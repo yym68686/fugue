@@ -25,12 +25,17 @@ const (
 func (s *Store) pgCreateAppRelease(release model.AppRelease) (model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	tx, err := s.recoveryGuardedTx(ctx, release.AppID)
+	if err != nil {
+		return model.AppRelease{}, err
+	}
+	defer tx.Rollback()
 
 	specJSON, err := marshalNullableAppSpec(release.SpecSnapshot)
 	if err != nil {
 		return model.AppRelease{}, err
 	}
-	out, err := scanAppRelease(s.db.QueryRowContext(ctx, `
+	out, err := scanAppRelease(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_app_releases (
 	id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url, runtime_id,
 	deployment_name, service_name, status, status_reason, spec_snapshot_json,
@@ -47,12 +52,20 @@ RETURNING `+appReleaseSelectColumns,
 		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, specJSON,
 		release.RollbackTargetID, release.ReleaseMessage, release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil,
 		release.CreatedAt, release.UpdatedAt))
-	return out, mapDBErr(err)
+	if err != nil {
+		return out, mapDBErr(err)
+	}
+	return out, tx.Commit()
 }
 
 func (s *Store) pgUpdateAppRelease(release model.AppRelease) (model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	tx, err := s.recoveryGuardedTx(ctx, release.AppID)
+	if err != nil {
+		return model.AppRelease{}, err
+	}
+	defer tx.Rollback()
 	bindingJSON, err := marshalReleaseWorkload(release.RevisionWorkload)
 	if err != nil {
 		return model.AppRelease{}, err
@@ -62,7 +75,7 @@ func (s *Store) pgUpdateAppRelease(release model.AppRelease) (model.AppRelease, 
 	if err != nil {
 		return model.AppRelease{}, err
 	}
-	out, err := scanAppRelease(s.db.QueryRowContext(ctx, `
+	out, err := scanAppRelease(tx.QueryRowContext(ctx, `
 UPDATE fugue_app_releases
 SET tenant_id = $2,
 	app_id = $3,
@@ -88,7 +101,10 @@ RETURNING `+appReleaseSelectColumns,
 		release.ID, release.TenantID, release.AppID, release.Role, release.SourceRef, release.ResolvedImageRef, release.UpstreamURL, release.RuntimeID,
 		release.DeploymentName, release.ServiceName, release.Status, release.StatusReason, release.RollbackTargetID, release.ReleaseMessage, specJSON,
 		release.ReadyAt, release.PromotedAt, release.RetiredAt, release.RetentionUntil, release.UpdatedAt, bindingJSON))
-	return out, mapDBErr(err)
+	if err != nil {
+		return out, mapDBErr(err)
+	}
+	return out, tx.Commit()
 }
 
 func (s *Store) pgGetAppRelease(tenantID string, platformAdmin bool, releaseID string) (model.AppRelease, error) {
@@ -244,6 +260,11 @@ func (s *Store) pgListAppTrafficPoliciesContext(ctx context.Context, tenantID st
 func (s *Store) pgUpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.AppTrafficPolicy, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	tx, err := s.recoveryGuardedTx(ctx, policy.AppID)
+	if err != nil {
+		return model.AppTrafficPolicy{}, err
+	}
+	defer tx.Rollback()
 
 	// Compare under the ON CONFLICT row lock, rather than a read-before-write
 	// check that could overwrite a concurrent operator's routing change.
@@ -256,7 +277,7 @@ func (s *Store) pgUpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.A
 		ROW(EXCLUDED.tenant_id, EXCLUDED.app_id, EXCLUDED.mode, EXCLUDED.stable_release_id,
 		EXCLUDED.candidate_release_id, EXCLUDED.stable_weight, EXCLUDED.candidate_weight,
 		EXCLUDED.sticky_header, EXCLUDED.sticky_cookie)`
-	out, err := scanAppTrafficPolicy(s.db.QueryRowContext(ctx, `
+	out, err := scanAppTrafficPolicy(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_app_traffic_policies (
 	id, tenant_id, app_id, mode, stable_release_id, candidate_release_id,
 	stable_weight, candidate_weight, sticky_header, sticky_cookie,
@@ -282,7 +303,10 @@ RETURNING `+appTrafficPolicySelectColumns,
 		policy.ID, policy.TenantID, policy.AppID, policy.Mode, policy.StableReleaseID, policy.CandidateReleaseID,
 		policy.StableWeight, policy.CandidateWeight, policy.StickyHeader, policy.StickyCookie,
 		policy.UpdatedByType, policy.UpdatedByID, policy.CreatedAt, policy.UpdatedAt))
-	return out, mapDBErr(err)
+	if err != nil {
+		return out, mapDBErr(err)
+	}
+	return out, tx.Commit()
 }
 
 func scanAppReleaseRows(rows *sql.Rows) ([]model.AppRelease, error) {

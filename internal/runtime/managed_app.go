@@ -121,6 +121,16 @@ func ManagedAppResourceName(app model.App) string {
 }
 
 func RuntimeAppResourceName(app model.App) string {
+	if generation := strings.TrimSpace(app.Spec.WorkloadGeneration); generation != "" {
+		base := app
+		base.Spec.WorkloadGeneration = ""
+		name := RuntimeAppResourceName(base)
+		suffix := "-r-" + workloadGenerationSuffix(generation)
+		if len(name)+len(suffix) > 63 {
+			name = name[:63-len(suffix)]
+		}
+		return strings.TrimRight(name, "-") + suffix
+	}
 	if id := strings.TrimSpace(app.ID); id != "" {
 		if name := RuntimeResourceName(id); name != "" {
 			return name

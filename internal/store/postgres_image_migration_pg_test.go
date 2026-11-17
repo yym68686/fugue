@@ -35,7 +35,7 @@ func TestPGIndependentImageMigrationAdmissionPreservesConsumer(t *testing.T) {
 	hash := PostgresImageMigrationConfigHash(app, svc, image)
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, app.TenantID, app.ProjectID, app.ID, 0, row)
-	expectPGLifecycleAppHydration(mock, app.ID, row)
+	expectRecoveryGuardedAdmissionHydration(mock, app.ID, row)
 	expectPGResizeBackingServiceForUpdate(mock, now, app.TenantID, app.ProjectID, "", svc.ID, resources, nil)
 	expectPGResizeTargetBinding(mock, app.TenantID, app.ID, svc.ID)
 	expectPGActiveLifecycleOperationsForTarget(mock, app.ID, svc.ID, pgLifecycleOperationRows())

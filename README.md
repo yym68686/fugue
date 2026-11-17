@@ -19,6 +19,7 @@ Fugue is a multi-tenant application control plane for k3s. It combines an OpenAP
 - Runtime inventory for `managed-shared`, `managed-owned`, and `external-owned` runtimes, including attached nodes through reusable node keys and `fugue-agent`.
 - App deployment from local uploads, GitHub repositories, or container images.
 - Async deploy, rebuild, scale, restart, migrate, failover, and delete operations.
+- [Isolated incident recovery](docs/incident-recovery.md) with business probes, traffic cutover and retained original containers for investigation (`fugue app recovery`).
 - App domains/routes, env/config/files/workspace management, generated secret env from `fugue.yaml`, runtime/build logs, and operation history.
 - Backing services and service bindings, including managed PostgreSQL flows.
 - Cluster inventory, current/resource-request capacity overlays, resource right-sizing, runtime sharing, and control-plane status inspection.

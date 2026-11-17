@@ -208,6 +208,9 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
+		if handled, err := s.reconcileAppRecovery(ctx, client, managed, storedApp); handled || err != nil {
+			return err
+		}
 		// Lifecycle overrides belong only to this orphan episode. Adoption must
 		// not exempt a later deletion of the same ManagedApp from hibernation.
 		if managed.Metadata.Annotations[runtime.FugueAnnotationOrphanPostgresLifecycle] != "" {
@@ -499,6 +502,9 @@ func (s *Service) reconcileManagedAppResolvedObject(ctx context.Context, client 
 func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app model.App) error {
 	if s == nil || s.Store == nil {
 		return nil
+	}
+	if held, err := s.Store.AppRecoveryHeld(app.ID); err != nil || held {
+		return err
 	}
 	active, err := s.appHasActiveOperation(app)
 	if err != nil || active {
@@ -836,6 +842,27 @@ func (s *Service) syncManagedAppObservedStatus(
 		appPods, err = client.listPodsBySelector(ctx, namespace, managedAppPodLabelSelector(app))
 		if err != nil {
 			return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("list app pods: %w", err))
+		}
+		if app.Spec.WorkloadGeneration != "" && s.Store != nil {
+			records, err := s.Store.ListAppRecoveries(app.ID)
+			if err != nil {
+				return err
+			}
+			excluded := map[string]bool{}
+			for _, r := range records {
+				if r.CutoverAt != nil {
+					for _, p := range r.SourcePods {
+						excluded[p.UID] = true
+					}
+				}
+			}
+			serving := make([]kubePod, 0, len(appPods))
+			for _, p := range appPods {
+				if !excluded[p.ObservedUID] {
+					serving = append(serving, p)
+				}
+			}
+			appPods = serving
 		}
 	}
 
@@ -3173,6 +3200,31 @@ func (s *Service) pruneManagedAppStaleObjects(ctx context.Context, client *kubeC
 	}
 
 	desiredByKind := desiredObjectNamesByKind(desiredObjects)
+	var recoveries []model.AppRecoveryRecord
+	if s != nil && s.Store != nil {
+		var err error
+		recoveries, err = s.Store.ListAppRecoveries(app.ID)
+		if err != nil {
+			return err
+		}
+	}
+	for _, r := range recoveries {
+		if r.SourcePVC != "" {
+			if desiredByKind["PersistentVolumeClaim"] == nil {
+				desiredByKind["PersistentVolumeClaim"] = map[string]struct{}{}
+			}
+			desiredByKind["PersistentVolumeClaim"][r.SourcePVC] = struct{}{}
+		}
+		if r.CutoverAt != nil && r.SourceService != "" {
+			if desiredByKind["Service"] == nil {
+				desiredByKind["Service"] = map[string]struct{}{}
+			}
+			desiredByKind["Service"][r.SourceService] = struct{}{}
+		}
+		if r.Active {
+			return fmt.Errorf("incident recovery hold prevents stale-object pruning")
+		}
+	}
 	if err := s.preserveActiveAppReleaseResources(app, desiredByKind); err != nil {
 		return err
 	}
@@ -3341,6 +3393,13 @@ func (s *Service) preserveActiveAppReleaseResources(app model.App, desiredByKind
 }
 
 func (s *Service) deleteManagedAppResources(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	if s != nil && s.Store != nil {
+		if held, err := s.Store.AppRecoveryHeld(app.ID); err != nil {
+			return err
+		} else if held {
+			return fmt.Errorf("incident recovery hold prevents app resource deletion")
+		}
+	}
 	resourceNames, err := s.managedAppOwnedResourceNames(ctx, client, namespace, app)
 	if err != nil {
 		return err

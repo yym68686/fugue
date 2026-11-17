@@ -840,6 +840,11 @@ func managedBackingServiceClusterRolloutReadyForDeployment(deployment runtime.Ma
 }
 
 func (s *Service) cleanupStrandedManagedAppPods(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	if s != nil && s.Store != nil {
+		if held, err := s.Store.AppRecoveryHeld(app.ID); err != nil || held {
+			return err
+		}
+	}
 	return s.cleanupStrandedPodsBySelector(ctx, client, namespace, managedAppPodLabelSelector(app), "managed app")
 }
 
@@ -863,6 +868,11 @@ func (s *Service) cleanupRetainedManagedAppEvictedPods(
 	app model.App,
 	pods []kubePod,
 ) error {
+	if s != nil && s.Store != nil {
+		if held, err := s.Store.AppRecoveryHeld(app.ID); err != nil || held {
+			return err
+		}
+	}
 	if client == nil || len(pods) == 0 {
 		return nil
 	}

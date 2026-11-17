@@ -122,6 +122,30 @@ FOR UPDATE
 	if err != nil {
 		return model.Tenant{}, mapDBErr(err)
 	}
+	// Serialize with recovery creation on every affected application row.
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM fugue_apps WHERE tenant_id=$1 ORDER BY id FOR UPDATE`, id)
+	if err != nil {
+		return model.Tenant{}, err
+	}
+	for rows.Next() {
+		var appID string
+		if err := rows.Scan(&appID); err != nil {
+			rows.Close()
+			return model.Tenant{}, err
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return model.Tenant{}, err
+	}
+	var held bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_app_recoveries WHERE active AND record_json->>'tenant_id'=$1)`, id).Scan(&held); err != nil {
+		return model.Tenant{}, err
+	}
+	if held {
+		return model.Tenant{}, ErrConflict
+	}
 
 	if _, err := tx.ExecContext(ctx, `
 DELETE FROM fugue_audit_events
@@ -2629,6 +2653,11 @@ func (s *Store) pgUpdateAppRoute(id string, route model.AppRoute) (model.App, er
 	if err != nil {
 		return model.App{}, mapDBErr(err)
 	}
+	if held, err := pgRecoveryHeld(ctx, tx, id); err != nil {
+		return model.App{}, err
+	} else if held {
+		return model.App{}, ErrConflict
+	}
 	if isDeletedApp(app) {
 		return model.App{}, ErrNotFound
 	}
@@ -2983,6 +3012,11 @@ func (s *Store) pgPurgeApp(id string) (model.App, error) {
 	if err != nil {
 		return model.App{}, mapDBErr(err)
 	}
+	if held, err := pgRecoveryHeld(ctx, tx, id); err != nil {
+		return model.App{}, err
+	} else if held {
+		return model.App{}, ErrConflict
+	}
 	normalizeAppStatusForRead(&app)
 	if app.Status.CurrentReplicas > 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) != "" {
 		return model.App{}, ErrConflict
@@ -3249,6 +3283,11 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	}
 	if app.TenantID != op.TenantID {
 		return model.Operation{}, operationCreateOutcome{}, ErrNotFound
+	}
+	if held, err := pgRecoveryHeld(ctx, tx, app.ID); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	} else if held {
+		return model.Operation{}, operationCreateOutcome{}, fmt.Errorf("%w: app has an active incident recovery hold", ErrConflict)
 	}
 	if policy.IdempotencyKey != "" {
 		record, err := s.pgGetIdempotencyRecordTx(ctx, tx, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey, false)

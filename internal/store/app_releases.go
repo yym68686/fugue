@@ -22,6 +22,9 @@ func (s *Store) CreateAppRelease(release model.AppRelease) (model.AppRelease, er
 	}
 	var out model.AppRelease
 	err = s.withLockedState(true, func(state *model.State) error {
+		if activeRecovery(state.AppRecoveries, release.AppID) {
+			return ErrConflict
+		}
 		for _, existing := range state.AppReleases {
 			if existing.ID == release.ID {
 				return ErrConflict
@@ -47,6 +50,9 @@ func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, er
 	}
 	var out model.AppRelease
 	err = s.withLockedState(true, func(state *model.State) error {
+		if activeRecovery(state.AppRecoveries, release.AppID) {
+			return ErrConflict
+		}
 		index := findAppReleaseByID(state.AppReleases, release.ID)
 		if index < 0 {
 			return ErrNotFound
@@ -210,6 +216,9 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 	}
 	var out model.AppTrafficPolicy
 	err = s.withLockedState(true, func(state *model.State) error {
+		if activeRecovery(state.AppRecoveries, policy.AppID) {
+			return ErrConflict
+		}
 		for _, release := range state.AppReleases {
 			if (release.ID == policy.StableReleaseID || release.ID == policy.CandidateReleaseID) && AppReleaseIsRetired(release) {
 				return ErrConflict

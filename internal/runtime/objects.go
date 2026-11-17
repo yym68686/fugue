@@ -669,6 +669,11 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 			sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
 		}
 	}
+	for i, p := range app.Spec.EphemeralPaths {
+		name := fmt.Sprintf("ephemeral-%d", i)
+		volumeMounts = append(volumeMounts, map[string]any{"name": name, "mountPath": p})
+		volumes = append(volumes, map[string]any{"name": name, "emptyDir": map[string]any{}})
+	}
 	container["volumeMounts"] = volumeMounts
 
 	podSpec := map[string]any{
@@ -2876,6 +2881,15 @@ func AppUsesWorkspaceReplication(app model.App) bool {
 }
 
 func workspaceStorageBaseName(app model.App) string {
+	if app.Spec.WorkloadGeneration != "" {
+		base := app
+		base.Spec.WorkloadGeneration = ""
+		name := workspaceStorageBaseName(base)
+		if len(name) > 20 {
+			name = name[:20]
+		}
+		return name + "-r-" + workloadGenerationSuffix(app.Spec.WorkloadGeneration)
+	}
 	if id := strings.TrimSpace(app.ID); id != "" {
 		return id
 	}
@@ -2884,6 +2898,11 @@ func workspaceStorageBaseName(app model.App) string {
 		return "app"
 	}
 	return name
+}
+
+func workloadGenerationSuffix(generation string) string {
+	digest := sha256.Sum256([]byte(generation))
+	return hex.EncodeToString(digest[:8])
 }
 
 func buildAppWorkspaceInitContainer(spec model.AppWorkspaceSpec) map[string]any {

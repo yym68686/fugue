@@ -8555,6 +8555,97 @@ paths:
                 $ref: "#/components/schemas/AppImageTrackingDiagnosisResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/recoveries:
+    get:
+      operationId: listAppRecoveries
+      summary: List incident recoveries and retained evidence
+      tags: [Apps]
+      x-fugue-handler: handleListAppRecoveries
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      responses:
+        '200':
+          description: Recovery records; probe credentials and application snapshots are omitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRecoveryListResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: startAppRecovery
+      summary: Start an isolated replacement and retain the original containers
+      description: Requires app.deploy and explicit authorization for one overlapping replica and fresh storage. Only managed, single replica applications are supported. The running image digest is reused. No live volume is copied or shared. Required business probes must pass before traffic changes. Retained originals are excluded from Fugue replacement and cleanup until explicit release or expiry; node loss and kubelet container restarts are reported as evidence changes. Concurrent app mutations are rejected while the hold is active.
+      tags: [Apps]
+      x-fugue-handler: handleStartAppRecovery
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppRecoveryStartRequest"
+      responses:
+        '202':
+          description: Accepted durable recovery intent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRecovery"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/recoveries/{recovery_id}:
+    get:
+      operationId: getAppRecovery
+      summary: Inspect a recovery and exact retained container identities
+      tags: [Apps]
+      x-fugue-handler: handleGetAppRecovery
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - name: recovery_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Recovery status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRecovery"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/recoveries/{recovery_id}/release:
+    post:
+      operationId: releaseAppRecovery
+      summary: Release the investigation hold
+      description: Requires app.deploy. After successful cutover, deletes only the recorded original Pod UIDs, retaining the original persistent volume for separate storage administration. Before cutover, removes the replacement and restores normal source reconciliation. Does not silently delete the serving replacement. The request is idempotent.
+      tags: [Apps]
+      x-fugue-handler: handleReleaseAppRecovery
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - name: recovery_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '202':
+          description: Release requested
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppRecovery"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/releases:
     get:
       operationId: listAppReleases
@@ -19422,8 +19513,13 @@ components:
           $ref: "#/components/schemas/BillingResourceSpec"
         managed_committed:
           $ref: "#/components/schemas/BillingResourceSpec"
+        managed_recovery_reserved:
+          allOf:
+            - $ref: "#/components/schemas/BillingResourceSpec"
+          description: Authorized recovery overlap reserved for admission. A reservation alone does not activate ledger charges.
         managed_available:
           $ref: "#/components/schemas/BillingResourceSpec"
+          description: Capacity remaining after live commitments and authorized recovery reservations.
         current_usage:
           $ref: "#/components/schemas/ResourceUsage"
         default_app_resources:
@@ -24431,6 +24527,10 @@ components:
       required: [phase, current_replicas, updated_at]
       description: Legacy effective status projection. Use stored_status for durable control-plane state and observed_status for fresh runtime decisions.
       properties:
+        recovery_capacity_reserved:
+          type: boolean
+          readOnly: true
+          description: Billing capacity projection includes an explicitly authorized incident recovery overlap. This reservation alone does not activate billing.
         phase:
           type: string
         current_runtime_id:
@@ -24803,6 +24903,14 @@ components:
       type: object
       additionalProperties: false
       properties:
+        workload_generation:
+          type: string
+          readOnly: true
+          description: Server-owned workload identity after incident recovery; preserved by subsequent deployments.
+        ephemeral_paths:
+          type: array
+          items: {type: string}
+          description: Absolute paths backed by separate per-Pod emptyDir volumes.
         image:
           type: string
         command:
@@ -28588,6 +28696,102 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppRelease"
+    AppRecoveryStartRequest:
+      type: object
+      additionalProperties: false
+      required: [authorize_overlap, storage_strategy, retention_seconds, probes]
+      properties:
+        authorize_overlap:
+          type: boolean
+          enum: [true]
+          description: Authorizes one additional replica with the same resource and placement limits, including metered usage during the hold.
+        storage_strategy:
+          type: string
+          enum: [fresh]
+          description: Separate fresh PVC and container filesystem. Existing live data is never copied. Declarative file seeds still apply. Persistent volumes are retained after release.
+        retention_seconds:
+          type: integer
+          minimum: 0
+          maximum: 2592000
+          description: Explicit retention after cutover; zero means manual release only. Failed recoveries require manual release.
+        timeout_seconds:
+          type: integer
+          minimum: 10
+          maximum: 900
+          default: 300
+        ephemeral_paths:
+          type: array
+          maxItems: 16
+          description: Optional absolute spool paths mounted on independent emptyDir volumes; must not overlap configured durable mounts.
+          items: {type: string}
+        probes:
+          type: array
+          minItems: 1
+          maxItems: 8
+          description: Explicit business requests executed against the isolated replacement before any cutover. Requests may have business effects; use a dedicated audit credential and harmless payload.
+          items:
+            $ref: "#/components/schemas/AppReleaseProbe"
+    AppRecovery:
+      type: object
+      additionalProperties: false
+      required: [id, app_id, phase, active, created_at, updated_at]
+      properties:
+        id: {type: string}
+        app_id: {type: string}
+        phase:
+          type: string
+          enum: [pending, preparing, probing, publishing, retained, failed, releasing, released]
+        active: {type: boolean}
+        message: {type: string}
+        image_ref: {type: string}
+        namespace: {type: string}
+        source_deployment: {type: string}
+        replacement_deployment: {type: string}
+        source_pvc: {type: string}
+        replacement_pvc: {type: string}
+        evidence_status:
+          type: string
+          enum: [pending, intact, changed, lost, released]
+        source_pods:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRecoveryPod"
+        probe_results:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppReleaseProbeResult"
+        cutover_at: {type: string, format: date-time}
+        retention_until: {type: string, format: date-time}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    AppRecoveryPod:
+      type: object
+      additionalProperties: false
+      required: [name, uid, node, containers]
+      properties:
+        name: {type: string}
+        uid: {type: string}
+        node: {type: string}
+        containers:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, id, restart_count]
+            properties:
+              name: {type: string}
+              id: {type: string}
+              restart_count: {type: integer}
+    AppRecoveryListResponse:
+      type: object
+      additionalProperties: false
+      required: [app_id, recoveries]
+      properties:
+        app_id: {type: string}
+        recoveries:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppRecovery"
     AppReleaseProbe:
       type: object
       additionalProperties: false

@@ -88,6 +88,7 @@ type TenantBillingSummary struct {
 	BalanceRestricted         bool                 `json:"balance_restricted"`
 	ManagedCap                BillingResourceSpec  `json:"managed_cap"`
 	ManagedCommitted          BillingResourceSpec  `json:"managed_committed"`
+	ManagedRecoveryReserved   BillingResourceSpec  `json:"managed_recovery_reserved"`
 	ManagedAvailable          BillingResourceSpec  `json:"managed_available"`
 	CurrentUsage              *ResourceUsage       `json:"current_usage,omitempty"`
 	DefaultAppResources       BillingResourceSpec  `json:"default_app_resources"`

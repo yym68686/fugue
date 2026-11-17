@@ -78,7 +78,7 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 		if billing == nil {
 			return ErrNotFound
 		}
-		committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, *billing)
+		committed := addResourceSpec(tenantManagedCommittedResourcesForBillingWithIndex(state, index, *billing), tenantRecoveryReservedResources(state, tenantID))
 		if err := validateCommittedManagedCapacity(normalizedCap, committed); err != nil {
 			return err
 		}
@@ -983,14 +983,18 @@ func buildTenantBillingSummaryWithIndex(state *model.State, index billingStateIn
 		}
 	}
 	committed := tenantManagedCommittedResourcesForBillingWithIndex(state, index, record)
-	available := clampResourceSpecSub(record.ManagedCap, committed)
+	reserved := tenantRecoveryReservedResources(state, record.TenantID)
+	capacity := addResourceSpec(committed, reserved)
+	available := clampResourceSpecSub(record.ManagedCap, capacity)
 	managedHourlyRate := activatedManagedHourlyRateMicroCents(record, committed)
 	publicHourlyRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, index, record.TenantID)
 	outgoingHourlyRate := managedHourlyRate + publicHourlyRate
-	billingActive := outgoingHourlyRate > 0
-	overCap := billingActive && resourceSpecExceeds(committed, record.ManagedCap)
+	overCap := resourceSpecExceeds(capacity, record.ManagedCap)
 	balanceRestricted := outgoingHourlyRate > 0 && record.BalanceMicroCents <= 0
 	status, reason := tenantBillingStatus(record, committed, managedHourlyRate, publicHourlyRate)
+	if overCap {
+		status, reason = model.BillingStatusOverCap, "Live commitments and authorized recovery reservations exceed the saved capacity envelope."
+	}
 	events := recentTenantBillingEvents(state, record.TenantID)
 	priceBook := normalizeBillingPriceBook(record.PriceBook)
 
@@ -1004,6 +1008,7 @@ func buildTenantBillingSummaryWithIndex(state *model.State, index billingStateIn
 		BalanceRestricted:         balanceRestricted,
 		ManagedCap:                record.ManagedCap,
 		ManagedCommitted:          committed,
+		ManagedRecoveryReserved:   reserved,
 		ManagedAvailable:          available,
 		DefaultAppResources:       model.BillingResourceSpec{},
 		DefaultPostgresResources:  model.DefaultManagedPostgresBillingResources(),
@@ -1327,7 +1332,7 @@ func validateCommittedManagedCapacity(managedCap, committed model.BillingResourc
 
 func projectedTenantManagedTotals(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
 	index := newBillingStateIndex(state)
-	currentTotal := tenantManagedCommittedResourcesWithIndex(state, index, app.TenantID)
+	currentTotal := addResourceSpec(tenantManagedCommittedResourcesWithIndex(state, index, app.TenantID), tenantRecoveryReservedResources(state, app.TenantID))
 	currentBundle, nextBundle, err := projectedAppManagedBundleCommitment(state, app, op)
 	if err != nil {
 		return model.BillingResourceSpec{}, model.BillingResourceSpec{}, err
@@ -1351,6 +1356,7 @@ func cloneTenantBillingState(state *model.State) model.State {
 		return model.State{}
 	}
 	projection := model.State{
+		AppRecoveries:   append([]model.AppRecoveryRecord(nil), state.AppRecoveries...),
 		Apps:            make([]model.App, 0, len(state.Apps)),
 		BackingServices: make([]model.BackingService, 0, len(state.BackingServices)),
 		ServiceBindings: make([]model.ServiceBinding, 0, len(state.ServiceBindings)),
@@ -1379,10 +1385,10 @@ func validateTenantManagedCapacityProjection(
 	record model.TenantBilling,
 	apply func(*model.State),
 ) error {
-	currentTotal := tenantManagedCommittedResourcesForBillingWithIndex(state, newBillingStateIndex(state), record)
+	currentTotal := addResourceSpec(tenantManagedCommittedResourcesForBillingWithIndex(state, newBillingStateIndex(state), record), tenantRecoveryReservedResources(state, record.TenantID))
 	projection := cloneTenantBillingState(state)
 	apply(&projection)
-	nextTotal := tenantManagedCommittedResourcesForBillingWithIndex(&projection, newBillingStateIndex(&projection), record)
+	nextTotal := addResourceSpec(tenantManagedCommittedResourcesForBillingWithIndex(&projection, newBillingStateIndex(&projection), record), tenantRecoveryReservedResources(&projection, record.TenantID))
 	return validateTenantManagedCapacityIncrease(record, currentTotal, nextTotal)
 }
 

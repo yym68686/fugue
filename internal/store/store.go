@@ -340,6 +340,11 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 
 	var tenant model.Tenant
 	err := s.withLockedState(true, func(state *model.State) error {
+		for _, r := range state.AppRecoveries {
+			if r.TenantID == id && r.Active {
+				return ErrConflict
+			}
+		}
 		index := findTenant(state, id)
 		if index < 0 {
 			return ErrNotFound
@@ -367,6 +372,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
 		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
+		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, id, "")
 		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
 		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByTenant(state.AppImageTrackingChecks, id)
 		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
@@ -2433,6 +2439,9 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 
 	var app model.App
 	err := s.withLockedState(true, func(state *model.State) error {
+		if activeRecovery(state.AppRecoveries, id) {
+			return ErrConflict
+		}
 		index := findApp(state, id)
 		if index < 0 {
 			return ErrNotFound
@@ -2724,6 +2733,9 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 
 	var app model.App
 	err := s.withLockedState(true, func(state *model.State) error {
+		if activeRecovery(state.AppRecoveries, id) {
+			return ErrConflict
+		}
 		index := findApp(state, id)
 		if index < 0 {
 			return ErrNotFound
@@ -2742,6 +2754,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		}
 
 		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
+		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, "", id)
 		state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, []string{id})
 		deleteAppDomainsByApp(state, id)
 		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
@@ -2765,6 +2778,12 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 }
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
+	if spec.WorkloadGeneration != "" {
+		return model.App{}, ErrInvalidInput
+	}
+	if err := model.ValidateRecoveryPaths(spec.EphemeralPaths, spec); err != nil {
+		return model.App{}, ErrInvalidInput
+	}
 	if spec.NodeLoss == nil {
 		spec.NodeLoss = &model.AppNodeLossPolicy{Mode: model.AppNodeLossWait}
 	}
@@ -2993,6 +3012,9 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		app := state.Apps[appIndex]
 		if app.TenantID != op.TenantID {
 			return ErrNotFound
+		}
+		if activeRecovery(state.AppRecoveries, app.ID) {
+			return fmt.Errorf("%w: app has an active incident recovery hold", ErrConflict)
 		}
 		if policy.IdempotencyKey != "" {
 			if idx := findIdempotencyRecord(state, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey); idx >= 0 {

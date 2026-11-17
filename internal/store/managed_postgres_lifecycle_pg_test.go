@@ -164,7 +164,7 @@ func TestPGCreateManagedPostgresSuspendLocksExactLifecycleTarget(t *testing.T) {
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
-	expectPGLifecycleAppHydration(mock, appID,
+	expectRecoveryGuardedAdmissionHydration(mock, appID,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
 	expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
@@ -344,7 +344,7 @@ func TestPGCreateManagedPostgresLifecycleRetryRequiresExactUniqueActiveOperation
 			expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0,
 				pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 			)
-			expectPGLifecycleAppHydration(mock, appID,
+			expectRecoveryGuardedAdmissionHydration(mock, appID,
 				pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 			)
 			expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
@@ -476,7 +476,7 @@ func TestPGCreateManagedPostgresSuspendRejectsMultipleBindings(t *testing.T) {
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
-	expectPGLifecycleAppHydration(mock, appID,
+	expectRecoveryGuardedAdmissionHydration(mock, appID,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
 	expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
@@ -618,7 +618,7 @@ func TestPGActiveManagedPostgresLifecycleBlocksLaterOperation(t *testing.T) {
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
-	expectPGLifecycleAppHydration(mock, appID,
+	expectRecoveryGuardedAdmissionHydration(mock, appID,
 		pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false),
 	)
 	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover', 'database-image-migrate'\).*AND app_id = \$7`).

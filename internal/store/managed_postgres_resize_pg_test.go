@@ -77,7 +77,7 @@ func TestPGCreateManagedPostgresResizePersistsNarrowIntent(t *testing.T) {
 
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0, serviceRow)
-	expectPGLifecycleAppHydration(mock, appID, serviceRow)
+	expectRecoveryGuardedAdmissionHydration(mock, appID, serviceRow)
 	expectPGResizeBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, bootstrap, nil)
 	expectPGResizeTargetBinding(mock, tenantID, appID, serviceID)
 	expectPGActiveLifecycleOperationsForTarget(mock, appID, serviceID, pgLifecycleOperationRows())

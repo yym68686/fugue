@@ -32,7 +32,7 @@ func TestPGActiveManagedPostgresResizeBlocksLaterAppOperation(t *testing.T) {
 	serviceRow := pgLifecycleBoundServiceRow(now, tenantID, projectID, appID, serviceID, false)
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 1, serviceRow)
-	expectPGLifecycleAppHydration(mock, appID, serviceRow)
+	expectRecoveryGuardedAdmissionHydration(mock, appID, serviceRow)
 	expectPGManagedPostgresExclusiveMutation(mock, appID, "", true)
 	mock.ExpectRollback()
 
@@ -153,7 +153,7 @@ func TestPGManagedPostgresResizeReportsExactActiveDependency(t *testing.T) {
 			serviceRow := pgResizeBoundServiceRow(now, tenantID, projectID, appID, serviceID, bootstrap, nil)
 			mock.ExpectBegin()
 			expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0, serviceRow)
-			expectPGLifecycleAppHydration(mock, appID, serviceRow)
+			expectRecoveryGuardedAdmissionHydration(mock, appID, serviceRow)
 			expectPGResizeBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, bootstrap, nil)
 			expectPGResizeTargetBinding(mock, tenantID, appID, serviceID)
 			expectPGActiveLifecycleOperationsForTarget(mock, appID, serviceID, pgLifecycleOperationRows())

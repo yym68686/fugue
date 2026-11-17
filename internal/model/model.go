@@ -1777,18 +1777,20 @@ type EdgeTLSCertificate struct {
 }
 
 type AppSpec struct {
-	Image         string                         `json:"image"`
-	Command       []string                       `json:"command,omitempty"`
-	Args          []string                       `json:"args,omitempty"`
-	Env           map[string]string              `json:"env,omitempty"`
-	GeneratedEnv  map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
-	SSH           *AppSSHSpec                    `json:"ssh,omitempty"`
-	NetworkMode   string                         `json:"network_mode,omitempty"`
-	NetworkPolicy *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
-	WorkloadClass string                         `json:"workload_class,omitempty"`
-	Ports         []int                          `json:"ports,omitempty"`
-	Replicas      int                            `json:"replicas"`
-	Resources     *ResourceSpec                  `json:"resources,omitempty"`
+	WorkloadGeneration string                         `json:"workload_generation,omitempty"`
+	EphemeralPaths     []string                       `json:"ephemeral_paths,omitempty"`
+	Image              string                         `json:"image"`
+	Command            []string                       `json:"command,omitempty"`
+	Args               []string                       `json:"args,omitempty"`
+	Env                map[string]string              `json:"env,omitempty"`
+	GeneratedEnv       map[string]AppGeneratedEnvSpec `json:"generated_env,omitempty"`
+	SSH                *AppSSHSpec                    `json:"ssh,omitempty"`
+	NetworkMode        string                         `json:"network_mode,omitempty"`
+	NetworkPolicy      *AppNetworkPolicySpec          `json:"network_policy,omitempty"`
+	WorkloadClass      string                         `json:"workload_class,omitempty"`
+	Ports              []int                          `json:"ports,omitempty"`
+	Replicas           int                            `json:"replicas"`
+	Resources          *ResourceSpec                  `json:"resources,omitempty"`
 	// Request template snapshots preserve the immutable serving template while
 	// Resources records verified runtime targets. Only resize operations write them.
 	CPURequestTemplateMilliCores   *int64                      `json:"cpu_request_template_millicores,omitempty"`
@@ -2299,13 +2301,15 @@ func CloneAppSourceSyncStatus(in *AppSourceSyncStatus) *AppSourceSyncStatus {
 }
 
 type AppStatus struct {
-	Phase                   string     `json:"phase"`
-	CurrentRuntimeID        string     `json:"current_runtime_id,omitempty"`
-	CurrentReplicas         int        `json:"current_replicas"`
-	CurrentReleaseStartedAt *time.Time `json:"current_release_started_at,omitempty"`
-	CurrentReleaseReadyAt   *time.Time `json:"current_release_ready_at,omitempty"`
-	LastOperationID         string     `json:"last_operation_id,omitempty"`
-	LastMessage             string     `json:"last_message,omitempty"`
+	// Set only in billing read projections; a reservation is not usage evidence.
+	RecoveryCapacityReserved bool       `json:"recovery_capacity_reserved,omitempty"`
+	Phase                    string     `json:"phase"`
+	CurrentRuntimeID         string     `json:"current_runtime_id,omitempty"`
+	CurrentReplicas          int        `json:"current_replicas"`
+	CurrentReleaseStartedAt  *time.Time `json:"current_release_started_at,omitempty"`
+	CurrentReleaseReadyAt    *time.Time `json:"current_release_ready_at,omitempty"`
+	LastOperationID          string     `json:"last_operation_id,omitempty"`
+	LastMessage              string     `json:"last_message,omitempty"`
 	// LastFailedOperation is durable operator-facing history. It is never used
 	// as evidence that the current runtime is serving; consumers must use
 	// ObservedStatus for that decision.
@@ -3478,6 +3482,7 @@ func MachinePolicyDedicatedMode(policy MachinePolicy) string {
 }
 
 type State struct {
+	AppRecoveries              []AppRecoveryRecord            `json:"app_recoveries,omitempty"`
 	StorageMaintenanceJobs     []StorageMaintenanceJob        `json:"storage_maintenance_jobs,omitempty"`
 	MailPlatformConfig         *MailPlatformConfig            `json:"mail_platform_config,omitempty"`
 	AppMailBindings            []AppMailBinding               `json:"app_mail_bindings,omitempty"`

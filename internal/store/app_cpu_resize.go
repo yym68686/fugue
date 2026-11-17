@@ -75,6 +75,18 @@ func (s *Store) pgHasActiveAppRequestResizeTx(ctx context.Context, tx *sql.Tx, a
 // Only normal deployments fold a verified runtime request into a new template.
 // Reject a fabricated server-owned snapshot on all other caller-provided specs.
 func reconcileAppRequestResizeSnapshot(op *model.Operation, app model.App) error {
+	if op.DesiredSpec != nil {
+		if op.DesiredSpec.WorkloadGeneration != "" && op.DesiredSpec.WorkloadGeneration != app.Spec.WorkloadGeneration {
+			return ErrInvalidInput
+		}
+		op.DesiredSpec.WorkloadGeneration = app.Spec.WorkloadGeneration
+		if app.Spec.WorkloadGeneration != "" && op.DesiredSpec.EphemeralPaths == nil {
+			op.DesiredSpec.EphemeralPaths = append([]string(nil), app.Spec.EphemeralPaths...)
+		}
+		if err := model.ValidateRecoveryPaths(op.DesiredSpec.EphemeralPaths, *op.DesiredSpec); err != nil {
+			return ErrInvalidInput
+		}
+	}
 	if op.DesiredSpec != nil && op.DesiredSpec.NodeLoss == nil {
 		op.DesiredSpec.NodeLoss = model.CloneAppNodeLossPolicy(app.Spec.NodeLoss)
 	}

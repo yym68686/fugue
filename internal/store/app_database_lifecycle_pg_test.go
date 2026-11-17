@@ -194,7 +194,7 @@ func TestPGManagedPostgresSuspendReturnsActionableConflictForActiveDatabaseImpor
 
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0, serviceRow)
-	expectPGLifecycleAppHydration(mock, appID, serviceRow)
+	expectRecoveryGuardedAdmissionHydration(mock, appID, serviceRow)
 	expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
 	mock.ExpectQuery(`(?s)SELECT tenant_id, app_id.*FROM fugue_service_bindings.*WHERE service_id = \$1.*FOR UPDATE`).
 		WithArgs(serviceID).
@@ -240,7 +240,7 @@ func TestPGManagedPostgresSuspendReturnsActionableConflictForActiveDatabaseBacku
 
 	mock.ExpectBegin()
 	expectPGLifecycleAppForUpdate(mock, now, tenantID, projectID, appID, 0, serviceRow)
-	expectPGLifecycleAppHydration(mock, appID, serviceRow)
+	expectRecoveryGuardedAdmissionHydration(mock, appID, serviceRow)
 	expectPGLifecycleBackingServiceForUpdate(mock, now, tenantID, projectID, appID, serviceID, false)
 	mock.ExpectQuery(`(?s)SELECT tenant_id, app_id.*FROM fugue_service_bindings.*WHERE service_id = \$1.*FOR UPDATE`).
 		WithArgs(serviceID).

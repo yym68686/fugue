@@ -108,6 +108,7 @@ in more than one visible project or tenant.
 		c.newAppRebuildShortcutCommand(),
 		c.newAppRollbackShortcutCommand(),
 		c.newAppReleaseCommand(),
+		c.newAppRecoveryCommand(),
 		c.newAppImageCommand(),
 		c.newAppTrafficCommand(),
 		c.newAppRolloutCommand(),

@@ -1467,6 +1467,7 @@ func renderBillingSummary(w io.Writer, billing model.TenantBillingSummary) error
 		kvPair{Key: "status", Value: billing.Status},
 		kvPair{Key: "managed_cap", Value: formatBillingResourceSpec(billing.ManagedCap)},
 		kvPair{Key: "managed_committed", Value: formatBillingResourceSpec(billing.ManagedCommitted)},
+		kvPair{Key: "managed_recovery_reserved", Value: formatBillingResourceSpec(billing.ManagedRecoveryReserved)},
 		kvPair{Key: "managed_available", Value: formatBillingResourceSpec(billing.ManagedAvailable)},
 		kvPair{Key: "balance", Value: formatCurrencyMicroCents(billing.BalanceMicroCents, billing.PriceBook.Currency)},
 		kvPair{Key: "hourly_rate", Value: formatCurrencyMicroCents(billing.HourlyRateMicroCents, billing.PriceBook.Currency)},

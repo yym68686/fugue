@@ -29,7 +29,7 @@ SELECT jsonb_build_object(
         CASE WHEN jsonb_typeof(status_json->'last_failed_operation') = 'object' THEN
           jsonb_build_object('last_failed_operation', (status_json->'last_failed_operation') - ARRAY['error_message','result_message'])
         ELSE '{}'::jsonb END
-      ELSE status_json END AS status, created_at, updated_at
+      ELSE status_json END || jsonb_build_object('recovery_capacity_reserved', EXISTS(SELECT 1 FROM fugue_app_recoveries r WHERE r.app_id=fugue_apps.id AND r.active)) AS status, created_at, updated_at
     FROM fugue_apps WHERE COALESCE(lower(btrim(status_json->>'phase')), '') <> 'deleted' AND tenant_id = ANY($1::text[])
   ) a), '[]'::jsonb),
   'backing_services', COALESCE((SELECT jsonb_agg(to_jsonb(s) ORDER BY s.created_at) FROM (

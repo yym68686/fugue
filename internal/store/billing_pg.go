@@ -70,7 +70,7 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
-	committed := tenantManagedCommittedResourcesForBillingWithIndex(&state, index, record)
+	committed := addResourceSpec(tenantManagedCommittedResourcesForBillingWithIndex(&state, index, record), tenantRecoveryReservedResources(&state, tenantID))
 	if err := validateCommittedManagedCapacity(normalizedCap, committed); err != nil {
 		return model.TenantBillingSummary{}, err
 	}
@@ -284,7 +284,8 @@ func (s *Store) pgLoadBillingStateTx(ctx context.Context, tx *sql.Tx, tenantIDs 
 		tenantArg = tenantIDs[0]
 	}
 	appRows, err := tx.QueryContext(ctx, `
-SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at
+SELECT id, tenant_id, project_id, name, description, source_json, route_json, spec_json,
+status_json || jsonb_build_object('recovery_capacity_reserved', EXISTS(SELECT 1 FROM fugue_app_recoveries r WHERE r.app_id=fugue_apps.id AND r.active)), created_at, updated_at
 FROM fugue_apps
 WHERE `+predicate+`
 ORDER BY created_at ASC
