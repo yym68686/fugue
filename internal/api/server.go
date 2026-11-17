@@ -2364,6 +2364,8 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "resource not found")
+	case errors.Is(err, store.ErrDataWorkspaceRetiring):
+		httpx.WriteError(w, http.StatusConflict, store.ErrDataWorkspaceRetiring.Error())
 	case errors.Is(err, store.ErrConflict):
 		httpx.WriteError(w, http.StatusConflict, "resource conflict")
 	case len(bundleInvariantChecks(err)) > 0:

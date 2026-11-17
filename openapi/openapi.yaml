@@ -15149,6 +15149,50 @@ paths:
                   transfer: {$ref: '#/components/schemas/DataTransferSummary'}
         default:
           $ref: '#/components/responses/ErrorResponse'
+  /v1/data/workspaces/{workspace_id}/retirement:
+    post:
+      operationId: retireDataWorkspace
+      summary: Preview or start safe workspace retirement
+      description: Requires data.delete and workspace admin access. Preview by default. Execution freezes new references, optionally cancels planned transfers, revokes grants and requests cache eviction, then soft-deletes snapshots. A durable task waits at least seven days after reference release and outstanding signed authorization expiry before reclaiming only this workspace's unshared blobs. No force deletion is supported.
+      tags: [Data Workspaces]
+      x-fugue-handler: handleRetireDataWorkspace
+      security: [{BearerAuth: []}]
+      parameters:
+        - $ref: '#/components/parameters/DataWorkspaceIdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DataWorkspaceRetirementRequest'
+      responses:
+        '200':
+          description: Advisory preview; execution repeats atomic dependency checks
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DataWorkspaceRetirementPlan'}
+        '202':
+          description: Durable retirement task, including an existing idempotent task
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StorageMaintenanceJob'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
+  /v1/data/workspace-retirements/{job_id}:
+    get:
+      operationId: getDataWorkspaceRetirement
+      summary: Inspect a workspace retirement task, including after metadata deletion
+      tags: [Data Workspaces]
+      x-fugue-handler: handleGetDataWorkspaceRetirement
+      security: [{BearerAuth: []}]
+      parameters:
+        - {name: job_id, in: path, required: true, schema: {type: string}}
+      responses:
+        '200':
+          description: Tenant-authorized progress and physical reclamation receipts
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StorageMaintenanceJob'}
+        default: {$ref: '#/components/responses/ErrorResponse'}
   /v1/data/workspaces/{workspace_id}/deletion-plan:
     get:
       operationId: getDataDeletionPlan
@@ -17977,7 +18021,7 @@ components:
       required: [id, kind, execute, status, attempts, created_at, updated_at]
       properties:
         id: {type: string}
-        kind: {type: string, enum: [retention, longhorn-reconcile, backup-cleanup, data-gc, transfer-expiry]}
+        kind: {type: string, enum: [retention, longhorn-reconcile, backup-cleanup, data-gc, transfer-expiry, workspace-retire]}
         scope_id: {type: string}
         execute: {type: boolean}
         status: {type: string, enum: [queued, running, retrying, succeeded, failed]}
@@ -17987,6 +18031,7 @@ components:
         retry_at: {type: string, format: date-time}
         error: {type: string}
         result: {type: object, additionalProperties: true}
+        workspace_retirement: {$ref: '#/components/schemas/DataWorkspaceRetirement'}
     AdminStorageNamespace:
       type: object
       required: [kind, resource_id, name, bucket, prefix, tenant_id, project_id, status]
@@ -18291,6 +18336,61 @@ components:
           type: array
           items:
             type: string
+    DataWorkspaceRetirementRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        execute: {type: boolean, default: false}
+        cancel_planned_transfers: {type: boolean, default: false}
+        revoke_grants: {type: boolean, default: false}
+        evict_caches: {type: boolean, default: false}
+    DataWorkspaceRetirementPlan:
+      type: object
+      required: [workspace_id, name, allowed, blockers, snapshot_count, grace_days, estimated_unique_bytes, shared_bytes, estimate_only]
+      properties:
+        workspace_id: {type: string}
+        name: {type: string}
+        allowed: {type: boolean}
+        blockers:
+          type: array
+          items: {$ref: '#/components/schemas/DataRetirementBlocker'}
+        dependencies:
+          type: array
+          description: Complete dependency inventory before applying explicitly requested cleanup options
+          items: {$ref: '#/components/schemas/DataRetirementBlocker'}
+        snapshot_count: {type: integer}
+        grace_days: {type: integer, enum: [7]}
+        estimated_unique_bytes: {type: integer, format: int64, description: 'Deduplicated manifest estimate, not a measured R2 inventory or a deletion guarantee'}
+        shared_bytes: {type: integer, format: int64}
+        estimate_only: {type: boolean, enum: [true]}
+        existing_job_id: {type: string}
+    DataRetirementBlocker:
+      type: object
+      required: [kind, id, state]
+      properties:
+        kind: {type: string}
+        id: {type: string}
+        state: {type: string}
+    DataWorkspaceRetirement:
+      type: object
+      required: [tenant_id, name, options, phase, deleted_objects, deleted_bytes]
+      properties:
+        tenant_id: {type: string}
+        name: {type: string}
+        actor_id: {type: string}
+        actor_type: {type: string}
+        project_id: {type: string, description: Original workspace project boundary retained after metadata deletion}
+        options: {$ref: '#/components/schemas/DataWorkspaceRetirementRequest'}
+        phase: {type: string, enum: [evicting, grace, reclaiming, completed]}
+        released_at: {type: string, format: date-time}
+        reclaim_after: {type: string, format: date-time}
+        deleted_objects: {type: integer, format: int64}
+        deleted_bytes: {type: integer, format: int64}
+        metadata_deleted: {type: boolean}
+        cursor: {type: integer, minimum: 0, description: Checkpoint in the stable manifest-derived object inventory}
+        inventory_digest: {type: string, description: Binds checkpoints to immutable object keys and physical backend identities; drift blocks reclamation}
+        shared_indices: {type: array, items: {type: integer, minimum: 0}, description: Previously shared objects rechecked before final metadata deletion}
+        backend_ids: {type: array, items: {type: string}, description: Retained namespace identities for background GC even after deleting the last workspace}
     DataDeletionPlan:
       type: object
       additionalProperties: false

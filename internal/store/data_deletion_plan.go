@@ -17,6 +17,27 @@ type DataDeletionBlocker struct {
 func dataDeletionBlockers(st *model.State, ws model.DataWorkspace, snapshot *model.DataSnapshot) []DataDeletionBlocker {
 	out := []DataDeletionBlocker{}
 	now := time.Now().UTC()
+	if j := dataRetirementJobState(st, ws.ID); j != nil {
+		out = append(out, DataDeletionBlocker{"retirement", j.ID, j.Status})
+	}
+	backupMatches := func(target model.BackupTarget) bool {
+		return target.Type == model.BackupTargetDataWorkspace && (target.WorkspaceID == ws.ID || (target.WorkspaceID == "" && target.TenantID == ws.TenantID && (target.Name == ws.Name || target.Name == ws.Slug)))
+	}
+	for _, p := range st.BackupPolicies {
+		if p.Enabled && backupMatches(p.Target) {
+			out = append(out, DataDeletionBlocker{"backup_policy", p.ID, p.Status})
+		}
+	}
+	for _, r := range st.BackupRuns {
+		if (r.Status == "pending" || r.Status == "running") && backupMatches(r.Target) {
+			out = append(out, DataDeletionBlocker{"backup_run", r.ID, r.Status})
+		}
+	}
+	for _, a := range st.BackupArtifacts {
+		if a.Status == "active" && backupMatches(a.Target) {
+			out = append(out, DataDeletionBlocker{"backup_artifact", a.ID, a.Status})
+		}
+	}
 	for _, t := range st.DataTransfers {
 		if t.WorkspaceID == ws.ID && (t.Status == "planned" || t.Status == "running" || (t.Direction == "prewarm" && (t.Cache == nil || t.Cache.State != "removed"))) {
 			out = append(out, DataDeletionBlocker{"transfer", t.ID, t.Status})
@@ -75,6 +96,10 @@ func queryDataDeletionBlockers(ctx context.Context, q dataDeletionQueryer, ws mo
 	}
 	rows, err := q.QueryContext(ctx, `
 SELECT 'transfer',id,status FROM fugue_data_transfers WHERE workspace_id=$1 AND (status IN ('planned','running') OR (direction='prewarm' AND COALESCE(prewarm_cache_json->>'state','')<>'removed'))
+	UNION ALL SELECT 'retirement',id,status FROM fugue_storage_maintenance_jobs WHERE kind='workspace-retire' AND scope_id=$1 AND body->>'execute'='true'
+	UNION ALL SELECT 'backup_policy',id,status FROM fugue_backup_policies WHERE enabled=true AND target_type='data-workspace' AND (target_json->>'workspace_id'=$1 OR (COALESCE(target_json->>'workspace_id','')='' AND COALESCE(target_tenant_id,'')=$4 AND target_json->>'name' IN ($5,$6)))
+	UNION ALL SELECT 'backup_run',id,status FROM fugue_backup_runs WHERE status IN ('pending','running') AND target_type='data-workspace' AND (target_json->>'workspace_id'=$1 OR (COALESCE(target_json->>'workspace_id','')='' AND COALESCE(target_tenant_id,'')=$4 AND target_json->>'name' IN ($5,$6)))
+	UNION ALL SELECT 'backup_artifact',id,status FROM fugue_backup_artifacts WHERE status='active' AND target_type='data-workspace' AND (target_json->>'workspace_id'=$1 OR (COALESCE(target_json->>'workspace_id','')='' AND COALESCE(target_tenant_id,'')=$4 AND target_json->>'name' IN ($5,$6)))
 UNION ALL SELECT 'grant',id,status FROM fugue_data_grants WHERE workspace_id=$1 AND status='active' AND (expires_at IS NULL OR expires_at>now()) AND ($2='' OR snapshot_id='' OR snapshot_id=$2)
 UNION ALL SELECT 'snapshot',id,'retained' FROM fugue_data_snapshots WHERE workspace_id=$1 AND deleted_at IS NULL AND $2=''
 UNION ALL SELECT DISTINCT 'app',a.id,'referenced' FROM fugue_apps a,jsonb_array_elements(COALESCE(a.spec_json->'data'->'workspaces','[]'::jsonb)) ref

@@ -1148,6 +1148,8 @@ func (c *CLI) newDataWorkspaceCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newDataWorkspaceListCommand(),
 		c.newDataWorkspaceDeleteCommand(),
+		c.newDataWorkspaceRetireCommand(),
+		c.newDataWorkspaceRetirementCommand(),
 		c.newDataWorkspaceShowCommand(),
 		c.newDataWorkspaceUseCommand(),
 		c.newDataWorkspaceSetBackendCommand(),

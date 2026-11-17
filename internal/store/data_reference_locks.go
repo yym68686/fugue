@@ -22,6 +22,9 @@ func validateDataReferencesState(st *model.State, tenant string, spec *model.App
 		if len(matches) != 1 {
 			return ErrConflict
 		}
+		if dataRetirementJobState(st, matches[0].ID) != nil {
+			return ErrDataWorkspaceRetiring
+		}
 		if ref.Version != "" && !strings.EqualFold(ref.Version, "latest") {
 			found := false
 			for _, snapshot := range st.DataSnapshots {
@@ -70,6 +73,13 @@ func lockDataReferencesTx(ctx context.Context, tx *sql.Tx, tenant string, spec *
 		}
 		if len(ids) != 1 {
 			return ErrConflict
+		}
+		var retiring bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_storage_maintenance_jobs WHERE kind='workspace-retire' AND scope_id=$1 AND body->>'execute'='true')`, ids[0]).Scan(&retiring); err != nil {
+			return err
+		}
+		if retiring {
+			return ErrDataWorkspaceRetiring
 		}
 		if ref.Version != "" && !strings.EqualFold(ref.Version, "latest") {
 			var exists bool
