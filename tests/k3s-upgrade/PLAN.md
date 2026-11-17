@@ -3,6 +3,10 @@
 This document is an operational gate, not permission to bypass CI or change
 tenant replicas, placement, storage, resource budgets, or application traffic.
 The qualification runner must never receive production credentials or backups.
+The disposable qualification OS is pinned to Ubuntu 24.04. Record its actual
+kernel and AppArmor settings; do not disable LSM enforcement or use unconfined
+database fixtures to obtain a pass. Production Debian 13 compatibility remains
+a separate release check, not an inference from the Ubuntu test.
 
 ## Required evidence, in order
 

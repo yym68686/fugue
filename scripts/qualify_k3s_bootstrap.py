@@ -131,6 +131,23 @@ def wait_ready(version):
     raise RuntimeError("node failed to reach Ready at " + version)
 
 
+def host_security():
+    """Record public host prerequisites, never environment or credentials."""
+    keys = ("ID", "VERSION_ID", "PRETTY_NAME")
+    release = platform.freedesktop_os_release()
+    result = {"os_release": {key: release.get(key) for key in keys}}
+    for name, filename in {
+        "apparmor_enabled": "/sys/module/apparmor/parameters/enabled",
+        "apparmor_stacking": "/sys/kernel/security/apparmor/features/domain/stack",
+        "apparmor_restrict_unprivileged_unconfined": "/proc/sys/kernel/apparmor_restrict_unprivileged_unconfined",
+    }.items():
+        try:
+            result[name] = Path(filename).read_text().strip()
+        except OSError as exc:
+            result[name] = type(exc).__name__
+    return result
+
+
 def rehearse_recovery(evidence, version, node_uid):
     """Restore ONLY this invocation's disposable datastore with its own token.
 
@@ -190,7 +207,8 @@ def main():
     binaries = evidence.parent / (evidence.name + "-binaries")
     binaries.mkdir(parents=True, exist_ok=False)
     report = {"versions": list(VERSIONS), "virtualization": virtualization,
-              "kernel": platform.release(), "results": [], "passed": False}
+              "kernel": platform.release(), "host_security": host_security(),
+              "results": [], "passed": False}
     failures, samples = [], []
     stop = threading.Event()
 

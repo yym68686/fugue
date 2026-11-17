@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.qualify_k3s_bootstrap import VERSIONS, memory_bytes, rehearse_recovery
+from scripts.qualify_k3s_bootstrap import VERSIONS, host_security, memory_bytes, rehearse_recovery
 
 
 class BootstrapQualificationTests(unittest.TestCase):
@@ -26,6 +26,25 @@ class BootstrapQualificationTests(unittest.TestCase):
         for value in ("unknown", "128MiB", "", "-1Mi"):
             with self.subTest(value=value), self.assertRaises(AssertionError):
                 memory_bytes(value)
+
+
+class HostSecurityEvidenceTests(unittest.TestCase):
+    def test_records_only_allowlisted_public_host_metadata(self):
+        release = {"ID": "synthetic-linux", "VERSION_ID": "1", "PRETTY_NAME": "Synthetic Linux",
+                   "PRIVATE_TEST_FIELD": "must-not-be-exported"}
+        with patch("scripts.qualify_k3s_bootstrap.platform.freedesktop_os_release", return_value=release), \
+             patch("scripts.qualify_k3s_bootstrap.Path.read_text", return_value="enforcing\n"):
+            evidence = host_security()
+        self.assertNotIn("PRIVATE_TEST_FIELD", evidence["os_release"])
+        self.assertEqual(evidence["os_release"]["ID"], "synthetic-linux")
+        self.assertEqual(evidence["apparmor_enabled"], "enforcing")
+
+    def test_missing_host_security_files_are_explicit_not_inferred(self):
+        with patch("scripts.qualify_k3s_bootstrap.platform.freedesktop_os_release", return_value={}), \
+             patch("scripts.qualify_k3s_bootstrap.Path.read_text", side_effect=FileNotFoundError):
+            evidence = host_security()
+        self.assertEqual(evidence["apparmor_enabled"], "FileNotFoundError")
+        self.assertEqual(evidence["apparmor_restrict_unprivileged_unconfined"], "FileNotFoundError")
 
 
 class RecoveryQualificationTests(unittest.TestCase):
