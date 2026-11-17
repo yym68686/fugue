@@ -43,6 +43,12 @@ func TestPostgresImageMigrationRecoveryReadFailurePreservesRunningOperation(t *t
 }
 
 func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *testing.T) {
+	for _, ownership := range []string{"app-owned", "independent"} {
+		t.Run(ownership, func(t *testing.T) { testPostgresImageMigrationExecutor(t, ownership == "independent") })
+	}
+}
+
+func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 	for _, scenario := range []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced"} {
 		t.Run(scenario, func(t *testing.T) {
 			state := store.New(filepath.Join(t.TempDir(), "state.json"))
@@ -57,12 +63,30 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			app, err := state.CreateApp(tenant.ID, project.ID, "database-client", "", model.AppSpec{Image: "registry.invalid/client:1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID, Postgres: &model.AppPostgresSpec{Database: "example", User: "example", Password: "test-secret", StorageSize: "1Gi", Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512, CPULimitMilliCores: 200, MemoryLimitMebibytes: 768}}})
+			appSpec := model.AppSpec{Image: "registry.invalid/client:1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID, Postgres: &model.AppPostgresSpec{Database: "example", User: "example", Password: "test-secret", StorageSize: "1Gi", Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512, CPULimitMilliCores: 200, MemoryLimitMebibytes: 768}}}
+			postgresSpec := appSpec.Postgres
+			if independent {
+				appSpec.Postgres = nil
+			}
+			app, err := state.CreateApp(tenant.ID, project.ID, "database-client", "", appSpec)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if independent {
+				service, err := state.CreateBackingService(tenant.ID, project.ID, "independent-postgres", "", model.BackingServiceSpec{Postgres: postgresSpec})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := state.BindBackingService(tenant.ID, app.ID, service.ID, "postgres", nil); err != nil {
+					t.Fatal(err)
+				}
+				app, err = state.GetApp(app.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			service := app.BackingServices[0]
-			postgres := service.Spec.Postgres
+			postgres := store.ManagedPostgresSpecForOperation(app, service.ID)
 			catalog, err := pgimage.ApprovedCatalog()
 			if err != nil {
 				t.Fatal(err)
@@ -207,7 +231,10 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 			if final.Status != model.OperationStatusCompleted || current.Spec.Postgres.Image != catalog.DefaultImage || patches != 1 || probes != 2 {
 				t.Fatalf("unexpected terminal state: %s patches=%d probes=%d", final.Status, patches, probes)
 			}
-			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) {
+			if current.OwnerAppID != service.OwnerAppID {
+				t.Fatal("migration changed independent ownership")
+			}
+			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) || !reflect.DeepEqual(before.Bindings, after.Bindings) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 				t.Fatal("migration mutated the consumer application")
 			}
 		})

@@ -64,7 +64,7 @@ func (c *CLI) newServicePostgresMigrateImageCommand() *cobra.Command {
 			return c.writeJSON(response)
 		}
 		if response.DryRun {
-			fmt.Fprintf(cmd.OutOrStdout(), "Database image migration plan (no changes made)\nService: %s\nTarget: %s\nConfig hash: %s\nBrief downtime required; live identity preflight runs before mutation.\n", service.ID, response.Plan.TargetImage, response.Plan.ConfigHash)
+			fmt.Fprintf(cmd.OutOrStdout(), "Database image migration plan (no changes made)\nService: %s\nOwnership: %s (preserved)\nConsumer operation anchor: %s\nTarget: %s\nConfig hash: %s\nBrief downtime required; live identity preflight runs before mutation.\n", service.ID, response.Plan.Ownership, response.Plan.AppID, response.Plan.TargetImage, response.Plan.ConfigHash)
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "Database image migration %s: %s\n", response.Operation.ID, response.Operation.Status)
 		}

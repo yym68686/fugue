@@ -365,12 +365,12 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 	if !s.Config.KubectlApply {
 		return fmt.Errorf("database image migration requires Kubernetes apply mode")
 	}
-	target, err := store.ManagedPostgresOperationTargetForApp(app, op.ServiceID)
+	target, err := store.PostgresImageMigrationTargetForApp(app, op.ServiceID)
 	if err != nil {
 		return err
 	}
-	if target == nil || target.Service == nil || !target.AppOwned || target.Postgres.Suspended || target.Postgres.Instances != 1 || op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
-		return fmt.Errorf("migration target is no longer one active owned database")
+	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
+		return fmt.Errorf("migration target specification is missing")
 	}
 	image, err := pgimage.Target(op.DesiredSpec.Postgres.Image)
 	if err != nil {

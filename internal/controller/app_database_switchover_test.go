@@ -217,6 +217,7 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 	var endpointMatches atomic.Bool
 	var sqlReady atomic.Bool
 	var sqlCalls atomic.Int32
+	var cancelAfterSQL context.CancelFunc
 
 	kubeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -284,7 +285,7 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 	}
 	svc := &Service{
 		Config: config.ControllerConfig{
-			ManagedAppRolloutTimeout: 25 * time.Millisecond,
+			ManagedAppRolloutTimeout: 5 * time.Second,
 		},
 		Logger: log.New(io.Discard, "", 0),
 		managedPostgresPrimarySQLProbe: func(_ context.Context, serviceHost, expectedPodIP string, got model.AppPostgresSpec) error {
@@ -299,6 +300,9 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 				t.Fatalf("unexpected SQL probe credentials: %+v", got)
 			}
 			if !sqlReady.Load() {
+				if cancelAfterSQL != nil {
+					cancelAfterSQL()
+				}
 				return errors.New("database system is shutting down")
 			}
 			return nil
@@ -334,15 +338,22 @@ func TestManagedPostgresPrimaryReadinessRequiresPodEndpointAndSQL(t *testing.T) 
 		t.Fatalf("transient SQL shutdown must remain pending: ready=%t detail=%q err=%v", ready, detail, err)
 	}
 
+	// Cancel only after the wait loop reaches SQL. A tiny wall-clock deadline
+	// could instead expire during any of the preceding HTTP requests under load,
+	// testing scheduler speed rather than the SQL readiness gate.
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	defer cancelWait()
+	cancelAfterSQL = cancelWait
+	callsBeforeWait := sqlCalls.Load()
 	_, err = svc.waitForManagedPostgresPrimary(
-		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
+		waitCtx, client, namespace, clusterName, targetPrimary, "", postgres,
 	)
-	if err == nil || !strings.Contains(err.Error(), "database system is shutting down") {
+	cancelAfterSQL = nil
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "database system is shutting down") || sqlCalls.Load() != callsBeforeWait+1 {
 		t.Fatalf("wait gate completed while SQL was shutting down: %v", err)
 	}
 
 	sqlReady.Store(true)
-	svc.Config.ManagedAppRolloutTimeout = time.Second
 	placement, err = svc.waitForManagedPostgresPrimary(
 		context.Background(), client, namespace, clusterName, targetPrimary, "", postgres,
 	)

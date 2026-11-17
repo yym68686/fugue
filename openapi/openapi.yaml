@@ -9322,6 +9322,10 @@ paths:
         digest-pinned baked-manager image is accepted. This dedicated single-instance
         database operation preserves its Cluster, PVCs, placement, resource envelope,
         secrets, and consumer app configuration. It never deploys the consumer app.
+        Supports app-owned services and independent services with exactly one bound
+        app in the same tenant and project. The bound app anchors the exclusive
+        lifecycle operation; independent service ownership is never reassigned.
+        Unbound or shared services are rejected without mutation.
         Fresh live identity, storage, node and SQL checks run before mutation.
         An accepted image change retains its exclusive mutation lease until verified;
         failures never trigger deletion, failover, storage copying or automatic rollback.
@@ -31877,10 +31881,11 @@ components:
     PostgresImageMigrationPlan:
       type: object
       additionalProperties: false
-      required: [service_id, app_id, target_image, config_hash, requires_downtime, live_preflight_pending, stages]
+      required: [service_id, app_id, ownership, target_image, config_hash, requires_downtime, live_preflight_pending, stages]
       properties:
         service_id: {type: string}
-        app_id: {type: string}
+        app_id: {type: string, description: "Exclusive lifecycle operation anchor: the owner app or the independent service's single bound consumer; not an ownership assignment."}
+        ownership: {type: string, enum: [app_owned, independent], description: Service ownership preserved throughout migration.}
         target_image: {type: string}
         config_hash: {type: string}
         requires_downtime: {type: boolean}

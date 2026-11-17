@@ -15,8 +15,18 @@ This is a dedicated single-instance database lifecycle operation, not an app
 deployment or a zero-downtime rollout. A brief database interruption is expected.
 The consumer application's zero-downtime policy is neither changed nor bypassed.
 
-The first implementation accepts app-owned, exclusively bound, active single-instance
-PostgreSQL services only. The source digest and target must match the platform's
+Accepts active single-instance PostgreSQL services that are app-owned or independent,
+with exactly one consumer binding in the same tenant and project. Independent
+services keep an empty `owner_app_id`: the real consumer anchors the lifecycle
+operation and exclusive lock, without assigning database ownership or deploying the app.
+The plan exposes `ownership` (`app_owned` or `independent`) and the anchor `app_id`.
+Unbound and shared independent databases are explicitly rejected. Their safe
+coordination requires a service-only or multi-consumer operation model and is not
+implemented by assigning a synthetic owner. Binding changes invalidate an independent
+service's configuration plan; applying an operation locks binding, app and service
+mutations until verification completes.
+
+The source digest and target must match the platform's
 same-version upgrade rehearsal receipt. Arbitrary image upgrades, major-version
 changes, replica changes, storage copying and placement migration are out of scope.
 The existing CNPG primary update policy must be `unsupervised` / `restart`;

@@ -96,6 +96,7 @@ func Hash(value any) string {
 type Plan struct {
 	ServiceID            string   `json:"service_id"`
 	AppID                string   `json:"app_id"`
+	Ownership            string   `json:"ownership"`
 	TargetImage          string   `json:"target_image"`
 	ConfigHash           string   `json:"config_hash"`
 	RequiresDowntime     bool     `json:"requires_downtime"`

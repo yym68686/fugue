@@ -19,7 +19,51 @@ func PostgresImageMigrationConfigHash(app model.App, service model.BackingServic
 		normalized := normalizeManagedPostgresSpec(appNameForService(&service, &app), app.Spec.RuntimeID, *service.Spec.Postgres)
 		service.Spec.Postgres = &normalized
 	}
-	return pgimage.Hash([]any{app.ID, app.TenantID, app.ProjectID, app.Spec, service.ID, service.OwnerAppID, service.Spec, image})
+	configuration := []any{app.ID, app.TenantID, app.ProjectID, app.Spec, service.ID, service.OwnerAppID, service.Spec, image}
+	if service.OwnerAppID == "" {
+		// An independent service's consumer is an operation anchor, not an owner.
+		// Pin the actual binding so an unbind/rebind invalidates an old plan.
+		bindings := []model.ServiceBinding{}
+		for _, binding := range app.Bindings {
+			if binding.ServiceID == service.ID {
+				bindings = append(bindings, cloneServiceBinding(binding))
+			}
+		}
+		sortServiceBindings(bindings)
+		configuration = append(configuration, bindings)
+	}
+	return pgimage.Hash(configuration)
+}
+
+// PostgresImageMigrationTargetForApp accepts an owner or an independent service's
+// actual single consumer. The store transaction separately locks and validates ALL
+// bindings to the service, including any not visible through this app snapshot.
+func PostgresImageMigrationTargetForApp(app model.App, serviceID string) (*ManagedPostgresOperationTarget, error) {
+	if strings.TrimSpace(serviceID) == "" {
+		return nil, ErrConflict
+	}
+	target, err := ManagedPostgresOperationTargetForApp(app, serviceID)
+	if err != nil || target == nil || target.Service == nil || target.Postgres.Suspended || target.Postgres.Instances != 1 {
+		return nil, ErrConflict
+	}
+	service := target.Service
+	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || (service.OwnerAppID != "" && !target.AppOwned) {
+		return nil, ErrConflict
+	}
+	bindings := 0
+	for _, binding := range app.Bindings {
+		if binding.ServiceID != service.ID {
+			continue
+		}
+		if binding.AppID != app.ID || binding.TenantID != app.TenantID {
+			return nil, ErrConflict
+		}
+		bindings++
+	}
+	if bindings != 1 {
+		return nil, ErrConflict
+	}
+	return target, nil
 }
 
 func preparePostgresImageMigration(app model.App, op *model.Operation) error {
@@ -30,8 +74,8 @@ func preparePostgresImageMigration(app model.App, op *model.Operation) error {
 	if err != nil {
 		return ErrInvalidInput
 	}
-	target, err := ManagedPostgresOperationTargetForApp(app, op.ServiceID)
-	if err != nil || target == nil || target.Service == nil || !target.AppOwned || target.Postgres.Suspended || target.Postgres.Instances != 1 {
+	target, err := PostgresImageMigrationTargetForApp(app, op.ServiceID)
+	if err != nil {
 		return ErrConflict
 	}
 	expected := PostgresImageMigrationConfigHash(app, *target.Service, image)

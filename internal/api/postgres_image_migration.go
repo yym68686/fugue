@@ -19,8 +19,8 @@ func (s *Server) handleMigrateBackingServiceImage(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	if !isMigratableBackingService(svc) || svc.Spec.Postgres == nil || svc.OwnerAppID == "" || svc.Spec.Postgres.Instances != 1 || svc.Spec.Postgres.Suspended {
-		httpx.WriteError(w, 409, "image migration requires an active app-owned single-instance PostgreSQL service")
+	if !isMigratableBackingService(svc) || svc.Spec.Postgres == nil || svc.Spec.Postgres.Instances != 1 || svc.Spec.Postgres.Suspended {
+		httpx.WriteError(w, 409, "image migration requires an active, exclusively bound single-instance PostgreSQL service")
 		return
 	}
 	var req struct {
@@ -38,16 +38,24 @@ func (s *Server) handleMigrateBackingServiceImage(w http.ResponseWriter, r *http
 		httpx.WriteError(w, 400, err.Error())
 		return
 	}
-	app, err := s.store.GetApp(svc.OwnerAppID)
+	app, err := s.backingServiceSwitchoverApp(svc)
 	if err != nil {
-		s.writeStoreError(w, err)
+		if err == store.ErrInvalidInput {
+			httpx.WriteError(w, 409, "image migration requires exactly one bound consumer app in the same tenant and project; unbound or shared independent services are not supported")
+		} else {
+			s.writeStoreError(w, err)
+		}
 		return
 	}
-	if app.TenantID != svc.TenantID || app.ProjectID != svc.ProjectID {
-		httpx.WriteError(w, 409, "database owner identity differs")
+	if _, err := store.PostgresImageMigrationTargetForApp(app, svc.ID); err != nil || app.TenantID != svc.TenantID || app.ProjectID != svc.ProjectID {
+		httpx.WriteError(w, 409, "database ownership, consumer binding or tenant/project identity differs")
 		return
 	}
-	plan := pgimage.Plan{ServiceID: svc.ID, AppID: app.ID, TargetImage: image, ConfigHash: store.PostgresImageMigrationConfigHash(app, svc, image), RequiresDowntime: true, LivePreflightPending: true,
+	ownership := "app_owned"
+	if svc.OwnerAppID == "" {
+		ownership = "independent"
+	}
+	plan := pgimage.Plan{ServiceID: svc.ID, AppID: app.ID, Ownership: ownership, TargetImage: image, ConfigHash: store.PostgresImageMigrationConfigHash(app, svc, image), RequiresDowntime: true, LivePreflightPending: true,
 		Stages: []string{"verify current Cluster, primary, PVC, node, resource envelope and writable SQL", "persist immutable preflight witness and image-change intent", "compare-and-swap only Cluster.spec.imageName; let CNPG replace the primary", "verify unchanged PVC identities, system ID, placement, resources, SQL and no bootstrap container", "persist only the backing service image; never deploy the consumer app"}}
 	if !req.Apply {
 		httpx.WriteJSON(w, 200, map[string]any{"plan": plan, "dry_run": true})
