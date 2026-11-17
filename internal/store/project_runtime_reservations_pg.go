@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 )
 
 func (s *Store) pgListProjectRuntimeReservations(projectID string) ([]model.ProjectRuntimeReservation, error) {
@@ -284,7 +285,7 @@ func pgValidateOperationRuntimeReservationsTx(ctx context.Context, tx *sql.Tx, p
 		// Keep suspension available as a capacity-reducing safety operation
 		// even when the reservation record has drifted from the live cluster.
 		return nil
-	case model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
+	case pgimage.OperationType, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
 		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 			return ErrInvalidInput
 		}

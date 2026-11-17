@@ -474,6 +474,9 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name.startswith("internal/pgimage/") or name in {"deploy/environments/production/cnpg-controller/release.json", "scripts/generate_postgres_image_catalog.py"} for name in paths):
+        non_go_tasks["postgres-image-catalog-drift"] = [sys.executable, "scripts/generate_postgres_image_catalog.py", "--check"]
+        non_go_tasks["postgres-image-catalog-tests"] = [sys.executable, "-m", "unittest", "scripts.test_generate_postgres_image_catalog"]
     if any(name.startswith("third_party/cloudnative-pg/") or name in {
             "Dockerfile.cnpg-candidate", "Dockerfile.postgres-baked-manager", "scripts/baked_postgres_contract.py",
             "scripts/verify_baked_postgres.py", "scripts/verify_cnpg_candidate.py", "scripts/postgres_baked_manager.sh",

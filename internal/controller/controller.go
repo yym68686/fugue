@@ -16,6 +16,7 @@ import (
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/pgimage"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
@@ -55,6 +56,7 @@ type Service struct {
 	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
 	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
 	newKubeClient                   func(namespace string) (*kubeClient, error)
+	postgresImageMigrationProbe     func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient
 	managedRolloutCapacityLocks     sync.Map
@@ -902,6 +904,11 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			if errors.Is(err, context.Canceled) {
+				if op.Type == pgimage.OperationType {
+					// Keep a possibly accepted image mutation running and
+					// non-cancellable. The recovery observer resumes its journal.
+					return err
+				}
 				if _, requeueErr := s.Store.RequeueManagedOperationGuarded(op, "operation requeued after controller interruption"); requeueErr != nil && !errors.Is(requeueErr, store.ErrConflict) {
 					s.Logger.Printf("operation %s requeue after interruption failed: %v", op.ID, requeueErr)
 				}
@@ -917,6 +924,10 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 			}
 			if errors.Is(err, errOperationNoLongerActive) {
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
+				return nil
+			}
+			if errors.Is(err, errPostgresImageMigrationUnsettled) {
+				s.Logger.Printf("operation %s retained active pending database image verification: %v", op.ID, err)
 				return nil
 			}
 			if errors.Is(err, errManagedPostgresResizeUnsettled) {
@@ -999,6 +1010,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedDatabaseLifecycleOperation(ctx, op, app)
 	case model.OperationTypeDatabaseResize:
 		return s.executeManagedDatabaseResizeOperation(ctx, op, app)
+	case pgimage.OperationType:
+		return s.executePostgresImageMigration(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

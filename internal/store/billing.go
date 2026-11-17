@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 )
 
 var (
@@ -1169,6 +1170,11 @@ func validateTenantOperationBilling(
 func projectedAppManagedBundleCommitment(state *model.State, app model.App, op model.Operation) (model.BillingResourceSpec, model.BillingResourceSpec, error) {
 	index := newBillingStateIndex(state)
 	current := appManagedBundleCommitmentWithIndex(index, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
+	// Image-only migration cannot change resource, replica, placement or storage
+	// commitments. Billing projection must not execute its runtime-proof gate.
+	if op.Type == pgimage.OperationType {
+		return current, current, nil
+	}
 	projection := cloneBillingProjectionState(state, app)
 	opCopy := op
 	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)
@@ -1382,6 +1388,9 @@ func validateTenantManagedCapacityProjection(
 
 func projectedTenantPublicRuntimeHourlyRates(state *model.State, app model.App, op model.Operation) (int64, int64, error) {
 	currentRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, newBillingStateIndex(state), app.TenantID)
+	if op.Type == pgimage.OperationType {
+		return currentRate, currentRate, nil
+	}
 	projection := cloneTenantBillingState(state)
 	opCopy := op
 	opCopy.DesiredSpec = cloneAppSpec(op.DesiredSpec)

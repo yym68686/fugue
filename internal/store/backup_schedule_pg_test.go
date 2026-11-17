@@ -1172,7 +1172,7 @@ func expectPGDatabaseMutationForBackup(mock sqlmock.Sqlmock, appID, serviceName,
 	if operationType != "" {
 		rows.AddRow(operationType)
 	}
-	mock.ExpectQuery(`(?s)SELECT operation.type.*FROM fugue_operations AS operation.*operation.type IN \(\$2, \$3, \$4\).*operation.status IN \(\$5, \$6, \$7\).*LIMIT 1`).
+	mock.ExpectQuery(`(?s)SELECT operation.type.*FROM fugue_operations AS operation.*operation.type IN \(\$2, \$3, \$4, 'database-image-migrate'\).*operation.status IN \(\$5, \$6, \$7\).*LIMIT 1`).
 		WithArgs(
 			appID,
 			model.OperationTypeDatabaseSuspend,
