@@ -292,6 +292,21 @@ passes, including passes resumed after a budget stop. Source diagnostics include
 errors. The service account needs read access to `nodes/proxy`, and the kubelet
 log handler must expose retained container logs.
 
+The owner-only source snapshot's `last_error_read` also reports fixed-size
+timing metadata. `start_offset_ms` is the stream's entry relative to the first
+stream in that source read; `deadline_remaining_ms` is its inherited remaining
+budget at entry (`-1` means no deadline, `0` means expired or below 1 ms).
+Connection-ready, request-written and first-response-byte times are relative to
+that stream's entry; use the corresponding booleans to distinguish an absent
+milestone from one reached in less than 1 ms. Retries reset these milestones.
+`body_read_ms` sums time inside the failing stream's `Read` calls, not decoding
+or admission. `chain_streams`, `chain_open_ms`, `chain_body_read_ms` and
+`chain_body_bytes` include all streams in the same source read, including
+recovered opens and bodies consumed after a later inventory request. These
+caller-observed timings do not identify server CPU, lock or network root cause.
+No URL, header, credential, file name or log body is retained in this receipt;
+read deadlines, cursors, queue admission and backoff behavior are unchanged.
+
 A log transport failure opens a circuit shared by all sources on that
 physical node. Initially in-flight reads are bounded by collector concurrency;
 subsequent cycles skip the node until one half-open probe is due. Retries grow

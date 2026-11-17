@@ -10,7 +10,8 @@ import (
 
 // One fixed-size receipt for the failing HTTP stream, not a request history.
 // None of the trace callback arguments (hosts, addresses, headers or errors)
-// are retained. Booleans describe observed milestones, not their root cause.
+// are retained. Timings describe caller-observed waits, not server CPU or a
+// network root cause. Chain totals include recovered attempts and older bodies.
 type logReadTransportObservation struct {
 	Phase             string `json:"phase"`
 	Attempts          uint32 `json:"attempts"`
@@ -22,17 +23,42 @@ type logReadTransportObservation struct {
 	OpenMillis        int64  `json:"open_ms"`
 	BodyBytes         int64  `json:"body_bytes"`
 	BodyReadError     bool   `json:"body_read_error"`
+	StartOffsetMillis int64  `json:"start_offset_ms"`
+	DeadlineMillis    int64  `json:"deadline_remaining_ms"`
+	ConnectionMillis  int64  `json:"connection_ready_ms"`
+	RequestMillis     int64  `json:"request_written_ms"`
+	FirstByteMillis   int64  `json:"first_response_byte_ms"`
+	BodyReadMillis    int64  `json:"body_read_ms"`
+	ChainStreams      uint32 `json:"chain_streams"`
+	ChainOpenMillis   int64  `json:"chain_open_ms"`
+	ChainBodyBytes    int64  `json:"chain_body_bytes"`
+	ChainReadMillis   int64  `json:"chain_body_read_ms"`
 }
 
 type logReadTransportKey struct{}
 type logReadTransportAttempt struct {
-	mu    sync.Mutex
-	fact  logReadTransportObservation
-	owner *logReadTransportTrace
+	mu       sync.Mutex
+	fact     logReadTransportObservation
+	owner    *logReadTransportTrace
+	started  time.Time
+	readTime time.Duration
 }
 type logReadTransportTrace struct {
 	mu             sync.Mutex
 	latest, failed *logReadTransportAttempt
+	started        time.Time
+	streams        uint32
+	openTime       time.Duration
+	readTime       time.Duration
+	bodyBytes      int64
+	clock          func() time.Time
+}
+
+func (t *logReadTransportTrace) now() time.Time {
+	if t.clock != nil {
+		return t.clock()
+	}
+	return time.Now()
 }
 
 func (t *logReadTransportTrace) snapshot() *logReadTransportObservation {
@@ -41,6 +67,7 @@ func (t *logReadTransportTrace) snapshot() *logReadTransportObservation {
 	if attempt == nil {
 		attempt = t.latest
 	}
+	streams, openTime, readTime, bodyBytes := t.streams, t.openTime, t.readTime, t.bodyBytes
 	t.mu.Unlock()
 	if attempt == nil {
 		return nil
@@ -48,6 +75,9 @@ func (t *logReadTransportTrace) snapshot() *logReadTransportObservation {
 	attempt.mu.Lock()
 	defer attempt.mu.Unlock()
 	copy := attempt.fact
+	copy.BodyReadMillis = attempt.readTime.Milliseconds()
+	copy.ChainStreams, copy.ChainOpenMillis = streams, openTime.Milliseconds()
+	copy.ChainReadMillis, copy.ChainBodyBytes = readTime.Milliseconds(), bodyBytes
 	return &copy
 }
 
@@ -68,8 +98,17 @@ func observedLogStream(ctx context.Context, phase string, open func(context.Cont
 	default:
 		phase = "other"
 	}
-	a := &logReadTransportAttempt{fact: logReadTransportObservation{Phase: phase}, owner: t}
+	started := t.now()
+	a := &logReadTransportAttempt{fact: logReadTransportObservation{Phase: phase, DeadlineMillis: -1}, owner: t, started: started}
+	if deadline, ok := ctx.Deadline(); ok {
+		a.fact.DeadlineMillis = max(int64(0), deadline.Sub(started).Milliseconds())
+	}
 	t.mu.Lock()
+	if t.started.IsZero() {
+		t.started = started
+	}
+	a.fact.StartOffsetMillis = max(int64(0), started.Sub(t.started).Milliseconds())
+	t.streams = min(t.streams+1, uint32(65535))
 	t.latest = a
 	// A new operation can be an intentional recovery (for example fetching a
 	// compressed file after its uncompressed name disappeared). Do not retain
@@ -83,30 +122,40 @@ func observedLogStream(ctx context.Context, phase string, open func(context.Cont
 			a.fact.Attempts = min(a.fact.Attempts+1, uint32(65535))
 			a.fact.ConnectionReady, a.fact.ConnectionReused = false, false
 			a.fact.RequestWritten, a.fact.FirstResponseByte = false, false
+			a.fact.ConnectionMillis, a.fact.RequestMillis, a.fact.FirstByteMillis = 0, 0, 0
 			a.mu.Unlock()
 		},
 		GotConn: func(info httptrace.GotConnInfo) {
 			a.mu.Lock()
 			a.fact.ConnectionReady, a.fact.ConnectionReused = true, info.Reused
+			a.fact.ConnectionMillis = max(int64(0), t.now().Sub(a.started).Milliseconds())
 			a.mu.Unlock()
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			a.mu.Lock()
 			a.fact.RequestWritten = info.Err == nil
+			a.fact.RequestMillis = 0
+			if info.Err == nil {
+				a.fact.RequestMillis = max(int64(0), t.now().Sub(a.started).Milliseconds())
+			}
 			a.mu.Unlock()
 		},
 		GotFirstResponseByte: func() {
 			a.mu.Lock()
 			a.fact.FirstResponseByte = true
+			a.fact.FirstByteMillis = max(int64(0), t.now().Sub(a.started).Milliseconds())
 			a.mu.Unlock()
 		},
 	}
-	started := time.Now()
 	body, err := open(httptrace.WithClientTrace(ctx, trace))
+	openTime := max(time.Duration(0), t.now().Sub(started))
 	a.mu.Lock()
-	a.fact.OpenMillis = time.Since(started).Milliseconds()
+	a.fact.OpenMillis = openTime.Milliseconds()
 	a.fact.StreamOpened = err == nil && body != nil
 	a.mu.Unlock()
+	t.mu.Lock()
+	t.openTime += openTime
+	t.mu.Unlock()
 	if err != nil {
 		a.failure()
 		return body, err
@@ -123,11 +172,18 @@ type observedLogBody struct {
 }
 
 func (b *observedLogBody) Read(p []byte) (int, error) {
+	started := b.attempt.owner.now()
 	n, err := b.ReadCloser.Read(p)
+	readTime := max(time.Duration(0), b.attempt.owner.now().Sub(started))
 	b.attempt.mu.Lock()
 	b.attempt.fact.BodyBytes += int64(n)
+	b.attempt.readTime += readTime
 	b.attempt.fact.BodyReadError = b.attempt.fact.BodyReadError || err != nil && err != io.EOF
 	b.attempt.mu.Unlock()
+	b.attempt.owner.mu.Lock()
+	b.attempt.owner.readTime += readTime
+	b.attempt.owner.bodyBytes += int64(n)
+	b.attempt.owner.mu.Unlock()
 	if err != nil && err != io.EOF {
 		b.attempt.failure()
 	}
