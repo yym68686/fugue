@@ -215,51 +215,59 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		return c.finishLogNodeRead(ticket, readErr, c.logNow())
 	}
 	defer func() { finishNodeRead(nil) }()
-	since := metav1.NewTime(cur.Time)
-	stream, err := observedLogStream(ctx, "pod_log", func(ctx context.Context) (io.ReadCloser, error) {
-		return c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
-	})
-	observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
-	if err != nil {
-		emitWarning := finishNodeRead(err)
-		observation.Outcome = "open_error"
-		observation.ErrorClass = logReadErrorClass(err)
-		observation.HTTPStatus = logReadHTTPStatus(err)
-		if parent.Err() != nil {
-			observation.Outcome = "canceled"
-		}
-		benign := isBenignKubernetesLogReadError(err)
-		if !benign && parent.Err() == nil {
-			c.pipeline.kubernetesLogErrors.Add(1)
-			if emitWarning {
-				c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, err))
+	var stream io.ReadCloser
+	var scanner *bufio.Scanner
+	var err error
+	// A restored or interrupted replay already requires retained CRI files.
+	// Do not gate it on opening an unused pod-log stream: that request would
+	// immediately be closed below and can consume the entire read deadline.
+	if !cur.RecoveringRotation {
+		since := metav1.NewTime(cur.Time)
+		stream, err = observedLogStream(ctx, "pod_log", func(ctx context.Context) (io.ReadCloser, error) {
+			return c.client.CoreV1().Pods(target.pod.Namespace).GetLogs(target.pod.Name, &corev1.PodLogOptions{Container: target.container, Timestamps: true, SinceTime: &since, Previous: target.previous}).Stream(ctx)
+		})
+		observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
+		if err != nil {
+			emitWarning := finishNodeRead(err)
+			observation.Outcome = "open_error"
+			observation.ErrorClass = logReadErrorClass(err)
+			observation.HTTPStatus = logReadHTTPStatus(err)
+			if parent.Err() != nil {
+				observation.Outcome = "canceled"
 			}
+			benign := isBenignKubernetesLogReadError(err)
+			if !benign && parent.Err() == nil {
+				c.pipeline.kubernetesLogErrors.Add(1)
+				if emitWarning {
+					c.pipeline.recordError(fmt.Errorf("read Kubernetes cursor logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, err))
+				}
+			}
+			// Persist the newly initialized cursor even when the stream cannot be
+			// opened. Without this write, the next poll recreates a fresh five-minute
+			// cursor and can silently skip the interval covered by this failure.
+			if (!benign || parent.Err() != nil) && cur.PendingAt.IsZero() {
+				cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+			}
+			// Failures retain their cursor and back off independently of successful
+			// catch-up reads. The node circuit additionally bounds all sibling sources.
+			if parent.Err() == nil {
+				c.deferLogSource(&cur)
+			}
+			cur.Visited = now
+			c.cursorsMu.Lock()
+			c.cursors[key] = cur
+			c.cursorsMu.Unlock()
+			return
 		}
-		// Persist the newly initialized cursor even when the stream cannot be
-		// opened. Without this write, the next poll recreates a fresh five-minute
-		// cursor and can silently skip the interval covered by this failure.
-		if (!benign || parent.Err() != nil) && cur.PendingAt.IsZero() {
-			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
-		}
-		// Failures retain their cursor and back off independently of successful
-		// catch-up reads. The node circuit additionally bounds all sibling sources.
-		if parent.Err() == nil {
-			c.deferLogSource(&cur)
-		}
-		cur.Visited = now
-		c.cursorsMu.Lock()
-		c.cursors[key] = cur
-		c.cursorsMu.Unlock()
-		return
+		defer stream.Close()
+		scanner = bufio.NewScanner(stream)
+		scanner.Split(scanKubernetesLogLine)
+		// Incoming OTLP request limits are unrelated to a container log record.
+		// Keep source reads independently bounded, including its CRI timestamp.
+		scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
 	}
-	defer stream.Close()
 	attrs := kubernetesLogAttributes(target.pod, target.container)
 	source := "kubernetes://" + target.pod.Namespace + "/" + target.pod.Name + "/" + target.container
-	scanner := bufio.NewScanner(stream)
-	scanner.Split(scanKubernetesLogLine)
-	// Incoming OTLP request limits are unrelated to a container log record.
-	// Keep source reads independently bounded, including its CRI timestamp.
-	scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
 	n := 0
 	truncated := false
 	invalid := false
@@ -275,7 +283,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	recoverRotation := func() {
 		rotationAttempted = true
 		cur.RecoveringRotation = true
-		stream.Close()
+		if stream != nil {
+			stream.Close()
+		}
 		replay, recoveryErr := c.openRotationLogs(ctx, target)
 		if recoveryErr != nil {
 			observation.Outcome = "rotation_recovery_error"
@@ -402,7 +412,10 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.Boundary[hash]++
 		}
 	}
-	if err = scanner.Err(); err != nil && parent.Err() == nil {
+	if scanner != nil {
+		err = scanner.Err()
+	}
+	if err != nil && parent.Err() == nil {
 		observation.Outcome = "scan_error"
 		observation.ErrorClass = logReadErrorClass(err)
 		observation.HTTPStatus = logReadHTTPStatus(err)

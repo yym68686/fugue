@@ -265,6 +265,12 @@ files and external or traversing links are rejected. Two directory observations
 bracket opening the current file, so a concurrent rotation retries before the
 cursor advances. Compressed and plain retained files use the same source order.
 
+Restored checkpoints and interrupted retained-file replays start directly with
+that retained-file protocol. They do not first open an unused ordinary Pod log
+response: failure or latency of that discarded request must not gate recovery
+or consume its read budget. The same inventory checks, inclusive boundary,
+admission limits, deadline and node/source backoff still apply.
+
 Ordinary pod-log responses also require a line terminator for timestamped
 records. A successful non-following kubelet read can end halfway through an
 in-progress CRI write. Its trailing fragment is not admitted or made a boundary
