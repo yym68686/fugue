@@ -3,6 +3,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import signal
 import threading
 import time
 
@@ -121,7 +122,10 @@ class StorageQualification:
                     container_id = next((c.get("containerID", "").removeprefix("containerd://")
                                          for c in item.get("status", {}).get("containerStatuses", [])
                                          if c["name"] == "initdb"), "")
-                    inspected = run("k3s", "crictl", "inspect", container_id, "-o", "json", check=False)
+                    inspected = run("k3s", "crictl", "inspect", "-o", "json", container_id, check=False)
+                    self.write(name + "-cri-inspection-status.json", {"exit_code": inspected.returncode,
+                                                                     "stderr": inspected.stderr})
+                    host_pid = None
                     if not inspected.returncode:
                         host_pid = int(json.loads(inspected.stdout)["info"]["pid"])
                         # Host-side kernel waits distinguish a runtime/syscall
@@ -160,6 +164,16 @@ class StorageQualification:
                                          "kill", "-QUIT", "1", check=False)
                         self.write(name + "-stack-signal.json", {"exit_code": result.returncode,
                                                                  "stdout": result.stdout, "stderr": result.stderr})
+                        if result.returncode and host_pid is not None:
+                            # A non-root exec may not signal the namespace init.
+                            # Verify the host PID still belongs to this exact
+                            # disposable container before the root-side signal.
+                            cgroup = Path(f"/proc/{host_pid}/cgroup").read_text()
+                            if host_pid <= 1 or not container_id or container_id not in cgroup:
+                                raise RuntimeError("refusing a diagnostic signal to an unverified host PID")
+                            os.kill(host_pid, signal.SIGQUIT)
+                            self.write(name + "-host-stack-signal.json", {"host_pid": host_pid,
+                                                                        "container_id": container_id})
                         time.sleep(3)
                         result = kubectl("-n", namespace, "logs", name, "-c", "initdb", "--tail=1500", check=False)
                         (self.evidence / (name + "-manager-stack.log")).write_text(result.stdout + result.stderr)
