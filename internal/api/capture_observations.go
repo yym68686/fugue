@@ -338,6 +338,6 @@ func (s *Server) captureSnapshot() any {
 			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},
 		"consumer_failures": map[string]any{"receipts": append([]consumerRequestFailure(nil), s.captures.consumerFailures...),
 			"total": s.captures.consumerFailureTotal, "evicted": s.captures.consumerFailureEvicted, "limit": consumerFailureLimit,
-			"coverage": "assignment_and_heartbeat_read_or_admission_errors_not_all_http_rejections"},
+			"coverage": "assignment_attempt_and_heartbeat_read_or_admission_errors_including_recovered_rereads_not_http_failure_totals"},
 		"coverage": "bounded_completed_local_reads_not_full_request_tracing", "authorizes_traffic": false}
 }

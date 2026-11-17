@@ -332,7 +332,7 @@ concurrently sampled counters are not a transactional snapshot. This observes
 driver query errors, not every store, transaction-commit or HTTP failure.
 
 The API operations snapshot also retains up to 24 `captures.consumer_failures`
-from the original assignment or verified heartbeat read/admission failure.
+from the original assignment attempt or verified heartbeat read/admission failure.
 Fixed operation/stage names, error categories, typed SQLSTATE and store-conflict
 flags are recorded without identifiers, request bodies or arbitrary errors.
 Successful requests cannot evict them. Heartbeat store writes copy only the
@@ -342,6 +342,17 @@ pairing unrelated failures. Authentication, decoding, expected conflict response
 and other handlers are outside this ring's coverage. Neither ring reconstructs
 events before deployment or authorizes serving traffic.
 
+Assignment discovery retries once only when its final independent authority
+check reports `assignment_changed`. Each attempt builds a new body-read session
+and reruns discovery, current membership/serving selection, complete input
+verification and the unchanged final equality check. A failed attempt stays in
+the ring even when the reread succeeds: these are not HTTP failure totals.
+Fixed `consumer-assignment-retry`, `consumer-assignment-retry-ok`,
+`consumer-assignment-retry-empty` and `consumer-assignment-retry-exhausted`
+counters distinguish outcomes. A cold input, database error, absent assignment
+or selection error does not initiate this retry; continued changes return 503
+without returning the first attempt's assignments.
+
 Assignment `input_recheck` failures additionally retain the original synchronous
 read's fixed substage. Store failures distinguish preparation, pin selection
 and admission checks. A failed dependency read retains its original typed error
@@ -350,7 +361,8 @@ discards that cause. A changed physical witness records its fixed relation,
 SHA-256 key identity and changed physical field names, never raw keys or tuples.
 Final authority comparisons retain only changed top-level field names from the
 fixed artifact, assignment and release structs; map keys and values are omitted.
-This adds no query, replay, retry, public response field or admission exception.
+The failure receipt itself adds no query, replay, retry, public response field
+or admission exception; the bounded assignment reread is described above.
 It describes the immediate failing check, not the upstream cause of a concurrent
 publication or evidence change.
 

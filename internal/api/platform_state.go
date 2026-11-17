@@ -1344,19 +1344,9 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 	defer s.observeOperation("consumer-assignment")()
 	started := time.Now().UTC()
 	r = r.WithContext(runtimeobservation.WithDatabaseOperation(r.Context(), "consumer-assignment"))
-	r = r.WithContext(withConsumerInputReadObservation(r.Context()))
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
 	if !ok {
 		httpx.WriteError(w, http.StatusInternalServerError, "verified platform component identity missing")
-		return
-	}
-	loadArtifact := s.store.NewPlatformArtifactReadSession()
-	readArtifact := newConsumerArtifactReader(loadArtifact)
-	readBinding := routeartifact.NewRequestBindingReader()
-	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
-	if err != nil {
-		s.retainConsumerRequestFailure(r.Context(), started, "assignment", "resolve", err)
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	servingOnly := false
@@ -1367,44 +1357,19 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 		}
 		if values[0] == "true" {
 			servingOnly = true
-			selected, selectErr := selectServingConsumerAssignments(resolved, func() ([]consumerArtifactLookup, error) {
-				return s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
-			}, func(item consumerArtifactLookup) (bool, error) {
-				if item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
-					return false, nil
-				}
-				set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
-				if err != nil {
-					return false, errors.New("serving topology unavailable")
-				}
-				group := ""
-				for _, c := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
-					if platformcontrol.ExpectedConsumerIdentityMatches(c, claims) {
-						group = c.Cohort
-						break
-					}
-				}
-				isSelected, err := s.consumerAssignmentIsSelectedWithBindingReader(item, group, readArtifact, readBinding)
-				if err != nil {
-					return false, errors.New("serving release unavailable")
-				}
-				return isSelected, nil
-			})
-			if selectErr != nil {
-				s.retainConsumerRequestFailure(r.Context(), started, "assignment", "serving_selection", selectErr)
-				httpx.WriteError(w, http.StatusServiceUnavailable, selectErr.Error())
-				return
-			}
-			resolved = selected
 		}
+	}
+	resolved, stage, err := s.readCheckedConsumerAssignments(r.Context(), claims, servingOnly, started, s.store.NewPlatformArtifactReadSession)
+	if err != nil {
+		message := err.Error()
+		if stage == "input_recheck" {
+			message = "consumer input dependencies unavailable or changed"
+		}
+		httpx.WriteError(w, http.StatusServiceUnavailable, message)
+		return
 	}
 	if len(resolved) == 0 {
 		httpx.WriteError(w, http.StatusNotFound, "no expected consumer assignment found")
-		return
-	}
-	if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, resolved, readArtifact, servingOnly, loadArtifact); err != nil {
-		s.retainConsumerRequestFailure(r.Context(), started, "assignment", "input_recheck", err)
-		httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
 		return
 	}
 	assignments := make([]model.PlatformConsumerAssignment, 0, len(resolved))
