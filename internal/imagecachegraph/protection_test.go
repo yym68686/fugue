@@ -1,10 +1,40 @@
 package imagecachegraph
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
 )
+
+func TestOrphanBlobGrantFitsCompleteTaskClaimBound(t *testing.T) {
+	blobs := make([]model.ImageCachePruneBlobCandidate, 1500)
+	for i := range blobs {
+		blobs[i].Digest = fmt.Sprintf("sha256:%064x", i)
+	}
+	for _, padding := range []int{0, 48 * 1024, 60*1024 - 100} {
+		t.Run(fmt.Sprint(padding), func(t *testing.T) {
+			payload := map[string]string{"targets_json": strings.Repeat("x", padding), "dry_run": "false"}
+			SetOrphanBlobGrant(payload, blobs)
+			raw, err := json.Marshal(payload)
+			if err != nil || len(raw)+2*len(payload) > 60*1024 {
+				t.Fatalf("task exceeds safe claim budget: bytes=%d err=%v", len(raw), err)
+			}
+			var digests []string
+			if err := json.Unmarshal([]byte(payload["unreferenced_blob_digests"]), &digests); err != nil || digests == nil {
+				t.Fatalf("grant must remain an explicit array: %v %q", err, payload["unreferenced_blob_digests"])
+			}
+			if len(digests) >= 1024 {
+				t.Fatalf("entry count alone did not bound a 64 KiB task: %d", len(digests))
+			}
+			if padding < 48*1024 && len(digests) == 0 {
+				t.Fatal("empty grant despite available budget")
+			}
+		})
+	}
+}
 
 func TestProtectManifestGraphPropagatesParentDisposition(t *testing.T) {
 	t.Parallel()

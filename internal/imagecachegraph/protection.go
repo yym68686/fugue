@@ -1,6 +1,7 @@
 package imagecachegraph
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,6 +29,33 @@ func OrphanBlobDigests(blobs []model.ImageCachePruneBlobCandidate) []string {
 		}
 	}
 	return out
+}
+
+// SetOrphanBlobGrant keeps the complete serialized task below the database's
+// 64 KiB claim bound, with room for jsonb's additional inter-field whitespace.
+// The grant remains an explicit empty array when no additional digest fits.
+func SetOrphanBlobGrant(payload map[string]string, blobs []model.ImageCachePruneBlobCandidate) {
+	payload["unreferenced_blob_digests"] = "[]"
+	base, _ := json.Marshal(payload)
+	budget := 60*1024 - len(base) - 2*len(payload)
+	admitted := make([]string, 0)
+	for _, digest := range OrphanBlobDigests(blobs) {
+		encoded, _ := json.Marshal(digest)
+		// The array is itself a JSON string in the task payload, so account
+		// for the second level of quote escaping as well as array commas.
+		escaped, _ := json.Marshal(string(encoded))
+		cost := len(escaped) - 2
+		if len(admitted) > 0 {
+			cost++
+		}
+		if cost > budget {
+			break
+		}
+		budget -= cost
+		admitted = append(admitted, digest)
+	}
+	grant, _ := json.Marshal(admitted)
+	payload["unreferenced_blob_digests"] = string(grant)
 }
 
 func AutomaticDeleteReasonSafe(reason string) bool {

@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "generation": 6,
+  "generation": 7,
   "minimum_updater_version": "v49",
   "origin": "https://api.fugue.pro",
   "policy_file": "policy.json",

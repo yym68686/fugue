@@ -19,7 +19,8 @@ They do not wait for a whole GC pass. Final unlink operations run under a short
 generation check; a changed observation defers remaining deletion. File identity,
 size and mtime are rechecked. Targeted retirement does not sweep unrelated orphan
 blobs. Automatic tasks carry an explicit inventory-derived orphan digest set,
-revalidated at claim time and bounded to 1,024 entries per task. A newly uploaded
+revalidated at claim time and bounded to 1,024 entries and a 60 KiB complete
+serialized task, below the database's 64 KiB claim bound. A newly uploaded
 blob awaiting its manifest is outside that grant. Budget, cooldown and retirement
 authorization are unchanged.
 

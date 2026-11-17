@@ -252,10 +252,7 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		// Persistence deliberately drops detailed candidates. Preserve the
 		// execution guard derived from the full, admitted retirement plan.
 		executionMinAge := imagecachepolicy.ExecutionMinAge(plan)
-		orphanDigestsRaw, err := json.Marshal(imagecachegraph.OrphanBlobDigests(plan.UnreferencedBlobs))
-		if err != nil {
-			return err
-		}
+		orphanBlobs := plan.UnreferencedBlobs
 		persisted, err := s.Store.UpsertImageCachePrunePlanSummary(plan)
 		if err != nil {
 			return err
@@ -263,7 +260,7 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 		plan = persisted
 		dryRun := mode != model.ImageCachePruneModeDelete
 		allowDelete := mode == model.ImageCachePruneModeDelete
-		if _, err := s.Store.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
+		payload := map[string]string{
 			"prune_plan_id":              plan.ID,
 			"plan_hash":                  plan.PlanHash,
 			"policy_version":             plan.PolicyVersion,
@@ -273,11 +270,12 @@ func (s *Service) scheduleOrphanImageCachePrune(ctx context.Context) error {
 			"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
 			"min_manifest_age":           executionMinAge,
 			"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
-			"unreferenced_blob_digests":  string(orphanDigestsRaw),
 			"candidate_blob_count":       fmt.Sprintf("%d", plan.CandidateBlobCount),
 			"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
 			"prune_reason":               "image-cache-orphan",
-		}); err != nil {
+		}
+		imagecachegraph.SetOrphanBlobGrant(payload, orphanBlobs)
+		if _, err := s.Store.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, payload); err != nil {
 			if !errors.Is(err, store.ErrInvalidInput) {
 				return err
 			}
