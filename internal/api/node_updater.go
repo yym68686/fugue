@@ -4380,8 +4380,8 @@ wait_for_unit_active() {
 
 restart_k3s_agent() {
   log_task "restarting k3s-agent"
-  systemctl restart k3s-agent
-  wait_for_unit_active k3s-agent 900
+  systemctl restart k3s-agent || return 1
+  wait_for_unit_active k3s-agent 900 || return 1
   log_task "k3s-agent is active"
 }
 
@@ -4402,8 +4402,8 @@ restart_k3s_agent_for_config_reload() {
     return 0
   fi
   log "restarting k3s-agent so containerd reloads updated join/registry configuration"
-  systemctl restart k3s-agent
-  wait_for_unit_active k3s-agent 900
+  systemctl restart k3s-agent || return 1
+  wait_for_unit_active k3s-agent 900 || return 1
   log "k3s-agent is active after join/registry configuration reload"
 }
 
@@ -4437,18 +4437,7 @@ request_k3s_agent_restart_for_cluster_rejoin() {
   log "queued non-blocking k3s-agent restart for cluster rejoin"
 }
 
-upgrade_k3s_agent() {
-  local channel="${FUGUE_NODE_UPDATE_TASK_K3S_CHANNEL:-${FUGUE_K3S_CHANNEL:-stable}}"
-  local target_version="${FUGUE_NODE_UPDATE_TASK_TARGET_K3S_VERSION:-}"
-  local install_env=(INSTALL_K3S_EXEC=agent INSTALL_K3S_SKIP_START=true INSTALL_K3S_CHANNEL="${channel}")
-  if [ -n "${target_version}" ]; then
-    install_env+=(INSTALL_K3S_VERSION="${target_version}")
-  fi
-  log_task "installing k3s agent channel=${channel} target=${target_version:-latest}"
-  curl -sfL https://get.k3s.io | env "${install_env[@]}" sh -
-  restart_k3s_agent
-  log_task "k3s agent version after upgrade: $(k3s_version)"
-}
+__FUGUE_K3S_UPGRADE_LIBRARY__
 
 upgrade_node_updater() {
   local script_url="${FUGUE_NODE_UPDATE_TASK_NODE_UPDATER_SCRIPT_URL:-${FUGUE_API_BASE}/install/node-updater.sh}"
@@ -5898,5 +5887,6 @@ esac
 		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", hostJournaldPolicyShellLibrary(),
 		"__FUGUE_LOCALPV_UNIT_LIBRARY__", localPVUnitShellLibrary(),
+		"__FUGUE_K3S_UPGRADE_LIBRARY__", guardedK3SUpgradeShell,
 	).Replace(script)
 }
