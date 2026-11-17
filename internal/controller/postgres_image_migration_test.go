@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -19,6 +20,27 @@ import (
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
+
+func TestPostgresImageMigrationRecoveryReadFailurePreservesRunningOperation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	op := model.Operation{ID: "migration", AppID: "client", TenantID: "tenant", Type: pgimage.OperationType, Status: model.OperationStatusRunning, ExecutionMode: model.ExecutionModeManaged}
+	state := model.State{Apps: []model.App{{ID: op.AppID, TenantID: op.TenantID, Status: model.AppStatus{Phase: "deleted"}}}, Operations: []model.Operation{op}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Service{Store: store.New(path), Config: config.ControllerConfig{KubectlApply: true}, Logger: log.New(io.Discard, "", 0)}
+	if err = s.recoverCompletedManagedDeploys(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.Store.GetOperation(op.ID)
+	if err != nil || current.Status != model.OperationStatusRunning {
+		t.Fatalf("app read failure released an unknown mutation: status=%s err=%v", current.Status, err)
+	}
+}
 
 func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *testing.T) {
 	for _, scenario := range []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced"} {
