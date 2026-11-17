@@ -43,6 +43,10 @@ func New(app model.App, svc model.BackingService) map[string]map[string]any {
 	pgretire.Meta(pvc)["ownerReferences"] = owner("previous", "source-uid")
 	pgretire.Meta(pvc)["labels"] = map[string]any{pgretire.ClusterLabel: "previous"}
 	add("/api/v1/persistentvolumes/source-pv", "source-pv", "source-pv-uid", map[string]any{"persistentVolumeReclaimPolicy": "Delete", "claimRef": map[string]any{"uid": "source-pvc-uid", "name": "previous-1", "namespace": ns}}, map[string]any{"phase": "Bound"})
+	// A label does not make this ownerless, unused claim part of the source.
+	protected := add(pgretire.Path(ns, "persistentvolumeclaims", "unowned-archive"), "unowned-archive", "protected-pvc-uid", map[string]any{"volumeName": "protected-pv"}, map[string]any{"phase": "Bound"})
+	pgretire.Meta(protected)["labels"] = map[string]any{pgretire.ClusterLabel: "previous"}
+	add("/api/v1/persistentvolumes/protected-pv", "protected-pv", "protected-pv-uid", map[string]any{"persistentVolumeReclaimPolicy": "Delete", "claimRef": map[string]any{"uid": "protected-pvc-uid", "name": "unowned-archive", "namespace": ns}}, map[string]any{"phase": "Bound"})
 	add(pgretire.Path(ns, "services", endpoint), endpoint, "endpoint-uid", map[string]any{"selector": map[string]any{pgretire.ClusterLabel: target, "cnpg.io/instanceRole": "primary"}}, nil)
 	ep := add(pgretire.Path(ns, "endpoints", endpoint), endpoint, "endpoints-uid", nil, nil)
 	ep["subsets"] = []any{map[string]any{"addresses": []any{map[string]any{"ip": "10.0.0.2", "targetRef": map[string]any{"name": target + "-1", "uid": "target-pod-uid"}}}}}

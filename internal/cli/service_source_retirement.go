@@ -61,6 +61,9 @@ func (c *CLI) newServicePostgresRetireSourceCommand() *cobra.Command {
 			return c.writeJSON(response)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "PostgreSQL source retirement (storage preserved)\nService: %s\nSource Cluster: %s\nSource UID: %s\nDestination: %s (unchanged)\nPods: %d\nRetained PVC/PV pairs: %d\nPlan hash: %s\n", p.ServiceID, p.SourceCluster, p.SourceUID, p.TargetCluster, len(p.Pods), len(p.Volumes), p.PlanHash)
+		for _, v := range p.ProtectedVolumes {
+			fmt.Fprintf(cmd.OutOrStdout(), "Protected unowned storage (read-only, unchanged): %s / %s\n", v.PVC, v.PV)
+		}
 		if response.DryRun {
 			fmt.Fprintln(cmd.OutOrStdout(), "Preview only; no changes made.")
 		} else {

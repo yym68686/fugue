@@ -21,6 +21,7 @@ func TestSourceRetirementCLIRequiresExactConfirmation(t *testing.T) {
 	}
 	for _, apply := range []bool{false, true} {
 		p := model.PostgresSourceRetirementPlan{ServiceID: "svc_pg", AppID: "client", SourceUID: "source-uid", TargetUID: "target-uid", PreserveStorage: true}
+		p.ProtectedVolumes = []model.PostgresSourceRetirementProtectedVolume{{PostgresSourceRetirementVolume: model.PostgresSourceRetirementVolume{PVC: "unowned-archive", PVCUID: "protected-claim", PV: "protected-pv", PVUID: "protected-volume"}, ConfigurationHash: "protected-configuration"}}
 		p.PlanHash = pgretire.PlanHash(p)
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/v1/backing-services" {

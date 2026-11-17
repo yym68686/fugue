@@ -29,6 +29,15 @@ Jobs, replacement identities, configuration changes or missing evidence block it
 Source Pod adoption, extra containers, ephemeral containers and native sidecars
 also block retirement because they fall outside the stopped-PostgreSQL proof.
 
+A PVC with a matching discovery label but no owner is not assumed to belong to
+the source. Unless it is the recorded primary claim, it may appear separately in
+`protected_volumes`: exact Bound PVC/PV identities, complete PV policy and metadata
+configuration are pinned and rechecked. These objects are never patched or deleted,
+including their existing reclaim policy. Adoption, configuration changes, missing
+objects, or any Pod/Job using them block retirement. The recorded primary claim
+must still be owned by the source. Plans with this inventory require a CLI that
+understands the field (v0.8.69 or later); older clients fail plan-hash validation.
+
 It never deletes PVCs, PVs, Services, secrets, Jobs or destination resources; never
 rebuilds/redeploys the consumer or changes traffic, resources or placement. Old
 storage remains Bound and marked

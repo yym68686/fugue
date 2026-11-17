@@ -143,6 +143,33 @@ func Volume(ctx context.Context, get Get, ns string, pvc map[string]any) (model.
 	return v, nil
 }
 
+// Labels are discovery hints, not authority to mutate storage. An unowned,
+// unused label collision is pinned separately and must remain entirely untouched.
+func ProtectedVolume(ctx context.Context, get Get, ns string, pvc map[string]any) (model.PostgresSourceRetirementProtectedVolume, error) {
+	var protected model.PostgresSourceRetirementProtectedVolume
+	if len(Objects(Meta(pvc)["ownerReferences"])) != 0 {
+		return protected, fmt.Errorf("label-colliding PVC has an unexpected owner")
+	}
+	v, err := Volume(ctx, get, ns, pvc)
+	if err != nil {
+		return protected, err
+	}
+	pv, err := Required(ctx, get, "/api/v1/persistentvolumes/"+url.PathEscape(v.PV))
+	if err != nil {
+		return protected, err
+	}
+	if len(Objects(Meta(pv)["ownerReferences"])) != 0 {
+		return protected, fmt.Errorf("protected PV has an unexpected owner")
+	}
+	configuration := func(obj map[string]any) any {
+		m := Meta(obj)
+		return []any{m["labels"], m["annotations"], m["ownerReferences"], m["finalizers"]}
+	}
+	protected.PostgresSourceRetirementVolume = v
+	protected.ConfigurationHash = Hash([]any{configuration(pvc), configuration(pv), pv["spec"]})
+	return protected, nil
+}
+
 func Inspect(ctx context.Context, get Get, app model.App, svc model.BackingService) (model.PostgresSourceRetirementPlan, error) {
 	p := model.PostgresSourceRetirementPlan{ServiceID: svc.ID, AppID: app.ID, Namespace: "fg-" + strings.ReplaceAll(svc.TenantID, "_", "-"), ConfigHash: ConfigHash(app, svc), PreserveStorage: true, Pods: []model.PostgresSourceRetirementPod{}, Volumes: []model.PostgresSourceRetirementVolume{}}
 	if svc.Spec.Postgres == nil || svc.Spec.Postgres.Suspended || svc.Spec.Postgres.Instances != 1 {
@@ -222,6 +249,14 @@ func Inspect(ctx context.Context, get Get, app model.App, svc model.BackingServi
 		if !Owned(pvc, p.SourceUID) && labels[ClusterLabel] != p.SourceCluster {
 			continue
 		}
+		if !Owned(pvc, p.SourceUID) && len(Objects(Meta(pvc)["ownerReferences"])) == 0 && String(Meta(pvc), "name") != st.SourcePVC {
+			v, e := ProtectedVolume(ctx, get, p.Namespace, pvc)
+			if e != nil {
+				return p, e
+			}
+			p.ProtectedVolumes = append(p.ProtectedVolumes, v)
+			continue
+		}
 		if !Owned(pvc, p.SourceUID) || len(Objects(Meta(pvc)["ownerReferences"])) != 1 || labels[ClusterLabel] != p.SourceCluster {
 			return p, fmt.Errorf("source PVC discovery/ownership mismatch")
 		}
@@ -263,6 +298,7 @@ func Inspect(ctx context.Context, get Get, app model.App, svc model.BackingServi
 	}
 	sort.Slice(p.Pods, func(i, j int) bool { return p.Pods[i].Name < p.Pods[j].Name })
 	sort.Slice(p.Volumes, func(i, j int) bool { return p.Volumes[i].PVC < p.Volumes[j].PVC })
+	sort.Slice(p.ProtectedVolumes, func(i, j int) bool { return p.ProtectedVolumes[i].PVC < p.ProtectedVolumes[j].PVC })
 	p.PlanHash = PlanHash(p)
 	if err = Validate(ctx, get, p, false); err != nil {
 		return p, err
@@ -363,6 +399,16 @@ func Validate(ctx context.Context, get Get, p model.PostgresSourceRetirementPlan
 			return fmt.Errorf("source PVC lost its identified ownership")
 		}
 	}
+	for _, protected := range p.ProtectedVolumes {
+		pvc, err := Required(ctx, get, Path(p.Namespace, "persistentvolumeclaims", protected.PVC))
+		if err != nil {
+			return err
+		}
+		got, err := ProtectedVolume(ctx, get, p.Namespace, pvc)
+		if err != nil || got != protected || Object(Meta(pvc)["labels"])[ClusterLabel] != p.SourceCluster {
+			return fmt.Errorf("protected unowned storage identity/configuration changed")
+		}
+	}
 	claims, err := RequiredList(ctx, get, Path(p.Namespace, "persistentvolumeclaims", ""))
 	if err != nil {
 		return err
@@ -373,6 +419,9 @@ func Validate(ctx context.Context, get Get, p model.PostgresSourceRetirementPlan
 		}
 		known := false
 		for _, v := range p.Volumes {
+			known = known || String(Meta(claim), "uid") == v.PVCUID
+		}
+		for _, v := range p.ProtectedVolumes {
 			known = known || String(Meta(claim), "uid") == v.PVCUID
 		}
 		if !known {
@@ -414,6 +463,11 @@ func Validate(ctx context.Context, get Get, p model.PostgresSourceRetirementPlan
 		}
 		uses := false
 		for _, volume := range Objects(Object(pod["spec"])["volumes"]) {
+			for _, v := range p.ProtectedVolumes {
+				if Object(volume["persistentVolumeClaim"])["claimName"] == v.PVC {
+					return fmt.Errorf("protected unowned storage is referenced by a Pod")
+				}
+			}
 			for _, v := range p.Volumes {
 				uses = uses || Object(volume["persistentVolumeClaim"])["claimName"] == v.PVC
 			}
@@ -431,6 +485,11 @@ func Validate(ctx context.Context, get Get, p model.PostgresSourceRetirementPlan
 			return fmt.Errorf("source Cluster still has a Job")
 		}
 		for _, volume := range Objects(Object(Object(Object(job["spec"])["template"])["spec"])["volumes"]) {
+			for _, v := range p.ProtectedVolumes {
+				if Object(volume["persistentVolumeClaim"])["claimName"] == v.PVC {
+					return fmt.Errorf("protected unowned storage is referenced by a Job")
+				}
+			}
 			for _, v := range p.Volumes {
 				if Object(volume["persistentVolumeClaim"])["claimName"] == v.PVC {
 					return fmt.Errorf("Job still references retained source storage")

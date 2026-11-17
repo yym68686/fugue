@@ -31951,6 +31951,14 @@ components:
         pv_uid: {type: string}
         pvc_spec_hash: {type: string}
         pv_spec_hash: {type: string}
+    PostgresSourceRetirementProtectedVolume:
+      description: Unowned, unused storage with a colliding source label. Pinned and verified read-only; never patched or deleted by retirement.
+      allOf:
+        - {$ref: '#/components/schemas/PostgresSourceRetirementVolume'}
+        - type: object
+          required: [configuration_hash]
+          properties:
+            configuration_hash: {type: string, description: 'Hash of PVC/PV metadata configuration and the complete PV spec, including reclaim policy.'}
     PostgresSourceRetirementPlan:
       type: object
       required: [service_id, app_id, namespace, source_cluster, source_uid, source_spec_hash, migration_uid, migration_hash, target_cluster, target_uid, target_pod, target_pod_uid, target_node, target_spec_hash, system_id, endpoint, endpoint_uid, endpoint_spec_hash, config_hash, plan_hash, preserve_storage, pods, volumes]
@@ -31978,6 +31986,7 @@ components:
         preserve_storage: {type: boolean, enum: [true]}
         pods: {type: array, items: {$ref: '#/components/schemas/PostgresSourceRetirementPod'}}
         volumes: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PostgresSourceRetirementVolume'}}
+        protected_volumes: {type: array, description: 'Read-only protection inventory, not source-owned storage. Nonempty plans require a CLI that understands this field.', items: {$ref: '#/components/schemas/PostgresSourceRetirementProtectedVolume'}}
     PostgresImageMigrationRequest:
       type: object
       additionalProperties: false

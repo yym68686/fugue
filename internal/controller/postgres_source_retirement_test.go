@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"fugue/internal/config"
@@ -23,7 +24,7 @@ import (
 
 func TestPostgresSourceRetirementExecutor(t *testing.T) {
 	for _, independent := range []bool{false, true} {
-		for _, scenario := range []string{"complete", "lost-cluster-response", "lost-pvc-response", "lost-pod-response", "source-running", "sql-unhealthy", "changed-after-intent"} {
+		for _, scenario := range []string{"complete", "lost-cluster-response", "lost-pvc-response", "lost-pod-response", "source-running", "sql-unhealthy", "changed-after-intent", "protected-changed-after-intent"} {
 			t.Run(fmt.Sprintf("independent=%v/%s", independent, scenario), func(t *testing.T) {
 				st := store.New(filepath.Join(t.TempDir(), "state.json"))
 				if err := st.Init(); err != nil {
@@ -67,6 +68,8 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 				}
 				svc = *target.Service
 				objects := retiretest.New(app, svc)
+				protectedPVCPath := pgretire.Path("fg-"+strings.ReplaceAll(app.TenantID, "_", "-"), "persistentvolumeclaims", "unowned-archive")
+				protectedBefore := pgretire.Hash([]any{objects[protectedPVCPath], objects["/api/v1/persistentvolumes/protected-pv"]})
 				p, err := pgretire.Inspect(context.Background(), retiretest.Get(objects), app, svc)
 				if err != nil {
 					t.Fatal(err)
@@ -165,6 +168,9 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 					if scenario == "changed-after-intent" && mutations == 1 {
 						pgretire.Meta(objects[pgretire.Path(p.Namespace, "clusters", p.TargetCluster)])["uid"] = "replacement"
 					}
+					if scenario == "protected-changed-after-intent" && mutations == 1 {
+						pgretire.Meta(objects[protectedPVCPath])["annotations"] = map[string]any{"changed": "externally"}
+					}
 					if !lost && ((scenario == "lost-cluster-response" && path == sourcePath && r.Method == http.MethodDelete) || (scenario == "lost-pvc-response" && path == pvcPath) || (scenario == "lost-pod-response" && path == podPath)) {
 						lost = true
 						http.Error(w, "response lost after commit", 500)
@@ -200,7 +206,7 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 							t.Fatal("retirement lease bypassed")
 						}
 					}
-					if scenario == "changed-after-intent" {
+					if scenario == "changed-after-intent" || scenario == "protected-changed-after-intent" {
 						if mutations != 1 {
 							t.Fatal("continued after identity change")
 						}
@@ -222,6 +228,9 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 				}
 				if objects[sourcePath] != nil || objects[podPath] != nil || objects[pvcPath] == nil || objects[pvPath] == nil {
 					t.Fatal("wrong retirement footprint")
+				}
+				if protectedBefore != pgretire.Hash([]any{objects[protectedPVCPath], objects["/api/v1/persistentvolumes/protected-pv"]}) {
+					t.Fatal("retirement modified protected unowned storage")
 				}
 			})
 		}
