@@ -16,6 +16,8 @@ import (
 const platformMutationReceiptLimit = 12
 const platformMutationQueryLimit = 48
 const platformMutationQueryHead = 16
+const platformMutationLockQueryLimit = 8
+const platformMutationLockQueryHead = 4
 
 type platformMutationQuery struct {
 	BackendPID              uint32    `json:"backend_pid"`
@@ -29,11 +31,14 @@ type platformMutationQuery struct {
 }
 
 type platformMutationDatabaseTrace struct {
-	mu        sync.Mutex
-	queries   []platformMutationQuery
-	next      int
-	completed uint64
-	dropped   atomic.Uint64
+	mu            sync.Mutex
+	queries       []platformMutationQuery
+	next          int
+	completed     uint64
+	locks         []platformMutationQuery
+	lockNext      int
+	lockCompleted uint64
+	dropped       atomic.Uint64
 }
 
 func observePlatformMutationQuery(ctx context.Context, fact runtimeobservation.DatabaseQueryFact, err error) {
@@ -51,11 +56,23 @@ func observePlatformMutationQuery(ctx context.Context, fact runtimeobservation.D
 	}
 	defer db.mu.Unlock()
 	db.completed++
+	// Preparation may consume the entire ordinary head before any promotion
+	// lock is acquired. Keep these original driver facts independently so a
+	// long transaction's ordinary tail cannot erase its acquisition evidence.
+	if fact.Caller == "fugue/internal/store.pgLockPromotionScope" {
+		db.lockCompleted++
+		if len(db.locks) < platformMutationLockQueryLimit {
+			db.locks = append(db.locks, query)
+		} else {
+			db.locks[platformMutationLockQueryHead+db.lockNext] = query
+			db.lockNext = (db.lockNext + 1) % (platformMutationLockQueryLimit - platformMutationLockQueryHead)
+		}
+	}
 	if len(db.queries) < platformMutationQueryLimit {
 		db.queries = append(db.queries, query)
 	} else {
-		// Keep the first acquisition queries as well as the tail before
-		// commit. A long validation must not erase its original lock caller.
+		// Keep preparation's head and the tail before commit. Promotion
+		// acquisitions have their own bounded retention above.
 		db.queries[platformMutationQueryHead+db.next] = query
 		db.next = (db.next + 1) % (platformMutationQueryLimit - platformMutationQueryHead)
 	}
@@ -67,17 +84,20 @@ type platformMutationStage struct {
 }
 
 type platformMutationReceipt struct {
-	Operation runtimeobservation.DatabaseOperation `json:"database_operation"`
-	Started   time.Time                            `json:"started_at"`
-	Finished  time.Time                            `json:"finished_at"`
-	Stage     string                               `json:"final_stage"`
-	Failed    bool                                 `json:"failed"`
-	Failure   PlatformInputReadFailure             `json:"failure"`
-	Stages    []platformMutationStage              `json:"stages"`
-	Queries   []platformMutationQuery              `json:"queries"`
-	Completed uint64                               `json:"queries_completed"`
-	Omitted   uint64                               `json:"queries_evicted"`
-	Dropped   uint64                               `json:"query_observations_dropped"`
+	Operation     runtimeobservation.DatabaseOperation `json:"database_operation"`
+	Started       time.Time                            `json:"started_at"`
+	Finished      time.Time                            `json:"finished_at"`
+	Stage         string                               `json:"final_stage"`
+	Failed        bool                                 `json:"failed"`
+	Failure       PlatformInputReadFailure             `json:"failure"`
+	Stages        []platformMutationStage              `json:"stages"`
+	Queries       []platformMutationQuery              `json:"queries"`
+	Completed     uint64                               `json:"queries_completed"`
+	Omitted       uint64                               `json:"queries_evicted"`
+	Dropped       uint64                               `json:"query_observations_dropped"`
+	Locks         []platformMutationQuery              `json:"promotion_lock_queries"`
+	LockCompleted uint64                               `json:"promotion_lock_queries_completed"`
+	LockOmitted   uint64                               `json:"promotion_lock_queries_evicted"`
 }
 
 type platformMutationRecorder struct {
@@ -113,8 +133,12 @@ func (r *platformMutationRecorder) record(trace *platformMutationTrace, err erro
 		receipt.Queries = append([]platformMutationQuery(nil), db.queries...)
 		receipt.Completed = db.completed
 		receipt.Omitted = db.completed - uint64(len(db.queries))
+		receipt.Locks = append([]platformMutationQuery(nil), db.locks...)
+		receipt.LockCompleted = db.lockCompleted
+		receipt.LockOmitted = db.lockCompleted - uint64(len(db.locks))
 		db.mu.Unlock()
 		sort.Slice(receipt.Queries, func(i, j int) bool { return receipt.Queries[i].Started.Before(receipt.Queries[j].Started) })
+		sort.Slice(receipt.Locks, func(i, j int) bool { return receipt.Locks[i].Started.Before(receipt.Locks[j].Started) })
 	} else {
 		db.dropped.Add(1)
 	}
@@ -153,7 +177,8 @@ func (r *platformMutationRecorder) snapshot() map[string]any {
 		"failure_recorded": failed, "evicted": recorded - uint64(len(recent)),
 		"failure_evicted": failed - uint64(len(failures)), "dropped": r.dropped.Load(),
 		"limit": platformMutationReceiptLimit, "query_limit": platformMutationQueryLimit,
-		"coverage": "completed_publication_stage_and_driver_timings_not_lock_hold_or_cpu_measurements"}
+		"promotion_lock_query_limit": platformMutationLockQueryLimit,
+		"coverage":                   "completed_publication_stage_and_driver_timings_not_lock_hold_or_cpu_measurements"}
 }
 
 func advancePlatformMutationTrace(ctx context.Context, stage string) {

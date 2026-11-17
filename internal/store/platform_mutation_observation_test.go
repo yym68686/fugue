@@ -84,6 +84,11 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 				Connection: ^uint64(0), ConnectionFirstObserved: trace.started,
 				Fingerprint: strings.Repeat("f", 32), Caller: strings.Repeat("c", 180), Started: trace.started}, nil)
 		}
+		for i := 0; i < platformMutationLockQueryLimit; i++ {
+			observePlatformMutationQuery(ctx, runtimeobservation.DatabaseQueryFact{BackendPID: ^uint32(0),
+				Connection: ^uint64(0), ConnectionFirstObserved: trace.started,
+				Fingerprint: strings.Repeat("f", 32), Caller: "fugue/internal/store.pgLockPromotionScope", Started: trace.started}, nil)
+		}
 		for i := 0; i < 40; i++ {
 			trace.advance("neutral-fixed-stage-" + strings.Repeat("x", i))
 		}
@@ -113,6 +118,58 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 	encoded, err := json.Marshal(snapshot)
 	if err != nil || len(encoded) > 800<<10 || strings.Contains(string(encoded), "never-retain") {
 		t.Fatal("owner-only observation exceeded budget or retained private errors", len(encoded), err)
+	}
+}
+
+func TestPlatformMutationObservationRetainsPromotionLocksAfterPreparationAndQueryChurn(t *testing.T) {
+	ctx, trace := startPlatformMutationTrace(context.Background(), "platform-release")
+	first := time.Now().UTC()
+	sequence := 0
+	query := func(caller string, failed bool) {
+		sequence++
+		fact := runtimeobservation.DatabaseQueryFact{ID: uint64(sequence), BackendPID: 71,
+			Connection: 9, ConnectionFirstObserved: first, Fingerprint: runtimeobservation.SQLFingerprint("private-query"),
+			Caller: caller, Started: first.Add(time.Duration(sequence) * time.Nanosecond)}
+		var err error
+		if failed {
+			err = errors.New("private-error")
+		}
+		(&postgresReadTracer{}).TraceQueryEnd(context.WithValue(ctx, databaseQueryKey{}, fact), nil, pgx.TraceQueryEndData{Err: err})
+	}
+	// Production preparation already exceeded the ordinary first 16 facts;
+	// all promotion locks can then fall between that head and the final tail.
+	for i := 0; i < 40; i++ {
+		query("fugue/internal/store.prepare", false)
+	}
+	for i := 0; i < 20; i++ {
+		query("fugue/internal/store.pgLockPromotionScope", i == 19)
+	}
+	for i := 0; i < 60; i++ {
+		query("fugue/internal/store.persist", false)
+	}
+	r := &platformMutationRecorder{}
+	r.record(trace, ErrConflict)
+	receipt := r.snapshot()["receipts"].([]platformMutationReceipt)[0]
+	if receipt.LockCompleted != 20 || receipt.LockOmitted != 12 || len(receipt.Locks) != platformMutationLockQueryLimit || receipt.Dropped != 0 {
+		t.Fatal("promotion lock retention or coverage incorrect", receipt.LockCompleted, receipt.LockOmitted, len(receipt.Locks), receipt.Dropped)
+	}
+	for i, lock := range receipt.Locks {
+		index := 41 + i
+		if i >= platformMutationLockQueryHead {
+			index += 12
+		}
+		if lock.Started != first.Add(time.Duration(index)*time.Nanosecond) || lock.BackendPID != 71 || lock.Connection != 9 || lock.Failed != (index == 60) {
+			t.Fatal("original lock driver identity, outcome or head/tail timing lost", i, lock)
+		}
+	}
+	for _, ordinary := range receipt.Queries {
+		if ordinary.Caller == "fugue/internal/store.pgLockPromotionScope" {
+			t.Fatal("fixture did not reproduce loss from ordinary head/tail")
+		}
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil || strings.Contains(string(encoded), "private-query") || strings.Contains(string(encoded), "private-error") {
+		t.Fatal("lock observation retained private data", err)
 	}
 }
 
@@ -194,6 +251,14 @@ func TestPlatformMutationObservationPostgresPublicationDriverAndStages(t *testin
 	for _, query := range receipt.Queries {
 		if query.BackendPID == 0 || query.Connection == 0 || query.ConnectionFirstObserved.IsZero() || query.Fingerprint == "" || query.Finished.Before(query.Started) {
 			t.Fatal("real driver identity or timing missing", query)
+		}
+	}
+	if receipt.LockCompleted == 0 || len(receipt.Locks) == 0 || receipt.LockOmitted != 0 {
+		t.Fatal("real publication promotion lock driver facts missing", receipt.LockCompleted, receipt.LockOmitted)
+	}
+	for _, lock := range receipt.Locks {
+		if lock.Caller != "fugue/internal/store.pgLockPromotionScope" || lock.BackendPID == 0 || lock.Connection == 0 || lock.Failed || lock.Finished.Before(lock.Started) {
+			t.Fatal("real promotion lock identity or outcome missing", lock)
 		}
 	}
 }

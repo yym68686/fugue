@@ -348,7 +348,11 @@ The API's local `storage` provider retains `platform_mutations` for completed
 publication, rollback and LKG verification operations: 12 recent receipts and
 an independent 12-failure ring. Each receipt includes the existing operation
 lineage, fixed stage durations and at most 48 original driver query timings
-(the first 16 and final 32). Query fingerprints, caller, backend PID and bounded
+(the first 16 and final 32). A separate eight-fact promotion-lock head/tail
+(the first four and final four) retains original `pgLockPromotionScope` driver
+facts even when preparation fills the ordinary head and later queries erase
+the middle. Its completed and evicted counts are independent and explicit.
+Query fingerprints, caller, backend PID and bounded
 connection identity can be matched to a separately observed PostgreSQL lock
 witness. SQL text, parameter values, result bodies, raw errors and credentials
 are never retained. Successful operations cannot evict the failure ring;
