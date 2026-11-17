@@ -1,14 +1,19 @@
 package imagecachepolicy
 
 import (
+	"fmt"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
 	"strings"
 	"time"
 )
 
-const Version = "image-cache-retirement/v2"
+const Version = "image-cache-retirement/v3"
 const DefaultGracePeriod = 24 * time.Hour
+
+// An affirmatively retired, complete generation can use a shorter age floor.
+// Live references, pins, migration and active tasks always take precedence.
+const ConfirmedRetirementGracePeriod = 15 * time.Minute
 
 // Facts are observations, not authority supplied by the caller of a delete API.
 // Adapters build them from authenticated control-plane snapshots; one evaluator
@@ -17,6 +22,7 @@ type Facts struct {
 	ActiveDigest, Migration, Live, Pin, Task, Lost, Deleted, MinimumReplica             bool
 	ImageIDs, WorkloadRefs, PinIDs, TaskIDs, KeeperIDs, ReplicaIDs, CandidateReplicaIDs []string
 	ReplicaReason                                                                       string
+	ActiveDigestReason                                                                  string
 }
 
 func Evaluate(manifest model.ImageCacheManifest, facts Facts, now time.Time, gracePeriod time.Duration) (out model.ImageCachePruneCandidate) {
@@ -50,8 +56,9 @@ func Evaluate(manifest model.ImageCacheManifest, facts Facts, now time.Time, gra
 	if digest := imagecachekeys.NormalizeDigest(manifest.Digest); digest != "" {
 		if facts.ActiveDigest {
 			out.Protected = true
-			out.SkipReason = "active_image_digest"
-			out.SkipDetails = []string{"canonical digest is used by an active workload or pin"}
+			out.SkipReason = firstNonEmpty(facts.ActiveDigestReason, "active_image_digest")
+			out.SkipDetails = []string{"canonical digest is retained by protection source: " + out.SkipReason}
+			out.MatchedWorkloadRefs, out.MatchedPinIDs, out.MatchedTaskIDs = facts.WorkloadRefs, facts.PinIDs, facts.TaskIDs
 			return out
 		}
 	}
@@ -94,10 +101,13 @@ func Evaluate(manifest model.ImageCacheManifest, facts Facts, now time.Time, gra
 	if manifest.CreatedAtObserved != nil {
 		ageBase = *manifest.CreatedAtObserved
 	}
+	if facts.Deleted && len(facts.ImageIDs) > 0 && manifest.GraphStatus == "complete" && manifest.GraphFailureReason == "" {
+		gracePeriod = min(gracePeriod, ConfirmedRetirementGracePeriod)
+	}
 	if !ageBase.IsZero() && now.Sub(ageBase) < gracePeriod {
 		out.Protected = true
 		out.SkipReason = "recent_manifest"
-		out.SkipDetails = []string{"manifest is newer than the configured minimum age"}
+		out.SkipDetails = []string{fmt.Sprintf("minimum age=%s; eligible_after=%s; retirement_authority=%t", gracePeriod, ageBase.Add(gracePeriod).UTC().Format(time.RFC3339), facts.Deleted && len(facts.ImageIDs) > 0)}
 		return out
 	}
 	if facts.Lost {

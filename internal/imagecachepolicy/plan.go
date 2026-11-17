@@ -6,7 +6,23 @@ import (
 	"encoding/json"
 	"fugue/internal/model"
 	"sort"
+	"time"
 )
+
+// The targeted node request contains only candidates already admitted by this
+// policy. Its final local age guard must allow the same positive retirements.
+func ExecutionMinAge(plan model.ImageCachePrunePlan) string {
+	age, err := time.ParseDuration(plan.MinManifestAge)
+	if err != nil || age <= 0 {
+		return plan.MinManifestAge
+	}
+	for _, c := range plan.Candidates {
+		if c.Reason == "deleted_image_generation" && len(c.RetirementEvidence) > 0 {
+			return min(age, ConfirmedRetirementGracePeriod).String()
+		}
+	}
+	return plan.MinManifestAge
+}
 
 // Seal binds the deletion explanation to identities and policy without making
 // inventory refresh timestamps a new authorization. A receipt is never a

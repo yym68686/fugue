@@ -159,5 +159,8 @@ func (s *Service) reconcileHistoricalImageProvenance(ctx context.Context) error 
 	if recovered > 0 && s.Logger != nil {
 		s.Logger.Printf("recovered %d historical image generation(s) from immutable operation/build receipts; retention remains independently gated", recovered)
 	}
+	if s.Logger != nil {
+		s.Logger.Printf("image provenance reconciliation physical_unattributed_graphs=%d verified_claims=%d ambiguous_claims=%d recovered=%d unresolved=%d", len(groups), len(claims), len(ambiguous), recovered, len(groups)-len(claims)+len(ambiguous))
+	}
 	return nil
 }

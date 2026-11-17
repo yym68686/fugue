@@ -295,7 +295,7 @@ func (s *Server) handleAdminCreateImageCachePrunePlanTask(w http.ResponseWriter,
 		"allow_delete":               fmt.Sprintf("%t", allowDelete),
 		"targets_json":               string(targetsRaw),
 		"max_delete_bytes":           fmt.Sprintf("%d", plan.MaxDeleteBytes),
-		"min_manifest_age":           strings.TrimSpace(plan.MinManifestAge),
+		"min_manifest_age":           imagecachepolicy.ExecutionMinAge(plan),
 		"include_unreferenced_blobs": fmt.Sprintf("%t", plan.CandidateBlobCount > 0),
 		"candidate_blob_bytes":       fmt.Sprintf("%d", plan.CandidateBlobBytes),
 		"candidate_manifest_count":   fmt.Sprintf("%d", plan.CandidateManifestCount),
@@ -600,7 +600,11 @@ func (s *Server) computeImageCachePrunePlanWithOptions(r *http.Request, filter m
 			}
 			if _, protectedBlob := protected.protectedBlobDigests[digest]; protectedBlob {
 				plan.ProtectedBlobCount++
-				plan.ProtectionSummary["current_workload"]++
+				protectionReason := protected.blobProtectionReasons[digest]
+				if protectionReason == "" {
+					protectionReason = "active_image_digest"
+				}
+				plan.ProtectionSummary[protectionReason]++
 				continue
 			}
 			blob.Digest = digest
@@ -669,25 +673,26 @@ func applyImageCachePrunePlanBudget(plan *model.ImageCachePrunePlan) {
 }
 
 type imageCacheProtectedSet struct {
-	orphanPolicy         model.ImageOrphanPolicy
-	orphanDecisions      map[string]model.ImageOrphanDecision
-	orphanCoverage       bool
-	availableRefs        map[string]struct{}
-	lostRefs             map[string]struct{}
-	deletedRefs          map[string]struct{}
-	pinnedRefs           map[string]struct{}
-	liveRefs             map[string]struct{}
-	taskRefs             map[string]struct{}
-	migrationRefs        map[string]struct{}
-	minReplicaRefs       map[string]struct{}
-	imageIDsByRef        map[string][]string
-	pinIDsByRef          map[string][]string
-	taskIDsByRef         map[string][]string
-	workloadRefsByRef    map[string][]string
-	replicaIDsByRef      map[string][]string
-	minReplicaKeeperRefs map[string][]imageCacheReplicaCandidate
-	replicaCandidateRefs map[string][]imageCacheReplicaCandidate
-	protectedBlobDigests map[string]struct{}
+	orphanPolicy          model.ImageOrphanPolicy
+	orphanDecisions       map[string]model.ImageOrphanDecision
+	orphanCoverage        bool
+	availableRefs         map[string]struct{}
+	lostRefs              map[string]struct{}
+	deletedRefs           map[string]struct{}
+	pinnedRefs            map[string]struct{}
+	liveRefs              map[string]struct{}
+	taskRefs              map[string]struct{}
+	migrationRefs         map[string]struct{}
+	minReplicaRefs        map[string]struct{}
+	imageIDsByRef         map[string][]string
+	pinIDsByRef           map[string][]string
+	taskIDsByRef          map[string][]string
+	workloadRefsByRef     map[string][]string
+	replicaIDsByRef       map[string][]string
+	minReplicaKeeperRefs  map[string][]imageCacheReplicaCandidate
+	replicaCandidateRefs  map[string][]imageCacheReplicaCandidate
+	protectedBlobDigests  map[string]struct{}
+	blobProtectionReasons map[string]string
 }
 
 type imageCacheReplicaCandidate struct {
@@ -723,6 +728,7 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 	protected.minReplicaKeeperRefs = map[string][]imageCacheReplicaCandidate{}
 	protected.replicaCandidateRefs = map[string][]imageCacheReplicaCandidate{}
 	protected.protectedBlobDigests = map[string]struct{}{}
+	protected.blobProtectionReasons = map[string]string{}
 
 	images, err := s.store.ListImagesWithRetirementAuthority()
 	if err != nil {
@@ -775,6 +781,7 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 		addImageCacheDetail(protected.imageIDsByRef, keys, image.ID)
 		if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
 			protected.protectedBlobDigests[digest] = struct{}{}
+			protected.blobProtectionReasons[digest] = "migration_cutover_pending"
 		}
 	}
 	for _, ledger := range latestMigrationByApp {
@@ -786,6 +793,7 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			addKeys(protected.migrationRefs, keys...)
 			if digest := managedImageDigest(imageRef); digest != "" {
 				protected.protectedBlobDigests[digest] = struct{}{}
+				protected.blobProtectionReasons[digest] = "migration_cutover_pending"
 			}
 		}
 	}
@@ -804,6 +812,9 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 		addImageCacheDetail(protected.pinIDsByRef, keys, pin.ID)
 		if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
 			protected.protectedBlobDigests[digest] = struct{}{}
+			if protected.blobProtectionReasons[digest] == "" {
+				protected.blobProtectionReasons[digest] = "active_pin"
+			}
 		}
 	}
 	apps, err := s.store.ListAppsMetadata("", true)
@@ -814,6 +825,9 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			addImageCacheDetail(protected.workloadRefsByRef, keys, ref)
 			if digest := managedImageDigest(ref); digest != "" {
 				protected.protectedBlobDigests[digest] = struct{}{}
+				if protected.blobProtectionReasons[digest] == "" {
+					protected.blobProtectionReasons[digest] = "current_workload"
+				}
 			}
 		}
 		activeApps := map[string]struct{}{}
@@ -833,6 +847,9 @@ func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, prot
 			}
 			if digest := store.CanonicalImageDigest(image.CanonicalDigest); digest != "" {
 				protected.protectedBlobDigests[digest] = struct{}{}
+				if protected.blobProtectionReasons[digest] == "" {
+					protected.blobProtectionReasons[digest] = "active_app_image"
+				}
 			}
 		}
 	}
@@ -1020,7 +1037,8 @@ func imageCachePruneCandidateForManifest(manifest model.ImageCacheManifest, prot
 	_, active := protected.protectedBlobDigests[imagecachekeys.NormalizeDigest(manifest.Digest)]
 	reason, _ := imageCacheReplicaCandidateForManifest(protected.replicaCandidateRefs, manifest, keys)
 	candidate := imagecachepolicy.Evaluate(manifest, imagecachepolicy.Facts{
-		ActiveDigest: active, Migration: keySetContainsAny(protected.migrationRefs, keys...), Live: keySetContainsAny(protected.liveRefs, keys...), Pin: keySetContainsAny(protected.pinnedRefs, keys...), Task: keySetContainsAny(protected.taskRefs, keys...), Lost: keySetContainsAny(protected.lostRefs, keys...), Deleted: keySetContainsAny(protected.deletedRefs, keys...), MinimumReplica: keySetContainsAny(protected.minReplicaRefs, keys...),
+		ActiveDigestReason: protected.blobProtectionReasons[imagecachekeys.NormalizeDigest(manifest.Digest)],
+		ActiveDigest:       active, Migration: keySetContainsAny(protected.migrationRefs, keys...), Live: keySetContainsAny(protected.liveRefs, keys...), Pin: keySetContainsAny(protected.pinnedRefs, keys...), Task: keySetContainsAny(protected.taskRefs, keys...), Lost: keySetContainsAny(protected.lostRefs, keys...), Deleted: keySetContainsAny(protected.deletedRefs, keys...), MinimumReplica: keySetContainsAny(protected.minReplicaRefs, keys...),
 		ImageIDs: imageCacheDetailsForKeys(protected.imageIDsByRef, keys), WorkloadRefs: imageCacheDetailsForKeys(protected.workloadRefsByRef, keys), PinIDs: imageCacheDetailsForKeys(protected.pinIDsByRef, keys), TaskIDs: imageCacheDetailsForKeys(protected.taskIDsByRef, keys), ReplicaIDs: imageCacheDetailsForKeys(protected.replicaIDsByRef, keys), KeeperIDs: imageCacheReplicaIDsForManifest(protected.minReplicaKeeperRefs, manifest, keys), CandidateReplicaIDs: imageCacheReplicaIDsForManifest(protected.replicaCandidateRefs, manifest, keys), ReplicaReason: reason,
 	}, now, defaultImageCacheOrphanGracePeriod)
 	return imagecachepolicy.ApplyOrphanDecision(candidate, manifest, protected.orphanPolicy, protected.orphanDecisions[imagecachepolicy.OrphanKey(manifest)], protected.orphanCoverage, now)

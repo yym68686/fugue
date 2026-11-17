@@ -83,6 +83,9 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	})
 	guardRejected := false
 	importCtx = sourceimport.WithBuildInputGuard(importCtx, func(actualCommit string) error {
+		if expected := strings.TrimSpace(op.DesiredSource.CommitSHA); gitHubTrackedCommitRequestedByGitHubSync(op) && model.IsGitHubAppSourceType(op.DesiredSource.Type) && expected != "" && actualCommit != expected {
+			return fmt.Errorf("source commit changed before build: expected=%s actual=%s; wait for a fresh source decision", expected, actualCommit)
+		}
 		source := *op.DesiredSource
 		source.CommitSHA = actualCommit
 		oomFingerprint = buildOOMInputFingerprint(source, *op.DesiredSpec)
@@ -344,6 +347,19 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		return err
 	}
 
+	if model.IsGitHubAppSourceType(op.DesiredSource.Type) {
+		inputSource := *op.DesiredSource
+		inputSource.CommitSHA = finalSource.CommitSHA
+		fingerprint := importBuildReuseFingerprint(inputSource, *op.DesiredSpec, builderPolicy)
+		saved, saveErr := s.Store.RecordImportBuildResult(op, finalSpec, finalSource, deployOriginSource)
+		if saveErr != nil {
+			return fmt.Errorf("save verified import result: %w", saveErr)
+		}
+		if saveErr = s.saveImportBuildLocator(importCtx, app, saved, fingerprint, imageDestination); saveErr != nil {
+			return fmt.Errorf("save reusable import result: %w", saveErr)
+		}
+		op = saved
+	}
 	deployOp, err := s.Store.CreateDeployOperationAfterImport(op.ID, model.Operation{
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,

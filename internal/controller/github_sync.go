@@ -93,26 +93,64 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			s.Logger.Printf("github sync build admission history unavailable app=%s: %v", app.ID, historyErr)
 			continue
 		}
-		if cachedBuildRejection(ledger, fingerprint) != nil {
+		reuseFingerprint := importBuildReuseFingerprint(buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
+		reusable, reuseErr := s.reusableGitHubBuild(ctx, app, reuseFingerprint)
+		if reuseErr != nil {
+			s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_artifact_verification", state, len(ops))
+			s.Logger.Printf("github release saved artifact verification failed app=%s: %v", app.ID, reuseErr)
 			continue
 		}
-		admitted, admissionErr := s.githubBuildOOMAdmission(ctx, app, buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
-		if admissionErr != nil {
-			s.Logger.Printf("github sync OOM admission check failed app=%s: %v", app.ID, admissionErr)
+		deploySpec := buildSpec
+		if reusable != nil {
+			preview := *reusable
+			preview.Type = model.OperationTypeDeploy
+			preview, err = store.RebasedManagedDeploy(preview, app)
+			if err != nil {
+				s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_configuration_conflict", state, len(ops))
+				continue
+			}
+			deploySpec = *preview.DesiredSpec
+		}
+		if billingErr := s.Store.CheckDeployBilling(ctx, app.ID, deploySpec); billingErr != nil {
+			s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_deploy_admission", state, len(ops))
+			s.Logger.Printf("github release waiting for deploy admission app=%s: %v", app.ID, billingErr)
 			continue
 		}
-		if !admitted {
-			continue
+		if reusable == nil {
+			if cachedBuildRejection(ledger, fingerprint) != nil {
+				s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_build_admission", state, len(ops))
+				continue
+			}
+			admitted, admissionErr := s.githubBuildOOMAdmission(ctx, app, buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
+			if admissionErr != nil {
+				s.Logger.Printf("github sync OOM admission check failed app=%s: %v", app.ID, admissionErr)
+				continue
+			}
+			if !admitted {
+				s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_build_memory", state, len(ops))
+				continue
+			}
 		}
 		if found && !wasOOMBlocked && !buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
+			!(reusable != nil && gitHubTrackedCommitBillingFailure(state.lastAutomaticFailure)) &&
 			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
+			s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_retry_budget_or_backoff", state, len(ops))
 			continue
 		}
 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		op, err := s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit, retryBaseOperation)
+		var op model.Operation
+		if reusable != nil {
+			op, err = s.Store.CreateDeployOperationAfterImport(reusable.ID, model.Operation{
+				TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeDeploy,
+				RequestedByType: model.ActorTypeBootstrap, RequestedByID: model.OperationRequestedByGitHubSyncController,
+				DesiredSpec: reusable.DesiredSpec, DesiredSource: reusable.DesiredSource, DesiredOriginSource: reusable.DesiredOriginSource,
+			})
+		} else {
+			op, err = s.queueGitHubAutoRebuild(app, resolvedBranch, latestCommit, retryBaseOperation)
+		}
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) {
 				continue
@@ -128,8 +166,19 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			continue
 		}
 
+		decision := "queued_build"
+		if wasOOMBlocked {
+			decision = "queued_build_after_memory_admission_recovered"
+		}
+		if buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) {
+			decision = "queued_build_after_input_policy_change"
+		}
+		if reusable != nil {
+			decision = "queued_deploy_with_verified_build"
+		}
+		s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, decision, state, len(ops))
 		s.Logger.Printf(
-			"github sync queued rebuild for app=%s repo=%s branch=%s old_commit=%s latest_commit=%s op=%s",
+			"github sync queued release for app=%s repo=%s branch=%s old_commit=%s latest_commit=%s op=%s",
 			app.ID,
 			strings.TrimSpace(originSource.RepoURL),
 			resolvedBranch,
@@ -161,10 +210,13 @@ func trackedGitHubCommitForOperation(op model.Operation) string {
 	default:
 		return ""
 	}
-	if op.DesiredSource == nil || !model.IsGitHubAppSourceType(op.DesiredSource.Type) {
-		return ""
+	if op.DesiredOriginSource != nil && model.IsGitHubAppSourceType(op.DesiredOriginSource.Type) {
+		return strings.TrimSpace(op.DesiredOriginSource.CommitSHA)
 	}
-	return strings.TrimSpace(op.DesiredSource.CommitSHA)
+	if op.DesiredSource != nil && model.IsGitHubAppSourceType(op.DesiredSource.Type) {
+		return strings.TrimSpace(op.DesiredSource.CommitSHA)
+	}
+	return ""
 }
 
 func queueableGitHubSource(source model.AppSource, branch string, commit string) (model.AppSource, error) {
@@ -316,7 +368,7 @@ func gitHubTrackedCommitResetOperation(op model.Operation) bool {
 	if gitHubReleaseSucceeded(op) {
 		return true
 	}
-	return !gitHubTrackedCommitRequestedByGitHubSync(op)
+	return gitHubTrackedCommitManualOperation(op)
 }
 
 func gitHubTrackedCommitAutomaticFailure(op model.Operation) bool {
@@ -326,7 +378,14 @@ func gitHubTrackedCommitAutomaticFailure(op model.Operation) bool {
 }
 
 func gitHubTrackedCommitManualOperation(op model.Operation) bool {
-	return trackedGitHubCommitForOperation(op) != "" && !gitHubTrackedCommitRequestedByGitHubSync(op)
+	if trackedGitHubCommitForOperation(op) == "" || gitHubTrackedCommitRequestedByGitHubSync(op) {
+		return false
+	}
+	return op.RequestedByType != model.ActorTypeSystem && !strings.HasPrefix(op.RequestedByID, "fugue-controller/")
+}
+
+func gitHubTrackedCommitBillingFailure(op model.Operation) bool {
+	return strings.Contains(strings.ToLower(op.ErrorMessage), "billing balance depleted")
 }
 
 func gitHubTrackedCommitRequestedByGitHubSync(op model.Operation) bool {

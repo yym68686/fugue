@@ -30100,6 +30100,12 @@ components:
           type: string
     ImageCachePrunePlan:
       type: object
+      description: >-
+        Retirement policy v3 reports the actual protection source and exact
+        references. Unknown provenance retains the configured age floor and
+        quarantine requirements. A positively retired generation with a complete
+        graph can use a 15 minute floor; live references, pins, migrations and
+        tasks always take precedence. Execution rechecks current authority.
       additionalProperties: false
       required:
         [id, mode, candidate_manifest_count, protected_manifest_count, created_at, status]
@@ -30143,6 +30149,7 @@ components:
           format: int64
         min_manifest_age:
           type: string
+          description: Configured age floor for unknown provenance; v3 positively retired complete generations may use a shorter 15 minute floor, explained in candidate skip_details.
         protection_summary:
           type: object
           additionalProperties:
