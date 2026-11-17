@@ -406,7 +406,7 @@ func (s *Service) applyRecoveryReplacement(ctx context.Context, c *kubeClient, m
 	return nil
 }
 
-// Create without adopting or overwriting a colliding object. Retried steps may
+// Create without taking over or overwriting a colliding object. Retried steps may
 // reuse only objects bearing this exact recovery identity. POST also closes
 // the get/create race: an intervening creator causes a conflict, never a patch.
 func createRecoveryObjects(ctx context.Context, c *kubeClient, namespace, recoveryID string, objects []map[string]any) error {
