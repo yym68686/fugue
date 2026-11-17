@@ -170,9 +170,10 @@ def main():
         run("sh", str(installer), env=env, timeout=600)
         node_uid = wait_ready(VERSIONS[0])
         assert run("systemctl", "show", "k3s", "-p", "KillMode", "--value").stdout.strip() == "process"
+        kubectl("create", "namespace", "upgrade-qualification", check=False)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            result = kubectl("-n", "kube-system", "get", "serviceaccount", "default", "-o", "json", check=False)
+            result = kubectl("-n", "upgrade-qualification", "get", "serviceaccount", "default", "-o", "json", check=False)
             if not result.returncode:
                 break
             time.sleep(2)
