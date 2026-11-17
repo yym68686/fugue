@@ -275,3 +275,19 @@ func TestVolumeRetirementBroadAdministrativeMountIsNotOwnership(t *testing.T) {
 		}
 	}
 }
+
+func TestVolumeRetirementReceiptPreservesLargeInode(t *testing.T) {
+	f := newRetirementFake(t)
+	p := f.plan()
+	if _, err := executeVolumeRetirement(context.Background(), f.kube, f.host, p, "test"); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := executeVolumeRetirement(context.Background(), f.kube, f.host, p, "read existing receipt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil || !strings.Contains(string(raw), `"inode":9007199254740993`) {
+		t.Fatalf("receipt rounded a pinned inode identity: %s %v", raw, err)
+	}
+}

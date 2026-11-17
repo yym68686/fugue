@@ -644,9 +644,9 @@ func (c *CLI) newVolumeRetirementCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		var receipt map[string]any
-		if err := json.Unmarshal([]byte(physicalString(physicalMap(cm, "data"), "receipt.json")), &receipt); err != nil {
-			return fmt.Errorf("invalid retirement receipt")
+		receipt, err := retirementReadReceipt(cm)
+		if err != nil {
+			return err
 		}
 		return c.writeJSON(receipt)
 	}}

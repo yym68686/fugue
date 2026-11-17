@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"strconv"
 	"strings"
@@ -16,6 +17,21 @@ import (
 func retirementReceiptName(pvUID string) string {
 	digest := sha256.Sum256([]byte(pvUID))
 	return "fugue-volume-retire-" + hex.EncodeToString(digest[:12])
+}
+
+func retirementReadReceipt(cm map[string]any) (map[string]any, error) {
+	decoder := json.NewDecoder(strings.NewReader(physicalString(physicalMap(cm, "data"), "receipt.json")))
+	// Inode/device identities and block counts must survive a read/resume cycle
+	// exactly, including integers larger than float64's exact range.
+	decoder.UseNumber()
+	var receipt map[string]any
+	if err := decoder.Decode(&receipt); err != nil || receipt == nil {
+		return nil, fmt.Errorf("invalid retirement receipt")
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return nil, fmt.Errorf("unexpected trailing retirement receipt data")
+	}
+	return receipt, nil
 }
 
 func retirementDatabaseHealthy(cluster map[string]any) bool {
@@ -113,7 +129,8 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 	}
 	var receipt map[string]any
 	if len(cm) != 0 {
-		if json.Unmarshal([]byte(physicalString(physicalMap(cm, "data"), "receipt.json")), &receipt) != nil || physicalString(receipt, "plan_sha256") != preview.SHA256 {
+		receipt, err = retirementReadReceipt(cm)
+		if err != nil || physicalString(receipt, "plan_sha256") != preview.SHA256 {
 			return nil, fmt.Errorf("an existing retirement owns this PV; resume with its original plan file")
 		}
 		if physicalString(receipt, "phase") == "completed" {
@@ -134,7 +151,8 @@ func executeVolumeRetirement(ctx context.Context, kube physicalKubeFunc, host vo
 		return nil, err
 	}
 	if len(cm) != 0 {
-		if json.Unmarshal([]byte(physicalString(physicalMap(cm, "data"), "receipt.json")), &receipt) != nil || physicalString(receipt, "plan_sha256") != preview.SHA256 {
+		receipt, err = retirementReadReceipt(cm)
+		if err != nil || physicalString(receipt, "plan_sha256") != preview.SHA256 {
 			return nil, fmt.Errorf("retirement receipt identity changed")
 		}
 		if physicalString(receipt, "phase") == "completed" {
