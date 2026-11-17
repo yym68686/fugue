@@ -265,6 +265,16 @@ files and external or traversing links are rejected. Two directory observations
 bracket opening the current file, so a concurrent rotation retries before the
 cursor advances. Compressed and plain retained files use the same source order.
 
+Ordinary pod-log responses also require a line terminator for timestamped
+records. A successful non-following kubelet read can end halfway through an
+in-progress CRI write. Its trailing fragment is not admitted or made a boundary
+witness; the collector retains the inclusive position and retries with existing
+source backoff. Source diagnostics report `scan_error` / `record_incomplete`,
+not a cursor gap or a node-wide transport outage. Complete preceding records are
+preserved. Untimestamped kubelet unavailable messages and actual transport errors
+retain their existing diagnostic paths. Existing historical gaps and exported
+fragments are not erased or retroactively declared recovered.
+
 Recovery retains the existing admission, line and cycle budgets and poll
 deadline. It resumes across budget stops, reconstructs partial CRI records, and
 preserves equal-timestamp occurrence counts. A boundary contains only records

@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+var errIncompleteKubernetesLogRecord = errors.New("incomplete Kubernetes log record")
 
 type kubernetesLogCursor struct {
 	Time                  time.Time
@@ -253,6 +256,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	attrs := kubernetesLogAttributes(target.pod, target.container)
 	source := "kubernetes://" + target.pod.Namespace + "/" + target.pod.Name + "/" + target.container
 	scanner := bufio.NewScanner(stream)
+	scanner.Split(scanKubernetesLogLine)
 	// Incoming OTLP request limits are unrelated to a container log record.
 	// Keep source reads independently bounded, including its CRI timestamp.
 	scanner.Buffer(make([]byte, 0, min(64<<10, c.pipeline.cfg.KubernetesLogMaxLineBytes+64)), c.pipeline.cfg.KubernetesLogMaxLineBytes+64)
@@ -466,6 +470,20 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	return
 }
 
+// A successful non-following kubelet response can end in the middle of a CRI
+// write. ScanLines would admit that final fragment at EOF and remember its hash
+// as a complete boundary, which cannot match the later completed record. Keep
+// the inclusive position and the normal read-error evidence instead. Kubelet's
+// untimestamped unavailable message still reaches the existing diagnostic path.
+func scanKubernetesLogLine(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && len(data) > 0 && bytes.IndexByte(data, '\n') < 0 {
+		if timestamp, _ := splitKubernetesLogLine(string(data)); !timestamp.IsZero() {
+			return 0, nil, errIncompleteKubernetesLogRecord
+		}
+	}
+	return bufio.ScanLines(data, atEOF)
+}
+
 // Preserve one missing-boundary event across queue/budget/transport retries.
 // The unread cursor never advances here. A widening unproven interval updates
 // its bounds without fabricating another loss event for the same boundary.
@@ -495,6 +513,8 @@ func logReadErrorClass(err error) string {
 		return rotationFailure.class
 	}
 	switch {
+	case errors.Is(err, errIncompleteKubernetesLogRecord):
+		return "record_incomplete"
 	case errors.Is(err, bufio.ErrTooLong):
 		return "line_too_long"
 	case errors.Is(err, context.DeadlineExceeded):
