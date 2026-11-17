@@ -25,7 +25,7 @@ spec:
       command:
         - /bin/sh
         - -ec
-        - cp /bin/busybox /shared/manager; printf 'upgrade-fixture-ok\n' > /shared/index.html
+        - cp /bin/busybox /shared/busybox; printf 'upgrade-fixture-ok\n' > /shared/index.html
       resources:
         requests: {cpu: 1m, memory: 512Mi}
         limits: {memory: 512Mi}
@@ -34,7 +34,7 @@ spec:
   containers:
     - name: application
       image: busybox:1.37.0
-      command: [/shared/manager, httpd, -f, -p, '8080', -h, /shared]
+      command: [/shared/busybox, httpd, -f, -p, '8080', -h, /shared]
       resources:
         requests: {cpu: 10m, memory: 64Mi}
         limits: {memory: 128Mi}

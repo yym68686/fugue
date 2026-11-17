@@ -5,11 +5,13 @@ This is a qualification test, never a production upgrade entrypoint. It has no
 production credentials or remote-node targets. Preserve raw evidence on failure.
 """
 import argparse
+from decimal import Decimal
 import hashlib
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import threading
 import time
@@ -33,6 +35,64 @@ def kubectl(*args, check=True):
 def pod():
     return json.loads(kubectl("-n", "upgrade-qualification", "get", "pod",
                               "bootstrap-floor-fixture", "-o", "json").stdout)
+
+
+def memory_bytes(value):
+    match = re.fullmatch(r"([0-9.]+)([KMGTPE]i|[kMGTPE]|m)?", str(value))
+    assert match, value
+    number, suffix = match.groups()
+    units = {None: 1, "m": Decimal("0.001"), "k": 1000}
+    for index, unit in enumerate("KMGTPE", 1):
+        units[unit + "i"] = 1024 ** index
+        if unit != "K":
+            units[unit] = 1000 ** index
+    return int(Decimal(number) * units[suffix])
+
+
+def schedule_capacity_probe(version, evidence, overflow):
+    """Prove scheduler accounting, not just a successful API patch.
+
+    This sleeping fixture reserves (but does NOT allocate) slightly more than
+    the currently available requests headroom. Only the init downsize can make
+    it schedulable; no production node or workload is involved.
+    """
+    nodes = json.loads(kubectl("get", "nodes", "-o", "json").stdout)["items"]
+    assert len(nodes) == 1
+    node = nodes[0]
+    pods = json.loads(kubectl("get", "pods", "-A", "-o", "json").stdout)["items"]
+    total = 0
+    for item in pods:
+        spec = item["spec"]
+        if spec.get("nodeName") != node["metadata"]["name"] or item["status"].get("phase") in {"Succeeded", "Failed"}:
+            continue
+        assert not spec.get("resources"), "unexpected pod-level resource accounting"
+        assert not any(c.get("restartPolicy") == "Always" for c in spec.get("initContainers", []))
+        requests = lambda c: memory_bytes(c.get("resources", {}).get("requests", {}).get("memory", "0"))
+        total += max(sum(map(requests, spec["containers"])),
+                     max(map(requests, spec.get("initContainers", [])), default=0))
+        total += memory_bytes(spec.get("overhead", {}).get("memory", "0"))
+    allocatable = memory_bytes(node["status"]["allocatable"]["memory"])
+    request = allocatable - total + overflow
+    assert request > 0
+    manifest = {"apiVersion": "v1", "kind": "Pod",
+                "metadata": {"name": "capacity-probe", "namespace": "upgrade-qualification"},
+                "spec": {"automountServiceAccountToken": False, "containers": [
+                    {"name": "reserve-only", "image": "busybox:1.37.0",
+                     "command": ["/bin/sleep", "100000"],
+                     "resources": {"requests": {"cpu": "1m", "memory": str(request)}}}]}}
+    path = evidence / (version + "-capacity-probe.json")
+    path.write_text(json.dumps(manifest, indent=2) + "\n")
+    kubectl("create", "-f", str(path))
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        probe = json.loads(kubectl("-n", "upgrade-qualification", "get", "pod", "capacity-probe", "-o", "json").stdout)
+        assert not probe["spec"].get("nodeName"), "capacity probe unexpectedly scheduled before resize"
+        conditions = probe["status"].get("conditions", [])
+        if any(c["type"] == "PodScheduled" and c["status"] == "False" and
+               "Insufficient memory" in c.get("message", "") for c in conditions):
+            return {"allocatable": allocatable, "requests_before": total, "probe_request": request}
+        time.sleep(2)
+    raise RuntimeError("scheduler did not confirm Insufficient memory before resize")
 
 
 def download(version, directory):
@@ -121,6 +181,8 @@ def main():
         kubectl("apply", "-f", str(ROOT / "tests/k3s-upgrade/bootstrap-floor.yaml"))
         run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=condition=Ready",
             "pod/bootstrap-floor-fixture", "--timeout=180s", timeout=200)
+        run("k3s", "kubectl", "-n", "kube-system", "wait", "--for=condition=Ready",
+            "pod", "--all", "--timeout=180s", timeout=200)
         before = pod()
         write_json("baseline-pod.json", before)
         assert before["status"]["initContainerStatuses"][0]["state"]["terminated"]["exitCode"] == 0
@@ -142,6 +204,7 @@ def main():
             # Only resize an ALREADY COMPLETED ordinary init container. Main
             # container memory, executable inode, UID and connections stay intact.
             target = "128Mi" if index < 2 else "96Mi"
+            capacity = schedule_capacity_probe(version, evidence, (128 if index < 2 else 16) * 1024 ** 2)
             patch = json.dumps({"spec": {"initContainers": [{"name": "bootstrap",
                                   "resources": {"requests": {"memory": target},
                                                 "limits": {"memory": target}}}]}})
@@ -157,7 +220,7 @@ def main():
                      "init_request": after["spec"]["initContainers"][0]["resources"]["requests"]["memory"],
                      "main_request": after["spec"]["containers"][0]["resources"]["requests"]["memory"],
                      "container_preserved": after["status"]["containerStatuses"][0]["containerID"] == container_id,
-                     "http_failures": len(failures)}
+                     "http_failures": len(failures), "scheduler_capacity": capacity}
             report["results"].append(entry)
             write_json("report.json", report)
             print(json.dumps(entry), flush=True)
@@ -167,6 +230,11 @@ def main():
             else:
                 assert result.returncode == 0, "completed-init resize failed; bootstrap benefit NOT proven"
                 assert entry["init_request"] == target
+                run("k3s", "kubectl", "-n", "upgrade-qualification", "wait", "--for=condition=PodScheduled",
+                    "pod/capacity-probe", "--timeout=90s", timeout=100)
+                entry["scheduler_capacity_released"] = True
+                write_json("report.json", report)
+            kubectl("-n", "upgrade-qualification", "delete", "pod", "capacity-probe", "--wait=false")
         assert not failures, "HTTP continuity failed"
         report["passed"] = True
     finally:
@@ -179,6 +247,10 @@ def main():
         (evidence / "journal.txt").write_text(logs.stdout)
         result = kubectl("get", "pods", "-A", "-o", "json", check=False)
         (evidence / "final-pods.json").write_text(result.stdout)
+        result = kubectl("-n", "upgrade-qualification", "logs", "bootstrap-floor-fixture", "--all-containers", "--tail=100", check=False)
+        (evidence / "fixture-logs.txt").write_text(result.stdout + result.stderr)
+        result = kubectl("get", "events", "-A", "-o", "json", check=False)
+        (evidence / "events.json").write_text(result.stdout)
 
 
 if __name__ == "__main__":
