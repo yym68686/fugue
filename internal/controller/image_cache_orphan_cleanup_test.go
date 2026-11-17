@@ -185,6 +185,11 @@ func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testin
 		tasks[0].Payload["prune_reason"] != "image-cache-orphan" {
 		t.Fatalf("unexpected prune payload: %+v", tasks[0].Payload)
 	}
+	// Automatic plan persistence keeps only a summary. The execution request
+	// must retain the admitted retirement age after candidate details are dropped.
+	if got := tasks[0].Payload["min_manifest_age"]; got != "15m0s" {
+		t.Fatalf("retired generation execution age = %q, want 15m0s", got)
+	}
 	var targets []map[string]string
 	if err := json.Unmarshal([]byte(tasks[0].Payload["targets_json"]), &targets); err != nil {
 		t.Fatalf("decode targets: %v", err)
