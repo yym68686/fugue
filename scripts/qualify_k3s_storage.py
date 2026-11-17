@@ -76,7 +76,7 @@ class StorageQualification:
             path = self.evidence / (name + ".json")
             path.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [cluster, service]}, indent=2))
             kubectl("apply", "-f", str(path))
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + 240
         while time.monotonic() < deadline:
             clusters = json.loads(kubectl("-n", "upgrade-qualification", "get", "clusters", "-o", "json").stdout)["items"]
             self.write("clusters-latest.json", clusters)
@@ -147,6 +147,10 @@ class StorageQualification:
                                     kernel_waits[str(pid)][field] = Path(f"/proc/{pid}/{field}").read_text()
                                 except OSError as exc:
                                     kernel_waits[str(pid)][field] = type(exc).__name__
+                            try:
+                                kernel_waits[str(pid)]["security_label"] = Path(f"/proc/{pid}/attr/current").read_text()
+                            except OSError as exc:
+                                kernel_waits[str(pid)]["security_label"] = type(exc).__name__
                             # Only process identity and syscall metadata. Never
                             # collect environment variables or credential files.
                             kernel_waits[str(pid)]["command"] = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
@@ -178,6 +182,10 @@ class StorageQualification:
                                 trace.send_signal(signal.SIGINT)
                                 output, errors = trace.communicate(timeout=10)
                                 self.write(name + "-trace-status.json", {"exit_code": trace.returncode, "stdout": output, "stderr": errors})
+                            kernel = run("journalctl", "--dmesg", "--no-pager", "-n", "4000", check=False)
+                            (self.evidence / (name + "-kernel-security.log")).write_text("\n".join(
+                                line for line in kernel.stdout.splitlines()
+                                if any(marker in line.lower() for marker in ("apparmor", "denied", "seccomp"))) + "\n")
                     result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "ps",
                                      "-e", "-o", "pid,ppid,stat,wchan:30,comm", check=False)
                     (self.evidence / (name + "-processes.txt")).write_text(result.stdout + result.stderr)
