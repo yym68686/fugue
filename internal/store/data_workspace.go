@@ -878,6 +878,21 @@ func (s *Store) CancelDataTransfer(id string) (model.DataTransfer, error) {
 }
 
 func (s *Store) CreateDataGrant(grant model.DataGrant) (model.DataGrant, string, error) {
+	type result struct {
+		grant  model.DataGrant
+		secret string
+	}
+	v, err := dataReferenceMutation(s, func() (result, error) {
+		if err := s.checkDataWorkspaceActive(strings.TrimSpace(grant.WorkspaceID)); err != nil {
+			return result{}, err
+		}
+		g, secret, err := s.createDataGrant(grant)
+		return result{g, secret}, err
+	})
+	return v.grant, v.secret, err
+}
+
+func (s *Store) createDataGrant(grant model.DataGrant) (model.DataGrant, string, error) {
 	grant.WorkspaceID = strings.TrimSpace(grant.WorkspaceID)
 	grant.Mode = strings.TrimSpace(grant.Mode)
 	if grant.WorkspaceID == "" || grant.Mode == "" {
@@ -1044,6 +1059,19 @@ func (s *Store) ListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataW
 }
 
 func (s *Store) GrantDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID, role, createdBy string) (model.DataWorkspaceAccessGrant, error) {
+	return dataReferenceMutation(s, func() (model.DataWorkspaceAccessGrant, error) {
+		ws, err := s.GetDataWorkspace(workspaceID, ownerTenantID, platformAdmin)
+		if err != nil {
+			return model.DataWorkspaceAccessGrant{}, err
+		}
+		if err = s.checkDataWorkspaceActive(ws.ID); err != nil {
+			return model.DataWorkspaceAccessGrant{}, err
+		}
+		return s.grantDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID, role, createdBy)
+	})
+}
+
+func (s *Store) grantDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID, role, createdBy string) (model.DataWorkspaceAccessGrant, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	ownerTenantID = strings.TrimSpace(ownerTenantID)
 	subjectType = normalizeDataWorkspaceAccessSubjectType(subjectType)

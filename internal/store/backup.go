@@ -760,6 +760,18 @@ func (s *Store) GetBackupPolicy(idOrName, tenantID string, platformAdmin bool) (
 }
 
 func (s *Store) UpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolicy, error) {
+	if policy.Enabled && model.NormalizeBackupTarget(policy.Target).Type == model.BackupTargetDataWorkspace {
+		return dataReferenceMutation(s, func() (model.BackupPolicy, error) {
+			if err := s.checkDataBackupTargetActive(policy.Target, policy.TenantID); err != nil {
+				return model.BackupPolicy{}, err
+			}
+			return s.upsertBackupPolicy(policy)
+		})
+	}
+	return s.upsertBackupPolicy(policy)
+}
+
+func (s *Store) upsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolicy, error) {
 	policy = model.NormalizeBackupPolicy(policy)
 	if policy.Schedule == "" {
 		policy.Schedule = model.BackupDefaultSchedule
@@ -824,6 +836,18 @@ func (s *Store) SetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin 
 	if s.usingDatabase() {
 		return s.pgSetBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
 	}
+	if enabled {
+		return dataReferenceMutation(s, func() (model.BackupPolicy, error) {
+			return s.setBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
+		})
+	}
+	return s.setBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
+}
+
+func (s *Store) setBackupPolicyEnabled(idOrName, tenantID string, platformAdmin bool, enabled bool, reason string) (model.BackupPolicy, error) {
+	if s.usingDatabase() {
+		return s.pgSetBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
+	}
 	var updated model.BackupPolicy
 	err := s.withLockedState(true, func(state *model.State) error {
 		index := findBackupPolicyByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
@@ -834,6 +858,11 @@ func (s *Store) SetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin 
 		policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
 		policy.Enabled = enabled
 		if enabled {
+			if policy.Target.Type == model.BackupTargetDataWorkspace {
+				if err := checkDataBackupTargetActiveState(state, policy.Target, policy.TenantID); err != nil {
+					return err
+				}
+			}
 			if err := backupschedule.Validate(policy.Schedule); err != nil {
 				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
 			}
@@ -923,6 +952,19 @@ func (s *Store) CreateBackupRetryRun(run model.BackupRun, failedRunID string) (m
 }
 
 func (s *Store) createBackupRun(run model.BackupRun, retryOf string) (model.BackupRun, error) {
+	target := model.NormalizeBackupTarget(run.Target)
+	if target.Type == model.BackupTargetDataWorkspace {
+		return dataReferenceMutation(s, func() (model.BackupRun, error) {
+			if err := s.checkDataBackupTargetActive(target, run.TenantID); err != nil {
+				return model.BackupRun{}, err
+			}
+			return s.createBackupRunUnchecked(run, retryOf)
+		})
+	}
+	return s.createBackupRunUnchecked(run, retryOf)
+}
+
+func (s *Store) createBackupRunUnchecked(run model.BackupRun, retryOf string) (model.BackupRun, error) {
 	run = model.NormalizeBackupRun(run)
 	if run.Target.Type == "" {
 		return model.BackupRun{}, ErrInvalidInput
@@ -1542,6 +1584,18 @@ func validateBackupAdoptionRun(run, observed model.BackupRun, now time.Time) err
 }
 
 func (s *Store) createBackupArtifact(artifact model.BackupArtifact, leaseOwner string, observedRun *model.BackupRun) (model.BackupArtifact, error) {
+	if model.NormalizeBackupTarget(artifact.Target).Type == model.BackupTargetDataWorkspace {
+		return dataReferenceMutation(s, func() (model.BackupArtifact, error) {
+			if err := s.checkDataBackupTargetActive(artifact.Target, artifact.TenantID); err != nil {
+				return model.BackupArtifact{}, err
+			}
+			return s.createBackupArtifactUnchecked(artifact, leaseOwner, observedRun)
+		})
+	}
+	return s.createBackupArtifactUnchecked(artifact, leaseOwner, observedRun)
+}
+
+func (s *Store) createBackupArtifactUnchecked(artifact model.BackupArtifact, leaseOwner string, observedRun *model.BackupRun) (model.BackupArtifact, error) {
 	artifact = model.NormalizeBackupArtifact(artifact)
 	if artifact.Kind == "" || artifact.Target.Type == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
@@ -4208,6 +4262,25 @@ func (s *Store) pgSetBackupPolicyEnabled(idOrName, tenantID string, platformAdmi
 	if err != nil {
 		return model.BackupPolicy{}, err
 	}
+	if enabled && policy.Target.Type == model.BackupTargetDataWorkspace {
+		return dataReferenceMutation(s, func() (model.BackupPolicy, error) {
+			// A disabled policy's target may change before the fence is held.
+			current, err := s.pgGetBackupPolicy(idOrName, tenantID, platformAdmin)
+			if err != nil {
+				return model.BackupPolicy{}, err
+			}
+			if current.Target.Type == model.BackupTargetDataWorkspace {
+				if err := s.checkDataBackupTargetActive(current.Target, current.TenantID); err != nil {
+					return model.BackupPolicy{}, err
+				}
+			}
+			return s.pgSetLoadedBackupPolicyEnabled(current, enabled, reason)
+		})
+	}
+	return s.pgSetLoadedBackupPolicyEnabled(policy, enabled, reason)
+}
+
+func (s *Store) pgSetLoadedBackupPolicyEnabled(policy model.BackupPolicy, enabled bool, reason string) (model.BackupPolicy, error) {
 	now := time.Now().UTC()
 	policy.Enabled = enabled
 	if enabled {

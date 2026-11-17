@@ -40,6 +40,10 @@ func dataGCObjectIdentityMatches(listed, current dataObjectInfo) bool {
 // The backend id and provider label are not physical namespace identities.
 // Compare bucket locations and physical keys, including overlapping prefixes.
 func (s *Server) dataNamespaceReferences(ctx context.Context, backend model.DataBackend) (map[string]bool, error) {
+	return s.dataNamespaceReferencesExcept(ctx, backend, "")
+}
+
+func (s *Server) dataNamespaceReferencesExcept(ctx context.Context, backend model.DataBackend, exceptWorkspace string) (map[string]bool, error) {
 	refs, err := s.store.ListDataGCReferences(ctx)
 	if err != nil {
 		return nil, err
@@ -54,6 +58,9 @@ func (s *Server) dataNamespaceReferences(ctx context.Context, backend model.Data
 	}
 	out := map[string]bool{}
 	for _, ref := range refs {
+		if exceptWorkspace != "" && ref.WorkspaceID == exceptWorkspace {
+			continue
+		}
 		backendID := ref.BackendID
 		if backendID == "" {
 			backendID = s.store.DefaultDataBackendID()

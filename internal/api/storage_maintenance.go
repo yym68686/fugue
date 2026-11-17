@@ -8,6 +8,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/store"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -112,6 +113,27 @@ func (s *Server) sweepStorageMaintenance(parent context.Context) {
 		if e != nil {
 			return e
 		}
+		// Retirement tasks outlive metadata. Keep their physical namespaces
+		// scheduled even when the final workspace in a backend has disappeared.
+		backendSeen := map[string]bool{}
+		for _, j := range jobs {
+			if j.Kind == "workspace-retire" && j.WorkspaceRetirement != nil {
+				for _, id := range j.WorkspaceRetirement.BackendIDs {
+					if backendSeen[id] {
+						continue
+					}
+					backendSeen[id] = true
+					b, err := s.store.GetDataBackend(id, "", true)
+					if errors.Is(err, store.ErrNotFound) {
+						continue
+					}
+					if err != nil {
+						return err
+					}
+					workspaces = append(workspaces, model.DataWorkspace{ID: "retired-backend:" + b.ID, TenantID: b.TenantID, StorageBackendID: b.ID})
+				}
+			}
+		}
 		namespaces := map[string]bool{}
 		workspaceNamespaces := map[string]string{}
 		for _, w := range workspaces {
@@ -163,7 +185,13 @@ func (s *Server) sweepStorageMaintenance(parent context.Context) {
 			if err != nil {
 				return err
 			}
-			result, runErr := s.runStorageMaintenance(ctx, job)
+			var result map[string]any
+			var runErr error
+			if job.Kind == "workspace-retire" {
+				result, runErr = s.runWorkspaceRetirement(ctx, &job)
+			} else {
+				result, runErr = s.runStorageMaintenance(ctx, job)
+			}
 			job.Result = result
 			job.Error = ""
 			job.RetryAt = nil
@@ -173,7 +201,14 @@ func (s *Server) sweepStorageMaintenance(parent context.Context) {
 				job.Status = "retrying"
 				retry := time.Now().UTC().Add(time.Duration(min(job.Attempts, 5)) * time.Minute)
 				job.RetryAt = &retry
-				if job.Attempts >= 5 && !errors.Is(runErr, errLonghornCleanupPending) {
+				if errors.Is(runErr, errWorkspaceRetirementPending) {
+					job.Error = ""
+					job.Attempts--
+					if ret := job.WorkspaceRetirement; ret != nil && ret.ReclaimAfter != nil && ret.ReclaimAfter.After(retry) {
+						job.RetryAt = ret.ReclaimAfter
+					}
+				}
+				if job.Attempts >= 5 && !errors.Is(runErr, errLonghornCleanupPending) && !errors.Is(runErr, errWorkspaceRetirementPending) {
 					job.Status = "failed"
 					job.RetryAt = nil
 				}
@@ -213,6 +248,17 @@ func (s *Server) runStorageMaintenance(ctx context.Context, job model.StorageMai
 		}
 		return map[string]any{"remaining_candidates": len(candidates), "truncated": len(candidates) == 501, "physical_reclamation": "engine-owned; inspect artifact receipts and repository measurements"}, err
 	case "data-gc":
+		if strings.HasPrefix(job.ScopeID, "retired-backend:") {
+			b, err := s.store.GetDataBackend(strings.TrimPrefix(job.ScopeID, "retired-backend:"), "", true)
+			if errors.Is(err, store.ErrNotFound) {
+				return map[string]any{"backend_removed": true}, nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			gc, err := s.sweepDataNamespaceGC(ctx, model.DataWorkspace{StorageBackendID: b.ID, TenantID: b.TenantID}, 7, !job.Execute)
+			return map[string]any{"gc": gc, "retirement_namespace": true}, err
+		}
 		w, err := s.store.GetDataWorkspace(job.ScopeID, "", true)
 		if err != nil {
 			return nil, err
