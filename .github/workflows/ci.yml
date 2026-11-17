@@ -62,6 +62,25 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  k3s_bootstrap_qualification:
+    # Disposable native Linux VM. No environment, secrets, production credentials,
+    # self-hosted runner or deploy dependency: this lane cannot mutate production.
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/codex/k3s-native-upgrade-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}'}
+      - name: Verify completed-init resize and surviving workloads across minor upgrades
+        run: sudo python3 scripts/qualify_k3s_bootstrap.py --disposable-host --evidence "$RUNNER_TEMP/k3s-qualification"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: fugue-k3s-bootstrap-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/k3s-qualification
+          retention-days: 14
+
   longhorn_local_snapshot_cleanup:
     needs: [prepush, deploy_api]
     if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}

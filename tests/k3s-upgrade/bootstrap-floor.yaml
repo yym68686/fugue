@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: upgrade-qualification
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bootstrap-floor-fixture
+  namespace: upgrade-qualification
+  labels:
+    app: bootstrap-floor-fixture
+spec:
+  automountServiceAccountToken: false
+  initContainers:
+    - name: bootstrap
+      image: busybox:1.37.0
+      command:
+        - /bin/sh
+        - -ec
+        - cp /bin/busybox /shared/manager; printf 'upgrade-fixture-ok\n' > /shared/index.html
+      resources:
+        requests: {cpu: 1m, memory: 512Mi}
+        limits: {memory: 512Mi}
+      volumeMounts:
+        - {name: executable, mountPath: /shared}
+  containers:
+    - name: application
+      image: busybox:1.37.0
+      command: [/shared/manager, httpd, -f, -p, '8080', -h, /shared]
+      resources:
+        requests: {cpu: 10m, memory: 64Mi}
+        limits: {memory: 128Mi}
+      ports:
+        - {containerPort: 8080, name: http}
+      readinessProbe:
+        httpGet: {path: /, port: http}
+      volumeMounts:
+        - {name: executable, mountPath: /shared}
+  volumes:
+    - name: executable
+      emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bootstrap-floor-fixture
+  namespace: upgrade-qualification
+spec:
+  type: NodePort
+  selector: {app: bootstrap-floor-fixture}
+  ports:
+    - {name: http, port: 80, targetPort: http, nodePort: 30080}
