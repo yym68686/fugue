@@ -121,6 +121,19 @@ class StorageQualification:
                     result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "ps",
                                      "-e", "-o", "pid,ppid,stat,wchan:30,comm", check=False)
                     (self.evidence / (name + "-processes.txt")).write_text(result.stdout + result.stderr)
+                    result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "env",
+                                     "PGCONNECT_TIMEOUT=3", "PGOPTIONS=-c statement_timeout=3000",
+                                     "psql", "-X", "-d", "postgres", "-Atc",
+                                     "SELECT pid, usename, state, wait_event_type, wait_event, query FROM pg_stat_activity;",
+                                     check=False)
+                    (self.evidence / (name + "-database-waits.txt")).write_text(result.stdout + result.stderr)
+                    if self.baseline is None:
+                        # No test data exists yet. Only this explicitly disposable
+                        # cluster may sacrifice a stuck init Job for a Go stack.
+                        kubectl("-n", namespace, "exec", name, "-c", "initdb", "--",
+                                "kill", "-QUIT", "1", check=False)
+                        result = kubectl("-n", namespace, "logs", name, "-c", "initdb", "--tail=1500", check=False)
+                        (self.evidence / (name + "-manager-stack.log")).write_text(result.stdout + result.stderr)
 
     def capture(self):
         pods = json.loads(kubectl("-n", "upgrade-qualification", "get", "pods", "-l", "cnpg.io/cluster", "-o", "json").stdout)["items"]
