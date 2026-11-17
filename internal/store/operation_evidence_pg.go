@@ -246,14 +246,14 @@ WHERE %s = $1
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 DELETE FROM fugue_operation_evidence
 WHERE %s = $1
-  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified')
+  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified')
   AND (
 	collected_at < $2
 	OR id NOT IN (
 		SELECT id
 		FROM fugue_operation_evidence
 		WHERE %s = $1
-		  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified')
+		  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified')
 		ORDER BY collected_at DESC, id DESC
 		LIMIT $3
 	)
@@ -276,7 +276,7 @@ WHERE tenant_id = $1
 DELETE FROM fugue_operation_evidence
 WHERE tenant_id = $1
   AND app_id = ''
-  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified')
+  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified')
   AND (
 	collected_at < $2
 	OR id NOT IN (
@@ -284,7 +284,7 @@ WHERE tenant_id = $1
 		FROM fugue_operation_evidence
 		WHERE tenant_id = $1
 		  AND app_id = ''
-		  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified')
+		  AND evidence_type NOT IN ($4, $5, $6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified')
 		ORDER BY collected_at DESC, id DESC
 		LIMIT $3
 	)

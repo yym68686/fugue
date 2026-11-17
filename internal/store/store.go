@@ -3029,7 +3029,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
 			return ErrConflict
 		}
-		if op.DesiredSpec != nil && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
+		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 				return err
 			}
@@ -3404,7 +3404,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if err := prepareAppRequestResizeOperation(app, &op); err != nil {
 				return err
 			}
-		case pgimage.OperationType, model.OperationTypeDatabaseResize:
+		case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
 			if err := validateManagedPostgresResizeTargetState(state, app, op.ServiceID); err != nil {
 				return err
 			}
@@ -3412,12 +3412,15 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 			if op.Type == pgimage.OperationType {
 				prepare = preparePostgresImageMigration
 			}
+			if op.Type == model.OperationTypeDatabaseSourceRetire {
+				prepare = preparePostgresSourceRetirement
+			}
 			if err := prepare(app, &op); err != nil {
 				return err
 			}
 			active := activeOperationsForLifecycleTarget(state.Operations, app.ID, op.ServiceID)
 			if len(active) > 0 {
-				if len(active) == 1 && (managedPostgresResizeRetryMatches(active[0], op) || postgresImageMigrationRetryMatches(active[0], op)) {
+				if len(active) == 1 && (sourceRetirementRetryMatches(active[0], op) || managedPostgresResizeRetryMatches(active[0], op) || postgresImageMigrationRetryMatches(active[0], op)) {
 					op = cloneOperation(active[0])
 					outcome.ReusedExistingOperation = true
 					outcome.ExistingOperationID = op.ID
@@ -4114,7 +4117,7 @@ func (s *Store) completeOperationGuarded(id, runtimeID, manifestPath, message st
 			return ErrConflict
 		}
 		immutableDesiredOperation := isManagedPostgresLifecycleOperationType(state.Operations[index].Type) ||
-			state.Operations[index].Type == pgimage.OperationType || state.Operations[index].Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(state.Operations[index].Type)
+			state.Operations[index].Type == model.OperationTypeDatabaseSourceRetire || state.Operations[index].Type == pgimage.OperationType || state.Operations[index].Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(state.Operations[index].Type)
 		if desiredSpec != nil && !immutableDesiredOperation {
 			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
 		}
@@ -4261,7 +4264,7 @@ func (s *Store) failOperationGuarded(id, message string, guard *operationFinaliz
 		if index < 0 {
 			return ErrNotFound
 		}
-		if state.Operations[index].Type == pgimage.OperationType && state.Operations[index].Status == model.OperationStatusRunning && guard == nil {
+		if (state.Operations[index].Type == model.OperationTypeDatabaseSourceRetire || state.Operations[index].Type == pgimage.OperationType) && state.Operations[index].Status == model.OperationStatusRunning && guard == nil {
 			return ErrConflict
 		}
 		if guard != nil {
@@ -5365,6 +5368,8 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		return applyManagedPostgresResizeState(state, app, op)
 	case pgimage.OperationType:
 		return applyPostgresImageMigration(state, app, op)
+	case model.OperationTypeDatabaseSourceRetire:
+		return applyPostgresSourceRetirement(state, app, op)
 	default:
 		return ErrInvalidInput
 	}
@@ -5426,7 +5431,7 @@ func operationCanUpdateProgress(op model.Operation) bool {
 func isRequeueableManagedOperation(op model.Operation) bool {
 	// Resize recovery must retain the original attempt and its durable journal.
 	// Requeueing would make an already accepted mutation cancellable as pending.
-	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && !model.IsAppRequestResize(op.Type) && op.Type != pgimage.OperationType
+	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && !model.IsAppRequestResize(op.Type) && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseSourceRetire
 }
 
 func requeueManagedOperationState(op *model.Operation, message string) {
@@ -5475,6 +5480,8 @@ func inFlightOperationPhase(op model.Operation) (string, error) {
 		return "database-resize", nil
 	case pgimage.OperationType:
 		return pgimage.OperationType, nil
+	case model.OperationTypeDatabaseSourceRetire:
+		return model.OperationTypeDatabaseSourceRetire, nil
 	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return op.Type, nil
 	default:
@@ -5532,6 +5539,8 @@ func operationActionLabel(op model.Operation) string {
 		return "database resize"
 	case pgimage.OperationType:
 		return "database image migration"
+	case model.OperationTypeDatabaseSourceRetire:
+		return "database source retirement"
 	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return "app resource request resize"
 	default:

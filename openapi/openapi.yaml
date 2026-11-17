@@ -9312,6 +9312,49 @@ paths:
                 $ref: "#/components/schemas/AppRoutePatchResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/retire-source:
+    post:
+      operationId: retireBackingServicePostgresSource
+      summary: Retire an exact completed PostgreSQL cold-migration source without deleting storage
+      description: >-
+        Platform administrators only. Defaults to a fresh, read-only Kubernetes
+        identity plan. Only a completed cold migration whose destination is the
+        current active service is eligible. Apply requires the exact source UID
+        and plan hash. A dedicated exclusive database operation verifies the
+        destination, stable endpoint and stopped source before mutation, protects
+        every source PV with Retain, detaches source PVC ownership/discovery,
+        pauses the source controller, and deletes only the identified source
+        Cluster (Orphan propagation) and its identified Pods with UID preconditions.
+        It never deletes a PVC/PV, Service, secret, Job or destination resource,
+        changes application configuration, or changes routing. Missing identity,
+        unhealthy destination, unexpected storage consumers or unavailable evidence
+        block retirement. Accepted intent is durable and interruption is resumable.
+        Initially supports active single-instance services with exactly one bound
+        consumer in the same tenant/project, preserving independent ownership.
+      tags: [Backing Services]
+      x-fugue-handler: handleRetireBackingServicePostgresSource
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IdPathParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PostgresSourceRetirementRequest'}
+      responses:
+        '200':
+          description: Fresh read-only identity plan; no runtime or desired-state changes
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PostgresSourceRetirementResponse'}
+        '202':
+          description: Exclusive storage-preserving source retirement operation accepted
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PostgresSourceRetirementResponse'}
+        default:
+          $ref: '#/components/responses/ErrorResponse'
   /v1/backing-services/{id}/migrate-image:
     post:
       operationId: migrateBackingServiceImage
@@ -31877,6 +31920,64 @@ components:
         memory_mebibytes: {type: integer, format: int64, minimum: 1}
         cpu_limit_millicores: {type: integer, format: int64, minimum: 0, description: "Zero preserves an existing unlimited CPU allowance; removing a configured CPU limit is rejected by the live resize preflight."}
         memory_limit_mebibytes: {type: integer, format: int64, minimum: 1}
+    PostgresSourceRetirementRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        apply: {type: boolean, default: false}
+        expected_source_uid: {type: string, description: Exact source Cluster UID from the preceding plan; required for apply.}
+        expected_plan_hash: {type: string, description: Identity/configuration hash from the preceding plan; required for apply.}
+    PostgresSourceRetirementResponse:
+      type: object
+      required: [plan, dry_run]
+      properties:
+        plan: {$ref: '#/components/schemas/PostgresSourceRetirementPlan'}
+        dry_run: {type: boolean}
+        operation: {$ref: '#/components/schemas/Operation'}
+    PostgresSourceRetirementPod:
+      type: object
+      required: [name, uid, node]
+      properties:
+        name: {type: string}
+        uid: {type: string}
+        node: {type: string}
+    PostgresSourceRetirementVolume:
+      type: object
+      required: [pvc, pvc_uid, pv, pv_uid, pvc_spec_hash, pv_spec_hash]
+      properties:
+        pvc: {type: string}
+        pvc_uid: {type: string}
+        pv: {type: string}
+        pv_uid: {type: string}
+        pvc_spec_hash: {type: string}
+        pv_spec_hash: {type: string}
+    PostgresSourceRetirementPlan:
+      type: object
+      required: [service_id, app_id, namespace, source_cluster, source_uid, source_spec_hash, migration_uid, migration_hash, target_cluster, target_uid, target_pod, target_pod_uid, target_node, target_spec_hash, system_id, endpoint, endpoint_uid, endpoint_spec_hash, config_hash, plan_hash, preserve_storage, pods, volumes]
+      properties:
+        service_id: {type: string}
+        app_id: {type: string, description: 'Exclusive consumer operation anchor, not an ownership reassignment.'}
+        namespace: {type: string}
+        source_cluster: {type: string}
+        source_uid: {type: string}
+        source_spec_hash: {type: string}
+        migration_uid: {type: string}
+        migration_hash: {type: string}
+        target_cluster: {type: string}
+        target_uid: {type: string}
+        target_pod: {type: string}
+        target_pod_uid: {type: string}
+        target_node: {type: string}
+        target_spec_hash: {type: string}
+        system_id: {type: string}
+        endpoint: {type: string}
+        endpoint_uid: {type: string}
+        endpoint_spec_hash: {type: string}
+        config_hash: {type: string}
+        plan_hash: {type: string}
+        preserve_storage: {type: boolean, enum: [true]}
+        pods: {type: array, items: {$ref: '#/components/schemas/PostgresSourceRetirementPod'}}
+        volumes: {type: array, minItems: 1, items: {$ref: '#/components/schemas/PostgresSourceRetirementVolume'}}
     PostgresImageMigrationRequest:
       type: object
       additionalProperties: false

@@ -124,7 +124,7 @@ func cloneOperation(op model.Operation) model.Operation {
 // suspension state, while resize completion persists only RuntimeResources.
 func isManagedPostgresExclusiveMutationOperationType(operationType string) bool {
 	return isManagedPostgresLifecycleOperationType(operationType) ||
-		operationType == model.OperationTypeDatabaseResize || operationType == storagerecovery.OperationType || operationType == pgimage.OperationType
+		operationType == model.OperationTypeDatabaseSourceRetire || operationType == model.OperationTypeDatabaseResize || operationType == storagerecovery.OperationType || operationType == pgimage.OperationType
 }
 
 func hasInFlightManagedPostgresExclusiveMutationForApp(ops []model.Operation, appID string) bool {

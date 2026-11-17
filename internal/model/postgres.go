@@ -63,6 +63,12 @@ func CloneAppPostgresSpec(spec *AppPostgresSpec) *AppPostgresSpec {
 	out := *spec
 	out.Resources = CloneResourceSpec(spec.Resources)
 	out.RuntimeResources = CloneResourceSpec(spec.RuntimeResources)
+	if spec.SourceRetirement != nil {
+		plan := *spec.SourceRetirement
+		plan.Pods = append([]PostgresSourceRetirementPod{}, plan.Pods...)
+		plan.Volumes = append([]PostgresSourceRetirementVolume{}, plan.Volumes...)
+		out.SourceRetirement = &plan
+	}
 	return &out
 }
 

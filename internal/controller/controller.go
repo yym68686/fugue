@@ -57,6 +57,7 @@ type Service struct {
 	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
 	newKubeClient                   func(namespace string) (*kubeClient, error)
 	postgresImageMigrationProbe     func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
+	postgresSourceRetirementProbe   func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient
 	managedRolloutCapacityLocks     sync.Map
@@ -904,7 +905,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			if errors.Is(err, context.Canceled) {
-				if op.Type == pgimage.OperationType {
+				if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType {
 					// Keep a possibly accepted image mutation running and
 					// non-cancellable. The recovery observer resumes its journal.
 					return err
@@ -926,7 +927,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
 				return nil
 			}
-			if errors.Is(err, errPostgresImageMigrationUnsettled) {
+			if errors.Is(err, errPostgresSourceRetirementUnsettled) || errors.Is(err, errPostgresImageMigrationUnsettled) {
 				s.Logger.Printf("operation %s retained active pending database image verification: %v", op.ID, err)
 				return nil
 			}
@@ -1012,6 +1013,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executeManagedDatabaseResizeOperation(ctx, op, app)
 	case pgimage.OperationType:
 		return s.executePostgresImageMigration(ctx, op, app)
+	case model.OperationTypeDatabaseSourceRetire:
+		return s.executePostgresSourceRetirement(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

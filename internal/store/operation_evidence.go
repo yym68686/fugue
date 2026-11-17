@@ -856,7 +856,7 @@ func normalizeEvidenceRedactionStatus(raw string) string {
 }
 
 func operationEvidenceMatchesFilter(e model.OperationEvidence, filter model.OperationEvidenceFilter) bool {
-	if isLongLivedMigrationEvidenceType(e.Type) && !strings.HasPrefix(e.Type, "postgres_image_migration_") && !filter.IncludeMigrationLedger {
+	if isLongLivedMigrationEvidenceType(e.Type) && !isPostgresMutationSafetyEvidence(e.Type) && !filter.IncludeMigrationLedger {
 		return false
 	}
 	if !filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {
@@ -944,7 +944,7 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 			continue
 		}
 		if isLongLivedMigrationEvidenceType(item.Type) {
-			if !strings.HasPrefix(item.Type, "postgres_image_migration_") && !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
+			if !isPostgresMutationSafetyEvidence(item.Type) && !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
 				continue
 			}
 			migration = append(migration, item)
@@ -981,12 +981,24 @@ func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(
 }
 
 func isLongLivedMigrationEvidenceType(evidenceType string) bool {
-	switch strings.TrimSpace(evidenceType) {
-	case "postgres_image_migration_baseline", "postgres_image_migration_intent", "postgres_image_migration_verified":
+	if isPostgresMutationSafetyEvidence(evidenceType) {
 		return true
+	}
+	switch strings.TrimSpace(evidenceType) {
 	case model.OperationEvidenceTypeMigrationStarted,
 		model.OperationEvidenceTypeMigrationCompleted,
 		model.OperationEvidenceTypeMigrationFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// Physical-mutation intent must outlive diagnostic history and time limits;
+// recovery may still own an unresolved, accepted Kubernetes mutation.
+func isPostgresMutationSafetyEvidence(kind string) bool {
+	switch kind {
+	case "postgres_image_migration_baseline", "postgres_image_migration_intent", "postgres_image_migration_verified", "postgres_source_retirement_intent", "postgres_source_retirement_verified":
 		return true
 	default:
 		return false

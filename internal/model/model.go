@@ -178,6 +178,7 @@ const (
 	OperationTypeDatabaseSuspend          = "database-suspend"
 	OperationTypeDatabaseResume           = "database-resume"
 	OperationTypeDatabaseResize           = "database-resize"
+	OperationTypeDatabaseSourceRetire     = "database-source-retire"
 	OperationTypeDatabaseStorageMigration = "database-storage-migration"
 	OperationTypeDataPrewarm              = "data-prewarm"
 	OperationTypeDelete                   = "delete"
@@ -2176,23 +2177,25 @@ func AppZeroDowntimeRequirementSource(spec AppSpec) string {
 }
 
 type AppPostgresSpec struct {
-	ImageMigrationConfigHash         string `json:"image_migration_config_hash,omitempty"`
-	Image                            string `json:"image,omitempty"`
-	Database                         string `json:"database,omitempty"`
-	User                             string `json:"user,omitempty"`
-	Password                         string `json:"password,omitempty"`
-	ServiceName                      string `json:"service_name,omitempty"`
-	EndpointServiceName              string `json:"endpoint_service_name,omitempty"`
-	CredentialSecretName             string `json:"credential_secret_name,omitempty"`
-	RuntimeID                        string `json:"runtime_id,omitempty"`
-	FailoverTargetRuntimeID          string `json:"failover_target_runtime_id,omitempty"`
-	PrimaryNodeName                  string `json:"primary_node_name,omitempty"`
-	PrimaryPlacementPendingRebalance bool   `json:"primary_placement_pending_rebalance,omitempty"`
-	StorageSize                      string `json:"storage_size,omitempty"`
-	StorageClassName                 string `json:"storage_class_name,omitempty"`
-	Instances                        int    `json:"instances,omitempty"`
-	SynchronousReplicas              int    `json:"synchronous_replicas,omitempty"`
-	Suspended                        bool   `json:"suspended,omitempty"`
+	// SourceRetirement is operation-only intent; it is never committed to an app or service.
+	SourceRetirement                 *PostgresSourceRetirementPlan `json:"source_retirement,omitempty"`
+	ImageMigrationConfigHash         string                        `json:"image_migration_config_hash,omitempty"`
+	Image                            string                        `json:"image,omitempty"`
+	Database                         string                        `json:"database,omitempty"`
+	User                             string                        `json:"user,omitempty"`
+	Password                         string                        `json:"password,omitempty"`
+	ServiceName                      string                        `json:"service_name,omitempty"`
+	EndpointServiceName              string                        `json:"endpoint_service_name,omitempty"`
+	CredentialSecretName             string                        `json:"credential_secret_name,omitempty"`
+	RuntimeID                        string                        `json:"runtime_id,omitempty"`
+	FailoverTargetRuntimeID          string                        `json:"failover_target_runtime_id,omitempty"`
+	PrimaryNodeName                  string                        `json:"primary_node_name,omitempty"`
+	PrimaryPlacementPendingRebalance bool                          `json:"primary_placement_pending_rebalance,omitempty"`
+	StorageSize                      string                        `json:"storage_size,omitempty"`
+	StorageClassName                 string                        `json:"storage_class_name,omitempty"`
+	Instances                        int                           `json:"instances,omitempty"`
+	SynchronousReplicas              int                           `json:"synchronous_replicas,omitempty"`
+	Suspended                        bool                          `json:"suspended,omitempty"`
 	// Resources is the bootstrap template rendered into CNPG Cluster.spec.resources.
 	// Changing it is a maintenance action because CNPG may roll database Pods.
 	Resources *ResourceSpec `json:"resources,omitempty"`

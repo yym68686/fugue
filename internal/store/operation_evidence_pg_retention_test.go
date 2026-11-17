@@ -35,7 +35,7 @@ func TestPostgresOrdinaryEvidencePrunePreservesNinetyDayMigrationLedger(t *testi
 				model.OperationEvidenceTypeMigrationCompleted,
 				model.OperationEvidenceTypeMigrationFailed).
 			WillReturnResult(sqlmock.NewResult(0, 0))
-		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type NOT IN \(\$4, \$5, \$6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified'\)`).
+		mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type NOT IN \(\$4, \$5, \$6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified'\)`).
 			WithArgs(scope.value, sqlmock.AnyArg(), scope.limit,
 				model.OperationEvidenceTypeMigrationStarted,
 				model.OperationEvidenceTypeMigrationCompleted,
@@ -77,7 +77,7 @@ func TestPostgresTenantEvidencePruneUsesContiguousParameters(t *testing.T) {
 			model.OperationEvidenceTypeMigrationCompleted,
 			model.OperationEvidenceTypeMigrationFailed).
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type NOT IN \(\$4, \$5, \$6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified'\)`).
+	mock.ExpectExec(`(?s)DELETE FROM fugue_operation_evidence.*evidence_type NOT IN \(\$4, \$5, \$6, 'postgres_image_migration_baseline', 'postgres_image_migration_intent', 'postgres_image_migration_verified', 'postgres_source_retirement_intent', 'postgres_source_retirement_verified'\)`).
 		WithArgs("tenant-retention", sqlmock.AnyArg(), operationEvidenceRetentionLimitPerTenant,
 			model.OperationEvidenceTypeMigrationStarted,
 			model.OperationEvidenceTypeMigrationCompleted,

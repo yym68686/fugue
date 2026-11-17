@@ -53,6 +53,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 	}
 	switch op.Type {
 	case model.OperationTypeDeploy,
+		model.OperationTypeDatabaseSourceRetire,
 		pgimage.OperationType,
 		model.OperationTypeMigrate,
 		model.OperationTypeDatabaseSwitchover,
@@ -69,7 +70,7 @@ func operationAppliesDesiredSpecBackingServices(op model.Operation) bool {
 
 func isManagedPostgresServiceOperation(operationType string) bool {
 	switch operationType {
-	case pgimage.OperationType:
+	case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType:
 		return true
 	case model.OperationTypeDatabaseSwitchover,
 		model.OperationTypeDatabaseLocalize, storagerecovery.OperationType,
@@ -84,7 +85,7 @@ func isManagedPostgresServiceOperation(operationType string) bool {
 
 func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
-	case pgimage.OperationType:
+	case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType:
 		return true
 	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return true

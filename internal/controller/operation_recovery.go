@@ -29,7 +29,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if op.Type == pgimage.OperationType && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
+		if (op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType) && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
 			s.operationClaimMu.Lock()
 			owner := new(int)
 			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
@@ -38,8 +38,12 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
-					err = s.executePostgresImageMigration(call, op, app)
-					if err != nil && !errors.Is(err, errPostgresImageMigrationUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errOperationNoLongerActive) {
+					if op.Type == model.OperationTypeDatabaseSourceRetire {
+						err = s.executePostgresSourceRetirement(call, op, app)
+					} else {
+						err = s.executePostgresImageMigration(call, op, app)
+					}
+					if err != nil && !errors.Is(err, errPostgresSourceRetirementUnsettled) && !errors.Is(err, errPostgresImageMigrationUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errOperationNoLongerActive) {
 						_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
 					}
 				}
