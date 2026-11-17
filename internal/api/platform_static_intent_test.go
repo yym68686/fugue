@@ -95,6 +95,8 @@ func TestProducerUsesPinnedStaticIntentAndSwitchesVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewServer(state, auth.New(state, ""), nil, ServerConfig{BundleSigningKey: "static-intent-test-key", BundleSigningKeyID: "static-key"})
+	// Retained legacy full-input replay is a reader compatibility fixture.
+	s.compilerInputOmitOriginal = false
 	s.platformRoutes = []model.PlatformRoute{{Hostname: "ambient.example", UpstreamURL: "http://ambient:8080"}}
 	first := createTestStaticIntent(t, s, "base-one", "http://first:8080")
 	second := createTestStaticIntent(t, s, "base-two", "http://second:8080")

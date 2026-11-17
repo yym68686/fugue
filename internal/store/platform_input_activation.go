@@ -21,16 +21,17 @@ import (
 // checks. Task claim, LKG promotion, release and rollback consume this proof;
 // remaining activation entry points still need their own checks.
 type compilerInputActivationProof struct {
-	store           *Store
-	database        *sql.DB
-	keyringRevision uint64
-	expires         time.Time
-	horizon         int64
-	sourceEpoch     int64
-	closure         inputarchive.HotClosure
-	tuples          []compilerInputActivationTuple
-	inputs          []string
-	inputManifests  map[string]inputManifest
+	store            *Store
+	database         *sql.DB
+	keyringRevision  uint64
+	expires          time.Time
+	horizon          int64
+	sourceEpoch      int64
+	compilerContract compilerContractState
+	closure          inputarchive.HotClosure
+	tuples           []compilerInputActivationTuple
+	inputs           []string
+	inputManifests   map[string]inputManifest
 	// A prospective task is immutable server-owned intent, not a row inserted
 	// before admission. Its descendants and selector are checked in the same
 	// RR snapshot; consume inserts this exact pending root atomically.
@@ -156,6 +157,11 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 			return nil, err
 		}
 	}
+	check = "compiler_contract_state"
+	proof.compilerContract, err = readCompilerContract(ctx, tx, false)
+	if err != nil {
+		return nil, err
+	}
 	var publicationSnapshots []model.PlatformLKGSnapshot
 	var publicationVerified []bool
 	publicationBytes := 0
@@ -205,6 +211,11 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 			}
 			publicationBytes += len(encoded)
 		}
+	}
+	// Retirement cannot inherit the legacy capability shortcut: it needs the
+	// existing complete signed closure, tuple witnesses and verified local pins.
+	if proof.compilerContract.Phase == "enforced" {
+		proof.capabilityOnly = false
 	}
 	if proof.capabilityOnly {
 		check = "capability_commit"
@@ -297,6 +308,9 @@ func (s *Store) prepareCompilerInputProof(ctx context.Context, roots []inputarch
 				artifact, size, err := readCompilerInputActivationArtifact(ctx, tx, ref.ID)
 				if err != nil {
 					return nil, err
+				}
+				if proof.compilerContract.Phase == "enforced" && artifact.Metadata["compiler_version"] != "" && artifact.Metadata["compiler_version"] != proof.compilerContract.Version {
+					return nil, ErrCompilerContractRetired
 				}
 				bytes += size
 				if bytes > 32<<20 || !platformsafety.EvaluateArtifactIntegrity(artifact, keyring).Pass {
@@ -777,12 +791,21 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	if epoch != proof.sourceEpoch {
 		return ErrConflict
 	}
+	check = "compiler_contract_state"
+	contract, err := readCompilerContract(ctx, tx, true)
+	if err != nil {
+		return err
+	}
+	if contract != proof.compilerContract {
+		return ErrConflict
+	}
 	if proof.ordinary {
 		check = "capability_phase"
 		capability, err := compilerInputCapabilityPhase(ctx, tx, true)
 		if err != nil {
 			return err
 		}
+		capability = capability && contract.Phase != "enforced"
 		if proof.capabilityOnly != capability {
 			return ErrConflict
 		}

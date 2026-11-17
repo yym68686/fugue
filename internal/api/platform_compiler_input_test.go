@@ -15,7 +15,9 @@ import (
 
 func TestCompactOnlyCompileNeverStoresFullInputAndReportsNotRetained(t *testing.T) {
 	st, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
-	server.compilerInputOmitOriginal = true
+	if !server.compilerInputOmitOriginal {
+		t.Fatal("production server did not default to compact-only compilation")
+	}
 	at := time.Now().UTC().Add(-time.Minute)
 	req := platformConfigCompileRequest{Intent: platformconfig.PlatformIntent{Generation: "compact-intent"}, Policy: platformconfig.PolicySnapshot{Generation: "compact-policy"},
 		RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &at, Facts: map[string]any{"raw": "never persist this full snapshot"}}}
@@ -52,6 +54,9 @@ func TestCompactOnlyCompileNeverStoresFullInputAndReportsNotRetained(t *testing.
 
 func TestCompilerInputIsFrozenReplayableAndAdminOnly(t *testing.T) {
 	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	// Historical reader compatibility fixture; production no longer selects
+	// the v36 writer through environment or ServerConfig.
+	server.compilerInputOmitOriginal = false
 	now := time.Now().UTC()
 	request := platformConfigCompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: "global", Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: "global"}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, Facts: map[string]any{"source_revision": "original"}}}
 	r := performJSONRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
@@ -138,6 +143,8 @@ func TestDNSConfigurationProjectionRetainsSelectionAndDoesNotMutateReplay(t *tes
 
 func TestCompilerInputViewUsesExplicitSignedRuntimeContract(t *testing.T) {
 	_, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
+	// Exercise the retained v37 signed read contract, not writer selection.
+	server.compilerInputOmitOriginal = false
 	at := time.Now().UTC().Add(-time.Minute)
 	req := platformConfigCompileRequest{Intent: platformconfig.PlatformIntent{Generation: "independent-intent"},
 		Policy:          platformconfig.PolicySnapshot{Generation: "independent-policy", RuntimeInputMode: platformconfig.RuntimeInputConfigurationV1},

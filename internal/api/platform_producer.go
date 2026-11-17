@@ -314,6 +314,20 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	// Failed-source suppression is scoped to a compiler contract. A legacy
+	// failed invocation must not suppress a fresh compact-only compilation;
+	// its original observations and signature are never reused or rewritten.
+	compiler := platformconfig.CompilerVersion
+	if projection.Policy.RuntimeInputMode == platformconfig.RuntimeInputConfigurationV1 {
+		compiler = platformconfig.ConfigurationInputCompilerVersion
+	}
+	if s.compilerInputOmitOriginal {
+		compiler = platformconfig.CompactOnlyInputCompilerVersion
+	}
+	sourceDigest, err = platformconfig.Digest(struct{ Compiler, Source string }{compiler, sourceDigest})
+	if err != nil {
+		return interval, err
+	}
 	if policy.Mode == "serving" {
 		failed, err := s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, sourceDigest)
 		if err != nil || failed {

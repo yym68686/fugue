@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -27,6 +28,30 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 	for _, op := range operations {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if op.Type == pgimage.OperationType && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
+			s.operationClaimMu.Lock()
+			owner := new(int)
+			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
+			s.operationClaimMu.Unlock()
+			if !owned {
+				call, cancel := context.WithTimeout(ctx, 20*time.Second)
+				app, err := s.Store.GetApp(op.AppID)
+				if err == nil {
+					err = s.executePostgresImageMigration(call, op, app)
+					if err != nil && !errors.Is(err, errPostgresImageMigrationUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errOperationNoLongerActive) {
+						_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
+					}
+				}
+				// Failure to read the app says nothing about an already
+				// accepted image mutation. Preserve its interlock and retry.
+				cancel()
+				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
+				if err != nil && s.Logger != nil {
+					s.Logger.Printf("database image migration recovery %s remains pending: %v", op.ID, err)
+				}
+			}
+			continue
 		}
 		if op.Type == model.OperationTypeDatabaseResize && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged &&
 			strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {

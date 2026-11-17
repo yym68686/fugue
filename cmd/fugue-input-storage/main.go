@@ -28,7 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const compilerInputStorageModes = "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, encoded-backup, decode-backup, release-backup, observe"
+const compilerInputStorageModes = "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, compiler-contract-readiness, encoded-backup, decode-backup, release-backup, observe"
 
 func main() {
 	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
@@ -71,6 +71,25 @@ func main() {
 	if !validCompilerInputStorageMode(*mode) {
 		fmt.Fprintln(os.Stderr, "unsupported compiler input maintenance mode")
 		os.Exit(2)
+	}
+	if *mode == "compiler-contract-readiness" {
+		other := false
+		flag.Visit(func(f *flag.Flag) { other = other || f.Name != "mode" })
+		if other || flag.NArg() != 0 || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "compiler-contract-readiness requires only mode and a database")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		report, err := store.RunCompilerContractReadiness(ctx, os.Getenv("FUGUE_DATABASE_URL"))
+		if json.NewEncoder(os.Stdout).Encode(report) != nil {
+			os.Exit(1)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "compiler contract readiness incomplete; retirement and deletion refused")
+			os.Exit(1)
+		}
+		return
 	}
 	// This separate read-only mode fails before database access unless the
 	// native process and all of its runtime threads have verified idle policy.
@@ -723,5 +742,8 @@ func observeStorage(ctx context.Context) error {
 }
 
 func validCompilerInputStorageMode(mode string) bool {
+	if mode == "compiler-contract-readiness" {
+		return true
+	}
 	return slices.Contains(strings.Split(compilerInputStorageModes, ", "), mode)
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/pgimage"
 )
 
 func (s *Store) ListProjectRuntimeReservations(projectID string) ([]model.ProjectRuntimeReservation, error) {
@@ -261,7 +262,7 @@ func validateOperationRuntimeReservationsState(state *model.State, projectID str
 		// available even if a stale reservation no longer describes the live
 		// database placement.
 		return nil
-	case model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
+	case pgimage.OperationType, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize:
 		if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 			return ErrInvalidInput
 		}

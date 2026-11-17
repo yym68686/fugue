@@ -2,9 +2,10 @@
 
 ## v38: complete invocation input is not retained
 
-The API's explicit `FUGUE_COMPILER_INPUT_OMIT_ORIGINAL=true` persistence policy
-selects `platform-config-compiler/v38` for **new** compilations, including manual
-and producer compilations. The default remains false for reader-first rollout.
+The production API selects `platform-config-compiler/v38` for **all new**
+compilations, including manual and producer compilations. Reader-first rollout
+is complete; the former `FUGUE_COMPILER_INPUT_OMIT_ORIGINAL` deployment setting
+can no longer restore the v36/v37 production writer.
 Compilation still validates complete, fresh evidence before projecting inputs.
 Signed lineage preserves the complete invocation's `input_snapshot_digest` as a
 commitment and binds the independently verified compact `runtime_input_digest`.
@@ -43,9 +44,9 @@ not-retained message for v38. `view=dns_configuration` still verifies and return
 the frozen operational projection. It never reconstructs an alleged original
 from live state. Full v36/v37 queries preserve their old behavior.
 
-Roll out readers and additive schema first with the writer flag false. Confirm
-both API replicas and schema are healthy; then enable the writer in a separate
-declarative API release, whose previous Git LKG already supports v38. Existing
+The initial reader-first rollout used a separate declarative writer-flag release.
+The current production writer is permanently compact-only, and its previous Git
+LKG already supports v38. Existing
 consumer payload and Lineage fields do not change: the new version and evidence
 metadata are signed strings, not unknown nested schema fields. This change does
 not implement collection of old compiler inputs/artifact bodies, a 5 GB budget
