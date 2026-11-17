@@ -15,6 +15,7 @@ type AuthorityRuntime struct {
 	Publisher    GroupAuthorityPublisher
 	GroupIDs     []string
 	Status       *AuthorityRuntimeState
+	observations authorityReconcileObservations
 
 	mu                  sync.Mutex
 	lastRouteIntentGen  string
@@ -40,43 +41,62 @@ func (runtime *AuthorityRuntime) cachedBatchValid(routeIntentGeneration, invento
 	return runtime.hasBatch && inventoryKnown && runtime.lastInventoryKnown && routeIntentGeneration == runtime.lastRouteIntentGen && inventoryDigest == runtime.lastInventoryDigest && now.Sub(runtime.lastReconcileAt) < authorityRuntimeRefreshInterval
 }
 
-func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (AuthorityRuntimeBatch, bool, error) {
+func (runtime *AuthorityRuntime) RunOnce(ctx context.Context) (result AuthorityRuntimeBatch, skipped bool, resultErr error) {
+	trace := runtime.observations.begin()
+	defer func() { trace.finish(result, skipped, resultErr) }()
 	if runtime.RouteIntents == nil {
 		return AuthorityRuntimeBatch{}, false, errors.New("edge-control authority RouteIntent source is nil")
 	}
+	trace.phase("route_fetch")
 	snapshot, err := runtime.RouteIntents.FetchRouteIntents(ctx)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, false, err
 	}
+	trace.source(snapshot, false)
+	trace.phase("inventory_read")
 	inventoryDigest := ""
 	inventoryKnown := false
 	if runtime.Compiler.Inventory != nil && len(runtime.GroupIDs) == 1 {
-		if inventory, readErr := runtime.Compiler.Inventory.ReadGroupInventory(ctx, runtime.GroupIDs[0]); readErr == nil {
+		inventory, readErr := runtime.Compiler.Inventory.ReadGroupInventory(ctx, runtime.GroupIDs[0])
+		trace.phaseError(readErr)
+		if readErr == nil {
 			inventoryDigest = groupInventorySemanticDigest(inventory)
 			inventoryKnown = true
 		}
 	}
 	now := time.Now().UTC()
+	trace.phase("cache_check")
 	if runtime.cachedBatchValid(routeIntentSemanticDigest(snapshot), inventoryDigest, inventoryKnown, now) {
 		runtime.mu.Lock()
 		batch := runtime.lastBatch
 		runtime.mu.Unlock()
 		return batch, true, nil
 	}
+	trace.phase("compile")
 	compiled, err := runtime.Compiler.Reconcile(ctx, snapshot, runtime.GroupIDs)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, false, err
 	}
 	if snapshot.TrafficRelease != nil {
+		trace.phase("route_recheck")
 		current, err := runtime.RouteIntents.FetchRouteIntents(ctx)
+		trace.phaseError(err)
+		if err == nil {
+			trace.source(current, true)
+		}
 		if err != nil || routeIntentSemanticDigest(current) != routeIntentSemanticDigest(snapshot) {
+			if err == nil {
+				trace.inputChanged()
+			}
 			return AuthorityRuntimeBatch{}, false, errors.New("traffic release changed before group publication; retain serving artifact")
 		}
 	}
+	trace.phase("publish")
 	published, err := runtime.Publisher.Publish(ctx, compiled)
 	if err != nil {
 		return AuthorityRuntimeBatch{}, false, err
 	}
+	trace.phase("cache_store")
 	batch := AuthorityRuntimeBatch{Compiled: compiled, Published: published}
 	runtime.mu.Lock()
 	runtime.lastRouteIntentGen = routeIntentSemanticDigest(snapshot)

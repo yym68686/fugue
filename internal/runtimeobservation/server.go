@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"time"
@@ -22,6 +23,16 @@ var namePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
 
 func Start(ctx context.Context, component string, providers map[string]Provider) error {
 	return startAt(ctx, component, SocketPath, providers)
+}
+
+// StartAt exposes the same owner-only endpoint in an existing writable private
+// directory. Components with a read-only root filesystem need not add a volume
+// or weaken their filesystem policy merely to retain diagnostic receipts.
+func StartAt(ctx context.Context, component, path string, providers map[string]Provider) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("observation socket requires an absolute normalized path")
+	}
+	return startAt(ctx, component, path, providers)
 }
 
 func startAt(ctx context.Context, component, path string, providers map[string]Provider) error {

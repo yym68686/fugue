@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"fugue/internal/edgecontrol"
+	"fugue/internal/runtimeobservation"
 )
 
 const (
@@ -97,6 +98,11 @@ func run(ctx context.Context, cfg config, logger *log.Logger) error {
 	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	if authorityRuntime != nil {
+		if err := runtimeobservation.StartAt(runCtx, "edge-control", filepath.Join(cfg.AuthorityStateDir, "fugue-observation.sock"), map[string]runtimeobservation.Provider{"reconcile": authorityRuntime.ReconcileObservationSnapshot}); err != nil {
+			logger.Printf("local reconciliation observation endpoint unavailable: %v", err)
+		}
+	}
 	mode := "boundary-only"
 	if handler == nil {
 		handler = edgecontrol.NewBoundary(cfg.Enabled).Handler()

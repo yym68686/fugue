@@ -84,6 +84,13 @@ func TestAuthorityRuntimeRechecksTrafficReleaseAndNeverDowngradesToLegacy(t *tes
 	if err != nil || after.Published.Bundle.Version != before.Published.Bundle.Version {
 		t.Fatal("legacy source replaced bound serving artifact")
 	}
+	receipts := reconcileSnapshot(t, runtime)["receipts"].([]authorityReconcileReceipt)
+	if len(receipts) != 4 || receipts[0].Outcome != "published" || receipts[1].Outcome != "failed" ||
+		receipts[1].Phases[len(receipts[1].Phases)-1].ErrorClass != "input_changed" ||
+		receipts[1].Source.Fence != 4 || receipts[1].Rechecked.Fence != 5 ||
+		receipts[2].Outcome != "published" || receipts[3].Outcome != "publication_failed" || receipts[3].PublicationFailure == "" {
+		t.Fatal("original reconcile decisions not retained", receipts)
+	}
 }
 
 func TestAuthorityRuntimeSkipsStableInputsUntilRefresh(t *testing.T) {

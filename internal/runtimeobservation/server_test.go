@@ -20,7 +20,7 @@ func TestPrivateObservationProvidersRejectMutationAndCleanUp(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	providers := map[string]Provider{"queue": func(context.Context) (any, error) { return map[string]int{"depth": 3}, nil }}
-	if err := startAt(ctx, "worker", path, providers); err != nil {
+	if err := StartAt(ctx, "worker", path, providers); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -58,4 +58,12 @@ func TestPrivateObservationProvidersRejectMutationAndCleanUp(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("socket remained after shutdown")
+}
+
+func TestStartAtRejectsAmbiguousPathsWithoutFilesystemChanges(t *testing.T) {
+	for _, path := range []string{"", "relative.sock", "/tmp/../observation.sock", "/tmp//observation.sock"} {
+		if err := StartAt(context.Background(), "worker", path, map[string]Provider{"queue": func(context.Context) (any, error) { return nil, nil }}); err == nil {
+			t.Fatalf("accepted ambiguous socket path %q", path)
+		}
+	}
 }
