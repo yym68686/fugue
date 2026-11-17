@@ -155,6 +155,16 @@ overwrite. Receipt bounds are captured at detection and are not silently updated
 by later interval widening. Read outcome and latest error provide context, not a
 proven cause. No log contents or cursors are reconstructed or changed.
 
+New rotation-boundary gaps include a `boundary_check` captured at the actual
+missing-witness branch, before newer records can change the cursor. It names
+the cursor/checkpoint witness and newer-record/EOF phase, exact distinct and
+occurrence counts, and separate deterministic four-hash samples of missing and
+seen messages with their required/observed counts. Omitted sample counts are
+explicit. No message text is stored. These owner-only hashes allow matching
+the original comparison to retained node files; timestamps alone cannot prove
+that the required body and multiplicity were present. The receipt does not
+change missing-boundary decisions, recovery, admission or cursor advancement.
+
 Each retained source and new gap receipt can include `last_admission`, the most
 recent failed queue admission for that source. Fixed reason codes distinguish
 ordinary-slot and byte bounds, a full physical queue, canceled/expired context,

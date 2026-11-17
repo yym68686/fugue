@@ -180,8 +180,10 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	}()
 	boundary := cur.Boundary
 	requiredBoundary := boundary
+	boundaryWitness := "cursor"
 	if len(cur.RecoveryBoundary) > 0 {
 		requiredBoundary = cur.RecoveryBoundary
+		boundaryWitness = "checkpoint"
 	}
 	seen := map[[32]byte]int{}
 	// An independent I/O timeout must expire before the shared cycle deadline.
@@ -338,6 +340,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 				// remaining records, but never report this as complete recovery.
 				rotationGap = true
 				observation.Outcome = "rotation_gap"
+				observation.BoundaryCheck = observeLogBoundary(boundaryWitness, "newer_record", requiredBoundary, seen)
 				c.observeRotationGap(&cur, &observation, original, ts, key)
 			}
 		}
@@ -426,6 +429,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		if rotationAttempted && !rotationGap && logBoundaryMissing(requiredBoundary, seen) {
 			rotationGap = true
 			observation.Outcome = "rotation_gap"
+			observation.BoundaryCheck = observeLogBoundary(boundaryWitness, "eof", requiredBoundary, seen)
 			c.observeRotationGap(&cur, &observation, original, now, key)
 		}
 		cur.RecoveringRotation = false
