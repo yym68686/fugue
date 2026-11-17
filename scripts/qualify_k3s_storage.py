@@ -118,6 +118,32 @@ class StorageQualification:
                 result = kubectl("-n", namespace, "logs", name, "--all-containers", "--tail=200", check=False)
                 (self.evidence / (namespace + "-" + name + ".log")).write_text(result.stdout + result.stderr)
                 if "initdb" in name:
+                    container_id = next((c.get("containerID", "").removeprefix("containerd://")
+                                         for c in item.get("status", {}).get("containerStatuses", [])
+                                         if c["name"] == "initdb"), "")
+                    inspected = run("k3s", "crictl", "inspect", container_id, "-o", "json", check=False)
+                    if not inspected.returncode:
+                        host_pid = int(json.loads(inspected.stdout)["info"]["pid"])
+                        # Host-side kernel waits distinguish a runtime/syscall
+                        # stall from an SQL or operator wait. Never dump env or
+                        # the full CRI inspection, which includes credentials.
+                        processes = run("ps", "-e", "-o", "pid,ppid,stat,wchan:40,comm", check=False)
+                        (self.evidence / (name + "-host-processes.txt")).write_text(processes.stdout + processes.stderr)
+                        kernel_waits = {}
+                        pending = [host_pid]
+                        rows = [line.split() for line in processes.stdout.splitlines()[1:]]
+                        while pending:
+                            pid = pending.pop()
+                            if str(pid) in kernel_waits:
+                                continue
+                            kernel_waits[str(pid)] = {}
+                            for field in ("wchan", "stack", "syscall"):
+                                try:
+                                    kernel_waits[str(pid)][field] = Path(f"/proc/{pid}/{field}").read_text()
+                                except OSError as exc:
+                                    kernel_waits[str(pid)][field] = type(exc).__name__
+                            pending.extend(int(row[0]) for row in rows if int(row[1]) == pid)
+                        self.write(name + "-kernel-waits.json", kernel_waits)
                     result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--", "ps",
                                      "-e", "-o", "pid,ppid,stat,wchan:30,comm", check=False)
                     (self.evidence / (name + "-processes.txt")).write_text(result.stdout + result.stderr)
@@ -130,8 +156,11 @@ class StorageQualification:
                     if self.baseline is None:
                         # No test data exists yet. Only this explicitly disposable
                         # cluster may sacrifice a stuck init Job for a Go stack.
-                        kubectl("-n", namespace, "exec", name, "-c", "initdb", "--",
-                                "kill", "-QUIT", "1", check=False)
+                        result = kubectl("-n", namespace, "exec", name, "-c", "initdb", "--",
+                                         "kill", "-QUIT", "1", check=False)
+                        self.write(name + "-stack-signal.json", {"exit_code": result.returncode,
+                                                                 "stdout": result.stdout, "stderr": result.stderr})
+                        time.sleep(3)
                         result = kubectl("-n", namespace, "logs", name, "-c", "initdb", "--tail=1500", check=False)
                         (self.evidence / (name + "-manager-stack.log")).write_text(result.stdout + result.stderr)
 
