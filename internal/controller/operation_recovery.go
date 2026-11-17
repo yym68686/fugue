@@ -39,10 +39,12 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
 					err = s.executePostgresImageMigration(call, op, app)
+					if err != nil && !errors.Is(err, errPostgresImageMigrationUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errOperationNoLongerActive) {
+						_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
+					}
 				}
-				if err != nil && !errors.Is(err, errPostgresImageMigrationUnsettled) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, errOperationNoLongerActive) {
-					_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
-				}
+				// Failure to read the app says nothing about an already
+				// accepted image mutation. Preserve its interlock and retry.
 				cancel()
 				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
 				if err != nil && s.Logger != nil {
