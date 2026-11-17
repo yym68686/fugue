@@ -161,7 +161,7 @@ func (s *Service) executePostgresSourceRetirement(ctx context.Context, op model.
 		if err != nil {
 			return err
 		}
-		return s.probeManagedPostgresPrimarySQL(ctx, p.Endpoint+"."+p.Namespace+".svc.cluster.local", pgretire.String(pgretire.Object(pod["status"]), "podIP"), target.Postgres)
+		return s.probeManagedPostgresPrimarySQL(ctx, managedPostgresRWServiceHost(p.Namespace, p.Endpoint), pgretire.String(pgretire.Object(pod["status"]), "podIP"), target.Postgres)
 	}
 	probe := s.postgresSourceRetirementProbe
 	if probe == nil {

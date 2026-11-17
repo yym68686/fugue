@@ -26,6 +26,8 @@ ownership and CNPG discovery labels, then deletes only the exact source Cluster
 with orphan propagation and gracefully deletes its recorded Pods. UID and
 resource-version preconditions fence every mutation. Unexpected storage consumers,
 Jobs, replacement identities, configuration changes or missing evidence block it.
+Source Pod adoption, extra containers, ephemeral containers and native sidecars
+also block retirement because they fall outside the stopped-PostgreSQL proof.
 
 It never deletes PVCs, PVs, Services, secrets, Jobs or destination resources; never
 rebuilds/redeploys the consumer or changes traffic, resources or placement. Old

@@ -390,6 +390,20 @@ func Validate(ctx context.Context, get Get, p model.PostgresSourceRetirementPlan
 				if String(Meta(pod), "uid") != id.UID || String(Object(pod["spec"]), "nodeName") != id.Node {
 					return fmt.Errorf("source Pod identity changed")
 				}
+				owners := Objects(Meta(pod)["ownerReferences"])
+				if !(Owned(pod, p.SourceUID) && len(owners) == 1) && !(progress && !found && len(owners) == 0) {
+					return fmt.Errorf("source Pod ownership changed")
+				}
+				spec := Object(pod["spec"])
+				containers := Objects(spec["containers"])
+				if len(containers) != 1 || containers[0]["name"] != "postgres" || len(Objects(spec["ephemeralContainers"])) > 0 {
+					return fmt.Errorf("source Pod has containers outside the stopped-state proof")
+				}
+				for _, init := range Objects(spec["initContainers"]) {
+					if init["restartPolicy"] == "Always" {
+						return fmt.Errorf("source Pod has a native sidecar outside the stopped-state proof")
+					}
+				}
 				known = true
 				if id.Node != "" {
 					if err = NodeReady(ctx, get, id.Node); err != nil {

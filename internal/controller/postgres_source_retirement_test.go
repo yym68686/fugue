@@ -153,6 +153,9 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 							t.Fatal("pod removal is not graceful")
 						}
 						delete(objects, path)
+						if path == sourcePath {
+							delete(pgretire.Meta(objects[podPath]), "ownerReferences") // Orphan GC keeps the exact Pod.
+						}
 					default:
 						t.Errorf("forbidden mutation %s", r.Method)
 						w.WriteHeader(400)

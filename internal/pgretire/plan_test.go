@@ -25,7 +25,7 @@ func TestWitnessHashSurvivesJSONBObjectOrdering(t *testing.T) {
 func TestRetirementWitnessRejectsChangedLiveState(t *testing.T) {
 	app := model.App{ID: "client", TenantID: "tenant", ProjectID: "project"}
 	svc := model.BackingService{ID: "database", TenantID: app.TenantID, ProjectID: app.ProjectID, Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{ServiceName: "current", Instances: 1}}}
-	for _, scenario := range []string{"valid", "source-uid", "target-uid", "target-unready", "target-node", "source-node", "endpoint", "endpoints", "fencing", "claim-uid", "pv-binding", "extra-claim", "extra-pod", "job", "migration"} {
+	for _, scenario := range []string{"valid", "source-uid", "target-uid", "target-unready", "target-node", "source-node", "endpoint", "endpoints", "fencing", "claim-uid", "pv-binding", "extra-claim", "extra-pod", "pod-adopted", "pod-sidecar", "pod-ephemeral", "pod-native-sidecar", "job", "migration"} {
 		t.Run(scenario, func(t *testing.T) {
 			objects := retiretest.New(app, svc)
 			get, ctx := retiretest.Get(objects), context.Background()
@@ -59,6 +59,14 @@ func TestRetirementWitnessRejectsChangedLiveState(t *testing.T) {
 				objects[path("persistentvolumeclaims", "new")] = map[string]any{"metadata": map[string]any{"labels": map[string]any{pgretire.ClusterLabel: p.SourceCluster}}}
 			case "extra-pod":
 				objects[path("pods", "new")] = map[string]any{"metadata": map[string]any{}, "spec": map[string]any{"volumes": []any{map[string]any{"persistentVolumeClaim": map[string]any{"claimName": "previous-1"}}}}}
+			case "pod-adopted":
+				pgretire.Meta(objects[path("pods", "previous-1")])["ownerReferences"] = []any{map[string]any{"uid": "foreign", "kind": "Cluster", "apiVersion": "postgresql.cnpg.io/v1"}}
+			case "pod-sidecar":
+				pgretire.Object(objects[path("pods", "previous-1")]["spec"])["containers"] = []any{map[string]any{"name": "postgres"}, map[string]any{"name": "other"}}
+			case "pod-ephemeral":
+				pgretire.Object(objects[path("pods", "previous-1")]["spec"])["ephemeralContainers"] = []any{map[string]any{"name": "debugger"}}
+			case "pod-native-sidecar":
+				pgretire.Object(objects[path("pods", "previous-1")]["spec"])["initContainers"] = []any{map[string]any{"name": "sidecar", "restartPolicy": "Always"}}
 			case "job":
 				objects["/apis/batch/v1/namespaces/"+p.Namespace+"/jobs/new"] = map[string]any{"metadata": map[string]any{"labels": map[string]any{pgretire.ClusterLabel: p.SourceCluster}}}
 			case "migration":
