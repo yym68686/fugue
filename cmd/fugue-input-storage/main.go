@@ -28,7 +28,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const compilerInputStorageModes = "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, compiler-source-verify, compiler-contract-readiness, encoded-backup, decode-backup, release-backup, observe"
+const compilerInputStorageModes = "inspect, migrate, rollback, collect, archive, archive-route, archive-unroute, archive-hot-copy, archive-hot-restore, archive-hot-inventory, archive-hot-roots, archive-root-obligations, archive-retention-inventory, archive-retention-prepared-inventory, archive-retention-idle-inventory, archive-hot-index, archive-hot-local-readback, archive-local-pin, archive-local-unpin, archive-read-check, archive-write-fence, task-input-prepare, task-input-plan, task-input-restore, task-input-confirm, publication-input-plan, publication-input-restore, publication-input-confirm, consumer-input-plan, consumer-input-restore, consumer-input-confirm, consumer-retire, compiler-source-verify, compiler-contract-readiness, encoded-backup, decode-backup, release-backup, observe"
 
 func main() {
 	if handled, err := inputhistory.WriteCapabilities(os.Args[1:], "store", os.Stdout); handled {
@@ -54,6 +54,8 @@ func main() {
 	consumerContract := flag.String("consumer-input-contract", "", "strict bounded consumer preparation contract; trusted plan only")
 	consumerPlan := flag.String("consumer-input-plan", "", "strict signed consumer preparation plan with public verification key")
 	consumerBackend := flag.String("consumer-input-backend", "", "exact archive backend fingerprint for trusted consumer-input-plan")
+	retirementContract := flag.String("consumer-retirement-contract", "", "strict exact consumer identity retirement contract; '-' reads stdin")
+	retirementPlan := flag.String("consumer-retirement-plan-sha256", "", "exact preview SHA required for irreversible consumer retirement")
 	digest := flag.String("digest", "", "exact compiler input digest")
 	expected := flag.String("expected-format", "", "expected old representation")
 	apply := flag.Bool("apply", false, "commit one bounded operation")
@@ -70,6 +72,31 @@ func main() {
 	flag.Parse()
 	if !validCompilerInputStorageMode(*mode) {
 		fmt.Fprintln(os.Stderr, "unsupported compiler input maintenance mode")
+		os.Exit(2)
+	}
+	if *mode == "consumer-retire" {
+		other := false
+		flag.Visit(func(f *flag.Flag) {
+			other = other || f.Name != "mode" && f.Name != "consumer-retirement-contract" && f.Name != "consumer-retirement-plan-sha256" && f.Name != "apply"
+		})
+		if other || flag.NArg() != 0 || *retirementContract == "" || os.Getenv("FUGUE_DATABASE_URL") == "" {
+			fmt.Fprintln(os.Stderr, "consumer-retire requires only an exact contract, database and optional apply/preview SHA")
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		report, err := runConsumerRetirement(ctx, *retirementContract, *apply, *retirementPlan)
+		if json.NewEncoder(os.Stdout).Encode(report) != nil {
+			os.Exit(1)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "consumer retirement refused; transaction not confirmed; category="+maintenanceErrorCategory(err))
+			os.Exit(1)
+		}
+		return
+	}
+	if *retirementContract != "" || *retirementPlan != "" {
+		fmt.Fprintln(os.Stderr, "consumer retirement flags require consumer-retire mode")
 		os.Exit(2)
 	}
 	if *mode == "compiler-contract-readiness" {

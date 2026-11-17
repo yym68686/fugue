@@ -59,3 +59,9 @@ existing signed-source dependency decoders without fetching raw history.
 The first-stage release intentionally supplies no destructive enabling or
 collection command. Until the gates are fulfilled, existing v37 runtime reads
 and full-history retention remain available and the retirement is incomplete.
+
+The subsequent [explicit consumer retirement](platform-consumer-retirement.md)
+maintenance path supplies durable, audited tombstones for exact identities whose
+recovery has been permanently abandoned. It does not enable this compiler
+contract or authorize physical history collection. Local pins retain their
+separate exact-key/token/digest release protocol.
