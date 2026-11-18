@@ -94,12 +94,14 @@ func Hash(value any) string {
 }
 
 type Plan struct {
-	ServiceID            string   `json:"service_id"`
-	AppID                string   `json:"app_id"`
-	Ownership            string   `json:"ownership"`
-	TargetImage          string   `json:"target_image"`
-	ConfigHash           string   `json:"config_hash"`
-	RequiresDowntime     bool     `json:"requires_downtime"`
-	LivePreflightPending bool     `json:"live_preflight_pending"`
-	Stages               []string `json:"stages"`
+	ServiceID            string            `json:"service_id"`
+	AppID                string            `json:"app_id"`
+	Ownership            string            `json:"ownership"`
+	TargetImage          string            `json:"target_image"`
+	ConfigHash           string            `json:"config_hash"`
+	RequiresDowntime     bool              `json:"requires_downtime"`
+	LivePreflightPending bool              `json:"live_preflight_pending"`
+	Stages               []string          `json:"stages"`
+	DrainBudgetSeconds   int               `json:"drain_budget_seconds,omitempty"`
+	Drain                *DrainObservation `json:"drain,omitempty"`
 }
