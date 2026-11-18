@@ -234,6 +234,66 @@ class TransportTests(unittest.TestCase):
                     self.assertIn({'op':'test','path':'/metadata/resourceVersion','value':'10'},writes[0])
                     self.assertIn({'op':'add','path':'/spec/selector','value':{'app':'candidate'}},writes[0])
 
+    def test_handoff_validates_each_backends_own_dns_port(self):
+        config = self.config()
+        current = transport.service(config, config["listeners"][0])
+        listener = dict(config["listeners"][0], selector={"app": "candidate"}, targetPort=5353)
+        node = {"metadata": {"name": "node", "uid": "node-uid"}}
+        old = {"pod": {"metadata": {"uid": "old"}}}
+        new = {"pod": {"metadata": {"uid": "new"}}, "snapshot": self.snapshot()}
+        old["snapshot"] = copy.deepcopy(new["snapshot"])
+        with patch.object(transport, "listener_node", return_value=node), \
+             patch.object(transport, "read_json", return_value={"items": []}), \
+             patch.object(transport, "handoff_backend", side_effect=[old, new]) as backends, \
+             patch.object(transport, "validate_handoff_endpoints") as endpoints, \
+             patch.object(transport, "validate_handoff_snapshots"):
+            transport.handoff_witness(config, listener, current)
+            self.assertEqual([c.args[-1] for c in backends.call_args_list], [53, 5353])
+            endpoints.assert_called_once_with(current, old["pod"], [], 53)
+        with self.assertRaisesRegex(ValueError, "different verified backend"):
+            transport.handoff_witness(config, dict(config["listeners"][0], targetPort=5353), current)
+
+    def test_staged_handoff_stops_on_public_failure_and_reverifies_on_resume(self):
+        one = dict(self.config()["listeners"][0], name="public-one", port=53)
+        two = dict(one, name="public-two", address="9.9.9.9")
+        diagnose = dict(one, port=15353, name="diagnostic-one")
+        diagnose_two = dict(two, port=15353, name="diagnostic-two")
+        config = dict(self.config(), apiVersion="transport.fugue.dev/v4", listeners=[one, two, diagnose, diagnose_two],
+                      handoffs=[{"address": x["address"], "previous_revision": "1"*40,
+                                 "candidate_revision": "2"*40} for x in (one, two)])
+        config = self.load(config)
+        witness = {"candidate_uid": "candidate"}
+        def op(listener):
+            return (["patch", listener["name"]], "{}", listener, {}, witness)
+        def save():
+            pass
+        def run(remaining, fail_port=None):
+            evidence, history = {"applied": []}, []
+            def verify(_, stage, binding, port):
+                history.append((stage["address"], port, binding))
+                if port == fail_port:
+                    raise ValueError("UDP failed")
+                return {"passed": True}
+            with patch.object(transport, "revalidate_handoff_witness"), patch.object(transport, "kubectl"):
+                if fail_port is None:
+                    transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                else:
+                    with self.assertRaisesRegex(ValueError, "UDP failed"):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
+            return evidence, history
+        operations = [op(one), op(two), op(diagnose), op(diagnose_two)]
+        evidence, history = run(operations, fail_port=15353)
+        self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertEqual(history, [(one["address"], 15353, witness)])
+        evidence, history = run(operations, fail_port=53)
+        self.assertEqual(evidence["applied"], ["diagnostic-one", "public-one"])
+        self.assertEqual(evidence["public_verifications"], [{"address": one["address"], "port": 53, "passed": False}])
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, witness)])
+        evidence, history = run([op(two), op(diagnose_two)])
+        self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
+        self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),
+                                   (two["address"], 15353, witness), (two["address"], 53, witness)])
+
     def test_assignment_refresh_requires_stable_complete_witness_and_same_identity(self):
         initial = {'node_uid':'node','old_uid':'old','candidate_uid':'candidate','assignment':{'fencing_token':1}}
         advanced = dict(initial, assignment={'fencing_token':2})

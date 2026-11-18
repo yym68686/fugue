@@ -33,9 +33,9 @@ type passiveASNCheckpoint struct {
 }
 
 type passiveASNDNSProof struct {
-	Process, PodUID string
-	Publication     dnsserver.DNSDecisionPublication
-	Verified        bool
+	Process, PodUID, ScopeKey string
+	Publication               dnsserver.DNSDecisionPublication
+	Verified                  bool
 }
 
 type passiveASNState struct {
@@ -219,7 +219,9 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 			next.Cohorts = retainPassiveASNCohorts(collectPassiveASNCohorts(samples, identities, resolver), next.Cohorts, resolver)
 			next.DNSProofs = window.dnsProofs
 			for node, proof := range next.DNSProofs {
-				if last.DNSProofs[node] == (passiveASNDNSProof{Process: proof.Process, PodUID: proof.PodUID, Publication: proof.Publication, Verified: true}) {
+				prior := proof
+				prior.Verified = true
+				if last.DNSProofs[node] == prior {
 					proof.Verified = true
 					next.DNSProofs[node] = proof
 				}
@@ -417,7 +419,7 @@ func (s *Server) observePassiveASNDNS(ctx context.Context, policies []platformco
 		}
 		window.dnsReads++
 		loaded := read.Snapshot.Publication.Loaded
-		proof := passiveASNDNSProof{Process: read.Snapshot.ProcessID, PodUID: read.Backend.PodUID}
+		proof := passiveASNDNSProof{Process: read.Snapshot.ProcessID, PodUID: read.Backend.PodUID, ScopeKey: read.scopeKey}
 		if loaded != nil && loaded.ArtifactID != "" && loaded.Digest != "" && loaded.ReleaseSetID != "" &&
 			loaded.ReleaseChannel == model.PlatformArtifactReleaseChannelFull && !read.Snapshot.Publication.ServingLKG {
 			proof.Publication = *loaded

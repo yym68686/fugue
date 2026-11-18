@@ -103,3 +103,29 @@ can bind multiple independent listener recoveries, each with its own exact old/n
 Pod identities and immutable candidate image. Duplicate listener recovery entries
 are rejected. An unhealthy predecessor is never silently treated as a valid
 rollback target.
+
+## Staged public handoff for ordinary DNS code releases
+
+Resolve the serving Pod from the live Service and EndpointSlice. Publish the
+replacement code to idle slots using their own declarative component intents;
+keep the selected workloads and their signed policy untouched during builds.
+Once the idle component releases are Ready, declare the desired selectors on
+the existing diagnostic and public sockets using transport version 4. Its
+ordered `handoffs` entries name each site's address and the exact
+`previous_revision` and `candidate_revision`. Both declared sockets at a
+site must select the same candidate using the same target port.
+
+CI checks live node, Pod, EndpointSlice, release assignment and readiness before
+allowing a selector CAS. The original target port is checked against the original
+Pod and EndpointSlice independently of the candidate target port. After
+switching the diagnostic socket, CI verifies signed bundle membership and real
+authoritative UDP/TCP answers there before touching port 53. It repeats both
+checks on port 53 before starting the next site. The separate public observation
+job still verifies both authorities from outside the cluster.
+
+A failure stops the sequence and preserves evidence of which sockets changed.
+On repeat, exact already-applied sockets are not rewritten, but must pass the
+same checks again. Keep the previous slots alive until rollout acceptance.
+Rollback is a new reviewed declaration pinning the current revision and the
+verified predecessor; a failed wire check never issues a blind reverse patch.
+Version 4 does not migrate signed authority or replace emergency recovery.

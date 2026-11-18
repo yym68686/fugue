@@ -11,6 +11,7 @@ import ipaddress
 import json
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,11 +32,14 @@ def load_config(path):
     fields = {"apiVersion", "kind", "generation", "namespace", "listeners"}
     if config.get("apiVersion") == "transport.fugue.dev/v2":
         fields.add("recovery")
-    if config.get("apiVersion") == "transport.fugue.dev/v3":
+    version = config.get("apiVersion")
+    if version == "transport.fugue.dev/v3":
         fields.update({"recoveries", "verifier_revision"})
+    if version == "transport.fugue.dev/v4":
+        fields.add("handoffs")
     if set(config) != fields:
         raise ValueError("unknown or missing transport configuration fields")
-    if config["apiVersion"] not in {"transport.fugue.dev/v1", "transport.fugue.dev/v2", "transport.fugue.dev/v3"} or config["kind"] != "DNSLocalTransport":
+    if version not in {f"transport.fugue.dev/v{n}" for n in (1, 2, 3, 4)} or config["kind"] != "DNSLocalTransport":
         raise ValueError("invalid transport schema")
     if type(config["generation"]) is not int or config["generation"] <= 0:
         raise ValueError("positive integer generation is required")
@@ -81,6 +85,23 @@ def load_config(path):
             if recovery['listener'] in seen:
                 raise ValueError('duplicate listener recovery')
             seen.add(recovery['listener'])
+    if "handoffs" in config:
+        stages = config["handoffs"]
+        if not isinstance(stages, list) or not 1 <= len(stages) <= 8:
+            raise ValueError("bounded DNS handoff sequence required")
+        seen = set()
+        for stage in stages:
+            if not isinstance(stage, dict) or set(stage) != {"address", "previous_revision", "candidate_revision"}:
+                raise ValueError("DNS handoff stage requires an address and exact revisions")
+            address = stage["address"]
+            public = [x for x in listeners if x["address"] == address and x["port"] == 53]
+            if not isinstance(address, str) or len(public) != 1 or address in seen:
+                raise ValueError("each DNS handoff stage must select a distinct public listener")
+            stage_diagnostic(config, address)
+            seen.add(address)
+            for key in ("previous_revision", "candidate_revision"):
+                if not isinstance(stage[key], str) or not re.fullmatch(r"[a-f0-9]{40}", stage[key]):
+                    raise ValueError("exact DNS handoff revision required")
     return config
 
 
@@ -255,33 +276,43 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
 
 
 def handoff_witness(config, listener, current):
-    if not current or current["spec"]["selector"] == listener["selector"]:
+    if not current:
         return None
-    namespace = config["namespace"]
-    nodes = read_json("get", "nodes", "-o", "json")["items"]
-    owners = [n for n in nodes if listener["address"] in [a["address"] for a in n.get("status", {}).get("addresses", [])]]
-    if len(owners) != 1 or not owners[0]["metadata"].get("uid") or owners[0]["metadata"].get("deletionTimestamp"):
-        raise ValueError("DNS handoff listener must belong to one live node")
-    node = owners[0]["metadata"]["name"]
-    last_error = None
     recoveries = config.get('recoveries', [config.get('recovery', {})])
     selected = [recovery for recovery in recoveries if recovery.get('listener') == listener['name']]
+    old_port = listener["targetPort"] if selected else current_target_port(current)
+    if current["spec"]["selector"] == listener["selector"]:
+        if old_port != listener["targetPort"]:
+            raise ValueError("DNS target port change requires a different verified backend")
+        return None
+    namespace = config["namespace"]
+    owner = listener_node(listener)
+    node = owner["metadata"]["name"]
+    last_error = None
+    stage = next((s for s in config.get("handoffs", []) if s["address"] == listener["address"]), None)
     attempts = RECOVERY_ATTEMPTS if selected else HANDOFF_ATTEMPTS
     for attempt in range(attempts):
         try:
             if selected:
                 from scripts.recover_dns_transport import witness
-                return witness(dict(config, recovery=selected[0]), listener, current, owners[0])
-            old = handoff_backend(namespace, current["spec"]["selector"], node, listener["targetPort"])
+                return witness(dict(config, recovery=selected[0]), listener, current, owner)
+            old = handoff_backend(namespace, current["spec"]["selector"], node, old_port)
             candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
             if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
                 raise ValueError("DNS handoff selectors do not isolate different instances")
+            revisions = {}
+            if stage:
+                for key, backend in (("previous_revision", old), ("candidate_revision", candidate)):
+                    revision = backend["pod"]["metadata"].get("annotations", {}).get("fugue.pro/oci-revision")
+                    if revision != stage[key]:
+                        raise ValueError("DNS handoff backend does not run the declared revision")
+                    revisions[key] = revision
             slices = read_json("get", "endpointslices", "-n", namespace, "-l",
                                "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
-            validate_handoff_endpoints(current, old["pod"], slices, listener["targetPort"])
+            validate_handoff_endpoints(current, old["pod"], slices, old_port)
             validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
-            return {"node_uid": owners[0]["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
-                    "candidate_uid": candidate["pod"]["metadata"]["uid"],
+            return {"node_uid": owner["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
+                    "candidate_uid": candidate["pod"]["metadata"]["uid"], **revisions,
                     "assignment": candidate["snapshot"]["assignment"], "parent_digest": candidate["snapshot"]["parent_digest"],
                     "plan_digest": candidate["snapshot"]["plan_digest"]}
         except (ValueError, ObservationUnavailable) as error:
@@ -299,6 +330,25 @@ def handoff_witness(config, listener, current):
                 raise
             time.sleep(HANDOFF_RETRY_SECONDS)
     raise last_error or ValueError("DNS handoff witness unavailable")
+
+
+def current_target_port(current):
+    ports = current["spec"].get("ports", [])
+    targets = {p.get("targetPort") for p in ports}
+    if len(ports) != 2 or {p.get("protocol") for p in ports} != {"UDP", "TCP"} or len(targets) != 1:
+        raise ValueError("current DNS transport requires a shared UDP/TCP target port")
+    old_port = targets.pop()
+    if type(old_port) is not int or not 1 <= old_port <= 65535:
+        raise ValueError("current DNS transport target port is invalid")
+    return old_port
+
+
+def listener_node(listener):
+    nodes = read_json("get", "nodes", "-o", "json")["items"]
+    owners = [n for n in nodes if listener["address"] in [a["address"] for a in n.get("status", {}).get("addresses", [])]]
+    if len(owners) != 1 or not owners[0]["metadata"].get("uid") or owners[0]["metadata"].get("deletionTimestamp"):
+        raise ValueError("DNS handoff listener must belong to one live node")
+    return owners[0]
 
 
 def validate_handoff_endpoints(service, pod, slices, target_port):
@@ -330,9 +380,103 @@ def validate_handoff_endpoints(service, pod, slices, target_port):
         raise ValueError("DNS handoff current endpoint is missing or duplicated")
 
 
-def reconcile(config, apply=False, evidence_path=None):
-    if apply and (config.get('recovery') or config.get('recoveries')) and not evidence_path:
-        raise ValueError('DNS recovery requires durable prewrite evidence')
+def stage_diagnostic(config, address):
+    local = [x for x in config["listeners"] if x["address"] == address]
+    public = next(x for x in local if x["port"] == 53)
+    diagnostic = [x for x in local if x["port"] != 53 and x["selector"] == public["selector"] and
+                  x["targetPort"] == public["targetPort"]]
+    if len(diagnostic) != 1:
+        raise ValueError("each DNS handoff stage requires a diagnostic listener to the same candidate")
+    return diagnostic[0]
+
+
+def observe_stage(config, stage, witness, port, *, policy_path, observer, verifier):
+    from scripts.capture_dns_observation_policy import capture, unchanged_backend
+
+    address = stage["address"]
+    listener = next(x for x in config["listeners"] if x["address"] == address and x["port"] == port)
+    namespace = config["namespace"]
+    owner = listener_node(listener)["metadata"]
+    raw = policy_path.read_bytes()
+    if len(raw) > 64 << 10:
+        raise ValueError("public DNS observation declaration exceeds bound")
+    declaration = json.loads(raw)
+    if address not in declaration["servers"]:
+        raise ValueError("DNS handoff address has no declared public observation")
+    declaration["servers"] = [address]
+    declaration.pop("recursive_servers", None)
+    declaration["authority_port"] = port
+    raw = json.dumps(declaration, sort_keys=True).encode()
+    for attempt in range(HANDOFF_ATTEMPTS):
+        try:
+            service_before = read_json("get", "service", listener["name"], "-n", namespace, "-o", "json")
+            desired = service(config, listener)
+            validate_existing(service_before, desired)
+            if service_before["metadata"]["annotations"][DIGEST] != desired["metadata"]["annotations"][DIGEST]:
+                raise ValueError("DNS handoff Service has not selected the declared transport")
+            candidate = handoff_backend(namespace, listener["selector"], owner["name"], listener["targetPort"])
+            pod = candidate["pod"]
+            uid = pod["metadata"]["uid"]
+            if pod["metadata"].get("annotations", {}).get("fugue.pro/oci-revision") != stage["candidate_revision"] or (
+                    witness and (uid != witness["candidate_uid"] or owner["uid"] != witness["node_uid"])):
+                raise ValueError("DNS handoff candidate revised or replaced before public verification")
+            expectations = capture(declaration, raw, config, verifier)
+            if len(expectations["servers"]) != 1 or any(expectations["servers"][0][k] != v for k, v in (
+                    ("server", address), ("pod_uid", uid), ("service_uid", service_before["metadata"]["uid"]))):
+                raise ValueError("DNS observation backend does not match the handoff")
+            with tempfile.TemporaryDirectory(prefix="fugue-dns-handoff-") as directory:
+                intent, expected = Path(directory) / "public.json", Path(directory) / "expectations.json"
+                intent.write_bytes(raw)
+                expected.write_text(json.dumps(expectations))
+                result = subprocess.run([observer, str(intent), str(expected)], capture_output=True, text=True, timeout=90)
+            accepted = json.loads(result.stdout)
+            if result.returncode != 0 or accepted.get("passed") is not True:
+                raise ValueError("post-handoff public UDP/TCP verification failed")
+            unchanged_backend(namespace, service_before, pod)
+            return accepted
+        except (ValueError, ObservationUnavailable, subprocess.TimeoutExpired):
+            if attempt + 1 == HANDOFF_ATTEMPTS:
+                raise
+            time.sleep(HANDOFF_RETRY_SECONDS)
+
+
+def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage):
+    def apply_one(operation):
+        command, body, listener, current, witness = operation
+        if witness is not None:
+            revalidate_handoff_witness(config, listener, current, witness)
+        kubectl(*command, body=body)
+        evidence['applied'].append(listener['name'])
+        save_evidence()
+        print("reconciled Service/" + listener["name"], flush=True)
+
+    if "handoffs" not in config:
+        for operation in planned:
+            apply_one(operation)
+        return
+    evidence["diagnostic_verifications"], evidence["public_verifications"] = [], []
+    for stage in config["handoffs"]:
+        diagnostic = stage_diagnostic(config, stage["address"])
+        for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
+            operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
+            if operation:
+                apply_one(operation)
+            # Re-observe even if the socket was switched by a previous run.
+            try:
+                observed = verify_stage(config, stage, operation[4] if operation else None, port)
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired):
+                evidence[report].append({"address": stage["address"], "port": port, "passed": False})
+                save_evidence()
+                raise
+            evidence[report].append({"address": stage["address"], "port": port, "result": observed})
+            save_evidence()
+
+
+def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
+    if apply and (config.get('recovery') or config.get('recoveries') or config.get('handoffs')) and not evidence_path:
+        raise ValueError('DNS handoff or recovery requires durable prewrite evidence')
+    if apply and 'handoffs' in config and not verify_stage:
+        raise ValueError("DNS staged handoff requires a public verifier")
     planned = []
     inventory = json.loads(kubectl("get", "services", "--all-namespaces", "-o", "json"))["items"]
     for listener in config["listeners"]:
@@ -348,6 +492,12 @@ def reconcile(config, apply=False, evidence_path=None):
         validate_existing(current, desired)
         if current and current["metadata"].get("annotations", {}).get(DIGEST) == desired["metadata"]["annotations"][DIGEST]:
             continue
+        if "handoffs" in config and (not current or not any(
+                s["address"] == listener["address"] and listener["port"] in (53, stage_diagnostic(config, s["address"])["port"])
+                for s in config["handoffs"]) or
+                current["spec"]["externalIPs"] != [listener["address"]] or
+                {p.get("port") for p in current["spec"]["ports"]} != {listener["port"]}):
+            raise ValueError("staged DNS handoff can only update declared sites on their existing sockets")
         selector = ",".join(k + "=" + v for k, v in sorted(listener["selector"].items()))
         pods = json.loads(kubectl("get", "pods", "-n", config["namespace"], "-l", selector, "-o", "json"))["items"]
         ready = [pod for pod in pods if not pod["metadata"].get("deletionTimestamp") and any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod.get("status", {}).get("conditions", []))]
@@ -363,6 +513,8 @@ def reconcile(config, apply=False, evidence_path=None):
         if listener["address"] not in addresses:
             raise ValueError("public listener address has no ready node-local backend")
         witness = handoff_witness(config, listener, current)
+        if "handoffs" in config and witness is None:
+            raise ValueError("staged DNS handoff requires a verified change of backend")
         if current:
             command = ["patch", "service", listener["name"], "-n", config["namespace"], "--type=json", "--field-manager=" + MANAGER, "--patch-file=/dev/stdin"]
             body = json.dumps(update_patch(current, desired))
@@ -383,13 +535,7 @@ def reconcile(config, apply=False, evidence_path=None):
             evidence_path.write_text(json.dumps(evidence, sort_keys=True) + '\n')
     save_evidence()
     if apply:
-        for command, body, listener, current, witness in planned:
-            if witness is not None:
-                revalidate_handoff_witness(config, listener, current, witness)
-            kubectl(*command, body=body)
-            evidence['applied'].append(listener['name'])
-            save_evidence()
-            print("reconciled Service/" + listener["name"], flush=True)
+        apply_transport_steps(config, planned, evidence, save_evidence, verify_stage)
     return len(planned)
 
 
@@ -415,5 +561,16 @@ if __name__ == "__main__":
     parser.add_argument("path")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--public-observation", type=Path)
+    parser.add_argument("--observer", type=Path)
+    parser.add_argument("--verifier", type=Path)
     args = parser.parse_args()
-    print("listeners=" + str(reconcile(load_config(args.path), args.apply, args.evidence)))
+    config = load_config(args.path)
+    verify_stage = None
+    if args.apply and "handoffs" in config:
+        if not args.public_observation or not args.observer or not args.verifier:
+            parser.error("staged handoff requires public observation declaration, observer and verifier")
+        from functools import partial
+        verify_stage = partial(observe_stage, policy_path=args.public_observation, observer=str(args.observer.resolve()),
+                               verifier=str(args.verifier.resolve()))
+    print("listeners=" + str(reconcile(config, args.apply, args.evidence, verify_stage)))

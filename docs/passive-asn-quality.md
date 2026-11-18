@@ -55,7 +55,11 @@ set, release and fence. Older Worker readers do not need new policy fields.
 The observation starts in shadow mode. It may change answers only after all
 configured independent authorities have verified classified ECS on their
 selected process and current full release. A restarted/replaced authority
-has to reestablish that proof.
+has to reestablish that proof. Both Kubernetes-bound global DNS and Cell DNS
+fetch the same private format, but a global process cannot activate using a
+Cell process's proof or vice versa. Each consumer uses its own expected-set
+cohort; an idle slot can verify shadow without adopting the on-duty slot's
+active proof.
 
 DNS accepts only a complete matching-family ECS prefix within a known
 `/24` or `/48` from a socket peer in the vendor-published
@@ -89,4 +93,7 @@ authority's live decision endpoint (`backend.pod_name` and owner), not
 from component names. A ready parallel or validation workload can load a
 signed observation without owning the public listener. After rollout,
 query both public addresses and confirm that the resulting receipts came
-from the upgraded serving workloads.
+from the upgraded serving workloads. A successful shadow load establishes
+observation, not active steering. Inspect replayed live decisions for mode
+and comparison evidence; DNS transport probes intentionally send no forged
+ECS and cannot establish that evidence.

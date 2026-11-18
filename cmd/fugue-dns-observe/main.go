@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ type configuration struct {
 	Schema           string                       `json:"schema"`
 	Servers          []string                     `json:"servers"`
 	RecursiveServers []string                     `json:"recursive_servers,omitempty"`
+	AuthorityPort    int                          `json:"authority_port,omitempty"`
 	Queries          []queryIntent                `json:"queries"`
 	TimeoutSeconds   int                          `json:"timeout_seconds"`
 }
@@ -57,6 +59,10 @@ type observation struct {
 func validate(config configuration) error {
 	if !slices.Contains([]string{"fugue.dns-public-observation/v1", "fugue.dns-public-observation/v2"}, config.Schema) || len(config.Servers) < 1 || len(config.Servers)+len(config.RecursiveServers) > 8 || len(config.Queries) < 1 || len(config.Queries) > 32 || config.TimeoutSeconds < 1 || config.TimeoutSeconds > 5 {
 		return errors.New("bounded DNS observation configuration required")
+	}
+	if config.AuthorityPort < 0 || config.AuthorityPort > 65535 || config.AuthorityPort != 0 && config.AuthorityPort != 53 &&
+		(config.Schema != "fugue.dns-public-observation/v2" || len(config.RecursiveServers) != 0) {
+		return errors.New("an alternate observation port requires an authoritative-only v2 declaration")
 	}
 	for _, server := range append(slices.Clone(config.Servers), config.RecursiveServers...) {
 		if net.ParseIP(server) == nil {
@@ -121,6 +127,10 @@ func observe(ctx context.Context, config configuration) ([]observation, bool) {
 	passed := true
 	for index, server := range append(slices.Clone(config.Servers), config.RecursiveServers...) {
 		recursive := index >= len(config.Servers)
+		port := "53"
+		if !recursive && config.AuthorityPort != 0 {
+			port = strconv.Itoa(config.AuthorityPort)
+		}
 		for _, transport := range []string{"udp", "tcp"} {
 			for _, intent := range config.Queries {
 				request := new(dns.Msg)
@@ -141,7 +151,7 @@ func observe(ctx context.Context, config configuration) ([]observation, bool) {
 					continue
 				}
 				result.ExpectationSource, result.PolicyDigests = intent.AnswerSource, digests
-				answer, elapsed, err := client.ExchangeContext(ctx, request, net.JoinHostPort(server, "53"))
+				answer, elapsed, err := client.ExchangeContext(ctx, request, net.JoinHostPort(server, port))
 				result.FinishedAt, result.DurationMS = time.Now().UTC(), elapsed.Milliseconds()
 				if err != nil {
 					result.Reason = "transport_unavailable"

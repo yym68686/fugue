@@ -21,6 +21,7 @@ type platformDNSDecisionResponse struct {
 	Backend     dnsRuntimeBackend             `json:"backend"`
 	Snapshot    dnsserver.DNSDecisionSnapshot `json:"snapshot"`
 	EvaluatedAt time.Time                     `json:"evaluated_at"`
+	scopeKey    string
 }
 
 func (s *Server) handleGetPlatformDNSDecisions(writer http.ResponseWriter, request *http.Request) {
@@ -86,6 +87,7 @@ func (s *Server) readPlatformDNSDecisions(ctx context.Context, node, hostname, d
 		return platformDNSDecisionResponse{}, errors.New("selected DNS decision backend changed or unavailable")
 	}
 	response.EvaluatedAt = time.Now().UTC()
+	response.scopeKey = claims.ScopeKey
 	return response, nil
 }
 

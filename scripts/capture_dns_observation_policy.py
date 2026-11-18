@@ -151,11 +151,14 @@ def capture(declaration, declaration_bytes, config, verifier):
     servers = declaration['servers']
     if not 1 <= len(servers) <= 8 or len(set(servers)) != len(servers):
         raise ValueError('bounded unique authoritative servers required')
+    port = declaration.get('authority_port') or 53
+    if type(port) is not int or not 1 <= port <= 65535 or port != 53 and declaration.get('recursive_servers'):
+        raise ValueError('invalid authoritative observation port')
     nodes = transport.read_json('get', 'nodes', '-o', 'json')['items']
     result = {'schema': 'fugue.dns-observation-expectations/v1',
               'declaration_digest': 'sha256:' + hashlib.sha256(declaration_bytes).hexdigest(), 'servers': []}
     for address in servers:
-        listeners = [x for x in config['listeners'] if x['address'] == address and x['port'] == 53]
+        listeners = [x for x in config['listeners'] if x['address'] == address and x['port'] == port]
         owners = [n for n in nodes if address in [a['address'] for a in n.get('status', {}).get('addresses', [])]]
         if len(listeners) != 1 or len(owners) != 1 or owners[0]['metadata'].get('deletionTimestamp'):
             raise ValueError('public DNS observation listener or node is ambiguous')

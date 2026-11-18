@@ -15,15 +15,15 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 )
 
 func (s *Server) handleGetPlatformConsumerPassiveASN(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	claims, ok := auth.PlatformComponentIdentityFromContext(r.Context())
-	if !ok || claims.Component != model.PlatformConsumerComponentDNSServer || claims.AuthorityID == "" ||
-		claims.ScopeKey != platformconfig.AuthorityCellScope(claims.AuthorityID) {
-		httpx.WriteError(w, http.StatusForbidden, "scoped DNS consumer identity required")
+	if !ok || passiveASNDNSPodUID(claims) == "" {
+		httpx.WriteError(w, http.StatusForbidden, "Kubernetes-bound DNS consumer identity required")
 		return
 	}
 	ids := r.URL.Query()["expected_consumer_set_id"]
@@ -34,7 +34,8 @@ func (s *Server) handleGetPlatformConsumerPassiveASN(w http.ResponseWriter, r *h
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	loadArtifact := s.store.NewPlatformArtifactReadSession()
-	items, err := s.resolvePlatformConsumerAssignmentsWithReaderContext(ctx, claims, newConsumerArtifactReader(loadArtifact))
+	read := newConsumerArtifactReader(loadArtifact)
+	items, err := s.resolvePlatformConsumerAssignmentsWithReaderContext(ctx, claims, read)
 	if err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "passive ASN assignment unavailable")
 		return
@@ -44,7 +45,21 @@ func (s *Server) handleGetPlatformConsumerPassiveASN(w http.ResponseWriter, r *h
 		item := &items[j]
 		if item.Artifact.ID == r.PathValue("artifact_id") && item.Assignment.ExpectedConsumerSetID == ids[0] &&
 			item.Artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelFull {
-			if found, err := s.consumerAssignmentIsSelected(*item, claims.AuthorityID, newConsumerArtifactReader(loadArtifact)); err == nil && found {
+			set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
+			if err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "DNS expected consumer set unavailable")
+				return
+			}
+			cohort, member := passiveASNExpectedCohort(set, claims)
+			if !member {
+				break
+			}
+			found, err := s.consumerAssignmentIsSelected(*item, cohort, read)
+			if err != nil {
+				httpx.WriteError(w, http.StatusServiceUnavailable, "DNS serving selection unavailable")
+				return
+			}
+			if found {
 				selected = item
 			}
 			break
@@ -55,12 +70,12 @@ func (s *Server) handleGetPlatformConsumerPassiveASN(w http.ResponseWriter, r *h
 		return
 	}
 	now := time.Now().UTC()
-	publication, ok := s.makePassiveASNPublication(ctx, selected.Assignment, claims.NodeID, now)
+	publication, ok := s.makePassiveASNPublication(ctx, selected.Assignment, claims, now)
 	if !ok {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "fresh passive ASN mapping unavailable")
 		return
 	}
-	if err := s.checkConsumerInputReadsWithLoader(ctx, claims, []consumerArtifactLookup{*selected}, newConsumerArtifactReader(loadArtifact), true, loadArtifact); err != nil {
+	if err := s.checkConsumerInputReadsWithLoader(ctx, claims, []consumerArtifactLookup{*selected}, read, true, loadArtifact); err != nil {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS observation assignment changed")
 		return
 	}
@@ -79,6 +94,35 @@ func (s *Server) handleGetPlatformConsumerPassiveASN(w http.ResponseWriter, r *h
 	_, _ = w.Write(raw)
 }
 
+func passiveASNDNSPodUID(claims platformcontrol.PlatformComponentIdentityClaims) string {
+	if claims.Component != model.PlatformConsumerComponentDNSServer || claims.NodeID == "" ||
+		!slices.Contains(claims.ArtifactKinds, model.PlatformArtifactKindDNSAnswerBundle) {
+		return ""
+	}
+	scope := "global"
+	if claims.AuthorityID != "" {
+		scope = platformconfig.AuthorityCellScope(claims.AuthorityID)
+	}
+	id := strings.Split(claims.CredentialID, ":")
+	if claims.ScopeKey != scope || len(id) != 4 || id[0] != "kubernetes" || id[1] == "" || id[2] == "" {
+		return ""
+	}
+	return id[3]
+}
+
+func passiveASNExpectedCohort(set model.PlatformExpectedConsumerSet, claims platformcontrol.PlatformComponentIdentityClaims) (string, bool) {
+	if set.ScopeKey != claims.ScopeKey || set.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+		return "", false
+	}
+	for _, member := range set.Consumers {
+		if member.ScopeKey == claims.ScopeKey && member.ArtifactKind == set.ArtifactKind &&
+			platformcontrol.ExpectedConsumerIdentityMatches(member, claims) {
+			return member.Cohort, true
+		}
+	}
+	return "", false
+}
+
 func passiveASNAuthorized(artifact model.PlatformArtifact) bool {
 	raw, err := json.Marshal(artifact.Content["policy"])
 	var p platformconfig.PolicySnapshot
@@ -88,9 +132,9 @@ func passiveASNAuthorized(artifact model.PlatformArtifact) bool {
 	return platformconfig.ValidateDNSQueryPolicy(p.DNSQueryPolicy) == nil && p.DNSQueryPolicy.DynamicQuality.Mode == "all_dynamic"
 }
 
-func (s *Server) makePassiveASNPublication(ctx context.Context, a model.PlatformConsumerAssignment, node string, now time.Time) (passiveasn.Publication, bool) {
+func (s *Server) makePassiveASNPublication(ctx context.Context, a model.PlatformConsumerAssignment, claims platformcontrol.PlatformComponentIdentityClaims, now time.Time) (passiveasn.Publication, bool) {
 	p := passiveasn.Publication{Mode: "shadow", DNSArtifactID: a.ArtifactID, DNSDigest: a.ContentHash, ReleaseSetID: a.ReleaseSetID,
-		ConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: node}
+		ConsumerSetID: a.ExpectedConsumerSetID, FencingToken: a.FencingToken, NodeID: claims.NodeID}
 	resolvers := s.passiveASN.resolvers.Load()
 	if resolvers == nil || now.Sub(resolvers.PublishedAt) > 8*24*time.Hour {
 		return p, false
@@ -108,7 +152,8 @@ func (s *Server) makePassiveASNPublication(ctx context.Context, a model.Platform
 	if err != nil || len(policies) == 0 {
 		return p, false
 	}
-	if passiveASNServingReady(cp.DNSProofs, policies, a, node) {
+	if passiveASNServingReady(cp.DNSProofs, policies, a, claims) &&
+		s.inspectDNSBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil) == http.StatusOK {
 		p.Mode = "active"
 	}
 	lookup, _, err := buildPassiveASNResolver(policies)
@@ -177,7 +222,7 @@ func minPassiveASNTime(a, b time.Time) time.Time {
 	return a
 }
 
-func passiveASNServingReady(proofs map[string]passiveASNDNSProof, policies []platformconfig.DNSClientPolicy, a model.PlatformConsumerAssignment, node string) bool {
+func passiveASNServingReady(proofs map[string]passiveASNDNSProof, policies []platformconfig.DNSClientPolicy, a model.PlatformConsumerAssignment, claims platformcontrol.PlatformComponentIdentityClaims) bool {
 	// Do not send subnet-dependent answers unless the configured independent
 	// authorities have each replay-verified a classified query on their current
 	// selected pod and release.
@@ -187,12 +232,14 @@ func passiveASNServingReady(proofs map[string]passiveASNDNSProof, policies []pla
 	seen := make(map[string]bool, len(policies))
 	for _, policy := range policies {
 		proof := proofs[policy.NodeID]
-		if !proof.Verified || seen[policy.NodeID] {
+		if !proof.Verified || proof.ScopeKey == "" || (proof.ScopeKey == "global") != (claims.ScopeKey == "global") || seen[policy.NodeID] {
 			return false
 		}
 		seen[policy.NodeID] = true
 	}
-	current := proofs[node].Publication
-	return seen[node] && current.ArtifactID == a.ArtifactID && current.Digest == a.ContentHash &&
+	proof := proofs[claims.NodeID]
+	current := proof.Publication
+	return seen[claims.NodeID] && proof.ScopeKey == claims.ScopeKey && proof.PodUID == passiveASNDNSPodUID(claims) &&
+		current.ArtifactID == a.ArtifactID && current.Digest == a.ContentHash &&
 		current.ReleaseSetID == a.ReleaseSetID && current.FencingToken == a.FencingToken
 }

@@ -12,6 +12,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 )
 
 func TestPassiveASNMappingNeedsAgreementAcrossDNSAuthorities(t *testing.T) {
@@ -37,22 +38,71 @@ func TestPassiveASNServingRequiresEveryCurrentAuthority(t *testing.T) {
 	a := model.PlatformConsumerAssignment{ArtifactID: "dns-1", ContentHash: "digest-1", ReleaseSetID: "release-1", FencingToken: 3}
 	release := dnsserver.DNSDecisionPublication{ArtifactID: a.ArtifactID, Digest: a.ContentHash, ReleaseSetID: a.ReleaseSetID, FencingToken: a.FencingToken}
 	policies := []platformconfig.DNSClientPolicy{{NodeID: "node-a"}, {NodeID: "node-b"}}
-	proof := passiveASNDNSProof{Process: "process", PodUID: "pod", Publication: release, Verified: true}
+	claims := platformcontrol.PlatformComponentIdentityClaims{NodeID: "node-a", Component: model.PlatformConsumerComponentDNSServer, ScopeKey: "global",
+		CredentialID: "kubernetes:system:dns-a:pod", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
+	proof := passiveASNDNSProof{Process: "process", PodUID: "pod", ScopeKey: claims.ScopeKey, Publication: release, Verified: true}
 	proofs := map[string]passiveASNDNSProof{"node-a": proof}
-	if passiveASNServingReady(proofs, policies, a, "node-a") {
+	if passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("one authority activated ranking")
 	}
-	proofs["node-b"] = passiveASNDNSProof{Process: "restarted", PodUID: "new-pod", Publication: release}
-	if passiveASNServingReady(proofs, policies, a, "node-a") {
+	proofs["node-b"] = passiveASNDNSProof{Process: "restarted", PodUID: "new-pod", ScopeKey: claims.ScopeKey, Publication: release}
+	if passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("unverified peer activated ranking")
 	}
+	foreign := proof
+	foreign.ScopeKey = "authority-cell:cell-b"
+	proofs["node-b"] = foreign
+	if passiveASNServingReady(proofs, policies, a, claims) {
+		t.Fatal("mixed global and cell backends activated ranking")
+	}
 	proofs["node-b"] = proof
-	if !passiveASNServingReady(proofs, policies, a, "node-a") {
+	if !passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("verified authorities failed admission")
 	}
+	replace := claims
+	replace.CredentialID = "kubernetes:system:dns-a:new-pod"
+	if passiveASNServingReady(proofs, policies, a, replace) {
+		t.Fatal("standby inherited positive evidence from the previous public process")
+	}
 	a.FencingToken++
-	if passiveASNServingReady(proofs, policies, a, "node-a") {
+	if passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("previous serving release authorized ranking")
+	}
+}
+
+func TestPassiveASNRequiresExactKubernetesDNSMemberAndUsesItsCohort(t *testing.T) {
+	for _, authority := range []string{"", "cell-a"} {
+		scope, cohort := "global", "region-a"
+		if authority != "" {
+			scope, cohort = platformconfig.AuthorityCellScope(authority), authority
+		}
+		const kind = model.PlatformArtifactKindDNSAnswerBundle
+		c := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer,
+			NodeID: "dns-a", ScopeKey: scope, AuthorityID: authority, CredentialID: "kubernetes:system:dns:pod", ArtifactKinds: []string{kind}}
+		member := model.PlatformExpectedConsumer{ConsumerID: c.ConsumerID(), Component: c.Component, NodeID: c.NodeID,
+			ScopeKey: scope, AuthorityID: authority, ArtifactKind: kind, Cohort: cohort}
+		set := model.PlatformExpectedConsumerSet{ArtifactKind: kind, ScopeKey: scope, Consumers: []model.PlatformExpectedConsumer{member}}
+		if got, ok := passiveASNExpectedCohort(set, c); !ok || got != cohort || passiveASNDNSPodUID(c) != "pod" {
+			t.Fatalf("exact assigned DNS identity rejected: %s, %v", got, ok)
+		}
+		for _, mutate := range []func(*platformcontrol.PlatformComponentIdentityClaims){
+			func(x *platformcontrol.PlatformComponentIdentityClaims) {
+				x.Component = model.PlatformConsumerComponentEdgeWorker
+			},
+			func(x *platformcontrol.PlatformComponentIdentityClaims) { x.CredentialID = "static:dns" },
+			func(x *platformcontrol.PlatformComponentIdentityClaims) { x.ScopeKey = "authority-cell:cell-b" },
+			func(x *platformcontrol.PlatformComponentIdentityClaims) { x.ArtifactKinds = nil },
+		} {
+			foreign := c
+			mutate(&foreign)
+			if passiveASNDNSPodUID(foreign) != "" {
+				t.Fatal("unrelated credential admitted")
+			}
+		}
+		c.NodeID = "dns-foreign"
+		if _, ok := passiveASNExpectedCohort(set, c); ok {
+			t.Fatal("a different node inherited the DNS assignment")
+		}
 	}
 }
 

@@ -1,10 +1,55 @@
 package main
 
 import (
+	"context"
+	"net"
+	"sync"
 	"testing"
 
 	"github.com/miekg/dns"
 )
+
+func TestDNSObservationProbesBothTransportsOnDeclaredDiagnosticSocket(t *testing.T) {
+	tcp, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := tcp.Addr().(*net.TCPAddr)
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: address.IP, Port: address.Port})
+	if err != nil {
+		_ = tcp.Close()
+		t.Fatal(err)
+	}
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, query *dns.Msg) {
+		reply := new(dns.Msg).SetReply(query)
+		reply.Authoritative = true
+		reply.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: query.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.IPv4(192, 0, 2, 2)}}
+		_ = w.WriteMsg(reply)
+	})
+	var servers sync.WaitGroup
+	for _, server := range []*dns.Server{{Listener: tcp, Handler: handler}, {PacketConn: udp, Handler: handler}} {
+		started := make(chan struct{})
+		server.NotifyStartedFunc = func() { close(started) }
+		servers.Add(1)
+		go func() { defer servers.Done(); _ = server.ActivateAndServe() }()
+		<-started
+		t.Cleanup(func() { _ = server.Shutdown() })
+	}
+	defer func() { _ = tcp.Close(); _ = udp.Close(); servers.Wait() }()
+	cfg := configuration{Schema: "fugue.dns-public-observation/v2", Servers: []string{"127.0.0.1"},
+		AuthorityPort: address.Port, TimeoutSeconds: 1, Queries: []queryIntent{{Hostname: "app.example.test", Type: "A", Allowed: []string{"192.0.2.2"}, Minimum: 1}}}
+	if err := validate(cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, passed := observe(context.Background(), cfg)
+	if !passed || len(got) != 2 || got[0].Transport != "udp" || got[1].Transport != "tcp" {
+		t.Fatalf("did not verify both transports on the diagnostic port: %+v", got)
+	}
+	cfg.RecursiveServers = []string{"127.0.0.2"}
+	if validate(cfg) == nil {
+		t.Fatal("diagnostic port accepted an unrelated recursive observation")
+	}
+}
 
 func TestDNSObservationNeverAcceptsUnexpectedIdentityOrAddress(t *testing.T) {
 	query := queryIntent{Hostname: "app.example.test", Type: "A", Allowed: []string{"192.0.2.2"}, Minimum: 1}

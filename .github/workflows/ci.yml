@@ -3038,7 +3038,17 @@ jobs:
           set -euo pipefail
           config=deploy/environments/production/dns-transport/transport.json
           export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
-          python3 -m scripts.reconcile_dns_transport "$config" --apply --evidence "$RUNNER_TEMP/dns-transport-result.json"
+          args=()
+          if jq -e 'has("handoffs")' "$config" >/dev/null; then
+            go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+            go build -trimpath -o "$RUNNER_TEMP/fugue-dns-observe" ./cmd/fugue-dns-observe
+            args+=(--public-observation deploy/environments/production/dns-observation/public.json
+                   --observer "$RUNNER_TEMP/fugue-dns-observe" --verifier "$FUGUE_DNS_OBSERVATION_VERIFIER")
+          fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$config" deploy/environments/production/dns-observation/public.json scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/capture_dns_observation_policy.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py cmd/fugue-dns-observe cmd/fugue-dns-observation-verify
+          python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport
+          python3 -m scripts.reconcile_dns_transport "$config" --apply --evidence "$RUNNER_TEMP/dns-transport-result.json" "${args[@]}"
       - name: Retain DNS transport execution result
         if: always() && steps.dns_transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
