@@ -330,6 +330,10 @@ func (s *Store) pgGetPlatformArtifact(ctx context.Context, idOrGeneration string
 }
 
 func pgGetPlatformArtifactForUpdate(ctx context.Context, db platformStateDB, idOrGeneration string, forUpdate bool) (model.PlatformArtifact, error) {
+	return pgGetPlatformArtifactWithScanner(ctx, db, idOrGeneration, forUpdate, scanPlatformArtifact)
+}
+
+func pgGetPlatformArtifactWithScanner(ctx context.Context, db platformStateDB, idOrGeneration string, forUpdate bool, scan func(sqlScanner) (model.PlatformArtifact, error)) (model.PlatformArtifact, error) {
 	query := `SELECT id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
 	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
 	created_by_type, created_by_id, provenance_json, created_at, updated_at
@@ -340,7 +344,7 @@ LIMIT 1`
 	if forUpdate {
 		query += " FOR UPDATE"
 	}
-	return scanPlatformArtifact(db.QueryRowContext(ctx, query, idOrGeneration))
+	return scan(db.QueryRowContext(ctx, query, idOrGeneration))
 }
 
 func (s *Store) pgValidatePlatformArtifact(id string, results []model.PlatformArtifactValidationResult) (model.PlatformArtifact, error) {

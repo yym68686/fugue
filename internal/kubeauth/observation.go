@@ -1,6 +1,7 @@
 package kubeauth
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -9,8 +10,29 @@ import (
 
 var HTTPObservations runtimeobservation.HTTPRecorder
 
+type ObservationSite uint8
+
+const (
+	ObservePublicFront ObservationSite = iota + 1
+	ObserveDNSBackend
+)
+
+type observationSiteKey struct{}
+
+// WithObservationSite identifies a fixed call site without adding request
+// headers or recording any names, selectors, URLs or credentials.
+func WithObservationSite(ctx context.Context, site ObservationSite) context.Context {
+	return context.WithValue(ctx, observationSiteKey{}, site)
+}
+
 func classifyRequest(req *http.Request) runtimeobservation.HTTPRequestClass {
 	c := runtimeobservation.HTTPRequestClass{Client: "kubernetes", Method: req.Method, Resource: "other", CacheMode: "unspecified"}
+	switch req.Context().Value(observationSiteKey{}) {
+	case ObservePublicFront:
+		c.CallSite = "public_front"
+	case ObserveDNSBackend:
+		c.CallSite = "dns_backend"
+	}
 	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
 	if len(parts) >= 3 && parts[0] == "api" {
 		parts = parts[2:]

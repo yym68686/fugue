@@ -37,9 +37,20 @@ func publicNetworkFixture() (model.EdgeNode, corev1.Service, corev1.Pod, discove
 }
 
 func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T) {
-	for _, scenario := range []string{"valid", "service_changed", "pod_changed", "endpoints_changed", "foreign_peer", "duplicate_public_owner", "unready"} {
+	for _, scenario := range []string{"valid", "empty_selector_value", "service_changed", "pod_changed", "endpoints_changed", "foreign_peer", "duplicate_public_owner", "duplicate_matching_pod", "incomplete_pods", "unready"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, service, pod, slices := publicNetworkFixture()
+			if scenario == "empty_selector_value" {
+				// The legacy local matcher treats an absent Pod label as
+				// matching an empty value. The server-side filter must not
+				// discard that potentially matching Pod.
+				service.Spec.Selector["optional-label"] = ""
+				raw, _ := json.Marshal(map[string]any{"type": service.Spec.Type, "selector": service.Spec.Selector, "ports": service.Spec.Ports,
+					"externalIPs": service.Spec.ExternalIPs, "externalTrafficPolicy": service.Spec.ExternalTrafficPolicy, "publishNotReadyAddresses": false})
+				var canonical map[string]any
+				_ = json.Unmarshal(raw, &canonical)
+				service.Annotations["transport.fugue.dev/digest"], _ = platformconfig.Digest(canonical)
+			}
 			query := frontnetwork.Request{Schema: frontnetwork.Schema, Nonce: strings.Repeat("b", 32), EdgeID: node.ID, GroupID: node.EdgeGroupID, Slot: "b", RemoteAddr: "198.51.100.1:40000"}
 			serviceReads, sliceReads := 0, 0
 			kube := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -60,6 +71,10 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 					}
 					response = corev1.ServiceList{Items: items}
 				case "/api/v1/namespaces/system/pods":
+					if request.URL.Query().Get("fieldSelector") != "spec.nodeName="+node.ID ||
+						request.URL.Query().Get("labelSelector") != "app=public-front" {
+						t.Error("Pod LIST did not use the exact service selector and node")
+					}
 					value := *pod.DeepCopy()
 					if scenario == "unready" {
 						value.Status.Conditions = nil
@@ -68,7 +83,16 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 					legacy.Name = "old-front"
 					legacy.UID = "other"
 					legacy.Labels["app"] = "old-front"
-					response = corev1.PodList{Items: []corev1.Pod{legacy, value}}
+					list := corev1.PodList{Items: []corev1.Pod{legacy, value}}
+					if scenario == "duplicate_matching_pod" {
+						duplicate := *value.DeepCopy()
+						duplicate.Name, duplicate.UID = "second-matching-front", "pod-b"
+						list.Items = append(list.Items, duplicate)
+					}
+					if scenario == "incomplete_pods" {
+						list.Continue = "not-all-candidates"
+					}
+					response = list
 				case "/api/v1/namespaces/system/pods/front-a":
 					value := *pod.DeepCopy()
 					if scenario == "pod_changed" {
@@ -105,7 +129,7 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 				return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader"}, nil
 			}}
 			response, err := server.readPublicFrontNetwork(context.Background(), node, query)
-			if (err == nil) != (scenario == "valid") {
+			if (err == nil) != (scenario == "valid" || scenario == "empty_selector_value") {
 				t.Fatal(scenario, response, err)
 			}
 			if err == nil && (response.Sample.Backend == nil || response.Sample.Backend.PodUID != "pod-a" || response.Sample.RTTMS != nil) {
@@ -158,6 +182,9 @@ func TestPassiveFrontBindsOnlyToCurrentServingRuntime(t *testing.T) {
 					}
 					v = corev1.ServiceList{Items: []corev1.Service{selected}}
 				case "/api/v1/namespaces/system/pods":
+					if r.URL.Query().Get("fieldSelector") != "spec.nodeName="+node.ID || r.URL.Query().Get("labelSelector") != "app=public-front" {
+						t.Error("passive discovery did not restrict its Pod inventory to potential matches")
+					}
 					v = corev1.PodList{Items: []corev1.Pod{pod}}
 				case "/api/v1/namespaces/system/pods/front-a":
 					v = pod

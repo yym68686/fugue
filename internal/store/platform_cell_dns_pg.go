@@ -24,11 +24,11 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || child.ScopeKey != parent.ScopeKey {
 			continue
 		}
-		var err error
-		dependencies, err = platformconfig.DNSRouteDependencies(child)
+		evidence, err := platformconfig.DecodeDNSRouteDependencyEvidence(child)
 		if err != nil {
 			return fmt.Errorf("%w: %s", ErrConflict, err)
 		}
+		dependencies = evidence.Dependencies
 		sources, err := platformconfig.DNSRouteSourceAuthorizations(child)
 		if err != nil {
 			return err
@@ -38,21 +38,15 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 		}
 		if len(sources) > 0 {
 			dynamicChildren = append(dynamicChildren, child)
-			cells, err := platformconfig.DecodeCellRoutePublications(child)
-			if err != nil {
-				return err
-			}
-			for _, cell := range cells {
+			// The dependency decoder already decoded and validated these
+			// exact typed views of this child; reuse them only in this read.
+			for _, cell := range evidence.Publications {
 				if cell.ProducerPolicy == nil {
 					return ErrConflict
 				}
 				producerReleases = append(producerReleases, cell.ProducerPolicy.ReleaseID)
 			}
-			previous, err := platformconfig.DecodePreviousTrafficPublication(child)
-			if err != nil {
-				return err
-			}
-			if previous != nil {
+			if previous := evidence.Previous; previous != nil {
 				if previous.ProducerPolicy == nil {
 					return ErrConflict
 				}

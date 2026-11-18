@@ -7,6 +7,18 @@ import (
 	"testing"
 )
 
+func TestKubernetesObservationSiteUsesOnlyFixedNames(t *testing.T) {
+	req, _ := http.NewRequest("GET", "https://control.invalid/api/v1/pods", nil)
+	for site, want := range map[ObservationSite]string{
+		ObservePublicFront: "public_front", ObserveDNSBackend: "dns_backend", 255: "",
+	} {
+		at := req.WithContext(WithObservationSite(req.Context(), site))
+		if got := classifyRequest(at).CallSite; got != want {
+			t.Fatalf("site %d got %q, want %q", site, got, want)
+		}
+	}
+}
+
 func TestKubernetesObservationClassifiesWithoutObjectOrQueryValues(t *testing.T) {
 	for _, row := range []struct {
 		path, resource, cache               string

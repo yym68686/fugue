@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 	corev1 "k8s.io/api/core/v1"
@@ -72,6 +73,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveDNSBackend)
 	client, err := s.newClusterNodeClient()
 	if err != nil {
 		observeCapture(ctx, captureEvent{Stage: "backend_metadata_client", Node: claims.NodeID, ErrorClass: captureErrorClass(err)})

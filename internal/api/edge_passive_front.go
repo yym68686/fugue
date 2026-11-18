@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/edgequality"
 	"fugue/internal/frontnetwork"
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 )
 
@@ -51,6 +52,7 @@ func (s *Server) collectPassiveFronts(ctx context.Context, nodes []model.EdgeNod
 }
 
 func (s *Server) readPassiveFront(ctx context.Context, client *clusterNodeClient, node model.EdgeNode) passiveFrontRead {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObservePublicFront)
 	result := passiveFrontRead{node: node.ID, status: "binding_unavailable"}
 	b, err := s.resolvePublicFrontBinding(ctx, client, node)
 	if err != nil {

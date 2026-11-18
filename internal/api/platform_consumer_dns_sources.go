@@ -28,11 +28,12 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 		httpx.WriteError(w, http.StatusBadRequest, "exact DNS artifact and expected set required")
 		return
 	}
-	loadArtifact := s.store.NewPlatformArtifactReadSession()
+	loadArtifact := s.store.NewPlatformArtifactReadSessionContext(r.Context())
+	observeSources := s.store.NewDNSRouteSourceObserver()
 	response, err := observeAssignedDNSRouteSources(r.Context(), func() (consumerArtifactLookup, error) {
 		return s.assignedDNSRouteSourceOwnerWithReader(claims, r.PathValue("artifact_id"), ids[0], loadArtifact)
 	}, func(ctx context.Context, dns model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
-		snapshot, err := s.store.ObserveDNSRouteSources(ctx, dns)
+		snapshot, err := observeSources(ctx, dns)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
@@ -48,7 +49,7 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 		if err := s.store.CheckPlatformInputRead(ctx, reads); err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		current, err := s.store.ObserveDNSRouteSources(ctx, dns)
+		current, err := observeSources(ctx, dns)
 		if err != nil || current.SelectionDigest != snapshot.SelectionDigest {
 			return model.PlatformDNSRouteSourceSnapshot{}, store.ErrConflict
 		}

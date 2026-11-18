@@ -11,6 +11,7 @@ import (
 
 type HTTPRequestClass struct {
 	Client        string `json:"client"`
+	CallSite      string `json:"call_site,omitempty"`
 	Method        string `json:"method"`
 	Resource      string `json:"resource"`
 	Subresource   string `json:"subresource,omitempty"`

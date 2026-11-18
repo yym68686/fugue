@@ -13,10 +13,12 @@ import (
 
 	"fugue/internal/frontnetwork"
 	"fugue/internal/httpx"
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
@@ -198,14 +200,29 @@ func publicFrontBindingError(reason string) error {
 func (s *Server) resolvePublicFrontBinding(ctx context.Context, client *clusterNodeClient, node model.EdgeNode) (publicFrontBinding, error) {
 	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
 	var services corev1.ServiceList
-	var pods corev1.PodList
-	podPath := base + "/pods?" + url.Values{"fieldSelector": {"spec.nodeName=" + node.ID}, "limit": {"256"}}.Encode()
-	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &services) != nil || services.Continue != "" || client.doJSON(ctx, http.MethodGet, podPath, &pods) != nil || pods.Continue != "" {
+	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &services) != nil || services.Continue != "" {
 		return publicFrontBinding{}, publicFrontBindingError("runtime_inventory_unavailable")
 	}
 	service, err := publicFrontService(services.Items, node, s.controlPlaneNamespace)
 	if err != nil {
 		return publicFrontBinding{}, publicFrontBindingError("serving_service_identity")
+	}
+	// Only narrow discovery to possible matches; keep the complete Service
+	// inventory above to detect conflicting owners of an external IP/port.
+	// Preserve the local matcher's treatment of absent, empty-valued labels.
+	nonempty := make(labels.Set, len(service.Spec.Selector))
+	for key, value := range service.Spec.Selector {
+		if value != "" {
+			nonempty[key] = value
+		}
+	}
+	podQuery := url.Values{"fieldSelector": {"spec.nodeName=" + node.ID}, "limit": {"256"}}
+	if len(nonempty) != 0 {
+		podQuery.Set("labelSelector", labels.SelectorFromSet(nonempty).String())
+	}
+	var pods corev1.PodList
+	if client.doJSON(ctx, http.MethodGet, base+"/pods?"+podQuery.Encode(), &pods) != nil || pods.Continue != "" {
+		return publicFrontBinding{}, publicFrontBindingError("runtime_inventory_unavailable")
 	}
 	pod, port, err := publicFrontPod(*service, pods.Items, node)
 	if err != nil {
@@ -240,6 +257,7 @@ func (b publicFrontBinding) verifiedBackend(ctx context.Context, client *cluster
 }
 
 func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode, query frontnetwork.Request) (frontnetwork.Response, error) {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObservePublicFront)
 	client, err := s.newClusterNodeClient()
 	if err != nil {
 		return frontnetwork.Response{}, err

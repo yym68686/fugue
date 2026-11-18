@@ -19,10 +19,11 @@ import (
 )
 
 type dnsRouteSourceReader struct {
-	artifact func(string) (model.PlatformArtifact, error)
-	release  func(string) (model.PlatformArtifactRelease, error)
-	lane     func(string) (model.PlatformReleaseLane, error)
-	lkg      func(string) (*model.PlatformLKGSnapshot, error)
+	artifact        func(string) (model.PlatformArtifact, error)
+	encodedArtifact func(string) (model.PlatformArtifact, int, error)
+	release         func(string) (model.PlatformArtifactRelease, error)
+	lane            func(string) (model.PlatformReleaseLane, error)
+	lkg             func(string) (*model.PlatformLKGSnapshot, error)
 }
 
 // ObserveDNSRouteSources reads only the selected lanes and current LKG in
@@ -30,6 +31,20 @@ type dnsRouteSourceReader struct {
 // no row/advisory write locks, mutations or historical scans are needed. The
 // consumer API independently rechecks its DNS assignment before disclosure.
 func (s *Store) ObserveDNSRouteSources(ctx context.Context, child model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
+	return s.observeDNSRouteSources(ctx, child, nil)
+}
+
+// NewDNSRouteSourceObserver shares only content lengths for one HTTP request.
+// Observations remain distinct fresh transactions with all live and signature
+// checks. Call sequentially; the function is not a cross-request cache.
+func (s *Store) NewDNSRouteSourceObserver() func(context.Context, model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
+	sizes := make(dnsRouteSourceContentSizes)
+	return func(ctx context.Context, child model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
+		return s.observeDNSRouteSources(ctx, child, sizes)
+	}
+}
+
+func (s *Store) observeDNSRouteSources(ctx context.Context, child model.PlatformArtifact, sizes dnsRouteSourceContentSizes) (model.PlatformDNSRouteSourceSnapshot, error) {
 	keys := s.platformArtifactSigningKeyring()
 	if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || child.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass {
 		return model.PlatformDNSRouteSourceSnapshot{}, ErrConflict
@@ -53,7 +68,13 @@ func (s *Store) ObserveDNSRouteSources(ctx context.Context, child model.Platform
 		return result, err
 	}
 	defer tx.Rollback()
-	result, err = observeDNSRouteSources(ctx, child, pgDNSRouteSourceReader(ctx, tx), keys, time.Now().UTC())
+	read := pgDNSRouteSourceReader(ctx, tx)
+	if sizes != nil {
+		read.encodedArtifact = func(id string) (model.PlatformArtifact, int, error) {
+			return sizes.readEncodedArtifact(ctx, tx, id)
+		}
+	}
+	result, err = observeDNSRouteSources(ctx, child, read, keys, time.Now().UTC())
 	if err != nil {
 		return result, err
 	}
@@ -80,6 +101,17 @@ func observeDNSRouteSources(ctx context.Context, child model.PlatformArtifact, r
 	// snapshot; a later request must read current validation and selection again.
 	cache := map[string]model.PlatformArtifact{}
 	bytesRead := 0
+	readEncoded := read.encodedArtifact
+	if readEncoded == nil {
+		readEncoded = func(id string) (model.PlatformArtifact, int, error) {
+			a, err := read.artifact(id)
+			if err != nil {
+				return model.PlatformArtifact{}, 0, err
+			}
+			raw, err := json.Marshal(a)
+			return a, len(raw), err
+		}
+	}
 	readArtifact := func(id string) (model.PlatformArtifact, error) {
 		if a, ok := cache[id]; ok {
 			return a, nil
@@ -87,18 +119,14 @@ func observeDNSRouteSources(ctx context.Context, child model.PlatformArtifact, r
 		if err := ctx.Err(); err != nil {
 			return model.PlatformArtifact{}, err
 		}
-		a, err := read.artifact(id)
+		a, size, err := readEncoded(id)
 		if err != nil {
 			return a, err
 		}
-		raw, err := json.Marshal(a)
-		if err != nil {
-			return a, err
-		}
-		bytesRead += len(raw)
-		if bytesRead > 16<<20 {
+		if size > (16<<20)-bytesRead {
 			return model.PlatformArtifact{}, fmt.Errorf("%w: routing source observation exceeds bound", ErrConflict)
 		}
+		bytesRead += size
 		cache[id] = a
 		return a, nil
 	}
