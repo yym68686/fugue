@@ -41,6 +41,21 @@ bodies and raw transport error strings. Error wrapping retains `errors.Is` /
 If the historical failure predates these observations, do not infer its exact
 cause from a later successful probe; collect a new failure first.
 
+## Pod preStop drain
+
+The sidecar starts a fresh quiet period after any failed socket observation.
+Only consecutive successful zero-connection observations spanning the quiet
+period can complete a fail-closed drain early. The configured hard timeout is
+unchanged. In completion logs and Kubernetes events, `final_tcp_states` lists
+the final TCP state counts; `active_connections=-1` and
+`final_tcp_states=unobserved` mean there was no valid final observation.
+
+`ESTABLISHED` does not prove an HTTP request is in flight: an idle keep-alive
+socket and a streaming response can look identical in the socket table. Treat
+this evidence as TCP state only. Do not drop established sockets or shorten
+the timeout to compensate without positive evidence from the application or
+the proxy that owns those sockets.
+
 ## Superseded release with a canceled deployment
 
 An operation can be canceled after its candidate was already promoted. Its

@@ -88,6 +88,7 @@ type drainResult struct {
 	ActiveConnections int    `json:"active_connections"`
 	MaxActive         int    `json:"max_active_connections"`
 	ObserverErrors    int    `json:"observer_errors"`
+	finalTCPStates    string
 }
 
 type metrics struct {
@@ -385,13 +386,15 @@ func (s *server) drain(ctx context.Context) drainResult {
 		now := s.now()
 		observed, err := s.observe()
 		if err != nil {
+			// Unknown is not zero. An observation gap breaks the quiet period.
+			idleSince = time.Time{}
 			observerErrors++
 			s.metrics.mu.Lock()
 			s.metrics.ObserverErrors++
 			s.metrics.mu.Unlock()
 			s.logger.Printf("fugue_drain_observer_error error=%q waited_ms=%d", err.Error(), now.Sub(start).Milliseconds())
 			if !s.cfg.FailClosed {
-				return s.complete("observer_error_open", start, 0, maxActive, observerErrors)
+				return s.complete("observer_error_open", start, nil, maxActive, observerErrors)
 			}
 		} else {
 			if observed.Active > maxActive {
@@ -413,21 +416,20 @@ func (s *server) drain(ctx context.Context) drainResult {
 					idleSince = now
 				}
 				if now.Sub(idleSince) >= s.cfg.QuietPeriod {
-					return s.complete("idle", start, 0, maxActive, observerErrors)
+					return s.complete("idle", start, &observed, maxActive, observerErrors)
 				}
 			} else {
 				idleSince = time.Time{}
 			}
 		}
 		if !now.Before(deadline) {
-			active := 0
-			if observed, err := s.observe(); err == nil {
-				active = observed.Active
+			if err != nil {
+				return s.complete("timeout", start, nil, maxActive, observerErrors)
 			}
-			return s.complete("timeout", start, active, maxActive, observerErrors)
+			return s.complete("timeout", start, &observed, maxActive, observerErrors)
 		}
-		if err := s.sleep(ctx, minDuration(s.cfg.PollInterval, time.Until(deadline))); err != nil {
-			return s.complete("context_canceled", start, 0, maxActive, observerErrors)
+		if err := s.sleep(ctx, minDuration(s.cfg.PollInterval, deadline.Sub(s.now()))); err != nil {
+			return s.complete("context_canceled", start, nil, maxActive, observerErrors)
 		}
 	}
 }
@@ -442,7 +444,7 @@ func shouldLogSample(now time.Time, interval time.Duration, last time.Time, last
 	return now.Sub(last) >= interval
 }
 
-func (s *server) complete(reason string, start time.Time, active, maxActive, observerErrors int) drainResult {
+func (s *server) complete(reason string, start time.Time, observed *observeResult, maxActive, observerErrors int) drainResult {
 	completedAt := s.now().UTC()
 	waited := completedAt.Sub(start)
 	if waited < 0 {
@@ -456,20 +458,29 @@ func (s *server) complete(reason string, start time.Time, active, maxActive, obs
 	if reason == "timeout" {
 		s.metrics.TimeoutTotal++
 	}
-	s.metrics.Active = active
 	s.metrics.mu.Unlock()
-	s.logger.Printf("fugue_drain_complete reason=%s waited_ms=%d active_connections=%d max_active_connections=%d observer_errors=%d", reason, waited.Milliseconds(), active, maxActive, observerErrors)
 	result := drainResult{
 		OK:                true,
 		Reason:            reason,
 		WaitedMS:          waited.Milliseconds(),
-		ActiveConnections: active,
+		ActiveConnections: -1,
 		MaxActive:         maxActive,
 		ObserverErrors:    observerErrors,
+		finalTCPStates:    "unobserved",
 	}
+	if observed != nil {
+		result.ActiveConnections = observed.Active
+		result.finalTCPStates = formatStateCounts(observed.States)
+	}
+	s.logger.Printf("fugue_drain_complete %s", result.logFields())
 	s.writeTerminationLog(result, completedAt)
 	s.recordKubernetesEvent(context.Background(), result, completedAt)
 	return result
+}
+
+func (result drainResult) logFields() string {
+	return fmt.Sprintf("reason=%s waited_ms=%d active_connections=%d max_active_connections=%d observer_errors=%d final_tcp_states=%s",
+		result.Reason, result.WaitedMS, result.ActiveConnections, result.MaxActive, result.ObserverErrors, result.finalTCPStates)
 }
 
 type drainTerminationMessage struct {
@@ -580,14 +591,6 @@ func (r *kubernetesEventRecorder) recordDrainResult(ctx context.Context, cfg con
 	if namespace == "" || podName == "" {
 		return nil
 	}
-	message := fmt.Sprintf(
-		"reason=%s waited_ms=%d active_connections=%d max_active_connections=%d observer_errors=%d",
-		result.Reason,
-		result.WaitedMS,
-		result.ActiveConnections,
-		result.MaxActive,
-		result.ObserverErrors,
-	)
 	annotations := map[string]string{
 		"fugue.io/drain-reason":                 result.Reason,
 		"fugue.io/drain-waited-ms":              strconv.FormatInt(result.WaitedMS, 10),
@@ -610,7 +613,7 @@ func (r *kubernetesEventRecorder) recordDrainResult(ctx context.Context, cfg con
 			"namespace":  namespace,
 		},
 		"reason":         result.Reason,
-		"message":        message,
+		"message":        result.logFields(),
 		"type":           drainEventType(result.Reason),
 		"source":         map[string]any{"component": componentName},
 		"firstTimestamp": completedAt.UTC().Format(time.RFC3339Nano),

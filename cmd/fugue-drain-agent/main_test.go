@@ -226,6 +226,51 @@ func TestDrainTimeout(t *testing.T) {
 	}
 }
 
+func TestDrainRestartsQuietPeriodAfterObserverError(t *testing.T) {
+	const idle = "  sl  local_address rem_address   st\n"
+	for _, tc := range []struct {
+		name     string
+		timeout  time.Duration
+		want     string
+		waitedMS int64
+	}{
+		{"recovery", 10 * time.Second, "idle", 4000},
+		{"deadline before fresh quiet period", 3 * time.Second, "timeout", 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ipv4 := writeTempFile(t, idle)
+			ipv6 := writeTempFile(t, idle)
+			srv := newTestServer(t, config{
+				AppPorts:     map[int]struct{}{8080: {}},
+				ProcTCPPath:  ipv4,
+				ProcTCP6Path: ipv6,
+				Timeout:      tc.timeout,
+				QuietPeriod:  2 * time.Second,
+				PollInterval: time.Second,
+				FailClosed:   true,
+			})
+			start := time.Unix(0, 0)
+			now := start
+			srv.now = func() time.Time { return now }
+			srv.sleep = func(context.Context, time.Duration) error {
+				now = now.Add(time.Second)
+				content := idle
+				if now.Sub(start) == time.Second {
+					content = ""
+				}
+				if err := osWriteFile(ipv6, content); err != nil {
+					t.Fatalf("write TCP fixture: %v", err)
+				}
+				return nil
+			}
+			result := srv.drain(context.Background())
+			if result.Reason != tc.want || result.WaitedMS != tc.waitedMS || result.ObserverErrors != 1 {
+				t.Fatalf("want %s after %d ms with one observation error, got %+v", tc.want, tc.waitedMS, result)
+			}
+		})
+	}
+}
+
 func TestDrainSampleLogsAreThrottledButCompleteIsAlwaysLogged(t *testing.T) {
 	active := "  sl  local_address rem_address   st\n   0: 0100007F:1F90 0100007F:C001 01 00000000:00000000 00:00000000 00000000 0 0 1\n"
 	path := writeTempFile(t, active)
@@ -256,7 +301,7 @@ func TestDrainSampleLogsAreThrottledButCompleteIsAlwaysLogged(t *testing.T) {
 	if count := strings.Count(output, "fugue_drain_sample"); count != 1 {
 		t.Fatalf("expected one throttled sample log, got %d in\n%s", count, output)
 	}
-	if !strings.Contains(output, "fugue_drain_complete reason=timeout") {
+	if !strings.Contains(output, "fugue_drain_complete reason=timeout") || !strings.Contains(output, "final_tcp_states=ESTABLISHED:2") {
 		t.Fatalf("missing complete log in\n%s", output)
 	}
 }
@@ -334,7 +379,7 @@ func TestDrainRecordsKubernetesEvent(t *testing.T) {
 	if got := eventPayload["reason"]; got != "idle" {
 		t.Fatalf("expected event reason idle, got %#v", got)
 	}
-	if got := eventPayload["message"]; !strings.Contains(fmt.Sprint(got), "reason=idle waited_ms=") || !strings.Contains(fmt.Sprint(got), "active_connections=0") || !strings.Contains(fmt.Sprint(got), "max_active_connections=0") {
+	if got := eventPayload["message"]; !strings.Contains(fmt.Sprint(got), "reason=idle waited_ms=") || !strings.Contains(fmt.Sprint(got), "active_connections=0") || !strings.Contains(fmt.Sprint(got), "max_active_connections=0") || !strings.Contains(fmt.Sprint(got), "final_tcp_states=none") {
 		t.Fatalf("unexpected event message %#v", got)
 	}
 	involved := eventPayload["involvedObject"].(map[string]any)
@@ -361,7 +406,7 @@ func TestDrainObserverErrorFailClosed(t *testing.T) {
 		return nil
 	}
 	result := srv.drain(context.Background())
-	if result.Reason != "timeout" || result.ObserverErrors == 0 {
+	if result.Reason != "timeout" || result.ObserverErrors != 2 || result.ActiveConnections != -1 || result.finalTCPStates != "unobserved" {
 		t.Fatalf("expected fail-closed timeout with observer errors, got %+v", result)
 	}
 }
