@@ -18,6 +18,13 @@ func ValidateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node str
 	return validateDNSAuthorityHandoff(previous, next, node, nil)
 }
 
+// ValidateDNSAuthorityHandoffs checks each physical node against the same
+// predecessor and transition. Like the single-node check, it only compares
+// configured behavior and does not authorize publication or serving.
+func ValidateDNSAuthorityHandoffs(previous, next model.PlatformArtifact, nodes []string) error {
+	return validateDNSAuthorityHandoffNodes(previous, next, nodes, nil)
+}
+
 // An availability handoff permits exactly one explicitly declared host policy
 // addition, while preserving every other configured answer behavior. The new
 // policy intersects the original signed candidate/route proof requirements.
@@ -30,7 +37,11 @@ func ValidateDNSAvailabilityHandoff(previous, next model.PlatformArtifact, node 
 }
 
 func validateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node string, availability *DNSAvailabilityRoute) error {
-	if node == "" || previous.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || next.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+	return validateDNSAuthorityHandoffNodes(previous, next, []string{node}, availability)
+}
+
+func validateDNSAuthorityHandoffNodes(previous, next model.PlatformArtifact, nodes []string, availability *DNSAvailabilityRoute) error {
+	if len(nodes) == 0 || nodes[0] == "" || previous.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || next.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
 		return fmt.Errorf("DNS handoff requires two DNS artifacts and a physical node")
 	}
 	if err := ValidateDNSCellPlan(next); err != nil {
@@ -58,16 +69,28 @@ func validateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node str
 	if err != nil {
 		return err
 	}
-	old, err := dnsHandoffBehavior(previous, node, source.Source.Intent.AuthorityCellID, aliases)
+	for _, node := range nodes {
+		if node == "" {
+			return fmt.Errorf("DNS handoff requires two DNS artifacts and a physical node")
+		}
+		if err := compareDNSHandoffNode(previous, next, node, source.Source.Intent, aliases, availability); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func compareDNSHandoffNode(previous, next model.PlatformArtifact, node string, intent PlatformIntent, aliases map[string]string, availability *DNSAvailabilityRoute) error {
+	old, err := dnsHandoffBehavior(previous, node, intent.AuthorityCellID, aliases)
 	if err != nil {
 		return err
 	}
-	current, err := dnsHandoffBehavior(next, node, source.Source.Intent.AuthorityCellID, nil)
+	current, err := dnsHandoffBehavior(next, node, intent.AuthorityCellID, nil)
 	if err != nil {
 		return err
 	}
 	if availability != nil {
-		if !DNSUsesRetainedRoutes(source.Source.Intent) {
+		if !DNSUsesRetainedRoutes(intent) {
 			return fmt.Errorf("availability handoff requires retained routing authority")
 		}
 		if err := removeDeclaredAvailabilityDelta(old, current, *availability); err != nil {

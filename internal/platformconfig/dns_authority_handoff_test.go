@@ -85,6 +85,51 @@ func TestDNSAuthorityHandoffPreservesWholeNodeAnswerBehavior(t *testing.T) {
 	}
 }
 
+func TestDNSAuthorityHandoffsCheckEveryNode(t *testing.T) {
+	req := celldns.TransitionRequest(t)
+	previous, next := req.PreviousTrafficPublication.DNS, celldns.Compile(t, req).DNSArtifact
+	for _, nodes := range [][]string{{"dns-a"}, {"dns-a", "dns-a"}, {"dns-a", "dns-other"}, {"dns-a", ""}, {"dns-other", "dns-a"}} {
+		var want error
+		for _, node := range nodes {
+			if want = platformconfig.ValidateDNSAuthorityHandoff(previous, next, node); want != nil {
+				break
+			}
+		}
+		if got := platformconfig.ValidateDNSAuthorityHandoffs(previous, next, nodes); (got == nil) != (want == nil) || got != nil && got.Error() != want.Error() {
+			t.Fatalf("nodes %q: batch = %v; sequential = %v", nodes, got, want)
+		}
+	}
+	if err := platformconfig.ValidateDNSAuthorityHandoffs(previous, next, nil); err == nil {
+		t.Fatal("batch without physical membership was accepted")
+	}
+}
+
+func BenchmarkDNSAuthorityHandoffs(b *testing.B) {
+	req := celldns.TransitionRequest(b)
+	previous, next := req.PreviousTrafficPublication.DNS, celldns.Compile(b, req).DNSArtifact
+	// Repeating an admitted node exercises two full node comparisons against
+	// the same transition without growing the retained publication fixture.
+	nodes := []string{"dns-a", "dns-a"}
+	b.Run("sequential", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			for _, node := range nodes {
+				if err := platformconfig.ValidateDNSAuthorityHandoff(previous, next, node); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+	b.Run("batch", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := platformconfig.ValidateDNSAuthorityHandoffs(previous, next, nodes); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func TestDNSAuthorityHandoffPreservesUnknownBehavior(t *testing.T) {
 	for _, field := range []string{"query policy", "authority", "consumer view", "query view", "query record"} {
 		t.Run(field, func(t *testing.T) {

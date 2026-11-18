@@ -122,19 +122,8 @@ func WriteRuntimeSnapshot(w io.Writer, snapshot RuntimeSnapshot) error {
 				if i > 0 {
 					s.text(",")
 				}
-				if len(fact.RetainedPhysicalEvidence) > 0 {
-					canonical, err := canonicalPhysicalEvidence(fact.RetainedPhysicalEvidence)
-					if err != nil {
-						return err
-					}
-					fact.RetainedPhysicalEvidence = canonical
-				}
-				if len(fact.PhysicalEvidence) > 0 {
-					canonical, err := canonicalPhysicalEvidence(fact.PhysicalEvidence)
-					if err != nil {
-						return err
-					}
-					fact.PhysicalEvidence = canonical
+				if err := canonicalizeDNSSelectionEvidence(&fact); err != nil {
+					return err
 				}
 				start := s.bytes
 				s.value(fact)

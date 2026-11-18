@@ -275,10 +275,5 @@ func validateDNSProducerOutputUncached(p Policy, child model.PlatformArtifact) e
 	if !reflect.DeepEqual(nodes, p.DNSSource.DNSNodeIDs) {
 		return fmt.Errorf("DNS producer output membership differs")
 	}
-	for _, node := range nodes {
-		if err := platformconfig.ValidateDNSAuthorityHandoff(previous.DNS, child, node); err != nil {
-			return err
-		}
-	}
-	return nil
+	return platformconfig.ValidateDNSAuthorityHandoffs(previous.DNS, child, nodes)
 }

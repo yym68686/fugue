@@ -1050,22 +1050,9 @@ func RuntimeSnapshotDigest(snapshot RuntimeSnapshot) (string, error) {
 func EncodeRuntimeSnapshot(snapshot RuntimeSnapshot) ([]byte, error) {
 	snapshot.DNSSelections = append([]DNSSelectionObservation(nil), snapshot.DNSSelections...)
 	for index := range snapshot.DNSSelections {
-		fact := &snapshot.DNSSelections[index]
-		if len(fact.RetainedPhysicalEvidence) > 0 {
-			canonical, err := canonicalPhysicalEvidence(fact.RetainedPhysicalEvidence)
-			if err != nil {
-				return nil, err
-			}
-			fact.RetainedPhysicalEvidence = canonical
-		}
-		if len(fact.PhysicalEvidence) == 0 {
-			continue
-		}
-		canonical, err := canonicalPhysicalEvidence(fact.PhysicalEvidence)
-		if err != nil {
+		if err := canonicalizeDNSSelectionEvidence(&snapshot.DNSSelections[index]); err != nil {
 			return nil, err
 		}
-		fact.PhysicalEvidence = canonical
 	}
 	return json.Marshal(snapshot)
 }
