@@ -401,6 +401,73 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 		t.Fatal("read mutated durable state")
 	}
 	originalProxy := f.proxyHandler
+	t.Run("explicit concurrent serving replacement can recover from a fresh snapshot", func(t *testing.T) {
+		defer func() { f.proxyHandler = originalProxy }()
+		attempts := 0
+		f.proxyHandler = func(w http.ResponseWriter, _ *http.Request) {
+			attempts++
+			if attempts == 1 {
+				w.Header().Set("X-Fugue-DNS-Observation-Rejection", "state_replaced")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(snapshot)
+		}
+		r := performJSONRequest(t, s, "GET", endpoint, "facts-admin", nil)
+		if r.Code != http.StatusOK || attempts != 2 {
+			t.Fatalf("management read did not recover from a concurrent replacement: HTTP %d, attempts %d", r.Code, attempts)
+		}
+		var response platformDNSRuntimeFactsResponse
+		mustDecodeJSON(t, r, &response)
+		if !response.Ready || !reflect.DeepEqual(response.Snapshot, snapshot) || response.Backend.PodUID != string(f.pod.UID) {
+			t.Fatal("replacement read changed the pinned backend or original evidence")
+		}
+	})
+	for _, tc := range []struct {
+		name     string
+		status   int
+		reasons  []string
+		attempts int
+	}{
+		{"repeat replacement", 503, []string{"state_replaced"}, 2},
+		{"unlabelled 503", 503, nil, 1},
+		{"listener changed", 503, []string{"listener_changed"}, 1},
+		{"wrong status with reason", 500, []string{"state_replaced"}, 1},
+		{"ambiguous reason", 503, []string{"state_replaced", "listener_changed"}, 1},
+		{"replacement then foreign assignment", 503, []string{"state_replaced"}, 2},
+		{"replacement then endpoint change", 503, []string{"state_replaced"}, 2},
+		{"replacement then revoked key", 503, []string{"state_replaced"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() { f.proxyHandler = originalProxy; f.changePath = ""; s.bundleRevokedKeyIDs = nil }()
+			attempts := 0
+			f.proxyHandler = func(w http.ResponseWriter, _ *http.Request) {
+				attempts++
+				if attempts == 1 || tc.name == "repeat replacement" {
+					for _, reason := range tc.reasons {
+						w.Header().Add("X-Fugue-DNS-Observation-Rejection", reason)
+					}
+					w.WriteHeader(tc.status)
+					return
+				}
+				fresh := snapshot
+				if tc.name == "replacement then endpoint change" {
+					f.changePath = "slice"
+				}
+				if tc.name == "replacement then foreign assignment" {
+					fresh.Assignment.FencingToken++
+				}
+				if tc.name == "replacement then revoked key" {
+					s.bundleRevokedKeyIDs = []string{child.Provenance.KeyID}
+				}
+				_ = json.NewEncoder(w).Encode(fresh)
+			}
+			r := performJSONRequest(t, s, "GET", endpoint, "facts-admin", nil)
+			if r.Code != http.StatusServiceUnavailable || attempts != tc.attempts {
+				t.Fatalf("expected fail-closed result after %d attempt(s), got HTTP %d after %d", tc.attempts, r.Code, attempts)
+			}
+		})
+	}
 	for _, scenario := range []string{"bad schema", "bad plan", "foreign assignment", "pod changed", "service changed", "endpoint changed", "truncated", "unknown field", "oversized", "redirect", "proxy failure", "publication changed", "artifact corrupt", "route artifact corrupt", "route content corrupt", "route artifact unavailable", "signing key revoked", "expected membership changed", "no HTTP port", "ambiguous container", "unready", "negative", "expired"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldSnapshot, oldPod := snapshot, *f.pod.DeepCopy()

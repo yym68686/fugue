@@ -19,8 +19,19 @@ the final base observation if the base publication changed, `renewal` indicates
 whether the observed renewal pointer changed, and `selection` identifies which
 path was selected at each comparison point. This does not identify the first
 writer if several changes occurred between the two reads. A legacy executor or
-missing metadata leaves the original rejection intact. The diagnostic does not
-replace the pointer equality check, retry the request, or affect wire DNS.
+missing metadata leaves the original rejection classification intact. The
+executor still rejects a replaced state by pointer identity; wire DNS is
+unchanged.
+
+For a single explicit backend `503 state_replaced` reason, the API attempts
+one new snapshot under the same pinned transport and original deadlines. It
+does not reuse a snapshot, reselect a backend, or retry other failures. The
+successful read must still pass all transport, authority, proof and freshness
+checks. `backend_snapshot_replacement_retry` preserves the first rejection;
+`dns-snapshot-replacement-retry` counts completed reads that retried, and
+`dns-snapshot-replacement-retry-verified` counts those that returned a verified
+observation, including verified negative readiness. Neither is a wire DNS
+success metric.
 
 Rejected Agent route proofs also retain a same-read `publication` pair. Each
 side has separate SHA-256 hashes of the release-set, route-artifact and release

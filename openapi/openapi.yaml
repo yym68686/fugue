@@ -4240,6 +4240,10 @@ paths:
         port, with redirects disabled and an 8 MiB response limit. Pod UID,
         Service and EndpointSlice observations are checked around the read;
         current publication and expectation are checked again afterwards.
+        If the selected backend explicitly rejects the read with HTTP 503
+        state_replaced, the server attempts at most one fresh snapshot from
+        the same pinned backend within the original deadlines. Other failures
+        are not retried. The fresh snapshot must pass every original check.
         During explicit cell coexistence, the physical node may have retained
         receipts in several authority namespaces. The immutable expected member
         supplies each receipt's authority; the uniquely selected public backend

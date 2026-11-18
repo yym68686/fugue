@@ -19,6 +19,7 @@ func TestOperationObservationsAreBoundedAndConcurrent(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	s.observeOperation("dns-snapshot-replacement-retry")()
 	value, err := s.OperationSnapshot(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -30,13 +31,21 @@ func TestOperationObservationsAreBoundedAndConcurrent(t *testing.T) {
 			Count int    `json:"count"`
 		} `json:"stages"`
 	}
-	if json.Unmarshal(raw, &result) != nil || len(result.Stages) != 39 {
+	if json.Unmarshal(raw, &result) != nil || len(result.Stages) != 41 {
 		t.Fatal("unexpected stage inventory")
 	}
+	stages := map[string]int{}
 	for _, stage := range result.Stages {
 		if stage.Stage == "untrusted-request-value" || stage.Stage == "consumer-assignment" && stage.Count != 24 {
 			t.Fatal("unbounded or inaccurate operation observations")
 		}
+		stages[stage.Stage] = stage.Count
+	}
+	if count, ok := stages["dns-snapshot-replacement-retry"]; !ok || count != 1 {
+		t.Fatal("replacement retry was not counted")
+	}
+	if count, ok := stages["dns-snapshot-replacement-retry-verified"]; !ok || count != 0 {
+		t.Fatal("starting a replacement retry must not count as verification")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

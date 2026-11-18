@@ -14,6 +14,7 @@ func (s *Server) operationObservations() *runtimeobservation.Operations {
 			"consumer-assignment", "consumer-artifact", "consumer-resolve",
 			"consumer-assignment-retry", "consumer-assignment-retry-ok", "consumer-assignment-retry-empty", "consumer-assignment-retry-exhausted",
 			"traffic-source", "discovery-bundle", "dns-serving-facts", "node-policy", "node-desired-state",
+			"dns-snapshot-replacement-retry", "dns-snapshot-replacement-retry-verified",
 			"agent-grant", "agent-cell-authorization", "agent-observation",
 			"agent-cell-unavailable", "agent-observation-unavailable", "agent-authority-changed",
 			"agent-evidence-expired", "agent-grant-constraint-unmet",

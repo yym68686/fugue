@@ -332,7 +332,14 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	ctx, trace := s.beginCaptureTrace(ctx, "dns-runtime-facts")
 	stage := "source"
 	var transportErr error
+	var finishReplacementRetry, finishVerifiedReplacementRetry func()
 	defer func() {
+		if finishReplacementRetry != nil {
+			finishReplacementRetry()
+			if readErr == nil {
+				finishVerifiedReplacementRetry()
+			}
+		}
 		outcome := "ready"
 		if readErr != nil {
 			outcome = stage
@@ -366,7 +373,19 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		}
 		stage = "backend_snapshot"
 		path := "/api/v1/namespaces/" + url.PathEscape(pod.Namespace) + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(int(port))) + "/proxy/runtime-facts"
-		if err := readDNSPodSnapshot(ctx, client, path, &response.Snapshot); err != nil {
+		err := readDNSPodSnapshot(ctx, client, path, &response.Snapshot)
+		// Retry only a discarded, concurrently replaced snapshot. Stay inside
+		// the same transport observation (no new backend selection or deadline),
+		// and still perform the post-read transport and authority checks.
+		if captureHTTPStatus(err) == http.StatusServiceUnavailable && captureDNSRejection(err) == "state_replaced" && ctx.Err() == nil {
+			observeCapture(ctx, captureEvent{Stage: "backend_snapshot_replacement_retry", Node: node,
+				ErrorClass: captureErrorClass(err), HTTPStatus: http.StatusServiceUnavailable,
+				Rejection: "state_replaced", DNSReplacement: captureDNSStateReplacement(err)})
+			finishReplacementRetry = s.observeOperation("dns-snapshot-replacement-retry")
+			finishVerifiedReplacementRetry = s.observeOperation("dns-snapshot-replacement-retry-verified")
+			err = readDNSPodSnapshot(ctx, client, path, &response.Snapshot)
+		}
+		if err != nil {
 			transportErr = err
 			return http.StatusServiceUnavailable
 		}
@@ -579,7 +598,14 @@ func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		rejection := dnsObservationRejection(resp.Header.Get("X-Fugue-DNS-Observation-Rejection"))
+		var rejection string
+		switch values := resp.Header.Values("X-Fugue-DNS-Observation-Rejection"); len(values) {
+		case 0:
+		case 1:
+			rejection = dnsObservationRejection(values[0])
+		default:
+			rejection = "unrecognized"
+		}
 		return &dnsObservationReadFailure{class: "http_status", status: resp.StatusCode, rejection: rejection,
 			replacement: dnsObservationStateReplacement(resp.StatusCode, rejection, resp.Header.Values)}
 	}
