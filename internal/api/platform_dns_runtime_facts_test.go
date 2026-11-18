@@ -17,6 +17,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/routeartifact"
 	"fugue/internal/routeprobe"
 	"fugue/internal/store"
 	corev1 "k8s.io/api/core/v1"
@@ -262,6 +263,24 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("request reuse preserves fresh authority observations", func(t *testing.T) {
+		loads := map[string]int{}
+		load := st.NewPlatformArtifactReadSession()
+		fresh := func(id string) (model.PlatformArtifact, error) {
+			loads[id]++
+			return load(id)
+		}
+		readBinding := routeartifact.NewRequestBindingReader()
+		for pass := 1; pass <= 2; pass++ {
+			observed, err := s.currentDNSFactSourceWithReaders(context.Background(), f.claims.NodeID, fresh, readBinding)
+			if err != nil || !reflect.DeepEqual(observed, source) {
+				t.Fatal("body or binding reuse changed the source", err)
+			}
+			if loads[child.ID] != pass || loads[source.routeID] != pass {
+				t.Fatal("authority observation reused an old artifact envelope", loads)
+			}
+		}
+	})
 	t.Run("assignment rejection receipts", func(t *testing.T) {
 		baseline, err := os.ReadFile(path)
 		if err != nil {
@@ -369,14 +388,16 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 		t.Fatal("read mutated durable state")
 	}
 	originalProxy := f.proxyHandler
-	for _, scenario := range []string{"bad schema", "bad plan", "foreign assignment", "pod changed", "service changed", "endpoint changed", "truncated", "unknown field", "oversized", "redirect", "proxy failure", "publication changed", "artifact corrupt", "no HTTP port", "ambiguous container", "unready", "negative", "expired"} {
+	for _, scenario := range []string{"bad schema", "bad plan", "foreign assignment", "pod changed", "service changed", "endpoint changed", "truncated", "unknown field", "oversized", "redirect", "proxy failure", "publication changed", "artifact corrupt", "route artifact corrupt", "route content corrupt", "route artifact unavailable", "signing key revoked", "expected membership changed", "no HTTP port", "ambiguous container", "unready", "negative", "expired"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldSnapshot, oldPod := snapshot, *f.pod.DeepCopy()
+			expectedState := baseline
 			defer func() {
 				snapshot = oldSnapshot
 				f.pod = oldPod
 				f.changePath = ""
 				f.proxyHandler = originalProxy
+				s.bundleRevokedKeyIDs = nil
 				if err := os.WriteFile(path, baseline, 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -411,7 +432,7 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 					w.WriteHeader(500)
 					w.Write([]byte("private-node-error"))
 				}
-			case "publication changed", "artifact corrupt":
+			case "publication changed", "artifact corrupt", "route artifact corrupt", "route content corrupt", "route artifact unavailable", "signing key revoked", "expected membership changed":
 				f.proxyHandler = func(w http.ResponseWriter, _ *http.Request) {
 					var state model.State
 					json.Unmarshal(baseline, &state)
@@ -421,15 +442,34 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 								state.PlatformArtifactReleases[i].FencingToken++
 							}
 						}
+					} else if scenario == "signing key revoked" {
+						s.bundleRevokedKeyIDs = []string{child.Provenance.KeyID}
+					} else if scenario == "expected membership changed" {
+						for i := range state.ExpectedConsumerSets {
+							if state.ExpectedConsumerSets[i].ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle {
+								state.ExpectedConsumerSets[i].Consumers = nil
+							}
+						}
 					} else {
 						for i := range state.PlatformArtifacts {
-							if state.PlatformArtifacts[i].ID == child.ID {
-								state.PlatformArtifacts[i].Provenance.Signature = "bad"
+							artifact := &state.PlatformArtifacts[i]
+							if scenario == "artifact corrupt" && artifact.ID == child.ID || strings.HasPrefix(scenario, "route ") && artifact.ID == source.routeID {
+								switch scenario {
+								case "route content corrupt":
+									// Preserve the claimed hash: actual body changes must
+									// still invalidate request-local computation reuse.
+									artifact.Content["routes"] = []any{}
+								case "route artifact unavailable":
+									artifact.Status = model.PlatformArtifactStatusDraft
+								default:
+									artifact.Provenance.Signature = "bad"
+								}
 							}
 						}
 					}
 					raw, _ := json.Marshal(state)
 					os.WriteFile(path, raw, 0600)
+					expectedState = raw
 					json.NewEncoder(w).Encode(snapshot)
 				}
 			case "no HTTP port":
@@ -454,7 +494,7 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			if len(rows[len(rows)-1].DNSRead) == 0 {
 				t.Fatal("failure or known not-ready result lost timing", scenario)
 			}
-			if scenario == "publication changed" || scenario == "artifact corrupt" {
+			if scenario == "publication changed" || scenario == "artifact corrupt" || strings.HasPrefix(scenario, "route ") || scenario == "signing key revoked" || scenario == "expected membership changed" {
 				rows := captureReceipts(t, s)
 				found := false
 				for _, event := range rows[len(rows)-1].Events {
@@ -499,11 +539,11 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			if len(freshDNSNodes(projected, now.Add(24*time.Hour))) != 1 {
 				t.Fatal("unavailable enrolled node disappeared with stale inventory")
 			}
-			if scenario != "publication changed" && scenario != "artifact corrupt" {
-				after, _ := os.ReadFile(path)
-				if !reflect.DeepEqual(baseline, after) {
-					t.Fatal("failure mutated durable state")
-				}
+			// The fixture may have changed authority while serving the proxy
+			// response; the read itself must preserve that exact changed state.
+			after, _ := os.ReadFile(path)
+			if !reflect.DeepEqual(expectedState, after) {
+				t.Fatal("failure mutated durable state")
 			}
 		})
 	}

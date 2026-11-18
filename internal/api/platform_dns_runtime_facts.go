@@ -21,6 +21,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/routeartifact"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -79,6 +80,10 @@ func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http
 }
 
 func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFactSource, error) {
+	return s.currentDNSFactSourceWithReaders(ctx, node, s.store.GetPlatformArtifact, nil)
+}
+
+func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node string, loadArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (dnsFactSource, error) {
 	fail := func(reason string) (dnsFactSource, error) {
 		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason})
 		return dnsFactSource{}, errDNSRuntimeFacts
@@ -150,7 +155,7 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 				return fail("backend_disambiguation")
 			}
 		}
-		source, err := s.dnsFactSourceForConsumer(ctx, node, candidate.fact, candidate.claims)
+		source, err := s.dnsFactSourceForConsumerWithReaders(ctx, node, candidate.fact, candidate.claims, loadArtifact, readBinding)
 		if err != nil {
 			return fail("consumer_assignment_unavailable")
 		}
@@ -166,11 +171,17 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 }
 
 func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
+	return s.dnsFactSourceForConsumerWithReaders(ctx, node, fact, claims, s.store.GetPlatformArtifact, nil)
+}
+
+func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims, loadArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (dnsFactSource, error) {
 	fail := func(reason string) (dnsFactSource, error) {
 		observeCapture(ctx, captureEvent{Stage: "source_assignment_rejected", Node: node, Rejection: reason})
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
-	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	// Each authority observation owns a fresh envelope reader. Only the bounded
+	// request-owned bodies and pure binding computation may cross observations.
+	readArtifact := newConsumerArtifactReader(loadArtifact)
 	finish := startDNSReadStage(ctx, dnsReadAssignmentResolution)
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	finish()
@@ -289,7 +300,7 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 			finish()
 		} else {
 			finish = startDNSReadStage(ctx, dnsReadRouteProjection)
-			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
+			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, claims.ScopeKey, readArtifact, readBinding)
 			finish()
 			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 				return fail("route_projection")
@@ -320,8 +331,10 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	loadArtifact := s.store.NewPlatformArtifactReadSession()
+	readBinding := routeartifact.NewRequestBindingReader()
 	phaseCtx, finishPhase := startDNSReadPhase(ctx, dnsReadInitialSource)
-	source, err := s.currentDNSFactSource(phaseCtx, node)
+	source, err := s.currentDNSFactSourceWithReaders(phaseCtx, node, loadArtifact, readBinding)
 	finishPhase()
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
@@ -354,11 +367,13 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		}
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
-	// Re-resolve immutable inputs and current publication; do not reuse an
-	// artifact-reader cache across the network request or renew heartbeat time.
+	// Re-resolve immutable inputs and current publication with fresh envelopes;
+	// never retain an authority verdict across the network or renew heartbeat
+	// time. The session rereads database metadata and actual content bytes; the
+	// binding reader fingerprints complete inputs and current signing keys.
 	stage = "authority_recheck"
 	phaseCtx, finishPhase = startDNSReadPhase(ctx, dnsReadAuthorityRecheck)
-	current, err := s.currentDNSFactSource(phaseCtx, node)
+	current, err := s.currentDNSFactSourceWithReaders(phaseCtx, node, loadArtifact, readBinding)
 	finishPhase()
 	if event := dnsAuthorityRecheckRejection(ctx, source, current, err); event.Rejection != "" {
 		event.Node = node
