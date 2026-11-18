@@ -4250,6 +4250,9 @@ paths:
         evaluated_at; expired or negative proofs cannot pass. The snapshot keeps
         its original timestamps and values. A failed or ambiguous lookup returns
         503 without fallback, probing, configuration writes or proof renewal.
+        The observation uses a shared 10-second budget (or an earlier request
+        deadline) for source reads, backend observation and final revalidation.
+        An expired budget cannot return a successful observation.
         This is a diagnostic observation, not serving authorization or a
         transaction spanning Kubernetes and the publication store.
       tags: [Admin]

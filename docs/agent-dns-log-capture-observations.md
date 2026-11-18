@@ -65,6 +65,13 @@ These timings are wall-clock observations, not CPU, SQL or network root-cause
 verdicts. They share the existing completed/failure receipt retention, consume
 none of the 12 rejection-event slots, and add no reads, retries or policy changes.
 
+The management read uses one 10-second context, bounded by the caller's
+deadline, for both source observations and the backend read. PostgreSQL
+inventory, release and artifact reads use that context as their parent, so they
+cannot start a new independent budget. The final validation does not return
+success after expiry. A budget failure remains HTTP 503 and does not imply
+which earlier operation consumed the budget or a failure of wire DNS.
+
 `started`, `completed`, `in_flight`, `evicted` and `events_dropped` describe the
 coverage limits. The ring is process-local and non-durable. Polling it cannot
 reconstruct already-evicted events or failures before that process started. A

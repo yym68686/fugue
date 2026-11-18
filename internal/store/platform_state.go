@@ -312,12 +312,19 @@ func (s *Store) listPlatformArtifacts(filter model.PlatformArtifactFilter, inclu
 }
 
 func (s *Store) GetPlatformArtifact(idOrGeneration string) (model.PlatformArtifact, error) {
+	return s.GetPlatformArtifactContext(context.Background(), idOrGeneration)
+}
+
+func (s *Store) GetPlatformArtifactContext(ctx context.Context, idOrGeneration string) (model.PlatformArtifact, error) {
 	idOrGeneration = strings.TrimSpace(idOrGeneration)
 	if idOrGeneration == "" {
 		return model.PlatformArtifact{}, ErrInvalidInput
 	}
+	if err := ctx.Err(); err != nil {
+		return model.PlatformArtifact{}, err
+	}
 	if s.usingDatabase() {
-		return s.pgGetPlatformArtifact(idOrGeneration)
+		return s.pgGetPlatformArtifact(ctx, idOrGeneration)
 	}
 	var out model.PlatformArtifact
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -825,6 +832,10 @@ func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model
 // A caller-owned reader can reuse immutable artifacts within one request. The
 // active release row is always fetched afresh; this never caches a lane/fence.
 func (s *Store) GetActivePlatformArtifactWithReader(kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.GetActivePlatformArtifactWithReaderContext(context.Background(), kind, scopeKey, channel, read)
+}
+
+func (s *Store) GetActivePlatformArtifactWithReaderContext(ctx context.Context, kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	scopeKey = strings.TrimSpace(strings.ToLower(scopeKey))
 	if scopeKey == "" {
@@ -834,8 +845,11 @@ func (s *Store) GetActivePlatformArtifactWithReader(kind, scopeKey, channel stri
 	if kind == "" || channel == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, ErrInvalidInput
 	}
+	if err := ctx.Err(); err != nil {
+		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, err
+	}
 	if s.usingDatabase() {
-		return s.pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel, read)
+		return s.pgGetActivePlatformArtifactWithReader(ctx, kind, scopeKey, channel, read)
 	}
 	var artifact model.PlatformArtifact
 	var release model.PlatformArtifactRelease
@@ -1060,16 +1074,23 @@ func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformCo
 // truncated set. The result grants no authority without exact member and
 // selected-backend verification by the caller.
 func (s *Store) ListPlatformAuthorityConsumers(kind, nodeID string) ([]model.PlatformConsumerInstance, error) {
+	return s.ListPlatformAuthorityConsumersContext(context.Background(), kind, nodeID)
+}
+
+func (s *Store) ListPlatformAuthorityConsumersContext(ctx context.Context, kind, nodeID string) ([]model.PlatformConsumerInstance, error) {
 	kind = NormalizePlatformArtifactKind(kind)
 	if kind == "" || strings.TrimSpace(nodeID) != nodeID || len(nodeID) > 253 {
 		return nil, ErrInvalidInput
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	limit := 4096
 	if nodeID != "" {
 		limit = 64
 	}
 	if s.usingDatabase() {
-		return s.pgListPlatformAuthorityConsumers(kind, nodeID, limit)
+		return s.pgListPlatformAuthorityConsumers(ctx, kind, nodeID, limit)
 	}
 	consumers := []model.PlatformConsumerInstance{}
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -1127,12 +1148,19 @@ func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsu
 }
 
 func (s *Store) GetPlatformExpectedConsumerSet(id string) (model.PlatformExpectedConsumerSet, error) {
+	return s.GetPlatformExpectedConsumerSetContext(context.Background(), id)
+}
+
+func (s *Store) GetPlatformExpectedConsumerSetContext(ctx context.Context, id string) (model.PlatformExpectedConsumerSet, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 	}
+	if err := ctx.Err(); err != nil {
+		return model.PlatformExpectedConsumerSet{}, err
+	}
 	if s.usingDatabase() {
-		return s.pgGetPlatformExpectedConsumerSet(id)
+		return s.pgGetPlatformExpectedConsumerSet(ctx, id)
 	}
 	var out model.PlatformExpectedConsumerSet
 	err := s.withLockedState(false, func(state *model.State) error {
@@ -1148,12 +1176,19 @@ func (s *Store) GetPlatformExpectedConsumerSet(id string) (model.PlatformExpecte
 }
 
 func (s *Store) ListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
+	return s.ListPlatformExpectedConsumerSetsContext(context.Background(), filter)
+}
+
+func (s *Store) ListPlatformExpectedConsumerSetsContext(ctx context.Context, filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
 	filter, err := normalizePlatformExpectedConsumerSetFilter(filter)
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.usingDatabase() {
-		return s.pgListPlatformExpectedConsumerSets(filter)
+		return s.pgListPlatformExpectedConsumerSets(ctx, filter)
 	}
 	sets := []model.PlatformExpectedConsumerSet{}
 	err = s.withLockedState(false, func(state *model.State) error {

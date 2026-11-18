@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -263,6 +264,18 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("cancelled source cannot return authority", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		load := func(id string) (model.PlatformArtifact, error) {
+			cancel()
+			return st.GetPlatformArtifact(id)
+		}
+		defer cancel()
+		observed, err := s.currentDNSFactSourceWithReaders(ctx, f.claims.NodeID, load, routeartifact.NewRequestBindingReader())
+		if !errors.Is(err, context.Canceled) || observed.parent.ID != "" {
+			t.Fatalf("source outlived cancellation: returned authority=%t, err=%v", observed.parent.ID != "", err)
+		}
+	})
 	t.Run("request reuse preserves fresh authority observations", func(t *testing.T) {
 		loads := map[string]int{}
 		load := st.NewPlatformArtifactReadSession()

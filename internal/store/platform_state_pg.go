@@ -319,8 +319,8 @@ FROM fugue_platform_artifacts WHERE true`
 	return artifacts, nil
 }
 
-func (s *Store) pgGetPlatformArtifact(idOrGeneration string) (model.PlatformArtifact, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgGetPlatformArtifact(ctx context.Context, idOrGeneration string) (model.PlatformArtifact, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	artifact, err := s.pgReadPlatformArtifact(ctx, idOrGeneration)
 	if err != nil {
@@ -1603,12 +1603,8 @@ func platformArtifactProvenanceEquivalent(existing, candidate model.PlatformArti
 		existing.SignedAt.Equal(candidate.SignedAt)
 }
 
-func (s *Store) pgGetActivePlatformArtifact(kind, scopeKey, channel string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
-	return s.pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel, nil)
-}
-
-func (s *Store) pgGetActivePlatformArtifactWithReader(kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgGetActivePlatformArtifactWithReader(ctx context.Context, kind, scopeKey, channel string, read func(string) (model.PlatformArtifact, error)) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	release, err := scanPlatformArtifactRelease(s.db.QueryRowContext(ctx, `
 SELECT id, artifact_id, artifact_kind, scope_key, scope_json, generation,
@@ -1737,8 +1733,8 @@ RETURNING id, release_set_id, artifact_release_id, artifact_kind, scope_key, sco
 	return out, nil
 }
 
-func (s *Store) pgGetPlatformExpectedConsumerSet(id string) (model.PlatformExpectedConsumerSet, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgGetPlatformExpectedConsumerSet(ctx context.Context, id string) (model.PlatformExpectedConsumerSet, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	set, err := scanPlatformExpectedConsumerSet(s.db.QueryRowContext(ctx, `
 SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
@@ -1753,8 +1749,8 @@ WHERE id = $1`, id))
 	return set, nil
 }
 
-func (s *Store) pgListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgListPlatformExpectedConsumerSets(ctx context.Context, filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	query := `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
 	expected_generation, topology_revision, revision, requires_consumers,
@@ -2247,8 +2243,8 @@ ORDER BY updated_at DESC, consumer_id ASC`, kind, scopeKey)
 	return consumers, nil
 }
 
-func (s *Store) pgListPlatformAuthorityConsumers(kind, nodeID string, limit int) ([]model.PlatformConsumerInstance, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func (s *Store) pgListPlatformAuthorityConsumers(ctx context.Context, kind, nodeID string, limit int) ([]model.PlatformConsumerInstance, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, consumer_id, credential_id, token_id, component, node_id, artifact_kind, scope_key,

@@ -1259,11 +1259,15 @@ func (s *Server) resolvePlatformConsumerAssignments(claims platformcontrol.Platf
 }
 
 func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
+	return s.resolvePlatformConsumerAssignmentsWithReaderContext(context.Background(), claims, readArtifact)
+}
+
+func (s *Server) resolvePlatformConsumerAssignmentsWithReaderContext(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
 	defer s.observeOperation("consumer-resolve")()
 	assignments := make([]consumerArtifactLookup, 0)
 	validatedParents := map[string]bool{}
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
-		releaseSet, release, found, err := s.store.GetActivePlatformArtifactWithReader(model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel, readArtifact)
+		releaseSet, release, found, err := s.store.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel, readArtifact)
 		if err != nil {
 			return nil, errors.New("consumer release assignment unavailable")
 		}
@@ -1292,7 +1296,7 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReader(claims platformcon
 		// Query the active release and authorized scope, rather than taking a
 		// global top-N window that can silently hide this consumer's assignment.
 		for _, kind := range claims.ArtifactKinds {
-			sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{
+			sets, err := s.store.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{
 				ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, ScopeKey: claims.ScopeKey,
 			})
 			if err != nil {

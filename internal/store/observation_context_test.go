@@ -22,6 +22,26 @@ func TestObservationQueriesHonorCallerBudget(t *testing.T) {
 			_, err := s.ListAppReleaseMetadataContext(ctx, model.AppReleaseFilter{PlatformAdmin: true})
 			return err
 		}},
+		{"dns-consumer-inventory", `SELECT .* FROM fugue_platform_consumer_instances`, func(ctx context.Context, s *Store) error {
+			_, err := s.ListPlatformAuthorityConsumersContext(ctx, model.PlatformArtifactKindDNSAnswerBundle, "dns-node")
+			return err
+		}},
+		{"dns-expected-set", `SELECT .* FROM fugue_platform_expected_consumer_sets`, func(ctx context.Context, s *Store) error {
+			_, err := s.GetPlatformExpectedConsumerSetContext(ctx, "expected")
+			return err
+		}},
+		{"dns-expected-inventory", `SELECT .* FROM fugue_platform_expected_consumer_sets`, func(ctx context.Context, s *Store) error {
+			_, err := s.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{ReleaseSetID: "parent"})
+			return err
+		}},
+		{"dns-active-release", `SELECT .* FROM fugue_platform_artifact_releases`, func(ctx context.Context, s *Store) error {
+			_, _, _, err := s.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindReleaseSet, "global", "full", nil)
+			return err
+		}},
+		{"dns-fresh-artifact", `SELECT .* FROM fugue_platform_artifacts`, func(ctx context.Context, s *Store) error {
+			_, err := s.NewPlatformArtifactReadSessionContext(ctx)("artifact")
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

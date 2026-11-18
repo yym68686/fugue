@@ -26,16 +26,25 @@ type platformContentSession struct {
 // current database facts and the digest of the actual current body bytes.
 // Sessions must not outlive a request or be used for mutation paths.
 func (s *Store) NewPlatformArtifactReadSession() func(string) (model.PlatformArtifact, error) {
+	return s.NewPlatformArtifactReadSessionContext(context.Background())
+}
+
+// NewPlatformArtifactReadSessionContext bounds every fresh read by ctx
+// without sharing any additional authority or publication state.
+func (s *Store) NewPlatformArtifactReadSessionContext(ctx context.Context) func(string) (model.PlatformArtifact, error) {
 	bodies := &platformContentSession{values: make(map[[32]byte]platformSessionContent)}
 	return func(id string) (model.PlatformArtifact, error) {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			return model.PlatformArtifact{}, ErrInvalidInput
 		}
-		if !s.usingDatabase() {
-			return s.GetPlatformArtifact(id)
+		if err := ctx.Err(); err != nil {
+			return model.PlatformArtifact{}, err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if !s.usingDatabase() {
+			return s.GetPlatformArtifactContext(ctx, id)
+		}
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		artifact, err := s.pgReadPlatformArtifactSession(ctx, id, bodies)
 		if err != nil {

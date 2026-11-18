@@ -33,7 +33,7 @@ func TestConditionalArtifactReadPostgresPreservesFreshAuthority(t *testing.T) {
 	}
 	for _, alias := range []string{"artifact", "generation"} {
 		for i := 0; i < 2; i++ {
-			got, err := s.pgGetPlatformArtifact(alias)
+			got, err := s.pgGetPlatformArtifact(t.Context(), alias)
 			if err != nil || got.Content["payload"] != payload {
 				t.Fatalf("read %s: %v", alias, err)
 			}
@@ -47,7 +47,7 @@ func TestConditionalArtifactReadPostgresPreservesFreshAuthority(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET status='draft', metadata_json='{"policy_digest":"changed"}', provenance_json='{"signature":"revoked"}' WHERE id='artifact'`); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.pgGetPlatformArtifact("artifact")
+	got, err := s.pgGetPlatformArtifact(t.Context(), "artifact")
 	if err != nil || got.Status != "draft" || got.Metadata["policy_digest"] != "changed" || got.Provenance.Signature != "revoked" || got.Content["payload"] != payload {
 		t.Fatalf("stale authority: %+v %v", got, err)
 	}
@@ -58,7 +58,7 @@ func TestConditionalArtifactReadPostgresPreservesFreshAuthority(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=$1 WHERE id='artifact'`, changed); err != nil {
 		t.Fatal(err)
 	}
-	got, err = s.pgGetPlatformArtifact("artifact")
+	got, err = s.pgGetPlatformArtifact(t.Context(), "artifact")
 	if err != nil || got.Content["payload"] != strings.Repeat("new", 1024) || got.ContentHash != "unchanged-claimed-hash" {
 		t.Fatal("actual content change hidden by claimed hash", err)
 	}
@@ -70,13 +70,13 @@ func TestConditionalArtifactReadPostgresPreservesFreshAuthority(t *testing.T) {
 		}
 	}
 	before = s.readMetrics[artifactReadMetric].bodyBytes.Load()
-	if _, err = s.pgGetPlatformArtifact("artifact"); err != nil || s.readMetrics[artifactReadMetric].bodyBytes.Load() <= before {
+	if _, err = s.pgGetPlatformArtifact(t.Context(), "artifact"); err != nil || s.readMetrics[artifactReadMetric].bodyBytes.Load() <= before {
 		t.Fatal("eviction did not fetch missing body", err)
 	}
 	if _, err := s.db.Exec(`DELETE FROM fugue_platform_artifacts WHERE id='artifact'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.pgGetPlatformArtifact("artifact"); err != ErrNotFound {
+	if _, err = s.pgGetPlatformArtifact(t.Context(), "artifact"); err != ErrNotFound {
 		t.Fatal("deleted artifact survived cache", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestConditionalArtifactReadPostgresTransferReduction(t *testing.T) {
 	}
 	started := time.Now()
 	for i := 0; i < 30; i++ {
-		if _, err := s.pgGetPlatformArtifact("large"); err != nil {
+		if _, err := s.pgGetPlatformArtifact(t.Context(), "large"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -186,7 +186,7 @@ func TestConditionalArtifactReadPostgresConcurrentReaders(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 10; j++ {
-				got, err := s.pgGetPlatformArtifact("concurrent")
+				got, err := s.pgGetPlatformArtifact(t.Context(), "concurrent")
 				if err != nil {
 					t.Error(err)
 					return

@@ -80,16 +80,20 @@ func (s *Server) handleGetPlatformDNSRuntimeFacts(w http.ResponseWriter, r *http
 }
 
 func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFactSource, error) {
-	return s.currentDNSFactSourceWithReaders(ctx, node, s.store.GetPlatformArtifact, nil)
+	return s.currentDNSFactSourceWithReaders(ctx, node, s.store.NewPlatformArtifactReadSessionContext(ctx), nil)
 }
 
 func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node string, loadArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (dnsFactSource, error) {
 	fail := func(reason string) (dnsFactSource, error) {
+		if err := ctx.Err(); err != nil {
+			observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason, ErrorClass: captureErrorClass(err)})
+			return dnsFactSource{}, err
+		}
 		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason})
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
 	finish := startDNSReadStage(ctx, dnsReadConsumerInventory)
-	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, node)
+	consumers, err := s.store.ListPlatformAuthorityConsumersContext(ctx, model.PlatformArtifactKindDNSAnswerBundle, node)
 	finish()
 	if err != nil {
 		return fail("consumer_inventory_read")
@@ -106,7 +110,7 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 			continue
 		}
 		finish = startDNSReadStage(ctx, dnsReadExpectedInventory)
-		set, err := s.store.GetPlatformExpectedConsumerSet(c.ExpectedConsumerSetID)
+		set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, c.ExpectedConsumerSetID)
 		finish()
 		if err != nil {
 			return fail("expected_set_read")
@@ -167,23 +171,32 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 	if selected == nil {
 		return fail("no_current_source")
 	}
+	if err := ctx.Err(); err != nil {
+		return dnsFactSource{}, err
+	}
 	return *selected, nil
 }
 
 func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims) (dnsFactSource, error) {
-	return s.dnsFactSourceForConsumerWithReaders(ctx, node, fact, claims, s.store.GetPlatformArtifact, nil)
+	return s.dnsFactSourceForConsumerWithReaders(ctx, node, fact, claims, s.store.NewPlatformArtifactReadSessionContext(ctx), nil)
 }
 
 func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node string, fact model.PlatformConsumerInstance, claims platformcontrol.PlatformComponentIdentityClaims, loadArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (dnsFactSource, error) {
 	fail := func(reason string) (dnsFactSource, error) {
-		observeCapture(ctx, captureEvent{Stage: "source_assignment_rejected", Node: node, Rejection: reason})
+		observeCapture(ctx, captureEvent{Stage: "source_assignment_rejected", Node: node, Rejection: reason, ErrorClass: captureErrorClass(ctx.Err())})
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
 	// Each authority observation owns a fresh envelope reader. Only the bounded
 	// request-owned bodies and pure binding computation may cross observations.
-	readArtifact := newConsumerArtifactReader(loadArtifact)
+	load := newConsumerArtifactReader(loadArtifact)
+	readArtifact := func(id string) (model.PlatformArtifact, error) {
+		if err := ctx.Err(); err != nil {
+			return model.PlatformArtifact{}, err
+		}
+		return load(id)
+	}
 	finish := startDNSReadStage(ctx, dnsReadAssignmentResolution)
-	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
+	resolved, err := s.resolvePlatformConsumerAssignmentsWithReaderContext(ctx, claims, readArtifact)
 	finish()
 	if err != nil {
 		return fail("assignment_resolution")
@@ -194,7 +207,7 @@ func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node s
 			continue
 		}
 		finish = startDNSReadStage(ctx, dnsReadAssignmentExpectedSet)
-		set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
+		set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, item.Assignment.ExpectedConsumerSetID)
 		finish()
 		if err != nil {
 			return fail("assignment_expected_set_read")
@@ -209,7 +222,7 @@ func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node s
 			return fail("assignment_expected_member_missing")
 		}
 		finish = startDNSReadStage(ctx, dnsReadTrafficReleaseSelection)
-		parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, claims.ScopeKey)
+		parent, release, found, err := s.selectTrafficRouteReleaseInScopeContext(ctx, group, claims.ScopeKey)
 		finish()
 		if err != nil {
 			return fail("traffic_release_selection")
@@ -300,7 +313,7 @@ func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node s
 			finish()
 		} else {
 			finish = startDNSReadStage(ctx, dnsReadRouteProjection)
-			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, claims.ScopeKey, readArtifact, readBinding)
+			projection, found, err := s.trafficRouteSourceWithInputCapture(ctx, group, claims.ScopeKey, readArtifact, readBinding, nil)
 			finish()
 			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 				return fail("route_projection")
@@ -331,13 +344,13 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	loadArtifact := s.store.NewPlatformArtifactReadSession()
+	loadArtifact := s.store.NewPlatformArtifactReadSessionContext(ctx)
 	readBinding := routeartifact.NewRequestBindingReader()
 	phaseCtx, finishPhase := startDNSReadPhase(ctx, dnsReadInitialSource)
 	source, err := s.currentDNSFactSourceWithReaders(phaseCtx, node, loadArtifact, readBinding)
 	finishPhase()
 	if err != nil {
-		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
+		return platformDNSRuntimeFactsResponse{}, err
 	}
 	transportReady := false
 	stage = "backend_selection"
@@ -378,6 +391,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	if event := dnsAuthorityRecheckRejection(ctx, source, current, err); event.Rejection != "" {
 		event.Node = node
 		observeCapture(ctx, event)
+		if err := ctx.Err(); err != nil {
+			return platformDNSRuntimeFactsResponse{}, err
+		}
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	_, finishPhase = startDNSReadPhase(ctx, dnsReadValidation)
@@ -393,6 +409,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		if err != nil {
 			return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 		}
+		if err := ctx.Err(); err != nil {
+			return platformDNSRuntimeFactsResponse{}, err
+		}
 		stage = "route_source_replay"
 		current.payload.ReadinessPlan, err = plans.Replay(response.Snapshot.RouteSources)
 		if err != nil {
@@ -406,6 +425,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		}
 	}
 	stage = "snapshot_validation"
+	if err := ctx.Err(); err != nil {
+		return platformDNSRuntimeFactsResponse{}, err
+	}
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshotWithRejection(response.Snapshot, current, response.EvaluatedAt, func(reason string) {
 		event := captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason}
@@ -420,6 +442,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	response.Ready = response.Ready && transportReady
 	response.lkgGeneration = current.consumer.LKGGeneration
 	response.heartbeatValidUntil = current.heartbeatValidUntil
+	if err := ctx.Err(); err != nil {
+		return platformDNSRuntimeFactsResponse{}, err
+	}
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
@@ -432,6 +457,8 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 func dnsAuthorityRecheckRejection(ctx context.Context, initial, current dnsFactSource, readErr error) captureEvent {
 	event := captureEvent{Stage: "authority_recheck_rejected"}
 	switch {
+	case errors.Is(readErr, context.DeadlineExceeded), errors.Is(readErr, context.Canceled):
+		event.Rejection, event.ErrorClass = "context", captureErrorClass(readErr)
 	case readErr != nil:
 		event.Rejection, event.ErrorClass = "source_unavailable", captureErrorClass(readErr)
 	case current.consumer.CredentialID != initial.consumer.CredentialID:

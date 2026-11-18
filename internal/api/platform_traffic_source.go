@@ -25,7 +25,7 @@ var errTrafficSourceChanged = errors.New("traffic release changed during route o
 // an unrelated cold candidate is not authority to reject a serving request.
 func (s *Server) edgeRouteIntentSnapshotForRead(ctx context.Context, group, scope string) (model.EdgeRouteIntentSnapshot, bool, error) {
 	var reads []store.PlatformInputReadSelection
-	before, found, err := s.trafficRouteSourceWithInputCapture(group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { reads = r })
+	before, found, err := s.trafficRouteSourceWithInputCapture(context.Background(), group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { reads = r })
 	if err != nil || !found {
 		return before, found, err
 	}
@@ -33,7 +33,7 @@ func (s *Server) edgeRouteIntentSnapshotForRead(ctx context.Context, group, scop
 		return model.EdgeRouteIntentSnapshot{}, true, err
 	}
 	var freshReads []store.PlatformInputReadSelection
-	after, found, err := s.trafficRouteSourceWithInputCapture(group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { freshReads = r })
+	after, found, err := s.trafficRouteSourceWithInputCapture(context.Background(), group, scope, newConsumerArtifactReader(s.store.GetPlatformArtifact), nil, func(r []store.PlatformInputReadSelection) { freshReads = r })
 	if err != nil || !found || !reflect.DeepEqual(before, after) || !reflect.DeepEqual(reads, freshReads) {
 		return model.EdgeRouteIntentSnapshot{}, true, errTrafficSourceChanged
 	}
@@ -64,12 +64,15 @@ func (s *Server) edgeRouteIntentSnapshotFromTrafficScope(group, scope string, re
 // returns a complete projection. Both paths perform the same fresh authority
 // and topology reads, including the final publication-change check.
 func (s *Server) edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
-	return s.trafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, nil)
+	return s.trafficRouteSourceWithInputCapture(context.Background(), group, scope, readArtifact, readBinding, nil)
 }
 
-func (s *Server) trafficRouteSourceWithInputCapture(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
+func (s *Server) trafficRouteSourceWithInputCapture(ctx context.Context, group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	for attempt := 0; ; attempt++ {
-		snapshot, found, err := s.observeTrafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, capture)
+		if err := ctx.Err(); err != nil {
+			return model.EdgeRouteIntentSnapshot{}, true, err
+		}
+		snapshot, found, err := s.observeTrafficRouteSourceWithInputCapture(ctx, group, scope, readArtifact, readBinding, capture)
 		if !errors.Is(err, errTrafficSourceChanged) || attempt == 2 {
 			return snapshot, found, err
 		}
@@ -81,12 +84,12 @@ func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact fun
 }
 
 func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
-	return s.observeTrafficRouteSourceWithInputCapture(group, scope, readArtifact, readBinding, nil)
+	return s.observeTrafficRouteSourceWithInputCapture(context.Background(), group, scope, readArtifact, readBinding, nil)
 }
 
-func (s *Server) observeTrafficRouteSourceWithInputCapture(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
+func (s *Server) observeTrafficRouteSourceWithInputCapture(ctx context.Context, group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	defer s.observeOperation("traffic-source")()
-	parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
+	parent, release, found, err := s.selectTrafficRouteReleaseInScopeContext(ctx, group, scope)
 	if err != nil || !found {
 		return model.EdgeRouteIntentSnapshot{}, found, err
 	}
@@ -110,7 +113,7 @@ func (s *Server) observeTrafficRouteSourceWithInputCapture(group, scope string, 
 		if err != nil || artifact.ScopeKey != parent.ScopeKey || s.store.VerifyPlatformArtifactIntegrity(artifact) != nil {
 			return fail()
 		}
-		sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, ScopeKey: parent.ScopeKey})
+		sets, err := s.store.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind, ScopeKey: parent.ScopeKey})
 		if err != nil {
 			return fail()
 		}
@@ -160,7 +163,7 @@ func (s *Server) observeTrafficRouteSourceWithInputCapture(group, scope string, 
 	}
 	// Publication/rollback can supersede an assignment while its artifacts
 	// are read. Never return a mixed release snapshot to the executor.
-	current, active, found, err := s.selectTrafficRouteReleaseInScope(group, scope)
+	current, active, found, err := s.selectTrafficRouteReleaseInScopeContext(ctx, group, scope)
 	if err != nil || !found || active.Status != model.PlatformArtifactReleaseStatusActive {
 		return fail()
 	}
@@ -188,6 +191,10 @@ func trafficRouteScope(group string) string {
 }
 
 func (s *Server) selectTrafficRouteReleaseInScope(group, scope string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.selectTrafficRouteReleaseInScopeContext(context.Background(), group, scope)
+}
+
+func (s *Server) selectTrafficRouteReleaseInScopeContext(ctx context.Context, group, scope string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	type candidate struct {
 		parent  model.PlatformArtifact
 		release model.PlatformArtifactRelease
@@ -200,7 +207,7 @@ func (s *Server) selectTrafficRouteReleaseInScope(group, scope string) (model.Pl
 		return fail()
 	}
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelFull, model.PlatformArtifactReleaseChannelGray} {
-		parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, channel)
+		parent, release, found, err := s.store.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindReleaseSet, scope, channel, nil)
 		if err != nil {
 			return fail()
 		}
