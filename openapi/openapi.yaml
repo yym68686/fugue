@@ -199,6 +199,18 @@ x-fugue-front-network-observation:
     response. No read probes applications, changes routing, persists peer data,
     renews evidence or authorizes serving. Publish the private reader to the actual
     selected Fronts through verified executor replacement before enabling its caller.
+  passive_batch:
+    endpoint: GET /edge/passive-network-samples on the private Front health listener
+    response_schema: '#/components/schemas/EdgeFrontPassiveNetworkBatch'
+    semantics: >-
+      Returns bounded, already-observed HTTPS TCP samples using kernel peers,
+      not HTTP headers or Worker route matches. Retains at most three complete
+      or in-progress five-minute buckets of 128 samples each and limits each
+      coarse prefix to eight per bucket. No exact client address, hostname,
+      or route is returned. The control plane reads only through the authenticated
+      Kubernetes pod proxy, binds evidence to the exact serving Service, Pod,
+      process lifetime and endpoints before persistence, and does not admit this
+      source through Worker heartbeats. Unknown TCP metrics remain unknown.
 x-fugue-dns-readiness:
   endpoint: GET /readyz on the DNS node HTTP listener
   response_schema: '#/components/schemas/DNSListenerReadiness'
@@ -22556,6 +22568,18 @@ components:
         service_uid: {type: string, maxLength: 128}
         service_version: {type: string, maxLength: 128}
         endpoints_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+    EdgeFrontPassiveNetworkBatch:
+      type: object
+      additionalProperties: false
+      required: [schema, edge_id, group_id, samples]
+      properties:
+        schema: {type: string, enum: [public-front-passive-v1]}
+        edge_id: {type: string}
+        group_id: {type: string}
+        samples:
+          type: array
+          maxItems: 384
+          items: {$ref: '#/components/schemas/EdgeClientNetworkSample'}
     EdgeClientNetworkSample:
       type: object
       additionalProperties: false
@@ -22980,7 +23004,7 @@ components:
           type: object
           additionalProperties: false
           required: [reason]
-          description: Scope and evidence for the passive ASN decision. Client and resolver addresses are not recorded.
+          description: Scope and evidence for the passive ASN decision. New ASNs may use a cross-ASN comparison derived from the same signed pairs, with at most one vote per ASN. Client and resolver addresses are not recorded.
           properties:
             reason: {type: string}
             mode: {type: string, enum: [shadow, active]}
@@ -22994,6 +23018,8 @@ components:
             shared_windows: {type: integer, minimum: 3}
             left_win_windows: {type: integer, minimum: 1}
             right_win_windows: {type: integer, minimum: 1}
+            aggregate_asns: {type: integer, minimum: 3, description: "Number of ASNs with comparable evidence for the decisive pair, including ties."}
+            aggregate_supporting_asns: {type: integer, minimum: 3, description: Number of ASNs favoring the chosen edge for that pair.}
         availability:
           type: object
           additionalProperties: false

@@ -51,12 +51,25 @@ type View struct {
 	resolverPrefixes             map[netip.Prefix]bool
 	resolverBits4, resolverBits6 []int
 	pairs                        map[comparisonKey]edgequality.PassiveASNComparison
+	aggregate                    map[comparisonKey]aggregatePair
 }
 
 type comparisonKey struct {
 	asn         uint32
 	family      int
 	left, right edgequality.PassiveEndpoint
+}
+
+type aggregatePair struct {
+	total, leftWins, rightWins int
+	leftAt, rightAt            time.Time
+}
+
+func earlierEvidence(current, sample time.Time) time.Time {
+	if current.IsZero() || sample.Before(current) {
+		return sample
+	}
+	return current
 }
 
 func Sign(p Publication, keys bundleauth.Keyring) (model.PlatformArtifact, error) {
@@ -117,7 +130,8 @@ func buildView(p Publication) (*View, error) {
 		return nil, errors.New("passive ASN publication exceeds validity bounds")
 	}
 	v := &View{Publication: p, bindings: make(map[netip.Prefix]uint32, len(p.Bindings)),
-		resolverPrefixes: make(map[netip.Prefix]bool, len(p.Resolvers)), pairs: make(map[comparisonKey]edgequality.PassiveASNComparison, len(p.Pairs))}
+		resolverPrefixes: make(map[netip.Prefix]bool, len(p.Resolvers)), pairs: make(map[comparisonKey]edgequality.PassiveASNComparison, len(p.Pairs)),
+		aggregate: make(map[comparisonKey]aggregatePair)}
 	for _, b := range p.Bindings {
 		if !validPrefix(b.Prefix) || b.ASN == 0 || b.Prefix.Bits() != cohortBits(b.Prefix.Addr()) || v.bindings[b.Prefix] != 0 {
 			return nil, errors.New("invalid or duplicate passive ASN binding")
@@ -157,6 +171,20 @@ func buildView(p Publication) (*View, error) {
 		}
 		seen[pair.Key()] = true
 		v.pairs[comparisonKey{pair.ASN, pair.Family, pair.Left, pair.Right}] = pair
+		// Pairs are already unique per ASN and exact endpoint pair. Sample
+		// volume and number of prefixes never increase an ASN's weight.
+		key := comparisonKey{0, pair.Family, pair.Left, pair.Right}
+		count := v.aggregate[key]
+		count.total++
+		switch pair.Preferred {
+		case pair.Left.EdgeID:
+			count.leftWins++
+			count.leftAt = earlierEvidence(count.leftAt, pair.ObservedAt)
+		case pair.Right.EdgeID:
+			count.rightWins++
+			count.rightAt = earlierEvidence(count.rightAt, pair.ObservedAt)
+		}
+		v.aggregate[key] = count
 	}
 	return v, nil
 }
@@ -223,10 +251,73 @@ type Choice struct {
 	Reason                                         string
 	EvidenceAt                                     time.Time
 	SharedWindows, LeftWinWindows, RightWinWindows int
+	AggregateASNs, AggregateSupportingASNs         int
 }
 
 func choiceWithEvidence(edge edgequality.PassiveEndpoint, reason string, comparison edgequality.PassiveASNComparison) Choice {
-	return Choice{edge, reason, comparison.ObservedAt, comparison.SharedWindows, comparison.LeftWinWindows, comparison.RightWinWindows}
+	return Choice{Edge: edge, Reason: reason, EvidenceAt: comparison.ObservedAt,
+		SharedWindows: comparison.SharedWindows, LeftWinWindows: comparison.LeftWinWindows, RightWinWindows: comparison.RightWinWindows}
+}
+
+func (v *View) aggregateChoice(a, b edgequality.PassiveEndpoint, family int) Choice {
+	left, right := a, b
+	if a.EdgeID > b.EdgeID {
+		left, right = b, a
+	}
+	pair := v.aggregate[comparisonKey{0, family, left, right}]
+	for _, side := range []struct {
+		edge edgequality.PassiveEndpoint
+		wins int
+		at   time.Time
+	}{{left, pair.leftWins, pair.leftAt}, {right, pair.rightWins, pair.rightAt}} {
+		if side.wins >= 3 && 3*side.wins >= 2*pair.total {
+			return Choice{Edge: side.edge, Reason: "passive_aggregate_preferred", EvidenceAt: side.at,
+				AggregateASNs: pair.total, AggregateSupportingASNs: side.wins}
+		}
+	}
+	return Choice{}
+}
+
+// Rank only endpoints that already have permission to serve. Unknown edges
+// keep their baseline order and remain eligible for bounded exploration.
+func (v *View) chooseAggregate(family int, candidates []edgequality.PassiveEndpoint) Choice {
+	base := candidates[0]
+	answer := Choice{Edge: base, Reason: "retained_no_comparison"}
+	winners := []Choice{}
+	for _, edge := range candidates[1:] {
+		choice := v.aggregateChoice(base, edge, family)
+		if choice.Edge == edge {
+			winners = append(winners, choice)
+		} else if choice.Edge == base && choice.EvidenceAt.After(answer.EvidenceAt) {
+			answer = choice
+			answer.Reason = "retained_passive_aggregate_advantage"
+		}
+	}
+	for _, winner := range winners {
+		proven := true
+		for _, other := range winners {
+			if other.Edge != winner.Edge && v.aggregateChoice(winner.Edge, other.Edge, family).Edge != winner.Edge {
+				proven = false
+				break
+			}
+		}
+		if !proven {
+			continue
+		}
+		for _, other := range candidates[1:] {
+			if other != winner.Edge && v.aggregateChoice(winner.Edge, other, family).Edge == other {
+				proven = false
+				break
+			}
+		}
+		if proven {
+			return winner
+		}
+	}
+	if len(winners) > 0 {
+		return Choice{Edge: base, Reason: "retained_conflicting_aggregate_comparisons"}
+	}
+	return answer
 }
 
 // Choose only receives already eligible members and preserves their baseline
@@ -238,7 +329,7 @@ func (v *View) Choose(asn uint32, family int, candidates []edgequality.PassiveEn
 	}
 	base := candidates[0]
 	answer := Choice{Edge: base, Reason: "retained_no_comparison"}
-	if asn == 0 || len(candidates) < 2 || v == nil {
+	if len(candidates) < 2 || v == nil {
 		return answer
 	}
 	find := func(a, b edgequality.PassiveEndpoint) (edgequality.PassiveASNComparison, bool) {
@@ -261,6 +352,34 @@ func (v *View) Choose(asn uint32, family int, candidates []edgequality.PassiveEn
 			}
 		} else {
 			unknown = append(unknown, edge)
+		}
+	}
+	// Don't let a fleet average override a local tie, loss, or an
+	// unresolved conflict between eligible members of this ASN.
+	if len(unknown) == len(candidates)-1 {
+		hasLocal := false
+		for i, a := range unknown {
+			for _, b := range unknown[i+1:] {
+				if _, ok := find(a, b); ok {
+					hasLocal = true
+					break
+				}
+			}
+			if hasLocal {
+				break
+			}
+		}
+		if !hasLocal {
+			answer = v.chooseAggregate(family, candidates)
+			if answer.Reason == "retained_conflicting_aggregate_comparisons" {
+				return answer
+			}
+			unknown = unknown[:0]
+			for _, edge := range candidates {
+				if edge != answer.Edge && v.aggregateChoice(answer.Edge, edge, family).Edge.EdgeID == "" {
+					unknown = append(unknown, edge)
+				}
+			}
 		}
 	}
 	if len(winners) != 0 {

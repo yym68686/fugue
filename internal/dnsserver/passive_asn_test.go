@@ -157,3 +157,87 @@ func TestPassiveASNBoundedExploration(t *testing.T) {
 		t.Fatalf("bounded exploration served %d answers", count)
 	}
 }
+
+func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
+	st, rt, now := passiveASNTestRuntime(t, "active", true)
+	p := rt.view.Publication
+	pair := p.Pairs[0]
+	for i, address := range []string{"192.0.2.0/24", "9.9.9.0/24", "1.1.1.0/24"} {
+		next := pair
+		next.ASN += uint32(i + 1)
+		next.Prefixes = []netip.Prefix{netip.MustParsePrefix(address)}
+		if i == 2 {
+			// This ASN disagrees. It must retain its own choice rather than
+			// have the average (3 out of 4) overwrite it.
+			next.LeftWinWindows, next.RightWinWindows, next.Preferred = 3, 0, "edge-a"
+		}
+		p.Pairs = append(p.Pairs, next)
+		p.Bindings = append(p.Bindings, passiveasn.Binding{Prefix: next.Prefixes[0], ASN: next.ASN})
+	}
+	keys := bundleauth.NewKeyring("test-key", "test-id", "", "", nil)
+	a, err := passiveasn.Sign(p, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := st.record.Candidate.Assignment
+	assignment.ArtifactID, assignment.ContentHash = st.record.Candidate.Artifact.ID, st.record.Candidate.Artifact.ContentHash
+	rt.view, err = passiveasn.Verify(a, assignment, "dns-a", keys, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct{ subnet, remote, answer, why string }{
+		{"8.8.4.0", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred"},
+		{"1.1.1.0", "198.51.100.2:53", "8.8.8.8", "retained_no_challenger_advantage"},
+		{"8.8.4.0", "192.0.2.10:53", "8.8.8.8", "ecs_resolver_untrusted"},
+		{"", "198.51.100.2:53", "8.8.8.8", "ecs_absent_or_invalid"},
+	} {
+		t.Run(test.why, func(t *testing.T) {
+			req := passiveASNTestQuery(test.subnet, 24)
+			capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}}
+			res := st.answerObserved(req, test.remote, now, capture, rt)
+			wire, err := res.Pack()
+			var decoded dns.Msg
+			if err != nil || decoded.Unpack(wire) != nil || len(decoded.Answer) != 1 || decoded.Answer[0].(*dns.A).A.String() != test.answer {
+				t.Fatalf("unexpected wire response %v, %v", res, err)
+			}
+			journal := decisionTestJournal(t)
+			journal.enqueue(req, res, capture, decisionPublicationState(st, nil), "tcp", now, true)
+			select {
+			case pending := <-journal.queue:
+				journal.append(pending)
+			default:
+				t.Fatal("missing receipt")
+			}
+			receipt := (*journal.records.Load())[0]
+			decision := receipt.Records[0].PassiveASN
+			if decision == nil || decision.Reason != test.why {
+				t.Fatal("wrong decision", decision)
+			}
+			if test.why == "passive_aggregate_preferred" &&
+				(decision.AggregateASNs != 4 || decision.AggregateSupportingASNs != 3 || decision.ASN != 0 ||
+					decision.EvidenceKind != "historical" || decoded.IsEdns0().Option[0].(*dns.EDNS0_SUBNET).SourceScope != 24) {
+				t.Fatal("lost aggregate evidence or unsafe scope", decision, decoded.IsEdns0())
+			}
+			if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
+				t.Fatal("receipt did not replay", err)
+			}
+		})
+	}
+}
+
+func TestPassiveASNExploresTrustedColdPrefixesWithoutOverridingFixedRecords(t *testing.T) {
+	st, rt, now := passiveASNTestRuntime(t, "active", false)
+	req := passiveASNTestQuery("8.8.4.0", 24)
+	for _, fixed := range []bool{false, true} {
+		st.passiveFixed = map[string]bool{"target.example.test\x00A": fixed}
+		rt.budget.Store(199)
+		got := st.answerObserved(req, "198.51.100.2:53", now, nil, rt)
+		expect := "9.9.9.9"
+		if fixed {
+			expect = "8.8.8.8"
+		}
+		if len(got.Answer) != 1 || got.Answer[0].(*dns.A).A.String() != expect {
+			t.Fatal("cold exploration violated the policy", got)
+		}
+	}
+}

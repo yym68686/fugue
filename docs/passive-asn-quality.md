@@ -3,7 +3,20 @@
 The API starts one bounded observer by default. It reads already authenticated
 public Front TCP samples across domains; it sends no traffic and consumes
 neither the GitHub recovery observer nor the client-probe report stream.
-Samples must match the current inventory group, address family and bundle.
+The selected public Front records coarse kernel-peer samples after forwarding
+HTTPS bytes in both directions. This works without Worker route matches or an
+exact live-connection lookup. The control plane reads a bounded batch through
+the Kubernetes pod proxy, verifies the actual public Service, ready Front
+process and EndpointSlices before and after the read, and records it with
+that provenance. Internal peers, handshake-only connections, claimed Worker
+batches and nonmatching listeners do not become samples.
+
+Samples must match the current inventory group and address family. Legacy
+Worker samples without a public transport witness remain tied to the original
+bundle. A verified witness can survive a routine bundle change while that
+same selected Front process and Service are still proven. The observer can
+replay the preceding retained 30-minute window separately, with the same
+comparison requirements and original timestamps.
 Hostname, application timing, origin and health-probe metrics are not inputs
 to the line comparison.
 
@@ -58,19 +71,19 @@ The observation starts in shadow mode. Active mode requires a replayable
 positive DNS answer from each configured independent public authority's
 selected process and current full release. This verifies the live wire path
 without waiting for a particular client traffic mix. Each active query must
-still carry trusted, classifiable ECS to affect the answer. A restarted or
+still carry a trusted, sufficiently specific ECS prefix to affect the answer. A restarted or
 replaced authority has to reestablish its wire proof. Both Kubernetes-bound global DNS and Cell DNS
 fetch the same private format, but a global process cannot activate using a
 Cell process's proof or vice versa. Each consumer uses its own expected-set
 cohort; an idle slot can verify shadow without using the on-duty slot's
 active proof.
 
-DNS accepts only a complete matching-family ECS prefix within a known
+DNS accepts only a complete matching-family ECS prefix at least as specific as
 `/24` or `/48` from a socket peer in the vendor-published
 [Google Public DNS authoritative egress ranges](https://developers.google.com/speed/public-dns/faq).
 No resolver address, ECS opt-in flag, or provider ASN is used as the client's
-ASN. Non-ECS queries and unknown or unavailable mappings keep the baseline
-answer. Eligible ECS replies use the query prefix as their cache scope,
+ASN. Non-ECS queries, untrusted sources, and unavailable mapping or trust
+snapshots keep the baseline answer. Eligible ECS replies use the query prefix as their cache scope,
 including during shadow and fallback, without using it to change the answer.
 
 ASN ranking can select only a still-ready member of the signed serving order
@@ -78,8 +91,14 @@ of a single-address dynamic record. Fixed per-name orders, explicit physical
 routes, redundant responses and business allocation keep their existing
 semantics. A recovered edge can compete immediately with retained compatible
 evidence once it has a current route/TLS proof and is back in that order.
-Missing comparisons keep the existing answer, except for at most one in 200
-eligible classified DNS responses per executor offered to exploration. An
+When no local comparison exists, a new ASN or a trusted, complete prefix
+without a learned mapping can use cross-ASN evidence derived from the same
+signed pairs. Each ASN contributes at most one vote per edge pair, separately
+by address family. To promote a candidate it needs at least three supporting
+ASNs and two-thirds of the comparable ASNs; ties count in the denominator.
+An existing local tie, loss, or conflict cannot be overridden by this fallback.
+Without a clear advantage the signed baseline remains the default. At most one
+in 200 eligible ECS responses per executor can explore an unknown pair. An
 exploratory reply has at most a 30-second TTL (and never outlives readiness).
 DNS caches mean this is **not** a bound on the resulting HTTP traffic share.
 Already-compared pairs are not exploration targets; conflicting comparisons
@@ -88,7 +107,9 @@ leases, attribution, and route/TLS proofs still have freshness requirements.
 
 The DNS decision receipt records the observation digest, mode, reason,
 incumbent, considered edge, and the comparison timestamp and window counts,
-including whether the evidence is historical. It replays the recorded wire
+including whether the evidence is historical. A cross-ASN result instead
+records the decisive pair's comparable and supporting ASN counts and the
+oldest supporting evidence timestamp. It replays the recorded wire
 selection, not the private source-prefix classification. Neither the client
 nor the resolver address is recorded in the receipt.
 

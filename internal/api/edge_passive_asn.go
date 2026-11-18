@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/netip"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -165,6 +164,7 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	}
 	identities := make(map[string]edgequality.PassiveEdgeIdentity)
 	var edgeIDs []string
+	var eligible []model.EdgeNode
 	for _, node := range nodes {
 		if !node.Healthy || !edgeNodeHeartbeatFresh(node, now) || node.Draining || node.RouteBundleVersion == "" ||
 			node.PublicIPv4 == "" && node.PublicIPv6 == "" {
@@ -177,10 +177,31 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 			GroupID: node.EdgeGroupID, IPv4: node.PublicIPv4, IPv6: node.PublicIPv6, Bundle: node.RouteBundleVersion,
 		}
 		edgeIDs = append(edgeIDs, node.ID)
+		eligible = append(eligible, node)
 	}
+	fronts := s.collectPassiveFronts(ctx, eligible)
+	writeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	for _, read := range fronts {
+		id := identities[read.node]
+		id.Front = read.identity
+		identities[read.node] = id
+		if len(read.samples) != 0 {
+			for chunk := range slices.Chunk(read.samples, 128) {
+				if err := s.store.RecordEdgeNetworkSamples(writeCtx, chunk, time.Time{}); err != nil {
+					read.status = "sample_store_unavailable"
+					break
+				}
+			}
+		}
+		if s.log != nil {
+			s.log.Printf("passive Front: edge_id=%s status=%s samples=%d", read.node, read.status, len(read.samples))
+		}
+	}
+	cancel()
 	const perEdge = 512
 	sampleReadCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	batch, err := s.store.ListPassiveEdgeNetworkSamples(sampleReadCtx, edgeIDs, now.Truncate(edgequality.PassiveASNInterval).Add(-edgequality.PassiveASNWindow), perEdge+1)
+	previousWindowEnd := now.Truncate(edgequality.PassiveASNInterval).Add(-edgequality.PassiveASNWindow)
+	batch, err := s.store.ListPassiveEdgeNetworkSamples(sampleReadCtx, edgeIDs, previousWindowEnd.Add(-edgequality.PassiveASNWindow), perEdge+1)
 	cancel()
 	if err != nil {
 		return err
@@ -198,6 +219,10 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	}
 	window.edges = len(identities)
 	comparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
+	// Replay the preceding real window before raw storage prunes it. Never
+	// mix widely separated windows or promote its original timestamps.
+	historical, _ := edgequality.ComparePassiveASN(samples, identities, resolver, previousWindowEnd)
+	comparisons = append(historical, comparisons...)
 	window.coverage = coverage
 	// Observe each selected authority even when it received no new sample.
 	// Read failure never fails or renews the measurement history.
@@ -260,9 +285,9 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	s.passiveASN.window = window
 	s.passiveASN.mu.Unlock()
 	if s.log != nil {
-		s.log.Printf("passive ASN: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d dns_verified=%d dns_wire_verified=%d",
+		s.log.Printf("passive ASN: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d reused_bundle_samples=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d dns_verified=%d dns_wire_verified=%d",
 			window.rules, window.bgpSourceAt.Format(time.RFC3339), window.edges, window.cappedEdges, coverage.Connections, coverage.Classified, coverage.TCPRTT, coverage.ClassifiedRTT,
-			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints, window.dnsVerified, window.dnsWireVerified)
+			coverage.ReusedBundleSamples, window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints, window.dnsVerified, window.dnsWireVerified)
 	}
 	return nil
 }
@@ -289,12 +314,11 @@ func collectPassiveASNCohorts(samples []model.EdgeNetworkSample, identities map[
 	seen := map[netip.Prefix]bool{}
 	for _, sample := range samples {
 		id, ok := identities[sample.EdgeID]
-		if !ok || sample.Source != "public_front_tcp_info_v1" || id.GroupID != sample.EdgeGroupID ||
-			id.Bundle != sample.BundleVersion || model.ValidateEdgeNetworkSample(sample) != nil {
+		if !ok {
 			continue
 		}
-		p, err := netip.ParsePrefix(strings.TrimPrefix(sample.ClientNetwork.Scope, "tcp_peer:"))
-		if err != nil || seen[p] {
+		p, admitted := edgequality.PassiveSamplePrefix(sample, id)
+		if !admitted || seen[p] {
 			continue
 		}
 		seen[p] = true
@@ -487,6 +511,7 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 		{"mapping_rules", window.rules}, {"edges", window.edges}, {"capped_edges", window.cappedEdges},
 		{"connections", window.coverage.Connections}, {"asn_connections", window.coverage.Classified},
 		{"tcp_rtt_connections", window.coverage.TCPRTT}, {"asn_tcp_rtt_connections", window.coverage.ClassifiedRTT},
+		{"reused_bundle_samples", window.coverage.ReusedBundleSamples},
 		{"retained_comparisons", window.retained}, {"preferred_comparisons", window.preferring}, {"unretained_new_comparisons", window.saturated},
 		{"dns_nodes", window.dnsNodes}, {"dns_reads", window.dnsReads}, {"dns_answers", window.dnsAnswers},
 		{"dns_ecs", window.dnsECS}, {"dns_ecs_asn_hint_upper_bound", window.dnsASNHints},

@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/frontnetwork"
+	"fugue/internal/model"
 	"fugue/internal/proxyproto"
 	"fugue/internal/tcpdiag"
 	"fugue/internal/tcpproxy"
@@ -66,6 +68,8 @@ type Service struct {
 	metrics         edgeFrontMetrics
 	sequence        uint64
 	networkLast     time.Time
+	passiveMu       sync.Mutex
+	passive         [frontnetwork.PassiveBuckets]passiveNetworkBucket
 }
 
 type tcpCopyResult = tcpproxy.CopyResult
@@ -302,6 +306,7 @@ func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) (func(contex
 	mux.HandleFunc("/edge/tcp-connections", func(w http.ResponseWriter, r *http.Request) {
 		s.handleTCPConnections(w, r)
 	})
+	mux.HandleFunc(frontnetwork.PassivePath, s.handlePassiveNetworkSamples)
 	mux.HandleFunc("/edge/tcp-capture-hints", func(w http.ResponseWriter, r *http.Request) {
 		s.handleTCPCaptureHints(w, r)
 	})
@@ -429,8 +434,16 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	}
 	connectionID := s.startTCPConnection(protocol, slot, target, downstream, upstream, startedAt, cfg.ProxyProtocol)
 	defer s.finishTCPConnection(connectionID)
+	connection, samplePublic := passiveConnection(cfg, protocol, slot, connectionID, downstream, startedAt)
+	var baseline model.EdgeClientNetworkSample
+	if samplePublic {
+		baseline = publicClientNetworkSample(connection, tcpdiag.SnapshotFromConn(downstream), time.Now().UTC())
+	}
 	clientToWorker, workerToClient, firstCompleted := tcpproxy.CopyBidirectional(downstream, upstream, "client_to_worker", "worker_to_client")
 	clientTCPInfo := tcpdiag.SnapshotFromConn(downstream)
+	if samplePublic && clientToWorker.Bytes > 0 && workerToClient.Bytes > 0 {
+		s.recordPassiveNetworkSample(connection, baseline, clientTCPInfo, time.Now().UTC())
+	}
 	s.recordTCPConnection(protocol, slot, firstCompleted, cfg.ProxyProtocol, time.Since(startedAt), clientToWorker, workerToClient, clientTCPInfo)
 	s.logTCPConnection(protocol, slot, target, downstream, upstream, startedAt, clientToWorker, workerToClient, firstCompleted, cfg.ProxyProtocol, clientTCPInfo)
 }

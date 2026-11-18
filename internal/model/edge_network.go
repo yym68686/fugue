@@ -29,6 +29,8 @@ type EdgeNetworkSample struct {
 	ObservedAt           time.Time                `json:"observed_at"`
 }
 
+const EdgeNetworkPassiveFrontSource = "public_front_passive_tcp_info_v1"
+
 func EdgeNetworkServiceSource(source string) bool {
 	return source == "service_endpoint_tcp_info_v1" || source == "service_endpoint_tcp_probe_v1"
 }
@@ -101,6 +103,19 @@ func EdgeNetworkWitnessMatches(sample, witness EdgeNetworkSample) bool {
 }
 
 func ValidateEdgeNetworkSample(sample EdgeNetworkSample) error {
+	if sample.Source == EdgeNetworkPassiveFrontSource {
+		// This domain-independent source is stored directly by the control
+		// plane; it must never masquerade as a route-specific observation.
+		if sample.ID == "" || len(sample.ID) > 128 || sample.EdgeID == "" || len(sample.EdgeID) > 128 ||
+			sample.EdgeGroupID == "" || len(sample.EdgeGroupID) > 128 || sample.Hostname != "" || sample.PathPrefix != "" ||
+			sample.TrafficClass != "" || sample.RouteDigest != "" || sample.BundleVersion != "" || sample.ServiceTarget != "" ||
+			sample.ServiceRTTMS != nil || sample.ServiceConnectFailed != nil || sample.RouteWitness != nil ||
+			ValidateEdgeClientNetworkSample(sample.ClientNetwork) != nil || sample.ClientNetwork.Backend == nil ||
+			!sample.ObservedAt.Equal(sample.ClientNetwork.ObservedAt) {
+			return errors.New("invalid passive Front observation")
+		}
+		return nil
+	}
 	digest, digestErr := hex.DecodeString(strings.TrimPrefix(sample.RouteDigest, "sha256:"))
 	host, port, targetErr := net.SplitHostPort(sample.ServiceTarget)
 	portNumber, portErr := strconv.Atoi(port)

@@ -31,8 +31,8 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM (
  SELECT edge_id, sample_json, row_number() OVER (PARTITION BY edge_id ORDER BY observed_at DESC, id) AS position
  FROM fugue_edge_network_samples
- WHERE edge_id = ANY($1::text[]) AND observed_at >= $2 AND sample_json->>'source' = 'public_front_tcp_info_v1'
-) AS observations WHERE position <= $3 ORDER BY edge_id, position`, edgeIDs, since, limit)
+ WHERE edge_id = ANY($1::text[]) AND observed_at >= $2 AND sample_json->>'source' IN ('public_front_tcp_info_v1', $4)
+) AS observations WHERE position <= $3 ORDER BY edge_id, position`, edgeIDs, since, limit, model.EdgeNetworkPassiveFrontSource)
 		if err != nil {
 			return nil, err
 		}
@@ -56,7 +56,7 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if wanted[sample.EdgeID] && sample.Source == "public_front_tcp_info_v1" && !sample.ObservedAt.Before(since) {
+			if wanted[sample.EdgeID] && (sample.Source == "public_front_tcp_info_v1" || sample.Source == model.EdgeNetworkPassiveFrontSource) && !sample.ObservedAt.Before(since) {
 				byEdge[sample.EdgeID] = append(byEdge[sample.EdgeID], sample)
 			}
 		}

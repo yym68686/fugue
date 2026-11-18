@@ -15,8 +15,8 @@ import (
 func passiveASNFixture() ([]model.EdgeNetworkSample, map[string]PassiveEdgeIdentity, time.Time) {
 	now := time.Date(2026, 1, 1, 0, 20, 0, 0, time.UTC)
 	identities := map[string]PassiveEdgeIdentity{
-		"edge-a": {"group-a", "192.0.2.2", "2001:db8:a::1", "bundle-a"},
-		"edge-b": {"group-b", "192.0.2.3", "2001:db8:b::1", "bundle-b"},
+		"edge-a": {GroupID: "group-a", IPv4: "192.0.2.2", IPv6: "2001:db8:a::1", Bundle: "bundle-a"},
+		"edge-b": {GroupID: "group-b", IPv4: "192.0.2.3", IPv6: "2001:db8:b::1", Bundle: "bundle-b"},
 	}
 	samples := []model.EdgeNetworkSample{}
 	for window := 1; window <= 3; window++ {
@@ -35,6 +35,46 @@ func passiveASNFixture() ([]model.EdgeNetworkSample, map[string]PassiveEdgeIdent
 		}
 	}
 	return samples, identities, now
+}
+
+func TestPassiveASNReusesOnlyVerifiedTransportAcrossBundles(t *testing.T) {
+	samples, ids, now := passiveASNFixture()
+	second := ids["edge-b"]
+	second.Front = &PassiveFrontIdentity{
+		Backend: model.EdgeClientNetworkBackend{Namespace: "edge", PodName: "front", PodUID: "uid", PodVersion: "10",
+			ServiceName: "public", ServiceUID: "service-uid", ServiceVersion: "8", EndpointsDigest: "sha256:" + strings.Repeat("a", 64)},
+		ProcessStartedAt: now.Add(-time.Hour), IPv4: second.IPv4,
+	}
+	second.Bundle = "updated"
+	ids["edge-b"] = second
+	for i := range samples {
+		if samples[i].EdgeID == "edge-b" {
+			backend := second.Front.Backend
+			backend.PodVersion = "9" // An unrelated pod status update does not replace the process.
+			samples[i].ClientNetwork.Backend = &backend
+		}
+	}
+	resolve := func(netip.Prefix) uint32 { return 64496 }
+	results, coverage := ComparePassiveASN(samples, ids, resolve, now)
+	if len(results) != 1 || results[0].Preferred != "edge-b" || coverage.ReusedBundleSamples != 9 {
+		t.Fatal(results, coverage)
+	}
+	variants := []func(*PassiveFrontIdentity){
+		func(f *PassiveFrontIdentity) { f.Backend.PodUID = "new-pod" },
+		func(f *PassiveFrontIdentity) { f.Backend.ServiceVersion = "9" },
+		func(f *PassiveFrontIdentity) { f.ProcessStartedAt = now.Add(-time.Minute) },
+		func(f *PassiveFrontIdentity) { f.IPv4 = "192.0.2.42" },
+	}
+	for _, change := range variants {
+		replacement := *second.Front
+		change(&replacement)
+		id := second
+		id.Front = &replacement
+		ids["edge-b"] = id
+		if results, coverage := ComparePassiveASN(samples, ids, resolve, now); len(results) != 0 || coverage.ReusedBundleSamples != 0 {
+			t.Fatal("accepted changed transport", results, coverage)
+		}
+	}
 }
 
 func TestPassiveASNComparesAcrossHostsAndReplaysDeterministically(t *testing.T) {

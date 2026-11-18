@@ -184,6 +184,61 @@ func publicFrontPod(service corev1.Service, pods []corev1.Pod, node model.EdgeNo
 	return selected, port, nil
 }
 
+type publicFrontBinding struct {
+	service                    *corev1.Service
+	pod                        *corev1.Pod
+	endpoints                  []discoveryv1.EndpointSlice
+	base, slicePath, proxyPath string
+}
+
+func publicFrontBindingError(reason string) error {
+	return errors.New("public Front runtime binding failed: " + reason)
+}
+
+func (s *Server) resolvePublicFrontBinding(ctx context.Context, client *clusterNodeClient, node model.EdgeNode) (publicFrontBinding, error) {
+	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
+	var services corev1.ServiceList
+	var pods corev1.PodList
+	podPath := base + "/pods?" + url.Values{"fieldSelector": {"spec.nodeName=" + node.ID}, "limit": {"256"}}.Encode()
+	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &services) != nil || services.Continue != "" || client.doJSON(ctx, http.MethodGet, podPath, &pods) != nil || pods.Continue != "" {
+		return publicFrontBinding{}, publicFrontBindingError("runtime_inventory_unavailable")
+	}
+	service, err := publicFrontService(services.Items, node, s.controlPlaneNamespace)
+	if err != nil {
+		return publicFrontBinding{}, publicFrontBindingError("serving_service_identity")
+	}
+	pod, port, err := publicFrontPod(*service, pods.Items, node)
+	if err != nil {
+		return publicFrontBinding{}, publicFrontBindingError("serving_pod_identity")
+	}
+	slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace) + "/endpointslices?" + url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + service.Name}, "limit": {"256"}}.Encode()
+	var endpoints discoveryv1.EndpointSliceList
+	if client.doJSON(ctx, http.MethodGet, slicePath, &endpoints) != nil || endpoints.Continue != "" || !dnsBackendEndpointsMatch(*service, *pod, endpoints.Items, true) {
+		return publicFrontBinding{}, publicFrontBindingError("serving_endpoints_identity")
+	}
+	path := base + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(port)) + "/proxy"
+	return publicFrontBinding{service, pod, endpoints.Items, base, slicePath, path}, nil
+}
+
+func (b publicFrontBinding) verifiedBackend(ctx context.Context, client *clusterNodeClient, node model.EdgeNode) (*model.EdgeClientNetworkBackend, error) {
+	var currentServices corev1.ServiceList
+	var currentPod corev1.Pod
+	var currentEndpoints discoveryv1.EndpointSliceList
+	if client.doJSON(ctx, http.MethodGet, b.base+"/services?limit=256", &currentServices) != nil || currentServices.Continue != "" || client.doJSON(ctx, http.MethodGet, b.base+"/pods/"+url.PathEscape(b.pod.Name), &currentPod) != nil || client.doJSON(ctx, http.MethodGet, b.slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
+		return nil, publicFrontBindingError("runtime_recheck_unavailable")
+	}
+	current, err := publicFrontService(currentServices.Items, node, b.service.Namespace)
+	if err != nil || current.UID != b.service.UID || current.ResourceVersion != b.service.ResourceVersion || currentPod.UID != b.pod.UID || currentPod.ResourceVersion != b.pod.ResourceVersion || !reflect.DeepEqual(currentEndpoints.Items, b.endpoints) {
+		return nil, publicFrontBindingError("runtime_changed_during_observation")
+	}
+	digest, err := platformconfig.Digest(b.endpoints)
+	if err != nil {
+		return nil, publicFrontBindingError("endpoints_digest_invalid")
+	}
+	return &model.EdgeClientNetworkBackend{Namespace: b.pod.Namespace, PodName: b.pod.Name, PodUID: string(b.pod.UID), PodVersion: b.pod.ResourceVersion,
+		ServiceName: b.service.Name, ServiceUID: string(b.service.UID), ServiceVersion: b.service.ResourceVersion, EndpointsDigest: digest}, nil
+}
+
 func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode, query frontnetwork.Request) (frontnetwork.Response, error) {
 	client, err := s.newClusterNodeClient()
 	if err != nil {
@@ -191,34 +246,18 @@ func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode
 	}
 	defer client.closeIdleConnections()
 	fail := func(reason string) (frontnetwork.Response, error) {
-		return frontnetwork.Response{}, errors.New("public Front runtime binding failed: " + reason)
+		return frontnetwork.Response{}, publicFrontBindingError(reason)
 	}
-	base := "/api/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace)
-	var services corev1.ServiceList
-	var pods corev1.PodList
-	podPath := base + "/pods?" + url.Values{"fieldSelector": {"spec.nodeName=" + node.ID}, "limit": {"256"}}.Encode()
-	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &services) != nil || services.Continue != "" || client.doJSON(ctx, http.MethodGet, podPath, &pods) != nil || pods.Continue != "" {
-		return fail("runtime_inventory_unavailable")
-	}
-	service, err := publicFrontService(services.Items, node, s.controlPlaneNamespace)
+	binding, err := s.resolvePublicFrontBinding(ctx, client, node)
 	if err != nil {
-		return fail("serving_service_identity")
-	}
-	pod, port, err := publicFrontPod(*service, pods.Items, node)
-	if err != nil {
-		return fail("serving_pod_identity")
-	}
-	slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + url.PathEscape(s.controlPlaneNamespace) + "/endpointslices?" + url.Values{"labelSelector": {discoveryv1.LabelServiceName + "=" + service.Name}, "limit": {"256"}}.Encode()
-	var endpoints discoveryv1.EndpointSliceList
-	if client.doJSON(ctx, http.MethodGet, slicePath, &endpoints) != nil || endpoints.Continue != "" || !dnsBackendEndpointsMatch(*service, *pod, endpoints.Items, true) {
-		return fail("serving_endpoints_identity")
+		return frontnetwork.Response{}, err
 	}
 	queryJSON, err := json.Marshal(query)
 	if err != nil {
 		return fail("socket_query_invalid")
 	}
 	var observation frontnetwork.Response
-	path := base + "/pods/" + url.PathEscape(pod.Name+":"+strconv.Itoa(port)) + "/proxy/edge/tcp-connections?" + url.Values{"request": {string(queryJSON)}}.Encode()
+	path := binding.proxyPath + "/edge/tcp-connections?" + url.Values{"request": {string(queryJSON)}}.Encode()
 	if readDNSPodObservation(ctx, client, path, &observation, 4096) != nil {
 		return fail("socket_inventory_unavailable")
 	}
@@ -230,21 +269,10 @@ func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode
 		return fail("socket_observation_binding")
 	}
 	sample := observation.Sample
-	var currentServices corev1.ServiceList
-	var currentPod corev1.Pod
-	var currentEndpoints discoveryv1.EndpointSliceList
-	if client.doJSON(ctx, http.MethodGet, base+"/services?limit=256", &currentServices) != nil || currentServices.Continue != "" || client.doJSON(ctx, http.MethodGet, base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || client.doJSON(ctx, http.MethodGet, slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
-		return fail("runtime_recheck_unavailable")
-	}
-	current, err := publicFrontService(currentServices.Items, node, s.controlPlaneNamespace)
-	if err != nil || current.UID != service.UID || current.ResourceVersion != service.ResourceVersion || currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || !reflect.DeepEqual(currentEndpoints.Items, endpoints.Items) {
-		return fail("runtime_changed_during_observation")
-	}
-	digest, err := platformconfig.Digest(endpoints.Items)
+	sample.Backend, err = binding.verifiedBackend(ctx, client, node)
 	if err != nil {
-		return fail("endpoints_digest_invalid")
+		return frontnetwork.Response{}, err
 	}
-	sample.Backend = &model.EdgeClientNetworkBackend{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), PodVersion: pod.ResourceVersion, ServiceName: service.Name, ServiceUID: string(service.UID), ServiceVersion: service.ResourceVersion, EndpointsDigest: digest}
 	if model.ValidateEdgeClientNetworkSample(&sample) != nil {
 		return fail("sample_validation_failed")
 	}

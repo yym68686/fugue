@@ -27,6 +27,43 @@ type PassiveEndpoint struct {
 
 type PassiveEdgeIdentity struct {
 	GroupID, IPv4, IPv6, Bundle string
+	Front                       *PassiveFrontIdentity
+}
+
+type PassiveFrontIdentity struct {
+	Backend          model.EdgeClientNetworkBackend
+	ProcessStartedAt time.Time
+	IPv4, IPv6       string
+}
+
+// PassiveSamplePrefix admits older route-scoped observations only when their
+// original transport provenance still matches the selected public listener.
+// A local socket witness has no such provenance and remains bundle-scoped.
+func PassiveSamplePrefix(sample model.EdgeNetworkSample, id PassiveEdgeIdentity) (netip.Prefix, bool) {
+	if sample.EdgeGroupID != id.GroupID ||
+		(sample.Source != "public_front_tcp_info_v1" && sample.Source != model.EdgeNetworkPassiveFrontSource) ||
+		model.ValidateEdgeNetworkSample(sample) != nil {
+		return netip.Prefix{}, false
+	}
+	c := sample.ClientNetwork
+	prefix, _ := netip.ParsePrefix(strings.TrimPrefix(c.Scope, "tcp_peer:"))
+	if sample.Source == "public_front_tcp_info_v1" && c.Backend == nil {
+		return prefix, id.Bundle != "" && id.Bundle == sample.BundleVersion
+	}
+	if id.Front == nil {
+		return prefix, sample.Source == "public_front_tcp_info_v1" && id.Bundle != "" && id.Bundle == sample.BundleVersion
+	}
+	f := id.Front
+	a, b := c.Backend, f.Backend
+	if a == nil || a.Namespace != b.Namespace || a.PodName != b.PodName || a.PodUID != b.PodUID ||
+		a.ServiceName != b.ServiceName || a.ServiceUID != b.ServiceUID || a.ServiceVersion != b.ServiceVersion ||
+		f.ProcessStartedAt.IsZero() || c.StartedAt.Before(f.ProcessStartedAt) {
+		return netip.Prefix{}, false
+	}
+	if prefix.Addr().Is4() {
+		return prefix, f.IPv4 != "" && f.IPv4 == id.IPv4
+	}
+	return prefix, f.IPv6 != "" && f.IPv6 == id.IPv6
 }
 
 type PassiveASNComparison struct {
@@ -50,6 +87,7 @@ func (c PassiveASNComparison) Key() string {
 
 type PassiveASNCoverage struct {
 	Connections, Classified, TCPRTT, ClassifiedRTT int
+	ReusedBundleSamples                            int
 }
 
 type passiveWindow struct {
@@ -76,15 +114,20 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 	}
 	latest := make(map[connection]passiveObservation)
 	asns := make(map[netip.Prefix]uint32)
+	var coverage PassiveASNCoverage
 	for _, sample := range samples {
 		id, ok := identities[sample.EdgeID]
-		if !ok || sample.Source != "public_front_tcp_info_v1" || id.GroupID != sample.EdgeGroupID ||
-			id.Bundle != sample.BundleVersion || sample.ObservedAt.Before(complete.Add(-PassiveASNWindow)) ||
-			sample.ObservedAt.After(now) || model.ValidateEdgeNetworkSample(sample) != nil {
+		if !ok || sample.ObservedAt.Before(complete.Add(-PassiveASNWindow)) || sample.ObservedAt.After(now) {
 			continue
 		}
+		prefix, admitted := PassiveSamplePrefix(sample, id)
+		if !admitted {
+			continue
+		}
+		if sample.Source == "public_front_tcp_info_v1" && id.Bundle != sample.BundleVersion {
+			coverage.ReusedBundleSamples++
+		}
 		client := sample.ClientNetwork
-		prefix, _ := netip.ParsePrefix(strings.TrimPrefix(client.Scope, "tcp_peer:"))
 		address := id.IPv6
 		if prefix.Addr().Is4() {
 			address = id.IPv4
@@ -95,7 +138,7 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 			continue
 		}
 		key := connection{sample.EdgeID, client.Slot, client.ConnectionID, client.StartedAt.UTC()}
-		if previous := latest[key]; previous.sample != nil && !client.ObservedAt.After(previous.sample.ObservedAt) {
+		if previous := latest[key]; previous.sample != nil && !betterPassiveSnapshot(client, previous.sample) {
 			continue
 		}
 		asn, known := asns[prefix]
@@ -105,7 +148,6 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 		}
 		latest[key] = passiveObservation{client, PassiveEndpoint{sample.EdgeID, id.GroupID, endpoint.String()}, prefix, asn}
 	}
-	var coverage PassiveASNCoverage
 	windows := make(map[passiveWindow]map[PassiveEndpoint][]*model.EdgeClientNetworkSample)
 	for _, obs := range latest {
 		coverage.Connections++
@@ -208,6 +250,19 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 	}
 	slices.SortFunc(result, func(a, b PassiveASNComparison) int { return cmp.Compare(a.Key(), b.Key()) })
 	return result, coverage
+}
+
+func betterPassiveSnapshot(current, previous *model.EdgeClientNetworkSample) bool {
+	currentRTT, previousRTT := current.RTTMS != nil && *current.RTTMS > 0, previous.RTTMS != nil && *previous.RTTMS > 0
+	if currentRTT != previousRTT {
+		return currentRTT
+	}
+	currentDelivery, _ := model.EdgeClientDeliveryMetrics(current)
+	previousDelivery, _ := model.EdgeClientDeliveryMetrics(previous)
+	if (currentDelivery != nil) != (previousDelivery != nil) {
+		return currentDelivery != nil
+	}
+	return current.ObservedAt.After(previous.ObservedAt)
 }
 
 type passiveWindowEdge struct {

@@ -17,18 +17,20 @@ import (
 )
 
 type dnsPassiveASNDecision struct {
-	Reason            string     `json:"reason"`
-	Mode              string     `json:"mode,omitempty"`
-	ASN               uint32     `json:"asn,omitempty"`
-	Family            int        `json:"family,omitempty"`
-	ObservationDigest string     `json:"observation_digest,omitempty"`
-	EvidenceAt        *time.Time `json:"evidence_at,omitempty"`
-	EvidenceKind      string     `json:"evidence_kind,omitempty"`
-	Incumbent         string     `json:"incumbent_edge_id,omitempty"`
-	ComparedChoice    string     `json:"choice_edge_id,omitempty"`
-	SharedWindows     int        `json:"shared_windows,omitempty"`
-	LeftWinWindows    int        `json:"left_win_windows,omitempty"`
-	RightWinWindows   int        `json:"right_win_windows,omitempty"`
+	Reason                  string     `json:"reason"`
+	Mode                    string     `json:"mode,omitempty"`
+	ASN                     uint32     `json:"asn,omitempty"`
+	Family                  int        `json:"family,omitempty"`
+	ObservationDigest       string     `json:"observation_digest,omitempty"`
+	EvidenceAt              *time.Time `json:"evidence_at,omitempty"`
+	EvidenceKind            string     `json:"evidence_kind,omitempty"`
+	Incumbent               string     `json:"incumbent_edge_id,omitempty"`
+	ComparedChoice          string     `json:"choice_edge_id,omitempty"`
+	SharedWindows           int        `json:"shared_windows,omitempty"`
+	LeftWinWindows          int        `json:"left_win_windows,omitempty"`
+	RightWinWindows         int        `json:"right_win_windows,omitempty"`
+	AggregateASNs           int        `json:"aggregate_asns,omitempty"`
+	AggregateSupportingASNs int        `json:"aggregate_supporting_asns,omitempty"`
 }
 
 type dnsPassiveASNSelection struct {
@@ -192,7 +194,7 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	resolver, _ := netip.ParseAddr(ip)
 	asn, reason := view.Classify(prefix, resolver.Unmap(), now)
 	result.Decision.Reason, result.Decision.ObservationDigest = reason, view.Digest
-	if asn == 0 {
+	if asn == 0 && reason != "ecs_origin_unknown" {
 		return result
 	}
 	if (record.Type == "A") != prefix.Addr().Is4() {
@@ -221,7 +223,9 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 		}
 	}
 	choice := view.Choose(asn, family, endpoints, explore)
-	result.Decision.Reason = choice.Reason
+	if asn != 0 || choice.Reason != "retained_no_comparison" {
+		result.Decision.Reason = choice.Reason
+	}
 	result.Decision.Incumbent, result.Decision.ComparedChoice = endpoints[0].EdgeID, choice.Edge.EdgeID
 	if !choice.EvidenceAt.IsZero() {
 		result.Decision.EvidenceAt = &choice.EvidenceAt
@@ -230,8 +234,9 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 			result.Decision.EvidenceKind = "historical"
 		}
 		result.Decision.SharedWindows, result.Decision.LeftWinWindows, result.Decision.RightWinWindows = choice.SharedWindows, choice.LeftWinWindows, choice.RightWinWindows
+		result.Decision.AggregateASNs, result.Decision.AggregateSupportingASNs = choice.AggregateASNs, choice.AggregateSupportingASNs
 	}
-	if mode == "active" && len(endpoints) > 1 {
+	if mode == "active" && len(endpoints) > 1 && (asn != 0 || choice.Edge != endpoints[0]) {
 		remaining := view.ExpiresAt.Sub(now) / time.Second
 		if remaining >= 1 {
 			result.TTL = uint32(remaining)

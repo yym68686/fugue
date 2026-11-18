@@ -124,6 +124,89 @@ func mustObservationPeer(t *testing.T, remote string) netip.Addr {
 	return peer.Addr()
 }
 
+func TestPassiveFrontBindsOnlyToCurrentServingRuntime(t *testing.T) {
+	for _, scenario := range []string{"ready", "legacy", "service_switched", "claimed_backend", "wrong_group", "old_process"} {
+		t.Run(scenario, func(t *testing.T) {
+			node, service, pod, slices := publicNetworkFixture()
+			now := time.Now().UTC()
+			pod.Status.ContainerStatuses[0].State.Running.StartedAt = metav1.NewTime(now.Add(-time.Hour))
+			rtt := 12.0
+			sample := model.EdgeClientNetworkSample{ConnectionID: "tcp-a", Slot: "b", Scope: "tcp_peer:198.51.100.0/24",
+				StartedAt: now.Add(-time.Minute), ObservedAt: now.Add(-time.Second), RTTMS: &rtt, TCPInfoAvailable: true}
+			batch := frontnetwork.PassiveBatch{Schema: frontnetwork.PassiveSchema, EdgeID: node.ID, GroupID: node.EdgeGroupID}
+			switch scenario {
+			case "claimed_backend":
+				sample.Backend = &model.EdgeClientNetworkBackend{}
+			case "wrong_group":
+				batch.GroupID = "unrelated"
+			case "old_process":
+				sample.StartedAt = now.Add(-2 * time.Hour)
+			}
+			batch.Samples = []model.EdgeClientNetworkSample{sample}
+			serviceReads := 0
+			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer metadata-reader" {
+					t.Error("missing Kubernetes credential")
+				}
+				var v any
+				switch r.URL.Path {
+				case "/api/v1/namespaces/system/services":
+					serviceReads++
+					selected := service
+					if serviceReads > 1 && scenario == "service_switched" {
+						selected.ResourceVersion = "changed"
+					}
+					v = corev1.ServiceList{Items: []corev1.Service{selected}}
+				case "/api/v1/namespaces/system/pods":
+					v = corev1.PodList{Items: []corev1.Pod{pod}}
+				case "/api/v1/namespaces/system/pods/front-a":
+					v = pod
+				case "/apis/discovery.k8s.io/v1/namespaces/system/endpointslices":
+					v = slices
+				case "/api/v1/namespaces/system/pods/front-a:7831/proxy" + frontnetwork.PassivePath:
+					if scenario == "legacy" {
+						http.NotFound(w, r)
+						return
+					}
+					v = batch
+				default:
+					t.Error("unrelated resource read", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				json.NewEncoder(w).Encode(v)
+			}))
+			defer kube.Close()
+			server := &Server{controlPlaneNamespace: "system"}
+			result := server.readPassiveFront(context.Background(), &clusterNodeClient{
+				client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader",
+			}, node)
+			switch scenario {
+			case "ready":
+				if result.status != "ready" || len(result.samples) != 1 {
+					t.Fatal(result)
+				}
+				got := result.samples[0]
+				if got.ClientNetwork.Backend.PodUID != string(pod.UID) || got.Hostname != "" || model.ValidateEdgeNetworkSample(got) != nil {
+					t.Fatal(got)
+				}
+				serving := true
+				if len(sanitizeEdgeNetworkSamples(edgeHeartbeatRequest{EdgeID: node.ID, EdgeGroupID: node.EdgeGroupID, NetworkSamples: result.samples}, &serving, now)) != 0 {
+					t.Fatal("heartbeat could manufacture a direct Front batch")
+				}
+			case "legacy":
+				if result.identity == nil || result.status != "batch_unavailable" || len(result.samples) != 0 {
+					t.Fatal(result)
+				}
+			default:
+				if len(result.samples) != 0 || result.status == "ready" {
+					t.Fatal("accepted unverified Front batch", result)
+				}
+			}
+		})
+	}
+}
+
 func TestPublicFrontObservationBudgetIsBounded(t *testing.T) {
 	server := &Server{}
 	now := time.Now()
