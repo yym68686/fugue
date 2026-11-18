@@ -102,6 +102,32 @@ def with_tolerations(doc):
 
 
 class ManagedAppCRDTransitionTest(unittest.TestCase):
+    def test_storage_unmount_receipt_is_one_exact_optional_leaf(self):
+        live = with_tolerations(document(target_properties()))
+        target = copy.deepcopy(live)
+        version = target["spec"]["versions"][0]
+        properties = MODULE._properties_at(version, MODULE.MANAGED_APP_SPEC_PROPERTIES_PATH)
+        schema = {"type": "string", "maxLength": 128}
+        properties["storageUnmountOperationID"] = schema
+        self.assertEqual(MODULE.validate_transition(live, target), ["v1alpha1.spec.storageUnmountOperationID"])
+        patch = MODULE.build_json_patch(live, target)
+        self.assertEqual(len(patch), 3)
+        self.assertEqual(patch[-1], {
+            "op": "add",
+            "path": "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/storageUnmountOperationID",
+            "value": schema,
+        })
+        self.assertEqual(MODULE.validate_transition(target, copy.deepcopy(target)), [])
+        with self.assertRaisesRegex(MODULE.TransitionError, "outside additive"):
+            MODULE.validate_transition(target, live)
+        properties["storageUnmountOperationID"] = scalar("string")
+        with self.assertRaisesRegex(MODULE.TransitionError, "invalid additive storageUnmountOperationID"):
+            MODULE.validate_transition(live, target)
+        properties["storageUnmountOperationID"] = schema
+        version["schema"]["openAPIV3Schema"]["properties"]["spec"]["required"] = ["storageUnmountOperationID"]
+        with self.assertRaisesRegex(MODULE.TransitionError, "outside additive"):
+            MODULE.validate_transition(live, target)
+
     def test_adds_exact_toleration_seconds_without_replacing_spec(self):
         live = with_tolerations(document(target_properties()))
         target = copy.deepcopy(live)

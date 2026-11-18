@@ -63,6 +63,7 @@ spec:
                   type: string
                 storageUnmountOperationID:
                   type: string
+                  maxLength: 128
                 bindings:
                   type: array
                   items:

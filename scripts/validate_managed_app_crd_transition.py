@@ -29,11 +29,21 @@ TOLERATION_PROPERTIES_PATH = (
     "schema", "openAPIV3Schema", "properties", "spec", "properties",
     "scheduling", "properties", "tolerations", "items", "properties",
 )
+STORAGE_UNMOUNT_OPERATION_ADDITION = "spec.storageUnmountOperationID"
+MANAGED_APP_SPEC_PROPERTIES_PATH = ("schema", "openAPIV3Schema", "properties", "spec", "properties")
+SPEC_ADDITIONS = {
+    TOLERATION_SECONDS_ADDITION: (TOLERATION_PROPERTIES_PATH, "tolerationSeconds", {"type": "integer", "format": "int64"}),
+    STORAGE_UNMOUNT_OPERATION_ADDITION: (MANAGED_APP_SPEC_PROPERTIES_PATH, "storageUnmountOperationID", {"type": "string", "maxLength": 128}),
+}
 
 
 def _toleration_properties(version):
+    return _properties_at(version, TOLERATION_PROPERTIES_PATH)
+
+
+def _properties_at(version, path):
     value = version
-    for key in TOLERATION_PROPERTIES_PATH:
+    for key in path:
         if not isinstance(value, dict) or key not in value:
             return None
         value = value[key]
@@ -133,17 +143,17 @@ def validate_transition(live, target):
         normalized_properties.update(copy.deepcopy(live_properties))
         _validate_required_status_schema(target_properties)
 
-        # This is the only permitted spec extension. Do not relax the guard for
-        # arbitrary spec changes or rewrite existing field definitions.
-        live_tolerations = _toleration_properties(live_version)
-        target_tolerations = _toleration_properties(target_version)
-        if (live_tolerations is not None and target_tolerations is not None
-                and "tolerationSeconds" not in live_tolerations
-                and "tolerationSeconds" in target_tolerations):
-            if target_tolerations["tolerationSeconds"] != {"type": "integer", "format": "int64"}:
-                raise TransitionError("invalid additive tolerationSeconds schema")
-            additions.append(f"{name}.{TOLERATION_SECONDS_ADDITION}")
-            del _toleration_properties(normalized_target_versions[name])["tolerationSeconds"]
+        # Explicit optional leaf additions only. The exact spec comparison
+        # below still rejects changes to existing fields and requirements.
+        for addition, (path, field, schema) in SPEC_ADDITIONS.items():
+            live_parent = _properties_at(live_version, path)
+            target_parent = _properties_at(target_version, path)
+            if (live_parent is not None and target_parent is not None
+                    and field not in live_parent and field in target_parent):
+                if target_parent[field] != schema:
+                    raise TransitionError(f"invalid additive {field} schema")
+                additions.append(f"{name}.{addition}")
+                del _properties_at(normalized_target_versions[name], path)[field]
 
     if normalized_target != live_spec:
         raise TransitionError(
@@ -177,10 +187,11 @@ def build_json_patch(live, target):
     ]
     for addition in additions:
         version_name, field = addition.split(".", 1)
-        if field == TOLERATION_SECONDS_ADDITION:
-            value = _toleration_properties(target_versions[version_name])["tolerationSeconds"]
-            schema_path = "/".join(TOLERATION_PROPERTIES_PATH)
-            path = f"/spec/versions/{version_indexes[version_name]}/{schema_path}/tolerationSeconds"
+        if field in SPEC_ADDITIONS:
+            schema_keys, leaf, _ = SPEC_ADDITIONS[field]
+            value = _properties_at(target_versions[version_name], schema_keys)[leaf]
+            schema_path = "/".join(schema_keys)
+            path = f"/spec/versions/{version_indexes[version_name]}/{schema_path}/{leaf}"
         else:
             properties = _status_properties(
                 target_versions[version_name], f"target version {version_name}"
