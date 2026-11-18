@@ -50,7 +50,7 @@ func validateDNSAuthorityHandoff(previous, next model.PlatformArtifact, node str
 	var source struct {
 		Source *CellDNSPlanSource `json:"cell_dns_source"`
 	}
-	raw, _ := json.Marshal(next.Content)
+	raw, _ := marshalDNSHandoffFields(next.Content, true)
 	if json.Unmarshal(raw, &source) != nil || source.Source == nil {
 		return fmt.Errorf("DNS handoff transition source missing")
 	}
@@ -168,7 +168,7 @@ func removeDeclaredAvailabilityDelta(previous, next map[string]any, route DNSAva
 // not accidentally make old and new answers look equivalent. Rewrite only the
 // finite list of explicitly declared routing authority aliases.
 func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliases map[string]string) (map[string]any, error) {
-	raw, err := json.Marshal(a.Content)
+	raw, err := marshalDNSHandoffFields(a.Content, false)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +243,29 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 	}
 	rewriteDNSAuthorityAliases(out, aliases)
 	return out, nil
+}
+
+// These decoders inspect either the typed source or the complete generic
+// policy/views. Do not repeatedly encode retained artifacts and readiness data
+// that neither decoder reads. First establish that the whole tree is ordinary
+// encodable JSON without invoking methods or scanning string bodies. Invalid,
+// custom or over-budget trees retain the original complete encoder and its
+// errors/effects. This does not replace any full content-integrity check.
+func marshalDNSHandoffFields(content map[string]any, source bool) ([]byte, error) {
+	remaining := 262144
+	if !dnsValidationNativeTree(content, 0, &remaining) {
+		return json.Marshal(content)
+	}
+	fields := make(map[string]any, 3)
+	for key, value := range content {
+		// Preserve all typed source aliases in encoding/json's sorted order.
+		// The behavior decoder is a generic map: its keys are case-sensitive.
+		if source && strings.EqualFold(key, "cell_dns_source") ||
+			!source && (key == "policy" || key == "consumer_views" || key == "query_views") {
+			fields[key] = value
+		}
+	}
+	return json.Marshal(fields)
 }
 
 func rewriteDNSAuthorityAliases(value any, aliases map[string]string) {

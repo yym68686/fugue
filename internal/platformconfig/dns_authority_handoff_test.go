@@ -2,6 +2,7 @@ package platformconfig_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -79,6 +80,48 @@ func TestDNSAuthorityHandoffPreservesWholeNodeAnswerBehavior(t *testing.T) {
 			c := celldns.Compile(t, r)
 			if err := platformconfig.ValidateDNSAuthorityHandoff(r.PreviousTrafficPublication.DNS, c.DNSArtifact, "dns-a"); err == nil {
 				t.Fatal("changed node DNS behavior authorized handoff")
+			}
+		})
+	}
+}
+
+func TestDNSAuthorityHandoffPreservesUnknownBehavior(t *testing.T) {
+	for _, field := range []string{"query policy", "authority", "consumer view", "query view", "query record"} {
+		t.Run(field, func(t *testing.T) {
+			req := celldns.TransitionRequest(t)
+			next := celldns.Compile(t, req).DNSArtifact
+			policy := next.Content["policy"].(map[string]any)
+			var row map[string]any
+			switch field {
+			case "query policy":
+				row = policy["dns_query_policy"].(map[string]any)
+			case "authority":
+				row = policy["dns_authorities"].([]any)[0].(map[string]any)
+			case "consumer view":
+				row = next.Content["consumer_views"].([]any)[0].(map[string]any)
+			case "query view":
+				row = next.Content["query_views"].([]any)[0].(map[string]any)
+			case "query record":
+				row = next.Content["query_views"].([]any)[0].(map[string]any)["records"].([]any)[0].(map[string]any)
+			}
+			row["future_behavior"] = map[string]any{"enabled": true}
+			before, err := json.Marshal(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = platformconfig.ValidateDNSAuthorityHandoff(req.PreviousTrafficPublication.DNS, next, "dns-a")
+			prefix := "DNS handoff changes "
+			if field == "query policy" {
+				// This policy has an existing strict decoder, so unknown fields
+				// must be rejected before the generic behavior comparison.
+				prefix = "DNS artifact policy cannot be decoded: "
+			}
+			if err == nil || !strings.HasPrefix(err.Error(), prefix) {
+				t.Fatal("unknown configured behavior was not compared", err)
+			}
+			after, _ := json.Marshal(next)
+			if string(before) != string(after) {
+				t.Fatal("handoff changed signed input")
 			}
 		})
 	}
