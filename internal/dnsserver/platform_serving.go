@@ -179,7 +179,7 @@ func (s *Service) loadDNSServingCache() (loaded bool, resultErr error) {
 		}
 		st.fallback = "restart_requires_fresh_readiness"
 		s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(item.Data), c})
-		s.platformServing.Store(st)
+		s.platformServing.publish(st, dnsServingWriterCheckpoint)
 		s.platformServingBound.Store(true)
 		return true, nil
 	}
@@ -256,13 +256,13 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) {
 			if ctx.Err() == nil && old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && s.platformServing.Load() == old {
 				if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, fallbackReason, *retainedReader); err == nil {
-					s.platformServing.Store(refreshed)
+					s.platformServing.publish(refreshed, dnsServingWriterRetainedSource)
 					return
 				}
 			}
 			if ctx.Err() == nil && old != nil && bridge != nil && s.platformServing.Load() == old {
 				if refreshed := s.refreshRetainedDNSFactsFromObservations(old, bridge.payload.Plan, observations, time.Now().UTC()); refreshed != nil {
-					s.platformServing.Store(refreshed)
+					s.platformServing.publish(refreshed, dnsServingWriterRetainedObservation)
 				}
 			}
 			return
@@ -275,7 +275,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// already replaced the runtime view and must not be overwritten here.
 		if syncErr != nil && ctx.Err() == nil && old != nil && s.platformServing.Load() == old {
 			if refreshed, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader); err == nil {
-				s.platformServing.Store(refreshed)
+				s.platformServing.publish(refreshed, dnsServingWriterRetainedFallback)
 			} else if errors.Is(err, platformconsumer.ErrAssignmentChanged) {
 				// A rejected candidate can race during its retained refresh too.
 				// Preserve the race so the existing bounded outer loop rereads
@@ -323,7 +323,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// rather than waiting until the candidate finally returns an error.
 	if old != nil && old.record.Positive && old.record.RouteSources != nil && retainedReader != nil && !reflect.DeepEqual(old.record.Candidate.Assignment, a) && !s.freshDNSRenewalCovers(old) {
 		if refreshed, refreshErr := s.refreshRetainedDNSRouteSources(ctx, old, probe, "candidate_pending", *retainedReader); refreshErr == nil {
-			s.platformServing.Store(refreshed)
+			s.platformServing.publish(refreshed, dnsServingWriterRetainedBeforePending)
 			old = refreshed
 		} else if errors.Is(refreshErr, platformconsumer.ErrAssignmentChanged) {
 			// A racing source grants no new proof. Retry current serving authority
@@ -380,7 +380,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if old.fallback != "" {
 			recovered := *old
 			recovered.fallback = ""
-			s.platformServing.Store(&recovered)
+			s.platformServing.publish(&recovered, dnsServingWriterClearFallback)
 			return s.reportDNSServing(ctx, client, id, &recovered)
 		}
 		return s.reportDNSServing(ctx, client, id, old)
@@ -462,7 +462,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 				st.record.Positive = false
 			}
 			st.fallback = "readiness_incomplete"
-			s.platformServing.Store(st)
+			s.platformServing.publish(st, dnsServingWriterReadinessIncomplete)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
 		} else if hosts := dnsTransitionRecords(old, bridge); len(hosts) > 0 {
 			retained, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader)
@@ -486,7 +486,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			st.record.Positive = false
 			st.record.AppliedAt = old.record.AppliedAt
 			retained.transition = &dnsRecordTransition{state: st, hosts: hosts}
-			s.platformServing.Store(retained)
+			s.platformServing.publish(retained, dnsServingWriterRecordTransition)
 		}
 		if snapshotErr != nil {
 			return snapshotErr
@@ -506,10 +506,10 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	if err = s.signDNSCheckpoint(&st.record); err != nil {
 		return err
 	}
-	s.platformServing.Store(st)
+	s.platformServing.publish(st, dnsServingWriterCandidate)
 	s.platformServingBound.Store(true)
 	rollback := func() {
-		s.platformServing.Store(old)
+		s.platformServing.publish(old, dnsServingWriterRollback)
 		s.platformServingBound.Store(wasBound)
 	}
 	if err = wireProbe(st); err != nil {

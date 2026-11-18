@@ -12,6 +12,16 @@ statuses, and mismatched route-proof **field names**. DNS runtime-fact failures
 retain only allowlisted rejection codes. They do not retain audiences, origins,
 paths, response bodies, credentials or raw error text.
 
+For a backend `503 state_replaced`, an updated DNS executor can attach fixed
+metadata to the existing failure. The API retains it as `dns_replacement` only
+if all three fields are present and allowlisted. `base` identifies the writer of
+the final base observation if the base publication changed, `renewal` indicates
+whether the observed renewal pointer changed, and `selection` identifies which
+path was selected at each comparison point. This does not identify the first
+writer if several changes occurred between the two reads. A legacy executor or
+missing metadata leaves the original rejection intact. The diagnostic does not
+replace the pointer equality check, retry the request, or affect wire DNS.
+
 Rejected Agent route proofs also retain a same-read `publication` pair. Each
 side has separate SHA-256 hashes of the release-set, route-artifact and release
 IDs, an allowlisted channel, and its numeric fence. Hashes are SHA-256 of the

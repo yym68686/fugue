@@ -69,7 +69,7 @@ type Service struct {
 	listenerFailed                atomic.Bool
 	udpListening                  atomic.Bool
 	tcpListening                  atomic.Bool
-	platformServing               atomic.Pointer[dnsServingState]
+	platformServing               dnsServingPointer
 	platformCheckpoint            atomic.Pointer[dnsPersistedCheckpoint]
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool

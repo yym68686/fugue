@@ -335,3 +335,47 @@ func TestDNSObservationReadFailurePreservesSafeStageWithoutBody(t *testing.T) {
 		})
 	}
 }
+
+func TestDNSObservationReplacementMetadataIsBoundedAndOptional(t *testing.T) {
+	for _, scenario := range []string{"valid", "legacy", "unsafe", "duplicate", "wrong_status", "wrong_reason"} {
+		t.Run(scenario, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				status, reason := http.StatusServiceUnavailable, "state_replaced"
+				if scenario == "wrong_status" {
+					status = http.StatusBadGateway
+				}
+				if scenario == "wrong_reason" {
+					reason = "listener_changed"
+				}
+				w.Header().Set("X-Fugue-DNS-Observation-Rejection", reason)
+				if scenario != "legacy" {
+					w.Header().Set(dnsfacts.ReplacementBaseHeader, dnsfacts.ReplacementRetainedFallback)
+					w.Header().Set(dnsfacts.ReplacementSelectionHeader, dnsfacts.ReplacementRenewalToBase)
+					w.Header().Set(dnsfacts.ReplacementRenewalHeader, dnsfacts.ReplacementChanged)
+				}
+				if scenario == "unsafe" {
+					w.Header().Set(dnsfacts.ReplacementBaseHeader, "untrusted tenant metadata")
+				}
+				if scenario == "duplicate" {
+					w.Header().Add(dnsfacts.ReplacementRenewalHeader, dnsfacts.ReplacementChanged)
+				}
+				http.Error(w, "private error body", status)
+			}))
+			defer server.Close()
+			var snapshot dnsfacts.Snapshot
+			err := readDNSPodSnapshot(context.Background(), &clusterNodeClient{baseURL: server.URL, client: server.Client()}, "/", &snapshot)
+			if !errors.Is(err, errDNSRuntimeFacts) || err.Error() != errDNSRuntimeFacts.Error() || captureErrorClass(err) != "http_status" {
+				t.Fatal("diagnostics changed the original rejection", err)
+			}
+			got := captureDNSStateReplacement(err)
+			if scenario == "valid" {
+				want := captureDNSReplacement{Base: dnsfacts.ReplacementRetainedFallback, Selection: dnsfacts.ReplacementRenewalToBase, Renewal: dnsfacts.ReplacementChanged}
+				if got == nil || *got != want || captureDNSRejection(err) != "state_replaced" {
+					t.Fatal("lost the original replacement observation", got)
+				}
+			} else if got != nil {
+				t.Fatal("retained malformed or unrelated replacement details", got)
+			}
+		})
+	}
+}

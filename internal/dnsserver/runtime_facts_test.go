@@ -189,3 +189,61 @@ func TestDNSRuntimeFactsRejectionClassificationPreservesFailClosed(t *testing.T)
 		})
 	}
 }
+
+type runtimeFactsComparedContext struct {
+	context.Context
+	checks  int
+	compare func()
+}
+
+func (c *runtimeFactsComparedContext) Err() error {
+	c.checks++
+	if c.checks == 2 {
+		c.compare()
+	}
+	return c.Context.Err()
+}
+
+func TestDNSRuntimeFactsReplacementDiagnosticsDoNotChangeVerdict(t *testing.T) {
+	for _, scenario := range []string{"replacement", "same_pointer", "cancelled"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, state, _ := runtimeFactsFixture(t)
+			s.platformServing.publish(state, dnsServingWriterCheckpoint)
+			other := *state
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			observed := &runtimeFactsComparedContext{Context: ctx, compare: func() {
+				next := &other
+				if scenario == "same_pointer" {
+					next = state
+				}
+				s.platformServing.publish(next, dnsServingWriterCandidate)
+				if scenario == "cancelled" {
+					cancel()
+				}
+			}}
+			response := httptest.NewRecorder()
+			s.handleRuntimeFacts(response, httptest.NewRequest(http.MethodGet, "/runtime-facts", nil).WithContext(observed))
+			header := response.Header()
+			if observed.checks != 2 || header.Get("Cache-Control") != "private, no-store" {
+				t.Fatalf("did not exercise the final comparison: checks=%d headers=%v", observed.checks, header)
+			}
+			if scenario == "replacement" {
+				if response.Code != http.StatusServiceUnavailable || header.Get("X-Fugue-DNS-Observation-Rejection") != "state_replaced" ||
+					header.Get(dnsfacts.ReplacementBaseHeader) != dnsfacts.ReplacementCandidate ||
+					header.Get(dnsfacts.ReplacementSelectionHeader) != dnsfacts.ReplacementBaseToBase ||
+					header.Get(dnsfacts.ReplacementRenewalHeader) != dnsfacts.ReplacementUnchanged ||
+					strings.Contains(response.Body.String(), dnsfacts.Schema) {
+					t.Fatalf("replacement did not fail closed with fixed diagnostics: %d %v %s", response.Code, header, response.Body.String())
+				}
+				return
+			}
+			if header.Get(dnsfacts.ReplacementBaseHeader) != "" || header.Get(dnsfacts.ReplacementSelectionHeader) != "" || header.Get(dnsfacts.ReplacementRenewalHeader) != "" {
+				t.Fatal("replacement metadata was emitted without a state_replaced verdict", header)
+			}
+			if scenario == "same_pointer" && response.Code != http.StatusOK || scenario == "cancelled" && (response.Code != http.StatusServiceUnavailable || header.Get("X-Fugue-DNS-Observation-Rejection") != "request_cancelled") {
+				t.Fatal("diagnostics changed existing precedence or pointer comparison", response.Code, header)
+			}
+		})
+	}
+}

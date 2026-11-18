@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/dnsfacts"
 	"fugue/internal/model"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,16 +57,23 @@ type captureReceipt struct {
 }
 
 type captureEvent struct {
-	Stage        string                  `json:"stage"`
-	Node         string                  `json:"node,omitempty"`
-	ErrorClass   string                  `json:"error_class,omitempty"`
-	DurationMS   int64                   `json:"duration_ms"`
-	Capacity     *captureCapacity        `json:"capacity,omitempty"`
-	Mismatches   []string                `json:"mismatches,omitempty"`
-	HTTPStatus   int                     `json:"http_status,omitempty"`
-	Rejection    string                  `json:"rejection,omitempty"`
-	Publication  *capturePublicationPair `json:"publication,omitempty"`
-	DNSAuthority *captureDNSAuthority    `json:"dns_authority,omitempty"`
+	Stage          string                  `json:"stage"`
+	Node           string                  `json:"node,omitempty"`
+	ErrorClass     string                  `json:"error_class,omitempty"`
+	DurationMS     int64                   `json:"duration_ms"`
+	Capacity       *captureCapacity        `json:"capacity,omitempty"`
+	Mismatches     []string                `json:"mismatches,omitempty"`
+	HTTPStatus     int                     `json:"http_status,omitempty"`
+	Rejection      string                  `json:"rejection,omitempty"`
+	Publication    *capturePublicationPair `json:"publication,omitempty"`
+	DNSAuthority   *captureDNSAuthority    `json:"dns_authority,omitempty"`
+	DNSReplacement *captureDNSReplacement  `json:"dns_replacement,omitempty"`
+}
+
+type captureDNSReplacement struct {
+	Base      string `json:"base"`
+	Selection string `json:"selection"`
+	Renewal   string `json:"renewal"`
 }
 
 // These values come from the exact failed comparison. No subsequent store
@@ -366,9 +374,10 @@ func (e *kubernetesHTTPStatusError) Error() string { return e.detail.Error() }
 func (e *kubernetesHTTPStatusError) Unwrap() error { return e.detail }
 
 type dnsObservationReadFailure struct {
-	class     string
-	status    int
-	rejection string
+	class       string
+	status      int
+	rejection   string
+	replacement *captureDNSReplacement
 }
 
 func (*dnsObservationReadFailure) Error() string { return errDNSRuntimeFacts.Error() }
@@ -380,6 +389,48 @@ func captureDNSRejection(err error) string {
 		return observation.rejection
 	}
 	return ""
+}
+
+func captureDNSStateReplacement(err error) *captureDNSReplacement {
+	var observation *dnsObservationReadFailure
+	if errors.As(err, &observation) {
+		return observation.replacement
+	}
+	return nil
+}
+
+// Older backends and proxies may omit these headers. Require one value from
+// each fixed vocabulary; discard incomplete or malformed diagnostics without
+// modifying the original error or exposing arbitrary response metadata.
+func dnsObservationStateReplacement(status int, rejection string, values func(string) []string) *captureDNSReplacement {
+	if status != 503 || rejection != "state_replaced" {
+		return nil
+	}
+	single := func(header string) string {
+		v := values(header)
+		if len(v) == 1 {
+			return v[0]
+		}
+		return ""
+	}
+	base, selection, renewal := single(dnsfacts.ReplacementBaseHeader), single(dnsfacts.ReplacementSelectionHeader), single(dnsfacts.ReplacementRenewalHeader)
+	switch base {
+	case dnsfacts.ReplacementCheckpoint, dnsfacts.ReplacementRetainedSource, dnsfacts.ReplacementRetainedObservation,
+		dnsfacts.ReplacementRetainedFallback, dnsfacts.ReplacementRetainedBeforePending, dnsfacts.ReplacementClearFallback,
+		dnsfacts.ReplacementReadinessIncomplete, dnsfacts.ReplacementRecordTransition, dnsfacts.ReplacementCandidate,
+		dnsfacts.ReplacementRollback, dnsfacts.ReplacementUnattributed, dnsfacts.ReplacementUnchanged:
+	default:
+		return nil
+	}
+	switch selection {
+	case dnsfacts.ReplacementBaseToBase, dnsfacts.ReplacementBaseToRenewal, dnsfacts.ReplacementRenewalToBase, dnsfacts.ReplacementRenewalToRenewal:
+	default:
+		return nil
+	}
+	if renewal != dnsfacts.ReplacementChanged && renewal != dnsfacts.ReplacementUnchanged {
+		return nil
+	}
+	return &captureDNSReplacement{Base: base, Selection: selection, Renewal: renewal}
 }
 
 // Only source-defined DNS reason codes are retained. A proxy must not be able

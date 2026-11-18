@@ -48,7 +48,8 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, no-store")
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS serving observations unavailable")
 	}
-	st := s.currentDNSServingState()
+	initial := s.currentDNSServingSelection()
+	st := initial.state
 	if st == nil {
 		fail("state_missing")
 		return
@@ -104,10 +105,17 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 		rejection = "response_encoding"
 	case r.Context().Err() != nil:
 		rejection = "request_cancelled"
-	case s.currentDNSServingState() != st:
-		rejection = "state_replaced"
-	case s.listenerFailed.Load() != listenerFailed:
-		rejection = "listener_changed"
+	default:
+		current := s.currentDNSServingSelection()
+		if current.state != st {
+			rejection = "state_replaced"
+			baseWriter, selection, renewal := dnsServingReplacement(initial, current)
+			w.Header().Set(dnsfacts.ReplacementBaseHeader, baseWriter)
+			w.Header().Set(dnsfacts.ReplacementSelectionHeader, selection)
+			w.Header().Set(dnsfacts.ReplacementRenewalHeader, renewal)
+		} else if s.listenerFailed.Load() != listenerFailed {
+			rejection = "listener_changed"
+		}
 	}
 	if rejection != "" {
 		fail(rejection)

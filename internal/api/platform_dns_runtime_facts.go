@@ -326,7 +326,7 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		} else if !response.Ready {
 			outcome = "not_ready"
 		}
-		observeCapture(ctx, captureEvent{Stage: stage, Node: node, ErrorClass: captureErrorClass(transportErr), HTTPStatus: captureHTTPStatus(transportErr), Rejection: captureDNSRejection(transportErr)})
+		observeCapture(ctx, captureEvent{Stage: stage, Node: node, ErrorClass: captureErrorClass(transportErr), HTTPStatus: captureHTTPStatus(transportErr), Rejection: captureDNSRejection(transportErr), DNSReplacement: captureDNSStateReplacement(transportErr)})
 		s.finishCaptureTrace(trace, outcome, readErr, 0, 0)
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -552,7 +552,9 @@ func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return &dnsObservationReadFailure{class: "http_status", status: resp.StatusCode, rejection: dnsObservationRejection(resp.Header.Get("X-Fugue-DNS-Observation-Rejection"))}
+		rejection := dnsObservationRejection(resp.Header.Get("X-Fugue-DNS-Observation-Rejection"))
+		return &dnsObservationReadFailure{class: "http_status", status: resp.StatusCode, rejection: rejection,
+			replacement: dnsObservationStateReplacement(resp.StatusCode, rejection, resp.Header.Values)}
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
 	if err != nil {

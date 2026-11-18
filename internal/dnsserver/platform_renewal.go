@@ -34,15 +34,23 @@ func sameDNSRenewalPublication(a, b *dnsServingState) bool {
 // or non-monotonic source makes the renewal inapplicable. Negative renewal
 // facts are intentionally selected too; old successes cannot mask a failure.
 func (s *Service) currentDNSServingState() *dnsServingState {
-	base := s.platformServing.Load()
+	return s.currentDNSServingSelection().state
+}
+
+func (s *Service) currentDNSServingSelection() dnsServingSelection {
+	published := s.platformServing.publication.Load()
+	var base *dnsServingState
+	if published != nil {
+		base = published.state
+	}
 	renewal := s.platformRenewal.Load()
 	if renewal == nil || !sameDNSRenewalPublication(base, renewal.base) ||
 		base.transition != renewal.base.transition || !renewal.state.checkedAt.After(base.checkedAt) ||
 		base.record.RouteSources == nil || renewal.state.record.RouteSources == nil ||
 		!dnsroutesource.Monotonic(base.record.RouteSources.Snapshot, renewal.state.record.RouteSources.Snapshot) {
-		return base
+		return dnsServingSelection{state: base, base: published, renewal: renewal}
 	}
-	return renewal.state
+	return dnsServingSelection{state: renewal.state, base: published, renewal: renewal, renewalSelected: true}
 }
 
 // A current independent observation with a full scan interval remaining lets
