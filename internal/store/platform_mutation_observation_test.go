@@ -104,6 +104,11 @@ func TestPlatformMutationObservationFailureRetentionAndResponseBudget(t *testing
 			}
 			admission.finish(nil)
 		}
+		guard := beginPlatformProducerGuardTrace(ctx)
+		for phase := producerGuardReadLanes; phase < producerGuardPhaseCount; phase++ {
+			guard.advance(phase)
+		}
+		guard.finish()
 		var err error
 		if failed {
 			err = errors.New("never-retain-this-error-or-credential")

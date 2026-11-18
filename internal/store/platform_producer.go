@@ -57,9 +57,14 @@ func producerRecoveryPhase(guard *platformProducerReleaseGuard) bool {
 }
 
 func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard) error {
+	return validateProducerReleaseGuardWithTrace(state, parent, req, principal, keys, guard, nil)
+}
+
+func validateProducerReleaseGuardWithTrace(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard, trace *platformProducerGuardTrace) error {
 	if guard == nil {
 		return nil
 	}
+	trace.advance(producerGuardParent)
 	if guard.Phase == "rollback" {
 		i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, guard.FailedReleaseID)
 		if i < 0 {
@@ -70,6 +75,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	if (guard.Phase == "" && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow) || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || guard.PolicyReleaseID == "" || (!producerRecoveryPhase(guard) && parent.Metadata[platformproducer.PolicyReleaseMetadata] != guard.PolicyReleaseID) || parent.Metadata[platformproducer.SourceDigestMetadata] == "" || (guard.Phase != "rollback" && (parent.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(parent, keys).Pass)) {
 		return ErrConflict
 	}
+	trace.advance(producerGuardPolicy)
 	policyScope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
 	if err != nil {
 		return ErrConflict
@@ -99,11 +105,13 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	// candidate or revoked source cannot block undoing its publication.
 	if !producerRecoveryPhase(guard) {
 		if policy.InputSource == platformproducer.DNSProducerInputSource {
+			trace.advance(producerGuardSourceAuthority)
 			if err := validateDNSProducerPolicySelection(stateDNSRouteSourceReader(state), policy.DNSSource.ProducerPolicy, keys); err != nil {
 				return err
 			}
 		}
 		if policy.InputSource == "business-static-intent" {
+			trace.advance(producerGuardStaticSources)
 			index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
 			if index < 0 {
 				return ErrConflict
@@ -158,6 +166,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		} else if parent.Metadata[platformproducer.StaticIntentIDMetadata] != "" || parent.Metadata[platformproducer.StaticIntentDigestMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" || parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != "" {
 			return ErrConflict
 		}
+		trace.advance(producerGuardComposition)
 		ids, idsOK := parent.Content["artifact_ids"].([]any)
 		kinds, kindsOK := parent.Content["artifact_kinds"].([]any)
 		_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
@@ -166,6 +175,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 		}
 		seen := map[string]bool{}
 		for i, raw := range ids {
+			trace.advance(producerGuardMemberIntegrity)
 			id, ok := raw.(string)
 			if !ok {
 				return ErrConflict
@@ -184,14 +194,17 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 				}
 			}
 			if policy.InputSource == platformproducer.DNSProducerInputSource {
+				trace.advance(producerGuardDNSOutput)
 				if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || platformproducer.ValidateDNSProducerOutput(policy, child) != nil {
 					return ErrConflict
 				}
 			}
+			trace.advance(producerGuardCohort)
 			if platformconfig.ValidateTrafficCohortProjection(parent, child) != nil {
 				return ErrConflict
 			}
 			if policy.RoutePlacementTransition != nil {
+				trace.advance(producerGuardRoutePlacement)
 				var payload struct {
 					Policy platformconfig.PolicySnapshot `json:"policy"`
 				}
@@ -205,10 +218,12 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 	}
 
 	if guard.Phase != "" {
+		trace.advance(producerGuardServingPhase)
 		if err := validateProducerServingPhase(state, parent, req, policy, keys, guard); err != nil {
 			return err
 		}
 	}
+	trace.advance(producerGuardLane)
 	lane, found := platformReleaseLaneByKey(state.PlatformReleaseLanes, platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, req.ReleaseChannel))
 	if found && lane.Frozen {
 		return ErrConflict
@@ -230,6 +245,8 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	if guard == nil {
 		return nil
 	}
+	trace := beginPlatformProducerGuardTrace(ctx)
+	defer trace.finish()
 	policyScope, err := platformproducer.PolicyScopeForTarget(parent.ScopeKey)
 	if err != nil {
 		return ErrConflict
@@ -257,6 +274,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
 		}
 	}
+	trace.advance(producerGuardReadLKG)
 	if guard.Phase != "" {
 		lkg, err := s.pgGetVerifiedPlatformLKGForUpdate(ctx, tx, parent.ArtifactKind, parent.ScopeKey, time.Now().UTC())
 		if err != nil {
@@ -276,6 +294,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, *lkg)
 		}
 	}
+	trace.advance(producerGuardReadPolicy)
 	release, err := pgGetPlatformArtifactRelease(ctx, tx, guard.PolicyReleaseID, false)
 	if err != nil {
 		return err
@@ -287,7 +306,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
 	state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
 	if producerRecoveryPhase(guard) {
-		return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
+		return validateProducerReleaseGuardWithTrace(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard, trace)
 	}
 	policy, err := platformproducer.Decode(artifact)
 	if err != nil {
@@ -302,6 +321,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 			return ErrConflict
 		}
 	}
+	trace.advance(producerGuardReadSources)
 	if policy.StaticIntentArtifactID != "" {
 		base, err := pgGetPlatformArtifactForUpdate(ctx, tx, policy.StaticIntentArtifactID, true)
 		if err != nil {
@@ -316,6 +336,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, a)
 	}
+	trace.advance(producerGuardReadMembers)
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)
 	if !ok || compositionErr != nil {
@@ -349,6 +370,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 	}
 	if policy.InputSource == platformproducer.DNSProducerInputSource {
+		trace.advance(producerGuardReadDNSReferences)
 		if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
 			return err
 		}
@@ -363,7 +385,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
 	}
-	return validateProducerReleaseGuard(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard)
+	return validateProducerReleaseGuardWithTrace(state, parent, req, principal, s.platformArtifactSigningKeyring(), guard, trace)
 }
 
 // The policy release is immutable. Read its scope before taking the scope

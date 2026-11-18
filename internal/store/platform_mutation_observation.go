@@ -100,6 +100,7 @@ type platformMutationReceipt struct {
 	LockOmitted       uint64                               `json:"promotion_lock_queries_evicted"`
 	Admissions        []platformAdmissionObservation       `json:"admissions,omitempty"`
 	AdmissionsOmitted uint64                               `json:"admissions_omitted"`
+	ProducerGuard     *platformProducerGuardObservation    `json:"producer_guard,omitempty"`
 }
 
 type platformMutationRecorder struct {
@@ -119,6 +120,7 @@ func (r *platformMutationRecorder) record(trace *platformMutationTrace, err erro
 		Started: trace.started, Finished: now, Stage: trace.stage, Failed: err != nil}
 	receipt.Admissions = append([]platformAdmissionObservation(nil), trace.admissions...)
 	receipt.AdmissionsOmitted = trace.admissionsOmitted
+	receipt.ProducerGuard = trace.producerGuardObservation()
 	// Reuse the fixed typed error classifier. Never retain err.Error().
 	ctx := context.WithValue(context.Background(), platformInputReadObservationKey{}, &receipt.Failure)
 	observePlatformInputReadFailure(ctx, "publication", trace.stage, nil, nil, err)

@@ -435,6 +435,17 @@ they do not retain content, source identities or error strings. No check is
 cached, reordered or skipped, and the existing clocks used for authorization,
 transaction locks, query deadlines and returned errors remain unchanged.
 
+Producer guards retain a separate fixed 17-slot wall-time partition, including
+shadow publications that do not run traffic admission. It separates lane/LKG,
+policy, source, member and DNS-reference loading from parent/member integrity,
+producer/source authorization, DNS output, cohort, route placement, serving-phase
+and lane validation. Repeated member work aggregates in the same slots per
+mutation; the final reached phase is retained on early rejection. These receipts
+contain only fixed phase names and elapsed milliseconds, not inputs or errors.
+They share the existing bounded mutation rings, add no queries or retries and do
+not change any validation, deadline or locking behavior. Wall time alone does
+not establish CPU attribution or the cause of another request's failure.
+
 On Linux a non-root component's runtime profile socket accepts only kernel
 credentials identifying root or the component's own UID. Diagnostic Jobs drop
 DAC_OVERRIDE, so filesystem owner-only mode by itself prevents those Jobs from

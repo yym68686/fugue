@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -131,7 +132,77 @@ func testDNSProducerPublicationGuard(t *testing.T, dsn string) {
 			if scenario == "wrong actor" {
 				actor.ActorID = "foreign"
 			}
+			if s.db == nil {
+				if err := s.withLockedState(false, func(state *model.State) error {
+					req, guard := producedShadowIntent(parent.ID, authority.ID, "")
+					before, err := json.Marshal(state)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := validateProducerReleaseGuard(state, parent, req, actor, s.platformArtifactSigningKeyring(), guard)
+					ctx, mutation := startPlatformMutationTrace(context.Background(), "platform-release")
+					trace := beginPlatformProducerGuardTrace(ctx)
+					got := validateProducerReleaseGuardWithTrace(state, parent, req, actor, s.platformArtifactSigningKeyring(), guard, trace)
+					trace.finish()
+					if want != got {
+						t.Fatal("observation changed original guard error identity", want, got)
+					}
+					if (scenario == "complete" || scenario == "retry") != (got == nil) {
+						t.Fatal("comparison did not exercise expected guard decision", got)
+					}
+					after, err := json.Marshal(state)
+					if err != nil || string(before) != string(after) {
+						t.Fatal("observation modified source state", err)
+					}
+					last := "lane"
+					switch scenario {
+					case "wrong actor":
+						last = "parent_integrity"
+					case "paused":
+						last = "policy_authority"
+					case "source frozen", "wrong source fence":
+						last = "source_authority"
+					case "changed TTL", "foreign topology":
+						last = "dns_output"
+					}
+					observation := mutation.producerGuardObservation()
+					if observation == nil || observation.FinalPhase != last || len(observation.Stages) > int(producerGuardPhaseCount) {
+						t.Fatal("guard rejection did not retain its original phase", observation)
+					}
+					encoded, err := json.Marshal(observation)
+					if err != nil || strings.Contains(string(encoded), parent.ID) || strings.Contains(string(encoded), authority.ID) || len(encoded) > 2048 {
+						t.Fatal("guard observation retained input or exceeded budget", err)
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			_, r, _, _, err := s.ReleaseProducedPlatformArtifact(parent.ID, authority.ID, "", actor)
+			if s.db != nil {
+				var observation *platformProducerGuardObservation
+				for _, receipt := range platformMutationObservations.snapshot()["receipts"].([]platformMutationReceipt) {
+					if receipt.Operation.Name == "platform-release" && receipt.ProducerGuard != nil {
+						observation = receipt.ProducerGuard
+					}
+				}
+				if observation == nil {
+					t.Fatal("actual PostgreSQL producer guard omitted its phase receipt")
+				}
+				seen := map[string]bool{}
+				for _, stage := range observation.Stages {
+					seen[stage.Stage] = true
+				}
+				phases := []string{"read_lanes", "read_policy", "read_members", "read_dns_references", "parent_integrity"}
+				if scenario != "wrong actor" {
+					phases = append(phases, "policy_authority")
+				}
+				for _, phase := range phases {
+					if !seen[phase] {
+						t.Fatal("actual PostgreSQL guard omitted a reached phase", phase, observation)
+					}
+				}
+			}
 			if scenario != "complete" && scenario != "retry" {
 				if !errors.Is(err, ErrConflict) {
 					t.Fatal("unsafe DNS publication accepted", err)

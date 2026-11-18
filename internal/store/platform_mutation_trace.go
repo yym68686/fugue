@@ -16,17 +16,20 @@ import (
 // Keeping the operation on the existing driver observations makes DB durations
 // distinguishable from CPU validation inside the same transaction deadline.
 type platformMutationTrace struct {
-	ctx                  context.Context
-	operation            string
-	started, timeOfStage time.Time
-	stage                string
-	durations            map[string]time.Duration
-	order                []string
-	now                  func() time.Time
-	database             platformMutationDatabaseTrace
-	recorded             bool
-	admissions           []platformAdmissionObservation
-	admissionsOmitted    uint64
+	ctx                     context.Context
+	operation               string
+	started, timeOfStage    time.Time
+	stage                   string
+	durations               map[string]time.Duration
+	order                   []string
+	now                     func() time.Time
+	database                platformMutationDatabaseTrace
+	recorded                bool
+	admissions              []platformAdmissionObservation
+	admissionsOmitted       uint64
+	producerGuardDuration   [producerGuardPhaseCount]time.Duration
+	producerGuardVisited    [producerGuardPhaseCount]bool
+	producerGuardFinalPhase string
 }
 
 type platformMutationTraceKey struct{}
