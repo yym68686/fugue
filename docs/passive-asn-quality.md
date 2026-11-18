@@ -76,9 +76,16 @@ RTT tier may use contemporaneous observations matched by ASN and family.
 This is lower-confidence evidence because populations can differ within an
 ASN. A lone sparse window is only reported when its median RTT gap is at
 least 25%. These estimates are retained separately, with their original timestamps
-and mapping checks, and are never signed as DNS comparisons. Tier zero means
-unranked; disconnected or contradictory comparisons do not prove a total
-order. Offline nodes are excluded from quality tiers.
+and mapping checks, and are never signed as DNS comparisons. When current
+evidence cannot place every online endpoint, the diagnostic rank may reuse
+the last complete snapshot for exactly that family and endpoint set, after
+rechecking its original ASN attribution. It keeps the original evidence
+timestamps. The current partial result and its reason remain visible in
+`fugue_edge_passive_fleet_live_rank` and the rank logs. To start with no
+compatible history, a provisional vote-based tier can use a complete set of
+measured pairs. It gives opponents equal weight, one vote per ASN and pair,
+and accounts for ties. With neither source, tier zero means unranked.
+Offline nodes are excluded from quality tiers.
 
 For the existing signed `all_dynamic` policy, each authoritative process
 fetches a private HMAC-signed observation bound to its exact artifact, consumer

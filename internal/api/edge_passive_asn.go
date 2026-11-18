@@ -35,6 +35,7 @@ type passiveASNCheckpoint struct {
 	DNSProofs         map[string]passiveASNDNSProof               `json:"dns_proofs,omitempty"`
 	ExplorationHolds  []edgequality.PassiveEndpoint               `json:"exploration_holds,omitempty"`
 	Estimates         map[string]edgequality.PassiveASNComparison `json:"fleet_estimates,omitempty"`
+	FleetSnapshots    map[int]passiveFleetSnapshot                `json:"fleet_snapshots,omitempty"`
 }
 
 type passiveASNDNSProof struct {
@@ -75,7 +76,12 @@ type passiveFleetEdge struct {
 	id, status string
 	samples    int
 	stats      *frontnetwork.PassiveStats
-	ranks      []passiveasn.FleetRank
+	ranks      []passiveFleetStatus
+}
+
+type passiveFleetStatus struct {
+	rank, live passiveasn.FleetRank
+	historical time.Time
 }
 
 // Default-on observation over the authenticated Front sample path. This
@@ -286,7 +292,7 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	estimates := append(priorCoverage.FleetEstimates, coverage.FleetEstimates...)
 	coverage.FleetEstimates = nil
 	window.coverage = coverage
-	var ranks []passiveasn.FleetRank
+	var ranks []passiveFleetStatus
 	// Observe each selected authority even when it received no new sample.
 	// Read failure never fails or renews the measurement history.
 	s.observePassiveASNDNS(ctx, policies, &window)
@@ -324,6 +330,7 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 					window.preferring++
 				}
 			}
+			next.FleetSnapshots = make(map[int]passiveFleetSnapshot, 2)
 			for _, family := range []int{4, 6} {
 				var endpoints []edgequality.PassiveEndpoint
 				for edge, id := range identities {
@@ -335,7 +342,14 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 						endpoints = append(endpoints, edgequality.PassiveEndpoint{EdgeID: edge, GroupID: id.GroupID, Address: address})
 					}
 				}
-				ranks = append(ranks, passiveasn.RankFleet(family, endpoints, admitted, admittedEstimates)...)
+				live, effective, snapshot, fallbackAt := selectPassiveFleet(now, family, endpoints, admitted, admittedEstimates,
+					previousWindowEnd, historical, priorCoverage.FleetEstimates, last.FleetSnapshots[family], resolver)
+				if !snapshot.At.IsZero() {
+					next.FleetSnapshots[family] = snapshot
+				}
+				for i, rank := range effective {
+					ranks = append(ranks, passiveFleetStatus{rank: rank, live: live[i], historical: fallbackAt})
+				}
 			}
 			next.ObservedAt = now
 			next.CohortExploration = true
@@ -370,7 +384,7 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 		}
 	}
 	for _, rank := range ranks {
-		row := fleet[rank.Edge.EdgeID]
+		row := fleet[rank.rank.Edge.EdgeID]
 		row.ranks = append(row.ranks, rank)
 		fleet[row.id] = row
 	}
@@ -380,9 +394,10 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	slices.SortFunc(window.fleet, func(a, b passiveFleetEdge) int { return strings.Compare(a.id, b.id) })
 	if s.log != nil {
 		for _, row := range window.fleet {
-			for _, rank := range row.ranks {
-				s.log.Printf("passive fleet: edge_id=%s family=%d tier=%d basis=%s confident_peers=%d estimated_peers=%d comparable_peers=%d evidence_at=%s front=%s closed_samples=%d",
-					row.id, rank.Family, rank.Tier, rank.Basis, rank.ConfidentPeers, rank.EstimatedPeers, rank.ComparablePeers, rank.EvidenceAt.Format(time.RFC3339), row.status, row.samples)
+			for _, result := range row.ranks {
+				rank := result.rank
+				s.log.Printf("passive fleet: edge_id=%s family=%d tier=%d basis=%s confident_peers=%d estimated_peers=%d comparable_peers=%d evidence_at=%s front=%s closed_samples=%d live_tier=%d live_basis=%s historical_snapshot_at=%s",
+					row.id, rank.Family, rank.Tier, rank.Basis, rank.ConfidentPeers, rank.EstimatedPeers, rank.ComparablePeers, rank.EvidenceAt.Format(time.RFC3339), row.status, row.samples, result.live.Tier, result.live.Basis, result.historical.Format(time.RFC3339))
 			}
 		}
 	}
@@ -630,9 +645,11 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 	const frontMetric = "fugue_edge_passive_front_observation"
 	const frontStatus = "fugue_edge_passive_front_status"
 	const rankMetric = "fugue_edge_passive_fleet_rank"
+	const liveRankMetric = "fugue_edge_passive_fleet_live_rank"
 	observability.WriteMetricHeader(w, frontMetric, "Last verified per-edge Front funnel snapshot.", "gauge")
 	observability.WriteMetricHeader(w, frontStatus, "Status of the most recent Front read.", "gauge")
 	observability.WriteMetricHeader(w, rankMetric, "Cross-ASN evidence tier; zero means unranked.", "gauge")
+	observability.WriteMetricHeader(w, liveRankMetric, "Current cross-ASN evidence tier without historical fallback; zero means unranked.", "gauge")
 	for _, edge := range window.fleet {
 		write := func(kind string, n uint64) {
 			observability.WriteMetricSample(w, frontMetric, map[string]string{"edge": edge.id, "kind": kind}, float64(n))
@@ -654,10 +671,14 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 			write("recent_forward_ok", p.RecentForwardOK)
 			write("recent_forward_error", p.RecentForwardError)
 		}
-		for _, rank := range edge.ranks {
+		for _, result := range edge.ranks {
+			rank := result.rank
 			observability.WriteMetricSample(w, rankMetric, map[string]string{
 				"edge": edge.id, "family": strconv.Itoa(rank.Family), "basis": rank.Basis,
 			}, float64(rank.Tier))
+			observability.WriteMetricSample(w, liveRankMetric, map[string]string{
+				"edge": edge.id, "family": strconv.Itoa(rank.Family), "basis": result.live.Basis,
+			}, float64(result.live.Tier))
 		}
 	}
 }

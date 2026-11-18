@@ -1,12 +1,86 @@
 package passiveasn
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 	"time"
 
 	"fugue/internal/edgequality"
 )
+
+// RankComparableFleet is an operator-only bootstrap when the low-confidence
+// partial order cannot place all peers and there is no compatible snapshot.
+// Each opponent has equal weight; each ASN gets just one vote per pair.
+func RankComparableFleet(rows []FleetRank, confident, estimates []edgequality.PassiveASNComparison) []FleetRank {
+	if len(rows) < 2 || len(estimates) == 0 {
+		return nil
+	}
+	index := make(map[edgequality.PassiveEndpoint]int, len(rows))
+	for i, r := range rows {
+		index[r.Edge] = i
+	}
+	type votes struct {
+		left, right, total int
+		at                 time.Time
+	}
+	ballots := make(map[[2]int]votes)
+	seen := make(map[comparisonKey]bool)
+	for _, batch := range [][]edgequality.PassiveASNComparison{confident, estimates} {
+		for _, pair := range batch {
+			left, l := index[pair.Left]
+			right, r := index[pair.Right]
+			key := comparisonKey{pair.ASN, pair.Family, pair.Left, pair.Right}
+			if !l || !r || left >= right || pair.Family != rows[0].Family || seen[key] || pair.ObservedAt.IsZero() {
+				continue
+			}
+			seen[key] = true
+			pos := [2]int{left, right}
+			vote := ballots[pos]
+			vote.total++
+			if pair.Preferred == pair.Left.EdgeID {
+				vote.left++
+			} else if pair.Preferred == pair.Right.EdgeID {
+				vote.right++
+			}
+			vote.at = earlierEvidence(vote.at, pair.ObservedAt)
+			ballots[pos] = vote
+		}
+	}
+	// Different or incomplete sets of opponents are not comparable scores.
+	if len(ballots) != len(rows)*(len(rows)-1)/2 {
+		return nil
+	}
+	type score struct {
+		id, points int
+		at         time.Time
+	}
+	scores := make([]score, len(rows))
+	for i := range rows {
+		scores[i].id = i
+	}
+	for pair, vote := range ballots {
+		// A tie/abstention contributes zero to the score but remains in
+		// the denominator, so thin or divided evidence carries less weight.
+		margin := 1000 * (vote.left - vote.right) / vote.total
+		scores[pair[0]].points += margin
+		scores[pair[1]].points -= margin
+		for _, i := range pair {
+			scores[i].at = earlierEvidence(scores[i].at, vote.at)
+		}
+	}
+	slices.SortFunc(scores, func(a, b score) int { return cmp.Compare(b.points, a.points) })
+	out := slices.Clone(rows)
+	tier := 1
+	for i, s := range scores {
+		if i > 0 && s.points != scores[i-1].points {
+			tier++
+		}
+		r := &out[s.id]
+		r.Tier, r.Basis, r.EvidenceAt = tier, "provisional_asn_votes", s.at
+	}
+	return out
+}
 
 // FleetRank is diagnostic; it is never DNS candidate authority. Tier zero
 // means there is no justified position, not that the endpoint came last.

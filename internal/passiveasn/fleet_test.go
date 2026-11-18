@@ -36,3 +36,26 @@ func TestPassiveFleetRanksOnlySupportedRelationships(t *testing.T) {
 		}
 	}
 }
+
+func TestComparableFleetRequiresEveryPairAndCountsEachASNOnce(t *testing.T) {
+	a := edgequality.PassiveEndpoint{EdgeID: "a", GroupID: "g", Address: "8.8.8.8"}
+	b := edgequality.PassiveEndpoint{EdgeID: "b", GroupID: "g", Address: "9.9.9.9"}
+	c := edgequality.PassiveEndpoint{EdgeID: "c", GroupID: "g", Address: "1.1.1.1"}
+	now := time.Now()
+	makePair := func(asn uint32, left, right edgequality.PassiveEndpoint, winner string) edgequality.PassiveASNComparison {
+		return edgequality.PassiveASNComparison{ASN: asn, Family: 4, Left: left, Right: right, Preferred: winner, ObservedAt: now}
+	}
+	confident := []edgequality.PassiveASNComparison{makePair(1, a, b, "a")}
+	estimates := []edgequality.PassiveASNComparison{
+		makePair(1, a, b, "b"), // Same ASN and pair cannot overrule confident evidence.
+		makePair(1, a, c, ""), makePair(2, a, c, "a"), makePair(1, b, c, "b"),
+	}
+	rows := RankFleet(4, []edgequality.PassiveEndpoint{b, a, c}, confident, estimates)
+	if scores := RankComparableFleet(rows, confident, estimates[:3]); scores != nil {
+		t.Fatal("missing pair was counted")
+	}
+	scores := RankComparableFleet(rows, confident, estimates)
+	if len(scores) != 3 || scores[0].Tier != 1 || scores[1].Tier != 2 || scores[2].Tier != 3 || scores[0].Basis != "provisional_asn_votes" {
+		t.Fatalf("unexpected scores: %+v", scores)
+	}
+}
