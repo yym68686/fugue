@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 // The independent full encoder is the compatibility oracle. Source decoding is
@@ -125,6 +127,69 @@ func TestDNSHandoffFieldsOwnDecodedUnknownBehavior(t *testing.T) {
 	after, _ := json.Marshal(content)
 	if string(before) != string(after) {
 		t.Fatal("decoded behavior aliases signed source content")
+	}
+}
+
+func TestDNSHandoffDocumentsPreserveNodeBehaviorAndOwnership(t *testing.T) {
+	content := map[string]any{
+		"policy": map[string]any{
+			"dns_query_policy":    map[string]any{"future": []any{map[string]any{"edge_group_id": "legacy", "bytes": "\xff"}}},
+			"dns_authorities":     []any{map[string]any{"node_id": "first"}, map[string]any{"node_id": "second"}},
+			"dns_client_policies": []any{map[string]any{"node_id": "first"}, map[string]any{"node_id": "second"}},
+		},
+		"consumer_views": []any{
+			map[string]any{"node_id": "first", "edge_group_id": "legacy"},
+			map[string]any{"node_id": "second", "edge_group_id": "legacy"},
+		},
+		"query_views": []any{
+			map[string]any{"node_id": "first", "edge_group_id": "legacy", "records": []any{
+				map[string]any{"name": "second.example.test", "future": []any{"one", "two"}},
+				map[string]any{"name": "first.example.test", "record_kind": model.EdgeDNSRecordKindProbe, "edge_group_id": "legacy"},
+			}},
+			map[string]any{"node_id": "second", "edge_group_id": "legacy", "records": []any{false}},
+		},
+	}
+	a := model.PlatformArtifact{Content: content}
+	before, _ := json.Marshal(content)
+	shared, _, ok := decodeDNSHandoffDocumentsOnce(a, a)
+	if !ok {
+		t.Fatal("ordinary JSON did not enter shared decode")
+	}
+	aliases := map[string]string{"legacy": "middle", "middle": "final"}
+	for _, node := range []string{"first", "second", "unconfigured", "first"} {
+		want, err := dnsHandoffBehavior(a, node, "authority", aliases)
+		got, gotErr := shared.behavior(node, "authority", aliases)
+		if fmt.Sprint(gotErr) != fmt.Sprint(err) || !reflect.DeepEqual(got, want) {
+			t.Fatalf("node %q shared behavior differs: got %v want %v", node, gotErr, err)
+		}
+		if got != nil {
+			got["dns_query_policy"].(map[string]any)["future"].([]any)[0].(map[string]any)["edge_group_id"] = "changed"
+			got["query_views"].([]any)[0].(map[string]any)["edge_group_id"] = "changed"
+		}
+	}
+	after, _ := json.Marshal(content)
+	if string(after) != string(before) {
+		t.Fatal("signed content was mutated")
+	}
+}
+
+func TestDNSHandoffDocumentsKeepCustomEncoderOrder(t *testing.T) {
+	calls := 0
+	plain := model.PlatformArtifact{Content: map[string]any{}}
+	custom := model.PlatformArtifact{Content: map[string]any{
+		"ignored": countedHandoffJSON{json.RawMessage("invalid"), &calls},
+	}}
+	for _, pair := range [][2]model.PlatformArtifact{{plain, custom}, {custom, plain}} {
+		if _, _, ok := decodeDNSHandoffDocumentsOnce(pair[0], pair[1]); ok || calls != 0 {
+			t.Fatalf("reusable decode evaluated a custom encoder, calls=%d", calls)
+		}
+	}
+	want := "DNS handoff policy missing"
+	if err := compareDNSHandoffNode(plain, custom, "node", PlatformIntent{}, nil, nil); fmt.Sprint(err) != want || calls != 0 {
+		t.Fatalf("predecessor rejection no longer short-circuits custom next encoding: %v calls=%d", err, calls)
+	}
+	if err := compareDNSHandoffNode(custom, plain, "node", PlatformIntent{}, nil, nil); err == nil || calls != 1 {
+		t.Fatalf("custom predecessor encoding did not preserve error/effect: %v calls=%d", err, calls)
 	}
 }
 

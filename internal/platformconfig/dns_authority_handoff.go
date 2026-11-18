@@ -69,11 +69,22 @@ func validateDNSAuthorityHandoffNodes(previous, next model.PlatformArtifact, nod
 	if err != nil {
 		return err
 	}
+	var previousDocument, nextDocument *dnsHandoffDocument
+	var reuseDocuments bool
+	if len(nodes) > 1 {
+		previousDocument, nextDocument, reuseDocuments = decodeDNSHandoffDocumentsOnce(previous, next)
+	}
 	for _, node := range nodes {
 		if node == "" {
 			return fmt.Errorf("DNS handoff requires two DNS artifacts and a physical node")
 		}
-		if err := compareDNSHandoffNode(previous, next, node, source.Source.Intent, aliases, availability); err != nil {
+		var err error
+		if reuseDocuments {
+			err = compareDNSHandoffDocuments(previousDocument, nextDocument, node, source.Source.Intent, aliases, availability)
+		} else {
+			err = compareDNSHandoffNode(previous, next, node, source.Source.Intent, aliases, availability)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -89,6 +100,22 @@ func compareDNSHandoffNode(previous, next model.PlatformArtifact, node string, i
 	if err != nil {
 		return err
 	}
+	return compareDNSHandoffBehaviors(old, current, intent, availability)
+}
+
+func compareDNSHandoffDocuments(previous, next *dnsHandoffDocument, node string, intent PlatformIntent, aliases map[string]string, availability *DNSAvailabilityRoute) error {
+	old, err := previous.behavior(node, intent.AuthorityCellID, aliases)
+	if err != nil {
+		return err
+	}
+	current, err := next.behavior(node, intent.AuthorityCellID, nil)
+	if err != nil {
+		return err
+	}
+	return compareDNSHandoffBehaviors(old, current, intent, availability)
+}
+
+func compareDNSHandoffBehaviors(old, current map[string]any, intent PlatformIntent, availability *DNSAvailabilityRoute) error {
 	if availability != nil {
 		if !DNSUsesRetainedRoutes(intent) {
 			return fmt.Errorf("availability handoff requires retained routing authority")
@@ -191,6 +218,43 @@ func removeDeclaredAvailabilityDelta(previous, next map[string]any, route DNSAva
 // not accidentally make old and new answers look equivalent. Rewrite only the
 // finite list of explicitly declared routing authority aliases.
 func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliases map[string]string) (map[string]any, error) {
+	document, err := decodeDNSHandoffDocument(a)
+	if err != nil {
+		return nil, err
+	}
+	return document.behavior(node, authority, aliases)
+}
+
+type dnsHandoffDocument struct {
+	content map[string]any
+	shared  bool
+}
+
+// Custom JSON trees keep the original per-node encoder calls and effects.
+// Ordinary signed JSON trees can be decoded once and projected independently
+// for each physical node.
+func decodeDNSHandoffDocumentsOnce(previous, next model.PlatformArtifact) (*dnsHandoffDocument, *dnsHandoffDocument, bool) {
+	remaining := 262144
+	if !dnsValidationNativeTree(previous.Content, 0, &remaining) {
+		return nil, nil, false
+	}
+	remaining = 262144
+	if !dnsValidationNativeTree(next.Content, 0, &remaining) {
+		return nil, nil, false
+	}
+	old, err := decodeDNSHandoffDocument(previous)
+	if err != nil {
+		return nil, nil, false
+	}
+	current, err := decodeDNSHandoffDocument(next)
+	if err != nil {
+		return nil, nil, false
+	}
+	old.shared, current.shared = true, true
+	return old, current, true
+}
+
+func decodeDNSHandoffDocument(a model.PlatformArtifact) (*dnsHandoffDocument, error) {
 	raw, err := marshalDNSHandoffFields(a.Content, false)
 	if err != nil {
 		return nil, err
@@ -199,13 +263,17 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 	if json.Unmarshal(raw, &content) != nil {
 		return nil, fmt.Errorf("DNS handoff content invalid")
 	}
-	policy, ok := content["policy"].(map[string]any)
+	return &dnsHandoffDocument{content: content}, nil
+}
+
+func (d *dnsHandoffDocument) behavior(node, authority string, aliases map[string]string) (map[string]any, error) {
+	policy, ok := d.content["policy"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("DNS handoff policy missing")
 	}
 	out := map[string]any{}
 	for _, key := range []string{"dns_query_policy", "dns_route_state_constraints", "dns_placement_mode"} {
-		out[key] = policy[key]
+		out[key] = d.own(policy[key])
 	}
 	for _, key := range []string{"dns_authorities", "dns_client_policies", "dns_answer_rules"} {
 		rows, _ := policy[key].([]any)
@@ -216,7 +284,7 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 				return nil, fmt.Errorf("DNS handoff policy row invalid")
 			}
 			if row["node_id"] == node {
-				selected = append(selected, row)
+				selected = append(selected, d.own(row))
 			}
 		}
 		if key != "dns_answer_rules" && len(selected) == 0 {
@@ -226,7 +294,7 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 		out[key] = selected
 	}
 	for _, key := range []string{"consumer_views", "query_views"} {
-		rows, _ := content[key].([]any)
+		rows, _ := d.content[key].([]any)
 		selected := []any{}
 		for _, value := range rows {
 			row, ok := value.(map[string]any)
@@ -236,6 +304,7 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 			if row["node_id"] != node {
 				continue
 			}
+			row = d.own(row).(map[string]any)
 			viewGroup, ok := row["edge_group_id"].(string)
 			if !ok || viewGroup == "" {
 				return nil, fmt.Errorf("DNS handoff node authority missing")
@@ -266,6 +335,32 @@ func dnsHandoffBehavior(a model.PlatformArtifact, node, authority string, aliase
 	}
 	rewriteDNSAuthorityAliases(out, aliases)
 	return out, nil
+}
+
+func (d *dnsHandoffDocument) own(value any) any {
+	if d.shared {
+		return cloneDNSHandoffValue(value)
+	}
+	return value
+}
+
+func cloneDNSHandoffValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(value))
+		for key, child := range value {
+			cloned[key] = cloneDNSHandoffValue(child)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(value))
+		for i, child := range value {
+			cloned[i] = cloneDNSHandoffValue(child)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 // These decoders inspect either the typed source or the complete generic
