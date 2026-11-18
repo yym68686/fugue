@@ -396,8 +396,8 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 		for _, row := range window.fleet {
 			for _, result := range row.ranks {
 				rank := result.rank
-				s.log.Printf("passive fleet: edge_id=%s family=%d tier=%d basis=%s confident_peers=%d estimated_peers=%d comparable_peers=%d evidence_at=%s front=%s closed_samples=%d live_tier=%d live_basis=%s historical_snapshot_at=%s",
-					row.id, rank.Family, rank.Tier, rank.Basis, rank.ConfidentPeers, rank.EstimatedPeers, rank.ComparablePeers, rank.EvidenceAt.Format(time.RFC3339), row.status, row.samples, result.live.Tier, result.live.Basis, result.historical.Format(time.RFC3339))
+				s.log.Printf("passive fleet: edge_id=%s family=%d tier=%d basis=%s confident_peers=%d estimated_peers=%d comparable_peers=%d evidence_at=%s front=%s closed_samples=%d live_tier=%d live_basis=%s historical_snapshot_at=%s vote_score=%d",
+					row.id, rank.Family, rank.Tier, rank.Basis, rank.ConfidentPeers, rank.EstimatedPeers, rank.ComparablePeers, rank.EvidenceAt.Format(time.RFC3339), row.status, row.samples, result.live.Tier, result.live.Basis, result.historical.Format(time.RFC3339), rank.VoteScore)
 			}
 		}
 	}

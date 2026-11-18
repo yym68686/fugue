@@ -55,7 +55,8 @@ func TestComparableFleetRequiresEveryPairAndCountsEachASNOnce(t *testing.T) {
 		t.Fatal("missing pair was counted")
 	}
 	scores := RankComparableFleet(rows, confident, estimates)
-	if len(scores) != 3 || scores[0].Tier != 1 || scores[1].Tier != 2 || scores[2].Tier != 3 || scores[0].Basis != "provisional_asn_votes" {
+	if len(scores) != 3 || scores[0].Tier != 1 || scores[1].Tier != 2 || scores[2].Tier != 3 ||
+		scores[0].Basis != "provisional_asn_votes" || scores[0].VoteScore != 1500 || scores[1].VoteScore != 0 || scores[2].VoteScore != -1500 {
 		t.Fatalf("unexpected scores: %+v", scores)
 	}
 }

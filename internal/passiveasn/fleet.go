@@ -77,7 +77,7 @@ func RankComparableFleet(rows []FleetRank, confident, estimates []edgequality.Pa
 			tier++
 		}
 		r := &out[s.id]
-		r.Tier, r.Basis, r.EvidenceAt = tier, "provisional_asn_votes", s.at
+		r.Tier, r.Basis, r.EvidenceAt, r.VoteScore = tier, "provisional_asn_votes", s.at, s.points
 	}
 	return out
 }
@@ -90,6 +90,7 @@ type FleetRank struct {
 	Basis                           string
 	ConfidentPeers, ComparablePeers int
 	EstimatedPeers                  int
+	VoteScore                       int // Normalized sum of per-opponent ASN vote margins.
 	EvidenceAt                      time.Time
 }
 
