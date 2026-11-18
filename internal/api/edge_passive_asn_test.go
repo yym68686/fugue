@@ -36,11 +36,12 @@ func TestPassiveASNMappingNeedsAgreementAcrossDNSAuthorities(t *testing.T) {
 
 func TestPassiveASNServingRequiresEveryCurrentAuthority(t *testing.T) {
 	a := model.PlatformConsumerAssignment{ArtifactID: "dns-1", ContentHash: "digest-1", ReleaseSetID: "release-1", FencingToken: 3}
-	release := dnsserver.DNSDecisionPublication{ArtifactID: a.ArtifactID, Digest: a.ContentHash, ReleaseSetID: a.ReleaseSetID, FencingToken: a.FencingToken}
+	release := dnsserver.DNSDecisionPublication{ArtifactID: a.ArtifactID, Digest: a.ContentHash, ReleaseSetID: a.ReleaseSetID,
+		FencingToken: a.FencingToken, ReleaseChannel: model.PlatformArtifactReleaseChannelFull}
 	policies := []platformconfig.DNSClientPolicy{{NodeID: "node-a"}, {NodeID: "node-b"}}
 	claims := platformcontrol.PlatformComponentIdentityClaims{NodeID: "node-a", Component: model.PlatformConsumerComponentDNSServer, ScopeKey: "global",
 		CredentialID: "kubernetes:system:dns-a:pod", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
-	proof := passiveASNDNSProof{Process: "process", PodUID: "pod", ScopeKey: claims.ScopeKey, Publication: release, Verified: true}
+	proof := passiveASNDNSProof{Process: "process", PodUID: "pod", ScopeKey: claims.ScopeKey, Publication: release, WireVerified: true}
 	proofs := map[string]passiveASNDNSProof{"node-a": proof}
 	if passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("one authority activated ranking")
@@ -57,8 +58,15 @@ func TestPassiveASNServingRequiresEveryCurrentAuthority(t *testing.T) {
 	}
 	proofs["node-b"] = proof
 	if !passiveASNServingReady(proofs, policies, a, claims) {
-		t.Fatal("verified authorities failed admission")
+		t.Fatal("replayed ordinary answers from both sites failed admission before the first classified query")
 	}
+	incomplete := proof
+	incomplete.Publication.ReleaseChannel = ""
+	proofs["node-b"] = incomplete
+	if passiveASNServingReady(proofs, policies, a, claims) {
+		t.Fatal("peer without a full release activated ranking")
+	}
+	proofs["node-b"] = proof
 	replace := claims
 	replace.CredentialID = "kubernetes:system:dns-a:new-pod"
 	if passiveASNServingReady(proofs, policies, a, replace) {
@@ -67,6 +75,33 @@ func TestPassiveASNServingRequiresEveryCurrentAuthority(t *testing.T) {
 	a.FencingToken++
 	if passiveASNServingReady(proofs, policies, a, claims) {
 		t.Fatal("previous serving release authorized ranking")
+	}
+}
+
+func TestPassiveASNDNSProofOnlyPersistsForExactServingIdentity(t *testing.T) {
+	current := passiveASNDNSProof{Process: "p", PodUID: "pod", ScopeKey: "global",
+		Publication: dnsserver.DNSDecisionPublication{ArtifactID: "a", ReleaseSetID: "r", FencingToken: 1}}
+	prior := current
+	prior.WireVerified = true
+	if got := current.inherit(prior); !got.WireVerified || got.Verified {
+		t.Fatal("lost wire proof after journal turnover or counted it as ASN evidence", got)
+	}
+	legacy := current
+	legacy.Verified = true
+	if got := current.inherit(legacy); !got.WireVerified || !got.Verified {
+		t.Fatal("legacy classified proof did not carry its implied wire verification", got)
+	}
+	for _, mutate := range []func(*passiveASNDNSProof){
+		func(p *passiveASNDNSProof) { p.Process = "new-process" },
+		func(p *passiveASNDNSProof) { p.PodUID = "new-pod" },
+		func(p *passiveASNDNSProof) { p.ScopeKey = "authority-cell:cell-new" },
+		func(p *passiveASNDNSProof) { p.Publication.FencingToken++ },
+	} {
+		replacement := current
+		mutate(&replacement)
+		if got := replacement.inherit(legacy); got.WireVerified || got.Verified {
+			t.Fatal("changed backend inherited prior serving evidence", got)
+		}
 	}
 }
 

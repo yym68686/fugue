@@ -46,16 +46,20 @@ replay-verified successful A/AAAA receipts enter the DNS denominator.
 `dns_ecs_asn_hint_upper_bound` is deliberately not usable ECS coverage:
 replay redacts the source prefix and cannot recompute its BGP classification.
 `dns_passive_verified` counts selected processes that have a replay-verified
-positive answer with a classifier result. These bounded samples are not
+positive answer with a classifier result. `dns_wire_verified` separately
+counts selected processes whose currently loaded full release produced a
+replay-verified positive answer, with or without ECS. These bounded samples are not
 request-, packet- or byte-level traffic shares.
 
 For the existing signed `all_dynamic` policy, each authoritative process
 fetches a private HMAC-signed observation bound to its exact artifact, consumer
 set, release and fence. Older Worker readers do not need new policy fields.
-The observation starts in shadow mode. It may change answers only after all
-configured independent authorities have verified classified ECS on their
-selected process and current full release. A restarted/replaced authority
-has to reestablish that proof. Both Kubernetes-bound global DNS and Cell DNS
+The observation starts in shadow mode. Active mode requires a replayable
+positive DNS answer from each configured independent public authority's
+selected process and current full release. This verifies the live wire path
+without waiting for a particular client traffic mix. Each active query must
+still carry trusted, classifiable ECS to affect the answer. A restarted or
+replaced authority has to reestablish its wire proof. Both Kubernetes-bound global DNS and Cell DNS
 fetch the same private format, but a global process cannot activate using a
 Cell process's proof or vice versa. Each consumer uses its own expected-set
 cohort; an idle slot can verify shadow without using the on-duty slot's
@@ -95,5 +99,5 @@ signed observation without owning the public listener. After rollout,
 query both public addresses and confirm that the resulting receipts came
 from the upgraded serving workloads. A successful shadow load establishes
 observation, not active steering. Inspect replayed live decisions for mode
-and comparison evidence; DNS transport probes intentionally send no forged
-ECS and cannot establish that evidence.
+and comparison evidence; ordinary DNS transport probes can confirm active mode
+and its baseline fallback, but cannot establish a real ASN-ranked answer.

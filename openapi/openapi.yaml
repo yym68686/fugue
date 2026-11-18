@@ -4757,7 +4757,7 @@ paths:
     get:
       operationId: getPlatformConsumerPassiveASN
       summary: Read a signed passive ASN observation for this DNS release
-      description: A bounded, short-lived ranking input for the exact selected full DNS assignment of a Kubernetes-bound global or authority-cell DNS consumer. The signed DNS policy must enable dynamic quality. An active observation requires matching replay evidence from the public DNS backends; an assigned standby can validate a shadow observation without selecting traffic. This operation never authorizes a candidate or renews route, TLS or serving readiness.
+      description: A bounded, short-lived ranking input for the exact selected full DNS assignment of a Kubernetes-bound global or authority-cell DNS consumer. The signed DNS policy must enable dynamic quality. An active observation requires replay-verified positive wire answers from the current public DNS backends on their loaded full releases, even if no client subnet has been classified yet. Individual answers still require trusted, classified client subnet evidence for ASN steering. An assigned standby can validate a shadow observation without selecting traffic. This operation never authorizes a candidate or renews route, TLS or serving readiness.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerPassiveASN
       security:

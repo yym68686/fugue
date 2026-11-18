@@ -35,7 +35,17 @@ type passiveASNCheckpoint struct {
 type passiveASNDNSProof struct {
 	Process, PodUID, ScopeKey string
 	Publication               dnsserver.DNSDecisionPublication
-	Verified                  bool
+	WireVerified              bool
+	Verified                  bool // A replayable answer carried a classified client ASN.
+}
+
+func (p passiveASNDNSProof) inherit(prior passiveASNDNSProof) passiveASNDNSProof {
+	if p.Process != prior.Process || p.PodUID != prior.PodUID || p.ScopeKey != prior.ScopeKey || p.Publication != prior.Publication {
+		return p
+	}
+	p.WireVerified = p.WireVerified || prior.WireVerified || prior.Verified
+	p.Verified = p.Verified || prior.Verified
+	return p
 }
 
 type passiveASNState struct {
@@ -51,6 +61,7 @@ type passiveASNWindow struct {
 	coverage                                                         edgequality.PassiveASNCoverage
 	rules, edges, cappedEdges, retained, preferring, saturated       int
 	dnsNodes, dnsReads, dnsAnswers, dnsECS, dnsASNHints, dnsVerified int
+	dnsWireVerified                                                  int
 	dnsProofs                                                        map[string]passiveASNDNSProof
 }
 
@@ -219,11 +230,10 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 			next.Cohorts = retainPassiveASNCohorts(collectPassiveASNCohorts(samples, identities, resolver), next.Cohorts, resolver)
 			next.DNSProofs = window.dnsProofs
 			for node, proof := range next.DNSProofs {
-				prior := proof
-				prior.Verified = true
-				if last.DNSProofs[node] == prior {
-					proof.Verified = true
-					next.DNSProofs[node] = proof
+				proof = proof.inherit(last.DNSProofs[node])
+				next.DNSProofs[node] = proof
+				if proof.WireVerified {
+					window.dnsWireVerified++
 				}
 				if proof.Verified {
 					window.dnsVerified++
@@ -250,9 +260,9 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	s.passiveASN.window = window
 	s.passiveASN.mu.Unlock()
 	if s.log != nil {
-		s.log.Printf("passive ASN: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d dns_verified=%d",
+		s.log.Printf("passive ASN: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d dns_verified=%d dns_wire_verified=%d",
 			window.rules, window.bgpSourceAt.Format(time.RFC3339), window.edges, window.cappedEdges, coverage.Connections, coverage.Classified, coverage.TCPRTT, coverage.ClassifiedRTT,
-			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints, window.dnsVerified)
+			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints, window.dnsVerified, window.dnsWireVerified)
 	}
 	return nil
 }
@@ -439,12 +449,15 @@ func (s *Server) observePassiveASNDNS(ctx context.Context, policies []platformco
 			if hint {
 				window.dnsASNHints++
 			}
-			if valid && ecs && proof.Publication.ArtifactID != "" && receipt.AnswerPublication != nil &&
+			if valid && proof.Publication.ArtifactID != "" && receipt.AnswerPublication != nil &&
 				*receipt.AnswerPublication == proof.Publication {
-				for _, record := range receipt.Records {
-					if record.PassiveASN != nil && record.PassiveASN.ASN != 0 && record.PassiveASN.ObservationDigest != "" {
-						proof.Verified = true
-						break
+				proof.WireVerified = true
+				if ecs {
+					for _, record := range receipt.Records {
+						if record.PassiveASN != nil && record.PassiveASN.ASN != 0 && record.PassiveASN.ObservationDigest != "" {
+							proof.Verified = true
+							break
+						}
 					}
 				}
 			}
@@ -478,6 +491,7 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 		{"dns_nodes", window.dnsNodes}, {"dns_reads", window.dnsReads}, {"dns_answers", window.dnsAnswers},
 		{"dns_ecs", window.dnsECS}, {"dns_ecs_asn_hint_upper_bound", window.dnsASNHints},
 		{"dns_passive_verified", window.dnsVerified},
+		{"dns_wire_verified", window.dnsWireVerified},
 	} {
 		observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_observation", "Counts from the last bounded passive ASN observation window.", map[string]string{"kind": entry.kind}, float64(entry.count))
 	}

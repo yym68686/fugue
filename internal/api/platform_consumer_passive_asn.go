@@ -223,16 +223,19 @@ func minPassiveASNTime(a, b time.Time) time.Time {
 }
 
 func passiveASNServingReady(proofs map[string]passiveASNDNSProof, policies []platformconfig.DNSClientPolicy, a model.PlatformConsumerAssignment, claims platformcontrol.PlatformComponentIdentityClaims) bool {
-	// Do not send subnet-dependent answers unless the configured independent
-	// authorities have each replay-verified a classified query on their current
-	// selected pod and release.
+	// Verify the wire path on each current public authority before admitting
+	// active mode. Classification is a per-query prerequisite for changing the
+	// answer, not a fleet admission prerequisite that depends on traffic mix.
 	if len(policies) < 2 || len(policies) != len(proofs) {
 		return false
 	}
 	seen := make(map[string]bool, len(policies))
 	for _, policy := range policies {
 		proof := proofs[policy.NodeID]
-		if !proof.Verified || proof.ScopeKey == "" || (proof.ScopeKey == "global") != (claims.ScopeKey == "global") || seen[policy.NodeID] {
+		if !proof.WireVerified || proof.Process == "" || proof.PodUID == "" || proof.ScopeKey == "" ||
+			proof.Publication.ArtifactID == "" || proof.Publication.Digest == "" || proof.Publication.ReleaseSetID == "" ||
+			proof.Publication.ReleaseChannel != model.PlatformArtifactReleaseChannelFull ||
+			(proof.ScopeKey == "global") != (claims.ScopeKey == "global") || seen[policy.NodeID] {
 			return false
 		}
 		seen[policy.NodeID] = true
