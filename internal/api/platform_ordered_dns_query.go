@@ -91,7 +91,8 @@ func projectOrderedDNSQueries(result *platformIntentProjectionResponse, strategy
 				}
 				sort.Slice(available, func(left, right int) bool { return available[left].IP < available[right].IP })
 				order := strategy.OrderedProjection.DefaultOrder
-				if override, found := overrides[consumer.NodeID+"\x00"+record.Hostname+"\x00"+family]; found {
+				override, fixed := overrides[consumer.NodeID+"\x00"+record.Hostname+"\x00"+family]
+				if fixed {
 					order = override
 				}
 				allowed := map[string]bool{}
@@ -109,6 +110,23 @@ func projectOrderedDNSQueries(result *platformIntentProjectionResponse, strategy
 					mode, reason, filtered = model.DNSAnswerPolicyKindPhysicalQuality, "awaiting_bound_physical_evidence", nil
 				} else if model.ValidateDNSPhysicalOrder(filtered) != nil {
 					return fmt.Errorf("configured physical order has no authorized endpoint")
+				} else if !fixed && strategy.DynamicQuality != nil && strategy.DynamicQuality.Mode == "all_dynamic" {
+					// Preserve the existing incumbent and fixed user orders.
+					// Dynamic defaults can admit additional approved members
+					// already constrained by projected placement. The DNS
+					// executor still needs independent current route/TLS proof.
+					extra := make([]string, 0, len(allowed))
+					for _, edgeID := range filtered.OrderedEdgeIDs {
+						delete(allowed, edgeID)
+					}
+					for edgeID := range allowed {
+						extra = append(extra, edgeID)
+					}
+					sort.Strings(extra)
+					filtered.OrderedEdgeIDs = append(filtered.OrderedEdgeIDs, extra...)
+					if model.ValidateDNSPhysicalOrder(filtered) != nil {
+						return fmt.Errorf("dynamic physical order exceeds authorized selection bounds")
+					}
 				}
 				ttl := max(strategy.MinimumTTLSeconds, min(strategy.MaximumTTLSeconds, record.TTL))
 				rules = append(rules, platformconfig.DNSAnswerRule{NodeID: consumer.NodeID, Hostname: record.Hostname, Type: family, SelectionMode: mode, PhysicalOrder: filtered, TTLSeconds: ttl})

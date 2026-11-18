@@ -146,6 +146,8 @@ func (s *Server) makePassiveASNPublication(ctx context.Context, a model.Platform
 		return p, false
 	}
 	p.ObservedAt, p.ExpiresAt = cp.ObservedAt, cp.ObservedAt.Add(passiveasn.PublicationTTL)
+	p.ExplorationHolds = cp.ExplorationHolds
+	p.CohortExploration = cp.CohortExploration
 	p.Resolvers, p.ResolverSourceAt = resolvers.Prefixes, resolvers.PublishedAt
 	p.ExpiresAt = minPassiveASNTime(p.ExpiresAt, resolvers.PublishedAt.Add(8*24*time.Hour))
 	policies, err := s.passiveASNSignedMappings(ctx)

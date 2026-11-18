@@ -70,6 +70,7 @@ type Service struct {
 	networkLast     time.Time
 	passiveMu       sync.Mutex
 	passive         [frontnetwork.PassiveBuckets]passiveNetworkBucket
+	passiveState    passiveNetworkState
 }
 
 type tcpCopyResult = tcpproxy.CopyResult
@@ -178,6 +179,13 @@ func (s *Service) Run(ctx context.Context) error {
 			return err
 		}
 		shutdowns = append(shutdowns, shutdown)
+		if cfg.ProxyProtocol && cfg.EdgeID != "" && cfg.EdgeGroupID != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.runPassiveNetwork(ctx)
+			}()
+		}
 	}
 
 	<-ctx.Done()
@@ -410,39 +418,64 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	defer downstream.Close()
 
 	slot := s.activeSlot(cfg)
+	connection, samplePublic := passiveConnection(cfg, protocol, slot, "", downstream, startedAt)
+	if samplePublic {
+		s.passiveState.eligible.Add(1)
+	}
 	target := cfg.Slots[slot].HTTPSAddress
 	if protocol == ProtocolHTTP {
 		target = cfg.Slots[slot].HTTPAddress
 	}
 	target = strings.TrimSpace(target)
 	if target == "" {
+		if samplePublic {
+			s.recordPassiveForwarding(false, time.Now())
+		}
 		s.Logger.Printf("edge front %s target missing; slot=%s", protocol, slot)
 		return
 	}
 
 	upstream, err := net.DialTimeout("tcp", target, cfg.DialTimeout)
 	if err != nil {
+		if samplePublic {
+			s.recordPassiveForwarding(false, time.Now())
+		}
 		s.Logger.Printf("edge front %s dial failed; slot=%s target=%s error=%v", protocol, slot, target, err)
 		return
 	}
 	defer upstream.Close()
 	if cfg.ProxyProtocol {
 		if _, err := io.WriteString(upstream, proxyproto.HeaderV1(downstream.RemoteAddr(), downstream.LocalAddr())); err != nil {
+			if samplePublic {
+				s.recordPassiveForwarding(false, time.Now())
+			}
 			s.Logger.Printf("edge front %s proxy protocol write failed; slot=%s target=%s error=%v", protocol, slot, target, err)
 			return
 		}
 	}
 	connectionID := s.startTCPConnection(protocol, slot, target, downstream, upstream, startedAt, cfg.ProxyProtocol)
 	defer s.finishTCPConnection(connectionID)
-	connection, samplePublic := passiveConnection(cfg, protocol, slot, connectionID, downstream, startedAt)
 	var baseline model.EdgeClientNetworkSample
 	if samplePublic {
+		connection.ID = connectionID
+		s.recordPassiveForwarding(true, time.Now())
 		baseline = publicClientNetworkSample(connection, tcpdiag.SnapshotFromConn(downstream), time.Now().UTC())
+		s.trackPassiveConnection(connection, baseline)
 	}
 	clientToWorker, workerToClient, firstCompleted := tcpproxy.CopyBidirectional(downstream, upstream, "client_to_worker", "worker_to_client")
 	clientTCPInfo := tcpdiag.SnapshotFromConn(downstream)
-	if samplePublic && clientToWorker.Bytes > 0 && workerToClient.Bytes > 0 {
-		s.recordPassiveNetworkSample(connection, baseline, clientTCPInfo, time.Now().UTC())
+	if samplePublic {
+		previous, sampled := s.finishPassiveConnection(connection.ID)
+		if previous.Delivery != nil {
+			baseline = previous
+		}
+		if clientToWorker.Bytes > 0 && workerToClient.Bytes > 0 {
+			if !sampled {
+				s.recordPassiveNetworkSample(connection, baseline, clientTCPInfo, time.Now().UTC())
+			}
+		} else {
+			s.passiveState.noPayload.Add(1)
+		}
 	}
 	s.recordTCPConnection(protocol, slot, firstCompleted, cfg.ProxyProtocol, time.Since(startedAt), clientToWorker, workerToClient, clientTCPInfo)
 	s.logTCPConnection(protocol, slot, target, downstream, upstream, startedAt, clientToWorker, workerToClient, firstCompleted, cfg.ProxyProtocol, clientTCPInfo)
@@ -682,6 +715,7 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request, cfg Conf
 	fmt.Fprintln(w, "# HELP fugue_edge_front_info Static low-cardinality edge-front identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_info gauge")
 	fmt.Fprintf(w, "fugue_edge_front_info{%s} 1\n", labels)
+	s.writePassiveNetworkMetrics(w, labels)
 	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_active_connections Active public TCP connections handled by edge-front.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_active_connections gauge")
 	for _, slot := range sortedEdgeFrontActiveSlots(active) {

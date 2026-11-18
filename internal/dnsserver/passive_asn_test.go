@@ -5,7 +5,6 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,7 +29,8 @@ func passiveASNTestRuntime(t *testing.T, mode string, wins bool) (*dnsServingSta
 	artifact := st.record.Candidate.Artifact
 	prefix := netip.MustParsePrefix("203.0.113.0/24")
 	p := passiveasn.Publication{Mode: mode, DNSArtifactID: artifact.ID, DNSDigest: artifact.ContentHash, ReleaseSetID: "parent-a", NodeID: "dns-a", ConsumerSetID: "set-a", FencingToken: 1,
-		ObservedAt: now.Add(-time.Second), ExpiresAt: now.Add(18 * time.Second), ResolverSourceAt: now.Add(-time.Hour),
+		CohortExploration: true,
+		ObservedAt:        now.Add(-time.Second), ExpiresAt: now.Add(18 * time.Second), ResolverSourceAt: now.Add(-time.Hour),
 		Bindings: []passiveasn.Binding{{Prefix: prefix, ASN: 64496}}, Resolvers: []netip.Prefix{netip.MustParsePrefix("198.51.100.0/24")}}
 	if wins {
 		p.Pairs = []edgequality.PassiveASNComparison{{ASN: 64496, Family: 4,
@@ -47,7 +47,7 @@ func passiveASNTestRuntime(t *testing.T, mode string, wins bool) (*dnsServingSta
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st, &dnsPassiveRuntime{view: view, budget: &atomic.Uint64{}, node: "dns-a"}, now
+	return st, &dnsPassiveRuntime{view: view, node: "dns-a"}, now
 }
 
 func passiveASNTestQuery(subnet string, bits uint8) *dns.Msg {
@@ -142,9 +142,9 @@ func TestPassiveASNRejoinsOnlyAfterRouteProofRecovers(t *testing.T) {
 
 func TestPassiveASNBoundedExploration(t *testing.T) {
 	st, runtime, now := passiveASNTestRuntime(t, "active", false)
-	req := passiveASNTestQuery("203.0.113.0", 24)
+	req := passiveASNTestQuery(exploredPrefix(t, now), 24)
 	count := 0
-	for range 401 {
+	for range 20 {
 		res := st.answerObserved(req, "198.51.100.2:53", now, nil, runtime)
 		if len(res.Answer) != 1 {
 			t.Fatal(res)
@@ -153,9 +153,31 @@ func TestPassiveASNBoundedExploration(t *testing.T) {
 			count++
 		}
 	}
-	if count != 2 {
-		t.Fatalf("bounded exploration served %d answers", count)
+	if count != 20 {
+		t.Fatalf("stable exploration split one cohort: %d answers", count)
 	}
+	count = 0
+	for i := 0; i < 4096; i++ {
+		ip := netip.AddrFrom4([4]byte{11, byte(i >> 8), byte(i), 0})
+		if passiveExploration(netip.PrefixFrom(ip, 24), now) > 0 {
+			count++
+		}
+	}
+	if count < 140 || count > 280 {
+		t.Fatalf("exploration exceeds expected cohort budget: %d", count)
+	}
+}
+
+func exploredPrefix(t *testing.T, now time.Time) string {
+	t.Helper()
+	for i := 0; i < 4096; i++ {
+		ip := netip.AddrFrom4([4]byte{11, byte(i >> 8), byte(i), 0})
+		if passiveExploration(netip.PrefixFrom(ip, 24), now) > 0 {
+			return ip.String()
+		}
+	}
+	t.Fatal("no explored cohort")
+	return ""
 }
 
 func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
@@ -189,7 +211,7 @@ func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
 		{"8.8.4.0", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred"},
 		{"1.1.1.0", "198.51.100.2:53", "8.8.8.8", "retained_no_challenger_advantage"},
 		{"8.8.4.0", "192.0.2.10:53", "8.8.8.8", "ecs_resolver_untrusted"},
-		{"", "198.51.100.2:53", "8.8.8.8", "ecs_absent_or_invalid"},
+		{"", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred"},
 	} {
 		t.Run(test.why, func(t *testing.T) {
 			req := passiveASNTestQuery(test.subnet, 24)
@@ -213,10 +235,13 @@ func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
 			if decision == nil || decision.Reason != test.why {
 				t.Fatal("wrong decision", decision)
 			}
-			if test.why == "passive_aggregate_preferred" &&
-				(decision.AggregateASNs != 4 || decision.AggregateSupportingASNs != 3 || decision.ASN != 0 ||
-					decision.EvidenceKind != "historical" || decoded.IsEdns0().Option[0].(*dns.EDNS0_SUBNET).SourceScope != 24) {
-				t.Fatal("lost aggregate evidence or unsafe scope", decision, decoded.IsEdns0())
+			if test.why == "passive_aggregate_preferred" {
+				opt := decoded.IsEdns0()
+				if decision.AggregateASNs != 4 || decision.AggregateSupportingASNs != 3 || decision.ASN != 0 ||
+					decision.EvidenceKind != "historical" || test.subnet == "" && opt != nil ||
+					test.subnet != "" && (opt == nil || opt.Option[0].(*dns.EDNS0_SUBNET).SourceScope != 24) {
+					t.Fatal("lost aggregate evidence or unsafe scope", decision, opt)
+				}
 			}
 			if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
 				t.Fatal("receipt did not replay", err)
@@ -227,10 +252,9 @@ func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
 
 func TestPassiveASNExploresTrustedColdPrefixesWithoutOverridingFixedRecords(t *testing.T) {
 	st, rt, now := passiveASNTestRuntime(t, "active", false)
-	req := passiveASNTestQuery("8.8.4.0", 24)
+	req := passiveASNTestQuery(exploredPrefix(t, now), 24)
 	for _, fixed := range []bool{false, true} {
 		st.passiveFixed = map[string]bool{"target.example.test\x00A": fixed}
-		rt.budget.Store(199)
 		got := st.answerObserved(req, "198.51.100.2:53", now, nil, rt)
 		expect := "9.9.9.9"
 		if fixed {
@@ -239,5 +263,28 @@ func TestPassiveASNExploresTrustedColdPrefixesWithoutOverridingFixedRecords(t *t
 		if len(got.Answer) != 1 || got.Answer[0].(*dns.A).A.String() != expect {
 			t.Fatal("cold exploration violated the policy", got)
 		}
+	}
+}
+
+func TestPassiveASNDoesNotExploreAFrontWithAnActiveHold(t *testing.T) {
+	st, rt, now := passiveASNTestRuntime(t, "active", false)
+	p := rt.view.Publication
+	p.ExplorationHolds = []edgequality.PassiveEndpoint{{EdgeID: "edge-b", GroupID: "edge-group-b", Address: "9.9.9.9"}}
+	keys := bundleauth.NewKeyring("test-key", "test-id", "", "", nil)
+	signed, err := passiveasn.Sign(p, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assignment := st.record.Candidate.Assignment
+	assignment.ArtifactID, assignment.ContentHash = st.record.Candidate.Artifact.ID, st.record.Candidate.Artifact.ContentHash
+	rt.view, err = passiveasn.Verify(signed, assignment, "dns-a", keys, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := passiveASNTestQuery(exploredPrefix(t, now), 24)
+	capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}}
+	resp := st.answerObserved(query, "198.51.100.2:53", now, capture, rt)
+	if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "8.8.8.8" {
+		t.Fatal("held Front received exploration", resp)
 	}
 }

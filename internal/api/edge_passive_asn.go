@@ -7,12 +7,15 @@ import (
 	"io"
 	"net/netip"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
+	"fugue/internal/frontnetwork"
 	"fugue/internal/model"
 	"fugue/internal/observability"
 	"fugue/internal/passiveasn"
@@ -24,11 +27,14 @@ import (
 const passiveASNCheckpointKey = "edge-passive-asn-comparison/v1"
 
 type passiveASNCheckpoint struct {
-	Mapping     string                                      `json:"mapping"`
-	Comparisons map[string]edgequality.PassiveASNComparison `json:"comparisons"`
-	Cohorts     []passiveasn.Binding                        `json:"cohorts,omitempty"`
-	ObservedAt  time.Time                                   `json:"observed_at,omitempty"`
-	DNSProofs   map[string]passiveASNDNSProof               `json:"dns_proofs,omitempty"`
+	CohortExploration bool                                        `json:"cohort_exploration,omitempty"`
+	Mapping           string                                      `json:"mapping"`
+	Comparisons       map[string]edgequality.PassiveASNComparison `json:"comparisons"`
+	Cohorts           []passiveasn.Binding                        `json:"cohorts,omitempty"`
+	ObservedAt        time.Time                                   `json:"observed_at,omitempty"`
+	DNSProofs         map[string]passiveASNDNSProof               `json:"dns_proofs,omitempty"`
+	ExplorationHolds  []edgequality.PassiveEndpoint               `json:"exploration_holds,omitempty"`
+	Estimates         map[string]edgequality.PassiveASNComparison `json:"fleet_estimates,omitempty"`
 }
 
 type passiveASNDNSProof struct {
@@ -62,6 +68,14 @@ type passiveASNWindow struct {
 	dnsNodes, dnsReads, dnsAnswers, dnsECS, dnsASNHints, dnsVerified int
 	dnsWireVerified                                                  int
 	dnsProofs                                                        map[string]passiveASNDNSProof
+	fleet                                                            []passiveFleetEdge
+}
+
+type passiveFleetEdge struct {
+	id, status string
+	samples    int
+	stats      *frontnetwork.PassiveStats
+	ranks      []passiveasn.FleetRank
 }
 
 // Default-on observation over the authenticated Front sample path. This
@@ -180,50 +194,99 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 		eligible = append(eligible, node)
 	}
 	fronts := s.collectPassiveFronts(ctx, eligible)
+	fleet := make(map[string]passiveFleetEdge, len(nodes))
+	for _, node := range nodes {
+		status := "inventory_not_eligible"
+		if _, ok := identities[node.ID]; ok {
+			status = "front_unavailable"
+		}
+		fleet[node.ID] = passiveFleetEdge{id: node.ID, status: status}
+	}
+	var holds []edgequality.PassiveEndpoint
 	writeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	for _, read := range fronts {
 		id := identities[read.node]
 		id.Front = read.identity
 		identities[read.node] = id
-		if len(read.samples) != 0 {
-			for chunk := range slices.Chunk(read.samples, 128) {
+		// Front reservoirs can still replace samples in the current open
+		// bucket. Persist only closed buckets so first-write wins remains valid.
+		closed := slices.DeleteFunc(read.samples, func(sample model.EdgeNetworkSample) bool {
+			return !sample.ObservedAt.Before(now.Truncate(edgequality.PassiveASNInterval))
+		})
+		if len(closed) != 0 {
+			for chunk := range slices.Chunk(closed, 128) {
 				if err := s.store.RecordEdgeNetworkSamples(writeCtx, chunk, time.Time{}); err != nil {
 					read.status = "sample_store_unavailable"
 					break
 				}
 			}
 		}
+		fleet[read.node] = passiveFleetEdge{id: read.node, status: read.status, samples: len(closed), stats: read.stats}
 		if s.log != nil {
 			s.log.Printf("passive Front: edge_id=%s status=%s samples=%d", read.node, read.status, len(read.samples))
 		}
 	}
 	cancel()
-	const perEdge = 512
+	for edge, id := range identities {
+		row := fleet[edge]
+		// Without a selected Front providing feedback, the endpoint may
+		// keep serving but must not receive exploratory traffic.
+		if row.status == "ready" && !passiveFrontExplorationHold(row.stats) {
+			continue
+		}
+		for _, address := range []string{id.IPv4, id.IPv6} {
+			if address != "" {
+				holds = append(holds, edgequality.PassiveEndpoint{EdgeID: edge, GroupID: id.GroupID, Address: address})
+			}
+		}
+	}
+	slices.SortFunc(holds, func(a, b edgequality.PassiveEndpoint) int {
+		if a.EdgeID != b.EdgeID {
+			return strings.Compare(a.EdgeID, b.EdgeID)
+		}
+		return strings.Compare(a.Address, b.Address)
+	})
+	const perEdge = 1023
 	sampleReadCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	previousWindowEnd := now.Truncate(edgequality.PassiveASNInterval).Add(-edgequality.PassiveASNWindow)
-	batch, err := s.store.ListPassiveEdgeNetworkSamples(sampleReadCtx, edgeIDs, previousWindowEnd.Add(-edgequality.PassiveASNWindow), perEdge+1)
-	cancel()
+	defer cancel()
+	complete := now.Truncate(edgequality.PassiveASNInterval)
+	previousWindowEnd := complete.Add(-edgequality.PassiveASNWindow)
+	capped := make(map[string]bool)
+	readWindow := func(end time.Time) ([]model.EdgeNetworkSample, error) {
+		batch, err := s.store.ListPassiveEdgeNetworkSamples(sampleReadCtx, edgeIDs, end.Add(-edgequality.PassiveASNWindow), end, perEdge+1)
+		if err != nil {
+			return nil, err
+		}
+		counts := make(map[string]int, len(edgeIDs))
+		return slices.DeleteFunc(batch, func(sample model.EdgeNetworkSample) bool {
+			counts[sample.EdgeID]++
+			over := counts[sample.EdgeID] > perEdge
+			if over {
+				capped[sample.EdgeID] = true
+			}
+			return over
+		}), nil
+	}
+	samples, err := readWindow(complete)
 	if err != nil {
 		return err
 	}
-	samples := batch[:0]
-	counts := make(map[string]int)
-	for _, sample := range batch {
-		counts[sample.EdgeID]++
-		if counts[sample.EdgeID] == perEdge+1 {
-			window.cappedEdges++
-		}
-		if counts[sample.EdgeID] <= perEdge {
-			samples = append(samples, sample)
-		}
+	prior, err := readWindow(previousWindowEnd)
+	if err != nil {
+		return err
 	}
+	cancel()
+	window.cappedEdges = len(capped)
 	window.edges = len(identities)
 	comparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
 	// Replay the preceding real window before raw storage prunes it. Never
 	// mix widely separated windows or promote its original timestamps.
-	historical, _ := edgequality.ComparePassiveASN(samples, identities, resolver, previousWindowEnd)
+	historical, priorCoverage := edgequality.ComparePassiveASN(prior, identities, resolver, previousWindowEnd)
 	comparisons = append(historical, comparisons...)
+	estimates := append(priorCoverage.FleetEstimates, coverage.FleetEstimates...)
+	coverage.FleetEstimates = nil
 	window.coverage = coverage
+	var ranks []passiveasn.FleetRank
 	// Observe each selected authority even when it received no new sample.
 	// Read failure never fails or renews the measurement history.
 	s.observePassiveASNDNS(ctx, policies, &window)
@@ -241,18 +304,43 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 				comparisons = revalidatePassiveASN(comparisons, resolver)
 			}
 			next, changed, saturated := retainPassiveASN(last, mapping, comparisons)
+			provisional, _, _ := retainPassiveASN(passiveASNCheckpoint{Mapping: last.Mapping, Comparisons: last.Estimates}, mapping, estimates)
+			next.Estimates = provisional.Comparisons
+			var admittedEstimates []edgequality.PassiveASNComparison
+			for _, estimate := range next.Estimates {
+				if passiveASNMatchesMapping(estimate, resolver) {
+					admittedEstimates = append(admittedEstimates, estimate)
+				}
+			}
 			window.saturated = saturated
+			admitted := make([]edgequality.PassiveASNComparison, 0, len(next.Comparisons))
 			for _, comparison := range next.Comparisons {
 				if mapping == risMapping && !passiveASNMatchesMapping(comparison, resolver) {
 					continue
 				}
 				window.retained++
+				admitted = append(admitted, comparison)
 				if comparison.Preferred != "" {
 					window.preferring++
 				}
 			}
+			for _, family := range []int{4, 6} {
+				var endpoints []edgequality.PassiveEndpoint
+				for edge, id := range identities {
+					address := id.IPv4
+					if family == 6 {
+						address = id.IPv6
+					}
+					if address != "" {
+						endpoints = append(endpoints, edgequality.PassiveEndpoint{EdgeID: edge, GroupID: id.GroupID, Address: address})
+					}
+				}
+				ranks = append(ranks, passiveasn.RankFleet(family, endpoints, admitted, admittedEstimates)...)
+			}
 			next.ObservedAt = now
-			next.Cohorts = retainPassiveASNCohorts(collectPassiveASNCohorts(samples, identities, resolver), next.Cohorts, resolver)
+			next.CohortExploration = true
+			next.ExplorationHolds = holds
+			next.Cohorts = retainPassiveASNCohorts(collectPassiveASNCohorts(append(samples, prior...), identities, resolver), next.Cohorts, resolver)
 			next.DNSProofs = window.dnsProofs
 			for node, proof := range next.DNSProofs {
 				proof = proof.inherit(last.DNSProofs[node])
@@ -279,6 +367,23 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 		}
 		if !updated {
 			return errors.New("passive ASN observation checkpoint busy")
+		}
+	}
+	for _, rank := range ranks {
+		row := fleet[rank.Edge.EdgeID]
+		row.ranks = append(row.ranks, rank)
+		fleet[row.id] = row
+	}
+	for _, row := range fleet {
+		window.fleet = append(window.fleet, row)
+	}
+	slices.SortFunc(window.fleet, func(a, b passiveFleetEdge) int { return strings.Compare(a.id, b.id) })
+	if s.log != nil {
+		for _, row := range window.fleet {
+			for _, rank := range row.ranks {
+				s.log.Printf("passive fleet: edge_id=%s family=%d tier=%d basis=%s confident_peers=%d estimated_peers=%d comparable_peers=%d evidence_at=%s front=%s closed_samples=%d",
+					row.id, rank.Family, rank.Tier, rank.Basis, rank.ConfidentPeers, rank.EstimatedPeers, rank.ComparablePeers, rank.EvidenceAt.Format(time.RFC3339), row.status, row.samples)
+			}
 		}
 	}
 	s.passiveASN.mu.Lock()
@@ -504,6 +609,8 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 	if !window.bgpSourceAt.IsZero() {
 		observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_bgp_source_timestamp_seconds", "Oldest family timestamp of the bulk BGP mapping in use.", nil, float64(window.bgpSourceAt.Unix()))
 	}
+	const observationMetric = "fugue_edge_passive_asn_observation"
+	observability.WriteMetricHeader(w, observationMetric, "Counts from the last bounded passive ASN observation window.", "gauge")
 	for _, entry := range []struct {
 		kind  string
 		count int
@@ -518,6 +625,39 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 		{"dns_passive_verified", window.dnsVerified},
 		{"dns_wire_verified", window.dnsWireVerified},
 	} {
-		observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_observation", "Counts from the last bounded passive ASN observation window.", map[string]string{"kind": entry.kind}, float64(entry.count))
+		observability.WriteMetricSample(w, observationMetric, map[string]string{"kind": entry.kind}, float64(entry.count))
+	}
+	const frontMetric = "fugue_edge_passive_front_observation"
+	const frontStatus = "fugue_edge_passive_front_status"
+	const rankMetric = "fugue_edge_passive_fleet_rank"
+	observability.WriteMetricHeader(w, frontMetric, "Last verified per-edge Front funnel snapshot.", "gauge")
+	observability.WriteMetricHeader(w, frontStatus, "Status of the most recent Front read.", "gauge")
+	observability.WriteMetricHeader(w, rankMetric, "Cross-ASN evidence tier; zero means unranked.", "gauge")
+	for _, edge := range window.fleet {
+		write := func(kind string, n uint64) {
+			observability.WriteMetricSample(w, frontMetric, map[string]string{"edge": edge.id, "kind": kind}, float64(n))
+		}
+		observability.WriteMetricSample(w, frontStatus, map[string]string{"edge": edge.id, "status": edge.status}, 1)
+		write("closed_batch_samples", uint64(edge.samples))
+		if p := edge.stats; p != nil {
+			write("eligible_total", p.Eligible)
+			write("recorded_total", p.Recorded)
+			write("delivery_total", p.Delivery)
+			write("active_samples_total", p.ActiveSamples)
+			write("active_limited_total", p.ActiveLimited)
+			write("no_payload_total", p.NoPayload)
+			write("no_rtt_total", p.NoRTT)
+			write("invalid_total", p.Invalid)
+			write("lock_busy_total", p.LockBusy)
+			write("prefix_limited_total", p.PrefixLimited)
+			write("bucket_limited_total", p.BucketLimited)
+			write("recent_forward_ok", p.RecentForwardOK)
+			write("recent_forward_error", p.RecentForwardError)
+		}
+		for _, rank := range edge.ranks {
+			observability.WriteMetricSample(w, rankMetric, map[string]string{
+				"edge": edge.id, "family": strconv.Itoa(rank.Family), "basis": rank.Basis,
+			}, float64(rank.Tier))
+		}
 	}
 }

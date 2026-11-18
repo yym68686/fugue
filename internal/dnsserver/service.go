@@ -72,7 +72,6 @@ type Service struct {
 	tcpListening                  atomic.Bool
 	platformServing               dnsServingPointer
 	passiveASNView                atomic.Pointer[passiveasn.View]
-	passiveASNBudget              atomic.Uint64
 	platformCheckpoint            atomic.Pointer[dnsPersistedCheckpoint]
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool
@@ -915,7 +914,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		}
 		observed := s.decisionPublication.Load()
 		queryAt := time.Now().UTC()
-		reply := st.answerObserved(r, remote, queryAt, capture, &dnsPassiveRuntime{view: s.passiveASNView.Load(), budget: &s.passiveASNBudget, node: s.Config.DNSNodeID})
+		reply := st.answerObserved(r, remote, queryAt, capture, &dnsPassiveRuntime{view: s.passiveASNView.Load(), node: s.Config.DNSNodeID})
 		qtype := "unknown"
 		if len(r.Question) > 0 {
 			qtype = miekgdns.TypeToString[r.Question[0].Qtype]

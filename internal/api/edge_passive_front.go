@@ -21,6 +21,7 @@ type passiveFrontRead struct {
 	identity *edgequality.PassiveFrontIdentity
 	samples  []model.EdgeNetworkSample
 	status   string
+	stats    *frontnetwork.PassiveStats
 }
 
 func (s *Server) collectPassiveFronts(ctx context.Context, nodes []model.EdgeNode) []passiveFrontRead {
@@ -59,7 +60,13 @@ func (s *Server) readPassiveFront(ctx context.Context, client *clusterNodeClient
 		return result
 	}
 	var batch frontnetwork.PassiveBatch
-	batchErr := readDNSPodObservation(ctx, client, b.proxyPath+frontnetwork.PassivePath, &batch, frontnetwork.PassiveResponseLimit)
+	path := b.proxyPath + frontnetwork.PassivePath
+	batchErr := readDNSPodObservation(ctx, client, path+"?"+frontnetwork.PassiveStatsQuery, &batch, frontnetwork.PassiveResponseLimit)
+	if batchErr != nil {
+		// Old and new API/Front replicas coexist during a rolling release.
+		batch = frontnetwork.PassiveBatch{}
+		batchErr = readDNSPodObservation(ctx, client, path, &batch, frontnetwork.PassiveResponseLimit)
+	}
 	backend, err := b.verifiedBackend(ctx, client, node)
 	if err != nil {
 		return result
@@ -87,7 +94,20 @@ func (s *Server) readPassiveFront(ctx context.Context, client *clusterNodeClient
 		return result
 	}
 	result.samples, result.status = bindPassiveFrontBatch(batch, node, identity, time.Now().UTC())
+	if result.status == "ready" {
+		result.stats = batch.Stats
+	}
 	return result
+}
+
+// This is a canary safety brake, not a quality estimate. Count only explicit
+// Front-to-Worker failures (not application status codes or client closes).
+func passiveFrontExplorationHold(stats *frontnetwork.PassiveStats) bool {
+	if stats == nil {
+		return true // require feedback before sending exploratory traffic
+	}
+	failures, ok := stats.RecentForwardError, stats.RecentForwardOK
+	return failures >= 3 && (failures >= 10 || ok >= 10-failures) && failures > ok/9
 }
 
 func bindPassiveFrontBatch(batch frontnetwork.PassiveBatch, node model.EdgeNode, identity *edgequality.PassiveFrontIdentity, now time.Time) ([]model.EdgeNetworkSample, string) {

@@ -88,6 +88,7 @@ func (c PassiveASNComparison) Key() string {
 type PassiveASNCoverage struct {
 	Connections, Classified, TCPRTT, ClassifiedRTT int
 	ReusedBundleSamples                            int
+	FleetEstimates                                 []PassiveASNComparison
 }
 
 type passiveWindow struct {
@@ -249,6 +250,7 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 		result = append(result, row)
 	}
 	slices.SortFunc(result, func(a, b PassiveASNComparison) int { return cmp.Compare(a.Key(), b.Key()) })
+	coverage.FleetEstimates = estimatePassiveFleetRTT(windows, asns)
 	return result, coverage
 }
 

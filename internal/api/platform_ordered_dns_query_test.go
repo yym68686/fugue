@@ -54,6 +54,32 @@ func TestOrderedProjectionPreservesStaticAndOwnedAliasConstraints(t *testing.T) 
 	}
 }
 
+func TestPassiveOrderedProjectionAdmitsReadyCandidatesWithoutChangingFixedOrder(t *testing.T) {
+	projection, nodes, strategy, now := directQueryFixture()
+	strategy.ECSEnabled, strategy.ExplorationPercent = false, 0
+	strategy.DynamicQuality = &platformconfig.DynamicQualityPolicy{Mode: "all_dynamic", Policy: edgequality.DefaultDeliveryNetworkPolicy(), RefreshQueriesPerCycle: 4, RefreshConcurrency: 2}
+	strategy.OrderedProjection = &platformconfig.DNSOrderedProjection{
+		DefaultOrder: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}},
+		Overrides: []platformconfig.DNSOrderOverride{{NodeID: "dns-a", Hostname: "alias.example.test", Type: "A",
+			Order: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}}},
+	}
+	alias := projection.Intent.DNS[0]
+	alias.Hostname, alias.RecordKind = "alias.example.test", model.EdgeDNSRecordKindCustomDomainTarget
+	projection.Intent.DNS = append(projection.Intent.DNS, alias)
+	if err := projectOrderedDNSQueries(&projection, strategy, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range projection.Policy.DNSAnswerRules {
+		want := []string{"edge-a", "edge-b"}
+		if rule.Hostname == alias.Hostname {
+			want = []string{"edge-a"}
+		}
+		if !reflect.DeepEqual(rule.PhysicalOrder.OrderedEdgeIDs, want) {
+			t.Fatalf("wrong signed candidate set for %s: %+v", rule.Hostname, rule.PhysicalOrder)
+		}
+	}
+}
+
 func TestOfflineProjectionRemovesCandidateWithoutReorderingAlternatives(t *testing.T) {
 	projection, nodes, strategy, now := directQueryFixture()
 	strategy.ECSEnabled, strategy.ExplorationPercent = false, 0

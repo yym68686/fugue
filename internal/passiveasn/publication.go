@@ -29,19 +29,21 @@ type Binding struct {
 // Publication is a supplemental observation, never a source of DNS candidate
 // authority. It cannot be attached to a different signed serving release.
 type Publication struct {
-	Mode             string                             `json:"mode"`
-	DNSArtifactID    string                             `json:"dns_artifact_id"`
-	DNSDigest        string                             `json:"dns_digest"`
-	ReleaseSetID     string                             `json:"release_set_id"`
-	ConsumerSetID    string                             `json:"consumer_set_id"`
-	FencingToken     int64                              `json:"fencing_token"`
-	NodeID           string                             `json:"node_id"`
-	ObservedAt       time.Time                          `json:"observed_at"`
-	ExpiresAt        time.Time                          `json:"expires_at"`
-	Bindings         []Binding                          `json:"bindings"`
-	Resolvers        []netip.Prefix                     `json:"resolvers"`
-	ResolverSourceAt time.Time                          `json:"resolver_source_at"`
-	Pairs            []edgequality.PassiveASNComparison `json:"pairs"`
+	Mode              string                             `json:"mode"`
+	DNSArtifactID     string                             `json:"dns_artifact_id"`
+	DNSDigest         string                             `json:"dns_digest"`
+	ReleaseSetID      string                             `json:"release_set_id"`
+	ConsumerSetID     string                             `json:"consumer_set_id"`
+	FencingToken      int64                              `json:"fencing_token"`
+	NodeID            string                             `json:"node_id"`
+	ObservedAt        time.Time                          `json:"observed_at"`
+	ExpiresAt         time.Time                          `json:"expires_at"`
+	Bindings          []Binding                          `json:"bindings"`
+	Resolvers         []netip.Prefix                     `json:"resolvers"`
+	ResolverSourceAt  time.Time                          `json:"resolver_source_at"`
+	Pairs             []edgequality.PassiveASNComparison `json:"pairs"`
+	ExplorationHolds  []edgequality.PassiveEndpoint      `json:"exploration_holds,omitempty"`
+	CohortExploration bool                               `json:"cohort_exploration,omitempty"`
 }
 
 type View struct {
@@ -52,6 +54,7 @@ type View struct {
 	resolverBits4, resolverBits6 []int
 	pairs                        map[comparisonKey]edgequality.PassiveASNComparison
 	aggregate                    map[comparisonKey]aggregatePair
+	explorationHolds             map[edgequality.PassiveEndpoint]bool
 }
 
 type comparisonKey struct {
@@ -126,12 +129,19 @@ func buildView(p Publication) (*View, error) {
 	if p.Mode != "shadow" && p.Mode != "active" || p.DNSArtifactID == "" || p.DNSDigest == "" || p.ReleaseSetID == "" || p.NodeID == "" ||
 		p.ConsumerSetID == "" || p.FencingToken <= 0 ||
 		p.ObservedAt.IsZero() || !p.ExpiresAt.After(p.ObservedAt) || p.ExpiresAt.Sub(p.ObservedAt) > PublicationTTL ||
-		len(p.Bindings) > MaxBindings || len(p.Resolvers) == 0 || len(p.Resolvers) > MaxResolvers || len(p.Pairs) > edgequality.MaxPassiveASNComparisons {
+		len(p.Bindings) > MaxBindings || len(p.Resolvers) == 0 || len(p.Resolvers) > MaxResolvers || len(p.Pairs) > edgequality.MaxPassiveASNComparisons ||
+		len(p.ExplorationHolds) > 64 {
 		return nil, errors.New("passive ASN publication exceeds validity bounds")
 	}
 	v := &View{Publication: p, bindings: make(map[netip.Prefix]uint32, len(p.Bindings)),
 		resolverPrefixes: make(map[netip.Prefix]bool, len(p.Resolvers)), pairs: make(map[comparisonKey]edgequality.PassiveASNComparison, len(p.Pairs)),
-		aggregate: make(map[comparisonKey]aggregatePair)}
+		aggregate: make(map[comparisonKey]aggregatePair), explorationHolds: make(map[edgequality.PassiveEndpoint]bool)}
+	for _, edge := range p.ExplorationHolds {
+		if !validEndpoint(edge, 4) && !validEndpoint(edge, 6) || v.explorationHolds[edge] {
+			return nil, errors.New("invalid or duplicate exploration hold")
+		}
+		v.explorationHolds[edge] = true
+	}
 	for _, b := range p.Bindings {
 		if !validPrefix(b.Prefix) || b.ASN == 0 || b.Prefix.Bits() != cohortBits(b.Prefix.Addr()) || v.bindings[b.Prefix] != 0 {
 			return nil, errors.New("invalid or duplicate passive ASN binding")
@@ -173,20 +183,24 @@ func buildView(p Publication) (*View, error) {
 		v.pairs[comparisonKey{pair.ASN, pair.Family, pair.Left, pair.Right}] = pair
 		// Pairs are already unique per ASN and exact endpoint pair. Sample
 		// volume and number of prefixes never increase an ASN's weight.
-		key := comparisonKey{0, pair.Family, pair.Left, pair.Right}
-		count := v.aggregate[key]
-		count.total++
-		switch pair.Preferred {
-		case pair.Left.EdgeID:
-			count.leftWins++
-			count.leftAt = earlierEvidence(count.leftAt, pair.ObservedAt)
-		case pair.Right.EdgeID:
-			count.rightWins++
-			count.rightAt = earlierEvidence(count.rightAt, pair.ObservedAt)
-		}
-		v.aggregate[key] = count
+		v.recordAggregate(pair)
 	}
 	return v, nil
+}
+
+func (v *View) recordAggregate(pair edgequality.PassiveASNComparison) {
+	key := comparisonKey{0, pair.Family, pair.Left, pair.Right}
+	count := v.aggregate[key]
+	count.total++
+	switch pair.Preferred {
+	case pair.Left.EdgeID:
+		count.leftWins++
+		count.leftAt = earlierEvidence(count.leftAt, pair.ObservedAt)
+	case pair.Right.EdgeID:
+		count.rightWins++
+		count.rightAt = earlierEvidence(count.rightAt, pair.ObservedAt)
+	}
+	v.aggregate[key] = count
 }
 
 func validPrefix(p netip.Prefix) bool {
@@ -417,6 +431,20 @@ func (v *View) Choose(asn uint32, family int, candidates []edgequality.PassiveEn
 		}
 	}
 	if exploration > 0 && len(unknown) > 0 {
+		unknown = slices.DeleteFunc(unknown, func(edge edgequality.PassiveEndpoint) bool { return v.explorationHolds[edge] })
+		if len(unknown) == 0 {
+			answer.Reason = "retained_passive_exploration_hold"
+			return answer
+		}
+		slices.SortFunc(unknown, func(a, b edgequality.PassiveEndpoint) int {
+			if a.EdgeID < b.EdgeID {
+				return -1
+			}
+			if a.EdgeID > b.EdgeID {
+				return 1
+			}
+			return 0
+		})
 		return Choice{Edge: unknown[(exploration-1)%uint64(len(unknown))], Reason: "bounded_passive_asn_exploration"}
 	}
 	return answer

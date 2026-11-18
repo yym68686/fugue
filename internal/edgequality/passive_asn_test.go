@@ -88,8 +88,21 @@ func TestPassiveASNComparesAcrossHostsAndReplaysDeterministically(t *testing.T) 
 	}
 	slices.Reverse(samples)
 	replay, replayCoverage := ComparePassiveASN(samples, ids, resolve, now.Add(time.Second))
-	if !reflect.DeepEqual(results, replay) || replayCoverage != coverage {
+	if !reflect.DeepEqual(results, replay) || !reflect.DeepEqual(replayCoverage, coverage) {
 		t.Fatal("reordering input or moving capture clock changed evidence", results, replay)
+	}
+}
+
+func TestPassiveFleetEstimateNeverAuthorizesDifferentPrefixes(t *testing.T) {
+	samples, ids, now := passiveASNFixture()
+	for i := range samples {
+		if samples[i].EdgeID == "edge-b" {
+			samples[i].ClientNetwork.Scope = "tcp_peer:203.0.113.0/24"
+		}
+	}
+	pairs, coverage := ComparePassiveASN(samples, ids, func(netip.Prefix) uint32 { return 64496 }, now)
+	if len(pairs) != 0 || len(coverage.FleetEstimates) != 1 || coverage.FleetEstimates[0].Preferred != "edge-b" || len(coverage.FleetEstimates[0].Prefixes) != 2 {
+		t.Fatalf("did not separate estimates from DNS evidence: %+v %+v", pairs, coverage)
 	}
 }
 

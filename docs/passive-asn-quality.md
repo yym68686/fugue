@@ -4,7 +4,10 @@ The API starts one bounded observer by default. It reads already authenticated
 public Front TCP samples across domains; it sends no traffic and consumes
 neither the GitHub recovery observer nor the client-probe report stream.
 The selected public Front records coarse kernel-peer samples after forwarding
-HTTPS bytes in both directions. This works without Worker route matches or an
+HTTPS bytes in both directions or while an open socket is making bidirectional
+data progress. Each connection contributes at most one Front observation;
+idle snapshots are excluded. Each bounded bucket favors diverse prefixes.
+Only closed buckets enter durable storage. This works without Worker route matches or an
 exact live-connection lookup. The control plane reads a bounded batch through
 the Kubernetes pod proxy, verifies the actual public Service, ready Front
 process and EndpointSlices before and after the read, and records it with
@@ -64,6 +67,19 @@ counts selected processes whose currently loaded full release produced a
 replay-verified positive answer, with or without ECS. These bounded samples are not
 request-, packet- or byte-level traffic shares.
 
+The Front and API expose low-cardinality per-Edge counters for eligible
+connections, accepted samples, live samples, delivery observations, and
+rejection/cap reasons. Fleet tiers are exported separately per IP family,
+with the evidence timestamp, number of matched peers and basis in API logs.
+Before there is enough same-prefix evidence, an operator-only provisional
+RTT tier may use contemporaneous observations matched by ASN and family.
+This is lower-confidence evidence because populations can differ within an
+ASN. A lone sparse window is only reported when its median RTT gap is at
+least 25%. These estimates are retained separately, with their original timestamps
+and mapping checks, and are never signed as DNS comparisons. Tier zero means
+unranked; disconnected or contradictory comparisons do not prove a total
+order. Offline nodes are excluded from quality tiers.
+
 For the existing signed `all_dynamic` policy, each authoritative process
 fetches a private HMAC-signed observation bound to its exact artifact, consumer
 set, release and fence. Older Worker readers do not need new policy fields.
@@ -71,7 +87,9 @@ The observation starts in shadow mode. Active mode requires a replayable
 positive DNS answer from each configured independent public authority's
 selected process and current full release. This verifies the live wire path
 without waiting for a particular client traffic mix. Each active query must
-still carry a trusted, sufficiently specific ECS prefix to affect the answer. A restarted or
+still carry a trusted, sufficiently specific ECS prefix for a per-ASN change
+or exploration. A genuinely non-ECS query may only get a verified cross-ASN
+preference (not an experiment or assumed client ASN). A restarted or
 replaced authority has to reestablish its wire proof. Both Kubernetes-bound global DNS and Cell DNS
 fetch the same private format, but a global process cannot activate using a
 Cell process's proof or vice versa. Each consumer uses its own expected-set
@@ -82,12 +100,14 @@ DNS accepts only a complete matching-family ECS prefix at least as specific as
 `/24` or `/48` from a socket peer in the vendor-published
 [Google Public DNS authoritative egress ranges](https://developers.google.com/speed/public-dns/faq).
 No resolver address, ECS opt-in flag, or provider ASN is used as the client's
-ASN. Non-ECS queries, untrusted sources, and unavailable mapping or trust
+ASN. Invalid ECS, untrusted ECS sources, and unavailable mapping or trust
 snapshots keep the baseline answer. Eligible ECS replies use the query prefix as their cache scope,
 including during shadow and fallback, without using it to change the answer.
 
 ASN ranking can select only a still-ready member of the signed serving order
-of a single-address dynamic record. Fixed per-name orders, explicit physical
+of a single-address dynamic record. The default dynamic projection appends
+placement-authorized members after the configured baseline, without touching
+fixed overrides. Fixed per-name orders, explicit physical
 routes, redundant responses and business allocation keep their existing
 semantics. A recovered edge can compete immediately with retained compatible
 evidence once it has a current route/TLS proof and is back in that order.
@@ -97,11 +117,15 @@ signed pairs. Each ASN contributes at most one vote per edge pair, separately
 by address family. To promote a candidate it needs at least three supporting
 ASNs and two-thirds of the comparable ASNs; ties count in the denominator.
 An existing local tie, loss, or conflict cannot be overridden by this fallback.
-Without a clear advantage the signed baseline remains the default. At most one
-in 200 eligible ECS responses per executor can explore an unknown pair. An
-exploratory reply has at most a 30-second TTL (and never outlives readiness).
-DNS caches mean this is **not** a bound on the resulting HTTP traffic share.
-Already-compared pairs are not exploration targets; conflicting comparisons
+Without a clear advantage the signed baseline remains the default. About 5%
+of eligible trusted client-prefix/minute cohorts can explore an unknown
+pair. Assignment is deterministic across DNS processes and across domains
+with the same candidate set. This is **not** a bound on the resulting HTTP
+traffic share: resolver caching and client demand can skew it. An exploratory
+answer has at most a 30-second TTL and never outlives readiness. New exploration
+is held for nodes missing verified Front feedback or showing a burst of
+Front-to-Worker setup errors; route and TLS readiness are still required
+for every candidate. Already-compared pairs are not exploration targets; conflicting comparisons
 retain the baseline. Historical comparisons have no age expiry; observation
 leases, attribution, and route/TLS proofs still have freshness requirements.
 

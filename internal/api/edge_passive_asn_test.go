@@ -9,11 +9,29 @@ import (
 
 	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
+	"fugue/internal/frontnetwork"
 	"fugue/internal/model"
 	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
+
+func TestPassiveFrontExplorationHold(t *testing.T) {
+	for _, test := range []struct {
+		stats *frontnetwork.PassiveStats
+		want  bool
+	}{
+		{nil, true},
+		{&frontnetwork.PassiveStats{RecentForwardOK: 30, RecentForwardError: 3}, false},
+		{&frontnetwork.PassiveStats{RecentForwardOK: 6, RecentForwardError: 3}, false},
+		{&frontnetwork.PassiveStats{RecentForwardOK: 7, RecentForwardError: 3}, true},
+		{&frontnetwork.PassiveStats{RecentForwardOK: 30, RecentForwardError: 9}, true},
+	} {
+		if got := passiveFrontExplorationHold(test.stats); got != test.want {
+			t.Fatalf("incorrect exploration brake for %+v: %v", test.stats, got)
+		}
+	}
+}
 
 func TestPassiveASNMappingNeedsAgreementAcrossDNSAuthorities(t *testing.T) {
 	policies := []platformconfig.DNSClientPolicy{

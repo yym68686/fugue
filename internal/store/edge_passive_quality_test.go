@@ -35,13 +35,17 @@ func TestPassiveEdgeNetworkReadIsCrossHostAndEdgeBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	for limit := 1; limit <= 3; limit++ {
-		got, err := store.ListPassiveEdgeNetworkSamples(t.Context(), []string{"edge-a"}, now.Add(-5*time.Minute), limit)
+		got, err := store.ListPassiveEdgeNetworkSamples(t.Context(), []string{"edge-a"}, now.Add(-5*time.Minute), now.Add(time.Second), limit)
 		if err != nil || len(got) != min(limit, 2) || got[0].ID != second.ID || limit > 1 && got[1].ID != first.ID {
 			t.Fatalf("limit %d: %+v %v", limit, got, err)
 		}
 	}
-	got, err := store.ListPassiveEdgeNetworkSamples(t.Context(), []string{"edge-b", "edge-a"}, now.Add(-5*time.Minute), 1)
+	got, err := store.ListPassiveEdgeNetworkSamples(t.Context(), []string{"edge-b", "edge-a"}, now.Add(-5*time.Minute), now.Add(time.Second), 1)
 	if err != nil || len(got) != 2 || got[0].ID != second.ID || got[1].ID != "other" {
 		t.Fatalf("one edge exhausted batch: %+v %v", got, err)
+	}
+	history, err := store.ListPassiveEdgeNetworkSamples(t.Context(), []string{"edge-a"}, now.Add(-5*time.Minute), now, 1)
+	if err != nil || len(history) != 1 || history[0].ID != first.ID {
+		t.Fatalf("new observations crowded out the historical window: %+v %v", history, err)
 	}
 }

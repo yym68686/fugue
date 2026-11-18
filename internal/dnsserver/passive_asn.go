@@ -2,11 +2,12 @@ package dnsserver
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
 	"slices"
-	"sync/atomic"
 	"time"
 
 	"fugue/internal/edgequality"
@@ -41,9 +42,45 @@ type dnsPassiveASNSelection struct {
 }
 
 type dnsPassiveRuntime struct {
-	view   *passiveasn.View
-	budget *atomic.Uint64
-	node   string
+	view *passiveasn.View
+	node string
+}
+
+func passiveHasECS(req *dns.Msg) bool {
+	for _, rr := range req.Extra {
+		if opt, ok := rr.(*dns.OPT); ok {
+			for _, option := range opt.Option {
+				if _, ecs := option.(*dns.EDNS0_SUBNET); ecs {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Cohort allocation is independent of request count, hostname and executor.
+// A 60-second assignment with a 30s response TTL lets recurring cohorts
+// contribute control and challenger traffic over time. This samples 5% of
+// eligible prefix/epochs, not a guaranteed percentage of HTTP requests.
+func passiveExploration(prefix netip.Prefix, now time.Time) uint64 {
+	if !prefix.IsValid() {
+		return 0
+	}
+	coarseBits := 48
+	if prefix.Addr().Is4() {
+		coarseBits = 24
+	}
+	prefix = netip.PrefixFrom(prefix.Addr(), coarseBits).Masked()
+	var key [24]byte
+	addr := prefix.Addr().As16()
+	copy(key[:16], addr[:])
+	binary.BigEndian.PutUint64(key[16:], uint64(now.Unix()/60))
+	sum := sha256.Sum256(key[:])
+	if binary.BigEndian.Uint64(sum[:8])%20 != 0 {
+		return 0
+	}
+	return 1 + (binary.BigEndian.Uint64(sum[8:16]) >> 1)
 }
 
 func (s *Service) runPassiveASNDNS(ctx context.Context) {
@@ -194,10 +231,11 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	resolver, _ := netip.ParseAddr(ip)
 	asn, reason := view.Classify(prefix, resolver.Unmap(), now)
 	result.Decision.Reason, result.Decision.ObservationDigest = reason, view.Digest
-	if asn == 0 && reason != "ecs_origin_unknown" {
+	noECS := !prefix.IsValid() && !passiveHasECS(req)
+	if !noECS && asn == 0 && reason != "ecs_origin_unknown" {
 		return result
 	}
-	if (record.Type == "A") != prefix.Addr().Is4() {
+	if !noECS && (record.Type == "A") != prefix.Addr().Is4() {
 		result.Decision.Reason = "ecs_family_mismatch"
 		return result
 	}
@@ -217,10 +255,8 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 		}
 	}
 	var explore uint64
-	if mode == "active" && len(endpoints) > 1 && rt.budget != nil {
-		if n := rt.budget.Add(1); n%200 == 0 {
-			explore = n / 200
-		}
+	if mode == "active" && view.CohortExploration && len(endpoints) > 1 && !noECS {
+		explore = passiveExploration(prefix, now)
 	}
 	choice := view.Choose(asn, family, endpoints, explore)
 	if asn != 0 || choice.Reason != "retained_no_comparison" {
@@ -256,7 +292,8 @@ func applyPassiveASNSelection(result *dnsPassiveASNSelection, record model.EdgeD
 		return
 	}
 	audit.PassiveASN = &result.Decision
-	if result.Decision.Mode != "active" || result.Scope == 0 || len(rrs) != 1 || len(audit.Answered) != 1 {
+	globalAggregate := result.Scope == 0 && result.Decision.ASN == 0 && result.Decision.Reason == "passive_aggregate_preferred"
+	if result.Decision.Mode != "active" || result.Scope == 0 && !globalAggregate || len(rrs) != 1 || len(audit.Answered) != 1 {
 		return
 	}
 	if result.TTL > 0 {

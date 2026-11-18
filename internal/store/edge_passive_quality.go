@@ -12,8 +12,8 @@ import (
 
 // Read across domains in one database scan, bounded per physical edge so the
 // incumbent cannot occupy the entire batch. No recovery or service probes.
-func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []string, since time.Time, limit int) ([]model.EdgeNetworkSample, error) {
-	if len(edgeIDs) > 32 || since.IsZero() || limit < 1 || limit > 1024 {
+func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []string, since, before time.Time, limit int) ([]model.EdgeNetworkSample, error) {
+	if len(edgeIDs) > 32 || since.IsZero() || !before.After(since) || limit < 1 || limit > 1024 {
 		return nil, ErrInvalidInput
 	}
 	samples := []model.EdgeNetworkSample{}
@@ -29,10 +29,10 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 	}
 	if s.usingDatabase() {
 		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM (
- SELECT edge_id, sample_json, row_number() OVER (PARTITION BY edge_id ORDER BY observed_at DESC, id) AS position
+ SELECT edge_id, sample_json, row_number() OVER (PARTITION BY edge_id ORDER BY (sample_json->>'source' = $4) DESC, observed_at DESC, id) AS position
  FROM fugue_edge_network_samples
- WHERE edge_id = ANY($1::text[]) AND observed_at >= $2 AND sample_json->>'source' IN ('public_front_tcp_info_v1', $4)
-) AS observations WHERE position <= $3 ORDER BY edge_id, position`, edgeIDs, since, limit, model.EdgeNetworkPassiveFrontSource)
+ WHERE edge_id = ANY($1::text[]) AND observed_at >= $2 AND observed_at < $5 AND sample_json->>'source' IN ('public_front_tcp_info_v1', $4)
+) AS observations WHERE position <= $3 ORDER BY edge_id, position`, edgeIDs, since, limit, model.EdgeNetworkPassiveFrontSource, before)
 		if err != nil {
 			return nil, err
 		}
@@ -56,7 +56,7 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if wanted[sample.EdgeID] && (sample.Source == "public_front_tcp_info_v1" || sample.Source == model.EdgeNetworkPassiveFrontSource) && !sample.ObservedAt.Before(since) {
+			if wanted[sample.EdgeID] && (sample.Source == "public_front_tcp_info_v1" || sample.Source == model.EdgeNetworkPassiveFrontSource) && !sample.ObservedAt.Before(since) && sample.ObservedAt.Before(before) {
 				byEdge[sample.EdgeID] = append(byEdge[sample.EdgeID], sample)
 			}
 		}
@@ -68,6 +68,12 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 	for _, edgeID := range slices.Sorted(slices.Values(edgeIDs)) {
 		edge := byEdge[edgeID]
 		slices.SortFunc(edge, func(a, b model.EdgeNetworkSample) int {
+			if first, second := a.Source == model.EdgeNetworkPassiveFrontSource, b.Source == model.EdgeNetworkPassiveFrontSource; first != second {
+				if first {
+					return -1
+				}
+				return 1
+			}
 			if order := b.ObservedAt.Compare(a.ObservedAt); order != 0 {
 				return order
 			}
