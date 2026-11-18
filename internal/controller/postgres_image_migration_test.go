@@ -18,6 +18,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/pgimage"
 	"fugue/internal/runtime"
+	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
 )
 
@@ -49,7 +50,11 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 }
 
 func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
-	for _, scenario := range []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift"} {
+	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift"}
+	if independent {
+		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed")
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			state := store.New(statePath)
@@ -72,6 +77,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				appSpec.Postgres.Resources.CPULimitMilliCores = 0
 			}
 			postgresSpec := appSpec.Postgres
+			coldTarget := strings.HasPrefix(scenario, "cold-target-")
 			if independent {
 				appSpec.Postgres = nil
 			}
@@ -93,6 +99,38 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 			}
 			service := app.BackingServices[0]
+			if coldTarget {
+				persisted, err := state.GetBackingService(service.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				current := *persisted.Spec.Postgres
+				desired := app.Spec
+				desired.Postgres = model.CloneAppPostgresSpec(&current)
+				recovery, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: storagerecovery.OperationType, TargetRuntimeID: current.RuntimeID, DesiredSpec: &desired})
+				if err != nil {
+					t.Fatal(err)
+				}
+				claimedRecovery, claimed, err := state.TryClaimPendingOperation(recovery.ID)
+				if err != nil || !claimed {
+					t.Fatalf("claim cold recovery: %v", err)
+				}
+				next := current
+				next.RuntimeID = claimedRecovery.TargetRuntimeID
+				next.ServiceName = "restored-cluster"
+				next.EndpointServiceName = model.PostgresEndpointName(current)
+				if _, err := state.CommitColdPostgresTarget(recovery.ID, store.PostgresSpecFingerprint(current), next); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := state.CompleteManagedOperationWithResult(recovery.ID, "", "verified synthetic recovery", &app.Spec, nil); err != nil {
+					t.Fatal(err)
+				}
+				app, err = state.GetApp(app.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				service = app.BackingServices[0]
+			}
 			resized := strings.HasPrefix(scenario, "resized-")
 			if resized {
 				target := *service.Spec.Postgres.Resources
@@ -179,6 +217,17 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			if scenario == "fenced" {
 				imageObject(cluster["metadata"])["annotations"] = map[string]any{"cnpg.io/fencedInstances": `["*"]`}
 			}
+			marker, endpoint := coldStateName(service.ID), model.PostgresEndpointName(*postgres)
+			var coldStateJSON []byte
+			if coldTarget {
+				imageObject(cluster["metadata"])["annotations"] = map[string]any{coldMigrationAnnotation: marker}
+				imageObject(cluster["metadata"])["labels"] = map[string]any{runtime.FugueLabelBackingServiceID: service.ID}
+				imageObject(pod["status"])["podIP"] = "10.42.0.7"
+				coldStateJSON, err = json.Marshal(coldPostgresState{Version: 1, ServiceID: service.ID, SourceName: "previous", SourceUID: "previous-uid", TargetName: name, TargetUID: "cluster-uid", Endpoint: endpoint, SystemID: "123456", Phase: "complete"})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			patches, probes := 0, 0
 			var baselineSpec map[string]any
 			b, _ := json.Marshal(spec)
@@ -194,6 +243,8 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					proofs, e := state.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{pgimage.IntentEvidence}, Limit: 1})
 					if e != nil || len(proofs) != 1 {
 						t.Error("PATCH sent before durable intent")
+					} else if coldTarget && proofs[0].Payload["cold_migration"] != marker {
+						t.Error("PATCH sent without the marked target recorded in durable intent")
 					}
 					var patch []map[string]any
 					json.NewDecoder(r.Body).Decode(&patch)
@@ -222,6 +273,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					status["imageID"] = catalog.DefaultImage
 					imageContainer(pod)["command"] = []any{"/usr/local/bin/fugue-cnpg-manager", "instance", "run"}
 					delete(imageObject(pod["spec"]), "initContainers")
+					if scenario == "cold-target-marker-removed" {
+						delete(imageObject(cluster["metadata"]), "annotations")
+					}
 					if scenario == "resized-replacement-drift" {
 						imageContainer(pod)["resources"] = resourceMap(*postgres.Resources)
 					}
@@ -234,6 +288,18 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					t.Error("forbidden mutation", r.Method, r.URL.Path)
 				case r.URL.Path == cloudNativePGClusterAPIPath(ns, name):
 					response = cluster
+				case coldTarget && r.URL.Path == coldStatePath(ns, service.ID):
+					response = map[string]any{"metadata": map[string]any{"resourceVersion": "1"}, "data": map[string]string{"state.json": string(coldStateJSON)}}
+				case coldTarget && r.URL.Path == cloudNativePGClusterAPIPath(ns, "previous"):
+					http.NotFound(w, r)
+					return
+				case coldTarget && r.URL.Path == "/api/v1/namespaces/"+ns+"/services/"+endpoint:
+					response = map[string]any{"metadata": map[string]any{"name": endpoint, "namespace": ns, "uid": "stable-uid"}, "spec": map[string]any{"selector": map[string]string{cloudNativePGClusterLabel: name, cloudNativePGInstanceRoleLabel: "primary"}}}
+				case coldTarget && strings.HasSuffix(r.URL.Path, "/endpointslices"):
+					response = map[string]any{"items": []any{map[string]any{
+						"metadata":  map[string]any{"namespace": ns, "labels": map[string]string{"kubernetes.io/service-name": endpoint}, "ownerReferences": []any{map[string]any{"apiVersion": "v1", "kind": "Service", "name": endpoint, "uid": "stable-uid"}}},
+						"endpoints": []any{map[string]any{"addresses": []string{"10.42.0.7"}, "conditions": map[string]bool{"ready": true}, "targetRef": map[string]any{"kind": "Pod", "name": "database-1", "namespace": ns, "uid": imageObject(pod["metadata"])["uid"]}}},
+					}}}
 				case strings.HasSuffix(r.URL.Path, "/pods/database-1"):
 					response = pod
 				case strings.HasSuffix(r.URL.Path, "/pods"):
@@ -273,7 +339,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 				return
 			}
-			if strings.HasSuffix(scenario, "changed-volume") || strings.HasSuffix(scenario, "lost-patch-response") || scenario == "resized-lost-before-patch" || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" {
+			if strings.HasSuffix(scenario, "changed-volume") || strings.HasSuffix(scenario, "lost-patch-response") || scenario == "resized-lost-before-patch" || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" || scenario == "cold-target-marker-removed" {
 				if !errors.Is(err, errPostgresImageMigrationUnsettled) {
 					t.Fatalf("accepted mutation lost interlock: %v", err)
 				}
@@ -288,7 +354,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				if _, err = state.RequeueManagedOperationGuarded(op, "requeue"); !errors.Is(err, store.ErrConflict) {
 					t.Fatal("accepted mutation became requeueable")
 				}
-				if strings.HasSuffix(scenario, "changed-volume") || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" {
+				if strings.HasSuffix(scenario, "changed-volume") || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" || scenario == "cold-target-marker-removed" {
 					return
 				}
 				// Reopen durable state to simulate recovery by a fresh controller.
@@ -320,6 +386,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			}
 			if current.OwnerAppID != service.OwnerAppID {
 				t.Fatal("migration changed independent ownership")
+			}
+			if coldTarget && (current.Spec.Postgres.EndpointServiceName != endpoint || imageObject(imageObject(cluster["metadata"])["annotations"])[coldMigrationAnnotation] != marker) {
+				t.Fatal("image migration changed the stable endpoint or the cold-recovery marker")
 			}
 			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) || !reflect.DeepEqual(before.Bindings, after.Bindings) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 				t.Fatal("migration mutated the consumer application")

@@ -36,6 +36,7 @@ type postgresImageWitness struct {
 	ResourcesHash  string            `json:"resources_hash"`
 	Volumes        map[string]string `json:"volumes"`
 	VerifiedPodUID string            `json:"verified_pod_uid,omitempty"`
+	ColdMigration  string            `json:"cold_migration,omitempty"`
 	// Optional for compatibility with image-only witnesses already in flight.
 	RestartResources      map[string]any      `json:"restart_resources,omitempty"`
 	RestartSpecHash       string              `json:"restart_spec_hash,omitempty"`
@@ -235,7 +236,8 @@ func (c *kubeClient) verifyImageMigrationOperator(ctx context.Context, catalog p
 	return fmt.Errorf("the verified baked-manager operator is not Ready")
 }
 
-func (c *kubeClient) observeImageMigration(ctx context.Context, ns, name string) (map[string]any, map[string]any, managedPostgresResizeSnapshot, error) {
+func (c *kubeClient) observeImageMigration(ctx context.Context, ns, serviceID string, postgres model.AppPostgresSpec) (map[string]any, map[string]any, managedPostgresResizeSnapshot, error) {
+	name := postgres.ServiceName
 	cluster, err := c.imageMigrationObject(ctx, cloudNativePGClusterAPIPath(ns, name))
 	if err != nil {
 		return nil, nil, managedPostgresResizeSnapshot{}, err
@@ -246,7 +248,7 @@ func (c *kubeClient) observeImageMigration(ctx context.Context, ns, name string)
 		return nil, nil, managedPostgresResizeSnapshot{}, err
 	}
 	annotations := typed.Metadata.Annotations
-	if annotations[runtime.CloudNativePGHibernationAnno] == runtime.CloudNativePGHibernationOn || annotations[coldReconciliationAnnotation] == coldReconciliationDisabled || annotations[coldMigrationAnnotation] != "" || (annotations["cnpg.io/fencedInstances"] != "" && annotations["cnpg.io/fencedInstances"] != "[]") {
+	if annotations[runtime.CloudNativePGHibernationAnno] == runtime.CloudNativePGHibernationOn || annotations[coldReconciliationAnnotation] == coldReconciliationDisabled || (annotations["cnpg.io/fencedInstances"] != "" && annotations["cnpg.io/fencedInstances"] != "[]") {
 		return nil, nil, managedPostgresResizeSnapshot{}, fmt.Errorf("database is fenced, hibernating or has reconciliation held")
 	}
 	pod, err := c.imageMigrationObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/pods/"+url.PathEscape(typed.Status.CurrentPrimary))
@@ -265,14 +267,18 @@ func (c *kubeClient) observeImageMigration(ctx context.Context, ns, name string)
 	if err == nil && (typed.Spec.Instances != 1 || typed.Status.SystemID == "" || len(typed.Status.DanglingPVC) > 0) {
 		err = fmt.Errorf("migration requires one healthy instance, a system ID and no dangling PVC")
 	}
+	if err == nil && annotations[coldMigrationAnnotation] != "" {
+		err = c.verifyImageMigrationColdTarget(ctx, ns, serviceID, postgres, typed, b)
+	}
 	if err != nil {
 		return nil, nil, managedPostgresResizeSnapshot{}, err
 	}
 	return cluster, pod, managedPostgresResizeSnapshot{Cluster: typed, Observation: observation}, nil
 }
 
-func (c *kubeClient) captureImageWitness(ctx context.Context, ns, name, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
-	cluster, pod, snapshot, err := c.observeImageMigration(ctx, ns, name)
+func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
+	name := postgres.ServiceName
+	cluster, pod, snapshot, err := c.observeImageMigration(ctx, ns, serviceID, postgres)
 	if err != nil {
 		return postgresImageWitness{}, err
 	}
@@ -360,6 +366,7 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, name, target s
 		return postgresImageWitness{}, err
 	}
 	witness := postgresImageWitness{Namespace: ns, Cluster: name, ClusterUID: imageString(meta, "uid"), SpecHash: imagePreservedSpecHash(cluster), SystemID: snapshot.Cluster.Status.SystemID, Pod: snapshot.Observation.PodName, PodUID: snapshot.Observation.PodUID, Node: snapshot.Observation.NodeName, SourceImage: source, TargetImage: target, ResourcesHash: pgimage.Hash(main["resources"]), Volumes: volumes}
+	witness.ColdMigration = snapshot.Cluster.Metadata.Annotations[coldMigrationAnnotation]
 	if alignResources {
 		witness.RestartResources = imageObject(main["resources"])
 		witness.RestartResourceTarget = model.CloneResourceSpec(postgres.RuntimeResources)
@@ -394,6 +401,9 @@ func imageMigrationRuntimePinned(spec map[string]any, id string) bool {
 }
 
 func validateImageWitness(w postgresImageWitness, cluster, pod map[string]any, snapshot managedPostgresResizeSnapshot) error {
+	if snapshot.Cluster.Metadata.Annotations[coldMigrationAnnotation] != w.ColdMigration {
+		return fmt.Errorf("database cold migration marker changed since preflight")
+	}
 	image := imageString(imageObject(cluster["spec"]), "imageName")
 	expectedSpecHash := w.SpecHash
 	if image == w.TargetImage && w.RestartResourceTarget != nil {
@@ -486,11 +496,11 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 			return fmt.Errorf("durable migration witness is incomplete or mismatched")
 		}
 	} else {
-		witness, err = client.captureImageWitness(ctx, ns, name, image, target.Postgres, catalog)
+		witness, err = client.captureImageWitness(ctx, ns, op.ServiceID, image, target.Postgres, catalog)
 		if err != nil {
 			return err
 		}
-		cluster, pod, snapshot, err := client.observeImageMigration(ctx, ns, name)
+		cluster, pod, snapshot, err := client.observeImageMigration(ctx, ns, op.ServiceID, target.Postgres)
 		if err != nil {
 			return err
 		}
@@ -526,7 +536,7 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 		if err = s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 			return err
 		}
-		cluster, pod, snapshot, observeErr := client.observeImageMigration(ctx, ns, name)
+		cluster, pod, snapshot, observeErr := client.observeImageMigration(ctx, ns, op.ServiceID, target.Postgres)
 		if observeErr != nil {
 			waitingReason = observeErr.Error()
 		}

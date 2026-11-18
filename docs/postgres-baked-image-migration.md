@@ -32,6 +32,13 @@ changes, replica changes, storage copying and placement migration are out of sco
 The existing CNPG primary update policy must be `unsupervised` / `restart`;
 the operation never changes a supervised or switchover policy on the user's behalf.
 
+A Cluster marked by a cold recovery is eligible only as the exact completed
+destination. Fugue checks the retained recovery state, Cluster UID and PostgreSQL
+system ID, and verifies that the stable Service and its ready backends point
+exclusively to the current primary. A retained source must still be fenced.
+The marker and recovery record are preserved; an incomplete or unverifiable
+recovery and an actively fenced, hibernating, or paused Cluster still block migration.
+
 Before mutation, Fugue checks the rehearsed operator, current Cluster/primary
 identity, healthy node, unambiguous existing runtime affinity, the fully applied
 persisted resource envelope, original bound PVC/PVs, physical database system ID, and writable
