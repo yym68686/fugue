@@ -56,6 +56,14 @@ this evidence as TCP state only. Do not drop established sockets or shorten
 the timeout to compensate without positive evidence from the application or
 the proxy that owns those sockets.
 
+For managed Kubernetes Service origins, Edge opens a new upstream connection
+for each request. The Service address and signed route can remain unchanged
+when a Pod stops receiving new connections, so an idle socket cannot be used
+as evidence that its Pod is still eligible. Existing streams and upgrades
+continue on their original connections. This does not pin a browser session to
+one application build; applications with hashed static assets still need
+cross-release asset compatibility.
+
 ## Superseded release with a canceled deployment
 
 An operation can be canceled after its candidate was already promoted. Its

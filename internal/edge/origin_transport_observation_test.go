@@ -79,16 +79,16 @@ func TestOriginTransportErrorsRetainBoundedDiagnostics(t *testing.T) {
 	}
 }
 
-func TestProxyHandlerObservesIdleConnectionEOFWithoutReplayingPOST(t *testing.T) {
+func TestProxyHandlerObservesOriginEOFWithoutReplayingPOST(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{model.EdgeRouteKindPlatform, model.EdgeRouteKindControlPlaneAPI} {
 		t.Run(kind, func(t *testing.T) {
-			testProxyHandlerIdleConnectionEOFWithoutReplay(t, kind)
+			testProxyHandlerOriginEOFWithoutReplay(t, kind)
 		})
 	}
 }
 
-func testProxyHandlerIdleConnectionEOFWithoutReplay(t *testing.T, routeKind string) {
+func testProxyHandlerOriginEOFWithoutReplay(t *testing.T, routeKind string) {
 	var requests atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -148,9 +148,11 @@ func testProxyHandlerIdleConnectionEOFWithoutReplay(t *testing.T, routeKind stri
 	if first["origin_conn_reused"] != false || first["origin_conn_was_idle"] != false || first["origin_conn_idle_ms"] != float64(0) {
 		t.Fatalf("incorrect fresh connection diagnostic: %+v", first)
 	}
-	if failed["origin_transport_error_kind"] != "eof" || failed["origin_conn_reused"] != true ||
-		failed["origin_conn_was_idle"] != true || failed["origin_conn_idle_ms"].(float64) < 1 ||
+	expectReuse := routeKind == model.EdgeRouteKindControlPlaneAPI
+	idleMS := failed["origin_conn_idle_ms"].(float64)
+	if failed["origin_transport_error_kind"] != "eof" || failed["origin_conn_reused"] != expectReuse ||
+		failed["origin_conn_was_idle"] != expectReuse || (expectReuse && idleMS < 1) || (!expectReuse && idleMS != 0) ||
 		failed["origin_wrote_request"] != true || failed["origin_first_byte"] != false {
-		t.Fatalf("missing idle connection failure diagnostic: %+v", failed)
+		t.Fatalf("incorrect origin connection failure diagnostic: %+v", failed)
 	}
 }

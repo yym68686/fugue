@@ -91,6 +91,7 @@ type Service struct {
 	proxyBase                     http.RoundTripper
 	proxyTransportMu              sync.Mutex
 	proxyTransportPrototype       *http.Transport
+	proxyAppServiceTransport      *http.Transport
 	proxyTransports               map[string]*http.Transport
 	proxyTransportActiveKeys      map[string]struct{}
 	proxyTransportBundleSet       bool
@@ -2542,8 +2543,9 @@ func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation)
 		// Tests and specialized callers can inject a complete RoundTripper.
 		return s.proxyBase
 	}
+	freshAppService := observation != nil && !observation.PeerFallback && edgeOriginIsAppService(observation.Route)
 	key := edgeOriginTransportKey(observation)
-	if key == "" {
+	if !freshAppService && key == "" {
 		return prototype
 	}
 
@@ -2552,6 +2554,18 @@ func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation)
 	if s.proxyTransportPrototype != prototype {
 		s.closeEdgeProxyTransportsLocked()
 		s.proxyTransportPrototype = prototype
+	}
+	if freshAppService {
+		if s.proxyAppServiceTransport == nil {
+			// A Service's address and signed route can stay unchanged across a
+			// Pod handoff. An existing TCP connection still targets its original
+			// Pod, even after that endpoint stops receiving new connections.
+			// Dial per request so endpoint selection is current, without closing
+			// any in-flight response or upgraded connection.
+			s.proxyAppServiceTransport = prototype.Clone()
+			s.proxyAppServiceTransport.DisableKeepAlives = true
+		}
+		return s.proxyAppServiceTransport
 	}
 	if transport := s.proxyTransports[key]; transport != nil {
 		return transport
@@ -2574,6 +2588,12 @@ func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation)
 	}
 	s.proxyTransports[key] = transport
 	return transport
+}
+
+func edgeOriginIsAppService(route model.EdgeRouteBinding) bool {
+	return !strings.EqualFold(strings.TrimSpace(route.RouteKind), model.EdgeRouteKindControlPlaneAPI) &&
+		strings.TrimSpace(route.UpstreamKind) == model.EdgeRouteUpstreamKindKubernetesService &&
+		(strings.TrimSpace(route.UpstreamScope) == model.EdgeRouteUpstreamScopeLocalService || strings.TrimSpace(route.AppID) != "")
 }
 
 func edgeOriginTransportKey(observation *edgeProxyObservation) string {
@@ -2656,6 +2676,10 @@ func (s *Service) closeEdgeProxyTransports() {
 }
 
 func (s *Service) closeEdgeProxyTransportsLocked() {
+	if s.proxyAppServiceTransport != nil {
+		s.proxyAppServiceTransport.CloseIdleConnections()
+		s.proxyAppServiceTransport = nil
+	}
 	for key, transport := range s.proxyTransports {
 		transport.CloseIdleConnections()
 		delete(s.proxyTransports, key)

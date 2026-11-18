@@ -3501,11 +3501,8 @@ func TestProxyHandlerRoutesPlatformAndCustomDomainsWithStreamingMetrics(t *testi
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(w, "uploaded:%s:%s", r.Header.Get("X-Forwarded-Host"), body)
 		case "/events":
-			if r.Close {
-				t.Errorf("expected streaming upload to keep its generation-scoped origin connection reusable")
-			}
-			if r.RemoteAddr != uploadRemoteAddr {
-				t.Errorf("expected streaming upload to reuse origin connection %s, got %s", uploadRemoteAddr, r.RemoteAddr)
+			if r.RemoteAddr == uploadRemoteAddr {
+				t.Errorf("streaming request reused an app Service origin connection: %s", r.RemoteAddr)
 			}
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -3685,7 +3682,7 @@ func TestProxyHandlerCachesStaticAssets(t *testing.T) {
 	}
 }
 
-func TestProxyHandlerReusesOriginConnections(t *testing.T) {
+func TestProxyHandlerReusesMeshOriginConnections(t *testing.T) {
 	t.Parallel()
 
 	var upstreamHits atomic.Int64
@@ -3698,6 +3695,8 @@ func TestProxyHandlerReusesOriginConnections(t *testing.T) {
 
 	bundle := testBundle("routegen_reuse")
 	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].UpstreamKind = model.EdgeRouteUpstreamKindMesh
+	bundle.Routes[0].UpstreamScope = model.EdgeRouteUpstreamScopeMesh
 
 	service := NewService(config.EdgeConfig{
 		APIURL:    "https://api.example.invalid",
@@ -3858,7 +3857,7 @@ func TestObservationWriterStopsCapturingWhenOriginDisallowsCache(t *testing.T) {
 	}
 }
 
-func TestProxyHandlerDoesNotReuseOriginConnectionAcrossDeploymentGenerations(t *testing.T) {
+func TestProxyHandlerDoesNotReuseMeshOriginConnectionAcrossDeploymentGenerations(t *testing.T) {
 	t.Parallel()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3869,6 +3868,8 @@ func TestProxyHandlerDoesNotReuseOriginConnectionAcrossDeploymentGenerations(t *
 
 	bundle := testBundle("routegen_origin_generation_1")
 	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].UpstreamKind = model.EdgeRouteUpstreamKindMesh
+	bundle.Routes[0].UpstreamScope = model.EdgeRouteUpstreamScopeMesh
 	bundle.Routes[0].DeploymentGeneration = "deploygen_origin_1"
 
 	service := NewService(config.EdgeConfig{
@@ -4428,6 +4429,8 @@ func TestProxyHandlerSupportsWebSocket(t *testing.T) {
 
 	bundle := testBundle("routegen_websocket")
 	bundle.Routes[0].UpstreamURL = backend.URL
+	bundle.Routes[0].UpstreamKind = model.EdgeRouteUpstreamKindKubernetesService
+	bundle.Routes[0].UpstreamScope = model.EdgeRouteUpstreamScopeLocalService
 	service := NewService(config.EdgeConfig{
 		APIURL:    "https://api.example.invalid",
 		EdgeToken: "edge-secret",
