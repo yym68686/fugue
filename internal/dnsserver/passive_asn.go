@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"slices"
@@ -69,14 +70,14 @@ func (s *Service) refreshPassiveASNDNS(ctx context.Context) error {
 	client := s.platformConsumerClient()
 	id, a, err := client.ObserveServingAssignment(run, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
-		return err
+		return fmt.Errorf("discover serving assignment: %w", err)
 	}
 	if !passiveAssignmentMatches(st, a) {
 		return nil
 	}
 	artifact, err := client.PassiveASN(run, id, a)
 	if err != nil {
-		return err
+		return fmt.Errorf("fetch bound observation: %w", err)
 	}
 	view, err := passiveasn.Verify(artifact, a, s.Config.DNSNodeID, s.platformDNSKeys(), time.Now().UTC())
 	if err != nil {

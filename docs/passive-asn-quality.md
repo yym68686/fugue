@@ -58,7 +58,7 @@ selected process and current full release. A restarted/replaced authority
 has to reestablish that proof. Both Kubernetes-bound global DNS and Cell DNS
 fetch the same private format, but a global process cannot activate using a
 Cell process's proof or vice versa. Each consumer uses its own expected-set
-cohort; an idle slot can verify shadow without adopting the on-duty slot's
+cohort; an idle slot can verify shadow without using the on-duty slot's
 active proof.
 
 DNS accepts only a complete matching-family ECS prefix within a known
