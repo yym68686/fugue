@@ -51,6 +51,38 @@ func TestObjectStoragePostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r2, r2Err := s.GetObjectStorageConfig()
+	if r2Err != nil && !errors.Is(r2Err, ErrNotFound) {
+		t.Fatal(r2Err)
+	}
+	t.Cleanup(func() {
+		testDB := New("", address)
+		if err := testDB.ensureDatabaseReady(); err != nil {
+			t.Error(err)
+			return
+		}
+		defer testDB.db.Close()
+		if r2Err == nil {
+			if err := testDB.SaveObjectStorageConfig(r2); err != nil {
+				t.Error(err)
+			}
+		} else if _, err := testDB.db.Exec("DELETE FROM fugue_object_storage_config WHERE id='platform'"); err != nil {
+			t.Error(err)
+		}
+		if _, err := testDB.db.Exec("DELETE FROM fugue_object_storage_providers WHERE provider=$1", model.DataBackendProviderBackblazeB2); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := s.SaveBackblazeB2Config(model.ObjectStorageProviderConfig{AccountID: "test-b2", Secret: secret}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveObjectStorageConfig(model.ObjectStorageConfig{AccountID: "test-r2"}); err != nil {
+		t.Fatal(err)
+	}
+	b2, err := s.GetBackblazeB2Config()
+	if err != nil || b2.AccountID != "test-b2" || b2.Secret.Ciphertext != secret.Ciphertext {
+		t.Fatal("R2 config write changed B2 provider configuration", err)
+	}
 	rec := model.ObjectStorageCredentialRecord{Credential: model.ObjectStorageCredential{ID: model.NewID("grant"), StoreID: v.ID, Name: "reader", Status: "active"}, Secret: secret}
 	if err = s.SaveObjectStorageCredential(rec); err != nil {
 		t.Fatal(err)

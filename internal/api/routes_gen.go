@@ -81,6 +81,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/admin/node-health/{node_updater_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetNodeDeepHealth)))
 	mux.Handle("GET /v1/admin/object-storage", s.auth.RequireAPI(http.HandlerFunc(s.handleGetObjectStorageConfig)))
 	mux.Handle("PUT /v1/admin/object-storage", s.auth.RequireAPI(http.HandlerFunc(s.handleConfigureObjectStorage)))
+	mux.Handle("GET /v1/admin/object-storage/backblaze-b2", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackblazeB2Config)))
+	mux.Handle("PUT /v1/admin/object-storage/backblaze-b2", s.auth.RequireAPI(http.HandlerFunc(s.handleConfigureBackblazeB2)))
 	mux.Handle("POST /v1/admin/platform-config/compile", s.auth.RequireAPI(http.HandlerFunc(s.handleCompilePlatformConfig)))
 	mux.Handle("POST /v1/admin/platform-config/compile-from-artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleCompilePlatformConfigFromArtifacts)))
 	mux.Handle("GET /v1/admin/platform-config/dns/compare", s.auth.RequireAPI(http.HandlerFunc(s.handleComparePlatformDNSMigration)))

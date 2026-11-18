@@ -91,9 +91,13 @@ func (s *Server) authorizedObjectStore(w http.ResponseWriter, r *http.Request, w
 	return v, true
 }
 func objectStorageConfigStatus(cfg model.ObjectStorageConfig) map[string]any {
-	return map[string]any{"configured": cfg.AccountID != "", "account_id": cfg.AccountID, "updated_at": cfg.UpdatedAt}
+	if cfg.AccountID == "" {
+		return map[string]any{"configured": false}
+	}
+	return map[string]any{"configured": true, "account_id": cfg.AccountID, "updated_at": cfg.UpdatedAt}
 }
 func (s *Server) handleGetObjectStorageConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	if !mustPrincipal(r).IsPlatformAdmin() {
 		httpx.WriteError(w, 403, "platform administrator required")
 		return
@@ -110,6 +114,7 @@ func (s *Server) handleGetObjectStorageConfig(w http.ResponseWriter, r *http.Req
 	httpx.WriteJSON(w, 200, objectStorageConfigStatus(cfg))
 }
 func (s *Server) handleConfigureObjectStorage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
 	p := mustPrincipal(r)
 	if !p.IsPlatformAdmin() {
 		httpx.WriteError(w, 403, "platform administrator required")
@@ -140,15 +145,18 @@ func (s *Server) handleConfigureObjectStorage(w http.ResponseWriter, r *http.Req
 			if err != nil {
 				return err
 			}
-			if len(items) > 0 {
-				return store.ErrConflict
+			for _, item := range items {
+				if item.Provider != model.DataBackendProviderBackblazeB2 {
+					return store.ErrConflict
+				}
 			}
 		}
 		secret, err := s.store.SealObjectStorageSecret(model.DataBackendCredentials{Token: req.APIToken})
 		if err != nil {
 			return err
 		}
-		cfg := model.ObjectStorageConfig{AccountID: req.AccountID, Secret: secret, UpdatedAt: time.Now().UTC(), CompilerInputArchive: old.CompilerInputArchive}
+		cfg := old
+		cfg.AccountID, cfg.Secret, cfg.UpdatedAt = req.AccountID, secret, time.Now().UTC()
 		provider, err := s.objectStorageProvider(cfg)
 		if err != nil {
 			return err
@@ -209,10 +217,15 @@ func (s *Server) handleCreateObjectStore(w http.ResponseWriter, r *http.Request)
 		TenantID   string `json:"tenant_id"`
 		ProjectID  string `json:"project_id"`
 		Name       string `json:"name"`
+		Provider   string `json:"provider"`
 		QuotaBytes int64  `json:"quota_bytes"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil || !objectStoreName.MatchString(req.Name) || req.QuotaBytes < 0 || req.ProjectID == "" {
 		httpx.WriteError(w, 400, "valid name, project_id and nonnegative quota required")
+		return
+	}
+	if req.Provider != "" && req.Provider != model.DataBackendProviderCloudflareR2 && req.Provider != model.DataBackendProviderBackblazeB2 {
+		httpx.WriteError(w, 400, "unsupported object storage provider")
 		return
 	}
 	project, err := s.store.GetProject(req.ProjectID)
@@ -221,14 +234,6 @@ func (s *Server) handleCreateObjectStore(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.objectStorageRun(w, r, func() error {
-		cfg, err := s.store.GetObjectStorageConfig()
-		if err != nil {
-			return err
-		}
-		provider, err := s.objectStorageProvider(cfg)
-		if err != nil {
-			return err
-		}
 		items, err := s.store.ListObjectStores(project.TenantID, project.ID)
 		if err != nil {
 			return err
@@ -243,17 +248,60 @@ func (s *Server) handleCreateObjectStore(w http.ResponseWriter, r *http.Request)
 		if v.ID == "" {
 			id := model.NewID("object_store")
 			now := time.Now().UTC()
-			v = model.ObjectStore{ID: id, TenantID: project.TenantID, ProjectID: project.ID, Name: req.Name, Provider: "cloudflare-r2", Bucket: "fugue-objects-" + strings.ReplaceAll(id, "_", "-"), Endpoint: "https://" + cfg.AccountID + ".r2.cloudflarestorage.com", Region: "auto", Status: "provisioning", QuotaBytes: req.QuotaBytes, QuotaMode: "soft", CreatedAt: now, UpdatedAt: now}
+			provider, endpoint, region := model.DataBackendProviderCloudflareR2, "", "auto"
+			if req.Provider == model.DataBackendProviderBackblazeB2 {
+				b2, err := s.store.GetBackblazeB2Config()
+				if err != nil {
+					return err
+				}
+				provider, endpoint, region = req.Provider, b2.Endpoint, b2.Region
+			} else {
+				cfg, err := s.store.GetObjectStorageConfig()
+				if err != nil {
+					return err
+				}
+				if cfg.AccountID == "" {
+					return store.ErrConflict
+				}
+				endpoint = "https://" + cfg.AccountID + ".r2.cloudflarestorage.com"
+			}
+			v = model.ObjectStore{ID: id, TenantID: project.TenantID, ProjectID: project.ID, Name: req.Name, Provider: provider, Bucket: "fugue-objects-" + strings.ReplaceAll(id, "_", "-"), Endpoint: endpoint, Region: region, Status: "provisioning", QuotaBytes: req.QuotaBytes, QuotaMode: "soft", CreatedAt: now, UpdatedAt: now}
 			if err = s.store.SaveObjectStore(v); err != nil {
 				return err
 			}
 		}
-		if v.Status == "deleting" {
+		if v.Status == "deleting" || (req.Provider != "" && v.Provider != req.Provider) {
 			return store.ErrConflict
 		}
 		if v.Status == "provisioning" {
-			if err = provider.EnsureBucket(r.Context(), v.Bucket); err != nil {
-				return err
+			switch v.Provider {
+			case model.DataBackendProviderBackblazeB2:
+				cfg, err := s.store.GetBackblazeB2Config()
+				if err != nil {
+					return err
+				}
+				b2, err := s.b2ObjectStoreManager(r.Context(), cfg, v)
+				if err != nil {
+					return err
+				}
+				v.BucketID, err = b2.ProvisionBucket(r.Context(), v.Bucket)
+				if err != nil {
+					return err
+				}
+			case model.DataBackendProviderCloudflareR2:
+				cfg, err := s.store.GetObjectStorageConfig()
+				if err != nil {
+					return err
+				}
+				r2, err := s.objectStorageProvider(cfg)
+				if err != nil {
+					return err
+				}
+				if err = r2.EnsureBucket(r.Context(), v.Bucket); err != nil {
+					return err
+				}
+			default:
+				return store.ErrInvalidInput
 			}
 			v.Status = "active"
 			v.UpdatedAt = time.Now().UTC()
@@ -289,6 +337,9 @@ func (s *Server) handleUpdateObjectStore(w http.ResponseWriter, r *http.Request)
 			return store.ErrConflict
 		}
 		if req.Enabled != nil {
+			if v.Provider == model.DataBackendProviderBackblazeB2 && v.BucketID == "" {
+				return store.ErrConflict
+			}
 			if *req.Enabled {
 				if v.Status != "active" && v.Status != "disabled" {
 					return store.ErrConflict
@@ -299,11 +350,7 @@ func (s *Server) handleUpdateObjectStore(w http.ResponseWriter, r *http.Request)
 				if err = s.store.SaveObjectStore(v); err != nil {
 					return err
 				}
-				cfg, err := s.store.GetObjectStorageConfig()
-				if err != nil {
-					return err
-				}
-				provider, err := s.objectStorageProvider(cfg)
+				provider, err := s.objectStoreManager(r.Context(), v)
 				if err != nil {
 					return err
 				}
@@ -333,16 +380,36 @@ func (s *Server) handleUpdateObjectStore(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) objectStoreDeletionPlan(v model.ObjectStore) (model.ObjectStoreDeleteInventory, error) {
-	cfg, err := s.store.GetObjectStorageConfig()
-	if err != nil {
-		return model.ObjectStoreDeleteInventory{}, err
-	}
 	// Only explicitly provisioned application buckets are valid targets. Never
 	// accept a supplied endpoint or a backup/shared bucket as a deletion target.
-	if !objectStoreAccount.MatchString(cfg.AccountID) || v.Provider != model.DataBackendProviderCloudflareR2 || v.Bucket != "fugue-objects-"+strings.ReplaceAll(v.ID, "_", "-") || v.Endpoint != "https://"+cfg.AccountID+".r2.cloudflarestorage.com" || v.Region != "auto" {
+	if v.Bucket != "fugue-objects-"+strings.ReplaceAll(v.ID, "_", "-") {
 		return model.ObjectStoreDeleteInventory{}, store.ErrConflict
 	}
-	target, _ := json.Marshal([]string{"fugue-object-store-delete/v1", v.ID, v.TenantID, v.ProjectID, v.Name, cfg.AccountID, v.Bucket, v.Endpoint, v.CreatedAt.UTC().Format(time.RFC3339Nano)})
+	targetFields := []string{"fugue-object-store-delete/v1", v.ID, v.TenantID, v.ProjectID, v.Name, "", v.Bucket, v.Endpoint, v.CreatedAt.UTC().Format(time.RFC3339Nano)}
+	switch v.Provider {
+	case model.DataBackendProviderCloudflareR2:
+		cfg, err := s.store.GetObjectStorageConfig()
+		if err != nil {
+			return model.ObjectStoreDeleteInventory{}, err
+		}
+		if !objectStoreAccount.MatchString(cfg.AccountID) || v.Endpoint != "https://"+cfg.AccountID+".r2.cloudflarestorage.com" || v.Region != "auto" {
+			return model.ObjectStoreDeleteInventory{}, store.ErrConflict
+		}
+		targetFields[5] = cfg.AccountID
+	case model.DataBackendProviderBackblazeB2:
+		b2, err := s.store.GetBackblazeB2Config()
+		if err != nil {
+			return model.ObjectStoreDeleteInventory{}, err
+		}
+		if b2 == nil || b2.AccountID == "" || v.Endpoint != b2.Endpoint || v.Region != b2.Region {
+			return model.ObjectStoreDeleteInventory{}, store.ErrConflict
+		}
+		targetFields[0], targetFields[5] = "fugue-object-store-delete/b2-v1", b2.AccountID
+		targetFields = append(targetFields, v.BucketID, v.Region)
+	default:
+		return model.ObjectStoreDeleteInventory{}, store.ErrConflict
+	}
+	target, _ := json.Marshal(targetFields)
 	sum := sha256.Sum256(target)
 	return model.ObjectStoreDeleteInventory{ObjectCount: v.ObjectCount, Bytes: v.UsedBytes, Source: "cached", Complete: false, MeasuredAt: v.UsageMeasuredAt, PlanSHA256: hex.EncodeToString(sum[:])}, nil
 }
@@ -396,20 +463,27 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 		if req.ConfirmBucket != v.Bucket {
 			return store.ErrConflict
 		}
-		cfg, err := s.store.GetObjectStorageConfig()
-		if err != nil {
-			return err
-		}
-		provider, err := s.objectStorageProvider(cfg)
-		if err != nil {
-			return err
-		}
 		inventory, err := s.objectStoreDeletionPlan(v)
 		if err != nil {
 			return err
 		}
 		if inventory.PlanSHA256 != req.PlanSHA256 {
 			return store.ErrConflict
+		}
+		provider, err := s.objectStoreManager(r.Context(), v)
+		if err != nil {
+			return err
+		}
+		// A lost create response may have made the bucket. Retry create to
+		// recover its immutable ID before issuing any destructive request.
+		if v.Provider == model.DataBackendProviderBackblazeB2 && v.BucketID == "" {
+			exists, err := provider.BucketExists(r.Context(), v.Bucket)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return store.ErrConflict
+			}
 		}
 		records, err := s.store.ListObjectStorageCredentials(v.ID)
 		if err != nil {
@@ -433,6 +507,9 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 			return err
 		}
 		if exists {
+			if v.Provider == model.DataBackendProviderBackblazeB2 && v.BucketID == "" {
+				return store.ErrConflict
+			}
 			// Never use the account-wide management credential for S3 deletes.
 			// CreateCredential first reconciles any prior ambiguous grant with this
 			// durable name, and scopes the new token to this bucket only.
@@ -444,7 +521,7 @@ func (s *Server) handleDeleteObjectStore(w http.ResponseWriter, r *http.Request)
 				revokeCancel()
 				return errors.Join(err, revokeErr)
 			}
-			backend := model.DataBackend{Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: model.DataBackendCredentials{AccessKeyID: temporary.ID, SecretAccessKey: objectstorage.SecretAccessKey(temporary.Value)}}
+			backend := model.DataBackend{Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: model.DataBackendCredentials{AccessKeyID: temporary.ID, SecretAccessKey: objectStoreS3Secret(v.Provider, temporary.Value)}}
 			cleanup := objectstorage.EmptyBucketBatch
 			if s.cleanupObjectStoreBatch != nil {
 				cleanup = s.cleanupObjectStoreBatch
@@ -534,11 +611,7 @@ func (s *Server) handleCreateObjectStoreCredential(w http.ResponseWriter, r *htt
 		if v.Status != "active" {
 			return store.ErrConflict
 		}
-		cfg, err := s.store.GetObjectStorageConfig()
-		if err != nil {
-			return err
-		}
-		provider, err := s.objectStorageProvider(cfg)
+		provider, err := s.objectStoreManager(r.Context(), v)
 		if err != nil {
 			return err
 		}
@@ -568,7 +641,7 @@ func (s *Server) handleCreateObjectStoreCredential(w http.ResponseWriter, r *htt
 			if err != nil {
 				return err
 			}
-			secret = model.DataBackendCredentials{AccessKeyID: token.ID, SecretAccessKey: objectstorage.SecretAccessKey(token.Value)}
+			secret = model.DataBackendCredentials{AccessKeyID: token.ID, SecretAccessKey: objectStoreS3Secret(v.Provider, token.Value)}
 			rec.Secret, err = s.store.SealObjectStorageSecret(secret)
 			if err != nil {
 				return err
@@ -589,7 +662,7 @@ func (s *Server) handleCreateObjectStoreCredential(w http.ResponseWriter, r *htt
 		return nil
 	})
 }
-func (s *Server) revokeObjectStorageCredential(ctx context.Context, provider *objectstorage.Client, v model.ObjectStore, rec model.ObjectStorageCredentialRecord) error {
+func (s *Server) revokeObjectStorageCredential(ctx context.Context, provider objectStoreManager, v model.ObjectStore, rec model.ObjectStorageCredentialRecord) error {
 	if rec.Credential.Status == "revoked" {
 		return nil
 	}
@@ -620,11 +693,7 @@ func (s *Server) handleRevokeObjectStoreCredential(w http.ResponseWriter, r *htt
 		}
 		for _, rec := range records {
 			if rec.Credential.ID == r.PathValue("credential_id") {
-				cfg, err := s.store.GetObjectStorageConfig()
-				if err != nil {
-					return err
-				}
-				provider, err := s.objectStorageProvider(cfg)
+				provider, err := s.objectStoreManager(r.Context(), v)
 				if err != nil {
 					return err
 				}
@@ -651,31 +720,69 @@ func (s *Server) handleMeasureObjectStoreUsage(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			return err
 		}
-		cfg, err := s.store.GetObjectStorageConfig()
-		if err != nil {
-			return err
+		var sealed model.DataBackendSecret
+		ctx, cancel := context.WithTimeout(r.Context(), normalizeObjectStorageUsageTimeout(s.objectStorageUsageTimeout))
+		defer cancel()
+		if v.Provider == model.DataBackendProviderBackblazeB2 {
+			if v.BucketID == "" {
+				return store.ErrConflict
+			}
+			cfg, err := s.store.GetBackblazeB2Config()
+			if err != nil {
+				return err
+			}
+			manager, err := s.b2ObjectStoreManager(ctx, cfg, v)
+			if err != nil {
+				return err
+			}
+			exists, err := manager.BucketExists(ctx, v.Bucket)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return store.ErrConflict
+			}
+			sealed = cfg.Secret
+		} else {
+			cfg, err := s.store.GetObjectStorageConfig()
+			if err != nil {
+				return err
+			}
+			sealed = cfg.Secret
 		}
-		secret, err := s.store.OpenObjectStorageSecret(cfg.Secret)
+		secret, err := s.store.OpenObjectStorageSecret(sealed)
 		if err != nil {
 			return err
 		}
 		secret.Token = ""
-		b, err := newDataObjectBackend(model.DataBackend{Name: v.Name, Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: secret})
+		b, err := newDataObjectBackend(model.DataBackend{Name: v.Name, Provider: v.Provider, Bucket: v.Bucket, Endpoint: v.Endpoint, Region: v.Region, Credentials: secret, Capabilities: model.DataBackendCapabilitiesForProvider(v.Provider)})
 		if err != nil {
 			return err
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), normalizeObjectStorageUsageTimeout(s.objectStorageUsageTimeout))
-		defer cancel()
-		pager := s3.NewListObjectsV2Paginator(b.client, &s3.ListObjectsV2Input{Bucket: aws.String(v.Bucket)})
 		var used, count int64
-		for pager.HasMorePages() {
-			page, err := pager.NextPage(ctx)
-			if err != nil {
-				return errors.New("object storage usage measurement failed; previous measurement retained")
+		if v.Provider == model.DataBackendProviderBackblazeB2 {
+			pager := s3.NewListObjectVersionsPaginator(b.client, &s3.ListObjectVersionsInput{Bucket: aws.String(v.Bucket)}, func(o *s3.ListObjectVersionsPaginatorOptions) { o.StopOnDuplicateToken = true })
+			for pager.HasMorePages() {
+				page, err := pager.NextPage(ctx)
+				if err != nil || (aws.ToBool(page.IsTruncated) && !pager.HasMorePages()) {
+					return errors.New("object storage usage measurement failed; previous measurement retained")
+				}
+				for _, obj := range page.Versions {
+					used += aws.ToInt64(obj.Size)
+					count++
+				}
 			}
-			for _, obj := range page.Contents {
-				used += aws.ToInt64(obj.Size)
-				count++
+		} else {
+			pager := s3.NewListObjectsV2Paginator(b.client, &s3.ListObjectsV2Input{Bucket: aws.String(v.Bucket)})
+			for pager.HasMorePages() {
+				page, err := pager.NextPage(ctx)
+				if err != nil {
+					return errors.New("object storage usage measurement failed; previous measurement retained")
+				}
+				for _, obj := range page.Contents {
+					used += aws.ToInt64(obj.Size)
+					count++
+				}
 			}
 		}
 		now := time.Now().UTC()

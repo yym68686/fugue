@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS fugue_object_storage_credentials (
  UNIQUE (store_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_fugue_object_stores_tenant ON fugue_object_stores(tenant_id, project_id);
+CREATE TABLE IF NOT EXISTS fugue_object_storage_providers (
+ provider TEXT PRIMARY KEY, body JSONB NOT NULL
+);
 `
 
 // MigrateObjectStorage only adds independent tables; prior API releases continue
