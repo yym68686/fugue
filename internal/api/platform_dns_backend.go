@@ -40,29 +40,35 @@ func (s *Server) validateDNSHeartbeatBackendSelection(ctx context.Context, claim
 	if status != http.StatusOK {
 		return status, false
 	}
-	status = s.inspectDNSBackendTransport(ctx, claims, h, nil, private, &notSelected)
+	status = s.inspectDNSBackendTransport(ctx, claims, h, nil, private, &notSelected, nil)
 	return status, notSelected
 }
 
 // A reader runs only after transport identity validation and before the final
 // metadata recheck. It must not retain the client or use Pod data as configuration.
 func (s *Server) inspectDNSBackend(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int) int {
-	return s.inspectDNSBackendTransport(ctx, claims, h, read, false)
+	return s.inspectDNSBackendTransport(ctx, claims, h, read, false, nil, nil)
 }
 
-func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int, allowPrivate bool, notSelected ...*bool) int {
+func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, read func(context.Context, *clusterNodeClient, corev1.Pod, corev1.Service, bool) int, allowPrivate bool, notSelected *bool, rejection *string) int {
+	reject := func(status int, reason string) int {
+		if rejection != nil {
+			*rejection = reason
+		}
+		return status
+	}
 	if claims.Component != model.PlatformConsumerComponentDNSServer {
 		return http.StatusOK
 	}
 	if !strings.HasPrefix(claims.CredentialID, "kubernetes:") {
 		if claims.AuthorityID != "" {
-			return http.StatusForbidden
+			return reject(http.StatusForbidden, "unsupported_credential")
 		}
 		return http.StatusOK
 	}
 	identity := strings.Split(claims.CredentialID, ":")
 	if len(identity) != 4 || identity[1] == "" || identity[1] != s.controlPlaneNamespace || identity[2] == "" || identity[3] == "" || claims.NodeID == "" {
-		return http.StatusForbidden
+		return reject(http.StatusForbidden, "invalid_pod_credential")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -88,34 +94,34 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	for i := range pods.Items {
 		if string(pods.Items[i].UID) == identity[3] {
 			if pod != nil {
-				return http.StatusForbidden
+				return reject(http.StatusForbidden, "duplicate_pod_identity")
 			}
 			pod = &pods.Items[i]
 		}
 	}
 	if pod == nil || pod.Name == "" || pod.ResourceVersion == "" || pod.Namespace != identity[1] || pod.Spec.NodeName != claims.NodeID || pod.Spec.ServiceAccountName != identity[2] || pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
-		return http.StatusForbidden
+		return reject(http.StatusForbidden, "pod_identity_mismatch")
 	}
 	policy, valid := decodePlatformConsumerIdentityPolicy(pod.Annotations[platformConsumerIdentityAnnotation])
 	if !valid || policy.Component != claims.Component || policy.ScopeKey != claims.ScopeKey || policy.AuthorityID != claims.AuthorityID ||
 		(claims.AuthorityID != "" && pod.Labels["fugue.io/edge-group-id"] != claims.AuthorityID) || len(policy.ArtifactKinds) != len(claims.ArtifactKinds) {
-		return http.StatusForbidden
+		return reject(http.StatusForbidden, "pod_policy_mismatch")
 	}
 	for _, kind := range claims.ArtifactKinds {
 		if !slices.Contains(policy.ArtifactKinds, kind) {
-			return http.StatusForbidden
+			return reject(http.StatusForbidden, "pod_policy_mismatch")
 		}
 	}
 	positive := strings.EqualFold(strings.TrimSpace(h.ApplyStatus), model.PlatformConsumerApplyStatusApplied) && strings.EqualFold(strings.TrimSpace(h.ProbeStatus), model.PlatformConsumerProbeStatusPassed)
 	if positive && !dnsBackendPodReady(*pod) {
-		return http.StatusConflict
+		return reject(http.StatusConflict, "pod_not_ready")
 	}
 	var node corev1.Node
 	if readDNSBackendMetadata(ctx, client, claims.NodeID, "node", "/api/v1/nodes/"+url.PathEscape(claims.NodeID), &node) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if node.Name != claims.NodeID || node.UID == "" || node.DeletionTimestamp != nil {
-		return http.StatusConflict
+		return reject(http.StatusConflict, "node_identity_mismatch")
 	}
 	var services corev1.ServiceList
 	query = url.Values{"labelSelector": {"app.kubernetes.io/managed-by=" + dnsTransportManager}, "limit": {"256"}}
@@ -124,24 +130,27 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	}
 	selected, transportStatus := publicDNSTransportForNode(services.Items, node, identity[1])
 	if transportStatus != http.StatusOK {
-		return transportStatus
+		return reject(transportStatus, "invalid_or_ambiguous_public_service")
 	}
 	var privateGuard *dnsPrivatePublicGuard
 	if selected == nil || !dnsServiceSelectsPod(*selected, *pod) {
 		if !allowPrivate {
 			// Distinguish a verified standby from malformed/missing transport.
 			// This remains a rejection; never accept or persist a serving fact.
-			if selected != nil && len(notSelected) == 1 && notSelected[0] != nil {
+			if selected == nil {
+				return reject(http.StatusConflict, "public_service_missing")
+			}
+			if notSelected != nil {
 				var currentPod corev1.Pod
 				var currentService corev1.Service
 				if readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_service_recheck", base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil {
 					return http.StatusServiceUnavailable
 				}
 				if currentPod.UID == pod.UID && currentPod.ResourceVersion == pod.ResourceVersion && currentService.UID == selected.UID && currentService.ResourceVersion == selected.ResourceVersion {
-					*notSelected[0] = true
+					*notSelected = true
 				}
 			}
-			return http.StatusConflict
+			return reject(http.StatusConflict, "public_service_selector_mismatch")
 		}
 		var status int
 		selected, privateGuard, status = selectPrivateDNSValidationService(ctx, client, claims, *pod, node, pods.Items, selected)
@@ -155,7 +164,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		return http.StatusServiceUnavailable
 	}
 	if !dnsBackendEndpointsMatch(*selected, *pod, endpoints.Items, positive) {
-		return http.StatusConflict
+		return reject(http.StatusConflict, "endpointslice_mismatch")
 	}
 	if read != nil {
 		ready := dnsBackendPodReady(*pod) && dnsBackendEndpointsMatch(*selected, *pod, endpoints.Items, true)
@@ -174,7 +183,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		return http.StatusServiceUnavailable
 	}
 	if currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || currentService.UID != selected.UID || currentService.ResourceVersion != selected.ResourceVersion || !reflect.DeepEqual(endpoints.Items, currentEndpoints.Items) {
-		return http.StatusConflict
+		return reject(http.StatusConflict, "transport_changed_during_read")
 	}
 	if privateGuard != nil {
 		return privateGuard.recheck(ctx, client)

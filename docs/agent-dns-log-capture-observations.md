@@ -69,6 +69,13 @@ not invent a validation rejection or become ready.
 `source_rejected` separates consumer/expected-set reads, identity ambiguity,
 backend disambiguation and current assignment failures. Stale heartbeats get
 their own fixed event; their rejection and freshness rules are unchanged.
+When no current source can be selected, `source_backend_rejected` retains up
+to four skipped 403/409 results from that source observation, including fixed
+reasons for Pod identity or policy, Service selection, EndpointSlice matching,
+and metadata changes on recheck. `source_backend_rejections_truncated` marks
+additional skipped results; the receipt-wide loss counter still applies.
+Successful selection does not emit ordinary standby refusals. No additional
+Kubernetes reads are made, and no candidate is accepted based on these events.
 `source_assignment_rejected` further separates assignment resolution, selected
 publication, the first mismatched heartbeat binding field (expected set, parent,
 fence or generation sequence), heartbeat time bounds, artifact/view validation

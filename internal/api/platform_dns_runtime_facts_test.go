@@ -152,12 +152,18 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 				t.Fatal("no selected backend reused retained receipt")
 			}
 			rows := captureReceipts(t, s)
-			foundSourceRejection := false
+			var foundSourceRejection, foundSelectorRejection, foundTruncation bool
+			refusals := 0
 			for _, event := range rows[len(rows)-1].Events {
 				foundSourceRejection = foundSourceRejection || event.Stage == "source_rejected" && event.Rejection == "no_current_source"
+				if event.Stage == "source_backend_rejected" {
+					refusals++
+					foundSelectorRejection = foundSelectorRejection || event.Rejection == "public_service_selector_mismatch" && event.HTTPStatus == http.StatusConflict
+				}
+				foundTruncation = foundTruncation || event.Stage == "source_backend_rejections_truncated"
 			}
-			if !foundSourceRejection {
-				t.Fatal("source selection failure lost its bounded reason")
+			if !foundSourceRejection || !foundSelectorRejection || !foundTruncation || refusals != 4 {
+				t.Fatal("source selection failure lost its bounded rejection sample", rows[len(rows)-1].Events)
 			}
 			projected, err = s.dnsInventoryServingFacts(context.Background(), inventory)
 			if err != nil || len(projected) != 1 || projected[0].Healthy || projected[0].ServingGeneration != "" || projected[0].ServingObservation == nil || projected[0].ServingObservation.State != "unknown" {

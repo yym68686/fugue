@@ -348,7 +348,7 @@ func TestPrivateDNSBackendNeverReplacesPublicAuthority(t *testing.T) {
 			if scenario == "public facts stay public" {
 				got = s.inspectDNSBackend(context.Background(), claims, h, nil)
 			} else {
-				got = s.inspectDNSBackendTransport(context.Background(), claims, h, nil, true)
+				got = s.inspectDNSBackendTransport(context.Background(), claims, h, nil, true, nil, nil)
 			}
 			if got != want {
 				t.Fatal("private/public transport binding", got, want)

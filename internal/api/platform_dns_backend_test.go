@@ -167,7 +167,7 @@ func TestDNSBackendMetadataFailurePreservesExactReadAndRejection(t *testing.T) {
 			f.install(t, s)
 			ctx, trace := s.beginCaptureTrace(t.Context(), "dns-runtime-facts")
 			standby := false
-			status := s.inspectDNSBackendTransport(ctx, f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, &standby)
+			status := s.inspectDNSBackendTransport(ctx, f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, &standby, nil)
 			s.finishCaptureTrace(trace, "backend_selection", errDNSRuntimeFacts, 0, 0)
 			if status != http.StatusServiceUnavailable || standby {
 				t.Fatalf("read failure changed rejection: status=%d standby=%t", status, standby)
@@ -183,6 +183,35 @@ func TestDNSBackendMetadataFailurePreservesExactReadAndRejection(t *testing.T) {
 			raw, err := json.Marshal(rows)
 			if err != nil || strings.Contains(string(raw), "sensitive-kubernetes-error") || strings.Contains(string(raw), "metadata-only-reader") || strings.Contains(string(raw), f.claims.CredentialID) || strings.Contains(string(raw), tc.path) {
 				t.Fatal("metadata receipt retained path, credential or body")
+			}
+		})
+	}
+}
+
+func TestDNSBackendSelectionReportsFixedRejectionWithoutChangingStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		change func(*dnsBackendFixture)
+	}{
+		{"pod_identity_mismatch", http.StatusForbidden, func(f *dnsBackendFixture) { f.pod.UID = "replacement" }},
+		{"pod_policy_mismatch", http.StatusForbidden, func(f *dnsBackendFixture) { delete(f.pod.Annotations, platformConsumerIdentityAnnotation) }},
+		{"public_service_missing", http.StatusConflict, func(f *dnsBackendFixture) { f.node.Status.Addresses = nil }},
+		{"public_service_selector_mismatch", http.StatusConflict, func(f *dnsBackendFixture) { f.pod.Labels["app"] = "standby" }},
+		{"invalid_or_ambiguous_public_service", http.StatusConflict, func(f *dnsBackendFixture) { f.extraService = true }},
+		{"endpointslice_mismatch", http.StatusConflict, func(f *dnsBackendFixture) { f.slices.Items[0].Endpoints = nil }},
+		{"transport_changed_during_read", http.StatusConflict, func(f *dnsBackendFixture) { f.changePath = "service" }},
+		{"", http.StatusOK, func(*dnsBackendFixture) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDNSBackendFixture(t)
+			tc.change(f)
+			s := &Server{}
+			f.install(t, s)
+			var reason string
+			got := s.inspectDNSBackendTransport(t.Context(), f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, nil, &reason)
+			if got != tc.status || reason != tc.name {
+				t.Fatalf("unexpected status or diagnostic: status=%d reason=%q", got, reason)
 			}
 		})
 	}
@@ -418,7 +447,7 @@ func TestDNSStandbyClassificationRequiresVerifiedUnselectedTransport(t *testing.
 			}
 			f.install(t, server)
 			standby := false
-			status := server.inspectDNSBackendTransport(context.Background(), f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: "applied", ProbeStatus: "passed"}, nil, false, &standby)
+			status := server.inspectDNSBackendTransport(context.Background(), f.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: "applied", ProbeStatus: "passed"}, nil, false, &standby, nil)
 			if standby != (scenario == "standby") || standby && status != http.StatusConflict || scenario == "selected" && status != http.StatusOK {
 				t.Fatalf("status=%d standby=%t", status, standby)
 			}

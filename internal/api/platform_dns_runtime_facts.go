@@ -144,14 +144,23 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 		candidates = append(candidates, candidate{fact: *c, claims: claims})
 	}
 	var selected *dnsFactSource
+	// Preserve a bounded sample of normally expected standby refusals only
+	// if none of the candidates can provide current facts.
+	var rejected [4]captureEvent
+	rejectedCount := 0
 	for _, candidate := range candidates {
 		if len(candidates) > 1 {
 			// Only transport can choose among retained authority receipts. Do
 			// not prefer the most recent heartbeat or invent a physical node.
 			finish = startDNSReadStage(ctx, dnsReadBackendDisambiguation)
-			status := s.inspectDNSBackend(ctx, candidate.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil)
+			var reason string
+			status := s.inspectDNSBackendTransport(ctx, candidate.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, nil, &reason)
 			finish()
 			if status == http.StatusForbidden || status == http.StatusConflict {
+				if rejectedCount < len(rejected) {
+					rejected[rejectedCount] = captureEvent{Stage: "source_backend_rejected", Node: node, HTTPStatus: status, Rejection: reason}
+				}
+				rejectedCount++
 				continue
 			}
 			if status != http.StatusOK {
@@ -169,6 +178,12 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 		selected = &source
 	}
 	if selected == nil {
+		for _, refusal := range rejected[:min(rejectedCount, len(rejected))] {
+			observeCapture(ctx, refusal)
+		}
+		if rejectedCount > len(rejected) {
+			observeCapture(ctx, captureEvent{Stage: "source_backend_rejections_truncated", Node: node})
+		}
 		return fail("no_current_source")
 	}
 	if err := ctx.Err(); err != nil {
