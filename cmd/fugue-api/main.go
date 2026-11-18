@@ -151,6 +151,7 @@ func main() {
 	}
 	warmersDone := server.StartBackgroundWarmers(ctx)
 	go server.StartBackgroundEdgeQualityRollups(ctx)
+	go server.StartBackgroundPassiveASN(ctx)
 	go server.StartBackgroundDNSObservations(ctx)
 	go server.StartBackgroundPlatformConfiguration(ctx)
 	go server.StartBackgroundTLSIssuance(ctx)

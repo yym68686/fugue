@@ -173,6 +173,7 @@ type Server struct {
 	edgeQualityRollupRunCount              int64
 	edgeQualityRollupErrorCount            int64
 	edgeQualityRollupLastError             string
+	passiveASN                             passiveASNState
 	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
 	edgeDNSArtifactLastRun                 time.Time
@@ -431,6 +432,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.store.WriteReadMetrics(w)
 	s.store.WriteStorageLifecycleMetrics(w)
 	s.store.WritePlatformQualityEvidenceMetrics(w)
+	s.writePassiveASNMetrics(w)
 	omitOriginal := float64(0)
 	if s.compilerInputOmitOriginal {
 		omitOriginal = 1

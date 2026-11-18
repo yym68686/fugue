@@ -1,0 +1,242 @@
+package edgequality
+
+import (
+	"cmp"
+	"fmt"
+	"net/netip"
+	"slices"
+	"strings"
+	"time"
+
+	"fugue/internal/model"
+)
+
+const (
+	PassiveASNInterval = 5 * time.Minute
+	PassiveASNWindow   = 30 * time.Minute
+	// Exhaustion is reported, not handled by age-based eviction.
+	MaxPassiveASNComparisons = 1024
+)
+
+type PassiveEndpoint struct {
+	EdgeID  string `json:"edge_id"`
+	GroupID string `json:"group_id"`
+	Address string `json:"address"`
+}
+
+type PassiveEdgeIdentity struct {
+	GroupID, IPv4, IPv6, Bundle string
+}
+
+type PassiveASNComparison struct {
+	ASN             uint32          `json:"asn"`
+	Family          int             `json:"family"`
+	Left            PassiveEndpoint `json:"left"`
+	Right           PassiveEndpoint `json:"right"`
+	Preferred       string          `json:"preferred,omitempty"`
+	ObservedAt      time.Time       `json:"observed_at"`
+	SharedWindows   int             `json:"shared_windows"`
+	LeftWinWindows  int             `json:"left_win_windows"`
+	RightWinWindows int             `json:"right_win_windows"`
+}
+
+func (c PassiveASNComparison) Key() string {
+	return fmt.Sprintf("%d/%d/%s/%s", c.ASN, c.Family, c.Left.EdgeID, c.Right.EdgeID)
+}
+
+type PassiveASNCoverage struct {
+	Connections, Classified, TCPRTT, ClassifiedRTT int
+}
+
+type passiveWindow struct {
+	scope netip.Prefix
+	at    time.Time
+}
+
+type passiveObservation struct {
+	sample *model.EdgeClientNetworkSample
+	edge   PassiveEndpoint
+	prefix netip.Prefix
+	asn    uint32
+}
+
+// ComparePassiveASN learns only the public Front TCP segment. Hostname,
+// request, and upstream attributes never enter a comparison. A match within
+// the same coarse prefix and time window limits population differences; an
+// ASN is a sharing scope, not a claim that all of its paths are equivalent.
+func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]PassiveEdgeIdentity, resolve func(netip.Prefix) uint32, now time.Time) ([]PassiveASNComparison, PassiveASNCoverage) {
+	complete := now.UTC().Truncate(PassiveASNInterval)
+	type connection struct {
+		edge, slot, id string
+		start          time.Time
+	}
+	latest := make(map[connection]passiveObservation)
+	asns := make(map[netip.Prefix]uint32)
+	for _, sample := range samples {
+		id, ok := identities[sample.EdgeID]
+		if !ok || sample.Source != "public_front_tcp_info_v1" || id.GroupID != sample.EdgeGroupID ||
+			id.Bundle != sample.BundleVersion || sample.ObservedAt.Before(complete.Add(-PassiveASNWindow)) ||
+			sample.ObservedAt.After(now) || model.ValidateEdgeNetworkSample(sample) != nil {
+			continue
+		}
+		client := sample.ClientNetwork
+		prefix, _ := netip.ParsePrefix(strings.TrimPrefix(client.Scope, "tcp_peer:"))
+		address := id.IPv6
+		if prefix.Addr().Is4() {
+			address = id.IPv4
+		}
+		endpoint, err := netip.ParseAddr(address)
+		if err != nil || !endpoint.IsGlobalUnicast() || endpoint.IsPrivate() || endpoint.Is4In6() ||
+			endpoint.Is4() != prefix.Addr().Is4() {
+			continue
+		}
+		key := connection{sample.EdgeID, client.Slot, client.ConnectionID, client.StartedAt.UTC()}
+		if previous := latest[key]; previous.sample != nil && !client.ObservedAt.After(previous.sample.ObservedAt) {
+			continue
+		}
+		asn, known := asns[prefix]
+		if !known {
+			asn = resolve(prefix)
+			asns[prefix] = asn
+		}
+		latest[key] = passiveObservation{client, PassiveEndpoint{sample.EdgeID, id.GroupID, endpoint.String()}, prefix, asn}
+	}
+	var coverage PassiveASNCoverage
+	windows := make(map[passiveWindow]map[PassiveEndpoint][]*model.EdgeClientNetworkSample)
+	for _, obs := range latest {
+		coverage.Connections++
+		if obs.asn != 0 {
+			coverage.Classified++
+		}
+		if obs.sample.RTTMS == nil || *obs.sample.RTTMS <= 0 {
+			continue
+		}
+		coverage.TCPRTT++
+		if obs.asn == 0 {
+			continue
+		}
+		coverage.ClassifiedRTT++
+		if !obs.sample.ObservedAt.Before(complete) {
+			continue // An open window never authorizes a new result.
+		}
+		key := passiveWindow{obs.prefix, obs.sample.ObservedAt.UTC().Truncate(PassiveASNInterval)}
+		if windows[key] == nil {
+			windows[key] = make(map[PassiveEndpoint][]*model.EdgeClientNetworkSample)
+		}
+		windows[key][obs.edge] = append(windows[key][obs.edge], obs.sample)
+	}
+	type tally struct {
+		comparison PassiveASNComparison
+		windows    map[time.Time]uint8
+	}
+	tallies := map[string]*tally{}
+	for window, edges := range windows {
+		ranks := make([]passiveWindowEdge, 0, len(edges))
+		for edge, connections := range edges {
+			if len(connections) >= 3 {
+				ranks = append(ranks, summarizePassiveWindow(edge, connections))
+			}
+		}
+		slices.SortFunc(ranks, func(a, b passiveWindowEdge) int { return cmp.Compare(a.endpoint.EdgeID, b.endpoint.EdgeID) })
+		for i, left := range ranks {
+			for _, right := range ranks[i+1:] {
+				family := 6
+				if window.scope.Addr().Is4() {
+					family = 4
+				}
+				row := PassiveASNComparison{ASN: asns[window.scope], Family: family, Left: left.endpoint, Right: right.endpoint}
+				key := row.Key()
+				state := tallies[key]
+				if state == nil {
+					state = &tally{comparison: row, windows: make(map[time.Time]uint8)}
+					tallies[key] = state
+				}
+				// Multiple prefixes must agree within one window. Neither
+				// repeated observations nor more prefixes multiply its weight.
+				flag := uint8(4)
+				leftBetter, rightBetter := passiveWindowBetter(left, right), passiveWindowBetter(right, left)
+				if leftBetter && !rightBetter {
+					flag = 1
+				} else if rightBetter && !leftBetter {
+					flag = 2
+				}
+				state.windows[window.at] |= flag
+				at := minTime(left.at, right.at)
+				if at.After(state.comparison.ObservedAt) {
+					state.comparison.ObservedAt = at
+				}
+			}
+		}
+	}
+	result := []PassiveASNComparison{}
+	for _, state := range tallies {
+		row := state.comparison
+		row.SharedWindows = len(state.windows)
+		if row.SharedWindows < 3 {
+			continue
+		}
+		for _, flag := range state.windows {
+			if flag == 1 {
+				row.LeftWinWindows++
+			} else if flag == 2 {
+				row.RightWinWindows++
+			}
+		}
+		if row.LeftWinWindows == row.SharedWindows {
+			row.Preferred = row.Left.EdgeID
+		}
+		if row.RightWinWindows == row.SharedWindows {
+			row.Preferred = row.Right.EdgeID
+		}
+		result = append(result, row)
+	}
+	slices.SortFunc(result, func(a, b PassiveASNComparison) int { return cmp.Compare(a.Key(), b.Key()) })
+	return result, coverage
+}
+
+type passiveWindowEdge struct {
+	endpoint         PassiveEndpoint
+	at               time.Time
+	rtt, dl, retrans []float64
+}
+
+func summarizePassiveWindow(edge PassiveEndpoint, observations []*model.EdgeClientNetworkSample) passiveWindowEdge {
+	result := passiveWindowEdge{endpoint: edge}
+	for _, obs := range observations {
+		result.rtt = append(result.rtt, *obs.RTTMS)
+		download, retrans := model.EdgeClientDeliveryMetrics(obs)
+		if download != nil {
+			result.dl = append(result.dl, *download)
+		}
+		if retrans != nil {
+			result.retrans = append(result.retrans, *retrans)
+		}
+		if obs.ObservedAt.After(result.at) {
+			result.at = obs.ObservedAt
+		}
+	}
+	slices.Sort(result.rtt)
+	slices.Sort(result.dl)
+	slices.Sort(result.retrans)
+	return result
+}
+
+func passiveWindowBetter(a, b passiveWindowEdge) bool {
+	lower := func(values []float64) float64 { return values[(len(values)-1)/10] }
+	middle := func(values []float64) float64 { return values[len(values)/2] }
+	upper := func(values []float64) float64 { return values[len(values)-1-(len(values)-1)/10] }
+	if upper(a.rtt) > 1.15*upper(b.rtt) ||
+		len(a.dl) >= 3 && len(b.dl) >= 3 && lower(a.dl) < 0.85*lower(b.dl) ||
+		len(a.retrans) >= 3 && len(b.retrans) >= 3 && upper(a.retrans) > upper(b.retrans)+0.02 {
+		return false
+	}
+	return middle(b.rtt)-middle(a.rtt) >= 10 && middle(a.rtt) <= 0.85*middle(b.rtt) ||
+		len(a.dl) >= 3 && len(b.dl) >= 3 && middle(a.dl) >= 1.2*middle(b.dl)
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}

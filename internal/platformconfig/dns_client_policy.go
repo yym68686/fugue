@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -131,4 +132,35 @@ func (m DNSClientMatcher) Lookup(raw string) (DNSClientRule, bool) {
 		}
 	}
 	return DNSClientRule{}, false
+}
+
+// ClientASN normalizes either notation used in signed client mappings.
+// AS_TRANS and the reserved boundary values are not network evidence.
+func ClientASN(raw string) uint32 {
+	value := strings.TrimPrefix(strings.ToLower(raw), "as")
+	asn, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || value != strconv.FormatUint(asn, 10) || asn == 0 || asn == 23456 || asn == 65535 || asn == 4294967295 {
+		return 0
+	}
+	return uint32(asn)
+}
+
+// LookupPrefixASN requires the entire prefix to have a single signed origin
+// under first-match semantics. Reading just the masked address of an ECS or
+// privacy prefix can incorrectly apply a narrower override to the whole subnet.
+func (m DNSClientMatcher) LookupPrefixASN(prefix netip.Prefix) uint32 {
+	if !prefix.IsValid() || prefix.Bits() == 0 || prefix.Addr().Is4In6() ||
+		!prefix.Addr().IsGlobalUnicast() || prefix.Addr().IsPrivate() {
+		return 0
+	}
+	for _, rule := range m.rules {
+		if !rule.prefix.Overlaps(prefix) {
+			continue
+		}
+		if rule.prefix.Bits() == 0 || rule.prefix.Bits() > prefix.Bits() {
+			return 0
+		}
+		return ClientASN(rule.rule.ASN)
+	}
+	return 0
 }
