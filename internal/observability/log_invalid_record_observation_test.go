@@ -17,12 +17,12 @@ import (
 )
 
 func TestInvalidLogRecordKeepsActualReadWithoutPayloadOrCursorChanges(t *testing.T) {
-	for _, trial := range []struct{ line, class string }{
-		{"unable to retrieve container logs for containerd://private-runtime", "runtime_log_unavailable_message"},
-		{"private-record", "timestamp_missing"},
-		{"private-time private-payload", "timestamp_invalid"},
-		{"0001-01-01T00:00:00Z private-payload", "timestamp_zero"},
-		{"", "timestamp_missing"},
+	for _, trial := range []struct{ line, class, gapReason string }{
+		{"unable to retrieve container logs for containerd://private-runtime", "runtime_log_unavailable_message", "runtime_log_unavailable"},
+		{"private-record", "timestamp_missing", "invalid_log_record"},
+		{"private-time private-payload", "timestamp_invalid", "invalid_log_record"},
+		{"0001-01-01T00:00:00Z private-payload", "timestamp_zero", "invalid_log_record"},
+		{"", "timestamp_missing", "invalid_log_record"},
 	} {
 		t.Run(trial.class+fmt.Sprint(len(trial.line)), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,11 +55,17 @@ func TestInvalidLogRecordKeepsActualReadWithoutPayloadOrCursorChanges(t *testing
 			if !c.cursors[key].Time.Equal(before) || !c.cursors[key].SourceUnavailable || row.GapEvents != 1 || budget.Load() != 5 || p.kubernetesLogLines.Load() != 0 || row.Errors != 0 {
 				t.Fatal("diagnostics changed cursor, queue, gap or error behavior")
 			}
+			if row.GapReason != trial.gapReason {
+				t.Fatalf("gap reason %q, want %q", row.GapReason, trial.gapReason)
+			}
 			p.observeLogSource(logSourceObservation{Identity: key, Outcome: "drained"})
 			fact.Class = "changed"
 			history := result["gap_history"].(map[string]any)["receipts"].([]logGapObservation)
 			if len(history) != 1 || history[0].InvalidRecord == nil || history[0].InvalidRecord.Class != trial.class {
 				t.Fatal("gap lost rejection evidence or aliases the source projection")
+			}
+			if history[0].Reason != trial.gapReason {
+				t.Fatalf("retained gap reason %q, want %q", history[0].Reason, trial.gapReason)
 			}
 			history[0].InvalidRecord.Read.Phase = "changed"
 			value, _ = p.DiagnosticSources(t.Context())

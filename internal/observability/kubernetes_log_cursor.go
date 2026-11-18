@@ -340,11 +340,15 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			observation.Outcome = "source_unavailable"
 			observation.InvalidRecord = observeInvalidLogRecord(scanner.Text(), readTrace)
 			// Kubelet can return HTTP 200 with an untimestamped unavailable-log
-			// message after container GC. Count the loss once and retry with backoff.
+			// message. Other invalid records do not establish runtime unavailability.
 			if !cur.SourceUnavailable {
 				c.pipeline.kubernetesLogCursorGaps.Add(1)
 				observation.GapEvents++
-				observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = "runtime_log_unavailable", cur.Time, now
+				reason := "invalid_log_record"
+				if observation.InvalidRecord.Class == invalidRecordRuntimeUnavailableMessage {
+					reason = "runtime_log_unavailable"
+				}
+				observation.GapReason, observation.GapLowerBound, observation.GapUpperBound = reason, cur.Time, now
 			}
 			cur.SourceUnavailable = true
 			cur.NextAttempt = now.Add(5 * time.Minute)

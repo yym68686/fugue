@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const invalidRecordRuntimeUnavailableMessage = "runtime_log_unavailable_message"
+
 // A fixed-size observation of the exact rejected record. Do not retain its
 // text, timestamp token, runtime ID or any other payload. Classification is
 // diagnostic only: it does not establish whether retained logs were lost.
@@ -19,7 +21,7 @@ func observeInvalidLogRecord(line string, trace *logReadTransportTrace) *logInva
 	class := "timestamp_invalid"
 	switch {
 	case strings.HasPrefix(line, "unable to retrieve container logs for "):
-		class = "runtime_log_unavailable_message"
+		class = invalidRecordRuntimeUnavailableMessage
 	case !strings.Contains(line, " "):
 		class = "timestamp_missing"
 	default:
