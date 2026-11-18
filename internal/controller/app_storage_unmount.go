@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 const storageUnmountTransitionAnnotation = "fugue.pro/storage-unmount-transition"
@@ -146,6 +147,10 @@ func (s *Service) stepAppStorageUnmount(ctx context.Context, c *kubeClient, op m
 		}
 		return s.startAppStorageUnmount(ctx, c, op, app, want, managed, ns, name, depPath, dep)
 	}
+	epoch, err := s.storageUnmountFenceEpoch(ctx, c, app, dep)
+	if err != nil {
+		return unsettled(err)
+	}
 
 	candidate, scheduling, err := s.storageUnmountCandidate(app, want, managed, transition)
 	if err != nil {
@@ -173,7 +178,8 @@ func (s *Service) stepAppStorageUnmount(ctx context.Context, c *kubeClient, op m
 			original = p
 		}
 	}
-	if replacement != nil && (replacement.Spec.NodeName != "" && replacement.Spec.NodeName != transition.Node || replacement.Spec.HostNetwork ||
+	if replacement != nil && (replacement.Labels[runtime.FugueLabelFenceEpoch] != epoch ||
+		replacement.Spec.NodeName != "" && replacement.Spec.NodeName != transition.Node || replacement.Spec.HostNetwork ||
 		!storageUnmountPodMountsMatch(replacement, transition.Claim, want.PersistentStorage, op.StorageUnmount.Path) || !storageUnmountPodHasGate(replacement)) {
 		return unsettled(fmt.Errorf("candidate Pod does not match the authorized placement or readiness gate"))
 	}
@@ -296,6 +302,36 @@ func (s *Service) storageUnmountCandidate(app model.App, want model.AppSpec, man
 	return s.Renderer.PrepareApp(snapshot), scheduling, nil
 }
 
+func (s *Service) storageUnmountFenceEpoch(ctx context.Context, c *kubeClient, app model.App, dep appsv1.Deployment) (string, error) {
+	epoch, err := s.currentAppFenceEpoch(ctx, c, app)
+	if err != nil {
+		return "", fmt.Errorf("read app fence epoch for storage unmount: %w", err)
+	}
+	const key = runtime.FugueLabelFenceEpoch
+	if dep.Spec.Selector == nil || dep.Labels[key] != epoch || dep.Spec.Selector.MatchLabels[key] != epoch || dep.Spec.Template.Labels[key] != epoch {
+		return "", fmt.Errorf("live Deployment does not match the current app fence epoch")
+	}
+	return epoch, nil
+}
+
+func (s *Service) renderStorageUnmountDeployment(app model.App, scheduling runtime.SchedulingConstraints, live appsv1.Deployment, epoch string) (map[string]any, error) {
+	objects := s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil)
+	// Match the normal ManagedApp apply path. The live Service and immutable
+	// Deployment selector both depend on this lease-derived label.
+	decorateManagedAppObjectsWithFenceEpoch(objects, app, epoch)
+	desired := firstManagedAppDeploymentObject(objects, live.Name)
+	if !zeroDowntimeDeploymentStrategyIsSafe(desired) {
+		return nil, fmt.Errorf("unmount candidate did not render a zero-unavailable RollingUpdate")
+	}
+	selector, err := metav1.LabelSelectorAsSelector(live.Spec.Selector)
+	desiredLabels := objectStringMapValue(nestedObjectValue(desired, "spec", "template", "metadata", "labels"))
+	if err != nil || !selector.Matches(labels.Set(desiredLabels)) ||
+		!revisionAppliedFieldsMatch("spec.selector", normalizeKubeValue(live.Spec.Selector), normalizeKubeValue(nestedObjectValue(desired, "spec", "selector"))) {
+		return nil, fmt.Errorf("unmount candidate does not satisfy the live Deployment selector")
+	}
+	return desired, nil
+}
+
 func (s *Service) startAppStorageUnmount(ctx context.Context, c *kubeClient, op model.Operation, app model.App, want model.AppSpec, managed runtime.ManagedAppObject, ns, name, depPath string, dep appsv1.Deployment) (bool, error) {
 	sourceKey := dep.Spec.Template.Annotations[runtime.FugueAnnotationReleaseKey]
 	sourceApp := s.Renderer.PrepareApp(runtime.AppFromManagedApp(managed))
@@ -338,6 +374,13 @@ func (s *Service) startAppStorageUnmount(ctx context.Context, c *kubeClient, op 
 	if err := verifyStorageUnmountServices(ctx, c, ns, runtime.RuntimeAppServiceName(app), p.Labels); err != nil {
 		return false, err
 	}
+	epoch, err := s.storageUnmountFenceEpoch(ctx, c, app, dep)
+	if err != nil {
+		return false, err
+	}
+	if p.Labels[runtime.FugueLabelFenceEpoch] != epoch {
+		return false, fmt.Errorf("serving Pod does not match the current app fence epoch")
+	}
 	claimName := runtime.PersistentStoragePVCName(app, *app.Spec.PersistentStorage)
 	if !storageUnmountPodMountsMatch(&p, claimName, app.Spec.PersistentStorage, "") || runtime.PersistentStoragePVCName(app, *want.PersistentStorage) != claimName {
 		return false, fmt.Errorf("source and candidate must use exactly the same existing PVC")
@@ -368,13 +411,9 @@ func (s *Service) startAppStorageUnmount(ctx context.Context, c *kubeClient, op 
 	if err := s.preflightManagedAppZeroDowntimeRolloutCapacity(ctx, candidate, scheduling); err != nil {
 		return false, err
 	}
-	objects := s.Renderer.BuildManagedAppChildObjects(candidate, scheduling, nil)
-	expected := firstManagedAppDeploymentObject(objects, name)
-	if !zeroDowntimeDeploymentStrategyIsSafe(expected) {
-		return false, fmt.Errorf("unmount candidate did not render a zero-unavailable RollingUpdate")
-	}
-	if !revisionAppliedFieldsMatch("spec.selector", normalizeKubeValue(dep.Spec.Selector), normalizeKubeValue(nestedObjectValue(expected, "spec", "selector"))) {
-		return false, fmt.Errorf("unmount would change the live Deployment selector")
+	expected, err := s.renderStorageUnmountDeployment(candidate, scheduling, dep, epoch)
+	if err != nil {
+		return false, err
 	}
 	t.CandidateKey = s.Renderer.ManagedAppReleaseKey(candidate, scheduling)
 	template := normalizeKubeMap(nestedObjectValue(expected, "spec", "template"))
@@ -799,6 +838,10 @@ func (s *Service) reconcileCompletedStorageUnmount(ctx context.Context, c *kubeC
 		dep.Labels[runtime.FugueLabelAppID] != app.ID || dep.Labels[runtime.FugueLabelTenantID] != app.TenantID {
 		return nil
 	}
+	epoch, err := s.storageUnmountFenceEpoch(ctx, c, live, dep)
+	if err != nil {
+		return err
+	}
 	pods, err := listStorageUnmountPods(ctx, c, ns, name)
 	if err != nil {
 		return err
@@ -808,7 +851,7 @@ func (s *Service) reconcileCompletedStorageUnmount(ctx context.Context, c *kubeC
 			p.Annotations[runtime.FugueStorageUnmountOperationAnnotation] != id || storageUnmountPodCondition(&p, runtime.FugueStorageUnmountReadyCondition) {
 			continue
 		}
-		if p.Spec.HostNetwork || p.Spec.NodeName != managed.Spec.Scheduling.NodeSelector[kubeHostnameLabelKey] ||
+		if p.Labels[runtime.FugueLabelFenceEpoch] != epoch || p.Spec.HostNetwork || p.Spec.NodeName != managed.Spec.Scheduling.NodeSelector[kubeHostnameLabelKey] ||
 			live.Spec.PersistentStorage == nil || !storageUnmountPodMountsMatch(&p, runtime.PersistentStoragePVCName(live, *live.Spec.PersistentStorage), live.Spec.PersistentStorage, op.StorageUnmount.Path) {
 			return fmt.Errorf("unmount-gated Pod drifted from the committed placement or claim")
 		}

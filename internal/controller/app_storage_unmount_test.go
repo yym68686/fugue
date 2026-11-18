@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -17,6 +18,98 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+func TestStorageUnmountPreservesLiveServiceFence(t *testing.T) {
+	app := model.App{ID: "app_demo", TenantID: "tenant_demo", Name: "demo", Spec: model.AppSpec{
+		Image: "example.invalid/app:v1", Replicas: 1, Ports: []int{8080},
+		PersistentStorage: &model.AppPersistentStorageSpec{
+			Mode: model.AppPersistentStorageModeMovableRWO, StorageClassName: model.AppStorageClassFugueLocalRWO, StorageSize: "4Gi",
+			Mounts: []model.AppPersistentStorageMount{{Kind: "file", Path: "/config"}, {Kind: "directory", Path: "/data"}},
+		},
+	}}
+	want, _, err := model.AppSpecWithoutPersistentMount(app.Spec, "/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := app
+	candidate.Spec = want
+	candidate.Spec.StorageUnmountOperationID = "op_unmount"
+	ns, name := runtime.NamespaceForTenant(app.TenantID), runtime.RuntimeAppResourceName(app)
+	s := &Service{}
+	scheduling := runtime.SchedulingConstraints{}
+	for _, epoch := range []string{"", "7"} {
+		t.Run("epoch="+epoch, func(t *testing.T) {
+			objects := s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil)
+			decorateManagedAppObjectsWithFenceEpoch(objects, app, epoch)
+			var live appsv1.Deployment
+			var service corev1.Service
+			for _, object := range objects {
+				var out any
+				switch object["kind"] {
+				case "Deployment":
+					out = &live
+				case "Service":
+					out = &service
+				default:
+					continue
+				}
+				data, err := json.Marshal(object)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, out); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if service.Name == "" || live.Name != name {
+				t.Fatalf("missing canonical workload: %q, %q", live.Name, service.Name)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/namespaces/" + ns + "/services":
+					_ = json.NewEncoder(w).Encode(corev1.ServiceList{Items: []corev1.Service{service}})
+				case "/apis/coordination.k8s.io/v1/namespaces/" + ns + "/leases/" + appFenceLeaseName(app):
+					if epoch == "" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					_, _ = io.WriteString(w, `{"spec":{"leaseTransitions":7}}`)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			ctx := context.Background()
+			client := &kubeClient{baseURL: srv.URL, client: srv.Client()}
+			got, err := s.storageUnmountFenceEpoch(ctx, client, app, live)
+			if err != nil || got != epoch {
+				t.Fatalf("expected current fence %q, got %q: %v", epoch, got, err)
+			}
+			desired, err := s.renderStorageUnmountDeployment(candidate, scheduling, live, got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			podLabels := objectStringMapValue(nestedObjectValue(desired, "spec", "template", "metadata", "labels"))
+			if podLabels[runtime.FugueLabelFenceEpoch] != epoch {
+				t.Fatalf("Pod fence label did not match the lease")
+			}
+			if err := verifyStorageUnmountServices(ctx, client, ns, service.Name, podLabels); err != nil {
+				t.Fatal(err)
+			}
+			if epoch != "" {
+				if _, err := s.renderStorageUnmountDeployment(candidate, scheduling, live, ""); err == nil {
+					t.Fatal("a candidate without the fence matched the live deployment")
+				}
+			}
+			drifted := live.DeepCopy()
+			drifted.Spec.Template.Labels[runtime.FugueLabelFenceEpoch] = "8"
+			if _, err := s.storageUnmountFenceEpoch(ctx, client, app, *drifted); err == nil {
+				t.Fatal("accepted a deployment with a stale or unexpected fence label")
+			}
+		})
+	}
+}
 
 func TestStorageUnmountTrafficProofRequiresExactReadyIdentities(t *testing.T) {
 	const ns = "test-tenant"
