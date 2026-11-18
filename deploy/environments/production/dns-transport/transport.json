@@ -1,16 +1,16 @@
 {
   "apiVersion": "transport.fugue.dev/v4",
-  "generation": 82,
+  "generation": 83,
   "handoffs": [
     {
       "address": "51.38.126.103",
-      "previous_revision": "a1702596efb4918e2c5e460e90ece5331c4b4497",
-      "candidate_revision": "1b186c6a1cfb51c14554a28acffca6024184d05c"
+      "previous_revision": "1b186c6a1cfb51c14554a28acffca6024184d05c",
+      "candidate_revision": "837d69f27ae9faacf834abc67a1ee6bb5db2bd75"
     },
     {
       "address": "15.204.94.71",
-      "previous_revision": "a1702596efb4918e2c5e460e90ece5331c4b4497",
-      "candidate_revision": "1b186c6a1cfb51c14554a28acffca6024184d05c"
+      "previous_revision": "1b186c6a1cfb51c14554a28acffca6024184d05c",
+      "candidate_revision": "837d69f27ae9faacf834abc67a1ee6bb5db2bd75"
     }
   ],
   "kind": "DNSLocalTransport",
@@ -20,7 +20,7 @@
       "name": "fugue-dns-transport-de",
       "port": 15353,
       "selector": {
-        "app.kubernetes.io/component": "dns-de-f",
+        "app.kubernetes.io/component": "dns-de-e",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -31,7 +31,7 @@
       "name": "fugue-dns-transport-us",
       "port": 15353,
       "selector": {
-        "app.kubernetes.io/component": "dns-us-f",
+        "app.kubernetes.io/component": "dns-us-e",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -42,7 +42,7 @@
       "name": "fugue-dns-public-de",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-de-f",
+        "app.kubernetes.io/component": "dns-de-e",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -53,7 +53,7 @@
       "name": "fugue-dns-public-us",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-us-f",
+        "app.kubernetes.io/component": "dns-us-e",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
