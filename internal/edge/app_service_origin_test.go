@@ -125,7 +125,7 @@ func TestAppServiceOriginTransportScope(t *testing.T) {
 	local := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route}).(*http.Transport)
 	route.UpstreamScope = model.EdgeRouteUpstreamScopeCluster // Also covers a release-owned Service.
 	cluster := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route}).(*http.Transport)
-	if local != cluster || !local.DisableKeepAlives {
+	if local != cluster || local.MaxIdleConnsPerHost >= 0 || local.DisableKeepAlives {
 		t.Fatal("managed Services must share the transport that dials for each request")
 	}
 	peer := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route, PeerFallback: true}).(*http.Transport)
@@ -138,7 +138,7 @@ func TestAppServiceOriginTransportScope(t *testing.T) {
 	route.UpstreamKind = model.EdgeRouteUpstreamKindMesh
 	mesh := service.edgeProxyBaseForObservation(&edgeProxyObservation{Route: route}).(*http.Transport)
 	for name, transport := range map[string]*http.Transport{"peer": peer, "api": api, "platform": platform, "mesh": mesh} {
-		if transport.DisableKeepAlives {
+		if transport.DisableKeepAlives || transport.MaxIdleConnsPerHost < 0 {
 			t.Errorf("%s transport lost connection reuse", name)
 		}
 	}

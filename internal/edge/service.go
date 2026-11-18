@@ -2562,8 +2562,13 @@ func (s *Service) edgeProxyBaseForObservation(observation *edgeProxyObservation)
 			// Pod, even after that endpoint stops receiving new connections.
 			// Dial per request so endpoint selection is current, without closing
 			// any in-flight response or upgraded connection.
-			s.proxyAppServiceTransport = prototype.Clone()
-			s.proxyAppServiceTransport.DisableKeepAlives = true
+			transport := prototype.Clone()
+			// Keep HTTP/1 sockets out of the idle pool without sending
+			// Connection: close, which can reset an early upload rejection.
+			transport.Protocols = new(http.Protocols)
+			transport.Protocols.SetHTTP1(true)
+			transport.MaxIdleConnsPerHost = -1
+			s.proxyAppServiceTransport = transport
 		}
 		return s.proxyAppServiceTransport
 	}

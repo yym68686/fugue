@@ -142,6 +142,9 @@ func TestBodyBufferRecoveryAdmissionMatrix(t *testing.T) {
 					t.Error("application headers changed")
 				}
 				if tc.mode == "auth" {
+					if r.Close {
+						t.Error("edge sent Connection: close on an upload")
+					}
 					http.Error(w, "unauthorized", 401)
 					return
 				}
