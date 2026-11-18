@@ -38,6 +38,13 @@ type b2Error struct {
 func (e *b2Error) Error() string { return "Backblaze B2 rejected the request" }
 func (e *b2Error) Unwrap() error { return &APIError{Status: e.status} }
 
+func isB2MasterKeyID(accountID, keyID string) bool {
+	// Backblaze accepts both the legacy account ID and the newer
+	// cluster-prefixed ID for a master key.
+	suffix := accountID + "0000000000"
+	return keyID == accountID || (len(keyID) == 3+len(suffix) && strings.HasSuffix(keyID, suffix))
+}
+
 func AuthorizeB2(ctx context.Context, keyID, key string, transport http.RoundTripper) (*B2Client, error) {
 	client := &http.Client{Transport: transport, Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b2AuthorizeURL, nil)
@@ -69,7 +76,7 @@ func AuthorizeB2(ctx context.Context, keyID, key string, transport http.RoundTri
 	if !b2APIEndpoint.MatchString(apiURL) || len(region) != 2 || !b2KeyID.MatchString(result.AccountID) || result.Token == "" {
 		return nil, errors.New("Backblaze B2 returned invalid account endpoints")
 	}
-	if keyID == result.AccountID || string(info.Allowed.Buckets) != "null" || info.Allowed.NamePrefix != nil {
+	if isB2MasterKeyID(result.AccountID, keyID) || string(info.Allowed.Buckets) != "null" || info.Allowed.NamePrefix != nil {
 		return nil, errors.New("Backblaze B2 requires a non-master management key without bucket or filename restrictions")
 	}
 	for _, capability := range []string{"listBuckets", "writeBuckets", "deleteBuckets", "listKeys", "writeKeys", "deleteKeys", "listFiles", "readFiles", "writeFiles", "deleteFiles"} {
@@ -256,7 +263,7 @@ func (c *B2Client) CreateCredential(ctx context.Context, name, bucket, permissio
 }
 
 func (c *B2Client) Revoke(ctx context.Context, id string) error {
-	if !b2KeyID.MatchString(id) || id == c.managementID {
+	if !b2KeyID.MatchString(id) || id == c.managementID || isB2MasterKeyID(c.AccountID, id) {
 		return errors.New("invalid Backblaze B2 grant identity")
 	}
 	err := c.call(ctx, "b2_delete_key", map[string]any{"applicationKeyId": id}, nil)

@@ -29,7 +29,8 @@ func TestAuthorizeB2RefusesRestrictedKeysAndUnsafeEndpoints(t *testing.T) {
 	for _, tc := range []struct{ name, id, source, replacement string }{
 		{"restricted", "12345678900001234", `"buckets":null`, `"buckets":[{"id":"1234"}]`},
 		{"missing permissions", "12345678900001234", `"deleteKeys",`, ""},
-		{"master", "012345abcdef", "", ""},
+		{"legacy master ID", "012345abcdef", "", ""},
+		{"cluster-prefixed master ID", "004012345abcdef0000000000", "", ""},
 		{"foreign host", "12345678900001234", "api004.backblazeb2.com", "api004.backblazeb2.com.example.invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -112,7 +113,7 @@ func TestB2ManagedBucketAndScopedKeyLifecycle(t *testing.T) {
 		t.Errorf("unexpected provider call %s", r.URL)
 		return b2Response(400, `{}`)
 	})
-	client, err := AuthorizeB2(ctx, "12345678900001234", "synthetic-secret", mock)
+	client, err := AuthorizeB2(ctx, "004012345abcdef0000000001", "synthetic-secret", mock)
 	if err != nil || client.Region != "us-west-004" {
 		t.Fatalf("authorization: %v", err)
 	}

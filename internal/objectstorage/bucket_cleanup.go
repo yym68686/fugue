@@ -3,6 +3,7 @@ package objectstorage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"fugue/internal/model"
@@ -27,6 +28,10 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 	var out CleanupBatch
 	if backend.Bucket == "" || backend.Endpoint == "" || backend.Credentials.AccessKeyID == "" || backend.Credentials.SecretAccessKey == "" {
 		return out, errors.New("incomplete object storage cleanup connection")
+	}
+	providerLabel := "R2"
+	if backend.Provider == model.DataBackendProviderBackblazeB2 {
+		providerLabel = "B2"
 	}
 	region := backend.Region
 	if region == "" {
@@ -90,7 +95,7 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 				}
 				select {
 				case <-ctx.Done():
-					return out, errors.New("R2 object deletion listing cancelled; retry deletion to resume")
+					return out, fmt.Errorf("%s object deletion listing cancelled; retry deletion to resume", providerLabel)
 				case <-time.After(500 * time.Millisecond):
 				}
 				objects, err = list()
@@ -98,18 +103,18 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 			started = time.Now()
 		}
 		if err != nil {
-			return out, errors.New("R2 object deletion listing failed; retry deletion to resume")
+			return out, fmt.Errorf("%s object deletion listing failed; retry deletion to resume", providerLabel)
 		}
 		if len(objects) == 0 {
 			break
 		}
 		deleted, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: aws.String(backend.Bucket), Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)}})
 		if err != nil {
-			return out, errors.New("R2 object deletion failed; retry deletion to resume")
+			return out, fmt.Errorf("%s object deletion failed; retry deletion to resume", providerLabel)
 		}
 		out.DeletedObjects += int64(len(objects) - len(deleted.Errors))
 		if len(deleted.Errors) > 0 {
-			return out, errors.New("R2 rejected one or more object deletions; retry deletion to resume")
+			return out, fmt.Errorf("%s rejected one or more object deletions; retry deletion to resume", providerLabel)
 		}
 		if pageNo == 7 || time.Since(started) >= 5*time.Second {
 			return out, nil
@@ -117,17 +122,17 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 	}
 	page, err := client.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(backend.Bucket), MaxUploads: aws.Int32(16)})
 	if err != nil {
-		return out, errors.New("R2 multipart deletion listing failed; retry deletion to resume")
+		return out, fmt.Errorf("%s multipart deletion listing failed; retry deletion to resume", providerLabel)
 	}
 	for i, upload := range page.Uploads {
 		if i >= 16 {
 			return out, nil
 		}
 		if upload.Key == nil || upload.UploadId == nil {
-			return out, errors.New("R2 returned an invalid multipart upload")
+			return out, fmt.Errorf("%s returned an invalid multipart upload", providerLabel)
 		}
 		if _, err = client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(backend.Bucket), Key: upload.Key, UploadId: upload.UploadId}); err != nil {
-			return out, errors.New("R2 multipart upload abort failed; retry deletion to resume")
+			return out, fmt.Errorf("%s multipart upload abort failed; retry deletion to resume", providerLabel)
 		}
 		out.AbortedMultipartUploads++
 		if time.Since(started) >= 5*time.Second {
