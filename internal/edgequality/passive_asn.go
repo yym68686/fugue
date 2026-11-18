@@ -3,6 +3,7 @@ package edgequality
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -38,6 +39,9 @@ type PassiveASNComparison struct {
 	SharedWindows   int             `json:"shared_windows"`
 	LeftWinWindows  int             `json:"left_win_windows"`
 	RightWinWindows int             `json:"right_win_windows"`
+	// Only coarse prefixes that contributed comparable windows. Source
+	// refreshes must revalidate these before historical results are reused.
+	Prefixes []netip.Prefix `json:"prefixes,omitempty"`
 }
 
 func (c PassiveASNComparison) Key() string {
@@ -128,6 +132,7 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 	type tally struct {
 		comparison PassiveASNComparison
 		windows    map[time.Time]uint8
+		prefixes   map[netip.Prefix]struct{}
 	}
 	tallies := map[string]*tally{}
 	for window, edges := range windows {
@@ -148,7 +153,7 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 				key := row.Key()
 				state := tallies[key]
 				if state == nil {
-					state = &tally{comparison: row, windows: make(map[time.Time]uint8)}
+					state = &tally{comparison: row, windows: make(map[time.Time]uint8), prefixes: make(map[netip.Prefix]struct{})}
 					tallies[key] = state
 				}
 				// Multiple prefixes must agree within one window. Neither
@@ -161,6 +166,9 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 					flag = 2
 				}
 				state.windows[window.at] |= flag
+				if len(state.prefixes) <= 32 {
+					state.prefixes[window.scope] = struct{}{}
+				}
 				at := minTime(left.at, right.at)
 				if at.After(state.comparison.ObservedAt) {
 					state.comparison.ObservedAt = at
@@ -174,6 +182,14 @@ func ComparePassiveASN(samples []model.EdgeNetworkSample, identities map[string]
 		row.SharedWindows = len(state.windows)
 		if row.SharedWindows < 3 {
 			continue
+		}
+		if len(state.prefixes) <= 32 {
+			row.Prefixes = slices.SortedFunc(maps.Keys(state.prefixes), func(a, b netip.Prefix) int {
+				if c := a.Addr().Compare(b.Addr()); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.Bits(), b.Bits())
+			})
 		}
 		for _, flag := range state.windows {
 			if flag == 1 {

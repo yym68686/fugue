@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
@@ -29,10 +31,11 @@ type passiveASNState struct {
 	mu       sync.Mutex
 	window   passiveASNWindow
 	failures int64
+	ris      atomic.Pointer[passiveasn.Index]
 }
 
 type passiveASNWindow struct {
-	observedAt                                                 time.Time
+	observedAt, bgpSourceAt                                    time.Time
 	coverage                                                   edgequality.PassiveASNCoverage
 	rules, edges, cappedEdges, retained, preferring, saturated int
 	dnsNodes, dnsReads, dnsAnswers, dnsECS, dnsASNHints        int
@@ -44,6 +47,7 @@ func (s *Server) StartBackgroundPassiveASN(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
 	}
+	go s.refreshPassiveASNRIS(ctx)
 	ticker := time.NewTicker(edgequality.PassiveASNInterval)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
@@ -68,6 +72,33 @@ func (s *Server) StartBackgroundPassiveASN(ctx context.Context) {
 	}
 }
 
+func (s *Server) refreshPassiveASNRIS(ctx context.Context) {
+	for ctx.Err() == nil {
+		run, cancel := context.WithTimeout(ctx, 75*time.Second)
+		index, err := passiveasn.FetchRIS(run, time.Now().UTC())
+		cancel()
+		interval := 6 * time.Hour
+		if previous := s.passiveASN.ris.Load(); err == nil && previous != nil && index.SourceAt.Before(previous.SourceAt) {
+			err = errors.New("RIS snapshot moved backwards")
+		}
+		if err == nil {
+			s.passiveASN.ris.Store(index)
+		} else if ctx.Err() == nil {
+			interval = 15 * time.Minute
+			if s.log != nil {
+				s.log.Printf("passive ASN bulk mapping refresh failed: %v", err)
+			}
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
 func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	window := passiveASNWindow{observedAt: now}
 	policies, err := s.passiveASNSignedMappings(ctx)
@@ -79,6 +110,18 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 		return err
 	}
 	window.rules, window.dnsNodes = rules, len(policies)
+	mapping, err := platformconfig.Digest(policies)
+	if err != nil {
+		return err
+	}
+	useRIS := len(policies) > 0
+	for _, policy := range policies {
+		useRIS = useRIS && len(policy.Rules) == 0
+	}
+	const risMapping = "ripe-ris-v1"
+	if index := s.passiveASN.ris.Load(); useRIS && index != nil && now.Sub(index.SourceAt) <= passiveasn.MaxSourceAge {
+		resolver, mapping, window.bgpSourceAt = index.Lookup, risMapping, index.SourceAt
+	}
 	nodes, _, err := s.store.ListActiveEdgeNodes("")
 	if err != nil {
 		return err
@@ -122,12 +165,8 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	window.edges = len(identities)
 	comparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
 	window.coverage = coverage
-	if rules > 0 {
-		mapping, err := platformconfig.Digest(policies)
-		if err != nil {
-			return err
-		}
-		const maxCheckpointBytes = 1 << 20
+	if rules > 0 || mapping == risMapping {
+		const maxCheckpointBytes = 4 << 20
 		updated, err := s.store.UpdateObservationCheckpoint(ctx, passiveASNCheckpointKey, func(raw []byte) ([]byte, error) {
 			if len(raw) > maxCheckpointBytes {
 				return nil, errors.New("passive ASN checkpoint exceeds bound")
@@ -136,9 +175,16 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 			if len(raw) > 0 && json.Unmarshal(raw, &last) != nil {
 				return nil, errors.New("passive ASN checkpoint is invalid")
 			}
+			if mapping == risMapping {
+				comparisons = revalidatePassiveASN(comparisons, resolver)
+			}
 			next, changed, saturated := retainPassiveASN(last, mapping, comparisons)
-			window.retained, window.saturated = len(next.Comparisons), saturated
+			window.saturated = saturated
 			for _, comparison := range next.Comparisons {
+				if mapping == risMapping && !passiveASNMatchesMapping(comparison, resolver) {
+					continue
+				}
+				window.retained++
 				if comparison.Preferred != "" {
 					window.preferring++
 				}
@@ -166,15 +212,37 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	s.passiveASN.window = window
 	s.passiveASN.mu.Unlock()
 	if s.log != nil {
-		s.log.Printf("passive ASN shadow: mapping_rules=%d edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d",
-			window.rules, window.edges, window.cappedEdges, coverage.Connections, coverage.Classified, coverage.TCPRTT, coverage.ClassifiedRTT,
+		s.log.Printf("passive ASN shadow: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d",
+			window.rules, window.bgpSourceAt.Format(time.RFC3339), window.edges, window.cappedEdges, coverage.Connections, coverage.Classified, coverage.TCPRTT, coverage.ClassifiedRTT,
 			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints)
 	}
 	return nil
 }
 
+func passiveASNMatchesMapping(comparison edgequality.PassiveASNComparison, resolve func(netip.Prefix) uint32) bool {
+	if len(comparison.Prefixes) == 0 || len(comparison.Prefixes) > 32 || comparison.ASN == 0 {
+		return false
+	}
+	for _, prefix := range comparison.Prefixes {
+		if resolve(prefix) != comparison.ASN {
+			return false
+		}
+	}
+	return true
+}
+
+func revalidatePassiveASN(comparisons []edgequality.PassiveASNComparison, resolve func(netip.Prefix) uint32) []edgequality.PassiveASNComparison {
+	valid := comparisons[:0]
+	for _, comparison := range comparisons {
+		if passiveASNMatchesMapping(comparison, resolve) {
+			valid = append(valid, comparison)
+		}
+	}
+	return valid
+}
+
 func (s *Server) passiveASNSignedMappings(ctx context.Context) ([]platformconfig.DNSClientPolicy, error) {
-	gate, _, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+	gate, _, found, err := s.store.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow", nil)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -297,6 +365,9 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 		return
 	}
 	observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_last_observed_timestamp_seconds", "Last completed passive ASN observation window.", nil, float64(window.observedAt.Unix()))
+	if !window.bgpSourceAt.IsZero() {
+		observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_bgp_source_timestamp_seconds", "Oldest family timestamp of the bulk BGP mapping in use.", nil, float64(window.bgpSourceAt.Unix()))
+	}
 	for _, entry := range []struct {
 		kind  string
 		count int

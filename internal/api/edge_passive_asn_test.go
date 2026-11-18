@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/netip"
+	"reflect"
 	"testing"
 	"time"
 
@@ -59,11 +60,26 @@ func TestPassiveASNRetainsLatestOriginalComparisonThroughRestart(t *testing.T) {
 	newer := older
 	newer.ObservedAt = ts.Add(240 * time.Hour)
 	got, changed, _ = retainPassiveASN(restored, "mapping", []edgequality.PassiveASNComparison{newer})
-	if !changed || got.Comparisons[cmp.Key()] != newer {
+	if !changed || !reflect.DeepEqual(got.Comparisons[cmp.Key()], newer) {
 		t.Fatal("new valid result did not supersede history", got)
 	}
 	got, changed, _ = retainPassiveASN(restored, "changed-mapping", nil)
 	if changed || len(got.Comparisons) != 0 {
 		t.Fatal("reused history with incompatible mapping", got)
+	}
+}
+
+func TestPassiveASNBulkMappingRefreshCannotReinterpretHistoricalEvidence(t *testing.T) {
+	first := netip.MustParsePrefix("198.51.100.0/24")
+	second := netip.MustParsePrefix("203.0.113.0/24")
+	obs := edgequality.PassiveASNComparison{ASN: 64496, Prefixes: []netip.Prefix{first, second}}
+	signedSource := map[netip.Prefix]uint32{first: 64496, second: 64496}
+	lookup := func(p netip.Prefix) uint32 { return signedSource[p] }
+	if !passiveASNMatchesMapping(obs, lookup) {
+		t.Fatal("stable mapping did not retain evidence")
+	}
+	signedSource[second] = 64497
+	if passiveASNMatchesMapping(obs, lookup) || passiveASNMatchesMapping(edgequality.PassiveASNComparison{ASN: 64496}, lookup) {
+		t.Fatal("changed or unbound mapping retained old evidence")
 	}
 }

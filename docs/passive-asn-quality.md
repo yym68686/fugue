@@ -7,12 +7,17 @@ Samples must match the current inventory group, address family and bundle.
 Hostname, application timing, origin and health-probe metrics are not inputs
 to the line comparison.
 
-The observer classifies a coarse Front TCP peer prefix only when the active
-producer's signed DNS client rules agree on one covering ASN. It does not
-trust request ASN headers, infer from a covering /0, classify a partial
-overlap, or turn the IP of a recursive resolver into the user's ASN. Empty,
-unmapped, ambiguous and inconsistent mappings remain unknown. There is no
-additional external data feed or cross-service disclosure of client prefixes.
+The observer classifies a coarse Front TCP peer prefix when the active
+producer's signed DNS client rules agree on one covering ASN. If all declared
+DNS client rules are empty, it can classify using local copies of the public
+IPv4 and IPv6 [RIPE RISwhois bulk dumps](https://ris.ripe.net/docs/ris-whois/).
+It downloads the two public files on a bounded background schedule; no
+client prefix, resolver address or hostname is sent to RIPE. It does not
+trust request ASN headers, infer from a covering /0, classify partial or
+ambiguous coverage, or turn a recursive resolver address into the user's ASN.
+Failed refreshes preserve the previous index; after 48 hours the mapping
+is no longer trusted. This freshness limit is for BGP attribution, not for
+historical quality measurements.
 
 Connections are deduplicated before comparing the same peer prefix, IP
 family, and complete five-minute window. A result requires three shared
@@ -26,7 +31,11 @@ every client behind the ASN.
 The latest original comparison per ASN, IP family and edge pair is stored in
 a separate observation checkpoint. Missing or delayed samples do not replace
 it. No hourly raw sample cleanup or elapsed age deletes it. Incompatible ASN
-mapping snapshots do not reuse prior comparisons. The checkpoint is bounded:
+mapping snapshots do not reuse prior comparisons. For bulk BGP data, the
+exact coarse prefixes used in a comparison are rechecked against the latest
+index. A refresh that preserves those mappings preserves the original
+evidence timestamp; a changed or ambiguous origin does not transfer evidence
+to the new ASN. The checkpoint is bounded:
 additional pairs at the limit are reported rather than evicting retained
 results. None of this state grants current route or TLS readiness.
 
@@ -41,9 +50,9 @@ request-, packet- or byte-level traffic shares.
 
 This is the first deployment gate, not an ASN DNS policy. No public DNS
 answer, candidate set, route pin, signed publication, or exploration budget is
-changed by this binary. Before promoting traffic, supply a vetted
-prefix-to-ASN source and establish usable coverage at the actual DNS
-executor. A subsequent signed serving policy must preserve fixed routes,
+changed by this binary. Before promoting traffic, establish usable coverage
+at the actual DNS executor and admit the consumer-side capability together
+with its signed serving policy. That policy must preserve fixed routes,
 intersect ASN rankings with the current per-hostname eligible candidates,
 fall back without trustworthy ECS, enforce a capped default exploration
 budget and stop on regressions. Do not use shadow comparisons as an ambient
