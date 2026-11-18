@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -236,6 +237,18 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 				observation.Outcome = "canceled"
 			}
 			benign := isBenignKubernetesLogReadError(err)
+			// Kubelet's terminal-state rejection does not prove that the same
+			// Pod UID/restart's retained CRI files are gone. Preserve this failed
+			// attempt, then try the existing fenced recovery on the next bounded
+			// source turn. Never mark unavailable logs drained or reset the cursor.
+			if parent.Err() == nil && apierrors.IsBadRequest(err) && strings.Contains(strings.ToLower(err.Error()), "is terminated") {
+				if _, _, eligible := rotationLogDirectory(target); eligible {
+					cur.RecoveringRotation = true
+					if cur.PendingAt.IsZero() {
+						cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
+					}
+				}
+			}
 			if !benign && parent.Err() == nil {
 				c.pipeline.kubernetesLogErrors.Add(1)
 				if emitWarning {

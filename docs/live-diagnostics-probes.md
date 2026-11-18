@@ -158,6 +158,15 @@ were fully delivered. Discovery errors do not replace the last successful
 inventory. This metadata does not change collection, retry, checkpoint, or
 cursor behavior.
 
+A Kubernetes pod-log HTTP 400 that explicitly reports a terminated container
+preserves its failed-read receipt and inclusive cursor, then schedules the
+existing retained CRI recovery on the next source turn. Recovery requires the
+same validated Pod UID and container restart identity, and uses the ordinary
+read deadline, source backoff and node circuit. Missing retained files remain
+an explicit failed recovery with pending coverage; neither terminal Pod status
+nor a missing directory establishes successful delivery. An unknown finish
+time cannot mark a source complete.
+
 The source snapshot also keeps an independent `gap_history` ring of 64 new gap
 observations. Ordinary reads, backoff, retained cumulative counts, source-detail
 eviction and the 512-row projection cannot evict those receipts. New gap
