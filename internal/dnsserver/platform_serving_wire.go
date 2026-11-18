@@ -21,17 +21,18 @@ type dnsServingZone struct {
 	records   map[string][]dnsServingRecord
 }
 type dnsServingState struct {
-	record       dnsServingCheckpoint
-	payload      dnsServingPayload
-	routeID      string
-	facts        []dnsReadinessFact
-	checkedAt    time.Time
-	fallback     string
-	zones        map[string]dnsServingZone
-	zoneOrder    []string
-	matcher      platformconfig.DNSClientMatcher
-	passiveFixed map[string]bool
-	transition   *dnsRecordTransition
+	record               dnsServingCheckpoint
+	payload              dnsServingPayload
+	routeID              string
+	facts                []dnsReadinessFact
+	checkedAt            time.Time
+	fallback             string
+	zones                map[string]dnsServingZone
+	zoneOrder            []string
+	matcher              platformconfig.DNSClientMatcher
+	passiveFixed         map[string]bool
+	passiveServicePolicy map[string]bool
+	transition           *dnsRecordTransition
 }
 
 func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, routeID, node, group string, facts []dnsReadinessFact, now time.Time) (*dnsServingState, error) {
@@ -48,9 +49,12 @@ func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, rout
 				}
 			}
 		}
+		st.passiveServicePolicy = make(map[string]bool)
 		for _, row := range policy.PhysicalRoutes {
-			st.passiveFixed[row.Hostname+"\x00A"] = true
-			st.passiveFixed[row.Hostname+"\x00AAAA"] = true
+			st.passiveServicePolicy[row.Hostname] = true
+		}
+		for _, row := range p.Policy.StaticEdgeRoutes {
+			st.passiveServicePolicy[row.Hostname] = true
 		}
 	}
 	clientFound := false

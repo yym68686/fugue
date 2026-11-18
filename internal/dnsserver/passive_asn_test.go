@@ -115,6 +115,78 @@ func TestPassiveASNWireSelectionAndReceipt(t *testing.T) {
 	}
 }
 
+func TestPassiveASNCanSupersedeHealthyAvailabilityBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name, inputReason, unavailable, wantEdge, wantReason string
+		comparison, explicit                                 bool
+	}{
+		{"healthy", "availability_only_quality_unavailable", "", "edge-b", "passive_asn_preferred", true, false},
+		{"retained baseline", "retained_previous_verified_order_quality_unavailable", "", "edge-b", "passive_asn_preferred", true, false},
+		{"no usable comparison", "availability_only_quality_unavailable", "", "edge-a", "retained_no_comparison", false, false},
+		{"challenger recovering", "availability_only_quality_unavailable", "edge-b", "edge-a", "retained_no_comparison", true, false},
+		{"primary not ready", "availability_only_quality_unavailable", "edge-a", "edge-b", "record_not_eligible", true, false},
+		{"effective fixed order", "explicit_physical_order_quality_unknown", "", "edge-a", "record_not_eligible", true, false},
+		{"explicit service policy", "availability_only_quality_unavailable", "", "edge-a", "record_not_eligible", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, runtime, now := passiveASNTestRuntime(t, "active", tc.comparison)
+			p := st.payload
+			queryPolicy := p.Policy.DNSQueryPolicy
+			record := &p.Queries[0].Records[0]
+			policy := &record.AnswerPolicy
+			policy.Reason = tc.inputReason
+			policy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion,
+				OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}
+			p.Plan.Records[0].MinimumHealthyEdges = 1
+			queryPolicy.AvailabilityRoutes = []platformconfig.DNSAvailabilityRoute{{Hostname: record.Name, Policy: *policy.Availability}}
+			queryPolicy.OrderedProjection.Overrides = []platformconfig.DNSOrderOverride{
+				{NodeID: "dns-a", Hostname: record.Name, Type: record.Type,
+					Order: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a"}}},
+			}
+			if tc.explicit {
+				queryPolicy.PhysicalRoutes = []platformconfig.PhysicalQualityRoute{{Hostname: record.Name}}
+			}
+			for i := range st.facts {
+				fact := &st.facts[i]
+				at := fact.Proof.CheckedAt
+				if fact.Proof.EdgeID != tc.unavailable {
+					fact.ProbeHistory = []time.Time{at.Add(-10 * time.Second), at}
+				}
+			}
+			st, err := buildDNSServingState(st.record, p, st.routeID, "dns-a", "edge-group-a", st.facts, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Isolate the ordinary signed baseline from exploration.
+			runtime.view.CohortExploration = false
+			for _, transport := range []string{"udp", "tcp"} {
+				req := passiveASNTestQuery("203.0.113.0", 24)
+				capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}}
+				answer := st.answerObserved(req, "198.51.100.2:53", now, capture, runtime)
+				if answer.Rcode != dns.RcodeSuccess || len(answer.Answer) != 1 {
+					t.Fatalf("unexpected answer: %s", answer)
+				}
+				journal := decisionTestJournal(t)
+				journal.enqueue(req, answer, capture, decisionPublicationState(st, nil), transport, now, true)
+				select {
+				case pending := <-journal.queue:
+					journal.append(pending)
+				default:
+					t.Fatal("no decision receipt")
+				}
+				receipt := (*journal.records.Load())[0]
+				decision := receipt.Records[0]
+				if len(decision.Answered) != 1 || decision.Answered[0].EdgeID != tc.wantEdge || decision.PassiveASN == nil || decision.PassiveASN.Reason != tc.wantReason {
+					t.Fatalf("unexpected %s decision: answered=%v passive=%+v", transport, decision.Answered, decision.PassiveASN)
+				}
+				if replay, err := ReplayDNSDecision(receipt); err != nil || !replay.Matched {
+					t.Fatal("wire answer did not replay", err)
+				}
+			}
+		})
+	}
+}
+
 func TestPassiveASNRejoinsOnlyAfterRouteProofRecovers(t *testing.T) {
 	st, runtime, now := passiveASNTestRuntime(t, "active", true)
 	zone := st.zones["example.test"]
@@ -207,14 +279,18 @@ func TestPassiveASNAggregateFallbackOnWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct{ subnet, remote, answer, why string }{
-		{"8.8.4.0", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred"},
-		{"1.1.1.0", "198.51.100.2:53", "8.8.8.8", "retained_no_challenger_advantage"},
-		{"8.8.4.0", "192.0.2.10:53", "8.8.8.8", "ecs_resolver_untrusted"},
-		{"", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred"},
+	for _, test := range []struct {
+		subnet, remote, answer, why string
+		bits                        uint8
+	}{
+		{"8.8.4.0", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred", 24},
+		{"1.1.1.0", "198.51.100.2:53", "8.8.8.8", "retained_no_challenger_advantage", 24},
+		{"8.8.4.0", "192.0.2.10:53", "8.8.8.8", "ecs_resolver_untrusted", 24},
+		{"", "198.51.100.2:53", "9.9.9.9", "passive_aggregate_preferred", 0},
+		{"0.0.0.0", "198.51.100.2:53", "8.8.8.8", "ecs_absent_or_invalid", 0},
 	} {
 		t.Run(test.why, func(t *testing.T) {
-			req := passiveASNTestQuery(test.subnet, 24)
+			req := passiveASNTestQuery(test.subnet, test.bits)
 			capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}}
 			res := st.answerObserved(req, test.remote, now, capture, rt)
 			wire, err := res.Pack()

@@ -114,9 +114,14 @@ including during shadow and fallback, without using it to change the answer.
 ASN ranking can select only a still-ready member of the signed serving order
 of a single-address dynamic record. The default dynamic projection appends
 placement-authorized members after the configured baseline, without touching
-fixed overrides. Fixed per-name orders, explicit physical
-routes, redundant responses and business allocation keep their existing
-semantics. A recovered edge can compete immediately with retained compatible
+fixed overrides. A single-answer availability policy on a dynamic record
+does not itself fix the primary. When the compiler publishes an availability
+baseline or bound quality order, the healthy candidates in that signed order
+can compete by ASN, even if a bootstrap override supplied the earlier order.
+A real readiness failover still uses the signed fallback without passive
+reordering. Effective fixed per-name orders, explicit physical routes,
+independent static edge routes, redundant responses and business allocation
+keep their existing semantics. A recovered edge can compete with retained compatible
 evidence once it has a current route/TLS proof and is back in that order.
 When no local comparison exists, a new ASN or a trusted, complete prefix
 without a learned mapping can use cross-ASN evidence derived from the same

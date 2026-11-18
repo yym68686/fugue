@@ -192,6 +192,23 @@ func passiveEndpoint(c model.EdgeDNSAnswerCandidate) edgequality.PassiveEndpoint
 	return edgequality.PassiveEndpoint{EdgeID: c.EdgeID, GroupID: c.EdgeGroupID, Address: c.IP}
 }
 
+// Availability can supply the baseline for an otherwise dynamic query; it
+// does not pin its healthy primary. Only compiler-owned dynamic baselines
+// may supersede a bootstrap order override. Do not steer a real failover.
+func passiveAvailabilityPrimary(policy model.DNSAnswerPolicy, selectionResult string) bool {
+	if policy.Availability == nil || policy.Availability.Version != model.DNSAvailabilityVersion {
+		return false
+	}
+	switch policy.PolicyKind {
+	case model.DNSAnswerPolicyKindPhysicalOrder:
+		return selectionResult == "physical_order_primary" &&
+			(policy.Reason == "availability_only_quality_unavailable" || policy.Reason == "retained_previous_verified_order_quality_unavailable")
+	case model.DNSAnswerPolicyKindPhysicalQuality:
+		return selectionResult == "physical_selected_primary" || selectionResult == "physical_learning_primary"
+	}
+	return false
+}
+
 func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.Msg, remote string, record model.EdgeDNSRecord, audit edgeDNSAnswerAudit, now time.Time, hasReadiness bool) *dnsPassiveASNSelection {
 	if !st.passiveASNDynamic() || rt == nil {
 		return nil
@@ -200,13 +217,16 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	if record.Type != "A" && record.Type != "AAAA" {
 		return nil
 	}
-	// Explicit service policy, fixed overrides, business allocation,
-	// redundancy, multi-answer and failover retain their original semantics.
-	if !hasReadiness || st.passiveFixed[record.Name+"\x00"+record.Type] || len(audit.Answered) != 1 || audit.SelectionResult == "availability_readiness_failover" || !record.AnswerPolicy.HealthRequired ||
-		!record.AnswerPolicy.RouteReadyRequired || len(record.ScopedCandidates) != 0 || record.AnswerPolicy.ECSEnabled ||
-		record.AnswerPolicy.Availability != nil ||
-		record.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindPhysicalQuality && record.AnswerPolicy.PolicyKind != model.DNSAnswerPolicyKindPhysicalOrder ||
-		(record.AnswerPolicy.PhysicalSelection != nil && record.AnswerPolicy.PhysicalSelection.BusinessAllocation != nil) {
+	policy := record.AnswerPolicy
+	availabilityPrimary := passiveAvailabilityPrimary(policy, audit.SelectionResult)
+	// Explicit service/placement constraints, effective fixed orders, and
+	// separate allocation rules retain their original semantics.
+	if !hasReadiness || st.passiveServicePolicy[record.Name] ||
+		(st.passiveFixed[record.Name+"\x00"+record.Type] || policy.Availability != nil) && !availabilityPrimary ||
+		len(audit.Answered) != 1 || !policy.HealthRequired || !policy.RouteReadyRequired ||
+		len(record.ScopedCandidates) != 0 || policy.ECSEnabled ||
+		policy.PolicyKind != model.DNSAnswerPolicyKindPhysicalQuality && policy.PolicyKind != model.DNSAnswerPolicyKindPhysicalOrder ||
+		(policy.PhysicalSelection != nil && policy.PhysicalSelection.BusinessAllocation != nil) {
 		return result
 	}
 	prefix := passiveECSPrefix(req)
