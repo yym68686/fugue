@@ -283,21 +283,25 @@ func TestManagedPostgresResizeAcceptedBaseline(t *testing.T) {
 	}
 }
 
-func TestManagedPostgresAutoMemoryBackoffAndPressure(t *testing.T) {
-	now := time.Now().UTC()
-	op := model.Operation{ServiceID: "db", Type: model.OperationTypeDatabaseResize, RequestedByType: model.ActorTypeSystem, RequestedByID: managedPostgresAutoMemoryActor + "/hash/1024", UpdatedAt: now, Status: model.OperationStatusFailed}
-	if !managedPostgresAutoMemoryBackoff([]model.Operation{op}, "db", false, now) {
-		t.Fatal("failed operation did not back off")
+func TestManagedPostgresAutoMemoryWithoutEligibleServicesSkipsStore(t *testing.T) {
+	s := &Service{Config: config.ControllerConfig{
+		KubectlApply: true,
+		ManagedPostgresInPlaceResize: config.ManagedPostgresInPlaceResizeConfig{
+			Enabled: true, AutoMemoryRequestResizeEnabled: true, MemoryRequestUpscaleEnabled: true,
+		},
+	}}
+	app := model.App{ID: "app-a", TenantID: "tenant-a", BackingServices: []model.BackingService{
+		{Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged},
+		{Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged, Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{Suspended: true}}},
+		{Type: model.BackingServiceTypePostgres, Provisioner: model.BackingServiceProvisionerManaged, OwnerAppID: "app-b", Spec: model.BackingServiceSpec{Postgres: &model.AppPostgresSpec{}}},
+	}}
+	// A nil store makes any unintended history or active operation read fail.
+	if changed, err := s.reconcileManagedPostgresAutoMemoryRequest(context.Background(), nil, app); err != nil || changed {
+		t.Fatalf("no candidates should be a no-op: changed=%t err=%v", changed, err)
 	}
-	op.UpdatedAt = now.Add(-7 * time.Hour)
-	if managedPostgresAutoMemoryBackoff([]model.Operation{op}, "db", true, now) {
-		t.Fatal("expired failure backoff")
-	}
-	op.Status = model.OperationStatusCompleted
-	op.UpdatedAt = now
-	if !managedPostgresAutoMemoryBackoff([]model.Operation{op}, "db", true, now) || managedPostgresAutoMemoryBackoff([]model.Operation{op}, "db", false, now) {
-		t.Fatal("downscale cooldown must not block an upscale")
-	}
+}
+
+func TestManagedPostgresAutoMemoryNodePressure(t *testing.T) {
 	var node kubeNode
 	if validateManagedPostgresAutoMemoryNode(node, false, true) == nil {
 		t.Fatal("missing node accepted")

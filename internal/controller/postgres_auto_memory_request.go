@@ -165,23 +165,9 @@ func automaticPostgresMemorySource(actor string) int64 {
 	return value
 }
 
-func managedPostgresAutoMemoryBackoff(ops []model.Operation, serviceID string, downscale bool, now time.Time) bool {
-	for _, op := range ops {
-		if op.ServiceID != serviceID || op.Type != model.OperationTypeDatabaseResize {
-			continue
-		}
-		if op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning {
-			return true
-		}
-		if op.RequestedByType != model.ActorTypeSystem || !strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
-			continue
-		}
-		if op.Status == model.OperationStatusFailed && op.UpdatedAt.After(now.Add(-6*time.Hour)) ||
-			downscale && op.Status == model.OperationStatusCompleted && op.UpdatedAt.After(now.Add(-time.Hour)) {
-			return true
-		}
-	}
-	return false
+func managedPostgresAutoMemoryCandidate(service model.BackingService, appID string) bool {
+	return service.Type == model.BackingServiceTypePostgres && service.Provisioner == model.BackingServiceProvisionerManaged &&
+		service.Spec.Postgres != nil && !service.Spec.Postgres.Suspended && (service.OwnerAppID == "" || service.OwnerAppID == appID)
 }
 
 func (s *Service) reconcileManagedPostgresAutoMemoryRequest(ctx context.Context, client *kubeClient, app model.App) (bool, error) {
@@ -189,18 +175,27 @@ func (s *Service) reconcileManagedPostgresAutoMemoryRequest(ctx context.Context,
 	if !s.Config.KubectlApply || !cfg.Enabled || !cfg.AutoMemoryRequestResizeEnabled || (!cfg.MemoryRequestUpscaleEnabled && !cfg.MemoryRequestDownscaleEnabled) {
 		return false, nil
 	}
+	var serviceIDs []string
+	for _, service := range app.BackingServices {
+		if managedPostgresAutoMemoryCandidate(service, app.ID) {
+			serviceIDs = append(serviceIDs, service.ID)
+		}
+	}
+	if len(serviceIDs) == 0 {
+		return false, nil
+	}
 	active, err := s.appHasActiveOperation(app)
 	if err != nil || active {
 		return false, err
 	}
-	ops, err := s.Store.ListOperationsByApp(app.TenantID, false, app.ID)
+	now := time.Now().UTC()
+	backoffs, err := s.Store.ManagedPostgresAutoMemoryBackoffs(ctx, app.TenantID, app.ID, serviceIDs, now)
 	if err != nil {
 		return false, err
 	}
-	now := time.Now().UTC()
 	for _, service := range app.BackingServices {
-		if service.Type != model.BackingServiceTypePostgres || service.Provisioner != model.BackingServiceProvisionerManaged || service.Spec.Postgres == nil || service.Spec.Postgres.Suspended ||
-			(service.OwnerAppID != "" && service.OwnerAppID != app.ID) || managedPostgresAutoMemoryBackoff(ops, service.ID, false, now) {
+		backoff := backoffs[service.ID]
+		if !managedPostgresAutoMemoryCandidate(service, app.ID) || backoff.Blocked {
 			continue
 		}
 		samples, err := s.Store.ListResourceUsageSamples(app.TenantID, managedPostgresCPUUsageSampleKind, service.ID, now.Add(-168*time.Hour))
@@ -240,7 +235,7 @@ func (s *Service) reconcileManagedPostgresAutoMemoryRequest(ctx context.Context,
 			return false, err
 		}
 		downscale := target.MemoryMebibytes < current.MemoryMebibytes
-		if downscale && (!cfg.MemoryRequestDownscaleEnabled || managedPostgresAutoMemoryBackoff(ops, service.ID, true, now)) || !downscale && !cfg.MemoryRequestUpscaleEnabled {
+		if downscale && (!cfg.MemoryRequestDownscaleEnabled || backoff.Downscale) || !downscale && !cfg.MemoryRequestUpscaleEnabled {
 			continue
 		}
 		// Queue through the existing store admission and database lifecycle lock.

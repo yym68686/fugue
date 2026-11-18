@@ -3,6 +3,7 @@ package platformconsumer
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,10 @@ func (c Client) ObserveServingAssignment(ctx context.Context, component, nodeID,
 }
 
 func (c Client) observeAssignment(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, string, error) {
+	return c.observeAssignmentWithSnapshot(ctx, component, nodeID, scope, kind, channel, nil)
+}
+
+func (c Client) observeAssignmentWithSnapshot(ctx context.Context, component, nodeID, scope, kind, channel string, snapshot *servingAssignmentSnapshot) (Identity, model.PlatformConsumerAssignment, string, error) {
 	switch channel {
 	case "serving", model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
 	default:
@@ -119,7 +124,15 @@ func (c Client) observeAssignment(ctx context.Context, component, nodeID, scope,
 	if channel == "serving" {
 		query = "?serving_only=true"
 	}
-	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/assignment"+query, id.Token, http.MethodGet, nil, &assignments); err != nil {
+	// A new credential exchange is still required at each artifact boundary.
+	// Only reuse the assignment list for an identical serving authority.
+	var credential [sha256.Size]byte
+	if snapshot != nil {
+		credential = sha256.Sum256(raw)
+	}
+	if snapshot.matches(id, credential, base.String(), channel, kind) {
+		assignments.Assignments = snapshot.items
+	} else if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/assignment"+query, id.Token, http.MethodGet, nil, &assignments); err != nil {
 		var status *responseStatusError
 		if channel == "serving" && errors.As(err, &status) && status.Code == http.StatusNotFound {
 			return id, model.PlatformConsumerAssignment{}, "", ErrNoServingAssignment
@@ -148,11 +161,21 @@ func (c Client) observeAssignment(ctx context.Context, component, nodeID, scope,
 		}
 		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform release assignment unavailable")
 	}
+	if snapshot != nil && snapshot.items == nil && channel == "serving" {
+		snapshot.identity, snapshot.base, snapshot.firstKind, snapshot.items = id, base.String(), kind, assignments.Assignments
+		snapshot.credential = credential
+		snapshot.identity.Token = "" // no bearer credential retained by the snapshot
+		snapshot.identity.ArtifactKinds = slices.Clone(id.ArtifactKinds)
+	}
 	return id, *chosen, base.String(), nil
 }
 
 func (c Client) syncChannel(ctx context.Context, component, nodeID, scope, kind, channel string) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
-	id, assignment, base, err := c.observeAssignment(ctx, component, nodeID, scope, kind, channel)
+	return c.syncChannelWithSnapshot(ctx, component, nodeID, scope, kind, channel, nil)
+}
+
+func (c Client) syncChannelWithSnapshot(ctx context.Context, component, nodeID, scope, kind, channel string, snapshot *servingAssignmentSnapshot) (Identity, model.PlatformConsumerAssignment, model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+	id, assignment, base, err := c.observeAssignmentWithSnapshot(ctx, component, nodeID, scope, kind, channel, snapshot)
 	if err != nil {
 		return id, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, err
 	}
@@ -181,6 +204,19 @@ func (c Client) CheckServingAssignment(ctx context.Context, identity Identity, a
 	return c.checkAssignment(ctx, identity, assignment, true)
 }
 func (c Client) checkAssignment(ctx context.Context, identity Identity, assignment model.PlatformConsumerAssignment, serving bool) error {
+	return c.checkAssignments(ctx, identity, serving, assignment)
+}
+
+// CheckServingAssignments rechecks both exact assignments in one fresh
+// observation. Individual follow-up writes still require their own rechecks.
+func (c Client) CheckServingAssignments(ctx context.Context, identity Identity, first, second model.PlatformConsumerAssignment) error {
+	if first.ScopeKey != second.ScopeKey || first.ArtifactKind == second.ArtifactKind {
+		return ErrAssignmentChanged
+	}
+	return c.checkAssignments(ctx, identity, true, first, second)
+}
+
+func (c Client) checkAssignments(ctx context.Context, identity Identity, serving bool, assignments ...model.PlatformConsumerAssignment) error {
 	identity, err := c.RefreshIdentity(ctx, identity)
 	if err != nil {
 		return err
@@ -197,17 +233,25 @@ func (c Client) checkAssignment(ctx context.Context, identity Identity, assignme
 		}
 		return err
 	}
-	matches := 0
-	for _, item := range current.Assignments {
-		if item.ScopeKey == assignment.ScopeKey && item.ArtifactKind == assignment.ArtifactKind && item.ReleaseChannel == assignment.ReleaseChannel {
-			if !reflect.DeepEqual(item, assignment) {
-				return ErrAssignmentChanged
+	for _, assignment := range assignments {
+		matches := 0
+		for _, item := range current.Assignments {
+			sameLane := item.ReleaseChannel == assignment.ReleaseChannel
+			// A combined serving snapshot must not report two possible
+			// serving lanes for either kind, even when one matches exactly.
+			if serving && len(assignments) > 1 {
+				sameLane = item.ReleaseChannel == "serving" || item.ReleaseChannel == "gray" || item.ReleaseChannel == "full"
 			}
-			matches++
+			if item.ScopeKey == assignment.ScopeKey && item.ArtifactKind == assignment.ArtifactKind && sameLane {
+				if !reflect.DeepEqual(item, assignment) {
+					return ErrAssignmentChanged
+				}
+				matches++
+			}
 		}
-	}
-	if matches != 1 {
-		return ErrAssignmentChanged
+		if matches != 1 {
+			return ErrAssignmentChanged
+		}
 	}
 	return nil
 }

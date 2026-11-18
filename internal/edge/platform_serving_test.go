@@ -32,7 +32,7 @@ import (
 )
 
 func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
-	for _, mode := range []string{"valid", "valid-group-generation", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "positive-report-rejected", "activation-lost", "inactive"} {
+	for _, mode := range []string{"valid", "valid-group-generation", "valid-static-policy", "valid-bundle-renewal", "valid-bundle-reread", "valid-bundle-retry", "persistent-binding-mismatch", "tls-parent-race", "tls-parent-invalid", "valid-cell", "valid-cell-routes", "route-proof-mismatch", "tls-failed", "cache-missing", "cache-different", "caddy-not-applied", "assignment-changed", "tls-assignment-changed", "tls-identity-denied", "bundle-changed", "shadow", "newer-full", "unverified-parent", "unverified-tls", "missing-tls-assignment", "cursor-corrupt", "cursor-unwritable", "recover-after-failure", "restart-after-failure", "report-rejected", "positive-report-rejected", "activation-lost", "inactive"} {
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now().UTC()
 			group := "edge-group-test"
@@ -120,10 +120,15 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			tlsCalls := 0
 			var installCurrent func()
 			identityReads := 0
+			assignmentReads := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/v1/platform-state/consumers/identity":
 					identityReads++
+					if mode == "tls-identity-denied" && identityReads == 2 {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
 					if (mode == "valid-bundle-reread" && identityReads == 1) || (mode == "valid-bundle-retry" && identityReads == 2) {
 						installCurrent()
 					}
@@ -133,6 +138,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 					}
 					json.NewEncoder(w).Encode(identity)
 				case "/v1/platform-state/consumers/assignment":
+					assignmentReads++
 					if r.URL.Query().Get("serving_only") != "true" {
 						t.Error("serving observation used an unselected release lane")
 					}
@@ -141,7 +147,11 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 						items = items[:1]
 					}
 					if changed {
-						items[0].FencingToken++
+						if mode == "tls-assignment-changed" {
+							items[1].FencingToken++
+						} else {
+							items[0].FencingToken++
+						}
 						if mode == "newer-full" {
 							items[0].ReleaseChannel, items[1].ReleaseChannel = "full", "full"
 						}
@@ -241,7 +251,7 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 				if mode == "route-proof-mismatch" {
 					p.Version = "old"
 				}
-				if mode == "assignment-changed" || mode == "newer-full" {
+				if mode == "assignment-changed" || mode == "tls-assignment-changed" || mode == "newer-full" {
 					changed = true
 				}
 				return p, nil
@@ -423,6 +433,9 @@ func TestTrafficServingReportsOnlyDurablyAppliedAndProbedRelease(t *testing.T) {
 			}
 			if err != nil || len(reports) != 2 || routeCalls != 1 || tlsCalls != 1 {
 				t.Fatal("valid serving failed", err, reports, routeCalls, tlsCalls)
+			}
+			if mode == "valid" && (assignmentReads != 4 || identityReads != 2) {
+				t.Fatalf("wanted two observation GETs plus one per heartbeat, and two live credential exchanges; got %d GETs, %d exchanges", assignmentReads, identityReads)
 			}
 			for _, h := range reports {
 				if strings.HasPrefix(mode, "valid-cell") && (h.ConsumerID != "edge-worker:cell-a:edge" || h.NodeID != "edge") {

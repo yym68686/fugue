@@ -156,8 +156,9 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	client := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
+	read := client.NewServingRead(model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey))
 	observation.Stage = "route_assignment"
-	id, a, artifact, release, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindEdgeRouteBundle)
+	id, a, artifact, release, err := read.Sync(ctx, model.PlatformArtifactKindEdgeRouteBundle)
 	if err != nil {
 		return err
 	}
@@ -194,7 +195,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		return err
 	}
 	observation.Stage = "tls_assignment"
-	_, ta, tlsArtifact, tr, err := client.SyncServing(ctx, model.PlatformConsumerComponentEdgeWorker, s.Config.EdgeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindCaddyRouteConfig)
+	_, ta, tlsArtifact, tr, err := read.Sync(ctx, model.PlatformArtifactKindCaddyRouteConfig)
 	if err != nil {
 		if errors.Is(err, platformconsumer.ErrNoServingAssignment) {
 			// A selected route without its TLS assignment is an incomplete
@@ -216,9 +217,8 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 		}
 	}
 	if !member || !memberKind {
-		// Route and TLS assignments are fetched separately. A publication may
-		// advance between them; only a fresh assignment read may classify that
-		// mismatch as retryable. An unchanged inconsistent parent still fails.
+		// Only a fresh assignment read may classify this mismatch as retryable.
+		// An unchanged inconsistent parent still fails.
 		if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 			return err
 		}
@@ -229,10 +229,8 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	observation.Stage = "tls_validation"
 	payload, err := s.verifyPlatformTLSCandidate(tlsCandidate, routeCandidate)
 	if err != nil {
-		for _, selected := range []model.PlatformConsumerAssignment{a, ta} {
-			if changed := client.CheckServingAssignment(ctx, id, selected); changed != nil {
-				return changed
-			}
+		if changed := client.CheckServingAssignments(ctx, id, a, ta); changed != nil {
+			return changed
 		}
 		return err
 	}
@@ -304,12 +302,8 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	if readiness == nil || readiness.Probes == 0 || readiness.ReadyProbes != readiness.Probes {
 		return errors.New("traffic TLS readiness is incomplete")
 	}
-	observation.Stage = "route_assignment_recheck"
-	if err = client.CheckServingAssignment(ctx, id, a); err != nil {
-		return err
-	}
-	observation.Stage = "tls_assignment_recheck"
-	if err = client.CheckServingAssignment(ctx, id, ta); err != nil {
+	observation.Stage = "serving_assignments_recheck"
+	if err = client.CheckServingAssignments(ctx, id, a, ta); err != nil {
 		return err
 	}
 	observation.Stage = "activation_recheck"
