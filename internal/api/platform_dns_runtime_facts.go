@@ -465,7 +465,10 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	response.EvaluatedAt = time.Now().UTC()
 	response.ReadyProbeIDs, response.Ready, err = evaluateDNSRuntimeSnapshotWithRejection(response.Snapshot, current, response.EvaluatedAt, func(reason string) {
 		event := captureEvent{Stage: "snapshot_validation_rejected", Node: node, Rejection: reason}
-		if reason == "assignment" {
+		switch reason {
+		case "parent_digest":
+			event.DNSParent = captureDNSParentEvidence(current.parent.ContentHash, response.Snapshot.ParentDigest, response.Backend.PodUID)
+		case "assignment":
 			event.Mismatches = dnsAssignmentMismatchFields(response.Snapshot.Assignment, current.lookup.Assignment)
 			event.DNSAuthority = captureDNSAuthorityEvidence(current.lookup.Assignment, current.consumer)
 			snapshot := captureDNSAssignmentReference(response.Snapshot.Assignment)
@@ -499,6 +502,7 @@ func dnsAuthorityRecheckRejection(ctx context.Context, initial, current dnsFactS
 		event.Rejection = "credential"
 	case current.parent.ContentHash != initial.parent.ContentHash:
 		event.Rejection = "parent_digest"
+		event.DNSParent = captureDNSParentEvidence(initial.parent.ContentHash, current.parent.ContentHash, "")
 	case !reflect.DeepEqual(current.lookup.Assignment, initial.lookup.Assignment):
 		event.Rejection = "assignment"
 		event.Mismatches = dnsAssignmentMismatchFields(current.lookup.Assignment, initial.lookup.Assignment)

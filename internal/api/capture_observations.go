@@ -68,7 +68,22 @@ type captureEvent struct {
 	Rejection      string                  `json:"rejection,omitempty"`
 	Publication    *capturePublicationPair `json:"publication,omitempty"`
 	DNSAuthority   *captureDNSAuthority    `json:"dns_authority,omitempty"`
+	DNSParent      *captureDNSParent       `json:"dns_parent,omitempty"`
 	DNSReplacement *captureDNSReplacement  `json:"dns_replacement,omitempty"`
+}
+
+// Observe only the two inputs to the rejected comparison. A backend UID is
+// available for a snapshot comparison, but not an authority-to-authority read.
+// Hash even the claimed digest: on the snapshot side it is a wire value.
+type captureDNSParent struct {
+	ExpectedDigestHash string `json:"expected_digest_hash"`
+	ObservedDigestHash string `json:"observed_digest_hash"`
+	BackendPodUIDHash  string `json:"backend_pod_uid_hash,omitempty"`
+}
+
+func captureDNSParentEvidence(expected, observed, backendUID string) *captureDNSParent {
+	return &captureDNSParent{ExpectedDigestHash: captureIdentityHash(expected),
+		ObservedDigestHash: captureIdentityHash(observed), BackendPodUIDHash: captureIdentityHash(backendUID)}
 }
 
 type captureDNSReplacement struct {
@@ -251,6 +266,10 @@ func observeCapture(ctx context.Context, event captureEvent) {
 			copy.Snapshot = &snapshot
 		}
 		event.DNSAuthority = &copy
+	}
+	if event.DNSParent != nil {
+		copy := *event.DNSParent
+		event.DNSParent = &copy
 	}
 	trace.receipt.Events = append(trace.receipt.Events, event)
 }

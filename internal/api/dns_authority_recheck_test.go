@@ -80,6 +80,15 @@ func TestDNSAuthorityRecheckPreservesEveryPredicateAndShortCircuit(t *testing.T)
 				if wantReason == "assignment" && !reflect.DeepEqual(event.Mismatches, []string{"artifact_id"}) || wantReason != "assignment" && len(event.Mismatches) != 0 {
 					t.Fatal("incorrect mismatch fields", event)
 				}
+				if wantReason == "parent_digest" {
+					want := captureDNSParent{ExpectedDigestHash: captureIdentityHash(initial.parent.ContentHash),
+						ObservedDigestHash: captureIdentityHash(current.parent.ContentHash)}
+					if event.DNSParent == nil || *event.DNSParent != want {
+						t.Fatal("authority reread did not retain the exact compared parents", event)
+					}
+				} else if event.DNSParent != nil {
+					t.Fatal("parent evidence attached to a different first rejection", event)
+				}
 				if mask == 0 && !reflect.DeepEqual(event, captureEvent{}) {
 					t.Fatal("successful recheck invented a rejection", event)
 				}

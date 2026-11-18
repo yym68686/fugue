@@ -596,7 +596,7 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			}
 		})
 	}
-	for _, scenario := range []string{"bad schema", "bad plan", "foreign assignment", "pod changed", "service changed", "endpoint changed", "truncated", "unknown field", "oversized", "redirect", "proxy failure", "publication changed", "artifact corrupt", "route artifact corrupt", "route content corrupt", "route artifact unavailable", "signing key revoked", "expected membership changed", "no HTTP port", "ambiguous container", "unready", "negative", "expired"} {
+	for _, scenario := range []string{"bad schema", "bad plan", "foreign parent", "foreign assignment", "pod changed", "service changed", "endpoint changed", "truncated", "unknown field", "oversized", "redirect", "proxy failure", "publication changed", "artifact corrupt", "route artifact corrupt", "route content corrupt", "route artifact unavailable", "signing key revoked", "expected membership changed", "no HTTP port", "ambiguous container", "unready", "negative", "expired"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldSnapshot, oldPod := snapshot, *f.pod.DeepCopy()
 			expectedState := baseline
@@ -616,6 +616,10 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 				snapshot.Schema = "unknown"
 			case "bad plan":
 				snapshot.PlanDigest = "sha256:" + strings.Repeat("0", 64)
+			case "foreign parent":
+				snapshot.ParentDigest = "private-foreign-parent"
+				// A later mismatch must not replace the first rejection.
+				snapshot.Assignment.FencingToken++
 			case "foreign assignment":
 				snapshot.Assignment.FencingToken++
 			case "pod changed":
@@ -712,11 +716,24 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 					t.Fatal("recheck lost the failed source predicate", rows[len(rows)-1])
 				}
 			}
-			if reason := (map[string]string{"bad schema": "schema", "bad plan": "plan_digest", "foreign assignment": "assignment"})[scenario]; reason != "" {
+			if reason := (map[string]string{"bad schema": "schema", "bad plan": "plan_digest", "foreign parent": "parent_digest", "foreign assignment": "assignment"})[scenario]; reason != "" {
 				rows := captureReceipts(t, s)
 				found := false
 				for _, event := range rows[len(rows)-1].Events {
 					found = found || event.Stage == "snapshot_validation_rejected" && event.Rejection == reason
+					if event.Stage == "snapshot_validation_rejected" && scenario == "foreign parent" {
+						want := captureDNSParent{ExpectedDigestHash: captureIdentityHash(source.parent.ContentHash),
+							ObservedDigestHash: captureIdentityHash(snapshot.ParentDigest), BackendPodUIDHash: captureIdentityHash(string(f.pod.UID))}
+						if event.DNSParent == nil || *event.DNSParent != want || event.DNSAuthority != nil {
+							t.Fatal("parent rejection lost its exact inputs or backend identity", event)
+						}
+						raw, err := json.Marshal(event)
+						if err != nil || strings.Contains(string(raw), snapshot.ParentDigest) || strings.Contains(string(raw), string(f.pod.UID)) {
+							t.Fatal("parent rejection retained raw snapshot input or backend UID")
+						}
+					} else if event.DNSParent != nil {
+						t.Fatal("parent evidence attached to an unrelated rejection", event)
+					}
 					if scenario == "foreign assignment" && event.Stage == "snapshot_validation_rejected" && !reflect.DeepEqual(event.Mismatches, []string{"fencing_token"}) {
 						t.Fatal("assignment mismatch lost its exact field", event)
 					}
