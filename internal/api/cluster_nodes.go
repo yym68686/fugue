@@ -7,6 +7,7 @@ import (
 
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -166,6 +167,9 @@ type kubeNodeCondition struct {
 }
 
 type clusterNodePodList struct {
+	Metadata struct {
+		Continue string `json:"continue"`
+	} `json:"metadata"`
 	Items []clusterNodePod `json:"items"`
 }
 
@@ -1124,8 +1128,9 @@ func (c *clusterNodeClient) listManagedPodsByNode(ctx context.Context) (map[stri
 
 func (c *clusterNodeClient) listActivePodsByNode(ctx context.Context) (map[string][]clusterNodePod, bool, error) {
 	var podList clusterNodePodList
-	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/pods", &podList); err != nil {
-		if strings.Contains(err.Error(), "status=403") || strings.Contains(err.Error(), "status=404") {
+	if err := c.readClusterPodInventory(ctx, &podList); err != nil {
+		var status *kubernetesHTTPStatusError
+		if errors.As(err, &status) && (status.status == http.StatusForbidden || status.status == http.StatusNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err

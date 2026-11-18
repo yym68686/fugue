@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"fugue/internal/cellpublication"
 	"fugue/internal/model"
 	"fugue/internal/observability"
 	"fugue/internal/platformconfig"
@@ -85,6 +86,13 @@ func (s *Server) reconcileDNSObservations(ctx context.Context, now time.Time) er
 }
 
 func (s *Server) writeDNSObservationMetrics(w io.Writer) {
+	const verificationCacheMetric = "fugue_dns_route_source_verification_cache_total"
+	observability.WriteMetricHeader(w, verificationCacheMetric, "DNS route source immutable verification material lookups, not trust decisions.", "counter")
+	hits, misses, bypasses := cellpublication.DNSRouteSourceVerificationReuse()
+	observability.WriteMetricSample(w, verificationCacheMetric, map[string]string{"result": "hit"}, float64(hits))
+	observability.WriteMetricSample(w, verificationCacheMetric, map[string]string{"result": "miss"}, float64(misses))
+	observability.WriteMetricSample(w, verificationCacheMetric, map[string]string{"result": "bypass"}, float64(bypasses))
+
 	s.dnsObservation.mu.Lock()
 	runs, failed, skipped, last, mode := s.dnsObservation.runs, s.dnsObservation.failures, s.dnsObservation.skipped, s.dnsObservation.lastSuccess, s.dnsObservation.mode
 	s.dnsObservation.mu.Unlock()

@@ -348,11 +348,7 @@ func SignPlatformArtifact(artifact model.PlatformArtifact, keyring bundleauth.Ke
 
 func VerifyPlatformArtifactSignature(artifact model.PlatformArtifact, keyring bundleauth.Keyring) error {
 	provenance := artifact.Provenance
-	if strings.TrimSpace(provenance.Issuer) != model.PlatformArtifactIssuerFugue ||
-		strings.TrimSpace(provenance.Algorithm) != model.PlatformSignatureHMACSHA256 ||
-		strings.TrimSpace(provenance.KeyID) == "" ||
-		strings.TrimSpace(provenance.Signature) == "" ||
-		provenance.SignedAt.IsZero() {
+	if !validArtifactSignatureProvenance(provenance) {
 		return ErrPlatformSignatureInvalid
 	}
 	key, err := platformVerificationKey(keyring, provenance.KeyID)
@@ -368,6 +364,12 @@ func VerifyPlatformArtifactSignature(artifact model.PlatformArtifact, keyring bu
 		return ErrPlatformSignatureInvalid
 	}
 	return nil
+}
+
+func validArtifactSignatureProvenance(p model.PlatformArtifactProvenance) bool {
+	return strings.TrimSpace(p.Issuer) == model.PlatformArtifactIssuerFugue &&
+		strings.TrimSpace(p.Algorithm) == model.PlatformSignatureHMACSHA256 &&
+		strings.TrimSpace(p.KeyID) != "" && strings.TrimSpace(p.Signature) != "" && !p.SignedAt.IsZero()
 }
 
 func SignTamperEvidentAuditEvent(event model.AuditEvent, keyring bundleauth.Keyring) (model.AuditEvent, error) {

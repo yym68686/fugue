@@ -46,10 +46,13 @@ func (s *Store) NewDNSRouteSourceObserver() func(context.Context, model.Platform
 
 func (s *Store) observeDNSRouteSources(ctx context.Context, child model.PlatformArtifact, sizes dnsRouteSourceContentSizes) (model.PlatformDNSRouteSourceSnapshot, error) {
 	keys := s.platformArtifactSigningKeyring()
-	if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || child.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(child, keys).Pass {
+	if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || child.Status != model.PlatformArtifactStatusValidated {
 		return model.PlatformDNSRouteSourceSnapshot{}, ErrConflict
 	}
-	if _, err := cellpublication.VerifyDNSArtifact(child, keys); err != nil {
+	if err := cellpublication.CheckDNSRouteSourceArtifact(child, keys); err != nil {
+		if errors.Is(err, cellpublication.ErrDNSRouteSourceArtifactIntegrity) {
+			return model.PlatformDNSRouteSourceSnapshot{}, ErrConflict
+		}
 		return model.PlatformDNSRouteSourceSnapshot{}, fmt.Errorf("%w: %s", ErrConflict, err)
 	}
 	var result model.PlatformDNSRouteSourceSnapshot

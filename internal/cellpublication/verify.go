@@ -12,11 +12,21 @@ import (
 )
 
 func VerifyInput(p platformconfig.CellRoutePublicationInput, keys bundleauth.Keyring) error {
+	return verifyInput(p, integrityCheck(keys))
+}
+
+func integrityCheck(keys bundleauth.Keyring) func(model.PlatformArtifact) bool {
+	return func(a model.PlatformArtifact) bool {
+		return platformsafety.EvaluateArtifactIntegrity(a, keys).Pass
+	}
+}
+
+func verifyInput(p platformconfig.CellRoutePublicationInput, check func(model.PlatformArtifact) bool) error {
 	if err := platformconfig.ValidateCellRoutePublication(p); err != nil {
 		return err
 	}
 	for _, a := range []model.PlatformArtifact{p.Parent, p.Route, p.TLS} {
-		if !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
+		if !check(a) {
 			return fmt.Errorf("referenced Cell artifact signature rejected")
 		}
 	}
@@ -24,6 +34,10 @@ func VerifyInput(p platformconfig.CellRoutePublicationInput, keys bundleauth.Key
 }
 
 func VerifyDNSArtifact(a model.PlatformArtifact, keys bundleauth.Keyring) ([]platformconfig.CellRoutePublicationInput, error) {
+	return verifyDNSArtifact(a, integrityCheck(keys))
+}
+
+func verifyDNSArtifact(a model.PlatformArtifact, check func(model.PlatformArtifact) bool) ([]platformconfig.CellRoutePublicationInput, error) {
 	if a.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
 		return nil, fmt.Errorf("DNS artifact required")
 	}
@@ -35,7 +49,7 @@ func VerifyDNSArtifact(a model.PlatformArtifact, keys bundleauth.Keyring) ([]pla
 		return nil, err
 	}
 	for _, p := range pubs {
-		if err := VerifyInput(p, keys); err != nil {
+		if err := verifyInput(p, check); err != nil {
 			return nil, err
 		}
 	}
@@ -44,7 +58,7 @@ func VerifyDNSArtifact(a model.PlatformArtifact, keys bundleauth.Keyring) ([]pla
 		return nil, err
 	}
 	if previous != nil {
-		if err := VerifyPreviousInput(*previous, keys); err != nil {
+		if err := verifyPreviousInput(*previous, check); err != nil {
 			return nil, err
 		}
 	}
@@ -52,11 +66,15 @@ func VerifyDNSArtifact(a model.PlatformArtifact, keys bundleauth.Keyring) ([]pla
 }
 
 func VerifyPreviousInput(p platformconfig.PreviousTrafficPublicationInput, keys bundleauth.Keyring) error {
+	return verifyPreviousInput(p, integrityCheck(keys))
+}
+
+func verifyPreviousInput(p platformconfig.PreviousTrafficPublicationInput, check func(model.PlatformArtifact) bool) error {
 	if err := platformconfig.ValidatePreviousTrafficPublication(p); err != nil {
 		return err
 	}
 	for _, a := range []model.PlatformArtifact{p.Parent, p.Route, p.TLS, p.DNS} {
-		if !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
+		if !check(a) {
 			return fmt.Errorf("previous traffic artifact signature rejected")
 		}
 	}
