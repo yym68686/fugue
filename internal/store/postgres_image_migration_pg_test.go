@@ -81,11 +81,17 @@ func TestPGPostgresImageMigrationCompletesOnlyServiceImageWithDurableProof(t *te
 		if owner == "" {
 			name = "independent"
 		}
-		t.Run(name, func(t *testing.T) { testPGPostgresImageMigrationCompletion(t, owner) })
+		for _, resized := range []bool{false, true} {
+			suffix := "/image-only"
+			if resized {
+				suffix = "/applied-resize"
+			}
+			t.Run(name+suffix, func(t *testing.T) { testPGPostgresImageMigrationCompletion(t, owner, resized) })
+		}
 	}
 }
 
-func testPGPostgresImageMigrationCompletion(t *testing.T, owner string) {
+func testPGPostgresImageMigrationCompletion(t *testing.T, owner string, resized bool) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
@@ -99,11 +105,15 @@ func testPGPostgresImageMigrationCompletion(t *testing.T, owner string) {
 	}
 	now := time.Now().UTC()
 	resources := model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512, CPULimitMilliCores: 200, MemoryLimitMebibytes: 768}
+	target := resources
+	if resized {
+		target.MemoryMebibytes, target.MemoryLimitMebibytes = 256, 640
+	}
 	image, err := pgimage.Target("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	row := pgResizeBoundServiceRow(now, "tenant", "project", owner, "service", resources, &resources)
+	row := pgResizeBoundServiceRow(now, "tenant", "project", owner, "service", resources, &target)
 	var serviceSpec model.BackingServiceSpec
 	if err = json.Unmarshal(row[17].([]byte), &serviceSpec); err != nil {
 		t.Fatal(err)
@@ -113,13 +123,19 @@ func testPGPostgresImageMigrationCompletion(t *testing.T, owner string) {
 	op := model.Operation{ID: "op", AppID: app.ID, TenantID: app.TenantID, ServiceID: svc.ID, Type: pgimage.OperationType, DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{Image: image, ImageMigrationConfigHash: PostgresImageMigrationConfigHash(app, svc, image)}}}
 	for _, kind := range []string{pgimage.BaselineEvidence, pgimage.IntentEvidence, pgimage.VerifiedEvidence} {
 		proof := map[string]any{"pod_uid": "old-pod", "cluster_uid": "cluster", "system_id": "123456", "target_image": image}
+		if resized {
+			proof["restart_resource_target"] = target
+			proof["restart_spec_hash"] = "target-spec"
+			proof["restart_resources"] = map[string]any{"requests": map[string]any{"memory": "256Mi", "cpu": "100m"}, "limits": map[string]any{"memory": "640Mi", "cpu": "200m"}}
+			proof["resources_hash"] = pgimage.Hash(proof["restart_resources"])
+		}
 		if kind == pgimage.VerifiedEvidence {
 			proof["verified_pod_uid"] = "new-pod"
 		}
 		b, _ := json.Marshal(proof)
 		mock.ExpectQuery(`SELECT payload_json FROM fugue_operation_evidence`).WithArgs(op.ID, op.TenantID, kind).WillReturnRows(sqlmock.NewRows([]string{"payload_json"}).AddRow(b))
 	}
-	expectPGResizeBackingServiceForUpdate(mock, now, app.TenantID, app.ProjectID, owner, svc.ID, resources, &resources)
+	expectPGResizeBackingServiceForUpdate(mock, now, app.TenantID, app.ProjectID, owner, svc.ID, resources, &target)
 	expectPGResizeTargetBinding(mock, app.TenantID, app.ID, svc.ID)
 	var persistedOwner any = owner
 	if owner == "" {
@@ -132,6 +148,9 @@ func testPGPostgresImageMigrationCompletion(t *testing.T, owner string) {
 		}
 		want := model.CloneAppPostgresSpec(serviceSpec.Postgres)
 		want.Image = image
+		if resized {
+			want.Resources = model.CloneResourceSpec(&target)
+		}
 		return pgimage.Hash(actual.Postgres) == pgimage.Hash(want)
 	}), nil, nil, now, sqlmock.AnyArg()).WillReturnResult(sqlmock.NewResult(0, 1))
 	if err = s.pgApplyPostgresImageMigration(context.Background(), tx, &app, &op); err != nil {

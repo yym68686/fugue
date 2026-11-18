@@ -242,7 +242,27 @@ func TestBuilderMemoryContainerContract(t *testing.T) {
 		{"short peak", "alpine:3.22", "/bin/sh", `awk 'BEGIN{x="0123456789abcdef"; for(i=0;i<21;i++)x=x x; print length(x)}'`, 512 << 20, 0},
 		{"kaniko shell", defaultKanikoImage, "/busybox/sh", `/busybox/echo kaniko-shell`, 512 << 20, 0},
 		{"command error", "alpine:3.22", "/bin/sh", "exit 42", 512 << 20, 42},
-		{"OOM child", "alpine:3.22", "/bin/sh", `awk 'BEGIN{x="0123456789abcdef"; for(i=0;i<28;i++)x=x x; print length(x)}'`, 64 << 20, 137},
+		{"OOM child", "alpine:3.22", "/bin/sh", `
+fugue_test_oom_count() {
+  for dir in "/sys/fs/cgroup$FUGUE_BUILD_MEMORY_CGROUP" /sys/fs/cgroup; do
+    [ -r "$dir/memory.max" ] && [ -r "$dir/memory.events" ] || continue
+    read -r cap < "$dir/memory.max"
+    [ "$cap" = 67108864 ] || continue
+    while read -r key value; do
+      if [ "$key" = oom_kill ]; then printf '%s\n' "$value"; return; fi
+    done < "$dir/memory.events"
+  done
+  return 1
+}
+before=$(fugue_test_oom_count) || before=
+awk 'BEGIN{x="0123456789abcdef"; for(i=0;i<28;i++)x=x x; print length(x)}'
+code=$?
+after=$(fugue_test_oom_count) || after=
+if [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+  printf 'FUGUE_TEST_OOM_KILL_CONFIRMED\n' >&2
+fi
+exit "$code"
+`, 64 << 20, 137},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -266,9 +286,23 @@ func TestBuilderMemoryContainerContract(t *testing.T) {
 				t.Fatalf("exit %d want %d: %s", code, tc.exit, out)
 			}
 			if tc.exit == 137 {
-				out, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.OOMKilled}}", name).CombinedOutput()
-				if err != nil || strings.TrimSpace(string(out)) != "true" {
-					t.Fatalf("OOM reason lost: %v %s", err, out)
+				// A child-only cgroup OOM can leave PID 1 alive and Docker's
+				// OOMKilled=false. Require positive kernel evidence, not just
+				// exit 137 or a high memory peak (both also occur without OOM).
+				confirmedChildOOM := strings.Contains(string(out), "FUGUE_TEST_OOM_KILL_CONFIRMED")
+				if !confirmedChildOOM {
+					inspection, err := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.OOMKilled}}", name).CombinedOutput()
+					if err != nil || strings.TrimSpace(string(inspection)) != "true" {
+						t.Fatalf("no positive cgroup/container OOM evidence: inspect=%s err=%v output=%s", inspection, err, out)
+					}
+					return // PID 1 was killed; a termination report cannot be required.
+				}
+				data, err := os.ReadFile(termination)
+				var observation struct {
+					Peak int64 `json:"peak_bytes"`
+				}
+				if err != nil || json.Unmarshal(data, &observation) != nil || observation.Peak <= 0 || observation.Peak > tc.limit {
+					t.Fatalf("OOM child exit lost its bounded cgroup high-water mark: peak=%d limit=%d report=%s err=%v", observation.Peak, tc.limit, data, err)
 				}
 				return
 			}

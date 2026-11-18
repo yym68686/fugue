@@ -33,18 +33,23 @@ The existing CNPG primary update policy must be `unsupervised` / `restart`;
 the operation never changes a supervised or switchover policy on the user's behalf.
 
 Before mutation, Fugue checks the rehearsed operator, current Cluster/primary
-identity, healthy node, unambiguous existing runtime affinity, matching live/template
-resource envelope, original bound PVC/PVs, physical database system ID, and writable
+identity, healthy node, unambiguous existing runtime affinity, the fully applied
+persisted resource envelope, original bound PVC/PVs, physical database system ID, and writable
 SQL. It persists a credential-free witness and intent before compare-and-swapping
-only `Cluster.spec.imageName`. CNPG performs the primary replacement using its
+`Cluster.spec.imageName`. When a prior in-place resize left a stale restart template,
+the same atomic PATCH also aligns `Cluster.spec.resources` with the verified running
+requests and limits. This requires a matching persisted `runtime_resources` target;
+unknown drift and changes to other resource dimensions are rejected. The source and
+target specification hashes are retained for recovery. There is no separate template
+update or extra resource-change rollout. CNPG performs the primary replacement using its
 existing lifecycle and storage. Fugue does not delete the Pod or PVC itself.
 
 Completion requires a new healthy primary Pod on the original node and PVC/PVs,
 the unchanged Cluster UID, preserved specification/resources and physical system ID,
 the approved baked-manager command with no init containers, and a successful SQL
-temporary-table write/read/rollback probe. Only then is the backing service image
-persisted. Consumer AppSpec, routes, bindings, backup policy and resource intent are
-not changed.
+temporary-table write/read/rollback probe. Only then are the backing service image
+and, when aligned, its restart resource template persisted. The authorized runtime
+requests/limits, consumer AppSpec, routes, bindings and backup policy are not changed.
 
 If a PATCH response is lost, a post-change check fails, or the controller is
 interrupted, the operation stays Running and retains its exclusive mutation lock.

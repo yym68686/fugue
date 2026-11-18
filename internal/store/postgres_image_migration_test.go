@@ -32,7 +32,13 @@ func TestPostgresImageMigrationOnlyPersistsVerifiedImage(t *testing.T) {
 		if independent {
 			name = "independent"
 		}
-		t.Run(name, func(t *testing.T) { testPostgresImageMigrationCompletion(t, independent) })
+		for _, resized := range []bool{false, true} {
+			suffix := "/image-only"
+			if resized {
+				suffix = "/applied-resize"
+			}
+			t.Run(name+suffix, func(t *testing.T) { testPostgresImageMigrationCompletion(t, independent, resized) })
+		}
 	}
 }
 
@@ -60,12 +66,18 @@ func independentImageMigrationStoreFixture(t *testing.T) managedPostgresResizeFi
 	return f
 }
 
-func testPostgresImageMigrationCompletion(t *testing.T, independent bool) {
+func testPostgresImageMigrationCompletion(t *testing.T, independent, resized bool) {
 	var f managedPostgresResizeFixture
 	if independent {
 		f = independentImageMigrationStoreFixture(t)
 	} else {
 		f = newManagedPostgresResizeFixture(t)
+	}
+	if resized {
+		mutateResizeFixtureState(t, f.store, func(state *model.State) {
+			target := managedPostgresResizeTarget()
+			state.BackingServices[findBackingService(state, f.service.ID)].Spec.Postgres.RuntimeResources = &target
+		})
 	}
 	before, err := f.store.GetApp(f.app.ID)
 	if err != nil {
@@ -115,6 +127,12 @@ func testPostgresImageMigrationCompletion(t *testing.T, independent bool) {
 	}
 	for _, kind := range []string{pgimage.BaselineEvidence, pgimage.IntentEvidence, pgimage.VerifiedEvidence} {
 		payload := map[string]any{"pod_uid": "old-primary-uid", "cluster_uid": "cluster-uid", "system_id": "12345", "target_image": op.DesiredSpec.Postgres.Image}
+		if resized {
+			payload["restart_resource_target"] = serviceBefore.Spec.Postgres.RuntimeResources
+			payload["restart_spec_hash"] = "verified-target-spec"
+			payload["restart_resources"] = map[string]any{"requests": map[string]any{"memory": "640Mi", "cpu": "250m"}, "limits": map[string]any{"memory": "1024Mi", "cpu": "500m"}}
+			payload["resources_hash"] = pgimage.Hash(payload["restart_resources"])
+		}
 		if kind == pgimage.VerifiedEvidence {
 			payload["verified_pod_uid"] = "new-primary-uid"
 		}
@@ -129,6 +147,9 @@ func testPostgresImageMigrationCompletion(t *testing.T, independent bool) {
 	want := serviceBefore.Spec
 	want.Postgres = model.CloneAppPostgresSpec(want.Postgres)
 	want.Postgres.Image = op.DesiredSpec.Postgres.Image
+	if resized {
+		want.Postgres.Resources = model.CloneResourceSpec(want.Postgres.RuntimeResources)
+	}
 	if !reflect.DeepEqual(want, current.Spec) {
 		t.Fatalf("migration changed more than image: %+v", current.Spec)
 	}
@@ -138,6 +159,44 @@ func testPostgresImageMigrationCompletion(t *testing.T, independent bool) {
 	after, _ := f.store.GetApp(f.app.ID)
 	if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) || !reflect.DeepEqual(before.Bindings, after.Bindings) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 		t.Fatal("consumer app was modified")
+	}
+}
+
+func TestImageMigrationCannotPersistUnapprovedRestartResources(t *testing.T) {
+	f := newManagedPostgresResizeFixture(t)
+	request := imageMigrationOperation(t, f)
+	target := managedPostgresResizeTarget()
+	intent := map[string]any{"restart_resource_target": target, "restart_spec_hash": "target", "restart_resources": map[string]any{"requests": map[string]any{"memory": "640Mi"}}}
+	intent["resources_hash"] = pgimage.Hash(intent["restart_resources"])
+	if _, err := imageMigrationPostgres(f.service, f.app, request, intent); !errors.Is(err, ErrConflict) {
+		t.Fatalf("missing persisted runtime target accepted: %v", err)
+	}
+	f.service.Spec.Postgres.RuntimeResources = model.CloneResourceSpec(&f.bootstrap)
+	request.DesiredSpec.Postgres.ImageMigrationConfigHash = PostgresImageMigrationConfigHash(f.app, f.service, request.DesiredSpec.Postgres.Image)
+	if _, err := imageMigrationPostgres(f.service, f.app, request, intent); !errors.Is(err, ErrConflict) {
+		t.Fatalf("different persisted runtime target accepted: %v", err)
+	}
+}
+
+func TestImageMigrationResourceEvidenceMatchesExactEnvelope(t *testing.T) {
+	target := model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 1024, MemoryLimitMebibytes: 1536}
+	for _, scenario := range []string{"valid", "memory-drift", "cpu-limit-added", "missing-limit", "malformed"} {
+		t.Run(scenario, func(t *testing.T) {
+			raw := map[string]any{"requests": map[string]any{"cpu": "0.1", "memory": "1Gi"}, "limits": map[string]any{"memory": "1536Mi"}}
+			switch scenario {
+			case "memory-drift":
+				raw["requests"].(map[string]any)["memory"] = "512Mi"
+			case "cpu-limit-added":
+				raw["limits"].(map[string]any)["cpu"] = "200m"
+			case "missing-limit":
+				delete(raw, "limits")
+			case "malformed":
+				raw["requests"] = "not resource requirements"
+			}
+			if imageMigrationResourceEvidenceMatches(raw, target) != (scenario == "valid") {
+				t.Fatal("invalid resource proof accepted or equivalent quantity rejected")
+			}
+		})
 	}
 }
 

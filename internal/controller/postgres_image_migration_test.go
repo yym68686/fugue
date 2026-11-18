@@ -49,9 +49,10 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 }
 
 func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
-	for _, scenario := range []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced"} {
+	for _, scenario := range []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift"} {
 		t.Run(scenario, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			statePath := filepath.Join(t.TempDir(), "state.json")
+			state := store.New(statePath)
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +64,13 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if _, err = state.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{CPUMilliCores: 4000, MemoryMebibytes: 8192, StorageGibibytes: 20}); err != nil {
+				t.Fatal(err)
+			}
 			appSpec := model.AppSpec{Image: "registry.invalid/client:1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID, Postgres: &model.AppPostgresSpec{Database: "example", User: "example", Password: "test-secret", StorageSize: "1Gi", Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512, CPULimitMilliCores: 200, MemoryLimitMebibytes: 768}}}
+			if scenario == "resized-unlimited" {
+				appSpec.Postgres.Resources.CPULimitMilliCores = 0
+			}
 			postgresSpec := appSpec.Postgres
 			if independent {
 				appSpec.Postgres = nil
@@ -86,6 +93,26 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 			}
 			service := app.BackingServices[0]
+			resized := strings.HasPrefix(scenario, "resized-")
+			if resized {
+				target := *service.Spec.Postgres.Resources
+				target.MemoryMebibytes, target.MemoryLimitMebibytes = 1024, 2048
+				if scenario == "resized-down" {
+					target.MemoryMebibytes, target.MemoryLimitMebibytes = 128, 384
+				}
+				resize, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: model.OperationTypeDatabaseResize, RequestedByType: model.ActorTypeSystem, RequestedByID: store.ManagedPostgresAutoMemoryRequestActorPrefix + "/synthetic", DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{RuntimeResources: &target}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err = state.CompleteManagedOperation(resize.ID, "", "verified synthetic resize"); err != nil {
+					t.Fatal(err)
+				}
+				app, err = state.GetApp(app.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				service = app.BackingServices[0]
+			}
 			postgres := store.ManagedPostgresSpecForOperation(app, service.ID)
 			catalog, err := pgimage.ApprovedCatalog()
 			if err != nil {
@@ -111,8 +138,28 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			source := strings.Split(catalog.PostgresBase, "@")[0]
 			spec["imageName"] = source
 			imageObject(imageObject(spec["affinity"])["nodeSelector"])[runtime.RuntimeIDLabelKey] = postgres.RuntimeID
-			resources := map[string]any{"requests": map[string]any{"cpu": "100m", "memory": "512Mi"}, "limits": map[string]any{"cpu": "200m", "memory": "768Mi"}}
-			spec["resources"] = resources
+			resourceMap := func(target model.ResourceSpec) map[string]any {
+				kube, err := managedPostgresKubeResources(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, _ := json.Marshal(kube)
+				var m map[string]any
+				json.Unmarshal(b, &m)
+				return m
+			}
+			resources := resourceMap(model.ManagedPostgresRuntimeResources(*postgres))
+			spec["resources"] = resourceMap(*postgres.Resources)
+			if scenario == "resized-extra-resource-drift" {
+				imageObject(resources["requests"])["ephemeral-storage"] = "1Gi"
+			}
+			if scenario == "resized-extra-resource-preserved" {
+				imageObject(resources["requests"])["ephemeral-storage"] = "1Gi"
+				imageObject(imageObject(spec["resources"])["requests"])["ephemeral-storage"] = "1Gi"
+			}
+			if scenario == "unpersisted-resource-drift" {
+				imageObject(resources["requests"])["memory"] = "640Mi"
+			}
 			json.Unmarshal([]byte(`{"metadata":{"name":"database-1","uid":"old-pod-uid","generation":1,"resourceVersion":"1","labels":{"role":"primary","cnpg.io/instanceRole":"primary"},"ownerReferences":[{"apiVersion":"postgresql.cnpg.io/v1","kind":"Cluster","uid":"cluster-uid","controller":true}]},"spec":{"nodeName":"node-a","containers":[{"name":"postgres"}],"volumes":[{"name":"pgdata","persistentVolumeClaim":{"claimName":"database-1"}}],"initContainers":[{"name":"bootstrap-controller"}]},"status":{"phase":"Running","observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}],"initContainerStatuses":[{"name":"bootstrap-controller","state":{"terminated":{"exitCode":0}}}],"containerStatuses":[{"name":"postgres","ready":true,"restartCount":0,"state":{"running":{"startedAt":"2026-01-01T00:00:00Z"}}}]}}`), &pod)
 			imageObject(pod["metadata"])["namespace"] = ns
 			imageObject(imageObject(pod["metadata"])["labels"])[cloudNativePGClusterLabel] = name
@@ -122,6 +169,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			main["image"] = source
 			status := imageObjects(imageObject(pod["status"])["containerStatuses"])[0]
 			status["resources"] = resources
+			if scenario == "resized-unapplied" {
+				status["resources"] = spec["resources"]
+			}
 			status["imageID"] = catalog.PostgresBase
 			if scenario == "wrong-source-digest" {
 				status["imageID"] = "registry.invalid/pg@sha256:other"
@@ -130,6 +180,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				imageObject(cluster["metadata"])["annotations"] = map[string]any{"cnpg.io/fencedInstances": `["*"]`}
 			}
 			patches, probes := 0, 0
+			var baselineSpec map[string]any
+			b, _ := json.Marshal(spec)
+			json.Unmarshal(b, &baselineSpec)
 			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				var response any
@@ -144,17 +197,35 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					}
 					var patch []map[string]any
 					json.NewDecoder(r.Body).Decode(&patch)
-					if len(patch) != 4 || patch[0]["op"] != "test" || patch[1]["op"] != "test" || patch[2]["path"] != "/spec" || patch[3]["op"] != "replace" || patch[3]["path"] != "/spec/imageName" || patch[3]["value"] != catalog.DefaultImage {
+					expectedPatches := 4
+					if resized {
+						expectedPatches = 5
+					}
+					if len(patch) != expectedPatches || patch[0]["op"] != "test" || patch[1]["op"] != "test" || patch[2]["path"] != "/spec" || pgimage.Hash(patch[2]["value"]) != pgimage.Hash(spec) || patch[3]["op"] != "replace" || patch[3]["path"] != "/spec/imageName" || patch[3]["value"] != catalog.DefaultImage {
 						t.Error("image patch changed unexpected fields", patch)
+					}
+					if scenario == "resized-cas-conflict" || (scenario == "resized-lost-before-patch" && patches == 0) {
+						patches++
+						http.Error(w, "uncertain or conflicting write", http.StatusConflict)
+						return
 					}
 					patches++
 					spec["imageName"] = catalog.DefaultImage
+					if resized {
+						if patch[4]["op"] != "replace" || patch[4]["path"] != "/spec/resources" || pgimage.Hash(patch[4]["value"]) != pgimage.Hash(resources) {
+							t.Fatal("restart template was not aligned atomically", patch)
+						}
+						spec["resources"] = patch[4]["value"]
+					}
 					imageObject(pod["metadata"])["uid"] = "new-pod-uid"
 					imageContainer(pod)["image"] = catalog.DefaultImage
 					status["imageID"] = catalog.DefaultImage
 					imageContainer(pod)["command"] = []any{"/usr/local/bin/fugue-cnpg-manager", "instance", "run"}
 					delete(imageObject(pod["spec"]), "initContainers")
-					if scenario == "lost-patch-response" {
+					if scenario == "resized-replacement-drift" {
+						imageContainer(pod)["resources"] = resourceMap(*postgres.Resources)
+					}
+					if strings.HasSuffix(scenario, "lost-patch-response") {
 						http.Error(w, "response lost after commit", 500)
 						return
 					}
@@ -171,7 +242,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					response = map[string]any{"metadata": map[string]any{"uid": "pvc-uid"}, "spec": map[string]any{"volumeName": "pv-data"}, "status": map[string]any{"phase": "Bound"}}
 				case r.URL.Path == "/api/v1/persistentvolumes/pv-data":
 					uid := "pv-uid"
-					if patches > 0 && scenario == "changed-volume" {
+					if patches > 0 && strings.HasSuffix(scenario, "changed-volume") {
 						uid = "replacement-pv"
 					}
 					response = map[string]any{"metadata": map[string]any{"uid": uid}, "spec": map[string]any{"claimRef": map[string]any{"uid": "pvc-uid", "namespace": ns, "name": "database-1"}}}
@@ -196,13 +267,13 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				return nil
 			}}
 			err = s.executePostgresImageMigration(context.Background(), op, before)
-			if scenario == "wrong-source-digest" || scenario == "fenced" {
+			if scenario == "wrong-source-digest" || scenario == "fenced" || scenario == "resized-unapplied" || scenario == "resized-extra-resource-drift" || scenario == "unpersisted-resource-drift" {
 				if err == nil || patches != 0 || probes != 0 {
 					t.Fatalf("unsafe preflight passed: patches=%d probes=%d err=%v", patches, probes, err)
 				}
 				return
 			}
-			if scenario == "changed-volume" || scenario == "lost-patch-response" {
+			if strings.HasSuffix(scenario, "changed-volume") || strings.HasSuffix(scenario, "lost-patch-response") || scenario == "resized-lost-before-patch" || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" {
 				if !errors.Is(err, errPostgresImageMigrationUnsettled) {
 					t.Fatalf("accepted mutation lost interlock: %v", err)
 				}
@@ -217,9 +288,11 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				if _, err = state.RequeueManagedOperationGuarded(op, "requeue"); !errors.Is(err, store.ErrConflict) {
 					t.Fatal("accepted mutation became requeueable")
 				}
-				if scenario == "changed-volume" {
+				if strings.HasSuffix(scenario, "changed-volume") || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" {
 					return
 				}
+				// Reopen durable state to simulate recovery by a fresh controller.
+				s.Store = store.New(statePath)
 				err = s.executePostgresImageMigration(context.Background(), op, before)
 			}
 			if err != nil {
@@ -228,14 +301,70 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			final, _ := state.GetOperation(op.ID)
 			current, _ := state.GetBackingService(service.ID)
 			after, _ := state.GetApp(app.ID)
-			if final.Status != model.OperationStatusCompleted || current.Spec.Postgres.Image != catalog.DefaultImage || patches != 1 || probes != 2 {
+			expectedCalls := 1
+			if scenario == "resized-lost-before-patch" {
+				expectedCalls = 2
+			}
+			if final.Status != model.OperationStatusCompleted || current.Spec.Postgres.Image != catalog.DefaultImage || patches != expectedCalls || probes != 2 {
 				t.Fatalf("unexpected terminal state: %s patches=%d probes=%d", final.Status, patches, probes)
+			}
+			if resized {
+				if !reflect.DeepEqual(current.Spec.Postgres.Resources, postgres.RuntimeResources) || !reflect.DeepEqual(current.Spec.Postgres.RuntimeResources, postgres.RuntimeResources) {
+					t.Fatal("migration lost the authorized resource target")
+				}
+				baselineSpec["resources"] = resources
+			}
+			baselineSpec["imageName"] = catalog.DefaultImage
+			if pgimage.Hash(baselineSpec) != pgimage.Hash(spec) {
+				t.Fatal("migration changed another Cluster field")
 			}
 			if current.OwnerAppID != service.OwnerAppID {
 				t.Fatal("migration changed independent ownership")
 			}
 			if !reflect.DeepEqual(before.Spec, after.Spec) || !reflect.DeepEqual(before.Status, after.Status) || !reflect.DeepEqual(before.Bindings, after.Bindings) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 				t.Fatal("migration mutated the consumer application")
+			}
+		})
+	}
+}
+
+func TestImageRestartWitnessRejectsPartialOrUnrelatedChanges(t *testing.T) {
+	for _, scenario := range []string{"source", "target", "image-without-resources", "resources-without-image", "storage-drift", "target-envelope-drift", "missing-target", "changed-authorization", "extra-resource-drift"} {
+		t.Run(scenario, func(t *testing.T) {
+			target := model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 1024, MemoryLimitMebibytes: 1536}
+			resources := map[string]any{"requests": map[string]any{"cpu": "100m", "memory": "1Gi", "ephemeral-storage": "1Gi"}, "limits": map[string]any{"memory": "1536Mi"}}
+			old := map[string]any{"requests": map[string]any{"cpu": "100m", "memory": "512Mi", "ephemeral-storage": "1Gi"}, "limits": map[string]any{"memory": "768Mi"}}
+			cluster := map[string]any{"metadata": map[string]any{"uid": "cluster"}, "spec": map[string]any{"imageName": "source", "resources": old, "storage": map[string]any{"size": "1Gi"}}}
+			w := postgresImageWitness{ClusterUID: "cluster", SpecHash: imagePreservedSpecHash(cluster), SourceImage: "source", TargetImage: "target", SystemID: "123", Pod: "database-1", PodUID: "old", Node: "node-a", ResourcesHash: pgimage.Hash(resources), RestartResources: resources, RestartSpecHash: imageRestartSpecHash(cluster, resources), RestartResourceTarget: &target}
+			pod := map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "postgres", "resources": resources}}}}
+			actual, err := managedPostgresKubeResources(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot := managedPostgresResizeSnapshot{Observation: managedPostgresResizeObservation{PodName: w.Pod, NodeName: w.Node, DesiredResources: actual, ActualResources: &actual}}
+			snapshot.Cluster.Status.SystemID = w.SystemID
+			spec := imageObject(cluster["spec"])
+			if scenario != "source" && scenario != "resources-without-image" {
+				spec["imageName"] = "target"
+			}
+			if scenario != "source" && scenario != "image-without-resources" {
+				spec["resources"] = resources
+			}
+			switch scenario {
+			case "storage-drift":
+				imageObject(spec["storage"])["size"] = "2Gi"
+			case "target-envelope-drift":
+				spec["resources"] = old
+			case "missing-target":
+				w.RestartResourceTarget = nil
+			case "changed-authorization":
+				w.RestartResourceTarget.MemoryMebibytes = 640
+			case "extra-resource-drift":
+				spec["resources"] = map[string]any{"requests": map[string]any{"cpu": "100m", "memory": "1Gi"}, "limits": map[string]any{"memory": "1536Mi"}}
+			}
+			err = validateImageWitness(w, cluster, pod, snapshot)
+			if (err == nil) != (scenario == "source" || scenario == "target") {
+				t.Fatalf("unexpected witness validation: %v", err)
 			}
 		})
 	}

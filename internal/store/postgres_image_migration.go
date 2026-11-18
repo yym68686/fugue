@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"fugue/internal/model"
 	"fugue/internal/pgimage"
@@ -104,13 +107,60 @@ func postgresImageMigrationRetryMatches(a, b model.Operation) bool {
 		a.DesiredSpec.Postgres.Image == b.DesiredSpec.Postgres.Image && a.DesiredSpec.Postgres.ImageMigrationConfigHash == b.DesiredSpec.Postgres.ImageMigrationConfigHash
 }
 
-func imageMigrationPostgres(service model.BackingService, app model.App, op model.Operation) (*model.AppPostgresSpec, error) {
+func imageMigrationPostgres(service model.BackingService, app model.App, op model.Operation, intent map[string]any) (*model.AppPostgresSpec, error) {
 	if err := preparePostgresImageMigration(app, &op); err != nil {
 		return nil, err
 	}
 	p := model.CloneAppPostgresSpec(service.Spec.Postgres)
 	p.Image = op.DesiredSpec.Postgres.Image
+	if raw, present := intent["restart_resource_target"]; present {
+		// Only this explicit maintenance operation may advance the restart
+		// template. Ordinary in-place resize must never roll a database Pod.
+		var target model.ResourceSpec
+		encoded, err := json.Marshal(raw)
+		if err != nil || json.Unmarshal(encoded, &target) != nil || p.RuntimeResources == nil || target != *p.RuntimeResources {
+			return nil, ErrConflict
+		}
+		specHash, _ := intent["restart_spec_hash"].(string)
+		resources, resourcesOK := intent["restart_resources"].(map[string]any)
+		resourcesHash, _ := intent["resources_hash"].(string)
+		if _, err := normalizeManagedPostgresResizeTarget(&target); err != nil || specHash == "" ||
+			!resourcesOK || resourcesHash == "" || pgimage.Hash(resources) != resourcesHash || !imageMigrationResourceEvidenceMatches(resources, target) {
+			return nil, ErrConflict
+		}
+		p.Resources = model.CloneResourceSpec(&target)
+	}
 	return p, nil
+}
+
+func imageMigrationResourceEvidenceMatches(resources map[string]any, target model.ResourceSpec) bool {
+	quantityMatches := func(section, name, expected string) bool {
+		values, ok := resources[section].(map[string]any)
+		if !ok {
+			return false
+		}
+		actualText, ok := values[name].(string)
+		if !ok {
+			return false
+		}
+		actual, actualErr := resource.ParseQuantity(actualText)
+		wanted, wantedErr := resource.ParseQuantity(expected)
+		return actualErr == nil && wantedErr == nil && actual.Cmp(wanted) == 0
+	}
+	if !quantityMatches("requests", "cpu", fmt.Sprintf("%dm", target.CPUMilliCores)) ||
+		!quantityMatches("requests", "memory", fmt.Sprintf("%dMi", target.MemoryMebibytes)) ||
+		!quantityMatches("limits", "memory", fmt.Sprintf("%dMi", target.MemoryLimitMebibytes)) {
+		return false
+	}
+	limits, ok := resources["limits"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if target.CPULimitMilliCores == 0 {
+		_, found := limits["cpu"]
+		return !found
+	}
+	return quantityMatches("limits", "cpu", fmt.Sprintf("%dm", target.CPULimitMilliCores))
 }
 
 func validatePostgresImageMigrationProof(op model.Operation, proofs map[string]map[string]any) error {
@@ -154,7 +204,7 @@ func applyPostgresImageMigration(state *model.State, app *model.App, op *model.O
 	svc := cloneBackingService(state.BackingServices[i])
 	owner := *app
 	hydrateAppBackingServices(state, &owner)
-	p, err := imageMigrationPostgres(svc, owner, *op)
+	p, err := imageMigrationPostgres(svc, owner, *op, proofs[pgimage.IntentEvidence])
 	if err != nil {
 		return err
 	}
@@ -186,7 +236,7 @@ func (s *Store) pgApplyPostgresImageMigration(ctx context.Context, tx *sql.Tx, a
 	}
 	// The completion transaction rehydrates the exact service before hashing.
 	app.BackingServices = []model.BackingService{svc}
-	p, err := imageMigrationPostgres(svc, *app, *op)
+	p, err := imageMigrationPostgres(svc, *app, *op, proofs[pgimage.IntentEvidence])
 	if err != nil {
 		return err
 	}
