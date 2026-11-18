@@ -326,6 +326,19 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 		if r.Code != 200 || !response.Ready || response.Backend.PodUID != string(f.pod.UID) || response.Backend.ServiceUID != string(f.svc.UID) || !reflect.DeepEqual(response.Snapshot, snapshot) || r.Header().Get("Cache-Control") != "private, no-store" {
 			t.Fatal(r.Code, r.Body.String())
 		}
+		rows := captureReceipts(t, s)
+		phases := map[string]uint64{}
+		for _, timing := range rows[len(rows)-1].DNSRead {
+			if timing.Stage == "total" {
+				phases[timing.Phase] += timing.Calls
+			}
+			if !timing.HasDeadline || timing.ElapsedMillis < 0 || timing.MaxMillis < 0 || timing.LastFinishOffset < timing.FirstStartOffset {
+				t.Fatal("invalid same-request timing", timing)
+			}
+		}
+		if !reflect.DeepEqual(phases, map[string]uint64{"initial_source": 1, "backend": 1, "authority_recheck": 1, "validation": 1}) {
+			t.Fatal("successful read lost a phase", phases)
+		}
 	}
 	if reads != 2 {
 		t.Fatal("node observations were cached", reads)
@@ -436,6 +449,10 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			r := performJSONRequest(t, s, "GET", endpoint, "facts-admin", nil)
 			if r.Code != want || strings.Contains(r.Body.String(), "private-node-error") {
 				t.Fatal(r.Code, r.Body.String())
+			}
+			rows := captureReceipts(t, s)
+			if len(rows[len(rows)-1].DNSRead) == 0 {
+				t.Fatal("failure or known not-ready result lost timing", scenario)
 			}
 			if scenario == "publication changed" || scenario == "artifact corrupt" {
 				rows := captureReceipts(t, s)

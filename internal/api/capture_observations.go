@@ -42,16 +42,17 @@ type captureObservations struct {
 }
 
 type captureReceipt struct {
-	Sequence   uint64         `json:"sequence"`
-	Kind       string         `json:"kind"`
-	StartedAt  time.Time      `json:"started_at"`
-	FinishedAt time.Time      `json:"finished_at"`
-	Outcome    string         `json:"outcome"`
-	ErrorClass string         `json:"error_class,omitempty"`
-	Candidates int            `json:"candidates"`
-	Minimum    int            `json:"minimum_candidates"`
-	Events     []captureEvent `json:"events"`
-	Dropped    uint64         `json:"events_dropped"`
+	Sequence   uint64                    `json:"sequence"`
+	Kind       string                    `json:"kind"`
+	StartedAt  time.Time                 `json:"started_at"`
+	FinishedAt time.Time                 `json:"finished_at"`
+	Outcome    string                    `json:"outcome"`
+	ErrorClass string                    `json:"error_class,omitempty"`
+	Candidates int                       `json:"candidates"`
+	Minimum    int                       `json:"minimum_candidates"`
+	Events     []captureEvent            `json:"events"`
+	Dropped    uint64                    `json:"events_dropped"`
+	DNSRead    []dnsReadStageObservation `json:"dns_read,omitempty"`
 }
 
 type captureEvent struct {
@@ -179,8 +180,10 @@ type captureCapacity struct {
 }
 
 type captureTrace struct {
-	mu      sync.Mutex
-	receipt captureReceipt
+	mu            sync.Mutex
+	receipt       captureReceipt
+	dnsRead       *dnsReadTimings
+	dnsReadClosed bool
 }
 
 type captureTraceKey struct{}
@@ -255,6 +258,8 @@ func captureConditionStatus(status string) string {
 func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err error, candidates, minimum int) {
 	trace.mu.Lock()
 	receipt := trace.receipt
+	receipt.DNSRead = trace.dnsReadSnapshot()
+	trace.dnsReadClosed = true
 	receipt.Outcome, receipt.ErrorClass = outcome, captureErrorClass(err)
 	receipt.FinishedAt = time.Now().UTC()
 	receipt.Candidates, receipt.Minimum = candidates, minimum

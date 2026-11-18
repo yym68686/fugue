@@ -42,6 +42,19 @@ Snapshot assignment rejection also records only the differing assignment field
 names, including expected-set revision, publication fence and deadlines. It does
 not retain either assignment or treat a same-content old assignment as current.
 
+Each DNS runtime-fact receipt also carries bounded `dns_read` wall-clock
+partitions for initial source resolution, the selected-backend read, independent
+authority recheck and final validation. Source-resolution work is aggregated by
+fixed stage (inventory, assignment resolution, selected release, artifact decode,
+publication verification and bindings). Repeated consumers increment counts;
+they cannot create additional diagnostic keys. Phase totals include their nested
+stages and must not be added to them. Offsets are relative to the same request;
+signed remaining budgets distinguish work begun or completed after its existing
+deadline. `has_deadline=false` denotes no deadline, with zero budget fields.
+These timings are wall-clock observations, not CPU, SQL or network root-cause
+verdicts. They share the existing completed/failure receipt retention, consume
+none of the 12 rejection-event slots, and add no reads, retries or policy changes.
+
 `started`, `completed`, `in_flight`, `evicted` and `events_dropped` describe the
 coverage limits. The ring is process-local and non-durable. Polling it cannot
 reconstruct already-evicted events or failures before that process started. A

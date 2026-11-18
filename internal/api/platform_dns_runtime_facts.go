@@ -83,7 +83,9 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason})
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
+	finish := startDNSReadStage(ctx, dnsReadConsumerInventory)
 	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, node)
+	finish()
 	if err != nil {
 		return fail("consumer_inventory_read")
 	}
@@ -98,7 +100,9 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 		if !c.IdentityVerified || c.NodeID != node || c.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(c.CredentialID, "kubernetes:") {
 			continue
 		}
+		finish = startDNSReadStage(ctx, dnsReadExpectedInventory)
 		set, err := s.store.GetPlatformExpectedConsumerSet(c.ExpectedConsumerSetID)
+		finish()
 		if err != nil {
 			return fail("expected_set_read")
 		}
@@ -135,7 +139,9 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 		if len(candidates) > 1 {
 			// Only transport can choose among retained authority receipts. Do
 			// not prefer the most recent heartbeat or invent a physical node.
+			finish = startDNSReadStage(ctx, dnsReadBackendDisambiguation)
 			status := s.inspectDNSBackend(ctx, candidate.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil)
+			finish()
 			if status == http.StatusForbidden || status == http.StatusConflict {
 				continue
 			}
@@ -165,7 +171,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
 	readArtifact := newConsumerArtifactReader(s.store.GetPlatformArtifact)
+	finish := startDNSReadStage(ctx, dnsReadAssignmentResolution)
 	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
+	finish()
 	if err != nil {
 		return fail("assignment_resolution")
 	}
@@ -174,7 +182,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 		if item.Artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || item.Release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
 			continue
 		}
+		finish = startDNSReadStage(ctx, dnsReadAssignmentExpectedSet)
 		set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
+		finish()
 		if err != nil {
 			return fail("assignment_expected_set_read")
 		}
@@ -187,7 +197,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 		if group == "" || freshness <= 0 {
 			return fail("assignment_expected_member_missing")
 		}
+		finish = startDNSReadStage(ctx, dnsReadTrafficReleaseSelection)
 		parent, release, found, err := s.selectTrafficRouteReleaseInScope(group, claims.ScopeKey)
+		finish()
 		if err != nil {
 			return fail("traffic_release_selection")
 		}
@@ -214,7 +226,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 				return dnsFactSource{}, errDNSRuntimeFacts
 			}
 		}
+		finish = startDNSReadStage(ctx, dnsReadArtifactDecode)
 		payload, err := decodePlatformDNSArtifact(item.Artifact)
+		finish()
 		if err != nil || payload.ReadinessPlan == nil || payload.Policy.DNSReadiness == nil {
 			return fail("artifact_payload")
 		}
@@ -232,7 +246,9 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 		}
 		candidateSource := &dnsFactSource{consumer: fact, claims: claims, parent: parent, lookup: item, payload: payload, group: group, heartbeatValidUntil: fact.LastHeartbeatAt.Add(time.Duration(freshness) * time.Second)}
 		if payload.Policy.PublicationRole == platformconfig.PublicationRoleCellDNS {
+			finish = startDNSReadStage(ctx, dnsReadCellPublicationVerification)
 			pubs, err := cellpublication.VerifyDNSArtifact(item.Artifact, s.bundleKeyring())
+			finish()
 			if err != nil {
 				return fail("cell_publication_verification")
 			}
@@ -241,31 +257,40 @@ func (s *Server) dnsFactSourceForConsumer(ctx context.Context, node string, fact
 				if payload.CellDNSSource == nil {
 					return fail("previous_traffic_source_missing")
 				}
+				finish = startDNSReadStage(ctx, dnsReadPreviousTrafficBinding)
 				aliases, err := platformconfig.RouteAuthorityAliases(payload.CellDNSSource.Intent)
 				if err != nil {
+					finish()
 					return fail("route_authority_aliases")
 				}
 				digest, _ := platformconfig.Digest(payload.PreviousTrafficPublication.Reference)
 				for group := range aliases {
 					binding, err := platformconfig.PreviousTrafficPublicationBinding(*payload.PreviousTrafficPublication, group)
 					if err != nil {
+						finish()
 						return fail("previous_traffic_binding")
 					}
 					candidateSource.cellBindings[digest] = binding
 					break
 				}
+				finish()
 			}
 
+			finish = startDNSReadStage(ctx, dnsReadCellRouteBindings)
 			for _, input := range pubs {
 				b, err := platformconfig.CellRoutePublicationBinding(input)
 				if err != nil {
+					finish()
 					return fail("cell_route_binding")
 				}
 				digest, _ := platformconfig.Digest(input.Reference)
 				candidateSource.cellBindings[digest] = b
 			}
+			finish()
 		} else {
+			finish = startDNSReadStage(ctx, dnsReadRouteProjection)
 			projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScope(group, claims.ScopeKey, readArtifact)
+			finish()
 			if err != nil || !found || projection.TrafficRelease == nil || projection.TrafficRelease.ReleaseSetID != parent.ID || projection.TrafficRelease.ReleaseID != release.ID || projection.TrafficRelease.FencingToken != release.FencingToken {
 				return fail("route_projection")
 			}
@@ -295,7 +320,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	source, err := s.currentDNSFactSource(ctx, node)
+	phaseCtx, finishPhase := startDNSReadPhase(ctx, dnsReadInitialSource)
+	source, err := s.currentDNSFactSource(phaseCtx, node)
+	finishPhase()
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
@@ -303,7 +330,8 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	stage = "backend_selection"
 	// Negative/expired observations are useful for diagnosis. Transport must be
 	// uniquely selected and live, but a failing readiness probe must not hide it.
-	status := s.inspectDNSBackend(ctx, source.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, func(ctx context.Context, client *clusterNodeClient, pod corev1.Pod, svc corev1.Service, ready bool) int {
+	phaseCtx, finishPhase = startDNSReadPhase(ctx, dnsReadBackend)
+	status := s.inspectDNSBackend(phaseCtx, source.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, func(ctx context.Context, client *clusterNodeClient, pod corev1.Pod, svc corev1.Service, ready bool) int {
 		transportReady = ready
 		port, ok := dnsBackendObservationPort(pod, svc)
 		if !ok {
@@ -319,6 +347,7 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		response.Backend = dnsRuntimeBackend{Namespace: pod.Namespace, PodName: pod.Name, PodUID: string(pod.UID), ServiceName: svc.Name, ServiceUID: string(svc.UID)}
 		return http.StatusOK
 	})
+	finishPhase()
 	if status != http.StatusOK {
 		if transportErr == nil {
 			transportErr = &dnsObservationReadFailure{class: "backend_selection", status: status}
@@ -328,12 +357,16 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	// Re-resolve immutable inputs and current publication; do not reuse an
 	// artifact-reader cache across the network request or renew heartbeat time.
 	stage = "authority_recheck"
-	current, err := s.currentDNSFactSource(ctx, node)
+	phaseCtx, finishPhase = startDNSReadPhase(ctx, dnsReadAuthorityRecheck)
+	current, err := s.currentDNSFactSource(phaseCtx, node)
+	finishPhase()
 	if event := dnsAuthorityRecheckRejection(ctx, source, current, err); event.Rejection != "" {
 		event.Node = node
 		observeCapture(ctx, event)
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
+	_, finishPhase = startDNSReadPhase(ctx, dnsReadValidation)
+	defer finishPhase()
 	if response.Snapshot.RouteSources != nil {
 		stage = "route_source_selection"
 		observed, err := s.store.ObserveDNSRouteSources(ctx, current.lookup.Artifact)
