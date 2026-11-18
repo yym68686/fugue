@@ -226,6 +226,9 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		case hasActiveOp:
 			return nil
 		default:
+			if err := s.reconcileCompletedStorageUnmount(ctx, client, managed, storedApp); err != nil {
+				return err
+			}
 			if managed.Metadata.DeletionTimestamp == "" {
 				if queued, err := s.reconcileManagedPostgresAutoMemoryRequest(ctx, client, storedApp); err != nil {
 					if s.Logger != nil {
@@ -1074,7 +1077,7 @@ func selectManagedAppDesiredApp(managedSnapshot, stored model.App, hasActiveOper
 }
 
 func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model.App) bool {
-	if !appHasOnlineRolloutIntent(managedSnapshot) {
+	if !appHasOnlineRolloutIntent(managedSnapshot) && managedSnapshot.Spec.StorageUnmountOperationID == "" {
 		return false
 	}
 	// A buildpacks runtime snapshot stores the lifecycle launcher wrapper while
@@ -1085,6 +1088,9 @@ func managedAppSnapshotCarriesCurrentOnlineRollout(managedSnapshot, stored model
 	stored.Spec = normalizeBuildpacksLaunchOverrideSpec(stored, stored.Spec)
 	if !managedAppRolloutSnapshotIdentityEqual(managedSnapshot, stored) {
 		return false
+	}
+	if managedSnapshot.Spec.StorageUnmountOperationID != "" {
+		return reflect.DeepEqual(comparableManagedAppRolloutSnapshot(managedSnapshot), comparableManagedAppRolloutSnapshot(stored))
 	}
 	switch strings.TrimSpace(managedSnapshot.Spec.RolloutIntent) {
 	case model.AppRolloutIntentOnlineImageUpdate:
@@ -1124,6 +1130,7 @@ func comparableManagedAppRolloutSnapshot(app model.App) managedAppRolloutSnapsho
 		normalized, _ := model.StripFugueInjectedAppEnvFromSpec(*spec)
 		spec = &normalized
 		spec.RolloutIntent = ""
+		spec.StorageUnmountOperationID = ""
 		model.ApplyAppSpecDefaults(spec)
 	}
 	bindings := comparableManagedAppServiceBindings(app.Bindings)

@@ -10568,6 +10568,67 @@ paths:
                 $ref: "#/components/schemas/AppRolloutTimelineResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/apps/{id}/storage/unmount:
+    get:
+      operationId: planAppStorageUnmount
+      summary: Preview removal of exactly one persistent storage mount
+      tags: [Apps]
+      x-fugue-handler: handlePlanAppStorageUnmount
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Exact absolute container mount path.
+      responses:
+        '200':
+          description: Read-only specification preview. Live admission is checked again before rollout.
+          headers:
+            ETag:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStorageUnmountPlan"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      operationId: executeAppStorageUnmount
+      summary: Queue removal of one mount with a same-node business-gated rollout
+      tags: [Apps]
+      x-fugue-handler: handleExecuteAppStorageUnmount
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+        - name: If-Match
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Quoted specification SHA-256 returned by the preview.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStorageUnmountRequest"
+      responses:
+        '202':
+          description: Guarded operation queued. Neither the PVC nor its data are deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OperationResponse"
+        '412':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/apps/{id}/env:
     get:
       operationId: getAppEnv
@@ -28753,6 +28814,66 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/AppRelease"
+    AppStorageUnmountPlan:
+      type: object
+      additionalProperties: false
+      required: [app_id, path, spec_sha256, allowed, reason, retained_mounts, reuse_pvc]
+      properties:
+        app_id:
+          type: string
+        path:
+          type: string
+        spec_sha256:
+          type: string
+        allowed:
+          type: boolean
+          description: Specification is eligible; does not attest to live placement, capacity, or application write safety.
+        reason:
+          type: string
+        retained_mounts:
+          type: array
+          items:
+            type: string
+        reuse_pvc:
+          type: boolean
+        claim_name:
+          type: string
+    AppStorageUnmountRequest:
+      type: object
+      additionalProperties: false
+      required: [path, authorize_overlap, probe]
+      properties:
+        path:
+          type: string
+        authorize_overlap:
+          type: boolean
+          description: Must be true. Confirms one temporary replica and concurrent access to all retained mounts are permitted.
+        probe:
+          $ref: "#/components/schemas/AppStorageUnmountProbe"
+    AppStorageUnmountProbe:
+      type: object
+      additionalProperties: false
+      required: [path, expected_body_contains]
+      properties:
+        path:
+          type: string
+          description: Relative HTTP request path on the candidate's first application port. No external URL, query string or redirects.
+        method:
+          type: string
+          enum: [GET, POST]
+          default: GET
+        body:
+          type: string
+          maxLength: 8192
+          description: Optional JSON for a safe-to-retry POST. Do not include credentials or sensitive data.
+        bearer_env:
+          type: string
+          description: Optional name of an existing application environment variable with the probe bearer token. Never pass the token itself.
+        expected_body_contains:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Text that must appear in the first 64 KiB of a successful 2xx response.
     AppRecoveryStartRequest:
       type: object
       additionalProperties: false

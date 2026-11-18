@@ -270,6 +270,8 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/apps/{id}/ssh/managed/rollback", s.auth.RequireAPI(http.HandlerFunc(s.handleRollbackManagedSSH)))
 	mux.Handle("GET /v1/apps/{id}/ssh/managed/status", s.auth.RequireAPI(http.HandlerFunc(s.handleGetManagedSSHStatus)))
 	mux.Handle("POST /v1/apps/{id}/ssh/rotate-port", s.auth.RequireAPI(http.HandlerFunc(s.handleRotateAppSSHPort)))
+	mux.Handle("GET /v1/apps/{id}/storage/unmount", s.auth.RequireAPI(http.HandlerFunc(s.handlePlanAppStorageUnmount)))
+	mux.Handle("POST /v1/apps/{id}/storage/unmount", s.auth.RequireAPI(http.HandlerFunc(s.handleExecuteAppStorageUnmount)))
 	mux.Handle("GET /v1/apps/{id}/traffic", s.auth.RequireAPI(http.HandlerFunc(s.handleGetAppTrafficPolicy)))
 	mux.Handle("PATCH /v1/apps/{id}/traffic", s.auth.RequireAPI(http.HandlerFunc(s.handlePatchAppTrafficPolicy)))
 	mux.Handle("GET /v1/audit-events", s.auth.RequireAPI(http.HandlerFunc(s.handleListAuditEvents)))

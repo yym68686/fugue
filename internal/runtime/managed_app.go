@@ -54,17 +54,18 @@ type ManagedAppMeta struct {
 }
 
 type ManagedAppSpec struct {
-	AppID           string                 `json:"appID"`
-	TenantID        string                 `json:"tenantID"`
-	ProjectID       string                 `json:"projectID,omitempty"`
-	Name            string                 `json:"name"`
-	Route           *model.AppRoute        `json:"route,omitempty"`
-	Source          *model.AppSource       `json:"source,omitempty"`
-	AppSpec         model.AppSpec          `json:"appSpec"`
-	RolloutIntent   string                 `json:"rolloutIntent,omitempty"`
-	Bindings        []model.ServiceBinding `json:"bindings,omitempty"`
-	BackingServices []model.BackingService `json:"backingServices,omitempty"`
-	Scheduling      SchedulingConstraints  `json:"scheduling,omitempty"`
+	AppID                     string                 `json:"appID"`
+	TenantID                  string                 `json:"tenantID"`
+	ProjectID                 string                 `json:"projectID,omitempty"`
+	Name                      string                 `json:"name"`
+	Route                     *model.AppRoute        `json:"route,omitempty"`
+	Source                    *model.AppSource       `json:"source,omitempty"`
+	AppSpec                   model.AppSpec          `json:"appSpec"`
+	RolloutIntent             string                 `json:"rolloutIntent,omitempty"`
+	StorageUnmountOperationID string                 `json:"storageUnmountOperationID,omitempty"`
+	Bindings                  []model.ServiceBinding `json:"bindings,omitempty"`
+	BackingServices           []model.BackingService `json:"backingServices,omitempty"`
+	Scheduling                SchedulingConstraints  `json:"scheduling,omitempty"`
 }
 
 type ManagedAppStatus struct {
@@ -181,17 +182,18 @@ func BuildManagedAppObject(app model.App, scheduling SchedulingConstraints) map[
 			Labels:    labels,
 		},
 		Spec: ManagedAppSpec{
-			AppID:           strings.TrimSpace(app.ID),
-			TenantID:        strings.TrimSpace(app.TenantID),
-			ProjectID:       strings.TrimSpace(app.ProjectID),
-			Name:            strings.TrimSpace(app.Name),
-			Route:           cloneManagedAppRoute(app.Route),
-			Source:          cloneManagedAppSource(app.Source),
-			AppSpec:         cloneManagedAppSpec(app.Spec),
-			RolloutIntent:   strings.TrimSpace(app.Spec.RolloutIntent),
-			Bindings:        cloneManagedServiceBindings(app.Bindings),
-			BackingServices: cloneManagedBackingServices(app.BackingServices),
-			Scheduling:      cloneSchedulingConstraints(scheduling),
+			AppID:                     strings.TrimSpace(app.ID),
+			TenantID:                  strings.TrimSpace(app.TenantID),
+			ProjectID:                 strings.TrimSpace(app.ProjectID),
+			Name:                      strings.TrimSpace(app.Name),
+			Route:                     cloneManagedAppRoute(app.Route),
+			Source:                    cloneManagedAppSource(app.Source),
+			AppSpec:                   cloneManagedAppSpec(app.Spec),
+			RolloutIntent:             strings.TrimSpace(app.Spec.RolloutIntent),
+			StorageUnmountOperationID: strings.TrimSpace(app.Spec.StorageUnmountOperationID),
+			Bindings:                  cloneManagedServiceBindings(app.Bindings),
+			BackingServices:           cloneManagedBackingServices(app.BackingServices),
+			Scheduling:                cloneSchedulingConstraints(scheduling),
 		},
 	}
 	return mustManagedAppMap(managed)
@@ -253,6 +255,7 @@ func ManagedAppOwnerReference(managed ManagedAppObject) *OwnerReference {
 func AppFromManagedApp(managed ManagedAppObject) model.App {
 	spec := cloneManagedAppSpec(managed.Spec.AppSpec)
 	spec.RolloutIntent = strings.TrimSpace(managed.Spec.RolloutIntent)
+	spec.StorageUnmountOperationID = strings.TrimSpace(managed.Spec.StorageUnmountOperationID)
 	return model.App{
 		ID:              strings.TrimSpace(managed.Spec.AppID),
 		TenantID:        strings.TrimSpace(managed.Spec.TenantID),

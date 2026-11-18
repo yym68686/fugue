@@ -1810,6 +1810,7 @@ type AppSpec struct {
 	TerminationGracePeriodSeconds  int64                       `json:"termination_grace_period_seconds,omitempty"`
 	RestartToken                   string                      `json:"restart_token,omitempty"`
 	RolloutIntent                  string                      `json:"-"`
+	StorageUnmountOperationID      string                      `json:"-"`
 }
 
 type AppNetworkPolicySpec struct {
@@ -3053,6 +3054,7 @@ type Operation struct {
 	DesiredReplicas          *int                               `json:"desired_replicas,omitempty"`
 	DesiredSpec              *AppSpec                           `json:"desired_spec,omitempty"`
 	ConfigBaseSpec           *AppSpec                           `json:"config_base_spec,omitempty"`
+	StorageUnmount           *AppStorageUnmountRequest          `json:"storage_unmount,omitempty"`
 	DesiredSource            *AppSource                         `json:"desired_source,omitempty"`
 	DesiredOriginSource      *AppSource                         `json:"desired_origin_source,omitempty"`
 	ResultMessage            string                             `json:"result_message,omitempty"`

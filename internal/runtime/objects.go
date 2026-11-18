@@ -665,7 +665,11 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 			},
 		})
 		if !model.AppPersistentStorageSpecUsesDirectSharedProjectDirectoryMount(storageSpec) {
-			initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
+			if app.Spec.StorageUnmountOperationID != "" {
+				initContainers = append(initContainers, buildExistingPersistentStorageCheck(*storageSpec))
+			} else {
+				initContainers = append(initContainers, buildAppPersistentStorageInitContainer(*storageSpec))
+			}
 			sidecars = append(sidecars, buildAppPersistentStorageSidecar(*storageSpec))
 		}
 	}
@@ -679,6 +683,9 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 	podSpec := map[string]any{
 		"containers": []map[string]any{container},
 		"volumes":    volumes,
+	}
+	if app.Spec.StorageUnmountOperationID != "" {
+		podSpec["readinessGates"] = []map[string]any{{"conditionType": FugueStorageUnmountReadyCondition}}
 	}
 	if appUsesStrictZeroDowntimeDrain(app) && options.StrictDrain.ConnectionAwareEnabled() {
 		podSpec["shareProcessNamespace"] = true
@@ -724,6 +731,9 @@ func buildAppDeploymentObjectWithOptions(namespace string, app model.App, labels
 		"labels": mergeStringMaps(labels, map[string]string{FugueLabelAppWorkload: resourceName}),
 	}
 	templateRolloutAnnotations := appRolloutAnnotations(app, options.StrictDrain)
+	if app.Spec.StorageUnmountOperationID != "" {
+		templateRolloutAnnotations = mergeStringMaps(templateRolloutAnnotations, map[string]string{FugueStorageUnmountOperationAnnotation: app.Spec.StorageUnmountOperationID})
+	}
 	if annotations := mergeStringMaps(templateRolloutAnnotations, buildAppTemplateAnnotations(app.Spec)); len(annotations) > 0 {
 		templateMetadata["annotations"] = annotations
 	}
@@ -2281,7 +2291,7 @@ func appUsesOnlineRestartStrategy(app model.App) bool {
 }
 
 func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
-	if (!appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) && !model.AppZeroDowntimeEnabled(app.Spec)) ||
+	if (!appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) && !model.AppZeroDowntimeEnabled(app.Spec) && app.Spec.StorageUnmountOperationID == "") ||
 		!model.AppHasClusterService(app.Spec) ||
 		app.Spec.Replicas <= 0 {
 		return false
@@ -2317,7 +2327,7 @@ func appUsesStrictZeroDowntimeDrain(app model.App) bool {
 	if !model.AppHasClusterService(app.Spec) || app.Spec.Replicas <= 0 {
 		return false
 	}
-	if model.AppZeroDowntimeEnabled(app.Spec) {
+	if model.AppZeroDowntimeEnabled(app.Spec) || app.Spec.StorageUnmountOperationID != "" {
 		return true
 	}
 	if appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) {
@@ -2345,6 +2355,9 @@ func deploymentRolloutAnnotations(app model.App, config StrictDrainConfig) map[s
 }
 
 func onlineDurableRolloutReason(app model.App) string {
+	if app.Spec.StorageUnmountOperationID != "" {
+		return "single-persistent-mount-unmount"
+	}
 	switch strings.TrimSpace(app.Spec.RolloutIntent) {
 	case model.AppRolloutIntentOnlineLifecycleUpdate:
 		return "lifecycle-only"
@@ -2370,7 +2383,7 @@ func appRequiresZeroDowntimeRollout(app model.App) bool {
 }
 
 func appUsesValidatedOnlineRollout(app model.App) bool {
-	if !appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) ||
+	if (!appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) && app.Spec.StorageUnmountOperationID == "") ||
 		!model.AppHasClusterService(app.Spec) ||
 		app.Spec.Replicas <= 0 {
 		return false

@@ -29,7 +29,8 @@ func validateOperationFinalization(op model.Operation, app model.App, guard *ope
 	}
 	if !guard.AttemptOnly && (!finalizationIntentEqual(op.DesiredSpec, expected.DesiredSpec) ||
 		!finalizationIntentEqual(op.ConfigBaseSpec, expected.ConfigBaseSpec) || !finalizationIntentEqual(op.DesiredSource, expected.DesiredSource) ||
-		!finalizationIntentEqual(op.DesiredOriginSource, expected.DesiredOriginSource)) {
+		!finalizationIntentEqual(op.DesiredOriginSource, expected.DesiredOriginSource) ||
+		!finalizationIntentEqual(op.StorageUnmount, expected.StorageUnmount)) {
 		return ErrConflict
 	}
 	if previous := guard.App; previous != nil && (!finalizationIntentEqual(app.Spec, previous.Spec) ||

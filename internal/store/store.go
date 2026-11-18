@@ -3045,13 +3045,16 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
 			return err
 		}
-		if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
+		if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeAppStorageUnmount {
 			op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 		}
 		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
 			return ErrConflict
 		}
-		if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
+		if err := validateStorageUnmountOperation(op, app, policy.ExpectedAppSpecHash); err != nil {
+			return err
+		}
+		if op.DesiredSpec != nil && op.Type != model.OperationTypeAppStorageUnmount && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 				return err
 			}
@@ -3128,6 +3131,8 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 				return err
 			}
 			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
+		case model.OperationTypeAppStorageUnmount:
+			op.TargetRuntimeID = app.Spec.RuntimeID
 		case model.OperationTypeDeploy:
 			if op.DesiredSpec == nil {
 				return ErrInvalidInput
@@ -3623,6 +3628,7 @@ func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool,
 func operationSummary(op model.Operation) model.Operation {
 	op.DesiredSpec = nil
 	op.ConfigBaseSpec = nil
+	op.StorageUnmount = nil
 	op.DesiredSource = nil
 	op.DesiredOriginSource = nil
 	return op
@@ -5301,6 +5307,10 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		}
 	}
 	switch op.Type {
+	case model.OperationTypeAppStorageUnmount:
+		if err := applyStorageUnmountOperation(app, *op); err != nil {
+			return err
+		}
 	case model.OperationTypeImport:
 		// Import only prepares the build artifact and queues a follow-up deploy.
 	case model.OperationTypeDeploy:
@@ -5412,7 +5422,7 @@ func applyInFlightOperationToApp(state *model.State, op *model.Operation) error 
 	if operationOnlyChangesRolloutConstraints(state.Apps[appIndex], *op) {
 		return nil
 	}
-	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || op.Type == model.OperationTypeAppStorageUnmount {
 		return nil
 	}
 	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
@@ -5453,7 +5463,7 @@ func operationCanUpdateProgress(op model.Operation) bool {
 func isRequeueableManagedOperation(op model.Operation) bool {
 	// Resize recovery must retain the original attempt and its durable journal.
 	// Requeueing would make an already accepted mutation cancellable as pending.
-	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && !model.IsAppRequestResize(op.Type) && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseSourceRetire
+	return op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged && !model.IsAppRequestResize(op.Type) && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != model.OperationTypeAppStorageUnmount
 }
 
 func requeueManagedOperationState(op *model.Operation, message string) {
@@ -5475,6 +5485,8 @@ func requeueManagedOperationState(op *model.Operation, message string) {
 
 func inFlightOperationPhase(op model.Operation) (string, error) {
 	switch op.Type {
+	case model.OperationTypeAppStorageUnmount:
+		return "deploying", nil
 	case model.OperationTypeImport:
 		return "importing", nil
 	case model.OperationTypeDeploy:
@@ -5534,6 +5546,8 @@ func defaultInFlightOperationMessage(op model.Operation) string {
 
 func operationActionLabel(op model.Operation) string {
 	switch op.Type {
+	case model.OperationTypeAppStorageUnmount:
+		return "storage unmount"
 	case model.OperationTypeImport:
 		return "import"
 	case model.OperationTypeDeploy:
@@ -5592,7 +5606,7 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 	}
 	now := time.Now().UTC()
 	app := &state.Apps[appIndex]
-	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+	if op.Type != model.OperationTypeAppStorageUnmount && !operationOnlyChangesRolloutConstraints(*app, *op) {
 		app.Status.Phase = failedPhaseForApp(*app)
 	}
 	app.Status.LastOperationID = op.ID
@@ -5604,7 +5618,8 @@ func applyFailedOperationToApp(state *model.State, op *model.Operation) {
 
 func applyCanceledOperationToApp(state *model.State, op *model.Operation) {
 	appIndex := findApp(state, op.AppID)
-	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || isDeletedApp(state.Apps[appIndex]) {
+	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) ||
+		op.Type == model.OperationTypeAppStorageUnmount || isDeletedApp(state.Apps[appIndex]) {
 		return
 	}
 	app := &state.Apps[appIndex]

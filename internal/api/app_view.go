@@ -44,6 +44,7 @@ func redactAppForDebugBundle(app model.App) model.App {
 
 func redactOperationForDebugBundle(op model.Operation) model.Operation {
 	out := op
+	out.StorageUnmount = nil
 	if op.ConfigBaseSpec != nil {
 		spec := redactAppSpecForDebugBundle(*op.ConfigBaseSpec)
 		out.ConfigBaseSpec = &spec

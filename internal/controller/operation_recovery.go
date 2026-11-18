@@ -29,6 +29,18 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if op.Type == model.OperationTypeAppStorageUnmount && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
+			s.operationClaimMu.Lock()
+			owner := operationExecutionKey(op)
+			_, active := s.runningManagedOperations.LoadOrStore(op.ID, owner)
+			s.operationClaimMu.Unlock()
+			if !active {
+				call, cancel := context.WithTimeout(ctx, 20*time.Second)
+				_ = s.handleClaimedOperation(call, op)
+				cancel()
+			}
+			continue
+		}
 		if (op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType) && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
 			s.operationClaimMu.Lock()
 			owner := new(int)

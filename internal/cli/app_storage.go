@@ -32,6 +32,7 @@ func (c *CLI) newAppStorageCommand() *cobra.Command {
 	cmd.AddCommand(
 		c.newAppStorageShowCommand(),
 		c.newAppStorageSetCommand(),
+		c.newAppStorageUnmountCommand(),
 		c.newAppStorageReplicationCommand(),
 		c.newAppStorageResetCommand(),
 		c.newAppStorageDisableCommand(),

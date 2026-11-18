@@ -897,6 +897,10 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {
+			if errors.Is(err, errStorageUnmountUnsettled) {
+				s.Logger.Printf("operation %s retained active pending storage unmount verification: %v", op.ID, err)
+				return nil
+			}
 			if errors.Is(err, errSafeRolloutTrafficPending) {
 				return s.deferSafeRolloutTrafficConfirmation(ctx, op)
 			}
@@ -905,7 +909,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			if errors.Is(err, context.Canceled) {
-				if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType {
+				if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType || op.Type == model.OperationTypeAppStorageUnmount {
 					// Keep a possibly accepted image mutation running and
 					// non-cancellable. The recovery observer resumes its journal.
 					return err
@@ -983,6 +987,9 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 
 	app, err := s.Store.GetApp(op.AppID)
 	if err != nil {
+		if op.Type == model.OperationTypeAppStorageUnmount {
+			return fmt.Errorf("%w: cannot observe app %s: %v", errStorageUnmountUnsettled, op.AppID, err)
+		}
 		return fmt.Errorf("load app %s: %w", op.AppID, err)
 	}
 	currentApp := app
@@ -995,6 +1002,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 	s.markReleaseAttemptOperationRunning(op, app)
 
 	switch op.Type {
+	case model.OperationTypeAppStorageUnmount:
+		return s.executeAppStorageUnmount(ctx, op, app)
 	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
 		return s.executeAppRequestResize(ctx, op, app)
 	case model.OperationTypeImport:

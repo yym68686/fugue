@@ -343,6 +343,9 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if strings.Contains(sharedRules, `resources: ["pods/resize"]`) {
 		t.Fatalf("shared platform role must not grant the pod resize subresource:\n%s", sharedRole)
 	}
+	if strings.Contains(sharedRules, `resources: ["pods/status"]`) {
+		t.Fatalf("shared platform role must not grant the pod status subresource:\n%s", sharedRole)
+	}
 	if strings.Contains(sharedRules, `resources: ["endpointslices"]`) {
 		t.Fatalf("shared platform role must not grant EndpointSlice inventory access:\n%s", sharedRole)
 	}
@@ -352,6 +355,12 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	if !strings.Contains(controlPlaneRules, strings.TrimSpace(resizeRule)) {
 		t.Fatalf("dedicated control-plane role must grant only patch on pods/resize:\n%s", role)
 	}
+	statusRule := "  - apiGroups: [\"\"]\n" +
+		"    resources: [\"pods/status\"]\n" +
+		"    verbs: [\"patch\"]\n"
+	if !strings.Contains(controlPlaneRules, strings.TrimSpace(statusRule)) {
+		t.Fatalf("dedicated control-plane role must grant only patch on pods/status:\n%s", role)
+	}
 	endpointSliceRule := "  - apiGroups: [\"discovery.k8s.io\"]\n" +
 		"    resources: [\"endpointslices\"]\n" +
 		"    verbs: [\"get\", \"list\", \"watch\"]\n"
@@ -360,9 +369,10 @@ func TestDedicatedControlPlaneServiceAccountIsolatesSecretRBAC(t *testing.T) {
 	}
 	wantSharedRules := strings.Replace(controlPlaneRules, `"secrets", `, "", 1)
 	wantSharedRules = strings.Replace(wantSharedRules, resizeRule, "", 1)
+	wantSharedRules = strings.Replace(wantSharedRules, statusRule, "", 1)
 	wantSharedRules = strings.Replace(wantSharedRules, endpointSliceRule, "", 1)
 	if sharedRules != wantSharedRules {
-		t.Fatalf("shared and control-plane roles must differ only by Secret API access, pod resize patch access, and read-only EndpointSlice inventory access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
+		t.Fatalf("shared and control-plane roles must differ only by Secret API access, pod resize and status patch access, and read-only EndpointSlice inventory access:\nshared:\n%s\ncontrol-plane:\n%s", sharedRole, role)
 	}
 	binding := manifestDocumentForKindAndName(manifest, "ClusterRoleBinding", "fugue-fugue-control-plane")
 	if binding == "" {

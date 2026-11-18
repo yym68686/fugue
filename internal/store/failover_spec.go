@@ -87,7 +87,7 @@ func operationRequiresManagedController(operationType string) bool {
 	switch operationType {
 	case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType:
 		return true
-	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
+	case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize, model.OperationTypeAppStorageUnmount:
 		return true
 	case model.OperationTypeImport,
 		storagerecovery.OperationType,

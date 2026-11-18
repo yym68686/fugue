@@ -3311,7 +3311,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := reconcileAppRequestResizeSnapshot(&op, app); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-	if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy {
+	if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeAppStorageUnmount {
 		op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
 	}
 	if err := lockDataReferencesTx(ctx, tx, op.TenantID, op.DesiredSpec); err != nil {
@@ -3329,7 +3329,10 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 			return model.Operation{}, operationCreateOutcome{}, ErrConflict
 		}
 	}
-	if op.DesiredSpec != nil && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
+	if err := validateStorageUnmountOperation(op, app, policy.ExpectedAppSpecHash); err != nil {
+		return model.Operation{}, operationCreateOutcome{}, err
+	}
+	if op.DesiredSpec != nil && op.Type != model.OperationTypeAppStorageUnmount && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3454,6 +3457,8 @@ LIMIT 1
 			}
 		}
 		op.TargetRuntimeID = op.DesiredSpec.RuntimeID
+	case model.OperationTypeAppStorageUnmount:
+		op.TargetRuntimeID = app.Spec.RuntimeID
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
@@ -6359,6 +6364,10 @@ func scanOperation(scanner sqlScanner) (model.Operation, error) {
 	op.DesiredOriginSource = desiredOriginSource
 	op.ConfigBaseSpec, err = decodeOperationConfigBase(desiredSourceRaw)
 	if err != nil {
+		return op, err
+	}
+	op.StorageUnmount, err = decodeOperationStorageUnmount(desiredSourceRaw)
+	if err != nil {
 		return model.Operation{}, err
 	}
 	if startedAt.Valid {
@@ -6464,6 +6473,10 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 		}
 	}
 	switch op.Type {
+	case model.OperationTypeAppStorageUnmount:
+		if err := applyStorageUnmountOperation(app, *op); err != nil {
+			return err
+		}
 	case model.OperationTypeImport:
 		// Import only prepares a build artifact; the deploy operation applies it.
 	case model.OperationTypeDeploy:
@@ -6550,7 +6563,7 @@ func applyInFlightOperationToAppModel(app *model.App, op *model.Operation) error
 	if operationOnlyChangesRolloutConstraints(*app, *op) {
 		return nil
 	}
-	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
+	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || op.Type == model.OperationTypeAppStorageUnmount {
 		return nil
 	}
 	if isDeletedApp(*app) && op.Type != model.OperationTypeDelete {
@@ -6577,7 +6590,7 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 		return
 	}
 	now := time.Now().UTC()
-	if !operationOnlyChangesRolloutConstraints(*app, *op) {
+	if op.Type != model.OperationTypeAppStorageUnmount && !operationOnlyChangesRolloutConstraints(*app, *op) {
 		app.Status.Phase = failedPhaseForApp(*app)
 	}
 	app.Status.LastOperationID = op.ID
@@ -6588,7 +6601,8 @@ func applyFailedOperationToAppModel(app *model.App, op *model.Operation) {
 }
 
 func applyCanceledOperationToAppModel(app *model.App, op *model.Operation) {
-	if app == nil || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || isDeletedApp(*app) {
+	if app == nil || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) ||
+		op.Type == model.OperationTypeAppStorageUnmount || isDeletedApp(*app) {
 		return
 	}
 	if !operationOnlyChangesRolloutConstraints(*app, *op) {

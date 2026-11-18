@@ -61,6 +61,8 @@ spec:
                   x-kubernetes-preserve-unknown-fields: true
                 rolloutIntent:
                   type: string
+                storageUnmountOperationID:
+                  type: string
                 bindings:
                   type: array
                   items:
