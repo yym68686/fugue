@@ -437,6 +437,16 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			if r.Code != want || strings.Contains(r.Body.String(), "private-node-error") {
 				t.Fatal(r.Code, r.Body.String())
 			}
+			if scenario == "publication changed" || scenario == "artifact corrupt" {
+				rows := captureReceipts(t, s)
+				found := false
+				for _, event := range rows[len(rows)-1].Events {
+					found = found || event.Stage == "authority_recheck_rejected" && event.Rejection == "source_unavailable"
+				}
+				if !found {
+					t.Fatal("recheck lost the failed source predicate", rows[len(rows)-1])
+				}
+			}
 			if reason := (map[string]string{"bad schema": "schema", "bad plan": "plan_digest", "foreign assignment": "assignment"})[scenario]; reason != "" {
 				rows := captureReceipts(t, s)
 				found := false
@@ -520,6 +530,12 @@ func TestDNSAssignmentMismatchFieldsCoverEveryFieldWithoutValues(t *testing.T) {
 			name := strings.Split(field.Tag.Get("json"), ",")[0]
 			if fields := dnsAssignmentMismatchFields(observed, expected); !reflect.DeepEqual(fields, []string{name}) {
 				t.Fatal("missing, misnamed or private mismatch field", fields)
+			}
+			initial := dnsFactSource{lookup: consumerArtifactLookup{Assignment: expected}}
+			current := dnsFactSource{lookup: consumerArtifactLookup{Assignment: observed}}
+			event := dnsAuthorityRecheckRejection(context.Background(), initial, current, nil)
+			if event.Rejection != "assignment" || !reflect.DeepEqual(event.Mismatches, []string{name}) {
+				t.Fatal("authority recheck lost an exact assignment difference", event)
 			}
 		})
 	}

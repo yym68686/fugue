@@ -329,7 +329,9 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	// artifact-reader cache across the network request or renew heartbeat time.
 	stage = "authority_recheck"
 	current, err := s.currentDNSFactSource(ctx, node)
-	if err != nil || current.consumer.CredentialID != source.consumer.CredentialID || current.parent.ContentHash != source.parent.ContentHash || !reflect.DeepEqual(current.lookup.Assignment, source.lookup.Assignment) || current.group != source.group || ctx.Err() != nil {
+	if event := dnsAuthorityRecheckRejection(ctx, source, current, err); event.Rejection != "" {
+		event.Node = node
+		observeCapture(ctx, event)
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	if response.Snapshot.RouteSources != nil {
@@ -374,6 +376,33 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
 	return response, nil
+}
+
+// Preserve the original short-circuit order, including evaluating ctx.Err only
+// after every authority comparison passes. Retain the first failed predicate
+// and field names, never a later read, credential, artifact body or error text.
+func dnsAuthorityRecheckRejection(ctx context.Context, initial, current dnsFactSource, readErr error) captureEvent {
+	event := captureEvent{Stage: "authority_recheck_rejected"}
+	switch {
+	case readErr != nil:
+		event.Rejection, event.ErrorClass = "source_unavailable", captureErrorClass(readErr)
+	case current.consumer.CredentialID != initial.consumer.CredentialID:
+		event.Rejection = "credential"
+	case current.parent.ContentHash != initial.parent.ContentHash:
+		event.Rejection = "parent_digest"
+	case !reflect.DeepEqual(current.lookup.Assignment, initial.lookup.Assignment):
+		event.Rejection = "assignment"
+		event.Mismatches = dnsAssignmentMismatchFields(current.lookup.Assignment, initial.lookup.Assignment)
+	case current.group != initial.group:
+		event.Rejection = "group"
+	default:
+		if err := ctx.Err(); err != nil {
+			event.Rejection, event.ErrorClass = "context", captureErrorClass(err)
+		} else {
+			return captureEvent{}
+		}
+	}
+	return event
 }
 
 // Field names only: retain the exact failed comparison without exposing either
