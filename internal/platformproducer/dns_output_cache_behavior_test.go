@@ -2,13 +2,89 @@ package platformproducer_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/testfixture/celldns"
 )
+
+var dnsOutputObservationRun atomic.Uint64
+
+func TestDNSOutputValidationObservation(t *testing.T) {
+	p, request, source := dnsProducerFixture(t)
+	p.Generation = fmt.Sprintf("dns-output-observation-%d", dnsOutputObservationRun.Add(1))
+	projected, err := platformproducer.ComposeDNSProjection(p, *request.PreviousTrafficPublication, source.Intent, source.Policy, source.RuntimeSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := celldns.Compile(t, projected).DNSArtifact
+	type event struct {
+		stage platformproducer.DNSOutputValidationStage
+		cache platformproducer.DNSOutputCacheResult
+	}
+	var observations []event
+	observe := func(stage platformproducer.DNSOutputValidationStage, elapsed time.Duration, cache platformproducer.DNSOutputCacheResult) {
+		if elapsed < 0 || stage.String() == "" {
+			t.Fatal("unexpected DNS output timing", stage, elapsed)
+		}
+		observations = append(observations, event{stage, cache})
+	}
+	check := func(a model.PlatformArtifact, want []event) error {
+		t.Helper()
+		observations = nil
+		err := platformproducer.ValidateDNSProducerOutputObserved(p, a, observe)
+		if !slices.Equal(observations, want) {
+			t.Fatalf("observed %v, want %v (validation error: %v)", observations, want, err)
+		}
+		return err
+	}
+	none := platformproducer.DNSOutputCacheUnobserved
+	policy := event{platformproducer.DNSOutputPolicy, none}
+	fingerprint := event{platformproducer.DNSOutputFingerprint, none}
+	cacheMiss := event{platformproducer.DNSOutputCacheLookup, platformproducer.DNSOutputCacheMiss}
+	childDecode := event{platformproducer.DNSOutputChildDecode, none}
+	if err := check(child, []event{
+		policy, fingerprint, cacheMiss, childDecode,
+		{platformproducer.DNSOutputAuthority, none}, {platformproducer.DNSOutputPredecessorDecode, none},
+		{platformproducer.DNSOutputPolicyComparison, none}, {platformproducer.DNSOutputMembership, none},
+		{platformproducer.DNSOutputHandoffComparison, none}, {platformproducer.DNSOutputCacheStore, none},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := check(child, []event{policy, fingerprint, {platformproducer.DNSOutputCacheLookup, platformproducer.DNSOutputCacheHit}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed model.PlatformArtifact
+	if err := json.Unmarshal(raw, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed.Content["generation"] = "unexpected-generation" // Keep the original claimed hash.
+	want := platformproducer.ValidateDNSProducerOutput(p, changed)
+	got := check(changed, []event{policy, fingerprint, cacheMiss, childDecode})
+	if want == nil || got == nil || got.Error() != want.Error() {
+		t.Fatalf("changed content changed validation result: plain %v, observed %v", want, got)
+	}
+	changed.Content["unknown"] = json.RawMessage("true")
+	want = platformproducer.ValidateDNSProducerOutput(p, changed)
+	got = check(changed, []event{policy, {platformproducer.DNSOutputFingerprint, platformproducer.DNSOutputCacheNotApplicable}, childDecode})
+	if want == nil || got == nil || got.Error() != want.Error() {
+		t.Fatalf("non-native input changed validation result: plain %v, observed %v", want, got)
+	}
+	p.DNSSource = nil
+	if err := check(child, []event{policy}); err == nil {
+		t.Fatal("invalid policy accepted")
+	}
+}
 
 func TestDNSOutputValidationReuseReadsActualInputs(t *testing.T) {
 	p, request, source := dnsProducerFixture(t)

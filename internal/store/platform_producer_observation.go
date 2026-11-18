@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"time"
+
+	"fugue/internal/platformproducer"
 )
 
 // These slots partition existing guard wall time, not CPU or lock hold time.
@@ -37,8 +39,23 @@ var platformProducerGuardPhaseNames = [producerGuardPhaseCount]string{
 }
 
 type platformProducerGuardObservation struct {
-	FinalPhase string                  `json:"final_phase"`
-	Stages     []platformMutationStage `json:"stages"`
+	FinalPhase string                           `json:"final_phase"`
+	Stages     []platformMutationStage          `json:"stages"`
+	DNSOutput  []platformProducerDNSOutputStage `json:"dns_output_stages,omitempty"`
+	DNSCache   *platformProducerDNSCacheCounts  `json:"dns_output_cache,omitempty"`
+}
+
+type platformProducerDNSOutputStage struct {
+	Stage     string `json:"stage"`
+	Calls     uint64 `json:"calls"`
+	ElapsedMS int64  `json:"elapsed_ms"`
+	duration  time.Duration
+}
+
+type platformProducerDNSCacheCounts struct {
+	Hit           uint64 `json:"hit"`
+	Miss          uint64 `json:"miss"`
+	NotApplicable uint64 `json:"not_applicable"`
 }
 
 type platformProducerGuardTrace struct {
@@ -73,6 +90,30 @@ func (t *platformProducerGuardTrace) finish() {
 	t.mutation.producerGuardFinalPhase = platformProducerGuardPhaseNames[t.phase]
 }
 
+func (t *platformProducerGuardTrace) dnsOutputObserver() platformproducer.DNSOutputObserver {
+	if t == nil {
+		return nil
+	}
+	return t.observeDNSOutput
+}
+
+func (t *platformProducerGuardTrace) observeDNSOutput(stage platformproducer.DNSOutputValidationStage, elapsed time.Duration, cache platformproducer.DNSOutputCacheResult) {
+	if stage >= platformproducer.DNSOutputStageCount {
+		return
+	}
+	slot := &t.mutation.producerDNSOutput[stage]
+	slot.Calls++
+	slot.duration += elapsed
+	switch cache {
+	case platformproducer.DNSOutputCacheHit:
+		t.mutation.producerDNSCache.Hit++
+	case platformproducer.DNSOutputCacheMiss:
+		t.mutation.producerDNSCache.Miss++
+	case platformproducer.DNSOutputCacheNotApplicable:
+		t.mutation.producerDNSCache.NotApplicable++
+	}
+}
+
 func (t *platformMutationTrace) producerGuardObservation() *platformProducerGuardObservation {
 	if t.producerGuardFinalPhase == "" {
 		return nil
@@ -82,6 +123,18 @@ func (t *platformMutationTrace) producerGuardObservation() *platformProducerGuar
 		if t.producerGuardVisited[phase] {
 			out.Stages = append(out.Stages, platformMutationStage{platformProducerGuardPhaseNames[phase], duration.Milliseconds()})
 		}
+	}
+	for stage, slot := range t.producerDNSOutput {
+		if slot.Calls > 0 {
+			out.DNSOutput = append(out.DNSOutput, platformProducerDNSOutputStage{
+				Stage: platformproducer.DNSOutputValidationStage(stage).String(),
+				Calls: slot.Calls, ElapsedMS: slot.duration.Milliseconds(),
+			})
+		}
+	}
+	if t.producerDNSCache != (platformProducerDNSCacheCounts{}) {
+		cache := t.producerDNSCache
+		out.DNSCache = &cache
 	}
 	return out
 }

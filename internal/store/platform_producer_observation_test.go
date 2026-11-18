@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/platformproducer"
 )
 
 func TestProducerGuardObservationAggregatesIntoFixedSlots(t *testing.T) {
@@ -48,5 +50,37 @@ func TestProducerGuardObservationAggregatesIntoFixedSlots(t *testing.T) {
 	raw, err := json.Marshal(platformMutationReceipt{ProducerGuard: empty.producerGuardObservation()})
 	if err != nil || strings.Contains(string(raw), "producer_guard") || empty.producerGuardObservation() != nil {
 		t.Fatal("empty guard observation was fabricated", err)
+	}
+}
+
+func TestProducerGuardObservationDNSOutputIsBoundedAndOwned(t *testing.T) {
+	ctx, mutation := startPlatformMutationTrace(context.Background(), "platform-release")
+	trace := beginPlatformProducerGuardTrace(ctx)
+	trace.advance(producerGuardDNSOutput)
+	observe := trace.dnsOutputObserver()
+	for range 100 {
+		observe(platformproducer.DNSOutputFingerprint, 600*time.Microsecond, platformproducer.DNSOutputCacheNotApplicable)
+		observe(platformproducer.DNSOutputCacheLookup, time.Millisecond, platformproducer.DNSOutputCacheHit)
+	}
+	observe(platformproducer.DNSOutputCacheLookup, 3*time.Millisecond, platformproducer.DNSOutputCacheMiss)
+	observe(platformproducer.DNSOutputStageCount, time.Hour, platformproducer.DNSOutputCacheMiss)
+	trace.finish()
+	receipt := mutation.producerGuardObservation()
+	if len(receipt.DNSOutput) != 2 || receipt.DNSOutput[0].Stage != "fingerprint" ||
+		receipt.DNSOutput[0].Calls != 100 || receipt.DNSOutput[0].ElapsedMS != 60 ||
+		receipt.DNSOutput[1].Stage != "cache_lookup" || receipt.DNSOutput[1].Calls != 101 ||
+		receipt.DNSOutput[1].ElapsedMS != 103 {
+		t.Fatal("unexpected timing partition", receipt.DNSOutput)
+	}
+	if *receipt.DNSCache != (platformProducerDNSCacheCounts{Hit: 100, Miss: 1, NotApplicable: 100}) {
+		t.Fatal("unexpected cache results", *receipt.DNSCache)
+	}
+	observe(platformproducer.DNSOutputFingerprint, time.Millisecond, platformproducer.DNSOutputCacheNotApplicable)
+	if receipt.DNSOutput[0].Calls != 100 || receipt.DNSCache.NotApplicable != 100 {
+		t.Fatal("observation changed after projection")
+	}
+	var disabled *platformProducerGuardTrace
+	if disabled.dnsOutputObserver() != nil {
+		t.Fatal("disabled trace installed an observer")
 	}
 }

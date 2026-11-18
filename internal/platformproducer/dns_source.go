@@ -223,57 +223,99 @@ func projectDNSProducerPolicy(p Policy, intent platformconfig.PlatformIntent, so
 // valid DNS artifact is insufficient: every node must preserve the approved
 // predecessor's complete DNS behavior, not merely its selected winning answer.
 func ValidateDNSProducerOutput(p Policy, child model.PlatformArtifact) error {
-	if err := validateDNSProducerPolicy(p); err != nil {
+	return ValidateDNSProducerOutputObserved(p, child, nil)
+}
+
+func ValidateDNSProducerOutputObserved(p Policy, child model.PlatformArtifact, observe DNSOutputObserver) error {
+	started := observe.start()
+	err := validateDNSProducerPolicy(p)
+	observe.end(DNSOutputPolicy, started, DNSOutputCacheUnobserved)
+	if err != nil {
 		return err
 	}
 	// Compiler output has a typed scope before persistence materializes ScopeKey.
 	if child.ScopeKey == "" {
 		child.ScopeKey = child.Scope.Key
 	}
+	started = observe.start()
 	key, cacheable := dnsOutputValidationKey(p, child)
-	if cacheable && dnsOutputValidations.contains(key) {
-		return nil
+	cache := DNSOutputCacheNotApplicable
+	if cacheable {
+		cache = DNSOutputCacheUnobserved
 	}
-	if err := validateDNSProducerOutputUncached(p, child); err != nil {
+	observe.end(DNSOutputFingerprint, started, cache)
+	if cacheable {
+		started = observe.start()
+		hit := dnsOutputValidations.contains(key)
+		cache = DNSOutputCacheMiss
+		if hit {
+			cache = DNSOutputCacheHit
+		}
+		observe.end(DNSOutputCacheLookup, started, cache)
+		if hit {
+			return nil
+		}
+	}
+	if err := validateDNSProducerOutputUncached(p, child, observe); err != nil {
 		return err
 	}
 	if cacheable {
+		started = observe.start()
 		dnsOutputValidations.remember(key)
+		observe.end(DNSOutputCacheStore, started, DNSOutputCacheUnobserved)
 	}
 	return nil
 }
 
-func validateDNSProducerOutputUncached(p Policy, child model.PlatformArtifact) error {
+func validateDNSProducerOutputUncached(p Policy, child model.PlatformArtifact, observe DNSOutputObserver) error {
+	started := observe.start()
 	payload, err := platformconfig.DecodeDNSArtifact(child)
+	observe.end(DNSOutputChildDecode, started, DNSOutputCacheUnobserved)
 	if err != nil {
 		return fmt.Errorf("DNS producer output: %w", err)
 	}
+	started = observe.start()
 	if payload.CellDNSSource == nil || payload.PreviousTrafficPublication == nil {
+		observe.end(DNSOutputAuthority, started, DNSOutputCacheUnobserved)
 		return fmt.Errorf("DNS producer output lacks retained source")
 	}
 	in, previous := payload.CellDNSSource.Intent, payload.PreviousTrafficPublication
 	if child.ScopeKey != p.TargetScope || in.AuthorityCellID != p.AuthorityCellID || !platformconfig.DNSUsesRetainedRoutes(in) || !reflect.DeepEqual(in.RouteAuthorityTransition.PreviousTopology, p.DNSSource.PreviousTopology) || previous.ProducerPolicy == nil || *previous.ProducerPolicy != p.DNSSource.ProducerPolicy || previous.Parent.Metadata[PolicyReleaseMetadata] != previous.ProducerPolicy.ReleaseID {
+		observe.end(DNSOutputAuthority, started, DNSOutputCacheUnobserved)
 		return fmt.Errorf("DNS producer output authority differs")
 	}
+	observe.end(DNSOutputAuthority, started, DNSOutputCacheUnobserved)
+	started = observe.start()
 	old, err := platformconfig.DecodeDNSArtifact(previous.DNS)
+	observe.end(DNSOutputPredecessorDecode, started, DNSOutputCacheUnobserved)
 	if err != nil {
 		return err
 	}
+	started = observe.start()
 	expected, err := projectDNSProducerPolicy(p, in, old.Policy)
 	if err != nil {
+		observe.end(DNSOutputPolicyComparison, started, DNSOutputCacheUnobserved)
 		return err
 	}
 	expected.Generation = payload.Policy.Generation
-	if !reflect.DeepEqual(platformconfig.NormalizePolicySnapshot(expected), payload.Policy) {
+	equal := reflect.DeepEqual(platformconfig.NormalizePolicySnapshot(expected), payload.Policy)
+	observe.end(DNSOutputPolicyComparison, started, DNSOutputCacheUnobserved)
+	if !equal {
 		return fmt.Errorf("DNS producer changed signed policy constraints")
 	}
+	started = observe.start()
 	nodes := []string{}
 	for _, c := range in.DNSConsumers {
 		nodes = append(nodes, c.NodeID)
 	}
 	slices.Sort(nodes)
-	if !reflect.DeepEqual(nodes, p.DNSSource.DNSNodeIDs) {
+	equal = reflect.DeepEqual(nodes, p.DNSSource.DNSNodeIDs)
+	observe.end(DNSOutputMembership, started, DNSOutputCacheUnobserved)
+	if !equal {
 		return fmt.Errorf("DNS producer output membership differs")
 	}
-	return platformconfig.ValidateDNSAuthorityHandoffs(previous.DNS, child, nodes)
+	started = observe.start()
+	err = platformconfig.ValidateDNSAuthorityHandoffs(previous.DNS, child, nodes)
+	observe.end(DNSOutputHandoffComparison, started, DNSOutputCacheUnobserved)
+	return err
 }

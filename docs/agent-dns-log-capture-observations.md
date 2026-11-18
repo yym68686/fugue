@@ -49,6 +49,15 @@ statement, including the shared lifecycle lock query. Both can carry SQLSTATE
 `55P03`; that code alone cannot distinguish them. A check name identifies the
 failing call, not the lock owner. These diagnostics add no database reads.
 
+The private storage observation's `platform_mutations` receipt partitions
+`producer_guard.dns_output` into fixed `dns_output_stages` with call counts and
+elapsed wall time. Stages distinguish the input fingerprint, cache lookup,
+child and predecessor decode, policy comparison and complete handoff
+comparison. `dns_output_cache` counts hits, misses and inapplicable lookups.
+Unreached stages are absent, and a cache hit does not record a decode or
+comparison. These are nested timings, not CPU or lock measurements, and add
+no reads, cache entries, retained inputs, or changes to publication checks.
+
 Rejected Agent route proofs also retain a same-read `publication` pair. Each
 side has separate SHA-256 hashes of the release-set, route-artifact and release
 IDs, an allowlisted channel, and its numeric fence. Hashes are SHA-256 of the

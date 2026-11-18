@@ -195,7 +195,7 @@ func validateProducerReleaseGuardWithTrace(state *model.State, parent model.Plat
 			}
 			if policy.InputSource == platformproducer.DNSProducerInputSource {
 				trace.advance(producerGuardDNSOutput)
-				if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || platformproducer.ValidateDNSProducerOutput(policy, child) != nil {
+				if child.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || platformproducer.ValidateDNSProducerOutputObserved(policy, child, trace.dnsOutputObserver()) != nil {
 					return ErrConflict
 				}
 			}

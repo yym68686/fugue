@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/platformproducer"
 	"fugue/internal/runtimeobservation"
 )
 
@@ -30,6 +31,8 @@ type platformMutationTrace struct {
 	producerGuardDuration   [producerGuardPhaseCount]time.Duration
 	producerGuardVisited    [producerGuardPhaseCount]bool
 	producerGuardFinalPhase string
+	producerDNSOutput       [platformproducer.DNSOutputStageCount]platformProducerDNSOutputStage
+	producerDNSCache        platformProducerDNSCacheCounts
 }
 
 type platformMutationTraceKey struct{}
