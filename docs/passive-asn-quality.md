@@ -83,3 +83,10 @@ incumbent, considered edge, and the comparison timestamp and window counts,
 including whether the evidence is historical. It replays the recorded wire
 selection, not the private source-prefix classification. Neither the client
 nor the resolver address is recorded in the receipt.
+
+Before a production upgrade, identify the serving workloads from each
+authority's live decision endpoint (`backend.pod_name` and owner), not
+from component names. A ready parallel or validation workload can load a
+signed observation without owning the public listener. After rollout,
+query both public addresses and confirm that the resulting receipts came
+from the upgraded serving workloads.
