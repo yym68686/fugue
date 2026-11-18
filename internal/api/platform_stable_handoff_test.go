@@ -13,15 +13,27 @@ import (
 )
 
 func TestAutomaticStableHandoffPreservesPositiveArtifactUntilIndependentReady(t *testing.T) {
-	s, request, parent, _ := retainedTrafficAPIFixture(t)
+	s, request, parent, _ := retainedTrafficAPIFixture(t, func(r *platformconfig.CompileRequest) {
+		r.Intent.CachePolicies = defaultEdgeCachePolicies()
+		route := &r.Intent.Routes[0]
+		route.DeploymentGeneration = "deploy-old"
+		route.CachePolicyID = r.Intent.CachePolicies[0].ID
+		route.CacheNamespace = "app-a_deploy-old"
+	})
 	now := time.Now().UTC()
 	request.RuntimeSnapshot.CapturedAt = &now
+	app := model.App{ID: "app-a", TenantID: "tenant-a", Spec: model.AppSpec{RuntimeID: model.DefaultManagedRuntimeID}, Status: model.AppStatus{LastOperationID: "deploy-next"}}
+	request.Intent.Routes[0].DeploymentGeneration = edgeRouteDeploymentGeneration(app)
+	request.Intent.Routes[0].CacheNamespace = "app-a_deploy-next"
 	request.RuntimeSnapshot.Releases[0].ID = "release-a-next"
 	request.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusUnavailable
 	request.RuntimeSnapshot.Releases[0].StatusReason = "release service-owned endpoint Pods are not ready"
 	request.Policy.TrafficConstraints[0].StableReleaseID = "release-a-next"
 	projection := platformIntentProjectionResponse{Intent: request.Intent, Policy: request.Policy, RuntimeSnapshot: request.RuntimeSnapshot, CapturedAt: now}
-	business := store.RouteBusinessSnapshot{TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a-next", StableWeight: 100, UpdatedByType: model.ActorTypeSystem, UpdatedByID: "stable-release-sync"}}}
+	business := store.RouteBusinessSnapshot{
+		Apps:            []model.App{app},
+		TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a-next", StableWeight: 100, UpdatedByType: model.ActorTypeSystem, UpdatedByID: "stable-release-sync"}},
+	}
 	before, _ := json.Marshal(projection)
 	err := s.guardPendingStableHandoffs(context.Background(), projection, business)
 	if err == nil || !strings.Contains(err.Error(), "managed app serving handoff pending") || !strings.Contains(err.Error(), "endpoint Pods are not ready") {
@@ -46,10 +58,14 @@ func TestAutomaticStableHandoffPreservesPositiveArtifactUntilIndependentReady(t 
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(compiled.RouteArtifact.Content)
-	if !strings.Contains(string(raw), "release-a-next") || strings.Contains(string(raw), "stable release is not ready") {
+	if !strings.Contains(string(raw), "release-a-next") || !strings.Contains(string(raw), "app-a_deploy-next") || strings.Contains(string(raw), "stable release is not ready") {
 		t.Fatal("ready handoff did not compile", string(raw))
 	}
-	for _, scenario := range []string{"operator selection", "disable", "route authority change", "peer config recovery", "dns recovery", "policy recovery", "expired evidence", "weights", "candidate", "ready", "no old binding"} {
+	for _, scenario := range []string{
+		"operator selection", "disable", "route authority change", "peer config recovery", "dns recovery",
+		"policy recovery", "expired evidence", "weights", "candidate", "ready", "no old binding",
+		"custom cache", "wrong operation", "failed operation", "unmanaged runtime",
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			var p platformIntentProjectionResponse
 			_ = json.Unmarshal(before, &p)
@@ -78,6 +94,17 @@ func TestAutomaticStableHandoffPreservesPositiveArtifactUntilIndependentReady(t 
 				p.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusActive
 			case "no old binding":
 				p.Intent.Scope = "another-scope"
+			case "custom cache":
+				p.Intent.Routes[0].CacheNamespace = "custom-cache"
+			case "wrong operation":
+				p.Intent.Routes[0].DeploymentGeneration = "not-the-app-operation"
+				p.Intent.Routes[0].CacheNamespace = "app-a_not-the-app-operation"
+			case "failed operation":
+				b.Apps = []model.App{app}
+				b.Apps[0].Status.LastFailedOperation = &model.AppOperationFailure{ID: "deploy-next"}
+			case "unmanaged runtime":
+				b.Apps = []model.App{app}
+				b.Apps[0].Spec.RuntimeID = "external"
 			}
 			if err := s.guardPendingStableHandoffs(context.Background(), p, b); err != nil {
 				t.Fatal("explicit authority or normal isolation blocked", err)

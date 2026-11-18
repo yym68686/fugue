@@ -28,6 +28,7 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 	policies := map[string]model.AppTrafficPolicy{}
 	automatic := map[string]bool{}
 	inFlightManagedDeploy := map[string]bool{}
+	managedRouteEpochs := map[string]string{}
 	enabled := map[string]bool{}
 	for _, route := range p.Intent.Routes {
 		if route.Enabled {
@@ -41,6 +42,9 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 		}
 	}
 	for _, app := range business.Apps {
+		if !managedRuntimes[strings.TrimSpace(app.Spec.RuntimeID)] {
+			continue
+		}
 		key := app.TenantID + "\x00" + app.ID
 		// The transactional business snapshot is frozen before the Kubernetes
 		// read. An in-place deployment may finish between those two reads: the
@@ -49,8 +53,10 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 		// app phase may already say deployed. Neither is
 		// serving proof. The existing LKG and exact authority gates below remain
 		// mandatory and its original evidence expiry is not extended.
-		if activeRouteDeployOperation(business, app) && managedRuntimes[strings.TrimSpace(app.Spec.RuntimeID)] {
+		if activeRouteDeployOperation(business, app) {
 			inFlightManagedDeploy[key] = true
+		} else if !model.AppHasCurrentFailedOperation(app.Status) {
+			managedRouteEpochs[key] = strings.TrimSpace(app.Status.LastOperationID)
 		}
 	}
 	for _, policy := range business.TrafficPolicies {
@@ -84,6 +90,7 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 	}
 	adjusted := p.Policy
 	adjusted.TrafficConstraints = append([]platformconfig.TrafficPolicyConstraint(nil), p.Policy.TrafficConstraints...)
+	adjustedIntent := p.Intent
 	protected := []platformconfig.ReleaseObservation{}
 	for _, release := range pending {
 		var oldRule, nextRule platformconfig.TrafficPolicyConstraint
@@ -111,8 +118,10 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 			continue
 		}
 		// Compare all per-app serving authority, including source, topology, TLS,
-		// cache, route ownership, limits and constraints. Only the system-authored
-		// stable release identity may differ; do not loosen retention's digest gate.
+		// cache, route ownership, limits and constraints. After automatic stable
+		// sync, the generated route epochs can advance along with the release ID.
+		// Only normalize those exact fields for the comparison; do not loosen the
+		// normal retention digest or copy an old binding into a new publication.
 		trial := p.Policy
 		trial.TrafficConstraints = append([]platformconfig.TrafficPolicyConstraint(nil), p.Policy.TrafficConstraints...)
 		for i := range trial.TrafficConstraints {
@@ -121,11 +130,18 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 			}
 		}
 		before, beforeErr := platformconfig.TrafficPartitionInputDigest(source.intent, source.policy, release.TenantID, release.AppID)
-		after, afterErr := platformconfig.TrafficPartitionInputDigest(p.Intent, trial, release.TenantID, release.AppID)
+		nextIntent := adjustedIntent
+		after, afterErr := platformconfig.TrafficPartitionInputDigest(nextIntent, trial, release.TenantID, release.AppID)
+		if beforeErr == nil && afterErr == nil && before != after && oldRule.StableReleaseID != nextRule.StableReleaseID {
+			if withPreviousEpochs, ok := intentWithPreviousHandoffEpochs(source, nextIntent, release.TenantID, release.AppID, managedRouteEpochs[key]); ok {
+				nextIntent = withPreviousEpochs
+				after, afterErr = platformconfig.TrafficPartitionInputDigest(nextIntent, trial, release.TenantID, release.AppID)
+			}
+		}
 		if beforeErr != nil || afterErr != nil || before != after {
 			continue
 		}
-		previous := source.routes[release.TenantID+"\x00"+release.AppID]
+		previous := source.routes[key]
 		if len(previous) == 0 {
 			continue
 		}
@@ -136,6 +152,7 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 		if !positive || !source.expiry(release.TenantID, release.AppID).After(p.CapturedAt) {
 			continue
 		}
+		adjustedIntent = nextIntent
 		for i := range adjusted.TrafficConstraints {
 			if adjusted.TrafficConstraints[i].AppID == release.AppID && adjusted.TrafficConstraints[i].TenantID == release.TenantID {
 				adjusted.TrafficConstraints[i].StableReleaseID = oldRule.StableReleaseID
@@ -143,7 +160,7 @@ func (s *Server) guardPendingStableHandoffsWithSource(ctx context.Context, p pla
 		}
 		protected = append(protected, release)
 	}
-	if len(protected) > 0 && stableHandoffAuthorityEqual(source.intent, source.policy, p.Intent, adjusted) {
+	if len(protected) > 0 && stableHandoffAuthorityEqual(source.intent, source.policy, adjustedIntent, adjusted) {
 		release := protected[0]
 		return fmt.Errorf("managed app serving handoff pending: app_id=%s release_id=%s; preserving current verified serving artifact without publication; runtime_reason=%s", release.AppID, release.ID, release.StatusReason)
 	}

@@ -23,3 +23,18 @@ func TestPlatformProducerRetryDelayIsBoundedAndResets(t *testing.T) {
 		t.Fatal("independent authorities retry in lockstep")
 	}
 }
+
+func TestPlatformProducerNextIntervalSeparatesRefreshAndFailureBackoff(t *testing.T) {
+	if got := platformProducerNextInterval(15*time.Minute, "global", 0); got != 15*time.Minute {
+		t.Fatalf("successful reconcile should keep the normal policy interval, got %s", got)
+	}
+	if got := platformProducerNextInterval(15*time.Minute, "global", 1); got != 30*time.Second {
+		t.Fatalf("first transient failure should retry promptly, got %s", got)
+	}
+	if got := platformProducerNextInterval(15*time.Minute, "global", 4); got > 130*time.Second {
+		t.Fatalf("retries should remain bounded, got %s", got)
+	}
+	if got := platformProducerNextInterval(30*time.Second, "global", 4); got < 120*time.Second || got > 130*time.Second {
+		t.Fatalf("a short policy interval should not prevent repeated failures from backing off, got %s", got)
+	}
+}

@@ -120,14 +120,13 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil)
 					if err != nil {
 						failures = min(failures+1, 4)
-						interval = max(interval, platformProducerRetryDelay(scope, failures))
 					} else {
 						failures = 0
 					}
 					if err != nil && s.log != nil {
 						s.log.Printf("platform configuration producer failed scope=%s; retaining release: %v", scope, err)
 					}
-					lastAuthority, nextRun = authority.ID, time.Now().Add(interval)
+					lastAuthority, nextRun = authority.ID, time.Now().Add(platformProducerNextInterval(interval, scope, failures))
 				}
 				// Policy changes are noticed within this poll interval even when
 				// the previous policy requested infrequent compilation.

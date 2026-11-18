@@ -59,42 +59,54 @@ func handoffRouteKey(r platformconfig.RouteIntent) string {
 	return r.TenantID + "\x00" + r.AppID + "\x00" + r.Hostname + "\x00" + model.NormalizeAppRoutePathPrefix(r.PathPrefix)
 }
 
-// Do not remove deployment/cache epochs from the normal authorization digest.
-// For this one transition only, prove both are the generic operation-derived
-// values before comparing every remaining per-app intent/policy dependency.
-// The desired inputs remain untouched; the output retains the old exact route.
-func managedHandoffAuthorityEqual(source retainedTrafficSource, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, h platformconfig.ManagedServingHandoff) bool {
+// Compare a managed handoff against the previous epochs only after proving
+// they are generated deployment/cache values. Callers still have to compare
+// all remaining authority; this copy is never a compiler or publication input.
+func intentWithPreviousHandoffEpochs(source retainedTrafficSource, intent platformconfig.PlatformIntent, tenantID, appID, operationID string) (platformconfig.PlatformIntent, bool) {
+	if operationID == "" {
+		return intent, false
+	}
 	trial := intent
 	trial.Routes = append([]platformconfig.RouteIntent(nil), intent.Routes...)
 	old := map[string]platformconfig.RouteIntent{}
 	for _, r := range source.intent.Routes {
-		if r.TenantID == h.TenantID && r.AppID == h.AppID {
+		if r.TenantID == tenantID && r.AppID == appID {
 			old[handoffRouteKey(r)] = r
 		}
 	}
 	count := 0
 	for i := range trial.Routes {
 		r := &trial.Routes[i]
-		if r.AppID != h.AppID || r.TenantID != h.TenantID {
+		if r.AppID != appID || r.TenantID != tenantID {
 			continue
 		}
 		previous, ok := old[handoffRouteKey(*r)]
-		if !ok || !r.Enabled || r.Status != "" && r.Status != model.EdgeRouteStatusActive || r.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy) || r.DeploymentGeneration != h.OperationID || previous.DeploymentGeneration == "" {
-			return false
+		if !ok || !r.Enabled || r.Status != "" && r.Status != model.EdgeRouteStatusActive || r.RoutePolicy != "" && !model.EdgeRoutePolicyAllowsTraffic(r.RoutePolicy) || r.DeploymentGeneration != operationID || previous.DeploymentGeneration == "" {
+			return intent, false
 		}
 		if r.CacheNamespace != previous.CacheNamespace {
-			if r.CachePolicyID == "" || previous.CachePolicyID == "" || r.CacheNamespace != h.AppID+"_"+h.OperationID || previous.CacheNamespace != h.AppID+"_"+previous.DeploymentGeneration {
-				return false
+			if r.CachePolicyID == "" || previous.CachePolicyID == "" || r.CacheNamespace != appID+"_"+operationID || previous.CacheNamespace != appID+"_"+previous.DeploymentGeneration {
+				return intent, false
 			}
 		} else if r.CachePolicyID != "" && r.DeploymentGeneration != previous.DeploymentGeneration {
 			// A changed operation with an unchanged custom cache namespace is
 			// explicit authority, not the generated namespace this guard owns.
-			return false
+			return intent, false
 		}
 		r.DeploymentGeneration, r.CacheNamespace = previous.DeploymentGeneration, previous.CacheNamespace
 		count++
 	}
 	if count == 0 || count != len(old) {
+		return intent, false
+	}
+	return trial, true
+}
+
+// Do not remove deployment/cache epochs from the normal authorization digest.
+// Only this proven transition may compare the rest of the per-app authority.
+func managedHandoffAuthorityEqual(source retainedTrafficSource, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, h platformconfig.ManagedServingHandoff) bool {
+	trial, ok := intentWithPreviousHandoffEpochs(source, intent, h.TenantID, h.AppID, h.OperationID)
+	if !ok {
 		return false
 	}
 	before, e1 := platformconfig.TrafficPartitionInputDigest(source.intent, source.policy, h.TenantID, h.AppID)

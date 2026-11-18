@@ -17,3 +17,13 @@ func platformProducerRetryDelay(scope string, failures int) time.Duration {
 	_, _ = h.Write([]byte(scope))
 	return delay + time.Duration(h.Sum32()%10000)*time.Millisecond
 }
+
+// The normal refresh interval is not the failure backoff. A transient failure
+// (such as a publication lock timeout) should get a prompt retry even under a
+// long refresh policy. Repeated failures still back off under short policies.
+func platformProducerNextInterval(normal time.Duration, scope string, failures int) time.Duration {
+	if failures > 0 {
+		return platformProducerRetryDelay(scope, failures)
+	}
+	return max(30*time.Second, normal)
+}
