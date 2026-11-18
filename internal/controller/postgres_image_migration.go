@@ -38,9 +38,11 @@ type postgresImageWitness struct {
 	VerifiedPodUID string            `json:"verified_pod_uid,omitempty"`
 	ColdMigration  string            `json:"cold_migration,omitempty"`
 	// Optional for compatibility with image-only witnesses already in flight.
-	RestartResources      map[string]any      `json:"restart_resources,omitempty"`
-	RestartSpecHash       string              `json:"restart_spec_hash,omitempty"`
-	RestartResourceTarget *model.ResourceSpec `json:"restart_resource_target,omitempty"`
+	RestartResources      map[string]any             `json:"restart_resources,omitempty"`
+	RestartSpecHash       string                     `json:"restart_spec_hash,omitempty"`
+	RestartResourceTarget *model.ResourceSpec        `json:"restart_resource_target,omitempty"`
+	Drain                 *postgresImageDrainWitness `json:"drain,omitempty"`
+	DrainRestored         bool                       `json:"drain_restored,omitempty"`
 }
 
 // Verify the control file itself as well as CNPG's reported system ID. The
@@ -69,17 +71,21 @@ func probePostgresImageMigration(ctx context.Context, c *kubeClient, ns string, 
 }
 
 func (c *kubeClient) patchImageMigration(ctx context.Context, w postgresImageWitness, cluster map[string]any) error {
-	if imageString(imageObject(cluster["metadata"]), "uid") != w.ClusterUID || imagePreservedSpecHash(cluster) != w.SpecHash || imageString(imageObject(cluster["spec"]), "imageName") != w.SourceImage {
+	original, staged, err := originalImageDrainSpec(cluster, w.Drain)
+	if err != nil {
+		return err
+	}
+	if (w.Drain != nil && !staged) || imageString(imageObject(cluster["metadata"]), "uid") != w.ClusterUID || imagePreservedSpecHash(original) != w.SpecHash || imageString(imageObject(cluster["spec"]), "imageName") != w.SourceImage {
 		return fmt.Errorf("image migration compare-and-swap baseline changed")
 	}
 	patch := []map[string]any{{"op": "test", "path": "/metadata/uid", "value": w.ClusterUID}, {"op": "test", "path": "/metadata/resourceVersion", "value": imageString(imageObject(cluster["metadata"]), "resourceVersion")}, {"op": "test", "path": "/spec", "value": cluster["spec"]}, {"op": "replace", "path": "/spec/imageName", "value": w.TargetImage}}
 	if w.RestartResourceTarget != nil {
-		if err := validateImageRestartResources(w, cluster, false); err != nil {
+		if err := validateImageRestartResources(w, original, false); err != nil {
 			return err
 		}
 		patch = append(patch, map[string]any{"op": "replace", "path": "/spec/resources", "value": w.RestartResources})
 	}
-	_, err := c.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(w.Namespace, w.Cluster), "application/json-patch+json", patch, nil)
+	_, err = c.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(w.Namespace, w.Cluster), "application/json-patch+json", patch, nil)
 	return err
 }
 
@@ -409,10 +415,14 @@ func validateImageWitness(w postgresImageWitness, cluster, pod map[string]any, s
 	if image == w.TargetImage && w.RestartResourceTarget != nil {
 		expectedSpecHash = w.RestartSpecHash
 	}
-	if err := validateImageRestartResources(w, cluster, image == w.TargetImage); err != nil {
+	original, _, err := originalImageDrainSpec(cluster, w.Drain)
+	if err != nil {
 		return err
 	}
-	if imageString(imageObject(cluster["metadata"]), "uid") != w.ClusterUID || imagePreservedSpecHash(cluster) != expectedSpecHash || snapshot.Cluster.Status.SystemID != w.SystemID {
+	if err := validateImageRestartResources(w, original, image == w.TargetImage); err != nil {
+		return err
+	}
+	if imageString(imageObject(cluster["metadata"]), "uid") != w.ClusterUID || imagePreservedSpecHash(original) != expectedSpecHash || snapshot.Cluster.Status.SystemID != w.SystemID {
 		return fmt.Errorf("database Cluster identity or preserved specification changed")
 	}
 	if snapshot.Observation.PodName != w.Pod || snapshot.Observation.NodeName != w.Node || pgimage.Hash(imageContainer(pod)["resources"]) != w.ResourcesHash {
@@ -442,11 +452,22 @@ func (s *Service) imageMigrationEvidence(op model.Operation, kind string, w post
 
 func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Operation, app model.App) (executionErr error) {
 	// Unknown evidence state is unsafe to classify as an ordinary failed job.
-	evidence, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{pgimage.IntentEvidence}, IncludeMigrationLedger: true, Limit: 1})
+	evidence, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{pgimage.IntentEvidence, pgimage.DrainAbortEvidence}, IncludeMigrationLedger: true, Limit: 3})
 	if err != nil {
 		return fmt.Errorf("%w: read durable intent: %v", errPostgresImageMigrationUnsettled, err)
 	}
-	intent := len(evidence) > 0
+	var recordedIntent *model.OperationEvidence
+	abortDrain := false
+	for i := range evidence {
+		switch evidence[i].Type {
+		case pgimage.IntentEvidence:
+			recordedIntent = &evidence[i]
+		case pgimage.DrainAbortEvidence:
+			abortDrain = true
+		}
+	}
+	intent := recordedIntent != nil
+	resuming := intent
 	defer func() {
 		if executionErr != nil && intent && !errors.Is(executionErr, context.Canceled) && !errors.Is(executionErr, errOperationNoLongerActive) {
 			_, _ = s.Store.UpdateOperationProgress(op.ID, "image migration waiting for verification: "+executionErr.Error())
@@ -467,7 +488,8 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 	if err != nil {
 		return err
 	}
-	if store.PostgresImageMigrationConfigHash(app, *target.Service, image) != op.DesiredSpec.Postgres.ImageMigrationConfigHash {
+	budget := op.DesiredSpec.Postgres.ImageMigrationDrainBudgetSeconds
+	if !pgimage.ValidDrainBudget(budget) || store.PostgresImageMigrationPlanHash(app, *target.Service, image, budget) != op.DesiredSpec.Postgres.ImageMigrationConfigHash {
 		return fmt.Errorf("configuration changed since migration admission")
 	}
 	catalog, err := pgimage.ApprovedCatalog()
@@ -487,14 +509,19 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 	}
 	ns, name := runtime.NamespaceForTenant(app.TenantID), target.Postgres.ServiceName
 	var witness postgresImageWitness
+	// Once armed, a timeout is measured from the first durable intent, not
+	// from each retry or a new controller leader.
+	armDeadline := time.Now().Add(30 * time.Second)
 	if intent {
-		b, _ := json.Marshal(evidence[0].Payload)
+		b, _ := json.Marshal(recordedIntent.Payload)
 		if err = json.Unmarshal(b, &witness); err != nil {
 			return err
 		}
-		if witness.Namespace != ns || witness.Cluster != name || witness.TargetImage != image || witness.ClusterUID == "" || witness.SystemID == "" || witness.PodUID == "" || witness.SpecHash == "" || len(witness.Volumes) == 0 {
+		if witness.Namespace != ns || witness.Cluster != name || witness.TargetImage != image || witness.ClusterUID == "" || witness.SystemID == "" || witness.PodUID == "" || witness.SpecHash == "" || len(witness.Volumes) == 0 ||
+			(budget == 0 && witness.Drain != nil) || (budget != 0 && (witness.Drain == nil || witness.Drain.BudgetSeconds != budget || witness.Drain.OriginalSeconds <= budget || witness.Drain.Marker != pgimage.Hash([]string{op.ID, witness.ClusterUID, witness.PodUID}))) || witness.DrainRestored {
 			return fmt.Errorf("durable migration witness is incomplete or mismatched")
 		}
+		armDeadline = recordedIntent.CollectedAt.Add(30 * time.Second)
 	} else {
 		witness, err = client.captureImageWitness(ctx, ns, op.ServiceID, image, target.Postgres, catalog)
 		if err != nil {
@@ -513,6 +540,20 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 		if err = probe(ctx, client, ns, target.Postgres, snapshot, pod); err != nil {
 			return err
 		}
+		if budget != 0 {
+			if err := configurePostgresImageDrain(&witness, cluster, op.ID, budget); err != nil {
+				return err
+			}
+			sample := s.imageDrainSample(ctx, client, witness)
+			s.recordImageDrainSample(op, sample)
+			if sample.Status != "eligible" || sample.LoadedMarker != "" {
+				reason := sample.Reason
+				if reason == "" {
+					reason = "an unexpected drain marker is loaded"
+				}
+				return fmt.Errorf("fast drain preflight blocked: %s", reason)
+			}
+		}
 		if err = s.imageMigrationEvidence(op, pgimage.BaselineEvidence, witness); err != nil {
 			return err
 		}
@@ -524,6 +565,7 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 			return err
 		}
 		intent = true
+		armDeadline = time.Now().Add(30 * time.Second)
 	}
 	if witness.RestartResourceTarget != nil && (target.Postgres.RuntimeResources == nil || *witness.RestartResourceTarget != *target.Postgres.RuntimeResources) {
 		return fmt.Errorf("accepted restart resources differ from the persisted in-place resource target")
@@ -532,9 +574,42 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 	deadline := time.Now().Add(15 * time.Minute)
 	waitingReason := "awaiting a new healthy primary Pod using the target image"
 	reportedReason := ""
+	var timing *postgresImageEndpointSampler
+	if witness.Drain != nil {
+		timing = s.observeImageEndpoint(ctx, op, client, witness, target.Postgres, resuming)
+		defer timing.stopAndRecord()
+	}
 	for {
 		if err = s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 			return err
+		}
+		if witness.Drain != nil {
+			current, readErr := client.imageMigrationObject(ctx, cloudNativePGClusterAPIPath(ns, name))
+			if readErr != nil {
+				return readErr
+			}
+			staged, verifyErr := verifyImageDrainCluster(witness, current)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			oldImage := imageString(imageObject(current["spec"]), "imageName") == witness.SourceImage
+			if oldImage && (abortDrain || time.Now().After(armDeadline)) {
+				if err := s.abortImageDrain(ctx, client, op, witness, current, target.Postgres, abortDrain, "old instance did not reach the approved cutover"); err != nil {
+					return err
+				}
+				intent = false
+				return fmt.Errorf("fast drain aborted before image replacement; original shutdown settings restored")
+			}
+			if !oldImage && staged {
+				// Restore only once the original writer has exited and CNPG has
+				// created the exact replacement. No need to wait for SQL readiness.
+				if replacement, err := client.imageMigrationObject(ctx, imageDrainPodPath(witness)); err == nil && imageDrainReplacement(replacement, witness) {
+					if err := s.restoreImageDrain(ctx, client, op, witness, current); err != nil {
+						return err
+					}
+					continue
+				}
+			}
 		}
 		cluster, pod, snapshot, observeErr := client.observeImageMigration(ctx, ns, op.ServiceID, target.Postgres)
 		if observeErr != nil {
@@ -557,13 +632,76 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 				if snapshot.Observation.PodUID != witness.PodUID {
 					return fmt.Errorf("source primary was replaced outside the migration")
 				}
+				if witness.Drain != nil {
+					staged, err := verifyImageDrainCluster(witness, cluster)
+					if err != nil {
+						return err
+					}
+					sample := s.imageDrainSample(ctx, client, witness)
+					if sample.Status != "eligible" {
+						s.recordImageDrainSample(op, sample)
+						if err := s.abortImageDrain(ctx, client, op, witness, cluster, target.Postgres, abortDrain, sample.Reason); err != nil {
+							return err
+						}
+						intent = false
+						return fmt.Errorf("fast drain aborted: %s", sample.Reason)
+					}
+					if !staged {
+						if sample.LoadedMarker != "" {
+							return fmt.Errorf("old instance reports a foreign drain marker")
+						}
+						if err := s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
+							return err
+						}
+						if err := client.patchImageDrain(ctx, witness, cluster, true); err != nil {
+							return err
+						}
+						continue
+					}
+					if sample.LoadedMarker != witness.Drain.Marker || !sample.MarkerFromFile {
+						reason := "awaiting old instance manager acknowledgement of temporary shutdown settings"
+						if reportedReason != reason {
+							_, _ = s.Store.UpdateOperationProgress(op.ID, "database image migration waiting: "+reason)
+							reportedReason = reason
+						}
+						if err := waitManagedPostgresResizePollInterval(ctx, 500*time.Millisecond); err != nil {
+							return err
+						}
+						continue
+					}
+					// UID and resourceVersion pin the old Pod and Cluster
+					// observations across the acknowledged reload.
+					currentPod, err := client.imageMigrationObject(ctx, imageDrainPodPath(witness))
+					if err != nil || imageString(imageObject(currentPod["metadata"]), "uid") != witness.PodUID {
+						return fmt.Errorf("primary changed while verifying temporary shutdown settings")
+					}
+					s.recordImageDrainSample(op, sample)
+				}
 				if err = s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 					return err
+				}
+				if timing != nil {
+					timing.markCutover()
 				}
 				if err = client.patchImageMigration(ctx, witness, cluster); err != nil {
 					return fmt.Errorf("image compare-and-swap outcome requires verification: %w", err)
 				}
 			} else if snapshot.Observation.PodUID != witness.PodUID && imageString(imageContainer(pod), "image") == image {
+				if witness.Drain != nil {
+					staged, err := verifyImageDrainCluster(witness, cluster)
+					if err != nil {
+						return err
+					}
+					if staged {
+						if err := s.restoreImageDrain(ctx, client, op, witness, cluster); err != nil {
+							return err
+						}
+						continue
+					}
+					if sample := s.imageDrainSample(ctx, client, witness); sample.SampledAt == nil || sample.LoadedMarker != "" {
+						return fmt.Errorf("waiting for replacement instance to acknowledge restored shutdown settings")
+					}
+				}
 				resolved := false
 				for _, status := range imageObjects(imageObject(pod["status"])["containerStatuses"]) {
 					if imageString(status, "name") == managedPostgresMainContainerName && strings.HasSuffix(imageString(status, "imageID"), strings.Split(image, "@")[1]) {
@@ -585,6 +723,10 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 				}
 				verified := witness
 				verified.VerifiedPodUID = snapshot.Observation.PodUID
+				verified.DrainRestored = witness.Drain != nil
+				if timing != nil {
+					timing.stopAndRecord()
+				}
 				if err = s.imageMigrationEvidence(op, pgimage.VerifiedEvidence, verified); err != nil {
 					return err
 				}

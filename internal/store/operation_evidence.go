@@ -998,7 +998,7 @@ func isLongLivedMigrationEvidenceType(evidenceType string) bool {
 // recovery may still own an unresolved, accepted Kubernetes mutation.
 func isPostgresMutationSafetyEvidence(kind string) bool {
 	switch kind {
-	case "postgres_image_migration_baseline", "postgres_image_migration_intent", "postgres_image_migration_verified", "postgres_source_retirement_intent", "postgres_source_retirement_verified":
+	case "postgres_image_migration_baseline", "postgres_image_migration_intent", "postgres_image_migration_verified", "postgres_image_migration_drain_abort", "postgres_source_retirement_intent", "postgres_source_retirement_verified":
 		return true
 	default:
 		return false

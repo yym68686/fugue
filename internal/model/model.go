@@ -2183,6 +2183,7 @@ type AppPostgresSpec struct {
 	// SourceRetirement is operation-only intent; it is never committed to an app or service.
 	SourceRetirement                 *PostgresSourceRetirementPlan `json:"source_retirement,omitempty"`
 	ImageMigrationConfigHash         string                        `json:"image_migration_config_hash,omitempty"`
+	ImageMigrationDrainBudgetSeconds int                           `json:"image_migration_drain_budget_seconds,omitempty"` // Operation-only.
 	Image                            string                        `json:"image,omitempty"`
 	Database                         string                        `json:"database,omitempty"`
 	User                             string                        `json:"user,omitempty"`

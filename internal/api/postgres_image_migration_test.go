@@ -168,3 +168,62 @@ func TestIndependentImageMigrationRejectsUnboundAndCrossProjectConsumers(t *test
 		})
 	}
 }
+
+func TestPostgresImageFastDrainBindsBudgetToPlanAndRequiresAcknowledgement(t *testing.T) {
+	state, server, key, app, service := managedPostgresLifecycleFixture(t, 0)
+	before, err := state.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/backing-services/" + service.ID + "/migrate-image"
+	plan := func(request map[string]any) pgimage.Plan {
+		t.Helper()
+		res := performJSONRequest(t, server, http.MethodPost, path, key, request)
+		if res.Code != http.StatusOK {
+			t.Fatalf("could not obtain plan: %d %s", res.Code, res.Body.String())
+		}
+		var result struct{ Plan pgimage.Plan }
+		mustDecodeJSON(t, res, &result)
+		return result.Plan
+	}
+	standard, fast := plan(map[string]any{}), plan(map[string]any{"drain_budget_seconds": 15})
+	if standard.Drain != nil || fast.Drain == nil || fast.DrainBudgetSeconds != 15 || standard.ConfigHash == fast.ConfigHash {
+		t.Fatalf("invalid fast drain plan: %+v", fast)
+	}
+	var acceptedID string
+	for _, tc := range []struct {
+		budget       int
+		acknowledges bool
+		hash         string
+		want         int
+	}{
+		{0, false, fast.ConfigHash, http.StatusBadRequest},
+		{9, true, fast.ConfigHash, http.StatusBadRequest},
+		{16, true, fast.ConfigHash, http.StatusBadRequest},
+		{15, false, fast.ConfigHash, http.StatusBadRequest},
+		{15, true, standard.ConfigHash, http.StatusConflict},
+		{10, true, fast.ConfigHash, http.StatusConflict},
+		{15, true, fast.ConfigHash, http.StatusAccepted},
+	} {
+		res := performJSONRequest(t, server, http.MethodPost, path, key, map[string]any{
+			"apply": true, "acknowledge_downtime": true, "expected_config_hash": tc.hash,
+			"drain_budget_seconds": tc.budget, "acknowledge_connection_termination": tc.acknowledges,
+		})
+		if res.Code != tc.want {
+			t.Fatalf("budget %d and ack %v: got %d want %d: %s", tc.budget, tc.acknowledges, res.Code, tc.want, res.Body.String())
+		}
+		if res.Code == http.StatusAccepted {
+			var result struct{ Operation model.Operation }
+			mustDecodeJSON(t, res, &result)
+			acceptedID = result.Operation.ID
+		}
+	}
+	ops, err := state.ListOperationsByApp(app.TenantID, false, app.ID)
+	if err != nil || len(ops) != len(before)+1 {
+		t.Fatalf("rejected requests created operations: before=%d after=%d error=%v", len(before), len(ops), err)
+	}
+	op, err := state.GetOperation(acceptedID)
+	if err != nil || op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil || op.DesiredSpec.Postgres.ImageMigrationDrainBudgetSeconds != 15 {
+		t.Fatalf("budget not recorded in accepted operation: %v", err)
+	}
+}
