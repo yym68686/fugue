@@ -124,6 +124,7 @@ type Workload struct {
 	FieldManager         string `json:"fieldManager"`
 	Replicas             int    `json:"replicas"`
 	PreservedUnavailable int    `json:"preservedUnavailable,omitempty"`
+	NodeParticipation    string `json:"nodeParticipation,omitempty"`
 	RolloutMode          string `json:"rolloutMode"`
 	HealthTimeoutSeconds int    `json:"healthTimeoutSeconds,omitempty"`
 }
@@ -556,6 +557,9 @@ func (workload Workload) validate(componentID string) error {
 	}
 	if workload.PreservedUnavailable < 0 || (workload.Kind != "DaemonSet" && workload.PreservedUnavailable != 0) {
 		return fmt.Errorf("component %q preservedUnavailable is invalid", componentID)
+	}
+	if workload.NodeParticipation != "" && (workload.NodeParticipation != "reachable" || workload.Kind != "DaemonSet" || workload.RolloutMode != "rolling" || workload.PreservedUnavailable != 0) {
+		return fmt.Errorf("component %q nodeParticipation requires a rolling DaemonSet without preservedUnavailable", componentID)
 	}
 	if workload.HealthTimeoutSeconds != 0 && (workload.HealthTimeoutSeconds < 120 || workload.HealthTimeoutSeconds > 300) {
 		return fmt.Errorf("component %q healthTimeoutSeconds must be omitted or between 120 and 300", componentID)

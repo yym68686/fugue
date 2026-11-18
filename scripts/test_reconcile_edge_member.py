@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh
+from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source
 import base64
 
 
@@ -52,6 +52,22 @@ def inactive_fixture():
 
 
 class MemberRecoveryTest(unittest.TestCase):
+    def test_retained_previous_stage_binds_both_current_and_retained_authorities(self):
+        c, authority, current, old = fixture()
+        authority.update(currentRecordDigest='sha256:'+'c'*64, previousRecordDigest='sha256:'+'d'*64)
+        mapping={'generation':'FrontGeneration','active_slot':'WorkerSlot','worker_source_commit':'WorkerSourceSha','worker_image_digest':'WorkerImageDigest','bundle_generation':'BundleGeneration'}
+        retained=dict(current, generation=9, active_slot='a', worker_source_commit='e'*40, worker_image_digest='sha256:'+'e'*64)
+        for key,suffix in mapping.items():authority['previous'+suffix]=retained[key]
+        old=dict(old, generation=7, active_slot='b')
+        c.update(authorityRecord=authority['currentRecordDigest'], previousState=old, retainedPrevious=True, workerPort=18443)
+        source=retained_source(authority,current)
+        validate(c,authority,source,old)
+        for mutation in [lambda a:a.update(previousRecordDigest=''), lambda a:a.update(previousWorkerSlot='b'), lambda a:a.update(currentWorkerSourceSha='f'*40)]:
+            changed=copy.deepcopy(authority);mutation(changed)
+            with self.assertRaises((ValueError,KeyError)):
+                candidate=retained_source(changed,current)
+                validate(c,changed,candidate,old)
+
     def test_inactive_refresh_rejects_active_foreign_or_uncommitted_replacements(self):
         args = inactive_fixture()
         self.assertTrue(validate_inactive_refresh(*args))

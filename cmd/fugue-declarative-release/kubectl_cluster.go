@@ -99,13 +99,14 @@ func emergencyOwnershipManager(manager string) bool {
 }
 
 type kubectlCluster struct {
-	edgeCohorts    map[string]edgecohort.Snapshot
-	kubectl        string
-	verifier       string
-	timeout        time.Duration
-	readTimeout    time.Duration
-	readAttempts   int
-	readRetryDelay time.Duration
+	nodeParticipation map[string]declarativerelease.NodeParticipation
+	edgeCohorts       map[string]edgecohort.Snapshot
+	kubectl           string
+	verifier          string
+	timeout           time.Duration
+	readTimeout       time.Duration
+	readAttempts      int
+	readRetryDelay    time.Duration
 	// readCommand allows retry semantics to be checked independently of OS
 	// process startup. Mutating commands always use run directly.
 	readCommand      func(context.Context, []byte, string, ...string) ([]byte, error)
@@ -234,6 +235,20 @@ func (cluster *kubectlCluster) ObserveCAS(ctx context.Context, release declarati
 	observation.UID = stringValue(metadata["uid"])
 	observation.ResourceVersion = stringValue(metadata["resourceVersion"])
 	observation.Generation = int64Value(metadata["generation"])
+	if p, found := cluster.nodeParticipation[participationKey(release)]; found {
+		selector, selectErr := selectorFromWorkload(workloadRaw)
+		if selectErr != nil {
+			return declarativerelease.Observation{}, selectErr
+		}
+		pods, readErr := cluster.kubectlRun(ctx, nil, "get", "pods", "--namespace", release.Workload.Namespace, "--selector", selector, "--output", "json")
+		if readErr != nil {
+			return declarativerelease.Observation{}, readErr
+		}
+		if _, _, err := cluster.participatingPods(ctx, release, workloadRaw, pods); err != nil {
+			return declarativerelease.Observation{}, err
+		}
+		observation.Participation = &p
+	}
 	return observation, nil
 }
 
@@ -604,6 +619,9 @@ func (cluster *kubectlCluster) ObserveDegraded(ctx context.Context, release decl
 		return declarativerelease.Observation{}, err
 	}
 	observation.Resources = resources
+	if p, ok := cluster.nodeParticipation[participationKey(release)]; ok {
+		observation.Participation = &p
+	}
 	if err := observation.ValidateDegradedPredecessor(release); err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -2466,7 +2484,7 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
-	podsRaw, members, err := cluster.edgeObservationMembers(release, workloadRaw, podsRaw)
+	podsRaw, members, err := cluster.participatingPods(ctx, release, workloadRaw, podsRaw)
 	if err != nil {
 		return declarativerelease.Observation{}, err
 	}
@@ -2505,6 +2523,10 @@ func (cluster *kubectlCluster) observeExpected(ctx context.Context, release decl
 		return declarativerelease.Observation{}, err
 	}
 	partial.Resources = resources
+	if p, ok := cluster.nodeParticipation[participationKey(release)]; ok {
+		partial.Participation = &p
+		partial.HealthDigest = digestJoin(partial.HealthDigest, digestJSON(p))
+	}
 	return partial, nil
 }
 
@@ -3237,7 +3259,7 @@ func (cluster *kubectlCluster) readyPodHTTPEndpoints(ctx context.Context, releas
 	if err != nil {
 		return nil, err
 	}
-	podsRaw, _, err = cluster.edgeObservationMembers(release, workloadRaw, podsRaw)
+	podsRaw, _, err = cluster.participatingPods(ctx, release, workloadRaw, podsRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -3585,7 +3607,7 @@ func parseObservationWithCohort(workloadRaw, podsRaw []byte, release declarative
 	}
 	if expectedMembers != nil {
 		if release.Workload.Kind != "DaemonSet" || *expectedMembers < 1 || release.Workload.PreservedUnavailable != 0 {
-			return declarativerelease.Observation{}, errors.New("invalid Edge observation membership count")
+			return declarativerelease.Observation{}, errors.New("invalid observation membership count")
 		}
 		observation.Desired = *expectedMembers
 	}

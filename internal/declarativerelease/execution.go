@@ -22,6 +22,7 @@ const (
 var resourceVersionPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 type Observation struct {
+	Participation      *NodeParticipation    `json:"participation,omitempty"`
 	Present            bool                  `json:"present"`
 	Primary            ResourceIdentity      `json:"primary"`
 	UID                string                `json:"uid"`
@@ -42,6 +43,32 @@ type Observation struct {
 	HealthDigest       string                `json:"healthDigest"`
 	FieldManagers      []string              `json:"fieldManagers"`
 	Resources          []ResourceObservation `json:"resources"`
+}
+
+// NodeParticipation is a frozen physical inventory, rather than a number of
+// failures to tolerate. Deferred nodes keep their identity and desired Pod;
+// returning nodes join the next observation, never a running transaction.
+type NodeParticipation struct {
+	WorkloadUID string            `json:"workloadUid"`
+	Required    map[string]string `json:"required"`
+	Deferred    map[string]string `json:"deferred"`
+}
+
+func (p NodeParticipation) Validate() error {
+	if p.WorkloadUID == "" || len(p.Required) < 1 || len(p.Required)+len(p.Deferred) > 1000 {
+		return errors.New("invalid node participation inventory")
+	}
+	for name, uid := range p.Required {
+		if name == "" || uid == "" || p.Deferred[name] != "" {
+			return errors.New("invalid required node identity")
+		}
+	}
+	for name, uid := range p.Deferred {
+		if name == "" || uid == "" {
+			return errors.New("invalid deferred node identity")
+		}
+	}
+	return nil
 }
 
 type ResourceObservation struct {
@@ -654,6 +681,20 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		result.Status, result.Reason, result.FailureDetail = "failed-no-write", "manifest-transition-invalid", err.Error()
 		return sealResult(result)
 	}
+	if prepared.Prewrite.Participation != nil {
+		binder, ok := cluster.(interface {
+			BindNodeParticipation(PlanRelease, NodeParticipation) error
+		})
+		if !ok {
+			err = errors.New("cluster cannot restore frozen node participation")
+		} else {
+			err = binder.BindNodeParticipation(release, *prepared.Prewrite.Participation)
+		}
+		if err != nil {
+			result.Status, result.Reason, result.FailureDetail = "failed-no-write", "node-participation-invalid", err.Error()
+			return sealResult(result)
+		}
+	}
 	observationManifest := forwardManifest
 	var current Observation
 	if prepared.DegradedPredecessor {
@@ -1036,6 +1077,15 @@ func ReconcileExecution(ctx context.Context, cluster Cluster, releasePlan Plan, 
 		result.Reason = "execution-plan-invalid"
 		return sealResult(result)
 	}
+	if p := prepared.Prewrite.Participation; p != nil {
+		binder, ok := cluster.(interface {
+			BindNodeParticipation(PlanRelease, NodeParticipation) error
+		})
+		if !ok || binder.BindNodeParticipation(release, *p) != nil {
+			result.Reason = "node-participation-invalid"
+			return sealResult(result)
+		}
+	}
 	if release.Transition != nil && release.Transition.Type == "edge-group-ab" {
 		reconciler, ok := cluster.(CommittedForwardReconciler)
 		if !ok {
@@ -1129,6 +1179,13 @@ func (plan ExecutionPlan) Validate(releasePlan Plan, forwardManifest, lkgManifes
 	release, err := releaseByID(releasePlan, plan.Component)
 	if err != nil {
 		return err
+	}
+	if p := plan.Prewrite.Participation; p != nil {
+		if release.Workload.NodeParticipation != "reachable" || p.Validate() != nil || p.WorkloadUID != plan.Prewrite.UID || !plan.DegradedPredecessor && len(p.Required) != int(plan.Prewrite.Desired) {
+			return errors.New("execution node participation is invalid")
+		}
+	} else if release.Workload.NodeParticipation != "" && plan.Prewrite.Present {
+		return errors.New("execution lacks frozen node participation")
 	}
 	if !plan.Forward.Present || plan.Forward.ConfigSHA != releasePlan.HeadSHA ||
 		plan.Forward.ManifestSHA != releasePlan.HeadSHA || plan.Forward.OCIRevision != releasePlan.HeadSHA ||
@@ -1238,6 +1295,11 @@ func (observation Observation) MatchesSupersededFailedAtom(release PlanRelease) 
 }
 
 func (observation Observation) Validate(release PlanRelease) error {
+	if p := observation.Participation; p != nil {
+		if release.Workload.NodeParticipation != "reachable" || p.Validate() != nil || p.WorkloadUID != observation.UID || len(p.Required) != int(observation.Desired) {
+			return errors.New("workload node participation is invalid")
+		}
+	}
 	if !observation.Present || observation.UID == "" || !resourceVersionPattern.MatchString(observation.ResourceVersion) ||
 		observation.Generation < 1 || observation.ObservedGeneration != observation.Generation ||
 		observation.Desired < 1 || !digestPattern.MatchString(observation.TemplateDigest) ||

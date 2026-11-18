@@ -1,0 +1,21 @@
+{
+  "schema": "fugue.automatic-node-participation/v1",
+  "generation": 1,
+  "namespace": "fugue-system",
+  "origin": "https://api.fugue.pro",
+  "readers": {"guardian": "fugue-release-guardian", "canary-prober": "fugue-release-canary-prober"},
+  "members": [
+    {
+      "node": "bwg",
+      "node_uid": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+      "group": "edge-group-country-us",
+      "component": "edge-worker-us",
+      "front": "fugue-fugue-edge-front",
+      "workers": {"a": "fugue-fugue-edge-worker-a", "b": "fugue-fugue-edge-worker-b"},
+      "reason": "quota_exhausted",
+      "adopt_hold": true,
+      "stable_seconds": 300,
+      "probes": [{"host": "fugue.pro", "path": "/"}, {"host": "api.fugue.pro", "path": "/"}]
+    }
+  ]
+}

@@ -47,8 +47,10 @@ def validate(config, authority, source, previous):
               'worker', 'workerUID', 'referenceFront', 'referenceFrontUID', 'referenceWorker',
               'referenceWorkerUID', 'authorityUID', 'authorityRecord', 'previousState',
               'activationPath', 'workerPort', 'probes'}
-    if set(config) not in (fields, fields | {'refreshInactiveWorker'}) or config['schema'] != 'fugue.edge-member-recovery/v1':
+    if not fields <= set(config) or set(config)-fields-{'refreshInactiveWorker','retainedPrevious'} or config['schema'] != 'fugue.edge-member-recovery/v1':
         raise ValueError('Unsupported member recovery declaration')
+    if 'retainedPrevious' in config and config['retainedPrevious'] is not True:
+        raise ValueError('Retained recovery stage must be explicit')
     refresh = config.get('refreshInactiveWorker')
     if refresh is not None and (set(refresh) != {'daemonset', 'daemonsetUID', 'nodeUID'} or
             any(not isinstance(v, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,200}', v) for v in refresh.values())):
@@ -71,6 +73,10 @@ def validate(config, authority, source, previous):
     mapping = {'edge_group_id': 'groupId', 'generation': 'currentFrontGeneration', 'active_slot': 'currentWorkerSlot',
                'worker_source_commit': 'currentWorkerSourceSha', 'worker_image_digest': 'currentWorkerImageDigest',
                'bundle_generation': 'currentBundleGeneration'}
+    if config.get('retainedPrevious'):
+        mapping = {k:v.replace('current','previous',1) if v.startswith('current') else v for k,v in mapping.items()}
+        if not re.fullmatch(r'sha256:[a-f0-9]{64}', authority.get('previousRecordDigest','')) or authority['previousRecordDigest'] == authority['currentRecordDigest']:
+            raise ValueError('Retained previous authority is unavailable')
     if authority.get('currentRecordDigest') != config['authorityRecord'] or authority.get('groupId') != config['group'] or any(source.get(k) != authority.get(v) for k, v in mapping.items()):
         raise ValueError('Reference Front is not the declared committed authority')
     if source.get('schema') != 'edge-front-group-activation/v1' or source.get('authority') != 'edge-control' or source.get('operation') not in ('promote', 'rollback'):
@@ -85,6 +91,20 @@ def validate(config, authority, source, previous):
 
 def without_time(value):
     return {k: v for k, v in value.items() if k != 'updated_at'}
+
+
+def retained_source(authority, reference):
+    mapping = {'edge_group_id':'groupId', 'generation':'currentFrontGeneration', 'active_slot':'currentWorkerSlot', 'worker_source_commit':'currentWorkerSourceSha', 'worker_image_digest':'currentWorkerImageDigest', 'bundle_generation':'currentBundleGeneration'}
+    if any(reference.get(k) != authority.get(v) for k,v in mapping.items()):
+        raise ValueError('Reference does not prove the current authority before retained recovery')
+    source = dict(reference)
+    for k,v in mapping.items():
+        if v.startswith('current'): source[k] = authority.get(v.replace('current','previous',1))
+    source.update(previous_slot=reference['active_slot'], operation='promote', reason='Recover through the retained previous authority')
+    source.pop('rollback_of_generation', None)
+    if source['active_slot'] not in ('a','b') or source['active_slot'] == reference['active_slot'] or not isinstance(source['generation'],int) or source['generation'] >= reference['generation']:
+        raise ValueError('Retained previous authority cannot bridge this code slot')
+    return source
 
 
 def validate_worker(pod, config, target, reference=False):
@@ -237,6 +257,8 @@ class Recovery:
             raise ValueError('Group authority owner changed')
         authority = json.loads(owner['data']['authority.json'])
         source, _ = self.activation(c['referenceFront'])
+        if c.get('retainedPrevious'):
+            source = retained_source(authority, source)
         previous, raw = self.activation(c['front'])
         for key in ['front', 'referenceFront']:
             pod = self.get('pod', c[key])
@@ -387,26 +409,20 @@ def verify_pair(config, worker, reference):
     return evidence
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('config')
-    parser.add_argument('--apply', action='store_true')
-    parser.add_argument('--evidence', required=True)
-    args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text())
+def reconcile(config, apply=False, write_evidence=lambda value: None):
     recovery = Recovery(config)
     owner, target, previous, raw, worker, reference = recovery.snapshot(allow_refresh=bool(config.get('refreshInactiveWorker')))
-    evidence = {'mode': 'apply' if args.apply else 'preview', 'node': config['node'], 'previous': previous, 'target': target,
+    evidence = {'mode': 'apply' if apply else 'preview', 'node': config['node'], 'previous': previous, 'target': target,
                 'authority_uid': owner['metadata']['uid'], 'authority_record': config['authorityRecord'], 'activated': False}
-    save = lambda: Path(args.evidence).write_text(json.dumps(evidence, indent=2) + '\n')
+    save = lambda: write_evidence(evidence)
     save()
-    if args.apply and without_time(previous) == without_time(target):
+    if apply and without_time(previous) == without_time(target):
         if not verified_worker_health(recovery.health(config['worker']), config):
             raise ValueError('Already recovered worker has not retained healthy authority')
         evidence['proofs'] = verify_pair(config, worker, reference)
         evidence.update(activated=True, verified=True, already_applied=True)
         save()
-    if args.apply and without_time(previous) != without_time(target):
+    if apply and without_time(previous) != without_time(target):
         with recovery.leases() as held:
             owner, target, previous, raw, worker, reference = recovery.snapshot(allow_refresh=bool(config.get('refreshInactiveWorker')))
             recovery.refresh_inactive_worker(held, owner, target, previous, raw, worker, reference)
@@ -465,7 +481,18 @@ def main():
                     raise ValueError('Recovered Front routes to another physical worker')
             evidence['verified'] = True
             save()
-    print(canonical(evidence))
+    return evidence
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('config')
+    parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--evidence', required=True)
+    args = parser.parse_args()
+    config = json.loads(Path(args.config).read_text())
+    result = reconcile(config, args.apply, lambda value: Path(args.evidence).write_text(json.dumps(value, indent=2) + '\n'))
+    print(canonical(result))
 
 
 if __name__ == '__main__':
