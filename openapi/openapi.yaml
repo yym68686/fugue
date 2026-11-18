@@ -4753,6 +4753,35 @@ paths:
         '409': {$ref: "#/components/responses/ErrorResponse"}
         '503': {$ref: "#/components/responses/ErrorResponse"}
         default: {$ref: "#/components/responses/ErrorResponse"}
+  /v1/platform-state/consumers/artifacts/{artifact_id}/passive-asn:
+    get:
+      operationId: getPlatformConsumerPassiveASN
+      summary: Read a signed passive ASN observation for this DNS release
+      description: A bounded, short-lived ranking input for the exact currently assigned DNS consumer and artifact. It never authorizes a candidate or renews route, TLS or serving readiness.
+      tags: [Admin]
+      x-fugue-handler: handleGetPlatformConsumerPassiveASN
+      security:
+        - PlatformComponentBearerAuth: []
+      parameters:
+        - in: path
+          name: artifact_id
+          required: true
+          schema: {type: string, minLength: 1}
+        - in: query
+          name: expected_consumer_set_id
+          required: true
+          schema: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Signed observation bound to this assignment; private and not cacheable.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformPassiveASNObservation'}
+        '400': {$ref: '#/components/responses/ErrorResponse'}
+        '401': {$ref: '#/components/responses/ErrorResponse'}
+        '403': {$ref: '#/components/responses/ErrorResponse'}
+        '404': {$ref: '#/components/responses/ErrorResponse'}
+        '503': {$ref: '#/components/responses/ErrorResponse'}
   /v1/platform-state/consumers/artifacts/{artifact_id}/retained-route-sources:
     get:
       operationId: getPlatformConsumerRetainedDNSRouteSources
@@ -22883,6 +22912,24 @@ components:
       additionalProperties: false
       required: [record_name, policy, input_candidates, materialized_candidates, ranking, filtered, selection_at, selected_edge_group_id, selection_result, exploration_kind, cooldown_result, scope_source, scope_resolution, matched_scope_key, answered]
       properties:
+        passive_asn:
+          type: object
+          additionalProperties: false
+          required: [reason]
+          description: Scope and evidence for the passive ASN decision. Client and resolver addresses are not recorded.
+          properties:
+            reason: {type: string}
+            mode: {type: string, enum: [shadow, active]}
+            asn: {type: integer, minimum: 1}
+            family: {type: integer, enum: [4, 6]}
+            observation_digest: {type: string}
+            evidence_at: {type: string, format: date-time}
+            evidence_kind: {type: string, enum: [recent, historical]}
+            incumbent_edge_id: {type: string}
+            choice_edge_id: {type: string, description: Proposed edge; only active mode may use it.}
+            shared_windows: {type: integer, minimum: 3}
+            left_win_windows: {type: integer, minimum: 1}
+            right_win_windows: {type: integer, minimum: 1}
         availability:
           type: object
           additionalProperties: false
@@ -37543,6 +37590,75 @@ components:
         signed_at:
           type: string
           format: date-time
+    PlatformPassiveASNObservation:
+      type: object
+      additionalProperties: false
+      required: [id, artifact_kind, scope, scope_key, schema_version, generation, generation_sequence, status, content_hash, content, provenance, created_at, updated_at]
+      properties:
+        id: {type: string}
+        artifact_kind: {type: string, enum: [dns_passive_asn_observation]}
+        scope: {$ref: '#/components/schemas/PlatformArtifactScope'}
+        scope_key: {type: string}
+        schema_version: {type: string, enum: ['1.0']}
+        generation: {type: string}
+        generation_sequence: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [validated]}
+        content_hash: {type: string}
+        provenance: {$ref: '#/components/schemas/PlatformArtifactProvenance'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        content:
+          type: object
+          additionalProperties: false
+          required: [mode, dns_artifact_id, dns_digest, release_set_id, consumer_set_id, fencing_token, node_id, observed_at, expires_at, bindings, resolvers, resolver_source_at, pairs]
+          properties:
+            mode: {type: string, enum: [shadow, active]}
+            dns_artifact_id: {type: string}
+            dns_digest: {type: string}
+            release_set_id: {type: string}
+            consumer_set_id: {type: string}
+            fencing_token: {type: integer, format: int64, minimum: 1}
+            node_id: {type: string}
+            observed_at: {type: string, format: date-time}
+            expires_at: {type: string, format: date-time}
+            bindings:
+              type: array
+              maxItems: 4096
+              items:
+                type: object
+                additionalProperties: false
+                required: [prefix, asn]
+                properties:
+                  prefix: {type: string}
+                  asn: {type: integer, format: int64, minimum: 1, maximum: 4294967295}
+            resolvers: {type: array, maxItems: 1024, items: {type: string}}
+            resolver_source_at: {type: string, format: date-time}
+            pairs:
+              type: array
+              maxItems: 1024
+              items:
+                type: object
+                additionalProperties: false
+                required: [asn, family, left, right, observed_at, shared_windows, left_win_windows, right_win_windows, prefixes]
+                properties:
+                  asn: {type: integer, format: int64, minimum: 1, maximum: 4294967295}
+                  family: {type: integer, enum: [4, 6]}
+                  left: {$ref: '#/components/schemas/PassiveASNEndpoint'}
+                  right: {$ref: '#/components/schemas/PassiveASNEndpoint'}
+                  preferred: {type: string}
+                  observed_at: {type: string, format: date-time}
+                  shared_windows: {type: integer, minimum: 3, maximum: 6}
+                  left_win_windows: {type: integer, minimum: 0, maximum: 6}
+                  right_win_windows: {type: integer, minimum: 0, maximum: 6}
+                  prefixes: {type: array, minItems: 1, maxItems: 32, items: {type: string}}
+    PassiveASNEndpoint:
+      type: object
+      additionalProperties: false
+      required: [edge_id, group_id, address]
+      properties:
+        edge_id: {type: string}
+        group_id: {type: string}
+        address: {type: string}
     PlatformArtifact:
       type: object
       additionalProperties: false

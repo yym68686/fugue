@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/dnsserver"
 	"fugue/internal/edgequality"
+	"fugue/internal/model"
+	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
 )
 
@@ -27,6 +30,40 @@ func TestPassiveASNMappingNeedsAgreementAcrossDNSAuthorities(t *testing.T) {
 		if err != nil || resolve(prefix) != 0 {
 			t.Fatal("conflicting or missing ASN was used", err)
 		}
+	}
+}
+
+func TestPassiveASNServingRequiresEveryCurrentAuthority(t *testing.T) {
+	a := model.PlatformConsumerAssignment{ArtifactID: "dns-1", ContentHash: "digest-1", ReleaseSetID: "release-1", FencingToken: 3}
+	release := dnsserver.DNSDecisionPublication{ArtifactID: a.ArtifactID, Digest: a.ContentHash, ReleaseSetID: a.ReleaseSetID, FencingToken: a.FencingToken}
+	policies := []platformconfig.DNSClientPolicy{{NodeID: "node-a"}, {NodeID: "node-b"}}
+	proof := passiveASNDNSProof{Process: "process", PodUID: "pod", Publication: release, Verified: true}
+	proofs := map[string]passiveASNDNSProof{"node-a": proof}
+	if passiveASNServingReady(proofs, policies, a, "node-a") {
+		t.Fatal("one authority activated ranking")
+	}
+	proofs["node-b"] = passiveASNDNSProof{Process: "restarted", PodUID: "new-pod", Publication: release}
+	if passiveASNServingReady(proofs, policies, a, "node-a") {
+		t.Fatal("unverified peer activated ranking")
+	}
+	proofs["node-b"] = proof
+	if !passiveASNServingReady(proofs, policies, a, "node-a") {
+		t.Fatal("verified authorities failed admission")
+	}
+	a.FencingToken++
+	if passiveASNServingReady(proofs, policies, a, "node-a") {
+		t.Fatal("previous serving release authorized ranking")
+	}
+}
+
+func TestPassiveASNCohortsSurviveMissingSamplesButNotASNChange(t *testing.T) {
+	p := netip.MustParsePrefix("203.0.113.0/24")
+	history := []passiveasn.Binding{{Prefix: p, ASN: 64496}}
+	if got := retainPassiveASNCohorts(nil, history, func(netip.Prefix) uint32 { return 64496 }); !reflect.DeepEqual(got, history) {
+		t.Fatal("missing samples dropped known eligible cohort", got)
+	}
+	if got := retainPassiveASNCohorts(nil, history, func(netip.Prefix) uint32 { return 64497 }); len(got) != 0 {
+		t.Fatal("historical cohort followed an incompatible ASN reassignment", got)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	"fugue/internal/passiveasn"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
@@ -70,6 +71,8 @@ type Service struct {
 	udpListening                  atomic.Bool
 	tcpListening                  atomic.Bool
 	platformServing               dnsServingPointer
+	passiveASNView                atomic.Pointer[passiveasn.View]
+	passiveASNBudget              atomic.Uint64
 	platformCheckpoint            atomic.Pointer[dnsPersistedCheckpoint]
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool
@@ -205,6 +208,7 @@ type edgeDNSFilteredCandidate struct {
 }
 
 type edgeDNSAnswerAudit struct {
+	PassiveASN            *dnsPassiveASNDecision
 	OwnerName             string
 	RecordName            string
 	RecordType            string
@@ -644,6 +648,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.Logger.Printf("fugue-dns artifact consumer started; dns_node_id=%s edge_group_id=%s", s.Config.DNSNodeID, s.Config.EdgeGroupID)
 		s.startHeartbeatLoop(ctx)
 		go s.runPlatformShadowConsumer(ctx)
+		go s.runPassiveASNDNS(ctx)
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -910,7 +915,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		}
 		observed := s.decisionPublication.Load()
 		queryAt := time.Now().UTC()
-		reply := st.answerObserved(r, remote, queryAt, capture)
+		reply := st.answerObserved(r, remote, queryAt, capture, &dnsPassiveRuntime{view: s.passiveASNView.Load(), budget: &s.passiveASNBudget, node: s.Config.DNSNodeID})
 		qtype := "unknown"
 		if len(r.Question) > 0 {
 			qtype = miekgdns.TypeToString[r.Question[0].Qtype]

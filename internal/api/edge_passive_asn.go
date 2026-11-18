@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/netip"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,20 +27,31 @@ const passiveASNCheckpointKey = "edge-passive-asn-comparison/v1"
 type passiveASNCheckpoint struct {
 	Mapping     string                                      `json:"mapping"`
 	Comparisons map[string]edgequality.PassiveASNComparison `json:"comparisons"`
+	Cohorts     []passiveasn.Binding                        `json:"cohorts,omitempty"`
+	ObservedAt  time.Time                                   `json:"observed_at,omitempty"`
+	DNSProofs   map[string]passiveASNDNSProof               `json:"dns_proofs,omitempty"`
+}
+
+type passiveASNDNSProof struct {
+	Process, PodUID string
+	Publication     dnsserver.DNSDecisionPublication
+	Verified        bool
 }
 
 type passiveASNState struct {
-	mu       sync.Mutex
-	window   passiveASNWindow
-	failures int64
-	ris      atomic.Pointer[passiveasn.Index]
+	mu        sync.Mutex
+	window    passiveASNWindow
+	failures  int64
+	ris       atomic.Pointer[passiveasn.Index]
+	resolvers atomic.Pointer[passiveasn.ResolverSources]
 }
 
 type passiveASNWindow struct {
-	observedAt, bgpSourceAt                                    time.Time
-	coverage                                                   edgequality.PassiveASNCoverage
-	rules, edges, cappedEdges, retained, preferring, saturated int
-	dnsNodes, dnsReads, dnsAnswers, dnsECS, dnsASNHints        int
+	observedAt, bgpSourceAt                                          time.Time
+	coverage                                                         edgequality.PassiveASNCoverage
+	rules, edges, cappedEdges, retained, preferring, saturated       int
+	dnsNodes, dnsReads, dnsAnswers, dnsECS, dnsASNHints, dnsVerified int
+	dnsProofs                                                        map[string]passiveASNDNSProof
 }
 
 // Default-on observation over the authenticated Front sample path. This
@@ -87,6 +100,16 @@ func (s *Server) refreshPassiveASNRIS(ctx context.Context) {
 			interval = 15 * time.Minute
 			if s.log != nil {
 				s.log.Printf("passive ASN bulk mapping refresh failed: %v", err)
+			}
+		}
+		if sources, err := passiveasn.FetchResolverSources(ctx, time.Now().UTC()); err == nil {
+			if previous := s.passiveASN.resolvers.Load(); previous == nil || !sources.PublishedAt.Before(previous.PublishedAt) {
+				s.passiveASN.resolvers.Store(sources)
+			}
+		} else if ctx.Err() == nil {
+			interval = 15 * time.Minute
+			if s.log != nil {
+				s.log.Printf("passive ASN resolver trust refresh failed: %v", err)
 			}
 		}
 		timer := time.NewTimer(interval)
@@ -165,6 +188,9 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	window.edges = len(identities)
 	comparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
 	window.coverage = coverage
+	// Observe each selected authority even when it received no new sample.
+	// Read failure never fails or renews the measurement history.
+	s.observePassiveASNDNS(ctx, policies, &window)
 	if rules > 0 || mapping == risMapping {
 		const maxCheckpointBytes = 4 << 20
 		updated, err := s.store.UpdateObservationCheckpoint(ctx, passiveASNCheckpointKey, func(raw []byte) ([]byte, error) {
@@ -189,6 +215,19 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 					window.preferring++
 				}
 			}
+			next.ObservedAt = now
+			next.Cohorts = retainPassiveASNCohorts(collectPassiveASNCohorts(samples, identities, resolver), next.Cohorts, resolver)
+			next.DNSProofs = window.dnsProofs
+			for node, proof := range next.DNSProofs {
+				if last.DNSProofs[node] == (passiveASNDNSProof{Process: proof.Process, PodUID: proof.PodUID, Publication: proof.Publication, Verified: true}) {
+					proof.Verified = true
+					next.DNSProofs[node] = proof
+				}
+				if proof.Verified {
+					window.dnsVerified++
+				}
+			}
+			changed = changed || !last.ObservedAt.Equal(now)
 			if !changed {
 				return nil, nil
 			}
@@ -205,18 +244,57 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 			return errors.New("passive ASN observation checkpoint busy")
 		}
 	}
-	// A small bounded sample of existing authoritative decisions. Timeouts
-	// never fail the network observation or mutate the DNS journal.
-	s.observePassiveASNDNS(ctx, policies, &window)
 	s.passiveASN.mu.Lock()
 	s.passiveASN.window = window
 	s.passiveASN.mu.Unlock()
 	if s.log != nil {
-		s.log.Printf("passive ASN shadow: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d",
+		s.log.Printf("passive ASN: mapping_rules=%d bgp_source_at=%s edges=%d capped_edges=%d connections=%d classified=%d rtt=%d classified_rtt=%d retained=%d preferred=%d saturated=%d dns_nodes=%d dns_reads=%d dns_answers=%d ecs=%d ecs_asn_hints=%d dns_verified=%d",
 			window.rules, window.bgpSourceAt.Format(time.RFC3339), window.edges, window.cappedEdges, coverage.Connections, coverage.Classified, coverage.TCPRTT, coverage.ClassifiedRTT,
-			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints)
+			window.retained, window.preferring, window.saturated, window.dnsNodes, window.dnsReads, window.dnsAnswers, window.dnsECS, window.dnsASNHints, window.dnsVerified)
 	}
 	return nil
+}
+
+func retainPassiveASNCohorts(current, history []passiveasn.Binding, lookup func(netip.Prefix) uint32) []passiveasn.Binding {
+	seen := make(map[netip.Prefix]bool, len(current))
+	for _, cohort := range current {
+		seen[cohort.Prefix] = true
+	}
+	for _, cohort := range history {
+		if len(current) >= passiveasn.MaxBindings {
+			break
+		}
+		if !seen[cohort.Prefix] && cohort.ASN != 0 && lookup(cohort.Prefix) == cohort.ASN {
+			current = append(current, cohort)
+			seen[cohort.Prefix] = true
+		}
+	}
+	return current
+}
+
+func collectPassiveASNCohorts(samples []model.EdgeNetworkSample, identities map[string]edgequality.PassiveEdgeIdentity, lookup func(netip.Prefix) uint32) []passiveasn.Binding {
+	results := make([]passiveasn.Binding, 0)
+	seen := map[netip.Prefix]bool{}
+	for _, sample := range samples {
+		id, ok := identities[sample.EdgeID]
+		if !ok || sample.Source != "public_front_tcp_info_v1" || id.GroupID != sample.EdgeGroupID ||
+			id.Bundle != sample.BundleVersion || model.ValidateEdgeNetworkSample(sample) != nil {
+			continue
+		}
+		p, err := netip.ParsePrefix(strings.TrimPrefix(sample.ClientNetwork.Scope, "tcp_peer:"))
+		if err != nil || seen[p] {
+			continue
+		}
+		seen[p] = true
+		if asn := lookup(p); asn != 0 {
+			results = append(results, passiveasn.Binding{Prefix: p, ASN: asn})
+		}
+		if len(results) >= passiveasn.MaxBindings {
+			break
+		}
+	}
+	slices.SortFunc(results, func(a, b passiveasn.Binding) int { return a.Prefix.Addr().Compare(b.Prefix.Addr()) })
+	return results
 }
 
 func passiveASNMatchesMapping(comparison edgequality.PassiveASNComparison, resolve func(netip.Prefix) uint32) bool {
@@ -326,6 +404,7 @@ func retainPassiveASN(last passiveASNCheckpoint, mapping string, comparisons []e
 func (s *Server) observePassiveASNDNS(ctx context.Context, policies []platformconfig.DNSClientPolicy, window *passiveASNWindow) {
 	dnsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	window.dnsProofs = make(map[string]passiveASNDNSProof, len(policies))
 	for _, policy := range policies {
 		if dnsCtx.Err() != nil {
 			break
@@ -337,6 +416,12 @@ func (s *Server) observePassiveASNDNS(ctx context.Context, policies []platformco
 			continue
 		}
 		window.dnsReads++
+		loaded := read.Snapshot.Publication.Loaded
+		proof := passiveASNDNSProof{Process: read.Snapshot.ProcessID, PodUID: read.Backend.PodUID}
+		if loaded != nil && loaded.ArtifactID != "" && loaded.Digest != "" && loaded.ReleaseSetID != "" &&
+			loaded.ReleaseChannel == model.PlatformArtifactReleaseChannelFull && !read.Snapshot.Publication.ServingLKG {
+			proof.Publication = *loaded
+		}
 		for _, receipt := range read.Snapshot.Receipts {
 			if receipt.ProcessID != read.Snapshot.ProcessID || receipt.ObservedAt.Before(window.observedAt.Add(-10*time.Minute)) ||
 				receipt.ObservedAt.After(read.EvaluatedAt) {
@@ -352,6 +437,18 @@ func (s *Server) observePassiveASNDNS(ctx context.Context, policies []platformco
 			if hint {
 				window.dnsASNHints++
 			}
+			if valid && ecs && proof.Publication.ArtifactID != "" && receipt.AnswerPublication != nil &&
+				*receipt.AnswerPublication == proof.Publication {
+				for _, record := range receipt.Records {
+					if record.PassiveASN != nil && record.PassiveASN.ASN != 0 && record.PassiveASN.ObservationDigest != "" {
+						proof.Verified = true
+						break
+					}
+				}
+			}
+		}
+		if proof.Publication.ArtifactID != "" && proof.PodUID != "" {
+			window.dnsProofs[policy.NodeID] = proof
 		}
 	}
 }
@@ -378,6 +475,7 @@ func (s *Server) writePassiveASNMetrics(w io.Writer) {
 		{"retained_comparisons", window.retained}, {"preferred_comparisons", window.preferring}, {"unretained_new_comparisons", window.saturated},
 		{"dns_nodes", window.dnsNodes}, {"dns_reads", window.dnsReads}, {"dns_answers", window.dnsAnswers},
 		{"dns_ecs", window.dnsECS}, {"dns_ecs_asn_hint_upper_bound", window.dnsASNHints},
+		{"dns_passive_verified", window.dnsVerified},
 	} {
 		observability.WriteGaugeMetric(w, "fugue_edge_passive_asn_observation", "Counts from the last bounded passive ASN observation window.", map[string]string{"kind": entry.kind}, float64(entry.count))
 	}

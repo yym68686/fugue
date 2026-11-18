@@ -67,6 +67,7 @@ type DNSAvailabilityDecision struct {
 }
 
 type DNSDecisionRecord struct {
+	PassiveASN             *dnsPassiveASNDecision         `json:"passive_asn,omitempty"`
 	Availability           *DNSAvailabilityDecision       `json:"availability,omitempty"`
 	RecordName             string                         `json:"record_name"`
 	Policy                 model.DNSAnswerPolicy          `json:"policy"`
@@ -136,8 +137,9 @@ type dnsDecisionEntry struct {
 }
 
 type dnsDecisionSelection struct {
-	At      time.Time          `json:"at"`
-	Entropy dnsDecisionEntropy `json:"entropy"`
+	At         time.Time               `json:"at"`
+	Entropy    dnsDecisionEntropy      `json:"entropy"`
+	PassiveASN *dnsPassiveASNSelection `json:"passive_asn,omitempty"`
 }
 
 type dnsDecisionStage struct {
@@ -364,7 +366,7 @@ func (capture *dnsDecisionCapture) describeRecord(entry dnsServingRecord, materi
 			output = scoped.Candidates
 		}
 	}
-	record := DNSDecisionRecord{RecordName: entry.record.Name, Policy: policy, InputCandidates: append([]model.EdgeDNSAnswerCandidate{}, input...),
+	record := DNSDecisionRecord{RecordName: entry.record.Name, Policy: policy, PassiveASN: audit.PassiveASN, InputCandidates: append([]model.EdgeDNSAnswerCandidate{}, input...),
 		MaterializedCandidates: append([]model.EdgeDNSAnswerCandidate{}, output...), Filtered: []DNSDecisionFilter{}, SelectionAt: at,
 		Ranking:             append([]DNSDecisionRank{}, audit.Ranking...),
 		SelectedEdgeGroupID: audit.SelectedEdgeGroupID, SelectionResult: firstNonEmpty(failure, audit.SelectionResult), ExplorationKind: audit.ExplorationKind,

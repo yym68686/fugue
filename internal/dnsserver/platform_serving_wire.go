@@ -21,16 +21,17 @@ type dnsServingZone struct {
 	records   map[string][]dnsServingRecord
 }
 type dnsServingState struct {
-	record     dnsServingCheckpoint
-	payload    dnsServingPayload
-	routeID    string
-	facts      []dnsReadinessFact
-	checkedAt  time.Time
-	fallback   string
-	zones      map[string]dnsServingZone
-	zoneOrder  []string
-	matcher    platformconfig.DNSClientMatcher
-	transition *dnsRecordTransition
+	record       dnsServingCheckpoint
+	payload      dnsServingPayload
+	routeID      string
+	facts        []dnsReadinessFact
+	checkedAt    time.Time
+	fallback     string
+	zones        map[string]dnsServingZone
+	zoneOrder    []string
+	matcher      platformconfig.DNSClientMatcher
+	passiveFixed map[string]bool
+	transition   *dnsRecordTransition
 }
 
 func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, routeID, node, group string, facts []dnsReadinessFact, now time.Time) (*dnsServingState, error) {
@@ -38,6 +39,20 @@ func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, rout
 		return nil, err
 	}
 	st := &dnsServingState{record: record, payload: p, routeID: routeID, facts: facts, checkedAt: now, zones: map[string]dnsServingZone{}}
+	if policy := p.Policy.DNSQueryPolicy; policy != nil && policy.DynamicQuality != nil {
+		st.passiveFixed = make(map[string]bool)
+		if policy.OrderedProjection != nil {
+			for _, row := range policy.OrderedProjection.Overrides {
+				if row.NodeID == node {
+					st.passiveFixed[row.Hostname+"\x00"+row.Type] = true
+				}
+			}
+		}
+		for _, row := range policy.PhysicalRoutes {
+			st.passiveFixed[row.Hostname+"\x00A"] = true
+			st.passiveFixed[row.Hostname+"\x00AAAA"] = true
+		}
+	}
 	clientFound := false
 	for _, policy := range p.Policy.DNSClientPolicies {
 		if policy.NodeID == node {
@@ -116,7 +131,7 @@ func (st *dnsServingState) answer(req *dns.Msg, remote string, now time.Time) *d
 	return st.answerObserved(req, remote, now, nil)
 }
 
-func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.Time, capture *dnsDecisionCapture) *dns.Msg {
+func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.Time, capture *dnsDecisionCapture, runtime ...*dnsPassiveRuntime) *dns.Msg {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
@@ -125,6 +140,7 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 		return resp
 	}
 	stage, hint := capture.begin(st, req, remote, now)
+	var passiveScope uint8
 	returnedTransition := false
 	defer func() {
 		if capture != nil && !returnedTransition && stage != nil {
@@ -190,6 +206,19 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 			}
 			selectionAt, selectionHint := capture.selection(stage, hint)
 			rrs, audit, _ := rrForEdgeDNSRecordWithGeoAuditAt(records[0], name, q.Qtype, selectionHint, nil, nil, selectionAt)
+			var passive *dnsPassiveASNSelection
+			if capture != nil && capture.replaying && stage != nil && capture.selectionCursor > 0 && capture.selectionCursor <= len(stage.Selections) {
+				passive = stage.Selections[capture.selectionCursor-1].PassiveASN
+			} else if len(runtime) == 1 {
+				passive = st.passiveASNSelection(runtime[0], req, remote, records[0], audit, selectionAt, len(entry.plan.Records) > 0 && len(entry.plan.Records[0].Targets) > 0)
+				if stage != nil && len(stage.Selections) > 0 {
+					stage.Selections[len(stage.Selections)-1].PassiveASN = passive
+				}
+			}
+			if passive != nil {
+				applyPassiveASNSelection(passive, records[0], rrs, &audit, selectionAt)
+				passiveScope = passive.Scope
+			}
 			capture.record(entry, &records[0], hint, selectionAt, audit, "")
 			// A route quorum may survive only on candidates excluded by the
 			// signed selector. This is temporary serving failure, not absence
@@ -225,13 +254,22 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 	// negative responses and the persisted positive checkpoint remain unchanged.
 	if resp.Rcode == dns.RcodeServerFailure && st.transition != nil && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA) &&
 		st.transition.hosts[recordName] {
-		next := st.transition.state.answerObserved(req, remote, now, capture)
+		next := st.transition.state.answerObserved(req, remote, now, capture, runtime...)
 		if next.Rcode == dns.RcodeSuccess && len(next.Answer) > 0 {
 			returnedTransition = true
 			return next
 		}
 	}
 	applyPlatformECSScope(resp, req, hint)
+	if passiveScope != 0 && resp.Rcode == dns.RcodeSuccess && len(resp.Answer) > 0 {
+		if opt := resp.IsEdns0(); opt != nil {
+			for _, option := range opt.Option {
+				if subnet, ok := option.(*dns.EDNS0_SUBNET); ok && subnet != nil && subnet.SourceNetmask == passiveScope {
+					subnet.SourceScope = passiveScope
+				}
+			}
+		}
+	}
 	return resp
 }
 
