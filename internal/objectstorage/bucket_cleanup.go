@@ -41,7 +41,44 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 	})
 	started := time.Now()
 	for pageNo := 0; pageNo < 8; pageNo++ {
-		page, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(backend.Bucket), MaxKeys: aws.Int32(1000)})
+		list := func() ([]types.ObjectIdentifier, error) {
+			bucket := aws.String(backend.Bucket)
+			if backend.Provider == model.DataBackendProviderBackblazeB2 {
+				page, err := client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{Bucket: bucket, MaxKeys: aws.Int32(1000)})
+				if err != nil {
+					return nil, err
+				}
+				objects := make([]types.ObjectIdentifier, 0, len(page.Versions)+len(page.DeleteMarkers))
+				for _, v := range page.Versions {
+					objects = append(objects, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+				}
+				for _, v := range page.DeleteMarkers {
+					objects = append(objects, types.ObjectIdentifier{Key: v.Key, VersionId: v.VersionId})
+				}
+				for _, v := range objects {
+					if v.Key == nil || aws.ToString(v.VersionId) == "" {
+						return nil, errors.New("B2 returned an invalid object version")
+					}
+				}
+				if len(objects) == 0 && aws.ToBool(page.IsTruncated) {
+					return nil, errors.New("B2 returned an incomplete versions page")
+				}
+				return objects, nil
+			}
+			page, err := client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: bucket, MaxKeys: aws.Int32(1000)})
+			if err != nil {
+				return nil, err
+			}
+			objects := make([]types.ObjectIdentifier, 0, len(page.Contents))
+			for _, obj := range page.Contents {
+				if obj.Key == nil {
+					return nil, errors.New("provider returned an invalid object key")
+				}
+				objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
+			}
+			return objects, nil
+		}
+		objects, err := list()
 		// Newly created bucket-scoped credentials may not have propagated to
 		// S3 yet. Retry only the first read, only for authorization errors, and
 		// never retry an ambiguous delete operation here.
@@ -56,22 +93,15 @@ func EmptyBucketBatch(ctx context.Context, backend model.DataBackend) (CleanupBa
 					return out, errors.New("R2 object deletion listing cancelled; retry deletion to resume")
 				case <-time.After(500 * time.Millisecond):
 				}
-				page, err = client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(backend.Bucket), MaxKeys: aws.Int32(1000)})
+				objects, err = list()
 			}
 			started = time.Now()
 		}
 		if err != nil {
 			return out, errors.New("R2 object deletion listing failed; retry deletion to resume")
 		}
-		if len(page.Contents) == 0 {
+		if len(objects) == 0 {
 			break
-		}
-		objects := make([]types.ObjectIdentifier, 0, len(page.Contents))
-		for _, obj := range page.Contents {
-			if obj.Key == nil {
-				return out, errors.New("R2 returned an invalid object key")
-			}
-			objects = append(objects, types.ObjectIdentifier{Key: obj.Key})
 		}
 		deleted, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{Bucket: aws.String(backend.Bucket), Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)}})
 		if err != nil {

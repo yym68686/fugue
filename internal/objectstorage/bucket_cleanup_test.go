@@ -118,3 +118,58 @@ func TestEmptyBucketBatchWaitsForScopedCredentialPropagation(t *testing.T) {
 		t.Fatalf("credential propagation was not retried: calls=%d out=%+v err=%v", listCalls, out, err)
 	}
 }
+
+func TestEmptyB2BucketDeletesExactVersionsAndMarkers(t *testing.T) {
+	for _, invalid := range []bool{false, true} {
+		t.Run(fmt.Sprint("missing-version=", invalid), func(t *testing.T) {
+			deleted := false
+			fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/target" {
+					t.Error("wrong bucket")
+				}
+				w.Header().Set("Content-Type", "application/xml")
+				switch {
+				case r.Method == "GET" && r.URL.Query().Has("versions"):
+					fmt.Fprint(w, `<ListVersionsResult><IsTruncated>false</IsTruncated>`)
+					if !deleted {
+						version := "previous"
+						if invalid {
+							version = ""
+						}
+						fmt.Fprintf(w, `<Version><Key>record</Key><VersionId>%s</VersionId></Version><DeleteMarker><Key>record</Key><VersionId>marker</VersionId></DeleteMarker>`, version)
+					}
+					fmt.Fprint(w, `</ListVersionsResult>`)
+				case r.Method == "POST" && r.URL.Query().Has("delete") && !invalid:
+					var request struct {
+						Objects []struct {
+							Key       string
+							VersionID string `xml:"VersionId"`
+						} `xml:"Object"`
+					}
+					if xml.NewDecoder(r.Body).Decode(&request) != nil || len(request.Objects) != 2 ||
+						request.Objects[0].Key != "record" || request.Objects[1].Key != "record" ||
+						request.Objects[0].VersionID != "previous" || request.Objects[1].VersionID != "marker" {
+						t.Error("did not delete exact object versions")
+					}
+					deleted = true
+					fmt.Fprint(w, `<DeleteResult/>`)
+				case r.Method == "GET" && r.URL.Query().Has("uploads") && deleted:
+					fmt.Fprint(w, `<ListMultipartUploadsResult/>`)
+				default:
+					t.Errorf("unexpected provider call: %s %s", r.Method, r.URL)
+					w.WriteHeader(400)
+				}
+			}))
+			defer fake.Close()
+			backend := model.DataBackend{Provider: model.DataBackendProviderBackblazeB2, Bucket: "target", Endpoint: fake.URL, Region: "us-west-004", Credentials: model.DataBackendCredentials{AccessKeyID: "synthetic", SecretAccessKey: "synthetic"}}
+			out, err := EmptyBucketBatch(context.Background(), backend)
+			if invalid {
+				if err == nil || out.Empty || deleted {
+					t.Fatalf("invalid version did not fail safely: %+v %v", out, err)
+				}
+			} else if err != nil || !out.Empty || out.DeletedObjects != 2 {
+				t.Fatalf("versioned deletion failed: %+v %v", out, err)
+			}
+		})
+	}
+}

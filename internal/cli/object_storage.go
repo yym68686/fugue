@@ -57,9 +57,16 @@ func (c *CLI) findObjectStore(client *Client, ref string) (model.ObjectStore, er
 }
 func (c *CLI) newObjectStorageCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "s3", Short: "Provision private project object storage and application S3 credentials"}
-	var account, tokenFile string
-	configure := &cobra.Command{Use: "configure", Short: "Configure platform R2 management (administrator only)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	var account, tokenFile, configureProvider, keyID string
+	configure := &cobra.Command{Use: "configure", Short: "Configure platform R2 or B2 management (administrator only)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		path, err := objectStorageConfigPath(configureProvider)
+		if err != nil {
+			return err
+		}
 		token := os.Getenv("FUGUE_S3_CF_API_TOKEN")
+		if path != "/v1/admin/object-storage" {
+			token = os.Getenv("FUGUE_S3_B2_APPLICATION_KEY")
+		}
 		if tokenFile != "" {
 			b, err := os.ReadFile(tokenFile)
 			if err != nil {
@@ -67,22 +74,48 @@ func (c *CLI) newObjectStorageCommand() *cobra.Command {
 			}
 			token = strings.TrimSpace(string(b))
 		}
-		if token == "" || account == "" {
-			return fmt.Errorf("--account-id and FUGUE_S3_CF_API_TOKEN or --token-file are required")
+		token = strings.TrimSpace(token)
+		body := map[string]string{"account_id": account, "api_token": token}
+		if path != "/v1/admin/object-storage" {
+			if token == "" || keyID == "" || account != "" {
+				return fmt.Errorf("B2 requires --key-id and FUGUE_S3_B2_APPLICATION_KEY or --token-file")
+			}
+			body = map[string]string{"key_id": keyID, "application_key": token}
+		} else if token == "" || account == "" || keyID != "" {
+			return fmt.Errorf("R2 requires --account-id and FUGUE_S3_CF_API_TOKEN or --token-file")
 		}
 		client, err := c.newClient()
 		if err != nil {
 			return err
 		}
 		var out map[string]any
-		if err = client.doJSON(http.MethodPut, "/v1/admin/object-storage", map[string]string{"account_id": account, "api_token": token}, &out); err != nil {
+		if err = client.doJSON(http.MethodPut, path, body, &out); err != nil {
 			return err
 		}
 		return c.writeJSON(out)
 	}}
 	configure.Flags().StringVar(&account, "account-id", "", "Cloudflare account ID")
-	configure.Flags().StringVar(&tokenFile, "token-file", "", "Read management API token from a private file")
-	cmd.AddCommand(configure, &cobra.Command{Use: "ls", Aliases: []string{"list"}, Short: "List object stores in the selected account/project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	configure.Flags().StringVar(&keyID, "key-id", "", "Backblaze B2 application key ID")
+	configure.Flags().StringVar(&configureProvider, "provider", "cloudflare-r2", "cloudflare-r2 or backblaze-b2")
+	configure.Flags().StringVar(&tokenFile, "token-file", "", "Read management token or application key from a private file")
+	var statusProvider string
+	status := &cobra.Command{Use: "config-status", Short: "Show provider configuration status without secrets (administrator only)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		path, err := objectStorageConfigPath(statusProvider)
+		if err != nil {
+			return err
+		}
+		client, err := c.newClient()
+		if err != nil {
+			return err
+		}
+		var out map[string]any
+		if err = client.doJSON(http.MethodGet, path, nil, &out); err != nil {
+			return err
+		}
+		return c.writeJSON(out)
+	}}
+	status.Flags().StringVar(&statusProvider, "provider", "cloudflare-r2", "cloudflare-r2 or backblaze-b2")
+	cmd.AddCommand(configure, status, &cobra.Command{Use: "ls", Aliases: []string{"list"}, Short: "List object stores in the selected account/project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := c.newClient()
 		if err != nil {
 			return err
@@ -98,6 +131,7 @@ func (c *CLI) newObjectStorageCommand() *cobra.Command {
 		return c.writeJSON(map[string]any{"stores": items})
 	}})
 	var quota int64
+	var createProvider string
 	create := &cobra.Command{Use: "create <name>", Short: "Explicitly create a private bucket for the selected project", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := c.newClient()
 		if err != nil {
@@ -111,13 +145,21 @@ func (c *CLI) newObjectStorageCommand() *cobra.Command {
 			return fmt.Errorf("select --project before creating object storage")
 		}
 		var out objectStoreEnvelope
-		err = client.doJSON(http.MethodPost, "/v1/object-stores", map[string]any{"tenant_id": tenant, "project_id": project, "name": args[0], "quota_bytes": quota}, &out)
+		body := map[string]any{"tenant_id": tenant, "project_id": project, "name": args[0], "quota_bytes": quota}
+		if createProvider != "" {
+			if _, err := objectStorageConfigPath(createProvider); err != nil {
+				return err
+			}
+			body["provider"] = model.NormalizeDataBackendProvider(createProvider)
+		}
+		err = client.doJSON(http.MethodPost, "/v1/object-stores", body, &out)
 		if err != nil {
 			return err
 		}
 		return c.writeJSON(out)
 	}}
 	create.Flags().Int64Var(&quota, "quota-bytes", 0, "Soft storage budget in bytes; 0 disables the budget")
+	create.Flags().StringVar(&createProvider, "provider", "", "cloudflare-r2 (default for new stores) or backblaze-b2")
 	cmd.AddCommand(create)
 	plan := &cobra.Command{Use: "deletion-plan <store>", Short: "Show a read-only, cached deletion plan (no provider calls)", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := c.newClient()
@@ -310,6 +352,17 @@ func (c *CLI) newObjectStorageCommand() *cobra.Command {
 		return c.writeJSON(out)
 	}})
 	return cmd
+}
+
+func objectStorageConfigPath(provider string) (string, error) {
+	switch model.NormalizeDataBackendProvider(provider) {
+	case model.DataBackendProviderCloudflareR2:
+		return "/v1/admin/object-storage", nil
+	case model.DataBackendProviderBackblazeB2:
+		return "/v1/admin/object-storage/backblaze-b2", nil
+	default:
+		return "", fmt.Errorf("choose cloudflare-r2 or backblaze-b2")
+	}
 }
 func writePrivateObjectStorageEnv(path string, env map[string]string) error {
 	keys := make([]string, 0, len(env))

@@ -19,6 +19,7 @@ type adminStorageNamespace struct {
 	Kind        string     `json:"kind"`
 	ResourceID  string     `json:"resource_id"`
 	Name        string     `json:"name"`
+	Provider    string     `json:"provider,omitempty"`
 	Bucket      string     `json:"bucket"`
 	Prefix      string     `json:"prefix"`
 	TenantID    string     `json:"tenant_id"`
@@ -78,7 +79,7 @@ func (s *Server) handleGetAdminStorageOverview(w http.ResponseWriter, r *http.Re
 	}
 	for _, v := range stores {
 		buckets[v.Bucket] = "configured"
-		row := adminStorageNamespace{Kind: "project-store", ResourceID: v.ID, Name: v.Name, Bucket: v.Bucket, TenantID: v.TenantID, ProjectID: v.ProjectID, Status: v.Status, MeasuredAt: v.UsageMeasuredAt, Stale: v.UsageMeasuredAt == nil || time.Since(*v.UsageMeasuredAt) > 24*time.Hour}
+		row := adminStorageNamespace{Kind: "project-store", ResourceID: v.ID, Name: v.Name, Provider: v.Provider, Bucket: v.Bucket, TenantID: v.TenantID, ProjectID: v.ProjectID, Status: v.Status, MeasuredAt: v.UsageMeasuredAt, Stale: v.UsageMeasuredAt == nil || time.Since(*v.UsageMeasuredAt) > 24*time.Hour}
 		if v.UsageMeasuredAt != nil {
 			row.UsedBytes, row.ObjectCount = &v.UsedBytes, &v.ObjectCount
 		}
@@ -107,6 +108,9 @@ func (s *Server) handleGetAdminStorageOverview(w http.ResponseWriter, r *http.Re
 		}
 	}
 	cfg, err := s.store.GetObjectStorageConfig()
+	if b2, _ := s.store.GetBackblazeB2Config(); b2 != nil {
+		out.Warnings = append(out.Warnings, "Backblaze B2 lists Fugue-managed namespaces only. Bucket inventory completeness covers the Cloudflare R2 account.")
+	}
 	if err == nil && cfg.AccountID != "" {
 		out.Configured = true
 		out.AccountID = cfg.AccountID

@@ -44,6 +44,42 @@ func (s *Store) SaveObjectStorageConfig(v model.ObjectStorageConfig) error {
 	}
 	return s.withLockedState(true, func(st *model.State) error { st.ObjectStorage.Config = &v; return nil })
 }
+
+func (s *Store) GetBackblazeB2Config() (*model.ObjectStorageProviderConfig, error) {
+	if s.usingDatabase() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		var raw []byte
+		if err := s.db.QueryRowContext(ctx, "SELECT body FROM fugue_object_storage_providers WHERE provider=$1", model.DataBackendProviderBackblazeB2).Scan(&raw); err != nil {
+			return nil, mapDBErr(err)
+		}
+		var out model.ObjectStorageProviderConfig
+		return &out, json.Unmarshal(raw, &out)
+	}
+	var out *model.ObjectStorageProviderConfig
+	err := s.withLockedState(false, func(st *model.State) error {
+		out = st.ObjectStorage.BackblazeB2
+		if out == nil {
+			return ErrNotFound
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (s *Store) SaveBackblazeB2Config(v model.ObjectStorageProviderConfig) error {
+	if s.usingDatabase() {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err = s.db.ExecContext(ctx, "INSERT INTO fugue_object_storage_providers(provider,body) VALUES($1,$2::jsonb) ON CONFLICT(provider) DO UPDATE SET body=EXCLUDED.body", model.DataBackendProviderBackblazeB2, string(raw))
+		return mapDBErr(err)
+	}
+	return s.withLockedState(true, func(st *model.State) error { st.ObjectStorage.BackblazeB2 = &v; return nil })
+}
 func (s *Store) SealObjectStorageSecret(v model.DataBackendCredentials) (model.DataBackendSecret, error) {
 	if _, keyID := dataBackendSecretKey(); s.usingDatabase() && keyID == "development-fallback" {
 		return model.DataBackendSecret{}, fmt.Errorf("configure production credential encryption before enabling object storage")

@@ -14720,6 +14720,49 @@ paths:
           $ref: "#/components/responses/ObjectStorageBusy"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/admin/object-storage/backblaze-b2:
+    get:
+      operationId: getBackblazeB2Config
+      summary: Get Backblaze B2 configuration status
+      description: Platform administrators only. Never returns stored credentials.
+      tags: [Object Storage]
+      x-fugue-handler: handleGetBackblazeB2Config
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Configuration status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageConfigStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      operationId: configureBackblazeB2
+      summary: Verify and save Backblaze B2 management credentials
+      description: Platform administrators only. Requires a non-master, unrestricted application key with bucket and key management permissions. Existing account and region cannot change while B2 stores exist.
+      tags: [Object Storage]
+      x-fugue-handler: handleConfigureBackblazeB2
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BackblazeB2ConfigRequest"
+      responses:
+        "200":
+          description: Configuration status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObjectStorageConfigStatus"
+        "409":
+          $ref: "#/components/responses/ObjectStorageBusy"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/object-stores:
     get:
       operationId: listObjectStores
@@ -14748,7 +14791,7 @@ paths:
     post:
       operationId: createObjectStore
       summary: createObjectStore
-      description: Explicitly provision a private independent R2 bucket. Requires storage.admin or the existing tenant data.admin scope. Name is unique within the project; retries resume provisioning. No backup objects are used.
+      description: Explicitly provision a private independent bucket. New stores default to Cloudflare R2 if provider is omitted. Requires storage.admin or the existing tenant data.admin scope. Name is unique within the project; retries resume provisioning and cannot change provider. No backup objects are used.
       tags: [Object Storage]
       x-fugue-handler: handleCreateObjectStore
       security:
@@ -14970,7 +15013,7 @@ paths:
     post:
       operationId: measureObjectStoreUsage
       summary: measureObjectStoreUsage
-      description: Requires storage.read, storage.admin, or the existing tenant data.admin scope. Measures current bucket object bytes and object count, with timestamp. Does not claim real-time hard quotas or exact billable request counts.
+      description: Requires storage.read, storage.admin, or the existing tenant data.admin scope. Measures current R2 objects or all stored B2 object versions (excluding delete markers and unfinished uploads), with timestamp. Does not report exact billable usage or enforce a hard quota.
       tags: [Object Storage]
       x-fugue-handler: handleMeasureObjectStoreUsage
       security:
@@ -18230,12 +18273,20 @@ components:
       properties:
         account_id: {type: string, pattern: '^[a-f0-9]{32}$'}
         api_token: {type: string, minLength: 20, writeOnly: true}
+    BackblazeB2ConfigRequest:
+      type: object
+      additionalProperties: false
+      required: [key_id, application_key]
+      properties:
+        key_id: {type: string, minLength: 12, maxLength: 128, writeOnly: true}
+        application_key: {type: string, minLength: 20, maxLength: 256, writeOnly: true}
     ObjectStorageConfigStatus:
       type: object
       required: [configured]
       properties:
         configured: {type: boolean}
         account_id: {type: string}
+        region: {type: string}
         updated_at: {type: string, format: date-time}
     ObjectStoreCreateRequest:
       type: object
@@ -18245,6 +18296,7 @@ components:
         tenant_id: {type: string}
         project_id: {type: string}
         name: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,47}$'}
+        provider: {type: string, enum: [cloudflare-r2, backblaze-b2]}
         quota_bytes: {type: integer, format: int64, minimum: 0}
     ObjectStoreUpdateRequest:
       type: object
@@ -18306,6 +18358,7 @@ components:
         kind: {type: string}
         resource_id: {type: string}
         name: {type: string}
+        provider: {type: string}
         bucket: {type: string}
         prefix: {type: string}
         tenant_id: {type: string}
@@ -18344,7 +18397,7 @@ components:
         observed_at: {type: string, format: date-time}
         configured: {type: boolean}
         account_id: {type: string}
-        buckets_complete: {type: boolean}
+        buckets_complete: {type: boolean, description: Whether the Cloudflare R2 account inventory completed. Does not attest completeness for other providers.}
         longhorn_complete: {type: boolean}
         metrics_status: {type: string}
         billing_status: {type: string}
@@ -18422,8 +18475,9 @@ components:
         tenant_id: {type: string}
         project_id: {type: string}
         name: {type: string}
-        provider: {type: string, enum: [cloudflare-r2]}
+        provider: {type: string, enum: [cloudflare-r2, backblaze-b2]}
         bucket: {type: string}
+        bucket_id: {type: string, description: Immutable provider bucket identity for Backblaze B2.}
         endpoint: {type: string}
         region: {type: string}
         status: {type: string, enum: [provisioning, active, disabling, disabled, deleting]}

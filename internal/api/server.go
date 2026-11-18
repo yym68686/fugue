@@ -41,6 +41,7 @@ type Server struct {
 	captures                               captureObservations
 	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
+	objectStorageB2Transport               http.RoundTripper
 	cleanupObjectStoreBatch                func(context.Context, model.DataBackend) (objectstorage.CleanupBatch, error)
 	store                                  *store.Store
 	auth                                   *auth.Authenticator

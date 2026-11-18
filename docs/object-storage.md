@@ -1,12 +1,16 @@
 # Project object storage
 
-Object storage is opt-in. Fugue provisions a private R2 bucket per resource,
+Object storage is opt-in. Fugue provisions a private Cloudflare R2 or Backblaze B2 bucket per resource,
 owned by a tenant and associated with a project. It never stores application
 objects in the backup or DataWorkspace garbage-collection namespace. Apps read
-and write R2 directly using standard S3 credentials; the control plane manages
+and write directly to the provider using standard S3 credentials; the control plane manages
 resource metadata, authorization, and credentials only.
 
 ## Configure the platform
+
+Platform administrators can save or rotate both providers independently at
+**Fugue Web → Platform settings** (`/admin/settings`). The page never displays
+stored secrets. Existing Web integrations also support credential rotation there.
 
 Create a Cloudflare account API token with Workers R2 Storage Write and Account
 API Tokens Write, limited to the platform's R2 account. Keep this management
@@ -22,6 +26,33 @@ key. Configure FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY (or the platform signing key
 on production installations and retain it through releases and restores.
 Configuration persists independently of code deployments. Changing Cloudflare
 account identity is rejected after resources have been created.
+
+For Backblaze, use a dedicated B2 account and a **non-master** application
+key for all buckets, with no filename prefix and these capabilities:
+`listBuckets`, `writeBuckets`, `deleteBuckets`, `listKeys`, `writeKeys`,
+`deleteKeys`, `listFiles`, `readFiles`, `writeFiles`, `deleteFiles`.
+The Backblaze console's data-only key presets may not grant all of them.
+Create the management key using the [Backblaze Native API](https://www.backblaze.com/apidocs/b2-create-key).
+The ability to create keys can grant broad access to the B2 account.
+Keep this credential out of app environments. The API derives the account and
+region from Backblaze's authorization response; changing either is blocked as
+long as Fugue B2 resources exist.
+
+```
+fugue s3 configure --provider backblaze-b2 --key-id <b2-application-key-id> --token-file <private-file>
+fugue s3 config-status --provider backblaze-b2
+fugue --project analytics s3 create cold-archive --provider backblaze-b2
+```
+
+Wait for all API replicas to run a B2-aware release before configuring or
+managing B2 buckets. If the API is rolled back to a pre-B2 release, keep B2
+management operations paused until a B2-aware release is restored. The provider
+record is independent of R2 and S3 clients keep using their scoped keys.
+
+The CLI also accepts the B2 secret from `FUGUE_S3_B2_APPLICATION_KEY`.
+Existing stores and new requests that omit the provider retain their current
+behavior (new stores default to R2). This does not migrate any existing data or
+switch any platform backup or compiler archive to B2.
 
 ## Use storage
 
@@ -54,6 +85,8 @@ scope. Cross-project application binding requires an explicitly selected app
 in the same tenant and a principal authorized for both projects. Each issued
 credential is restricted to one bucket and either object read-only or object
 read-write permissions, with no bucket/account administration.
+Configure S3 clients with the explicit B2 bucket name and region. Fugue does not
+grant access to list all B2 bucket names in the account.
 
 Disabling persists `disabling` before revoking every grant upstream and reports
 `disabled` only after revocation succeeds. A failed operation remains retryable.
@@ -63,12 +96,17 @@ credential records outlive compute. Tenant deletion with owned stores is
 blocked to preserve ownership; this release deliberately has no bulk object
 purge operation.
 
-Usage measurement lists the bucket to calculate current object bytes and count.
+Usage measurement lists the bucket to calculate current R2 object bytes/count
+or B2 stored object version bytes/count, excluding delete markers and incomplete
+uploads. B2 retains historical versions unless removed; review your provider
+lifecycle policy before large ingestion. Bucket deletion requires the existing
+explicit confirmation and clears versions, markers and unfinished uploads.
 It retains the previous successful measurement on failure and includes its
 observation timestamp. quota_bytes is a **soft budget**, not a synchronous hard
 limit or provider invoice. Multipart pending bytes, request charges, and billing
 reconciliation are not represented as measured zero. Measurements are explicit,
-so direct R2 traffic does not load the Fugue control plane.
+so direct S3 traffic does not load the Fugue control plane. Neither provider
+indexes JSON contents; maintain an external index if filtering by file content.
 
 ## Platform inventory and Longhorn reconciliation
 

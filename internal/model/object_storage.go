@@ -11,6 +11,7 @@ type ObjectStore struct {
 	Name            string                       `json:"name"`
 	Provider        string                       `json:"provider"`
 	Bucket          string                       `json:"bucket"`
+	BucketID        string                       `json:"bucket_id,omitempty"`
 	Endpoint        string                       `json:"endpoint"`
 	Region          string                       `json:"region"`
 	Status          string                       `json:"status"`
@@ -48,6 +49,14 @@ type ObjectStorageConfig struct {
 	CompilerInputArchive *CompilerInputArchiveBackend `json:"compiler_input_archive,omitempty"`
 }
 
+type ObjectStorageProviderConfig struct {
+	AccountID string            `json:"account_id"`
+	Region    string            `json:"region,omitempty"`
+	Endpoint  string            `json:"endpoint,omitempty"`
+	Secret    DataBackendSecret `json:"secret"`
+	UpdatedAt time.Time         `json:"updated_at"`
+}
+
 // CompilerInputArchiveBackend is platform-owned and never exposed with its
 // encrypted credentials. Identity and granted credentials survive retries.
 type CompilerInputArchiveBackend struct {
@@ -64,6 +73,7 @@ type CompilerInputArchiveBackend struct {
 	ProtectionVerifiedAt  *time.Time        `json:"protection_verified_at,omitempty"`
 }
 type ObjectStorageState struct {
+	BackblazeB2 *ObjectStorageProviderConfig    `json:"backblaze_b2,omitempty"`
 	Config      *ObjectStorageConfig            `json:"config,omitempty"`
 	Stores      []ObjectStore                   `json:"stores,omitempty"`
 	Credentials []ObjectStorageCredentialRecord `json:"credentials,omitempty"`
