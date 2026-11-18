@@ -1,0 +1,49 @@
+name: verify-dns-authority-recheck-candidate
+
+on:
+  push:
+    branches: [verify/dns-authority-recheck-20261118]
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-candidate-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      GOCACHE: ${{ github.workspace }}/.gocache
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 8173ec2f6c076793528cc027fc64a7988d0f6406
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Verify exact candidate identity
+        run: test "$(git rev-parse HEAD)" = 8173ec2f6c076793528cc027fc64a7988d0f6406
+      - name: Download modules outside bounded prepush budget
+        run: go mod download
+      - name: Full unmodified repository test target
+        run: make test
+      - name: Candidate race regressions
+        run: go test -race ./internal/api -run 'Test(DNSAuthorityRecheck|DNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment|DNSAssignmentMismatchFields)' -count=3
+      - name: Warm the unchanged compile-all command outside the timed regression
+        run: go build -p 4 ./...
+      - name: Default exact prepush without expanded budgets
+        env:
+          PREPUSH_BASE_REF: e84cc0682dad709b8706dff7f7f42fc60ab7c76f
+          PREPUSH_RECEIPT: ${{ runner.temp }}/candidate-prepush.json
+        run: make prepush
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: candidate-prepush-8173ec2f6
+          path: ${{ runner.temp }}/candidate-prepush.json
+          if-no-files-found: warn
+          retention-days: 7
