@@ -344,7 +344,7 @@ func (s *Server) dnsFactSourceForConsumerWithReaders(ctx context.Context, node s
 }
 
 func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (response platformDNSRuntimeFactsResponse, readErr error) {
-	ctx, trace := s.beginCaptureTrace(ctx, "dns-runtime-facts")
+	ctx, trace := s.beginDNSRuntimeFactsCapture(ctx)
 	stage := "source"
 	var transportErr error
 	var finishReplacementRetry, finishVerifiedReplacementRetry func()

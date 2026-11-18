@@ -8,7 +8,82 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"fugue/internal/runtimeobservation"
 )
+
+func TestDNSReadDatabaseCorrelationSeparatesSiblingCaptures(t *testing.T) {
+	s := &Server{}
+	db := &runtimeobservation.DatabaseRecorder{}
+	base, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	parent := runtimeobservation.WithDatabaseOperation(base, "http-request")
+	parentID := runtimeobservation.DatabaseOperationFromContext(parent).ID
+	deadline, _ := base.Deadline()
+	var want [2]uint64
+	var queryContexts [2]context.Context
+	var workers sync.WaitGroup
+	for i := range want {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ctx, trace := s.beginDNSRuntimeFactsCapture(parent)
+			op := runtimeobservation.DatabaseOperationFromContext(ctx)
+			want[i] = op.ID
+			if op.ID == 0 || op.Parent != parentID || op.Name != "dns-runtime-facts" {
+				t.Errorf("capture has no distinct child operation: %+v", op)
+			}
+			readCtx, finish := startDNSReadPhase(ctx, dnsReadAuthorityRecheck)
+			if got, ok := readCtx.Deadline(); !ok || got != deadline || readCtx.Done() != base.Done() {
+				t.Error("correlation changed the caller budget")
+			}
+			queryContexts[i] = readCtx
+			finish()
+			s.finishCaptureTrace(trace, "authority_recheck", context.DeadlineExceeded, 0, 0)
+		}()
+	}
+	workers.Wait()
+	if want[0] == want[1] {
+		t.Fatalf("sibling reads share a database operation: %v", want)
+	}
+	// Exercise the real recorder serially so its intentionally best-effort
+	// contention policy cannot make the identity assertions flaky.
+	for _, ctx := range queryContexts {
+		fact := db.StartQuery(ctx, 1, 1, time.Time{}, "SELECT 1", nil)
+		db.FinishQuery(fact, context.DeadlineExceeded)
+	}
+	snapshot, err := db.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	failureView := snapshot.(map[string]any)["failures"].(map[string]any)
+	if failureView["total"] != uint64(2) {
+		t.Fatal("missing observed driver failures", failureView)
+	}
+	receipts := s.captureSnapshot().(map[string]any)["dns_failures"].(map[string]any)["receipts"].([]captureReceipt)
+	seen := map[uint64]bool{}
+	for _, receipt := range receipts {
+		seen[receipt.DatabaseOperationID] = true
+	}
+	for _, id := range want {
+		if !seen[id] {
+			t.Fatal("failure receipt lost the driver operation ID", id)
+		}
+	}
+	rows := failureView["receipts"].([]runtimeobservation.DatabaseFailureFact)
+	if len(rows) != len(want) || rows[0].Operation.ID == rows[1].Operation.ID {
+		t.Fatal("missing distinct database failures", rows)
+	}
+	for _, row := range rows {
+		if !seen[row.Operation.ID] {
+			t.Fatal("driver failure cannot join its DNS capture", row.Operation)
+		}
+	}
+	ctx, trace := s.beginDNSRuntimeFactsCapture(context.Background())
+	if op := runtimeobservation.DatabaseOperationFromContext(ctx); op.ID == 0 || op.Parent != 0 || trace.receipt.DatabaseOperationID != op.ID {
+		t.Fatal("background DNS read cannot join its database activity", op)
+	}
+}
 
 func TestDNSReadTimingsAggregateExactWallIntervalsWithoutChangingContext(t *testing.T) {
 	s := &Server{}

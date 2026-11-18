@@ -469,6 +469,7 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := "/v1/admin/platform-state/dns-runtime-facts/" + f.claims.NodeID
+	var previousOperationID uint64
 	for i := 0; i < 2; i++ {
 		r := performJSONRequest(t, s, "GET", endpoint, "facts-admin", nil)
 		var response platformDNSRuntimeFactsResponse
@@ -477,6 +478,11 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			t.Fatal(r.Code, r.Body.String())
 		}
 		rows := captureReceipts(t, s)
+		operationID := rows[len(rows)-1].DatabaseOperationID
+		if operationID == 0 || operationID == previousOperationID || strings.Contains(r.Body.String(), "database_operation_id") {
+			t.Fatal("DNS read did not have a unique, private database operation")
+		}
+		previousOperationID = operationID
 		phases := map[string]uint64{}
 		for _, timing := range rows[len(rows)-1].DNSRead {
 			if timing.Stage == "total" {
@@ -497,6 +503,10 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 	projected, err := s.dnsInventoryServingFacts(context.Background(), []model.DNSNode{legacy, legacy})
 	if err != nil || len(projected) != 2 || reads != 3 {
 		t.Fatal("inventory projection did not deduplicate physical node reads", err, reads)
+	}
+	rows := captureReceipts(t, s)
+	if id := rows[len(rows)-1].DatabaseOperationID; id == 0 || id == previousOperationID {
+		t.Fatal("background inventory read did not have its own database operation")
 	}
 	for _, node := range projected {
 		if !node.Healthy || node.Status != model.EdgeHealthHealthy || node.LastError != "" || node.DNSBundleVersion != child.Generation || node.LKGGeneration != child.Generation || node.ServingObservation == nil || node.ServingObservation.BackendPodUID != string(f.pod.UID) || node.ServingObservation.State != "ready" || node.QueryCount != legacy.QueryCount || node.CacheWriteErrors != legacy.CacheWriteErrors || node.LastHeartbeatAt != legacy.LastHeartbeatAt || !node.ServingObservation.ObservedAt.Equal(snapshot.ObservedAt) {

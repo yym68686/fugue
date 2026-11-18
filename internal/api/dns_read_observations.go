@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"time"
+
+	"fugue/internal/runtimeobservation"
 )
 
 type dnsReadPhase uint8
@@ -57,6 +59,17 @@ type dnsReadStageObservation struct {
 
 type dnsReadTimings [dnsReadPhaseCount][dnsReadStageCount]dnsReadStageObservation
 type dnsReadPhaseKey struct{}
+
+// Inventory reads fan out by node, so the HTTP request operation (if any)
+// cannot identify a single DNS capture. Attach a child ID before creating any
+// readers, including the artifact session that spans both authority reads.
+// The ID remains local to these receipts and the database recorder.
+func (s *Server) beginDNSRuntimeFactsCapture(ctx context.Context) (context.Context, *captureTrace) {
+	ctx = runtimeobservation.WithDatabaseOperation(ctx, "dns-runtime-facts")
+	ctx, trace := s.beginCaptureTrace(ctx, "dns-runtime-facts")
+	trace.receipt.DatabaseOperationID = runtimeobservation.DatabaseOperationFromContext(ctx).ID
+	return ctx, trace
+}
 
 func startDNSReadPhase(ctx context.Context, phase dnsReadPhase) (context.Context, func()) {
 	ctx = context.WithValue(ctx, dnsReadPhaseKey{}, phase)

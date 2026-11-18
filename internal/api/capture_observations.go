@@ -43,17 +43,18 @@ type captureObservations struct {
 }
 
 type captureReceipt struct {
-	Sequence   uint64                    `json:"sequence"`
-	Kind       string                    `json:"kind"`
-	StartedAt  time.Time                 `json:"started_at"`
-	FinishedAt time.Time                 `json:"finished_at"`
-	Outcome    string                    `json:"outcome"`
-	ErrorClass string                    `json:"error_class,omitempty"`
-	Candidates int                       `json:"candidates"`
-	Minimum    int                       `json:"minimum_candidates"`
-	Events     []captureEvent            `json:"events"`
-	Dropped    uint64                    `json:"events_dropped"`
-	DNSRead    []dnsReadStageObservation `json:"dns_read,omitempty"`
+	Sequence            uint64                    `json:"sequence"`
+	DatabaseOperationID uint64                    `json:"database_operation_id,omitempty"`
+	Kind                string                    `json:"kind"`
+	StartedAt           time.Time                 `json:"started_at"`
+	FinishedAt          time.Time                 `json:"finished_at"`
+	Outcome             string                    `json:"outcome"`
+	ErrorClass          string                    `json:"error_class,omitempty"`
+	Candidates          int                       `json:"candidates"`
+	Minimum             int                       `json:"minimum_candidates"`
+	Events              []captureEvent            `json:"events"`
+	Dropped             uint64                    `json:"events_dropped"`
+	DNSRead             []dnsReadStageObservation `json:"dns_read,omitempty"`
 }
 
 type captureEvent struct {
