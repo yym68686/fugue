@@ -1202,10 +1202,26 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return fmt.Errorf("render manifest for app %s: %w", app.ID, err)
 	}
 	timer.Mark("render_bundle")
+	var unlockCapacityDomain func()
+	var releaseCapacity func(string)
 	if s.Config.KubectlApply && app.Spec.Replicas > 0 &&
 		(op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate) {
-		unlockCapacityDomain := s.lockManagedRolloutCapacityDomain(scheduling)
-		defer unlockCapacityDomain()
+		unlockCapacityDomain, err = s.lockManagedRolloutCapacityDomainContext(ctx, scheduling, op.ID)
+		if err != nil {
+			return err
+		}
+		heldAt := time.Now()
+		releaseCapacity = func(reason string) {
+			if unlockCapacityDomain == nil {
+				return
+			}
+			unlockCapacityDomain()
+			unlockCapacityDomain = nil
+			if s.Logger != nil {
+				s.Logger.Printf("rollout capacity lock released operation=%s app=%s reason=%s hold_ms=%d", op.ID, app.ID, reason, time.Since(heldAt).Milliseconds())
+			}
+		}
+		defer releaseCapacity("operation_exit")
 		timer.Mark("rollout_capacity_lock")
 	}
 
@@ -1260,7 +1276,11 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if safeRollout != nil {
 				rolloutResult = s.waitForManagedAppRevisionRolloutResultWithScheduling(ctx, app, op.ID, scheduling, safeRolloutCandidateRevision(safeRollout.Candidate.ID))
 			} else {
-				rolloutResult = s.waitForManagedAppRolloutResultWithScheduling(ctx, app, op.ID, scheduling)
+				waitCtx := ctx
+				if releaseCapacity != nil && canHandOffRolloutCapacity(op, currentApp, app) {
+					waitCtx = withRolloutCapacityHandoff(ctx, releaseCapacity)
+				}
+				rolloutResult = s.waitForManagedAppRolloutResultWithScheduling(waitCtx, app, op.ID, scheduling)
 			}
 			s.recordRolloutReadinessResultStep(op, app, rolloutResult)
 			if err := rolloutResult.Error(); err != nil {
@@ -1272,6 +1292,18 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 						return fmt.Errorf("wait for managed app rollout %s: %w; safe rollout restore failed: %v", app.ID, err, rollbackErr)
 					}
 				} else if failedManagedAppRolloutNeedsRestore(op, currentApp) {
+					// A compensating Deployment update can create its own surge.
+					// Rejoin normal admission serialization before restoring.
+					if releaseCapacity != nil && unlockCapacityDomain == nil {
+						releaseRestore, lockErr := s.lockManagedRolloutCapacityDomainContext(ctx, currentScheduling, op.ID)
+						if lockErr != nil {
+							return fmt.Errorf("wait for restore admission after managed app rollout %s: %w", app.ID, lockErr)
+						}
+						defer releaseRestore()
+						if err := s.ensureOperationStillActiveContext(ctx, op.ID); err != nil {
+							return err
+						}
+					}
 					if rollbackErr := s.restoreFailedManagedAppRollout(ctx, op, currentApp, currentScheduling, err); rollbackErr != nil {
 						return fmt.Errorf("wait for managed app rollout %s: %w; previous release restore failed: %v", app.ID, err, rollbackErr)
 					}

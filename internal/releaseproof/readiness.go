@@ -56,8 +56,12 @@ type MetadataEvidence struct {
 type Service struct {
 	MetadataEvidence
 	Spec struct {
-		Selector map[string]string `json:"selector"`
-		Ports    []struct {
+		Selector                 map[string]string `json:"selector"`
+		PublishNotReadyAddresses bool              `json:"publishNotReadyAddresses"`
+		InternalTrafficPolicy    string            `json:"internalTrafficPolicy"`
+		ExternalTrafficPolicy    string            `json:"externalTrafficPolicy"`
+		ClusterIP                string            `json:"clusterIP"`
+		Ports                    []struct {
 			Port int `json:"port"`
 		} `json:"ports"`
 	} `json:"spec"`
@@ -278,7 +282,7 @@ func Observe(app model.App, release model.AppRelease, stable bool, snapshot Snap
 			return fail("release revision workload differs from immutable binding")
 		}
 	}
-	endpointPods, err := observeReleaseEndpointPods(app, release, deployment, service, snapshot, owner, equivalent)
+	endpointPods, err := observeReleaseEndpointPods(app, release, deployment, service, snapshot, owner, equivalent, canonical)
 	if err != nil {
 		return fail(err.Error())
 	}
@@ -305,7 +309,17 @@ func SingleControllerOwner(refs []OwnerReference, apiVersion, kind string) (Owne
 	return result, count == 1 && result.APIVersion == apiVersion && result.Kind == kind && result.Name != "" && result.UID != ""
 }
 
-func observeReleaseEndpointPods(app model.App, release model.AppRelease, deployment Deployment, service Service, snapshot Snapshot, owner func(map[string]string) bool, equivalent func(model.App, string, string) bool) ([]EndpointPodIdentity, error) {
+// OrdinarySingletonDrainEligible scopes the fast path to apps without state,
+// backing workloads or independent revision/placement recovery.
+func OrdinarySingletonDrainEligible(spec model.AppSpec) bool {
+	return spec.Replicas == 1 && model.AppExposesPublicService(spec) &&
+		!model.AppSafeZeroDowntimeRolloutEnabled(spec) &&
+		spec.Workspace == nil && spec.PersistentStorage == nil && spec.Data == nil &&
+		spec.Postgres == nil && spec.SSH == nil && spec.Failover == nil && spec.VolumeReplication == nil && spec.NodeLoss == nil &&
+		spec.WorkloadGeneration == ""
+}
+
+func observeReleaseEndpointPods(app model.App, release model.AppRelease, deployment Deployment, service Service, snapshot Snapshot, owner func(map[string]string) bool, equivalent func(model.App, string, string) bool, canonical bool) ([]EndpointPodIdentity, error) {
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	slices := snapshot.EndpointSlices[NamespacedKey(ns, service.Metadata.Name)]
 	key := deployment.Spec.Template.Metadata.Annotations.ReleaseKey
@@ -315,6 +329,17 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 	ready := map[string]EndpointPodIdentity{}
 	addresses := map[string]map[string]struct{}{}
 	addressOwner := map[netip.Addr]string{}
+	drainingFamilies := map[bool]bool{}
+	readyFamilies := map[bool]bool{}
+	// Cluster-wide Service routing uses ready endpoints before terminating
+	// ones. Local policies and headless/explicit non-ready publication do not
+	// provide that guarantee. A complete current cohort is required by Observe.
+	_, ipErr := netip.ParseAddr(service.Spec.ClusterIP)
+	allowDraining := canonical && deployment.Spec.Replicas != nil && *deployment.Spec.Replicas == 1 &&
+		release.SpecSnapshot != nil && OrdinarySingletonDrainEligible(*release.SpecSnapshot) &&
+		!service.Spec.PublishNotReadyAddresses && ipErr == nil &&
+		(service.Spec.InternalTrafficPolicy == "" || service.Spec.InternalTrafficPolicy == "Cluster") &&
+		(service.Spec.ExternalTrafficPolicy == "" || service.Spec.ExternalTrafficPolicy == "Cluster")
 	for _, slice := range slices {
 		ref, valid := SingleControllerOwner(slice.Metadata.OwnerReferences, "v1", "Service")
 		if !valid || ref.Name != service.Metadata.Name || ref.UID != service.Metadata.UID || slice.Metadata.Namespace != ns || slice.Metadata.UID == "" || slice.Metadata.DeletionTimestamp != "" {
@@ -340,15 +365,16 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 			if !valid {
 				return nil, fmt.Errorf("release endpoint ReplicaSet Deployment controller owner invalid: replica_set=%s", rs.Metadata.Name)
 			}
+			identityDiffers := func(field, expected, observed string) error {
+				return fmt.Errorf("release endpoint identity differs: field=%s expected=%s observed=%s pod=%s pod_uid=%s pod_rv=%s replica_set=%s replica_set_uid=%s replica_set_rv=%s deployment=%s deployment_rv=%s", field, expected, observed, pod.Metadata.Name, pod.Metadata.UID, pod.Metadata.ResourceVersion, rs.Metadata.Name, rs.Metadata.UID, rs.Metadata.ResourceVersion, deployment.Metadata.Name, deployment.Metadata.ResourceVersion)
+			}
 			for _, check := range []struct{ field, expected, observed string }{
 				{"deployment_name", deployment.Metadata.Name, depRef.Name},
 				{"deployment_uid", deployment.Metadata.UID, depRef.UID},
 				{"replica_set_workload_label", deployment.Metadata.Name, rs.Spec.Template.Metadata.Labels[runtime.FugueLabelAppWorkload]},
-				{"pod_release_key", key, pod.Metadata.Annotations.ReleaseKey},
-				{"replica_set_release_key", key, rs.Spec.Template.Metadata.Annotations.ReleaseKey},
 			} {
 				if check.expected != check.observed {
-					return nil, fmt.Errorf("release endpoint identity differs: field=%s expected=%s observed=%s pod=%s pod_uid=%s pod_rv=%s replica_set=%s replica_set_uid=%s replica_set_rv=%s deployment=%s deployment_rv=%s", check.field, check.expected, check.observed, pod.Metadata.Name, pod.Metadata.UID, pod.Metadata.ResourceVersion, rs.Metadata.Name, rs.Metadata.UID, rs.Metadata.ResourceVersion, deployment.Metadata.Name, deployment.Metadata.ResourceVersion)
+					return nil, identityDiffers(check.field, check.expected, check.observed)
 				}
 			}
 			podIPs := map[netip.Addr]struct{}{}
@@ -373,6 +399,26 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 				}
 				addressOwner[ip.Unmap()] = target.UID
 			}
+			podKey, rsKey := pod.Metadata.Annotations.ReleaseKey, rs.Spec.Template.Metadata.Annotations.ReleaseKey
+			if podKey != key || rsKey != key {
+				// Retain validation of Pod/RS/Deployment, selector and address
+				// ownership above. Explicitly withdrawn old endpoints are not
+				// current backends, even if they still serve existing connections.
+				if allowDraining && podKey != "" && podKey == rsKey && pod.Metadata.DeletionTimestamp != "" &&
+					endpoint.Conditions.Ready != nil && !*endpoint.Conditions.Ready &&
+					endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating &&
+					endpoint.Conditions.Serving != nil && *endpoint.Conditions.Serving {
+					for _, address := range endpoint.Addresses {
+						ip, _ := netip.ParseAddr(address)
+						drainingFamilies[ip.Unmap().Is4()] = true
+					}
+					continue
+				}
+				if podKey != key {
+					return nil, identityDiffers("pod_release_key", key, podKey)
+				}
+				return nil, identityDiffers("replica_set_release_key", key, rsKey)
+			}
 			if endpoint.Conditions.Ready == nil || !*endpoint.Conditions.Ready {
 				continue
 			}
@@ -392,7 +438,13 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 			for _, address := range endpoint.Addresses {
 				ip, _ := netip.ParseAddr(address)
 				addresses[target.UID][ip.Unmap().String()] = struct{}{}
+				readyFamilies[ip.Unmap().Is4()] = true
 			}
+		}
+	}
+	for ipv4 := range drainingFamilies {
+		if !readyFamilies[ipv4] {
+			return nil, fmt.Errorf("release has no ready replacement for a draining endpoint address family")
 		}
 	}
 	result := make([]EndpointPodIdentity, 0, len(ready))

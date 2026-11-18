@@ -358,6 +358,10 @@ func (s *Service) waitForManagedAppRolloutErrorWithScheduling(
 				if blockingMessage = deploymentTemplatePodSchedulingBlockMessage(pods, deployment); blockingMessage != "" {
 					message = blockingMessage
 				}
+				if handoff, _ := ctx.Value(rolloutCapacityHandoffKey{}).(*rolloutCapacityHandoff); ready && handoff != nil && !handoff.done &&
+					expectedReleaseKey != "" && expectedImage != "" && blockingMessage == "" && volumeMessage == "" {
+					handoff.try(waitCtx, client, namespace, deployment, podSnapshot)
+				}
 			}
 		}
 		if err := volumeBlock.observe(s.rolloutObservationTime(), volumePod, volumeMessage); err != nil {

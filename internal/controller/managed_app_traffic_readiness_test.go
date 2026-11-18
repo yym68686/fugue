@@ -256,3 +256,93 @@ func TestOrdinaryRolloutTrafficGateUsesExactCompilerReadiness(t *testing.T) {
 		})
 	}
 }
+
+func TestOrdinaryRolloutTrafficGateKeepsVerifiedWithdrawnCohortsDraining(t *testing.T) {
+	for _, scenario := range []string{"two draining generations", "still ready", "unknown ready", "not terminating", "unknown serving", "pod not terminating", "foreign owner", "wrong address", "no ready replacement", "different address family", "local traffic", "publish not ready", "headless", "stateful"} {
+		t.Run(scenario, func(t *testing.T) {
+			app, objects := trafficReadinessFixture(t)
+			ns := runtime.NamespaceForTenant(app.TenantID)
+			svcPath := "/api/v1/namespaces/" + ns + "/services/" + runtime.RuntimeAppServiceName(app)
+			podPath := "/api/v1/namespaces/" + ns + "/pods/"
+			rsPath := "/apis/apps/v1/namespaces/" + ns + "/replicasets/"
+			slicePath := "/apis/discovery.k8s.io/v1/namespaces/" + ns + "/endpointslices"
+			svc := objects[svcPath].(releaseproof.Service)
+			svc.Spec.ClusterIP = "192.0.2.200"
+			yes, no := true, false
+			slices := objects[slicePath].(map[string]any)["items"].([]releaseproof.EndpointSlice)
+			current := slices[0].Endpoints[0]
+			for _, version := range []string{"oldest", "previous"} {
+				pod := objects[podPath+"sample-pod"].(releaseproof.Pod)
+				rs := objects[rsPath+"sample-rs"].(releaseproof.ReplicaSet)
+				pod.Metadata.Name, pod.Metadata.UID = "pod-"+version, "uid-"+version
+				pod.Metadata.DeletionTimestamp, pod.Metadata.Annotations.ReleaseKey = "2026-01-01T00:00:00Z", version
+				rs.Metadata.Name, rs.Metadata.UID, rs.Spec.Template.Metadata.Annotations.ReleaseKey = "rs-"+version, "rs-uid-"+version, version
+				pod.Metadata.OwnerReferences = []releaseproof.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: rs.Metadata.Name, UID: rs.Metadata.UID, Controller: &yes}}
+				ep := current
+				ep.TargetRef.Name, ep.TargetRef.UID = pod.Metadata.Name, pod.Metadata.UID
+				pod.Status.PodIP = "192.0.2.11"
+				if version == "previous" {
+					pod.Status.PodIP = "192.0.2.12"
+				}
+				switch scenario {
+				case "pod not terminating":
+					pod.Metadata.DeletionTimestamp = ""
+				case "foreign owner":
+					rs.Metadata.OwnerReferences = append([]releaseproof.OwnerReference(nil), rs.Metadata.OwnerReferences...)
+					rs.Metadata.OwnerReferences[0].UID = "foreign"
+				case "different address family":
+					pod.Status.PodIP = "2001:db8::11"
+					if version == "previous" {
+						pod.Status.PodIP = "2001:db8::12"
+					}
+				}
+				ep.Addresses = []string{pod.Status.PodIP}
+				ep.Conditions.Ready, ep.Conditions.Terminating, ep.Conditions.Serving = &no, &yes, &yes
+				switch scenario {
+				case "still ready":
+					ep.Conditions.Ready = &yes
+				case "unknown ready":
+					ep.Conditions.Ready = nil
+				case "not terminating":
+					ep.Conditions.Terminating = &no
+				case "unknown serving":
+					ep.Conditions.Serving = nil
+				case "wrong address":
+					ep.Addresses = []string{"192.0.2.99"}
+				}
+				objects[podPath+pod.Metadata.Name], objects[rsPath+rs.Metadata.Name] = pod, rs
+				slices[0].Endpoints = append(slices[0].Endpoints, ep)
+			}
+			switch scenario {
+			case "no ready replacement":
+				slices[0].Endpoints = slices[0].Endpoints[1:]
+			case "local traffic":
+				svc.Spec.InternalTrafficPolicy = "Local"
+			case "publish not ready":
+				svc.Spec.PublishNotReadyAddresses = true
+			case "headless":
+				svc.Spec.ClusterIP = "None"
+			case "stateful":
+				app.Spec.PersistentStorage = &model.AppPersistentStorageSpec{}
+			}
+			objects[svcPath] = svc
+			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					t.Error("traffic observation attempted to mutate a workload")
+				}
+				data, ok := objects[r.URL.Path]
+				if !ok {
+					http.NotFound(w, r)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(data)
+			}))
+			defer kube.Close()
+			want := scenario == "two draining generations"
+			ready, reason, err := (&Service{}).managedAppTrafficReady(context.Background(), &kubeClient{client: kube.Client(), baseURL: kube.URL}, app)
+			if ready != want || err != nil {
+				t.Fatalf("ready=%t want=%t reason=%s err=%v", ready, want, reason, err)
+			}
+		})
+	}
+}

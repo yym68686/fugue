@@ -59,6 +59,7 @@ type kubeLeaseSpec struct {
 type kubePodList struct {
 	Metadata struct {
 		ResourceVersion string `json:"resourceVersion"`
+		Continue        string `json:"continue"`
 	} `json:"metadata"`
 	Items []kubePod `json:"items"`
 }
@@ -677,6 +678,9 @@ func (c *kubeClient) listAllPods(ctx context.Context) ([]kubePod, bool, error) {
 			return nil, false, nil
 		}
 		return nil, false, err
+	}
+	if podList.Metadata.Continue != "" {
+		return nil, false, fmt.Errorf("cluster Pod inventory is incomplete")
 	}
 	return podList.Items, true, nil
 }
