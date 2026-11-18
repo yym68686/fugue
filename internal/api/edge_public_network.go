@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -21,6 +22,24 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+var errPublicFrontConnectionMissing = errors.New("connection_missing")
+
+func classifyPublicFrontObservation(response *http.Response) error {
+	if response.StatusCode != http.StatusNotFound {
+		return nil
+	}
+	// The Kubernetes pod proxy also emits 404s for missing Pods. Only accept
+	// the exact, bounded response from the indexed Front handler.
+	body, err := io.ReadAll(io.LimitReader(response.Body, 128))
+	if err == nil {
+		switch string(body) {
+		case "exact indexed connection unavailable\n", "indexed connection changed during observation\n":
+			return errPublicFrontConnectionMissing
+		}
+	}
+	return nil
+}
 
 func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWriter, request *http.Request) {
 	authority, ok := s.authorizeEdgeRequest(writer, request)
@@ -57,7 +76,11 @@ func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWrit
 		if s.log != nil {
 			s.log.Printf("public Front network observation rejected; edge_id=%s slot=%s reason=%s", query.EdgeID, query.Slot, err.Error())
 		}
-		httpx.WriteError(writer, http.StatusServiceUnavailable, "selected public Front connection evidence unavailable")
+		if errors.Is(err, errPublicFrontConnectionMissing) {
+			httpx.WriteError(writer, http.StatusNotFound, "selected public Front connection is no longer present")
+		} else {
+			httpx.WriteError(writer, http.StatusServiceUnavailable, "selected public Front connection evidence unavailable")
+		}
 		return
 	}
 	writer.Header().Set("Cache-Control", "private, no-store")
@@ -276,7 +299,10 @@ func (s *Server) readPublicFrontNetwork(ctx context.Context, node model.EdgeNode
 	}
 	var observation frontnetwork.Response
 	path := binding.proxyPath + "/edge/tcp-connections?" + url.Values{"request": {string(queryJSON)}}.Encode()
-	if readDNSPodObservation(ctx, client, path, &observation, 4096) != nil {
+	if err := readPodObservation(ctx, client, path, &observation, 4096, classifyPublicFrontObservation); err != nil {
+		if errors.Is(err, errPublicFrontConnectionMissing) {
+			return frontnetwork.Response{}, err
+		}
 		return fail("socket_inventory_unavailable")
 	}
 	peer, err := frontnetwork.ParseRemote(query.RemoteAddr)

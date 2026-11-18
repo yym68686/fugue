@@ -1958,6 +1958,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EdgePublicNetworkObservationResponse'
+        '404':
+          description: The selected Front reported that the exact connection was absent or changed; no sample was returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         default:
           $ref: '#/components/responses/ErrorResponse'
   /v1/edge/heartbeat:

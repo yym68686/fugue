@@ -599,6 +599,10 @@ func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path str
 }
 
 func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path string, out any, maximum int64) error {
+	return readPodObservation(ctx, client, path, out, maximum, nil)
+}
+
+func readPodObservation(ctx context.Context, client *clusterNodeClient, path string, out any, maximum int64, classify func(*http.Response) error) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, client.baseURL+path, nil)
 	if err != nil {
 		return &dnsObservationReadFailure{class: "request"}
@@ -613,6 +617,11 @@ func readDNSPodObservation(ctx context.Context, client *clusterNodeClient, path 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		if classify != nil {
+			if err := classify(resp); err != nil {
+				return err
+			}
+		}
 		var rejection string
 		switch values := resp.Header.Values("X-Fugue-DNS-Observation-Rejection"); len(values) {
 		case 0:

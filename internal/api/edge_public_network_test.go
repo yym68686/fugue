@@ -37,7 +37,7 @@ func publicNetworkFixture() (model.EdgeNode, corev1.Service, corev1.Pod, discove
 }
 
 func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T) {
-	for _, scenario := range []string{"valid", "empty_selector_value", "service_changed", "pod_changed", "endpoints_changed", "foreign_peer", "duplicate_public_owner", "duplicate_matching_pod", "incomplete_pods", "unready"} {
+	for _, scenario := range []string{"valid", "empty_selector_value", "connection_missing", "connection_changed", "proxy_not_found", "front_unavailable", "service_changed", "pod_changed", "endpoints_changed", "foreign_peer", "duplicate_public_owner", "duplicate_matching_pod", "incomplete_pods", "unready"} {
 		t.Run(scenario, func(t *testing.T) {
 			node, service, pod, slices := publicNetworkFixture()
 			if scenario == "empty_selector_value" {
@@ -107,6 +107,20 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 					}
 					response = value
 				case "/api/v1/namespaces/system/pods/front-a:7831/proxy/edge/tcp-connections":
+					switch scenario {
+					case "connection_missing":
+						http.Error(writer, "exact indexed connection unavailable", http.StatusNotFound)
+						return
+					case "connection_changed":
+						http.Error(writer, "indexed connection changed during observation", http.StatusNotFound)
+						return
+					case "proxy_not_found":
+						http.NotFound(writer, request)
+						return
+					case "front_unavailable":
+						http.Error(writer, "observation busy", http.StatusServiceUnavailable)
+						return
+					}
 					values, err := url.ParseQuery(request.URL.RawQuery)
 					if err != nil || len(values) != 1 || len(values["request"]) != 1 || json.Unmarshal([]byte(values.Get("request")), &query) != nil {
 						t.Error("missing exact indexed Front observation request")
@@ -129,6 +143,10 @@ func TestPublicFrontObservationSelectsRuntimeTransportNotLegacyName(t *testing.T
 				return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader"}, nil
 			}}
 			response, err := server.readPublicFrontNetwork(context.Background(), node, query)
+			wantMissing := scenario == "connection_missing" || scenario == "connection_changed"
+			if (err == errPublicFrontConnectionMissing) != wantMissing {
+				t.Fatal("incorrect classification of indexed socket or proxy failure", err)
+			}
 			if (err == nil) != (scenario == "valid" || scenario == "empty_selector_value") {
 				t.Fatal(scenario, response, err)
 			}
