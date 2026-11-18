@@ -9508,6 +9508,9 @@ paths:
         lifecycle operation; independent service ownership is never reassigned.
         Unbound or shared services are rejected without mutation.
         Fresh live identity, storage, node and SQL checks run before mutation.
+        A fully applied, persisted in-place resource target may be carried into the
+        restart template atomically with the image change. Unknown resource drift
+        is rejected; the running request/limit envelope is never changed by migration.
         An accepted image change retains its exclusive mutation lease until verified;
         failures never trigger deletion, failover, storage copying or automatic rollback.
       tags: [Backing Services]

@@ -56,7 +56,7 @@ func (s *Server) handleMigrateBackingServiceImage(w http.ResponseWriter, r *http
 		ownership = "independent"
 	}
 	plan := pgimage.Plan{ServiceID: svc.ID, AppID: app.ID, Ownership: ownership, TargetImage: image, ConfigHash: store.PostgresImageMigrationConfigHash(app, svc, image), RequiresDowntime: true, LivePreflightPending: true,
-		Stages: []string{"verify current Cluster, primary, PVC, node, resource envelope and writable SQL", "persist immutable preflight witness and image-change intent", "compare-and-swap only Cluster.spec.imageName; let CNPG replace the primary", "verify unchanged PVC identities, system ID, placement, resources, SQL and no bootstrap container", "persist only the backing service image; never deploy the consumer app"}}
+		Stages: []string{"verify current Cluster, primary, PVC, node, persisted resource envelope and writable SQL", "persist immutable preflight witness and image-change intent", "atomically compare-and-swap Cluster.spec.imageName and, if needed, align its restart template with the applied in-place resource target; let CNPG replace the primary", "verify unchanged PVC identities, system ID, placement, running resources, SQL and no bootstrap container", "persist the backing service image and verified restart template; never deploy the consumer app"}}
 	if !req.Apply {
 		httpx.WriteJSON(w, 200, map[string]any{"plan": plan, "dry_run": true})
 		return
