@@ -14,6 +14,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/routeprobe"
+	"fugue/internal/store"
 )
 
 func offlineRecoveryFixture(t *testing.T) (*Server, platformproducer.Policy, platformproducer.OfflineEdge, platformproducer.ProjectionPolicyInput) {
@@ -155,6 +156,82 @@ func TestOfflineRecoveryRestoresCandidatesAndRetractsOnFailedProof(t *testing.T)
 	frozen, err = platformproducer.PublicationOfflineHolds(parent, []platformproducer.OfflineEdge{hold})
 	if err != nil || len(frozen) != 0 {
 		t.Fatal("live failure rewrote historical membership", err)
+	}
+}
+
+func TestOfflineRecoveryRetainsSignedHoldForRetiredRouteEnrollment(t *testing.T) {
+	s, _, retiredHold, input := offlineRecoveryFixture(t)
+	at := time.Now().UTC()
+	otherHold := retiredHold
+	otherHold.EdgeID, otherHold.PublicIPv4 = "edge-b", "9.9.9.9"
+	input.OfflineEdges = []platformproducer.OfflineEdge{retiredHold, otherHold}
+	nodes := []model.EdgeNode{
+		{ID: retiredHold.EdgeID, EdgeGroupID: retiredHold.EdgeGroupID, PublicIPv4: retiredHold.PublicIPv4},
+		{ID: otherHold.EdgeID, EdgeGroupID: otherHold.EdgeGroupID, PublicIPv4: otherHold.PublicIPv4},
+		{ID: "edge-c", EdgeGroupID: retiredHold.EdgeGroupID, PublicIPv4: "8.8.4.4"},
+	}
+	for _, hold := range input.OfflineEdges {
+		o := platformproducer.OfflineRecoveryObservation{EdgeID: hold.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(hold), LastAttempt: at, LastSuccess: at, ProofValidUntil: at.Add(time.Hour), Successes: 3, Admitted: true}
+		if _, err := s.store.UpdateObservationCheckpoint(t.Context(), platformproducer.OfflineRecoveryKey(hold), func([]byte) ([]byte, error) { return json.Marshal(o) }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+		t.Run(kind, func(t *testing.T) {
+			key := store.PlatformConsumerRetirementTarget{ConsumerID: "edge-worker:" + retiredHold.EdgeID, ArtifactKind: kind, ScopeKey: "global"}
+			calls := 0
+			lookup := func(_ context.Context, targets []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error) {
+				calls++
+				matches := map[store.PlatformConsumerRetirementTarget]bool{}
+				for _, target := range targets {
+					if target == key {
+						matches[target] = true
+					}
+				}
+				return matches, nil
+			}
+			intent := model.EdgeDNSAdmissionIntent{State: "suspended", Reason: retiredHold.Reason}
+			s.observeOfflineRecoveryChecked(nodes[0], &intent, input.OfflineEdges, at, lookup)
+			if intent.State != "suspended" || intent.RecoveryState != "enrollment_retired" || calls != 1 {
+				t.Fatal("inventory reported a retired enrollment as eligible", intent)
+			}
+			calls = 0
+			batchLookup := func(ctx context.Context, targets []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error) {
+				matches, err := lookup(ctx, targets)
+				if len(targets) != 4 || len(matches) != 1 {
+					t.Fatal("expected one batch with both exact route enrollments per recovered edge", targets)
+				}
+				return matches, err
+			}
+			projection := platformIntentProjectionResponse{Policy: platformconfig.PolicySnapshot{Generation: "old", Scope: "global"}}
+			if err := s.projectDNSReadinessWithRecoveryChecked(t.Context(), &projection, nodes, at, &input, batchLookup); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || len(projection.RuntimeSnapshot.DNSEdgeEndpoints) != 2 {
+				t.Fatal("retired enrollment blocked independent recovery or serving membership", calls, projection.RuntimeSnapshot.DNSEdgeEndpoints)
+			}
+			for _, e := range projection.RuntimeSnapshot.DNSEdgeEndpoints {
+				if e.EdgeID == retiredHold.EdgeID {
+					t.Fatal("retired enrollment returned to DNS candidates")
+				}
+			}
+			parent := model.PlatformArtifact{Metadata: map[string]string{}, Provenance: model.PlatformArtifactProvenance{SignedAt: at}}
+			if err := pinOfflineRecoveryEvidence(&parent, projection.RuntimeSnapshot); err != nil {
+				t.Fatal(err)
+			}
+			holds, err := platformproducer.PublicationOfflineHolds(parent, input.OfflineEdges)
+			if err != nil || len(holds) != 1 || holds[0].EdgeID != retiredHold.EdgeID {
+				t.Fatal("publication replay did not retain exactly the retired enrollment's hold", holds, err)
+			}
+		})
+	}
+	unavailable := errors.New("retirement lookup unavailable")
+	projection := platformIntentProjectionResponse{Policy: platformconfig.PolicySnapshot{Generation: "old", Scope: "global"}}
+	err := s.projectDNSReadinessWithRecoveryChecked(t.Context(), &projection, nodes, at, &input, func(context.Context, []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error) {
+		return nil, unavailable
+	})
+	if !errors.Is(err, unavailable) || len(projection.RuntimeSnapshot.DNSEdgeEndpoints) != 0 || len(projection.RuntimeSnapshot.Facts) != 0 {
+		t.Fatal("unavailable ledger did not stop candidate publication", err)
 	}
 }
 

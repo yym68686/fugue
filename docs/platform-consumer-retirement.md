@@ -72,6 +72,13 @@ direct old-binary writers and replica-session writes. Ledger UPDATE/DELETE/
 TRUNCATE and epoch downgrade are refused. It is a database backstop, not a
 promise against a database owner deliberately disabling schema protections.
 
+For global releases with a signed offline-edge recovery policy, a successful
+probe cannot lift the hold if either required global worker route enrollment
+has been permanently retired. The producer retains the original hold in newly
+compiled releases and still requires the remaining consumers to converge. It
+does not alter historical releases or enroll a replacement identity. If the
+retirement ledger cannot be read, candidate capture stops rather than guessing.
+
 Archived audit snapshots are deliberately not restoration/retention roots:
 their prior recovery obligations have explicitly been abandoned. Consequently
 the native root inventory stops retaining those old consumer generations without

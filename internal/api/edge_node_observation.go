@@ -7,6 +7,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
+	"fugue/internal/store"
 )
 
 func observeEdgeNodeInventory(node model.EdgeNode, now time.Time) *model.EdgeNodeInventoryObservation {
@@ -104,6 +105,10 @@ func (s *Server) observeEdgeNode(node model.EdgeNode, now time.Time) *model.Edge
 }
 
 func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeDNSAdmissionIntent, holds []platformproducer.OfflineEdge, now time.Time) {
+	s.observeOfflineRecoveryChecked(node, intent, holds, now, s.store.RetiredPlatformConsumerTargets)
+}
+
+func (s *Server) observeOfflineRecoveryChecked(node model.EdgeNode, intent *model.EdgeDNSAdmissionIntent, holds []platformproducer.OfflineEdge, now time.Time, lookup func(context.Context, []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error)) {
 	if intent.State != "suspended" {
 		return
 	}
@@ -112,8 +117,8 @@ func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeD
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
 		o, err := s.readOfflineRecovery(ctx, hold)
-		cancel()
 		intent.RecoveryState = "probing"
 		if err != nil {
 			intent.RecoveryState = "unavailable"
@@ -141,6 +146,20 @@ func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeD
 			intent.RecoveryCapacityEvidenceDigest = o.Capacity.ReportDigest
 		}
 		if o.Ready(hold, now) {
+			targets, err := offlineEdgeRouteEnrollments(hold)
+			if err != nil {
+				intent.RecoveryState = "unavailable"
+				return
+			}
+			retired, err := lookup(ctx, targets[:])
+			if err != nil {
+				intent.RecoveryState = "unavailable"
+				return
+			}
+			if len(retired) > 0 {
+				intent.RecoveryState = "enrollment_retired"
+				return
+			}
 			intent.State, intent.Reason, intent.RecoveryState = "allowed", "", "ready"
 			if o.ReviewOverdue(hold, now) {
 				intent.RecoveryState = "review_overdue"

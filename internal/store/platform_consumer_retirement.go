@@ -14,12 +14,63 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/schemamigrate"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+var ErrPlatformConsumerRetired = errors.New("cannot re-enroll a permanently retired consumer")
 
 type PlatformConsumerRetirementTarget struct {
 	ConsumerID   string `json:"consumer_id"`
 	ArtifactKind string `json:"artifact_kind"`
 	ScopeKey     string `json:"scope_key"`
+}
+
+// RetiredPlatformConsumerTargets looks up only exact enrollment keys. It
+// neither grants membership nor replaces the transactional retirement fence.
+func (s *Store) RetiredPlatformConsumerTargets(ctx context.Context, targets []PlatformConsumerRetirementTarget) (map[PlatformConsumerRetirementTarget]bool, error) {
+	// One global recovery capture has at most 64 edges and two route kinds.
+	if len(targets) > 128 {
+		return nil, ErrInvalidInput
+	}
+	if len(targets) == 0 || !s.usingDatabase() {
+		return nil, nil
+	}
+	data, err := json.Marshal(targets)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
+SELECT retired.consumer_id, retired.artifact_kind, retired.scope_key
+FROM jsonb_to_recordset($1::jsonb) AS wanted(consumer_id text, artifact_kind text, scope_key text)
+JOIN fugue_platform_consumer_retirements retired USING (consumer_id, artifact_kind, scope_key)`, string(data))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	retired := make(map[PlatformConsumerRetirementTarget]bool)
+	for rows.Next() {
+		var target PlatformConsumerRetirementTarget
+		if err := rows.Scan(&target.ConsumerID, &target.ArtifactKind, &target.ScopeKey); err != nil {
+			return nil, err
+		}
+		retired[target] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return retired, nil
+}
+
+// The deployed guard shares SQLSTATE 40001 with real serialization failures.
+// Classify its specific permanent rejection before mapDBErr loses the cause.
+func mapExpectedConsumerInsertError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40001" && pgErr.Message == ErrPlatformConsumerRetired.Error() {
+		return ErrPlatformConsumerRetired
+	}
+	return mapDBErr(err)
 }
 
 type PlatformConsumerRetirementContract struct {

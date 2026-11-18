@@ -48,6 +48,43 @@ func retirementCounts(t *testing.T, db *sql.DB) [4]int64 {
 	return counts
 }
 
+func TestConsumerRetirementPostgresRecoveryEligibilityAndInsertRejection(t *testing.T) {
+	db, address, c := consumerRetirementFixture(t)
+	s := &Store{db: db, databaseURL: address}
+	set := expectedConsumerSetFixture(t, 1)
+	target := c.Targets[1]
+	otherScope := target
+	otherScope.ScopeKey = "authority-cell:cell-neutral"
+	otherKind := target
+	otherKind.ArtifactKind = model.PlatformArtifactKindDNSAnswerBundle
+	keys := []PlatformConsumerRetirementTarget{target, c.Targets[0], otherScope, otherKind}
+	if retired, err := s.RetiredPlatformConsumerTargets(t.Context(), keys); err != nil || len(retired) != 0 {
+		t.Fatal("live slots counted as retired", retired, err)
+	}
+	p, err := RunPlatformConsumerRetirement(t.Context(), address, c, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunPlatformConsumerRetirement(t.Context(), address, c, true, p.PlanSHA256); err != nil {
+		t.Fatal(err)
+	}
+	if retired, err := s.RetiredPlatformConsumerTargets(t.Context(), keys); err != nil || len(retired) != 2 || !retired[target] || !retired[c.Targets[0]] {
+		t.Fatal("retirement lookup did not match only exact enrollment keys", retired, err)
+	}
+	survivor := set.Consumers[0]
+	set.Consumers[0].ConsumerID = target.ConsumerID
+	if _, err := pgInsertPlatformExpectedConsumerSet(t.Context(), db, set); !errors.Is(err, ErrPlatformConsumerRetired) || errors.Is(err, ErrConflict) {
+		t.Fatal("database fence did not report a distinct permanent rejection", err)
+	}
+	set.Consumers[0] = survivor
+	if _, err := pgInsertPlatformExpectedConsumerSet(t.Context(), db, set); err != nil {
+		t.Fatal("database fence blocked surviving membership", err)
+	}
+	if _, err := pgInsertPlatformExpectedConsumerSet(t.Context(), db, set); !errors.Is(err, ErrConflict) || errors.Is(err, ErrPlatformConsumerRetired) {
+		t.Fatal("real uniqueness conflict was misclassified", err)
+	}
+}
+
 func TestConsumerRetirementPostgresExactAtomicAuditedAndIdempotent(t *testing.T) {
 	db, address, c := consumerRetirementFixture(t)
 	before := retirementCounts(t, db)

@@ -4110,6 +4110,12 @@ paths:
           content:
             application/json:
               schema: {type: object, additionalProperties: true}
+        '409':
+          description: The release, expectation revision or membership conflicts with current authority. A permanently retired enrollment is rejected rather than reused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/admin/platform-state/convergence:
@@ -21073,7 +21079,10 @@ components:
         evaluated_at: {type: string, format: date-time}
         scope: {type: string, enum: [global]}
         state: {type: string, enum: [not_configured, allowed, suspended, unavailable, identity_conflict]}
-        recovery_state: {type: string, enum: [probing, ready, review_overdue, retention_expired, unavailable]}
+        recovery_state:
+          type: string
+          description: enrollment_retired means the probe passed but the signed global hold remains because a required worker route enrollment was permanently retired.
+          enum: [probing, ready, review_overdue, retention_expired, enrollment_retired, unavailable]
         recovery_last_success_at: {type: string, format: date-time}
         recovery_retain_until: {type: string, format: date-time}
         recovery_last_probe_at: {type: string, format: date-time}

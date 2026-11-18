@@ -859,16 +859,28 @@ func (s *Server) preparePlatformReleaseSetConsumers(ctx context.Context, princip
 		}
 		created, createErr := s.store.CreatePlatformExpectedConsumerSet(set)
 		if createErr != nil {
+			if errors.Is(createErr, store.ErrPlatformConsumerRetired) {
+				return nil, &platformConfigReferenceError{fmt.Sprintf("%s: artifact kind %s, scope %s", createErr, set.ArtifactKind, set.ScopeKey)}
+			}
 			if errors.Is(createErr, store.ErrConflict) {
-				existing, listErr := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind})
+				existing, listErr := s.store.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{ReleaseSetID: releaseSet.ID, ArtifactReleaseID: release.ID, ArtifactKind: kind})
+				if listErr != nil {
+					return nil, errors.Join(createErr, listErr)
+				}
 				var same *model.PlatformExpectedConsumerSet
 				for i := range existing {
 					if same == nil || existing[i].Revision > same.Revision {
 						same = &existing[i]
 					}
 				}
-				if listErr != nil || same == nil || same.TopologyRevision != set.TopologyRevision || same.ExpectedGeneration != set.ExpectedGeneration || same.ScopeKey != set.ScopeKey {
-					return nil, &platformConfigReferenceError{"expected consumer set already exists with conflicting identity"}
+				if same == nil {
+					return nil, createErr
+				}
+				if same.TopologyRevision != set.TopologyRevision || same.ExpectedGeneration != set.ExpectedGeneration || same.ScopeKey != set.ScopeKey {
+					if same.Revision == set.Revision {
+						return nil, &platformConfigReferenceError{"expected consumer set already exists with conflicting identity"}
+					}
+					return nil, createErr
 				}
 				created = *same
 			} else {

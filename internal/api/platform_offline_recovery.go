@@ -9,9 +9,11 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
+	"fugue/internal/store"
 )
 
 func (s *Server) readOfflineRecovery(ctx context.Context, hold platformproducer.OfflineEdge) (platformproducer.OfflineRecoveryObservation, error) {
@@ -167,10 +169,31 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 }
 
 func (s *Server) projectDNSReadinessWithRecovery(ctx context.Context, result *platformIntentProjectionResponse, nodes []model.EdgeNode, at time.Time, input *platformproducer.ProjectionPolicyInput) error {
+	return s.projectDNSReadinessWithRecoveryChecked(ctx, result, nodes, at, input, s.store.RetiredPlatformConsumerTargets)
+}
+
+func offlineEdgeRouteEnrollments(hold platformproducer.OfflineEdge) ([2]store.PlatformConsumerRetirementTarget, error) {
+	id, err := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentEdgeWorker, hold.EdgeID, platformcontrol.ConsumerAuthorityID(hold.EdgeGroupID))
+	if err != nil {
+		return [2]store.PlatformConsumerRetirementTarget{}, err
+	}
+	// Global offline intent is shared by the DNS candidate and both
+	// worker-owned route artifacts in its ReleaseSet.
+	return [2]store.PlatformConsumerRetirementTarget{
+		{ConsumerID: id, ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: "global"},
+		{ConsumerID: id, ArtifactKind: model.PlatformArtifactKindCaddyRouteConfig, ScopeKey: "global"},
+	}, nil
+}
+
+func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, result *platformIntentProjectionResponse, nodes []model.EdgeNode, at time.Time, input *platformproducer.ProjectionPolicyInput, lookup func(context.Context, []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error)) error {
 	if input == nil || len(input.OfflineEdges) == 0 {
 		return projectDNSReadinessWithPolicy(result, nodes, at, input)
 	}
+	if err := platformproducer.ValidateOfflineEdges(input.OfflineEdges); err != nil {
+		return err
+	}
 	observations := []platformproducer.OfflineRecoveryObservation{}
+	var targets []store.PlatformConsumerRetirementTarget
 	for _, hold := range input.OfflineEdges {
 		if hold.Recovery != nil {
 			o, err := s.readOfflineRecovery(ctx, hold)
@@ -183,9 +206,40 @@ func (s *Server) projectDNSReadinessWithRecovery(ctx context.Context, result *pl
 				continue
 			}
 			if o.Ready(hold, at) {
+				enrollments, err := offlineEdgeRouteEnrollments(hold)
+				if err != nil {
+					return err
+				}
+				targets = append(targets, enrollments[:]...)
 				observations = append(observations, o)
 			}
 		}
+	}
+	if len(targets) > 0 {
+		retired, err := lookup(ctx, targets)
+		if err != nil {
+			return fmt.Errorf("check permanent consumer retirement before offline recovery: %w", err)
+		}
+		// A fresh probe establishes readiness, not enrollment authority.
+		// Omit ineligible evidence before signing so replay retains the
+		// original offline hold, rather than editing a prepared topology.
+		eligible := observations[:0]
+		for i, o := range observations {
+			blocked := false
+			for _, target := range targets[2*i : 2*i+2] {
+				if retired[target] {
+					blocked = true
+					if s.log != nil {
+						s.log.Printf("offline hold retained: permanently retired consumer edge_id=%s consumer_id=%s artifact_kind=%s scope=%s", o.EdgeID, target.ConsumerID, target.ArtifactKind, target.ScopeKey)
+					}
+				}
+			}
+			if blocked {
+				continue
+			}
+			eligible = append(eligible, o)
+		}
+		observations = eligible
 	}
 	effective, err := platformproducer.EffectiveOfflineHolds(nodes, input.OfflineEdges, observations, at)
 	if err != nil {

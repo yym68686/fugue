@@ -1732,7 +1732,7 @@ RETURNING id, release_set_id, artifact_release_id, artifact_kind, scope_key, sco
 		set.ConvergenceDeadline, consumersJSON, set.CreatedAt, set.UpdatedAt,
 	))
 	if err != nil {
-		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+		return model.PlatformExpectedConsumerSet{}, err
 	}
 	return out, nil
 }
@@ -2534,7 +2534,7 @@ func scanPlatformExpectedConsumerSet(scanner sqlScanner) (model.PlatformExpected
 		&set.CreatedAt,
 		&set.UpdatedAt,
 	); err != nil {
-		return model.PlatformExpectedConsumerSet{}, mapDBErr(err)
+		return model.PlatformExpectedConsumerSet{}, mapExpectedConsumerInsertError(err)
 	}
 	scope, err := decodeJSONValue[model.PlatformArtifactScope](scopeRaw)
 	if err != nil {
