@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source
+from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source, require_idle_front, verify_pair
 import base64
 
 
@@ -52,6 +53,38 @@ def inactive_fixture():
 
 
 class MemberRecoveryTest(unittest.TestCase):
+    def test_retained_worker_is_compared_to_current_front_not_inactive_listener(self):
+        c, _, _, _ = fixture()
+        c['retainedPrevious'] = True
+        baseline = dict(digest='digest', traffic={'release_id': 'signed-full'}, app_traffic='app-proof',
+                        version='active-version', edge='node-reference', group=c['group'])
+        subject = dict(baseline, version='prepared-version', edge=c['node'])
+        health = {'caddy_applied_version': 'prepared-version'}
+        worker = {'status': {'podIP': '10.0.0.1'}}
+        reference = ('10.0.0.2', 443, 'node-reference', False)
+        with patch('scripts.reconcile_edge_member.proof', side_effect=[baseline, subject, baseline] * 2) as probe:
+            self.assertEqual(len(verify_pair(c, worker, reference, health)), 2)
+            self.assertEqual(probe.call_args_list[0].args, ('10.0.0.2', 443, c['probes'][0], False))
+        for changed in [dict(subject, digest='wrong'), dict(subject, traffic={}), dict(subject, app_traffic='wrong'),
+                        dict(subject, edge='foreign'), dict(subject, group='foreign'), dict(subject, version='not-applied')]:
+            with patch('scripts.reconcile_edge_member.proof', side_effect=[baseline, changed, baseline]):
+                with self.assertRaises(ValueError):
+                    verify_pair(c, worker, reference, health)
+        with patch('scripts.reconcile_edge_member.proof', side_effect=[baseline, subject, dict(baseline, version='moved')]):
+            with self.assertRaises(ValueError):
+                verify_pair(c, worker, reference, health)
+        del c['retainedPrevious']
+        with patch('scripts.reconcile_edge_member.proof', side_effect=[baseline, subject, baseline]):
+            with self.assertRaises(ValueError):
+                verify_pair(c, worker, ('10.0.0.2', 28443, 'node-reference', True), health)
+
+    def test_check_requires_full_idle_front_inventory(self):
+        require_idle_front({'count': 1, 'active': [{'slot': 'b'}]}, 'a')
+        for inputs in [{'count': 1, 'active': [{'slot': 'a'}]}, {'count': 1, 'active': []},
+                       {'count': True, 'active': [{'slot': 'b'}]}, {'count': 1, 'active': [{'slot': ''}]}]:
+            with self.assertRaises(ValueError):
+                require_idle_front(inputs, 'a')
+
     def test_retained_previous_stage_binds_both_current_and_retained_authorities(self):
         c, authority, current, old = fixture()
         authority.update(currentRecordDigest='sha256:'+'c'*64, previousRecordDigest='sha256:'+'d'*64)
@@ -96,6 +129,7 @@ class MemberRecoveryTest(unittest.TestCase):
             def __init__(self):
                 super().__init__(copy.deepcopy(c))
                 self.deletes, self.renewed = [], False
+                self.busy = True
             def get(self, kind, name):
                 return {'daemonset':ds, 'node':node, 'lease':lease}[kind]
             def snapshot(self, allow_refresh=False):
@@ -107,7 +141,14 @@ class MemberRecoveryTest(unittest.TestCase):
                 return json.dumps(dict(items=[replacement]))
             def renew_leases(self, held):
                 self.renewed = True
+            def require_inactive_idle(self, worker, previous, slot):
+                if self.busy:
+                    raise ValueError('open connections')
         recovery = FakeRecovery()
+        with self.assertRaisesRegex(ValueError, 'open connections'):
+            recovery.refresh_inactive_worker([lease], owner, target, previous, 'original', old, reference)
+        self.assertEqual(recovery.deletes, [])
+        recovery.busy = False
         recovery.refresh_inactive_worker([lease], owner, target, previous, 'original', old, reference)
         self.assertTrue(recovery.renewed)
         self.assertEqual(len(recovery.deletes), 1)

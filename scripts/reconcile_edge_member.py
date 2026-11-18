@@ -24,6 +24,7 @@ import subprocess
 import time
 
 from scripts.observe_front_candidate import parse_proof
+from scripts.observe_worker_standby import socket_counts
 
 
 def canonical(value):
@@ -141,6 +142,24 @@ def verified_worker_health(health, config):
             health.get('edge_group_id') == config['group'] and timestamp(health['bundle_valid_until']) > now() + dt.timedelta(seconds=30))
 
 
+def require_front_activation(health, state):
+    expected = {'status': 'ok', 'route_authority': 'edge-control',
+                'active_slot': state['active_slot'], 'activation_generation': state['generation']}
+    expected.update({k: state[k] for k in ('bundle_generation', 'worker_source_commit', 'worker_image_digest')})
+    if any(health.get(k) != v for k, v in expected.items()):
+        raise ValueError('Ready Front differs from the pinned activation')
+
+
+def require_idle_front(connections, slot):
+    active = connections.get('active')
+    if not isinstance(active, list) or type(connections.get('count')) is not int or connections['count'] != len(active):
+        raise ValueError('Front connection inventory is incomplete')
+    if any(not isinstance(x, dict) or x.get('slot') not in ('a', 'b') for x in active):
+        raise ValueError('Front connection slot is unknown')
+    if any(x['slot'] == slot for x in active):
+        raise ValueError('Inactive Worker retains open Front connections')
+
+
 def validate_inactive_refresh(config, daemonset, node, source, previous, worker, reference):
     """Permit only normal replacement of one declared inactive OnDelete Pod.
 
@@ -226,8 +245,50 @@ class Recovery:
         raw = self.kube('-n', self.config['namespace'], 'exec', pod, '-c', 'edge-front', '--', 'cat', self.config['activationPath'])
         return json.loads(raw), raw
 
-    def health(self, pod, port=7832):
-        return json.loads(self.kube('get', '--raw', '/api/v1/namespaces/' + self.config['namespace'] + '/pods/' + pod + ':' + str(port) + '/proxy/healthz'))
+    def health(self, pod, port=7832, path='healthz'):
+        return json.loads(self.kube('get', '--raw', '/api/v1/namespaces/' + self.config['namespace'] + '/pods/' + pod + ':' + str(port) + '/proxy/' + path))
+
+    def route_reference(self, owner, reference):
+        c = self.config
+        node = reference['spec']['nodeName']
+        if not c.get('retainedPrevious'):
+            return reference['status']['podIP'], c['workerPort'], node, True
+        # The retained Worker pins the executable, not a live route publisher.
+        # The committed reference Front reaches its currently serving sibling.
+        front = self.get('pod', c['referenceFront'])
+        if front['metadata']['uid'] != c['referenceFrontUID'] or front['metadata'].get('deletionTimestamp') or front['spec']['nodeName'] != node or node == c['node']:
+            raise ValueError('Serving reference Front identity changed')
+        current, _ = self.activation(c['referenceFront'])
+        retained_source(json.loads(owner['data']['authority.json']), current)
+        require_front_activation(self.health(c['referenceFront'], 7831, 'readyz'), current)
+        return front['status']['podIP'], 443, node, False
+
+    def require_inactive_idle(self, worker, previous, slot):
+        c = self.config
+        inventory = json.loads(self.kube('-n', c['namespace'], 'get', 'pods', '--field-selector', 'spec.nodeName=' + c['node'], '-o', 'json'))
+        if inventory.get('metadata', {}).get('continue'):
+            raise ValueError('Front inventory is incomplete')
+        fronts = [pod for pod in inventory['items'] if pod['status']['phase'] not in ('Succeeded', 'Failed') and
+                  any(x['name'] == 'edge-front' for x in pod['spec']['containers'])]
+        if not any(pod['metadata']['uid'] == c['frontUID'] for pod in fronts):
+            raise ValueError('Declared Front is absent from connection inventory')
+        for pod in fronts:
+            meta = pod['metadata']
+            if meta.get('deletionTimestamp') or pod['status']['phase'] != 'Running' or meta.get('labels', {}).get('fugue.io/edge-group-id') != c['group']:
+                raise ValueError('Local Front identity is not stable')
+            name = meta['name']
+            require_front_activation(self.health(name, 7831, 'readyz'), previous)
+            require_idle_front(self.health(name, 7831, 'edge/tcp-connections'), slot)
+            if self.get('pod', name)['metadata']['uid'] != meta['uid']:
+                raise ValueError('Front changed while observing open connections')
+        ports = [p['containerPort'] for container in worker['spec']['containers'] if container['name'] == 'caddy'
+                 for p in container.get('ports', []) if p.get('protocol') == 'TCP']
+        if c['workerPort'] not in ports:
+            raise ValueError('Inactive Worker serving listeners are unknown')
+        raw = self.kube('-n', c['namespace'], 'exec', worker['metadata']['name'], '-c', 'caddy', '--',
+                        'cat', '/proc/net/tcp', '/proc/net/tcp6')
+        if socket_counts(raw, ports)['active'] != 0:
+            raise ValueError('Inactive Worker still has live serving sockets')
 
     def current_worker(self, target):
         c = self.config
@@ -296,6 +357,7 @@ class Recovery:
         observed = self.snapshot(allow_refresh=True)
         if observed[0]['metadata']['resourceVersion'] != owner['metadata']['resourceVersion'] or observed[1] != target or observed[3] != raw or observed[4]['metadata']['uid'] != worker['metadata']['uid']:
             raise ValueError('Authority changed before inactive replacement')
+        self.require_inactive_idle(worker, previous, target['active_slot'])
         deadline = min(timestamp(x['spec']['renewTime']) + dt.timedelta(seconds=x['spec']['leaseDurationSeconds']) for x in held)
         if (deadline - now()).total_seconds() < 100:
             raise ValueError('Recovery leases lack the bounded inactive replacement budget')
@@ -395,15 +457,19 @@ def proof(ip, port, probe, send_proxy=True):
         raw.close()
 
 
-def verify_pair(config, worker, reference):
+def verify_pair(config, worker, reference, worker_health):
+    address, port, node, send_proxy = reference
     evidence = []
     for p in config['probes']:
-        a = proof(reference['status']['podIP'], config['workerPort'], p)
+        a = proof(address, port, p, send_proxy)
         b = proof(worker['status']['podIP'], config['workerPort'], p)
-        again = proof(reference['status']['podIP'], config['workerPort'], p)
-        if a != again or a['edge'] != reference['spec']['nodeName'] or b['edge'] != config['node'] or a['group'] != config['group'] or b['group'] != config['group']:
+        again = proof(address, port, p, send_proxy)
+        if a != again or a['edge'] != node or b['edge'] != config['node'] or a['group'] != config['group'] or b['group'] != config['group'] or b['version'] != worker_health['caddy_applied_version']:
             raise ValueError('Fresh worker proof identity/publication is unstable')
-        if {k: v for k, v in a.items() if k != 'edge'} != {k: v for k, v in b.items() if k != 'edge'}:
+        # Across slots version labels differ; route digest, exact signed
+        # traffic publication and application proof must all still match.
+        differences_allowed = {'edge', 'version'} if config.get('retainedPrevious') else {'edge'}
+        if {k: v for k, v in a.items() if k not in differences_allowed} != {k: v for k, v in b.items() if k not in differences_allowed}:
             raise ValueError('Returned worker does not prove the same serving routes')
         evidence.append({'host': p['host'], 'proof': b})
     return evidence
@@ -417,9 +483,10 @@ def reconcile(config, apply=False, write_evidence=lambda value: None):
     save = lambda: write_evidence(evidence)
     save()
     if apply and without_time(previous) == without_time(target):
-        if not verified_worker_health(recovery.health(config['worker']), config):
+        health = recovery.health(config['worker'])
+        if not verified_worker_health(health, config):
             raise ValueError('Already recovered worker has not retained healthy authority')
-        evidence['proofs'] = verify_pair(config, worker, reference)
+        evidence['proofs'] = verify_pair(config, worker, recovery.route_reference(owner, reference), health)
         evidence.update(activated=True, verified=True, already_applied=True)
         save()
     if apply and without_time(previous) != without_time(target):
@@ -440,7 +507,7 @@ def reconcile(config, apply=False, write_evidence=lambda value: None):
                 health = recovery.health(config['worker'])
                 if verified_worker_health(health, config):
                     try:
-                        evidence['proofs'] = verify_pair(config, worker, reference)
+                        evidence['proofs'] = verify_pair(config, worker, recovery.route_reference(owner, reference), health)
                         break
                     except ValueError:
                         if time.monotonic() >= deadline:

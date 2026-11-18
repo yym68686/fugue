@@ -1,0 +1,31 @@
+{
+  "schema": "fugue.front-executor-replacement/v1",
+  "service": "fugue-front-serving-public-a",
+  "serviceUID": "935d3d0b-7a46-434e-9054-185fa8f3a017",
+  "address": "51.38.126.103",
+  "expectedGeneration": 4,
+  "generation": 5,
+  "rollbackGeneration": 6,
+  "verificationSeconds": 60,
+  "observation": {
+    "schema": "fugue.front-observation/v1",
+    "namespace": "fugue-system",
+    "node": "vps-84c8f0a9",
+    "group": "edge-group-country-de",
+    "legacySelector": {
+      "app.kubernetes.io/component": "edge-client-front-public-a",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue"
+    },
+    "candidateSelector": {
+      "app.kubernetes.io/component": "edge-client-front-public-a-quality",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue"
+    },
+    "candidateSource": "1b186c6a1cfb51c14554a28acffca6024184d05c",
+    "activationPath": "/var/lib/fugue-edge-front/activation.json",
+    "probes": [{"host": "api.fugue.pro", "path": "/"}, {"host": "fugue.pro", "path": "/"}],
+    "samples": 3,
+    "intervalSeconds": 10
+  }
+}
