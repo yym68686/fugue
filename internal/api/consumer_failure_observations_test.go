@@ -13,11 +13,43 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestConsumerUnavailableCorrelatesOnlyFinalAuthenticatedDNSFailure(t *testing.T) {
+	s := &Server{}
+	base := runtimeobservation.WithDatabaseOperation(t.Context(), "consumer-heartbeat")
+	ctx := withConsumerFailureCorrelation(base, model.PlatformConsumerComponentDNSServer)
+	busy := &pgconn.PgError{Code: "55P03", Message: "private diagnostic fixture"}
+	s.retainConsumerRequestFailure(ctx, time.Now(), "assignment", "input_recheck", store.ErrConflict)
+	detail := store.PlatformInputReadFailure{Phase: "admission", Check: "admission_writer_busy", ErrorClass: "database", SQLState: "55P03"}
+	s.retainConsumerRequestFailure(ctx, time.Now(), "trusted_heartbeat", "store_admission", busy, detail)
+	w := httptest.NewRecorder()
+	writeTrustedPlatformConsumerHeartbeatError(w, busy, ctx)
+	rows := s.captureSnapshot().(map[string]any)["consumer_failures"].(map[string]any)["receipts"].([]consumerRequestFailure)
+	id := w.Header().Get(platformconsumer.FailureIDHeader)
+	if len(rows) != 2 || w.Code != 503 || len(id) != 32 || rows[1].FailureID != id || rows[0].FailureID == "" || rows[0].FailureID == id ||
+		rows[1].StoreAdmission == nil || rows[1].StoreAdmission.Check != detail.Check || rows[1].DatabaseOperation != runtimeobservation.DatabaseOperationFromContext(base) {
+		t.Fatal("missing or ambiguous failure correlation", rows, w.Code)
+	}
+	for _, test := range []struct {
+		ctx context.Context
+		err error
+	}{
+		{withConsumerFailureCorrelation(base, model.PlatformConsumerComponentEdgeWorker), busy},
+		{ctx, errors.Join(store.ErrConflict, busy)},
+	} {
+		w = httptest.NewRecorder()
+		writeTrustedPlatformConsumerHeartbeatError(w, test.err, test.ctx)
+		if w.Header().Get(platformconsumer.FailureIDHeader) != "" {
+			t.Fatal("correlation exposed for a non-target response")
+		}
+	}
+}
 
 func TestConsumerFailurePreservesTypedCauseAndIndependentRetention(t *testing.T) {
 	s := &Server{}

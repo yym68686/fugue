@@ -5,10 +5,28 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"net/http"
 	"net/http/httptrace"
 	"sync"
 	"time"
 )
+
+const FailureIDHeader = "X-Fugue-Consumer-Failure-Id"
+
+// consumerFailureID accepts one opaque server correlation value, never an
+// authorization input. Missing, malformed or combined headers are unavailable.
+func consumerFailureID(headers http.Header) string {
+	values := headers.Values(FailureIDHeader)
+	if len(values) != 1 || len(values[0]) != 32 {
+		return ""
+	}
+	for _, c := range values[0] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return ""
+		}
+	}
+	return values[0]
+}
 
 // RequestFailureObservation retains only fixed classes and transport milestones.
 // It never retains callback arguments, URLs, credentials, response bodies or the
@@ -19,6 +37,7 @@ type RequestFailureObservation struct {
 	Phase             string    `json:"phase"`
 	Class             string    `json:"class"`
 	HTTPStatus        int       `json:"http_status,omitempty"`
+	FailureID         string    `json:"failure_id,omitempty"`
 	DurationMS        int64     `json:"duration_ms"`
 	DNSStarted        bool      `json:"dns_started"`
 	DNSCompleted      bool      `json:"dns_completed"`

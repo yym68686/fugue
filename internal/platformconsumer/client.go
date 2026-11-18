@@ -297,6 +297,10 @@ func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, meth
 	}
 	if resp.StatusCode != http.StatusOK {
 		status := &responseStatusError{Code: resp.StatusCode, observation: observation.finish("status", resp.StatusCode, nil)}
+		if resp.StatusCode == http.StatusServiceUnavailable &&
+			(status.observation.Operation == "assignment" || status.observation.Operation == "trusted_heartbeat") {
+			status.observation.FailureID = consumerFailureID(resp.Header)
+		}
 		if resp.StatusCode == http.StatusConflict && (req.URL.Path == "/v1/platform-state/consumers/trusted-heartbeat" || req.URL.Path == "/v1/platform-state/consumers/shadow-heartbeat") {
 			var body struct {
 				Code string `json:"code"`

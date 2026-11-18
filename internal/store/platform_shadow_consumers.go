@@ -203,6 +203,7 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.P
 	defer cancel()
 	if len(observation) == 1 {
 		ctx = runtimeobservation.CopyDatabaseOperation(ctx, observation[0])
+		ctx = copyPlatformInputFailureObservation(ctx, observation[0])
 	}
 	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: h.ExpectedConsumerSetID, heartbeat: &h, bytes: size})
 	if err != nil {

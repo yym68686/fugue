@@ -1904,6 +1904,7 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	defer cancel()
 	if len(observation) == 1 {
 		ctx = runtimeobservation.CopyDatabaseOperation(ctx, observation[0])
+		ctx = copyPlatformInputFailureObservation(ctx, observation[0])
 	}
 	proof, pins, err := s.prepareCompilerInputConsumer(ctx, compilerInputConsumerIntent{expectedID: expectedSetID, heartbeat: &heartbeat, bytes: size})
 	if err != nil {

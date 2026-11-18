@@ -2,14 +2,36 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"net/http"
 	"time"
 
+	"fugue/internal/model"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
 
 const consumerFailureLimit = 24
+
+type consumerFailureCorrelationKey struct{}
+
+// The holder is private to the synchronous handler and only the final failed
+// assignment attempt is echoed. Never read a caller's correlation header.
+func withConsumerFailureCorrelation(ctx context.Context, component string) context.Context {
+	if component != model.PlatformConsumerComponentDNSServer {
+		return ctx
+	}
+	return context.WithValue(ctx, consumerFailureCorrelationKey{}, new(string))
+}
+
+func writeConsumerFailureCorrelation(w http.ResponseWriter, ctx context.Context) {
+	if id, _ := ctx.Value(consumerFailureCorrelationKey{}).(*string); id != nil && *id != "" {
+		w.Header().Set(platformconsumer.FailureIDHeader, *id)
+	}
+}
 
 // These are the original failing calls, never a replay of mutable authority.
 // Fixed operation/stage names and error categories are the only retained data.
@@ -23,10 +45,12 @@ type consumerRequestFailure struct {
 	ErrorClass        string                               `json:"error_class"`
 	Conflict          bool                                 `json:"store_conflict"`
 	SQLState          string                               `json:"sql_state,omitempty"`
+	FailureID         string                               `json:"failure_id,omitempty"`
 	InputRead         *consumerInputReadFailure            `json:"input_read,omitempty"`
+	StoreAdmission    *store.PlatformInputReadFailure      `json:"store_admission,omitempty"`
 }
 
-func (s *Server) retainConsumerRequestFailure(ctx context.Context, start time.Time, operation, stage string, err error) {
+func (s *Server) retainConsumerRequestFailure(ctx context.Context, start time.Time, operation, stage string, err error, observed ...store.PlatformInputReadFailure) {
 	if err == nil {
 		return
 	}
@@ -44,6 +68,18 @@ func (s *Server) retainConsumerRequestFailure(ctx context.Context, start time.Ti
 		DatabaseOperation: runtimeobservation.DatabaseOperationFromContext(ctx), Stage: stage, ErrorClass: captureErrorClass(err), Conflict: errors.Is(err, store.ErrConflict)}
 	if stage == "input_recheck" {
 		receipt.InputRead = consumerInputReadFailureFromContext(ctx)
+	}
+	if stage == "store_admission" && len(observed) == 1 && observed[0].Phase != "" {
+		detail := observed[0]
+		detail.ChangedFields = append([]string(nil), detail.ChangedFields...)
+		receipt.StoreAdmission = &detail
+	}
+	if id, _ := ctx.Value(consumerFailureCorrelationKey{}).(*string); id != nil {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err == nil {
+			receipt.FailureID = hex.EncodeToString(random[:])
+		}
+		*id = receipt.FailureID
 	}
 	var databaseError interface{ SQLState() string }
 	if errors.As(err, &databaseError) {

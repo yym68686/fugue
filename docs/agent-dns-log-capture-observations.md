@@ -33,6 +33,22 @@ checks. `backend_snapshot_replacement_retry` preserves the first rejection;
 observation, including verified negative readiness. Neither is a wire DNS
 success metric.
 
+DNS assignment and trusted-heartbeat HTTP 503 responses may include
+`X-Fugue-Consumer-Failure-Id`. The same opaque value identifies the exact failed
+attempt in that API process's bounded `consumer_failures` ring. Retries have
+distinct IDs; a successful request does not echo a failed attempt's ID. A DNS
+sync failure logs a fixed report step and, when available, the client request
+observation including the ID. No response or a missing/invalid ID means no
+exact join; timestamps alone do not identify a matching attempt. Old clients
+can ignore the header and old API versions omit it. Neither side uses the ID to
+accept, reject, retry, or change an assignment or heartbeat.
+
+Heartbeat admission observations also distinguish the bounded local wait for
+the compiler-input writer barrier from failures returned by a PostgreSQL
+statement, including the shared lifecycle lock query. Both can carry SQLSTATE
+`55P03`; that code alone cannot distinguish them. A check name identifies the
+failing call, not the lock owner. These diagnostics add no database reads.
+
 Rejected Agent route proofs also retain a same-read `publication` pair. Each
 side has separate SHA-256 hashes of the release-set, route-artifact and release
 IDs, an allowlisted channel, and its numeric fence. Hashes are SHA-256 of the

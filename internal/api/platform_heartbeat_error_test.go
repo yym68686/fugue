@@ -32,7 +32,7 @@ func TestTrustedHeartbeatLockContentionIsRetryableWithoutChangingValidation(t *t
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := httptest.NewRecorder()
-			writeTrustedPlatformConsumerHeartbeatError(response, test.err)
+			writeTrustedPlatformConsumerHeartbeatError(response, test.err, t.Context())
 			if response.Code != test.status || strings.Contains(response.Body.String(), "private") {
 				t.Fatal("heartbeat error leaked details or changed classification", response.Code, response.Body.String())
 			}

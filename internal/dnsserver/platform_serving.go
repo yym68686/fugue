@@ -789,17 +789,21 @@ func (s *Service) reportDNSRejectedSuccessor(ctx context.Context, client platfor
 }
 
 func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) (resultErr error) {
-	ctx, finish := observeDNSSyncPhase(ctx, "report_assignment_state")
+	step := "serving_state"
+	ctx, finish := observeDNSSyncPhaseWithFailureStep(ctx, "report_assignment_state", func() string { return step })
 	defer func() { finish(resultErr) }()
 	if s.platformServing.Load() != loaded {
 		return errors.New("DNS serving evidence changed")
 	}
+	step = "assignment_recheck"
 	if err := client.CheckServingAssignment(ctx, id, a); err != nil {
 		return err
 	}
+	step = "serving_state"
 	if s.platformServing.Load() != loaded {
 		return errors.New("DNS serving evidence changed")
 	}
+	step = "cursor_read"
 	path := s.Config.CachePath + ".platform-serving-cursor.json"
 	var sequence int64
 	if raw, err := platformconsumer.ReadFile(path, 1024); err == nil {
@@ -811,9 +815,11 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 	}
 	sequence = max(sequence+1, time.Now().UnixNano())
 	raw, _ := json.Marshal(sequence)
+	step = "cursor_write"
 	if err := lkgcache.AtomicWriteFile(path, raw, 0600); err != nil {
 		return err
 	}
+	step = "heartbeat_nonce"
 	nonce := make([]byte, 16)
 	if _, err := rand.Read(nonce); err != nil {
 		return err
@@ -827,9 +833,11 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse
+	step = "heartbeat_post"
 	if err := client.PostIdentityJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id, h, &receipt); err != nil {
 		return err
 	}
+	step = "receipt_verification"
 	if !receipt.Consumer.IdentityVerified || receipt.Consumer.ConsumerID != h.ConsumerID || receipt.Consumer.Sequence != sequence || receipt.Consumer.EvidenceHash != h.EvidenceHash || receipt.Consumer.ExpectedConsumerSetID != a.ExpectedConsumerSetID {
 		return errors.New("DNS serving receipt mismatch")
 	}

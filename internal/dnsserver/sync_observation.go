@@ -27,6 +27,8 @@ type dnsSyncPhase struct {
 	path  string
 }
 
+type dnsSyncFailureStep func() string
+
 var dnsSyncTraceSequence atomic.Uint64
 
 // A trace is diagnostic data only. It carries no authority, adds no deadlines,
@@ -49,6 +51,10 @@ func dnsSyncTraceIdentity(ctx context.Context) (string, string) {
 }
 
 func observeDNSSyncPhase(ctx context.Context, name string) (context.Context, func(error)) {
+	return observeDNSSyncPhaseWithFailureStep(ctx, name, nil)
+}
+
+func observeDNSSyncPhaseWithFailureStep(ctx context.Context, name string, step dnsSyncFailureStep) (context.Context, func(error)) {
 	parent, ok := ctx.Value(dnsSyncTraceKey{}).(dnsSyncPhase)
 	if !ok || parent.trace == nil || len(name) == 0 || len(name) > 40 || len(parent.path)+len(name) > 200 {
 		return ctx, func(error) {}
@@ -82,17 +88,30 @@ func observeDNSSyncPhase(ctx context.Context, name string) (context.Context, fun
 			projections = dnsroutesource.PublicationProjectionCacheObservation()
 			payloads = platformconfig.DNSPayloadCacheObservation()
 		}
+		var failureStep string
+		var requestFailure *platformconsumer.RequestFailureObservation
+		if err != nil && (step != nil || name == "serving_assignment_read" || name == "assignment_recheck") {
+			requestFailure = platformconsumer.RequestFailure(err)
+			if step != nil {
+				failureStep = step()
+				if requestFailure != nil && requestFailure.Operation == "identity" {
+					failureStep = "identity_refresh"
+				}
+			}
+		}
 		report, marshalErr := json.Marshal(struct {
-			Event       string            `json:"event"`
-			TraceID     string            `json:"sync_trace_id"`
-			Phase       string            `json:"sync_phase"`
-			StartedAt   time.Time         `json:"started_at"`
-			FinishedAt  time.Time         `json:"finished_at"`
-			ElapsedMS   int64             `json:"elapsed_ms"`
-			Outcome     string            `json:"outcome"`
-			Projections map[string]uint64 `json:"publication_projection_cache,omitempty"`
-			Payloads    map[string]uint64 `json:"payload_cache,omitempty"`
-		}{"dns_sync_phase", phase.trace.id, path, started.UTC(), time.Now().UTC(), time.Since(started).Milliseconds(), outcome, projections, payloads})
+			Event          string                                      `json:"event"`
+			TraceID        string                                      `json:"sync_trace_id"`
+			Phase          string                                      `json:"sync_phase"`
+			StartedAt      time.Time                                   `json:"started_at"`
+			FinishedAt     time.Time                                   `json:"finished_at"`
+			ElapsedMS      int64                                       `json:"elapsed_ms"`
+			Outcome        string                                      `json:"outcome"`
+			Projections    map[string]uint64                           `json:"publication_projection_cache,omitempty"`
+			Payloads       map[string]uint64                           `json:"payload_cache,omitempty"`
+			FailureStep    string                                      `json:"failure_step,omitempty"`
+			RequestFailure *platformconsumer.RequestFailureObservation `json:"request_failure,omitempty"`
+		}{"dns_sync_phase", phase.trace.id, path, started.UTC(), time.Now().UTC(), time.Since(started).Milliseconds(), outcome, projections, payloads, failureStep, requestFailure})
 		if marshalErr == nil {
 			phase.trace.logger.Print(string(report))
 		}

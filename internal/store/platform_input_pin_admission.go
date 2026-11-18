@@ -66,7 +66,9 @@ func setCompilerInputAdmissionTimeouts(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
-func lockCompilerInputAdmissionBarrier(ctx context.Context, tx *sql.Tx) (int64, error) {
+func lockCompilerInputAdmissionBarrier(ctx context.Context, tx *sql.Tx) (_ int64, returnedErr error) {
+	check := "admission_isolation"
+	defer func() { observePlatformInputReadFailure(ctx, "admission", check, nil, nil, returnedErr) }()
 	// A repeatable-read snapshot acquired before the barrier could see an old
 	// verified label after a completed unpin. Activation uses read-committed,
 	// then locks before reading the pin/epoch/representation identity.
@@ -77,6 +79,7 @@ func lockCompilerInputAdmissionBarrier(ctx context.Context, tx *sql.Tx) (int64, 
 	if !currentRead {
 		return 0, fmt.Errorf("pin admission requires a current writable transaction: %w", ErrConflict)
 	}
+	check = "admission_lock_limits"
 	if err := setCompilerInputAdmissionTimeouts(ctx, tx); err != nil {
 		return 0, err
 	}
@@ -84,12 +87,15 @@ func lockCompilerInputAdmissionBarrier(ctx context.Context, tx *sql.Tx) (int64, 
 	// writer barrier. Shared mode permits other short activations; unpin,
 	// re-verification, representation changes and retirement need exclusive.
 	// No retries and no network/body I/O occur while these locks are held.
+	check = "admission_gc_shared"
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('fugue.compiler-input-gc.v1',0))`); err != nil {
 		return 0, err
 	}
+	check = "admission_writer_lock_check"
 	if err := waitCompilerInputAdmissionWriter(ctx, tx); err != nil {
 		return 0, err
 	}
+	check = "admission_archive_epoch"
 	return readInputArchiveEpoch(ctx, tx, -1)
 }
 

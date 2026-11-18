@@ -45,6 +45,48 @@ func TestAdmissionWriterContentionPreservesBudgetAndDoesNotAbortTransaction(t *t
 	}
 }
 
+func TestAdmissionBarrierSeparatesActualAndSyntheticLockTimeouts(t *testing.T) {
+	db, _, _ := hotInventoryTestDatabase(t)
+	for _, pair := range []struct{ lock, want string }{
+		{`SELECT pg_advisory_xact_lock(hashtextextended('fugue.compiler-input-gc.v1',0))`, "admission_gc_shared"},
+		{`SELECT pg_advisory_xact_lock(315609238744290)`, "admission_writer_busy"},
+	} {
+		t.Run(pair.want, func(t *testing.T) {
+			holder, err := db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer holder.Rollback()
+			if _, err := holder.ExecContext(t.Context(), pair.lock); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err := tx.ExecContext(t.Context(), `SET LOCAL lock_timeout='50ms'`); err != nil {
+				t.Fatal(err)
+			}
+			source, cancel := context.WithCancel(t.Context())
+			source, observed := WithPlatformInputFailureObservation(source)
+			cancel()
+			work := copyPlatformInputFailureObservation(t.Context(), source)
+			if _, err := lockCompilerInputAdmissionBarrier(work, tx); stringSQLState(err) != "55P03" {
+				t.Fatal("original SQLSTATE changed or diagnostic propagation copied caller cancellation", err)
+			}
+			want := observed()
+			if want.Phase != "admission" || want.Check != pair.want || want.SQLState != "55P03" {
+				t.Fatal("wrong lock provenance", want)
+			}
+			_, err = tx.ExecContext(t.Context(), `SELECT 1`)
+			if (err != nil) != (pair.want == "admission_gc_shared") {
+				t.Fatal("transaction abort behavior changed", err)
+			}
+		})
+	}
+}
+
 func TestAppendWriterAllowsCommittedReadersButSerializesWritersAndMaintenance(t *testing.T) {
 	for _, chunks := range []bool{false, true} {
 		t.Run(fmt.Sprintf("chunks=%t", chunks), func(t *testing.T) {

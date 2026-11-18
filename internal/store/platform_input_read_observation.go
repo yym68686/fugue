@@ -23,12 +23,30 @@ type PlatformInputReadFailure struct {
 
 type platformInputReadObservationKey struct{}
 
+// WithPlatformInputFailureObservation records one synchronous admission
+// failure. The handle is read only after the observed store call returns.
+func WithPlatformInputFailureObservation(ctx context.Context) (context.Context, func() PlatformInputReadFailure) {
+	failure := &PlatformInputReadFailure{}
+	return context.WithValue(ctx, platformInputReadObservationKey{}, failure), func() PlatformInputReadFailure {
+		out := *failure
+		out.ChangedFields = append([]string(nil), out.ChangedFields...)
+		return out
+	}
+}
+
+func copyPlatformInputFailureObservation(dst, src context.Context) context.Context {
+	if failure, ok := src.Value(platformInputReadObservationKey{}).(*PlatformInputReadFailure); ok {
+		return context.WithValue(dst, platformInputReadObservationKey{}, failure)
+	}
+	return dst
+}
+
 // CheckPlatformInputReadObserved preserves the error and all admission checks.
 // Its request-local observation is populated synchronously at the failing call.
 func (s *Store) CheckPlatformInputReadObserved(ctx context.Context, selections []PlatformInputReadSelection) (PlatformInputReadFailure, error) {
-	failure := PlatformInputReadFailure{}
-	err := s.CheckPlatformInputRead(context.WithValue(ctx, platformInputReadObservationKey{}, &failure), selections)
-	return failure, err
+	ctx, observation := WithPlatformInputFailureObservation(ctx)
+	err := s.CheckPlatformInputRead(ctx, selections)
+	return observation(), err
 }
 
 func observePlatformInputReadFailure(ctx context.Context, phase, check string, tuple *compilerInputActivationTuple, changed []string, err error) {

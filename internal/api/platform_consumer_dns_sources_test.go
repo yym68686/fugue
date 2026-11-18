@@ -16,6 +16,7 @@ import (
 	"fugue/internal/dnsroutewire"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
@@ -85,6 +86,12 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		return token
 	}
 	token := issue(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns", model.PlatformArtifactKindDNSAnswerBundle)
+	const injectedID = "00000000000000000000000000000000"
+	consumerHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Set(platformconsumer.FailureIDHeader, injectedID)
+		s.Handler().ServeHTTP(w, r)
+	}))
+	defer consumerHTTP.Close()
 	base := "/v1/platform-state/consumers/artifacts/" + compiled.DNSArtifact.ID + "/route-sources"
 	url := base + "?expected_consumer_set_id=" + set.ID
 	read := func(token, url string, code int) model.PlatformConsumerDNSRouteSourcesResponse {
@@ -152,6 +159,23 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		}
 		read(token, url, http.StatusConflict)
 		revalidate(http.StatusConflict)
+		// Run the real client against the authenticated route. Only the final
+		// failure it actually receives may join to an API receipt.
+		client := platformconsumer.Client{BaseURL: consumerHTTP.URL}
+		err := client.CheckAssignment(t.Context(), platformconsumer.Identity{Token: token}, first.Assignment)
+		if !platformconsumer.IsUnavailable(err) {
+			t.Fatal("missing input must still fail closed", err)
+		}
+		observed := platformconsumer.RequestFailure(err)
+		rows := s.captureSnapshot().(map[string]any)["consumer_failures"].(map[string]any)["receipts"].([]consumerRequestFailure)
+		if len(rows) == 0 {
+			t.Fatal("authenticated assignment failure was not retained")
+		}
+		last := rows[len(rows)-1]
+		if observed == nil || observed.HTTPStatus != http.StatusServiceUnavailable || len(observed.FailureID) != 32 ||
+			observed.FailureID == injectedID || observed.FailureID != last.FailureID || last.Operation != "assignment" || last.Stage != "input_recheck" {
+			t.Fatal("client did not retain the actual failed API attempt", observed, last)
+		}
 		for _, route := range []string{"/v1/platform-state/consumers/assignment", "/v1/platform-state/consumers/artifacts/" + compiled.DNSArtifact.ID + "?expected_consumer_set_id=" + set.ID, "/v1/platform-state/consumers/artifacts/" + compiled.ReleaseArtifact.ID + "?expected_consumer_set_id=" + set.ID} {
 			response := performJSONRequest(t, s, http.MethodGet, route, token, nil)
 			if response.Code != http.StatusServiceUnavailable || response.Header().Get("ETag") != "" || strings.Contains(response.Body.String(), compiled.DNSArtifact.ID) {

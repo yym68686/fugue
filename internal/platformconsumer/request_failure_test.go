@@ -163,3 +163,40 @@ func TestRequestFailureDoesNotChangeConflictOrValidatorSemantics(t *testing.T) {
 		t.Fatal("validator result changed", err)
 	}
 }
+
+func TestConsumerFailureIDRequiresSingleValid503Header(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	for _, test := range []struct {
+		name, operation, want string
+		status                int
+		values                []string
+	}{
+		{"assignment", "assignment", id, 503, []string{id}},
+		{"heartbeat", "trusted-heartbeat", id, 503, []string{id}},
+		{"mixed version", "assignment", "", 503, nil},
+		{"duplicate", "assignment", "", 503, []string{id, id}},
+		{"combined", "assignment", "", 503, []string{id + "," + id}},
+		{"malformed", "trusted-heartbeat", "", 503, []string{strings.Repeat("x", 32)}},
+		{"unrelated status", "assignment", "", 500, []string{id}},
+		{"unrelated endpoint", "identity", "", 503, []string{id}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			client := Client{BaseURL: "https://example.test", HTTPClient: &http.Client{Transport: sourceBudgetTransport(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Header.Get(FailureIDHeader) != "" {
+					t.Fatal("client sent a diagnostic ID as a request input")
+				}
+				header := make(http.Header)
+				for _, value := range test.values {
+					header.Add(FailureIDHeader, value)
+				}
+				return &http.Response{StatusCode: test.status, Body: http.NoBody, Header: header}, nil
+			})}}
+			err := client.GetJSON(t.Context(), "/v1/platform-state/consumers/"+test.operation, "test", &struct{}{})
+			if got := RequestFailure(err); got == nil || got.FailureID != test.want || got.HTTPStatus != test.status || calls != 1 {
+				t.Fatal("correlation changed the original outcome", got, err, calls)
+			}
+		})
+	}
+}

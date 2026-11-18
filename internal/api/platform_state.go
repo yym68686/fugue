@@ -1173,6 +1173,9 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !shadow {
+		r = r.WithContext(withConsumerFailureCorrelation(r.Context(), claims.Component))
+	}
 	set, err := s.store.GetPlatformExpectedConsumerSet(heartbeat.ExpectedConsumerSetID)
 	if err != nil {
 		s.retainConsumerRequestFailure(r.Context(), started, operation, "expected_set", err)
@@ -1202,6 +1205,9 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		if status >= http.StatusInternalServerError {
 			s.retainConsumerRequestFailure(r.Context(), started, operation, "backend_validation", errDNSRuntimeFacts)
 		}
+		if status == http.StatusServiceUnavailable {
+			writeConsumerFailureCorrelation(w, r.Context())
+		}
 		if standby {
 			httpx.WriteJSON(w, status, httpx.ErrorResponse{Error: "DNS backend is not selected by public transport", Code: "dns_backend_not_selected", Category: "conflict"})
 			return
@@ -1210,14 +1216,15 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		return
 	}
 	var consumer model.PlatformConsumerInstance
+	admissionCtx, admission := store.WithPlatformInputFailureObservation(r.Context())
 	if shadow {
-		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeatObserved(r.Context(), claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
+		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeatObserved(admissionCtx, claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
 	} else {
-		consumer, err = s.store.AcceptTrustedPlatformConsumerHeartbeatWithAuditObserved(r.Context(), claims, heartbeat.ExpectedConsumerSetID, heartbeat, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, s.heartbeatAuditKeyring)
+		consumer, err = s.store.AcceptTrustedPlatformConsumerHeartbeatWithAuditObserved(admissionCtx, claims, heartbeat.ExpectedConsumerSetID, heartbeat, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}, s.heartbeatAuditKeyring)
 	}
 	if err != nil {
-		s.retainConsumerRequestFailure(r.Context(), started, operation, "store_admission", err)
-		writeTrustedPlatformConsumerHeartbeatError(w, err)
+		s.retainConsumerRequestFailure(r.Context(), started, operation, "store_admission", err, admission())
+		writeTrustedPlatformConsumerHeartbeatError(w, err, r.Context())
 		return
 	}
 	drift := consumer.DesiredGeneration != "" && consumer.ActualGeneration != "" && consumer.DesiredGeneration != consumer.ActualGeneration
@@ -1363,12 +1370,14 @@ func (s *Server) handleGetPlatformConsumerAssignment(w http.ResponseWriter, r *h
 			servingOnly = true
 		}
 	}
-	resolved, stage, err := s.readCheckedConsumerAssignments(r.Context(), claims, servingOnly, started, s.store.NewPlatformArtifactReadSession)
+	ctx := withConsumerFailureCorrelation(r.Context(), claims.Component)
+	resolved, stage, err := s.readCheckedConsumerAssignments(ctx, claims, servingOnly, started, s.store.NewPlatformArtifactReadSession)
 	if err != nil {
 		message := err.Error()
 		if stage == "input_recheck" {
 			message = "consumer input dependencies unavailable or changed"
 		}
+		writeConsumerFailureCorrelation(w, ctx)
 		httpx.WriteError(w, http.StatusServiceUnavailable, message)
 		return
 	}
@@ -1511,7 +1520,7 @@ func consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string, rea
 	return model.PlatformArtifact{}, store.ErrNotFound
 }
 
-func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error) {
+func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error, ctx context.Context) {
 	var databaseError interface{ SQLState() string }
 	switch {
 	case errors.Is(err, store.ErrInvalidInput):
@@ -1536,6 +1545,7 @@ func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error
 		// Preserve that refusal, but distinguish retryable contention from an
 		// unexpected server failure without exposing database details.
 		w.Header().Set("Retry-After", "1")
+		writeConsumerFailureCorrelation(w, ctx)
 		httpx.WriteError(w, http.StatusServiceUnavailable, "trusted heartbeat admission is busy")
 	default:
 		httpx.WriteError(w, http.StatusInternalServerError, "trusted heartbeat could not be recorded")

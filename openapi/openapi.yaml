@@ -4527,7 +4527,7 @@ paths:
         '422':
           $ref: "#/components/responses/ErrorResponse"
         '503':
-          $ref: "#/components/responses/ErrorResponse"
+          $ref: "#/components/responses/PlatformConsumerUnavailable"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/shadow-heartbeat:
@@ -4670,7 +4670,7 @@ paths:
         '404':
           $ref: "#/components/responses/ErrorResponse"
         '503':
-          $ref: "#/components/responses/ErrorResponse"
+          $ref: "#/components/responses/PlatformConsumerUnavailable"
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/platform-state/consumers/artifacts/{artifact_id}:
@@ -41170,6 +41170,19 @@ components:
             code: object_storage_busy
             category: conflict
             retryable: true
+    PlatformConsumerUnavailable:
+      description: Platform consumer request unavailable.
+      headers:
+        X-Fugue-Consumer-Failure-Id:
+          description: Optional server-generated correlation for a retained DNS consumer failure. Diagnostic only, never authorization, retry, or idempotency evidence.
+          schema: {type: string, pattern: '^[0-9a-f]{32}$'}
+        Retry-After:
+          description: Suggested delay in seconds when a trusted heartbeat admission lock is busy.
+          schema: {type: integer, minimum: 1}
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     ErrorResponse:
       description: Error response
       content:

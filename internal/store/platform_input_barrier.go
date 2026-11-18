@@ -14,6 +14,14 @@ func compilerInputBarrierBusy() error {
 	return &pgconn.PgError{Code: "55P03", Message: "compiler input writer barrier is busy"}
 }
 
+func observeCompilerInputAdmissionWriterBusy(ctx context.Context) error {
+	err := compilerInputBarrierBusy()
+	// Only this local return denotes a try-lock budget exhaustion. A genuine
+	// PgError with the same SQLSTATE still belongs to its original query.
+	observePlatformInputReadFailure(ctx, "admission", "admission_writer_busy", nil, nil, err)
+	return err
+}
+
 // Append-only input writes serialize on a separate queue. They never replace
 // committed canonical bytes: new manifests/refs become visible together only
 // after their complete readback verification and commit. The shared lifecycle
@@ -48,7 +56,7 @@ func waitCompilerInputAdmissionWriter(ctx context.Context, tx *sql.Tx) error {
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return compilerInputBarrierBusy()
+			return observeCompilerInputAdmissionWriterBusy(ctx)
 		}
 		timer := time.NewTimer(min(delay, remaining))
 		select {
@@ -58,7 +66,7 @@ func waitCompilerInputAdmissionWriter(ctx context.Context, tx *sql.Tx) error {
 		case <-timer.C:
 		}
 		if !time.Now().Before(deadline) {
-			return compilerInputBarrierBusy()
+			return observeCompilerInputAdmissionWriterBusy(ctx)
 		}
 		if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock_shared(315609238744290)`).Scan(&acquired); err != nil {
 			return err
