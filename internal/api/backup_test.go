@@ -2937,7 +2937,7 @@ func TestPendingControlPlaneBackupRunRetriesAfterCoordinationLeaseBecomesAvailab
 	}
 
 	backend.setBlocked(false)
-	server.enqueuePendingControlPlaneBackupRuns(context.Background())
+	server.enqueuePendingCoordinatedBackupRuns(context.Background())
 	select {
 	case <-runnerCalled:
 	case <-time.After(2 * time.Second):

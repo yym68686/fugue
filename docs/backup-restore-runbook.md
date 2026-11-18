@@ -83,6 +83,24 @@ Run drills against an isolated target database or staging control-plane store.
 
 ## Safety boundaries
 
+Pending control-plane and application Longhorn backups are revisited by the
+normal scheduler, scanning oldest eligible runs first. A run waiting for the
+shared snapshot/release coordination Lease is resumed under the same run ID; it is
+not failed, replaced, or force-unlocked just because it is old. Each attempt
+must still acquire the coordination Lease and atomically claim the database
+record before starting backup effects. Retry-triggered runs retain their
+separate due-time scanner; future `next_retry_at` values are never bypassed.
+Recovered Longhorn workers likewise resume their original run and existing
+provider objects. Disabled automatic policies and database lifecycle interlocks
+are rechecked by the normal execution path, not bypassed by the scanner.
+
+To investigate a prolonged Pending run, inspect
+`fugue backup run show RUN_ID --json` and API logs containing that run ID.
+Empty `started_at` and `lease_owner` mean it has not been claimed, not that the
+provider is uploading.
+Do not cancel an unknown backup, delete its provider objects, or clear a
+coordination Lease to make a database migration pass.
+
 - App database and persistent-storage destructive restores require an explicit
   restore plan and protective backup before replacement.
 - Clone restore is preferred for app database verification because it avoids

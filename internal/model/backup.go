@@ -340,6 +340,13 @@ func NormalizeBackupTarget(target BackupTarget) BackupTarget {
 	return target
 }
 
+// BackupRunNeedsCoordinationLease defines the shared snapshot/release fencing
+// domain. Pending recovery and execution must agree on which runs use it.
+func BackupRunNeedsCoordinationLease(run BackupRun) bool {
+	target := NormalizeBackupTarget(run.Target)
+	return target.Type == BackupTargetControlPlaneDatabase || target.Engine == BackupEngineLonghornSnapshot
+}
+
 func NormalizeBackupTargetType(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "", BackupTargetControlPlaneDatabase, "control-plane-postgres", "platform-db", "control-plane-database":

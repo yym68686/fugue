@@ -632,7 +632,7 @@ func (s *Server) enqueueDueBackups(ctx context.Context) {
 	s.recoverStaleBackupRuns(ctx)
 	s.enqueueRecoverableLonghornLockRetries(ctx)
 	s.enqueueDueBackupRetries(ctx)
-	s.enqueuePendingControlPlaneBackupRuns(ctx)
+	s.enqueuePendingCoordinatedBackupRuns(ctx)
 	policies, err := s.store.ListDueBackupPolicies(time.Now().UTC(), 25)
 	if err != nil {
 		if s.log != nil {
@@ -717,9 +717,9 @@ func (s *Server) recoverStaleBackupRuns(ctx context.Context) {
 	}
 	for _, run := range runs {
 		if backupRunWaitingForCoordinationLease(run) {
-			// An unclaimed control-plane run may be intentionally waiting for
-			// a release to clear the shared Kubernetes Lease. It is not a lost
-			// worker and must remain pending for the pending/due-retry scanner.
+			// An unclaimed coordinated run may be waiting for a release or
+			// snapshot writer. Both control-plane and tenant Longhorn backups
+			// remain pending for the coordinated pending/due-retry scanners.
 			continue
 		}
 		updated, err := s.store.RecoverStaleBackupRun(run, now, backupRunLeaseTTL)
@@ -765,25 +765,17 @@ func (s *Server) enqueueDueBackupRetries(ctx context.Context) {
 	}
 }
 
-func (s *Server) enqueuePendingControlPlaneBackupRuns(ctx context.Context) {
-	runs, err := s.store.ListBackupRuns(store.BackupRunFilter{
-		TargetType:    model.BackupTargetControlPlaneDatabase,
-		Status:        model.BackupRunStatusPending,
-		PlatformAdmin: true,
-		Limit:         500,
-	})
+func (s *Server) enqueuePendingCoordinatedBackupRuns(ctx context.Context) {
+	runs, err := s.store.ListPendingCoordinatedBackupRuns(time.Now().UTC(), 500)
 	if err != nil {
 		if s.log != nil {
-			s.log.Printf("backup scheduler list pending control-plane runs failed: %v", err)
+			s.log.Printf("backup scheduler list pending coordinated runs failed: %v", err)
 		}
 		return
 	}
 	for _, run := range runs {
-		// Retry runs have their own due-time-aware scanner. Excluding them here
-		// prevents an early claim while preserving blocked manual/scheduled runs.
-		if run.Trigger == model.BackupRunTriggerRetry {
-			continue
-		}
+		// Resume the durable run, not a replacement. Execution still acquires
+		// the coordination Lease and atomically claims the run before effects.
 		go s.executeBackupRun(contextWithoutCancel(ctx), run.ID)
 	}
 }
@@ -2405,13 +2397,13 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 		coordinationLease, leaseErr = factory(runID)
 		if leaseErr != nil {
 			if s.log != nil {
-				s.log.Printf("control-plane backup run %s remains pending: initialize coordination Lease: %v", runID, leaseErr)
+				s.log.Printf("coordinated backup run %s remains pending: initialize coordination Lease: %v", runID, leaseErr)
 			}
 			return
 		}
 		if coordinationLease == nil {
 			if s.log != nil {
-				s.log.Printf("control-plane backup run %s remains pending: coordination Lease factory returned nil", runID)
+				s.log.Printf("coordinated backup run %s remains pending: coordination Lease factory returned nil", runID)
 			}
 			return
 		}
@@ -2420,9 +2412,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			coordinationLease.Close()
 			if s.log != nil {
 				if leaseErr != nil {
-					s.log.Printf("control-plane backup run %s remains pending: acquire coordination Lease: %v", runID, leaseErr)
+					s.log.Printf("coordinated backup run %s remains pending: acquire coordination Lease: %v", runID, leaseErr)
 				} else {
-					s.log.Printf("control-plane backup run %s remains pending: coordination Lease is held", runID)
+					s.log.Printf("coordinated backup run %s remains pending: coordination Lease is held", runID)
 				}
 			}
 			return
@@ -2435,9 +2427,9 @@ func (s *Server) executeBackupRun(parent context.Context, runID string) {
 			defer releaseCancel()
 			released, releaseErr := coordinationLease.Release(releaseCtx, time.Now().UTC())
 			if releaseErr != nil && s.log != nil {
-				s.log.Printf("release control-plane backup coordination Lease for run %s failed: %v", runID, releaseErr)
+				s.log.Printf("release backup coordination Lease for run %s failed: %v", runID, releaseErr)
 			} else if !released && s.log != nil {
-				s.log.Printf("control-plane backup coordination Lease for run %s was already transferred", runID)
+				s.log.Printf("backup coordination Lease for run %s was already transferred", runID)
 			}
 			coordinationLease.Close()
 		}()

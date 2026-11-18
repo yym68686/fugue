@@ -1381,6 +1381,46 @@ func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error
 	return runs, err
 }
 
+// ListPendingCoordinatedBackupRuns resumes manual/scheduled runs whose initial
+// execution could not acquire the coordination Lease (or whose Longhorn worker
+// was recovered). Filter before limiting so unrelated/future/retry work cannot
+// hide the oldest eligible run. Due retries retain their separate scanner.
+func (s *Store) ListPendingCoordinatedBackupRuns(now time.Time, limit int) ([]model.BackupRun, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	if limit <= 0 {
+		limit = defaultBackupDueScannerLimit
+	}
+	if s.usingDatabase() {
+		return s.pgListPendingCoordinatedBackupRuns(now, limit)
+	}
+	runs := []model.BackupRun{}
+	err := s.withLockedState(false, func(state *model.State) error {
+		for _, run := range state.BackupRuns {
+			run = model.NormalizeBackupRun(run)
+			if run.Status != model.BackupRunStatusPending || run.Trigger == model.BackupRunTriggerRetry ||
+				!model.BackupRunNeedsCoordinationLease(run) || run.NextRetryAt != nil && run.NextRetryAt.After(now) {
+				continue
+			}
+			runs = append(runs, run)
+		}
+		sort.Slice(runs, func(i, j int) bool {
+			if !runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
+				return runs[i].CreatedAt.Before(runs[j].CreatedAt)
+			}
+			return runs[i].ID < runs[j].ID
+		})
+		if len(runs) > limit {
+			runs = runs[:limit]
+		}
+		return nil
+	})
+	return runs, err
+}
+
 // ListDueBackupRetryRuns filters and orders due retries before applying the
 // scan limit so newer future work cannot starve an older runnable retry.
 func (s *Store) ListDueBackupRetryRuns(now time.Time, limit int) ([]model.BackupRun, error) {
@@ -4657,6 +4697,32 @@ func (s *Store) pgListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, err
 	args = append(args, limit)
 	query += fmt.Sprintf(` LIMIT $%d`, len(args))
 	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	runs := []model.BackupRun{}
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, mapDBErr(rows.Err())
+}
+
+func (s *Store) pgListPendingCoordinatedBackupRuns(now time.Time, limit int) ([]model.BackupRun, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// Keep this domain predicate aligned with model.BackupRunNeedsCoordinationLease.
+	rows, err := s.db.QueryContext(ctx, backupRunSelectSQL()+`
+ WHERE status = 'pending'
+   AND trigger <> 'retry'
+   AND (target_type = $1 OR target_json->>'engine' = $2)
+   AND (next_retry_at IS NULL OR next_retry_at <= $3)
+ ORDER BY created_at ASC, id ASC
+ LIMIT $4`, model.BackupTargetControlPlaneDatabase, model.BackupEngineLonghornSnapshot, now, limit)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
