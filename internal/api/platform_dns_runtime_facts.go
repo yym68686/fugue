@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 	"fugue/internal/dnsfacts"
 	"fugue/internal/dnsroutesource"
 	"fugue/internal/httpx"
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -595,6 +595,7 @@ func dnsBackendObservationPort(pod corev1.Pod, svc corev1.Service) (int32, bool)
 }
 
 func readDNSPodSnapshot(ctx context.Context, client *clusterNodeClient, path string, out *dnsfacts.Snapshot) error {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveDNSRuntimeFacts)
 	return readDNSPodObservation(ctx, client, path, out, 32<<20)
 }
 
@@ -633,19 +634,48 @@ func readPodObservation(ctx context.Context, client *clusterNodeClient, path str
 		return &dnsObservationReadFailure{class: "http_status", status: resp.StatusCode, rejection: rejection,
 			replacement: dnsObservationStateReplacement(resp.StatusCode, rejection, resp.Header.Values)}
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maximum+1))
-	if err != nil {
-		return &dnsObservationReadFailure{class: captureErrorClass(err), status: resp.StatusCode}
-	}
-	if int64(len(raw)) > maximum {
-		return &dnsObservationReadFailure{class: "response_budget", status: resp.StatusCode}
-	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(out) != nil || decoder.Decode(&struct{}{}) != io.EOF {
-		return &dnsObservationReadFailure{class: "decode", status: resp.StatusCode}
+	if failure := decodePodObservationBody(resp.Body, out, maximum); failure != "" {
+		return &dnsObservationReadFailure{class: failure, status: resp.StatusCode}
 	}
 	return nil
+}
+
+type dnsObservationBodyReader struct {
+	io.Reader
+	err error
+}
+
+func (r *dnsObservationBodyReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil && err != io.EOF {
+		r.err = err
+	}
+	return n, err
+}
+
+// Decode from the bounded body without first making a full copy of the same
+// JSON in io.ReadAll. Unknown fields and trailing values still fail closed.
+// Drain only within the original budget on a decode error to distinguish
+// truncated or oversized responses from malformed JSON as before.
+func decodePodObservationBody(body io.Reader, out any, maximum int64) string {
+	reader := &dnsObservationBodyReader{Reader: body}
+	limited := &io.LimitedReader{R: reader, N: maximum + 1}
+	decoder := json.NewDecoder(limited)
+	decoder.DisallowUnknownFields()
+	valid := decoder.Decode(out) == nil && decoder.Decode(&struct{}{}) == io.EOF
+	if !valid && reader.err == nil {
+		_, _ = io.Copy(io.Discard, limited)
+	}
+	switch {
+	case reader.err != nil:
+		return captureErrorClass(reader.err)
+	case limited.N == 0:
+		return "response_budget"
+	case !valid:
+		return "decode"
+	default:
+		return ""
+	}
 }
 
 func evaluateDNSRuntimeSnapshot(snapshot dnsfacts.Snapshot, source dnsFactSource, now time.Time) ([]string, bool, error) {

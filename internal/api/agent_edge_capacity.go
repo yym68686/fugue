@@ -3,12 +3,12 @@ package api
 import (
 	"context"
 	"errors"
-	"net/http"
 	"net/url"
 	"slices"
 	"time"
 
 	"fugue/internal/agentedge"
+	"fugue/internal/kubeauth"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -50,6 +50,7 @@ func readAgentCapacity(ctx context.Context, c *clusterNodeClient, nodeID, addres
 }
 
 func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, nodeID, address string, p agentedge.CapacityPolicy, clockNow func() time.Time, observe func(string)) (agentCapacityEvidence, error) {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveAgentCapacity)
 	event := captureEvent{Stage: "agent-capacity-ok", Node: nodeID, Capacity: &captureCapacity{MaxCPUPercent: p.MaxNodeCPUPercent, MaxMemoryPercent: p.MaxNodeMemoryPercent}}
 	traceStarted := time.Now()
 	defer func() {
@@ -66,7 +67,7 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	started := clockNow().UTC()
 	var node corev1.Node
 	path := "/api/v1/nodes/" + url.PathEscape(nodeID)
-	nodeErr := c.doJSON(ctx, http.MethodGet, path, &node)
+	nodeErr := c.getKubernetesNode(ctx, path, &node)
 	event.ErrorClass = captureErrorClass(nodeErr)
 	event.HTTPStatus = captureHTTPStatus(nodeErr)
 	event.Capacity.NodeUID = string(node.UID)
@@ -92,20 +93,20 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	}
 	event.Capacity.CPUMilliCores = node.Status.Allocatable.Cpu().MilliValue()
 	event.Capacity.MemoryAvailable = node.Status.Allocatable.Memory().Value()
-	summary, err := c.getNodeSummary(ctx, nodeID)
+	summary, err := c.getNodeCapacitySummary(ctx, nodeID)
 	event.ErrorClass = captureErrorClass(err)
 	event.HTTPStatus = captureHTTPStatus(err)
-	if err != nil || summary == nil || summary.Node.NodeName != nodeID || summary.Node.CPU.UsageNanoCores == nil {
+	if err != nil || summary == nil || summary.NodeName != nodeID || summary.CPU.UsageNanoCores == nil {
 		return fail("agent-capacity-summary-unavailable")
 	}
-	used := summary.Node.Memory.WorkingSetBytes
+	used := summary.Memory.WorkingSetBytes
 	if used == nil {
-		used = summary.Node.Memory.UsageBytes
+		used = summary.Memory.UsageBytes
 	}
 	if used == nil {
 		return fail("agent-capacity-summary-unavailable")
 	}
-	event.Capacity.CPUNanoCores = *summary.Node.CPU.UsageNanoCores
+	event.Capacity.CPUNanoCores = *summary.CPU.UsageNanoCores
 	event.Capacity.MemoryBytes = *used
 	// Kubelet may collect a sample while this authenticated request is in
 	// flight. Compare it with read completion, never with request start. The
@@ -114,8 +115,8 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	if now.Before(started) {
 		return fail("agent-capacity-time-invalid")
 	}
-	cpuAt, e1 := time.Parse(time.RFC3339Nano, summary.Node.CPU.Time)
-	memoryAt, e2 := time.Parse(time.RFC3339Nano, summary.Node.Memory.Time)
+	cpuAt, e1 := time.Parse(time.RFC3339Nano, summary.CPU.Time)
+	memoryAt, e2 := time.Parse(time.RFC3339Nano, summary.Memory.Time)
 	event.Capacity.CPUTime, event.Capacity.MemoryTime = cpuAt, memoryAt
 	if e1 != nil || e2 != nil || cpuAt.After(now) || memoryAt.After(now) || cpuAt.Before(node.CreationTimestamp.Time) || memoryAt.Before(node.CreationTimestamp.Time) {
 		return fail("agent-capacity-time-invalid")
@@ -131,12 +132,12 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 	}
 	cpu := node.Status.Allocatable.Cpu().MilliValue()
 	memory := node.Status.Allocatable.Memory().Value()
-	if cpu <= 0 || memory <= 0 || float64(*summary.Node.CPU.UsageNanoCores)/1e6/float64(cpu)*100 > float64(p.MaxNodeCPUPercent) ||
+	if cpu <= 0 || memory <= 0 || float64(*summary.CPU.UsageNanoCores)/1e6/float64(cpu)*100 > float64(p.MaxNodeCPUPercent) ||
 		float64(*used)/float64(memory)*100 > float64(p.MaxNodeMemoryPercent) {
 		return fail("agent-capacity-pressure")
 	}
 	var current corev1.Node
-	recheckErr := c.doJSON(ctx, http.MethodGet, path, &current)
+	recheckErr := c.getKubernetesNode(ctx, path, &current)
 	event.ErrorClass = captureErrorClass(recheckErr)
 	event.HTTPStatus = captureHTTPStatus(recheckErr)
 	if recheckErr != nil || current.UID != node.UID || !agentCapacityNodeReady(current, address) ||
@@ -148,5 +149,5 @@ func readAgentCapacityWithObserver(ctx context.Context, c *clusterNodeClient, no
 		return fail("agent-capacity-expired")
 	}
 	return agentCapacityEvidence{NodeID: nodeID, NodeUID: string(node.UID), Address: address, ObservedAt: observed, ValidUntil: until,
-		CPUUsageNanoCores: *summary.Node.CPU.UsageNanoCores, CPUAllocatableMilliCores: cpu, MemoryWorkingSetBytes: *used, MemoryAllocatableBytes: memory}, nil
+		CPUUsageNanoCores: *summary.CPU.UsageNanoCores, CPUAllocatableMilliCores: cpu, MemoryWorkingSetBytes: *used, MemoryAllocatableBytes: memory}, nil
 }

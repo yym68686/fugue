@@ -119,7 +119,7 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 		return reject(http.StatusConflict, "pod_not_ready")
 	}
 	var node corev1.Node
-	if readDNSBackendMetadata(ctx, client, claims.NodeID, "node", "/api/v1/nodes/"+url.PathEscape(claims.NodeID), &node) != nil {
+	if readDNSBackendNode(ctx, client, claims.NodeID, "node", &node) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if node.Name != claims.NodeID || node.UID == "" || node.DeletionTimestamp != nil {
@@ -143,12 +143,11 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 				return reject(http.StatusConflict, "public_service_missing")
 			}
 			if notSelected != nil {
-				var currentPod corev1.Pod
-				var currentService corev1.Service
-				if readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil || readDNSBackendMetadata(ctx, client, claims.NodeID, "standby_service_recheck", base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil {
+				var currentPod, currentService kubernetesObjectRevision
+				if readDNSBackendRevision(ctx, client, claims.NodeID, "standby_pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), "Pod", &currentPod) != nil || readDNSBackendRevision(ctx, client, claims.NodeID, "standby_service_recheck", base+"/services/"+url.PathEscape(selected.Name), "Service", &currentService) != nil {
 					return http.StatusServiceUnavailable
 				}
-				if currentPod.UID == pod.UID && currentPod.ResourceVersion == pod.ResourceVersion && currentService.UID == selected.UID && currentService.ResourceVersion == selected.ResourceVersion {
+				if currentPod.matches(pod) && currentService.matches(selected) {
 					*notSelected = true
 				}
 			}
@@ -176,15 +175,14 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 	}
 	// Fail on an observed replacement or readiness/selector change during the
 	// lookup. Resource versions fence observations, not a lease on serving.
-	var currentPod corev1.Pod
-	var currentService corev1.Service
+	var currentPod, currentService kubernetesObjectRevision
 	var currentEndpoints discoveryv1.EndpointSliceList
-	if readDNSBackendMetadata(ctx, client, claims.NodeID, "pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), &currentPod) != nil ||
-		readDNSBackendMetadata(ctx, client, claims.NodeID, "service_recheck", base+"/services/"+url.PathEscape(selected.Name), &currentService) != nil ||
+	if readDNSBackendRevision(ctx, client, claims.NodeID, "pod_recheck", base+"/pods/"+url.PathEscape(pod.Name), "Pod", &currentPod) != nil ||
+		readDNSBackendRevision(ctx, client, claims.NodeID, "service_recheck", base+"/services/"+url.PathEscape(selected.Name), "Service", &currentService) != nil ||
 		readDNSBackendMetadata(ctx, client, claims.NodeID, "endpoints_recheck", slicePath, &currentEndpoints) != nil || currentEndpoints.Continue != "" {
 		return http.StatusServiceUnavailable
 	}
-	if currentPod.UID != pod.UID || currentPod.ResourceVersion != pod.ResourceVersion || currentService.UID != selected.UID || currentService.ResourceVersion != selected.ResourceVersion || !reflect.DeepEqual(endpoints.Items, currentEndpoints.Items) {
+	if !currentPod.matches(pod) || !currentService.matches(selected) || !reflect.DeepEqual(endpoints.Items, currentEndpoints.Items) {
 		return reject(http.StatusConflict, "transport_changed_during_read")
 	}
 	if privateGuard != nil {
@@ -196,8 +194,26 @@ func (s *Server) inspectDNSBackendTransport(ctx context.Context, claims platform
 // Callers supply fixed stage names. Preserve the original result and request
 // order; retain no URL, credential, response body or arbitrary error text.
 func readDNSBackendMetadata(ctx context.Context, client *clusterNodeClient, node, stage, path string, out any) error {
+	return observeDNSBackendMetadataRead(ctx, node, stage, func() error {
+		return client.doJSON(ctx, http.MethodGet, path, out)
+	})
+}
+
+func readDNSBackendRevision(ctx context.Context, client *clusterNodeClient, node, stage, path, kind string, out *kubernetesObjectRevision) error {
+	return observeDNSBackendMetadataRead(ctx, node, stage, func() error {
+		return client.getKubernetesObjectRevision(ctx, path, kind, out)
+	})
+}
+
+func readDNSBackendNode(ctx context.Context, client *clusterNodeClient, node, stage string, out *corev1.Node) error {
+	return observeDNSBackendMetadataRead(ctx, node, stage, func() error {
+		return client.getKubernetesNode(ctx, "/api/v1/nodes/"+url.PathEscape(node), out)
+	})
+}
+
+func observeDNSBackendMetadataRead(ctx context.Context, node, stage string, read func() error) error {
 	started := time.Now()
-	err := client.doJSON(ctx, http.MethodGet, path, out)
+	err := read()
 	if err != nil {
 		observeCapture(ctx, captureEvent{Stage: "backend_metadata_" + stage, Node: node,
 			ErrorClass: captureErrorClass(err), HTTPStatus: captureHTTPStatus(err), DurationMS: time.Since(started).Milliseconds()})

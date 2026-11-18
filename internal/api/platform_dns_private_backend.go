@@ -180,7 +180,7 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 		return http.StatusConflict
 	}
 	var currentNode corev1.Node
-	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_node_recheck", "/api/v1/nodes/"+url.PathEscape(g.node.Name), &currentNode) != nil {
+	if readDNSBackendNode(ctx, client, g.node.Name, "private_node_recheck", &currentNode) != nil {
 		return http.StatusServiceUnavailable
 	}
 	if currentNode.UID != g.node.UID || currentNode.ResourceVersion != g.node.ResourceVersion {
@@ -204,11 +204,11 @@ func (g *dnsPrivatePublicGuard) recheck(ctx context.Context, client *clusterNode
 	if current == nil || current.UID != g.service.UID || current.ResourceVersion != g.service.ResourceVersion {
 		return http.StatusConflict
 	}
-	var pod corev1.Pod
-	if readDNSBackendMetadata(ctx, client, g.node.Name, "private_public_pod_recheck", base+"/pods/"+url.PathEscape(g.pod.Name), &pod) != nil {
+	var pod kubernetesObjectRevision
+	if readDNSBackendRevision(ctx, client, g.node.Name, "private_public_pod_recheck", base+"/pods/"+url.PathEscape(g.pod.Name), "Pod", &pod) != nil {
 		return http.StatusServiceUnavailable
 	}
-	if pod.UID != g.pod.UID || pod.ResourceVersion != g.pod.ResourceVersion {
+	if !pod.matches(g.pod) {
 		return http.StatusConflict
 	}
 	return http.StatusOK

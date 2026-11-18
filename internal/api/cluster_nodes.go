@@ -1152,6 +1152,7 @@ func (c *clusterNodeClient) listActivePodsByNode(ctx context.Context) (map[strin
 }
 
 func (c *clusterNodeClient) listNodeSummaries(ctx context.Context, nodes []kubeNode) (map[string]*kubeNodeSummary, error) {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveNodeInventoryStats)
 	nodeNames := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		name := strings.TrimSpace(node.Metadata.Name)

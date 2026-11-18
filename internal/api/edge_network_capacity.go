@@ -3,11 +3,11 @@ package api
 import (
 	"context"
 	"errors"
-	"net/http"
 	"net/url"
 	"reflect"
 	"time"
 
+	"fugue/internal/kubeauth"
 	"fugue/internal/model"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -51,22 +51,23 @@ func networkCapacityNode(node corev1.Node, nodeID, address string) ([]string, er
 }
 
 func readNetworkNodeCapacity(ctx context.Context, client *clusterNodeClient, nodeID, address string, clock func() time.Time) (*model.EdgeNetworkNodeCapacity, error) {
+	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveEdgeNetworkCapacity)
 	started := clock().UTC()
 	path := "/api/v1/nodes/" + url.PathEscape(nodeID)
 	var node corev1.Node
-	if err := client.doJSON(ctx, http.MethodGet, path, &node); err != nil {
+	if err := client.getKubernetesNode(ctx, path, &node); err != nil {
 		return nil, err
 	}
 	pressure, err := networkCapacityNode(node, nodeID, address)
 	if err != nil {
 		return nil, err
 	}
-	summary, err := client.getNodeSummary(ctx, nodeID)
-	if err != nil || summary == nil || summary.Node.NodeName != nodeID || summary.Node.CPU.UsageNanoCores == nil || summary.Node.Memory.WorkingSetBytes == nil {
+	summary, err := client.getNodeCapacitySummary(ctx, nodeID)
+	if err != nil || summary == nil || summary.NodeName != nodeID || summary.CPU.UsageNanoCores == nil || summary.Memory.WorkingSetBytes == nil {
 		return nil, errors.New("node CPU or working-set memory sample unavailable")
 	}
-	cpuAt, cpuErr := time.Parse(time.RFC3339Nano, summary.Node.CPU.Time)
-	memoryAt, memoryErr := time.Parse(time.RFC3339Nano, summary.Node.Memory.Time)
+	cpuAt, cpuErr := time.Parse(time.RFC3339Nano, summary.CPU.Time)
+	memoryAt, memoryErr := time.Parse(time.RFC3339Nano, summary.Memory.Time)
 	now := clock().UTC()
 	if cpuErr != nil || memoryErr != nil || now.Before(started) || cpuAt.After(now) || memoryAt.After(now) ||
 		cpuAt.Before(node.CreationTimestamp.Time) || memoryAt.Before(node.CreationTimestamp.Time) {
@@ -77,14 +78,14 @@ func readNetworkNodeCapacity(ctx context.Context, client *clusterNodeClient, nod
 		observed = memoryAt
 	}
 	capacity := &model.EdgeNetworkNodeCapacity{Source: "kubelet_node_allocatable_v1", NodeUID: string(node.UID), ObservedAt: observed, ValidUntil: observed.Add(2 * time.Minute),
-		CPUObservedAt: cpuAt, MemoryObservedAt: memoryAt, CPUUsageNanoCores: *summary.Node.CPU.UsageNanoCores,
-		CPUAllocatableMilliCores: node.Status.Allocatable.Cpu().MilliValue(), MemoryWorkingSetBytes: *summary.Node.Memory.WorkingSetBytes,
+		CPUObservedAt: cpuAt, MemoryObservedAt: memoryAt, CPUUsageNanoCores: *summary.CPU.UsageNanoCores,
+		CPUAllocatableMilliCores: node.Status.Allocatable.Cpu().MilliValue(), MemoryWorkingSetBytes: *summary.Memory.WorkingSetBytes,
 		MemoryAllocatableBytes: node.Status.Allocatable.Memory().Value(), Pressure: pressure}
 	if model.ValidateEdgeNetworkNodeCapacity(capacity) != nil || !capacity.ValidUntil.After(now) {
 		return nil, errors.New("node capacity stale or invalid")
 	}
 	var current corev1.Node
-	if err := client.doJSON(ctx, http.MethodGet, path, &current); err != nil {
+	if err := client.getKubernetesNode(ctx, path, &current); err != nil {
 		return nil, err
 	}
 	currentPressure, err := networkCapacityNode(current, nodeID, address)

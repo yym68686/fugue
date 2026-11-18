@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +28,115 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+func TestDecodePodObservationBody(t *testing.T) {
+	const valid = `{"ready":true}`
+	for _, tc := range []struct {
+		name, input, failure string
+		budget               int64
+		transport            bool
+	}{
+		{name: "exact budget", input: valid, budget: int64(len(valid))},
+		{name: "exact budget with trailing whitespace", input: valid + " \r\n", budget: int64(len(valid) + 3)},
+		{name: "oversized whitespace", input: valid + " ", budget: int64(len(valid)), failure: "response_budget"},
+		{name: "unknown field", input: `{"ready":true,"extra":1}`, budget: 100, failure: "decode"},
+		{name: "trailing value", input: valid + " {}", budget: 100, failure: "decode"},
+		{name: "truncated JSON", input: valid[:len(valid)-1], budget: 100, failure: "decode"},
+		{name: "oversized malformed body", input: "!" + strings.Repeat(" ", 2048), budget: 1024, failure: "response_budget"},
+		{name: "truncated body transport", input: valid, budget: 100, transport: true, failure: captureErrorClass(io.ErrUnexpectedEOF)},
+		{name: "malformed body with transport error", input: "!", budget: 100, transport: true, failure: captureErrorClass(io.ErrUnexpectedEOF)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out struct {
+				Ready bool `json:"ready"`
+			}
+			var body io.Reader = strings.NewReader(tc.input)
+			if tc.transport {
+				body = io.MultiReader(body, observationTruncatedReader{})
+			}
+			if failure := decodePodObservationBody(body, &out, tc.budget); failure != tc.failure {
+				t.Fatalf("failure = %q, want %q", failure, tc.failure)
+			} else if failure == "" && !out.Ready {
+				t.Fatal("ready not decoded")
+			}
+		})
+	}
+}
+
+type observationTruncatedReader struct{}
+
+func (observationTruncatedReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func TestReadPodObservationAppliesBudgetAfterGzip(t *testing.T) {
+	payload := `{"ready":true}` + strings.Repeat(" ", 512)
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "gzip" {
+			t.Error("transport did not negotiate gzip")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+	c := &clusterNodeClient{baseURL: upstream.URL, client: upstream.Client()}
+	var out struct {
+		Ready bool `json:"ready"`
+	}
+	if err := readPodObservation(t.Context(), c, "/", &out, int64(len(payload)), nil); err != nil || !out.Ready {
+		t.Fatalf("exact decoded limit did not accept gzip response: %v", err)
+	}
+	err := readPodObservation(t.Context(), c, "/", &out, int64(len(payload)-1), nil)
+	var failure *dnsObservationReadFailure
+	if !errors.As(err, &failure) || failure.class != "response_budget" {
+		t.Fatalf("decoded limit did not reject gzip response: %v", err)
+	}
+}
+
+func BenchmarkDecodePodObservationBody(b *testing.B) {
+	// Representative proxy response size, without production data.
+	payload := `{"facts":[` + strings.Repeat(`{"ready":true,"value":"synthetic sample"},`, 3200) + `{"ready":true}]}`
+	type response struct {
+		Facts []struct {
+			Ready bool   `json:"ready"`
+			Value string `json:"value"`
+		} `json:"facts"`
+	}
+	const budget = 32 << 20
+	b.Run("read-all", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(payload)))
+		for b.Loop() {
+			raw, err := io.ReadAll(io.LimitReader(strings.NewReader(payload), budget+1))
+			if err != nil || len(raw) > budget {
+				b.Fatal(err)
+			}
+			var out response
+			decoder := json.NewDecoder(bytes.NewReader(raw))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&out); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("bounded-decoder", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(payload)))
+		for b.Loop() {
+			var out response
+			if failure := decodePodObservationBody(strings.NewReader(payload), &out, budget); failure != "" {
+				b.Fatal(failure)
+			}
+		}
+	})
+}
 
 func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.T) {
 	for _, tc := range []struct{ group, scope string }{{"edge-group-old", "global"}, {"cell-a", "global"}, {"cell-b", "global"}, {"cell-a", "authority-cell:cell-a"}} {

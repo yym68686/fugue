@@ -51,7 +51,7 @@ func inventoryPodEncodings(t testing.TB, pods *corev1.PodList) ([]byte, []byte) 
 		t.Fatal(err)
 	}
 	var binary bytes.Buffer
-	if err := clusterPodProtobuf.Encode(pods, &binary); err != nil {
+	if err := clusterCoreProtobuf.Encode(pods, &binary); err != nil {
 		t.Fatal(err)
 	}
 	return text, binary.Bytes()

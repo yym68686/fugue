@@ -10,7 +10,9 @@ import (
 func TestKubernetesObservationSiteUsesOnlyFixedNames(t *testing.T) {
 	req, _ := http.NewRequest("GET", "https://control.invalid/api/v1/pods", nil)
 	for site, want := range map[ObservationSite]string{
-		ObservePublicFront: "public_front", ObserveDNSBackend: "dns_backend", ObserveNodePodInventory: "node_pod_inventory", 255: "",
+		ObservePublicFront: "public_front", ObserveDNSBackend: "dns_backend", ObserveNodePodInventory: "node_pod_inventory",
+		ObserveAgentCapacity: "agent_capacity", ObserveEdgeNetworkCapacity: "edge_network_capacity",
+		ObserveNodeInventoryStats: "node_inventory_stats", ObserveDNSRuntimeFacts: "dns_runtime_facts", 255: "",
 	} {
 		at := req.WithContext(WithObservationSite(req.Context(), site))
 		if got := classifyRequest(at).CallSite; got != want {

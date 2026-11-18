@@ -4,15 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
-	"mime"
-	"net/http"
 
 	"fugue/internal/kubeauth"
 	corev1 "k8s.io/api/core/v1"
 	kuberuntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer/protobuf"
 )
 
 const clusterPodInventoryPath = "/api/v1/pods"
@@ -22,43 +17,10 @@ const clusterPodInventoryPath = "/api/v1/pods"
 // JSON negotiation with servers that cannot provide Kubernetes Protobuf.
 func (c *clusterNodeClient) readClusterPodInventory(ctx context.Context, out *clusterNodePodList) error {
 	ctx = kubeauth.WithObservationSite(ctx, kubeauth.ObserveNodePodInventory)
-	err := c.readClusterPodInventoryWithAccept(ctx, kuberuntime.ContentTypeProtobuf+","+kuberuntime.ContentTypeJSON, out)
-	var status *kubernetesHTTPStatusError
-	if errors.As(err, &status) && status.status == http.StatusNotAcceptable && ctx.Err() == nil {
-		return c.readClusterPodInventoryWithAccept(ctx, kuberuntime.ContentTypeJSON, out)
-	}
-	return err
+	return c.getKubernetesCoreResource(ctx, clusterPodInventoryPath, "Pod inventory", func(raw []byte, contentType string) error {
+		return decodeClusterPodInventory(raw, contentType, out)
+	})
 }
-
-func (c *clusterNodeClient) readClusterPodInventoryWithAccept(ctx context.Context, accept string, out *clusterNodePodList) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+clusterPodInventoryPath, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.bearerToken)
-	req.Header.Set("Accept", accept)
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("kubernetes Pod inventory request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		// Kubernetes can negotiate a binary Status here as well. The status
-		// code is sufficient for fallback and authorization; do not log a body.
-		return &kubernetesHTTPStatusError{status: resp.StatusCode, detail: fmt.Errorf("kubernetes Pod inventory failed: status=%d", resp.StatusCode)}
-	}
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("read kubernetes Pod inventory: %w", err)
-	}
-	contentType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err := decodeClusterPodInventory(raw, contentType, out); err != nil {
-		return fmt.Errorf("decode kubernetes Pod inventory: %w", err)
-	}
-	return nil
-}
-
-var clusterPodProtobuf = protobuf.NewSerializer(nil, nil)
 
 func decodeClusterPodInventory(raw []byte, contentType string, out *clusterNodePodList) error {
 	if contentType != kuberuntime.ContentTypeProtobuf {
@@ -70,18 +32,12 @@ func decodeClusterPodInventory(raw []byte, contentType string, out *clusterNodeP
 		}
 		return nil
 	}
-	var envelope kuberuntime.Unknown
-	// Decode the Kubernetes framing (not a raw CRI protobuf message). The
-	// Unknown branch needs no global scheme and retains the actual wire kind.
-	_, gvk, err := clusterPodProtobuf.Decode(raw, nil, &envelope)
+	message, err := kubernetesCoreProtobufMessage(raw, "PodList")
 	if err != nil {
 		return err
 	}
-	if gvk == nil || *gvk != corev1.SchemeGroupVersion.WithKind("PodList") || envelope.ContentEncoding != "" || envelope.Raw == nil {
-		return errors.New("unexpected Kubernetes PodList envelope")
-	}
 	var pods corev1.PodList
-	if err := pods.Unmarshal(envelope.Raw); err != nil {
+	if err := pods.Unmarshal(message); err != nil {
 		return err
 	}
 	if pods.Continue != "" {

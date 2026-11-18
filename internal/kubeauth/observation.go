@@ -16,6 +16,10 @@ const (
 	ObservePublicFront ObservationSite = iota + 1
 	ObserveDNSBackend
 	ObserveNodePodInventory
+	ObserveAgentCapacity
+	ObserveEdgeNetworkCapacity
+	ObserveNodeInventoryStats
+	ObserveDNSRuntimeFacts
 )
 
 type observationSiteKey struct{}
@@ -35,6 +39,14 @@ func classifyRequest(req *http.Request) runtimeobservation.HTTPRequestClass {
 		c.CallSite = "dns_backend"
 	case ObserveNodePodInventory:
 		c.CallSite = "node_pod_inventory"
+	case ObserveAgentCapacity:
+		c.CallSite = "agent_capacity"
+	case ObserveEdgeNetworkCapacity:
+		c.CallSite = "edge_network_capacity"
+	case ObserveNodeInventoryStats:
+		c.CallSite = "node_inventory_stats"
+	case ObserveDNSRuntimeFacts:
+		c.CallSite = "dns_runtime_facts"
 	}
 	parts := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
 	if len(parts) >= 3 && parts[0] == "api" {
