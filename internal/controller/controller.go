@@ -57,6 +57,7 @@ type Service struct {
 	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
 	newKubeClient                   func(namespace string) (*kubeClient, error)
 	postgresImageMigrationProbe     func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
+	postgresImageDrainProbe         func(context.Context, *kubeClient, postgresImageWitness) pgimage.DrainObservation
 	postgresSourceRetirementProbe   func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
 	kubeClientMu                    sync.Mutex
 	kubeClients                     map[string]*kubeClient

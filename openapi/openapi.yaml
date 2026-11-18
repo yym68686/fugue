@@ -9535,6 +9535,11 @@ paths:
         A fully applied, persisted in-place resource target may be carried into the
         restart template atomically with the image change. Unknown resource drift
         is rejected; the running request/limit envelope is never changed by migration.
+        An optional 10–15 second smart shutdown budget requires a separate
+        acknowledgement of connection termination and uncommitted transaction rollback.
+        Fast plans include a read-only session sample; apply rechecks it on the
+        actual primary. The temporary budget is verified on the old instance and
+        restored before the operation is finalized. The default policy is unchanged.
         An accepted image change retains its exclusive mutation lease until verified;
         failures never trigger deletion, failover, storage copying or automatic rollback.
       tags: [Backing Services]
@@ -24560,6 +24565,12 @@ components:
           type: string
           readOnly: true
           description: Operation-only configuration precondition for image migration; never persisted as database configuration.
+        image_migration_drain_budget_seconds:
+          type: integer
+          minimum: 10
+          maximum: 15
+          readOnly: true
+          description: Operation-only CNPG smart shutdown budget; never persisted as database configuration.
         database:
           type: string
         user:
@@ -32483,6 +32494,8 @@ components:
         apply: {type: boolean, default: false}
         acknowledge_downtime: {type: boolean, default: false}
         expected_config_hash: {type: string, description: Exact configuration hash returned by a preceding plan.}
+        drain_budget_seconds: {type: integer, minimum: 10, maximum: 15, description: Optional operation-local CNPG smart shutdown budget; omitted preserves the current policy.}
+        acknowledge_connection_termination: {type: boolean, default: false, description: Required to apply a shortened budget; remaining sessions may be disconnected and their uncommitted transactions rolled back.}
     PostgresImageMigrationPlan:
       type: object
       additionalProperties: false
@@ -32496,6 +32509,19 @@ components:
         requires_downtime: {type: boolean}
         live_preflight_pending: {type: boolean}
         stages: {type: array, items: {type: string}}
+        drain_budget_seconds: {type: integer, minimum: 10, maximum: 15}
+        drain:
+          type: object
+          additionalProperties: false
+          required: [status]
+          properties:
+            status: {type: string, enum: [eligible, blocked, unavailable]}
+            sampled_at: {type: string, format: date-time}
+            sessions: {type: integer, minimum: 0}
+            active_transactions: {type: integer, minimum: 0}
+            idle_in_transaction: {type: integer, minimum: 0}
+            oldest_transaction_ms: {type: integer, minimum: 0}
+            reason: {type: string}
     PostgresImageMigrationResponse:
       type: object
       additionalProperties: false

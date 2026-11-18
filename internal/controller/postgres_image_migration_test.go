@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
@@ -21,6 +22,45 @@ import (
 	"fugue/internal/storagerecovery"
 	"fugue/internal/store"
 )
+
+func TestPostgresImageDrainPreservesConcurrentDatabaseSettings(t *testing.T) {
+	for _, having := range []string{"none", "postgresql", "parameters"} {
+		t.Run(having, func(t *testing.T) {
+			spec := map[string]any{"smartShutdownTimeout": float64(180), "stopDelay": float64(1800)}
+			switch having {
+			case "postgresql":
+				spec["postgresql"] = map[string]any{"syncReplicaElectionConstraint": map[string]any{"enabled": true}}
+			case "parameters":
+				spec["postgresql"] = map[string]any{"parameters": map[string]any{"log_min_duration_statement": "-1"}}
+			}
+			cluster := map[string]any{"spec": spec}
+			before := imagePreservedSpecHash(cluster)
+			var w postgresImageWitness
+			if err := configurePostgresImageDrain(&w, cluster, "op", 10); err != nil {
+				t.Fatal(err)
+			}
+			spec["smartShutdownTimeout"] = float64(10)
+			if spec["postgresql"] == nil {
+				spec["postgresql"] = map[string]any{}
+			}
+			postgres := imageObject(spec["postgresql"])
+			if postgres["parameters"] == nil {
+				postgres["parameters"] = map[string]any{}
+			}
+			params := imageObject(postgres["parameters"])
+			params[pgimage.DrainMarker] = w.Drain.Marker
+			original, staged, err := originalImageDrainSpec(cluster, w.Drain)
+			if err != nil || !staged || imagePreservedSpecHash(original) != before {
+				t.Fatalf("staged settings do not reconstruct original: %v", err)
+			}
+			params["shared_buffers"] = "64MB"
+			original, _, err = originalImageDrainSpec(cluster, w.Drain)
+			if err == nil && imagePreservedSpecHash(original) == before {
+				t.Fatal("normalization masked independently changed parameters")
+			}
+		})
+	}
+}
 
 func TestPostgresImageMigrationRecoveryReadFailurePreservesRunningOperation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -52,7 +92,7 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift"}
 	if independent {
-		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed")
+		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed", "fast-ready", "fast-blocked-before-stage", "fast-blocked-after-stage", "fast-stage-response-lost", "fast-image-lost-patch-response", "fast-restore-response-lost")
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
@@ -156,7 +196,12 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			op, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: pgimage.OperationType, DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{Image: catalog.DefaultImage, ImageMigrationConfigHash: store.PostgresImageMigrationConfigHash(app, service, catalog.DefaultImage)}}})
+			fast := strings.HasPrefix(scenario, "fast-")
+			budget := 0
+			if fast {
+				budget = 15
+			}
+			op, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: pgimage.OperationType, DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{Image: catalog.DefaultImage, ImageMigrationConfigHash: store.PostgresImageMigrationPlanHash(app, service, catalog.DefaultImage, budget), ImageMigrationDrainBudgetSeconds: budget}}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -173,6 +218,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			spec := imageObject(cluster["spec"])
 			spec["primaryUpdateStrategy"] = "unsupervised"
 			spec["primaryUpdateMethod"] = "restart"
+			params := map[string]any{"shared_buffers": "128MB"}
+			spec["smartShutdownTimeout"], spec["stopDelay"] = float64(180), float64(1800)
+			spec["postgresql"] = map[string]any{"parameters": params}
 			source := strings.Split(catalog.PostgresBase, "@")[0]
 			spec["imageName"] = source
 			imageObject(imageObject(spec["affinity"])["nodeSelector"])[runtime.RuntimeIDLabelKey] = postgres.RuntimeID
@@ -232,6 +280,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			var baselineSpec map[string]any
 			b, _ := json.Marshal(spec)
 			json.Unmarshal(b, &baselineSpec)
+			drainWrites, drainSamples := 0, 0
 			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				var response any
@@ -248,6 +297,30 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					}
 					var patch []map[string]any
 					json.NewDecoder(r.Body).Decode(&patch)
+					if fast && len(patch) == 5 && patch[3]["path"] == "/spec/smartShutdownTimeout" {
+						if pgimage.Hash(patch[2]["value"]) != pgimage.Hash(spec) {
+							t.Error("drain did not guard full Cluster spec")
+						}
+						drainWrites++
+						spec["smartShutdownTimeout"] = patch[3]["value"]
+						if patch[4]["path"] != "/spec/postgresql/parameters/"+pgimage.DrainMarker {
+							t.Error("did not patch the exact acknowledgement parameter")
+						}
+						if patch[4]["op"] == "add" {
+							params[pgimage.DrainMarker] = patch[4]["value"]
+						} else {
+							delete(params, pgimage.DrainMarker)
+						}
+						if (scenario == "fast-stage-response-lost" && drainWrites == 1) || (scenario == "fast-restore-response-lost" && drainWrites == 2) {
+							http.Error(w, "response lost after drain PATCH", 500)
+							return
+						}
+						json.NewEncoder(w).Encode(cluster)
+						return
+					}
+					if fast && (drainWrites != 1 || params[pgimage.DrainMarker] == nil || drainSamples < 3) {
+						t.Error("image changed before temporary policy was loaded")
+					}
 					expectedPatches := 4
 					if resized {
 						expectedPatches = 5
@@ -300,6 +373,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 						"metadata":  map[string]any{"namespace": ns, "labels": map[string]string{"kubernetes.io/service-name": endpoint}, "ownerReferences": []any{map[string]any{"apiVersion": "v1", "kind": "Service", "name": endpoint, "uid": "stable-uid"}}},
 						"endpoints": []any{map[string]any{"addresses": []string{"10.42.0.7"}, "conditions": map[string]bool{"ready": true}, "targetRef": map[string]any{"kind": "Pod", "name": "database-1", "namespace": ns, "uid": imageObject(pod["metadata"])["uid"]}}},
 					}}}
+				case fast && r.URL.Path == "/api/v1/namespaces/"+ns+"/services/"+endpoint:
+					http.NotFound(w, r)
+					return
 				case strings.HasSuffix(r.URL.Path, "/pods/database-1"):
 					response = pod
 				case strings.HasSuffix(r.URL.Path, "/pods"):
@@ -331,15 +407,40 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			}, postgresImageMigrationProbe: func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error {
 				probes++
 				return nil
+			}, postgresImageDrainProbe: func(_ context.Context, _ *kubeClient, _ postgresImageWitness) pgimage.DrainObservation {
+				drainSamples++
+				at := time.Now()
+				marker, _ := params[pgimage.DrainMarker].(string)
+				if scenario == "fast-blocked-before-stage" || (scenario == "fast-blocked-after-stage" && marker != "") {
+					return pgimage.DrainObservation{Status: "blocked", SampledAt: &at, Reason: "long transaction", LoadedMarker: marker, MarkerFromFile: marker != ""}
+				}
+				return pgimage.DrainObservation{Status: "eligible", SampledAt: &at, LoadedMarker: marker, MarkerFromFile: marker != ""}
 			}}
 			err = s.executePostgresImageMigration(context.Background(), op, before)
+			if fast {
+				if strings.HasSuffix(scenario, "response-lost") || scenario == "fast-image-lost-patch-response" {
+					if !errors.Is(err, errPostgresImageMigrationUnsettled) {
+						t.Fatalf("uncertain fast drain did not retain lock: %v", err)
+					}
+					err = s.executePostgresImageMigration(context.Background(), op, before)
+				}
+				if strings.HasPrefix(scenario, "fast-blocked") {
+					if err == nil || errors.Is(err, errPostgresImageMigrationUnsettled) || patches != 0 || params[pgimage.DrainMarker] != nil || spec["smartShutdownTimeout"] != float64(180) {
+						t.Fatalf("unsafe transaction did not abort cleanly: image patches=%d drain writes=%d err=%v", patches, drainWrites, err)
+					}
+					return
+				}
+				if err != nil || drainWrites != 2 || params[pgimage.DrainMarker] != nil || spec["smartShutdownTimeout"] != float64(180) || patches != 1 {
+					t.Fatalf("fast drain did not restore the original timeout after exactly one image replacement: writes=%d patches=%d err=%v", drainWrites, patches, err)
+				}
+			}
 			if scenario == "wrong-source-digest" || scenario == "fenced" || scenario == "resized-unapplied" || scenario == "resized-extra-resource-drift" || scenario == "unpersisted-resource-drift" {
 				if err == nil || patches != 0 || probes != 0 {
 					t.Fatalf("unsafe preflight passed: patches=%d probes=%d err=%v", patches, probes, err)
 				}
 				return
 			}
-			if strings.HasSuffix(scenario, "changed-volume") || strings.HasSuffix(scenario, "lost-patch-response") || scenario == "resized-lost-before-patch" || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" || scenario == "cold-target-marker-removed" {
+			if !fast && (strings.HasSuffix(scenario, "changed-volume") || strings.HasSuffix(scenario, "lost-patch-response") || scenario == "resized-lost-before-patch" || scenario == "resized-cas-conflict" || scenario == "resized-replacement-drift" || scenario == "cold-target-marker-removed") {
 				if !errors.Is(err, errPostgresImageMigrationUnsettled) {
 					t.Fatalf("accepted mutation lost interlock: %v", err)
 				}

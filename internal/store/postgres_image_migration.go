@@ -15,6 +15,10 @@ import (
 )
 
 func PostgresImageMigrationConfigHash(app model.App, service model.BackingService, image string) string {
+	return PostgresImageMigrationPlanHash(app, service, image, 0)
+}
+
+func PostgresImageMigrationPlanHash(app model.App, service model.BackingService, image string, budget int) string {
 	app.Spec = *cloneAppSpec(&app.Spec)
 	model.ApplyAppSpecDefaults(&app.Spec)
 	service = cloneBackingService(service)
@@ -34,6 +38,9 @@ func PostgresImageMigrationConfigHash(app model.App, service model.BackingServic
 		}
 		sortServiceBindings(bindings)
 		configuration = append(configuration, bindings)
+	}
+	if budget != 0 {
+		configuration = append(configuration, "fast-drain-v1", budget)
 	}
 	return pgimage.Hash(configuration)
 }
@@ -81,13 +88,18 @@ func preparePostgresImageMigration(app model.App, op *model.Operation) error {
 	if err != nil {
 		return ErrConflict
 	}
-	expected := PostgresImageMigrationConfigHash(app, *target.Service, image)
+	budget := op.DesiredSpec.Postgres.ImageMigrationDrainBudgetSeconds
+	if !pgimage.ValidDrainBudget(budget) {
+		return ErrInvalidInput
+	}
+	expected := PostgresImageMigrationPlanHash(app, *target.Service, image, budget)
 	if op.DesiredSpec.Postgres.ImageMigrationConfigHash != expected {
 		return ErrConflict
 	}
 	next := model.CloneAppPostgresSpec(&target.Postgres)
 	next.Image = image
 	next.ImageMigrationConfigHash = expected
+	next.ImageMigrationDrainBudgetSeconds = budget
 	op.DesiredSpec = cloneAppSpec(&app.Spec)
 	op.DesiredSpec.Postgres = next
 	op.DesiredSource = nil
@@ -175,9 +187,18 @@ func validatePostgresImageMigrationProof(op model.Operation, proofs map[string]m
 	if uid == "" || sourceUID == "" || uid == sourceUID || intent["target_image"] != op.DesiredSpec.Postgres.Image || clusterUID == "" || systemID == "" {
 		return ErrConflict
 	}
+	budget := op.DesiredSpec.Postgres.ImageMigrationDrainBudgetSeconds
+	if budget != 0 {
+		drain, ok := intent["drain"].(map[string]any)
+		if !pgimage.ValidDrainBudget(budget) || !ok || drain["budget_seconds"] != float64(budget) || verified["drain_restored"] != true {
+			return ErrConflict
+		}
+	} else if intent["drain"] != nil || verified["drain_restored"] != nil {
+		return ErrConflict
+	}
 	copy := map[string]any{}
 	for k, v := range verified {
-		if k != "verified_pod_uid" {
+		if k != "verified_pod_uid" && k != "drain_restored" {
 			copy[k] = v
 		}
 	}

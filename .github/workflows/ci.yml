@@ -1090,6 +1090,33 @@ jobs:
           PREPUSH_TIMEOUT_SECONDS: "360"
           PREPUSH_MAX_ELAPSED_SECONDS: "360"
         run: make prepush
+      - name: Rehearse PostgreSQL fast drain on the pinned production operator
+        timeout-minutes: 8
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- internal/pgimage internal/controller/postgres_image_fast_drain.go internal/controller/postgres_image_migration.go scripts/smoke_postgres_image_fast_drain.py; then exit 0; fi
+          dir="$(mktemp -d "$RUNNER_TEMP/fugue-postgres-drain.XXXXXX")"
+          cluster="fugue-baked-${GITHUB_SHA:0:12}"
+          config="$dir/kubeconfig"
+          curl -fsSL --retry 3 https://github.com/kubernetes-sigs/kind/releases/download/v0.27.0/kind-linux-amd64 -o "$dir/kind"
+          echo "a6875aaea358acf0ac07786b1a6755d08fd640f4c79b7a2e46681cc13f49a04b  $dir/kind" | sha256sum -c -
+          curl -fsSL --retry 3 https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl -o "$dir/kubectl"
+          echo "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea  $dir/kubectl" | sha256sum -c -
+          chmod 755 "$dir/kind" "$dir/kubectl"
+          export PATH="$dir:$PATH"
+          trap 'kind delete cluster --name "$cluster" --kubeconfig "$config"' EXIT
+          kind create cluster --name "$cluster" --kubeconfig "$config" \
+            --image kindest/node:v1.32.2@sha256:142f543559cc55d64e1ab9341df08e5ced84bd2e893736da8f51320f26f5950b --wait 120s
+          curl -fsSL --retry 3 \
+            https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/23eae00cd7aad82978397798dd27b600eb25ae3d/releases/cnpg-1.29.0.yaml \
+            -o "$dir/cnpg-upstream.yaml"
+          python3 -m scripts.smoke_postgres_image_fast_drain --cluster-name "$cluster" --kubeconfig "$config" \
+            --revision "$GITHUB_SHA" --operator-manifest "$dir/cnpg-upstream.yaml" \
+            --release deploy/environments/production/cnpg-controller/release.json
       - name: Verify Workers against the pinned production runtime
         timeout-minutes: 5
         run: |

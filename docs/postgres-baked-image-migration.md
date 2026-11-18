@@ -64,3 +64,34 @@ The controller's recovery observer resumes the durable witness; it never turns a
 unknown outcome into Failed, makes it cancellable, or automatically rolls back.
 Inspect `fugue operation show OPERATION_ID` and its evidence for the waiting reason.
 An invariant violation needs investigation; do not clear the lock by deleting data.
+
+## Optional fast drain
+
+The standard migration continues to use the Cluster's existing CNPG shutdown
+policy. When the app can reconnect and retry incomplete transactions, request a
+shorter smart-shutdown budget for a single migration:
+
+```sh
+fugue service postgres migrate-image SERVICE_ID --drain-budget-seconds 15
+
+fugue service postgres migrate-image SERVICE_ID --apply \
+  --drain-budget-seconds 15 --acknowledge-downtime \
+  --acknowledge-connection-termination --expected-config-hash CONFIG_HASH
+```
+
+Use the hash from the plan with the same budget. The plan reports a point-in-time
+sample of connected sessions, active and idle-in-transaction sessions, and the
+oldest transaction. The controller checks again before changing the image and
+does not proceed if the session state is unreadable, a session is idle in a
+transaction, or a transaction already exceeds the budget. Clients can still
+open transactions after that check. At expiry, CNPG can end remaining sessions
+and PostgreSQL rolls back any uncommitted transactions.
+
+Fugue confirms the source primary has loaded the temporary policy before asking
+CNPG to replace it, then restores the original policy after the replacement
+appears. An uncertain write or unverified restore retains the operation lock.
+The 10–15 second budget limits only the smart-shutdown phase. It does not bound
+image pulling, volume attachment, recovery, scheduling, or total downtime.
+The CLI separates queue time and execution through verification from the
+stable Service's sampled SQL failure-to-recovery interval. If no complete
+interval was observed, that interval is not reported as a downtime estimate.

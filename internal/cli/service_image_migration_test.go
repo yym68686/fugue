@@ -41,7 +41,15 @@ func TestServicePostgresImageMigrationDefaultsToReadOnlyPlan(t *testing.T) {
 }
 
 func TestServicePostgresImageMigrationRejectsUnacknowledgedApplyLocally(t *testing.T) {
-	for _, flags := range [][]string{{"--apply"}, {"--apply", "--acknowledge-downtime"}, {"--apply", "--expected-config-hash", "hash"}} {
+	for _, flags := range [][]string{
+		{"--apply"},
+		{"--apply", "--acknowledge-downtime"},
+		{"--apply", "--expected-config-hash", "hash"},
+		{"--apply", "--acknowledge-downtime", "--expected-config-hash", "hash", "--drain-budget-seconds", "15"},
+		{"--acknowledge-connection-termination"},
+		{"--drain-budget-seconds", "0"},
+		{"--drain-budget-seconds", "16"},
+	} {
 		var stdout, stderr bytes.Buffer
 		args := append([]string{"--base-url", "http://127.0.0.1:1", "--token", "test", "service", "postgres", "migrate-image", "main-db"}, flags...)
 		if err := runWithStreams(args, &stdout, &stderr); err == nil {
