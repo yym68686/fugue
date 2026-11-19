@@ -82,7 +82,9 @@ func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []Platfor
 		return errors.Join(err, ErrConflict)
 	}
 	phase = "admission"
-	return s.withPreparedCompilerInputActivation(ctx, proof, pins, func(context.Context, *sql.Tx) error { return nil })
+	return retryConsumerAdmissionLock(ctx, func(ctx context.Context) error {
+		return s.withPreparedCompilerInputActivation(ctx, proof, pins, func(context.Context, *sql.Tx) error { return nil })
+	})
 }
 
 func validateCompilerInputReadSelection(r PlatformInputReadSelection) error {

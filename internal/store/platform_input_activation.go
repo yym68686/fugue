@@ -717,6 +717,8 @@ func (s *Store) withPreparedCompilerInputTaskCreation(ctx context.Context, proof
 	return s.consumePreparedCompilerInput(ctx, proof, nil, true, nil, apply)
 }
 
+const compilerInputAdmissionTimeout = 10 * time.Second
+
 func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compilerInputActivationProof, pins []compilerInputPinBinding, pendingOnly bool, beforeInputLocks, apply func(context.Context, *sql.Tx) error) (returnedErr error) {
 	check := "proof_and_pins"
 	defer func() { observePlatformInputReadFailure(ctx, "admission", check, nil, nil, returnedErr) }()
@@ -740,7 +742,7 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 			return ErrInvalidInput
 		}
 	}
-	budget := 10 * time.Second
+	budget := compilerInputAdmissionTimeout
 	if proof.publication != nil {
 		// Publication already has its own bounded transaction budget. Its
 		// authority checks include signed cross-scope DNS references, not just

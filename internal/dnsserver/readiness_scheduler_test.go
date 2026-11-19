@@ -188,6 +188,45 @@ func TestDNSReadinessProgressSurvivesShortObservationWindows(t *testing.T) {
 	}
 }
 
+func TestDNSReadinessRenewsBeforeMeasuredSweepGap(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{
+		{ID: "unobserved", Hostname: "new", Address: "192.0.2.1"},
+		{ID: "serving", Hostname: "serving", Address: "192.0.2.1"},
+	}}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, FactFreshnessSeconds: 120, MaxConcurrency: 1}
+	scheduler := &dnsReadinessScheduler{}
+	checked := time.Now().UTC()
+	until := checked.Add(85 * time.Second)
+	scheduler.collect(t.Context(), plan, policy, func(_ context.Context, host, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		if host == "new" {
+			return routeprobe.Proof{}, errors.New("no current proof")
+		}
+		return routeprobe.Proof{Version: "v1", CheckedAt: checked, ValidUntil: until}, nil
+	})
+	// The 30s sweep plus slow control-plane calls made the real spacing
+	// 70s. A valid 85s lease would miss the old fixed 60s lookahead.
+	scheduler.lastStarted = checked.Add(-70 * time.Second)
+	delete(scheduler.attempts, "unobserved")
+	probeFirst := func(err error) string {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		var first string
+		scheduler.collect(ctx, plan, policy, func(_ context.Context, host, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+			first = host
+			cancel()
+			return routeprobe.Proof{}, err
+		})
+		return first
+	}
+	if first := probeFirst(routeprobe.ErrUnavailable); first != "serving" || !scheduler.expires["serving"].Equal(until) {
+		t.Fatal("long scan gap or transient timeout displaced the valid serving lease", first, scheduler.expires)
+	}
+	scheduler.lastStarted = checked.Add(-70 * time.Second)
+	if first := probeFirst(errors.New("explicit negative response")); first != "serving" || !scheduler.expires["serving"].IsZero() {
+		t.Fatal("negative evidence retained an old scheduling deadline", first, scheduler.expires)
+	}
+}
+
 func TestDNSReadinessBackoffIsConnectionScopedAndAssignmentBound(t *testing.T) {
 	plan, policy := readinessTestPlan()
 	scheduler := &dnsReadinessScheduler{}

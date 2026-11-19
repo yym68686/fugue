@@ -94,8 +94,9 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID)
-	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
+	preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, union)
+	source := &dnsroutesource.Context{Snapshot: snapshot}
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, plans.Matches, source.ProofDeadline, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
 	// A physical request can satisfy a different authorized publication than
 	// its scheduling representative. Record continuity under each immutable
 	// requirement only after its complete publication binding is verified.
@@ -106,7 +107,7 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	}
 
 	facts = retainValidDNSReadinessFacts(union, p.Policy.DNSReadiness, s.platformDNSRouteFacts, facts, time.Now().UTC())
-	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: &dnsroutesource.Context{Snapshot: snapshot}}, facts, time.Now().UTC())
+	boundDNSRouteSourceFacts(dnsServingPayload{routeSources: source}, facts, time.Now().UTC())
 	valid := validDNSReadinessFacts(union, p.Policy.DNSReadiness, facts, time.Now().UTC())
 	byID := map[string]dnsReadinessFact{}
 	for _, f := range facts {
@@ -174,45 +175,73 @@ func (s *Service) checkDNSRouteSources(ctx context.Context, client platformconsu
 // Schedule each physical target once, then evaluate its unchanged observation
 // against every authorized publication. Waiting duplicates must not occupy the
 // bounded network worker pool or starve other targets during the probe window.
-func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, schedulers ...*dnsReadinessScheduler) []dnsReadinessFact {
+func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, matches func(platformconfig.DNSReadinessProbe, routeprobe.Proof) bool, sourceDeadline func(*model.TrafficReleaseBinding) time.Time, scheduler *dnsReadinessScheduler) []dnsReadinessFact {
 	physical := &platformconfig.DNSReadinessPlan{}
-	representatives := map[string]string{}
-	for _, requirement := range plan.Probes {
+	indices := make(map[string]int, len(plan.Probes))
+	physicalIndex := make([]int, len(plan.Probes))
+	variants := make([][]int, 0)
+	for i, requirement := range plan.Probes {
 		key := dnsroutesource.ProbeKey(requirement)
-		if _, exists := representatives[key]; !exists {
-			representatives[key] = requirement.ID
+		index, exists := indices[key]
+		if !exists {
+			index = len(physical.Probes)
+			indices[key] = index
 			physical.Probes = append(physical.Probes, requirement)
+			variants = append(variants, nil)
 		}
+		physicalIndex[i] = index
+		variants[index] = append(variants[index], i)
 	}
-	// Transport results must be retained separately: a proof may mismatch the
-	// representative's digest while satisfying another authorized publication.
-	type observation struct {
-		proof routeprobe.Proof
-		err   error
+	// Each worker owns disjoint variant indices. Only its scheduling view
+	// uses the representative's ID; export and recovery keep the real IDs.
+	facts := make([]dnsReadinessFact, len(plan.Probes))
+	if scheduler == nil {
+		scheduler = &dnsReadinessScheduler{}
 	}
-	results := make([]observation, len(physical.Probes))
-	indices := map[string]int{}
-	for i, p := range physical.Probes {
-		indices[dnsroutesource.ProbeKey(p)] = i
-	}
-	wrapped := func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
-		proof, err := probe(ctx, host, path, address, state, timeout)
-		key := address + "\x00" + host + "\x00" + path + "\x00" + state
-		results[indices[key]] = observation{proof, err}
-		return proof, err
-	}
-	physicalFacts := collectDNSReadinessFacts(ctx, physical, policy, wrapped, schedulers...)
-	facts := make([]dnsReadinessFact, 0, len(plan.Probes))
-	for _, requirement := range plan.Probes {
-		i := indices[dnsroutesource.ProbeKey(requirement)]
-		if physicalFacts[i].Reason == "not_observed" {
-			facts = append(facts, dnsReadinessFact{ProbeID: requirement.ID, ObservationID: physicalFacts[i].ObservationID, Reason: "not_observed"})
+	physicalFacts := scheduler.collectWithEvaluator(ctx, physical, policy, probe, func(index int, proof routeprobe.Proof, err error, now time.Time) dnsReadinessFact {
+		representative := physical.Probes[index]
+		scheduled := dnsReadinessFact{ProbeID: representative.ID, Reason: "traffic_release_mismatch"}
+		var until time.Time
+		var checkedDeadline bool
+		for _, i := range variants[index] {
+			requirement := plan.Probes[i]
+			fact := evaluateDNSReadinessFact(requirement, policy, proof, err, now)
+			facts[i] = fact
+			if i == variants[index][0] && !fact.Ready {
+				scheduled = fact // preserve transport/negative probe diagnostics
+			}
+			if !fact.Ready || !matches(requirement, proof) {
+				continue
+			}
+			if !checkedDeadline && sourceDeadline != nil {
+				until = sourceDeadline(proof.TrafficRelease)
+				checkedDeadline = true
+			}
+			if !until.IsZero() && until.Before(fact.Proof.ValidUntil) {
+				if !until.After(now) {
+					continue
+				}
+				fact.Proof.ValidUntil = until
+			}
+			if !scheduled.Ready || fact.Proof.ValidUntil.Before(scheduled.Proof.ValidUntil) {
+				scheduled = fact
+				scheduled.ProbeID = representative.ID
+			}
+		}
+		return scheduled
+	})
+	now := time.Now().UTC()
+	for original, requirement := range plan.Probes {
+		physicalFact := physicalFacts[physicalIndex[original]]
+		if physicalFact.Reason == "not_observed" {
+			facts[original] = dnsReadinessFact{ProbeID: requirement.ID, ObservationID: physicalFact.ObservationID, Reason: "not_observed"}
 			continue
 		}
-		observed := results[i]
-		fact := evaluateDNSReadinessFact(requirement, policy, observed.proof, observed.err, time.Now().UTC())
-		fact.ObservationID = physicalFacts[i].ObservationID
-		facts = append(facts, fact)
+		fact := &facts[original]
+		fact.ObservationID = physicalFact.ObservationID
+		if fact.Ready && !fact.Proof.ValidUntil.After(now) {
+			fact.Ready, fact.Reason = false, "proof_not_fresh"
+		}
 	}
 	return facts
 }

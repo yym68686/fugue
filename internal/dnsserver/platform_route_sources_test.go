@@ -270,7 +270,9 @@ func TestDNSRouteSourceVariantsDoNotOccupyNetworkWorkers(t *testing.T) {
 				return routeprobe.Proof{}, ctx.Err()
 			}
 			return routeprobe.Proof{EdgeID: "edge-a", GroupID: "cell-a", Digest: "current", State: state, Version: "v1", CheckedAt: checked, ValidUntil: checked.Add(10 * time.Second)}, nil
-		})
+		}, func(p platformconfig.DNSReadinessProbe, proof routeprobe.Proof) bool {
+			return p.RouteDigest == proof.Digest
+		}, nil, nil)
 	}()
 	for i := 0; i < 2; i++ {
 		select {
@@ -294,5 +296,51 @@ func TestDNSRouteSourceVariantsDoNotOccupyNetworkWorkers(t *testing.T) {
 	case <-started:
 		t.Fatal("physical probe duplicated")
 	default:
+	}
+}
+
+func TestDNSRouteSourceSchedulerRenewsMatchedNonRepresentativeProof(t *testing.T) {
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 2, FactFreshnessSeconds: 120, MaxConcurrency: 1}
+	background := platformconfig.DNSReadinessProbe{ID: "background", Hostname: "background.example.test", Address: "192.0.2.10", Path: "/", State: "ready", RouteDigest: "background", EdgeID: "edge-a", EdgeGroupID: "cell-a"}
+	representative := background
+	representative.ID, representative.Hostname, representative.RouteDigest = "representative", "route.example.test", "old-digest"
+	matched := representative
+	matched.ID, matched.RouteDigest = "current", "current-digest"
+	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{background, representative, matched}}
+	binding := &model.TrafficReleaseBinding{ReleaseID: "current-release"}
+	check := time.Now().UTC().Add(-time.Second)
+	sourceEnd := check.Add(32 * time.Second)
+	probe := func(_ context.Context, host, _, _, state string, _ time.Duration) (routeprobe.Proof, error) {
+		digest := background.RouteDigest
+		if host == matched.Hostname {
+			digest = matched.RouteDigest
+		}
+		return routeprobe.Proof{Version: "v1", State: state, Digest: digest, EdgeID: matched.EdgeID, GroupID: matched.EdgeGroupID, TrafficRelease: binding, CheckedAt: check, ValidUntil: check.Add(2 * time.Minute)}, nil
+	}
+	match := func(p platformconfig.DNSReadinessProbe, proof routeprobe.Proof) bool {
+		return p.ID == matched.ID && proof.TrafficRelease == binding
+	}
+	deadline := func(*model.TrafficReleaseBinding) time.Time { return sourceEnd }
+	scheduler := &dnsReadinessScheduler{}
+	facts := collectDNSRouteSourceFacts(t.Context(), plan, policy, probe, match, deadline, scheduler)
+	if facts[1].Ready || !facts[2].Ready || facts[2].ProbeID != matched.ID || !facts[2].Proof.ValidUntil.After(sourceEnd) {
+		t.Fatal("scheduling projection replaced the original proof or its variant", facts)
+	}
+	if !scheduler.expires[representative.ID].Equal(sourceEnd) || !scheduler.expires[background.ID].IsZero() {
+		t.Fatal("scheduler lost the verified alternate expiry or credited an unmatched binding", scheduler.expires)
+	}
+	// Make the ordinary route overdue so that it would beat a variant whose
+	// expiry was lost. Stop after one probe: a saturated sweep models that gap.
+	scheduler.attempts[background.ID] = check.Add(-2 * time.Minute)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := ""
+	collectDNSRouteSourceFacts(ctx, plan, policy, func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
+		first = host
+		cancel()
+		return probe(ctx, host, path, address, state, timeout)
+	}, match, deadline, scheduler)
+	if first != matched.Hostname {
+		t.Fatal("the verified route lost its renewal slot before expiry", first)
 	}
 }

@@ -15,7 +15,7 @@ func compilerInputBarrierBusy() error {
 }
 
 func observeCompilerInputAdmissionWriterBusy(ctx context.Context) error {
-	err := compilerInputBarrierBusy()
+	err := &consumerAdmissionLockBusy{compilerInputBarrierBusy()}
 	// Only this local return denotes a try-lock budget exhaustion. A genuine
 	// PgError with the same SQLSTATE still belongs to its original query.
 	observePlatformInputReadFailure(ctx, "admission", "admission_writer_busy", nil, nil, err)

@@ -29,6 +29,7 @@ type dnsReadinessScheduler struct {
 	scope        string
 	digest       string
 	cursor       int
+	lastStarted  time.Time
 	attempts     map[string]time.Time
 	expires      map[string]time.Time
 	targets      map[string]dnsProbeTargetState
@@ -77,6 +78,13 @@ type dnsProbeResult struct {
 }
 
 func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc) []dnsReadinessFact {
+	return scheduler.collectWithEvaluator(ctx, plan, policy, probe, nil)
+}
+
+// A physical source probe can cover multiple authorized publication variants.
+// Its scheduler must use the expiry of the matched variant, not the expiry (or
+// mismatch) of whichever variant supplied its wire request.
+func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact) []dnsReadinessFact {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	started := time.Now().UTC()
@@ -90,10 +98,22 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 	if scheduler.digest != digest {
 		scheduler.digest = digest
 		scheduler.cursor = 0
+		scheduler.lastStarted = time.Time{}
 		scheduler.attempts = map[string]time.Time{}
 		scheduler.expires = map[string]time.Time{}
 		scheduler.targets = map[string]dnsProbeTargetState{}
 	}
+	interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
+	refreshHorizon := started.Add(2 * interval)
+	if !scheduler.lastStarted.IsZero() {
+		// The configured interval bounds a scan, not the time between
+		// scans: assignment reads, verification and reports share the loop.
+		// Account for the observed spacing plus the next scan's budget,
+		// but do not let a long outage dominate later scheduling.
+		spacing := min(started.Sub(scheduler.lastStarted), 3*interval)
+		refreshHorizon = started.Add(max(interval, spacing) + interval)
+	}
+	scheduler.lastStarted = started
 	observationID, _ := platformconfig.Digest(struct {
 		Context string
 		Started time.Time
@@ -112,7 +132,6 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 	queues := make([]dnsProbeTargetQueue, 0, len(addresses))
 	for _, address := range addresses {
 		indices := byAddress[address]
-		interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
 		// Prioritize a bounded batch of explicitly ordered candidate probes
 		// in every sweep, even when ordinary proofs have the same deadline.
 		// Rotating the oldest attempts first prevents a large pool pinning its
@@ -140,13 +159,10 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 			first, second := plan.Probes[indices[left]].ID, plan.Probes[indices[right]].ID
 			firstAttempt, secondAttempt := scheduler.attempts[first], scheduler.attempts[second]
 			firstExpiry, secondExpiry := scheduler.expires[first], scheduler.expires[second]
-			// A sweep can occupy an entire interval. Renew an existing proof
-			// before that sweep plus the next interval can exhaust its lease.
-			// Never-observed work otherwise sorts ahead of every old proof and
-			// can repeatedly leave a healthy serving endpoint without evidence.
-			refreshHorizon := started.Add(2 * interval)
-			firstRefreshDue := !firstExpiry.IsZero() && !firstExpiry.After(refreshHorizon)
-			secondRefreshDue := !secondExpiry.IsZero() && !secondExpiry.After(refreshHorizon)
+			// Only live observations receive deadline priority. Expired work
+			// rejoins the normal bounded fairness rotation.
+			firstRefreshDue := firstExpiry.After(started) && !firstExpiry.After(refreshHorizon)
+			secondRefreshDue := secondExpiry.After(started) && !secondExpiry.After(refreshHorizon)
 			if firstRefreshDue != secondRefreshDue {
 				return firstRefreshDue
 			}
@@ -229,7 +245,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 					proof, err = probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
 				}
 				finished := time.Now().UTC()
-				results <- dnsProbeResult{index: index, target: target, fact: evaluateDNSReadinessFact(requirement, policy, proof, err, finished), connectionFailure: errors.Is(err, routeprobe.ErrConnectionUnavailable), started: started, finished: finished}
+				var fact dnsReadinessFact
+				if evaluate != nil {
+					fact = evaluate(index, proof, err, finished)
+				} else {
+					fact = evaluateDNSReadinessFact(requirement, policy, proof, err, finished)
+				}
+				results <- dnsProbeResult{index: index, target: target, fact: fact, connectionFailure: errors.Is(err, routeprobe.ErrConnectionUnavailable), started: started, finished: finished}
 			}(index, selected)
 		}
 		if active == 0 {
@@ -246,11 +268,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 		}
 		queue.outcomes[outcome]++
 		result.fact.ObservationID = observationID
-		scheduler.observeProbeHistory(&result.fact, policy, result.finished)
+		if evaluate == nil {
+			scheduler.observeProbeHistory(&result.fact, policy, result.finished)
+		}
 		facts[result.index] = result.fact
 		if result.fact.Ready {
 			scheduler.expires[result.fact.ProbeID] = result.fact.Proof.ValidUntil
-		} else {
+		} else if result.fact.Reason != "probe_unavailable" || !scheduler.expires[result.fact.ProbeID].After(result.finished) {
 			delete(scheduler.expires, result.fact.ProbeID)
 		}
 		state := scheduler.targets[queue.address]

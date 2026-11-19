@@ -1918,21 +1918,24 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 	}
 	var out model.PlatformConsumerInstance
 	var rollbackScope bool
-	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
-		lockHeartbeat := heartbeat
-		lockHeartbeat.ArtifactKind = proof.consumerKind
-		rollbackScope, err = pgLockConsumerHeartbeatScope(ctx, tx, claims, lockHeartbeat)
-		return err
-	}, func(ctx context.Context, tx *sql.Tx) error {
-		// Preparation can take longer than a point lookup. Recheck real
-		// freshness/identity expiry at acceptance, never using its old start
-		// time to admit a heartbeat which expired while preparing.
-		acceptAt := time.Now().UTC()
-		if receivedAt.After(acceptAt) {
-			acceptAt = receivedAt
-		}
-		out, err = s.pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx, tx, claims, expectedSetID, heartbeat, acceptAt, policy, auditKeyring, rollbackScope)
-		return err
+	err = retryConsumerAdmissionLock(ctx, func(ctx context.Context) error {
+		return s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+			lockHeartbeat := heartbeat
+			lockHeartbeat.ArtifactKind = proof.consumerKind
+			var err error
+			rollbackScope, err = pgLockConsumerHeartbeatScope(ctx, tx, claims, lockHeartbeat)
+			return err
+		}, func(ctx context.Context, tx *sql.Tx) error {
+			// Recheck freshness/identity expiry at acceptance, including
+			// after lock contention. Do not reuse the first attempt's time.
+			acceptAt := time.Now().UTC()
+			if receivedAt.After(acceptAt) {
+				acceptAt = receivedAt
+			}
+			var err error
+			out, err = s.pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx, tx, claims, expectedSetID, heartbeat, acceptAt, policy, auditKeyring, rollbackScope)
+			return err
+		})
 	})
 	return out, err
 }
@@ -1947,6 +1950,10 @@ func pgLockConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platfo
 		return false, err
 	}
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, rollbackScope); err != nil {
+		var pgError interface{ SQLState() string }
+		if errors.As(err, &pgError) && pgError.SQLState() == "55P03" {
+			return false, &consumerAdmissionLockBusy{err}
+		}
 		return false, err
 	}
 	return rollbackScope, nil
