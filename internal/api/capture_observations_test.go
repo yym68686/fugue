@@ -27,6 +27,30 @@ func captureReceipts(t *testing.T, s *Server) []captureReceipt {
 	return value.(map[string]any)["captures"].(map[string]any)["receipts"].([]captureReceipt)
 }
 
+func TestAgentPublicationRecheckDoesNotFabricateObservedBinding(t *testing.T) {
+	source := agentCellSource{parent: model.PlatformArtifact{ID: "private-parent", ContentHash: "private-digest"},
+		release: model.PlatformArtifactRelease{ID: "private-release", ReleaseChannel: "full", FencingToken: 9}}
+	for _, tc := range []struct {
+		found      bool
+		err        error
+		rejection  string
+		errorClass string
+	}{
+		{true, context.Canceled, "selection_read_error", "canceled"},
+		{false, nil, "selection_missing", ""},
+	} {
+		event := agentPublicationRecheckFailure("edge-a", source, source.parent, source.release, tc.found, tc.err)
+		if event.Stage != "cell_publication_changed" || event.Rejection != tc.rejection || event.ErrorClass != tc.errorClass ||
+			event.Publication == nil || event.Publication.Observed != nil || event.Publication.Expected.FencingToken != 9 {
+			t.Fatal("incorrect unsuccessful selection receipt", event)
+		}
+		raw, err := json.Marshal(event)
+		if err != nil || strings.Contains(string(raw), "private") || !strings.Contains(string(raw), captureIdentityHash(source.parent.ContentHash)) {
+			t.Fatal("selection receipt leaked raw input or lost the exact digest fingerprint", string(raw), err)
+		}
+	}
+}
+
 func TestDNSCaptureFailuresSurviveSuccessfulReadsWithDetachedBoundedEvidence(t *testing.T) {
 	s := &Server{}
 	now := time.Now().UTC()

@@ -531,7 +531,7 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 		}
 		current, release, found, e := s.selectTrafficRouteRelease(source.cell.ServingGroupID())
 		if e != nil || !found || current.ID != source.parent.ID || current.ContentHash != source.parent.ContentHash || release.ID != source.release.ID || release.FencingToken != source.release.FencingToken {
-			observeCapture(ctx, captureEvent{Stage: "cell_publication_changed", Node: o.candidate.EdgeID})
+			observeCapture(ctx, agentPublicationRecheckFailure(o.candidate.EdgeID, source, current, release, found, e))
 			// A cell's publication race removes that cell's observation only.
 			// Other cells retain independent authority; final grant validation
 			// still enforces every signed hard floor using surviving candidates.

@@ -140,16 +140,35 @@ func captureDNSAuthorityEvidence(a model.PlatformConsumerAssignment, fact model.
 // inventory can identify both sides of one rejected proof without retaining
 // the proof, raw identities, Host/path, credentials or arbitrary wire strings.
 type capturePublication struct {
-	ReleaseSetHash    string `json:"release_set_hash"`
-	RouteArtifactHash string `json:"route_artifact_hash"`
-	ReleaseHash       string `json:"release_hash"`
-	Channel           string `json:"channel"`
-	FencingToken      int64  `json:"fencing_token"`
+	ReleaseSetHash       string `json:"release_set_hash"`
+	ReleaseSetDigestHash string `json:"release_set_digest_hash,omitempty"`
+	RouteArtifactHash    string `json:"route_artifact_hash"`
+	ReleaseHash          string `json:"release_hash"`
+	Channel              string `json:"channel"`
+	FencingToken         int64  `json:"fencing_token"`
 }
 
 type capturePublicationPair struct {
 	Expected capturePublication  `json:"expected"`
 	Observed *capturePublication `json:"observed,omitempty"`
+}
+
+func (p *capturePublicationPair) clone() *capturePublicationPair {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	if copy.Observed != nil {
+		observed := *copy.Observed
+		copy.Observed = &observed
+	}
+	return &copy
+}
+
+func captureSelectionPublication(parent, digest, release, channel string, fence int64) capturePublication {
+	p := capturePublicationReference(parent, "", release, channel, fence)
+	p.ReleaseSetDigestHash = captureIdentityHash(digest)
+	return p
 }
 
 func captureIdentityHash(value string) string {
@@ -181,6 +200,29 @@ func agentPublicationEvidence(source agentCellSource, proof *model.TrafficReleas
 		pair.Observed = &observed
 	}
 	return pair
+}
+
+// The inputs are the final authority read, not a fresh read or a route proof.
+// An error or missing result must not be represented as an observed binding.
+func agentPublicationRecheckFailure(node string, source agentCellSource, current model.PlatformArtifact, release model.PlatformArtifactRelease, found bool, err error) captureEvent {
+	event := captureEvent{
+		Stage: "cell_publication_changed", Node: node,
+		Publication: &capturePublicationPair{
+			Expected: captureSelectionPublication(source.parent.ID, source.parent.ContentHash, source.release.ID, source.release.ReleaseChannel, source.release.FencingToken),
+		},
+	}
+	switch {
+	case err != nil:
+		event.Rejection = "selection_read_error"
+		event.ErrorClass = captureErrorClass(err)
+	case !found:
+		event.Rejection = "selection_missing"
+	default:
+		event.Rejection = "selection_mismatch"
+		observed := captureSelectionPublication(current.ID, current.ContentHash, release.ID, release.ReleaseChannel, release.FencingToken)
+		event.Publication.Observed = &observed
+	}
+	return event
 }
 
 type captureCapacity struct {
@@ -251,14 +293,7 @@ func observeCapture(ctx context.Context, event captureEvent) {
 		event.Capacity = &copy
 	}
 	event.Mismatches = append([]string(nil), event.Mismatches...)
-	if event.Publication != nil {
-		copy := *event.Publication
-		if copy.Observed != nil {
-			observed := *copy.Observed
-			copy.Observed = &observed
-		}
-		event.Publication = &copy
-	}
+	event.Publication = event.Publication.clone()
 	if event.DNSAuthority != nil {
 		copy := *event.DNSAuthority
 		if copy.Snapshot != nil {

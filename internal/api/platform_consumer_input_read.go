@@ -94,9 +94,11 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 							break
 						}
 					}
-					var observe func(...string)
+					var observe consumerInputSelectionObserver
 					if claims.Component == model.PlatformConsumerComponentDNSServer {
-						observe = func(fields ...string) { observeConsumerInputSelectionFailure(ctx, fields) }
+						observe = func(comparison *capturePublicationPair, fields ...string) {
+							observeConsumerInputSelectionFailure(ctx, comparison, fields...)
+						}
 					}
 					ok, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe)
 					if err != nil || !ok {

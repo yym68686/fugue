@@ -14,7 +14,10 @@ type consumerInputReadFailure struct {
 	Stage         string                         `json:"stage"`
 	Store         store.PlatformInputReadFailure `json:"store,omitempty"`
 	ChangedFields []string                       `json:"changed_fields,omitempty"`
+	Selection     *capturePublicationPair        `json:"selection,omitempty"`
 }
+
+type consumerInputSelectionObserver func(*capturePublicationPair, ...string)
 
 type consumerInputReadObservationKey struct{}
 
@@ -46,10 +49,9 @@ func observeConsumerInputReadFailure(ctx context.Context, stage string, detail s
 	}
 }
 
-// Selection diagnostics contain only fixed names for values that failed the
-// final authority comparison. They never retain identifiers, digests, or
-// projection contents.
-func observeConsumerInputSelectionFailure(ctx context.Context, fields []string) {
+// Keep fixed field names and the fingerprints of the exact rejected binding
+// in the owner-only receipt. Never retain raw values or projection contents.
+func observeConsumerInputSelectionFailure(ctx context.Context, comparison *capturePublicationPair, fields ...string) {
 	failure, _ := ctx.Value(consumerInputReadObservationKey{}).(*consumerInputReadFailure)
 	if failure == nil || failure.Stage != "" {
 		return
@@ -74,6 +76,9 @@ func observeConsumerInputSelectionFailure(ctx context.Context, fields []string) 
 			failure.ChangedFields = append(failure.ChangedFields, field)
 		}
 	}
+	if comparison != nil && failure.Selection == nil {
+		failure.Selection = comparison.clone()
+	}
 }
 
 func consumerInputReadFailureFromContext(ctx context.Context) *consumerInputReadFailure {
@@ -84,5 +89,6 @@ func consumerInputReadFailureFromContext(ctx context.Context) *consumerInputRead
 	copy := *failure
 	copy.ChangedFields = append([]string(nil), failure.ChangedFields...)
 	copy.Store.ChangedFields = append([]string(nil), failure.Store.ChangedFields...)
+	copy.Selection = failure.Selection.clone()
 	return &copy
 }

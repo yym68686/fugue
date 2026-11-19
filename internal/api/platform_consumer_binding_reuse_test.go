@@ -136,12 +136,26 @@ func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.
 		return binding, err
 	}
 	var rejectedFields []string
-	recordRejection := func(fields ...string) { rejectedFields = append(rejectedFields, fields...) }
+	var rejection *capturePublicationPair
+	recordRejection := func(comparison *capturePublicationPair, fields ...string) {
+		rejectedFields = append(rejectedFields, fields...)
+		if comparison != nil {
+			rejection = comparison
+		}
+	}
 	if ok, err := server.checkConsumerAssignmentSelection(items[0], "edge-group-test-a", readArtifact, project, recordRejection); err != nil || ok {
 		t.Fatal("superseded assignment accepted during observation", ok, err)
 	}
 	if want := []string{"selection.release_id", "selection.fencing_token"}; !reflect.DeepEqual(rejectedFields, want) {
 		t.Fatal("actual successor mismatch not retained", rejectedFields)
+	}
+	observed := captureSelectionPublication(next.ReleaseArtifact.ID, next.ReleaseArtifact.ContentHash, nextRelease.ID, nextRelease.ReleaseChannel, nextRelease.FencingToken)
+	want := capturePublicationPair{
+		Expected: captureSelectionPublication(compiled.ReleaseArtifact.ID, compiled.ReleaseArtifact.ContentHash, release.ID, release.ReleaseChannel, release.FencingToken),
+		Observed: &observed,
+	}
+	if !reflect.DeepEqual(rejection, &want) {
+		t.Fatal("actual compared bindings not retained", rejection, want)
 	}
 	items, err = server.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil || len(items) != 2 {

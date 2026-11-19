@@ -1447,18 +1447,18 @@ func (s *Server) consumerAssignmentIsSelectedWithBindingReader(item consumerArti
 	return s.checkConsumerAssignmentSelection(item, group, readArtifact, readBinding, nil)
 }
 
-func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, observe func(...string)) (bool, error) {
+func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, observe consumerInputSelectionObserver) (bool, error) {
 	parent, err := readArtifact(item.Assignment.ReleaseSetID)
 	if err != nil {
 		if observe != nil {
-			observe("selection.parent_read")
+			observe(nil, "selection.parent_read")
 		}
 		return false, err
 	}
 	if parent.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
 		if item.Artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
 			if observe != nil {
-				observe("selection.non_dns_child")
+				observe(nil, "selection.non_dns_child")
 			}
 			return false, errors.New("DNS-only assignment has a non-DNS child")
 		}
@@ -1467,17 +1467,17 @@ func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, g
 		if observe != nil {
 			switch {
 			case err != nil:
-				observe("selection.current_release_read")
+				observe(nil, "selection.current_release_read")
 			case !found:
-				observe("selection.current_release_missing")
+				observe(nil, "selection.current_release_missing")
 			case !selected:
 				if current.ID != parent.ID {
-					observe("selection.parent_id")
+					observe(nil, "selection.parent_id")
 				}
 				if current.ContentHash != parent.ContentHash {
-					observe("selection.parent_digest")
+					observe(nil, "selection.parent_digest")
 				}
-				observeSelectionReleaseMismatch(item, release.ID, release.FencingToken, observe)
+				observeSelectionReleaseMismatch(item, parent, current.ID, current.ContentHash, release.ID, release.ReleaseChannel, release.FencingToken, observe)
 			}
 		}
 		return selected, err
@@ -1488,25 +1488,34 @@ func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, g
 	if observe != nil {
 		switch {
 		case err != nil:
-			observe("selection.projection_read")
+			observe(nil, "selection.projection_read")
 		case !found:
-			observe("selection.projection_missing")
+			observe(nil, "selection.projection_missing")
 		case binding == nil:
-			observe("selection.traffic_release_missing")
+			observe(nil, "selection.traffic_release_missing")
 		case !selected:
-			observeSelectionReleaseMismatch(item, binding.ReleaseID, binding.FencingToken, observe)
+			observeSelectionReleaseMismatch(item, parent, binding.ReleaseSetID, binding.ReleaseSetDigest, binding.ReleaseID, binding.ReleaseChannel, binding.FencingToken, observe)
 		}
 	}
 	return selected, err
 }
 
-func observeSelectionReleaseMismatch(item consumerArtifactLookup, releaseID string, fence int64, observe func(...string)) {
+func observeSelectionReleaseMismatch(item consumerArtifactLookup, parent model.PlatformArtifact, parentID, parentDigest, releaseID, channel string, fence int64, observe consumerInputSelectionObserver) {
+	var fields [2]string
+	n := 0
 	if releaseID != item.Release.ID {
-		observe("selection.release_id")
+		fields[n] = "selection.release_id"
+		n++
 	}
 	if fence != item.Assignment.FencingToken {
-		observe("selection.fencing_token")
+		fields[n] = "selection.fencing_token"
+		n++
 	}
+	observed := captureSelectionPublication(parentID, parentDigest, releaseID, channel, fence)
+	observe(&capturePublicationPair{
+		Expected: captureSelectionPublication(parent.ID, parent.ContentHash, item.Release.ID, item.Release.ReleaseChannel, item.Assignment.FencingToken),
+		Observed: &observed,
+	}, fields[:n]...)
 }
 
 func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *http.Request) {

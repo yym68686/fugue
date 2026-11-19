@@ -54,10 +54,14 @@ func TestConsumerUnavailableCorrelatesOnlyFinalAuthenticatedDNSFailure(t *testin
 
 func TestConsumerInputSelectionFailureKeepsOnlyAllowedFieldNames(t *testing.T) {
 	ctx := withConsumerInputReadObservation(context.Background())
-	observeConsumerInputSelectionFailure(ctx, []string{
+	expected := captureSelectionPublication("private-parent", "private-digest", "private-release", "gray", 11)
+	observed := captureSelectionPublication("private-next-parent", "private-next-digest", "private-next-release", "full", 12)
+	callerInput := observed
+	comparison := capturePublicationPair{Expected: expected, Observed: &callerInput}
+	observeConsumerInputSelectionFailure(ctx, &comparison,
 		"selection.release_id", "selection.release_id", "private-value",
 		"selection.fencing_token", "selection.projection_missing",
-	})
+	)
 	observeConsumerInputReadFailure(ctx, "serving_not_selected", store.PlatformInputReadFailure{}, nil, nil)
 	detail := consumerInputReadFailureFromContext(ctx)
 	if detail == nil || !reflect.DeepEqual(detail.ChangedFields, []string{
@@ -65,12 +69,25 @@ func TestConsumerInputSelectionFailureKeepsOnlyAllowedFieldNames(t *testing.T) {
 	}) {
 		t.Fatal("selection diagnostics were not bounded and deduplicated", detail)
 	}
-	observeConsumerInputSelectionFailure(ctx, []string{"selection.parent_id"})
+	if !reflect.DeepEqual(detail.Selection, &comparison) {
+		t.Fatal("comparison missing from retained observation", detail)
+	}
+	detail.Selection.Expected.FencingToken = 999
+	detail.Selection.Observed.FencingToken = 999
+	comparison.Observed.FencingToken = 998
+	observeConsumerInputSelectionFailure(ctx, &comparison, "selection.parent_id")
 	detail = consumerInputReadFailureFromContext(ctx)
 	if detail == nil || !reflect.DeepEqual(detail.ChangedFields, []string{
 		"selection.release_id", "selection.fencing_token", "selection.projection_missing",
 	}) {
 		t.Fatal("selection diagnostics changed after the terminal stage", detail)
+	}
+	if !reflect.DeepEqual(detail.Selection, &capturePublicationPair{Expected: expected, Observed: &observed}) {
+		t.Fatal("comparison changed after the terminal stage", detail)
+	}
+	raw, err := json.Marshal(detail)
+	if err != nil || strings.Contains(string(raw), "private") || !strings.Contains(string(raw), captureIdentityHash("private-release")) {
+		t.Fatal("comparison exported private input or lost the fingerprint", string(raw), err)
 	}
 }
 

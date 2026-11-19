@@ -414,9 +414,14 @@ func TestAgentGrantKeepsIndependentCellWhenAnotherPublicationChanges(t *testing.
 	original := f.s.agentEdgeProbe
 	var once sync.Once
 	var publicationErr error
+	previous, previousRelease, found, err := f.s.selectTrafficRouteRelease("edge-group-a")
+	if err != nil || !found {
+		t.Fatal("fixture missing original cell authority", found, err)
+	}
+	var published model.PlatformArtifactRelease
 	f.s.agentEdgeProbe = func(ctx context.Context, host, path, address, state string, timeout time.Duration) (routeprobe.Proof, error) {
 		once.Do(func() {
-			_, _, _, _, publicationErr = f.s.store.ReleasePlatformArtifact(next.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=only-a", IdempotencyKey: "advance-only-a"}, platformProducerPrincipal())
+			_, published, _, _, publicationErr = f.s.store.ReleasePlatformArtifact(next.ReleaseArtifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=only-a", IdempotencyKey: "advance-only-a"}, platformProducerPrincipal())
 		})
 		return original(ctx, host, path, address, state, timeout)
 	}
@@ -429,6 +434,18 @@ func TestAgentGrantKeepsIndependentCellWhenAnotherPublicationChanges(t *testing.
 	}
 	if !f.s.agentGrantAuthorityUnchanged(grant) {
 		t.Fatal("surviving independent publication was not valid for signing")
+	}
+	receipts := captureReceipts(t, f.s)
+	observed := captureSelectionPublication(next.ReleaseArtifact.ID, next.ReleaseArtifact.ContentHash, published.ID, published.ReleaseChannel, published.FencingToken)
+	want := &capturePublicationPair{
+		Expected: captureSelectionPublication(previous.ID, previous.ContentHash, previousRelease.ID, previousRelease.ReleaseChannel, previousRelease.FencingToken),
+		Observed: &observed,
+	}
+	if len(receipts) != 1 || !slices.ContainsFunc(receipts[0].Events, func(e captureEvent) bool {
+		return e.Stage == "cell_publication_changed" && e.Node == "edge-a" &&
+			e.Rejection == "selection_mismatch" && reflect.DeepEqual(e.Publication, want)
+	}) {
+		t.Fatal("final rejected authority comparison was not captured", receipts)
 	}
 }
 
