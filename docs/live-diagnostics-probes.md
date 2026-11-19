@@ -408,6 +408,12 @@ The failure receipt itself adds no query, replay, retry, public response field
 or admission exception; the bounded assignment reread is described above.
 It describes the immediate failing check, not the upstream cause of a concurrent
 publication or evidence change.
+On an authenticated DNS-only assignment's rejected final comparison, the
+optional `selection_reads` pairs the original and final full/gray lookup
+bounds and release fingerprints for that exact assignment. Each attempt
+keeps up to four successful initial checks by assignment, with overflow
+counted; successful requests do not export these bounds. These are API-clock
+bounds on the existing store calls, not PostgreSQL statement timestamps.
 
 The API's local `storage` provider retains `platform_mutations` for completed
 publication, rollback and LKG verification operations: 12 recent receipts and
@@ -425,6 +431,14 @@ contention drops observations and all overwrites/drops are counted. These are
 completed driver and code-stage durations, not measurements of CPU use or exact
 server lock-hold intervals. They add no SQL, replay, retry, timeout change or
 admission exception, and do not explain failures predating deployment.
+
+New gray/full release-set publications (including rollback publications) also
+retain `committed_publication`: SHA-256 release/parent identifiers, channel,
+fencing token and API-clock bounds around a successful COMMIT call. Idempotent
+replays, shadow publications, LKG verification and failed commits do not
+produce this field. `released_at` is assigned before commit and does not
+establish visibility; the bounds do not give the exact visibility instant.
+Compare clocks and retention coverage before joining separate processes.
 
 Release and rollback admission receipts additionally retain at most four
 fixed subphase samples per mutation. They partition validation wall time into

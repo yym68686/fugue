@@ -44,6 +44,65 @@ func TestPlatformMutationObservationStagesAndOriginalErrors(t *testing.T) {
 	}
 }
 
+func TestPlatformMutationPublicationWitnessRequiresNewSuccessfulCommit(t *testing.T) {
+	release := model.PlatformArtifactRelease{ID: "private-release", ArtifactID: "private-parent",
+		ArtifactKind: model.PlatformArtifactKindReleaseSet, ReleaseChannel: model.PlatformArtifactReleaseChannelGray, FencingToken: 11}
+	for _, scenario := range []struct {
+		name          string
+		channel       string
+		stage, commit bool
+		commitErr     error
+		want          bool
+	}{
+		{"new release", "gray", true, true, nil, true},
+		{"idempotent replay", "gray", false, true, nil, false},
+		{"shadow publication", "shadow", true, true, nil, false},
+		{"failed commit", "gray", true, true, ErrConflict, false},
+		{"never reached commit", "gray", true, false, nil, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			_, tr := startPlatformMutationTrace(t.Context(), "platform-release")
+			start := tr.started.UTC()
+			at := start
+			tr.now = func() time.Time { return at }
+			r := release
+			r.ReleaseChannel = scenario.channel
+			if scenario.stage {
+				tr.stagePublication(r)
+			}
+			calls := 0
+			if scenario.commit {
+				if err := tr.observePublicationCommit(func() error {
+					calls++
+					at = at.Add(7 * time.Millisecond)
+					return scenario.commitErr
+				}); err != scenario.commitErr || calls != 1 {
+					t.Fatal("observer changed the original commit result or count", err, calls)
+				}
+			}
+			recorder := &platformMutationRecorder{}
+			recorder.record(tr, scenario.commitErr)
+			row := recorder.snapshot()["receipts"].([]platformMutationReceipt)[0]
+			if (row.Publication != nil) != scenario.want {
+				t.Fatal("wrong commit witness presence", row.Publication)
+			}
+			if !scenario.want {
+				return
+			}
+			tr.publication.FencingToken = 999
+			if p := row.Publication; p.FencingToken != 11 || p.Channel != "gray" ||
+				!p.CommitStarted.Equal(start) || !p.CommitReturned.Equal(start.Add(7*time.Millisecond)) ||
+				len(p.ReleaseHash) != 71 || len(p.ReleaseSetHash) != 71 || p.ReleaseHash == p.ReleaseSetHash {
+				t.Fatal("wrong bound or transaction identity", p)
+			}
+			body, err := json.Marshal(row)
+			if err != nil || strings.Contains(string(body), "private-") {
+				t.Fatal("observation leaked an input or failed to encode", err)
+			}
+		})
+	}
+}
+
 func TestPlatformMutationObservationDriverHookRetainsBoundedHeadAndTail(t *testing.T) {
 	ctx, trace := startPlatformMutationTrace(context.Background(), "platform-release")
 	first := time.Now().UTC()

@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -12,6 +14,56 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 )
+
+func TestReleaseSetPostgresCommitWitness(t *testing.T) {
+	s := platformStatePostgresFixture(t)
+	const full = model.PlatformArtifactReleaseChannelFull
+	f := preparePromotionFixture(t, s, "commit-witness-"+model.NewID("test"))
+	find := func(r model.PlatformArtifactRelease) []platformCommittedPublication {
+		t.Helper()
+		want := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(r.ID)))
+		var out []platformCommittedPublication
+		for _, row := range platformMutationObservations.snapshot()["receipts"].([]platformMutationReceipt) {
+			if p := row.Publication; p != nil && p.ReleaseHash == want {
+				out = append(out, *p)
+			}
+		}
+		return out
+	}
+	check := func(r model.PlatformArtifactRelease, returned time.Time) platformCommittedPublication {
+		t.Helper()
+		rows := find(r)
+		if len(rows) != 1 {
+			t.Fatalf("want one committed publication, got %d", len(rows))
+		}
+		p := rows[0]
+		wantSet := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(r.ArtifactID)))
+		if p.ReleaseSetHash != wantSet || p.Channel != r.ReleaseChannel || p.FencingToken != r.FencingToken ||
+			p.CommitStarted.Before(r.ReleasedAt) || p.CommitReturned.Before(p.CommitStarted) || p.CommitReturned.After(returned) {
+			t.Fatal("wrong committed publication receipt", p)
+		}
+		return p
+	}
+	check(f.release, time.Now()) // The later LKG verification must not count as a second commit witness.
+	req := model.PlatformArtifactReleaseRequest{ReleaseChannel: full, IdempotencyKey: "witness-full"}
+	_, r, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, req, testPlatformPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned := time.Now()
+	original := check(r, returned)
+	_, active, found, err := s.GetActivePlatformArtifact(r.ArtifactKind, r.ScopeKey, full)
+	if err != nil || !found || active.ID != r.ID {
+		t.Fatal("observed commit does not bind the visible lane", err)
+	}
+	_, replay, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, req, testPlatformPrincipal())
+	if err != nil || replay.ID != r.ID {
+		t.Fatal("idempotent release did not return original publication", err)
+	}
+	if retained := check(replay, returned); retained != original {
+		t.Fatal("replay changed original commit witness", retained)
+	}
+}
 
 func TestFullReleaseSetPostgresAtomicPromotion(t *testing.T) {
 	address := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))

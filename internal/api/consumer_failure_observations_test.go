@@ -91,6 +91,45 @@ func TestConsumerInputSelectionFailureKeepsOnlyAllowedFieldNames(t *testing.T) {
 	}
 }
 
+func TestConsumerSelectionReadWitnessJoinsExactAssignmentAndBoundsRetention(t *testing.T) {
+	ctx := withConsumerInputReadObservation(t.Context())
+	at := time.Now().UTC()
+	read := func(group, release string, start time.Time) consumerSelectionRead {
+		return consumerSelectionRead{
+			CohortHash: captureIdentityHash(group),
+			Full:       consumerSelectionLaneRead{Started: start, Returned: start.Add(time.Millisecond)},
+			Gray:       consumerSelectionLaneRead{Started: start.Add(time.Millisecond), Returned: start.Add(2 * time.Millisecond), ReleaseHash: captureIdentityHash(release)},
+		}
+	}
+	match := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "private-set", ArtifactReleaseID: "private-release"}
+	initial := read("private-cohort", "private-prior", at)
+	final := read("private-cohort", "private-next", at.Add(time.Second))
+	recordConsumerSelectionRead(ctx, match, initial, false)
+	for i := range 6 {
+		other := model.PlatformConsumerAssignment{ExpectedConsumerSetID: model.NewID("other"), ArtifactReleaseID: match.ArtifactReleaseID}
+		recordConsumerSelectionRead(ctx, other, read("other-cohort", "other-release", at.Add(time.Duration(i+1)*time.Millisecond)), false)
+	}
+	if detail := consumerInputReadFailureFromContext(ctx); detail != nil {
+		t.Fatal("successful initial selection was retained as a failure", detail)
+	}
+	expected := captureSelectionPublication("parent", "digest", match.ArtifactReleaseID, "full", 1)
+	observed := captureSelectionPublication("next-parent", "next-digest", "private-next", "gray", 2)
+	observeConsumerInputSelectionFailure(ctx, &capturePublicationPair{Expected: expected, Observed: &observed}, "selection.release_id")
+	recordConsumerSelectionRead(ctx, match, final, true)
+	observeConsumerInputReadFailure(ctx, "serving_not_selected", store.PlatformInputReadFailure{}, nil, nil)
+	row := consumerInputReadFailureFromContext(ctx)
+	if p := row.SelectionReads; p == nil || p.Initial == nil || *p.Initial != initial || p.Recheck != final ||
+		p.InitialOmitted != 3 || p.Recheck.Gray.ReleaseHash != row.Selection.Observed.ReleaseHash {
+		t.Fatal("initial and final read bounds do not match the failure", row)
+	}
+	row.SelectionReads.Initial.CohortHash = "mutated"
+	row = consumerInputReadFailureFromContext(ctx)
+	raw, err := json.Marshal(row)
+	if err != nil || row.SelectionReads.Initial.CohortHash != initial.CohortHash || strings.Contains(string(raw), "private-") {
+		t.Fatal("read witness shared mutable data or retained raw input", err)
+	}
+}
+
 func TestConsumerFailurePreservesTypedCauseAndIndependentRetention(t *testing.T) {
 	s := &Server{}
 	ctx := runtimeobservation.WithDatabaseOperation(context.Background(), "consumer-heartbeat")

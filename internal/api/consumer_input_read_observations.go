@@ -4,17 +4,80 @@ import (
 	"context"
 	"reflect"
 	"strings"
+	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/store"
 )
 
 // One synchronous assignment request owns this metadata. It is copied into the
 // existing failure ring, never exposed by the public API or reused as authority.
 type consumerInputReadFailure struct {
-	Stage         string                         `json:"stage"`
-	Store         store.PlatformInputReadFailure `json:"store,omitempty"`
-	ChangedFields []string                       `json:"changed_fields,omitempty"`
-	Selection     *capturePublicationPair        `json:"selection,omitempty"`
+	Stage          string                         `json:"stage"`
+	Store          store.PlatformInputReadFailure `json:"store,omitempty"`
+	ChangedFields  []string                       `json:"changed_fields,omitempty"`
+	Selection      *capturePublicationPair        `json:"selection,omitempty"`
+	SelectionReads *consumerSelectionReadPair     `json:"selection_reads,omitempty"`
+
+	initialReads   [4]consumerInitialSelectionRead
+	initialCount   int
+	initialOmitted uint64
+}
+
+type consumerSelectionLaneRead struct {
+	Started     time.Time `json:"started_at"`
+	Returned    time.Time `json:"returned_at"`
+	ReleaseHash string    `json:"release_hash,omitempty"`
+}
+
+type consumerSelectionRead struct {
+	CohortHash string                    `json:"cohort_hash"`
+	Full       consumerSelectionLaneRead `json:"full"`
+	Gray       consumerSelectionLaneRead `json:"gray"`
+}
+
+type consumerSelectionReadPair struct {
+	Initial        *consumerSelectionRead `json:"initial,omitempty"`
+	Recheck        consumerSelectionRead  `json:"recheck"`
+	InitialOmitted uint64                 `json:"initial_omitted"`
+}
+
+type consumerInitialSelectionRead struct {
+	setID, releaseID string
+	read             consumerSelectionRead
+}
+
+func recordConsumerSelectionRead(ctx context.Context, assignment model.PlatformConsumerAssignment, read consumerSelectionRead, recheck bool) {
+	o, _ := ctx.Value(consumerInputReadObservationKey{}).(*consumerInputReadFailure)
+	// This records only the DNS-only branch that read both original lanes.
+	if o == nil || o.Stage != "" || read.Full.Returned.IsZero() || read.Gray.Returned.IsZero() || recheck && o.Selection == nil {
+		return
+	}
+	if recheck {
+		o.SelectionReads = &consumerSelectionReadPair{Recheck: read, InitialOmitted: o.initialOmitted}
+	}
+	for i := 0; i < o.initialCount; i++ {
+		entry := &o.initialReads[i]
+		if entry.setID == assignment.ExpectedConsumerSetID && entry.releaseID == assignment.ArtifactReleaseID {
+			if recheck {
+				initial := entry.read
+				o.SelectionReads.Initial = &initial
+			} else {
+				// Retain the last successful check for this exact assignment.
+				entry.read = read
+			}
+			return
+		}
+	}
+	if recheck {
+		return
+	}
+	if o.initialCount == len(o.initialReads) {
+		o.initialOmitted++
+		return
+	}
+	o.initialReads[o.initialCount] = consumerInitialSelectionRead{assignment.ExpectedConsumerSetID, assignment.ArtifactReleaseID, read}
+	o.initialCount++
 }
 
 type consumerInputSelectionObserver func(*capturePublicationPair, ...string)
@@ -86,9 +149,16 @@ func consumerInputReadFailureFromContext(ctx context.Context) *consumerInputRead
 	if failure == nil || failure.Stage == "" {
 		return nil
 	}
-	copy := *failure
-	copy.ChangedFields = append([]string(nil), failure.ChangedFields...)
-	copy.Store.ChangedFields = append([]string(nil), failure.Store.ChangedFields...)
-	copy.Selection = failure.Selection.clone()
-	return &copy
+	out := &consumerInputReadFailure{Stage: failure.Stage, Store: failure.Store,
+		ChangedFields: append([]string(nil), failure.ChangedFields...), Selection: failure.Selection.clone()}
+	out.Store.ChangedFields = append([]string(nil), failure.Store.ChangedFields...)
+	if r := failure.SelectionReads; r != nil {
+		pair := *r
+		if r.Initial != nil {
+			initial := *r.Initial
+			pair.Initial = &initial
+		}
+		out.SelectionReads = &pair
+	}
+	return out
 }

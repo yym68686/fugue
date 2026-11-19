@@ -71,9 +71,17 @@ func (s *Server) readConsumerAssignmentAttempt(ctx context.Context, claims platf
 					break
 				}
 			}
-			selected, err := s.consumerAssignmentIsSelectedWithBindingReader(item, group, read, bindings)
+			var observation consumerSelectionRead
+			var observe *consumerSelectionRead
+			if claims.Component == model.PlatformConsumerComponentDNSServer {
+				observe = &observation
+			}
+			selected, err := s.checkConsumerAssignmentSelection(item, group, read, bindings, nil, observe)
 			if err != nil {
 				return false, errors.New("serving release unavailable")
+			}
+			if selected && observe != nil {
+				recordConsumerSelectionRead(ctx, item.Assignment, observation, false)
 			}
 			return selected, nil
 		})

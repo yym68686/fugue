@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"time"
 
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
@@ -195,6 +196,10 @@ func (s *Server) selectTrafficRouteReleaseInScope(group, scope string) (model.Pl
 }
 
 func (s *Server) selectTrafficRouteReleaseInScopeContext(ctx context.Context, group, scope string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
+	return s.selectTrafficRouteReleaseInScopeObserved(ctx, group, scope, nil)
+}
+
+func (s *Server) selectTrafficRouteReleaseInScopeObserved(ctx context.Context, group, scope string, timing *consumerSelectionRead) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
 	type candidate struct {
 		parent  model.PlatformArtifact
 		release model.PlatformArtifactRelease
@@ -207,13 +212,30 @@ func (s *Server) selectTrafficRouteReleaseInScopeContext(ctx context.Context, gr
 		return fail()
 	}
 	for _, channel := range []string{model.PlatformArtifactReleaseChannelFull, model.PlatformArtifactReleaseChannelGray} {
+		var lane *consumerSelectionLaneRead
+		if timing != nil {
+			lane = &timing.Full
+			if channel == model.PlatformArtifactReleaseChannelGray {
+				lane = &timing.Gray
+			}
+			lane.Started = time.Now().UTC()
+		}
 		parent, release, found, err := s.store.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindReleaseSet, scope, channel, nil)
+		if lane != nil {
+			lane.Returned = time.Now().UTC()
+			if err == nil && found {
+				lane.ReleaseHash = captureIdentityHash(release.ID)
+			}
+		}
 		if err != nil {
 			return fail()
 		}
 		if found {
 			candidates = append(candidates, candidate{parent, release})
 		}
+	}
+	if timing != nil {
+		timing.CohortHash = captureIdentityHash(group)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].release.ReleasedAt.After(candidates[j].release.ReleasedAt) })
 	for _, c := range candidates {

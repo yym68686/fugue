@@ -95,16 +95,21 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 						}
 					}
 					var observe consumerInputSelectionObserver
+					var observation consumerSelectionRead
+					var timing *consumerSelectionRead
 					if claims.Component == model.PlatformConsumerComponentDNSServer {
+						timing = &observation
 						observe = func(comparison *capturePublicationPair, fields ...string) {
 							observeConsumerInputSelectionFailure(ctx, comparison, fields...)
 						}
 					}
-					ok, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe)
+					ok, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe, timing)
 					if err != nil || !ok {
 						stage := "serving_not_selected"
 						if err != nil {
 							stage = "serving_selection_read"
+						} else if timing != nil {
+							recordConsumerSelectionRead(ctx, after.Assignment, observation, true)
 						}
 						observeConsumerInputReadFailure(ctx, stage, store.PlatformInputReadFailure{}, nil, nil)
 						return store.ErrConflict

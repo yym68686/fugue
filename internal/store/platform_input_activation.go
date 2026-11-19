@@ -884,5 +884,6 @@ func (s *Store) consumePreparedCompilerInput(ctx context.Context, proof *compile
 	}
 	check = "commit"
 	advancePlatformMutationTrace(ctx, "admission-commit")
-	return tx.Commit()
+	trace, _ := ctx.Value(platformMutationTraceKey{}).(*platformMutationTrace)
+	return trace.observePublicationCommit(tx.Commit)
 }

@@ -630,6 +630,7 @@ func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *
 	if err := s.pgDNSPublicationGuard(ctx, tx, artifact, req); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, platformReleaseRejected("dns_precondition", err)
 	}
+	trace.stagePublication(release)
 	return artifact, release, message, lkg, nil
 }
 
@@ -866,6 +867,7 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 	if err := validateVerifiedTrafficRecoveryAdmissionObserved(ctx, admissionSnapshot, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
 	}
+	trace.stagePublication(release)
 	return target, release, message, lkg, nil
 }
 

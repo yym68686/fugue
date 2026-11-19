@@ -1444,10 +1444,10 @@ func (s *Server) consumerAssignmentIsSelected(item consumerArtifactLookup, group
 }
 
 func (s *Server) consumerAssignmentIsSelectedWithBindingReader(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (bool, error) {
-	return s.checkConsumerAssignmentSelection(item, group, readArtifact, readBinding, nil)
+	return s.checkConsumerAssignmentSelection(item, group, readArtifact, readBinding, nil, nil)
 }
 
-func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, observe consumerInputSelectionObserver) (bool, error) {
+func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, observe consumerInputSelectionObserver, timing *consumerSelectionRead) (bool, error) {
 	parent, err := readArtifact(item.Assignment.ReleaseSetID)
 	if err != nil {
 		if observe != nil {
@@ -1462,7 +1462,7 @@ func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, g
 			}
 			return false, errors.New("DNS-only assignment has a non-DNS child")
 		}
-		current, release, found, err := s.selectTrafficRouteReleaseInScope(group, item.Assignment.ScopeKey)
+		current, release, found, err := s.selectTrafficRouteReleaseInScopeObserved(context.Background(), group, item.Assignment.ScopeKey, timing)
 		selected := found && current.ID == parent.ID && current.ContentHash == parent.ContentHash && release.ID == item.Release.ID && release.FencingToken == item.Assignment.FencingToken
 		if observe != nil {
 			switch {

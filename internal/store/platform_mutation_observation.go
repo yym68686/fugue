@@ -2,11 +2,14 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/runtimeobservation"
 )
 
@@ -83,6 +86,47 @@ type platformMutationStage struct {
 	Milliseconds int64  `json:"elapsed_ms"`
 }
 
+// Commit bounds are API-clock times around a successful COMMIT call, not the
+// ledger's precommit timestamp or the instant the primary made the row visible.
+type platformCommittedPublication struct {
+	ReleaseHash    string    `json:"release_hash"`
+	ReleaseSetHash string    `json:"release_set_hash"`
+	Channel        string    `json:"channel"`
+	FencingToken   int64     `json:"fencing_token"`
+	CommitStarted  time.Time `json:"commit_started_at"`
+	CommitReturned time.Time `json:"commit_returned_at"`
+}
+
+// Called only for a newly written serving release in this transaction, not
+// for idempotent reads or verification of an earlier publication.
+func (t *platformMutationTrace) stagePublication(release model.PlatformArtifactRelease) {
+	if t == nil || release.ArtifactKind != model.PlatformArtifactKindReleaseSet ||
+		(release.ReleaseChannel != model.PlatformArtifactReleaseChannelGray && release.ReleaseChannel != model.PlatformArtifactReleaseChannelFull) ||
+		release.ID == "" || len(release.ID) > 256 || release.ArtifactID == "" || len(release.ArtifactID) > 256 || release.FencingToken < 1 {
+		return
+	}
+	fingerprint := func(id string) string {
+		sum := sha256.Sum256([]byte(id))
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}
+	t.publication = &platformCommittedPublication{
+		ReleaseHash: fingerprint(release.ID), ReleaseSetHash: fingerprint(release.ArtifactID),
+		Channel: release.ReleaseChannel, FencingToken: release.FencingToken,
+	}
+}
+
+func (t *platformMutationTrace) observePublicationCommit(commit func() error) error {
+	if t == nil || t.publication == nil {
+		return commit()
+	}
+	t.publication.CommitStarted = t.now().UTC()
+	err := commit()
+	if err == nil {
+		t.publication.CommitReturned = t.now().UTC()
+	}
+	return err
+}
+
 type platformMutationReceipt struct {
 	Operation         runtimeobservation.DatabaseOperation `json:"database_operation"`
 	Started           time.Time                            `json:"started_at"`
@@ -101,6 +145,7 @@ type platformMutationReceipt struct {
 	Admissions        []platformAdmissionObservation       `json:"admissions,omitempty"`
 	AdmissionsOmitted uint64                               `json:"admissions_omitted"`
 	ProducerGuard     *platformProducerGuardObservation    `json:"producer_guard,omitempty"`
+	Publication       *platformCommittedPublication        `json:"committed_publication,omitempty"`
 }
 
 type platformMutationRecorder struct {
@@ -121,6 +166,11 @@ func (r *platformMutationRecorder) record(trace *platformMutationTrace, err erro
 	receipt.Admissions = append([]platformAdmissionObservation(nil), trace.admissions...)
 	receipt.AdmissionsOmitted = trace.admissionsOmitted
 	receipt.ProducerGuard = trace.producerGuardObservation()
+	if p := trace.publication; err == nil && p != nil && !p.CommitStarted.IsZero() && !p.CommitReturned.IsZero() {
+		// Store an immutable copy, even if the original trace is reused in tests.
+		copy := *p
+		receipt.Publication = &copy
+	}
 	// Reuse the fixed typed error classifier. Never retain err.Error().
 	ctx := context.WithValue(context.Background(), platformInputReadObservationKey{}, &receipt.Failure)
 	observePlatformInputReadFailure(ctx, "publication", trace.stage, nil, nil, err)

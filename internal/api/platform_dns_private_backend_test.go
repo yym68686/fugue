@@ -29,6 +29,57 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+func TestDNSOnlyAssignmentSelectionWitnessUsesOriginalLaneReads(t *testing.T) {
+	c := celldns.Compile(t, celldns.Request(t))
+	parent := c.ReleaseArtifact
+	now := time.Now().UTC()
+	full := model.PlatformArtifactRelease{ID: "older-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind,
+		Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full",
+		FencingToken: 7, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now.Add(-time.Second)}
+	gray := full
+	gray.ID, gray.ReleaseChannel, gray.FencingToken, gray.ReleasedAt = "newer-gray", "gray", 5, now
+	gray.CanaryRuleRef = "cohort=complete"
+	for _, r := range []*model.PlatformArtifactRelease{&full, &gray} {
+		r.LaneKey = platformsafety.ReleaseLaneKey(r.ArtifactKind, r.ScopeKey, r.ReleaseChannel)
+	}
+	state := model.State{
+		PlatformArtifacts:        []model.PlatformArtifact{parent},
+		PlatformArtifactReleases: []model.PlatformArtifactRelease{full, gray},
+	}
+	for _, r := range state.PlatformArtifactReleases {
+		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey,
+			ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID})
+	}
+	path := t.TempDir() + "/state.json"
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(path)
+	st.ConfigurePlatformArtifactSigning(celldns.Keys())
+	s := &Server{store: st}
+	item := consumerArtifactLookup{Artifact: c.DNSArtifact, Release: full, Assignment: model.PlatformConsumerAssignment{
+		ScopeKey: parent.ScopeKey, ReleaseSetID: parent.ID, ArtifactReleaseID: full.ID, FencingToken: full.FencingToken}}
+	var timing consumerSelectionRead
+	var rejected *capturePublicationPair
+	observe := func(pair *capturePublicationPair, _ ...string) {
+		if pair != nil {
+			rejected = pair
+		}
+	}
+	selected, err := s.checkConsumerAssignmentSelection(item, "cell-dns", st.GetPlatformArtifact, nil, observe, &timing)
+	if err != nil || selected || rejected == nil || rejected.Observed == nil ||
+		timing.Full.ReleaseHash != rejected.Expected.ReleaseHash || timing.Gray.ReleaseHash != rejected.Observed.ReleaseHash ||
+		timing.CohortHash != captureIdentityHash("cell-dns") || timing.Full.Started.Before(now) ||
+		timing.Full.Returned.Before(timing.Full.Started) || timing.Gray.Started.Before(timing.Full.Returned) ||
+		timing.Gray.Returned.Before(timing.Gray.Started) {
+		t.Fatal("comparison or original lookup witnesses changed", timing, rejected, err)
+	}
+}
+
 func TestPrivateDNSReceiptRequiresSignedCurrentDNSOnlyMember(t *testing.T) {
 	for _, scenario := range []string{"valid", "unbound set", "wrong fence", "wrong generation", "wrong parent", "foreign node", "tampered membership", "untrusted parent", "legacy role"} {
 		t.Run(scenario, func(t *testing.T) {

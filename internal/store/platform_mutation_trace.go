@@ -12,8 +12,9 @@ import (
 	"fugue/internal/runtimeobservation"
 )
 
-// Trace only fixed code stages and elapsed time. It changes neither the SQL
-// deadline/locks nor any admission decision, and never captures SQL or inputs.
+// Trace fixed code stages, elapsed time and bounded publication fingerprints.
+// It changes neither SQL deadlines/locks nor any admission decision, and never
+// retains SQL, artifact contents or raw publication identifiers.
 // Keeping the operation on the existing driver observations makes DB durations
 // distinguishable from CPU validation inside the same transaction deadline.
 type platformMutationTrace struct {
@@ -26,6 +27,7 @@ type platformMutationTrace struct {
 	now                     func() time.Time
 	database                platformMutationDatabaseTrace
 	recorded                bool
+	publication             *platformCommittedPublication
 	admissions              []platformAdmissionObservation
 	admissionsOmitted       uint64
 	producerGuardDuration   [producerGuardPhaseCount]time.Duration
