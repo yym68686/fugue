@@ -102,7 +102,11 @@ func (s *Service) runDNSRenewal(ctx context.Context, worker *Service) {
 }
 
 func (s *Service) observeDNSRenewal(ctx context.Context, worker *Service, probe dnsReadinessProbeFunc) (resultErr error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// This is a work budget, not an extension of any lease or proof. A
+	// complete sweep can take 30s and still needs the authority recheck after
+	// it. Leave room for that read when assignment resolution and the first
+	// source read are slow, rather than repeatedly timing out after the sweep.
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 	ctx, finish := startDNSSyncTrace(ctx, s.Logger, "serving_renewal")
 	defer func() { finish(resultErr) }()
