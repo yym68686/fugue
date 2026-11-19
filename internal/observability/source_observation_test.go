@@ -349,6 +349,34 @@ func TestSameGapWideningPreservesCountAndUpdatedCoverageBounds(t *testing.T) {
 	}
 }
 
+func TestGapHTTPExchangeOnlyDescribesItsOwnSourceTurn(t *testing.T) {
+	p := NewPipeline(Config{}, nil)
+	now := time.Now().UTC()
+	read := &logReadTransportObservation{Phase: "rotation_inventory_before", HTTPExchange: logHTTPExchangeObservation{
+		RoundTrips: 1, Status: 404, AuditID: "11111111-1111-4111-8111-111111111111", AuditState: "present",
+	}}
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now, Outcome: "rotation_recovery_error",
+		ErrorClass: "not_found", HTTPStatus: 404, LastErrorRead: read, GapEvents: 1, GapReason: "retention_window"})
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now.Add(time.Second),
+		Outcome: "node_backoff", GapEvents: 1, GapReason: "retention_window"})
+	view := func() []logGapObservation {
+		value, err := p.DiagnosticSources(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value.(map[string]any)["gap_history"].(map[string]any)["receipts"].([]logGapObservation)
+	}
+	receipts := view()
+	if len(receipts) != 2 || receipts[0].ReadExchange == nil || *receipts[0].ReadExchange != read.HTTPExchange ||
+		receipts[0].ReadPhase != read.Phase || receipts[1].ReadExchange != nil || receipts[1].ReadPhase != "" {
+		t.Fatalf("gap exchange attribution is not exact: %+v", receipts)
+	}
+	receipts[0].ReadExchange.Status = 0
+	if view()[0].ReadExchange.Status != 404 {
+		t.Fatal("diagnostic projection shares mutable gap exchange")
+	}
+}
+
 func TestLogReadErrorMetadataIsTypedAndDoesNotDependOnBody(t *testing.T) {
 	for _, tc := range []struct {
 		err    error

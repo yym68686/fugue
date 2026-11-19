@@ -98,6 +98,8 @@ type logGapObservation struct {
 	LastErrorAt    time.Time                    `json:"last_error_at"`
 	LastErrorClass string                       `json:"last_error_class,omitempty"`
 	LastErrorStage string                       `json:"last_error_stage,omitempty"`
+	ReadExchange   *logHTTPExchangeObservation  `json:"read_http_exchange,omitempty"`
+	ReadPhase      string                       `json:"read_phase,omitempty"`
 	LastAdmission  *logAdmissionObservation     `json:"last_admission,omitempty"`
 	InvalidRecord  *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 	BoundaryCheck  *logBoundaryObservation      `json:"boundary_check,omitempty"`
@@ -165,6 +167,14 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	}
 	p.sourceObservations[v.Identity] = v
 	if newGapEvents > 0 {
+		var exchange *logHTTPExchangeObservation
+		var phase string
+		// A prior source error is context only; do not imply it was the
+		// HTTP exchange of this gap observation.
+		if failed && v.LastErrorRead != nil && v.LastErrorRead.HTTPExchange.RoundTrips != 0 {
+			copy := v.LastErrorRead.HTTPExchange
+			exchange, phase = &copy, v.LastErrorRead.Phase
+		}
 		p.sourceGapReceiptTotal++
 		if len(p.sourceGapReceipts) == logGapReceiptLimit {
 			copy(p.sourceGapReceipts, p.sourceGapReceipts[1:])
@@ -178,6 +188,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 			CursorBefore: v.CursorBefore, CursorAfter: v.CursorAfter, PendingAt: v.PendingAt, DrainedThrough: v.DrainedThrough,
 			Lines: v.Lines, RotationFiles: v.RotationFiles, RotationBytes: v.RotationBytes,
 			LastErrorAt: v.LastErrorAt, LastErrorClass: v.LastErrorClass, LastErrorStage: v.LastErrorStage,
+			ReadExchange: exchange, ReadPhase: phase,
 			LastAdmission: v.LastAdmission, InvalidRecord: v.InvalidRecord,
 			BoundaryCheck: v.BoundaryCheck,
 		})
@@ -230,6 +241,10 @@ func (p *Pipeline) DiagnosticSources(ctx context.Context) (any, error) {
 	gapReceipts := append([]logGapObservation(nil), p.sourceGapReceipts...)
 	for i := range gapReceipts {
 		row := &gapReceipts[i]
+		if row.ReadExchange != nil {
+			copy := *row.ReadExchange
+			row.ReadExchange = &copy
+		}
 		row.BoundaryCheck = cloneLogBoundaryObservation(row.BoundaryCheck)
 		if row.InvalidRecord != nil {
 			copy := *row.InvalidRecord

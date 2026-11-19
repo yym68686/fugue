@@ -13,7 +13,100 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
+
+func TestLogHTTPResponseUsesFinalClientGoExchange(t *testing.T) {
+	const firstID = "11111111-1111-4111-8111-111111111111"
+	const lastID = "22222222-2222-4222-8222-222222222222"
+	requests := make(chan string, 4)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/nodes/example/proxy/logs/pods/example/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Error("method changed")
+		}
+		first := len(requests) == 0
+		requests <- r.Header.Get("Audit-ID")
+		if first {
+			w.Header().Set("Audit-ID", firstID)
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Audit-ID", lastID)
+		http.Error(w, "private-body", http.StatusNotFound)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	cfg := &rest.Config{Host: server.URL, QPS: -1}
+	cfg.Wrap(observeLogHTTPResponse)
+	client, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	trace := &logReadTransportTrace{}
+	ctx = context.WithValue(ctx, logReadTransportKey{}, trace)
+	body, err := observedLogStream(ctx, "rotation_inventory_before", func(ctx context.Context) (io.ReadCloser, error) {
+		return client.CoreV1().RESTClient().Get().AbsPath("/api/v1/nodes/example/proxy/logs/pods/example/").Stream(ctx)
+	})
+	if body != nil {
+		body.Close()
+	}
+	if logReadHTTPStatus(err) != 404 || len(requests) != 2 || <-requests != "" || <-requests != "" {
+		t.Fatalf("request, retry, or client-go error handling changed: %v", err)
+	}
+	fact := trace.snapshot()
+	if want := (logHTTPExchangeObservation{RoundTrips: 2, Status: 404, AuditID: lastID, AuditState: "present"}); fact.HTTPExchange != want {
+		t.Fatalf("wrong last exchange: %+v", fact)
+	}
+	raw, _ := json.Marshal(fact)
+	if strings.Contains(string(raw), firstID) || strings.Contains(string(raw), "private-body") {
+		t.Fatal("wrong audit ID or body retained")
+	}
+}
+
+type logObservationRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f logObservationRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestLogHTTPResponseRejectsUnexpectedAuditHeadersAndSkipsOutsideStreams(t *testing.T) {
+	for _, tc := range []struct {
+		name, phase string
+		values      []string
+		want        logHTTPExchangeObservation
+	}{
+		{"missing", "pod_log", nil, logHTTPExchangeObservation{RoundTrips: 1, Status: 404, AuditState: "missing"}},
+		{"arbitrary", "pod_log", []string{"private-cookie"}, logHTTPExchangeObservation{RoundTrips: 1, Status: 404, AuditState: "invalid_or_ambiguous"}},
+		{"duplicated", "pod_log", []string{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"}, logHTTPExchangeObservation{RoundTrips: 1, Status: 404, AuditState: "invalid_or_ambiguous"}},
+		{"outside", "unknown", []string{"11111111-1111-4111-8111-111111111111"}, logHTTPExchangeObservation{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trace := &logReadTransportTrace{}
+			ctx := context.WithValue(t.Context(), logReadTransportKey{}, trace)
+			errSentinel := errors.New("private-error")
+			rt := observeLogHTTPResponse(logObservationRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.Header.Get("Audit-ID") != "" {
+					t.Fatal("unexpected request mutation")
+				}
+				return &http.Response{StatusCode: 404, Header: http.Header{"Audit-Id": tc.values}}, errSentinel
+			}))
+			_, err := observedLogStream(ctx, tc.phase, func(ctx context.Context) (io.ReadCloser, error) {
+				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://example.invalid/private-path", nil)
+				_, err := rt.RoundTrip(req)
+				return nil, err
+			})
+			if !errors.Is(err, errSentinel) || trace.snapshot().HTTPExchange != tc.want {
+				t.Fatalf("wrong projected exchange: %+v", trace.snapshot())
+			}
+		})
+	}
+}
 
 func TestLogReadTransportMilestonesPreserveStreamAndExistingTrace(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

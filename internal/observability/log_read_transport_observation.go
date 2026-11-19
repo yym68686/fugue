@@ -3,45 +3,120 @@ package observability
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptrace"
 	"sync"
 	"time"
 )
 
 // One fixed-size receipt for the failing HTTP stream, not a request history.
-// None of the trace callback arguments (hosts, addresses, headers or errors)
-// are retained. Timings describe caller-observed waits, not server CPU or a
+// None of the trace callback arguments (hosts, addresses or errors) are
+// retained. Timings describe caller-observed waits, not server CPU or a
 // network root cause. Chain totals include recovered attempts and older bodies.
 type logReadTransportObservation struct {
-	Phase             string `json:"phase"`
-	Attempts          uint32 `json:"attempts"`
-	ConnectionReady   bool   `json:"connection_ready"`
-	ConnectionReused  bool   `json:"connection_reused"`
-	RequestWritten    bool   `json:"request_written"`
-	FirstResponseByte bool   `json:"first_response_byte"`
-	StreamOpened      bool   `json:"stream_opened"`
-	OpenMillis        int64  `json:"open_ms"`
-	BodyBytes         int64  `json:"body_bytes"`
-	BodyReadError     bool   `json:"body_read_error"`
-	StartOffsetMillis int64  `json:"start_offset_ms"`
-	DeadlineMillis    int64  `json:"deadline_remaining_ms"`
-	ConnectionMillis  int64  `json:"connection_ready_ms"`
-	RequestMillis     int64  `json:"request_written_ms"`
-	FirstByteMillis   int64  `json:"first_response_byte_ms"`
-	BodyReadMillis    int64  `json:"body_read_ms"`
-	ChainStreams      uint32 `json:"chain_streams"`
-	ChainOpenMillis   int64  `json:"chain_open_ms"`
-	ChainBodyBytes    int64  `json:"chain_body_bytes"`
-	ChainReadMillis   int64  `json:"chain_body_read_ms"`
+	Phase             string                     `json:"phase"`
+	Attempts          uint32                     `json:"attempts"`
+	ConnectionReady   bool                       `json:"connection_ready"`
+	ConnectionReused  bool                       `json:"connection_reused"`
+	RequestWritten    bool                       `json:"request_written"`
+	FirstResponseByte bool                       `json:"first_response_byte"`
+	StreamOpened      bool                       `json:"stream_opened"`
+	OpenMillis        int64                      `json:"open_ms"`
+	BodyBytes         int64                      `json:"body_bytes"`
+	BodyReadError     bool                       `json:"body_read_error"`
+	StartOffsetMillis int64                      `json:"start_offset_ms"`
+	DeadlineMillis    int64                      `json:"deadline_remaining_ms"`
+	ConnectionMillis  int64                      `json:"connection_ready_ms"`
+	RequestMillis     int64                      `json:"request_written_ms"`
+	FirstByteMillis   int64                      `json:"first_response_byte_ms"`
+	BodyReadMillis    int64                      `json:"body_read_ms"`
+	ChainStreams      uint32                     `json:"chain_streams"`
+	ChainOpenMillis   int64                      `json:"chain_open_ms"`
+	ChainBodyBytes    int64                      `json:"chain_body_bytes"`
+	ChainReadMillis   int64                      `json:"chain_body_read_ms"`
+	HTTPExchange      logHTTPExchangeObservation `json:"http_exchange,omitzero"`
+}
+
+// The last client transport call in this stream, not a unique wire request.
+// Replace the whole value; readers can copy it without sharing mutable state.
+type logHTTPExchangeObservation struct {
+	RoundTrips uint32 `json:"round_trips"`
+	Status     int    `json:"status,omitempty"`
+	AuditID    string `json:"audit_id,omitempty"`
+	AuditState string `json:"audit_id_state"`
+}
+
+type logHTTPAttemptKey struct{}
+type observedLogTransport struct{ http.RoundTripper }
+
+func observeLogHTTPResponse(next http.RoundTripper) http.RoundTripper {
+	return observedLogTransport{next}
+}
+
+func (t observedLogTransport) WrappedRoundTripper() http.RoundTripper {
+	return t.RoundTripper
+}
+
+func (t observedLogTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	a, _ := r.Context().Value(logHTTPAttemptKey{}).(*logReadTransportAttempt)
+	if a == nil || a.fact.Phase == "other" || r.Method != http.MethodGet {
+		return t.RoundTripper.RoundTrip(r)
+	}
+	a.mu.Lock()
+	a.httpCalls++
+	call := a.httpCalls
+	fact := logHTTPExchangeObservation{RoundTrips: uint32(min(call, 65535)), AuditState: "no_response"}
+	a.fact.HTTPExchange = fact
+	a.mu.Unlock()
+	resp, err := t.RoundTripper.RoundTrip(r)
+	if resp != nil {
+		if resp.StatusCode >= 100 && resp.StatusCode <= 599 {
+			fact.Status = resp.StatusCode
+		}
+		switch values := resp.Header.Values("Audit-ID"); {
+		case len(values) == 0:
+			fact.AuditState = "missing"
+		case len(values) == 1 && validLogAuditID(values[0]):
+			fact.AuditState, fact.AuditID = "present", values[0]
+		default:
+			fact.AuditState = "invalid_or_ambiguous"
+		}
+		a.mu.Lock()
+		if a.httpCalls == call {
+			a.fact.HTTPExchange = fact
+		}
+		a.mu.Unlock()
+	}
+	return resp, err
+}
+
+// Do not copy arbitrary header values into the source diagnostics; only
+// canonical lowercase UUIDs may be joined to existing server audit records.
+func validLogAuditID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := range len(id) {
+		b := id[i]
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if b != '-' {
+				return false
+			}
+		} else if !(b >= '0' && b <= '9' || b >= 'a' && b <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 type logReadTransportKey struct{}
 type logReadTransportAttempt struct {
-	mu       sync.Mutex
-	fact     logReadTransportObservation
-	owner    *logReadTransportTrace
-	started  time.Time
-	readTime time.Duration
+	mu        sync.Mutex
+	fact      logReadTransportObservation
+	owner     *logReadTransportTrace
+	started   time.Time
+	readTime  time.Duration
+	httpCalls uint64
 }
 type logReadTransportTrace struct {
 	mu             sync.Mutex
@@ -147,6 +222,7 @@ func observedLogStream(ctx context.Context, phase string, open func(context.Cont
 			a.mu.Unlock()
 		},
 	}
+	ctx = context.WithValue(ctx, logHTTPAttemptKey{}, a)
 	body, err := open(httptrace.WithClientTrace(ctx, trace))
 	openTime := max(time.Duration(0), t.now().Sub(started))
 	a.mu.Lock()

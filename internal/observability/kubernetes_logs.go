@@ -84,6 +84,7 @@ func newKubernetesLogCollector(p *Pipeline) (*kubernetesLogCollector, error) {
 	restConfig.UserAgent = "fugue-telemetry-agent"
 	restConfig.QPS = float32(p.cfg.KubernetesLogQPS)
 	restConfig.Burst = p.cfg.KubernetesLogBurst
+	restConfig.Wrap(observeLogHTTPResponse)
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, err

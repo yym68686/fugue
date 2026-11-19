@@ -310,8 +310,17 @@ or admission. `chain_streams`, `chain_open_ms`, `chain_body_read_ms` and
 `chain_body_bytes` include all streams in the same source read, including
 recovered opens and bodies consumed after a later inventory request. These
 caller-observed timings do not identify server CPU, lock or network root cause.
-No URL, header, credential, file name or log body is retained in this receipt;
-read deadlines, cursors, queue admission and backoff behavior are unchanged.
+For production collector log streams, `http_exchange` describes the last
+client transport call in the selected stream: bounded call count, HTTP status
+where available, and the API response's canonical Audit-ID when exactly one
+valid value is present. A gap receipt includes this projection only when the
+same source turn observed a read error. No request header is added or changed;
+no URL, other header, credential, file name or log body is retained. The
+transport can replay a GET, and the last exchange is not a complete request
+history. An ID does not establish that an audit event was retained, that the
+kubelet saw the request, or which hop generated a 404. Join only to separately
+verified server records and preserve unknown coverage where no match exists.
+Read deadlines, cursors, queue admission and backoff behavior are unchanged.
 
 A log transport failure opens a circuit shared by all sources on that
 physical node. Initially in-flight reads are bounded by collector concurrency;
