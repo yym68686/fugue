@@ -5,30 +5,38 @@ import (
 	"fugue/internal/platformconfig"
 )
 
-// Preferences only order declared probes. They do not select answers, change
-// quorum, reuse proof authority or add an endpoint to the signed plan.
-func dnsPreferredProbeKeys(payload dnsServingPayload, nodeID string) map[string]bool {
-	keys := map[string]bool{}
+// Preferences only order existing requirements. They cannot select answers,
+// change quorum, reuse proof authority or add an endpoint to the signed plan.
+func dnsProbePriorities(payload dnsServingPayload, nodeID string) (preferred, candidates map[string]bool) {
+	preferred, candidates = map[string]bool{}, map[string]bool{}
 	if payload.Plan == nil {
-		return keys
+		return preferred, candidates
 	}
-	primaries := map[string]map[string]bool{}
+	type hostEdge struct{ host, edge string }
+	primaries, pool := map[hostEdge]bool{}, map[hostEdge]bool{}
 	for _, view := range payload.Queries {
 		if view.NodeID != nodeID {
 			continue
 		}
 		for _, record := range view.Records {
 			primary := ""
+			order := record.AnswerPolicy.PhysicalOrder
 			if selection := record.AnswerPolicy.PhysicalSelection; selection != nil {
 				primary = selection.PrimaryEdgeID
-			} else if order := record.AnswerPolicy.PhysicalOrder; order != nil && len(order.OrderedEdgeIDs) > 0 {
+			} else if order != nil && len(order.OrderedEdgeIDs) > 0 {
 				primary = order.OrderedEdgeIDs[0]
 			}
 			if primary != "" {
-				if primaries[record.Name] == nil {
-					primaries[record.Name] = map[string]bool{}
-				}
-				primaries[record.Name][primary] = true
+				primaries[hostEdge{record.Name, primary}] = true
+			}
+			var ordered []string
+			if policy := record.AnswerPolicy.Availability; policy != nil {
+				ordered = policy.OrderedEdgeIDs
+			} else if order != nil {
+				ordered = order.OrderedEdgeIDs
+			}
+			for _, edgeID := range ordered {
+				pool[hostEdge{record.Name, edgeID}] = true
 			}
 		}
 	}
@@ -38,15 +46,22 @@ func dnsPreferredProbeKeys(payload dnsServingPayload, nodeID string) map[string]
 	}
 	for _, record := range payload.Plan.Records {
 		for _, target := range record.Targets {
-			if !primaries[record.Hostname][target.EdgeID] {
+			binding := hostEdge{record.Hostname, target.EdgeID}
+			if !primaries[binding] && !pool[binding] {
 				continue
 			}
 			for _, id := range target.ProbeIDs {
-				if probe, exists := probes[id]; exists && probe.EdgeID == target.EdgeID && probe.Address == target.Address {
-					keys[dnsroutesource.ProbeKey(probe)] = true
+				if probe, exists := probes[id]; exists && probe.EdgeID == target.EdgeID && probe.EdgeGroupID == target.EdgeGroupID && probe.Address == target.Address {
+					key := dnsroutesource.ProbeKey(probe)
+					if primaries[binding] {
+						preferred[key] = true
+					}
+					if pool[binding] {
+						candidates[key] = true
+					}
 				}
 			}
 		}
 	}
-	return keys
+	return preferred, candidates
 }

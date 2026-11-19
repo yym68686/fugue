@@ -94,7 +94,8 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(dnsPreferredProbeKeys(p, s.Config.DNSNodeID)))
+	preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID)
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
 	// A physical request can satisfy a different authorized publication than
 	// its scheduling representative. Record continuity under each immutable
 	// requirement only after its complete publication binding is verified.

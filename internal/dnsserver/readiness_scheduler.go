@@ -33,14 +33,16 @@ type dnsReadinessScheduler struct {
 	expires      map[string]time.Time
 	targets      map[string]dnsProbeTargetState
 	preferred    map[string]bool
+	candidates   map[string]bool
 	logger       *log.Logger
 	path         string
 }
 
-func (scheduler *dnsReadinessScheduler) prioritize(keys map[string]bool) *dnsReadinessScheduler {
+func (scheduler *dnsReadinessScheduler) prioritize(preferred, candidates map[string]bool) *dnsReadinessScheduler {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	scheduler.preferred = maps.Clone(keys)
+	scheduler.preferred = maps.Clone(preferred)
+	scheduler.candidates = maps.Clone(candidates)
 	return scheduler
 }
 
@@ -111,7 +113,30 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 	for _, address := range addresses {
 		indices := byAddress[address]
 		interval := time.Duration(policy.ProbeIntervalSeconds) * time.Second
+		// Prioritize a bounded batch of explicitly ordered candidate probes
+		// in every sweep, even when ordinary proofs have the same deadline.
+		// Rotating the oldest attempts first prevents a large pool pinning its
+		// same members to the head. The remaining queue keeps normal fairness.
+		const maxCandidatePriorityPerTarget = 8
+		candidates := make([]int, 0, min(len(indices), maxCandidatePriorityPerTarget))
+		if len(scheduler.candidates) != 0 {
+			for _, index := range indices {
+				if scheduler.candidates[dnsroutesource.ProbeKey(plan.Probes[index])] {
+					candidates = append(candidates, index)
+				}
+			}
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return scheduler.attempts[plan.Probes[candidates[i]].ID].Before(scheduler.attempts[plan.Probes[candidates[j]].ID])
+		})
+		priority := make(map[int]int, min(len(candidates), maxCandidatePriorityPerTarget))
+		for rank, index := range candidates[:min(len(candidates), maxCandidatePriorityPerTarget)] {
+			priority[index] = rank + 1
+		}
 		sort.SliceStable(indices, func(left, right int) bool {
+			if first, second := priority[indices[left]], priority[indices[right]]; first != second {
+				return first != 0 && (second == 0 || first < second)
+			}
 			first, second := plan.Probes[indices[left]].ID, plan.Probes[indices[right]].ID
 			firstAttempt, secondAttempt := scheduler.attempts[first], scheduler.attempts[second]
 			firstExpiry, secondExpiry := scheduler.expires[first], scheduler.expires[second]
