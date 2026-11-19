@@ -93,6 +93,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift", "resized-bootstrap-patch-lost-patch-response", "custom-pod-patch"}
 	if independent {
 		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed", "fast-ready", "fast-blocked-before-stage", "fast-blocked-after-stage", "fast-stage-response-lost", "fast-image-lost-patch-response", "fast-restore-response-lost")
+		scenarios = append(scenarios, "shared-bootstrap-patch-lost-patch-response", "shared-wrong-location", "shared-wrong-pool", "shared-duplicate-hostname", "shared-affinity-alternative", "shared-wrong-volume-node", "shared-local-volume-unpinned", "shared-node-recreated")
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
@@ -113,6 +114,32 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				t.Fatal(err)
 			}
 			appSpec := model.AppSpec{Image: "registry.invalid/client:1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID, Postgres: &model.AppPostgresSpec{Database: "example", User: "example", Password: "test-secret", StorageSize: "1Gi", Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 512, CPULimitMilliCores: 200, MemoryLimitMebibytes: 768}}}
+			shared := strings.HasPrefix(scenario, "shared-")
+			const country = "de"
+			if shared {
+				if err := state.SyncManagedSharedLocationRuntimes([]map[string]string{{runtime.LocationCountryCodeLabelKey: country}}); err != nil {
+					t.Fatal(err)
+				}
+				pool, err := state.ListRuntimes(tenant.ID, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, placement := range pool {
+					if placement.Type == model.RuntimeTypeManagedShared && placement.Labels[runtime.LocationCountryCodeLabelKey] == country {
+						appSpec.Postgres.RuntimeID = placement.ID
+						break
+					}
+				}
+				if appSpec.Postgres.RuntimeID == "" || appSpec.Postgres.RuntimeID == model.DefaultManagedRuntimeID {
+					t.Fatal("location-shared runtime was not created")
+				}
+			} else {
+				physical, _, err := state.CreateRuntime(tenant.ID, "dedicated", model.RuntimeTypeManagedOwned, "in-cluster", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				appSpec.Postgres.RuntimeID = physical.ID
+			}
 			if scenario == "resized-unlimited" {
 				appSpec.Postgres.Resources.CPULimitMilliCores = 0
 			}
@@ -224,6 +251,16 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			source := strings.Split(catalog.PostgresBase, "@")[0]
 			spec["imageName"] = source
 			imageObject(imageObject(spec["affinity"])["nodeSelector"])[runtime.RuntimeIDLabelKey] = postgres.RuntimeID
+			nodeTerm := func(key, value string) map[string]any {
+				return map[string]any{"matchExpressions": []any{map[string]any{"key": key, "operator": "In", "values": []any{value}}}}
+			}
+			if shared {
+				terms := []any{nodeTerm(kubeHostnameLabelKey, "node-a")}
+				if scenario == "shared-affinity-alternative" {
+					terms = append(terms, nodeTerm(runtime.SharedPoolLabelKey, runtime.SharedPoolLabelValue))
+				}
+				spec["affinity"] = map[string]any{"nodeAffinity": map[string]any{"requiredDuringSchedulingIgnoredDuringExecution": map[string]any{"nodeSelectorTerms": terms}}}
+			}
 			resourceMap := func(target model.ResourceSpec) map[string]any {
 				kube, err := managedPostgresKubeResources(target)
 				if err != nil {
@@ -285,7 +322,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 				imageObject(cluster["metadata"])["annotations"] = map[string]any{imageMigrationPodPatchAnnotation: value, retainedAnnotation: "preserve"}
 			}
-			patches, probes := 0, 0
+			patches, probes, nodeReads := 0, 0, 0
 			var baselineSpec map[string]any
 			b, _ := json.Marshal(spec)
 			json.Unmarshal(b, &baselineSpec)
@@ -303,6 +340,8 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 						t.Error("PATCH sent before durable intent")
 					} else if coldTarget && proofs[0].Payload["cold_migration"] != marker {
 						t.Error("PATCH sent without the marked target recorded in durable intent")
+					} else if shared && proofs[0].Payload["shared_node_uid"] != "node-a-uid" {
+						t.Error("PATCH sent without the shared node identity recorded in durable intent")
 					}
 					var patch []map[string]any
 					json.NewDecoder(r.Body).Decode(&patch)
@@ -411,9 +450,43 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					if patches > 0 && strings.HasSuffix(scenario, "changed-volume") {
 						uid = "replacement-pv"
 					}
-					response = map[string]any{"metadata": map[string]any{"uid": uid}, "spec": map[string]any{"claimRef": map[string]any{"uid": "pvc-uid", "namespace": ns, "name": "database-1"}}}
+					pvSpec := map[string]any{"claimRef": map[string]any{"uid": "pvc-uid", "namespace": ns, "name": "database-1"}}
+					if shared {
+						pvNode := "node-a"
+						if scenario == "shared-wrong-volume-node" {
+							pvNode = "node-b"
+						}
+						pvSpec["csi"] = map[string]any{"driver": "local.csi.openebs.io"}
+						if scenario != "shared-local-volume-unpinned" {
+							pvSpec["nodeAffinity"] = map[string]any{"required": map[string]any{"nodeSelectorTerms": []any{nodeTerm("openebs.io/nodename", pvNode)}}}
+						}
+					}
+					response = map[string]any{"metadata": map[string]any{"uid": uid}, "spec": pvSpec}
 				case r.URL.Path == "/api/v1/nodes":
-					response = map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "node-a", "labels": map[string]any{runtime.RuntimeIDLabelKey: postgres.RuntimeID}}}}}
+					if shared {
+						nodeReads++
+						if r.URL.Query().Get("labelSelector") != kubeHostnameLabelKey+"=node-a" {
+							t.Error("did not check uniqueness of the hostname across all Nodes")
+						}
+						labels := map[string]any{runtime.RuntimeIDLabelKey: "physical-runtime", runtime.SharedPoolLabelKey: runtime.SharedPoolLabelValue, runtime.LocationCountryCodeLabelKey: country, kubeHostnameLabelKey: "node-a", "openebs.io/nodename": "node-a"}
+						if scenario == "shared-wrong-location" {
+							labels[runtime.LocationCountryCodeLabelKey] = "fr"
+						}
+						if scenario == "shared-wrong-pool" {
+							delete(labels, runtime.SharedPoolLabelKey)
+						}
+						uid := "node-a-uid"
+						if scenario == "shared-node-recreated" && nodeReads > 1 {
+							uid = "new-node-a-uid"
+						}
+						items := []any{map[string]any{"metadata": map[string]any{"name": "node-a", "uid": uid, "labels": labels}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}}
+						if scenario == "shared-duplicate-hostname" {
+							items = append(items, map[string]any{"metadata": map[string]any{"name": "node-b", "uid": "node-b-uid", "labels": labels}})
+						}
+						response = map[string]any{"items": items}
+					} else {
+						response = map[string]any{"items": []any{map[string]any{"metadata": map[string]any{"name": "node-a", "labels": map[string]any{runtime.RuntimeIDLabelKey: postgres.RuntimeID}}}}}
+					}
 				case r.URL.Path == "/api/v1/nodes/node-a":
 					response = map[string]any{"metadata": map[string]any{"name": "node-a"}, "status": map[string]any{"conditions": []any{map[string]any{"type": "Ready", "status": "True"}}}}
 				case strings.HasSuffix(r.URL.Path, "/deployments"):
@@ -441,6 +514,26 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				return pgimage.DrainObservation{Status: "eligible", SampledAt: &at, LoadedMarker: marker, MarkerFromFile: marker != ""}
 			}}
 			err = s.executePostgresImageMigration(context.Background(), op, before)
+			sharedRejection := map[string]string{
+				"shared-wrong-location":        runtime.LocationCountryCodeLabelKey + " mismatch",
+				"shared-wrong-pool":            runtime.SharedPoolLabelKey + " mismatch",
+				"shared-duplicate-hostname":    "does not uniquely select",
+				"shared-affinity-alternative":  "requires existing hard affinity",
+				"shared-wrong-volume-node":     "node affinity excludes",
+				"shared-local-volume-unpinned": "is not pinned",
+			}
+			if reason := sharedRejection[scenario]; reason != "" {
+				if err == nil || !strings.Contains(err.Error(), reason) || errors.Is(err, errPostgresImageMigrationUnsettled) || patches != 0 || probes != 0 {
+					t.Fatalf("unsafe shared placement reached mutation intent: patches=%d probes=%d err=%v", patches, probes, err)
+				}
+				return
+			}
+			if scenario == "shared-node-recreated" {
+				if !errors.Is(err, errPostgresImageMigrationUnsettled) || !strings.Contains(err.Error(), "node identity is missing or changed") || patches != 0 || probes != 1 {
+					t.Fatalf("changed shared node identity reached mutation: patches=%d probes=%d err=%v", patches, probes, err)
+				}
+				return
+			}
 			if fast {
 				if strings.HasSuffix(scenario, "response-lost") || scenario == "fast-image-lost-patch-response" {
 					if !errors.Is(err, errPostgresImageMigrationUnsettled) {

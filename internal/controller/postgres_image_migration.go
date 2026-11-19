@@ -37,6 +37,7 @@ type postgresImageWitness struct {
 	Volumes        map[string]string `json:"volumes"`
 	VerifiedPodUID string            `json:"verified_pod_uid,omitempty"`
 	ColdMigration  string            `json:"cold_migration,omitempty"`
+	SharedNodeUID  string            `json:"shared_node_uid,omitempty"`
 	// Optional for compatibility with image-only witnesses already in flight.
 	RestartResources      map[string]any             `json:"restart_resources,omitempty"`
 	RestartSpecHash       string                     `json:"restart_spec_hash,omitempty"`
@@ -196,14 +197,14 @@ func (c *kubeClient) imageMigrationObject(ctx context.Context, path string) (map
 	return m, nil
 }
 
-func (c *kubeClient) imageMigrationVolumes(ctx context.Context, ns string, pod map[string]any) (map[string]string, error) {
+func (c *kubeClient) imageMigrationVolumes(ctx context.Context, ns string, pod map[string]any, sharedNode *kubeNode) (map[string]string, error) {
 	out := map[string]string{}
 	for _, volume := range imageObjects(imageObject(pod["spec"])["volumes"]) {
 		claim := imageString(imageObject(volume["persistentVolumeClaim"]), "claimName")
 		if claim == "" {
 			continue
 		}
-		identity, err := c.imageMigrationVolumeIdentity(ctx, ns, claim)
+		identity, err := c.imageMigrationVolumeIdentity(ctx, ns, claim, sharedNode)
 		if err != nil {
 			return nil, err
 		}
@@ -215,7 +216,7 @@ func (c *kubeClient) imageMigrationVolumes(ctx context.Context, ns string, pod m
 	return out, nil
 }
 
-func (c *kubeClient) imageMigrationVolumeIdentity(ctx context.Context, ns, claim string) (string, error) {
+func (c *kubeClient) imageMigrationVolumeIdentity(ctx context.Context, ns, claim string, sharedNode *kubeNode) (string, error) {
 	pvc, err := c.imageMigrationObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/persistentvolumeclaims/"+url.PathEscape(claim))
 	if err != nil {
 		return "", err
@@ -233,6 +234,11 @@ func (c *kubeClient) imageMigrationVolumeIdentity(ctx context.Context, ns, claim
 	ref := imageObject(pvSpec["claimRef"])
 	if imageString(ref, "uid") != imageString(meta, "uid") || imageString(ref, "namespace") != ns || imageString(ref, "name") != claim || imageString(imageObject(pv["metadata"]), "uid") == "" {
 		return "", fmt.Errorf("PV %s does not match its PVC identity", pvName)
+	}
+	if sharedNode != nil {
+		if err := validateImageMigrationVolumeNode(pvSpec, pvName, *sharedNode); err != nil {
+			return "", err
+		}
 	}
 	return pgimage.Hash([]any{claim, imageString(meta, "uid"), spec, pvName, imageString(imageObject(pv["metadata"]), "uid"), pvSpec}), nil
 }
@@ -300,7 +306,7 @@ func (c *kubeClient) observeImageMigration(ctx context.Context, ns, serviceID st
 	return cluster, pod, managedPostgresResizeSnapshot{Cluster: typed, Observation: observation}, nil
 }
 
-func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
+func (s *Service) captureImageWitness(ctx context.Context, c *kubeClient, ns, serviceID, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
 	name := postgres.ServiceName
 	cluster, pod, snapshot, err := c.observeImageMigration(ctx, ns, serviceID, postgres)
 	if err != nil {
@@ -355,24 +361,11 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, tar
 			return postgresImageWitness{}, fmt.Errorf("source Pod does not match the legacy bootstrap CPU patch")
 		}
 	}
-	// A single runtime node and the existing mandatory runtime affinity prevent
-	// a restart from becoming an unrequested placement migration.
-	nodes, err := c.listNodeRuntimeIDs(ctx)
+	placement, err := s.Store.GetRuntime(postgres.RuntimeID)
 	if err != nil {
-		return postgresImageWitness{}, err
+		return postgresImageWitness{}, fmt.Errorf("read configured database runtime for image migration: %w", err)
 	}
-	count := 0
-	for node, id := range nodes {
-		if id == postgres.RuntimeID {
-			count++
-			if node != snapshot.Observation.NodeName {
-				return postgresImageWitness{}, fmt.Errorf("runtime placement is ambiguous")
-			}
-		}
-	}
-	if count != 1 || !imageMigrationRuntimePinned(spec, postgres.RuntimeID) {
-		return postgresImageWitness{}, fmt.Errorf("migration requires an unambiguous existing runtime placement")
-	}
+	nodeName := snapshot.Observation.NodeName
 	pods, err := c.listPodsBySelector(ctx, ns, cloudNativePGClusterLabel+"="+name+",cnpg.io/podRole=instance")
 	if err != nil {
 		return postgresImageWitness{}, err
@@ -380,26 +373,51 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, tar
 	if len(pods) != 1 || pods[0].Metadata.Name != snapshot.Observation.PodName || pods[0].ObservedUID != snapshot.Observation.PodUID {
 		return postgresImageWitness{}, fmt.Errorf("migration requires exactly the observed primary Pod and no other database instance")
 	}
-	node, found, err := c.getNode(ctx, snapshot.Observation.NodeName)
-	if err != nil {
-		return postgresImageWitness{}, err
-	}
-	if err = validateManagedPostgresAutoMemoryNode(node, found, false); err != nil {
-		return postgresImageWitness{}, err
-	}
-	if node.Spec.Unschedulable {
-		return postgresImageWitness{}, fmt.Errorf("database node is cordoned")
-	}
-	for _, taint := range node.Spec.Taints {
-		if taint.Effect == "NoSchedule" || taint.Effect == "NoExecute" {
-			return postgresImageWitness{}, fmt.Errorf("database node has a scheduling/execution taint; migration requires a stable node")
+	var sharedNode *kubeNode
+	if placement.Type == model.RuntimeTypeManagedShared && !imageMigrationRuntimePinned(spec, postgres.RuntimeID) {
+		node, err := c.imageMigrationSharedNode(ctx, placement, postgres, spec, nodeName, "")
+		if err != nil {
+			return postgresImageWitness{}, err
+		}
+		if err := validateImageMigrationNode(node, true); err != nil {
+			return postgresImageWitness{}, err
+		}
+		sharedNode = &node
+	} else {
+		// Preserve the single-Node, hard runtime-id proof for existing placements
+		// that use a physical runtime label, including legacy Clusters.
+		nodes, err := c.listNodeRuntimeIDs(ctx)
+		if err != nil {
+			return postgresImageWitness{}, err
+		}
+		count := 0
+		for node, id := range nodes {
+			if id == postgres.RuntimeID {
+				count++
+				if node != nodeName {
+					return postgresImageWitness{}, fmt.Errorf("runtime placement is ambiguous")
+				}
+			}
+		}
+		if count != 1 || !imageMigrationRuntimePinned(spec, postgres.RuntimeID) {
+			return postgresImageWitness{}, fmt.Errorf("migration requires an unambiguous existing runtime placement")
+		}
+		node, found, err := c.getNode(ctx, nodeName)
+		if err != nil {
+			return postgresImageWitness{}, err
+		}
+		if err := validateImageMigrationNode(node, found); err != nil {
+			return postgresImageWitness{}, err
 		}
 	}
-	volumes, err := c.imageMigrationVolumes(ctx, ns, pod)
+	volumes, err := c.imageMigrationVolumes(ctx, ns, pod, sharedNode)
 	if err != nil {
 		return postgresImageWitness{}, err
 	}
 	witness := postgresImageWitness{Namespace: ns, Cluster: name, ClusterUID: imageString(meta, "uid"), SpecHash: imagePreservedSpecHash(cluster), SystemID: snapshot.Cluster.Status.SystemID, Pod: snapshot.Observation.PodName, PodUID: snapshot.Observation.PodUID, Node: snapshot.Observation.NodeName, SourceImage: source, TargetImage: target, ResourcesHash: pgimage.Hash(main["resources"]), Volumes: volumes}
+	if sharedNode != nil {
+		witness.SharedNodeUID = sharedNode.Metadata.UID
+	}
 	witness.BootstrapPodPatch = &patchValue
 	witness.ColdMigration = snapshot.Cluster.Metadata.Annotations[coldMigrationAnnotation]
 	if alignResources {
@@ -556,7 +574,7 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 		}
 		armDeadline = recordedIntent.CollectedAt.Add(30 * time.Second)
 	} else {
-		witness, err = client.captureImageWitness(ctx, ns, op.ServiceID, image, target.Postgres, catalog)
+		witness, err = s.captureImageWitness(ctx, client, ns, op.ServiceID, image, target.Postgres, catalog)
 		if err != nil {
 			return err
 		}
@@ -665,14 +683,32 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 			if err = validateImageWitness(witness, cluster, pod, snapshot); err != nil {
 				return err
 			}
-			volumes, err := client.imageMigrationVolumes(ctx, ns, pod)
+			spec := imageObject(cluster["spec"])
+			currentImage := imageString(spec, "imageName")
+			var sharedNode *kubeNode
+			if witness.SharedNodeUID != "" {
+				placement, err := s.Store.GetRuntime(target.Postgres.RuntimeID)
+				if err != nil {
+					return fmt.Errorf("recheck configured shared database runtime: %w", err)
+				}
+				node, err := client.imageMigrationSharedNode(ctx, placement, target.Postgres, spec, witness.Node, witness.SharedNodeUID)
+				if err != nil {
+					return err
+				}
+				if currentImage == witness.SourceImage {
+					if err := validateImageMigrationNode(node, true); err != nil {
+						return err
+					}
+				}
+				sharedNode = &node
+			}
+			volumes, err := client.imageMigrationVolumes(ctx, ns, pod, sharedNode)
 			if err != nil {
 				return err
 			}
 			if pgimage.Hash(volumes) != pgimage.Hash(witness.Volumes) {
 				return fmt.Errorf("database PVC/PV identity or specification changed")
 			}
-			currentImage := imageString(imageObject(cluster["spec"]), "imageName")
 			if currentImage == witness.SourceImage {
 				if snapshot.Observation.PodUID != witness.PodUID {
 					return fmt.Errorf("source primary was replaced outside the migration")

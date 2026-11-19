@@ -233,7 +233,7 @@ func (s *Service) abortImageDrain(ctx context.Context, c *kubeClient, op model.O
 		imageString(imageContainer(pod), "image") != w.SourceImage {
 		return fmt.Errorf("waiting for the source database image after drain settings restoration")
 	}
-	volumes, err := c.imageMigrationVolumes(ctx, w.Namespace, pod)
+	volumes, err := c.imageMigrationVolumes(ctx, w.Namespace, pod, nil)
 	if err != nil || pgimage.Hash(volumes) != pgimage.Hash(w.Volumes) {
 		return fmt.Errorf("source database storage identity changed during fast drain abort")
 	}

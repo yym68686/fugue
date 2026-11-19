@@ -51,6 +51,13 @@ target specification hashes are retained for recovery. There is no separate temp
 update or extra resource-change rollout. CNPG performs the primary replacement using its
 existing lifecycle and storage. Fugue does not delete the Pod or PVC itself.
 
+For a managed shared runtime, a hard Cluster affinity to the current primary's
+hostname is also accepted. The hostname must uniquely select that Node, the Node
+must still match the authorized shared pool and location, and the bound storage
+must allow the original Node. A local volume must be pinned to it. Fugue rechecks
+the Node UID and these placement and storage constraints before the image switch
+and when verifying the replacement. It never rewrites affinity to make a migration pass.
+
 If the Cluster has the legacy, standalone bootstrap CPU override in
 `cnpg.io/podPatch`, Fugue removes that exact annotation atomically with the
 image switch. Other `podPatch` values block the live preflight, since they may

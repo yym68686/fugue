@@ -154,7 +154,7 @@ func (c *kubeClient) recoverLegacyImageMigrationPodPatch(ctx context.Context, w 
 			return false, fmt.Errorf("stale bootstrap podPatch recovery requires the original node to have no scheduling taints")
 		}
 	}
-	identity, err := c.imageMigrationVolumeIdentity(ctx, w.Namespace, w.Pod)
+	identity, err := c.imageMigrationVolumeIdentity(ctx, w.Namespace, w.Pod, nil)
 	if err != nil {
 		return false, err
 	}
