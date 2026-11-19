@@ -117,7 +117,9 @@ site must select the same candidate using the same target port.
 
 CI checks live node, Pod, EndpointSlice, release assignment and readiness before
 allowing a selector CAS. The original target port is checked against the original
-Pod and EndpointSlice independently of the candidate target port. After
+Pod and EndpointSlice independently of the candidate target port. The two
+runtime snapshots are read concurrently, then checked against the same clock;
+neither snapshot may extend a proof's original deadline. After
 switching the diagnostic socket, CI verifies signed bundle membership and real
 authoritative UDP/TCP answers there before touching port 53. It repeats both
 checks on port 53 before starting the next site. The separate public observation

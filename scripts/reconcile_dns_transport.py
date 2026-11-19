@@ -5,6 +5,7 @@ Services supply node-local transport only. DNS records, answers, policy and
 runtime probes remain owned by the current signed artifact and its consumers.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import hashlib
 import ipaddress
@@ -296,8 +297,19 @@ def handoff_witness(config, listener, current):
             if selected:
                 from scripts.recover_dns_transport import witness
                 return witness(dict(config, recovery=selected[0]), listener, current, owner)
-            old = handoff_backend(namespace, current["spec"]["selector"], node, old_port)
-            candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
+            if stage:
+                # Each runtime snapshot keeps its original absolute deadline.
+                # Observe the two backends together so slow proxying of the
+                # candidate cannot consume the predecessor's proof window.
+                # Both calls are read-only and independently recheck Pod UID
+                # and resourceVersion; later EndpointSlice/CAS checks remain.
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    old_read = pool.submit(handoff_backend, namespace, current["spec"]["selector"], node, old_port)
+                    candidate_read = pool.submit(handoff_backend, namespace, listener["selector"], node, listener["targetPort"])
+                    old, candidate = old_read.result(), candidate_read.result()
+            else:
+                old = handoff_backend(namespace, current["spec"]["selector"], node, old_port)
+                candidate = handoff_backend(namespace, listener["selector"], node, listener["targetPort"])
             if old["pod"]["metadata"]["uid"] == candidate["pod"]["metadata"]["uid"]:
                 raise ValueError("DNS handoff selectors do not isolate different instances")
             revisions = {}

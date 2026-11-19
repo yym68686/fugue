@@ -3,6 +3,7 @@ import datetime
 import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -252,6 +253,37 @@ class TransportTests(unittest.TestCase):
             endpoints.assert_called_once_with(current, old["pod"], [], 53)
         with self.assertRaisesRegex(ValueError, "different verified backend"):
             transport.handoff_witness(config, dict(config["listeners"][0], targetPort=5353), current)
+
+    def test_staged_handoff_observes_both_backends_in_one_fresh_window(self):
+        config = self.config()
+        current = transport.service(config, config["listeners"][0])
+        listener = dict(config["listeners"][0], selector={"app": "candidate"})
+        config["handoffs"] = [{"address": listener["address"], "previous_revision": "1"*40,
+                               "candidate_revision": "2"*40}]
+        node = {"metadata": {"name": "node", "uid": "node-uid"}}
+        parallel = threading.Barrier(2, timeout=2)
+        snapshot = self.snapshot()
+
+        def backend(namespace, selector, node_name, port):
+            parallel.wait()
+            candidate = selector == listener["selector"]
+            return {"pod": {"metadata": {"uid": "new" if candidate else "old", "annotations":
+                        {"fugue.pro/oci-revision": ("2" if candidate else "1")*40}}},
+                    "snapshot": copy.deepcopy(snapshot)}
+
+        with patch.object(transport, "listener_node", return_value=node), \
+             patch.object(transport, "read_json", return_value={"items": []}), \
+             patch.object(transport, "handoff_backend", side_effect=backend), \
+             patch.object(transport, "validate_handoff_endpoints") as endpoints:
+            witness = transport.handoff_witness(config, listener, current)
+            self.assertEqual((witness["old_uid"], witness["candidate_uid"]), ("old", "new"))
+            self.assertEqual(witness["candidate_revision"], "2"*40)
+            endpoints.assert_called_once()
+            now = datetime.datetime.now(datetime.timezone.utc)
+            snapshot["facts"][0]["proof"]["valid_until"] = (now - datetime.timedelta(seconds=1)).isoformat()
+            with patch.object(transport, "HANDOFF_ATTEMPTS", 1):
+                with self.assertRaisesRegex(ValueError, "proof is expired"):
+                    transport.handoff_witness(config, listener, current)
 
     def test_staged_handoff_stops_on_public_failure_and_reverifies_on_resume(self):
         one = dict(self.config()["listeners"][0], name="public-one", port=53)
