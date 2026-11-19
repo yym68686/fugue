@@ -37,15 +37,14 @@ func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.Man
 				if op.ID != h.OperationID || op.AppID != app.ID || op.TenantID != app.TenantID {
 					continue
 				}
-				switch reason {
-				case platformconfig.ManagedHandoffReleaseReason:
-					if op.ActiveDeploy() {
-						return app, false, true
-					}
-					fallthrough
-				case platformconfig.ManagedHandoffEndpointsReason:
-					if op.SyncedStableRelease(p) {
-						return app, true, true
+				if reason == platformconfig.ManagedHandoffReleaseReason && op.ActiveDeploy() {
+					return app, false, true
+				}
+				if platformconfig.IsManagedHandoffPendingReason(reason) {
+					for _, r := range b.Releases {
+						if r.ID == h.ReleaseID && r.RuntimeID == app.Spec.RuntimeID && op.SyncedStableRelease(p, r) {
+							return app, true, true
+						}
 					}
 				}
 			}
@@ -216,7 +215,26 @@ func managedHandoffMatchesSource(source retainedTrafficSource, intent platformco
 	}
 	// Once the actual new stable has a positive publication this is no longer
 	// a handoff. Ordinary retention and failure policy own subsequent outages.
-	return (!completed || previous.ReleaseID != h.ReleaseID) && managedHandoffSourcePositive(source, previous, runtimeID)
+	if completed {
+		if previous.ReleaseID == h.ReleaseID {
+			return false
+		}
+		var url string
+		for _, r := range b.Releases {
+			if r.ID == h.ReleaseID && r.AppID == h.AppID && r.TenantID == h.TenantID {
+				url = r.UpstreamURL
+				break
+			}
+		}
+		// An in-place completion keeps the Service address. Changing to a
+		// different Service is not evidence that the earlier target still serves.
+		for _, r := range routes {
+			if url == "" || len(r.Upstreams) != 1 || r.Upstreams[0].UpstreamURL != url {
+				return false
+			}
+		}
+	}
+	return managedHandoffSourcePositive(source, previous, runtimeID)
 }
 
 func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, budgets ...time.Duration) error {
@@ -234,7 +252,7 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	}
 	var candidates []candidate
 	for _, r := range p.RuntimeSnapshot.Releases {
-		if r.Status != model.EdgeRouteStatusUnavailable || (r.StatusReason != platformconfig.ManagedHandoffReleaseReason && r.StatusReason != platformconfig.ManagedHandoffEndpointsReason) {
+		if r.Status != model.EdgeRouteStatusUnavailable || !platformconfig.IsManagedHandoffPendingReason(r.StatusReason) {
 			continue
 		}
 		for _, a := range b.Apps {
@@ -254,7 +272,7 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	if err != nil {
 		for _, c := range candidates {
 			h := c.handoff
-			if managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) && (c.completed || managedHandoffOriginPending(*p, h)) {
+			if managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) && managedHandoffOriginEligible(*p, h, c.completed) {
 				// A failed complete proof is not a negative workload observation.
 				// Do not publish an empty replacement for a signed positive path.
 				// Retry capture; do not copy the partial proof, renew its expiry or
@@ -271,7 +289,8 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	var facts []platformconfig.ManagedServingHandoff
 	for _, c := range candidates {
 		h := c.handoff
-		if !managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) {
+		if !managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) ||
+			c.completed && !managedHandoffOriginEligible(*p, h, true) {
 			continue
 		}
 		expires := source.expiry(h.TenantID, h.AppID)
@@ -304,7 +323,7 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	return nil
 }
 
-func managedHandoffOriginPending(p platformIntentProjectionResponse, h platformconfig.ManagedServingHandoff) bool {
+func managedHandoffOriginEligible(p platformIntentProjectionResponse, h platformconfig.ManagedServingHandoff, allowActive bool) bool {
 	origins := map[string]platformconfig.OriginObservation{}
 	for _, origin := range p.RuntimeSnapshot.Origins {
 		origins[origin.Ref] = origin
@@ -315,7 +334,8 @@ func managedHandoffOriginPending(p platformIntentProjectionResponse, h platformc
 			continue
 		}
 		origin, ok := origins[r.OriginRef]
-		if !ok || origin.Status != model.EdgeRouteStatusUnavailable || origin.StatusReason != platformconfig.ManagedHandoffOriginReason {
+		if !ok || !(allowActive && origin.Status == model.EdgeRouteStatusActive ||
+			origin.Status == model.EdgeRouteStatusUnavailable && origin.StatusReason == platformconfig.ManagedHandoffOriginReason) {
 			return false
 		}
 		found = true

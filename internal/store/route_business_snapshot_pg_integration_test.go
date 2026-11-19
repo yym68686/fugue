@@ -109,11 +109,26 @@ VALUES ($1,$2,$3,'deploy','running','managed','system','snapshot-test',now(),now
 	if name, url := find(current); name != "snapshot-new" || url != "http://new" || !strings.HasPrefix(current.Revision, "postgres:") {
 		t.Fatalf("new snapshot missed commit: %s %s", name, url)
 	}
+	var promoted model.AppRelease
+	if len(current.TrafficPolicies) == 1 {
+		for _, r := range current.Releases {
+			if r.ID == current.TrafficPolicies[0].StableReleaseID {
+				promoted = r
+			}
+		}
+	}
 	if len(current.Operations) != 1 || current.Operations[0].ID != opID || current.Operations[0].ActiveDeploy() ||
-		len(current.TrafficPolicies) != 1 || current.TrafficPolicies[0].StableReleaseID == release.ID || !current.Operations[0].SyncedStableRelease(current.TrafficPolicies[0]) {
+		len(current.TrafficPolicies) != 1 || promoted.ID == release.ID || !current.Operations[0].SyncedStableRelease(current.TrafficPolicies[0], promoted) {
 		t.Fatalf("missing completed deploy and its automatic policy sync: ops=%+v policies=%+v", current.Operations, current.TrafficPolicies)
 	}
-	if _, err := s.db.Exec(`UPDATE fugue_app_traffic_policies SET updated_at=updated_at+interval '1 second' WHERE id=$1`, current.TrafficPolicies[0].ID); err != nil {
+	if _, err := s.db.Exec(`UPDATE fugue_app_traffic_policies SET updated_at=updated_at+interval '30 milliseconds' WHERE id=$1`, current.TrafficPolicies[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := s.CaptureRouteBusinessSnapshot(ctx)
+	if err != nil || len(legacy.Operations) != 1 {
+		t.Fatalf("legacy writer lost exact promotion evidence: %+v, %v", legacy.Operations, err)
+	}
+	if _, err := s.db.Exec(`UPDATE fugue_app_traffic_policies SET updated_by_type='api-key', updated_by_id='operator' WHERE id=$1`, current.TrafficPolicies[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	edited, err := s.CaptureRouteBusinessSnapshot(ctx)

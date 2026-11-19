@@ -224,6 +224,52 @@ func TestReleaseRuntimeReadinessUsesExactIndependentWorkload(t *testing.T) {
 	}
 }
 
+func TestReleaseRuntimeReadinessDistinguishesOwnedPreviousEndpoint(t *testing.T) {
+	for _, name := range []string{"owned previous", "pod and RS disagree", "foreign deployment", "additional foreign endpoint", "independent revision"} {
+		t.Run(name, func(t *testing.T) {
+			independent := name == "independent revision"
+			app, r, snap := releaseReadinessFixture(t, false, independent)
+			app.Spec.Replicas, r.SpecSnapshot.Replicas = 1, 1
+			ns := runtime.NamespaceForTenant(app.TenantID)
+			dk, sk := kubeNamespacedKey(ns, r.DeploymentName), kubeNamespacedKey(ns, r.ServiceName)
+			d, svc := snap.deployments[dk], snap.serviceDetails[sk]
+			d.Spec.Replicas = &app.Spec.Replicas
+			d.Status.Replicas, d.Status.ReadyReplicas, d.Status.AvailableReplicas, d.Status.UpdatedReplicas = 1, 1, 1, 1
+			svc.Spec.ClusterIP = "10.96.0.9"
+			snap.deployments[dk], snap.serviceDetails[sk] = d, svc
+			populateReleaseEndpointFixture(t, &snap, r, 1)
+			for podName, pod := range snap.releasePods {
+				pod.Metadata.Annotations.ReleaseKey = "owned-previous-key"
+				pod.Spec.Containers = append(pod.Spec.Containers[:0:0], pod.Spec.Containers...)
+				pod.Spec.Containers[0].Image = "registry.example/app@sha256:" + strings.Repeat("c", 64)
+				snap.releasePods[podName] = pod
+			}
+			for rsName, rs := range snap.releaseReplicaSets {
+				if name != "pod and RS disagree" {
+					rs.Spec.Template.Metadata.Annotations.ReleaseKey = "owned-previous-key"
+				}
+				if name == "foreign deployment" {
+					rs.Metadata.OwnerReferences[0].UID = "unrelated deployment"
+				}
+				snap.releaseReplicaSets[rsName] = rs
+			}
+			if name == "additional foreign endpoint" {
+				slice := &snap.releaseEndpointSlices[sk][0]
+				foreign := slice.Endpoints[0]
+				foreign.TargetRef.UID = "not the owned endpoint"
+				slice.Endpoints = append(slice.Endpoints, foreign)
+			}
+			fact, proof := (&Server{}).observeReleaseRuntimeReadiness(app, r, true, snap, time.Now().UTC())
+			if proof.Ready || fact.Status != model.EdgeRouteStatusUnavailable {
+				t.Fatal("previous endpoint incorrectly counted toward new release", proof)
+			}
+			if got := strings.HasPrefix(fact.StatusReason, platformconfig.ManagedHandoffPreviousCohortPrefix); got != (name == "owned previous") {
+				t.Fatalf("wrong continuity eligibility: %s", fact.StatusReason)
+			}
+		})
+	}
+}
+
 func TestCaptureReleaseRuntimeReadinessAllowsCanaryBeforeServing(t *testing.T) {
 	for _, draining := range []bool{false, true} {
 		t.Run(fmt.Sprintf("canonical_draining=%v", draining), func(t *testing.T) {

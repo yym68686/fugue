@@ -331,6 +331,7 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 	addressOwner := map[netip.Addr]string{}
 	drainingFamilies := map[bool]bool{}
 	readyFamilies := map[bool]bool{}
+	var previousCohort error
 	// Cluster-wide Service routing uses ready endpoints before terminating
 	// ones. Local policies and headless/explicit non-ready publication do not
 	// provide that guarantee. A complete current cohort is required by Observe.
@@ -400,6 +401,12 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 				addressOwner[ip.Unmap()] = target.UID
 			}
 			podKey, rsKey := pod.Metadata.Annotations.ReleaseKey, rs.Spec.Template.Metadata.Annotations.ReleaseKey
+			podReady := false
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == "Ready" {
+					podReady = condition.Status == "True"
+				}
+			}
 			if podKey != key || rsKey != key {
 				// Retain validation of Pod/RS/Deployment, selector and address
 				// ownership above. Explicitly withdrawn old endpoints are not
@@ -414,6 +421,21 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 					}
 					continue
 				}
+				// The new Deployment can be complete while the Service's slice
+				// still names the ready old Pod. A coherent owned singleton is
+				// distinguishable from a foreign endpoint or a torn Pod/RS pair,
+				// but never counts as evidence for the new release. Validate all
+				// other endpoints before reporting this bounded transition.
+				if allowDraining && podKey != "" && podKey == rsKey && pod.Metadata.DeletionTimestamp == "" &&
+					endpoint.Conditions.Ready != nil && *endpoint.Conditions.Ready &&
+					(endpoint.Conditions.Terminating == nil || !*endpoint.Conditions.Terminating) &&
+					(endpoint.Conditions.Serving == nil || *endpoint.Conditions.Serving) &&
+					pod.Status.Phase == "Running" && podReady && len(pod.Spec.Containers) > 0 && pod.Spec.Containers[0].Image != "" {
+					if previousCohort == nil {
+						previousCohort = identityDiffers("pod_release_key", key, podKey)
+					}
+					continue
+				}
 				if podKey != key {
 					return nil, identityDiffers("pod_release_key", key, podKey)
 				}
@@ -421,12 +443,6 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 			}
 			if endpoint.Conditions.Ready == nil || !*endpoint.Conditions.Ready {
 				continue
-			}
-			podReady := false
-			for _, condition := range pod.Status.Conditions {
-				if condition.Type == "Ready" {
-					podReady = condition.Status == "True"
-				}
 			}
 			if endpoint.Conditions.Terminating != nil && *endpoint.Conditions.Terminating || endpoint.Conditions.Serving != nil && !*endpoint.Conditions.Serving || pod.Metadata.DeletionTimestamp != "" || pod.Status.Phase != "Running" || !podReady || len(pod.Spec.Containers) == 0 || !equivalent(app, pod.Spec.Containers[0].Image, release.ResolvedImageRef) {
 				return nil, fmt.Errorf("release endpoint Pod is not currently ready")
@@ -446,6 +462,9 @@ func observeReleaseEndpointPods(app model.App, release model.AppRelease, deploym
 		if !readyFamilies[ipv4] {
 			return nil, fmt.Errorf("release has no ready replacement for a draining endpoint address family")
 		}
+	}
+	if previousCohort != nil {
+		return nil, fmt.Errorf("%s%w", platformconfig.ManagedHandoffPreviousCohortPrefix, previousCohort)
 	}
 	result := make([]EndpointPodIdentity, 0, len(ready))
 	for uid, pod := range ready {

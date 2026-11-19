@@ -18,11 +18,15 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 	}{
 		{"pending endpoints after exact automatic sync", "", true},
 		{"pending generation after exact automatic sync", "generation", true},
+		{"Service still selects an owned previous cohort", "previous_cohort", true},
+		{"older PostgreSQL writer restamps policy", "older_writer", true},
 		{"unrelated historical automatic sync", "older_sync", false},
 		{"not a deploy", "scale", false},
 		{"operator selection", "manual", false},
-		{"origin identity failure", "ownership", false},
+		{"release ownership failure", "ownership", false},
+		{"independent origin failure", "origin", false},
 		{"changed app authority", "cache", false},
+		{"new stable binds a different Service", "service", false},
 		{"insufficient original expiry", "lifetime", false},
 		{"new release already ready", "ready", false},
 	} {
@@ -38,20 +42,32 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 			op.Status, op.CompletedAt = model.OperationStatusCompleted, &completed
 			policy.StableReleaseID, policy.UpdatedAt = "release-next", completed
 			policy.UpdatedByType, policy.UpdatedByID = model.ActorTypeSystem, "stable-release-sync"
+			promoted := completed
+			b.Releases = []model.AppRelease{{ID: policy.StableReleaseID, AppID: policy.AppID, TenantID: policy.TenantID,
+				RuntimeID: b.Apps[0].Spec.RuntimeID, Status: model.AppReleaseStatusServing, Role: model.AppReleaseRoleStable, PromotedAt: &promoted,
+				UpstreamURL: p.RuntimeSnapshot.Releases[0].UpstreamURL}}
 			budget := time.Duration(0)
 			switch test.edit {
 			case "generation":
 				p.RuntimeSnapshot.Releases[0].StatusReason = platformconfig.ManagedHandoffReleaseReason
+			case "previous_cohort":
+				p.RuntimeSnapshot.Releases[0].StatusReason = platformconfig.ManagedHandoffPreviousCohortPrefix + "release endpoint identity differs: field=pod_release_key"
+			case "older_writer":
+				policy.UpdatedAt = completed.Add(30 * time.Millisecond)
 			case "older_sync":
-				policy.UpdatedAt = completed.Add(-time.Second)
+				promoted = completed.Add(-time.Second)
 			case "scale":
 				op.Type = model.OperationTypeScale
 			case "manual":
 				policy.UpdatedByType = model.ActorTypeAPIKey
 			case "ownership":
 				p.RuntimeSnapshot.Releases[0].StatusReason = "release deployment ownership differs"
+			case "origin":
+				p.RuntimeSnapshot.Origins[0].Status, p.RuntimeSnapshot.Origins[0].StatusReason = model.EdgeRouteStatusUnavailable, "service absent"
 			case "cache":
 				p.Intent.Routes[0].CacheNamespace = "operator-defined"
+			case "service":
+				b.Releases[0].UpstreamURL = "http://other-service:8080"
 			case "lifetime":
 				budget = 24 * time.Hour
 			case "ready":
@@ -100,10 +116,10 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 			if err = s.validateRetainedTrafficCompilation(ctx, compiled); err != nil {
 				t.Fatal("exact automatic handoff failed admission", err)
 			}
-			policy.UpdatedAt = policy.UpdatedAt.Add(time.Second)
+			promoted = promoted.Add(-time.Second)
 			persistHandoffBusiness(t, path, b)
 			if err = s.validateRetainedTrafficCompilation(ctx, compiled); err == nil {
-				t.Fatal("stale handoff claim bypassed fresh policy/operation proof")
+				t.Fatal("stale handoff claim bypassed fresh release and operation proof")
 			}
 		})
 	}

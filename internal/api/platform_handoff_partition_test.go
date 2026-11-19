@@ -59,6 +59,9 @@ func persistHandoffBusiness(t *testing.T, path string, b store.RouteBusinessSnap
 	}
 	state.Apps = b.Apps
 	state.AppTrafficPolicies = b.TrafficPolicies
+	if b.Releases != nil {
+		state.AppReleases = b.Releases
+	}
 	state.Operations = nil
 	for _, op := range b.Operations {
 		state.Operations = append(state.Operations, model.Operation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status, CompletedAt: op.CompletedAt})

@@ -48,13 +48,17 @@ func (op RouteBusinessOperation) ActiveDeploy() bool {
 	return op.Type == model.OperationTypeDeploy && (op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent)
 }
 
-// SyncedStableRelease ties the system's sticky actor marker to this exact
-// deployment. Completion and automatic policy sync use the same timestamp
-// in one store transaction; a later deploy or operator change is not proof.
-func (op RouteBusinessOperation) SyncedStableRelease(p model.AppTrafficPolicy) bool {
+// SyncedStableRelease ties the system's sticky policy actor to the release
+// promoted by this exact deployment. The release promotion and operation
+// completion use the same event time, including with older store writers
+// that restamp policy.UpdatedAt after validating the update.
+func (op RouteBusinessOperation) SyncedStableRelease(p model.AppTrafficPolicy, r model.AppRelease) bool {
 	return op.Type == model.OperationTypeDeploy && op.Status == model.OperationStatusCompleted &&
 		op.AppID == p.AppID && op.TenantID == p.TenantID && op.CompletedAt != nil && !op.CompletedAt.IsZero() &&
-		p.UpdatedByType == model.ActorTypeSystem && p.UpdatedByID == stableReleaseSyncActorID && op.CompletedAt.Equal(p.UpdatedAt)
+		p.UpdatedByType == model.ActorTypeSystem && p.UpdatedByID == stableReleaseSyncActorID && !p.UpdatedAt.Before(*op.CompletedAt) &&
+		r.ID != "" && r.ID == p.StableReleaseID && r.AppID == op.AppID && r.TenantID == op.TenantID &&
+		r.Role == model.AppReleaseRoleStable && r.Status == model.AppReleaseStatusServing &&
+		r.PromotedAt != nil && op.CompletedAt.Equal(*r.PromotedAt)
 }
 
 func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusinessSnapshot, error) {
@@ -130,10 +134,17 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 	for _, policy := range snapshot.TrafficPolicies {
 		policies[policy.TenantID+"\x00"+policy.AppID] = policy
 	}
+	stableReleases := make(map[string]model.AppRelease, len(policies))
+	for _, r := range snapshot.Releases {
+		if r.Role == model.AppReleaseRoleStable && r.ID == policies[r.TenantID+"\x00"+r.AppID].StableReleaseID {
+			stableReleases[r.ID] = r
+		}
+	}
 	operations := make([]RouteBusinessOperation, 0)
 	for _, op := range snapshot.Operations {
 		app, ok := currentOperations[op.ID]
-		if ok && op.AppID == app.ID && op.TenantID == app.TenantID && (op.ActiveDeploy() || op.SyncedStableRelease(policies[op.TenantID+"\x00"+op.AppID])) {
+		policy := policies[op.TenantID+"\x00"+op.AppID]
+		if ok && op.AppID == app.ID && op.TenantID == app.TenantID && (op.ActiveDeploy() || op.SyncedStableRelease(policy, stableReleases[policy.StableReleaseID])) {
 			operations = append(operations, op)
 		}
 	}

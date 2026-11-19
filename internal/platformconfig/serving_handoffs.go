@@ -13,6 +13,7 @@ import (
 const ManagedServingHandoffsFact = "managed_serving_handoffs"
 const ManagedHandoffReleaseReason = "release deployment image or current generation is not ready"
 const ManagedHandoffEndpointsReason = "release service-owned endpoint Pods are not ready"
+const ManagedHandoffPreviousCohortPrefix = "release Service still selects a ready previous cohort: "
 const ManagedHandoffOriginReason = "runtime invariant violation: current_image_mismatch"
 
 // This is provenance for retaining an exact signed old route, NOT readiness of
@@ -27,7 +28,12 @@ type ManagedServingHandoff struct {
 
 func (h ManagedServingHandoff) MatchesPendingRelease(r ReleaseObservation) bool {
 	return r.ID == h.ReleaseID && r.AppID == h.AppID && r.TenantID == h.TenantID &&
-		r.Status == model.EdgeRouteStatusUnavailable && (r.StatusReason == ManagedHandoffReleaseReason || r.StatusReason == ManagedHandoffEndpointsReason)
+		r.Status == model.EdgeRouteStatusUnavailable && IsManagedHandoffPendingReason(r.StatusReason)
+}
+
+func IsManagedHandoffPendingReason(reason string) bool {
+	return reason == ManagedHandoffReleaseReason || reason == ManagedHandoffEndpointsReason ||
+		strings.HasPrefix(reason, ManagedHandoffPreviousCohortPrefix)
 }
 
 func ManagedServingHandoffs(snapshot RuntimeSnapshot) ([]ManagedServingHandoff, error) {
