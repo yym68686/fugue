@@ -30,6 +30,74 @@ func TestUnrelatedQualitySourcePolicyPreservesContinuousRecovery(t *testing.T) {
 	testApprovedSourceAdvance(t, true, true)
 }
 
+func TestShadowRecoveryCarriesOnlyExactSourcesIntoServing(t *testing.T) {
+	req, policies, activations := celldns.SourceAuthorizedRequest(t, false)
+	compiled := celldns.Compile(t, req)
+	now := time.Now().UTC()
+	snapshot := celldns.SourceSnapshot(t, req, compiled.DNSArtifact, policies, activations, now)
+	plans, err := dnsroutesource.Build(compiled.DNSArtifact, snapshot, celldns.Keys(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var probe platformconfig.DNSReadinessProbe
+	for _, requirement := range plans.Probes {
+		probe = requirement
+		break
+	}
+	if probe.ID == "" {
+		t.Fatal("missing source probe fixture")
+	}
+	parent := NewService(config.DNSConfig{
+		PlatformScopeKey: platformconfig.AuthorityCellScope("cell-dns"), EdgeGroupID: "cell-dns",
+		CachePath: filepath.Join(t.TempDir(), "dns"),
+	}, nil)
+	parent.PlatformTokenFile = filepath.Join(t.TempDir(), "token")
+	shadow := parent.newIsolatedDNSShadowValidator()
+	if shadow == nil || shadow.probeHistoryStore() == parent.probeHistoryStore() {
+		t.Fatal("shadow must keep its ordinary probe state separate")
+	}
+	policy := &platformconfig.DNSReadinessPolicy{FactFreshnessSeconds: 120}
+	recovery := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{probe.EdgeID}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+	at := now.Add(-90 * time.Second)
+	makeFact := func() dnsReadinessFact {
+		return dnsReadinessFact{ProbeID: probe.ID, Ready: true, Proof: routeprobe.Proof{
+			EdgeID: probe.EdgeID, GroupID: probe.EdgeGroupID, Digest: probe.RouteDigest, State: probe.State,
+			Version: "observed", TrafficRelease: plans.Bindings[probe.CellPublicationDigest],
+			CheckedAt: at, ValidUntil: at.Add(2 * time.Minute),
+		}}
+	}
+	observe := func(worker *Service, artifact model.PlatformArtifact, f dnsReadinessFact) dnsReadinessFact {
+		t.Helper()
+		facts := []dnsReadinessFact{f}
+		if err := worker.observeDNSRouteRecovery(artifact, plans, facts, policy, at); err != nil {
+			t.Fatal(err)
+		}
+		return facts[0]
+	}
+	for i := 0; i < 2; i++ {
+		if f := observe(shadow, compiled.DNSArtifact, makeFact()); !f.Ready {
+			t.Fatal("fixture did not supply a fresh exact shadow proof", f.Reason)
+		}
+		at = at.Add(30 * time.Second)
+	}
+	other := compiled.DNSArtifact
+	other.ID += "-different"
+	if f := observe(parent, other, makeFact()); dnsAvailabilityRecovered(recovery, f, 2*time.Minute, at) {
+		t.Fatal("another DNS artifact inherited shadow recovery")
+	}
+	if f := observe(parent, compiled.DNSArtifact, makeFact()); !dnsAvailabilityRecovered(recovery, f, 2*time.Minute, at) {
+		t.Fatal("serving the same DNS artifact lost actual shadow observations", f.ProbeHistory)
+	}
+	at = at.Add(time.Second)
+	negative := makeFact()
+	negative.Ready, negative.Reason = false, "probe_unavailable"
+	observe(shadow, compiled.DNSArtifact, negative)
+	at = at.Add(time.Second)
+	if f := observe(parent, compiled.DNSArtifact, makeFact()); dnsAvailabilityRecovered(recovery, f, 2*time.Minute, at) || len(f.ProbeHistory) != 1 {
+		t.Fatal("a genuine negative observation must reset exact-source recovery", f.ProbeHistory)
+	}
+}
+
 func testApprovedSourceAdvance(t *testing.T, changePolicy bool, retained ...bool) {
 	global := len(retained) > 0 && retained[0]
 	req, policies, activations := celldns.SourceAuthorizedRequest(t, global)

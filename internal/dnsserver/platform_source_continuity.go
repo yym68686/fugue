@@ -84,7 +84,17 @@ func (s *Service) observeDNSRouteRecovery(dns model.PlatformArtifact, plans *dns
 		}
 		groups[key] = append(groups[key], i)
 	}
-	scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore())
+	historyStore := s.probeHistoryStore()
+	if s.shadowValidationParent != nil {
+		// A shadow and serving assignment for the identical signed DNS
+		// artifact may contribute real observations to the same recovery
+		// window. Only use this for dynamic source recovery: the keys bind
+		// the DNS artifact, producer, constraints and exact route behavior.
+		// The shadow worker still owns its assignments, proof cache, cursor
+		// and probe budget, and cannot write serving state or a serving ACK.
+		historyStore = s.shadowValidationParent.probeHistoryStore()
+	}
+	scheduler := s.servingDNSProbes.shareHistory(historyStore)
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	// Explicitly removed eligibility cannot retain readmission progress.
