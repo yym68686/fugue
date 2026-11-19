@@ -65,7 +65,13 @@ func TestPassiveOrderedProjectionAdmitsReadyCandidatesWithoutChangingFixedOrder(
 	}
 	alias := projection.Intent.DNS[0]
 	alias.Hostname, alias.RecordKind = "alias.example.test", model.EdgeDNSRecordKindCustomDomainTarget
-	projection.Intent.DNS = append(projection.Intent.DNS, alias)
+	seeded := alias
+	seeded.Hostname = "seeded.example.test"
+	strategy.OrderedProjection.Overrides = append(strategy.OrderedProjection.Overrides, platformconfig.DNSOrderOverride{
+		NodeID: "dns-a", Hostname: seeded.Hostname, Type: "A", BootstrapOnly: true,
+		Order: model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-b"}},
+	})
+	projection.Intent.DNS = append(projection.Intent.DNS, alias, seeded)
 	if err := projectOrderedDNSQueries(&projection, strategy, nodes, now); err != nil {
 		t.Fatal(err)
 	}
@@ -74,9 +80,16 @@ func TestPassiveOrderedProjectionAdmitsReadyCandidatesWithoutChangingFixedOrder(
 		if rule.Hostname == alias.Hostname {
 			want = []string{"edge-a"}
 		}
+		if rule.Hostname == seeded.Hostname {
+			want = []string{"edge-b", "edge-a"}
+		}
 		if !reflect.DeepEqual(rule.PhysicalOrder.OrderedEdgeIDs, want) {
 			t.Fatalf("wrong signed candidate set for %s: %+v", rule.Hostname, rule.PhysicalOrder)
 		}
+	}
+	published := projection.Policy.DNSQueryPolicy.OrderedProjection.Overrides
+	if len(published) != 1 || published[0].Hostname != alias.Hostname || len(strategy.OrderedProjection.Overrides) != 2 {
+		t.Fatal("bootstrap metadata escaped into serving policy or mutated source policy")
 	}
 }
 

@@ -62,10 +62,11 @@ type DNSOrderedProjection struct {
 }
 
 type DNSOrderOverride struct {
-	NodeID   string                 `json:"node_id"`
-	Hostname string                 `json:"hostname"`
-	Type     string                 `json:"type"`
-	Order    model.DNSPhysicalOrder `json:"order"`
+	NodeID        string                 `json:"node_id"`
+	Hostname      string                 `json:"hostname"`
+	Type          string                 `json:"type"`
+	Order         model.DNSPhysicalOrder `json:"order"`
+	BootstrapOnly bool                   `json:"bootstrap_only,omitempty"`
 }
 
 func (value *DNSOrderedProjection) UnmarshalJSON(raw []byte) error {
@@ -241,7 +242,7 @@ func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 		seen := map[string]bool{}
 		for _, entry := range ordered.Overrides {
 			key := dnsQueryKey(entry.NodeID, entry.Hostname, entry.Type)
-			if !validDNSConsumerIdentity(entry.NodeID) || !validDNSConsumerZone(entry.Hostname) || entry.Type != "A" && entry.Type != "AAAA" || seen[key] || model.ValidateDNSPhysicalOrder(&entry.Order) != nil {
+			if !validDNSConsumerIdentity(entry.NodeID) || !validDNSConsumerZone(entry.Hostname) || entry.Type != "A" && entry.Type != "AAAA" || seen[key] || model.ValidateDNSPhysicalOrder(&entry.Order) != nil || entry.BootstrapOnly && p.DynamicQuality == nil {
 				return fmt.Errorf("invalid or duplicate physical order override")
 			}
 			seen[key] = true

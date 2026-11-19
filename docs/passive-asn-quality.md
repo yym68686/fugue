@@ -114,7 +114,14 @@ including during shadow and fallback, without using it to change the answer.
 ASN ranking can select only a still-ready member of the signed serving order
 of a single-address dynamic record. The default dynamic projection appends
 placement-authorized members after the configured baseline, without touching
-fixed overrides. A single-answer availability policy on a dynamic record
+fixed overrides. Source policy can mark an exact order as `bootstrap_only`
+under `all_dynamic`: it retains the declared order as a seed and uses the
+same placement-filtered admission as a new domain. The compiler publishes
+the effective order, not the migration marker; unmarked fixed overrides
+remain in the signed runtime override list. The fenced dynamic-quality
+configuration lane may mark existing rows in a metadata-only transition,
+without changing the order, membership, or other source settings.
+A single-answer availability policy on a dynamic record
 does not itself fix the primary. When the compiler publishes an availability
 baseline or bound quality order, the healthy candidates in that signed order
 can compete by ASN, even if a bootstrap override supplied the earlier order.

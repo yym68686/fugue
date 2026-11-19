@@ -141,6 +141,8 @@ def check_delta(previous, successor):
         raise ValueError("policy generation must advance")
     old.pop("generation", None)
     new.pop("generation", None)
+    if bootstrap_only_delta(old, new):
+        return
     before = old.get("dns_query_policy", {}).pop("dynamic_quality", None)
     after = new.get("dns_query_policy", {}).pop("dynamic_quality", None)
     if after is not None and not new.get("dns_query_policy", {}).get("physical_routes"):
@@ -156,6 +158,25 @@ def check_delta(previous, successor):
         new.get("dns_query_policy", {}).pop("physical_routes", None)
     if after is None or before == after or old != new:
         raise ValueError("only the generic quality policy may change")
+
+
+def bootstrap_only_delta(old, new):
+    """Permit a separate migration atom that only marks the same preserved order."""
+    restored = copy.deepcopy(new)
+    left = old.get("dns_query_policy", {})
+    right = restored.get("dns_query_policy", {})
+    if not left.get("dynamic_quality") or not right.get("dynamic_quality"):
+        return False
+    before = left.get("ordered_projection", {}).get("overrides", [])
+    after = right.get("ordered_projection", {}).get("overrides", [])
+    if len(before) != len(after):
+        return False
+    changed = False
+    for prior, row in zip(before, after):
+        if row.get("bootstrap_only") is True and "bootstrap_only" not in prior:
+            changed = True
+            del row["bootstrap_only"]
+    return changed and old == restored
 
 
 def validate_preview(previous, current):

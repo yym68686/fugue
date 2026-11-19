@@ -23,6 +23,33 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_bootstrap_migration_changes_only_explicit_classification(self):
+        config, _ = fixture()
+        previous = copy.deepcopy(config["projection_policy"])
+        previous["generation"] = "old-generation"
+        ordered = previous["dns_query_policy"]["ordered_projection"]
+        ordered["overrides"] = [
+            {"node_id": "dns-a", "hostname": host, "type": "A", "order": copy.deepcopy(ordered["default_order"])}
+            for host in ("a.example.test", "b.example.test")
+        ]
+        next_policy = copy.deepcopy(previous)
+        next_policy["generation"] = config["projection_policy"]["generation"]
+        next_policy["dns_query_policy"]["ordered_projection"]["overrides"][0]["bootstrap_only"] = True
+        quality.check_delta(previous, next_policy)
+        for mutate in (
+            lambda p: p["dns_query_policy"]["ordered_projection"]["overrides"][0]["order"]["ordered_edge_ids"].reverse(),
+            lambda p: p["dns_query_policy"]["ordered_projection"]["overrides"].pop(),
+            lambda p: p["dns_query_policy"]["ordered_projection"]["default_order"]["ordered_edge_ids"].reverse(),
+            lambda p: p["dns_query_policy"]["dynamic_quality"].update(refresh_queries_per_cycle=8),
+            lambda p: p["dns_query_policy"].update(minimum_ttl_seconds=74),
+        ):
+            candidate = copy.deepcopy(next_policy)
+            mutate(candidate)
+            with self.assertRaises(ValueError):
+                quality.check_delta(previous, candidate)
+        with self.assertRaises(ValueError):
+            quality.check_delta(next_policy, previous)
+
     def test_business_drift_restarts_every_check_but_never_relaxes_intent_equality(self):
         for mode, failures, expected in [("latest_verified_same_policy", 1, 2), ("latest_verified_same_policy", 3, 3), ("declared", 1, 1)]:
             outcomes = [quality.QualityPreviewChanged("changed intent")] * failures + [{"accepted": True}]

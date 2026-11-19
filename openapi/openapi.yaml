@@ -38787,6 +38787,9 @@ components:
               hostname: {type: string, minLength: 1, maxLength: 253}
               type: {type: string, enum: [A, AAAA]}
               order: {$ref: '#/components/schemas/DNSPhysicalOrder'}
+              bootstrap_only:
+                type: boolean
+                description: 'Source-only marker for all_dynamic policies. Preserves this order as the starting order, not a fixed selection or endpoint allowlist. Only placement-authorized, route/TLS-ready nodes may participate. Omission retains a fixed override.'
     PlatformDynamicQualityPolicy:
       type: object
       additionalProperties: false

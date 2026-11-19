@@ -62,6 +62,9 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 		return validateBusinessExplorationDelta(oldPolicy, newPolicy)
 	}
 	if operation == "dynamic_quality" {
+		if dnsBootstrapOnlyDelta(oldPolicy, newPolicy) {
+			return nil
+		}
 		if newPolicy.DNSQueryPolicy.DynamicQuality == nil || newPolicy.DNSQueryPolicy.OrderedProjection == nil || reflect.DeepEqual(oldPolicy.DNSQueryPolicy.DynamicQuality, newPolicy.DNSQueryPolicy.DynamicQuality) {
 			return fmt.Errorf("dynamic quality transition requires changed complete default policy")
 		}
@@ -105,4 +108,31 @@ func validatePhysicalDNSUpdate(previous, next Policy, static, oldDNS, newDNS mod
 		return fmt.Errorf("physical DNS transition changed unrelated constraint or DNS strategy")
 	}
 	return nil
+}
+
+// Authorize only the transition from a fixed declaration to the same order
+// as a bootstrap seed. This must be a separate atom from changes to quality,
+// availability, defaults, membership, static routes or any configured order.
+func dnsBootstrapOnlyDelta(old, next ProjectionPolicyInput) bool {
+	if old.DNSQueryPolicy.DynamicQuality == nil || next.DNSQueryPolicy.DynamicQuality == nil ||
+		old.DNSQueryPolicy.OrderedProjection == nil || next.DNSQueryPolicy.OrderedProjection == nil {
+		return false
+	}
+	query := *next.DNSQueryPolicy
+	query.OrderedProjection = platformconfig.CloneDNSOrderedProjection(query.OrderedProjection)
+	before, after := old.DNSQueryPolicy.OrderedProjection.Overrides, query.OrderedProjection.Overrides
+	if len(before) != len(after) {
+		return false
+	}
+	changed := false
+	for i := range after {
+		if before[i].BootstrapOnly && !after[i].BootstrapOnly {
+			return false
+		}
+		changed = changed || after[i].BootstrapOnly != before[i].BootstrapOnly
+		after[i].BootstrapOnly = before[i].BootstrapOnly
+	}
+	next.DNSQueryPolicy = &query
+	old.Generation, next.Generation = "", ""
+	return changed && reflect.DeepEqual(old, next)
 }

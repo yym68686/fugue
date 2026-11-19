@@ -84,11 +84,23 @@ func passiveExploration(prefix netip.Prefix, now time.Time) uint64 {
 }
 
 func (s *Service) runPassiveASNDNS(ctx context.Context) {
-	ticker := time.NewTicker(time.Minute)
+	// Detect a newly loaded binding locally rather than waiting a full minute
+	// to fetch it. HTTP work remains serial and bounded even when DNS or the
+	// publisher is recovering.
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+	var prior passiveASNBinding
+	var attempted time.Time
 	for ctx.Err() == nil {
-		if err := s.refreshPassiveASNDNS(ctx); err != nil && ctx.Err() == nil && s.Logger != nil {
-			s.Logger.Printf("DNS passive ASN refresh: %v", err)
+		st := s.currentDNSServingState()
+		if st == nil || !st.passiveASNDynamic() {
+			s.passiveASNView.Store(nil)
+			prior, attempted = passiveASNBinding{}, time.Time{}
+		} else if binding := st.passiveASNBinding(); binding.refreshDue(prior, attempted, time.Now(), s.passiveASNView.Load()) {
+			prior, attempted = binding, time.Now()
+			if err := s.refreshPassiveASNDNS(ctx); err != nil && ctx.Err() == nil && s.Logger != nil {
+				s.Logger.Printf("DNS passive ASN refresh: %v", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -96,6 +108,32 @@ func (s *Service) runPassiveASNDNS(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+type passiveASNBinding struct {
+	artifact, digest, release, consumers string
+	fence                                int64
+}
+
+func (st *dnsServingState) passiveASNBinding() passiveASNBinding {
+	c := st.record.Candidate
+	return passiveASNBinding{c.Artifact.ID, c.Artifact.ContentHash, c.Assignment.ReleaseSetID, c.Assignment.ExpectedConsumerSetID, c.Assignment.FencingToken}
+}
+
+func (b passiveASNBinding) matchesView(view *passiveasn.View, now time.Time) bool {
+	return view != nil && view.DNSArtifactID == b.artifact && view.DNSDigest == b.digest && view.ReleaseSetID == b.release &&
+		view.ConsumerSetID == b.consumers && view.FencingToken == b.fence && view.ExpiresAt.After(now)
+}
+
+func (b passiveASNBinding) refreshDue(prior passiveASNBinding, attempted, now time.Time, view *passiveasn.View) bool {
+	if b != prior || attempted.IsZero() {
+		return true
+	}
+	interval := 15 * time.Second
+	if b.matchesView(view, now) && view.Mode == "active" {
+		interval = time.Minute
+	}
+	return now.Sub(attempted) >= interval
 }
 
 func (s *Service) refreshPassiveASNDNS(ctx context.Context) error {
@@ -219,9 +257,11 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	}
 	policy := record.AnswerPolicy
 	availabilityPrimary := passiveAvailabilityPrimary(policy, audit.SelectionResult)
+	primary := audit.SelectionResult == "physical_order_primary" || audit.SelectionResult == "physical_selected_primary" || audit.SelectionResult == "physical_learning_primary"
 	// Explicit service/placement constraints, effective fixed orders, and
-	// separate allocation rules retain their original semantics.
-	if !hasReadiness || st.passiveServicePolicy[record.Name] ||
+	// separate allocation rules retain their original semantics. Once the
+	// signed primary is unavailable, readiness failover owns the answer.
+	if !primary || !hasReadiness || st.passiveServicePolicy[record.Name] ||
 		(st.passiveFixed[record.Name+"\x00"+record.Type] || policy.Availability != nil) && !availabilityPrimary ||
 		len(audit.Answered) != 1 || !policy.HealthRequired || !policy.RouteReadyRequired ||
 		len(record.ScopedCandidates) != 0 || policy.ECSEnabled ||
@@ -238,10 +278,7 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 		result.Scope = uint8(prefix.Bits())
 	}
 	view := rt.view
-	c := st.record.Candidate
-	if view == nil || view.NodeID != rt.node || view.DNSArtifactID != c.Artifact.ID || view.DNSDigest != c.Artifact.ContentHash ||
-		view.ReleaseSetID != c.Assignment.ReleaseSetID || view.ConsumerSetID != c.Assignment.ExpectedConsumerSetID ||
-		view.FencingToken != c.Assignment.FencingToken || !view.ExpiresAt.After(now) {
+	if !st.passiveASNBinding().matchesView(view, now) || view.NodeID != rt.node {
 		result.Decision.Reason = "publication_unavailable"
 		return result
 	}

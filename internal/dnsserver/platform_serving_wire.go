@@ -44,7 +44,7 @@ func buildDNSServingState(record dnsServingCheckpoint, p dnsServingPayload, rout
 		st.passiveFixed = make(map[string]bool)
 		if policy.OrderedProjection != nil {
 			for _, row := range policy.OrderedProjection.Overrides {
-				if row.NodeID == node {
+				if row.NodeID == node && !row.BootstrapOnly {
 					st.passiveFixed[row.Hostname+"\x00"+row.Type] = true
 				}
 			}

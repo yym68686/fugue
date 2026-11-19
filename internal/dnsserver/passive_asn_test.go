@@ -115,6 +115,32 @@ func TestPassiveASNWireSelectionAndReceipt(t *testing.T) {
 	}
 }
 
+func TestPassiveASNRefreshFollowsBindingWithoutUsingStaleEvidence(t *testing.T) {
+	st, rt, now := passiveASNTestRuntime(t, "active", true)
+	binding := st.passiveASNBinding()
+	if !binding.refreshDue(binding, time.Time{}, now, nil) ||
+		binding.refreshDue(binding, now.Add(-5*time.Second), now, nil) ||
+		!binding.refreshDue(binding, now.Add(-15*time.Second), now, nil) ||
+		binding.refreshDue(binding, now.Add(-30*time.Second), now, rt.view) ||
+		!binding.refreshDue(binding, now.Add(-time.Minute), now, rt.view) {
+		t.Fatal("refresh budget should distinguish active and pending observations")
+	}
+	shadow := *rt.view
+	shadow.Mode = "shadow"
+	if !binding.refreshDue(binding, now.Add(-15*time.Second), now, &shadow) {
+		t.Fatal("shadow should be polled for promotion")
+	}
+	st.record.Candidate.Assignment.FencingToken++
+	if updated := st.passiveASNBinding(); updated.matchesView(rt.view, now) || !updated.refreshDue(binding, now, now, rt.view) {
+		t.Fatal("a new publication requires immediate refresh and cannot use the old observation")
+	}
+	req := passiveASNTestQuery("203.0.113.0", 24)
+	resp := st.answerObserved(req, "198.51.100.2:53", now, nil, rt)
+	if len(resp.Answer) != 1 || resp.Answer[0].(*dns.A).A.String() != "8.8.8.8" {
+		t.Fatal("stale publication must keep signed baseline", resp)
+	}
+}
+
 func TestPassiveASNCanSupersedeHealthyAvailabilityBaseline(t *testing.T) {
 	for _, tc := range []struct {
 		name, inputReason, unavailable, wantEdge, wantReason string
