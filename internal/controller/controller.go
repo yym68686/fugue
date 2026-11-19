@@ -902,8 +902,8 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				s.Logger.Printf("operation %s retained active pending storage unmount verification: %v", op.ID, err)
 				return nil
 			}
-			if errors.Is(err, errSafeRolloutTrafficPending) {
-				return s.deferSafeRolloutTrafficConfirmation(ctx, op)
+			if message := safeRolloutPendingResult(err); message != "" {
+				return s.deferSafeRolloutPending(ctx, op, message)
 			}
 			if errors.Is(err, errAppRequestResizeUnsettled) {
 				s.Logger.Printf("operation %s retained active pending app resource request resize verification: %v", op.ID, err)
@@ -1249,7 +1249,10 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if err != nil {
 				return fmt.Errorf("render managed app manifest for app %s: %w", app.ID, err)
 			}
-			if op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate {
+			if (op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeMigrate) &&
+				(safeRollout == nil || !safeRollout.AlreadyPromoted) {
+				// A resumed promotion already consumed the candidate surge.
+				// The canonical apply has its own live admission guard.
 				if err := s.preflightManagedAppZeroDowntimeRolloutCapacity(ctx, app, scheduling); err != nil {
 					return fmt.Errorf("preflight managed app rollout capacity %s: %w", app.ID, err)
 				}
@@ -1356,8 +1359,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
 				alignedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
 				if errors.Is(err, errSafeCanonicalHandoffPending) {
-					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "promoted candidate serves while original canonical connections drain; reconciliation will retry", safeRollout.Candidate.ID, map[string]any{"error": err.Error()})
-					break
+					return s.waitForSafeRolloutCanonicalHandoff(ctx, op, app, safeRollout.Candidate.ID, err)
 				}
 				if err != nil {
 					return fmt.Errorf("align managed app desired state after safe rollout %s: %w", app.ID, err)
@@ -1382,8 +1384,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				// restores canonical selectors only once it is ready.
 				if _, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling); err != nil {
 					if errors.Is(err, errSafeCanonicalHandoffPending) {
-						s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "canonical replacement ready; service handoff awaits renewed safety evidence", safeRollout.Candidate.ID, map[string]any{"error": err.Error()})
-						break
+						return s.waitForSafeRolloutCanonicalHandoff(ctx, op, app, safeRollout.Candidate.ID, err)
 					}
 					return fmt.Errorf("finish canonical service handoff: %w", err)
 				}
@@ -1393,8 +1394,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 					return err
 				}
 				if !stableReleaseAligned {
-					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusSkipped, "stable desired state aligned but edge route bundle has not confirmed canonical stable release yet", safeRollout.Candidate.ID, nil)
-					break
+					s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusRunning, "stable desired state aligned but edge route bundle has not confirmed canonical stable release yet", safeRollout.Candidate.ID, nil)
+					return safeRolloutTrafficPending(ctx)
 				}
 				s.recordSafeRolloutReleaseStep(op, app, "stable_alignment", model.ReleaseStepStatusCompleted, "stable desired state aligned after edge route confirmation", safeRollout.Candidate.ID, nil)
 				s.finalizeSafeZeroDowntimePreviousRetire(ctx, op, safeRollout)

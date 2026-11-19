@@ -401,24 +401,27 @@ func (s *Service) alignSafeRolloutPromotedStableRelease(ctx context.Context, op 
 	if !s.safeRolloutBoundReleaseMatchesApp(state.CandidateApp, latest) {
 		return false, fmt.Errorf("canonical target differs from bound release executable intent")
 	}
-	since := time.Now().UTC()
 	aligned := s.safeRolloutApplyCanonicalStableFields(ctx, state.CandidateApp, latest, "safe rollout promoted stable aligned to canonical service")
 	aligned.Role = model.AppReleaseRoleStable
 	aligned.Status = model.AppReleaseStatusServing
 	aligned.StatusReason = ""
-	updated, err := s.Store.UpdateAppRelease(aligned)
-	if err != nil {
-		return false, fmt.Errorf("align promoted safe rollout release to canonical stable service: %w", err)
+	// A retry must not reset when the canonical target was first published.
+	if latest.DeploymentName != aligned.DeploymentName || latest.ServiceName != aligned.ServiceName || latest.UpstreamURL != aligned.UpstreamURL {
+		updated, err := s.Store.UpdateAppRelease(aligned)
+		if err != nil {
+			return false, fmt.Errorf("align promoted safe rollout release to canonical stable service: %w", err)
+		}
+		latest = updated
+		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_alignment", model.ReleaseStepStatusCompleted, "promoted stable release points to canonical service", updated.ID, map[string]any{
+			"upstream_url":      updated.UpstreamURL,
+			"deployment_name":   updated.DeploymentName,
+			"service_name":      updated.ServiceName,
+			"stable_release_id": updated.ID,
+		})
 	}
-	state.Candidate = updated
-	s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "stable_release_alignment", model.ReleaseStepStatusCompleted, "promoted stable release points to canonical service", updated.ID, map[string]any{
-		"upstream_url":      updated.UpstreamURL,
-		"deployment_name":   updated.DeploymentName,
-		"service_name":      updated.ServiceName,
-		"stable_release_id": updated.ID,
-	})
-	if !s.waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx, op, state, since) {
-		return false, safeRolloutTrafficPending(ctx)
+	state.Candidate = latest
+	if !s.waitSafeRolloutStableReleaseEdgeRouteBundleApplied(ctx, op, state, latest.UpdatedAt) {
+		return false, ctx.Err()
 	}
 	return true, nil
 }

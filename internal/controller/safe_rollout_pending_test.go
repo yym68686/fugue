@@ -17,6 +17,44 @@ func (deadlineEdgeObserver) WaitForSafeRolloutEdgeRouteBundle(context.Context, m
 	return safeRolloutEdgeBundleObservation{Ready: false, Summary: map[string]any{"waiting_nodes": []string{"edge-a:app_traffic_proof_mismatch"}}}, context.DeadlineExceeded
 }
 
+type canonicalAlignmentRetryObserver struct {
+	starts []time.Time
+}
+
+func (o *canonicalAlignmentRetryObserver) WaitForSafeRolloutEdgeRouteBundle(_ context.Context, _ model.App, _ model.AppRelease, _ int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+	o.starts = append(o.starts, since)
+	if len(o.starts) == 1 {
+		return safeRolloutEdgeBundleObservation{}, context.DeadlineExceeded
+	}
+	return safeRolloutEdgeBundleObservation{Ready: true}, nil
+}
+
+func TestCanonicalAlignmentRetryKeepsPublicationTimestamp(t *testing.T) {
+	st, previous, candidate, op := newSafeRolloutTestState(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer upstream.Close()
+	s := newSafeRolloutIntegrationService(st, upstream.URL, safeRolloutDrainMetrics{})
+	ctx := context.Background()
+	state, err := s.prepareSafeZeroDowntimeRollout(ctx, op, previous, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeSafeZeroDowntimeRollout(ctx, op, state); err != nil {
+		t.Fatal(err)
+	}
+	o := &canonicalAlignmentRetryObserver{}
+	s.safeRolloutEdgeBundleObserver = o
+	if ready, err := s.alignSafeRolloutPromotedStableRelease(ctx, op, state); err != nil || ready {
+		t.Fatalf("canonical timeout must not confirm handoff: ready=%v err=%v", ready, err)
+	}
+	if ready, err := s.alignSafeRolloutPromotedStableRelease(ctx, op, state); err != nil || !ready {
+		t.Fatalf("retry did not accept fresh proof: ready=%v err=%v", ready, err)
+	}
+	if len(o.starts) != 2 || o.starts[0].IsZero() || !o.starts[0].Equal(o.starts[1]) {
+		t.Fatalf("retry moved the publication timestamp: %v", o.starts)
+	}
+}
+
 func TestSafeRolloutChildDeadlineRemainsPendingAndResumesSameRelease(t *testing.T) {
 	st, previous, candidate, op := newSafeRolloutTestState(t)
 	op, claimed, err := st.TryClaimPendingOperation(op.ID)
@@ -34,7 +72,7 @@ func TestSafeRolloutChildDeadlineRemainsPendingAndResumesSameRelease(t *testing.
 	if err = s.completeSafeZeroDowntimeRollout(context.Background(), op, state); !errors.Is(err, errSafeRolloutTrafficPending) || state.ServingVerified || state.StableAlignmentAllowed {
 		t.Fatal("child timeout claimed success", err, state)
 	}
-	if err = s.deferSafeRolloutTrafficConfirmation(context.Background(), op); err != nil {
+	if err = s.deferSafeRolloutPending(context.Background(), op, safeRolloutPendingResult(err)); err != nil {
 		t.Fatal(err)
 	}
 	pending, _ := st.GetOperation(op.ID)
@@ -73,6 +111,57 @@ func TestSafeRolloutChildDeadlineRemainsPendingAndResumesSameRelease(t *testing.
 	}
 }
 
+func TestSafeRolloutCanonicalWaitRemainsNonterminal(t *testing.T) {
+	st, previous, candidate, op := newSafeRolloutTestState(t)
+	op, claimed, err := st.TryClaimPendingOperation(op.ID)
+	if err != nil || !claimed {
+		t.Fatal("claim", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer upstream.Close()
+	s := newSafeRolloutIntegrationService(st, upstream.URL, safeRolloutDrainMetrics{})
+	ctx := context.Background()
+	state, err := s.prepareSafeZeroDowntimeRollout(ctx, op, previous, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.completeSafeZeroDowntimeRollout(ctx, op, state); err != nil {
+		t.Fatal(err)
+	}
+	wait := s.waitForSafeRolloutCanonicalHandoff(ctx, op, candidate, state.Candidate.ID, errSafeCanonicalHandoffPending)
+	if !errors.Is(wait, errSafeRolloutCanonicalPending) {
+		t.Fatalf("missing canonical wait: %v", wait)
+	}
+	if err := s.deferSafeRolloutPending(ctx, op, safeRolloutPendingResult(wait)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := st.GetOperation(op.ID)
+	if err != nil || !model.OperationWaitingForCanonicalHandoff(pending) || pending.CompletedAt != nil ||
+		pendingOperationRetryReady(pending, pending.UpdatedAt) || !pendingOperationRetryReady(pending, pending.UpdatedAt.Add(30*time.Second)) {
+		t.Fatal("canonical wait did not remain pending with backoff", pending, err)
+	}
+	attempt, _, _ := st.FindReleaseAttemptForOperation(op.ID)
+	steps, _ := st.ListReleaseSteps(candidate.TenantID, true, attempt.ID)
+	waitRecorded := false
+	for _, step := range steps {
+		if step.Type == model.ReleaseStepTypeMarkDeployedDigest || step.Type == model.ReleaseStepTypeFinalize {
+			t.Fatal("unconfirmed handoff finalized", step)
+		}
+		waitRecorded = waitRecorded || (step.Payload["phase"] == "stable_alignment" && step.Status == model.ReleaseStepStatusRunning)
+	}
+	if !waitRecorded || attempt.FinishedAt != nil {
+		t.Fatal("nonterminal handoff absent from release history", steps)
+	}
+	reclaimed, claimed, err := st.TryClaimPendingOperation(op.ID)
+	if err != nil || !claimed {
+		t.Fatal("reclaim", err)
+	}
+	resumed, err := s.prepareSafeZeroDowntimeRollout(ctx, reclaimed, previous, candidate)
+	if err != nil || resumed == nil || !resumed.AlreadyPromoted || resumed.Candidate.ID != state.Candidate.ID {
+		t.Fatal("handoff retry did not recover the serving revision", resumed, err)
+	}
+}
+
 func TestSafeRolloutPendingDoesNotOverrideCancellation(t *testing.T) {
 	st, _, _, op := newSafeRolloutTestState(t)
 	op, _, _ = st.TryClaimPendingOperation(op.ID)
@@ -80,7 +169,7 @@ func TestSafeRolloutPendingDoesNotOverrideCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Service{Store: st}
-	if err := s.deferSafeRolloutTrafficConfirmation(context.Background(), op); err != nil {
+	if err := s.deferSafeRolloutPending(context.Background(), op, model.OperationResultCanonicalHandoffPending); err != nil {
 		t.Fatal(err)
 	}
 	after, _ := st.GetOperation(op.ID)
@@ -128,7 +217,7 @@ func TestSafeRolloutCanaryChildDeadlineResumesBeforeHealthGate(t *testing.T) {
 			if err := s.completeSafeZeroDowntimeRollout(context.Background(), op, state); !errors.Is(err, errSafeRolloutTrafficPending) {
 				t.Fatal("canary timeout must remain pending", err)
 			}
-			if err := s.deferSafeRolloutTrafficConfirmation(context.Background(), op); err != nil {
+			if err := s.deferSafeRolloutPending(context.Background(), op, model.OperationResultTrafficConfirmationPending); err != nil {
 				t.Fatal(err)
 			}
 			op, claimed, err = st.TryClaimPendingOperation(op.ID)

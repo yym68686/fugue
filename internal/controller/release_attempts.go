@@ -118,6 +118,10 @@ func (s *Service) markReleaseAttemptOperationRunning(op model.Operation, app mod
 		stepType = model.ReleaseStepTypeImageImport
 	}
 	s.updateReleaseAttemptBestEffort(attempt)
+	started := time.Time{}
+	if op.StartedAt != nil {
+		started = op.StartedAt.UTC()
+	}
 	s.recordReleaseStepBestEffort(model.ReleaseStep{
 		TenantID:         app.TenantID,
 		ReleaseAttemptID: attempt.ID,
@@ -125,6 +129,7 @@ func (s *Service) markReleaseAttemptOperationRunning(op model.Operation, app mod
 		Type:             stepType,
 		Status:           model.ReleaseStepStatusRunning,
 		Summary:          "operation started",
+		StartedAt:        started,
 	})
 }
 

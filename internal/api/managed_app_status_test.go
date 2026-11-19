@@ -225,6 +225,14 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 	namespace := runtime.NamespaceForTenant(app.TenantID)
 	canonicalDeploymentName := runtime.RuntimeAppResourceName(app)
 	canonicalServiceName := runtime.RuntimeAppServiceName(app)
+	previousReady := time.Now().UTC().Add(-time.Hour)
+	app.Status.CurrentReleaseStartedAt = &previousReady
+	app.Status.CurrentReleaseReadyAt = &previousReady
+	var releaseReady *time.Time
+	if !implicit {
+		ready := time.Now().UTC()
+		releaseReady = &ready
+	}
 	release, err := stateStore.CreateAppRelease(model.AppRelease{
 		TenantID:         app.TenantID,
 		AppID:            app.ID,
@@ -233,6 +241,7 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 		DeploymentName:   runtime.RuntimeAppResourceName(app) + "-candidate-release",
 		ServiceName:      runtime.RuntimeAppServiceName(app) + "-candidate-release",
 		Status:           model.AppReleaseStatusServing,
+		ReadyAt:          releaseReady,
 	})
 	if err != nil {
 		t.Fatalf("create serving release: %v", err)
@@ -312,6 +321,16 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 	}
 	if !slices.Contains(observed.ObservedStatus.EvidenceSources, "app_release_traffic_policy") {
 		t.Fatalf("serving release evidence source missing: %+v", observed.ObservedStatus.EvidenceSources)
+	}
+	if observed.Status.CurrentReleaseStartedAt == nil || !observed.Status.CurrentReleaseStartedAt.Equal(release.CreatedAt) {
+		t.Fatalf("effective release start did not come from %s: %+v", release.ID, observed.Status)
+	}
+	gotReady := observed.Status.CurrentReleaseReadyAt
+	if (releaseReady == nil && gotReady != nil) || (releaseReady != nil && (gotReady == nil || !gotReady.Equal(*releaseReady))) {
+		t.Fatalf("effective release readiness did not come from %s: %v, want %v", release.ID, gotReady, releaseReady)
+	}
+	if observed.StoredStatus == nil || observed.StoredStatus.CurrentReleaseReadyAt == nil || !observed.StoredStatus.CurrentReleaseReadyAt.Equal(previousReady) {
+		t.Fatalf("runtime observation rewrote stored readiness: %+v", observed.StoredStatus)
 	}
 	if implicit {
 		persisted, err := stateStore.GetAppRelease(app.TenantID, true, release.ID)

@@ -38,6 +38,9 @@ For an app with `continuity.zero_downtime.mode=safe`, a deploy should additional
 5. `canary_gate`: active probes and passive request metrics pass for that step.
 6. `final_gate`: the candidate is checked once more before full promotion.
 7. `promote`: candidate becomes `stable`; the old stable becomes `previous/draining`.
+8. `stable_alignment`: verify the stable-Service handoff and old canonical
+   connection drain. The deploy stays pending while this proof or the required
+   Edge confirmation is missing. Fugue retries the same promoted release.
 
 If a gate fails, Fugue records `app_release_gate_failure` evidence, sets
 candidate traffic to zero, marks the candidate failed, and keeps traffic on the
@@ -104,7 +107,11 @@ Use these to determine whether failures are isolated to one app or systemic.
 3. If canary traffic was shifted and then failed, verify the traffic policy has
    returned to stable-only.
 4. If the old stable is still `previous/draining`, this is expected during the
-   rollback window. It must not receive new traffic after stable-only restore.
+   rollback window. Changing a Kubernetes Service selector moves new TCP
+   connections. Existing connections may still carry requests and are allowed
+   to finish. Inspect `fugue operation explain <operation-id>` for the canonical
+   handoff or Edge confirmation wait and the release attempt for the exact
+   evidence. Do not delete old Pods to bypass a drain.
 5. If the candidate is healthy but metrics are unavailable, treat that as an
    observability gap. Do not manually promote unless active probes and direct
    request tests are clean.

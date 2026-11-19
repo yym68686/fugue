@@ -10,6 +10,7 @@ const (
 	OperationControllerLaneUnknown               = "unknown"
 	OperationResultDeployImageReplicationPending = "deploy image replication is pending"
 	OperationResultTrafficConfirmationPending    = "traffic publication confirmation is pending"
+	OperationResultCanonicalHandoffPending       = "new release is serving; stable Service handoff or old connection drain is pending"
 )
 
 // OperationWaitingForImageReplication reports the recoverable prerequisite
@@ -22,6 +23,10 @@ func OperationWaitingForImageReplication(op Operation) bool {
 
 func OperationWaitingForTrafficConfirmation(op Operation) bool {
 	return op.Status == OperationStatusPending && strings.HasPrefix(op.ResultMessage, OperationResultTrafficConfirmationPending)
+}
+
+func OperationWaitingForCanonicalHandoff(op Operation) bool {
+	return op.Status == OperationStatusPending && strings.HasPrefix(op.ResultMessage, OperationResultCanonicalHandoffPending)
 }
 
 func OperationControllerLaneName(op Operation) string {

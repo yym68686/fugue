@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -58,7 +57,7 @@ func (t *controllerOperationTimer) Log(logger *log.Logger, scope string, op mode
 	if err != nil {
 		status = "failed"
 	}
-	if errors.Is(err, errSafeRolloutTrafficPending) {
+	if safeRolloutPendingResult(err) != "" {
 		status = "pending"
 	}
 	logger.Printf(

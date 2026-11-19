@@ -206,6 +206,8 @@ type managedAppRuntimeEvidence struct {
 	imageLocationObservedAt      time.Time
 	servingReleaseID             string
 	servingReleaseReady          bool
+	servingReleaseCreatedAt      time.Time
+	servingReleaseReadyAt        *time.Time
 }
 
 type managedAppKubeSnapshot struct {
@@ -1060,7 +1062,7 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		errorMessage = "live runtime observation is unavailable"
 	}
 	managed := entry.managed
-	if entry.evidence.servingReleaseReady {
+	if complete && fresh && entry.evidence.servingReleaseReady {
 		if managed.Metadata.Generation <= 0 {
 			managed.Metadata.Generation = 1
 		}
@@ -1093,7 +1095,22 @@ func (s *Server) applyManagedAppObservation(app model.App, entry managedAppStatu
 		InvariantViolations:     entry.evidence.invariantViolations,
 		ErrorMessage:            errorMessage,
 	})
-	return runtime.ApplyAppObservedStatus(app, observed)
+	out := runtime.ApplyAppObservedStatus(app, observed)
+	if observed.ServingReleaseID != "" {
+		// The effective status describes this specific observed release. The
+		// ManagedApp can still carry readiness history from its old canonical pod.
+		out.Status.CurrentReleaseStartedAt = nil
+		if at := entry.evidence.servingReleaseCreatedAt; !at.IsZero() {
+			started := at.UTC()
+			out.Status.CurrentReleaseStartedAt = &started
+		}
+		out.Status.CurrentReleaseReadyAt = nil
+		if at := entry.evidence.servingReleaseReadyAt; at != nil && !at.IsZero() {
+			ready := at.UTC()
+			out.Status.CurrentReleaseReadyAt = &ready
+		}
+	}
+	return out
 }
 
 func (s *Server) applyManagedAppListObservation(apps []model.App, entry managedAppStatusListCacheEntry, runtimeByID map[string]model.Runtime, fresh bool, errorMessage string) []model.App {
@@ -1499,6 +1516,8 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		(!serviceRequired || (boolPointerTrue(evidence.servicePresent) && boolPointerTrue(evidence.endpointReady))) {
 		evidence.servingReleaseReady = true
 		evidence.servingReleaseID = strings.TrimSpace(servingRelease.ID)
+		evidence.servingReleaseCreatedAt = servingRelease.CreatedAt
+		evidence.servingReleaseReadyAt = servingRelease.ReadyAt
 		evidence.evidenceSources = append(evidence.evidenceSources, "app_release_traffic_policy")
 	}
 

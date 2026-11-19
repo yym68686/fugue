@@ -39,7 +39,9 @@ func (s *Server) handleGetOperationDiagnosis(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, err)
 		return
 	}
-	s.attachOperationBackupDiagnosis(op, &diagnosis)
+	if !isSafeRolloutOperationWait(op) {
+		s.attachOperationBackupDiagnosis(op, &diagnosis)
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"diagnosis": redactOperationDiagnosisForAPI(diagnosis)})
 }
 
@@ -49,6 +51,10 @@ func (s *Server) attachOperationEvidenceDiagnosis(ctx context.Context, op model.
 	}
 	if strings.TrimSpace(diagnosis.Confidence) == "" {
 		diagnosis.Confidence = defaultDiagnosisConfidence(op, *diagnosis)
+	}
+	if isSafeRolloutOperationWait(op) {
+		// Earlier scheduling and Pod evidence cannot explain a later handoff wait.
+		return nil
 	}
 	evidence, err := s.store.ListOperationEvidence(model.OperationEvidenceFilter{
 		TenantID:               op.TenantID,
@@ -294,6 +300,19 @@ func (s *Server) diagnoseOperation(ctx context.Context, op model.Operation) (mod
 	app, appFound, err := s.getDiagnosisApp(op.AppID)
 	if err != nil {
 		return model.OperationDiagnosis{}, err
+	}
+	if isSafeRolloutOperationWait(op) {
+		category, hint := "safe-rollout-traffic-confirmation", "The rollout will retry automatically. Inspect its release attempt and Edge publication evidence."
+		if model.OperationWaitingForCanonicalHandoff(op) {
+			category, hint = "safe-rollout-canonical-handoff", "The rollout will retry automatically. Inspect the release attempt for stable Service and old connection drain evidence."
+		}
+		return model.OperationDiagnosis{
+			Category: category,
+			Summary:  strings.TrimSpace(op.ResultMessage),
+			Hint:     hint,
+			AppName:  diagnosisAppName(app, appFound),
+			Service:  diagnosisComposeService(op, app, appFound),
+		}, nil
 	}
 	imageDiagnosis, err := s.diagnoseDeployImageState(ctx, op, app, appFound)
 	if err != nil {
@@ -737,19 +756,20 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 
 	diagnosis := model.OperationDiagnosis{
 		Category: "queue",
-		Summary:  firstNonEmpty(strings.TrimSpace(op.ResultMessage), "operation is pending"),
+		Summary:  "no app-local or compose dependency blocker was detected; the controller has not claimed this operation yet",
 		Hint:     "No direct app-local blocker was detected. If this persists, check controller health and logs.",
 		AppName:  diagnosisAppName(app, appFound),
 		Service:  diagnosisComposeService(op, app, appFound),
 	}
+	if op.StartedAt != nil {
+		diagnosis.Summary = firstNonEmpty(strings.TrimSpace(op.ResultMessage), "the controller previously claimed this operation; it is pending another attempt")
+	}
 	if op.Type != model.OperationTypeDeploy || !appFound {
-		diagnosis.Summary = "no app-local blocker was detected; the controller has not claimed this operation yet"
 		return diagnosis, nil
 	}
 
 	dependencies := diagnosisComposeDependencies(op, app)
 	if len(dependencies) == 0 {
-		diagnosis.Summary = "no app-local or compose dependency blocker was detected; the controller has not claimed this operation yet"
 		return diagnosis, nil
 	}
 
@@ -814,15 +834,18 @@ func (s *Server) diagnosePendingOperation(op model.Operation, app model.App, app
 		}
 	}
 
-	diagnosis.Summary = "no app-local or compose dependency blocker was detected; the controller has not claimed this operation yet"
 	return diagnosis, nil
+}
+
+func isSafeRolloutOperationWait(op model.Operation) bool {
+	return model.OperationWaitingForTrafficConfirmation(op) || model.OperationWaitingForCanonicalHandoff(op)
 }
 
 func (s *Server) attachOperationControllerLaneDiagnosis(principal model.Principal, op model.Operation, diagnosis *model.OperationDiagnosis) error {
 	if diagnosis == nil {
 		return nil
 	}
-	if diagnosis.Category == "deploy-image-replication-pending" {
+	if diagnosis.Category == "deploy-image-replication-pending" || isSafeRolloutOperationWait(op) {
 		return nil
 	}
 	lane := model.OperationControllerLaneName(op)

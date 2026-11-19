@@ -12578,6 +12578,7 @@ paths:
     get:
       operationId: getOperationDiagnosis
       summary: Get Operation Diagnosis
+      description: A safe deployment waiting for Edge traffic publication or canonical handoff has already executed. Its diagnosis reports the specific retry stage rather than an unclaimed queue position.
       tags: [Operations]
       x-fugue-handler: handleGetOperationDiagnosis
       security:
@@ -24821,9 +24822,11 @@ components:
         current_release_started_at:
           type: string
           format: date-time
+          description: In the effective status, the creation time of the verified serving release when an exact serving release is observed. Otherwise this can reflect legacy stored runtime status.
         current_release_ready_at:
           type: string
           format: date-time
+          description: In the effective status, the ready timestamp of the same verified serving release, omitted if that release has no recorded ready time. Otherwise this can reflect legacy stored runtime status.
         last_operation_id:
           type: string
         last_message:
@@ -26785,6 +26788,7 @@ components:
         started_at:
           type: string
           format: date-time
+          description: On operation reads, the first recorded deploy execution when release-step evidence exists; otherwise the recorded execution attempt start, if available.
         completed_at:
           type: string
           format: date-time
@@ -26839,6 +26843,7 @@ components:
         started_at:
           type: string
           format: date-time
+          description: First recorded deploy execution when release-step evidence exists; otherwise the recorded execution attempt start, if available.
         completed_at:
           type: string
           format: date-time

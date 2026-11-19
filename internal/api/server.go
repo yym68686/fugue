@@ -1860,6 +1860,9 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
+	timingEvidenceStartedAt := time.Now()
+	s.projectFirstDeployStarts(r.Context(), ops)
+	timings.Add("store_execution_start", time.Since(timingEvidenceStartedAt))
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operations": sanitizeOperationsForAPI(ops)})
 }
 
@@ -1871,7 +1874,9 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.attachQueuedDeployOperation(&op)
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(op)})
+	view := []model.Operation{op}
+	s.projectFirstDeployStarts(r.Context(), view)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"operation": sanitizeOperationForAPI(view[0])})
 }
 
 func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {

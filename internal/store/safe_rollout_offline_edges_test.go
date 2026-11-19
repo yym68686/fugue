@@ -123,6 +123,22 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 				if errors.Is(err, ErrSafeRolloutServingPublicationPending) != pending {
 					t.Fatalf("incorrect retry classification for %s: %v", scenario, err)
 				}
+				if want, ok := map[string]string{
+					"invalid_recovery":    "pinned_offline_recovery",
+					"failed_verification": "publication_verification_state",
+					"expired_lkg":         "lkg_integrity/",
+					"tampered_source":     "dns_policy_integrity",
+					"wrong_identity":      "offline_inventory_identity",
+					"still_in_dns":        "dns_readiness_offline_exclusion",
+					"missing_dns_plan":    "dns_readiness_plan_unavailable",
+					"cell_publication":    "global_publication_identity",
+					"producer_mismatch":   "producer_policy_binding",
+				}[scenario]; ok {
+					var diagnostic *SafeRolloutServingMembershipError
+					if !errors.As(err, &diagnostic) || !strings.HasPrefix(diagnostic.Check, want) {
+						t.Fatalf("missing failure check %q: %v", want, err)
+					}
+				}
 			}
 		})
 	}
