@@ -1,6 +1,6 @@
 {
   "schema": "fugue.automatic-node-participation/v1",
-  "generation": 1,
+  "generation": 2,
   "namespace": "fugue-system",
   "origin": "https://api.fugue.pro",
   "readers": {"guardian": "fugue-release-guardian", "canary-prober": "fugue-release-canary-prober"},
@@ -16,6 +16,30 @@
       "adopt_hold": true,
       "stable_seconds": 300,
       "probes": [{"host": "fugue.pro", "path": "/"}, {"host": "api.fugue.pro", "path": "/"}]
+    },
+    {
+      "node": "86eabf26-42a9-4f9d-998a-754115f8b829",
+      "node_uid": "71021b79-e4a8-4f59-8003-e1fe21f336df",
+      "group": "edge-group-country-us",
+      "component": "edge-worker-us",
+      "front": "fugue-fugue-edge-front",
+      "workers": {
+        "a": "fugue-fugue-edge-worker-a",
+        "b": "fugue-fugue-edge-worker-b"
+      },
+      "reason": "quota_exhausted",
+      "adopt_hold": true,
+      "stable_seconds": 300,
+      "probes": [
+        {
+          "host": "fugue.pro",
+          "path": "/"
+        },
+        {
+          "host": "api.fugue.pro",
+          "path": "/"
+        }
+      ]
     }
   ]
 }
