@@ -72,7 +72,7 @@ FOR UPDATE
 	}
 
 	policy = stableReleaseSyncedTrafficPolicy(policy, desired.ID, now)
-	if _, err := s.pgUpsertAppTrafficPolicyTx(ctx, tx, policy); err != nil {
+	if _, err := s.pgUpsertAppTrafficPolicyAtTx(ctx, tx, policy, now); err != nil {
 		return err
 	}
 	return nil
@@ -175,9 +175,18 @@ RETURNING `+appReleaseSelectColumns,
 }
 
 func (s *Store) pgUpsertAppTrafficPolicyTx(ctx context.Context, tx *sql.Tx, policy model.AppTrafficPolicy) (model.AppTrafficPolicy, error) {
+	return s.pgUpsertAppTrafficPolicyAtTx(ctx, tx, policy, time.Time{})
+}
+
+func (s *Store) pgUpsertAppTrafficPolicyAtTx(ctx context.Context, tx *sql.Tx, policy model.AppTrafficPolicy, updatedAt time.Time) (model.AppTrafficPolicy, error) {
 	policy, err := normalizeAppTrafficPolicyForStore(policy)
 	if err != nil {
 		return model.AppTrafficPolicy{}, err
+	}
+	// Keep the same transaction event time as the completed deploy. The
+	// normalizer's wall clock cannot establish that causal link.
+	if !updatedAt.IsZero() {
+		policy.UpdatedAt = updatedAt
 	}
 	out, err := scanAppTrafficPolicy(tx.QueryRowContext(ctx, `
 INSERT INTO fugue_app_traffic_policies (

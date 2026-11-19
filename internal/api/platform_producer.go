@@ -15,6 +15,10 @@ import (
 	"fugue/internal/store"
 )
 
+// Includes the Store's independently bounded compiler-input write plus
+// validation, immutable artifact readback and materialization.
+const platformProducerPersistenceTimeout = 3 * time.Minute
+
 func platformProducerPrincipal() model.Principal {
 	return model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
 }
@@ -273,10 +277,8 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}()
 	}
 	// Runtime capture includes several independently bounded network probes.
-	// Give artifact persistence its own budget after capture succeeds: sharing
-	// the capture deadline starves verified object-store readback whenever the
-	// observations use most of their allowance. Neither budget renews evidence
-	// timestamps or relaxes policy, integrity, convergence or LKG checks.
+	// Neither a new phase nor a new deadline renews evidence timestamps or
+	// relaxes policy, integrity, convergence or LKG checks.
 	captureCtx, cancelCapture := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancelCapture()
 	var projection platformIntentProjectionResponse
@@ -297,8 +299,6 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, err
 	}
 	cancelCapture()
-	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
 	s.rememberProducerQualityPlan(policy, projection)
 	advance("source_digest")
 	var sourceDigest string
@@ -378,28 +378,40 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	if err := ctx.Err(); err != nil {
+		return interval, err
+	}
+	// The verified compiler-input write has its own two-minute ceiling. Start
+	// the outer deadline only now, so digesting and compilation cannot consume
+	// the write's allowance or the time required to verify child artifacts.
+	persistCtx, cancelPersist := context.WithTimeout(ctx, platformProducerPersistenceTimeout)
+	defer cancelPersist()
 	advance("persist_inputs")
-	inputs, err := s.ensurePlatformProducerInputs(runCtx, compiled, principal)
+	inputs, err := s.ensurePlatformProducerInputs(persistCtx, compiled, principal)
 	if err != nil {
 		return interval, err
 	}
 	advance("persist_artifacts")
-	result, err := s.materializePlatformCompilation(runCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest})
+	result, err := s.materializePlatformCompilation(persistCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest})
 	if err != nil {
 		return interval, err
 	}
-	if err = runCtx.Err(); err != nil {
+	if err = persistCtx.Err(); err != nil {
 		return interval, err
 	}
+	cancelPersist()
 	advance("publish_shadow")
 	_, release, _, _, err := s.store.ReleaseProducedPlatformArtifact(result.ReleaseArtifact.ID, authority.ID, previous.ID, principal)
 	if err != nil {
 		return interval, err
 	}
 	advance("prepare_consumers")
-	if _, err = s.preparePlatformReleaseSetConsumers(runCtx, principal, result.ReleaseArtifact, release); err != nil {
+	prepareCtx, cancelPrepare := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelPrepare()
+	if _, err = s.preparePlatformReleaseSetConsumers(prepareCtx, principal, result.ReleaseArtifact, release); err != nil {
 		return interval, err
 	}
+	cancelPrepare()
 	s.appendAudit(principal, "platform_config.shadow_produced", "platform_release_set", result.ReleaseArtifact.ID, "", map[string]string{"policy_release_id": authority.ID, "source_digest": sourceDigest, "business_snapshot_revision": projection.BusinessSnapshotRevision, "release_id": release.ID})
 	if s.log != nil {
 		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, sourceDigest, projection.BusinessSnapshotRevision)

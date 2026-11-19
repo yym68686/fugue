@@ -15,29 +15,43 @@ import (
 // Only a durable, nonfailed managed deployment operation can explain the exact
 // old-stable/current-image transition. Neither an arbitrary runtime failure nor
 // the presence of a caller-provided fact is permission to preserve a route.
-func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff) (model.App, bool) {
+func managedHandoffOperation(b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff, reason string) (app model.App, completed bool, ok bool) {
 	managed := map[string]bool{model.DefaultManagedRuntimeID: true}
 	for _, r := range b.Runtimes {
 		if r.Type == model.RuntimeTypeManagedShared || r.Type == model.RuntimeTypeManagedOwned {
 			managed[r.ID] = true
 		}
 	}
-	var app model.App
 	for _, a := range b.Apps {
 		if a.ID == h.AppID && a.TenantID == h.TenantID {
 			app = a
 			break
 		}
 	}
-	if !managed[app.Spec.RuntimeID] || app.Status.LastOperationID != h.OperationID || !activeRouteDeployOperation(b, app) {
-		return app, false
+	if app.ID == "" || !managed[app.Spec.RuntimeID] || h.OperationID == "" || app.Status.LastOperationID != h.OperationID || model.AppHasCurrentFailedOperation(app.Status) {
+		return app, false, false
 	}
 	for _, p := range b.TrafficPolicies {
 		if p.TenantID == h.TenantID && p.AppID == h.AppID && p.Mode == model.AppTrafficModeSingle && p.StableWeight == 100 && p.CandidateWeight == 0 && p.CandidateReleaseID == "" && p.StableReleaseID == h.ReleaseID {
-			return app, true
+			for _, op := range b.Operations {
+				if op.ID != h.OperationID || op.AppID != app.ID || op.TenantID != app.TenantID {
+					continue
+				}
+				switch reason {
+				case platformconfig.ManagedHandoffReleaseReason:
+					if op.ActiveDeploy() {
+						return app, false, true
+					}
+					fallthrough
+				case platformconfig.ManagedHandoffEndpointsReason:
+					if op.SyncedStableRelease(p) {
+						return app, true, true
+					}
+				}
+			}
 		}
 	}
-	return app, false
+	return app, false, false
 }
 
 // The observer may report deployed before the operation commits its new image
@@ -133,7 +147,7 @@ func managedHandoffSourcePositive(source retainedTrafficSource, h platformconfig
 // authorizes only the exact earlier verified path, never a relabeled upstream
 // or readiness for the intermediate release. An operator selection cannot use
 // this exception; admission repeats the durable actor and operation checks.
-func managedHandoffMatchesSource(source retainedTrafficSource, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff, runtimeID string) bool {
+func managedHandoffMatchesSource(source retainedTrafficSource, intent platformconfig.PlatformIntent, policy platformconfig.PolicySnapshot, b store.RouteBusinessSnapshot, h platformconfig.ManagedServingHandoff, runtimeID string, completed bool) bool {
 	previous := h
 	foundSourcePolicy := false
 	for _, rule := range source.policy.TrafficConstraints {
@@ -200,7 +214,9 @@ func managedHandoffMatchesSource(source retainedTrafficSource, intent platformco
 		}
 		previous.ReleaseID = selected
 	}
-	return managedHandoffSourcePositive(source, previous, runtimeID)
+	// Once the actual new stable has a positive publication this is no longer
+	// a handoff. Ordinary retention and failure policy own subsequent outages.
+	return (!completed || previous.ReleaseID != h.ReleaseID) && managedHandoffSourcePositive(source, previous, runtimeID)
 }
 
 func (s *Server) captureManagedHandoffPartitions(ctx context.Context, p *platformIntentProjectionResponse, b store.RouteBusinessSnapshot, budgets ...time.Duration) error {
@@ -211,9 +227,14 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	if !p.RuntimeSnapshot.IsolateTrafficAvailability {
 		return nil
 	}
-	var candidates []platformconfig.ManagedServingHandoff
+	type candidate struct {
+		handoff   platformconfig.ManagedServingHandoff
+		runtimeID string
+		completed bool
+	}
+	var candidates []candidate
 	for _, r := range p.RuntimeSnapshot.Releases {
-		if r.Status != model.EdgeRouteStatusUnavailable || r.StatusReason != platformconfig.ManagedHandoffReleaseReason {
+		if r.Status != model.EdgeRouteStatusUnavailable || (r.StatusReason != platformconfig.ManagedHandoffReleaseReason && r.StatusReason != platformconfig.ManagedHandoffEndpointsReason) {
 			continue
 		}
 		for _, a := range b.Apps {
@@ -221,8 +242,8 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 				continue
 			}
 			h := platformconfig.ManagedServingHandoff{TenantID: r.TenantID, AppID: r.AppID, ReleaseID: r.ID, OperationID: a.Status.LastOperationID}
-			if _, ok := managedHandoffOperation(b, h); ok {
-				candidates = append(candidates, h)
+			if app, completed, ok := managedHandoffOperation(b, h, r.StatusReason); ok {
+				candidates = append(candidates, candidate{h, app.Spec.RuntimeID, completed})
 			}
 		}
 	}
@@ -231,9 +252,9 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 	}
 	source, err := readSource()
 	if err != nil {
-		for _, h := range candidates {
-			app, _ := managedHandoffOperation(b, h)
-			if managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, app.Spec.RuntimeID) && managedHandoffOriginPending(*p, h) {
+		for _, c := range candidates {
+			h := c.handoff
+			if managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) && (c.completed || managedHandoffOriginPending(*p, h)) {
 				// A failed complete proof is not a negative workload observation.
 				// Do not publish an empty replacement for a signed positive path.
 				// Retry capture; do not copy the partial proof, renew its expiry or
@@ -248,9 +269,9 @@ func (s *Server) captureManagedHandoffPartitionsWithSource(ctx context.Context, 
 		minimum = minimum.Add(budgets[0])
 	}
 	var facts []platformconfig.ManagedServingHandoff
-	for _, h := range candidates {
-		app, _ := managedHandoffOperation(b, h)
-		if !managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, app.Spec.RuntimeID) {
+	for _, c := range candidates {
+		h := c.handoff
+		if !managedHandoffMatchesSource(source, p.Intent, p.Policy, b, h, c.runtimeID, c.completed) {
 			continue
 		}
 		expires := source.expiry(h.TenantID, h.AppID)
@@ -303,8 +324,8 @@ func managedHandoffOriginPending(p platformIntentProjectionResponse, h platformc
 }
 
 // Admission repeats the business gate, not just the claimed runtime fact. A
-// finished/replaced/failed operation or explicit selection cannot admit an old
-// partition captured earlier. Normal producer retry gets a fresh projection.
+// replaced/failed operation or explicit selection cannot admit an old
+// partition. A completed operation must prove its exact automatic policy sync.
 func (s *Server) validateManagedHandoffCompilation(ctx context.Context, compiled platformconfig.CompileResult, source retainedTrafficSource) (map[string]bool, error) {
 	out := map[string]bool{}
 	facts, err := platformconfig.ManagedServingHandoffs(compiled.InputSnapshot)
@@ -322,9 +343,15 @@ func (s *Server) validateManagedHandoffCompilation(ctx context.Context, compiled
 	if e1 != nil || e2 != nil || json.Unmarshal(iraw, &intent) != nil || json.Unmarshal(praw, &policy) != nil {
 		return nil, fmt.Errorf("managed handoff immutable inputs invalid")
 	}
+	reasons := make(map[string]string, len(compiled.InputSnapshot.Releases))
+	for _, r := range compiled.InputSnapshot.Releases {
+		if r.Status == model.EdgeRouteStatusUnavailable {
+			reasons[r.TenantID+"\x00"+r.AppID+"\x00"+r.ID] = r.StatusReason
+		}
+	}
 	for _, h := range facts {
-		app, ok := managedHandoffOperation(b, h)
-		if !ok || !managedHandoffMatchesSource(source, intent, policy, b, h, app.Spec.RuntimeID) {
+		app, completed, ok := managedHandoffOperation(b, h, reasons[h.TenantID+"\x00"+h.AppID+"\x00"+h.ReleaseID])
+		if !ok || !managedHandoffMatchesSource(source, intent, policy, b, h, app.Spec.RuntimeID, completed) {
 			return nil, fmt.Errorf("managed handoff operation or authority changed")
 		}
 		digest, err := platformconfig.TrafficPartitionInputDigest(intent, policy, h.TenantID, h.AppID)

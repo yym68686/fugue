@@ -243,7 +243,7 @@ func Observe(app model.App, release model.AppRelease, stable bool, snapshot Snap
 		return fail("release deployment ownership differs")
 	}
 	if !DeploymentCurrentCohortComplete(deployment) || deployment.Spec.Replicas == nil || !equivalent(app, release.ResolvedImageRef, firstDeploymentContainerImage(deployment)) {
-		return fail("release deployment image or current generation is not ready")
+		return fail(platformconfig.ManagedHandoffReleaseReason)
 	}
 	serviceKey := NamespacedKey(proof.Namespace, release.ServiceName)
 	service, found := snapshot.Services[serviceKey]
@@ -289,7 +289,7 @@ func Observe(app model.App, release model.AppRelease, stable bool, snapshot Snap
 	proof.ReadyEndpoints = len(endpointPods)
 	proof.EndpointPods = endpointPods
 	if proof.ReadyEndpoints < proof.DesiredReplicas {
-		return fail("release service-owned endpoint Pods are not ready")
+		return fail(platformconfig.ManagedHandoffEndpointsReason)
 	}
 	fact.Status = model.EdgeRouteStatusActive
 	fact.StatusReason = ""

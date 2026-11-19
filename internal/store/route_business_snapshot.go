@@ -36,15 +36,25 @@ type RouteBusinessSnapshot struct {
 // payloads. App phase can be updated by runtime observation before the current
 // deploy commits, so serving handoffs need the operation in the same snapshot.
 type RouteBusinessOperation struct {
-	ID       string `json:"id"`
-	TenantID string `json:"tenant_id"`
-	AppID    string `json:"app_id"`
-	Type     string `json:"type"`
-	Status   string `json:"status"`
+	ID          string     `json:"id"`
+	TenantID    string     `json:"tenant_id"`
+	AppID       string     `json:"app_id"`
+	Type        string     `json:"type"`
+	Status      string     `json:"status"`
+	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
 func (op RouteBusinessOperation) ActiveDeploy() bool {
 	return op.Type == model.OperationTypeDeploy && (op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent)
+}
+
+// SyncedStableRelease ties the system's sticky actor marker to this exact
+// deployment. Completion and automatic policy sync use the same timestamp
+// in one store transaction; a later deploy or operator change is not proof.
+func (op RouteBusinessOperation) SyncedStableRelease(p model.AppTrafficPolicy) bool {
+	return op.Type == model.OperationTypeDeploy && op.Status == model.OperationStatusCompleted &&
+		op.AppID == p.AppID && op.TenantID == p.TenantID && op.CompletedAt != nil && !op.CompletedAt.IsZero() &&
+		p.UpdatedByType == model.ActorTypeSystem && p.UpdatedByID == stableReleaseSyncActorID && op.CompletedAt.Equal(p.UpdatedAt)
 }
 
 func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusinessSnapshot, error) {
@@ -63,7 +73,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 			snapshot.Apps = append(snapshot.Apps, routeBusinessAppProjection(app))
 		}
 		for _, op := range state.Operations {
-			snapshot.Operations = append(snapshot.Operations, RouteBusinessOperation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status})
+			snapshot.Operations = append(snapshot.Operations, RouteBusinessOperation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status, CompletedAt: op.CompletedAt})
 		}
 		raw, err := json.Marshal(snapshot)
 		if err != nil {
@@ -116,10 +126,14 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 			currentOperations[app.Status.LastOperationID] = app
 		}
 	}
+	policies := make(map[string]model.AppTrafficPolicy, len(snapshot.TrafficPolicies))
+	for _, policy := range snapshot.TrafficPolicies {
+		policies[policy.TenantID+"\x00"+policy.AppID] = policy
+	}
 	operations := make([]RouteBusinessOperation, 0)
 	for _, op := range snapshot.Operations {
 		app, ok := currentOperations[op.ID]
-		if ok && op.AppID == app.ID && op.TenantID == app.TenantID && op.ActiveDeploy() {
+		if ok && op.AppID == app.ID && op.TenantID == app.TenantID && (op.ActiveDeploy() || op.SyncedStableRelease(policies[op.TenantID+"\x00"+op.AppID])) {
 			operations = append(operations, op)
 		}
 	}

@@ -61,7 +61,7 @@ func persistHandoffBusiness(t *testing.T, path string, b store.RouteBusinessSnap
 	state.AppTrafficPolicies = b.TrafficPolicies
 	state.Operations = nil
 	for _, op := range b.Operations {
-		state.Operations = append(state.Operations, model.Operation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status})
+		state.Operations = append(state.Operations, model.Operation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status, CompletedAt: op.CompletedAt})
 	}
 	raw, err = json.Marshal(state)
 	if err != nil {

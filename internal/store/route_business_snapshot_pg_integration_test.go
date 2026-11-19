@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 )
@@ -22,6 +23,11 @@ func TestRouteBusinessSnapshotPostgresIsRepeatableAcrossBusinessWrites(t *testin
 	}
 	release, err := s.CreateAppRelease(model.AppRelease{TenantID: tenant.ID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, UpstreamURL: "http://old"})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID: tenant.ID, AppID: app.ID, Mode: model.AppTrafficModeSingle, StableReleaseID: release.ID, StableWeight: 100,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	opID := model.NewID("snapshot_deploy")
@@ -53,7 +59,14 @@ VALUES ($1,$2,$3,'deploy','running','managed','system','snapshot-test',now(),now
 	if _, err := writer.ExecContext(ctx, `UPDATE fugue_app_releases SET upstream_url='http://new' WHERE id=$1`, release.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.ExecContext(ctx, `UPDATE fugue_operations SET status='completed', completed_at=now() WHERE id=$1`, opID); err != nil {
+	completed := time.Now().UTC()
+	if _, err := writer.ExecContext(ctx, `UPDATE fugue_operations SET status='completed', completed_at=$2 WHERE id=$1`, opID, completed); err != nil {
+		t.Fatal(err)
+	}
+	app.Spec.Image = "registry.example/image:v2"
+	if err := s.pgSyncStableReleaseForCompletedDeployTx(ctx, writer, app, model.Operation{
+		Type: model.OperationTypeDeploy, DesiredSpec: &app.Spec,
+	}, completed); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Commit(); err != nil {
@@ -96,7 +109,15 @@ VALUES ($1,$2,$3,'deploy','running','managed','system','snapshot-test',now(),now
 	if name, url := find(current); name != "snapshot-new" || url != "http://new" || !strings.HasPrefix(current.Revision, "postgres:") {
 		t.Fatalf("new snapshot missed commit: %s %s", name, url)
 	}
-	if len(current.Operations) != 0 {
-		t.Fatalf("completed operation remained eligible for handoff: %+v", current.Operations)
+	if len(current.Operations) != 1 || current.Operations[0].ID != opID || current.Operations[0].ActiveDeploy() ||
+		len(current.TrafficPolicies) != 1 || current.TrafficPolicies[0].StableReleaseID == release.ID || !current.Operations[0].SyncedStableRelease(current.TrafficPolicies[0]) {
+		t.Fatalf("missing completed deploy and its automatic policy sync: ops=%+v policies=%+v", current.Operations, current.TrafficPolicies)
+	}
+	if _, err := s.db.Exec(`UPDATE fugue_app_traffic_policies SET updated_at=updated_at+interval '1 second' WHERE id=$1`, current.TrafficPolicies[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := s.CaptureRouteBusinessSnapshot(ctx)
+	if err != nil || len(edited.Operations) != 0 {
+		t.Fatalf("stale completion remained eligible after unrelated policy write: %+v, %v", edited.Operations, err)
 	}
 }

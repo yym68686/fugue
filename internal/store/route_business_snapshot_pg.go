@@ -46,11 +46,11 @@ func readRouteBusinessSnapshotTx(ctx context.Context, tx *sql.Tx) (RouteBusiness
 	if err != nil {
 		return out, fmt.Errorf("capture route apps: %w", err)
 	}
-	out.Operations, err = readRouteBusinessRows(ctx, tx, `SELECT o.id, o.tenant_id, o.app_id, o.type, o.status
+	out.Operations, err = readRouteBusinessRows(ctx, tx, `SELECT o.id, o.tenant_id, o.app_id, o.type, o.status, o.completed_at
 FROM fugue_operations o JOIN fugue_apps a ON a.id=o.app_id AND a.tenant_id=o.tenant_id AND a.status_json->>'last_operation_id'=o.id
-WHERE o.type='deploy' AND o.status IN ('pending','running','waiting-agent')`, func(row sqlScanner) (RouteBusinessOperation, error) {
+WHERE o.type='deploy' AND o.status IN ('pending','running','waiting-agent','completed')`, func(row sqlScanner) (RouteBusinessOperation, error) {
 		var op RouteBusinessOperation
-		err := row.Scan(&op.ID, &op.TenantID, &op.AppID, &op.Type, &op.Status)
+		err := row.Scan(&op.ID, &op.TenantID, &op.AppID, &op.Type, &op.Status, &op.CompletedAt)
 		return op, err
 	})
 	if err != nil {
