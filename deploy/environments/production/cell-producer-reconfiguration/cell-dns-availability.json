@@ -1,6 +1,6 @@
 {
   "authority_cell_id": "cell-dns-availability",
-  "generation": 10,
+  "generation": 11,
   "origin": "https://api.fugue.pro",
   "policy": {
     "authority_cell_id": "cell-dns-availability",

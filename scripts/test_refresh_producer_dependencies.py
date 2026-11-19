@@ -21,20 +21,22 @@ class DependencyRefreshTests(unittest.TestCase):
                     calls.append(path)
                     if scenario == "transport": raise RuntimeError("transport unavailable")
                     if scenario == "forbidden": raise repair.ArtifactHTTPError(403)
-                    if scenario == "recover" and len(calls) == 3: return {"intent": {}}
+                    if scenario == "recover" and len(calls) == 12: return {"intent": {}}
                     raise repair.ArtifactHTTPError(503)
-                with patch.object(repair, "baseline") as baseline, patch.object(repair, "selected", return_value=state) as selected, patch.object(repair.time, "sleep") as sleep, patch.object(repair.time, "monotonic", side_effect=[0, 121] if scenario == "deadline" else None, return_value=0):
+                with patch.object(repair, "baseline") as baseline, patch.object(repair, "selected", return_value=state) as selected, patch.object(repair.time, "sleep") as sleep, patch.object(repair.time, "monotonic", side_effect=[0, 241] if scenario == "deadline" else None, return_value=0):
                     if scenario == "source changed": selected.return_value = {}
                     if scenario == "baseline changed": baseline.side_effect = ValueError("baseline changed")
                     if scenario == "recover":
                         self.assertEqual({"intent": {}}, repair.dns_preview(c, api, {"id": "candidate"}))
-                        self.assertEqual(3, len(calls))
-                        self.assertEqual(2, sleep.call_count)
+                        self.assertEqual(12, len(calls))
+                        self.assertEqual(11, sleep.call_count)
+                        self.assertEqual(12, baseline.call_count)
+                        self.assertEqual(12, selected.call_count)
                     else:
                         with self.assertRaises((RuntimeError, ValueError)):
                             repair.dns_preview(c, api, {"id": "candidate"})
-                        self.assertEqual(8 if scenario == "exhausted" else 0 if scenario in ["source changed", "baseline changed"] else 1, len(calls))
-                        self.assertEqual(7 if scenario == "exhausted" else 0, sleep.call_count)
+                        self.assertEqual(25 if scenario == "exhausted" else 0 if scenario in ["source changed", "baseline changed"] else 1, len(calls))
+                        self.assertEqual(24 if scenario == "exhausted" else 0, sleep.call_count)
 
     def fixture(self):
         c, _ = fixture()

@@ -13,25 +13,29 @@ from scripts.reconfigure_cell_producer import validate_ref
 from scripts.publish_agent_edge_shadow import ArtifactHTTPError
 
 SCHEMA = "fugue.producer-dependency-refresh/v1"
+DNS_PREVIEW_SECONDS = 240
+DNS_PREVIEW_RETRY_SECONDS = 10
+DNS_PREVIEW_ATTEMPTS = 25
 
 
 def dns_preview(c, api, artifact):
     # A continuously publishing source may be between full selection and LKG
     # verification, or change its fence during a complete read. Retry ONLY the
     # read-only 503 preview, never artifact creation, release, or a CAS failure.
-    # Eight attempts and a two-minute start budget bound the lane; the final
-    # already-bounded HTTP read can add at most two minutes.
-    deadline = time.monotonic() + 120
-    for attempt in range(8):
+    # A full verification window can exceed two minutes. Allow a bounded
+    # four-minute start window; the final bounded preview can add up to two
+    # minutes, leaving room for the fenced release in the ten-minute CI job.
+    deadline = time.monotonic() + DNS_PREVIEW_SECONDS
+    for attempt in range(DNS_PREVIEW_ATTEMPTS):
         baseline(c, api)
         if authority_identity(selected(api, "platform-config-producer", "shadow")) != c["policy"]["dns_source"]["producer_policy"]:
             raise ValueError("approved source producer changed")
         try:
             return api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=configuration")
         except ArtifactHTTPError as error:
-            if error.status != 503 or attempt == 7 or time.monotonic() + 10 >= deadline:
+            if error.status != 503 or attempt + 1 == DNS_PREVIEW_ATTEMPTS or time.monotonic() + DNS_PREVIEW_RETRY_SECONDS >= deadline:
                 raise
-            time.sleep(10)
+            time.sleep(DNS_PREVIEW_RETRY_SECONDS)
 
 
 def validate(c):
