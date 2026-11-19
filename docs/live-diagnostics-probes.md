@@ -386,14 +386,17 @@ and other handlers are outside this ring's coverage. Neither ring reconstructs
 events before deployment or authorizes serving traffic.
 
 Assignment discovery retries once only when its final independent authority
-check reports `assignment_changed`. Each attempt builds a new body-read session
+check reports `assignment_changed`, or when a serving-only DNS consumer's
+final selection positively changes to a different cell-dns publication. The
+latter keeps the original `serving_not_selected` receipt. Each attempt builds a new body-read session
 and reruns discovery, current membership/serving selection, complete input
 verification and the unchanged final equality check. A failed attempt stays in
 the ring even when the reread succeeds: these are not HTTP failure totals.
 Fixed `consumer-assignment-retry`, `consumer-assignment-retry-ok`,
 `consumer-assignment-retry-empty` and `consumer-assignment-retry-exhausted`
-counters distinguish outcomes. A cold input, database error, absent assignment
-or selection error does not initiate this retry; continued changes return 503
+counters distinguish outcomes. A cold input, database error, absent assignment,
+selection error, or mismatch within the same DNS publication does not initiate
+this retry; continued changes return 503
 without returning the first attempt's assignments.
 
 Assignment `input_recheck` failures additionally retain the original synchronous

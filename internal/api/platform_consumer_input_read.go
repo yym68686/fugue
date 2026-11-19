@@ -103,7 +103,7 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 							observeConsumerInputSelectionFailure(ctx, comparison, fields...)
 						}
 					}
-					ok, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe, timing)
+					ok, dnsPublicationChanged, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe, timing)
 					if err != nil || !ok {
 						stage := "serving_not_selected"
 						if err != nil {
@@ -112,6 +112,9 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 							recordConsumerSelectionRead(ctx, after.Assignment, observation, true)
 						}
 						observeConsumerInputReadFailure(ctx, stage, store.PlatformInputReadFailure{}, nil, nil)
+						if err == nil && dnsPublicationChanged && claims.Component == model.PlatformConsumerComponentDNSServer {
+							return errConsumerDNSPublicationChanged
+						}
 						return store.ErrConflict
 					}
 				}

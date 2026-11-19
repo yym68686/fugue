@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 	"fugue/internal/store"
+	"fugue/internal/testfixture/celldns"
 )
 
 func assignmentReadStageCounts(t *testing.T, s *Server) map[string]uint64 {
@@ -241,6 +244,191 @@ func TestConsumerAssignmentReadDoesNotRetryOtherFailures(t *testing.T) {
 				if (name == "consumer-assignment-retry" || name == "consumer-assignment-retry-ok" || name == "consumer-assignment-retry-empty" || name == "consumer-assignment-retry-exhausted") && count != 0 {
 					t.Fatal("unrelated failure counted as assignment change", name, count)
 				}
+			}
+		})
+	}
+}
+
+func TestDNSOnlyAssignmentReadRetriesSelectedPublicationChange(t *testing.T) {
+	for _, scenario := range []string{"gray-to-full", "full-to-gray", "continued-change", "missing-membership", "no-selection", "selection-error", "same-release"} {
+		t.Run(scenario, func(t *testing.T) {
+			req, _, _, inputs, _ := celldns.CompletePublication(t, false, false)
+			before := celldns.Compile(t, req)
+			after := before
+			if scenario != "gray-to-full" {
+				// Also exercise a change of signed parent, not only promotion
+				// of the same parent with a different release ID and fence.
+				req.Intent.Generation += "-next"
+				after = celldns.Compile(t, req)
+				after.DNSArtifact = celldns.Sign(t, after.DNSArtifact, "dns-child-next", 2)
+				after.ReleaseArtifact = celldns.Sign(t, platformconfig.BuildReleaseSetArtifact(after.ReleaseSet, []string{after.DNSArtifact.ID}, req.CreatedAt), "dns-parent-next", 2)
+			}
+			path := t.TempDir() + "/state.json"
+			st := store.New(path)
+			if err := st.Init(); err != nil {
+				t.Fatal(err)
+			}
+			st.ConfigurePlatformArtifactSigning(celldns.Keys())
+			persistInput := func(c platformconfig.CompileResult) {
+				t.Helper()
+				if err := st.EnsurePlatformCompilerInput(c.InputSnapshot, c.Lineage.InputSnapshotDigest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			persistInput(before)
+			persistInput(after)
+			for _, c := range inputs {
+				persistInput(c)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var state model.State
+			if err := json.Unmarshal(raw, &state); err != nil {
+				t.Fatal(err)
+			}
+			write := func() {
+				t.Helper()
+				raw, err := json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i, source := range req.CellRoutePublications {
+				policy := celldns.Sign(t, inputs[i].PolicyArtifact, "source-policy-"+source.Parent.ID, 1)
+				state.PlatformArtifacts = append(state.PlatformArtifacts, source.Parent, source.Route, source.TLS, policy)
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, celldns.Publication(source))
+			}
+			add := func(c platformconfig.CompileResult, id, lane string, fence int64, offset time.Duration, withMember bool) model.PlatformArtifactRelease {
+				t.Helper()
+				p := c.ReleaseArtifact
+				seen := false
+				for _, a := range state.PlatformArtifacts {
+					seen = seen || a.ID == p.ID
+				}
+				if !seen {
+					state.PlatformArtifacts = append(state.PlatformArtifacts, p, c.DNSArtifact)
+				}
+				foundPolicy := false
+				for _, a := range state.PlatformArtifacts {
+					foundPolicy = foundPolicy || a.ArtifactKind == c.PolicyArtifact.ArtifactKind && a.ScopeKey == p.ScopeKey && a.Generation == c.PolicyArtifact.Generation
+				}
+				if !foundPolicy {
+					state.PlatformArtifacts = append(state.PlatformArtifacts, celldns.Sign(t, c.PolicyArtifact, "policy-"+p.ID, fence))
+				}
+				r := model.PlatformArtifactRelease{ID: id, ArtifactID: p.ID, ArtifactKind: p.ArtifactKind, Scope: p.Scope, ScopeKey: p.ScopeKey,
+					Generation: p.Generation, ReleaseChannel: lane, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: req.CreatedAt.Add(offset),
+					LaneKey: platformsafety.ReleaseLaneKey(p.ArtifactKind, p.ScopeKey, lane), FencingToken: fence}
+				if lane == "gray" {
+					r.CanaryRuleRef = "cohort=complete"
+				}
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
+				if withMember {
+					topology, _, err := platformcontrol.DeclaredTrafficConsumerTopology(p)
+					if err != nil {
+						t.Fatal(err)
+					}
+					set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: p.ID, ArtifactReleaseID: r.ID,
+						ArtifactKind: c.DNSArtifact.ArtifactKind, Generation: c.DNSArtifact.Generation, Scope: p.Scope, ScopeKey: p.ScopeKey, Revision: 1,
+						PreparedAt: r.ReleasedAt, Topology: topology})
+					if err != nil {
+						t.Fatal(err)
+					}
+					state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, set)
+				}
+				return r
+			}
+			firstLane, nextLane := "full", "gray"
+			if scenario == "gray-to-full" {
+				firstLane, nextLane = "gray", "full"
+			}
+			first := add(before, "initial", firstLane, 4, 0, true)
+			write()
+			s := &Server{store: st}
+			claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", AuthorityID: "cell-dns",
+				ScopeKey: first.ScopeKey, ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
+			sessions, transitions := 0, 0
+			var next model.PlatformArtifactRelease
+			factory := func() func(string) (model.PlatformArtifact, error) {
+				sessions++
+				load := st.NewPlatformArtifactReadSession()
+				watched := first.ArtifactID
+				if sessions == 2 {
+					watched = next.ArtifactID
+				}
+				reads := 0
+				return func(id string) (model.PlatformArtifact, error) {
+					a, err := load(id)
+					if id == watched {
+						reads++
+					}
+					if err != nil || reads != 2 || id != watched || (sessions > 1 && scenario != "continued-change") {
+						return a, err
+					}
+					// The final resolver already read the old release row.
+					// Change selection after discovery and real input admission.
+					transitions++
+					switch scenario {
+					case "no-selection":
+						state.PlatformArtifactReleases = state.PlatformArtifactReleases[:len(state.PlatformArtifactReleases)-1]
+					case "selection-error":
+						broken := add(after, "broken", nextLane, 5, time.Second, true)
+						state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].ArtifactID = broken.ArtifactID + "-missing"
+					case "same-release":
+						state.PlatformArtifactReleases[len(state.PlatformArtifactReleases)-1].FencingToken++
+					default:
+						if sessions == 1 {
+							next = add(after, "next", nextLane, 5, time.Second, scenario != "missing-membership")
+						} else {
+							add(before, "newer", firstLane, 6, 2*time.Second, true)
+						}
+					}
+					write()
+					return a, err
+				}
+			}
+			items, stage, err := s.readCheckedConsumerAssignments(t.Context(), claims, true, time.Now(), factory)
+			success := scenario == "gray-to-full" || scenario == "full-to-gray"
+			empty := scenario == "missing-membership"
+			exhausted := scenario == "continued-change"
+			retry := success || empty || exhausted
+			switch {
+			case success:
+				if err != nil || stage != "" || len(items) != 1 || !reflect.DeepEqual(items[0].Release, next) ||
+					items[0].Assignment.ArtifactID != after.DNSArtifact.ID || items[0].Assignment.FencingToken != next.FencingToken {
+					t.Fatal("did not return only the newly authorized publication", items, err, stage)
+				}
+			case empty:
+				if err != nil || stage != "" || len(items) != 0 {
+					t.Fatal("disclosed an old or unauthorized publication", items, err, stage)
+				}
+			default:
+				if !errors.Is(err, store.ErrConflict) || stage != "input_recheck" || len(items) != 0 {
+					t.Fatal("did not fail closed", items, err, stage)
+				}
+			}
+			want := map[bool]int{true: 1}
+			if sessions != 1+want[retry] || transitions != 1+want[exhausted] {
+				t.Fatal("unexpected attempt or transition count", sessions, transitions)
+			}
+			counts := assignmentReadStageCounts(t, s)
+			if counts["consumer-assignment-retry"] != uint64(want[retry]) ||
+				counts["consumer-assignment-retry-ok"] != uint64(want[success]) ||
+				counts["consumer-assignment-retry-empty"] != uint64(want[empty]) ||
+				counts["consumer-assignment-retry-exhausted"] != uint64(want[exhausted]) {
+				t.Fatal(counts)
+			}
+			failures := s.captures.consumerFailures
+			wantStage := "serving_not_selected"
+			if scenario == "selection-error" {
+				wantStage = "serving_selection_read"
+			}
+			if len(failures) != 1+want[exhausted] || failures[0].InputRead == nil || failures[0].InputRead.Stage != wantStage {
+				t.Fatal("original selection failure was not retained", failures)
 			}
 		})
 	}

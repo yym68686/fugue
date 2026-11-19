@@ -70,8 +70,8 @@ func TestDNSOnlyAssignmentSelectionWitnessUsesOriginalLaneReads(t *testing.T) {
 			rejected = pair
 		}
 	}
-	selected, err := s.checkConsumerAssignmentSelection(item, "cell-dns", st.GetPlatformArtifact, nil, observe, &timing)
-	if err != nil || selected || rejected == nil || rejected.Observed == nil ||
+	selected, changed, err := s.checkConsumerAssignmentSelection(item, "cell-dns", st.GetPlatformArtifact, nil, observe, &timing)
+	if err != nil || selected || !changed || rejected == nil || rejected.Observed == nil ||
 		timing.Full.ReleaseHash != rejected.Expected.ReleaseHash || timing.Gray.ReleaseHash != rejected.Observed.ReleaseHash ||
 		timing.CohortHash != captureIdentityHash("cell-dns") || timing.Full.Started.Before(now) ||
 		timing.Full.Returned.Before(timing.Full.Started) || timing.Gray.Started.Before(timing.Full.Returned) ||

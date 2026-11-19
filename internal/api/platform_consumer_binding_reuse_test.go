@@ -143,7 +143,7 @@ func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.
 			rejection = comparison
 		}
 	}
-	if ok, err := server.checkConsumerAssignmentSelection(items[0], "edge-group-test-a", readArtifact, project, recordRejection, nil); err != nil || ok {
+	if ok, changed, err := server.checkConsumerAssignmentSelection(items[0], "edge-group-test-a", readArtifact, project, recordRejection, nil); err != nil || ok || changed {
 		t.Fatal("superseded assignment accepted during observation", ok, err)
 	}
 	if want := []string{"selection.release_id", "selection.fencing_token"}; !reflect.DeepEqual(rejectedFields, want) {

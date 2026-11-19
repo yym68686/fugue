@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"fugue/internal/model"
@@ -11,11 +12,13 @@ import (
 	"fugue/internal/store"
 )
 
-// A release can finish verification while discovery is reading it. Never
+var errConsumerDNSPublicationChanged = fmt.Errorf("DNS serving publication changed: %w", store.ErrConflict)
+
+// Verification or a DNS-only publication change can overtake discovery. Never
 // disclose a mixed observation or relax the final DeepEqual: discard the whole
 // attempt and repeat all checks once, with a new immutable-body read session.
-// A cold input, database error, absent assignment or selection error is not
-// evidence of this race and must not trigger a retry.
+// Do not retry a cold input, database error, absent assignment, or failed
+// selection read.
 func (s *Server) readCheckedConsumerAssignments(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, servingOnly bool, started time.Time, newSession func() func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, string, error) {
 	for attempt := 0; ; attempt++ {
 		attemptCtx := withConsumerInputReadObservation(ctx)
@@ -34,7 +37,8 @@ func (s *Server) readCheckedConsumerAssignments(ctx context.Context, claims plat
 		// The failure ring is attempt coverage, not an HTTP failure-rate counter.
 		s.retainConsumerRequestFailure(attemptCtx, started, "assignment", stage, err)
 		detail := consumerInputReadFailureFromContext(attemptCtx)
-		changed := stage == "input_recheck" && errors.Is(err, store.ErrConflict) && detail != nil && detail.Stage == "assignment_changed"
+		changed := stage == "input_recheck" && (errors.Is(err, errConsumerDNSPublicationChanged) ||
+			errors.Is(err, store.ErrConflict) && detail != nil && detail.Stage == "assignment_changed")
 		if !changed || ctx.Err() != nil {
 			return nil, stage, err
 		}
@@ -76,7 +80,7 @@ func (s *Server) readConsumerAssignmentAttempt(ctx context.Context, claims platf
 			if claims.Component == model.PlatformConsumerComponentDNSServer {
 				observe = &observation
 			}
-			selected, err := s.checkConsumerAssignmentSelection(item, group, read, bindings, nil, observe)
+			selected, _, err := s.checkConsumerAssignmentSelection(item, group, read, bindings, nil, observe)
 			if err != nil {
 				return false, errors.New("serving release unavailable")
 			}
