@@ -757,9 +757,15 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			}
 			// Legacy inventory health cannot hide failed, expired or replaced
 			// current backend evidence, even if its last heartbeat was fresh.
-			projected, projectionErr := s.dnsInventoryServingFacts(context.Background(), []model.DNSNode{legacy})
+			projected, reads, projectionErr := s.dnsInventoryServingFactsWithReads(context.Background(), []model.DNSNode{legacy})
 			if projectionErr != nil || len(projected) != 1 || projected[0].Healthy || projected[0].ServingObservation == nil {
 				t.Fatal("unavailable backend reused legacy health or dropped membership", projectionErr, projected)
+			}
+			id := firstNonEmpty(legacy.PhysicalNodeID, legacy.ID)
+			read, ok := reads[id]
+			projectedReceipts := captureReceipts(t, s)
+			if !ok || read.facts.captureSequence != projectedReceipts[len(projectedReceipts)-1].Sequence {
+				t.Fatal("inventory did not retain its exact selected facts read")
 			}
 			if len(freshDNSNodes(projected, now.Add(24*time.Hour))) != 1 {
 				t.Fatal("unavailable enrolled node disappeared with stale inventory")

@@ -37,6 +37,10 @@ type captureObservations struct {
 	trafficFailures        []trafficDiagnosticFailure
 	trafficFailureTotal    uint64
 	trafficFailureEvicted  uint64
+	dnsPreflightCompleted  uint64
+	dnsPreflightFailures   []dnsPreflightFailure
+	dnsPreflightTotal      uint64
+	dnsPreflightEvicted    uint64
 	consumerFailures       []consumerRequestFailure
 	consumerFailureTotal   uint64
 	consumerFailureEvicted uint64
@@ -518,6 +522,9 @@ func (s *Server) captureSnapshot() any {
 		"traffic_failures": map[string]any{"receipts": append([]trafficDiagnosticFailure(nil), s.captures.trafficFailures...),
 			"total": s.captures.trafficFailureTotal, "evicted": s.captures.trafficFailureEvicted, "limit": trafficFailureLimit,
 			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},
+		"dns_preflight_failures": map[string]any{"receipts": append([]dnsPreflightFailure(nil), s.captures.dnsPreflightFailures...),
+			"total": s.captures.dnsPreflightTotal, "completed": s.captures.dnsPreflightCompleted, "evicted": s.captures.dnsPreflightEvicted, "limit": dnsPreflightFailureLimit,
+			"coverage": "completed_delegation_preflight_builds_not_public_dns_queries; child_references_are_process_local_and_may_have_been_evicted"},
 		"consumer_failures": map[string]any{"receipts": append([]consumerRequestFailure(nil), s.captures.consumerFailures...),
 			"total": s.captures.consumerFailureTotal, "evicted": s.captures.consumerFailureEvicted, "limit": consumerFailureLimit,
 			"coverage": "assignment_attempt_and_heartbeat_read_or_admission_errors_including_recovered_rereads_not_http_failure_totals"},

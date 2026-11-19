@@ -13,13 +13,25 @@ import (
 // bound artifact-consumer identity, the selected backend owns serving health.
 // A failing read must not downgrade authority to the old inventory writer.
 func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNSNode) ([]model.DNSNode, error) {
+	projected, _, err := s.dnsInventoryServingFactsWithReads(ctx, nodes)
+	return projected, err
+}
+
+type dnsInventoryFactRead struct {
+	facts platformDNSRuntimeFactsResponse
+	err   error
+}
+
+// The optional caller evidence is the same read used to project serving
+// health. Do not re-read the backend to explain a preflight verdict.
+func (s *Server) dnsInventoryServingFactsWithReads(ctx context.Context, nodes []model.DNSNode) ([]model.DNSNode, map[string]dnsInventoryFactRead, error) {
 	defer s.observeOperation("dns-serving-facts")()
 	if len(nodes) == 0 {
-		return nodes, nil
+		return nodes, nil, nil
 	}
 	consumers, err := s.store.ListPlatformAuthorityConsumers(model.PlatformArtifactKindDNSAnswerBundle, "")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	enrolled := map[string]bool{}
 	for _, consumer := range consumers {
@@ -29,11 +41,7 @@ func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNS
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	type observation struct {
-		facts platformDNSRuntimeFactsResponse
-		err   error
-	}
-	results := map[string]observation{}
+	results := map[string]dnsInventoryFactRead{}
 	var mu sync.Mutex
 	var workers sync.WaitGroup
 	queue := make(chan string)
@@ -44,7 +52,7 @@ func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNS
 			for node := range queue {
 				facts, err := s.readPlatformDNSRuntimeFacts(ctx, node)
 				mu.Lock()
-				results[node] = observation{facts, err}
+				results[node] = dnsInventoryFactRead{facts, err}
 				mu.Unlock()
 			}
 		}()
@@ -72,7 +80,7 @@ func (s *Server) dnsInventoryServingFacts(ctx context.Context, nodes []model.DNS
 		result, found := results[id]
 		out[i] = projectDNSInventoryServingFact(out[i], result.facts, !found || result.err != nil, time.Now().UTC())
 	}
-	return out, nil
+	return out, results, nil
 }
 
 func projectDNSInventoryServingFact(node model.DNSNode, facts platformDNSRuntimeFactsResponse, unavailable bool, now time.Time) model.DNSNode {

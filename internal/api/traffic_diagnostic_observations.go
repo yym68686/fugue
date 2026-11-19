@@ -98,7 +98,7 @@ func trafficDiagnosticReason(value string) string {
 	}
 }
 
-func (s *Server) retainTrafficDiagnosticFailure(receipt trafficDiagnosticFailure) {
+func (s *Server) retainTrafficDiagnosticFailure(receipt trafficDiagnosticFailure) uint64 {
 	s.captures.mu.Lock()
 	defer s.captures.mu.Unlock()
 	s.captures.trafficFailureTotal++
@@ -110,6 +110,7 @@ func (s *Server) retainTrafficDiagnosticFailure(receipt trafficDiagnosticFailure
 		s.captures.trafficFailureEvicted++
 	}
 	s.captures.trafficFailures = append(s.captures.trafficFailures, receipt)
+	return receipt.Sequence
 }
 
 func trafficConvergenceObservation(set model.PlatformExpectedConsumerSet, binding *platformcontrol.ConsumerReleaseBinding, status model.PlatformConsumerConvergenceStatus) trafficDiagnosticFailure {

@@ -19,7 +19,7 @@ func TestPublishedTrafficDiagnosticsRejectLegacySourcesAndMissingConsumers(t *te
 	s.platformRoutes = []model.PlatformRoute{{Hostname: "ambient.example.test", UpstreamURL: "http://ambient:8080"}}
 	s.dnsStaticRecords = []model.EdgeDNSRecord{{Name: "ambient.example.test", Type: "A", Values: []string{"8.8.8.8"}, TTL: 60}}
 	opts := dnsDelegationPreflightOptions{Zone: "example.test"}
-	if c := s.buildRouteDNSInvariantPreflightCheck(context.Background(), opts); c.Pass {
+	if c, _ := s.buildRouteDNSInvariantPreflightCheck(context.Background(), opts); c.Pass {
 		t.Fatal("legacy configuration supplied passing invariant")
 	}
 	checks, err := s.robustnessGeneratedArtifactChecks(httptest.NewRequest("GET", "/", nil), opts)
@@ -110,12 +110,25 @@ func TestPublishedTrafficDiagnosticsBindPublicationAndFreshFacts(t *testing.T) {
 			if err := os.WriteFile(path, damaged, 0600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.inspectPublishedTrafficArtifacts(context.Background(), "example.test", owners); err == nil {
+			diagnostic, err := s.inspectPublishedTrafficArtifacts(context.Background(), "example.test", owners)
+			if err == nil {
 				t.Fatal("invalid published state became passing diagnostics")
 			}
 			failures := s.captureSnapshot().(map[string]any)["traffic_failures"].(map[string]any)["receipts"].([]trafficDiagnosticFailure)
-			if len(failures) == 0 || failures[len(failures)-1].Stage == "" {
+			if len(failures) == 0 || failures[len(failures)-1].Stage == "" || failures[len(failures)-1].Sequence != diagnostic.failureSequence {
 				t.Fatal("failed published read discarded its diagnostic category")
+			}
+			response := s.buildDNSDelegationPreflight(context.Background(), model.Principal{}, dnsDelegationPreflightOptions{Zone: "example.test", MinHealthyNodes: 1})
+			preflights := s.captureSnapshot().(map[string]any)["dns_preflight_failures"].(map[string]any)["receipts"].([]dnsPreflightFailure)
+			traffic := s.captureSnapshot().(map[string]any)["traffic_failures"].(map[string]any)["receipts"].([]trafficDiagnosticFailure)
+			lastPreflight := preflights[len(preflights)-1]
+			if response.Pass || lastPreflight.GeneratedAt != response.GeneratedAt {
+				t.Fatal("preflight failed without an exact response receipt", lastPreflight)
+			}
+			for _, check := range response.Checks {
+				if check.Name == "route_dns_invariant" && (check.Pass || lastPreflight.TrafficFailureSequence != traffic[len(traffic)-1].Sequence || lastPreflight.TrafficFailureSequence <= diagnostic.failureSequence) {
+					t.Fatal("preflight did not link its own traffic failure", lastPreflight)
+				}
 			}
 			if scenario == "stale heartbeat" || scenario == "foreign release" {
 				last := failures[len(failures)-1]

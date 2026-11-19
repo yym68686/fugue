@@ -17,6 +17,7 @@ import (
 type trafficArtifactDiagnostic struct {
 	Parents, Releases, Digests            []string
 	Routes, DNSRecords, RequiredConsumers int
+	failureSequence                       uint64
 }
 
 func (d trafficArtifactDiagnostic) evidence() map[string]string {
@@ -31,7 +32,7 @@ func (s *Server) inspectPublishedTrafficArtifacts(ctx context.Context, zone stri
 	fail := func(message string) (trafficArtifactDiagnostic, error) {
 		// All messages are source-defined categories, never request values.
 		failure.Stage = message
-		s.retainTrafficDiagnosticFailure(failure)
+		out.failureSequence = s.retainTrafficDiagnosticFailure(failure)
 		return out, fmt.Errorf("published traffic diagnostics: %s", message)
 	}
 	if err := ctx.Err(); err != nil {

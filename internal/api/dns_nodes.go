@@ -263,7 +263,14 @@ func (s *Server) dnsDelegationPreflightOptionsFromRequest(r *http.Request) dnsDe
 	}
 }
 
-func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal model.Principal, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightResponse {
+func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal model.Principal, opts dnsDelegationPreflightOptions) (response model.DNSDelegationPreflightResponse) {
+	var reads map[string]dnsInventoryFactRead
+	var trafficFailureSequence uint64
+	defer func() {
+		if !response.GeneratedAt.IsZero() {
+			s.retainDNSPreflightObservation(response, reads, trafficFailureSequence)
+		}
+	}()
 	hint, configErr := s.verifiedDNSDelegationHints(opts.Zone)
 	if configErr != nil {
 		return model.DNSDelegationPreflightResponse{Zone: opts.Zone, ProbeName: opts.ProbeName, MinHealthyNodes: opts.MinHealthyNodes, GeneratedAt: time.Now().UTC(),
@@ -272,7 +279,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 	}
 	nodes, err := s.store.ListDNSNodes(opts.EdgeGroupID)
 	if err == nil {
-		nodes, err = s.dnsInventoryServingFacts(ctx, nodes)
+		nodes, reads, err = s.dnsInventoryServingFactsWithReads(ctx, nodes)
 	}
 	checks := []model.DNSDelegationPreflightCheck{{Name: "dns_delegation_configuration", Pass: true, Message: "delegation declared by verified traffic intent and policy"}}
 	if err != nil {
@@ -320,6 +327,8 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 
 	healthyNodeCount := countPassingDNSNodeChecks(nodeChecks)
 	bundleVersion, bundleStable := stableDNSBundleVersion(nodeChecks)
+	routeCheck, failureSequence := s.buildRouteDNSInvariantPreflightCheck(ctx, opts)
+	trafficFailureSequence = failureSequence
 	checks = append(checks,
 		model.DNSDelegationPreflightCheck{
 			Name:    "dns_node_count",
@@ -336,7 +345,7 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 			Pass:    bundleStable,
 			Message: dnsBundleStableMessage(bundleVersion, bundleStable),
 		},
-		s.buildRouteDNSInvariantPreflightCheck(ctx, opts),
+		routeCheck,
 		s.buildEdgeTLSReadinessPreflightCheck(ctx, principal),
 		model.DNSDelegationPreflightCheck{
 			Name:    "cache_errors_zero",
@@ -376,16 +385,16 @@ func (s *Server) buildDNSDelegationPreflight(ctx context.Context, principal mode
 	}
 }
 
-func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts dnsDelegationPreflightOptions) model.DNSDelegationPreflightCheck {
+func (s *Server) buildRouteDNSInvariantPreflightCheck(ctx context.Context, opts dnsDelegationPreflightOptions) (model.DNSDelegationPreflightCheck, uint64) {
 	hint, err := s.verifiedDNSDelegationHints(opts.Zone)
 	if err != nil {
-		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}
+		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}, 0
 	}
 	diagnostic, err := s.inspectPublishedTrafficArtifacts(ctx, opts.Zone, hint.ConsumerGroups)
 	if err != nil {
-		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}
+		return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Message: err.Error()}, diagnostic.failureSequence
 	}
-	return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Pass: true, Message: fmt.Sprintf("published traffic release=%s routes=%d DNS consumer records=%d required consumers=%d", strings.Join(diagnostic.Releases, ","), diagnostic.Routes, diagnostic.DNSRecords, diagnostic.RequiredConsumers)}
+	return model.DNSDelegationPreflightCheck{Name: "route_dns_invariant", Pass: true, Message: fmt.Sprintf("published traffic release=%s routes=%d DNS consumer records=%d required consumers=%d", strings.Join(diagnostic.Releases, ","), diagnostic.Routes, diagnostic.DNSRecords, diagnostic.RequiredConsumers)}, 0
 }
 
 func (s *Server) buildEdgeTLSReadinessPreflightCheck(ctx context.Context, principal model.Principal) model.DNSDelegationPreflightCheck {
