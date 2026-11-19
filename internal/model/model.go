@@ -175,6 +175,7 @@ const (
 	OperationTypeFailover                 = "failover"
 	OperationTypeDatabaseSwitchover       = "database-switchover"
 	OperationTypeDatabaseLocalize         = "database-localize"
+	OperationTypeDatabaseReplicaRetire    = "database-replica-retire"
 	OperationTypeDatabaseSuspend          = "database-suspend"
 	OperationTypeDatabaseResume           = "database-resume"
 	OperationTypeDatabaseResize           = "database-resize"
@@ -2182,6 +2183,8 @@ func AppZeroDowntimeRequirementSource(spec AppSpec) string {
 type AppPostgresSpec struct {
 	// SourceRetirement is operation-only intent; it is never committed to an app or service.
 	SourceRetirement                 *PostgresSourceRetirementPlan `json:"source_retirement,omitempty"`
+	RetireReplicaNode                string                        `json:"retire_replica_node,omitempty"`    // Operation-only.
+	RetireReplicaPodUID              string                        `json:"retire_replica_pod_uid,omitempty"` // Operation-only.
 	ImageMigrationConfigHash         string                        `json:"image_migration_config_hash,omitempty"`
 	ImageMigrationDrainBudgetSeconds int                           `json:"image_migration_drain_budget_seconds,omitempty"` // Operation-only.
 	Image                            string                        `json:"image,omitempty"`

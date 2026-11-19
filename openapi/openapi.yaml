@@ -9698,6 +9698,9 @@ paths:
         Explicit platform-administrator placement takes precedence over tenant
         placement and zero-downtime preferences without weakening data integrity,
         source preservation or destination verification.
+        To remove a standby while keeping the current primary in place, use
+        the dedicated retire-replica endpoint. Localize refuses an implicit
+        same-placement standby retirement rather than rewriting primary affinity.
       tags: [Backing Services]
       x-fugue-handler: handleLocalizeBackingService
       security:
@@ -9721,6 +9724,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/BackingServiceMigrateResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/backing-services/{id}/retire-replica:
+    post:
+      operationId: retireBackingServicePostgresReplica
+      summary: Retire the exact sole PostgreSQL standby without replacing the primary
+      description: >-
+        Retires the sole ready standby on replica_node. An optional
+        Pod UID prevents acting on a replaced standby. Refuses relocation and
+        unsupported topology or storage. Waits for the primary to acknowledge
+        disabling synchronous replication before removing a standby.
+        The standby PVC is removed under
+        its volume reclaim policy and failover standby capacity is removed.
+        Completion requires the unchanged primary and healthy stable SQL endpoint.
+      tags: [Backing Services]
+      x-fugue-handler: handleRetireBackingServicePostgresReplica
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetirePostgresReplicaRequest"
+      responses:
+        '202':
+          description: Guarded replica retirement queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BackingServiceMigrateResponse"
+        '400':
+          description: Missing or invalid standby identity
+        '409':
+          description: Conflicting operation or incompatible service topology
         default:
           $ref: "#/components/responses/ErrorResponse"
   /v1/backing-services/{id}/recover:
@@ -11898,6 +11941,8 @@ paths:
         Explicit platform-administrator placement takes precedence over tenant
         placement and zero-downtime preferences without weakening data integrity,
         source preservation or destination verification.
+        Use the backing-service retire-replica endpoint for same-placement
+        standby removal; localize refuses that implicit topology change.
       tags: [Apps]
       x-fugue-handler: handleLocalizeAppDatabase
       security:
@@ -27548,6 +27593,17 @@ components:
           type: string
         storage_class_name:
           type: string
+    RetirePostgresReplicaRequest:
+      type: object
+      additionalProperties: false
+      required: [replica_node]
+      properties:
+        replica_node:
+          type: string
+          minLength: 1
+        expected_replica_pod_uid:
+          type: string
+          minLength: 1
     AppContinuityAppFailoverRequest:
       type: object
       additionalProperties: false

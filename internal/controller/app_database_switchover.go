@@ -635,6 +635,9 @@ func (s *Service) executeManagedDatabaseLocalizeOperation(
 		alreadyLocalized = storageReady
 	}
 	if alreadyLocalized {
+		if err := guardLocalizeStandbyRetirement(ctx, client, namespace, clusterName, op); err != nil {
+			return err
+		}
 		targetPrimary = currentPrimary
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres primary %s on localization target; resuming finalization", targetPrimary))
 	} else {
@@ -829,6 +832,9 @@ func (s *Service) executeBoundManagedDatabaseLocalizeOperation(
 		alreadyLocalized = storageReady
 	}
 	if alreadyLocalized {
+		if err := guardLocalizeStandbyRetirement(ctx, client, namespace, clusterName, op); err != nil {
+			return err
+		}
 		targetPrimary = currentPrimary
 		s.updateManagedPostgresTransitionProgress(op.ID, fmt.Sprintf("observed managed postgres service %s primary %s on localization target; resuming finalization", target.ServiceID, targetPrimary))
 	} else {

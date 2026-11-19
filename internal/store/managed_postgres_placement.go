@@ -394,6 +394,14 @@ func (s *Store) CompleteManagedPostgresSwitchoverWithPlacement(
 	id, manifestPath, message string,
 	mutation ManagedPostgresPlacementMutation,
 ) (model.Operation, error) {
+	return s.completeManagedPostgresPlacement(id, manifestPath, message, mutation, nil)
+}
+
+func (s *Store) CompleteManagedPostgresReplicaRetirement(op model.Operation, message string, mutation ManagedPostgresPlacementMutation) (model.Operation, error) {
+	return s.completeManagedPostgresPlacement(op.ID, "", message, mutation, &op)
+}
+
+func (s *Store) completeManagedPostgresPlacement(id, manifestPath, message string, mutation ManagedPostgresPlacementMutation, retirement *model.Operation) (model.Operation, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return model.Operation{}, ErrInvalidInput
@@ -403,7 +411,7 @@ func (s *Store) CompleteManagedPostgresSwitchoverWithPlacement(
 		return model.Operation{}, err
 	}
 	if s.usingDatabase() {
-		return s.pgCompleteManagedPostgresSwitchoverWithPlacement(id, manifestPath, message, mutation)
+		return s.pgCompleteManagedPostgresPlacement(id, manifestPath, message, mutation, retirement)
 	}
 
 	var completed model.Operation
@@ -413,7 +421,7 @@ func (s *Store) CompleteManagedPostgresSwitchoverWithPlacement(
 			return ErrNotFound
 		}
 		op := state.Operations[opIndex]
-		if err := validateManagedPostgresSwitchoverPlacementOperation(op, mutation); err != nil {
+		if err := validateManagedPostgresPlacementCompletion(op, mutation, retirement); err != nil {
 			return err
 		}
 		target, err := managedPostgresPlacementTargetInState(state, mutation.Witness)

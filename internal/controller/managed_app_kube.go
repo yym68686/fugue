@@ -368,6 +368,7 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	}
 	if cloudNativePGObject(obj) {
 		preserveColdMigrationAnnotation(current, obj)
+		preserveRetiredPostgresReplicaAffinity(current, obj)
 	}
 	preservePostgresBootstrap(current, obj)
 	if cloudNativePGObject(obj) && skipExistingCloudNativePGWrites(ctx) {
@@ -944,6 +945,7 @@ func (c *kubeClient) replaceObjectSpec(ctx context.Context, obj map[string]any) 
 			preserveCloudNativePGResizePolicy(current, obj)
 			preserveCloudNativePGDefaultedImage(current, obj)
 			preservePostgresBootstrap(current, obj)
+			preserveRetiredPostgresReplicaAffinity(current, obj)
 			if desiredSpecAlreadyApplied(current, obj) {
 				c.writeStats.record("replace_spec_skipped_noop", obj)
 				return nil

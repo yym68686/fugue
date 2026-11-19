@@ -1177,7 +1177,8 @@ func projectedAppManagedBundleCommitment(state *model.State, app model.App, op m
 	current := appManagedBundleCommitmentWithIndex(index, app, app.Status.CurrentRuntimeID, app.Status.CurrentReplicas)
 	// Image-only migration cannot change resource, replica, placement or storage
 	// commitments. Billing projection must not execute its runtime-proof gate.
-	if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType {
+	// Replica retirement only reduces existing capacity after verified settlement.
+	if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == model.OperationTypeDatabaseReplicaRetire || op.Type == pgimage.OperationType {
 		return current, current, nil
 	}
 	projection := cloneBillingProjectionState(state, app)
@@ -1394,7 +1395,7 @@ func validateTenantManagedCapacityProjection(
 
 func projectedTenantPublicRuntimeHourlyRates(state *model.State, app model.App, op model.Operation) (int64, int64, error) {
 	currentRate := tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, newBillingStateIndex(state), app.TenantID)
-	if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType {
+	if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == model.OperationTypeDatabaseReplicaRetire || op.Type == pgimage.OperationType {
 		return currentRate, currentRate, nil
 	}
 	projection := cloneTenantBillingState(state)

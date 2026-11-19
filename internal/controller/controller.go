@@ -910,7 +910,7 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				return nil
 			}
 			if errors.Is(err, context.Canceled) {
-				if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType || op.Type == model.OperationTypeAppStorageUnmount {
+				if op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == model.OperationTypeDatabaseReplicaRetire || op.Type == pgimage.OperationType || op.Type == model.OperationTypeAppStorageUnmount {
 					// Keep a possibly accepted image mutation running and
 					// non-cancellable. The recovery observer resumes its journal.
 					return err
@@ -932,8 +932,8 @@ func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation
 				s.Logger.Printf("operation %s stopped before completion: %v", op.ID, err)
 				return nil
 			}
-			if errors.Is(err, errPostgresSourceRetirementUnsettled) || errors.Is(err, errPostgresImageMigrationUnsettled) {
-				s.Logger.Printf("operation %s retained active pending database image verification: %v", op.ID, err)
+			if errors.Is(err, errPostgresSourceRetirementUnsettled) || errors.Is(err, errPostgresReplicaRetirementUnsettled) || errors.Is(err, errPostgresImageMigrationUnsettled) {
+				s.Logger.Printf("operation %s retained active pending database verification: %v", op.ID, err)
 				return nil
 			}
 			if errors.Is(err, errManagedPostgresResizeUnsettled) {
@@ -1025,6 +1025,8 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		return s.executePostgresImageMigration(ctx, op, app)
 	case model.OperationTypeDatabaseSourceRetire:
 		return s.executePostgresSourceRetirement(ctx, op, app)
+	case model.OperationTypeDatabaseReplicaRetire:
+		return s.executePostgresReplicaRetirement(ctx, op, app)
 	case model.OperationTypeDeploy:
 		if op.DesiredSpec == nil {
 			return fmt.Errorf("deploy operation %s missing desired spec", op.ID)

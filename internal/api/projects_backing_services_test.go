@@ -493,6 +493,57 @@ func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 	}
 }
 
+func TestRetireBackingServiceReplicaQueuesOnlyExactDatabaseIntent(t *testing.T) {
+	t.Parallel()
+	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, _ := s.CreateTenant("Replica retirement fixture")
+	raiseManagedTestCap(t, s, tenant.ID)
+	project, _ := s.CreateProject(tenant.ID, "fixture", "")
+	app, err := s.CreateApp(tenant.ID, project.ID, "fixture", "", model.AppSpec{
+		Image: "example.invalid/app:stable", RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1,
+		Postgres: &model.AppPostgresSpec{Instances: 2, SynchronousReplicas: 1, PrimaryNodeName: "primary-node", Database: "fixture", User: "fixture", Password: "fixture-secret"},
+	})
+	if err != nil || len(app.BackingServices) != 1 {
+		t.Fatalf("initialize retirement target: %v", err)
+	}
+	service := app.BackingServices[0]
+	_, key, _ := s.CreateAPIKey(tenant.ID, "writer", []string{"project.write"})
+	_, reader, _ := s.CreateAPIKey(tenant.ID, "reader", []string{"project.read"})
+	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	path := "/v1/backing-services/" + service.ID + "/retire-replica"
+	for _, tc := range []struct {
+		key  string
+		body map[string]any
+		code int
+	}{
+		{reader, map[string]any{"replica_node": "standby-node"}, http.StatusForbidden},
+		{key, map[string]any{"expected_replica_pod_uid": "standby-uid"}, http.StatusBadRequest},
+		{key, map[string]any{"replica_node": "standby-node", "storage_size": "1Gi"}, http.StatusBadRequest},
+		{key, map[string]any{"replica_node": "primary-node"}, http.StatusConflict},
+		{key, map[string]any{"replica_node": "standby-node", "expected_replica_pod_uid": "standby-uid"}, http.StatusAccepted},
+	} {
+		rec := performJSONRequest(t, server, http.MethodPost, path, tc.key, tc.body)
+		if rec.Code != tc.code {
+			t.Fatalf("%+v: got HTTP %d want %d: %s", tc.body, rec.Code, tc.code, rec.Body.String())
+		}
+		if tc.code == http.StatusAccepted {
+			var out struct {
+				Operation model.Operation `json:"operation"`
+			}
+			mustDecodeJSON(t, rec, &out)
+			op, err := s.GetOperation(out.Operation.ID)
+			if err != nil || op.Type != model.OperationTypeDatabaseReplicaRetire || op.ServiceID != service.ID ||
+				op.SourceRuntimeID != op.TargetRuntimeID || op.DesiredSpec.Postgres.RetireReplicaNode != "standby-node" ||
+				op.DesiredSpec.Postgres.RetireReplicaPodUID != "standby-uid" || op.DesiredSpec.Postgres.Instances != 2 {
+				t.Fatalf("unexpected operation scope or pending spec: %v", err)
+			}
+		}
+	}
+}
+
 func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 	t.Parallel()
 

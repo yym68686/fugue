@@ -287,6 +287,11 @@ func storageSpecDigest(value any) (string, error) {
 }
 
 func (s *Service) storageGrowthSQLWitness(ctx context.Context, host, podIP string, postgres model.AppPostgresSpec) (string, error) {
+	started, _, err := s.postgresContinuitySQLWitness(ctx, host, podIP, postgres, false)
+	return started, err
+}
+
+func (s *Service) postgresContinuitySQLWitness(ctx context.Context, host, podIP string, postgres model.AppPostgresSpec, observeSync bool) (started, synchronousStandbys string, err error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	connect := s.postgresPrimarySQLConnect
@@ -297,22 +302,28 @@ func (s *Service) storageGrowthSQLWitness(ctx context.Context, host, podIP strin
 	}
 	conn, err := connect(probeCtx, managedPostgresServiceDatabaseURL(host, postgres))
 	if err != nil {
-		return "", fmt.Errorf("storage growth RW service SQL probe: %w", err)
+		return "", "", fmt.Errorf("RW service SQL probe: %w", err)
 	}
 	defer closeManagedPostgresPrimarySQLConnection(conn)
 	var recovery bool
-	var readOnly, address, started string
-	err = conn.QueryRow(probeCtx, `SELECT pg_is_in_recovery(), current_setting('transaction_read_only'), COALESCE(host(inet_server_addr()), ''), pg_postmaster_start_time()::text`).Scan(&recovery, &readOnly, &address, &started)
+	var readOnly, address string
+	query := `SELECT pg_is_in_recovery(), current_setting('transaction_read_only'), COALESCE(host(inet_server_addr()), ''), pg_postmaster_start_time()::text`
+	fields := []any{&recovery, &readOnly, &address, &started}
+	if observeSync {
+		query += `, current_setting('synchronous_standby_names')`
+		fields = append(fields, &synchronousStandbys)
+	}
+	err = conn.QueryRow(probeCtx, query).Scan(fields...)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := validateManagedPostgresPrimarySQL(address, podIP, readOnly, recovery); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if started == "" {
-		return "", fmt.Errorf("missing PostgreSQL postmaster start witness")
+		return "", "", fmt.Errorf("missing PostgreSQL postmaster start witness")
 	}
-	return started, nil
+	return started, synchronousStandbys, nil
 }
 
 func (c *kubeClient) patchPostgresStorageSize(ctx context.Context, namespace, name string, baseline postgresStorageSnapshot, target string) error {

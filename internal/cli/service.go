@@ -113,6 +113,7 @@ func (c *CLI) newServicePostgresCommand() *cobra.Command {
 		c.newServicePostgresResizeCommand(),
 		c.newServicePostgresMigrateImageCommand(),
 		c.newServicePostgresRetireSourceCommand(),
+		c.newServicePostgresRetireReplicaCommand(),
 		c.newServicePostgresRecoverCommand(),
 		c.newServicePostgresOrphanCommand(),
 	)

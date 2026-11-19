@@ -3332,7 +3332,7 @@ func (s *Store) pgCreateOperation(op model.Operation, policy operationCreatePoli
 	if err := validateStorageUnmountOperation(op, app, policy.ExpectedAppSpecHash); err != nil {
 		return model.Operation{}, operationCreateOutcome{}, err
 	}
-	if op.DesiredSpec != nil && op.Type != model.OperationTypeAppStorageUnmount && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
+	if op.DesiredSpec != nil && op.Type != model.OperationTypeAppStorageUnmount && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != model.OperationTypeDatabaseReplicaRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
 		if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3909,7 +3909,7 @@ WHERE app_id = $1
 		if err := prepareAppRequestResizeOperation(app, &op); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
-	case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
+	case model.OperationTypeDatabaseSourceRetire, model.OperationTypeDatabaseReplicaRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
 		if _, err := s.pgValidateManagedPostgresResizeTargetTx(ctx, tx, &app, op.ServiceID); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
 		}
@@ -3919,6 +3919,9 @@ WHERE app_id = $1
 		}
 		if op.Type == model.OperationTypeDatabaseSourceRetire {
 			prepare = preparePostgresSourceRetirement
+		}
+		if op.Type == model.OperationTypeDatabaseReplicaRetire {
+			prepare = preparePostgresReplicaRetirement
 		}
 		if err := prepare(app, &op); err != nil {
 			return model.Operation{}, operationCreateOutcome{}, err
@@ -4751,7 +4754,7 @@ func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message 
 	if runtimeID != "" && op.AssignedRuntimeID != runtimeID {
 		return model.Operation{}, ErrNotFound
 	}
-	if !operationCanTransitionToCompleted(op) {
+	if !operationCanTransitionToCompleted(op) || op.Type == model.OperationTypeDatabaseReplicaRetire {
 		return model.Operation{}, ErrConflict
 	}
 	if guard != nil {
@@ -4924,7 +4927,7 @@ func (s *Store) pgFailOperationGuarded(id, message string, guard *operationFinal
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if (op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == pgimage.OperationType) && op.Status == model.OperationStatusRunning && guard == nil {
+	if (op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == model.OperationTypeDatabaseReplicaRetire || op.Type == pgimage.OperationType) && op.Status == model.OperationStatusRunning && guard == nil {
 		return model.Operation{}, ErrConflict
 	}
 
@@ -6541,7 +6544,7 @@ func applyOperationToAppModel(app *model.App, op *model.Operation) error {
 	case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
 		// The exact backing service lifecycle intent is applied transactionally
 		// before this model update. AppSpec must remain untouched.
-	case model.OperationTypeDatabaseSourceRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
+	case model.OperationTypeDatabaseSourceRetire, model.OperationTypeDatabaseReplicaRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
 		// The exact runtime target is applied to the backing service in the same
 		// transaction. Do not change AppSpec, status, or timestamps.
 		return nil

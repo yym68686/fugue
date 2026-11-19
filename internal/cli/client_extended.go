@@ -1406,6 +1406,16 @@ func (c *Client) LocalizeBackingServiceWithOptions(id string, opts databaseLocal
 	return response, nil
 }
 
+func (c *Client) RetireBackingServicePostgresReplica(id, node, uid string) (backingServiceMigrateResponse, error) {
+	var response backingServiceMigrateResponse
+	request := map[string]string{"replica_node": node}
+	if uid != "" {
+		request["expected_replica_pod_uid"] = uid
+	}
+	err := c.doJSON(http.MethodPost, path.Join("/v1/backing-services", id, "retire-replica"), request, &response)
+	return response, err
+}
+
 func (c *Client) ListOperations(appID string) ([]model.Operation, error) {
 	return c.ListOperationsFiltered(listOperationsOptions{AppID: appID})
 }

@@ -2729,6 +2729,7 @@ func activeManagedPostgresExclusiveMutationForBackupRun(state *model.State, run 
 	// contains more than one active database mutation; resume and resize follow.
 	for _, operationType := range []string{
 		model.OperationTypeDatabaseSourceRetire,
+		model.OperationTypeDatabaseReplicaRetire,
 		pgimage.OperationType,
 		model.OperationTypeDatabaseSuspend,
 		model.OperationTypeDatabaseResume,

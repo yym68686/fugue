@@ -447,7 +447,7 @@ func buildPostgresClusterObject(namespace, secretName, resourceName string, labe
 	}
 	clusterSpec["minSyncReplicas"] = minSyncReplicas
 	clusterSpec["maxSyncReplicas"] = spec.SynchronousReplicas
-	if affinity := buildPostgresAffinity(spec, placements); len(affinity) > 0 {
+	if affinity := PostgresAffinity(spec, placements); len(affinity) > 0 {
 		clusterSpec["affinity"] = affinity
 	}
 
@@ -2601,7 +2601,9 @@ func applyScheduling(podSpec *map[string]any, scheduling SchedulingConstraints) 
 	}
 }
 
-func buildPostgresAffinity(spec model.AppPostgresSpec, placements []SchedulingConstraints) map[string]any {
+// PostgresAffinity is the canonical rendering used by CNPG Cluster apply and
+// by topology transitions that must prove what a later apply will request.
+func PostgresAffinity(spec model.AppPostgresSpec, placements []SchedulingConstraints) map[string]any {
 	if len(placements) == 0 {
 		return nil
 	}

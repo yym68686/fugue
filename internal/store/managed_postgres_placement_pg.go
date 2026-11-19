@@ -224,9 +224,10 @@ func (s *Store) pgSyncObservedManagedPostgresPlacement(
 	return app, nil
 }
 
-func (s *Store) pgCompleteManagedPostgresSwitchoverWithPlacement(
+func (s *Store) pgCompleteManagedPostgresPlacement(
 	id, manifestPath, message string,
 	mutation ManagedPostgresPlacementMutation,
+	retirement *model.Operation,
 ) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -241,7 +242,7 @@ func (s *Store) pgCompleteManagedPostgresSwitchoverWithPlacement(
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if err := validateManagedPostgresSwitchoverPlacementOperation(op, mutation); err != nil {
+	if err := validateManagedPostgresPlacementCompletion(op, mutation, retirement); err != nil {
 		return model.Operation{}, err
 	}
 	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)

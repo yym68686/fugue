@@ -223,6 +223,14 @@ func (s *Server) handleMigrateBackingService(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Request) {
+	s.queueBackingServiceLocalization(w, r, false)
+}
+
+func (s *Server) handleRetireBackingServicePostgresReplica(w http.ResponseWriter, r *http.Request) {
+	s.queueBackingServiceLocalization(w, r, true)
+}
+
+func (s *Server) queueBackingServiceLocalization(w http.ResponseWriter, r *http.Request, exactRetirement bool) {
 	principal := mustPrincipal(r)
 	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("project.write") {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or project.write scope")
@@ -247,13 +255,46 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 		TargetNodeName   string `json:"target_node_name"`
 		StorageSize      string `json:"storage_size"`
 		StorageClassName string `json:"storage_class_name"`
+		ReplicaNode      string `json:"replica_node"`
+		ReplicaPodUID    string `json:"expected_replica_pod_uid"`
 	}
-	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
-		return
+	if exactRetirement {
+		var identity struct {
+			Node   string `json:"replica_node"`
+			PodUID string `json:"expected_replica_pod_uid"`
+		}
+		if err := httpx.DecodeJSON(r, &identity); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.ReplicaNode, req.ReplicaPodUID = identity.Node, identity.PodUID
+	} else {
+		var placement struct {
+			TargetRuntimeID  string `json:"target_runtime_id"`
+			TargetNodeName   string `json:"target_node_name"`
+			StorageSize      string `json:"storage_size"`
+			StorageClassName string `json:"storage_class_name"`
+		}
+		if err := httpx.DecodeJSON(r, &placement); err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		req.TargetRuntimeID, req.TargetNodeName, req.StorageSize, req.StorageClassName = placement.TargetRuntimeID, placement.TargetNodeName, placement.StorageSize, placement.StorageClassName
 	}
 
+	replicaNode, replicaUID := strings.TrimSpace(req.ReplicaNode), strings.TrimSpace(req.ReplicaPodUID)
+	if exactRetirement && replicaNode == "" {
+		httpx.WriteError(w, http.StatusBadRequest, "replica retirement requires the standby node")
+		return
+	}
 	targetRuntimeID := strings.TrimSpace(req.TargetRuntimeID)
+	if exactRetirement {
+		if service.Spec.Postgres == nil || service.Spec.Postgres.Suspended || service.Spec.Postgres.Instances != 2 {
+			httpx.WriteError(w, http.StatusConflict, "online replica retirement requires an active two-instance PostgreSQL service")
+			return
+		}
+		targetRuntimeID = strings.TrimSpace(service.Spec.Postgres.RuntimeID)
+	}
 	if targetRuntimeID == "" {
 		targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
 	}
@@ -267,7 +308,10 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 		postgresCopy := *cloneAppPostgresSpec(service.Spec.Postgres)
 		postgresCopy.RuntimeID = targetRuntimeID
 		postgresCopy.FailoverTargetRuntimeID = ""
-		postgresCopy.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
+		if !exactRetirement {
+			postgresCopy.PrimaryNodeName = strings.TrimSpace(req.TargetNodeName)
+		}
+		postgresCopy.RetireReplicaNode, postgresCopy.RetireReplicaPodUID = replicaNode, replicaUID
 		postgresCopy.PrimaryPlacementPendingRebalance = false
 		postgresCopy.Instances = 1
 		postgresCopy.SynchronousReplicas = 0
@@ -280,9 +324,13 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 		desiredSpec.Postgres = &postgresCopy
 	}
 
+	operationType := model.OperationTypeDatabaseLocalize
+	if exactRetirement {
+		operationType = model.OperationTypeDatabaseReplicaRetire
+	}
 	op, err := s.store.CreateOperation(model.Operation{
 		TenantID:        service.TenantID,
-		Type:            model.OperationTypeDatabaseLocalize,
+		Type:            operationType,
 		RequestedByType: principal.ActorType,
 		RequestedByID:   principal.ActorID,
 		AppID:           app.ID,
@@ -310,7 +358,14 @@ func (s *Server) handleLocalizeBackingService(w http.ResponseWriter, r *http.Req
 	if storageClassName := strings.TrimSpace(req.StorageClassName); storageClassName != "" {
 		metadata["storage_class_name"] = storageClassName
 	}
-	s.appendAudit(principal, "backing_service.localize", "operation", op.ID, service.TenantID, metadata)
+	if exactRetirement {
+		metadata["replica_node"], metadata["replica_pod_uid"] = replicaNode, replicaUID
+	}
+	auditAction := "backing_service.localize"
+	if exactRetirement {
+		auditAction = "backing_service.retire_replica"
+	}
+	s.appendAudit(principal, auditAction, "operation", op.ID, service.TenantID, metadata)
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"backing_service": cloneBackingService(service),
 		"operation":       sanitizeOperationForAPI(op),
