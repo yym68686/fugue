@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,8 @@ type producedTrafficState struct {
 	fullArtifact, grayArtifact model.PlatformArtifact
 	hasFull, hasGray           bool
 }
+
+const trafficPublicationTimeoutReason = "traffic publication did not converge before rollout timeout"
 
 func (s *Server) producedTrafficState(scope string) (producedTrafficState, error) {
 	var state producedTrafficState
@@ -99,19 +102,31 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 		return true, fmt.Errorf("automatic publication waits for the current operator release")
 	}
 	settings := policy.Serving
-	if parent.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID || time.Since(current.ReleasedAt) >= time.Duration(settings.RolloutTimeoutSeconds)*time.Second {
+	recoverBaseline := func(reason string) (bool, error) {
 		if err := ctx.Err(); err != nil {
 			return true, err
 		}
-		artifact, release, _, _, err := s.store.RollbackProducedTraffic(parent.ID, current.ID, authority.ID, state.full.ID, state.lkg.ArtifactID, model.PlatformArtifactRollbackRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull, ToGeneration: state.lkg.Generation, Reason: "producer restores verified baseline after timeout or policy revision"}, principal)
+		artifact, release, _, _, err := s.store.RollbackProducedTraffic(parent.ID, current.ID, authority.ID, state.full.ID, state.lkg.ArtifactID, model.PlatformArtifactRollbackRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull, ToGeneration: state.lkg.Generation, Reason: reason}, principal)
 		if err != nil {
 			return true, err
+		}
+		if reason == trafficPublicationTimeoutReason {
+			s.trafficPublicationTimeouts.Add(1)
+		}
+		s.appendAudit(principal, "platform_config.serving_rolled_back", "platform_release_set", parent.ID, "", map[string]string{"reason": reason, "channel": current.ReleaseChannel, "policy_release_id": authority.ID, "failed_release_id": current.ID, "recovery_release_id": release.ID, "lkg_artifact_id": artifact.ID})
+		if s.log != nil {
+			s.log.Printf("traffic publication rolled back channel=%s release=%s recovery=%s reason=%s", current.ReleaseChannel, current.ID, release.ID, reason)
 		}
 		if _, err = s.preparePlatformReleaseSetConsumers(ctx, principal, artifact, release); err != nil {
 			return true, err
 		}
-		s.appendAudit(principal, "platform_config.serving_rolled_back", "platform_release_set", parent.ID, "", map[string]string{"policy_release_id": authority.ID, "failed_release_id": current.ID, "recovery_release_id": release.ID, "lkg_artifact_id": artifact.ID})
 		return true, nil
+	}
+	if parent.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID {
+		return recoverBaseline("producer policy revision changed")
+	}
+	if time.Since(current.ReleasedAt) >= time.Duration(settings.RolloutTimeoutSeconds)*time.Second {
+		return recoverBaseline(trafficPublicationTimeoutReason)
 	}
 	if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, parent, current); err != nil {
 		return true, err
@@ -130,6 +145,12 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 		return true, err
 	}
 	if current.ReleaseChannel == model.PlatformArtifactReleaseChannelGray {
+		if err := s.recheckTrafficWithdrawal(ctx, parent, state.fullArtifact); err != nil {
+			if errors.Is(err, errObsoleteWithdrawal) {
+				return recoverBaseline(err.Error())
+			}
+			return true, err
+		}
 		artifact, release, _, _, err := s.store.ReleaseProducedTrafficArtifact(parent.ID, authority.ID, model.PlatformArtifactReleaseChannelFull, state.full.ID, state.full.ID, state.lkg.ArtifactID, "", principal)
 		if err != nil {
 			return true, err
@@ -200,6 +221,9 @@ func (s *Server) stageProducedTraffic(ctx context.Context, policy platformproduc
 		return err
 	}
 	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.recheckTrafficWithdrawal(ctx, parent, state.fullArtifact); err != nil {
 		return err
 	}
 	artifact, release, _, _, err := s.store.ReleaseProducedTrafficArtifact(parent.ID, authority.ID, model.PlatformArtifactReleaseChannelGray, state.gray.ID, state.full.ID, state.lkg.ArtifactID, policy.Serving.CanaryRuleRef, platformProducerPrincipal())

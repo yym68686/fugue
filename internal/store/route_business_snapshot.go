@@ -166,9 +166,7 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 		snapshot.RoutePolicies[i].ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(snapshot.RoutePolicies[i], snapshot.CapturedAt)
 	}
 	for i := range snapshot.Releases {
-		if spec := snapshot.Releases[i].SpecSnapshot; spec != nil {
-			snapshot.Releases[i].SpecSnapshot = &model.AppSpec{Image: spec.Image, RuntimeID: spec.RuntimeID}
-		}
+		snapshot.Releases[i].SpecSnapshot = routeReleaseSpec(snapshot.Releases[i].SpecSnapshot)
 	}
 	sort.Slice(snapshot.Releases, func(i, j int) bool { return snapshot.Releases[i].ID < snapshot.Releases[j].ID })
 	sort.Slice(snapshot.TrafficPolicies, func(i, j int) bool { return snapshot.TrafficPolicies[i].AppID < snapshot.TrafficPolicies[j].AppID })
@@ -182,6 +180,31 @@ func (snapshot *RouteBusinessSnapshot) normalize() {
 		snapshot.DNSRecords[i] = normalizeDNSRecordForRead(snapshot.DNSRecords[i])
 	}
 	snapshot.DNSRecords = filterAndSortDNSRecords(snapshot.DNSRecords)
+}
+
+// Keep only facts consumed by releaseproof.Observe, including every exclusion
+// of the singleton drain path. Never copy executable payloads or credentials.
+func routeMarker[T any](v *T) *T {
+	if v == nil {
+		return nil
+	}
+	return new(T)
+}
+
+func routeReleaseSpec(s *model.AppSpec) *model.AppSpec {
+	if s == nil {
+		return nil
+	}
+	p := &model.AppSpec{Image: s.Image, RuntimeID: s.RuntimeID, Replicas: s.Replicas,
+		Ports: append([]int(nil), s.Ports...), NetworkMode: s.NetworkMode, WorkloadGeneration: s.WorkloadGeneration,
+		Workspace: routeMarker(s.Workspace), PersistentStorage: routeMarker(s.PersistentStorage),
+		Data: routeMarker(s.Data), Postgres: routeMarker(s.Postgres), SSH: routeMarker(s.SSH),
+		Failover: routeMarker(s.Failover), VolumeReplication: routeMarker(s.VolumeReplication), NodeLoss: routeMarker(s.NodeLoss)}
+	if s.Continuity != nil && s.Continuity.ZeroDowntime != nil {
+		z := s.Continuity.ZeroDowntime
+		p.Continuity = &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{Enabled: z.Enabled, Mode: z.Mode}}
+	}
+	return p
 }
 
 // Compiler snapshots describe route intent and runtime identity, not workload

@@ -7,6 +7,25 @@ Shadow mode never publishes gray/full traffic or verifies LKG. Serving mode uses
 the same producer with complete pinned configuration and bounded promotion gates.
 The retired business-migration source is rejected in every mode.
 
+### Verify public delivery after an application rollout
+
+Run `fugue app domain primary verify <app> --public --json` with platform-admin
+route diagnostics access. Check `public_delivery` for the internal Service
+state, selected stable release, published upstream, Edge evidence and a
+credential-free public HTTP observation. Ordinary verification only checks the
+workload. A reachable older release, or a healthy Pod with a public 503, does
+not verify the new rollout. An HTTP response alone cannot identify a release.
+
+Before gray publication and full promotion, a proposed removal of a healthy
+path for stable-release unreadiness is checked against its current selection
+and managed workload. An obsolete negative must not replace that route. A
+confirmed negative may be published; explicit disable and isolation still
+take effect. Check API logs for the application, release and observation
+reason. A convergence timeout restores the verified baseline, records a
+`platform_config.serving_rolled_back` audit event and increments
+`fugue_traffic_publication_timeouts_total`. Install the chart's
+`FugueTrafficPublicationTimedOut` rule on the monitoring system to alert.
+
 Create a `policy_snapshot` artifact with scope
 `{"scope_type":"global","key":"platform-config-producer"}` and this content:
 

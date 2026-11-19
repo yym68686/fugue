@@ -187,6 +187,13 @@ data:
               description: "An app restarted more than 3 times in 10 minutes."
       - name: fugue-operation-evidence
         rules:
+          - alert: FugueTrafficPublicationTimedOut
+            expr: sum(increase(fugue_traffic_publication_timeouts_total[10m])) > 0
+            labels:
+              severity: warning
+            annotations:
+              summary: "Fugue rolled back a traffic publication after its deadline"
+              description: "Inspect the platform_config.serving_rolled_back audit event for the affected release and recovery generation."
           - alert: FugueRolloutEvidenceCaptureFailed
             expr: sum(fugue_rollout_failure_evidence_capture_total{result="error"}) > 0
             for: 10m

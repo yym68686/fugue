@@ -149,6 +149,18 @@ func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string,
 	return values, rows.Err()
 }
 
-// Route readiness consumes only immutable image/runtime identity from a release
-// spec. Keep nil distinguishable from an empty spec, and retain workload proof.
-var routeBusinessReleaseSelectColumns = strings.Replace(appReleaseSelectColumns, "spec_snapshot_json", `CASE WHEN spec_snapshot_json IS NULL OR spec_snapshot_json = 'null'::jsonb THEN NULL ELSE jsonb_build_object('image', spec_snapshot_json->'image', 'runtime_id', spec_snapshot_json->'runtime_id') END AS spec_snapshot_json`, 1)
+// Project at the database boundary as well as in the detached file-store
+// snapshot. Presence-only configuration (e.g. SSH) must not cross this boundary.
+var routeBusinessReleaseSpecSQL = func() string {
+	var pairs []string
+	for _, key := range []string{"image", "runtime_id", "replicas", "ports", "network_mode", "workload_generation"} {
+		pairs = append(pairs, "'"+key+"', spec_snapshot_json->'"+key+"'")
+	}
+	for _, key := range []string{"workspace", "persistent_storage", "data", "postgres", "ssh", "failover", "volume_replication", "node_loss"} {
+		pairs = append(pairs, "'"+key+"', CASE WHEN NULLIF(spec_snapshot_json->'"+key+"','null'::jsonb) IS NOT NULL THEN '{}'::jsonb END")
+	}
+	pairs = append(pairs, `'continuity', CASE WHEN NULLIF(spec_snapshot_json#>'{continuity,zero_downtime}','null'::jsonb) IS NOT NULL THEN jsonb_build_object('zero_downtime',jsonb_build_object('enabled',spec_snapshot_json#>'{continuity,zero_downtime,enabled}','mode',spec_snapshot_json#>'{continuity,zero_downtime,mode}')) END`)
+	return "CASE WHEN jsonb_typeof(spec_snapshot_json)='object' THEN jsonb_strip_nulls(jsonb_build_object(" + strings.Join(pairs, ",") + ")) ELSE spec_snapshot_json END"
+}()
+
+var routeBusinessReleaseSelectColumns = strings.Replace(appReleaseSelectColumns, "spec_snapshot_json", routeBusinessReleaseSpecSQL+" AS spec_snapshot_json", 1)

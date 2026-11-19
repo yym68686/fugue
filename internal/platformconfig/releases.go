@@ -1,11 +1,16 @@
 package platformconfig
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"fugue/internal/model"
 )
+
+const partitionPendingPrefix = "application traffic partition pending: "
+const stableNotReadyReason = "stable release is not ready for traffic"
+const StableNotReadyRouteReason = partitionPendingPrefix + stableNotReadyReason
 
 // ApplyTrafficPolicyConstraints resolves only fixed input facts. Unavailable
 // candidates may fall back only when policy explicitly permits it and the
@@ -69,7 +74,7 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 			*route = previous
 		} else {
 			route.Status = model.EdgeRouteStatusUnavailable
-			route.StatusReason = "application traffic partition pending: " + cause.Error()
+			route.StatusReason = partitionPendingPrefix + cause.Error()
 			route.Upstreams = nil
 		}
 		return nil
@@ -135,7 +140,7 @@ func ApplyTrafficPolicyConstraints(routes []CompiledRoute, policy PolicySnapshot
 				return nil, err
 			}
 			if stable.Status != model.EdgeRouteStatusActive || stable.UpstreamURL == "" {
-				if err := isolate(route, fmt.Errorf("stable release is not ready for traffic")); err != nil {
+				if err := isolate(route, errors.New(stableNotReadyReason)); err != nil {
 					return nil, err
 				}
 				continue

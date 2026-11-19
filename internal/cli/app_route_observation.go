@@ -25,6 +25,7 @@ type appRouteShowResult struct {
 	ConclusionCode    string                        `json:"conclusion_code,omitempty"`
 	Conclusion        string                        `json:"conclusion,omitempty"`
 	Warnings          []string                      `json:"warnings,omitempty"`
+	Delivery          *routeDelivery                `json:"public_delivery,omitempty"`
 }
 
 func (c *CLI) loadAppRouteShowResult(client *Client, app model.App) appRouteShowResult {
@@ -78,13 +79,13 @@ func finalizeAppRouteShowResult(result *appRouteShowResult) {
 	switch {
 	case result.Service == nil || result.PodInventory == nil:
 		result.ConclusionCode = "inconclusive"
-		result.Conclusion = "the CLI could not load enough runtime/service evidence to prove which endpoints the public route currently reaches"
+		result.Conclusion = "the CLI could not confirm which endpoints the internal Service currently reaches"
 	case result.Rollout != nil && strings.EqualFold(strings.TrimSpace(result.Rollout.Status), "ready") && !result.EndpointsSwitched:
 		result.ConclusionCode = "endpoints_not_switched"
 		result.Conclusion = "the deployment rollout is ready, but the service endpoints have not fully switched to the serving revision"
 	case result.EndpointsSwitched:
 		result.ConclusionCode = "in_sync"
-		result.Conclusion = "the public route service endpoints are serving the expected ready revision"
+		result.Conclusion = "internal Service endpoints have switched to the expected revision; public delivery is not verified (use --public)"
 	case len(result.ServingPods) == 0:
 		result.ConclusionCode = "no_endpoints"
 		result.Conclusion = "the app service currently has no ready endpoints"
@@ -122,6 +123,11 @@ func renderAppRouteShowResult(w io.Writer, result appRouteShowResult) error {
 	)
 	if err := writeKeyValues(w, pairs...); err != nil {
 		return err
+	}
+	if d := result.Delivery; d != nil {
+		if err := writeKeyValues(w, kvPair{Key: "delivery_observed_at", Value: d.At}, kvPair{Key: "workload", Value: d.Workload}, kvPair{Key: "target_stable", Value: d.Stable}, kvPair{Key: "route_publication", Value: d.Publication}, kvPair{Key: "edge_apply", Value: d.Edge}, kvPair{Key: "public_http", Value: fmt.Sprint(d.HTTP)}, kvPair{Key: "public_edge_request", Value: d.RequestID}, kvPair{Key: "delivery_reason", Value: d.Reason}); err != nil {
+			return err
+		}
 	}
 	if len(result.ReadyPods) > 0 {
 		if _, err := fmt.Fprintf(w, "ready_pods=%s\n", strings.Join(result.ReadyPods, ",")); err != nil {

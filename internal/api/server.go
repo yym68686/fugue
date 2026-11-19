@@ -133,6 +133,7 @@ type Server struct {
 	managedAppStatusCache                  managedAppStatusCache
 	edgeRouteDecisionMu                    sync.Mutex
 	edgeRouteDecisionLast                  map[string]string
+	trafficPublicationTimeouts             atomic.Uint64
 	edgeRouteSourceMu                      sync.Mutex
 	edgeRouteSourceHeartbeats              map[string]uint64
 	edgeRouteInventoryFallbacks            map[string]uint64

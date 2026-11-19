@@ -8,7 +8,8 @@ import (
 )
 
 func (c *CLI) newAppRouteShowCommand() *cobra.Command {
-	return &cobra.Command{
+	var public bool
+	cmd := &cobra.Command{
 		Use:     "show <app>",
 		Aliases: []string{"status", "get"},
 		Short:   "Show the app's primary route",
@@ -27,6 +28,9 @@ func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 				return err
 			}
 			result := c.loadAppRouteShowResult(client, app)
+			if public {
+				checkPublicDelivery(cmd.Context(), client, app, &result)
+			}
 			if c.wantsJSON() {
 				if err := c.writeJSON(result); err != nil {
 					return err
@@ -46,6 +50,8 @@ func (c *CLI) newAppRouteShowCommand() *cobra.Command {
 			}
 		},
 	}
+	cmd.Flags().BoolVar(&public, "public", false, "Verify stable publication, matching Edge consumer evidence and the public HTTP path (route evidence requires platform admin)")
+	return cmd
 }
 
 func (c *CLI) newAppRouteCheckCommand() *cobra.Command {

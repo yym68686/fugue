@@ -41,6 +41,10 @@ func (s *Server) recordEdgeRouteSourceHeartbeat(raw string) {
 }
 
 func (s *Server) writeEdgeRouteSourceMetrics(w io.Writer) {
+	if s != nil {
+		observability.WriteMetricHeader(w, "fugue_traffic_publication_timeouts_total", "Traffic publications rolled back after their convergence deadline.", "counter")
+		observability.WriteMetricSample(w, "fugue_traffic_publication_timeouts_total", nil, float64(s.trafficPublicationTimeouts.Load()))
+	}
 	counts := map[string]uint64{}
 	if s != nil {
 		s.edgeRouteSourceMu.Lock()
