@@ -134,6 +134,56 @@ class ObservationPolicyTests(unittest.TestCase):
                 observation.coherent_policy(candidate, config, '/approved/verifier', queries, current)
         self.assertEqual(read.call_count, observation.CAPTURE_MAX_ATTEMPTS)
 
+    def test_expected_set_transition_discards_both_inputs_and_verifies_new_pair(self):
+        config, candidate, current, queries, first = self.coherent_fixture()
+        first['checkpoint']['candidate']['assignment']['expected_consumer_set_id'] = 'old-set'
+        first['snapshot']['assignment']['expected_consumer_set_id'] = 'new-set'
+        stable = copy.deepcopy(first)
+        stable['checkpoint']['candidate']['assignment'] = copy.deepcopy(stable['snapshot']['assignment'])
+        stable['checkpoint']['applied_at'] = '2026-01-01T00:01:00Z'
+        stable['snapshot']['evaluated_at'] = '2026-01-01T00:01:03Z'
+        stable['signing_key'] = 'fresh-synthetic-key'
+        checked = []
+
+        def verify(args, **kwargs):
+            self.assertEqual(args, ['/approved/verifier', '--export-policy'])
+            req = json.loads(kwargs['input'])
+            checked.append(req)
+            if req['checkpoint']['candidate']['assignment'] != req['snapshot']['assignment']:
+                return subprocess.CompletedProcess(args, 1, '', 'DNS observation policy rejected: assignment_expected_set')
+            self.assertEqual(req, dict(stable, observation_queries=queries))
+            return subprocess.CompletedProcess(args, 0, json.dumps({'schema': 'fugue.dns-observation-policy/v1'}), '')
+
+        output = io.StringIO()
+        with patch.object(observation, 'candidate_request', side_effect=[first, stable]) as read, \
+                patch.object(observation.subprocess, 'run', side_effect=verify), \
+                patch.object(observation, 'unchanged_backend') as unchanged, \
+                patch.object(observation.time, 'sleep') as sleep, \
+                patch.object(observation.sys, 'stderr', output):
+            observation.coherent_policy(candidate, config, '/approved/verifier', queries, current)
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(unchanged.call_count, 2)
+        sleep.assert_called_once_with(observation.CAPTURE_RETRY_INTERVAL_SECONDS)
+        self.assertNotEqual(checked[0]['checkpoint'], checked[1]['checkpoint'])
+        self.assertNotEqual(checked[0]['snapshot'], checked[1]['snapshot'])
+        self.assertEqual([json.loads(line)['outcome'] for line in output.getvalue().splitlines()], ['retry', 'verified'])
+        for value in ['old-set', 'new-set', 'fresh-synthetic-key']:
+            self.assertNotIn(value, output.getvalue())
+
+    def test_expected_set_mismatch_stays_fail_closed(self):
+        config, candidate, current, queries, request = self.coherent_fixture()
+        with patch.object(observation, 'candidate_request', return_value=request) as read, \
+                patch.object(observation.subprocess, 'run', return_value=subprocess.CompletedProcess(
+                    [], 1, '', 'DNS observation policy rejected: assignment_expected_set')) as verify, \
+                patch.object(observation, 'unchanged_backend'), \
+                patch.object(observation.time, 'monotonic', return_value=0), \
+                patch.object(observation.time, 'sleep'), \
+                patch.object(observation.sys, 'stderr', io.StringIO()):
+            with self.assertRaisesRegex(ValueError, ': assignment_expected_set$'):
+                observation.coherent_policy(candidate, config, '/approved/verifier', queries, current)
+        self.assertEqual(read.call_count, observation.CAPTURE_MAX_ATTEMPTS)
+        self.assertEqual(verify.call_count, read.call_count)
+
     def test_only_allowlisted_pair_mismatches_can_trigger_a_retry(self):
         config, candidate, current, queries, request = self.coherent_fixture()
         messages = [message for message, category in observation.POLICY_VERIFIER_REJECTIONS.items()

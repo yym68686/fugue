@@ -51,7 +51,9 @@ POLICY_VERIFIER_REJECTIONS.update({
 CAPTURE_MAX_ATTEMPTS = 6
 CAPTURE_RETRY_INTERVAL_SECONDS = 2
 CAPTURE_RETRY_BUDGET_SECONDS = 60
-CAPTURE_PAIR_REJECTIONS = frozenset(('checkpoint_deadline', 'snapshot_parent'))
+# A fresh full pair can succeed when a serving refresh changes the lease,
+# parent, or expected set between the separate disk and runtime reads.
+CAPTURE_PAIR_REJECTIONS = frozenset(('checkpoint_deadline', 'snapshot_parent', 'assignment_expected_set'))
 
 
 class PolicyVerificationRejected(ValueError):
@@ -112,8 +114,8 @@ def coherent_policy(candidate, binding, verifier, queries, current):
     # The DNS listener publishes a signed in-memory state before its wire and
     # assignment checks finish and the checkpoint is atomically persisted.
     # Separate disk/runtime reads can therefore span a normal same-assignment
-    # refresh or a publication change. Never repair timestamps or parent
-    # identities: discard that whole pair and fully verify a new observation.
+    # refresh or a publication change. Never repair either input: discard the
+    # whole pair and fully verify a new observation.
     retry_deadline = time.monotonic() + CAPTURE_RETRY_BUDGET_SECONDS
     last_rejection = None
     for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):

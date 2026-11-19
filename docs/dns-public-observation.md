@@ -13,17 +13,17 @@ The normal CI entrypoint first captures expectations on the production runner:
    checkpoint MAC, current signing-key revocations, artifact signatures, parent
    composition, scope, generation, fence, plan and checkpoint freshness using the
    DNS consumer's existing verifier. Recheck Service and Pod UID/resourceVersion.
-   A normal same-assignment refresh may publish signed in-memory state before
-   its post-activation checks finish and its checkpoint is persisted. If, and
-   only if, the verifier reaches `checkpoint_deadline`, discard the mixed pair
-   and recollect the entire request, including current trust material. Every new
-   pair must pass the complete unchanged verifier. Retry at most six total
-   observations per backend, with two-second spacing and no new retry starting
+   A refresh or publication change may publish signed in-memory state before
+   its post-activation checks finish and its checkpoint is persisted. For
+   `checkpoint_deadline`, `snapshot_parent` or `assignment_expected_set`,
+   discard the rejected pair and recollect the entire request, including current
+   trust material. Every new pair must pass the complete unchanged verifier.
+   Retry at most six total observations per backend, with two-second spacing and no new retry starting
    after a sixty-second retry-initiation budget. Individual Kubernetes reads and
    verification retain their existing bounded timeouts. A changed Pod or Service
    identity/resourceVersion aborts capture, including between retries. All other
-   verifier rejections fail immediately; a persistent deadline mismatch still
-   fails with `checkpoint_deadline` rather than exporting an old receipt.
+   verifier rejections fail immediately; persistent mismatches still fail
+   rather than exporting an old receipt.
 3. Export only the requested address records and reduced provenance. Membership
    comes from signed candidates intersected with physical order/selection and
    explicit availability pools and allowed groups. Temporary proof failure does
