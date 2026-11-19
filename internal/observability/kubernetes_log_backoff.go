@@ -23,12 +23,29 @@ type kubernetesLogNodeRetry struct {
 	Probe       bool
 	Epoch       uint64
 	Visited     time.Time
+	Trigger     logNodeBackoffObservation
 }
 
 type kubernetesLogNodeRead struct {
 	Node  string
 	Epoch uint64
 	Probe bool
+	// Populated only for a denied read, under the same lock as the decision.
+	Backoff logNodeBackoffObservation
+}
+
+// The attempt that opened the active circuit epoch, not a read by the
+// skipped source. Keep a fixed-size projection without URLs or log contents.
+type logNodeBackoffObservation struct {
+	Epoch            uint64                     `json:"epoch"`
+	TriggeredAt      time.Time                  `json:"triggered_at"`
+	SourceSHA256     string                     `json:"source_sha256"`
+	Stage            string                     `json:"stage"`
+	ErrorClass       string                     `json:"error_class"`
+	ErrorHTTPStatus  int                        `json:"error_http_status,omitempty"`
+	LastReadPhase    string                     `json:"last_read_phase,omitempty"`
+	LastReadExchange logHTTPExchangeObservation `json:"last_read_http_exchange,omitzero"`
+	HalfOpenProbe    bool                       `json:"half_open_probe_in_flight,omitempty"`
 }
 
 func (c *kubernetesLogCollector) logNow() time.Time {
@@ -99,6 +116,9 @@ func (c *kubernetesLogCollector) beginLogNodeRead(node string, now time.Time) (k
 		allowed = !state.Probe && !now.Before(state.NextAttempt)
 		if allowed {
 			state.Probe, ticket.Probe = true, true
+		} else if state.Trigger.Epoch == state.Epoch && state.Trigger.Epoch != 0 {
+			ticket.Backoff = state.Trigger
+			ticket.Backoff.HalfOpenProbe = state.Probe
 		}
 	}
 	c.nodeRetries[node] = state
@@ -107,7 +127,7 @@ func (c *kubernetesLogCollector) beginLogNodeRead(node string, now time.Time) (k
 
 // Returns whether this failure should emit a warning. Other requests from the
 // same failed epoch still count as errors, but do not multiply warnings/backoff.
-func (c *kubernetesLogCollector) finishLogNodeRead(ticket kubernetesLogNodeRead, err error, now time.Time) bool {
+func (c *kubernetesLogCollector) finishLogNodeRead(ticket kubernetesLogNodeRead, err error, now time.Time, trigger func() logNodeBackoffObservation) bool {
 	if ticket.Node == "" {
 		return true
 	}
@@ -122,11 +142,17 @@ func (c *kubernetesLogCollector) finishLogNodeRead(ticket kubernetesLogNodeRead,
 		state.Epoch++
 		state.Probe = false
 		state.NextAttempt = now.Add(logRetryDelay(c.pipeline.cfg.KubernetesLogPollInterval, state.Failures))
+		state.Trigger = logNodeBackoffObservation{}
+		if trigger != nil {
+			state.Trigger = trigger()
+			state.Trigger.Epoch, state.Trigger.TriggeredAt = state.Epoch, now
+		}
 	} else if ticket.Probe {
 		state.Probe = false
 		if !errors.Is(err, context.Canceled) {
 			state.Failures, state.NextAttempt = 0, time.Time{}
 			state.Epoch++
+			state.Trigger = logNodeBackoffObservation{}
 			c.pipeline.logger.Printf("Kubernetes log node reachable again node=%s; resuming retained cursors", ticket.Node)
 		}
 	}

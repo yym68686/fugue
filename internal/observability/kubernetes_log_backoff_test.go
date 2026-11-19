@@ -112,8 +112,8 @@ func TestLogNodeProbeFencingAndSourceErrors(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	first, _, _ := c.beginLogNodeRead("node", now)
 	late, _, _ := c.beginLogNodeRead("node", now)
-	c.finishLogNodeRead(first, apierrors.NewServiceUnavailable("backend unavailable"), now)
-	c.finishLogNodeRead(late, nil, now)
+	c.finishLogNodeRead(first, apierrors.NewServiceUnavailable("backend unavailable"), now, nil)
+	c.finishLogNodeRead(late, nil, now, nil)
 	if _, _, ok := c.beginLogNodeRead("node", now); ok {
 		t.Fatal("late success reset failed node")
 	}
@@ -126,7 +126,7 @@ func TestLogNodeProbeFencingAndSourceErrors(t *testing.T) {
 		if _, _, ok := c.beginLogNodeRead("node", next); ok {
 			t.Fatal("multiple half-open probes")
 		}
-		c.finishLogNodeRead(probe, apierrors.NewServiceUnavailable("backend unavailable"), next)
+		c.finishLogNodeRead(probe, apierrors.NewServiceUnavailable("backend unavailable"), next, nil)
 		delay := c.nodeRetries["node"].NextAttempt.Sub(next)
 		if delay <= 0 || delay > 5*time.Minute {
 			t.Fatalf("unbounded retry delay: %s", delay)
@@ -134,7 +134,7 @@ func TestLogNodeProbeFencingAndSourceErrors(t *testing.T) {
 	}
 	next := c.nodeRetries["node"].NextAttempt
 	probe, _, _ := c.beginLogNodeRead("node", next)
-	c.finishLogNodeRead(probe, apierrors.NewBadRequest("container has no log"), next)
+	c.finishLogNodeRead(probe, apierrors.NewBadRequest("container has no log"), next, nil)
 	if _, _, ok := c.beginLogNodeRead("node", next); !ok {
 		t.Fatal("container error quarantined reachable node")
 	}
@@ -142,5 +142,45 @@ func TestLogNodeProbeFencingAndSourceErrors(t *testing.T) {
 		if logNodeUnavailable(err) {
 			t.Fatalf("source or cancellation classified as node fault: %v", err)
 		}
+	}
+}
+
+func TestLogNodeBackoffRetainsOnlyTriggerForActiveEpoch(t *testing.T) {
+	c := newKubernetesLogCollectorWithClient(NewPipeline(Config{Enabled: true}, nil), nil)
+	now := time.Now().UTC()
+	first, _, _ := c.beginLogNodeRead("node", now)
+	late, _, _ := c.beginLogNodeRead("node", now)
+	trigger := func(class string) func() logNodeBackoffObservation {
+		return func() logNodeBackoffObservation { return logNodeBackoffObservation{ErrorClass: class} }
+	}
+	unused := func() logNodeBackoffObservation {
+		t.Helper()
+		t.Fatal("a stale, canceled or source-local attempt replaced the trigger")
+		return logNodeBackoffObservation{}
+	}
+	c.finishLogNodeRead(first, apierrors.NewNotFound(corev1.Resource("pods"), "source"), now, unused)
+	c.finishLogNodeRead(first, apierrors.NewServiceUnavailable("backend"), now, trigger("api_unavailable"))
+	c.finishLogNodeRead(late, context.DeadlineExceeded, now, unused)
+	skip, next, ok := c.beginLogNodeRead("node", now)
+	if ok || skip.Backoff.Epoch != 1 || skip.Backoff.ErrorClass != "api_unavailable" || skip.Backoff.TriggeredAt != now || skip.Backoff.HalfOpenProbe {
+		t.Fatalf("missing original cause: %+v", skip)
+	}
+	probe, _, _ := c.beginLogNodeRead("node", next)
+	skip, _, ok = c.beginLogNodeRead("node", next)
+	if ok || !skip.Backoff.HalfOpenProbe || skip.Backoff.Epoch != 1 {
+		t.Fatalf("in-flight half-open probe misreported: %+v", skip)
+	}
+	c.finishLogNodeRead(probe, context.Canceled, next, unused)
+	probe, _, _ = c.beginLogNodeRead("node", next)
+	c.finishLogNodeRead(probe, context.DeadlineExceeded, next, trigger("deadline"))
+	skip, nextProbe, ok := c.beginLogNodeRead("node", next)
+	if ok || skip.Backoff.Epoch != 2 || skip.Backoff.ErrorClass != "deadline" || skip.Backoff.TriggeredAt != next || skip.Backoff.HalfOpenProbe {
+		t.Fatalf("active epoch not updated: %+v", skip)
+	}
+	probe, _, _ = c.beginLogNodeRead("node", nextProbe)
+	c.finishLogNodeRead(probe, nil, nextProbe, unused)
+	recovered, _, ok := c.beginLogNodeRead("node", nextProbe)
+	if !ok || recovered.Backoff.Epoch != 0 || c.nodeRetries["node"].Trigger.Epoch != 0 {
+		t.Fatalf("recovered node kept a stale trigger: %+v", recovered)
 	}
 }

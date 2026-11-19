@@ -163,6 +163,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		gap.Outcome = "node_backoff"
 		if gap.GapEvents > 0 {
 			gap.Target = observeLogTarget(target)
+			if ticket.Backoff.Epoch != 0 {
+				gap.NodeBackoff = &ticket.Backoff
+			}
 		}
 		c.pipeline.observeLogSource(gap)
 		return
@@ -207,7 +210,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 	// node probe leased until its body (including rotation recovery) finishes,
 	// and report transport failures from every stage exactly once.
 	nodeReadFinished := false
-	finishNodeRead := func(readErr error) bool {
+	finishNodeRead := func(readErr error, stage string) bool {
 		if nodeReadFinished {
 			return false
 		}
@@ -219,9 +222,18 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			// A shared scheduling deadline is not evidence of node failure.
 			readErr = context.Canceled
 		}
-		return c.finishLogNodeRead(ticket, readErr, c.logNow())
+		return c.finishLogNodeRead(ticket, readErr, c.logNow(), func() logNodeBackoffObservation {
+			fact := logNodeBackoffObservation{
+				SourceSHA256: fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(key))),
+				Stage:        stage, ErrorClass: logReadErrorClass(readErr), ErrorHTTPStatus: logReadHTTPStatus(readErr),
+			}
+			if read := readTrace.snapshot(); read != nil {
+				fact.LastReadPhase, fact.LastReadExchange = read.Phase, read.HTTPExchange
+			}
+			return fact
+		})
 	}
-	defer func() { finishNodeRead(nil) }()
+	defer func() { finishNodeRead(nil, "") }()
 	var stream io.ReadCloser
 	var scanner *bufio.Scanner
 	var err error
@@ -235,7 +247,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		})
 		observation.OpenMillis = c.logNow().Sub(now).Milliseconds()
 		if err != nil {
-			emitWarning := finishNodeRead(err)
+			emitWarning := finishNodeRead(err, "open_error")
 			observation.Outcome = "open_error"
 			observation.ErrorClass = logReadErrorClass(err)
 			observation.HTTPStatus = logReadHTTPStatus(err)
@@ -315,7 +327,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			}
 			if parent.Err() == nil {
 				c.pipeline.kubernetesLogErrors.Add(1)
-				if finishNodeRead(recoveryErr) {
+				if finishNodeRead(recoveryErr, "rotation_recovery_error") {
 					c.pipeline.recordError(fmt.Errorf("recover rotated Kubernetes logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, recoveryErr))
 				}
 				c.deferLogSource(&cur)
@@ -446,7 +458,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			cur.PendingAt = maxLogTime(cur.Time, cur.DrainedThrough)
 		}
 		c.pipeline.kubernetesLogErrors.Add(1)
-		if finishNodeRead(err) {
+		if finishNodeRead(err, "scan_error") {
 			c.pipeline.recordError(fmt.Errorf("scan Kubernetes cursor logs node=%s source=%s: %w", target.pod.Spec.NodeName, key, err))
 		}
 		c.deferLogSource(&cur)

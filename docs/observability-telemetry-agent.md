@@ -348,6 +348,14 @@ Observe `fugue_telemetry_pipeline_kubernetes_log_backoff_nodes`,
 `fugue_telemetry_pipeline_kubernetes_log_backoff_skips_total`, actual read errors,
 and backlog age together. Skipped sources do not count as attempted reads in
 source diagnostics; `next_attempt` and `node_backoff` expose the wait explicitly.
+When a skipped turn reports a retention gap, its bounded gap receipt includes
+`node_backoff_trigger`: the active node retry epoch, the opening read's time,
+source fingerprint, stage, error class and available HTTP exchange metadata.
+It distinguishes an in-flight half-open probe from a timed wait. The opening
+read belongs to this node's circuit; it may be for a different source, and does
+not establish why logs became unavailable or how many records were lost.
+The skipped source's prior error remains separate context; no HTTP request was
+issued by the skipped turn.
 
 Cursor collection also reserves queue bytes as well as slots before opening
 sources. Each ordinary cursor admission leaves one eighth of ordinary byte and

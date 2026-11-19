@@ -3,6 +3,9 @@ package observability
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -28,7 +31,7 @@ func streamBackoffCollector(t *testing.T, body func(*http.Request) io.Reader) (*
 	transport := logStreamTransport(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(body(r)), Request: r}, nil
 	})
-	client, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "http://unused.invalid", QPS: 1000, Burst: 1000}, &http.Client{Transport: transport})
+	client, err := kubernetes.NewForConfigAndClient(&rest.Config{Host: "http://unused.invalid", QPS: 1000, Burst: 1000}, &http.Client{Transport: observeLogHTTPResponse(transport)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +86,53 @@ func TestCursorBodyTransportFailureBacksOffNodeAndPreservesAdmittedProgress(t *t
 				t.Fatal("successful recovery failed to drain the retained cursor or close circuit")
 			}
 		})
+	}
+}
+
+func TestCursorGapOnNodeBackoffPreservesOtherSourcesTrigger(t *testing.T) {
+	now := time.Now().UTC()
+	var requests int
+	c, p := streamBackoffCollector(t, func(*http.Request) io.Reader {
+		requests++
+		return logStreamReader(func([]byte) (int, error) { return 0, io.ErrUnexpectedEOF })
+	})
+	c.clock = func() time.Time { return now }
+	p.cfg.Retention = time.Hour
+	trigger := kubernetesLogTarget{pod: runningLogPod("first"), container: "app"}
+	sibling := kubernetesLogTarget{pod: runningLogPod("sibling"), container: "app"}
+	key := logTargetKey(sibling)
+	c.cursors = map[string]kubernetesLogCursor{key: {Time: now.Add(-2 * time.Hour)}}
+	// A previous source-local 404 is context only; it did not open this circuit.
+	p.observeLogSource(logSourceObservation{Identity: key, ObservedAt: now.Add(-time.Minute), Outcome: "rotation_recovery_error", ErrorClass: "not_found", HTTPStatus: 404})
+	collectStreamTarget(c, t.Context(), trigger)
+	collectStreamTarget(c, t.Context(), sibling)
+	value, err := p.DiagnosticSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := value.(map[string]any)["gap_history"].(map[string]any)["receipts"].([]logGapObservation)
+	if requests != 1 || len(rows) != 1 || rows[0].Outcome != "node_backoff" || rows[0].ReadExchange != nil || rows[0].LastErrorClass != "not_found" {
+		t.Fatalf("skipped source issued a request or lost its original context: requests=%d rows=%+v", requests, rows)
+	}
+	wantHash := fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(logTargetKey(trigger))))
+	row := rows[0]
+	if row.NodeBackoff.SourceSHA256 != wantHash || row.NodeBackoff.Stage != "scan_error" || row.NodeBackoff.ErrorClass != "unexpected_eof" || row.NodeBackoff.LastReadPhase != "pod_log" || row.NodeBackoff.Epoch == 0 {
+		t.Fatalf("wrong node trigger: %+v", row.NodeBackoff)
+	}
+	if exchange := row.NodeBackoff.LastReadExchange; exchange.RoundTrips != 1 || exchange.Status != http.StatusOK || row.NodeBackoff.ErrorHTTPStatus != 0 {
+		t.Fatalf("body error confused with last HTTP response: %+v", row.NodeBackoff)
+	}
+	if p.sourceObservations[key].NodeBackoff != nil || p.sourceObservations[key].Attempts != 1 || !c.cursors[key].Time.Equal(now.Add(-time.Hour)) {
+		t.Fatal("diagnostics changed cursor, source attempts or per-source retention")
+	}
+	p.observeLogSource(logSourceObservation{Identity: "ordinary-gap", Outcome: "drained", GapEvents: 1})
+	value, err = p.DiagnosticSources(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(value.(map[string]any)["gap_history"].(map[string]any)["receipts"].([]logGapObservation)[1])
+	if err != nil || strings.Contains(string(raw), "node_backoff_trigger") {
+		t.Fatalf("ordinary gap invented a node trigger: %s %v", raw, err)
 	}
 }
 

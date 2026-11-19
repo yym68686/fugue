@@ -38,17 +38,18 @@ type logSourceObservation struct {
 	Target                 logTargetObservation         `json:"-"`
 	// The independent 64-entry gap ring exposes this witness. Do not multiply
 	// its payload across the 512-row source projection's response budget.
-	BoundaryCheck    *logBoundaryObservation `json:"-"`
-	LineLimitBytes   int                     `json:"line_limit_bytes"`
-	MaxLineBytes     int                     `json:"max_line_bytes"`
-	TotalLines       uint64                  `json:"total_lines"`
-	RotationFiles    int                     `json:"rotation_files,omitempty"`
-	RotationBytes    int64                   `json:"rotation_bytes,omitempty"`
-	RecoveryUnproven bool                    `json:"recovery_unproven,omitempty"`
-	GapEvents        uint64                  `json:"gap_events"`
-	GapReason        string                  `json:"gap_reason,omitempty"`
-	GapLowerBound    time.Time               `json:"gap_lower_bound,omitempty"`
-	GapUpperBound    time.Time               `json:"gap_upper_bound,omitempty"`
+	BoundaryCheck    *logBoundaryObservation    `json:"-"`
+	NodeBackoff      *logNodeBackoffObservation `json:"-"`
+	LineLimitBytes   int                        `json:"line_limit_bytes"`
+	MaxLineBytes     int                        `json:"max_line_bytes"`
+	TotalLines       uint64                     `json:"total_lines"`
+	RotationFiles    int                        `json:"rotation_files,omitempty"`
+	RotationBytes    int64                      `json:"rotation_bytes,omitempty"`
+	RecoveryUnproven bool                       `json:"recovery_unproven,omitempty"`
+	GapEvents        uint64                     `json:"gap_events"`
+	GapReason        string                     `json:"gap_reason,omitempty"`
+	GapLowerBound    time.Time                  `json:"gap_lower_bound,omitempty"`
+	GapUpperBound    time.Time                  `json:"gap_upper_bound,omitempty"`
 }
 
 type sourceErrorSummary struct {
@@ -106,6 +107,7 @@ type logGapObservation struct {
 	LastAdmission  *logAdmissionObservation     `json:"last_admission,omitempty"`
 	InvalidRecord  *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 	BoundaryCheck  *logBoundaryObservation      `json:"boundary_check,omitempty"`
+	NodeBackoff    logNodeBackoffObservation    `json:"node_backoff_trigger,omitzero"`
 }
 
 func (p *Pipeline) observeLogSource(v logSourceObservation) {
@@ -124,6 +126,12 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 		v.InvalidRecord = &copy
 	}
 	v.BoundaryCheck = cloneLogBoundaryObservation(v.BoundaryCheck)
+	// Retain the trigger only in the bounded gap history, not in every source.
+	var nodeBackoff logNodeBackoffObservation
+	if v.Outcome == "node_backoff" && v.GapEvents > 0 && v.NodeBackoff != nil {
+		nodeBackoff = *v.NodeBackoff
+	}
+	v.NodeBackoff = nil
 	newGapEvents := v.GapEvents
 	if !exists && len(p.sourceObservations) >= 2048 {
 		oldest := ""
@@ -197,6 +205,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 			Target:        v.Target,
 			LastAdmission: v.LastAdmission, InvalidRecord: v.InvalidRecord,
 			BoundaryCheck: v.BoundaryCheck,
+			NodeBackoff:   nodeBackoff,
 		})
 	}
 }
