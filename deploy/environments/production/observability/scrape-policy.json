@@ -166,6 +166,7 @@
     }
   ],
   "storageLifecycleAlerts": {"version": 1, "enabled": true},
+  "trafficPublicationAlerts": true,
   "verificationQueries": [
     "count(up{job=\"fugue-etcd\"} == 1) == count(up{job=\"fugue-etcd\"})",
     "count((time() - timestamp(etcd_disk_backend_commit_duration_seconds_count{job=\"fugue-etcd\"})) < 90) == count(up{job=\"fugue-etcd\"})",

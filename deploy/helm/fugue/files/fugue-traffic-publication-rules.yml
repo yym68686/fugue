@@ -1,0 +1,11 @@
+# Managed Fugue traffic publication alerts v1
+groups:
+  - name: fugue-traffic-publication
+    rules:
+      - alert: FugueTrafficPublicationTimedOut
+        expr: sum(increase(fugue_traffic_publication_timeouts_total[10m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Fugue rolled back a traffic publication after its deadline"
+          description: "Inspect the platform_config.serving_rolled_back audit event for the affected release and recovery generation."

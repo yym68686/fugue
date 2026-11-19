@@ -4,9 +4,24 @@ import re
 import unittest
 from unittest.mock import patch
 from scripts.reconcile_prometheus_scrape_policy import additional_scrapes, project, verify_queries, public_dns_targets_match, lifecycle_rules, lifecycle_rule_path, LIFECYCLE_RULE_PATH
+from scripts.reconcile_prometheus_scrape_policy import managed_rule_path, traffic_rules, TRAFFIC_RULE_PATH
 
 
 class ScrapePolicyTest(unittest.TestCase):
+    def test_publication_alert_shares_chart_rule_and_is_reversible(self):
+        policy = json.loads(Path("deploy/environments/production/observability/scrape-policy.json").read_text())
+        rules = traffic_rules(policy)
+        self.assertIn("alert: FugueTrafficPublicationTimedOut", rules)
+        self.assertIn("increase(fugue_traffic_publication_timeouts_total[10m])", rules)
+        original = "rule_files:\n" + LIFECYCLE_RULE_PATH + "  - /etc/prometheus/unrelated.yml\n"
+        added = managed_rule_path(original, TRAFFIC_RULE_PATH, rules)
+        self.assertEqual(added, managed_rule_path(added, TRAFFIC_RULE_PATH, rules))
+        self.assertEqual(original, managed_rule_path(added, TRAFFIC_RULE_PATH, traffic_rules({})))
+        with self.assertRaises(ValueError):
+            traffic_rules({"trafficPublicationAlerts": "false"})
+        with self.assertRaises(ValueError):
+            managed_rule_path(added + TRAFFIC_RULE_PATH, TRAFFIC_RULE_PATH, rules)
+
     def test_lifecycle_rules_are_owned_idempotent_and_do_not_replace_existing_rules(self):
         policy = {'storageLifecycleAlerts': {'version': 1, 'enabled': True}}
         original = 'rule_files:\n  - /etc/prometheus/original.yml\nalerting:\n  alertmanagers: []\n'

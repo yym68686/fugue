@@ -16,6 +16,21 @@ MANAGED_END = "  # END Fugue additional scrape configs\n"
 LIFECYCLE_RULE_FILE = 'fugue-storage-lifecycle-rules.yml'
 LIFECYCLE_RULE_PATH = '  - /etc/prometheus/fugue-storage-lifecycle-*.yml\n'
 LIFECYCLE_RULE_OWNER = '# Managed Fugue storage lifecycle alerts v1\n'
+TRAFFIC_RULE_FILE = 'fugue-traffic-publication-rules.yml'
+TRAFFIC_RULE_PATH = '  - /etc/prometheus/fugue-traffic-publication-*.yml\n'
+TRAFFIC_RULE_OWNER = '# Managed Fugue traffic publication alerts v1\n'
+
+
+def traffic_rules(policy):
+    enabled = policy.get('trafficPublicationAlerts', False)
+    if type(enabled) is not bool:
+        raise ValueError('invalid traffic publication alert configuration')
+    if not enabled:
+        return None
+    body = (Path(__file__).resolve().parents[1] / 'deploy/helm/fugue/files' / TRAFFIC_RULE_FILE).read_text()
+    if not body.startswith(TRAFFIC_RULE_OWNER):
+        raise ValueError('traffic rule ownership marker missing')
+    return body
 
 
 def lifecycle_rules(policy):
@@ -48,16 +63,20 @@ def lifecycle_rules(policy):
 
 
 def lifecycle_rule_path(config, policy):
-    if config.count(LIFECYCLE_RULE_PATH) > 1:
-        raise ValueError('duplicate managed lifecycle rule path')
-    config = config.replace(LIFECYCLE_RULE_PATH, '')
-    if lifecycle_rules(policy) is None:
+    return managed_rule_path(config, LIFECYCLE_RULE_PATH, lifecycle_rules(policy))
+
+
+def managed_rule_path(config, path, rules):
+    if config.count(path) > 1:
+        raise ValueError('duplicate managed rule path')
+    config = config.replace(path, '')
+    if rules is None:
         return config
     headers = list(re.finditer(r'(?m)^rule_files:[ \t]*\n', config))
     if len(headers) != 1:
         raise ValueError('expected one block-style rule_files section')
     at = headers[0].end()
-    return config[:at] + LIFECYCLE_RULE_PATH + config[at:]
+    return config[:at] + path + config[at:]
 
 
 def additional_scrapes(config, policy):
@@ -144,7 +163,8 @@ def project(config, policy):
             return replacement
         return ""
     block = rule.sub(replace, block)
-    return lifecycle_rule_path(additional_scrapes(config[:start] + block + config[end:], policy), policy)
+    new = lifecycle_rule_path(additional_scrapes(config[:start] + block + config[end:], policy), policy)
+    return managed_rule_path(new, TRAFFIC_RULE_PATH, traffic_rules(policy))
 
 
 def query_prometheus(proxy, expression):
@@ -215,9 +235,12 @@ def main():
     old = cm["data"]["prometheus.yml"]
     new = project(old, policy)
     rules = lifecycle_rules(policy)
-    old_rules = cm['data'].get(LIFECYCLE_RULE_FILE)
-    if old_rules is not None and not old_rules.startswith(LIFECYCLE_RULE_OWNER):
-        raise ValueError('lifecycle rule filename is owned by another publisher')
+    files = {LIFECYCLE_RULE_FILE: (rules, LIFECYCLE_RULE_OWNER),
+             TRAFFIC_RULE_FILE: (traffic_rules(policy), TRAFFIC_RULE_OWNER)}
+    for filename, (_, owner) in files.items():
+        if filename in cm['data'] and not cm['data'][filename].startswith(owner):
+            raise ValueError(f'{filename} is owned by another publisher')
+    changed = old != new or any(cm['data'].get(name) != body for name, (body, _) in files.items())
     deployment = json.loads(run(base + ["get", "deployment", policy["deployment"], "-o", "json"]))
     selector = ",".join(k + "=" + v for k, v in deployment["spec"]["selector"]["matchLabels"].items())
     pods = json.loads(run(base + ["get", "pods", "-l", selector, "-o", "json"]))["items"]
@@ -225,18 +248,20 @@ def main():
     if not pods:
         raise RuntimeError("no Ready Prometheus process to validate and reload")
     for pod in pods:
-        if rules is not None:
-            run(base + ["exec", "-i", pod["metadata"]["name"], "-c", policy["container"], "--", "/bin/promtool", "check", "rules", "/dev/stdin"], rules)
+        for body, _ in files.values():
+            if body is not None:
+                run(base + ["exec", "-i", pod["metadata"]["name"], "-c", policy["container"], "--", "/bin/promtool", "check", "rules", "/dev/stdin"], body)
         run(base + ["exec", "-i", pod["metadata"]["name"], "-c", policy["container"], "--", "/bin/promtool", "check", "config", "/dev/stdin"], new)
-    print(json.dumps({"changed": old != new or old_rules != rules, "validatedPods": len(pods), "apply": args.apply}))
+    print(json.dumps({"changed": changed, "validatedPods": len(pods), "apply": args.apply}))
     if not args.apply:
         return
-    if old != new or old_rules != rules:
+    if changed:
         patch = [{"op": "test", "path": "/metadata/resourceVersion", "value": cm["metadata"]["resourceVersion"]}, {"op": "replace", "path": "/data/prometheus.yml", "value": new}]
-        if rules is not None:
-            patch.append({'op': 'add', 'path': '/data/' + LIFECYCLE_RULE_FILE, 'value': rules})
-        elif old_rules is not None:
-            patch.append({'op': 'remove', 'path': '/data/' + LIFECYCLE_RULE_FILE})
+        for filename, (body, _) in files.items():
+            if body is not None:
+                patch.append({'op': 'add', 'path': '/data/' + filename, 'value': body})
+            elif filename in cm['data']:
+                patch.append({'op': 'remove', 'path': '/data/' + filename})
         run(base + ["patch", "configmap", policy["configMap"], "--type=json", "--patch-file=/dev/stdin"], json.dumps(patch))
     for pod in pods:
         name = pod["metadata"]["name"]
@@ -245,11 +270,13 @@ def main():
             if time.monotonic() >= deadline:
                 raise RuntimeError("projected Prometheus config has not converged")
             time.sleep(5)
-        if rules is not None:
-            rule_path = str(Path(policy['configPath']).parent / LIFECYCLE_RULE_FILE)
-            while run(base + ['exec', name, '-c', policy['container'], '--', 'cat', rule_path]) != rules:
+        for filename, (body, _) in files.items():
+            if body is None:
+                continue
+            rule_path = str(Path(policy['configPath']).parent / filename)
+            while run(base + ['exec', name, '-c', policy['container'], '--', 'cat', rule_path]) != body:
                 if time.monotonic() >= deadline:
-                    raise RuntimeError('projected lifecycle rules have not converged')
+                    raise RuntimeError(f'projected rules have not converged: {filename}')
                 time.sleep(5)
             run(base + ['exec', name, '-c', policy['container'], '--', '/bin/promtool', 'check', 'rules', rule_path])
         run(base + ["exec", name, "-c", policy["container"], "--", "/bin/promtool", "check", "config", policy["configPath"]])
@@ -276,11 +303,15 @@ def main():
                 raise RuntimeError("Prometheus did not load the new scrape policy")
             time.sleep(2)
         verify_queries(proxy.removesuffix("/api/v1/status/config"), policy.get("verificationQueries", []))
-        if rules is not None:
+        if rules is not None or files[TRAFFIC_RULE_FILE][0] is not None:
             loaded_rules = json.loads(run(['kubectl', 'get', '--raw', proxy.removesuffix('/api/v1/status/config') + '/api/v1/rules']))
             groups = loaded_rules.get('data', {}).get('groups', [])
-            if not any(group.get('name') == 'fugue-storage-lifecycle' and len(group.get('rules', [])) == 7 for group in groups):
+            if rules is not None and not any(group.get('name') == 'fugue-storage-lifecycle' and len(group.get('rules', [])) == 7 for group in groups):
                 raise RuntimeError('Prometheus did not load lifecycle alert rules')
+            if files[TRAFFIC_RULE_FILE][0] is not None and not any(
+                    g.get('name') == 'fugue-traffic-publication' and
+                    [r.get('name') for r in g.get('rules', [])] == ['FugueTrafficPublicationTimedOut'] for g in groups):
+                raise RuntimeError('Prometheus did not load traffic publication alert')
         if policy.get("publicDNSTargets"):
             verify_public_dns_targets(base, proxy.removesuffix("/api/v1/status/config"), policy["publicDNSTargets"])
     print("Prometheus scrape policy loaded without replacing Pods or TSDB")

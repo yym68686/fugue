@@ -23,8 +23,9 @@ confirmed negative may be published; explicit disable and isolation still
 take effect. Check API logs for the application, release and observation
 reason. A convergence timeout restores the verified baseline, records a
 `platform_config.serving_rolled_back` audit event and increments
-`fugue_traffic_publication_timeouts_total`. Install the chart's
-`FugueTrafficPublicationTimedOut` rule on the monitoring system to alert.
+`fugue_traffic_publication_timeouts_total`. The production observability
+configuration lane loads and verifies the same `FugueTrafficPublicationTimedOut`
+rule as the Helm chart, without restarting Prometheus.
 
 Create a `policy_snapshot` artifact with scope
 `{"scope_type":"global","key":"platform-config-producer"}` and this content:
