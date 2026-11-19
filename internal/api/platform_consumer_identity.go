@@ -104,6 +104,14 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 		CredentialID: "kubernetes:" + identity[2] + ":" + identity[3] + ":" + string(pod.UID),
 		Component:    policy.Component, NodeID: pod.Spec.NodeName, ScopeKey: policy.ScopeKey, ArtifactKinds: policy.ArtifactKinds, AuthorityID: policy.AuthorityID,
 	}
+	if policy.Component == model.PlatformConsumerComponentEdgeWorker && policy.ScopeKey == "global" && policy.AuthorityID == "" &&
+		len(policy.ArtifactKinds) == 2 && slices.Contains(policy.ArtifactKinds, model.PlatformArtifactKindEdgeRouteBundle) && slices.Contains(policy.ArtifactKinds, model.PlatformArtifactKindCaddyRouteConfig) {
+		claims.WorkerEnrollmentID, err = s.bindGlobalWorkerEnrollment(ctx, client, pod)
+		if err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "global Worker enrollment could not be verified")
+			return
+		}
+	}
 	// Issuance and parsing also enforce the kernel's finite component/kind schema.
 	keyring := s.auth.PlatformComponentIdentityKeyring
 	if policy.Component == model.PlatformConsumerComponentEdgeControl {

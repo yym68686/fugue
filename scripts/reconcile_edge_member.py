@@ -150,6 +150,19 @@ def require_front_activation(health, state):
         raise ValueError('Ready Front differs from the pinned activation')
 
 
+def require_activation_writer(pod, activation_path):
+    """The serving Front can be a read-only observer of the host state."""
+    spec = pod['spec']
+    containers = [c for c in spec.get('containers', []) if c['name'] == 'edge-front']
+    mounts = [m for c in containers for m in c.get('volumeMounts', [])
+              if activation_path.startswith(m['mountPath'].rstrip('/') + '/')]
+    volumes = [v for v in spec.get('volumes', []) if len(mounts) == 1 and v['name'] == mounts[0]['name']]
+    if (len(containers) != 1 or len(mounts) != 1 or mounts[0].get('readOnly') or
+            mounts[0].get('subPath') or mounts[0].get('subPathExpr') or len(volumes) != 1 or
+            not volumes[0].get('hostPath', {}).get('path', '').startswith('/')):
+        raise ValueError('Recovery requires the Front that owns the writable host activation mount')
+
+
 def require_idle_front(connections, slot):
     active = connections.get('active')
     if not isinstance(active, list) or type(connections.get('count')) is not int or connections['count'] != len(active):
@@ -325,6 +338,8 @@ class Recovery:
             pod = self.get('pod', c[key])
             if pod['metadata']['uid'] != c[key + 'UID'] or pod['metadata'].get('deletionTimestamp') or (key == 'front' and pod['spec']['nodeName'] != c['node']):
                 raise ValueError('Front identity changed')
+            if key == 'front' and without_time(previous) != without_time(source):
+                require_activation_writer(pod, c['activationPath'])
         validate(c, authority, source, previous)
         worker, reference = self.current_worker(source), self.get('pod', c['referenceWorker'])
         validate_worker(reference, c, source, True)

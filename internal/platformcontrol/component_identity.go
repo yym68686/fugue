@@ -51,16 +51,17 @@ type PlatformComponentIdentityKeyring struct {
 }
 
 type PlatformComponentIdentityClaims struct {
-	Version       string   `json:"v"`
-	CredentialID  string   `json:"credential_id"`
-	TokenID       string   `json:"token_id"`
-	Component     string   `json:"component"`
-	NodeID        string   `json:"node_id"`
-	AuthorityID   string   `json:"authority_id,omitempty"`
-	ScopeKey      string   `json:"scope_key"`
-	ArtifactKinds []string `json:"artifact_kinds"`
-	IssuedAtUnix  int64    `json:"issued_at"`
-	ExpiresAtUnix int64    `json:"expires_at"`
+	Version            string   `json:"v"`
+	CredentialID       string   `json:"credential_id"`
+	TokenID            string   `json:"token_id"`
+	Component          string   `json:"component"`
+	NodeID             string   `json:"node_id"`
+	AuthorityID        string   `json:"authority_id,omitempty"`
+	WorkerEnrollmentID string   `json:"worker_enrollment_id,omitempty"`
+	ScopeKey           string   `json:"scope_key"`
+	ArtifactKinds      []string `json:"artifact_kinds"`
+	IssuedAtUnix       int64    `json:"issued_at"`
+	ExpiresAtUnix      int64    `json:"expires_at"`
 }
 
 type PlatformConsumerHeartbeatEnvelope struct {
@@ -601,10 +602,15 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 	claims.NodeID = strings.TrimSpace(claims.NodeID)
 	claims.ScopeKey = strings.TrimSpace(strings.ToLower(claims.ScopeKey))
 	claims.ArtifactKinds = normalizedPlatformIdentityArtifactKinds(claims.ArtifactKinds)
-	if _, err := PlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID); err != nil {
+	if _, err := EnrolledPlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID, claims.ScopeKey, claims.WorkerEnrollmentID); err != nil {
 		return PlatformComponentIdentityClaims{}, err
 	}
-	if claims.Component == model.PlatformConsumerComponentDNSServer && claims.AuthorityID != "" {
+	if claims.WorkerEnrollmentID != "" && (claims.Component != model.PlatformConsumerComponentEdgeWorker ||
+		len(claims.ArtifactKinds) != 2 || !containsExactString(claims.ArtifactKinds, model.PlatformArtifactKindEdgeRouteBundle) ||
+		!containsExactString(claims.ArtifactKinds, model.PlatformArtifactKindCaddyRouteConfig)) {
+		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
+	}
+	if claims.Component == model.PlatformConsumerComponentDNSServer && claims.AuthorityID != "" || claims.WorkerEnrollmentID != "" {
 		binding := strings.Split(claims.CredentialID, ":")
 		if len(binding) != 4 || binding[0] != "kubernetes" || binding[1] == "" || binding[2] == "" || binding[3] == "" {
 			return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid

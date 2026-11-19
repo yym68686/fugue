@@ -173,7 +173,11 @@ func (s *Server) projectDNSReadinessWithRecovery(ctx context.Context, result *pl
 }
 
 func offlineEdgeRouteEnrollments(hold platformproducer.OfflineEdge) ([2]store.PlatformConsumerRetirementTarget, error) {
-	id, err := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentEdgeWorker, hold.EdgeID, platformcontrol.ConsumerAuthorityID(hold.EdgeGroupID))
+	enrollment := ""
+	if hold.WorkerEnrollment != nil {
+		enrollment = hold.WorkerEnrollment.ID
+	}
+	id, err := platformcontrol.EnrolledPlatformConsumerID(model.PlatformConsumerComponentEdgeWorker, hold.EdgeID, platformcontrol.ConsumerAuthorityID(hold.EdgeGroupID), "global", enrollment)
 	if err != nil {
 		return [2]store.PlatformConsumerRetirementTarget{}, err
 	}

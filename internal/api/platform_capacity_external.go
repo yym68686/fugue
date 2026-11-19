@@ -81,7 +81,9 @@ func (s *Server) externalCapacityHolds(ctx context.Context) ([]platformproducer.
 	return input.OfflineEdges, nil
 }
 
-func (s *Server) claimExternalCapacity(ctx context.Context, hold platformproducer.OfflineEdge, holds []platformproducer.OfflineEdge, observer string) (*preparedCapacityRecovery, error) {
+// A nonempty reason means an interval was claimed and its preparation failure
+// was persisted. It is distinct from an unclaimed interval and a signed plan.
+func (s *Server) claimExternalCapacity(ctx context.Context, hold platformproducer.OfflineEdge, holds []platformproducer.OfflineEdge, observer string) (*preparedCapacityRecovery, string, error) {
 	now := time.Now().UTC()
 	var previous platformproducer.OfflineRecoveryObservation
 	claimed := false
@@ -100,11 +102,14 @@ func (s *Server) claimExternalCapacity(ctx context.Context, hold platformproduce
 		return json.Marshal(current)
 	})
 	if err != nil || !locked || !claimed {
-		return nil, err
+		return nil, "", err
 	}
 	round, failure := s.prepareCapacityRecovery(ctx, hold, holds)
 	if round == nil {
-		return nil, s.completeExternalCapacity(ctx, hold, externalCapacityRound{ClaimedAt: now, Previous: previous}, failure)
+		if err := s.completeExternalCapacity(ctx, hold, externalCapacityRound{ClaimedAt: now, Previous: previous}, failure); err != nil {
+			return nil, "", err
+		}
+		return nil, failure.reason, nil
 	}
 	packet := externalCapacityRound{Round: *round, Observer: observer, ClaimedAt: now, Previous: previous}
 	encoded, _ := json.Marshal(packet)
@@ -112,7 +117,7 @@ func (s *Server) claimExternalCapacity(ctx context.Context, hold platformproduce
 	if err == nil && !locked {
 		err = errors.New("external recovery claim busy")
 	}
-	return round, err
+	return round, "", err
 }
 
 func (s *Server) completeExternalCapacity(ctx context.Context, hold platformproducer.OfflineEdge, pending externalCapacityRound, result capacityRecoveryResult) error {
@@ -244,9 +249,10 @@ func (s *Server) handleIssueEdgeRecoveryClientProbePlan(w http.ResponseWriter, r
 	// The first declaration must not consume every scheduled runner when
 	// several declarations share the same observation interval.
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].last.Before(candidates[j].last) })
+	var blocked string
 	for _, candidate := range candidates {
 		hold := candidate.hold
-		round, err := s.claimExternalCapacity(ctx, hold, holds, clientProbeObserver(p))
+		round, reason, err := s.claimExternalCapacity(ctx, hold, holds, clientProbeObserver(p))
 		if err != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -256,6 +262,17 @@ func (s *Server) handleIssueEdgeRecoveryClientProbePlan(w http.ResponseWriter, r
 			httpx.WriteJSON(w, http.StatusOK, round.Plan)
 			return
 		}
+		if blocked == "" {
+			blocked = reason
+		}
+	}
+	writeNoExternalCapacityPlan(w, blocked)
+}
+
+func writeNoExternalCapacityPlan(w http.ResponseWriter, blocked string) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	if blocked != "" {
+		w.Header().Set("X-Fugue-Capacity-Recovery-Blocked", blocked)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

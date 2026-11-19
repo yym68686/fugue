@@ -70,6 +70,12 @@ type Identity struct {
 }
 
 func (id Identity) BoundConsumerID() string {
+	if id.ConsumerID != "" {
+		if _, err := platformcontrol.ConsumerEnrollmentFromID(id.Component, id.NodeID, id.AuthorityID, id.ScopeKey, id.ConsumerID); err != nil {
+			return ""
+		}
+		return id.ConsumerID
+	}
 	value, _ := platformcontrol.PlatformConsumerID(id.Component, id.NodeID, id.AuthorityID)
 	return value
 }
@@ -115,8 +121,7 @@ func (c Client) observeAssignmentWithSnapshot(ctx context.Context, component, no
 	if err := c.json(ctx, base.String()+"/v1/platform-state/consumers/identity", strings.TrimSpace(string(raw)), http.MethodPost, nil, &id); err != nil {
 		return Identity{}, model.PlatformConsumerAssignment{}, "", err
 	}
-	wantedID, identityErr := platformcontrol.PlatformConsumerID(component, nodeID, c.AuthorityID)
-	if identityErr != nil || id.AuthorityID != c.AuthorityID || (id.ConsumerID != "" && id.ConsumerID != wantedID) || (c.AuthorityID != "" && id.ConsumerID != wantedID) || id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
+	if id.BoundConsumerID() == "" || id.AuthorityID != c.AuthorityID || (c.AuthorityID != "" && id.ConsumerID == "") || id.Token == "" || id.Component != component || id.NodeID != nodeID || id.ScopeKey != scope || !slices.Contains(id.ArtifactKinds, kind) || !id.ExpiresAt.After(time.Now().Add(10*time.Second)) {
 		return Identity{}, model.PlatformConsumerAssignment{}, "", errors.New("platform credential identity mismatch")
 	}
 	var assignments model.PlatformConsumerAssignmentResponse

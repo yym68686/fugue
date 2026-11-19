@@ -79,6 +79,30 @@ compiled releases and still requires the remaining consumers to converge. It
 does not alter historical releases or enroll a replacement identity. If the
 retirement ledger cannot be read, candidate capture stops rather than guessing.
 
+### A new global Worker enrollment on the same physical Node
+
+To deliberately return a physical Edge without reviving an abandoned consumer,
+deploy replacement enrollment support to the API, producer and Worker. Then add
+`worker_enrollment` to its existing recovery hold in the signed global
+projection policy, using the fenced `edge_offline` configuration lane. Supply
+a fresh 32-character lowercase hex `id`, the exact Kubernetes `node_uid`,
+the Worker `service_account`, sorted and unique `daemonset_uids` for the
+declared rollout slots, and a UTC `pod_created_after` timestamp. The approved
+Worker must be running on the original Node and created strictly after that
+cutoff; an old Pod, foreign workload, changed Node UID, or Cell credential
+cannot use the new identity. Only a global Worker with both route artifact
+capabilities, both original route slots retired, and neither successor slot
+retired can receive the new identity.
+
+Both route and TLS expectations use the new consumer key while DNS, endpoint
+probes and routing keep the original physical Edge ID and addresses. Recovery
+checkpoints are bound to the updated declaration: old proof, convergence,
+cursors and LKG are not transferred. Normal signed candidate readiness,
+authenticated Worker convergence and DNS publication gates still apply.
+Keep this signed enrollment declaration with the hold after readmission; it
+is the authority for future Worker restarts. Do not use an old declaration or
+remove a tombstone as rollback.
+
 Archived audit snapshots are deliberately not restoration/retention roots:
 their prior recovery obligations have explicitly been abandoned. Consequently
 the native root inventory stops retaining those old consumer generations without

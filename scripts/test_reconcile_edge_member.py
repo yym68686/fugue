@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source, require_idle_front, verify_pair
+from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source, require_activation_writer, require_idle_front, verify_pair
 import base64
 
 
@@ -53,6 +53,17 @@ def inactive_fixture():
 
 
 class MemberRecoveryTest(unittest.TestCase):
+    def test_read_only_serving_front_cannot_be_the_activation_writer(self):
+        c, _, _, _ = fixture()
+        mount = dict(name='state', mountPath='/var/lib/fugue-edge-front')
+        pod = dict(spec=dict(containers=[dict(name='edge-front', volumeMounts=[mount])],
+                             volumes=[dict(name='state', hostPath={'path': '/var/lib/group/front'})]))
+        require_activation_writer(pod, c['activationPath'])
+        for field, value in [('readOnly', True), ('subPath', 'other'), ('name', 'unknown')]:
+            with self.assertRaisesRegex(ValueError, 'writable host activation'):
+                require_activation_writer(dict(spec=dict(pod['spec'], containers=[
+                    dict(name='edge-front', volumeMounts=[dict(mount, **{field: value})])])), c['activationPath'])
+
     def test_retained_worker_is_compared_to_current_front_not_inactive_listener(self):
         c, _, _, _ = fixture()
         c['retainedPrevious'] = True

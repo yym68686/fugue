@@ -9,6 +9,11 @@ import (
 )
 
 var consumerNodeIDPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$`)
+var workerEnrollmentPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+
+const workerEnrollmentSeparator = ":enrollment:"
+
+func ValidWorkerEnrollmentID(value string) bool { return workerEnrollmentPattern.MatchString(value) }
 
 // ConsumerAuthorityID identifies the new consumer namespace. A country or
 // legacy group is never translated into a cell. Existing consumers retain
@@ -58,8 +63,45 @@ func PlatformConsumerID(component, node, authority string) (string, error) {
 	return component + ":" + authority + ":" + node, nil
 }
 
+// EnrolledPlatformConsumerID keeps the physical Node and legacy group intact
+// while giving a replacement global Worker its own lifecycle and cursor. The
+// TLS sidecar uses the same enrollment when projected to its Worker owner.
+func EnrolledPlatformConsumerID(component, node, authority, scope, enrollment string) (string, error) {
+	id, err := PlatformConsumerID(component, node, authority)
+	if err != nil || enrollment == "" {
+		return id, err
+	}
+	if authority != "" || scope != "global" || !ValidWorkerEnrollmentID(enrollment) ||
+		!consumerNodeIDPattern.MatchString(node) ||
+		(component != model.PlatformConsumerComponentEdgeWorker && component != model.PlatformConsumerComponentCaddyEdgeFront) {
+		return "", ErrPlatformComponentIdentityInvalid
+	}
+	return id + workerEnrollmentSeparator + enrollment, nil
+}
+
+// ConsumerEnrollmentFromID checks the exact component, physical node and
+// scope before decoding an enrollment. It never accepts another node's ID.
+func ConsumerEnrollmentFromID(component, node, authority, scope, id string) (string, error) {
+	base, err := PlatformConsumerID(component, node, authority)
+	if err != nil {
+		return "", err
+	}
+	if id == base {
+		return "", nil
+	}
+	suffix, ok := strings.CutPrefix(id, base+workerEnrollmentSeparator)
+	if !ok || suffix == "" {
+		return "", ErrPlatformComponentIdentityInvalid
+	}
+	canonical, err := EnrolledPlatformConsumerID(component, node, authority, scope, suffix)
+	if err != nil || canonical != id {
+		return "", ErrPlatformComponentIdentityInvalid
+	}
+	return suffix, nil
+}
+
 func (claims PlatformComponentIdentityClaims) ConsumerID() string {
-	id, _ := PlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID)
+	id, _ := EnrolledPlatformConsumerID(claims.Component, claims.NodeID, claims.AuthorityID, claims.ScopeKey, claims.WorkerEnrollmentID)
 	return id
 }
 

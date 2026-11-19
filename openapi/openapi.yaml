@@ -1398,7 +1398,14 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/EdgeClientProbePlan'}
-        '204': {description: No due recoverable capacity round.}
+        '204':
+          description: No signed plan was issued. The absence of a blocking reason means no round was claimed.
+          headers:
+            X-Fugue-Capacity-Recovery-Blocked:
+              description: First recorded blocking reason when a due round was claimed but could not be prepared for measurement.
+              schema:
+                type: string
+                pattern: '^[a-z_]{1,64}$'
         '400': {$ref: '#/components/responses/ErrorResponse'}
         '401': {$ref: '#/components/responses/ErrorResponse'}
         '403': {$ref: '#/components/responses/ErrorResponse'}
@@ -4631,8 +4638,12 @@ paths:
         server then binds consumer_id to component:authority_id:node_id. A Worker or DNS Server
         identity can read and report only an exact authority-bound expected member;
         it cannot overwrite the legacy component:node_id consumer or another cell.
-        An absent authority_id retains the legacy identity. Neither form grants
-        a new assignment or copies observations, fences, or LKG across authorities.
+        An absent authority_id normally retains the legacy identity. A global
+        Worker with an explicit signed replacement enrollment and a matching
+        live Node UID, ServiceAccount, and current Worker workload can receive
+        component:node_id:enrollment:<id> without changing its physical identity.
+        No form grants an assignment or copies observations, fences, or LKG
+        across consumer identities. A retired identity is not reactivated.
         DNS node_id remains the physical process owner; zone aliases are collapsed
         only within the same authority. Neutral DNS identities require a live
         Pod binding, and their current Pod policy and authority label must match
@@ -40656,7 +40667,7 @@ components:
           description: Server-derived neutral Edge Worker, DNS Server or Edge Control authority; omitted for legacy identities.
         consumer_id:
           type: string
-          description: Exact consumer identity derived from the signed component, node and optional authority scope. Legacy responses may omit this field.
+          description: Exact consumer identity derived from signed component and node, with an optional authority scope or global Worker enrollment. Legacy responses may omit this field.
         scope_key:
           type: string
         artifact_kinds:

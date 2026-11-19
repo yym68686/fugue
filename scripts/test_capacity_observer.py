@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('capacity_observer', Path(__file__).with_name('observe_capacity_recovery.py'))
 observer = importlib.util.module_from_spec(spec)
@@ -23,6 +24,18 @@ class Response(io.BytesIO):
 
 
 class CapacityObserverTest(unittest.TestCase):
+    def test_empty_response_distinguishes_blocked_and_not_due(self):
+        for headers, want in [
+            ({}, {'status': 'no_due_capacity_round'}),
+            ({'X-Fugue-Capacity-Recovery-Blocked': 'code_not_current'},
+             {'status': 'blocked_before_measurement', 'reason': 'code_not_current'}),
+        ]:
+            response = Response(b'')
+            response.status, response.headers = 204, headers
+            with patch.object(observer.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.return_value = response
+                self.assertEqual(observer.api_post('https://example.test', 'test', '/probe'), (None, want))
+
     def test_exact_payload_and_full_failure_evidence(self):
         body = b'a' * 1048576
         permit = {'body_sha256': 'sha256:' + hashlib.sha256(body).hexdigest()}

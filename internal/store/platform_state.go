@@ -2227,6 +2227,11 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 				return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 			}
 		}
+		if strings.Contains(consumer.ConsumerID, ":enrollment:") {
+			if enrollment, err := platformcontrol.ConsumerEnrollmentFromID(consumer.Component, consumer.NodeID, consumer.AuthorityID, consumer.ScopeKey, consumer.ConsumerID); err != nil || enrollment == "" {
+				return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+			}
+		}
 		consumer.ExpectedProtocolVersion = strings.TrimSpace(consumer.ExpectedProtocolVersion)
 		consumer.AcceptedProtocolVersions = normalizeStringList(consumer.AcceptedProtocolVersions)
 		consumer.ExpectedSchemaVersion = strings.TrimSpace(consumer.ExpectedSchemaVersion)

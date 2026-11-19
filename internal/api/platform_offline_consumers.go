@@ -58,6 +58,12 @@ func (s *Server) applyGlobalOfflineConsumerIntent(parent model.PlatformArtifact,
 	if _, err := platformproducer.EffectiveOfflineHolds(topology.EdgeNodes, policy.OfflineEdges, nil, parent.Provenance.SignedAt); err != nil {
 		return fail()
 	}
+	enrollments := make(map[string]string)
+	for _, hold := range policy.OfflineEdges {
+		if hold.WorkerEnrollment != nil {
+			enrollments[hold.EdgeID] = hold.WorkerEnrollment.ID
+		}
+	}
 	policy.OfflineEdges, err = platformproducer.PublicationOfflineHolds(parent, policy.OfflineEdges)
 	if err != nil {
 		return fail()
@@ -93,6 +99,9 @@ func (s *Server) applyGlobalOfflineConsumerIntent(parent model.PlatformArtifact,
 		return fail()
 	}
 	topology.EdgeNodes = selected
+	if len(enrollments) != 0 {
+		topology.WorkerEnrollments = enrollments
+	}
 	return topology, nil
 }
 

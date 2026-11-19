@@ -14,10 +14,10 @@ func ProjectExpectedConsumerOwners(set model.PlatformExpectedConsumerSet) model.
 	out.Consumers = append([]model.PlatformExpectedConsumer(nil), set.Consumers...)
 	for i := range out.Consumers {
 		c := &out.Consumers[i]
-		id, err := PlatformConsumerID(c.Component, c.NodeID, c.AuthorityID)
-		if err == nil && c.Component == model.PlatformConsumerComponentCaddyEdgeFront && c.NodeID != "" && c.ConsumerID == id && c.ArtifactKind == set.ArtifactKind && c.ScopeKey == set.ScopeKey && (c.AuthorityID == "" || c.Cohort == c.AuthorityID) {
+		enrollment, err := ConsumerEnrollmentFromID(c.Component, c.NodeID, c.AuthorityID, c.ScopeKey, c.ConsumerID)
+		if err == nil && c.Component == model.PlatformConsumerComponentCaddyEdgeFront && c.NodeID != "" && c.ArtifactKind == set.ArtifactKind && c.ScopeKey == set.ScopeKey && (c.AuthorityID == "" || c.Cohort == c.AuthorityID) {
 			c.Component = model.PlatformConsumerComponentEdgeWorker
-			c.ConsumerID, _ = PlatformConsumerID(c.Component, c.NodeID, c.AuthorityID)
+			c.ConsumerID, _ = EnrolledPlatformConsumerID(c.Component, c.NodeID, c.AuthorityID, c.ScopeKey, enrollment)
 		}
 	}
 	return out

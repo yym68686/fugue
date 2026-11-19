@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 )
 
 type OfflineEdge struct {
@@ -19,15 +20,43 @@ type OfflineEdge struct {
 	Reason               string                     `json:"reason"`
 	ExpectedRecoveryDate string                     `json:"expected_recovery_date,omitempty"`
 	Recovery             *OfflineEdgeRecoveryPolicy `json:"recovery,omitempty"`
+	WorkerEnrollment     *OfflineWorkerEnrollment   `json:"worker_enrollment,omitempty"`
+}
+
+// OfflineWorkerEnrollment authorizes a fresh global consumer incarnation on
+// the same physical Node. It cannot inherit a retired identity or its evidence.
+type OfflineWorkerEnrollment struct {
+	ID              string   `json:"id"`
+	NodeUID         string   `json:"node_uid"`
+	ServiceAccount  string   `json:"service_account"`
+	DaemonSetUIDs   []string `json:"daemonset_uids"`
+	PodCreatedAfter string   `json:"pod_created_after"`
 }
 
 var offlineIdentity = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,127}$`)
 var offlineGroup = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
+var offlineKubernetesUID = regexp.MustCompile(`^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$`)
+
+func (e OfflineWorkerEnrollment) Validate() error {
+	cutover, err := time.Parse(time.RFC3339, e.PodCreatedAfter)
+	if !platformcontrol.ValidWorkerEnrollmentID(e.ID) || !offlineKubernetesUID.MatchString(e.NodeUID) || !offlineIdentity.MatchString(e.ServiceAccount) ||
+		err != nil || cutover.IsZero() || cutover.UTC().Format(time.RFC3339) != e.PodCreatedAfter ||
+		len(e.DaemonSetUIDs) < 1 || len(e.DaemonSetUIDs) > 2 {
+		return fmt.Errorf("worker replacement enrollment requires exact Node and workload ownership")
+	}
+	for i, uid := range e.DaemonSetUIDs {
+		if !offlineKubernetesUID.MatchString(uid) || i > 0 && e.DaemonSetUIDs[i-1] >= uid {
+			return fmt.Errorf("ordered unique Worker workload UIDs required")
+		}
+	}
+	return nil
+}
 
 func ValidateOfflineEdges(holds []OfflineEdge) error {
 	if len(holds) > 64 {
 		return fmt.Errorf("offline endpoint declaration exceeds bound")
 	}
+	enrollments := map[string]bool{}
 	for index, hold := range holds {
 		address, err := netip.ParseAddr(hold.PublicIPv4)
 		if !offlineIdentity.MatchString(hold.EdgeID) || !offlineGroup.MatchString(hold.EdgeGroupID) || err != nil || !address.Is4() || !platformconfig.PublicDNSFlattenIP(address) || address.String() != hold.PublicIPv4 || index > 0 && holds[index-1].EdgeID >= hold.EdgeID {
@@ -48,6 +77,12 @@ func ValidateOfflineEdges(holds []OfflineEdge) error {
 			if p := hold.Recovery.Capacity; p != nil && slices.Contains(p.ReferenceEdgeIDs, hold.EdgeID) {
 				return fmt.Errorf("capacity reference must be another physical Edge")
 			}
+		}
+		if e := hold.WorkerEnrollment; e != nil {
+			if hold.Recovery == nil || e.Validate() != nil || enrollments[e.ID] {
+				return fmt.Errorf("unique replacement Worker enrollment requires a recovery policy")
+			}
+			enrollments[e.ID] = true
 		}
 	}
 	return nil

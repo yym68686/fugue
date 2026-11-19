@@ -165,8 +165,9 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 			if trace != nil {
 				trace.value.RequiredConsumers++
 			}
-			claims := platformcontrol.PlatformComponentIdentityClaims{Component: component, NodeID: expected.NodeID, AuthorityID: expected.AuthorityID}
-			if !platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) || expected.ArtifactKind != child.ArtifactKind || expected.ScopeKey != parent.ScopeKey || expected.ExpectedGeneration != child.Generation || expected.Cohort == "" {
+			enrollment, err := platformcontrol.ConsumerEnrollmentFromID(component, expected.NodeID, expected.AuthorityID, expected.ScopeKey, expected.ConsumerID)
+			claims := platformcontrol.PlatformComponentIdentityClaims{Component: component, NodeID: expected.NodeID, AuthorityID: expected.AuthorityID, ScopeKey: expected.ScopeKey, WorkerEnrollmentID: enrollment}
+			if err != nil || !platformcontrol.ExpectedConsumerIdentityMatches(expected, claims) || expected.ArtifactKind != child.ArtifactKind || expected.ScopeKey != parent.ScopeKey || expected.ExpectedGeneration != child.Generation || expected.Cohort == "" {
 				return fail("required consumer ownership invalid")
 			}
 			if verifiedRecovery {

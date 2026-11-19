@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -18,9 +20,9 @@ func TestSingleCapacityRoundRestoresPublishedMembershipAndSurvivesRestart(t *tes
 	hold.Recovery.Capacity.Version, hold.Recovery.Capacity.MinimumStableSeconds = platformproducer.CapacitySingleVersion, 0
 	input.OfflineEdges = []platformproducer.OfflineEdge{hold}
 	ctx := t.Context()
-	plan, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-a")
-	if err != nil || plan == nil {
-		t.Fatal("single-round policy could not claim a signed measurement", err)
+	plan, blocked, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-a")
+	if err != nil || plan == nil || blocked != "" {
+		t.Fatal("single-round policy could not claim a signed measurement", blocked, err)
 	}
 	started := time.Now().UTC()
 	time.Sleep(time.Millisecond)
@@ -58,13 +60,13 @@ func TestCapacityExternalClaimsAreBoundedAndReportsCannotReplayOrChangeIdentity(
 			previous := platformproducer.OfflineRecoveryObservation{EdgeID: hold.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(hold), LastAttempt: now.Add(-6 * time.Minute), LastSuccess: now.Add(-6 * time.Minute), FirstSuccess: now.Add(-12 * time.Minute), ProofValidUntil: now.Add(time.Hour), Successes: 2, Capacity: &platformproducer.CapacityRecoveryEvidence{CheckedAt: now.Add(-6 * time.Minute), ReportDigest: "sha256:" + strings.Repeat("b", 64), ReferenceEdgeID: "edge-b", Bytes: 1 << 20, ElapsedMilliseconds: 2000, BytesPerSecond: 524288, Code: testCapacityCode(), RouteDigest: "sha256:" + strings.Repeat("a", 64)}}
 			key := platformproducer.OfflineRecoveryKey(hold)
 			s.store.UpdateObservationCheckpoint(ctx, key, func([]byte) ([]byte, error) { return json.Marshal(previous) })
-			plan, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-a")
-			if err != nil || plan == nil {
-				t.Fatal("failed to issue bounded plan", err)
+			plan, blocked, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-a")
+			if err != nil || plan == nil || blocked != "" {
+				t.Fatal("failed to issue bounded plan", blocked, err)
 			}
-			second, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-b")
-			if err != nil || second != nil {
-				t.Fatal("duplicate observer spent interval budget", err)
+			second, blocked, err := s.claimExternalCapacity(ctx, hold, input.OfflineEdges, "observer-b")
+			if err != nil || second != nil || blocked != "" {
+				t.Fatal("duplicate observer spent interval budget", blocked, err)
 			}
 			started := time.Now().UTC()
 			time.Sleep(time.Millisecond)
@@ -126,6 +128,28 @@ func TestCapacityExternalClaimsAreBoundedAndReportsCannotReplayOrChangeIdentity(
 				t.Fatal("report replay manufactured consecutive successes", observed)
 			}
 		})
+	}
+}
+
+func TestCapacityExternalBlockedPreparationIsNotAnIdleInterval(t *testing.T) {
+	s, _, hold, input := capacityRecoveryFixture(t)
+	s.offlineCapacityCode = func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+		return platformproducer.CapacityCodeIdentity{}, codeObservationError("code_not_current", "code_binding")
+	}
+	for _, want := range []string{"code_not_current", ""} {
+		plan, blocked, err := s.claimExternalCapacity(t.Context(), hold, input.OfflineEdges, "observer-a")
+		if err != nil || plan != nil || blocked != want {
+			t.Fatalf("unexpected claim: plan=%v, blocked=%q, error=%v", plan, blocked, err)
+		}
+		w := httptest.NewRecorder()
+		writeNoExternalCapacityPlan(w, blocked)
+		if w.Code != http.StatusNoContent || w.Header().Get("X-Fugue-Capacity-Recovery-Blocked") != want || w.Body.Len() != 0 {
+			t.Fatal("wrong non-plan response", w.Code, w.Header(), w.Body)
+		}
+	}
+	o, err := s.readOfflineRecovery(t.Context(), hold)
+	if err != nil || o.LastResult != "code_not_current" || o.CodeDetail != "code_binding" || o.Ready(hold, time.Now().UTC()) {
+		t.Fatal("diagnostic did not preserve the failed recovery observation", o, err)
 	}
 }
 

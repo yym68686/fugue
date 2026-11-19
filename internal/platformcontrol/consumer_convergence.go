@@ -13,10 +13,13 @@ import (
 )
 
 type ExpectedConsumerTopology struct {
-	EdgeNodes    []model.EdgeNode
-	DNSNodes     []model.DNSNode
-	NodeUpdaters []model.NodeUpdater
-	Runtimes     []model.Runtime
+	EdgeNodes []model.EdgeNode
+	// WorkerEnrollments is reconstructed from the exact signed source of a
+	// global publication, never from the node's self-reported heartbeat.
+	WorkerEnrollments map[string]string
+	DNSNodes          []model.DNSNode
+	NodeUpdaters      []model.NodeUpdater
+	Runtimes          []model.Runtime
 }
 
 type ExpectedConsumerSetBuildRequest struct {
@@ -53,10 +56,10 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 	}
 	active := map[string]bool{}
 	for _, node := range topology.EdgeNodes {
-		worker := expectedEdgeConsumer(model.PlatformConsumerComponentEdgeWorker, node, set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+		worker := expectedEdgeConsumer(model.PlatformConsumerComponentEdgeWorker, node, topology.WorkerEnrollments[node.ID], set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
 		active[worker.ConsumerID] = true
 		if normalizeExpectedConsumerArtifactKind(set.ArtifactKind) != model.PlatformArtifactKindEdgeRouteBundle {
-			front := expectedEdgeConsumer(model.PlatformConsumerComponentCaddyEdgeFront, node, set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+			front := expectedEdgeConsumer(model.PlatformConsumerComponentCaddyEdgeFront, node, topology.WorkerEnrollments[node.ID], set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
 			active[front.ConsumerID] = true
 		}
 	}
@@ -171,7 +174,7 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 				if !expectedEdgeNodeMatchesScope(node, req.Scope) {
 					continue
 				}
-				consumer := expectedEdgeConsumer(component, node, kind, scopeKey, generation, now)
+				consumer := expectedEdgeConsumer(component, node, req.Topology.WorkerEnrollments[node.ID], kind, scopeKey, generation, now)
 				if consumer.ConsumerID == "" {
 					return model.PlatformExpectedConsumerSet{}, ErrPlatformComponentIdentityInvalid
 				}
@@ -481,13 +484,16 @@ func normalizeExpectedConsumerArtifactKind(kind string) string {
 	return ""
 }
 
-func expectedEdgeConsumer(component string, node model.EdgeNode, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
+func expectedEdgeConsumer(component string, node model.EdgeNode, enrollment, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
+	if artifactKind != model.PlatformArtifactKindEdgeRouteBundle && artifactKind != model.PlatformArtifactKindCaddyRouteConfig {
+		enrollment = ""
+	}
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "country:"+strings.ToLower(strings.TrimSpace(node.Country)), "region:"+strings.ToLower(strings.TrimSpace(node.Region)), "node:"+nodeID)
 	consumer := expectedConsumer(component, nodeID, artifactKind, scopeKey, generation, failureDomain, firstNonEmptyExpected(strings.TrimSpace(node.EdgeGroupID), "edge"), !node.Draining, 90*time.Second, now)
 	consumer.AuthorityID = ConsumerAuthorityID(node.EdgeGroupID)
+	consumer.ConsumerID, _ = EnrolledPlatformConsumerID(component, nodeID, consumer.AuthorityID, scopeKey, enrollment)
 	if consumer.AuthorityID != "" {
-		consumer.ConsumerID, _ = PlatformConsumerID(component, nodeID, consumer.AuthorityID)
 		// The physical node is a known shared risk; an authority scope is not
 		// a country or infrastructure failure-domain observation.
 		consumer.FailureDomain = "node:" + nodeID

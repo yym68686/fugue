@@ -106,4 +106,37 @@ func TestGlobalOfflineMembershipUsesPinnedInputAndPreservesRequiredSurvivors(t *
 	if err != nil || !reflect.DeepEqual(selected, topology) {
 		t.Fatal("current hold changed a parent pinned to the previous input", err)
 	}
+	t.Run("replacement expectation comes from pinned recovered source", func(t *testing.T) {
+		at := time.Now().UTC()
+		hold := policy.OfflineEdges[0]
+		hold.Recovery = &platformproducer.OfflineEdgeRecoveryPolicy{Hostname: "app.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}
+		hold.WorkerEnrollment = testWorkerEnrollment(at.Add(-time.Hour))
+		next := policy
+		next.Generation, next.OfflineEdges = "replacement-input", []platformproducer.OfflineEdge{hold}
+		source := create(model.PlatformArtifactKindPolicySnapshot, "global", next.Generation, next)
+		producer.Generation, producer.DNSPolicyArtifactID, producer.DNSPolicyDigest = "replacement-producer", source.ID, source.ContentHash
+		newPolicy := create(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, producer.Generation, producer)
+		_, newRelease, _, _, err := server.store.ReleasePlatformArtifact(newPolicy.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
+		if err != nil {
+			t.Fatal(err)
+		}
+		withRecoveredEdge := plan
+		withRecoveredEdge.Probes = append(append([]platformconfig.DNSReadinessProbe(nil), plan.Probes...), platformconfig.DNSReadinessProbe{EdgeID: hold.EdgeID, Address: "1.1.1.1:443"})
+		child := create(model.PlatformArtifactKindDNSAnswerBundle, "global", "replacement-dns", map[string]any{"readiness_plan": withRecoveredEdge})
+		newParent := parent
+		newParent.Provenance.SignedAt = at
+		newParent.Content = map[string]any{"artifact_ids": []any{child.ID}, "artifact_kinds": []any{model.PlatformArtifactKindDNSAnswerBundle}}
+		newParent.Metadata = map[string]string{platformproducer.DNSPolicyIDMetadata: source.ID, platformproducer.DNSPolicyDigestMetadata: source.ContentHash,
+			platformproducer.StaticIntentIDMetadata: intent.ID, platformproducer.StaticIntentDigestMetadata: intent.ContentHash, platformproducer.PolicyReleaseMetadata: newRelease.ID}
+		if _, err := server.applyGlobalOfflineConsumerIntent(newParent, topology); err == nil {
+			t.Fatal("DNS included the replacement before signed recovery")
+		}
+		proof := platformproducer.OfflineRecoveryObservation{EdgeID: hold.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(hold), LastAttempt: at, LastSuccess: at, ProofValidUntil: at.Add(time.Minute), Successes: 3, Admitted: true}
+		raw, _ := json.Marshal(map[string]any{"captured_at": at, "observations": []platformproducer.OfflineRecoveryObservation{proof}})
+		newParent.Metadata[platformproducer.OfflineRecoveryMetadata] = string(raw)
+		selected, err := server.applyGlobalOfflineConsumerIntent(newParent, topology)
+		if err != nil || len(selected.EdgeNodes) != 2 || len(selected.WorkerEnrollments) != 1 || selected.WorkerEnrollments[hold.EdgeID] != hold.WorkerEnrollment.ID {
+			t.Fatal("published topology lost exact replacement identity", selected, err)
+		}
+	})
 }

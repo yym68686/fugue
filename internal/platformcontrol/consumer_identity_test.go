@@ -2,11 +2,60 @@ package platformcontrol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestWorkerReplacementEnrollmentUsesOnlyFreshExactIdentity(t *testing.T) {
+	now := time.Now().UTC()
+	legacy := platformComponentTestClaims()
+	legacy.NodeID, legacy.ScopeKey, legacy.CredentialID = "node-a", "global", "kubernetes:test:worker:pod-uid"
+	legacy.ArtifactKinds = []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig}
+	replacement := legacy
+	replacement.WorkerEnrollmentID = strings.Repeat("a", 32)
+	token, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), replacement, now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err = ParsePlatformComponentIdentity(platformComponentTestKeyring(), token, now)
+	if err != nil || replacement.ConsumerID() == legacy.ConsumerID() {
+		t.Fatal("replacement acquired legacy identity", err)
+	}
+	for _, kind := range replacement.ArtifactKinds {
+		topology := ExpectedConsumerTopology{EdgeNodes: []model.EdgeNode{{ID: replacement.NodeID, EdgeGroupID: "edge-group-a"}}, WorkerEnrollments: map[string]string{replacement.NodeID: replacement.WorkerEnrollmentID}}
+		set, err := BuildExpectedConsumerSet(ExpectedConsumerSetBuildRequest{ReleaseSetID: "release-set", ArtifactKind: kind, Generation: "generation", ScopeKey: "global", Topology: topology, PreparedAt: now})
+		if err != nil || len(set.Consumers) != 1 || set.Consumers[0].ConsumerID != replacement.ConsumerID() || set.Consumers[0].NodeID != replacement.NodeID {
+			t.Fatal("physical and logical membership were not kept separate", set, err)
+		}
+		if _, err := BindPlatformConsumerHeartbeatToExpectedSet(replacement, set, PlatformConsumerHeartbeatEnvelope{}); err != nil {
+			t.Fatal("replacement could not report its own expectation", err)
+		}
+		if _, err := BindPlatformConsumerHeartbeatToExpectedSet(legacy, set, PlatformConsumerHeartbeatEnvelope{}); err == nil {
+			t.Fatal("legacy credential inherited the new membership")
+		}
+		if _, err := BindPlatformConsumerHeartbeatToExpectedSet(replacement, set, PlatformConsumerHeartbeatEnvelope{ConsumerID: legacy.ConsumerID()}); err == nil {
+			t.Fatal("replacement could report as the legacy identity")
+		}
+		fact := model.PlatformConsumerInstance{ConsumerID: legacy.ConsumerID(), Component: legacy.Component, NodeID: legacy.NodeID, IdentityVerified: true, ArtifactKind: kind, ScopeKey: "global"}
+		if out := EvaluateConsumerConvergence(set, []model.PlatformConsumerInstance{fact}, now); out.Pass || out.RequiredObserved != 0 {
+			t.Fatal("replacement reused old evidence", out)
+		}
+		if projected := ProjectExpectedConsumerSetToTopology(set, topology); projected.RequiredCardinality != 1 {
+			t.Fatal("enrollment lost when evaluating convergence", projected)
+		}
+	}
+	for _, invalid := range []PlatformComponentIdentityClaims{
+		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", WorkerEnrollmentID: replacement.WorkerEnrollmentID, CredentialID: "unbound", ArtifactKinds: replacement.ArtifactKinds},
+		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", AuthorityID: "cell-a", WorkerEnrollmentID: replacement.WorkerEnrollmentID, CredentialID: replacement.CredentialID, ArtifactKinds: replacement.ArtifactKinds},
+	} {
+		if _, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), invalid, now, time.Minute); err == nil {
+			t.Fatal("replacement identity accepted a foreign scope or unbound credential")
+		}
+	}
+}
 
 func TestAuthorityConsumersKeepStableNodeAndSeparateExpectedOwnership(t *testing.T) {
 	now := time.Now().UTC()

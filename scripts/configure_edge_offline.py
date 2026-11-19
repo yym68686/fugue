@@ -25,9 +25,10 @@ def holds(policy):
     if not isinstance(result, list) or len(result) > 64:
         raise ValueError('bounded offline intent required')
     previous = ''
+    enrollments = set()
     for hold in result:
         required = {'edge_id', 'edge_group_id', 'public_ipv4', 'reason'}
-        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date', 'recovery'}:
+        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date', 'recovery', 'worker_enrollment'}:
             raise ValueError('complete offline endpoint identity required')
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', hold['edge_id']) or hold['edge_id'] <= previous or not re.fullmatch(r'edge-group-[a-z0-9]+(?:-[a-z0-9]+)*', hold['edge_group_id']):
             raise ValueError('ordered unique offline endpoint identities required')
@@ -51,6 +52,19 @@ def holds(policy):
                 raise ValueError('recovery probe bounds invalid')
             if 'capacity' in p:
                 validate_capacity_policy(p['capacity'], hold['edge_id'], p['freshness_seconds'])
+        if 'worker_enrollment' in hold:
+            e = hold['worker_enrollment']
+            required = {'id', 'node_uid', 'service_account', 'daemonset_uids', 'pod_created_after'}
+            uid = r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+            if 'recovery' not in hold or not isinstance(e, dict) or set(e) != required or any(not isinstance(e[k], str) for k in required-{'daemonset_uids'}) or not re.fullmatch(r'[a-f0-9]{32}', e['id']) or not re.fullmatch(uid, e['node_uid']) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', e['service_account']) or e['id'] in enrollments:
+                raise ValueError('replacement Worker requires a unique enrollment and exact Node ownership')
+            ds = e['daemonset_uids']
+            if not isinstance(ds, list) or not 1 <= len(ds) <= 2 or any(not isinstance(v, str) or not re.fullmatch(uid, v) for v in ds) or ds != sorted(set(ds)):
+                raise ValueError('ordered unique Worker workload UIDs required')
+            created_after = datetime.datetime.strptime(e['pod_created_after'], '%Y-%m-%dT%H:%M:%SZ')
+            if created_after.isoformat(timespec='seconds') + 'Z' != e['pod_created_after'] or created_after == datetime.datetime.min:
+                raise ValueError('canonical Worker Pod cutoff required')
+            enrollments.add(e['id'])
         previous = hold['edge_id']
     return result
 
@@ -152,6 +166,8 @@ def recovery_declaration_digest(hold):
             value['recovery']['capacity'] = {key: hold['recovery']['capacity'][key] for key in ('version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds')}
             if hold['recovery']['capacity'].get('retain_admission_seconds'):
                 value['recovery']['capacity']['retain_admission_seconds'] = hold['recovery']['capacity']['retain_admission_seconds']
+    if 'worker_enrollment' in hold:
+        value['worker_enrollment'] = {key: hold['worker_enrollment'][key] for key in ('id', 'node_uid', 'service_account', 'daemonset_uids', 'pod_created_after')}
     raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
     for character, escape in [('<', r'\u003c'), ('>', r'\u003e'), ('&', r'\u0026'), ('\u2028', r'\u2028'), ('\u2029', r'\u2029')]:
         raw = raw.replace(character, escape)

@@ -13,6 +13,7 @@ import json
 import ipaddress
 import os
 from pathlib import Path
+import re
 import socket
 import ssl
 import sys
@@ -120,11 +121,16 @@ def api_post(base, key, path, payload=None):
                                      headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
         if response.status == 204:
-            return None
+            blocked = response.headers.get('X-Fugue-Capacity-Recovery-Blocked')
+            if blocked is None:
+                return None, {'status': 'no_due_capacity_round'}
+            if not re.fullmatch(r'[a-z_]{1,64}', blocked):
+                raise ValueError('Invalid recovery preparation result')
+            return None, {'status': 'blocked_before_measurement', 'reason': blocked}
         raw = response.read(131073)
         if len(raw) > 131072:
             raise ValueError('API response exceeds bound')
-        return json.loads(raw)
+        return json.loads(raw), None
 
 
 def main():
@@ -132,14 +138,16 @@ def main():
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
     base, key = os.environ['FUGUE_API_URL'], os.environ['FUGUE_API_KEY']
-    plan = api_post(base, key, '/v1/admin/edge-recovery/client-probes')
+    plan, disposition = api_post(base, key, '/v1/admin/edge-recovery/client-probes')
     if plan is None:
-        print(json.dumps({'status': 'no_due_capacity_round'}))
+        print(json.dumps(disposition))
         return
     report = measure_plan(plan)
     if args.report:
         args.report.write_text(json.dumps(report, separators=(',', ':')) + '\n')
-    result = api_post(base, key, '/v1/admin/edge-recovery/client-probes/report', report)
+    result, disposition = api_post(base, key, '/v1/admin/edge-recovery/client-probes/report', report)
+    if disposition is not None:
+        raise ValueError('Capacity report returned no verification result')
     print(json.dumps({'round_id': plan['round_id'], 'result': result,
                       'outcomes': [{k: outcome[k] for k in ('attempt_id', 'http_status', 'failure', 'bytes_received', 'started_at', 'completed_at')} for outcome in report['outcomes']]}))
 
