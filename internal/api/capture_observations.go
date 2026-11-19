@@ -322,7 +322,7 @@ func captureConditionStatus(status string) string {
 	}
 }
 
-func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err error, candidates, minimum int) {
+func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err error, candidates, minimum int) captureReceipt {
 	trace.mu.Lock()
 	receipt := trace.receipt
 	receipt.DNSRead = trace.dnsReadSnapshot()
@@ -362,6 +362,7 @@ func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err err
 		}
 		s.captures.dnsFailures = append(s.captures.dnsFailures, receipt)
 	}
+	return receipt
 }
 
 func captureErrorClass(err error) string {
@@ -524,7 +525,7 @@ func (s *Server) captureSnapshot() any {
 			"coverage": "failed_published_traffic_diagnostic_reads_not_all_dns_checks_or_request_causes"},
 		"dns_preflight_failures": map[string]any{"receipts": append([]dnsPreflightFailure(nil), s.captures.dnsPreflightFailures...),
 			"total": s.captures.dnsPreflightTotal, "completed": s.captures.dnsPreflightCompleted, "evicted": s.captures.dnsPreflightEvicted, "limit": dnsPreflightFailureLimit,
-			"coverage": "completed_delegation_preflight_builds_not_public_dns_queries; child_references_are_process_local_and_may_have_been_evicted"},
+			"coverage": "completed_preflight_builds_with_compact_failed_fact_read_witnesses_not_public_dns_queries"},
 		"consumer_failures": map[string]any{"receipts": append([]consumerRequestFailure(nil), s.captures.consumerFailures...),
 			"total": s.captures.consumerFailureTotal, "evicted": s.captures.consumerFailureEvicted, "limit": consumerFailureLimit,
 			"coverage": "assignment_attempt_and_heartbeat_read_or_admission_errors_including_recovered_rereads_not_http_failure_totals"},

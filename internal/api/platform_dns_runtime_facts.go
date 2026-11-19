@@ -39,6 +39,7 @@ type dnsRuntimeBackend struct {
 
 type platformDNSRuntimeFactsResponse struct {
 	captureSequence     uint64 `json:"-"`
+	preflightFailure    *dnsPreflightFactFailure
 	lkgGeneration       string
 	heartbeatValidUntil time.Time
 	Backend             dnsRuntimeBackend `json:"backend"`
@@ -363,8 +364,11 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 			outcome = "not_ready"
 		}
 		observeCapture(ctx, captureEvent{Stage: stage, Node: node, ErrorClass: captureErrorClass(transportErr), HTTPStatus: captureHTTPStatus(transportErr), Rejection: captureDNSRejection(transportErr), DNSReplacement: captureDNSStateReplacement(transportErr)})
-		s.finishCaptureTrace(trace, outcome, readErr, 0, 0)
-		response.captureSequence = trace.receipt.Sequence
+		receipt := s.finishCaptureTrace(trace, outcome, readErr, 0, 0)
+		response.captureSequence = receipt.Sequence
+		if readErr != nil {
+			response.preflightFailure = dnsPreflightFactFailureFromReceipt(receipt)
+		}
 	}()
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

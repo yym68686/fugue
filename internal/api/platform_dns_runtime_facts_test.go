@@ -767,6 +767,13 @@ func TestDNSRuntimeFactsReadBindsPodProxyAndCurrentAssignment(t *testing.T) {
 			if !ok || read.facts.captureSequence != projectedReceipts[len(projectedReceipts)-1].Sequence {
 				t.Fatal("inventory did not retain its exact selected facts read")
 			}
+			if read.err != nil {
+				if witness := read.facts.preflightFailure; witness == nil || witness.Outcome != projectedReceipts[len(projectedReceipts)-1].Outcome {
+					t.Fatal("failed inventory read did not carry its own witness", witness)
+				}
+			} else if read.facts.preflightFailure != nil {
+				t.Fatal("a completed negative readiness observation was labeled a read failure")
+			}
 			if len(freshDNSNodes(projected, now.Add(24*time.Hour))) != 1 {
 				t.Fatal("unavailable enrolled node disappeared with stale inventory")
 			}
