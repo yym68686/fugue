@@ -51,6 +51,16 @@ target specification hashes are retained for recovery. There is no separate temp
 update or extra resource-change rollout. CNPG performs the primary replacement using its
 existing lifecycle and storage. Fugue does not delete the Pod or PVC itself.
 
+If the Cluster has the legacy, standalone bootstrap CPU override in
+`cnpg.io/podPatch`, Fugue removes that exact annotation atomically with the
+image switch. Other `podPatch` values block the live preflight, since they may
+be incompatible with the new Pod and are not authorized for removal. For an
+older operation that has already switched the image but cannot recreate its
+primary, recovery can remove only that known bootstrap override after
+verifying the durable migration intent, the original node and bound PGDATA,
+and the absence of a competing database Pod. It then resumes normal
+verification; it does not create, delete or replace storage.
+
 Completion requires a new healthy primary Pod on the original node and PVC/PVs,
 the unchanged Cluster UID, preserved specification/resources and physical system ID,
 the approved baked-manager command with no init containers, and a successful SQL

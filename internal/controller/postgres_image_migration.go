@@ -43,6 +43,8 @@ type postgresImageWitness struct {
 	RestartResourceTarget *model.ResourceSpec        `json:"restart_resource_target,omitempty"`
 	Drain                 *postgresImageDrainWitness `json:"drain,omitempty"`
 	DrainRestored         bool                       `json:"drain_restored,omitempty"`
+	// Nil means the intent predates podPatch compatibility checks.
+	BootstrapPodPatch *string `json:"bootstrap_pod_patch,omitempty"`
 }
 
 // Verify the control file itself as well as CNPG's reported system ID. The
@@ -85,6 +87,14 @@ func (c *kubeClient) patchImageMigration(ctx context.Context, w postgresImageWit
 		}
 		patch = append(patch, map[string]any{"op": "replace", "path": "/spec/resources", "value": w.RestartResources})
 	}
+	patchValue, err := imageMigrationPodPatch(cluster)
+	if err != nil {
+		return err
+	}
+	if err := validateImageMigrationPodPatch(w, patchValue, false); err != nil {
+		return err
+	}
+	patch = append(patch, removeImageMigrationPodPatch(patchValue)...)
 	_, err = c.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(w.Namespace, w.Cluster), "application/json-patch+json", patch, nil)
 	return err
 }
@@ -193,30 +203,38 @@ func (c *kubeClient) imageMigrationVolumes(ctx context.Context, ns string, pod m
 		if claim == "" {
 			continue
 		}
-		pvc, err := c.imageMigrationObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/persistentvolumeclaims/"+url.PathEscape(claim))
+		identity, err := c.imageMigrationVolumeIdentity(ctx, ns, claim)
 		if err != nil {
 			return nil, err
 		}
-		meta, spec := imageObject(pvc["metadata"]), imageObject(pvc["spec"])
-		pvName := imageString(spec, "volumeName")
-		if imageString(meta, "uid") == "" || pvName == "" || imageString(imageObject(pvc["status"]), "phase") != "Bound" {
-			return nil, fmt.Errorf("PVC %s is not persistently bound", claim)
-		}
-		pv, err := c.imageMigrationObject(ctx, "/api/v1/persistentvolumes/"+url.PathEscape(pvName))
-		if err != nil {
-			return nil, err
-		}
-		pvSpec := imageObject(pv["spec"])
-		ref := imageObject(pvSpec["claimRef"])
-		if imageString(ref, "uid") != imageString(meta, "uid") || imageString(ref, "namespace") != ns || imageString(ref, "name") != claim || imageString(imageObject(pv["metadata"]), "uid") == "" {
-			return nil, fmt.Errorf("PV %s does not match its PVC identity", pvName)
-		}
-		out[imageString(volume, "name")] = pgimage.Hash([]any{claim, imageString(meta, "uid"), spec, pvName, imageString(imageObject(pv["metadata"]), "uid"), pvSpec})
+		out[imageString(volume, "name")] = identity
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("database has no bound persistent volume")
 	}
 	return out, nil
+}
+
+func (c *kubeClient) imageMigrationVolumeIdentity(ctx context.Context, ns, claim string) (string, error) {
+	pvc, err := c.imageMigrationObject(ctx, "/api/v1/namespaces/"+url.PathEscape(ns)+"/persistentvolumeclaims/"+url.PathEscape(claim))
+	if err != nil {
+		return "", err
+	}
+	meta, spec := imageObject(pvc["metadata"]), imageObject(pvc["spec"])
+	pvName := imageString(spec, "volumeName")
+	if imageString(meta, "uid") == "" || pvName == "" || imageString(imageObject(pvc["status"]), "phase") != "Bound" {
+		return "", fmt.Errorf("PVC %s is not persistently bound", claim)
+	}
+	pv, err := c.imageMigrationObject(ctx, "/api/v1/persistentvolumes/"+url.PathEscape(pvName))
+	if err != nil {
+		return "", err
+	}
+	pvSpec := imageObject(pv["spec"])
+	ref := imageObject(pvSpec["claimRef"])
+	if imageString(ref, "uid") != imageString(meta, "uid") || imageString(ref, "namespace") != ns || imageString(ref, "name") != claim || imageString(imageObject(pv["metadata"]), "uid") == "" {
+		return "", fmt.Errorf("PV %s does not match its PVC identity", pvName)
+	}
+	return pgimage.Hash([]any{claim, imageString(meta, "uid"), spec, pvName, imageString(imageObject(pv["metadata"]), "uid"), pvSpec}), nil
 }
 
 // Require the exact rehearsed operator; an unrelated operator or a new mutable
@@ -289,6 +307,10 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, tar
 		return postgresImageWitness{}, err
 	}
 	spec, meta := imageObject(cluster["spec"]), imageObject(cluster["metadata"])
+	patchValue, err := imageMigrationPodPatch(cluster)
+	if err != nil {
+		return postgresImageWitness{}, err
+	}
 	main := imageContainer(pod)
 	source := imageString(spec, "imageName")
 	if imageString(spec, "primaryUpdateStrategy") != "unsupervised" || imageString(spec, "primaryUpdateMethod") != "restart" {
@@ -325,6 +347,12 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, tar
 		term := imageObject(imageObject(status["state"])["terminated"])
 		if term == nil || term["exitCode"] != float64(0) {
 			return postgresImageWitness{}, fmt.Errorf("initialization is not successfully complete")
+		}
+	}
+	if patchValue != "" {
+		init := imageObjects(imageObject(pod["spec"])["initContainers"])
+		if len(init) != 1 || imageString(init[0], "name") != "bootstrap-controller" {
+			return postgresImageWitness{}, fmt.Errorf("source Pod does not match the legacy bootstrap CPU patch")
 		}
 	}
 	// A single runtime node and the existing mandatory runtime affinity prevent
@@ -372,6 +400,7 @@ func (c *kubeClient) captureImageWitness(ctx context.Context, ns, serviceID, tar
 		return postgresImageWitness{}, err
 	}
 	witness := postgresImageWitness{Namespace: ns, Cluster: name, ClusterUID: imageString(meta, "uid"), SpecHash: imagePreservedSpecHash(cluster), SystemID: snapshot.Cluster.Status.SystemID, Pod: snapshot.Observation.PodName, PodUID: snapshot.Observation.PodUID, Node: snapshot.Observation.NodeName, SourceImage: source, TargetImage: target, ResourcesHash: pgimage.Hash(main["resources"]), Volumes: volumes}
+	witness.BootstrapPodPatch = &patchValue
 	witness.ColdMigration = snapshot.Cluster.Metadata.Annotations[coldMigrationAnnotation]
 	if alignResources {
 		witness.RestartResources = imageObject(main["resources"])
@@ -434,7 +463,11 @@ func validateImageWitness(w postgresImageWitness, cluster, pod map[string]any, s
 	if image != w.SourceImage && image != w.TargetImage {
 		return fmt.Errorf("database image changed outside this operation")
 	}
-	return nil
+	patchValue, err := imageMigrationPodPatch(cluster)
+	if err != nil {
+		return err
+	}
+	return validateImageMigrationPodPatch(w, patchValue, image == w.TargetImage)
 }
 
 func (s *Service) imageMigrationEvidence(op model.Operation, kind string, w postgresImageWitness) error {
@@ -582,6 +615,18 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 	for {
 		if err = s.ensureManagedPostgresLifecycleOperationOwned(op); err != nil {
 			return err
+		}
+		if resuming && witness.BootstrapPodPatch == nil && witness.Drain == nil {
+			repaired, err := client.recoverLegacyImageMigrationPodPatch(ctx, witness, target.Postgres.RuntimeID)
+			if err != nil {
+				return err
+			}
+			if repaired {
+				if s.Logger != nil {
+					s.Logger.Printf("database image migration %s removed a stale bootstrap-only CNPG podPatch during recovery", op.ID)
+				}
+				continue
+			}
 		}
 		if witness.Drain != nil {
 			current, readErr := client.imageMigrationObject(ctx, cloudNativePGClusterAPIPath(ns, name))

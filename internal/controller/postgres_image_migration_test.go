@@ -90,7 +90,7 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 }
 
 func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
-	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift"}
+	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift", "resized-bootstrap-patch-lost-patch-response", "custom-pod-patch"}
 	if independent {
 		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed", "fast-ready", "fast-blocked-before-stage", "fast-blocked-after-stage", "fast-stage-response-lost", "fast-image-lost-patch-response", "fast-restore-response-lost")
 	}
@@ -276,6 +276,15 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					t.Fatal(err)
 				}
 			}
+			bootstrapPatch := strings.Contains(scenario, "bootstrap-patch")
+			const retainedAnnotation = "fugue.io/test-retained"
+			if bootstrapPatch || scenario == "custom-pod-patch" {
+				value := migrationTestBootstrapPodPatch
+				if !bootstrapPatch {
+					value = `[{"op":"remove","path":"/spec/containers/0/resources"}]`
+				}
+				imageObject(cluster["metadata"])["annotations"] = map[string]any{imageMigrationPodPatchAnnotation: value, retainedAnnotation: "preserve"}
+			}
 			patches, probes := 0, 0
 			var baselineSpec map[string]any
 			b, _ := json.Marshal(spec)
@@ -325,6 +334,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					if resized {
 						expectedPatches = 5
 					}
+					if bootstrapPatch {
+						expectedPatches += 2
+					}
 					if len(patch) != expectedPatches || patch[0]["op"] != "test" || patch[1]["op"] != "test" || patch[2]["path"] != "/spec" || pgimage.Hash(patch[2]["value"]) != pgimage.Hash(spec) || patch[3]["op"] != "replace" || patch[3]["path"] != "/spec/imageName" || patch[3]["value"] != catalog.DefaultImage {
 						t.Error("image patch changed unexpected fields", patch)
 					}
@@ -340,6 +352,18 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 							t.Fatal("restart template was not aligned atomically", patch)
 						}
 						spec["resources"] = patch[4]["value"]
+					}
+					if bootstrapPatch {
+						expected := removeImageMigrationPodPatch(migrationTestBootstrapPodPatch)
+						if !reflect.DeepEqual(patch[len(patch)-2:], expected) {
+							t.Errorf("missing atomic exact annotation removal: %v", patch)
+							http.Error(w, "stale patch would block replacement", http.StatusConflict)
+							return
+						}
+						if len(proofs) != 1 || proofs[0].Payload["bootstrap_pod_patch"] != migrationTestBootstrapPodPatch {
+							t.Error("annotation removal not pinned in durable intent")
+						}
+						delete(imageObject(imageObject(cluster["metadata"])["annotations"]), imageMigrationPodPatchAnnotation)
 					}
 					imageObject(pod["metadata"])["uid"] = "new-pod-uid"
 					imageContainer(pod)["image"] = catalog.DefaultImage
@@ -434,9 +458,12 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					t.Fatalf("fast drain did not restore the original timeout after exactly one image replacement: writes=%d patches=%d err=%v", drainWrites, patches, err)
 				}
 			}
-			if scenario == "wrong-source-digest" || scenario == "fenced" || scenario == "resized-unapplied" || scenario == "resized-extra-resource-drift" || scenario == "unpersisted-resource-drift" {
+			if scenario == "wrong-source-digest" || scenario == "fenced" || scenario == "resized-unapplied" || scenario == "resized-extra-resource-drift" || scenario == "unpersisted-resource-drift" || scenario == "custom-pod-patch" {
 				if err == nil || patches != 0 || probes != 0 {
 					t.Fatalf("unsafe preflight passed: patches=%d probes=%d err=%v", patches, probes, err)
+				}
+				if scenario == "custom-pod-patch" && (!strings.Contains(err.Error(), "cnpg.io/podPatch") || errors.Is(err, errPostgresImageMigrationUnsettled)) {
+					t.Fatalf("custom patch must fail before intent: %v", err)
 				}
 				return
 			}
@@ -484,6 +511,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			baselineSpec["imageName"] = catalog.DefaultImage
 			if pgimage.Hash(baselineSpec) != pgimage.Hash(spec) {
 				t.Fatal("migration changed another Cluster field")
+			}
+			if bootstrapPatch && !reflect.DeepEqual(imageObject(cluster["metadata"])["annotations"], map[string]any{retainedAnnotation: "preserve"}) {
+				t.Fatal("migration did not remove only the obsolete bootstrap patch")
 			}
 			if current.OwnerAppID != service.OwnerAppID {
 				t.Fatal("migration changed independent ownership")

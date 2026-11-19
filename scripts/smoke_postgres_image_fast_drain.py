@@ -16,6 +16,12 @@ from scripts.smoke_cnpg_baked_manager import MANIFEST_SHA256, Rehearsal, manifes
 MARKER = "fugue.image_migration_drain_nonce"
 NS = "manager-check"
 NAME = "shutdown-canary"
+POD_PATCH = "cnpg.io/podPatch"
+POD_PATCH_PATH = "/metadata/annotations/cnpg.io~1podPatch"
+BOOTSTRAP_CPU_PATCH = json.dumps([
+    {"op": "test", "path": "/spec/initContainers/0/name", "value": "bootstrap-controller"},
+    {"op": "replace", "path": "/spec/initContainers/0/resources/requests/cpu", "value": "5m"},
+], sort_keys=True, separators=(",", ":"))
 
 
 def exercise(r, release):
@@ -43,10 +49,16 @@ def exercise(r, release):
     r.kube("-n", deployment["metadata"]["namespace"], "rollout", "status",
            "deployment/" + deployment["metadata"]["name"], "--timeout=120s", raw=True)
     r.apply({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": NS}})
-    r.apply({"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster", "metadata": {"name": NAME, "namespace": NS},
+    r.apply({"apiVersion": "postgresql.cnpg.io/v1", "kind": "Cluster",
+             "metadata": {"name": NAME, "namespace": NS,
+                          "annotations": {POD_PATCH: BOOTSTRAP_CPU_PATCH, "example.org/retained": "true"}},
              "spec": {"instances": 1, "imageName": source, "storage": {"size": "1Gi"}, "primaryUpdateMethod": "restart",
+                      "resources": {"requests": {"cpu": "100m", "memory": "256Mi"}},
                       "stopDelay": 1800, "smartShutdownTimeout": 180, "postgresql": {"parameters": {"log_min_duration_statement": "-1"}}}})
     old = r.wait(lambda: r.pod(NAME), r.ready, "source primary never became Ready", timeout=180)
+    init = old["spec"].get("initContainers", [])
+    if len(init) != 1 or init[0]["name"] != "bootstrap-controller" or init[0]["resources"]["requests"]["cpu"] != "5m":
+        raise ValueError("legacy bootstrap-only CPU patch was not applied to the source Pod")
     pod = old["metadata"]["name"]
     old_uid = old["metadata"]["uid"]
 
@@ -93,7 +105,9 @@ def exercise(r, release):
             tail = subprocess.Popen([*r.command, "-n", NS, "logs", pod, "-c", "postgres", "-f", "--tail=15"], stdout=logs, stderr=logs)
             try:
                 start = time.monotonic()
-                patch([{"op": "replace", "path": "/spec/imageName", "value": operand}])
+                patch([{"op": "replace", "path": "/spec/imageName", "value": operand},
+                       {"op": "test", "path": POD_PATCH_PATH, "value": BOOTSTRAP_CPU_PATCH},
+                       {"op": "remove", "path": POD_PATCH_PATH}])
                 target = r.wait(lambda: r.pod(NAME), lambda p: p and p["metadata"]["uid"] != old_uid, "CNPG did not recreate the old primary within the shortened window", timeout=65)
                 before_restore = time.monotonic() - start
             finally:
@@ -117,7 +131,11 @@ def exercise(r, release):
         ready = r.wait(lambda: r.pod(NAME), lambda p: r.ready(p) and p["metadata"]["uid"] == target["metadata"]["uid"],
                        "replacement primary never became Ready", timeout=90)
         final_spec = dict(baseline, imageName=operand)
-        if cluster()["spec"] != final_spec or claim() != claim_uid or ready["metadata"]["uid"] != target["metadata"]["uid"]:
+        final_cluster = cluster()
+        annotations = final_cluster["metadata"]["annotations"]
+        if POD_PATCH in annotations or annotations.get("example.org/retained") != "true":
+            raise ValueError("cutover did not remove only the obsolete bootstrap CPU patch")
+        if final_cluster["spec"] != final_spec or claim() != claim_uid or ready["metadata"]["uid"] != target["metadata"]["uid"]:
             raise ValueError("original configuration or storage identity did not survive restoration")
         if ready["spec"].get("initContainers") or r.sql(ready, "SELECT value FROM drain_continuity") != "7" or r.sql(ready, "SELECT system_identifier FROM pg_control_system()") != physical_id:
             raise ValueError("baked instance lost the original PostgreSQL identity or data")
@@ -128,7 +146,8 @@ def exercise(r, release):
         if not r.ready(stable) or stable["metadata"]["uid"] != ready["metadata"]["uid"] or stable["status"]["containerStatuses"][0]["restartCount"] != 0:
             raise ValueError("restoration caused an additional rollout")
         print(json.dumps({"old_manager_budget_seconds": 10, "replacement_observed_seconds": round(before_restore, 2),
-                          "settings_restored": True, "single_replacement": True, "data_and_storage_verified": True}, sort_keys=True))
+                          "settings_restored": True, "single_replacement": True, "data_and_storage_verified": True,
+                          "obsolete_bootstrap_patch_removed_atomically": True}, sort_keys=True))
     finally:
         if idle.poll() is None:
             idle.terminate()
