@@ -97,6 +97,11 @@ func TestCursorTerminatedOpenFailureSchedulesRetainedRecovery(t *testing.T) {
 					if inventories != 1 || cur.Complete || !cur.RecoveringRotation || !cur.Time.Equal(at) || !cur.DrainedThrough.IsZero() || cur.PendingAt.IsZero() || cur.NextAttempt.IsZero() || row.Outcome != "rotation_recovery_error" || row.HTTPStatus != 404 || row.Errors != 2 || c.pipeline.kubernetesLogLines.Load() != 0 {
 						t.Fatalf("missing retained logs were hidden or marked delivered: cursor=%+v row=%+v", cur, row)
 					}
+					if row.LastErrorTarget.ContainerState != "terminated" ||
+						row.LastErrorTarget.StatusUnknown != (kind == "unknown finish") ||
+						row.LastErrorTarget.FinishedAtPresent != (kind != "unknown finish") {
+						t.Fatalf("missing inventory lacked exact listed termination evidence: %+v", row.LastErrorTarget)
+					}
 				} else if got := rotationMessages(t, c.pipeline); !reflect.DeepEqual(got, []string{"retained", "after"}) || inventories != 2 || cur.Complete != (kind != "unknown finish") || cur.RecoveringRotation || !cur.PendingAt.IsZero() || !cur.Time.Equal(at.Add(2*time.Second)) || row.Errors != 1 || c.pipeline.kubernetesLogCursorGaps.Load() != 0 {
 					t.Fatalf("retained recovery lost ordering, coverage or failure evidence: messages=%v cursor=%+v row=%+v", got, cur, row)
 				}

@@ -131,8 +131,9 @@ func TestLogBoundaryObservationConcurrentProjectionAndResponseBudget(t *testing.
 	p := NewPipeline(Config{}, nil)
 	now := time.Now().UTC()
 	for i := range 512 {
+		target := logTargetObservation{PodPhase: "Failed", ContainerState: "terminated", StatusUnknown: true}
 		p.observeLogSource(logSourceObservation{Identity: fmt.Sprintf("source-%04d", i), Node: "node-a", ObservedAt: now,
-			CursorBefore: now, CursorAfter: now, Outcome: "rotation_gap", GapEvents: 1,
+			CursorBefore: now, CursorAfter: now, Outcome: "rotation_recovery_error", ErrorClass: "not_found", Target: target, GapEvents: 1,
 			GapReason: "rotation_boundary_missing", GapLowerBound: now, GapUpperBound: now, BoundaryCheck: fact})
 	}
 	var wg sync.WaitGroup

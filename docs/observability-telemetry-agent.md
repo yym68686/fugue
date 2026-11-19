@@ -320,6 +320,13 @@ transport can replay a GET, and the last exchange is not a complete request
 history. An ID does not establish that an audit event was retained, that the
 kubelet saw the request, or which hop generated a 404. Join only to separately
 verified server records and preserve unknown coverage where no match exists.
+Read errors and gap receipts include the collector's listed Kubernetes target
+state (`last_error_target` or `target`). It distinguishes a running container,
+a known termination and a Kubernetes `ContainerStatusUnknown` termination
+without exposing container IDs, arbitrary status reasons or exit messages.
+On a backoff gap the target describes that turn, not the earlier read error.
+An absent ID or finish timestamp is not proof that the log was drained,
+permanently lost, or never written.
 Read deadlines, cursors, queue admission and backoff behavior are unchanged.
 
 A log transport failure opens a circuit shared by all sources on that

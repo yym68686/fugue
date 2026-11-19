@@ -42,6 +42,7 @@ func TestGapHistorySurvivesDetailTruncationAndSourceEviction(t *testing.T) {
 	p := NewPipeline(Config{}, nil)
 	now := time.Now().UTC()
 	p.observeLogSource(logSourceObservation{Identity: "gap-source", Node: "node-a", ObservedAt: now, Outcome: "queue_rejected",
+		Target:    logTargetObservation{PodPhase: "Failed", ContainerState: "terminated", StatusUnknown: true},
 		GapEvents: 1, GapReason: "rotation_boundary_missing", GapLowerBound: now.Add(-time.Minute), GapUpperBound: now})
 	for i := range 2100 {
 		p.observeLogSource(logSourceObservation{Identity: fmt.Sprintf("pending-%04d", i), ObservedAt: now.Add(time.Second), PendingAt: now, Outcome: "cycle_budget"})
@@ -59,7 +60,7 @@ func TestGapHistorySurvivesDetailTruncationAndSourceEviction(t *testing.T) {
 		t.Fatal("new gap evidence disappeared with the source detail")
 	}
 	rows := history["receipts"].([]logGapObservation)
-	if len(rows) != 1 || rows[0].Identity != "gap-source" || rows[0].Events != 1 || rows[0].Reason != "rotation_boundary_missing" || !rows[0].ObservedAt.Equal(now) || history["total"] != uint64(1) {
+	if len(rows) != 1 || rows[0].Identity != "gap-source" || rows[0].Events != 1 || rows[0].Reason != "rotation_boundary_missing" || !rows[0].ObservedAt.Equal(now) || !rows[0].Target.StatusUnknown || rows[0].Target.ContainerState != "terminated" || history["total"] != uint64(1) {
 		t.Fatal("gap evidence was lost or misattributed", history)
 	}
 	for range logGapReceiptLimit + 1 {

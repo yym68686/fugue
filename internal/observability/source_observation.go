@@ -32,8 +32,10 @@ type logSourceObservation struct {
 	LastErrorStage         string                       `json:"last_error_stage,omitempty"`
 	LastErrorMillis        int64                        `json:"last_error_ms,omitempty"`
 	LastErrorRead          *logReadTransportObservation `json:"last_error_read,omitempty"`
+	LastErrorTarget        logTargetObservation         `json:"last_error_target,omitzero"`
 	LastAdmission          *logAdmissionObservation     `json:"last_admission,omitempty"`
 	InvalidRecord          *logInvalidRecordObservation `json:"invalid_record,omitempty"`
+	Target                 logTargetObservation         `json:"-"`
 	// The independent 64-entry gap ring exposes this witness. Do not multiply
 	// its payload across the 512-row source projection's response budget.
 	BoundaryCheck    *logBoundaryObservation `json:"-"`
@@ -100,6 +102,7 @@ type logGapObservation struct {
 	LastErrorStage string                       `json:"last_error_stage,omitempty"`
 	ReadExchange   *logHTTPExchangeObservation  `json:"read_http_exchange,omitempty"`
 	ReadPhase      string                       `json:"read_phase,omitempty"`
+	Target         logTargetObservation         `json:"target,omitzero"`
 	LastAdmission  *logAdmissionObservation     `json:"last_admission,omitempty"`
 	InvalidRecord  *logInvalidRecordObservation `json:"invalid_record,omitempty"`
 	BoundaryCheck  *logBoundaryObservation      `json:"boundary_check,omitempty"`
@@ -151,6 +154,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	}
 	if !failed {
 		v.LastErrorRead = prior.LastErrorRead
+		v.LastErrorTarget = prior.LastErrorTarget
 	} else if v.LastErrorRead != nil {
 		copy := *v.LastErrorRead
 		v.LastErrorRead = &copy
@@ -161,6 +165,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	v.GapEvents += prior.GapEvents
 	if failed {
 		v.Errors++
+		v.LastErrorTarget = v.Target
 		v.LastErrorAt, v.LastErrorClass = v.ObservedAt, v.ErrorClass
 		v.LastHTTPStatus = v.HTTPStatus
 		v.LastErrorStage, v.LastErrorMillis = v.Outcome, v.TotalMillis
@@ -189,6 +194,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 			Lines: v.Lines, RotationFiles: v.RotationFiles, RotationBytes: v.RotationBytes,
 			LastErrorAt: v.LastErrorAt, LastErrorClass: v.LastErrorClass, LastErrorStage: v.LastErrorStage,
 			ReadExchange: exchange, ReadPhase: phase,
+			Target:        v.Target,
 			LastAdmission: v.LastAdmission, InvalidRecord: v.InvalidRecord,
 			BoundaryCheck: v.BoundaryCheck,
 		})

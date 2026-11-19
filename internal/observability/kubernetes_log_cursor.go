@@ -161,6 +161,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		gap.ObservedAt, gap.CursorBefore, gap.CursorAfter = now, cur.Time, cur.Time
 		gap.PendingAt, gap.DrainedThrough, gap.NextAttempt = cur.PendingAt, cur.DrainedThrough, retryAt
 		gap.Outcome = "node_backoff"
+		if gap.GapEvents > 0 {
+			gap.Target = observeLogTarget(target)
+		}
 		c.pipeline.observeLogSource(gap)
 		return
 	}
@@ -179,6 +182,9 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 		observation.TotalMillis = time.Since(now).Milliseconds()
 		if observation.ErrorClass != "" {
 			observation.LastErrorRead = readTrace.snapshot()
+		}
+		if observation.ErrorClass != "" || observation.GapEvents > 0 {
+			observation.Target = observeLogTarget(target)
 		}
 		c.pipeline.observeLogSource(observation)
 	}()
