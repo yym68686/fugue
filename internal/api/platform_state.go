@@ -1444,19 +1444,69 @@ func (s *Server) consumerAssignmentIsSelected(item consumerArtifactLookup, group
 }
 
 func (s *Server) consumerAssignmentIsSelectedWithBindingReader(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (bool, error) {
+	return s.checkConsumerAssignmentSelection(item, group, readArtifact, readBinding, nil)
+}
+
+func (s *Server) checkConsumerAssignmentSelection(item consumerArtifactLookup, group string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, observe func(...string)) (bool, error) {
 	parent, err := readArtifact(item.Assignment.ReleaseSetID)
 	if err != nil {
+		if observe != nil {
+			observe("selection.parent_read")
+		}
 		return false, err
 	}
 	if parent.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
 		if item.Artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle {
+			if observe != nil {
+				observe("selection.non_dns_child")
+			}
 			return false, errors.New("DNS-only assignment has a non-DNS child")
 		}
 		current, release, found, err := s.selectTrafficRouteReleaseInScope(group, item.Assignment.ScopeKey)
-		return found && current.ID == parent.ID && current.ContentHash == parent.ContentHash && release.ID == item.Release.ID && release.FencingToken == item.Assignment.FencingToken, err
+		selected := found && current.ID == parent.ID && current.ContentHash == parent.ContentHash && release.ID == item.Release.ID && release.FencingToken == item.Assignment.FencingToken
+		if observe != nil {
+			switch {
+			case err != nil:
+				observe("selection.current_release_read")
+			case !found:
+				observe("selection.current_release_missing")
+			case !selected:
+				if current.ID != parent.ID {
+					observe("selection.parent_id")
+				}
+				if current.ContentHash != parent.ContentHash {
+					observe("selection.parent_digest")
+				}
+				observeSelectionReleaseMismatch(item, release.ID, release.FencingToken, observe)
+			}
+		}
+		return selected, err
 	}
 	projection, found, err := s.edgeRouteIntentSnapshotFromTrafficScopeWithBindingReader(group, item.Assignment.ScopeKey, readArtifact, readBinding)
-	return found && projection.TrafficRelease != nil && projection.TrafficRelease.ReleaseID == item.Release.ID && projection.TrafficRelease.FencingToken == item.Assignment.FencingToken, err
+	binding := projection.TrafficRelease
+	selected := found && binding != nil && binding.ReleaseID == item.Release.ID && binding.FencingToken == item.Assignment.FencingToken
+	if observe != nil {
+		switch {
+		case err != nil:
+			observe("selection.projection_read")
+		case !found:
+			observe("selection.projection_missing")
+		case binding == nil:
+			observe("selection.traffic_release_missing")
+		case !selected:
+			observeSelectionReleaseMismatch(item, binding.ReleaseID, binding.FencingToken, observe)
+		}
+	}
+	return selected, err
+}
+
+func observeSelectionReleaseMismatch(item consumerArtifactLookup, releaseID string, fence int64, observe func(...string)) {
+	if releaseID != item.Release.ID {
+		observe("selection.release_id")
+	}
+	if fence != item.Assignment.FencingToken {
+		observe("selection.fencing_token")
+	}
 }
 
 func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *http.Request) {

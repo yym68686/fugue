@@ -135,8 +135,13 @@ func TestConsumerBindingReuseRetainsFreshTopologyTrustAndPublication(t *testing.
 		}
 		return binding, err
 	}
-	if ok, err := server.consumerAssignmentIsSelectedWithBindingReader(items[0], "edge-group-test-a", readArtifact, project); err != nil || ok {
+	var rejectedFields []string
+	recordRejection := func(fields ...string) { rejectedFields = append(rejectedFields, fields...) }
+	if ok, err := server.checkConsumerAssignmentSelection(items[0], "edge-group-test-a", readArtifact, project, recordRejection); err != nil || ok {
 		t.Fatal("superseded assignment accepted during observation", ok, err)
+	}
+	if want := []string{"selection.release_id", "selection.fencing_token"}; !reflect.DeepEqual(rejectedFields, want) {
+		t.Fatal("actual successor mismatch not retained", rejectedFields)
 	}
 	items, err = server.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
 	if err != nil || len(items) != 2 {

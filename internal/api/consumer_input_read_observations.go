@@ -46,6 +46,36 @@ func observeConsumerInputReadFailure(ctx context.Context, stage string, detail s
 	}
 }
 
+// Selection diagnostics contain only fixed names for values that failed the
+// final authority comparison. They never retain identifiers, digests, or
+// projection contents.
+func observeConsumerInputSelectionFailure(ctx context.Context, fields []string) {
+	failure, _ := ctx.Value(consumerInputReadObservationKey{}).(*consumerInputReadFailure)
+	if failure == nil || failure.Stage != "" {
+		return
+	}
+	for _, field := range fields {
+		switch field {
+		case "selection.parent_id", "selection.parent_digest", "selection.release_id",
+			"selection.fencing_token", "selection.projection_missing", "selection.traffic_release_missing",
+			"selection.parent_read", "selection.current_release_read", "selection.current_release_missing",
+			"selection.projection_read", "selection.non_dns_child":
+		default:
+			continue
+		}
+		seen := false
+		for _, existing := range failure.ChangedFields {
+			if existing == field {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			failure.ChangedFields = append(failure.ChangedFields, field)
+		}
+	}
+}
+
 func consumerInputReadFailureFromContext(ctx context.Context) *consumerInputReadFailure {
 	failure, _ := ctx.Value(consumerInputReadObservationKey{}).(*consumerInputReadFailure)
 	if failure == nil || failure.Stage == "" {

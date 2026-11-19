@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -48,6 +49,28 @@ func TestConsumerUnavailableCorrelatesOnlyFinalAuthenticatedDNSFailure(t *testin
 		if w.Header().Get(platformconsumer.FailureIDHeader) != "" {
 			t.Fatal("correlation exposed for a non-target response")
 		}
+	}
+}
+
+func TestConsumerInputSelectionFailureKeepsOnlyAllowedFieldNames(t *testing.T) {
+	ctx := withConsumerInputReadObservation(context.Background())
+	observeConsumerInputSelectionFailure(ctx, []string{
+		"selection.release_id", "selection.release_id", "private-value",
+		"selection.fencing_token", "selection.projection_missing",
+	})
+	observeConsumerInputReadFailure(ctx, "serving_not_selected", store.PlatformInputReadFailure{}, nil, nil)
+	detail := consumerInputReadFailureFromContext(ctx)
+	if detail == nil || !reflect.DeepEqual(detail.ChangedFields, []string{
+		"selection.release_id", "selection.fencing_token", "selection.projection_missing",
+	}) {
+		t.Fatal("selection diagnostics were not bounded and deduplicated", detail)
+	}
+	observeConsumerInputSelectionFailure(ctx, []string{"selection.parent_id"})
+	detail = consumerInputReadFailureFromContext(ctx)
+	if detail == nil || !reflect.DeepEqual(detail.ChangedFields, []string{
+		"selection.release_id", "selection.fencing_token", "selection.projection_missing",
+	}) {
+		t.Fatal("selection diagnostics changed after the terminal stage", detail)
 	}
 }
 

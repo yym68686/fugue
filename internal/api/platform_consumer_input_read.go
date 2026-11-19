@@ -94,7 +94,11 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 							break
 						}
 					}
-					ok, err := s.consumerAssignmentIsSelected(after, group, freshRead)
+					var observe func(...string)
+					if claims.Component == model.PlatformConsumerComponentDNSServer {
+						observe = func(fields ...string) { observeConsumerInputSelectionFailure(ctx, fields) }
+					}
+					ok, err := s.checkConsumerAssignmentSelection(after, group, freshRead, nil, observe)
 					if err != nil || !ok {
 						stage := "serving_not_selected"
 						if err != nil {
