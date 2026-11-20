@@ -214,30 +214,32 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 		}
 	}
 	var readiness *dnsReadinessReceipt
+	var query *dnsQueryReceipt
 	if sourcePayload != nil {
-		p, facts, err := s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe)
+		// The final source read rechecks both the exact shadow assignment and the
+		// complete source digest after probes and query evaluation. Do that once;
+		// no candidate, receipt or cursor is written before it succeeds.
+		_, _, err = s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe, func(p dnsServingPayload, facts []dnsReadinessFact) error {
+			now := time.Now().UTC()
+			digest, _ := platformconfig.Digest(p.Plan)
+			readiness = &dnsReadinessReceipt{ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID, FencingToken: chosen.FencingToken, NodeID: s.Config.DNSNodeID, Facts: facts, payload: &p, Status: summarizeDNSReadiness(p.Plan, p.Policy.DNSReadiness, facts, digest, now, now)}
+			var queryErr error
+			query, queryErr = s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
+			return queryErr
+		})
 		if err != nil {
 			return err
 		}
-		sourcePayload = &p
-		now := time.Now().UTC()
-		digest, _ := platformconfig.Digest(p.Plan)
-		readiness = &dnsReadinessReceipt{ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID, FencingToken: chosen.FencingToken, NodeID: s.Config.DNSNodeID, Facts: facts, payload: &p, Status: summarizeDNSReadiness(p.Plan, p.Policy.DNSReadiness, facts, digest, now, now)}
 	} else {
 		readiness, err = s.observeDecodedPlatformDNSReadiness(ctx, candidate, *chosen, payload)
 		if err != nil {
 			return err
 		}
-	}
-	query, err := s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
-	if err != nil {
-		return err
-	}
-	if err = client.CheckAssignment(ctx, identity, assignment); err != nil {
-		return err
-	}
-	if sourcePayload != nil {
-		if err = s.checkDNSRouteSources(ctx, client, identity, candidate, sourcePayload.routeSources); err != nil {
+		query, err = s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
+		if err != nil {
+			return err
+		}
+		if err = client.CheckAssignment(ctx, identity, assignment); err != nil {
 			return err
 		}
 	}

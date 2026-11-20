@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,11 +53,15 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			reads := 0
+			var reads atomic.Int32
+			var evaluated atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				reads++
+				read := reads.Add(1)
 				next := snapshot
-				if scenario == "selection-race" && reads > 1 {
+				if scenario == "selection-race" && read > 1 {
+					if !evaluated.Load() {
+						t.Error("final source read preceded local query evaluation")
+					}
 					next.SelectionDigest = "changed"
 				}
 				json.NewEncoder(w).Encode(model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: next})
@@ -102,9 +107,15 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			effective, facts, err := s.observeDNSRouteSources(context.Background(), client, platformconsumer.Identity{Token: "test"}, candidate, payload, nil, probe)
+			effective, facts, err := s.observeDNSRouteSources(context.Background(), client, platformconsumer.Identity{Token: "test"}, candidate, payload, nil, probe, func(p dnsServingPayload, f []dnsReadinessFact) error {
+				if reads.Load() != 1 || p.routeSources == nil || len(f) == 0 {
+					t.Fatal("local query evaluation did not receive the selected observation before its final recheck")
+				}
+				evaluated.Store(true)
+				return nil
+			})
 			if scenario == "selection-race" {
-				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) {
+				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || reads.Load() != 2 || !evaluated.Load() {
 					t.Fatal("selection drift accepted", err)
 				}
 				return

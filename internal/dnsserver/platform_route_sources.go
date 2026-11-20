@@ -42,7 +42,9 @@ func (s *Service) replayDNSRouteContext(p dnsServingPayload, c dnsPlatformCandid
 	return p, nil
 }
 
-func (s *Service) observeDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc) (dnsServingPayload, []dnsReadinessFact, error) {
+type dnsSourceEvaluation func(dnsServingPayload, []dnsReadinessFact) error
+
+func (s *Service) observeDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, evaluate ...dnsSourceEvaluation) (dnsServingPayload, []dnsReadinessFact, error) {
 	var prior []model.PlatformDNSRouteSourceSnapshot
 	if previous != nil {
 		prior = []model.PlatformDNSRouteSourceSnapshot{previous.Snapshot}
@@ -53,12 +55,12 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 			prior = []model.PlatformDNSRouteSourceSnapshot{snapshot}
 		}
 		return snapshot, err
-	})
+	}, evaluate...)
 }
 
 // Both selected and retained DNS use the same authenticated source compilation,
 // recovery history and physical proof checks, but separate read authority.
-func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, read func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error)) (resultPayload dnsServingPayload, resultFacts []dnsReadinessFact, resultErr error) {
+func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPlatformCandidate, p dnsServingPayload, previous *dnsroutesource.Context, probe dnsReadinessProbeFunc, read func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error), evaluate ...dnsSourceEvaluation) (resultPayload dnsServingPayload, resultFacts []dnsReadinessFact, resultErr error) {
 	ctx, finish := observeDNSSyncPhase(ctx, "route_sources")
 	defer func() { finish(resultErr) }()
 	originalRead := read
@@ -143,6 +145,14 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	selected := make([]dnsReadinessFact, 0, len(p.Plan.Probes))
 	for _, requirement := range p.Plan.Probes {
 		selected = append(selected, byID[requirement.ID])
+	}
+	// A shadow query test can finish before this same final authority read.
+	// It must remain in-memory: a changed source or assignment below invalidates
+	// the whole observation before any candidate or ACK can be persisted.
+	for _, evaluation := range evaluate {
+		if err := evaluation(p, selected); err != nil {
+			return p, selected, err
+		}
 	}
 	next, err := read(ctx)
 	if err != nil {
