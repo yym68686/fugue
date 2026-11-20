@@ -17,7 +17,13 @@ type ProjectHostRoutePlan struct {
 }
 
 type ProjectHostRoutePublicationStatus struct {
-	State     string `json:"state"`
-	Reason    string `json:"reason"`
-	ReleaseID string `json:"release_id,omitempty"`
+	State          string                     `json:"state"`
+	Reason         string                     `json:"reason"`
+	ReleaseID      string                     `json:"release_id,omitempty"`
+	ApplyPreflight *ProjectHostRoutePreflight `json:"apply_preflight,omitempty"`
+}
+
+type ProjectHostRoutePreflight struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
 }

@@ -51,6 +51,13 @@ explicit, `plan --remove-path /path` restores its inherited matching; for a
 previously explicit path plan a replacement with its old app. This uses the
 same signed publication flow rather than deleting the hostname.
 
+Before applying a forward or rollback plan, run
+`fugue project routes status example --plan host-plan.json --preflight`
+as a platform admin. The optional `apply_preflight` reports `ready`, `blocked`
+with the current compatibility gate, or `not_applicable` for a superseded
+plan or one whose routes are already desired. This check does not change
+routes or attest serving; apply still validates the plan and gates independently.
+
 Before gray publication and full promotion, a proposed removal of a healthy
 path for stable-release unreadiness is checked against its current selection
 and managed workload. An obsolete negative must not replace that route. A

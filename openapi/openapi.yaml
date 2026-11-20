@@ -6183,6 +6183,12 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/IdPathParam"
+        - name: preflight
+          in: query
+          description: Also evaluate the exact unapplied plan's write compatibility gates without committing it. The result is point-in-time; apply rechecks the plan and all gates.
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         content:
@@ -28427,6 +28433,16 @@ components:
           type: string
         release_id:
           type: string
+        apply_preflight:
+          type: object
+          additionalProperties: false
+          required: [state, reason]
+          properties:
+            state:
+              type: string
+              enum: [ready, blocked, not_applicable]
+            reason:
+              type: string
     PutProjectRouteTableRequest:
       type: object
       additionalProperties: false

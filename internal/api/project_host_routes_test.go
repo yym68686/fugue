@@ -102,6 +102,76 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 	}
 }
 
+func TestProjectHostRouteStatusPreflightDoesNotApplyManagedChange(t *testing.T) {
+	st, srv, token, admin, owner, _ := setupAppDomainTestServer(t)
+	web, err := st.CreateApp(owner.TenantID, owner.ProjectID, "web", "", model.AppSpec{
+		Image: "example.test/web:v1", Ports: []int{3000}, Replicas: 1, RuntimeID: "runtime_managed_shared",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const host = "customer.example.net"
+	zone := putHostedDNSZoneForEdgeDNSTest(t, st, owner.TenantID, host)
+	rec := performJSONRequest(t, srv, http.MethodPost, "/v1/apps/"+owner.ID+"/domains", token, map[string]string{"hostname": host, "dns_mode": "managed"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("managed domain: %d %s", rec.Code, rec.Body)
+	}
+	claim, err := st.GetAppDomain(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim.TLSStatus = model.AppDomainTLSStatusReady
+	claim, err = st.PutAppDomain(claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsBefore, err := st.GetDNSRecord(zone.ID, claim.DNSRecordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/v1/projects/" + owner.ProjectID + "/routes/"
+	var plan model.ProjectHostRoutePlan
+	edit := model.ProjectHostRouteEdit{Hostname: host, Paths: map[string]string{"/": web.ID, "/v1": owner.ID, "/v1beta": owner.ID, "/healthz": owner.ID}}
+	rec = performJSONRequest(t, srv, http.MethodPost, base+"host-plan", token, edit)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plan: %d %s", rec.Code, rec.Body)
+	}
+	mustDecodeJSON(t, rec, &plan)
+	for _, tc := range []struct {
+		credential, suffix string
+		code               int
+		state, reason      string
+	}{
+		{token, "?preflight=true", http.StatusForbidden, "", ""},
+		{admin, "", http.StatusOK, "", ""},
+		{admin, "?preflight=true", http.StatusOK, "blocked", errProjectHostDNSContinuity.Error()},
+	} {
+		rec := performJSONRequest(t, srv, http.MethodPost, base+"host-status"+tc.suffix, tc.credential, plan)
+		if rec.Code != tc.code {
+			t.Fatalf("status: %d, want %d: %s", rec.Code, tc.code, rec.Body)
+		}
+		if tc.code == http.StatusOK {
+			var status model.ProjectHostRoutePublicationStatus
+			mustDecodeJSON(t, rec, &status)
+			if status.State != "pending" || !strings.Contains(status.Reason, "has not been applied") ||
+				(tc.state == "" && status.ApplyPreflight != nil) ||
+				(tc.state != "" && (status.ApplyPreflight == nil || status.ApplyPreflight.State != tc.state || status.ApplyPreflight.Reason != tc.reason)) {
+				t.Fatalf("unexpected status: %+v, preflight: %+v", status, status.ApplyPreflight)
+			}
+		}
+	}
+	rec = performJSONRequest(t, srv, http.MethodPost, base+"host-apply", token, plan)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), errProjectHostDNSContinuity.Error()) {
+		t.Fatalf("apply must enforce the same gate: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := st.GetProjectRouteTable(owner.ProjectID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("preflight or blocked apply changed the route table: %v", err)
+	}
+	if dnsAfter, err := st.GetDNSRecord(zone.ID, claim.DNSRecordID); err != nil || !reflect.DeepEqual(dnsBefore, dnsAfter) {
+		t.Fatalf("preflight or blocked apply changed the managed DNS record: %v", err)
+	}
+}
+
 func TestProjectHostRoutePostgresSerializesPlans(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {

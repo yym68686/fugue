@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -65,6 +66,7 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 	}
 	status := model.ProjectHostRoutePublicationStatus{State: "pending", Reason: "no exact full global publication with fresh consumer evidence"}
 	desired := false
+	var unapplied, managed bool
 	err := s.store.EditProjectHostRoutes(r.Context(), project.ID, plan.Edit.Hostname, false, func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {
 		current, _, changed, err := buildProjectHostRoutePlan(in, plan.Edit)
 		if err != nil {
@@ -77,6 +79,8 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 			desired = true
 		case current.PlanID == plan.PlanID && maps.Equal(current.Before, plan.Before) && maps.Equal(current.After, plan.After):
 			status.Reason = "hostname plan has not been applied"
+			unapplied = true
+			managed = in.Domain.DNSMode == model.AppDomainDNSModeManaged
 		default:
 			status.State, status.Reason = "superseded", "current desired routes differ from the plan"
 		}
@@ -95,6 +99,22 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 		if err == nil {
 			status = projectHostPublicationStatus(plan, snapshot, healthy)
 		}
+	}
+	if r.URL.Query().Get("preflight") == "true" {
+		check := model.ProjectHostRoutePreflight{State: "not_applicable", Reason: status.Reason}
+		switch {
+		case desired:
+			check.Reason = "the planned routes are already desired; see publication state"
+		case unapplied:
+			check = model.ProjectHostRoutePreflight{State: "ready", Reason: "the plan and its current compatibility gates passed; apply rechecks them"}
+			if managed {
+				dnsErr, workerErr := s.checkProjectHostConsumerCapabilities(r.Context())
+				if err := projectHostManagedPreflight(plan, dnsErr, workerErr); err != nil {
+					check = model.ProjectHostRoutePreflight{State: "blocked", Reason: err.Error()}
+				}
+			}
+		}
+		status.ApplyPreflight = &check
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, status)
@@ -147,10 +167,7 @@ func (s *Server) projectHostRoutes(w http.ResponseWriter, r *http.Request, edit 
 	if apply {
 		// Observe production outside the project write transaction. This is a
 		// compatibility gate; fresh signed data-plane probes remain mandatory.
-		dnsContinuityErr = s.checkProjectHostDNSContinuity(r.Context())
-		if dnsContinuityErr == nil {
-			workerTLSErr = s.checkProjectHostWorkerTLS(r.Context())
-		}
+		dnsContinuityErr, workerTLSErr = s.checkProjectHostConsumerCapabilities(r.Context())
 	}
 	var plan model.ProjectHostRoutePlan
 	err := s.store.EditProjectHostRoutes(r.Context(), project.ID, edit.Hostname, apply, func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {
@@ -194,6 +211,14 @@ func (s *Server) projectHostRoutes(w http.ResponseWriter, r *http.Request, edit 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, plan)
+}
+
+func (s *Server) checkProjectHostConsumerCapabilities(ctx context.Context) (dns, worker error) {
+	dns = s.checkProjectHostDNSContinuity(ctx)
+	if dns == nil {
+		worker = s.checkProjectHostWorkerTLS(ctx)
+	}
+	return dns, worker
 }
 
 func projectHostManagedPreflight(plan model.ProjectHostRoutePlan, dnsContinuityErr, workerTLSErr error) error {

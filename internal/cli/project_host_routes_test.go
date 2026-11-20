@@ -44,6 +44,14 @@ func TestProjectHostRouteCLIPlanAndApplyWait(t *testing.T) {
 			saved.State = "saved"
 			_ = json.NewEncoder(w).Encode(saved)
 		case "/v1/projects/project_123/routes/host-status":
+			if r.URL.Query().Get("preflight") == "true" {
+				operations = append(operations, "preflight")
+				_ = json.NewEncoder(w).Encode(model.ProjectHostRoutePublicationStatus{
+					State: "pending", Reason: "not applied",
+					ApplyPreflight: &model.ProjectHostRoutePreflight{State: "blocked", Reason: "DNS not converged"},
+				})
+				return
+			}
 			operations = append(operations, "status")
 			_ = json.NewEncoder(w).Encode(model.ProjectHostRoutePublicationStatus{State: "published", ReleaseID: "full-release", Reason: "confirmed"})
 		default:
@@ -63,8 +71,12 @@ func TestProjectHostRouteCLIPlanAndApplyWait(t *testing.T) {
 	if err := os.WriteFile(path, run("plan", "demo", "--host", "customer.example.net", "--route", "/=web", "--route", "/api=api"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	preflight := run("status", "demo", "--plan", path, "--preflight")
+	if !bytes.Contains(preflight, []byte("DNS not converged")) || !reflect.DeepEqual(operations, []string{"plan", "preflight"}) {
+		t.Fatalf("preflight did not report the gate without applying: %s, operations %v", preflight, operations)
+	}
 	got := run("apply", "demo", "--plan", path, "--wait")
-	if !bytes.Contains(got, []byte("full-release")) || !reflect.DeepEqual(operations, []string{"plan", "status", "apply", "status"}) {
+	if !bytes.Contains(got, []byte("full-release")) || !reflect.DeepEqual(operations, []string{"plan", "preflight", "status", "apply", "status"}) {
 		t.Fatalf("unexpected wait result %s, operations %v", got, operations)
 	}
 }

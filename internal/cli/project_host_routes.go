@@ -58,6 +58,7 @@ func (c *CLI) newProjectHostRoutePlanCommand() *cobra.Command {
 
 func (c *CLI) newProjectHostRouteStatusCommand() *cobra.Command {
 	var file string
+	var preflight bool
 	cmd := &cobra.Command{
 		Use:   "status <project>",
 		Short: "Check whether a hostname plan is in the verified global publication (platform admin)",
@@ -75,14 +76,18 @@ func (c *CLI) newProjectHostRouteStatusCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			status, err := client.projectHostRouteStatus(project.ID, plan)
+			status, err := client.projectHostRouteStatus(project.ID, plan, preflight)
 			if err != nil {
 				return err
+			}
+			if preflight && status.ApplyPreflight == nil {
+				return fmt.Errorf("server did not return a hostname preflight result")
 			}
 			return c.writeJSON(status)
 		},
 	}
 	cmd.Flags().StringVar(&file, "plan", "", "JSON plan file; - reads stdin")
+	cmd.Flags().BoolVar(&preflight, "preflight", false, "Also evaluate the reviewed plan's write gates without applying it")
 	return cmd
 }
 
@@ -114,9 +119,13 @@ func readProjectHostRoutePlan(file, projectID string) (model.ProjectHostRoutePla
 	return plan, nil
 }
 
-func (c *Client) projectHostRouteStatus(projectID string, plan model.ProjectHostRoutePlan) (model.ProjectHostRoutePublicationStatus, error) {
+func (c *Client) projectHostRouteStatus(projectID string, plan model.ProjectHostRoutePlan, preflight bool) (model.ProjectHostRoutePublicationStatus, error) {
 	var status model.ProjectHostRoutePublicationStatus
-	err := c.doJSONWithTimeout(http.MethodPost, projectHostRouteEndpoint(projectID, "host-status"), plan, &status, 20*time.Second)
+	endpoint := projectHostRouteEndpoint(projectID, "host-status")
+	if preflight {
+		endpoint += "?preflight=true"
+	}
+	err := c.doJSONWithTimeout(http.MethodPost, endpoint, plan, &status, 20*time.Second)
 	return status, err
 }
 
@@ -127,7 +136,7 @@ func (c *CLI) applyProjectHostRoutePlan(ctx context.Context, client *Client, pro
 	}
 	if wait {
 		// Before mutating, verify the caller can read publication evidence.
-		if _, err := client.projectHostRouteStatus(projectID, plan); err != nil {
+		if _, err := client.projectHostRouteStatus(projectID, plan, false); err != nil {
 			return err
 		}
 	}
@@ -141,7 +150,7 @@ func (c *CLI) applyProjectHostRoutePlan(ctx context.Context, client *Client, pro
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
 	for ctx.Err() == nil {
-		status, err := client.projectHostRouteStatus(projectID, saved)
+		status, err := client.projectHostRouteStatus(projectID, saved, false)
 		if err == nil {
 			switch status.State {
 			case "published":
