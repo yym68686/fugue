@@ -83,7 +83,7 @@ func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent 
 			return err
 		}
 		if !locked {
-			return fmt.Errorf("%w: referenced Cell publication is changing", ErrConflict)
+			return platformReleaseRejected(PlatformReleaseStageDNSRoutingSourceBusy, fmt.Errorf("%w: referenced Cell publication is changing", ErrConflict))
 		}
 	}
 	for _, id := range producerArtifacts {

@@ -6,6 +6,10 @@ import "errors"
 // report proving an incompatible reader or a change of release authority.
 const PlatformReleaseStageTrafficCapabilityPending = "traffic_capability_pending"
 
+// The referenced scope's mutation lock was busy. Nothing about the selected
+// source's validity or compatibility was inferred from the lock conflict.
+const PlatformReleaseStageDNSRoutingSourceBusy = "dns_routing_source_busy"
+
 // Fixed internal stages are safe to expose in operator logs. The underlying
 // error remains unchanged for callers; request bodies and database errors are
 // never copied into the diagnostic fields.

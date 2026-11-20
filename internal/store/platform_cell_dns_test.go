@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/testfixture/celldns"
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestCellDNSPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "", false) }
@@ -596,6 +598,35 @@ func testDNSReferencesIndependentOfSourceHeartbeats(t *testing.T, s *Store, chil
 		t.Fatal("narrow routing snapshot lost source authorization", err)
 	}
 	t.Logf("DNS reference authorization completed with source consumer tables exclusively locked: %s", time.Since(started))
+}
+
+func TestCellDNSAdmissionReportsBusySourceSeparately(t *testing.T) {
+	child := celldns.Compile(t, celldns.Request(t)).DNSArtifact
+	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_xact_lock_shared($1)")).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
+	mock.ExpectRollback()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{db: db}
+	err = s.pgLoadCellDNSReferences(t.Context(), tx, parent, &model.State{PlatformArtifacts: []model.PlatformArtifact{child}})
+	if !errors.Is(err, ErrConflict) || PlatformReleaseFailureStage(err) != PlatformReleaseStageDNSRoutingSourceBusy {
+		t.Fatalf("source lock failure lost its retryable rejection stage: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {

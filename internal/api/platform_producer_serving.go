@@ -203,11 +203,12 @@ func (s *Server) resumeProducedShadow(ctx context.Context, policy platformproduc
 	}
 	if _, err = s.preparePlatformReleaseSetConsumers(ctx, platformProducerPrincipal(), parent, shadow); err == nil {
 		err = s.stageProducedTraffic(ctx, policy, authority, parent)
-		if keepDNSShadowForPendingCapability(policy, shadow, store.PlatformReleaseFailureStage(err), time.Now()) && ctx.Err() == nil {
+		stage := store.PlatformReleaseFailureStage(err)
+		if keepDNSShadowForRetryableAdmission(policy, shadow, stage, time.Now()) && ctx.Err() == nil {
 			// The next reconcile checks the same signed candidate. Do not
 			// repeatedly move the fence while the consumers are still probing.
 			if s.log != nil {
-				s.log.Printf("DNS producer waiting for fresh shadow capability artifact=%s release=%s", parent.ID, shadow.ID)
+				s.log.Printf("DNS producer waiting on shadow admission stage=%s artifact=%s release=%s", stage, parent.ID, shadow.ID)
 			}
 			return true, nil
 		}
@@ -224,9 +225,9 @@ func (s *Server) resumeProducedShadow(ctx context.Context, policy platformproduc
 	return true, nil
 }
 
-func keepDNSShadowForPendingCapability(policy platformproducer.Policy, shadow model.PlatformArtifactRelease, failureStage string, now time.Time) bool {
+func keepDNSShadowForRetryableAdmission(policy platformproducer.Policy, shadow model.PlatformArtifactRelease, failureStage string, now time.Time) bool {
 	return policy.PublicationRole == platformconfig.PublicationRoleCellDNS && policy.Serving != nil &&
-		failureStage == store.PlatformReleaseStageTrafficCapabilityPending &&
+		(failureStage == store.PlatformReleaseStageTrafficCapabilityPending || failureStage == store.PlatformReleaseStageDNSRoutingSourceBusy) &&
 		!shadow.ReleasedAt.IsZero() && !shadow.ReleasedAt.After(now) &&
 		now.Before(shadow.ReleasedAt.Add(time.Duration(policy.Serving.RolloutTimeoutSeconds)*time.Second))
 }

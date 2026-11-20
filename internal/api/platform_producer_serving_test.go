@@ -49,7 +49,7 @@ func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(
 	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{delayedShadow: true})
 }
 
-func TestDNSProducerKeepsShadowOnlyWhileAwaitingFreshCapability(t *testing.T) {
+func TestDNSProducerKeepsShadowOnlyForRetryableAdmission(t *testing.T) {
 	now := time.Now().UTC()
 	p := platformproducer.Policy{PublicationRole: platformconfig.PublicationRoleCellDNS, Serving: &platformproducer.ServingPolicy{RolloutTimeoutSeconds: 120}}
 	for _, tc := range []struct {
@@ -58,6 +58,8 @@ func TestDNSProducerKeepsShadowOnlyWhileAwaitingFreshCapability(t *testing.T) {
 		want              bool
 	}{
 		{"missing capability", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, time.Minute, true},
+		{"upstream lock held", p.PublicationRole, store.PlatformReleaseStageDNSRoutingSourceBusy, time.Minute, true},
+		{"upstream lock held after timeout", p.PublicationRole, store.PlatformReleaseStageDNSRoutingSourceBusy, 2 * time.Minute, false},
 		{"expired shadow", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, 2 * time.Minute, false},
 		{"future shadow", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, -time.Second, false},
 		{"incompatible reader", p.PublicationRole, "capability_admission", time.Minute, false},
@@ -68,7 +70,7 @@ func TestDNSProducerKeepsShadowOnlyWhileAwaitingFreshCapability(t *testing.T) {
 			policy := p
 			policy.PublicationRole = tc.role
 			release := model.PlatformArtifactRelease{ReleasedAt: now.Add(-tc.age)}
-			if keepDNSShadowForPendingCapability(policy, release, tc.stage, now) != tc.want {
+			if keepDNSShadowForRetryableAdmission(policy, release, tc.stage, now) != tc.want {
 				t.Fatalf("incorrect shadow capture decision for %s", tc.name)
 			}
 		})
