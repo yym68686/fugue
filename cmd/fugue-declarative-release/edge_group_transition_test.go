@@ -1288,7 +1288,7 @@ func TestEdgeForwardPreflightStopsBeforeWorkerOrAuthorityMutation(t *testing.T) 
 	}
 }
 
-func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *testing.T) {
+func TestExecuteEdgeGroupABRollsInactiveAndObservesOriginalFormerActive(t *testing.T) {
 	transition := edgeTransitionFixture()
 	old := edgeTargetFixture("1", "a")
 	target := edgeTargetFixture("2", "b")
@@ -1312,18 +1312,50 @@ func TestExecuteEdgeGroupABRollsInactiveSwitchesAndThenRollsFormerActive(t *test
 	if err := executeEdgeGroupAB(context.Background(), runtime, release, transition, target); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-current-authority", "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "roll:" + transition.WorkerAName, "snapshot"}
+	want := []string{"snapshot", "apply-shared", "stage:b", "apply:b", "roll:" + transition.WorkerBName, "wait-candidate-authority:" + transition.WorkerBName, "wait-current-authority", "wait-front:b", "apply:" + transition.FrontName, "roll:" + transition.FrontName, "wait-worker-authority:" + transition.WorkerBName, "stage-standby:a", "apply:" + transition.WorkerAName, "wait-candidate-authority:" + transition.WorkerAName, "snapshot"}
 	if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("edge forward order=%v want=%v", runtime.calls, want)
 	}
 	if len(runtime.requests) != 0 {
 		t.Fatalf("edge forward performed a direct Front activation CAS: %+v", runtime.requests)
 	}
-	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollAuthority), "[true true]"; got != want {
 		t.Fatalf("edge authority gates=%s want=%s", got, want)
 	}
-	if got, want := fmt.Sprint(runtime.rollUnready), "[false false true]"; got != want {
+	if got, want := fmt.Sprint(runtime.rollUnready), "[false false]"; got != want {
 		t.Fatalf("edge replace-unready gates=%s want=%s", got, want)
+	}
+}
+
+func TestStandbyMaintenanceDoesNotReplaceFormerActiveOnObservationFailure(t *testing.T) {
+	transition := edgeTransitionFixture()
+	old := edgeTargetFixture("1", "a")
+	before := edgeStateFixture("a", old, edgeFrontHealth{ActiveSlot: "a"})
+	serving := before
+	serving.ActiveSlot = "b"
+	for _, scenario := range []string{"unchanged", "lost-identity", "unavailable"} {
+		t.Run(scenario, func(t *testing.T) {
+			pod := before.WorkerA["node-1"]
+			pod.UID = "original"
+			before.WorkerA["node-1"] = pod
+			if scenario == "lost-identity" {
+				pod.UID = "unexpected-replacement"
+			}
+			runtime := &fakeEdgeGroupRuntime{
+				rolls: map[string]map[string]edgeGroupPod{transition.WorkerAName: {"node-1": pod}},
+			}
+			if scenario == "unavailable" {
+				runtime.candidateWaitErrors = []error{context.DeadlineExceeded}
+			}
+			plan := edgeGroupABPlan{before: before, activeSlot: "a", activeName: transition.WorkerAName, activeTarget: old, inactiveSlot: "b"}
+			if got := repairEdgeGroupStandby(context.Background(), runtime, plan, serving); got != (scenario == "unchanged") {
+				t.Fatalf("unexpected standby verification result: %t", got)
+			}
+			want := "stage-standby:a,apply:" + transition.WorkerAName + ",wait-candidate-authority:" + transition.WorkerAName
+			if got := strings.Join(runtime.calls, ","); got != want {
+				t.Fatalf("standby maintenance attempted a destructive write: %s", got)
+			}
+		})
 	}
 }
 

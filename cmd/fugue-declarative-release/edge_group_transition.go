@@ -207,6 +207,9 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	if release.Transition == nil || release.Transition.EdgeGroupAB == nil || !target.Present {
 		return errors.New("edge group transition is not fully bound")
 	}
+	if err := requireEdgeGroupOnDelete(release.Workload.Namespace, *release.Transition.EdgeGroupAB, manifest); err != nil {
+		return err
+	}
 	transition, membershipErr := cluster.managedEdgeTransition(ctx, *release.Transition.EdgeGroupAB)
 	if membershipErr != nil {
 		return membershipErr
@@ -221,6 +224,20 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	}
 	runtime := &kubectlEdgeGroupRuntime{cluster: cluster, client: client, release: release, transition: transition, manifest: manifest}
 	return executeEdgeGroupAB(ctx, runtime, release, transition, target)
+}
+
+func requireEdgeGroupOnDelete(namespace string, transition declarativerelease.EdgeGroupABTransition, manifest []byte) error {
+	for _, name := range []string{transition.FrontName, transition.WorkerAName, transition.WorkerBName} {
+		id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "DaemonSet", Namespace: namespace, Name: name}
+		resource, err := declarativerelease.ResourceSetItem(manifest, id)
+		if err != nil {
+			return fmt.Errorf("verify guarded DaemonSet/%s update strategy: %w", name, err)
+		}
+		if stringValue(mapField(mapField(resource, "spec"), "updateStrategy")["type"]) != "OnDelete" {
+			return fmt.Errorf("DaemonSet/%s must not replace Pods outside the guarded OnDelete path", name)
+		}
+	}
+	return nil
 }
 
 // ReconcileCommittedForward is the read-only recovery path for an Edge A/B
@@ -628,8 +645,18 @@ func repairEdgeGroupStandby(ctx context.Context, runtime edgeGroupTransitionRunt
 			standby.WorkerSourceSHA == plan.activeTarget.ConfigSHA && standby.WorkerImageDigest == previousDigest &&
 			!standby.AllowDegradedPrevious && standby.StandbyOnly && !standby.OrdinaryTrafficMutation
 		if receiptValid && runtime.ApplyCandidateResources(ctx, plan.activeName) == nil {
-			_, standbyErr = runtime.Roll(ctx, plan.activeName, plan.activeTarget, true, true, nil)
-			standbyConverged = standbyErr == nil
+			// Activation only moves new connections. The former active Pods
+			// can still be serving long-lived streams and are our immediate
+			// rollback target. Never replace one merely because its standby
+			// authority has not loaded yet. Observe the original cohort.
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			observed, standbyErr := runtime.WaitCandidateWorkerAuthority(waitCtx, plan.activeName, plan.activeTarget, standby)
+			cancel()
+			before := edgeWorkerPods(plan.before, plan.activeSlot)
+			standbyConverged = standbyErr == nil && sameEdgeNodes(before, observed)
+			for node, prior := range before {
+				standbyConverged = standbyConverged && prior.UID != "" && observed[node].UID == prior.UID
+			}
 		}
 	}
 	return standbyConverged
@@ -2640,7 +2667,7 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 		if name == transition.FrontName {
 			err = cluster.deleteDrainedEdgeFrontPod(ctx, client, release.Workload.Namespace, pod)
 		} else {
-			err = deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod)
+			err = cluster.deleteDrainedEdgeWorkerPod(ctx, client, release, transition, name, pod)
 		}
 		if err != nil {
 			return nil, err
