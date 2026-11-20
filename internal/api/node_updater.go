@@ -3830,20 +3830,25 @@ def cni_netns_path(info):
                 return str(sandbox)
     return ""
 
-def pod_netns_contexts(limit=30):
+def select_pod_probe_context(limit=30):
     if not shutil.which("crictl"):
-        return [], "crictl unavailable"
+        return None, None, "crictl unavailable"
     if not shutil.which("nsenter"):
-        return [], "nsenter unavailable"
+        return None, None, "nsenter unavailable"
     ok, out = run_capture(["crictl", "pods", "--state", "Ready", "--quiet"], 5)
-    if ok is False:
+    # Only old clients without the filter need an unfiltered listing. On a
+    # busy runtime, another CRI invocation after a timeout adds load without
+    # restoring observation. Preserve the failure as unobserved instead.
+    if ok is False and any(marker in out.lower() for marker in ("unknown flag: --state", "flag provided but not defined: -state")):
         ok, out = run_capture(["crictl", "pods", "--quiet"], 5)
     if ok is None:
-        return [], out
+        return None, None, out
     if not ok:
-        return [], out[-240:]
+        return None, None, out[-240:]
     sandbox_ids = [line.strip() for line in out.splitlines() if line.strip()]
-    contexts = []
+    fallback = None
+    fallback_reason = ""
+    has_network_context = False
     last_error = ""
     for sandbox_id in sandbox_ids[:limit]:
         ok_inspect, inspect_out = run_capture(["crictl", "inspectp", sandbox_id], 5)
@@ -3877,7 +3882,7 @@ def pod_netns_contexts(limit=30):
         if not netns:
             last_error = "pod sandbox %s has no CNI network namespace path" % sandbox_id[:12]
             continue
-        contexts.append({
+        ctx = {
             "sandbox_id": sandbox_id,
             "pid": pid,
             "namespace": str(metadata.get("namespace") or ""),
@@ -3887,11 +3892,23 @@ def pod_netns_contexts(limit=30):
             "dns_servers": servers,
             "dns_searches": searches,
             "netns": netns,
-        })
-    if not contexts:
-        suffix = ": " + last_error if last_error else ""
-        return [], "no Ready pod sandbox with CNI network namespace found" + suffix
-    return contexts, ""
+        }
+        has_network_context = True
+        if not pod_context_probe_eligible(ctx):
+            continue
+        service, reason = first_same_namespace_service(ctx)
+        if service:
+            # Only one context feeds the probes. Do not launch more CRI
+            # subprocesses once the original first-match policy has a winner.
+            return ctx, service, ""
+        if fallback is None:
+            fallback, fallback_reason = ctx, reason
+    if fallback is not None:
+        return fallback, None, fallback_reason
+    if has_network_context:
+        return None, None, ""
+    suffix = ": " + last_error if last_error else ""
+    return None, None, "no Ready pod sandbox with CNI network namespace found" + suffix
 
 def pod_netns_run(ctx, argv, timeout=5):
     return run(["nsenter", "--target", str(ctx["pid"]), "--net", "--"] + argv, timeout)
@@ -4024,21 +4041,8 @@ def pod_context_probe_eligible(ctx):
     labels = ctx.get("labels") or {}
     return labels.get("app.kubernetes.io/component") != "edge-control"
 
-pod_context_list, pod_context_reason = pod_netns_contexts()
-probe_contexts = [ctx for ctx in pod_context_list if pod_context_probe_eligible(ctx)]
-pod_ctx = probe_contexts[0] if probe_contexts else None
-same_service = None
-same_service_reason = ""
-for candidate_ctx in probe_contexts:
-    candidate_service, candidate_reason = first_same_namespace_service(candidate_ctx)
-    if candidate_service:
-        pod_ctx = candidate_ctx
-        same_service = candidate_service
-        same_service_reason = ""
-        break
-    same_service_reason = candidate_reason
-if pod_ctx and not same_service:
-    same_service, same_service_reason = first_same_namespace_service(pod_ctx)
+pod_ctx, same_service, pod_context_reason = select_pod_probe_context()
+same_service_reason = pod_context_reason if pod_ctx else ""
 
 kube_service_dns_name = "kubernetes.default.svc.cluster.local"
 kube_dns_service_ip = ""
