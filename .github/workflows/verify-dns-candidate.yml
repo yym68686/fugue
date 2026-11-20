@@ -14,6 +14,35 @@ env:
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
+  transport-rehearsal:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Rehearse DNS transport and explicit rollback on a disposable cluster
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$FUGUE_SOURCE" HEAD
+          unexpected="$(git diff --name-only "$FUGUE_SOURCE" HEAD -- . ':!.github/workflows/ci.yml' ':!.github/workflows/verify-dns-candidate.yml' ':!scripts/verify_dns_transport_isolation.py')"
+          test -z "$unexpected"
+          bindir="$(mktemp -d "$RUNNER_TEMP/fugue-kind.XXXXXX")"
+          curl -fsSL --retry 3 https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64 -o "$bindir/kind"
+          echo "517ab7fc89ddeed5fa65abf71530d90648d9638ef0c4cde22c2c11f8097b8889  $bindir/kind" | sha256sum -c -
+          chmod 755 "$bindir/kind"
+          curl -fsSL --retry 3 https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/kubectl -o "$bindir/kubectl"
+          echo "cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c  $bindir/kubectl" | sha256sum -c -
+          chmod 755 "$bindir/kubectl"
+          export PATH="$bindir:$PATH"
+          export KUBECONFIG="$bindir/no-production-context"
+          python3 -m scripts.verify_dns_transport_isolation
   full-test:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
     runs-on: ubuntu-latest

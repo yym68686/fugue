@@ -9,6 +9,7 @@ import time
 import uuid
 
 from scripts import retire_dns_hostport as retirement
+from scripts import reconcile_dns_transport as transport
 
 
 def run(arguments, timeout=120, body=None, env=None):
@@ -40,7 +41,9 @@ def verify():
             (work / 'Dockerfile').write_text('FROM scratch\nCOPY fixture /fixture\nENTRYPOINT ["/fixture"]\n')
             run(['docker', 'build', '-t', image, str(work)])
             created = True
-            run(kind + ['create', 'cluster', '--name', cluster, '--image', 'kindest/node:v1.34.0', '--kubeconfig', str(work / 'kubeconfig')], timeout=240)
+            run(kind + ['create', 'cluster', '--name', cluster, '--image',
+                        'kindest/node:v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a',
+                        '--kubeconfig', str(work / 'kubeconfig')], timeout=240)
             run(kind + ['load', 'docker-image', '--name', cluster, image])
             nodes = json.loads(run(kube + ['get', 'nodes', '-o', 'json']))['items']
             if len(nodes) != 1 or nodes[0]['metadata']['name'] != cluster + '-control-plane':
@@ -67,10 +70,11 @@ def verify():
                           'spec': {'selector': {'matchLabels': {'fixture': 'previous'}}, 'updateStrategy': {'type': 'RollingUpdate'},
                                    'template': {'metadata': {'labels': {'fixture': 'previous'}}, 'spec': spec('previous', True)}}},
                          {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'candidate', 'namespace': namespace, 'labels': {'fixture': 'candidate'}}, 'spec': spec('candidate')},
-                         {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'entry', 'namespace': namespace},
-                          'spec': {'selector': {'fixture': 'candidate'}, 'externalTrafficPolicy': 'Local', 'publishNotReadyAddresses': False, 'externalIPs': [address],
-                                   'ports': [{'port': 53, 'targetPort': 53, 'protocol': protocol, 'name': protocol.lower()} for protocol in ['UDP', 'TCP']]}}]
-            run(kube + ['create', '-f', '-'], body=json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': resources}).encode())
+                         transport.service({'namespace': namespace, 'generation': 1},
+                                           {'name': 'entry', 'address': address, 'port': 53,
+                                            'targetPort': 53, 'selector': {'fixture': 'candidate'}})]
+            run(kube + ['create', '--field-manager=' + transport.MANAGER, '-f', '-'],
+                body=json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': resources}).encode())
             run(kube + ['wait', '-n', namespace, '--for=condition=Ready', 'pod', '--all', '--timeout=90s'])
 
             def query(destination, expected, stage, within_cluster=False):
@@ -111,15 +115,53 @@ def verify():
             if run(kube + ['exec', '-n', namespace, previous_name, '--', '/fixture', 'count']) != baseline_count:
                 raise ValueError('empty Service sent traffic to the retired predecessor')
             query(previous_ip, 'previous', 'predecessor-still-alive', within_cluster=True)
+            def service_patch(target, generation):
+                current = json.loads(run(kube + ['get', 'service', 'entry', '-n', namespace, '-o', 'json']))
+                desired = transport.service({'namespace': namespace, 'generation': generation},
+                                            {'name': 'entry', 'address': address, 'port': 53,
+                                             'targetPort': 53, 'selector': {'fixture': target}})
+                return transport.update_patch(current, desired)
+
+            def update_command(operations):
+                return kube + ['patch', 'service', 'entry', '-n', namespace, '--type=json',
+                               '--field-manager=' + transport.MANAGER, '-p', json.dumps(operations)]
+
+            def wait_selected(target):
+                deadline = time.monotonic() + 30
+                expected = json.loads(run(kube + ['get', 'pods', '-n', namespace, '-l', 'fixture=' + target, '-o', 'json']))['items']
+                if len(expected) != 1:
+                    raise ValueError('target fixture identity is ambiguous')
+                uid = expected[0]['metadata']['uid']
+                while time.monotonic() < deadline:
+                    slices = json.loads(run(kube + ['get', 'endpointslice', '-n', namespace, '-l', 'kubernetes.io/service-name=entry', '-o', 'json']))['items']
+                    seen = {e.get('targetRef', {}).get('uid') for row in slices for e in row.get('endpoints', [])
+                            if e.get('conditions', {}).get('ready') is True}
+                    if seen == {uid}:
+                        return
+                    time.sleep(1)
+                raise ValueError('isolated Service did not select the expected Ready fixture')
+
+            rollback = service_patch('previous', 2)
+            run(update_command(rollback))
+            wait_selected('previous')
+            time.sleep(3)
+            query(address, 'previous', 'explicit-cas-rollback')
+            stale = subprocess.run(update_command(rollback), capture_output=True, timeout=20)
+            if stale.returncode == 0 or not any(s in stale.stderr.lower() for s in (b'test operation', b'json patch test', b'invalid request')):
+                raise ValueError('isolated Service did not reject the stale rollback CAS as expected')
+            wait_selected('previous')
+            query(address, 'previous', 'stale-cas-left-previous')
             run(kube + ['exec', '-n', namespace, 'candidate', '--', '/fixture', 'restore'])
             run(kube + ['wait', '-n', namespace, '--for=condition=Ready', 'pod/candidate', '--timeout=30s'])
+            run(update_command(service_patch('candidate', 3)))
+            wait_selected('candidate')
             time.sleep(3)
             query(address, 'candidate', 'candidate-recovered')
             pods = json.loads(run(kube + ['get', 'pods', '-n', namespace, '-o', 'json']))['items']
             if any(status.get('restartCount') != 0 for pod in pods for status in pod['status']['containerStatuses']):
                 raise ValueError('isolated executors restarted unexpectedly')
             return {'schema': 'fugue.dns-transport-isolation/v1', 'verified': True, 'cluster': cluster,
-                    'checks': ['udp-tcp-exact-executor', 'real-retirement-cas-patch', 'retained-predecessor-alive', 'empty-ready-endpoints-no-fallback', 'predecessor-receive-counter-unchanged', 'candidate-recovery'],
+                    'checks': ['udp-tcp-exact-executor', 'real-retirement-cas-patch', 'retained-predecessor-alive', 'empty-ready-endpoints-no-fallback', 'predecessor-receive-counter-unchanged', 'explicit-cas-rollback', 'stale-cas-rejected', 'candidate-recovery'],
                     'observations': observations, 'elapsed_seconds': round(time.monotonic() - started, 2)}
         except Exception:
             if created:
