@@ -315,7 +315,9 @@ func (e *edgeOriginRelay) noteProbe(sample model.EdgeNetworkSample, round uint64
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for key, window := range e.probes {
-		if window.Health(now).State == relayroute.Unknown {
+		// One success is not yet a verdict, but it is evidence for
+		// the next round. Evict only windows with no live samples.
+		if window.Health(now).Samples == 0 {
 			delete(e.probes, key)
 		}
 	}

@@ -142,11 +142,16 @@ func TestOriginRelayFirstDispatch(t *testing.T) {
 	a.policy.Store(p)
 	b.policy.Store(p)
 	for _, r := range []*edgeOriginRelay{a, b} {
-		var window relayroute.Window
+		failed := r == a
 		for i := 1; i <= 2; i++ {
-			window.Add(relayroute.Sample{At: now.Add(-time.Second), Round: uint64(i), Failed: r == a, RTT: 50 * time.Millisecond}, now)
+			rtt := 50.0
+			sample := model.EdgeNetworkSample{BundleVersion: "live", RouteDigest: digest, ObservedAt: now.Add(-time.Second),
+				ServiceConnectFailed: &failed}
+			if !failed {
+				sample.ServiceRTTMS = &rtt
+			}
+			r.noteProbe(sample, uint64(i), now)
 		}
-		r.probes[relayProbeKey{"live", digest}] = window
 	}
 	a.pollPeer(t.Context(), p, binding, bp)
 	a.pollPeer(t.Context(), p, binding, bp)
