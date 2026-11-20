@@ -30,6 +30,11 @@ func TestOnlyTransportTimeoutsAllowBoundedProofRetention(t *testing.T) {
 			if got := errors.Is(classifyTransportError(tc.err), ErrUnavailable); got != tc.transient {
 				t.Fatalf("transient=%v, want %v", got, tc.transient)
 			}
+			for _, cause := range []error{context.DeadlineExceeded, context.Canceled} {
+				if errors.Is(tc.err, cause) != errors.Is(classifyTransportError(tc.err), cause) {
+					t.Fatalf("classification lost context cause %v", cause)
+				}
+			}
 		})
 	}
 }

@@ -188,6 +188,60 @@ func TestDNSReadinessProgressSurvivesShortObservationWindows(t *testing.T) {
 	}
 }
 
+func TestDNSProbeSweepDeadlineDoesNotEraseLiveRecoveryHistory(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	plan.Probes = plan.Probes[:1]
+	requirement := plan.Probes[0]
+	availability := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{requirement.EdgeID}, RecoverySuccesses: 3, RecoveryMinSeconds: 30}
+	scheduler := &dnsReadinessScheduler{}
+	positiveAt := func(at time.Time) routeprobe.Proof {
+		return routeprobe.Proof{Version: "serving", Digest: requirement.RouteDigest, EdgeID: requirement.EdgeID,
+			GroupID: requirement.EdgeGroupID, CheckedAt: at, ValidUntil: at.Add(45 * time.Second)}
+	}
+	now := time.Now().UTC()
+	for _, offset := range []time.Duration{-40 * time.Second, -20 * time.Second} {
+		at := now.Add(offset)
+		fact := dnsReadinessFact{ProbeID: requirement.ID, Ready: true, Proof: positiveAt(at)}
+		scheduler.observeProbeHistory(&fact, &policy, at)
+	}
+	positive := func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		return positiveAt(time.Now().UTC()), nil
+	}
+	previous := scheduler.collect(context.Background(), &plan, &policy, positive)
+	expiry := previous[0].Proof.ValidUntil
+	if !dnsAvailabilityRecovered(availability, previous[0], time.Minute, time.Now()) {
+		t.Fatal("fixture does not have mature recovery history")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	budget := scheduler.collect(ctx, &plan, &policy, func(ctx context.Context, _, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		<-ctx.Done()
+		return routeprobe.Proof{}, errors.Join(routeprobe.ErrUnavailable, ctx.Err())
+	})
+	if budget[0].Ready || budget[0].Reason != "not_observed" || !scheduler.expires[requirement.ID].Equal(expiry) {
+		t.Fatal("sweep budget was mistaken for a new proof or an endpoint failure", budget)
+	}
+	retained := retainValidDNSReadinessFacts(&plan, &policy, previous, budget, time.Now())
+	if !retained[0].Proof.ValidUntil.Equal(expiry) || !dnsAvailabilityRecovered(availability, retained[0], time.Minute, time.Now()) {
+		t.Fatal("local budget loss displaced valid recovery history", retained)
+	}
+	if expired := retainValidDNSReadinessFacts(&plan, &policy, previous, budget, expiry); expired[0].Ready {
+		t.Fatal("sweep budget extended a proof beyond its original deadline", expired)
+	}
+	if renewed := scheduler.collect(context.Background(), &plan, &policy, positive); !dnsAvailabilityRecovered(availability, renewed[0], time.Minute, time.Now()) {
+		t.Fatal("sweep budget reset the shared history", renewed)
+	}
+	failed := scheduler.collect(context.Background(), &plan, &policy, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		return routeprobe.Proof{}, errors.Join(routeprobe.ErrUnavailable, context.DeadlineExceeded)
+	})
+	if failed[0].Reason != "probe_unavailable" {
+		t.Fatal("endpoint timeout was discarded as a local budget loss", failed)
+	}
+	if renewed := scheduler.collect(context.Background(), &plan, &policy, positive); dnsAvailabilityRecovered(availability, renewed[0], time.Minute, time.Now()) {
+		t.Fatal("real endpoint timeout did not restart recovery", renewed)
+	}
+}
+
 func TestDNSReadinessRenewsBeforeMeasuredSweepGap(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{
 		{ID: "unobserved", Hostname: "new", Address: "192.0.2.1"},

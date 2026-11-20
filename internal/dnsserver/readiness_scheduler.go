@@ -237,16 +237,21 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			go func(index, target int) {
 				requirement := plan.Probes[index]
 				started := time.Now().UTC()
+				timeout := time.Duration(policy.ProbeTimeoutSeconds) * time.Second
 				var proof routeprobe.Proof
 				var err error
 				if requirement.StaticEdge != nil {
-					proof, err = routeprobe.ProbeStatic(ctx, requirement, time.Duration(policy.ProbeTimeoutSeconds)*time.Second, time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)
+					proof, err = routeprobe.ProbeStatic(ctx, requirement, timeout, time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)
 				} else {
-					proof, err = probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
+					proof, err = probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, timeout)
 				}
 				finished := time.Now().UTC()
 				var fact dnsReadinessFact
-				if evaluate != nil {
+				if dnsProbeSweepInterrupted(ctx, err, started.Add(timeout)) {
+					// No endpoint verdict was produced. This still consumes a
+					// scheduler attempt, but cannot erase or renew a live proof.
+					fact = dnsReadinessFact{ProbeID: requirement.ID, Reason: "not_observed"}
+				} else if evaluate != nil {
 					fact = evaluate(index, proof, err, finished)
 				} else {
 					fact = evaluateDNSReadinessFact(requirement, policy, proof, err, finished)
@@ -268,13 +273,13 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 		}
 		queue.outcomes[outcome]++
 		result.fact.ObservationID = observationID
-		if evaluate == nil {
+		if evaluate == nil && result.fact.Reason != "not_observed" {
 			scheduler.observeProbeHistory(&result.fact, policy, result.finished)
 		}
 		facts[result.index] = result.fact
 		if result.fact.Ready {
 			scheduler.expires[result.fact.ProbeID] = result.fact.Proof.ValidUntil
-		} else if result.fact.Reason != "probe_unavailable" || !scheduler.expires[result.fact.ProbeID].After(result.finished) {
+		} else if (result.fact.Reason != "probe_unavailable" && result.fact.Reason != "not_observed") || !scheduler.expires[result.fact.ProbeID].After(result.finished) {
 			delete(scheduler.expires, result.fact.ProbeID)
 		}
 		state := scheduler.targets[queue.address]
@@ -314,6 +319,18 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 		}
 	}
 	return facts
+}
+
+func dnsProbeSweepInterrupted(ctx context.Context, probeErr error, probeDeadline time.Time) bool {
+	parentErr := ctx.Err()
+	if parentErr == nil || !errors.Is(probeErr, parentErr) {
+		return false
+	}
+	if parentErr == context.Canceled {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && deadline.Before(probeDeadline)
 }
 
 func (scheduler *dnsReadinessScheduler) saveObservation(report json.RawMessage) {

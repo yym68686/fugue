@@ -68,6 +68,12 @@ func (failure connectionError) Error() string        { return failure.err.Error(
 func (failure connectionError) Unwrap() error        { return failure.err }
 func (failure connectionError) Is(target error) bool { return target == ErrConnectionUnavailable }
 
+type probeDeadlineError struct{}
+
+func (probeDeadlineError) Error() string        { return ErrUnavailable.Error() }
+func (probeDeadlineError) Unwrap() error        { return context.DeadlineExceeded }
+func (probeDeadlineError) Is(target error) bool { return target == ErrUnavailable }
+
 func classifyTransportError(err error) error {
 	if errors.Is(err, ErrConnectionUnavailable) {
 		var failure connectionError
@@ -75,8 +81,16 @@ func classifyTransportError(err error) error {
 			return failure
 		}
 	}
+	// Callers with a shorter parent budget need to distinguish cancellation
+	// of their sweep from a probe that actually used its own timeout.
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return probeDeadlineError{}
+	}
 	var networkError net.Error
-	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+	if errors.As(err, &networkError) && networkError.Timeout() {
 		return ErrUnavailable
 	}
 	return errors.New("placement TLS probe unavailable")
