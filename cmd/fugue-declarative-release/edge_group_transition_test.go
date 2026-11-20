@@ -128,7 +128,7 @@ func TestReadEdgeCandidateStageStatusAcceptsFullAuthorityResponse(t *testing.T) 
 	}
 }
 
-func TestEdgeActivationStatesAgreeIgnoresOnlyLocalTimestamp(t *testing.T) {
+func TestEdgeActivationStatesAgreeIgnoresLocalTimestamp(t *testing.T) {
 	state := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: "edge-group-country-us", Generation: 9,
 		ActiveSlot: "b", PreviousSlot: "a", BundleGeneration: "routes.p9.r0", WorkerSourceCommit: strings.Repeat("a", 40),
 		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationPromote,
@@ -141,6 +141,36 @@ func TestEdgeActivationStatesAgreeIgnoresOnlyLocalTimestamp(t *testing.T) {
 	later.BundleGeneration = "routes.p10.r0"
 	if edgeActivationStatesAgree(state, later) {
 		t.Fatal("different activation bundle was accepted across a cohort")
+	}
+}
+
+func TestEdgeActivationStatesAgreeAcrossExactRollbackAuditReasons(t *testing.T) {
+	state := edgeActivationState{Schema: edgeActivationStateSchema, GroupID: "edge-group-country-us", Generation: 9,
+		ActiveSlot: "a", PreviousSlot: "b", BundleGeneration: "routes.p8.r0", WorkerSourceCommit: strings.Repeat("a", 40),
+		WorkerImageDigest: "sha256:" + strings.Repeat("b", 64), Authority: edgeActivationAuthority, Operation: edgeActivationRollback,
+		RollbackOfGeneration: 8, Reason: "restore Guardian group authority LKG"}
+	other := state
+	other.Reason = "restore exact edge LKG before workload rollback"
+	if !edgeActivationStatesAgreeForMember(state, other, false, false) {
+		t.Fatal("identical rollback authority was rejected because audit reasons differ")
+	}
+	for _, change := range []func(*edgeActivationState){
+		func(x *edgeActivationState) { x.RollbackOfGeneration-- },
+		func(x *edgeActivationState) { x.Generation++ },
+		func(x *edgeActivationState) { x.ActiveSlot = "b" },
+		func(x *edgeActivationState) { x.WorkerImageDigest = "sha256:" + strings.Repeat("c", 64) },
+		func(x *edgeActivationState) { x.Operation = edgeActivationPromote },
+	} {
+		different := other
+		change(&different)
+		if edgeActivationStatesAgreeForMember(state, different, false, false) {
+			t.Fatalf("different rollback authority was accepted: %+v", different)
+		}
+	}
+	state.Operation, other.Operation = edgeActivationPromote, edgeActivationPromote
+	state.RollbackOfGeneration, other.RollbackOfGeneration = 0, 0
+	if edgeActivationStatesAgreeForMember(state, other, false, false) {
+		t.Fatal("promotion reason disagreement was accepted")
 	}
 }
 

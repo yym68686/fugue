@@ -2112,15 +2112,15 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 	return canonical, canonical != nil, nil
 }
 
-// UpdatedAt is a local execution timestamp. It is intentionally excluded from
-// cohort comparison because a successful per-node CAS can commit the same
-// immutable activation at slightly different times.
+// UpdatedAt is a local execution timestamp. The executor and Guardian can
+// also write different audit reasons when restoring the same exact rollback.
+// Neither changes the serving authority or its rollback fence.
 func edgeActivationStatesAgree(left, right edgeActivationState) bool {
 	return left.Schema == right.Schema && left.GroupID == right.GroupID && left.Generation == right.Generation &&
 		left.ActiveSlot == right.ActiveSlot && left.PreviousSlot == right.PreviousSlot && left.BundleGeneration == right.BundleGeneration &&
 		left.WorkerSourceCommit == right.WorkerSourceCommit && left.WorkerImageDigest == right.WorkerImageDigest &&
 		left.Authority == right.Authority && left.Operation == right.Operation && left.RollbackOfGeneration == right.RollbackOfGeneration &&
-		left.Reason == right.Reason
+		(left.Reason == right.Reason || (left.Operation == edgeActivationRollback && left.RollbackOfGeneration != 0))
 }
 
 // A newly admitted node has its own initialize receipt, not another host's
