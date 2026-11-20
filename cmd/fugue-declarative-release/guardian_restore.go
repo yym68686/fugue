@@ -43,9 +43,17 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	if err != nil || current.Bundle.Record != currentBundle.Record {
 		return errors.New("live monitor pointer is not bound to the requested stable record")
 	}
-	lkgName, lkgBundle, err := loadBoundMonitorLKG(ctx, store, currentBundle, release, args[2])
-	if err != nil {
-		return err
+	// Once DesiredRelease settles back on the stable monitor record,
+	// Guardian's rollback anchor is that same record, not its historical
+	// predecessor. Repair that exact target without walking older history.
+	currentOnly := args[2] == currentBundle.Record.RecordDigest
+	var lkgName string
+	var lkgBundle monitorBundle
+	if !currentOnly {
+		lkgName, lkgBundle, err = loadBoundMonitorLKG(ctx, store, currentBundle, release, args[2])
+		if err != nil {
+			return err
+		}
 	}
 	cluster, err := newKubectlCluster()
 	if err != nil {
@@ -66,7 +74,12 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
 	}
-	result := declarativerelease.RepairMonitoredForward(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	var result declarativerelease.ExecutionResult
+	if currentOnly {
+		result = declarativerelease.RepairMonitoredCurrent(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	} else {
+		result = declarativerelease.RepairMonitoredForward(ctx, cluster, currentBundle.Plan, currentBundle.Prepared, currentBundle.Forward, currentBundle.LKG, release)
+	}
 	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
 	defer finalizeCancel()
 	var activateErr error
@@ -80,7 +93,7 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 		// do not call it healthy or compensated.
 		lkgMetadataRestored = true
 	}
-	if lkgMetadataRestored {
+	if !currentOnly && lkgMetadataRestored {
 		_, activateErr = store.activateExistingRecord(finalizeCtx, fresh, lkgName, lkgBundle)
 	}
 	releaseErr := lease.release(finalizeCtx, held)

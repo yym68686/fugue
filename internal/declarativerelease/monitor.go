@@ -295,6 +295,17 @@ func RestoreMonitoredLKG(ctx context.Context, cluster Cluster, plan Plan, prepar
 // only as a fresh CAS starting point, while the recovery target remains the
 // current stable record. Arbitrary live drift cannot enter this path.
 func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, healthRelease PlanRelease) ExecutionResult {
+	return repairMonitoredForward(ctx, cluster, plan, prepared, forwardManifest, lkgManifest, healthRelease, true)
+}
+
+// RepairMonitoredCurrent is used when the immutable current monitor record
+// is also Guardian's rollback anchor. Its historical LKG bytes are still
+// checked as part of the sealed plan, but cannot justify a CAS or rollback.
+func RepairMonitoredCurrent(ctx context.Context, cluster Cluster, plan Plan, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, healthRelease PlanRelease) ExecutionResult {
+	return repairMonitoredForward(ctx, cluster, plan, prepared, forwardManifest, lkgManifest, healthRelease, false)
+}
+
+func repairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, prepared ExecutionPlan, forwardManifest, lkgManifest []byte, healthRelease PlanRelease, allowPredecessor bool) ExecutionResult {
 	result := ExecutionResult{
 		APIVersion: ExecutionPlanAPIVersion, Kind: ExecutionResultKind,
 		Component: prepared.Component, ConfigSHA: prepared.ConfigSHA,
@@ -333,7 +344,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 	// health no longer satisfies the current contract. Otherwise only a
 	// reviewed emergency Update-manager drift from the stable forward is
 	// accepted.
-	if prepared.LKG.Present {
+	if allowPredecessor && prepared.LKG.Present {
 		lkg, lkgErr := cluster.Observe(ctx, healthRelease, prepared.LKG, lkgManifest)
 		if lkgErr != nil && cluster.VerifyTarget(ctx, prepared.LKG) == nil {
 			lkg, lkgErr = cluster.ObserveDegraded(ctx, healthRelease, lkgManifest)
@@ -379,7 +390,7 @@ func RepairMonitoredForward(ctx context.Context, cluster Cluster, plan Plan, pre
 		return sealResult(result)
 	}
 	result.FailureDetail = forwardFailureDetail(applyErr, healthErr, convergedErr)
-	if !prepared.LKG.Present {
+	if !allowPredecessor || !prepared.LKG.Present {
 		result.Reason = "continuous-repair-forward-unproven"
 		return sealResult(result)
 	}

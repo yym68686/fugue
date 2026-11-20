@@ -236,3 +236,38 @@ func TestContinuousRepairCompensatesAForwardThatFailsHealth(t *testing.T) {
 		t.Fatalf("failed stable repair result=%+v applies=%d", result, cluster.applies)
 	}
 }
+
+func TestCurrentAnchorRepairDoesNotUseHistoricalLKG(t *testing.T) {
+	plan, _, rendered, prepared, _, lkg, forward := verifiedMonitorFixture(t)
+	repair := func(cluster *fakeCluster) ExecutionResult {
+		return RepairMonitoredCurrent(context.Background(), cluster, plan, prepared, rendered.Forward, rendered.LKG, plan.Releases[0])
+	}
+	t.Run("current is already healthy", func(t *testing.T) {
+		cluster := &fakeCluster{observations: []Observation{forward}, health: []Observation{forward}}
+		result := repair(cluster)
+		if result.Status != "verified" || result.Reason != "continuous-repair-forward-already-converged" || cluster.applies != 0 {
+			t.Fatalf("exact current repair was not verified: %+v", result)
+		}
+	})
+	t.Run("historical LKG alone does not authorize writes", func(t *testing.T) {
+		cluster := &fakeCluster{
+			observations: []Observation{lkg, lkg}, cas: []Observation{lkg},
+			rollbackDriftErrors: []error{errors.New("unreviewed drift")},
+		}
+		result := repair(cluster)
+		if result.Reason != "continuous-repair-live-identity-unreviewed" || cluster.applies != 0 || cluster.rollbackDriftChecks != 1 {
+			t.Fatalf("unbound historical predecessor authorized a write: %+v", result)
+		}
+	})
+	t.Run("failed current repair does not rewind history", func(t *testing.T) {
+		cluster := &fakeCluster{
+			observationErrors: []error{errors.New("forward drift")}, cas: []Observation{forward},
+			health: []Observation{forward, lkg}, healthErrors: []error{errors.New("forward route unavailable"), nil},
+		}
+		result := repair(cluster)
+		if result.Status != "recovery-required" || result.Reason != "continuous-repair-forward-unproven" ||
+			result.ForwardApplyCount != 1 || result.LKGApplyCount != 0 || cluster.applies != 1 {
+			t.Fatalf("failed current repair did not preserve its anchor: %+v", result)
+		}
+	})
+}
