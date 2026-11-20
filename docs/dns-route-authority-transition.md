@@ -111,7 +111,8 @@ normal or explicitly authorized recovery witness is still required.
 A staged DNS transport handoff reserves the generation immediately after its
 forward generation for compensation. It verifies both the live predecessor and
 the candidate against fresh signed serving evidence before changing a socket,
-then verifies the diagnostic UDP/TCP listener before changing public port 53.
+then verifies the candidate's diagnostic UDP/TCP listener and the predecessor's
+actual public UDP/TCP port 53 before changing any public traffic.
 If public observations fail, it may restore only this site's attempted changes,
 in reverse order. Compensation rechecks the exact predecessor and uses a CAS
 on the complete Service state; it cannot overwrite unrelated updates or a

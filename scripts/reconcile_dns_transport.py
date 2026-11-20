@@ -444,6 +444,33 @@ def stage_diagnostic(config, address):
     return diagnostic[0]
 
 
+def predecessor_listener_config(config, listener, previous, generation):
+    predecessor = dict(listener, selector=previous["spec"]["selector"], targetPort=current_target_port(previous))
+    return dict(config, generation=generation,
+                listeners=[predecessor if item["name"] == listener["name"] else item for item in config["listeners"]]), predecessor
+
+
+def predecessor_stage_identity(stage, witness):
+    return dict(stage, candidate_revision=witness["previous_revision"]), {
+        "candidate_uid": witness["old_uid"], "node_uid": witness["node_uid"]}
+
+
+def observe_stage_result(verify_stage, config, stage, witness, port, evidence, report, save_evidence):
+    entry = {"address": stage["address"], "port": port}
+    evidence[report].append(entry)
+    try:
+        observed = verify_stage(config, stage, witness, port)
+    except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        entry["passed"] = False
+        if isinstance(error, PublicDNSVerificationFailed):
+            entry["failed_samples"] = error.samples
+        save_evidence()
+        raise
+    entry["result"] = observed
+    save_evidence()
+    return observed
+
+
 def observe_stage(config, stage, witness, port, *, policy_path, observer, verifier):
     from scripts.capture_dns_observation_policy import capture, unchanged_backend
 
@@ -545,9 +572,7 @@ def restore_staged_listener(config, operation, witness, write_acknowledged, *, r
             identity.get("annotations", {}).get("fugue.pro/oci-revision") != witness["previous_revision"]):
         raise ValueError("DNS compensation predecessor identity changed")
     verify_staged_backend(old, namespace, port)
-    previous_listener = dict(listener, selector=previous["spec"]["selector"], targetPort=port)
-    rollback_config = dict(config, generation=config["rollback_generation"],
-                           listeners=[previous_listener if item["name"] == listener["name"] else item for item in config["listeners"]])
+    rollback_config, previous_listener = predecessor_listener_config(config, listener, previous, config["rollback_generation"])
     restore = service(rollback_config, previous_listener)
     if restore["metadata"]["annotations"][DIGEST] != before_meta["annotations"][DIGEST]:
         raise ValueError("DNS compensation could not reproduce the original Service declaration")
@@ -595,7 +620,8 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         for operation in planned:
             apply_one(operation)
         return
-    evidence["diagnostic_verifications"], evidence["public_verifications"], evidence["compensations"] = [], [], []
+    for name in ("diagnostic_verifications", "predecessor_verifications", "public_verifications", "compensations"):
+        evidence[name] = []
     for stage in config["handoffs"]:
         diagnostic = stage_diagnostic(config, stage["address"])
         diagnostic_policy = None
@@ -603,20 +629,20 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         try:
             for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
                 operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
+                if port == 53 and operation:
+                    _, _, listener, previous, witness = operation
+                    # Reconstructing a signed answer does not show that the
+                    # public predecessor's actual socket can serve it. Verify
+                    # that exact backend as the fallback before changing :53.
+                    old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
+                    old_stage, old_binding = predecessor_stage_identity(stage, witness)
+                    observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
+                                         "predecessor_verifications", save_evidence)
                 witness = apply_one(operation, diagnostic_policy, attempted) if operation else None
                 # Re-observe even if the socket was switched by a previous run.
-                try:
-                    observed = verify_stage(config, stage, witness, port)
-                except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-                    failure = {"address": stage["address"], "port": port, "passed": False}
-                    if isinstance(error, PublicDNSVerificationFailed):
-                        failure["failed_samples"] = error.samples
-                    evidence[report].append(failure)
-                    raise
-                evidence[report].append({"address": stage["address"], "port": port, "result": observed})
+                observed = observe_stage_result(verify_stage, config, stage, witness, port, evidence, report, save_evidence)
                 if port == diagnostic["port"]:
                     diagnostic_policy = observed["verified_backend"]
-                save_evidence()
         except (Exception, KeyboardInterrupt):
             compensation_errors, public = [], None
             for operation, witness, acknowledged in reversed(attempted):
@@ -633,8 +659,8 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
             if public is not None:
                 rollback, witness, entry = public
                 try:
-                    entry["public_verification"] = verify_stage(rollback, dict(stage, candidate_revision=witness["previous_revision"]),
-                        {"candidate_uid": witness["old_uid"], "node_uid": witness["node_uid"]}, 53)
+                    old_stage, old_binding = predecessor_stage_identity(stage, witness)
+                    entry["public_verification"] = verify_stage(rollback, old_stage, old_binding, 53)
                 except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                     entry["result"] = "restored_public_unverified"
                     compensation_errors.append(error)

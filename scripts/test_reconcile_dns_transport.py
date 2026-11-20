@@ -352,17 +352,22 @@ class TransportTests(unittest.TestCase):
         witness = {"candidate_uid": "candidate", "old_uid": "old", "node_uid": "node",
                    "previous_revision": "1"*40, "assignment": {"fencing_token": 1},
                    "parent_digest": "parent", "plan_digest": "plan"}
+        predecessor_binding = {"candidate_uid": "old", "node_uid": "node"}
         def op(listener):
-            return (["patch", listener["name"]], "{}", listener, {}, witness)
+            old = transport.service(config, dict(listener, selector={"app": "predecessor"}))
+            return (["patch", listener["name"]], "{}", listener, old, witness)
         def save():
             pass
         def run(remaining, fail_port=None, fail_address=None, changed_diagnostic=False,
-                write_failure=None, restore_failure=False):
+                write_failure=None, restore_failure=False, predecessor_failure=False):
             evidence, history = {"applied": []}, []
             def verify(_, stage, binding, port):
                 history.append((stage["address"], port, binding))
                 if port == fail_port and (fail_address is None or stage["address"] == fail_address) and binding == witness:
                     raise ValueError("UDP failed")
+                if binding == predecessor_binding and predecessor_failure:
+                    raise transport.PublicDNSVerificationFailed([{"hostname": "app.example.test",
+                                                                  "transport": "udp", "response_code": 2}])
                 result = dict(witness, assignment={"fencing_token": 2}) if changed_diagnostic else witness
                 return {"passed": True, "verified_backend": result}
             def write(_, name, **kwargs):
@@ -385,6 +390,9 @@ class TransportTests(unittest.TestCase):
                 elif write_failure:
                     with self.assertRaisesRegex(RuntimeError, "could not be fully verified" if restore_failure else "response lost"):
                         transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                elif predecessor_failure:
+                    with self.assertRaises(transport.PublicDNSVerificationFailed):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 elif fail_port is None:
                     transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 else:
@@ -400,8 +408,13 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(evidence["applied"], ["diagnostic-one", "public-one"])
         self.assertEqual(evidence["public_verifications"], [{"address": one["address"], "port": 53, "passed": False}])
         self.assertEqual([x["listener"] for x in evidence["compensations"]], ["public-one", "diagnostic-one"])
-        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, witness),
-                                   (one["address"], 53, {"candidate_uid": "old", "node_uid": "node"})])
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding),
+                                   (one["address"], 53, witness), (one["address"], 53, predecessor_binding)])
+        evidence, history = run(operations, predecessor_failure=True)
+        self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["diagnostic-one"])
+        self.assertEqual(evidence["predecessor_verifications"][0]["failed_samples"][0]["response_code"], 2)
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
         evidence, _ = run(operations, fail_port=53, fail_address=two["address"])
         self.assertEqual([x["listener"] for x in evidence["compensations"]], ["public-two", "diagnostic-two"])
         evidence, _ = run(operations, write_failure="public-one")
@@ -411,11 +424,12 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([x["result"] for x in evidence["compensations"]], ["unverified", "restored"])
         evidence, history = run(operations, changed_diagnostic=True)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
-        self.assertEqual(history, [(one["address"], 15353, witness)])
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
         evidence, history = run([op(two), op(diagnose_two)])
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),
-                                   (two["address"], 15353, witness), (two["address"], 53, witness)])
+                                   (two["address"], 15353, witness), (two["address"], 53, predecessor_binding),
+                                   (two["address"], 53, witness)])
 
     def test_staged_compensation_cas_restores_exact_predecessor_and_rejects_drift(self):
         prior = self.config()
