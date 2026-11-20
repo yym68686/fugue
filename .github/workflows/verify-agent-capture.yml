@@ -1,0 +1,45 @@
+# Verification branch only; neither this file nor the removal of ci.yml may merge.
+name: verify-agent-capture
+
+on:
+  push:
+    branches: ['verify/fugue-agent-capture-20261120-565ae4f4']
+
+permissions:
+  contents: read
+
+env:
+  FUGUE_SOURCE: 565ae4f426ad0e2405c0043a533de8f4bc23b307
+  FUGUE_BASE: 026e8392a4052906c9ed1c2703172665e4977b8d
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  full-test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-agent-capture-20261120-565ae4f4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.FUGUE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9b171d7bfbaa4d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Check immutable source and run the complete suite
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FUGUE_SOURCE"
+          test "$(git rev-parse HEAD^)" = "$FUGUE_BASE"
+          test -z "$(git status --porcelain)"
+          make test GOCACHE="$(go env GOCACHE)"
+      - name: Check the witness under the race detector
+        run: >-
+          go test -race ./internal/agentedge ./internal/api ./internal/runtime
+          -run 'Test(ControlCaptureFailure|CaptureFailureID|Agent.*(Failure|Capture))'
+          -count=2
