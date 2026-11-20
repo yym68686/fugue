@@ -119,18 +119,16 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 		last := history[len(history)-1]
 		// A delayed positive result may not roll shared history backwards.
 		if at.Before(last) {
-			// The result may be an exact observation already in the shared
-			// continuity window. Return only its chronological prefix to this
-			// fact without mutating the newer shared history. Callers must never
-			// attach successes newer than the proof they are evaluating.
-			for i, prior := range history {
-				if at.Equal(prior) {
-					fact.ProbeHistory = slices.Clone(history[:i+1])
-					return
-				}
-				if at.Before(prior) {
-					break
-				}
+			// Serving and renewal can finish in the opposite order to their
+			// physical probes. Use only the existing chronological prefix
+			// and the exact success in this fact, without advancing or
+			// changing shared history. No success may cross the last failure
+			// (checked above), a gap, or the start of the retained window.
+			i, found := slices.BinarySearchFunc(history, at, time.Time.Compare)
+			if found {
+				fact.ProbeHistory = slices.Clone(history[:i+1])
+			} else if i > 0 && at.Sub(history[i-1]) <= time.Duration(policy.FactFreshnessSeconds)*time.Second {
+				fact.ProbeHistory = append(slices.Clone(history[:i]), at)
 			}
 			return
 		}

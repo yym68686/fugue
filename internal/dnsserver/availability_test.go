@@ -239,7 +239,7 @@ func TestAvailabilityControlPlaneLossPreservesProbeContinuityWithoutReusingSucce
 	}
 }
 
-func TestAvailabilityDelayedDuplicateUsesOnlyItsExistingHistoryPrefix(t *testing.T) {
+func TestAvailabilityDelayedSuccessUsesOnlyItsChronologicalHistoryPrefix(t *testing.T) {
 	start := time.Now().UTC().Add(-time.Minute)
 	readiness := &platformconfig.DNSReadinessPolicy{FactFreshnessSeconds: 60}
 	availability := &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}
@@ -268,17 +268,32 @@ func TestAvailabilityDelayedDuplicateUsesOnlyItsExistingHistoryPrefix(t *testing
 	if !reflect.DeepEqual(delayed.ProbeHistory, []time.Time{first, second}) || !dnsAvailabilityRecovered(availability, delayed, time.Minute, third.Add(5*time.Second)) {
 		t.Fatal("delayed duplicate lost the history valid at its proof timestamp", delayed.ProbeHistory)
 	}
+	// A distinct successful probe may also be delayed. Use its observed-time
+	// prefix for this fact only; a proof from the future cannot make it ready.
+	delayedAt := second.Add(2 * time.Second)
+	unique := observe(delayedAt, true, third.Add(5*time.Second))
+	if !reflect.DeepEqual(unique.ProbeHistory, []time.Time{first, second, delayedAt}) || !dnsAvailabilityRecovered(availability, unique, time.Minute, third.Add(5*time.Second)) {
+		t.Fatal("delayed exact success lost its chronological history", unique.ProbeHistory)
+	}
+	tooEarly := observe(first.Add(-time.Second), true, third.Add(5*time.Second))
+	if len(tooEarly.ProbeHistory) != 0 {
+		t.Fatal("delayed success crossed the start of the retained window", tooEarly.ProbeHistory)
+	}
 	store.mu.Lock()
 	after := slices.Clone(store.values["authenticated-semantic-history"].successes)
 	store.mu.Unlock()
 	if !reflect.DeepEqual(after, before) {
-		t.Fatal("delayed duplicate rolled shared history backwards", before, after)
+		t.Fatal("delayed result modified newer shared history", before, after)
 	}
 
 	observe(third.Add(10*time.Second), false, third.Add(10*time.Second))
 	afterFailure := observe(second, true, third.Add(15*time.Second))
 	if len(afterFailure.ProbeHistory) != 0 || dnsAvailabilityRecovered(availability, afterFailure, time.Minute, third.Add(15*time.Second)) {
 		t.Fatal("delayed success crossed an intervening failure", afterFailure.ProbeHistory)
+	}
+	afterFailure = observe(delayedAt, true, third.Add(15*time.Second))
+	if len(afterFailure.ProbeHistory) != 0 {
+		t.Fatal("distinct delayed success crossed an intervening failure", afterFailure.ProbeHistory)
 	}
 }
 
