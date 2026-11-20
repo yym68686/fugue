@@ -63,7 +63,7 @@ def validate_publication(snapshot, publication):
 
 def candidate_request(candidate, config):
     """Read verification input without printing or persisting signing material."""
-    pod, snapshot = candidate['pod'], candidate['snapshot']
+    pod = candidate['pod']
     containers = [container for container in pod['spec']['containers'] if container.get('image') == config['recovery']['candidate_image']]
     if len(containers) != 1 or pod['metadata']['uid'] != config['recovery']['candidate_pod_uid']:
         raise ValueError('DNS recovery candidate identity or image changed')

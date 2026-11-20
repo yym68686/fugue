@@ -304,6 +304,79 @@ class ObservationPolicyTests(unittest.TestCase):
                         self.assertNotIn('synthetic-private-material', str(raised.exception))
                     self.assertNotIn('synthetic-private-material', diagnostic.getvalue())
 
+    def test_public_snapshot_unavailability_discards_pair_and_keeps_backend_pinned(self):
+        for scenario in ['recovered', 'replaced', 'unavailable', 'forbidden']:
+            with self.subTest(scenario=scenario):
+                config, candidate, current, declaration = self.fixture()
+                pod = candidate['pod']
+                uid = pod['metadata']['uid']
+                checkpoints = []
+                def read(*args):
+                    if args[:2] == ('get', 'nodes'):
+                        return {'items': [{'metadata': {'name': pod['spec']['nodeName']},
+                                           'status': {'addresses': [{'address': '8.8.8.8'}]}}]}
+                    if args[:2] == ('get', 'service'):
+                        return copy.deepcopy(current)
+                    if args[:2] == ('get', 'pods'):
+                        return {'items': [copy.deepcopy(pod)]}
+                    if args[:2] == ('get', 'pod'):
+                        fresh = copy.deepcopy(pod)
+                        if checkpoints and scenario == 'replaced':
+                            fresh['metadata']['uid'] = 'replacement'
+                        return fresh
+                    if args[:2] == ('get', 'endpointslices'):
+                        owner = {'kind': 'Service', 'name': current['metadata']['name'],
+                                 'uid': current['metadata']['uid'], 'controller': True}
+                        ref = {key: pod['metadata'][key] for key in ('name', 'namespace', 'uid')}
+                        return {'items': [{'metadata': {'namespace': config['namespace'], 'ownerReferences': [owner]},
+                                           'ports': [{'protocol': p, 'port': 53} for p in ('UDP', 'TCP')],
+                                           'endpoints': [{'nodeName': pod['spec']['nodeName'],
+                                                          'targetRef': dict(ref, kind='Pod'),
+                                                          'addresses': ['10.0.0.2'], 'conditions': {'ready': True}}]}]}
+                    if args[:2] == ('get', 'secret'):
+                        return {'data': {'key': 'c3ludGhldGljLXRlc3Qta2V5'}}
+                    if args[0] == 'exec':
+                        self.assertEqual(args[args.index('--') + 1:], ('cat', '/state/cache.platform-serving.json'))
+                        checkpoints.append(len(checkpoints) + 1)
+                        return {'checkpoint_sequence': checkpoints[-1]}
+                    if args[:2] == ('get', '--raw'):
+                        self.assertEqual(args[2], candidate['snapshot_path'])
+                        self.assertTrue(checkpoints, 'runtime read must be paired with a checkpoint')
+                        if scenario == 'forbidden':
+                            raise RuntimeError('Forbidden')
+                        if len(checkpoints) == 1 or scenario == 'unavailable':
+                            raise transport.ObservationUnavailable('DNS read unavailable')
+                        return {'snapshot_sequence': checkpoints[-1]}
+                    self.fail('unexpected capture operation')
+
+                def verify(request, verifier):
+                    self.assertEqual(request['checkpoint']['checkpoint_sequence'], 2)
+                    self.assertEqual(request['snapshot']['snapshot_sequence'], 2)
+                    return {'schema': 'fugue.dns-observation-policy/v1'}
+
+                with patch.object(transport, 'read_json', side_effect=read), \
+                        patch.object(observation, 'verified_policy', side_effect=verify) as check, \
+                        patch.object(observation.time, 'sleep') as sleep, \
+                        patch.object(observation.sys, 'stderr', io.StringIO()) as output:
+                    if scenario == 'recovered':
+                        result = observation.capture(declaration, b'declaration', config, '/approved/verifier')
+                        self.assertEqual(result['servers'][0]['pod_uid'], uid)
+                        self.assertEqual(checkpoints, [1, 2])
+                        self.assertEqual([json.loads(line)['outcome'] for line in output.getvalue().splitlines()],
+                                         ['retry', 'verified'])
+                        check.assert_called_once()
+                        sleep.assert_called_once()
+                    else:
+                        error = {'replaced': ValueError, 'unavailable': transport.ObservationUnavailable,
+                                 'forbidden': RuntimeError}[scenario]
+                        with self.assertRaises(error):
+                            observation.capture(declaration, b'declaration', config, '/approved/verifier')
+                        check.assert_not_called()
+                        self.assertEqual(len(checkpoints), observation.CAPTURE_MAX_ATTEMPTS if scenario == 'unavailable' else 1)
+                        if scenario == 'forbidden':
+                            sleep.assert_not_called()
+                    self.assertNotIn('synthetic-test-key', output.getvalue())
+
     def test_ci_captures_before_independent_public_observation(self):
         workflow = Path('.github/workflows/ci.yml').read_text()
         capture = workflow.split('\n  dns_observation_policy:', 1)[1].split('\n  dns_public_observation:', 1)[0]

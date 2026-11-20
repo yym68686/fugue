@@ -118,28 +118,47 @@ def coherent_policy(candidate, binding, verifier, queries, current):
     # whole pair and fully verify a new observation.
     retry_deadline = time.monotonic() + CAPTURE_RETRY_BUDGET_SECONDS
     last_rejection = None
+    recheck_identity = False
     for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
         if last_rejection is not None and time.monotonic() >= retry_deadline:
             raise last_rejection
-        request = candidate_request(candidate, binding)
-        request['observation_queries'] = queries
+        request = {}
+        pod = candidate['pod']
+        uid = pod['metadata']['uid']
         try:
-            policy = verified_policy(request, verifier)
-        except PolicyVerificationRejected as error:
+            if recheck_identity:
+                unchanged_backend(binding['namespace'], current, pod)
+                recheck_identity = False
+            request = candidate_request(candidate, binding)
+            request['observation_queries'] = queries
+            try:
+                policy = verified_policy(request, verifier)
+            except PolicyVerificationRejected as error:
+                last_rejection = error
+                retry = (error.category in CAPTURE_PAIR_REJECTIONS and attempt < CAPTURE_MAX_ATTEMPTS and
+                         time.monotonic() + CAPTURE_RETRY_INTERVAL_SECONDS < retry_deadline)
+                capture_diagnostic(request, attempt, 'retry' if retry else 'rejected', error.category, uid)
+                if not retry:
+                    raise
+                # A replacement is not a checkpoint/runtime refresh race.
+                unchanged_backend(binding['namespace'], current, pod)
+                time.sleep(CAPTURE_RETRY_INTERVAL_SECONDS)
+                continue
+            unchanged_backend(binding['namespace'], current, pod)
+        except transport.ObservationUnavailable as error:
             last_rejection = error
-            retry = (error.category in CAPTURE_PAIR_REJECTIONS and attempt < CAPTURE_MAX_ATTEMPTS and
+            retry = (attempt < CAPTURE_MAX_ATTEMPTS and
                      time.monotonic() + CAPTURE_RETRY_INTERVAL_SECONDS < retry_deadline)
-            capture_diagnostic(request, attempt, 'retry' if retry else 'rejected', error.category,
-                               candidate['pod']['metadata']['uid'])
+            capture_diagnostic(request, attempt, 'retry' if retry else 'rejected', 'read_unavailable', uid)
             if not retry:
                 raise
-            # A Pod/Service replacement is not this race. Do not retry using
-            # a stale container identity, environment or transport binding.
-            unchanged_backend(binding['namespace'], current, candidate['pod'])
+            # A failed read, including the final identity check, cannot
+            # authorize anything from that attempt. Recheck the pinned backend
+            # before taking and verifying a new complete pair.
+            recheck_identity = True
             time.sleep(CAPTURE_RETRY_INTERVAL_SECONDS)
             continue
-        unchanged_backend(binding['namespace'], current, candidate['pod'])
-        capture_diagnostic(request, attempt, 'verified', pod_uid=candidate['pod']['metadata']['uid'])
+        capture_diagnostic(request, attempt, 'verified', pod_uid=uid)
         return policy
 
 
@@ -169,8 +188,11 @@ def capture(declaration, declaration_bytes, config, verifier):
         transport.validate_existing(current, transport.service(config, listener))
         if not current['metadata'].get('uid') or not current['metadata'].get('resourceVersion'):
             raise ValueError('public DNS observation Service identity is incomplete')
+        # Only the snapshot read together with the signed checkpoint can be
+        # verified. Do not require an earlier, unused runtime snapshot.
         candidate = transport.handoff_backend(config['namespace'], current['spec']['selector'],
-                                              owners[0]['metadata']['name'], listener['targetPort'])
+                                              owners[0]['metadata']['name'], listener['targetPort'],
+                                              read_runtime=False)
         pod = candidate['pod']
         slices = transport.read_json('get', 'endpointslices', '-n', config['namespace'], '-l',
                                      'kubernetes.io/service-name=' + listener['name'], '-o', 'json')['items']

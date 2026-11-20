@@ -231,7 +231,7 @@ def ready_pod(pod):
                 for c in pod.get("status", {}).get("conditions", [])))
 
 
-def handoff_backend(namespace, selector, node_name, target_port):
+def handoff_backend(namespace, selector, node_name, target_port, *, read_runtime=True):
     query = ",".join(k + "=" + v for k, v in sorted(selector.items()))
     pods = read_json("get", "pods", "-n", namespace, "-l", query, "-o", "json")["items"]
     local = [p for p in pods if p.get("spec", {}).get("nodeName") == node_name]
@@ -256,7 +256,7 @@ def handoff_backend(namespace, selector, node_name, target_port):
     if type(port) is not int or not 1 <= port <= 65535 or probe.get("host") or probe.get("scheme", "HTTP") != "HTTP":
         raise ValueError("DNS handoff observation port is invalid")
     path = "/api/v1/namespaces/" + namespace + "/pods/" + meta["name"] + ":" + str(port) + "/proxy/runtime-facts"
-    snapshot = read_json("get", "--raw", path)
+    snapshot = read_json("get", "--raw", path) if read_runtime else None
     current = read_json("get", "pod", meta["name"], "-n", namespace, "-o", "json")
     if current["metadata"].get("uid") != meta["uid"] or current["metadata"].get("resourceVersion") != meta["resourceVersion"]:
         raise ValueError("DNS handoff backend changed while reading runtime facts")
