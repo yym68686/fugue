@@ -103,6 +103,10 @@ The broader migration also includes:
   source policy changes, source fencing races, restart and control-plane loss.
 - Public handoff using the existing whole-node DNS behavior and live transport
   checks, followed by source authorization and legacy identity retirement.
+  Staged socket changes verify the candidate checkpoint and full record
+  readiness before any selector update. Before changing port 53, the public
+  handoff rechecks that the same candidate and signed assignment passed the
+  diagnostic UDP and TCP checks.
 
 The runtime and source-verification portions above are implemented. The remaining
 independent DNS producer and public migration still require explicit configuration

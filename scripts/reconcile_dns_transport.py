@@ -10,6 +10,7 @@ import datetime
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -276,6 +277,27 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
         raise ValueError("DNS handoff backends have different probe membership")
 
 
+def verify_staged_backend(candidate, namespace, port, verifier=None):
+    from scripts.capture_dns_observation_policy import unchanged_backend
+    from scripts.recover_dns_transport import verify_candidate
+
+    pod = candidate["pod"]
+    images = [c["image"] for c in pod["spec"]["containers"]
+              if all(any(p.get("containerPort") == port and p.get("protocol", "TCP") == protocol
+                         for p in c.get("ports", [])) for protocol in ("UDP", "TCP"))]
+    if len(images) != 1 or not re.fullmatch(r"[^\s@]+@sha256:[a-f0-9]{64}", images[0]):
+        raise ValueError("immutable DNS handoff backend image required")
+    binding = {"namespace": namespace, "recovery": {"candidate_image": images[0],
+               "candidate_pod_uid": pod["metadata"]["uid"]}}
+    verify_candidate(candidate, binding, verifier)
+    # The verifier takes a new checkpoint/runtime pair, then the caller
+    # compares that exact snapshot with the live predecessor assignment.
+    observed = read_json("get", "pod", pod["metadata"]["name"], "-n", namespace, "-o", "json")
+    if not ready_pod(observed) or any(observed["metadata"].get(k) != pod["metadata"][k]
+                                     for k in ("uid", "resourceVersion")):
+        raise ValueError("DNS handoff backend changed while reading runtime facts")
+
+
 def handoff_witness(config, listener, current):
     if not current:
         return None
@@ -322,6 +344,8 @@ def handoff_witness(config, listener, current):
             slices = read_json("get", "endpointslices", "-n", namespace, "-l",
                                "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
             validate_handoff_endpoints(current, old["pod"], slices, old_port)
+            if stage:
+                verify_staged_backend(candidate, namespace, listener["targetPort"])
             validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
             return {"node_uid": owner["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
                     "candidate_uid": candidate["pod"]["metadata"]["uid"], **revisions,
@@ -444,7 +468,14 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
             accepted = json.loads(result.stdout)
             if result.returncode != 0 or accepted.get("passed") is not True:
                 raise ValueError("post-handoff public UDP/TCP verification failed")
+            verify_staged_backend(candidate, namespace, listener["targetPort"], verifier)
+            signed = candidate["snapshot"]
+            policy = expectations["servers"][0]["policy"]
+            if signed["assignment"] != policy["assignment"] or signed["parent_digest"] != policy["parent_digest"]:
+                raise ValueError("DNS handoff assignment changed during socket verification")
             unchanged_backend(namespace, service_before, pod)
+            accepted["verified_backend"] = {"candidate_uid": uid, "assignment": signed["assignment"],
+                                            "parent_digest": signed["parent_digest"], "plan_digest": signed["plan_digest"]}
             return accepted
         except (ValueError, ObservationUnavailable, subprocess.TimeoutExpired):
             if attempt + 1 == HANDOFF_ATTEMPTS:
@@ -453,14 +484,18 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
 
 
 def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage):
-    def apply_one(operation):
+    def apply_one(operation, diagnostic_policy=None):
         command, body, listener, current, witness = operation
         if witness is not None:
-            revalidate_handoff_witness(config, listener, current, witness)
+            witness = revalidate_handoff_witness(config, listener, current, witness)
+        if diagnostic_policy is not None and any(
+                diagnostic_policy[k] != witness[k] for k in ("candidate_uid", "assignment", "parent_digest", "plan_digest")):
+            raise ValueError("DNS handoff assignment changed after diagnostic verification")
         kubectl(*command, body=body)
         evidence['applied'].append(listener['name'])
         save_evidence()
         print("reconciled Service/" + listener["name"], flush=True)
+        return witness
 
     if "handoffs" not in config:
         for operation in planned:
@@ -469,18 +504,22 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
     evidence["diagnostic_verifications"], evidence["public_verifications"] = [], []
     for stage in config["handoffs"]:
         diagnostic = stage_diagnostic(config, stage["address"])
+        diagnostic_policy = None
         for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
             operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
+            witness = None
             if operation:
-                apply_one(operation)
+                witness = apply_one(operation, diagnostic_policy)
             # Re-observe even if the socket was switched by a previous run.
             try:
-                observed = verify_stage(config, stage, operation[4] if operation else None, port)
+                observed = verify_stage(config, stage, witness, port)
             except (ValueError, RuntimeError, subprocess.TimeoutExpired):
                 evidence[report].append({"address": stage["address"], "port": port, "passed": False})
                 save_evidence()
                 raise
             evidence[report].append({"address": stage["address"], "port": port, "result": observed})
+            if port == diagnostic["port"]:
+                diagnostic_policy = observed["verified_backend"]
             save_evidence()
 
 
@@ -561,14 +600,14 @@ def revalidate_handoff_witness(config, listener, current, witness):
         if fresh is None or any(fresh.get(k) != v for k, v in identities.items()):
             raise ValueError("DNS handoff identity changed before selector CAS")
         if fresh == witness:
-            return
+            return fresh
         witness = fresh
         if attempt + 1 < HANDOFF_ATTEMPTS:
             time.sleep(HANDOFF_RETRY_SECONDS)
     raise ValueError("DNS handoff assignment did not stabilize before selector CAS")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
     parser.add_argument("--apply", action="store_true")
@@ -578,6 +617,8 @@ if __name__ == "__main__":
     parser.add_argument("--verifier", type=Path)
     args = parser.parse_args()
     config = load_config(args.path)
+    if args.verifier:
+        os.environ["FUGUE_DNS_OBSERVATION_VERIFIER"] = str(args.verifier.resolve())
     verify_stage = None
     if args.apply and "handoffs" in config:
         if not args.public_observation or not args.observer or not args.verifier:
@@ -586,3 +627,10 @@ if __name__ == "__main__":
         verify_stage = partial(observe_stage, policy_path=args.public_observation, observer=str(args.observer.resolve()),
                                verifier=str(args.verifier.resolve()))
     print("listeners=" + str(reconcile(config, args.apply, args.evidence, verify_stage)))
+
+
+if __name__ == "__main__":
+    # Keep the CLI and imported recovery/observation helpers on the same
+    # typed read errors when launched with python -m.
+    from scripts.reconcile_dns_transport import main
+    main()

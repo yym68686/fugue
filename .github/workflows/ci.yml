@@ -3037,7 +3037,7 @@ jobs:
               exit 0
             fi
             python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport
-            if jq -e 'has("recovery") or has("recoveries")' "$config" >/dev/null; then
+            if jq -e 'has("recovery") or has("recoveries") or has("handoffs")' "$config" >/dev/null; then
               export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
               verifier_revision="$(jq -r '.verifier_revision // empty' "$config")"
               if [[ -n "$verifier_revision" ]]; then

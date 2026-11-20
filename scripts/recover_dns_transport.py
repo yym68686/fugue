@@ -105,12 +105,16 @@ def candidate_request(candidate, config):
     return request
 
 
-def verify_candidate(candidate, config):
-    request = candidate_request(candidate, config)
-    verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
+def verify_candidate(candidate, config, verifier=None):
+    if verifier is None:
+        verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
     if not verifier or not os.path.isabs(verifier):
         raise ValueError('DNS recovery observation verifier unavailable')
-    result = subprocess.run([verifier], input=json.dumps(request), text=True, capture_output=True, timeout=30)
+    request = candidate_request(candidate, config)
+    try:
+        result = subprocess.run([verifier], input=json.dumps(request), text=True, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        raise transport.ObservationUnavailable('DNS serving observation verification timed out') from None
     if result.returncode or result.stdout.strip() != '{"verified":true}':
         categories = {'invalid bounded DNS verification input': 'input',
                       'DNS observation checkpoint authentication failed': 'checkpoint_authentication',

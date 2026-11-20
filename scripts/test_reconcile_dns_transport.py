@@ -274,16 +274,46 @@ class TransportTests(unittest.TestCase):
         with patch.object(transport, "listener_node", return_value=node), \
              patch.object(transport, "read_json", return_value={"items": []}), \
              patch.object(transport, "handoff_backend", side_effect=backend), \
+             patch.object(transport, "verify_staged_backend") as verify, \
              patch.object(transport, "validate_handoff_endpoints") as endpoints:
             witness = transport.handoff_witness(config, listener, current)
             self.assertEqual((witness["old_uid"], witness["candidate_uid"]), ("old", "new"))
             self.assertEqual(witness["candidate_revision"], "2"*40)
             endpoints.assert_called_once()
+            self.assertEqual(verify.call_args.args[0]["pod"]["metadata"]["uid"], "new")
+            self.assertEqual(verify.call_args.args[1:], (config["namespace"], listener["targetPort"]))
+            with patch.object(transport, "HANDOFF_ATTEMPTS", 1):
+                verify.side_effect = ValueError("DNS recovery observation failed cryptographic or readiness verification: record_readiness")
+                with self.assertRaisesRegex(ValueError, "record_readiness"):
+                    transport.handoff_witness(config, listener, current)
+            verify.side_effect = None
             now = datetime.datetime.now(datetime.timezone.utc)
             snapshot["facts"][0]["proof"]["valid_until"] = (now - datetime.timedelta(seconds=1)).isoformat()
             with patch.object(transport, "HANDOFF_ATTEMPTS", 1):
                 with self.assertRaisesRegex(ValueError, "proof is expired"):
                     transport.handoff_witness(config, listener, current)
+
+    def test_staged_backend_verifies_the_dns_listener_owner_and_rechecks_pod(self):
+        from scripts import recover_dns_transport
+
+        port = 5353
+        image = "registry.example/dns@sha256:" + "a"*64
+        pod = {"metadata": {"name": "new", "uid": "uid", "resourceVersion": "11"},
+               "spec": {"containers": [{"image": "other", "ports": [{"containerPort": port}]},
+                                        {"image": image, "ports": [{"containerPort": port, "protocol": protocol}
+                                                                   for protocol in ("UDP", "TCP")]}]},
+               "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]}}
+        candidate = {"pod": pod}
+        with patch.object(recover_dns_transport, "verify_candidate") as verify, \
+             patch.object(transport, "read_json", return_value=copy.deepcopy(pod)) as read:
+            transport.verify_staged_backend(candidate, "system", port, "/approved/verifier")
+            verify.assert_called_once_with(candidate, {"namespace": "system", "recovery":
+                {"candidate_image": image, "candidate_pod_uid": "uid"}}, "/approved/verifier")
+            read.return_value["metadata"]["resourceVersion"] = "12"
+            with self.assertRaisesRegex(ValueError, "backend changed"):
+                transport.verify_staged_backend(candidate, "system", port)
+            with self.assertRaisesRegex(ValueError, "immutable"):
+                transport.verify_staged_backend(candidate, "system", port + 1)
 
     def test_staged_handoff_stops_on_public_failure_and_reverifies_on_resume(self):
         one = dict(self.config()["listeners"][0], name="public-one", port=53)
@@ -294,20 +324,25 @@ class TransportTests(unittest.TestCase):
                       handoffs=[{"address": x["address"], "previous_revision": "1"*40,
                                  "candidate_revision": "2"*40} for x in (one, two)])
         config = self.load(config)
-        witness = {"candidate_uid": "candidate"}
+        witness = {"candidate_uid": "candidate", "assignment": {"fencing_token": 1},
+                   "parent_digest": "parent", "plan_digest": "plan"}
         def op(listener):
             return (["patch", listener["name"]], "{}", listener, {}, witness)
         def save():
             pass
-        def run(remaining, fail_port=None):
+        def run(remaining, fail_port=None, changed_diagnostic=False):
             evidence, history = {"applied": []}, []
             def verify(_, stage, binding, port):
                 history.append((stage["address"], port, binding))
                 if port == fail_port:
                     raise ValueError("UDP failed")
-                return {"passed": True}
-            with patch.object(transport, "revalidate_handoff_witness"), patch.object(transport, "kubectl"):
-                if fail_port is None:
+                result = dict(witness, assignment={"fencing_token": 2}) if changed_diagnostic else witness
+                return {"passed": True, "verified_backend": result}
+            with patch.object(transport, "revalidate_handoff_witness", return_value=witness), patch.object(transport, "kubectl"):
+                if changed_diagnostic:
+                    with self.assertRaisesRegex(ValueError, "assignment changed after diagnostic"):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                elif fail_port is None:
                     transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 else:
                     with self.assertRaisesRegex(ValueError, "UDP failed"):
@@ -321,6 +356,9 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(evidence["applied"], ["diagnostic-one", "public-one"])
         self.assertEqual(evidence["public_verifications"], [{"address": one["address"], "port": 53, "passed": False}])
         self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, witness)])
+        evidence, history = run(operations, changed_diagnostic=True)
+        self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertEqual(history, [(one["address"], 15353, witness)])
         evidence, history = run([op(two), op(diagnose_two)])
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),
