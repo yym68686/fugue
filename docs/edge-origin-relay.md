@@ -23,6 +23,7 @@ policy signing private key. The following are process-level file paths:
 | `TLS_CERT_FILE` | PEM leaf certificate and chain |
 | `TLS_KEY_FILE` | PEM TLS private key |
 | `CA_FILE` | PEM trust bundle for the dedicated relay CA |
+| `STATE_FILE` | Absolute writable fence path in a private retained directory, with a single writer per Edge/slot |
 
 Compile the two route proofs from their actual applied route bindings
 (`internal/routeproof.Digest`, or a verified active route's
@@ -79,11 +80,16 @@ The output is a signed envelope, not an applied change. Active policies
 require an explicit `-allow-active` after review. An `off` lease can be issued
 without live route files so withdrawal does not depend on origin health.
 
-Publish atomically and keep the trusted mount current across restarts. Workers
-reject a regressed or conflicting generation within a running process; **that
-fence is not durable across restart**. A stale unexpired signed file must never
-be restored by deployment tooling. Expiry, invalid content, changed slot or
-listener identity stop new relays. Certificates and CA are read at startup;
+Publish atomically and keep the trusted mount current across restarts. Start
+with a signed `off` lease containing the exact listener endpoints so each worker
+can persist its initial generation and bind the private listener before shadow.
+Workers persist the generation and exact payload hash before allowing use, and
+reject a regressed or conflicting generation across restarts. An `off` lease
+can withdraw even if the local endpoint has been omitted. Each fence directory
+must be pre-created, owner-only, and retained with a single writer for that
+Edge/slot and verifier. Do not restore or share that directory across releases.
+Expiry, invalid content, changed slot, listener identity or a failed fence
+write stop new relays. Certificates and CA are read at startup;
 rotate through the normal drain/restart procedure. Automatic policy issuance,
 renewal and production secret/endpoint provisioning are not part of the
 initial worker release. Initial material must be mounted before startup;

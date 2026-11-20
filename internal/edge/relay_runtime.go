@@ -54,8 +54,7 @@ type edgeOriginRelay struct {
 	roots       *x509.CertPool
 	local       relayroute.Endpoint
 	policy      atomic.Pointer[relayroute.Policy]
-	generation  uint64 // written only by the refresh loop
-	policyHash  [32]byte
+	fence       *relayPolicyFence // updated on startup and then only by the refresh loop
 	process     string
 	mu          sync.Mutex
 	probes      map[relayProbeKey]relayroute.Window
@@ -98,6 +97,10 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 	if err != nil || len(key) != ed25519.PublicKeySize {
 		return nil, nil, errors.New("relay verifier invalid")
 	}
+	fence, err := openRelayPolicyFence(envPath("STATE_FILE"), s.Config.EdgeID, s.Config.EdgeSlot, key)
+	if err != nil {
+		return nil, nil, err
+	}
 	certPEM, err := relayReadFile(envPath("TLS_CERT_FILE"), 64<<10)
 	if err != nil {
 		return nil, nil, errors.New("relay certificate unavailable")
@@ -115,7 +118,7 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 	if err != nil || !pool.AppendCertsFromPEM(ca) {
 		return nil, nil, errors.New("relay CA invalid")
 	}
-	e := &edgeOriginRelay{s: s, policyFile: policyFile, key: key, certificate: cert, roots: pool, process: relayRandomID(),
+	e := &edgeOriginRelay{s: s, policyFile: policyFile, key: key, certificate: cert, roots: pool, fence: fence, process: relayRandomID(),
 		probes: map[relayProbeKey]relayroute.Window{}, remote: map[string]relayRemote{}, clients: map[relayroute.Endpoint]*http.Client{},
 		permits: map[string]relayPermit{}, dispatches: map[relayDispatchKey]time.Time{}}
 	p, err := e.loadPolicy(time.Now())
@@ -123,8 +126,16 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 		return nil, nil, err
 	}
 	local, ok := p.Endpoint(s.Config.EdgeID)
+	if p.Mode == "off" {
+		if err := fence.accept(p); err != nil {
+			return nil, nil, err
+		}
+	}
 	if !ok || local.Slot != s.Config.EdgeSlot || !relayCertificateName(cert.Leaf, local.TLSName) {
 		return nil, nil, errors.New("relay local slot identity not authorized")
+	}
+	if err := fence.accept(p); err != nil {
+		return nil, nil, err
 	}
 	// The mounted directory must pin the actual private listener, not a public
 	// wildcard or a Service that can load balance to a different worker.
@@ -133,7 +144,6 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 		return nil, nil, errors.New("relay private listener unavailable")
 	}
 	e.local = local
-	e.generation, e.policyHash = p.Generation, p.Hash
 	srv := &http.Server{Handler: e, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}}
 	srv.Protocols = new(http.Protocols)
@@ -151,14 +161,7 @@ func (e *edgeOriginRelay) loadPolicy(now time.Time) (*relayroute.Policy, error) 
 	if err != nil {
 		return nil, errors.New("relay policy unavailable")
 	}
-	p, err := relayroute.Verify(raw, e.key, now)
-	if err != nil {
-		return nil, err
-	}
-	if p.Generation < e.generation || (p.Generation == e.generation && p.Hash != e.policyHash) {
-		return nil, errors.New("relay policy generation regressed or conflicts")
-	}
-	return p, nil
+	return relayroute.Verify(raw, e.key, now)
 }
 
 func (e *edgeOriginRelay) refresh(now time.Time) {
@@ -167,13 +170,26 @@ func (e *edgeOriginRelay) refresh(now time.Time) {
 		e.policy.Store(nil)
 		return
 	}
+	if p.Mode == "off" {
+		e.policy.Store(nil)
+		// Withdrawal is independent of endpoint churn and certificate age.
+		// In particular a signed off policy may remove the local endpoint.
+		if err := e.fence.accept(p); err != nil && e.s.Logger != nil {
+			e.s.Logger.Printf("edge origin relay withdrawal not persisted: %v", err)
+		}
+		return
+	}
 	local, ok := p.Endpoint(e.s.Config.EdgeID)
 	if !ok || local != e.local || now.Before(e.certificate.Leaf.NotBefore) || !now.Before(e.certificate.Leaf.NotAfter) {
 		e.policy.Store(nil)
 		return
 	}
-	if e.generation != p.Generation {
-		e.generation, e.policyHash = p.Generation, p.Hash
+	if err := e.fence.accept(p); err != nil {
+		e.policy.Store(nil)
+		if e.s.Logger != nil {
+			e.s.Logger.Printf("edge origin relay policy not accepted: %v", err)
+		}
+		return
 	}
 	e.policy.Store(p)
 }
