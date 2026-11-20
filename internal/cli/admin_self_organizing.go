@@ -299,6 +299,23 @@ func writeRouteExplain(w io.Writer, explain model.RouteExplainResponse) error {
 		{Key: "fallback_chain", Value: stringsJoin(explain.FallbackChain)},
 		{Key: "reasons", Value: stringsJoin(explain.Reasons)},
 	}
+	if publication := explain.TrafficRelease; publication != nil {
+		pairs = append(pairs,
+			kvPair{Key: "published_traffic_release", Value: publication.ReleaseID},
+			kvPair{Key: "published_channel", Value: publication.ReleaseChannel},
+			kvPair{Key: "published_route_sequence", Value: fmt.Sprint(publication.RouteArtifactSequence)},
+		)
+	}
+	for _, selection := range explain.PublishedRoutes {
+		weights := make([]string, 0, len(selection.ReleaseWeights))
+		for _, target := range selection.ReleaseWeights {
+			weights = append(weights, fmt.Sprintf("%s:%d%%", target.ReleaseID, target.Weight))
+		}
+		pairs = append(pairs, kvPair{
+			Key:   "signed_route_target",
+			Value: fmt.Sprintf("%s status=%s upstream_in_bundle=%t %s", selection.PathPrefix, selection.Status, selection.HasUpstream, stringsJoin(weights)),
+		})
+	}
 	if explain.Route != nil {
 		pairs = append(pairs,
 			kvPair{Key: "selected_edge_group", Value: firstNonEmpty(explain.Route.SelectedEdgeGroup, "-")},

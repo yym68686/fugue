@@ -60,7 +60,7 @@ func TestAdminRouteDiagnosticsUsePublishedArtifactsAndFreshFacts(t *testing.T) {
 	for _, suffix := range []string{"", "?edge_group_id=edge-group-a"} {
 		r := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/published.example.test"+suffix, "diagnostic-admin", nil)
 		var response struct {
-			Explain publishedRouteExplainResponse `json:"explain"`
+			Explain model.RouteExplainResponse `json:"explain"`
 		}
 		mustDecodeJSON(t, r, &response)
 		if r.Code != 200 || response.Explain.TrafficRelease.ReleaseID != result.TrafficRelease.ReleaseID || response.Explain.ServingMode != "edge" || response.Explain.Route.UpstreamURL != "http://published:8080" || r.Header().Get("Cache-Control") != "private, no-store" {
@@ -68,7 +68,7 @@ func TestAdminRouteDiagnosticsUsePublishedArtifactsAndFreshFacts(t *testing.T) {
 		}
 	}
 	missing := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/ambient.example.test", "diagnostic-admin", nil)
-	if missing.Code != 200 || !strings.Contains(missing.Body.String(), `"serving_mode":"unrouted"`) {
+	if missing.Code != 200 || !strings.Contains(missing.Body.String(), `"serving_mode":"unrouted"`) || strings.Contains(missing.Body.String(), `"published_routes"`) {
 		t.Fatal(missing.Code, missing.Body.String())
 	}
 	for _, query := range []string{"?edge_group_id=", "?edge_group_id=BAD", "?edge_group_id=edge-group-a&edge_group_id=edge-group-b"} {
@@ -109,10 +109,12 @@ func TestAdminRouteDiagnosticsUsePublishedArtifactsAndFreshFacts(t *testing.T) {
 			r := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/published.example.test", "diagnostic-admin", nil)
 			if scenario == "stale facts" || scenario == "foreign fence" {
 				var response struct {
-					Explain publishedRouteExplainResponse `json:"explain"`
+					Explain model.RouteExplainResponse `json:"explain"`
 				}
 				mustDecodeJSON(t, r, &response)
-				if r.Code != 200 || response.Explain.ServingMode != "degraded" || response.Explain.Route.UpstreamURL != "" {
+				selection := response.Explain.PublishedRoutes
+				if r.Code != 200 || response.Explain.ServingMode != "degraded" || response.Explain.Route.UpstreamURL != "" || len(response.Explain.Route.Upstreams) != 0 ||
+					len(selection) == 0 || selection[0].Status != model.EdgeRouteStatusActive || !selection[0].HasUpstream || strings.Contains(r.Body.String(), "http://published:8080") {
 					t.Fatal(r.Code, r.Body.String())
 				}
 			} else if r.Code != 503 {

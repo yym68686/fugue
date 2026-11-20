@@ -191,9 +191,17 @@ func pgLoadReleaseSetConsumers(ctx context.Context, tx *sql.Tx, parent model.Pla
 // then let the caller lock/reload the artifact. All publication paths use this
 // ordering, including standalone members and rollback between two different ReleaseSets.
 func pgLockPlatformReleaseMutation(ctx context.Context, tx *sql.Tx, id string, exclusive bool) error {
+	scope, exclusive, err := pgPlatformReleaseMutationScope(ctx, tx, id, exclusive)
+	if err != nil {
+		return err
+	}
+	return pgLockPromotionScope(ctx, tx, scope, exclusive)
+}
+
+func pgPlatformReleaseMutationScope(ctx context.Context, tx *sql.Tx, id string, exclusive bool) (string, bool, error) {
 	var kind, scope string
 	if err := tx.QueryRowContext(ctx, `SELECT artifact_kind, scope_key FROM fugue_platform_artifacts WHERE id=$1 OR generation=$1 ORDER BY updated_at DESC, id ASC LIMIT 1`, id).Scan(&kind, &scope); err != nil {
-		return mapDBErr(err)
+		return "", false, mapDBErr(err)
 	}
 	if scope == platformproducer.InputDeferralScope {
 		// Serialize finite-control selection with every new-input decision. This
@@ -202,5 +210,5 @@ func pgLockPlatformReleaseMutation(ctx context.Context, tx *sql.Tx, id string, e
 	} else if kind != model.PlatformArtifactKindReleaseSet {
 		exclusive = false
 	}
-	return pgLockPromotionScope(ctx, tx, scope, exclusive)
+	return scope, exclusive, nil
 }

@@ -24,7 +24,7 @@ func TestConsumerAdmissionLockRetryDoesNotReplayUnmarkedFailures(t *testing.T) {
 			t.Fatal("unmarked transaction failure was replayed", original, calls, err)
 		}
 	}
-	busy := &consumerAdmissionLockBusy{compilerInputBarrierBusy()}
+	busy := &preApplyAdmissionLockBusy{compilerInputBarrierBusy()}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	calls := 0
@@ -128,7 +128,7 @@ func TestTrustedHeartbeatPublicationLockRetryAfterRollback(t *testing.T) {
 		}
 		rollbackScope, lockErr := pgLockConsumerHeartbeatScope(ctx, tx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{})
 		if calls == 1 {
-			var busy *consumerAdmissionLockBusy
+			var busy *preApplyAdmissionLockBusy
 			if !errors.As(lockErr, &busy) || stringSQLState(lockErr) != "55P03" {
 				t.Fatal("scope lock timeout was not classified", lockErr)
 			}

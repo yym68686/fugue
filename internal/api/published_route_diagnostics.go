@@ -17,11 +17,6 @@ import (
 var errMixedRoutePublications = errors.New("groups select different traffic publications; specify edge_group_id")
 var errPublishedRouteDiagnostics = errors.New("published traffic artifacts or prepared membership unavailable")
 
-type publishedRouteExplainResponse struct {
-	model.RouteExplainResponse
-	TrafficRelease *model.TrafficReleaseBinding `json:"traffic_release"`
-}
-
 type publishedRouteServingModesResponse struct {
 	model.RouteServingModeListResponse
 	TrafficRelease    *model.TrafficReleaseBinding `json:"traffic_release"`
@@ -214,19 +209,36 @@ func (s *Server) publishedRouteDiagnostics(ctx context.Context, group string) (m
 func publishedRouteDiagnosticBindings(snapshot model.EdgeRouteIntentSnapshot, healthy map[string]bool) []model.EdgeRouteBinding {
 	bindings := edgeRouteIntentDiagnosticBindings(snapshot.Routes)
 	for i := range bindings {
-		r := &bindings[i]
-		if r.Status != model.EdgeRouteStatusActive {
-			continue
-		}
-		ready := false
-		for group, ok := range healthy {
-			ready = ready || ok && (r.PolicyEdgeGroupID == "" || r.PolicyEdgeGroupID == group) && !slices.Contains(r.ExcludedEdgeGroupIDs, group)
-		}
-		if !ready {
-			r.Status = model.EdgeRouteStatusUnavailable
-			r.StatusReason = "published traffic consumers have not provided fresh matching serving evidence"
-			r.UpstreamURL, r.Upstreams = "", nil
-		}
+		requirePublishedRouteServingEvidence(&bindings[i], healthy)
 	}
 	return bindings
+}
+
+func requirePublishedRouteServingEvidence(r *model.EdgeRouteBinding, healthy map[string]bool) {
+	if r.Status != model.EdgeRouteStatusActive {
+		return
+	}
+	for group, ok := range healthy {
+		if ok && (r.PolicyEdgeGroupID == "" || r.PolicyEdgeGroupID == group) && !slices.Contains(r.ExcludedEdgeGroupIDs, group) {
+			return
+		}
+	}
+	r.Status = model.EdgeRouteStatusUnavailable
+	r.StatusReason = "published traffic consumers have not provided fresh matching serving evidence"
+	r.UpstreamURL, r.Upstreams = "", nil
+}
+
+func publishedRouteSelection(r model.EdgeRouteBinding) model.PublishedRouteSelection {
+	selection := model.PublishedRouteSelection{
+		PathPrefix: r.PathPrefix, Status: r.Status,
+		HasUpstream: r.UpstreamURL != "" || len(r.Upstreams) > 0,
+	}
+	for _, upstream := range r.Upstreams {
+		if upstream.ReleaseID != "" {
+			selection.ReleaseWeights = append(selection.ReleaseWeights, model.PublishedReleaseWeight{
+				ReleaseID: upstream.ReleaseID, Weight: upstream.Weight,
+			})
+		}
+	}
+	return selection
 }

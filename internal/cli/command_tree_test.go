@@ -581,6 +581,34 @@ func TestRunAppCommandShowRedactsAppSecretsInJSON(t *testing.T) {
 	}
 }
 
+func TestRunAdminEdgeRouteCheckSeparatesPublicationFromServingEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/admin/routes/explain/route.example.test" {
+			http.Error(w, "unexpected route diagnostic request", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"explain":{"hostname":"route.example.test","serving_mode":"degraded","route":{"status":"unavailable"},"traffic_release":{"release_id":"platform-release","release_channel":"full","route_artifact_sequence":42},"published_routes":[{"path_prefix":"/","status":"active","has_upstream":true,"release_weights":[{"release_id":"app-release","weight":100}]}]}}`))
+	}))
+	defer server.Close()
+	for _, format := range []string{"text", "json"} {
+		t.Run(format, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			args := []string{"--base-url", server.URL, "--token", "token", "admin", "edge", "route-check", "route.example.test"}
+			if format == "json" {
+				args = append(args, "-o", format)
+			}
+			if err := runWithStreams(args, &stdout, &stderr); err != nil {
+				t.Fatal(err, stderr.String())
+			}
+			for _, want := range []string{"degraded", "platform-release", "app-release", "42"} {
+				if !strings.Contains(stdout.String(), want) {
+					t.Fatal("missing", want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestRunAppRouteCheckUsesPathPrefix(t *testing.T) {
 	t.Parallel()
 

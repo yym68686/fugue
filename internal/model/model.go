@@ -3282,14 +3282,29 @@ type RestoreManifest struct {
 }
 
 type RouteExplainResponse struct {
-	Hostname          string             `json:"hostname"`
-	ServingMode       string             `json:"serving_mode"`
-	Route             *EdgeRouteBinding  `json:"route,omitempty"`
-	Routes            []EdgeRouteBinding `json:"routes,omitempty"`
-	HealthyEdgeGroups map[string]bool    `json:"healthy_edge_groups,omitempty"`
-	FallbackChain     []string           `json:"fallback_chain,omitempty"`
-	Reasons           []string           `json:"reasons,omitempty"`
-	GeneratedAt       time.Time          `json:"generated_at"`
+	Hostname          string                    `json:"hostname"`
+	ServingMode       string                    `json:"serving_mode"`
+	TrafficRelease    *TrafficReleaseBinding    `json:"traffic_release,omitempty"`
+	PublishedRoutes   []PublishedRouteSelection `json:"published_routes,omitempty"`
+	Route             *EdgeRouteBinding         `json:"route,omitempty"`
+	Routes            []EdgeRouteBinding        `json:"routes,omitempty"`
+	HealthyEdgeGroups map[string]bool           `json:"healthy_edge_groups,omitempty"`
+	FallbackChain     []string                  `json:"fallback_chain,omitempty"`
+	Reasons           []string                  `json:"reasons,omitempty"`
+	GeneratedAt       time.Time                 `json:"generated_at"`
+}
+
+// PublishedRouteSelection describes intent, not consumer or origin health.
+type PublishedRouteSelection struct {
+	PathPrefix     string                   `json:"path_prefix"`
+	Status         string                   `json:"status"`
+	HasUpstream    bool                     `json:"has_upstream"`
+	ReleaseWeights []PublishedReleaseWeight `json:"release_weights,omitempty"`
+}
+
+type PublishedReleaseWeight struct {
+	ReleaseID string `json:"release_id"`
+	Weight    int    `json:"weight"`
 }
 
 type RouteServingMode struct {

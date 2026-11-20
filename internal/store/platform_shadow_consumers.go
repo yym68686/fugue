@@ -228,11 +228,11 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.P
 
 func pgLockShadowConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims) error {
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, true); err != nil {
-		return markConsumerAdmissionLockBusy(err)
+		return markPreApplyAdmissionLockBusy(err)
 	}
 	// Serialize first inserts as well as updates without touching serving.
 	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "fugue-shadow/"+claims.ConsumerID()+"/"+claims.ScopeKey)
-	return markConsumerAdmissionLockBusy(err)
+	return markPreApplyAdmissionLockBusy(err)
 }
 
 func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {

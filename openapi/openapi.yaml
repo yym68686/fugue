@@ -35510,7 +35510,13 @@ components:
       additionalProperties: true
       properties:
         traffic_release:
+          description: Selected signed traffic publication, not evidence that a request was served by it.
           $ref: "#/components/schemas/TrafficReleaseBinding"
+        published_routes:
+          description: Targets in the selected signed route bundle before applying live consumer evidence. Does not attest to traffic served. Use route, routes and healthy_edge_groups for the evidence-gated view.
+          type: array
+          items:
+            $ref: "#/components/schemas/PublishedRouteSelection"
         hostname:
           type: string
         serving_mode:
@@ -35537,6 +35543,28 @@ components:
         generated_at:
           type: string
           format: date-time
+    PublishedRouteSelection:
+      type: object
+      additionalProperties: false
+      required: [path_prefix, status, has_upstream]
+      properties:
+        path_prefix:
+          type: string
+        status:
+          type: string
+        has_upstream:
+          type: boolean
+        release_weights:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [release_id, weight]
+            properties:
+              release_id:
+                type: string
+              weight:
+                type: integer
     RouteExplainResponseEnvelope:
       type: object
       additionalProperties: false

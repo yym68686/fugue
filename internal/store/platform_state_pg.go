@@ -389,16 +389,17 @@ func (s *Store) pgReleasePreparedPlatformArtifact(ctx context.Context, id string
 		return artifact, release, message, nil, ErrInvalidInput
 	}
 	canonicalID := proof.publication.artifactID
-	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+	err = s.consumePreparedPublicationInput(ctx, guard, proof, pins, func(ctx context.Context, tx *sql.Tx) error {
+		advancePlatformMutationTrace(ctx, "admission-reconfiguration-lock")
 		if err := pgLockProducerReconfiguration(ctx, tx, canonicalID, req); err != nil {
 			return err
 		}
 		if guard != nil {
-			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+			if err := pgLockPublicationAdmissionPolicy(ctx, tx, guard); err != nil {
 				return err
 			}
 		}
-		return pgLockPlatformReleaseMutation(ctx, tx, canonicalID, guard != nil || req.DNSPublicationPrecondition != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow)
+		return pgLockPublicationAdmissionArtifact(ctx, tx, canonicalID, guard != nil || req.DNSPublicationPrecondition != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow, guard != nil)
 	}, func(ctx context.Context, tx *sql.Tx) error {
 		var inner error
 		artifact, release, message, lkg, inner = s.pgReleasePlatformArtifactInTransaction(ctx, tx, canonicalID, req, principal, guard, trace)
@@ -652,13 +653,13 @@ func (s *Store) pgRollbackPreparedPlatformArtifact(ctx context.Context, id strin
 		return artifact, release, message, nil, ErrInvalidInput
 	}
 	canonicalID := proof.publication.artifactID
-	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+	err = s.consumePreparedPublicationInput(ctx, guard, proof, pins, func(ctx context.Context, tx *sql.Tx) error {
 		if guard != nil {
-			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+			if err := pgLockPublicationAdmissionPolicy(ctx, tx, guard); err != nil {
 				return err
 			}
 		}
-		return pgLockPlatformReleaseMutation(ctx, tx, canonicalID, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow)
+		return pgLockPublicationAdmissionArtifact(ctx, tx, canonicalID, NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow, guard != nil)
 	}, func(ctx context.Context, tx *sql.Tx) error {
 		var inner error
 		artifact, release, message, lkg, inner = s.pgRollbackPlatformArtifactInTransaction(ctx, tx, canonicalID, req, principal, guard, trace)
@@ -894,18 +895,18 @@ func (s *Store) pgVerifyPreparedPlatformArtifactReleaseLKG(ctx context.Context, 
 	if !compilerInputProofHasLKGPromotionRoot(proof, releaseID, guard) {
 		return artifact, release, message, nil, ErrInvalidInput
 	}
-	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
-		trace.advance("publication-input-lock-order")
+	err = s.consumePreparedPublicationInput(ctx, guard, proof, pins, func(ctx context.Context, tx *sql.Tx) error {
 		if guard != nil {
-			if err := pgLockProducerPolicy(ctx, tx, guard); err != nil {
+			if err := pgLockPublicationAdmissionPolicy(ctx, tx, guard); err != nil {
 				return err
 			}
 		}
+		advancePlatformMutationTrace(ctx, "admission-read-publication-scope")
 		release, err := pgGetPlatformArtifactRelease(ctx, tx, releaseID, false)
 		if err != nil {
 			return mapDBErr(err)
 		}
-		return pgLockPromotionScope(ctx, tx, release.ScopeKey, true)
+		return pgLockPublicationAdmissionScope(ctx, tx, release.ScopeKey, true, guard != nil, "admission-output-scope-lock")
 	}, func(ctx context.Context, tx *sql.Tx) error {
 		var innerErr error
 		artifact, release, message, lkg, innerErr = s.pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx, tx, releaseID, req, principal, guard, trace)
@@ -1950,7 +1951,7 @@ func pgLockConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platfo
 		return false, err
 	}
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, rollbackScope); err != nil {
-		return false, markConsumerAdmissionLockBusy(err)
+		return false, markPreApplyAdmissionLockBusy(err)
 	}
 	return rollbackScope, nil
 }

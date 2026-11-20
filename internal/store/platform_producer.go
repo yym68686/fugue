@@ -392,12 +392,20 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 // lock; guard validation later requires this exact current lane and authority.
 // This preserves policy-before-output lock ordering for every independent cell.
 func pgLockProducerPolicy(ctx context.Context, tx *sql.Tx, guard *platformProducerReleaseGuard) error {
-	r, err := pgGetPlatformArtifactRelease(ctx, tx, guard.PolicyReleaseID, false)
+	scope, err := pgProducerPolicyScope(ctx, tx, guard)
 	if err != nil {
 		return err
 	}
-	if r.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformproducer.IsPolicyScope(r.ScopeKey) {
-		return ErrConflict
+	return pgLockPromotionScope(ctx, tx, scope, true)
+}
+
+func pgProducerPolicyScope(ctx context.Context, tx *sql.Tx, guard *platformProducerReleaseGuard) (string, error) {
+	r, err := pgGetPlatformArtifactRelease(ctx, tx, guard.PolicyReleaseID, false)
+	if err != nil {
+		return "", err
 	}
-	return pgLockPromotionScope(ctx, tx, r.ScopeKey, true)
+	if r.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformproducer.IsPolicyScope(r.ScopeKey) {
+		return "", ErrConflict
+	}
+	return r.ScopeKey, nil
 }

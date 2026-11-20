@@ -173,21 +173,20 @@ func (s *Server) handleExplainRoute(w http.ResponseWriter, r *http.Request) {
 		writeRouteDiagnosticError(w, err)
 		return
 	}
-	response := publishedRouteExplainResponse{
+	response := model.RouteExplainResponse{
 		TrafficRelease: snapshot.TrafficRelease,
-		RouteExplainResponse: model.RouteExplainResponse{
-			Hostname: hostname, ServingMode: "unrouted",
-			HealthyEdgeGroups: healthyEdgeGroups, GeneratedAt: time.Now().UTC(),
-		},
+		Hostname:       hostname, ServingMode: "unrouted",
+		HealthyEdgeGroups: healthyEdgeGroups, GeneratedAt: time.Now().UTC(),
 	}
-	for _, route := range publishedRouteDiagnosticBindings(snapshot, healthyEdgeGroups) {
+	for _, route := range edgeRouteIntentDiagnosticBindings(snapshot.Routes) {
 		if !strings.EqualFold(normalizeExternalAppDomain(route.Hostname), hostname) {
 			continue
 		}
-		routeCopy := route
-		response.Routes = append(response.Routes, routeCopy)
+		response.PublishedRoutes = append(response.PublishedRoutes, publishedRouteSelection(route))
+		requirePublishedRouteServingEvidence(&route, healthyEdgeGroups)
+		response.Routes = append(response.Routes, route)
 		if response.Route == nil {
-			response.Route = &routeCopy
+			response.Route = &route
 			response.ServingMode = routeServingMode(route)
 			response.FallbackChain = routeFallbackChain(route)
 			response.Reasons = routeExplainReasons(route)
