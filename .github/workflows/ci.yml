@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches-ignore: ['verify/fugue-collector-passive-20261120']
+    branches-ignore: ['verify/fugue-collector-passive-20261120', 'verify/fugue-collector-passive-rollout-20261120']
   pull_request:
   schedule:
     - cron: '23 18 * * *'

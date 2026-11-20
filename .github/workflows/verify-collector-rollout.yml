@@ -1,0 +1,44 @@
+# Isolated verification only. Do not merge this workflow or its CI exclusion.
+name: verify-collector-rollout
+
+on:
+  push:
+    branches: ['verify/fugue-collector-passive-rollout-20261120']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-collector-passive-rollout-20261120'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CANDIDATE: 69868474d2596067170616addf52b1ddf40d3089
+      CURRENT: ghcr.io/yym68686/fugue-telemetry-agent@sha256:fd663d9c259d63a2a065caeba006f3ef7d60926042fb9d2082d73eefd53b8703
+      ROLLBACK: ghcr.io/yym68686/fugue-telemetry-agent@sha256:d5ebf6a22462984ffd75e65a07bba5b124b9a1617dc18f3f426743c3241e4e99
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build exact candidate without publishing an image
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          git archive "$CANDIDATE" | tar -x -C "$dir"
+          docker build --platform linux/amd64 --label "org.opencontainers.image.revision=$CANDIDATE" \
+            -f "$dir/Dockerfile.telemetry-agent" -t fugue-collector-fixture:candidate "$dir"
+      - name: Verify OCI identity and exercise both checkpoint handoffs
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$CURRENT"
+          docker pull --platform linux/amd64 "$ROLLBACK"
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/fixture-lease-decode" ./scripts/verify_collector_fixture_lease_decode.go
+          "$RUNNER_TEMP/fixture-lease-decode" --self-test
+          export FIXTURE_LEASE_DECODE="$RUNNER_TEMP/fixture-lease-decode"
+          python3 scripts/verify_collector_rollout_fixture.py "$CURRENT" fugue-collector-fixture:candidate "$ROLLBACK"
