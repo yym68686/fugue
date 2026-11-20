@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,15 @@ class ObservationUnavailable(RuntimeError):
     """A read-only Kubernetes observation is temporarily unavailable."""
 
 
+class PublicDNSVerificationFailed(RuntimeError):
+    """An actual authoritative UDP/TCP sample failed after a switch."""
+
+    def __init__(self, samples):
+        super().__init__("post-handoff public UDP/TCP verification failed")
+        self.samples = [{key: item.get(key) for key in ("hostname", "type", "transport", "reason", "response_code")}
+                        for item in samples]
+
+
 def load_config(path):
     config = json.loads(Path(path).read_text())
     fields = {"apiVersion", "kind", "generation", "namespace", "listeners"}
@@ -39,12 +49,17 @@ def load_config(path):
         fields.update({"recoveries", "verifier_revision"})
     if version == "transport.fugue.dev/v4":
         fields.add("handoffs")
+        if "rollback_generation" in config:
+            fields.add("rollback_generation")
     if set(config) != fields:
         raise ValueError("unknown or missing transport configuration fields")
     if version not in {f"transport.fugue.dev/v{n}" for n in (1, 2, 3, 4)} or config["kind"] != "DNSLocalTransport":
         raise ValueError("invalid transport schema")
     if type(config["generation"]) is not int or config["generation"] <= 0:
         raise ValueError("positive integer generation is required")
+    if "rollback_generation" in config and (type(config["rollback_generation"]) is not int or
+            config["rollback_generation"] != config["generation"] + 1):
+        raise ValueError("staged DNS compensation requires a reserved next generation")
     name_pattern = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
     if not isinstance(config["namespace"], str) or not re.fullmatch(name_pattern, config["namespace"]):
         raise ValueError("canonical namespace is required")
@@ -89,8 +104,10 @@ def load_config(path):
             seen.add(recovery['listener'])
     if "handoffs" in config:
         stages = config["handoffs"]
-        if not isinstance(stages, list) or not 1 <= len(stages) <= 8:
+        if not isinstance(stages, list) or len(stages) > 8:
             raise ValueError("bounded DNS handoff sequence required")
+        if not stages and "rollback_generation" in config:
+            raise ValueError("DNS transport hold cannot reserve a compensation generation")
         seen = set()
         for stage in stages:
             if not isinstance(stage, dict) or set(stage) != {"address", "previous_revision", "candidate_revision"}:
@@ -345,6 +362,7 @@ def handoff_witness(config, listener, current):
                                "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
             validate_handoff_endpoints(current, old["pod"], slices, old_port)
             if stage:
+                verify_staged_backend(old, namespace, old_port)
                 verify_staged_backend(candidate, namespace, listener["targetPort"])
             validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
             return {"node_uid": owner["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
@@ -467,6 +485,13 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
                 result = subprocess.run([observer, str(intent), str(expected)], capture_output=True, text=True, timeout=90)
             accepted = json.loads(result.stdout)
             if result.returncode != 0 or accepted.get("passed") is not True:
+                # Retry stale expectations, but do not leave a publicly failing
+                # socket on the candidate for several more observation rounds.
+                failures = [sample for sample in accepted.get("observations", [])
+                            if not sample.get("passed") and sample.get("reason") not in
+                            ("verified_expectation_unavailable", "verified_expectation_expired")]
+                if port == 53 and failures:
+                    raise PublicDNSVerificationFailed(failures)
                 raise ValueError("post-handoff public UDP/TCP verification failed")
             verify_staged_backend(candidate, namespace, listener["targetPort"], verifier)
             signed = candidate["snapshot"]
@@ -483,15 +508,84 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
             time.sleep(HANDOFF_RETRY_SECONDS)
 
 
+def restore_staged_listener(config, operation, witness, write_acknowledged, *, raced_forward=False):
+    _, _, listener, previous, _ = operation
+    namespace = config["namespace"]
+    args = ("get", "service", listener["name"], "-n", namespace, "-o", "json")
+    live = read_json(*args)
+    before_meta, live_meta = previous["metadata"], live["metadata"]
+    if live_meta.get("uid") != before_meta["uid"] or live_meta.get("labels") != before_meta["labels"]:
+        raise ValueError("DNS compensation refuses a replaced or relabeled Service")
+    on_predecessor = live["spec"] == previous["spec"] and live_meta["annotations"] == before_meta["annotations"]
+    if on_predecessor:
+        if write_acknowledged:
+            raise ValueError("acknowledged DNS handoff reverted outside this execution")
+        if live_meta["resourceVersion"] != before_meta["resourceVersion"]:
+            return None  # The forward CAS cannot still commit against this version.
+        # The failed client call might still have a write in flight. Fence it
+        # by advancing only our own generation on the exact predecessor.
+    desired = service(config, listener)
+    def normalized(spec):
+        return dict(spec, publishNotReadyAddresses=bool(spec.get("publishNotReadyAddresses")))
+    def is_attempted_state(state):
+        meta = state["metadata"]
+        return (meta.get("uid") == before_meta["uid"] and meta.get("labels") == before_meta["labels"] and
+                normalized(state["spec"]) == normalized(previous["spec"] | desired["spec"]) and
+                meta.get("annotations") == before_meta["annotations"] | desired["metadata"]["annotations"])
+    if raced_forward and not is_attempted_state(live):
+        raise ValueError("DNS compensation cannot confirm the raced forward write")
+    if not on_predecessor and not is_attempted_state(live):
+        raise ValueError("DNS compensation refuses Service state not written by this handoff")
+    validate_existing(live, desired)
+    owner = listener_node(listener)["metadata"]
+    port = current_target_port(previous)
+    old = handoff_backend(namespace, previous["spec"]["selector"], owner["name"], port)
+    identity = old["pod"]["metadata"]
+    if (owner["uid"] != witness["node_uid"] or identity["uid"] != witness["old_uid"] or
+            identity.get("annotations", {}).get("fugue.pro/oci-revision") != witness["previous_revision"]):
+        raise ValueError("DNS compensation predecessor identity changed")
+    verify_staged_backend(old, namespace, port)
+    previous_listener = dict(listener, selector=previous["spec"]["selector"], targetPort=port)
+    rollback_config = dict(config, generation=config["rollback_generation"],
+                           listeners=[previous_listener if item["name"] == listener["name"] else item for item in config["listeners"]])
+    restore = service(rollback_config, previous_listener)
+    if restore["metadata"]["annotations"][DIGEST] != before_meta["annotations"][DIGEST]:
+        raise ValueError("DNS compensation could not reproduce the original Service declaration")
+    body = json.dumps(update_patch(live, restore))
+    write_error = None
+    try:
+        kubectl("patch", "service", listener["name"], "-n", namespace, "--type=json", "--field-manager=" + MANAGER,
+                "--patch-file=/dev/stdin", body=body)
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        write_error = error
+    # Read back even after an ambiguous response to the compensation CAS.
+    restored = read_json(*args)
+    if on_predecessor and write_error is not None and is_attempted_state(restored):
+        # The outstanding forward CAS won before we could fence it. Verify its
+        # exact write and the predecessor again before one compensating CAS.
+        return restore_staged_listener(config, operation, witness, False, raced_forward=True)
+    validate_existing(restored, restore)
+    if (restored["metadata"].get("uid") != before_meta["uid"] or
+            restored["metadata"].get("labels") != before_meta["labels"] or
+            restored["metadata"].get("annotations") != before_meta["annotations"] | restore["metadata"]["annotations"] or
+            normalized(restored["spec"]) != normalized(previous["spec"])):
+        raise ValueError("DNS compensation restore could not be read back") from write_error
+    return rollback_config
+
+
 def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage):
-    def apply_one(operation, diagnostic_policy=None):
+    def apply_one(operation, diagnostic_policy=None, attempted=None):
         command, body, listener, current, witness = operation
         if witness is not None:
             witness = revalidate_handoff_witness(config, listener, current, witness)
         if diagnostic_policy is not None and any(
                 diagnostic_policy[k] != witness[k] for k in ("candidate_uid", "assignment", "parent_digest", "plan_digest")):
             raise ValueError("DNS handoff assignment changed after diagnostic verification")
+        if attempted is not None:
+            attempted.append([operation, witness, False])
         kubectl(*command, body=body)
+        if attempted is not None:
+            attempted[-1][2] = True
         evidence['applied'].append(listener['name'])
         save_evidence()
         print("reconciled Service/" + listener["name"], flush=True)
@@ -501,33 +595,64 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         for operation in planned:
             apply_one(operation)
         return
-    evidence["diagnostic_verifications"], evidence["public_verifications"] = [], []
+    evidence["diagnostic_verifications"], evidence["public_verifications"], evidence["compensations"] = [], [], []
     for stage in config["handoffs"]:
         diagnostic = stage_diagnostic(config, stage["address"])
         diagnostic_policy = None
-        for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
-            operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
-            witness = None
-            if operation:
-                witness = apply_one(operation, diagnostic_policy)
-            # Re-observe even if the socket was switched by a previous run.
-            try:
-                observed = verify_stage(config, stage, witness, port)
-            except (ValueError, RuntimeError, subprocess.TimeoutExpired):
-                evidence[report].append({"address": stage["address"], "port": port, "passed": False})
+        attempted = []
+        try:
+            for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
+                operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
+                witness = apply_one(operation, diagnostic_policy, attempted) if operation else None
+                # Re-observe even if the socket was switched by a previous run.
+                try:
+                    observed = verify_stage(config, stage, witness, port)
+                except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    failure = {"address": stage["address"], "port": port, "passed": False}
+                    if isinstance(error, PublicDNSVerificationFailed):
+                        failure["failed_samples"] = error.samples
+                    evidence[report].append(failure)
+                    raise
+                evidence[report].append({"address": stage["address"], "port": port, "result": observed})
+                if port == diagnostic["port"]:
+                    diagnostic_policy = observed["verified_backend"]
                 save_evidence()
-                raise
-            evidence[report].append({"address": stage["address"], "port": port, "result": observed})
-            if port == diagnostic["port"]:
-                diagnostic_policy = observed["verified_backend"]
-            save_evidence()
+        except (Exception, KeyboardInterrupt):
+            compensation_errors, public = [], None
+            for operation, witness, acknowledged in reversed(attempted):
+                listener = operation[2]
+                entry = {"listener": listener["name"], "result": "unverified"}
+                evidence["compensations"].append(entry)
+                try:
+                    rollback = restore_staged_listener(config, operation, witness, acknowledged)
+                    entry["result"] = "restored" if rollback is not None else "not_applied"
+                    if rollback is not None and listener["port"] == 53:
+                        public = (rollback, witness, entry)
+                except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    compensation_errors.append(error)
+            if public is not None:
+                rollback, witness, entry = public
+                try:
+                    entry["public_verification"] = verify_stage(rollback, dict(stage, candidate_revision=witness["previous_revision"]),
+                        {"candidate_uid": witness["old_uid"], "node_uid": witness["node_uid"]}, 53)
+                except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                    entry["result"] = "restored_public_unverified"
+                    compensation_errors.append(error)
+            if attempted:
+                save_evidence()
+            if compensation_errors:
+                raise RuntimeError("DNS handoff failed and compensation could not be fully verified") from ExceptionGroup(
+                    "DNS compensation errors", compensation_errors)
+            raise
 
 
 def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
     if apply and (config.get('recovery') or config.get('recoveries') or config.get('handoffs')) and not evidence_path:
         raise ValueError('DNS handoff or recovery requires durable prewrite evidence')
-    if apply and 'handoffs' in config and not verify_stage:
+    if apply and config.get('handoffs') and not verify_stage:
         raise ValueError("DNS staged handoff requires a public verifier")
+    if apply and config.get('handoffs') and "rollback_generation" not in config:
+        raise ValueError("DNS staged handoff requires a reserved compensation generation")
     planned = []
     inventory = json.loads(kubectl("get", "services", "--all-namespaces", "-o", "json"))["items"]
     for listener in config["listeners"]:
@@ -578,6 +703,8 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
                 'declaration_digest': 'sha256:' + hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                 'operations': [{'listener': listener['name'], 'patch': json.loads(body), 'witness': witness}
                                for _, body, listener, _, witness in planned], 'applied': []}
+    if "rollback_generation" in config:
+        evidence["rollback_generation"] = config["rollback_generation"]
     def save_evidence():
         if evidence_path:
             evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -620,10 +747,13 @@ def main():
     if args.verifier:
         os.environ["FUGUE_DNS_OBSERVATION_VERIFIER"] = str(args.verifier.resolve())
     verify_stage = None
-    if args.apply and "handoffs" in config:
+    if args.apply and config.get("handoffs"):
         if not args.public_observation or not args.observer or not args.verifier:
             parser.error("staged handoff requires public observation declaration, observer and verifier")
         from functools import partial
+        def interrupted(_signum, _frame):
+            raise RuntimeError("DNS staged handoff interrupted")
+        signal.signal(signal.SIGTERM, interrupted)
         verify_stage = partial(observe_stage, policy_path=args.public_observation, observer=str(args.observer.resolve()),
                                verifier=str(args.verifier.resolve()))
     print("listeners=" + str(reconcile(config, args.apply, args.evidence, verify_stage)))

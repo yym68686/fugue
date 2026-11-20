@@ -81,6 +81,23 @@ class TransportTests(unittest.TestCase):
             mutate(config)
             with self.assertRaises(ValueError): self.load(config)
 
+    def test_empty_staged_declaration_is_a_read_only_transport_hold(self):
+        config = self.load(dict(self.config(), apiVersion="transport.fugue.dev/v4", handoffs=[]))
+        old = transport.service(config, config["listeners"][0])
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence.json"
+            with patch.object(transport, "kubectl", side_effect=['{"items":[]}', json.dumps(old)]) as kubectl:
+                self.assertEqual(transport.reconcile(config, apply=True, evidence_path=evidence), 0)
+                self.assertEqual(json.loads(evidence.read_text())["operations"], [])
+                self.assertTrue(all(call.args[0] == "get" for call in kubectl.call_args_list))
+            drift = copy.deepcopy(config)
+            drift["generation"] += 1
+            drift["listeners"][0]["selector"] = {"app": "candidate"}
+            with patch.object(transport, "kubectl", side_effect=['{"items":[]}', json.dumps(old)]) as kubectl:
+                with self.assertRaisesRegex(ValueError, "only update declared sites"):
+                    transport.reconcile(drift, apply=True, evidence_path=evidence)
+                self.assertTrue(all(call.args[0] == "get" for call in kubectl.call_args_list))
+
     def test_update_binds_identity_and_preserves_allocated_and_foreign_fields(self):
         config = self.config()
         old = transport.service(config, config["listeners"][0])
@@ -280,8 +297,9 @@ class TransportTests(unittest.TestCase):
             self.assertEqual((witness["old_uid"], witness["candidate_uid"]), ("old", "new"))
             self.assertEqual(witness["candidate_revision"], "2"*40)
             endpoints.assert_called_once()
-            self.assertEqual(verify.call_args.args[0]["pod"]["metadata"]["uid"], "new")
-            self.assertEqual(verify.call_args.args[1:], (config["namespace"], listener["targetPort"]))
+            self.assertEqual([call.args[0]["pod"]["metadata"]["uid"] for call in verify.call_args_list], ["old", "new"])
+            self.assertTrue(all(call.args[1:] == (config["namespace"], listener["targetPort"])
+                                for call in verify.call_args_list))
             with patch.object(transport, "HANDOFF_ATTEMPTS", 1):
                 verify.side_effect = ValueError("DNS recovery observation failed cryptographic or readiness verification: record_readiness")
                 with self.assertRaisesRegex(ValueError, "record_readiness"):
@@ -315,32 +333,57 @@ class TransportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "immutable"):
                 transport.verify_staged_backend(candidate, "system", port + 1)
 
-    def test_staged_handoff_stops_on_public_failure_and_reverifies_on_resume(self):
+    def test_staged_handoff_compensates_only_attempted_stage_and_reverifies_on_resume(self):
         one = dict(self.config()["listeners"][0], name="public-one", port=53)
         two = dict(one, name="public-two", address="9.9.9.9")
         diagnose = dict(one, port=15353, name="diagnostic-one")
         diagnose_two = dict(two, port=15353, name="diagnostic-two")
-        config = dict(self.config(), apiVersion="transport.fugue.dev/v4", listeners=[one, two, diagnose, diagnose_two],
+        config = dict(self.config(), apiVersion="transport.fugue.dev/v4", rollback_generation=2,
+                      listeners=[one, two, diagnose, diagnose_two],
                       handoffs=[{"address": x["address"], "previous_revision": "1"*40,
                                  "candidate_revision": "2"*40} for x in (one, two)])
         config = self.load(config)
-        witness = {"candidate_uid": "candidate", "assignment": {"fencing_token": 1},
+        with self.assertRaisesRegex(ValueError, "reserved next generation"):
+            self.load(dict(config, rollback_generation=3))
+        with self.assertRaisesRegex(ValueError, "reserved compensation generation"):
+            old_config = dict(config)
+            del old_config["rollback_generation"]
+            transport.reconcile(self.load(old_config), apply=True, evidence_path=Path("unused"), verify_stage=object())
+        witness = {"candidate_uid": "candidate", "old_uid": "old", "node_uid": "node",
+                   "previous_revision": "1"*40, "assignment": {"fencing_token": 1},
                    "parent_digest": "parent", "plan_digest": "plan"}
         def op(listener):
             return (["patch", listener["name"]], "{}", listener, {}, witness)
         def save():
             pass
-        def run(remaining, fail_port=None, changed_diagnostic=False):
+        def run(remaining, fail_port=None, fail_address=None, changed_diagnostic=False,
+                write_failure=None, restore_failure=False):
             evidence, history = {"applied": []}, []
             def verify(_, stage, binding, port):
                 history.append((stage["address"], port, binding))
-                if port == fail_port:
+                if port == fail_port and (fail_address is None or stage["address"] == fail_address) and binding == witness:
                     raise ValueError("UDP failed")
                 result = dict(witness, assignment={"fencing_token": 2}) if changed_diagnostic else witness
                 return {"passed": True, "verified_backend": result}
-            with patch.object(transport, "revalidate_handoff_witness", return_value=witness), patch.object(transport, "kubectl"):
+            def write(_, name, **kwargs):
+                if name == write_failure:
+                    raise RuntimeError("write response lost")
+            def restore(_, operation, observed, acknowledged):
+                if operation[2]["name"] == write_failure:
+                    self.assertFalse(acknowledged)
+                    if restore_failure:
+                        raise ValueError("foreign CAS")
+                else:
+                    self.assertTrue(acknowledged)
+                return config
+            with patch.object(transport, "revalidate_handoff_witness", return_value=witness), \
+                 patch.object(transport, "kubectl", side_effect=write), \
+                 patch.object(transport, "restore_staged_listener", side_effect=restore):
                 if changed_diagnostic:
                     with self.assertRaisesRegex(ValueError, "assignment changed after diagnostic"):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                elif write_failure:
+                    with self.assertRaisesRegex(RuntimeError, "could not be fully verified" if restore_failure else "response lost"):
                         transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 elif fail_port is None:
                     transport.apply_transport_steps(config, remaining, evidence, save, verify)
@@ -351,11 +394,21 @@ class TransportTests(unittest.TestCase):
         operations = [op(one), op(two), op(diagnose), op(diagnose_two)]
         evidence, history = run(operations, fail_port=15353)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["diagnostic-one"])
         self.assertEqual(history, [(one["address"], 15353, witness)])
         evidence, history = run(operations, fail_port=53)
         self.assertEqual(evidence["applied"], ["diagnostic-one", "public-one"])
         self.assertEqual(evidence["public_verifications"], [{"address": one["address"], "port": 53, "passed": False}])
-        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, witness)])
+        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["public-one", "diagnostic-one"])
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, witness),
+                                   (one["address"], 53, {"candidate_uid": "old", "node_uid": "node"})])
+        evidence, _ = run(operations, fail_port=53, fail_address=two["address"])
+        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["public-two", "diagnostic-two"])
+        evidence, _ = run(operations, write_failure="public-one")
+        self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["public-one", "diagnostic-one"])
+        evidence, _ = run(operations, write_failure="public-one", restore_failure=True)
+        self.assertEqual([x["result"] for x in evidence["compensations"]], ["unverified", "restored"])
         evidence, history = run(operations, changed_diagnostic=True)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
         self.assertEqual(history, [(one["address"], 15353, witness)])
@@ -363,6 +416,77 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),
                                    (two["address"], 15353, witness), (two["address"], 53, witness)])
+
+    def test_staged_compensation_cas_restores_exact_predecessor_and_rejects_drift(self):
+        prior = self.config()
+        old_listener = prior["listeners"][0]
+        previous = transport.service(prior, old_listener)
+        previous["metadata"].update(uid="service-uid", resourceVersion="11")
+        previous["metadata"]["annotations"]["unrelated"] = "keep"
+        previous["spec"]["clusterIP"] = "10.0.0.1"
+        listener = dict(old_listener, selector={"app": "new"}, targetPort=5353)
+        config = dict(prior, generation=2, rollback_generation=3, listeners=[listener])
+        witness = {"node_uid": "node-uid", "old_uid": "old-uid", "previous_revision": "1"*40}
+        operation = (None, None, listener, previous, witness)
+        desired = transport.service(config, listener)
+
+        def applied(declaration, revision):
+            state = copy.deepcopy(previous)
+            state["metadata"]["resourceVersion"] = revision
+            state["metadata"]["annotations"].update(declaration["metadata"]["annotations"])
+            state["spec"].update(declaration["spec"])
+            return state
+
+        live = applied(desired, "12")
+        restored = applied(transport.service(dict(prior, generation=3), old_listener), "13")
+        node = {"metadata": {"name": "node", "uid": witness["node_uid"]}}
+        backend = {"pod": {"metadata": {"uid": witness["old_uid"], "annotations":
+                                       {"fugue.pro/oci-revision": witness["previous_revision"]}}}}
+        with patch.object(transport, "listener_node", return_value=node), \
+             patch.object(transport, "handoff_backend", return_value=backend) as read_backend, \
+             patch.object(transport, "verify_staged_backend") as verify, \
+             patch.object(transport, "read_json") as read, patch.object(transport, "kubectl") as write:
+            for observed in (live, previous):
+                # The first case restored the candidate. The second fences a
+                # still-pending forward CAS on the original resourceVersion.
+                read.side_effect = [observed, restored]
+                write.side_effect = RuntimeError("lost compensation response")
+                result = transport.restore_staged_listener(config, operation, witness, observed is live)
+                self.assertEqual((result["generation"], result["listeners"]), (3, [old_listener]))
+                read_backend.assert_called_with("system", old_listener["selector"], "node", 53)
+                verify.assert_called_with(backend, "system", 53)
+                operations = json.loads(write.call_args.kwargs["body"])
+                self.assertEqual(operations[1]["value"], observed["metadata"]["resourceVersion"])
+                self.assertEqual(operations[2]["value"], observed["spec"])
+                self.assertEqual(operations[3]["value"], observed["metadata"]["annotations"])
+
+            write.reset_mock()
+            read.side_effect = [previous, live, live, restored]
+            self.assertIsNotNone(transport.restore_staged_listener(config, operation, witness, False))
+            self.assertEqual([json.loads(call.kwargs["body"])[1]["value"] for call in write.call_args_list], ["11", "12"])
+
+            rejected = copy.deepcopy(previous)
+            rejected["metadata"]["resourceVersion"] = "12"
+            read.side_effect = [rejected]
+            write.reset_mock()
+            self.assertIsNone(transport.restore_staged_listener(config, operation, witness, False))
+            write.assert_not_called()
+            for drift in ("uid", "annotations", "spec", "pod"):
+                current = copy.deepcopy(live)
+                old = copy.deepcopy(backend)
+                if drift == "uid":
+                    current["metadata"]["uid"] = "foreign"
+                if drift == "annotations":
+                    current["metadata"]["annotations"]["unrelated"] = "foreign"
+                if drift == "spec":
+                    current["spec"]["clusterIP"] = "10.0.0.2"
+                if drift == "pod":
+                    old["pod"]["metadata"]["uid"] = "foreign"
+                read.side_effect = [current]
+                read_backend.return_value = old
+                with self.assertRaises(ValueError):
+                    transport.restore_staged_listener(config, operation, witness, True)
+                write.assert_not_called()
 
     def test_assignment_refresh_requires_stable_complete_witness_and_same_identity(self):
         initial = {'node_uid':'node','old_uid':'old','candidate_uid':'candidate','assignment':{'fencing_token':1}}

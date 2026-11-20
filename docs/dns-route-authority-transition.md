@@ -107,3 +107,16 @@ positive proof. HTTP/2 uses GOAWAY and permits existing streams to finish;
 successful probes retain pooling, and ordinary application errors are copied
 unchanged. This is not permission to force a DNS Service handoff: the complete
 normal or explicitly authorized recovery witness is still required.
+
+A staged DNS transport handoff reserves the generation immediately after its
+forward generation for compensation. It verifies both the live predecessor and
+the candidate against fresh signed serving evidence before changing a socket,
+then verifies the diagnostic UDP/TCP listener before changing public port 53.
+If public observations fail, it may restore only this site's attempted changes,
+in reverse order. Compensation rechecks the exact predecessor and uses a CAS
+on the complete Service state; it cannot overwrite unrelated updates or a
+replaced Service. After a public restoration it verifies UDP/TCP again and
+reports failure if the restoration or observation cannot be confirmed. A new
+handoff after compensation needs a reviewed generation above the reserved one.
+An empty v4 handoff sequence is a read-only hold: existing listeners must match
+the declaration, and no writes are authorized.
