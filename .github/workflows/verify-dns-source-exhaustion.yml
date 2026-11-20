@@ -1,0 +1,45 @@
+# Isolated verification only; do not merge this workflow or the CI exclusion.
+name: verify-dns-source-exhaustion
+
+on:
+  push:
+    branches: ['verify/fugue-dns-source-exhaustion-20261120']
+
+permissions:
+  contents: read
+
+env:
+  FUGUE_SOURCE: 19dbff5bc390081fb9c565e04871367aa4473ea8
+  FUGUE_BASE: 94ae825ef3f65e5c2782e3e9c79968018c167938
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  verify:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-source-exhaustion-20261120'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.FUGUE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Verify exact clean candidate and run complete test suite
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FUGUE_SOURCE"
+          test "$(git rev-parse HEAD^)" = "$FUGUE_BASE"
+          test -z "$(git status --porcelain)"
+          make test GOCACHE="$(go env GOCACHE)"
+      - name: Verify bounded preflight receipts under the race detector
+        run: >-
+          go test -race ./internal/api
+          -run 'Test(DNSPreflightFactWitness|DNSPreflightReceipts|DNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities)'
+          -count=3
