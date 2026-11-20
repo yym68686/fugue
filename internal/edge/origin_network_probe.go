@@ -121,6 +121,16 @@ func (s *Service) probeOriginNetworkOnce(ctx context.Context, now time.Time, dia
 }
 
 func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRouteIndex, sample model.EdgeNetworkSample, dial func(context.Context, string, string) (net.Conn, error), inspect func(net.Conn) tcpdiag.Snapshot) {
+	sample, ok := s.measureOriginNetworkTarget(ctx, index, sample, dial, inspect)
+	if !ok {
+		return
+	}
+	s.networkSampleMu.Lock()
+	s.appendNetworkSampleLocked(sample)
+	s.networkSampleMu.Unlock()
+}
+
+func (s *Service) measureOriginNetworkTarget(ctx context.Context, index *edgeRouteIndex, sample model.EdgeNetworkSample, dial func(context.Context, string, string) (net.Conn, error), inspect func(net.Conn) tcpdiag.Snapshot) (model.EdgeNetworkSample, bool) {
 	probeContext, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	connection, err := dial(probeContext, "tcp", sample.ServiceTarget)
@@ -128,7 +138,7 @@ func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRoute
 		defer connection.Close()
 	}
 	if ctx.Err() != nil {
-		return
+		return model.EdgeNetworkSample{}, false
 	}
 	failed := err != nil || connection == nil
 	sample.ServiceConnectFailed = &failed
@@ -137,22 +147,20 @@ func (s *Service) probeOriginNetworkTarget(ctx context.Context, index *edgeRoute
 		observation := edgeProxyObservation{BundleVersion: sample.BundleVersion}
 		route, ok, fallback, version, _ := index.routeForRequest(sample.Hostname, sample.PathPrefix)
 		if !ok || fallback || version != sample.BundleVersion {
-			return
+			return model.EdgeNetworkSample{}, false
 		}
 		observation.Route = route
 		measured, ok := originNetworkSample(&observation, connection.RemoteAddr(), inspect(connection), s.Config.EdgeID, s.Config.EdgeGroupID, sample.ObservedAt)
 		if !ok {
-			return
+			return model.EdgeNetworkSample{}, false
 		}
 		sample.ServiceRTTMS = measured.ServiceRTTMS
 	}
 	active, known := s.servingActiveForHeartbeat()
 	if !active || !known || s.currentRouteIndex() != index || !s.appTrafficProofApplied(index) || model.ValidateEdgeNetworkSample(sample) != nil {
-		return
+		return model.EdgeNetworkSample{}, false
 	}
-	s.networkSampleMu.Lock()
-	s.appendNetworkSampleLocked(sample)
-	s.networkSampleMu.Unlock()
+	return sample, true
 }
 
 func originNetworkProbeTarget(route model.EdgeRouteBinding, version, edgeID, groupID string, now time.Time) (model.EdgeNetworkSample, bool) {
