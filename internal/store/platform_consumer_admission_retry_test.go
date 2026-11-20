@@ -4,10 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"regexp"
 	"testing"
 	"time"
 
 	"fugue/internal/platformcontrol"
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestConsumerAdmissionLockRetryDoesNotReplayUnmarkedFailures(t *testing.T) {
@@ -144,5 +147,50 @@ func TestTrustedHeartbeatPublicationLockRetryAfterRollback(t *testing.T) {
 	})
 	if calls != 2 || err != nil {
 		t.Fatal("publication lock did not recover in fresh transaction", calls, err)
+	}
+}
+
+func TestShadowHeartbeatPublicationLockRetryAfterRollback(t *testing.T) {
+	for _, busyAt := range []string{"scope", "consumer"} {
+		t.Run(busyAt, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			claims := platformcontrol.PlatformComponentIdentityClaims{ScopeKey: "neutral-scope"}
+			scope := regexp.QuoteMeta("SELECT pg_advisory_xact_lock($1)")
+			consumer := regexp.QuoteMeta("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+			lockTimeout := &pgconn.PgError{Code: "55P03"}
+			mock.ExpectBegin()
+			if busyAt == "scope" {
+				mock.ExpectExec(scope).WillReturnError(lockTimeout)
+			} else {
+				mock.ExpectExec(scope).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec(consumer).WithArgs("fugue-shadow/" + claims.ConsumerID() + "/" + claims.ScopeKey).WillReturnError(lockTimeout)
+			}
+			mock.ExpectRollback()
+			mock.ExpectBegin()
+			mock.ExpectExec(scope).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectExec(consumer).WithArgs("fugue-shadow/" + claims.ConsumerID() + "/" + claims.ScopeKey).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectCommit()
+			err = retryConsumerAdmissionLock(t.Context(), func(ctx context.Context) error {
+				tx, err := db.BeginTx(ctx, nil)
+				if err != nil {
+					return err
+				}
+				defer tx.Rollback()
+				if err := pgLockShadowConsumerHeartbeatScope(ctx, tx, claims); err != nil {
+					return err
+				}
+				return tx.Commit()
+			})
+			if err != nil {
+				t.Fatal("shadow lock did not recover in a fresh transaction", err)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

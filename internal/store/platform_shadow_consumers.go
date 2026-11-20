@@ -210,22 +210,29 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.P
 		return model.PlatformConsumerInstance{}, err
 	}
 	var out model.PlatformConsumerInstance
-	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
-		if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, true); err != nil {
+	err = retryConsumerAdmissionLock(ctx, func(ctx context.Context) error {
+		return s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
+			return pgLockShadowConsumerHeartbeatScope(ctx, tx, claims)
+		}, func(ctx context.Context, tx *sql.Tx) error {
+			acceptAt := time.Now().UTC()
+			if at.After(acceptAt) {
+				acceptAt = at
+			}
+			var err error
+			out, err = s.pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx, tx, claims, h, acceptAt, audit)
 			return err
-		}
-		// Serialize first inserts as well as updates without touching serving.
-		_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "fugue-shadow/"+claims.ConsumerID()+"/"+claims.ScopeKey)
-		return err
-	}, func(ctx context.Context, tx *sql.Tx) error {
-		acceptAt := time.Now().UTC()
-		if at.After(acceptAt) {
-			acceptAt = at
-		}
-		out, err = s.pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx, tx, claims, h, acceptAt, audit)
-		return err
+		})
 	})
 	return out, err
+}
+
+func pgLockShadowConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims) error {
+	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, true); err != nil {
+		return markConsumerAdmissionLockBusy(err)
+	}
+	// Serialize first inserts as well as updates without touching serving.
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "fugue-shadow/"+claims.ConsumerID()+"/"+claims.ScopeKey)
+	return markConsumerAdmissionLockBusy(err)
 }
 
 func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context.Context, tx *sql.Tx, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {

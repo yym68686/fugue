@@ -13,8 +13,18 @@ type consumerAdmissionLockBusy struct{ error }
 
 func (err *consumerAdmissionLockBusy) Unwrap() error { return err.error }
 func (err *consumerAdmissionLockBusy) SQLState() string {
-	// Both marking sites require the same lock-unavailable classification.
+	// Only pre-apply lock failures have this classification.
 	return "55P03"
+}
+
+// Call only for explicitly identified pre-apply locks. A lock error from
+// business validation, a write, or commit must not be replayed.
+func markConsumerAdmissionLockBusy(err error) error {
+	var pgError interface{ SQLState() string }
+	if errors.As(err, &pgError) && pgError.SQLState() == "55P03" {
+		return &consumerAdmissionLockBusy{err}
+	}
+	return err
 }
 
 // The caller owns the usual dependency proof and pin selection. Retry their

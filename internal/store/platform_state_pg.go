@@ -1950,11 +1950,7 @@ func pgLockConsumerHeartbeatScope(ctx context.Context, tx *sql.Tx, claims platfo
 		return false, err
 	}
 	if err := pgLockPromotionScope(ctx, tx, claims.ScopeKey, rollbackScope); err != nil {
-		var pgError interface{ SQLState() string }
-		if errors.As(err, &pgError) && pgError.SQLState() == "55P03" {
-			return false, &consumerAdmissionLockBusy{err}
-		}
-		return false, err
+		return false, markConsumerAdmissionLockBusy(err)
 	}
 	return rollbackScope, nil
 }
