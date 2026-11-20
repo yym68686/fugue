@@ -62,7 +62,7 @@ func (s *Service) freshDNSRenewalCovers(base *dnsServingState) bool {
 		return false
 	}
 	horizon := time.Now().Add(time.Duration(current.payload.Policy.DNSReadiness.ProbeIntervalSeconds+current.payload.Policy.DNSReadiness.ProbeTimeoutSeconds) * time.Second)
-	return dnsServingReady(current, horizon) && probeDNSServingSnapshot(current) == nil
+	return dnsServingReady(current, horizon) && checkDNSServingSnapshot(current, horizon, false) == nil
 }
 
 func (s *Service) newDNSRenewalWorker() *Service {

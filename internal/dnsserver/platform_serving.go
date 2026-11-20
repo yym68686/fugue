@@ -376,7 +376,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
-	if same && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 && !old.checkedAt.After(time.Now()) && time.Since(old.checkedAt) < time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second && dnsServingReady(old, time.Now()) {
+	if now := time.Now().UTC(); same && old.record.Positive && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
+		!old.checkedAt.After(now) && now.Sub(old.checkedAt) < time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second &&
+		dnsServingReady(old, now) && checkDNSServingSnapshot(old, now, false) == nil {
 		if old.fallback != "" {
 			recovered := *old
 			recovered.fallback = ""
@@ -531,7 +533,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		rollback()
 		return err
 	}
-	if !dnsServingReady(st, time.Now()) {
+	if now := time.Now().UTC(); !dnsServingReady(st, now) || checkDNSServingSnapshot(st, now, false) != nil {
 		rollback()
 		return errors.New("DNS readiness expired during apply")
 	}
@@ -692,19 +694,42 @@ func (failure *dnsSnapshotProbeFailure) Error() string {
 }
 
 func probeDNSServingSnapshot(st *dnsServingState) error {
+	return checkDNSServingSnapshot(st, time.Time{}, true)
+}
+
+// The materialization-only check uses the caller's evaluation time and
+// bypasses wire encoding and diagnostic capture.
+func checkDNSServingSnapshot(st *dnsServingState, evaluatedAt time.Time, wire bool) error {
+	// A partial successor transition can answer individual live requests, but
+	// cannot prove this checkpoint is ready on its own.
+	if st.transition != nil {
+		copy := *st
+		copy.transition = nil
+		st = &copy
+	}
 	for _, zone := range st.zoneOrder {
 		for name, rows := range st.zones[zone].records {
 			for _, entry := range rows {
 				req := new(dns.Msg)
 				req.SetQuestion(dns.Fqdn(name), dns.StringToType[entry.record.Type])
-				now := time.Now().UTC()
-				capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
+				now := evaluatedAt
+				var capture *dnsDecisionCapture
+				if wire {
+					now = time.Now().UTC()
+					capture = &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
+				}
 				response := st.answerObserved(req, "", now, capture)
 				if response.Rcode != dns.RcodeSuccess {
+					if !wire {
+						return errors.New("DNS snapshot cannot materialize a declared answer")
+					}
 					// This detached candidate was never applied or checkpointed.
 					candidate := dnsPublication(st.record)
 					publication := DNSDecisionPublicationState{ObservedAt: now, DesiredKnown: true, Desired: &candidate, Outcome: "snapshot_probe_failed"}
 					return &dnsSnapshotProbeFailure{request: req, response: response, capture: capture, publication: publication, observedAt: now}
+				}
+				if !wire {
+					continue
 				}
 				raw, err := response.Pack()
 				if err != nil {

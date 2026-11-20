@@ -15,7 +15,9 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/dnsfacts"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
+	"github.com/miekg/dns"
 )
 
 func runtimeFactsFixture(t *testing.T) (*Service, *dnsServingState, time.Time) {
@@ -153,6 +155,82 @@ func TestDNSRuntimeFactsHTTPReadsOnlyTheCurrentVerifiedSnapshot(t *testing.T) {
 	s.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodGet, "/runtime-facts", nil))
 	if r.Code != 503 || r.Header().Get("X-Fugue-DNS-Observation-Rejection") != "state_missing" || r.Header().Get("Cache-Control") != "private, no-store" || strings.Contains(r.Body.String(), "unpublished-candidate") {
 		t.Fatal("missing serving state used candidate", r.Code, r.Body.String())
+	}
+}
+
+func TestDNSRuntimeFactsRequireAnAnswerFromTheExactSignedSelector(t *testing.T) {
+	_, base, _ := runtimeFactsFixture(t)
+	view, plan, policy, facts, now := queryExecutionFixture()
+	plan.Records[0].MinimumHealthyEdges = 1
+	payload := base.payload
+	payload.Plan, payload.Policy.DNSReadiness = &plan, &policy
+	payload.Queries = []platformconfig.DNSQueryView{view}
+	for i := range facts {
+		facts[i].Proof.TrafficRelease = base.facts[0].Proof.TrafficRelease
+		facts[i].Ready = facts[i].Proof.EdgeID == "edge-b"
+	}
+	record := &view.Records[0]
+	record.AnswerPolicy = physicalSelectionTestRecord(now).AnswerPolicy
+	record.AnswerPolicy.PhysicalSelection.PrimaryEdgeID = "edge-a"
+	record.AnswerPolicy.PhysicalSelection.OrderedEdgeIDs = []string{"edge-a"}
+
+	build := func(payload dnsServingPayload) *dnsServingState {
+		t.Helper()
+		st, err := buildDNSServingState(base.record, payload, base.routeID, view.NodeID, view.EdgeGroupID, facts, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	blocked := build(payload)
+	if !dnsServingReady(blocked, now) {
+		t.Fatal("the fallback's fresh proof must still satisfy the generic route quorum")
+	}
+	snapshot, err := dnsRuntimeFacts(blocked, now)
+	if err != nil || snapshot.Ready {
+		t.Fatalf("unranked proof appeared as an answer from the checkpoint: ready=%v err=%v", snapshot.Ready, err)
+	}
+	for _, fact := range snapshot.Facts {
+		if fact.Ready != (fact.Proof.EdgeID == "edge-b") {
+			t.Fatal("the transport verdict must not erase individual route evidence")
+		}
+	}
+
+	// An independently proved successor can legitimately serve a query. It
+	// still cannot certify the old checkpoint for promotion.
+	readyView := view
+	readyView.Records = append([]model.EdgeDNSRecord(nil), view.Records...)
+	selector := *record.AnswerPolicy.PhysicalSelection
+	selector.OrderedEdgeIDs = []string{"edge-a", "edge-b"}
+	readyView.Records[0].AnswerPolicy.PhysicalSelection = &selector
+	payload.Queries = []platformconfig.DNSQueryView{readyView}
+	ready := build(payload)
+	blocked.transition = &dnsRecordTransition{state: ready, hosts: map[string]bool{record.Name: true}}
+	request := new(dns.Msg)
+	request.SetQuestion(dns.Fqdn(record.Name), dns.TypeA)
+	if reply := blocked.answer(request, "", now); reply.Rcode != dns.RcodeSuccess || len(reply.Answer) != 1 {
+		t.Fatal("the authorized successor did not preserve live traffic", reply)
+	}
+	if checkDNSServingSnapshot(blocked, now, false) == nil || probeDNSServingSnapshot(blocked) == nil {
+		t.Fatal("the old checkpoint borrowed a successor answer")
+	}
+	if got, err := dnsRuntimeFacts(ready, now); err != nil || !got.Ready {
+		t.Fatalf("the ranked, fresh fallback did not satisfy the checkpoint: ready=%v err=%v", got.Ready, err)
+	}
+
+	// At a future renewal horizon, the shorter-lived selected route must
+	// not borrow a longer-lived unranked route's validity.
+	payload.Queries = []platformconfig.DNSQueryView{view}
+	for i := range facts {
+		facts[i].Ready = true
+		if facts[i].Proof.EdgeID == "edge-a" {
+			facts[i].Proof.ValidUntil = now.Add(10 * time.Second)
+		}
+	}
+	expiring := build(payload)
+	horizon := now.Add(12 * time.Second)
+	if checkDNSServingSnapshot(expiring, now, false) != nil || !dnsServingReady(expiring, horizon) || checkDNSServingSnapshot(expiring, horizon, false) == nil {
+		t.Fatal("future materialization did not detect loss of the only ranked route")
 	}
 }
 

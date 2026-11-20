@@ -39,6 +39,14 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 	sort.Slice(out.Facts, func(i, j int) bool { return out.Facts[i].ProbeID < out.Facts[j].ProbeID })
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, filtered, digest, st.checkedAt, now)
 	out.Ready = now.Before(until) && status.ReadyRecords == status.Records
+	if out.Ready {
+		// A transport handoff needs an answer from this exact checkpoint, not
+		// just a fresh route quorum. A signed selector can exclude the only
+		// healthy targets, or the live listener can be answering from a
+		// successor bridge whose proofs this checkpoint cannot export.
+		state, err := buildDNSServingState(st.record, st.payload, st.routeID, st.record.NodeID, st.record.GroupID, filtered, st.checkedAt)
+		out.Ready = err == nil && checkDNSServingSnapshot(state, now, false) == nil
+	}
 	return out, nil
 }
 
