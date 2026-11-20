@@ -28,7 +28,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa4d006ae7abdb4310
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
       - name: Verify candidate identity and run all tests
@@ -53,7 +53,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa4d006ae7abdb4310
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v4.2.0
       - name: Warm exactly the CI test binaries
