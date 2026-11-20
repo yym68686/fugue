@@ -330,6 +330,7 @@ def handoff_witness(config, listener, current):
     node = owner["metadata"]["name"]
     last_error = None
     stage = next((s for s in config.get("handoffs", []) if s["address"] == listener["address"]), None)
+    from scripts.recover_dns_transport import DNSObservationRejected
     attempts = RECOVERY_ATTEMPTS if selected else HANDOFF_ATTEMPTS
     for attempt in range(attempts):
         try:
@@ -362,8 +363,14 @@ def handoff_witness(config, listener, current):
                                "kubernetes.io/service-name=" + current["metadata"]["name"], "-o", "json")["items"]
             validate_handoff_endpoints(current, old["pod"], slices, old_port)
             if stage:
-                verify_staged_backend(old, namespace, old_port)
-                verify_staged_backend(candidate, namespace, listener["targetPort"])
+                for role, backend, port in (("predecessor", old, old_port),
+                                            ("candidate", candidate, listener["targetPort"])):
+                    try:
+                        verify_staged_backend(backend, namespace, port)
+                    except DNSObservationRejected as error:
+                        # Include the side, not the private verifier input.
+                        error.add_note("DNS staged listener " + listener["name"] + " " + role)
+                        raise
             validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
             return {"node_uid": owner["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
                     "candidate_uid": candidate["pod"]["metadata"]["uid"], **revisions,
@@ -380,6 +387,10 @@ def handoff_witness(config, listener, current):
                 "DNS recovery observation",
                 "DNS recovery candidate does not match current verified full authority",
             ])
+            if isinstance(error, DNSObservationRejected):
+                # A transiently incomplete set can get a fresh observation;
+                # an identity, signature, or positive-proof defect cannot.
+                retryable = stage is not None and error.category in ("record_readiness", "wire_materialization")
             if not retryable or attempt + 1 == attempts:
                 raise
             time.sleep(HANDOFF_RETRY_SECONDS)

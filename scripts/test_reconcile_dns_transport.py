@@ -272,6 +272,8 @@ class TransportTests(unittest.TestCase):
             transport.handoff_witness(config, dict(config["listeners"][0], targetPort=5353), current)
 
     def test_staged_handoff_observes_both_backends_in_one_fresh_window(self):
+        from scripts.recover_dns_transport import DNSObservationRejected
+
         config = self.config()
         current = transport.service(config, config["listeners"][0])
         listener = dict(config["listeners"][0], selector={"app": "candidate"})
@@ -304,6 +306,19 @@ class TransportTests(unittest.TestCase):
                 verify.side_effect = ValueError("DNS recovery observation failed cryptographic or readiness verification: record_readiness")
                 with self.assertRaisesRegex(ValueError, "record_readiness"):
                     transport.handoff_witness(config, listener, current)
+            with patch.object(transport, "HANDOFF_ATTEMPTS", 2), patch.object(transport.time, "sleep") as wait:
+                pending = DNSObservationRejected("wire_materialization")
+                verify.side_effect = [None, pending, None, None]
+                self.assertEqual(transport.handoff_witness(config, listener, current), witness)
+                self.assertIn("candidate", pending.__notes__[0])
+                wait.assert_called_once()
+                wait.reset_mock()
+                rejected = DNSObservationRejected("artifact_authentication")
+                verify.side_effect = rejected
+                with self.assertRaisesRegex(ValueError, "artifact_authentication"):
+                    transport.handoff_witness(config, listener, current)
+                self.assertIn("predecessor", rejected.__notes__[0])
+                wait.assert_not_called()
             verify.side_effect = None
             now = datetime.datetime.now(datetime.timezone.utc)
             snapshot["facts"][0]["proof"]["valid_until"] = (now - datetime.timedelta(seconds=1)).isoformat()

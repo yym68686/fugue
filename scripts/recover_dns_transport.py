@@ -105,6 +105,12 @@ def candidate_request(candidate, config):
     return request
 
 
+class DNSObservationRejected(ValueError):
+    def __init__(self, category):
+        self.category = category
+        super().__init__('DNS recovery observation failed cryptographic or readiness verification: ' + category)
+
+
 def verify_candidate(candidate, config, verifier=None):
     if verifier is None:
         verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
@@ -125,7 +131,7 @@ def verify_candidate(candidate, config, verifier=None):
                       'DNS observation lacks complete record readiness': 'record_readiness',
                       'DNS observation cannot materialize all declared answers': 'wire_materialization'}
         category = categories.get(result.stderr.strip(), 'verifier_failed')
-        raise ValueError('DNS recovery observation failed cryptographic or readiness verification: ' + category)
+        raise DNSObservationRejected(category)
 
 
 def witness(config, listener, current, node):
