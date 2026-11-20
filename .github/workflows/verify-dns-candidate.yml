@@ -15,7 +15,9 @@ env:
 
 jobs:
   transport-rehearsal:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+      && !startsWith(github.event.head_commit.message, 'Rehearsal only: verify DNS checkpoints')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -31,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$FUGUE_SOURCE" HEAD
-          unexpected="$(git diff --name-only "$FUGUE_SOURCE" HEAD -- . ':!.github/workflows/ci.yml' ':!.github/workflows/verify-dns-candidate.yml' ':!scripts/verify_dns_transport_isolation.py')"
+          unexpected="$(git diff --name-only "$FUGUE_SOURCE" HEAD -- . ':!.github/workflows/ci.yml' ':!.github/workflows/verify-dns-candidate.yml' ':!scripts/verify_dns_transport_isolation.py' ':!scripts/testdata/dns_checkpoint_compatibility_test.go')"
           test -z "$unexpected"
           bindir="$(mktemp -d "$RUNNER_TEMP/fugue-kind.XXXXXX")"
           curl -fsSL --retry 3 https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64 -o "$bindir/kind"
@@ -43,6 +45,49 @@ jobs:
           export PATH="$bindir:$PATH"
           export KUBECONFIG="$bindir/no-production-context"
           python3 -m scripts.verify_dns_transport_isolation
+  checkpoint-compatibility:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FUGUE_CURRENT_DNS: f9e131bbc61c2fbf19fc393bbc7cb7a268d8b493
+      FUGUE_ROLLBACK_DNS: a7db1ac3ec17660a3b15329f3cb46e5f9b2e16ef
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Read synthetic global checkpoints in both directions
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$FUGUE_SOURCE" HEAD
+          git merge-base --is-ancestor "$FUGUE_ROLLBACK_DNS" "$FUGUE_BASE"
+          git merge-base --is-ancestor "$FUGUE_CURRENT_DNS" "$FUGUE_BASE"
+          workspace="$(mktemp -d "$RUNNER_TEMP/fugue-dns-checkpoints.XXXXXX")"
+          for revision in "$FUGUE_CURRENT_DNS" "$FUGUE_ROLLBACK_DNS" "$FUGUE_SOURCE"; do
+            git worktree add --detach "$workspace/$revision" "$revision"
+            cp scripts/testdata/dns_checkpoint_compatibility_test.go "$workspace/$revision/internal/dnsserver/hosted_global_checkpoint_test.go"
+            (
+              cd "$workspace/$revision"
+              test "$(git rev-parse HEAD)" = "$revision"
+              go test -p 2 -c -o "$workspace/test-$revision" ./internal/dnsserver
+            )
+            FUGUE_CHECKPOINT_FIXTURE="$workspace/$revision-cache" FUGUE_CHECKPOINT_MODE=write \
+              "$workspace/test-$revision" -test.v -test.run '^TestHostedGlobalDNSCheckpointCrossVersion$' -test.timeout 45s
+          done
+          for deployment in "$FUGUE_CURRENT_DNS" "$FUGUE_ROLLBACK_DNS"; do
+            for writer in "$deployment" "$FUGUE_SOURCE"; do
+              reader="$FUGUE_SOURCE"
+              if [[ "$writer" = "$FUGUE_SOURCE" ]]; then reader="$deployment"; fi
+              echo "writer=$writer reader=$reader scope=global"
+              FUGUE_CHECKPOINT_FIXTURE="$workspace/$writer-cache" FUGUE_CHECKPOINT_MODE=read \
+                "$workspace/test-$reader" -test.v -test.run '^TestHostedGlobalDNSCheckpointCrossVersion$' -test.timeout 45s
+            done
+          done
   full-test:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805' && !startsWith(github.event.head_commit.message, 'Rehearsal only:')
     runs-on: ubuntu-latest
