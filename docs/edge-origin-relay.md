@@ -63,15 +63,21 @@ the placeholder times and digests at issuance):
 ```
 
 The envelope fields `payload` and `signature` are base64 of the exact payload
-bytes and their Ed25519 signature, respectively. Given an existing offline
-Ed25519 PEM key and the payload above saved to `policy.json`, a publisher can
-produce the wire format with OpenSSL 3 and jq:
+bytes and their Ed25519 signature, respectively. The pilot's offline issuer
+checks both exact `EdgeRouteBinding` records and their observed digests before
+producing a lease. Capture the two records and successful live route-proof
+responses for the exact host and path from the **current serving** workers.
+Do not synthesize the expected proof from the cached file being checked.
+Use time-bounded material and keep the PKCS#8 Ed25519 signing key owner-only:
 
 ```sh
-openssl pkeyutl -sign -rawin -inkey policy-signer.pem -in policy.json -out policy.sig
-jq -n --arg payload "$(openssl base64 -A -in policy.json)" \
-  --arg signature "$(openssl base64 -A -in policy.sig)" '{payload:$payload,signature:$signature}'
+go run ./cmd/fugue-edge-relay-policy -policy policy.json -signing-key policy-signer.pem \
+  -source-route source-route.json -peer-route peer-route.json
 ```
+
+The output is a signed envelope, not an applied change. Active policies
+require an explicit `-allow-active` after review. An `off` lease can be issued
+without live route files so withdrawal does not depend on origin health.
 
 Publish atomically and keep the trusted mount current across restarts. Workers
 reject a regressed or conflicting generation within a running process; **that
