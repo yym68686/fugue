@@ -211,6 +211,13 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	s.platformConsumerMu.Lock()
 	finishLock(nil)
 	defer s.platformConsumerMu.Unlock()
+	defer func() {
+		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) ||
+			errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) ||
+			errors.Is(syncErr, platformconsumer.ErrNoServingAssignment) {
+			s.pendingDNSProbeWindow = nil
+		}
+	}()
 	old := s.platformServing.Load()
 	publicationObservation := &DNSDecisionPublicationState{ObservedAt: time.Now().UTC(), Outcome: "publication_unavailable"}
 	if previous := s.decisionPublication.Load(); previous != nil {
@@ -299,6 +306,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	wasBound := s.platformServingBound.Load()
 	if err != nil {
+		if errors.Is(err, platformconsumer.ErrNoServingAssignment) {
+			s.pendingDNSProbeWindow = nil
+		}
 		fallbackReason = "control_plane_unavailable"
 		if !platformconsumer.IsUnavailable(err) {
 			fallbackReason = "control_plane_rejected"
@@ -310,6 +320,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			return nil
 		}
 		return err
+	}
+	if pending := s.pendingDNSProbeWindow; pending != nil && !reflect.DeepEqual(pending.assignment, a) {
+		s.pendingDNSProbeWindow = nil
 	}
 	reusedContent := false
 	if old != nil {
@@ -397,16 +410,43 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return err
 	}
 	facts := sourceFacts
+	var previousFacts []dnsReadinessFact
 	if p.routeSources == nil {
+		pending := s.pendingDNSProbeWindow
+		s.pendingDNSProbeWindow = nil
+		if same && old.record.RouteSources == nil && old.record.Parent.ContentHash == parent.ContentHash && old.routeID == routeID {
+			previousFacts = old.facts
+		} else if pending.matches(a, parent, routeID) {
+			previousFacts = pending.facts
+		}
+		started := time.Now().UTC()
+		var deferrable map[string]dnsReadinessFact
+		// Keep spending a full sweep budget well before the checkpoint
+		// lease expires. A rolling set of retained proofs never renews it.
+		if !same || dnsServingMayDeferProbes(old, started) {
+			deferrable = validDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, previousFacts, started)
+			for id, fact := range deferrable {
+				if !dnsFactMatchesRelease(fact, parent, candidate, routeID, p) {
+					delete(deferrable, id)
+				}
+			}
+		}
 		preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
-		facts = collectDNSReadinessFacts(ctx, p.Plan, p.Policy.DNSReadiness, probe, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
+		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(preferred, availability)
+		facts = scheduler.collectWindow(ctx, p.Plan, p.Policy.DNSReadiness, probe, nil, deferrable)
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
 	observations = append([]dnsReadinessFact(nil), facts...)
 	now := time.Now().UTC()
-	if same && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
-		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, old.facts, facts, now)
+	sameSources := same && dnsSameSourceContext(old.record.RouteSources, p.routeSources)
+	if sameSources && p.routeSources != nil {
+		previousFacts = old.facts
+	}
+	if len(previousFacts) > 0 {
+		facts = retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, previousFacts, facts, now)
+	}
+	if sameSources {
 		facts = retainDNSFactsForSourceRenewal(old, facts, now)
 	}
 	for i := range facts {
@@ -444,6 +484,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// previously positive facts or refreshing with this candidate's bridge.
 		if err = checkAssignment(); err != nil {
 			return err
+		}
+		if !same && p.routeSources == nil && ctx.Err() == nil {
+			s.pendingDNSProbeWindow = newDNSServingProbeWindow(a, parent, routeID, p, facts, now)
 		}
 		if same {
 			if old.record.Positive && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
@@ -641,6 +684,13 @@ func dnsServingCanSkipProbeSweep(st *dnsServingState, now time.Time) bool {
 	horizon := now.Add(platformDNSConsumerPollInterval + sweep + time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
 	return dnsServingReady(st, now) && checkDNSServingSnapshot(st, now, false) == nil &&
 		dnsServingReady(st, horizon) && checkDNSServingSnapshot(st, horizon, false) == nil
+}
+
+func dnsServingMayDeferProbes(st *dnsServingState, now time.Time) bool {
+	if !st.record.Positive {
+		return true // no positive lease to renew
+	}
+	return st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds) * time.Second / 2).After(now)
 }
 
 // A failed candidate scan already contains current observations for unchanged
@@ -897,7 +947,7 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 
 // Retained observations cannot renew a positive checkpoint's lease.
 func preserveDNSCheckpointAge(next dnsServingCheckpoint, old *dnsServingState, facts []dnsReadinessFact) dnsServingCheckpoint {
-	if old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, next.Candidate.Assignment) {
+	if old != nil && old.record.Positive && reflect.DeepEqual(old.record.Candidate.Assignment, next.Candidate.Assignment) {
 		for _, fact := range facts {
 			if fact.Reason == "retained_valid_proof" {
 				if dnsSameSourceContext(old.record.RouteSources, next.RouteSources) {

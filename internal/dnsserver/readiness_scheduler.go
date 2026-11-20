@@ -85,6 +85,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 // Its scheduler must use the expiry of the matched variant, not the expiry (or
 // mismatch) of whichever variant supplied its wire request.
 func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact) []dnsReadinessFact {
+	return scheduler.collectWindow(ctx, plan, policy, probe, evaluate, nil)
+}
+
+// previous is supplied only by a caller that has verified the unexpired facts
+// against the exact signed assignment and plan. A deferred request returns no
+// observation and cannot update recovery history or the original deadline.
+func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact, previous map[string]dnsReadinessFact) []dnsReadinessFact {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	started := time.Now().UTC()
@@ -120,8 +127,18 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 	}{digest, started})
 	facts := make([]dnsReadinessFact, len(plan.Probes))
 	byAddress := map[string][]int{}
+	deferred := 0
+	nextSweep := started.Add(platformDNSConsumerPollInterval + interval + time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
+	deferUntil := refreshHorizon
+	if nextSweep.After(deferUntil) {
+		deferUntil = nextSweep
+	}
 	for index, requirement := range plan.Probes {
 		facts[index] = dnsReadinessFact{ProbeID: requirement.ID, ObservationID: observationID, Reason: "not_observed"}
+		if fact, ok := previous[requirement.ID]; ok && fact.Proof.ValidUntil.After(deferUntil) {
+			deferred++
+			continue
+		}
 		byAddress[requirement.Address] = append(byAddress[requirement.Address], index)
 	}
 	addresses := make([]string, 0, len(byAddress))
@@ -198,10 +215,7 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 		})
 		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, outcomes: map[string]int{}})
 	}
-	if len(queues) == 0 || policy.MaxConcurrency <= 0 {
-		return facts
-	}
-	concurrency := min(policy.MaxConcurrency, len(plan.Probes))
+	concurrency := max(0, min(policy.MaxConcurrency, len(plan.Probes)-deferred))
 	results := make(chan dnsProbeResult, concurrency)
 	active, attempted := 0, 0
 	for {
@@ -301,6 +315,10 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			}
 			counts[reason]++
 		}
+		if deferred > 0 {
+			counts["not_observed"] -= deferred
+			counts["deferred_fresh"] = deferred
+		}
 		deadline, _ := ctx.Deadline()
 		planDigest, _ := platformconfig.Digest(plan)
 		targets := make([]map[string]any, 0, min(32, len(queues)))
@@ -308,7 +326,7 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			targets = append(targets, map[string]any{"address": queue.address, "probes": len(queue.indices), "started": queue.started, "unobserved": len(queue.indices) - queue.started, "outcomes": queue.outcomes, "duration_ms": queue.duration.Milliseconds(), "retry_at": scheduler.targets[queue.address].retryAt})
 		}
 		traceID, tracePhase := dnsSyncTraceIdentity(ctx)
-		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
+		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "deferred_fresh": deferred, "unobserved": len(facts) - attempted - deferred, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
 		if err == nil {
 			if scheduler.logger != nil {
 				scheduler.logger.Print(string(report))
