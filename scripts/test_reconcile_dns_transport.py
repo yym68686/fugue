@@ -47,6 +47,27 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(sum(p.get('containerPort') == listener['targetPort'] and
                                      p.get('protocol', 'TCP') == protocol for p in ports), 1)
 
+    def test_staged_dns_recovery_executor_has_no_public_listener_or_shared_checkpoint(self):
+        root = Path(__file__).resolve().parents[1]
+        resources = root / 'deploy/releases'
+        config = transport.load_config(root / 'deploy/environments/production/dns-transport/transport.json')
+
+        def placement(slot):
+            manifest = json.loads((resources / ('edge-client-dns-de-' + slot) / 'resources.json').read_text())
+            self.assertEqual({item['kind'] for item in manifest['items']}, {'DaemonSet', 'ServiceAccount'})
+            return next(item['spec']['template'] for item in manifest['items'] if item['kind'] == 'DaemonSet')
+
+        def cache(template):
+            return next(v['hostPath']['path'] for v in template['spec']['volumes'] if v['name'] == 'dns-cache')
+
+        spare = placement('g')
+        self.assertFalse(spare['spec'].get('hostNetwork'))
+        self.assertTrue(spare['spec']['nodeSelector'].get('kubernetes.io/hostname'))
+        self.assertFalse(any(port.get('hostPort') for c in spare['spec']['containers'] for port in c['ports']))
+        self.assertEqual(len({cache(spare), cache(placement('e')), cache(placement('f'))}), 3)
+        self.assertFalse(any(all(spare['metadata']['labels'].get(k) == v for k, v in listener['selector'].items())
+                             for listener in config['listeners'] if listener['port'] == 53))
+
     def config(self):
         return {"apiVersion": "transport.fugue.dev/v1", "kind": "DNSLocalTransport", "generation": 1,
                 "namespace": "system", "listeners": [{"name": "listener", "address": "8.8.8.8", "port": 15353,
