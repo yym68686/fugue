@@ -195,6 +195,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 	}
 	chosen := &assignment
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release}
+	if s.dnsShadowAlreadyAdvanced(ctx, client, identity, candidate) {
+		return errDNSShadowAlreadyAdvanced
+	}
 	counts, payload, err := s.decodePlatformDNSCandidate(candidate, *chosen)
 	if err != nil {
 		return err

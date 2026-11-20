@@ -99,6 +99,23 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, union)
 	source := &dnsroutesource.Context{Snapshot: snapshot}
 	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, plans.Matches, source.ProofDeadline, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
+	recheck := func() error {
+		next, err := read(ctx)
+		if err != nil {
+			return err
+		}
+		if next.SelectionDigest != snapshot.SelectionDigest {
+			return platformconsumer.ErrAssignmentChanged
+		}
+		return nil
+	}
+	// A sweep across a publication change can see healthy endpoints presenting
+	// a new binding, which looks negative only against its superseded plan.
+	// Establish that the complete source observation is still current before
+	// touching shared recovery history or replacing the volatile proof cache.
+	if err := recheck(); err != nil {
+		return p, nil, err
+	}
 	// A physical request can satisfy a different authorized publication than
 	// its scheduling representative. Record continuity under each immutable
 	// requirement only after its complete publication binding is verified.
@@ -146,20 +163,18 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 	for _, requirement := range p.Plan.Probes {
 		selected = append(selected, byID[requirement.ID])
 	}
-	// A shadow query test can finish before this same final authority read.
-	// It must remain in-memory: a changed source or assignment below invalidates
-	// the whole observation before any candidate or ACK can be persisted.
+	// Shadow evaluates its local queries using the current recovery history.
+	// Recheck again after that evaluation and before any candidate or ACK
+	// can be persisted. Serving has its own pre/post listener authority gates.
 	for _, evaluation := range evaluate {
 		if err := evaluation(p, selected); err != nil {
 			return p, selected, err
 		}
 	}
-	next, err := read(ctx)
-	if err != nil {
-		return p, selected, err
-	}
-	if next.SelectionDigest != selection.Snapshot.SelectionDigest {
-		return p, selected, platformconsumer.ErrAssignmentChanged
+	if len(evaluate) > 0 {
+		if err := recheck(); err != nil {
+			return p, selected, err
+		}
 	}
 	if err = s.advanceDNSRouteCursor(snapshot); err != nil {
 		return p, selected, err

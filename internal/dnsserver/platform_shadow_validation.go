@@ -6,9 +6,36 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/model"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 )
+
+var errDNSShadowAlreadyAdvanced = errors.New("exact DNS shadow release set already advanced to serving")
+
+// A shadow lane can still reference the exact ReleaseSet that has already
+// advanced to gray or full. The heartbeat API only accepts the newest active
+// publication of that set. Avoid another full source sweep for a receipt that
+// cannot count, but never skip a different artifact or infer selection from
+// the local checkpoint: a later rollback can make the shadow relevant again.
+func (s *Service) dnsShadowAlreadyAdvanced(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, shadow dnsPlatformCandidate) bool {
+	if s.shadowValidationParent == nil {
+		return false
+	}
+	loaded := s.shadowValidationParent.platformServing.Load()
+	if loaded == nil || !loaded.record.Positive {
+		return false
+	}
+	serving := loaded.record.Candidate
+	a, b := shadow.Assignment, serving.Assignment
+	if a.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow ||
+		(b.ReleaseChannel != model.PlatformArtifactReleaseChannelGray && b.ReleaseChannel != model.PlatformArtifactReleaseChannelFull) ||
+		a.ReleaseSetID == "" || a.ReleaseSetID != b.ReleaseSetID || a.ArtifactID != b.ArtifactID || a.ContentHash != b.ContentHash ||
+		a.ScopeKey != b.ScopeKey || a.ArtifactKind != b.ArtifactKind || shadow.Release.ReleasedAt.IsZero() || !serving.Release.ReleasedAt.After(shadow.Release.ReleasedAt) {
+		return false
+	}
+	return client.CheckServingAssignment(ctx, id, b) == nil
+}
 
 func (s *Service) newIsolatedDNSShadowValidator() *Service {
 	authority := platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)
@@ -43,6 +70,12 @@ func (s *Service) syncIsolatedDNSShadowOnce(ctx context.Context, worker *Service
 		return
 	}
 	if ctx.Err() != nil {
+		return
+	}
+	if errors.Is(err, errDNSShadowAlreadyAdvanced) {
+		s.mu.Lock()
+		s.platformCandidate = PlatformCandidateStatus{State: "awaiting_release"}
+		s.mu.Unlock()
 		return
 	}
 	s.recordDNSSnapshotFailure(err)

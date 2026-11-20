@@ -18,9 +18,63 @@ import (
 	"fugue/internal/dnsroutesource"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestIsolatedDNSShadowDefersOnlyAfterExactServingAdvance(t *testing.T) {
+	now := time.Now().UTC()
+	shadow := dnsPlatformCandidate{
+		Assignment: model.PlatformConsumerAssignment{ReleaseSetID: "set", ArtifactID: "dns", ContentHash: "hash", ScopeKey: "authority-cell:cell-dns", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ReleaseChannel: "shadow", ArtifactReleaseID: "shadow", FencingToken: 19, Revision: 2},
+		Release:    model.PlatformArtifactRelease{ID: "shadow", ReleasedAt: now},
+	}
+	serving := shadow
+	serving.Assignment.ArtifactReleaseID, serving.Assignment.ReleaseChannel, serving.Assignment.FencingToken = "serving", "full", 3
+	serving.Release.ID, serving.Release.ReleasedAt = "serving", now.Add(time.Minute)
+	for _, tc := range []struct {
+		name       string
+		adjust     func(*dnsPlatformCandidate)
+		remoteDiff bool
+		checks     int32
+		deferProbe bool
+	}{
+		{name: "newer exact full", checks: 1, deferProbe: true},
+		{name: "newer exact gray", adjust: func(c *dnsPlatformCandidate) { c.Assignment.ReleaseChannel = "gray" }, checks: 1, deferProbe: true},
+		{name: "no longer selected after rollback", remoteDiff: true, checks: 1},
+		{name: "different release set", adjust: func(c *dnsPlatformCandidate) { c.Assignment.ReleaseSetID = "other-set" }},
+		{name: "different content", adjust: func(c *dnsPlatformCandidate) { c.Assignment.ContentHash = "other-hash" }},
+		{name: "reissued shadow is newer", adjust: func(c *dnsPlatformCandidate) { c.Release.ReleasedAt = now.Add(-time.Minute) }},
+		{name: "ambiguous order", adjust: func(c *dnsPlatformCandidate) { c.Release.ReleasedAt = now }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := serving
+			if tc.adjust != nil {
+				tc.adjust(&candidate)
+			}
+			remote := candidate.Assignment
+			if tc.remoteDiff {
+				remote.ArtifactReleaseID = "replacement"
+			}
+			var checks atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				checks.Add(1)
+				if r.URL.Path != "/v1/platform-state/consumers/assignment" || r.URL.Query().Get("serving_only") != "true" {
+					t.Error("shadow advance must check current serving selection")
+				}
+				json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{remote}})
+			}))
+			defer server.Close()
+			parent := &Service{}
+			parent.platformServing.Store(&dnsServingState{record: dnsServingCheckpoint{Positive: true, Candidate: candidate}})
+			worker := &Service{shadowValidationParent: parent}
+			got := worker.dnsShadowAlreadyAdvanced(t.Context(), platformconsumer.Client{BaseURL: server.URL}, platformconsumer.Identity{Token: "fixture"}, shadow)
+			if got != tc.deferProbe || checks.Load() != tc.checks {
+				t.Fatalf("defer=%v checks=%d, want defer=%v checks=%d", got, checks.Load(), tc.deferProbe, tc.checks)
+			}
+		})
+	}
+}
 
 func TestIsolatedDNSShadowSucceedsWhileServingLockedAndPreservesCheckpoint(t *testing.T) {
 	req := celldns.Request(t)

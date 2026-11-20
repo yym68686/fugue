@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -23,7 +25,7 @@ import (
 )
 
 func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
-	for _, scenario := range []string{"success", "selection-race", "negative-probe", "wrong-binding", "mixed-publications", "old-fence", "forged-checkpoint", "transient-refresh", "expired-refresh", "negative-refresh"} {
+	for _, scenario := range []string{"success", "selection-race", "post-evaluation-selection-race", "negative-probe", "wrong-binding", "mixed-publications", "old-fence", "forged-checkpoint", "transient-refresh", "expired-refresh", "negative-refresh"} {
 		t.Run(scenario, func(t *testing.T) {
 			req, policies, activations := celldns.SourceAuthorizedRequest(t, true)
 			compiled := celldns.Compile(t, req)
@@ -53,12 +55,29 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var beforeRace map[string]dnsProbeHistory
+			if scenario == "selection-race" {
+				recoveryKeys, err := dnsRouteRecoveryKeys(compiled.DNSArtifact, plans)
+				if err != nil || len(recoveryKeys) == 0 {
+					t.Fatal("missing recovery test bindings", err)
+				}
+				history := s.probeHistoryStore()
+				history.values = map[string]dnsProbeHistory{}
+				at := now.Add(-time.Second)
+				for _, key := range recoveryKeys {
+					history.values[key] = dnsProbeHistory{observedAt: at, successes: []time.Time{at}}
+				}
+				beforeRace = maps.Clone(history.values)
+			}
 			var reads atomic.Int32
 			var evaluated atomic.Bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				read := reads.Add(1)
 				next := snapshot
-				if scenario == "selection-race" && read > 1 {
+				if scenario == "selection-race" && read == 2 {
+					next.SelectionDigest = "changed-before-history"
+				}
+				if scenario == "post-evaluation-selection-race" && read == 3 {
 					if !evaluated.Load() {
 						t.Error("final source read preceded local query evaluation")
 					}
@@ -90,7 +109,7 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 						group = p.PreviousAuthority.EdgeGroupID
 					}
 					b := *plans.Bindings[p.CellPublicationDigest]
-					if scenario == "wrong-binding" {
+					if scenario == "wrong-binding" || scenario == "selection-race" {
 						b.FencingToken++
 					}
 					return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: group, Digest: p.RouteDigest, Version: "observed", State: state, TrafficRelease: &b, CheckedAt: time.Now(), ValidUntil: time.Now().Add(20 * time.Second)}, nil
@@ -108,15 +127,22 @@ func TestDynamicDNSRouteSourcesObserveRecheckAndRecover(t *testing.T) {
 				}
 			}
 			effective, facts, err := s.observeDNSRouteSources(context.Background(), client, platformconsumer.Identity{Token: "test"}, candidate, payload, nil, probe, func(p dnsServingPayload, f []dnsReadinessFact) error {
-				if reads.Load() != 1 || p.routeSources == nil || len(f) == 0 {
+				if reads.Load() != 2 || p.routeSources == nil || len(f) == 0 {
 					t.Fatal("local query evaluation did not receive the selected observation before its final recheck")
 				}
 				evaluated.Store(true)
 				return nil
 			})
 			if scenario == "selection-race" {
-				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || reads.Load() != 2 || !evaluated.Load() {
-					t.Fatal("selection drift accepted", err)
+				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || reads.Load() != 2 || evaluated.Load() ||
+					!reflect.DeepEqual(beforeRace, s.probeHistoryStore().values) || len(s.platformDNSRouteFacts) != 0 {
+					t.Fatal("an obsolete sweep affected recovery, cache or query evaluation", err)
+				}
+				return
+			}
+			if scenario == "post-evaluation-selection-race" {
+				if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || reads.Load() != 3 || !evaluated.Load() {
+					t.Fatal("selection drift after local evaluation accepted", err)
 				}
 				return
 			}
