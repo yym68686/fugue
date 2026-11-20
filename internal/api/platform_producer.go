@@ -401,6 +401,10 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	}
 	cancelPersist()
 	advance("publish_shadow")
+	s.warmDNSProducerPublication(ctx, policy, result.ReleaseArtifact)
+	if err := ctx.Err(); err != nil {
+		return interval, err
+	}
 	_, release, _, _, err := s.store.ReleaseProducedPlatformArtifact(result.ReleaseArtifact.ID, authority.ID, previous.ID, principal)
 	if err != nil {
 		return interval, err

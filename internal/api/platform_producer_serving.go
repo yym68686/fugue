@@ -152,6 +152,10 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 			}
 			return true, err
 		}
+		s.warmDNSProducerPublication(ctx, policy, parent)
+		if err := ctx.Err(); err != nil {
+			return true, err
+		}
 		artifact, release, _, _, err := s.store.ReleaseProducedTrafficArtifact(parent.ID, authority.ID, model.PlatformArtifactReleaseChannelFull, state.full.ID, state.full.ID, state.lkg.ArtifactID, "", principal)
 		if err != nil {
 			return true, err
@@ -161,6 +165,10 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 		}
 		s.appendAudit(principal, "platform_config.full_produced", "platform_release_set", parent.ID, "", map[string]string{"policy_release_id": authority.ID, "release_id": release.ID})
 		return true, nil
+	}
+	s.warmDNSProducerPublication(ctx, policy, parent)
+	if err := ctx.Err(); err != nil {
+		return true, err
 	}
 	_, _, _, _, err = s.store.VerifyProducedTrafficLKG(current.ID, authority.ID, state.lkg.ArtifactID, model.PlatformArtifactVerifyLKGRequest{FencingToken: current.FencingToken, Reason: "producer full publication verified by fresh actual consumer evidence", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{parent.ID, current.ID}}}, principal)
 	if err == nil {
@@ -241,6 +249,10 @@ func (s *Server) stageProducedTraffic(ctx context.Context, policy platformproduc
 		return err
 	}
 	if err := s.recheckTrafficWithdrawal(ctx, parent, state.fullArtifact); err != nil {
+		return err
+	}
+	s.warmDNSProducerPublication(ctx, policy, parent)
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	artifact, release, _, _, err := s.store.ReleaseProducedTrafficArtifact(parent.ID, authority.ID, model.PlatformArtifactReleaseChannelGray, state.gray.ID, state.full.ID, state.lkg.ArtifactID, policy.Serving.CanaryRuleRef, platformProducerPrincipal())

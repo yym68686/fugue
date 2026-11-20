@@ -137,6 +137,36 @@ func TestDNSProducerCaptureAndShadowAreIndependentAndReadOnlyForSources(t *testi
 	}
 }
 
+func TestDNSProducerWarmsOnlyExactPersistedOutput(t *testing.T) {
+	s, _, policy, _ := dnsProducerServer(t)
+	if _, err := s.reconcilePlatformConfigurationScope(t.Context(), "platform-config-producer:cell-dns", nil); err != nil {
+		t.Fatal(err)
+	}
+	parent, _, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "shadow")
+	if err != nil || !found {
+		t.Fatal("missing fixture shadow", err)
+	}
+	child, err := s.consumerAssignmentChild(parent, model.PlatformArtifactKindDNSAnswerBundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Generation = model.NewID("warm-dns-producer") // A fresh cache key for this validation.
+	s.warmDNSProducerPublication(t.Context(), policy, parent)
+	var sawHit, decoded bool
+	observe := func(stage platformproducer.DNSOutputValidationStage, _ time.Duration, result platformproducer.DNSOutputCacheResult) {
+		sawHit = sawHit || result == platformproducer.DNSOutputCacheHit
+		decoded = decoded || stage == platformproducer.DNSOutputChildDecode
+	}
+	if err := platformproducer.ValidateDNSProducerOutputObserved(policy, child, observe); err != nil || !sawHit || decoded {
+		t.Fatal("persisted DNS output was not warmed for the transaction", sawHit, decoded, err)
+	}
+	sawHit, decoded = false, false
+	child.Content["generation"] = "unapproved-generation-with-original-claimed-hash"
+	if err := platformproducer.ValidateDNSProducerOutputObserved(policy, child, observe); err == nil || sawHit || !decoded {
+		t.Fatal("warm cache masked changed content", sawHit, decoded, err)
+	}
+}
+
 func TestDNSProducerRefusesUnverifiedChangedOrUnavailableSource(t *testing.T) {
 	for _, scenario := range []string{"source activation", "full fence", "unverified", "expired LKG", "corrupt LKG", "unsigned input", "missing input", "missing producer dependency", "missing runtime input", "corrupt runtime input", "runtime input size", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {

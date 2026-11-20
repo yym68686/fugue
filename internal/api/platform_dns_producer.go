@@ -14,6 +14,33 @@ import (
 	"fugue/internal/store"
 )
 
+// Warm only the deterministic DNS output comparison, using the canonical
+// persisted child. Compile-time validation saw a different artifact envelope
+// (before signing and persistence). The store still reads the exact current
+// child, checks its integrity and authorization under the ordinary locks, and
+// fingerprints the complete actual artifact and policy before using this cache.
+// A missing, moved or changed artifact gets no shortcut.
+func (s *Server) warmDNSProducerPublication(ctx context.Context, policy platformproducer.Policy, parent model.PlatformArtifact) {
+	if policy.InputSource != platformproducer.DNSProducerInputSource || parent.Content["publication_role"] != platformconfig.PublicationRoleCellDNS ||
+		parent.ScopeKey != policy.TargetScope || ctx.Err() != nil {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	child, err := consumerAssignmentChild(parent, model.PlatformArtifactKindDNSAnswerBundle, func(id string) (model.PlatformArtifact, error) {
+		a, err := s.store.GetPlatformArtifactContext(readCtx, id)
+		if err == nil && a.ID != id {
+			return model.PlatformArtifact{}, store.ErrConflict
+		}
+		return a, err
+	})
+	if err == nil && readCtx.Err() == nil && child.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle &&
+		child.ScopeKey == parent.ScopeKey && child.Status == model.PlatformArtifactStatusValidated {
+		// Cache only success. The transaction owns the authoritative verdict.
+		_ = platformproducer.ValidateDNSProducerOutput(policy, child)
+	}
+}
+
 // Read only signed stored inputs. In particular, this independent worker never
 // waits on an Edge health request or takes the global producer election lock.
 func (s *Server) captureDNSProducer(ctx context.Context, p platformproducer.Policy) (platformconfig.CompileRequest, error) {
