@@ -14,11 +14,9 @@ import (
 
 var errConsumerDNSPublicationChanged = fmt.Errorf("DNS serving publication changed: %w", store.ErrConflict)
 
-// Verification or a DNS-only publication change can overtake discovery. Never
-// disclose a mixed observation or relax the final DeepEqual: discard the whole
-// attempt and repeat all checks once, with a new immutable-body read session.
-// Do not retry a cold input, database error, absent assignment, or failed
-// selection read.
+// Publication state can change between discovery and the final authority read.
+// Never disclose that mixed observation: repeat all checks once in a fresh
+// session, only when both reads succeeded and their authority differed.
 func (s *Server) readCheckedConsumerAssignments(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, servingOnly bool, started time.Time, newSession func() func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, string, error) {
 	for attempt := 0; ; attempt++ {
 		attemptCtx := withConsumerInputReadObservation(ctx)
@@ -36,9 +34,7 @@ func (s *Server) readCheckedConsumerAssignments(ctx context.Context, claims plat
 		// Keep the original failed attempt even if its complete reread succeeds.
 		// The failure ring is attempt coverage, not an HTTP failure-rate counter.
 		s.retainConsumerRequestFailure(attemptCtx, started, "assignment", stage, err)
-		detail := consumerInputReadFailureFromContext(attemptCtx)
-		changed := stage == "input_recheck" && (errors.Is(err, errConsumerDNSPublicationChanged) ||
-			errors.Is(err, store.ErrConflict) && detail != nil && detail.Stage == "assignment_changed")
+		changed := stage == "input_recheck" && (errors.Is(err, errConsumerDNSPublicationChanged) || consumerInputReadAuthorityChanged(attemptCtx, err))
 		if !changed || ctx.Err() != nil {
 			return nil, stage, err
 		}

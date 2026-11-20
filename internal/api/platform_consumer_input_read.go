@@ -2,12 +2,19 @@ package api
 
 import (
 	"context"
+	"errors"
 	"reflect"
 
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/store"
 )
+
+func consumerInputReadAuthorityChanged(ctx context.Context, err error) bool {
+	detail := consumerInputReadFailureFromContext(ctx)
+	return errors.Is(err, store.ErrConflict) && detail != nil &&
+		(detail.Stage == "assignment_changed" || detail.Stage == "parent_changed")
+}
 
 func consumerInputReadSelection(item consumerArtifactLookup, parent model.PlatformArtifact) store.PlatformInputReadSelection {
 	return store.PlatformInputReadSelection{ArtifactID: item.Artifact.ID, ContentHash: item.Artifact.ContentHash,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"reflect"
 	"testing"
@@ -16,6 +17,69 @@ import (
 	"fugue/internal/store"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestConsumerReadsDiscardMixedParentAuthority(t *testing.T) {
+	for _, endpoint := range []string{"assignment", "parent", "child"} {
+		for _, scenario := range []string{"stabilizes", "keeps-changing", "fresh-read-unavailable"} {
+			t.Run(endpoint+"/"+scenario, func(t *testing.T) {
+				s, _, parent, _ := retainedTrafficAPIFixture(t)
+				claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentEdgeWorker, NodeID: "edge-a", ScopeKey: "global", ArtifactKinds: []string{model.PlatformArtifactKindEdgeRouteBundle}}
+				initial, err := s.resolvePlatformConsumerAssignments(claims)
+				if err != nil || len(initial) == 0 {
+					t.Fatal("fixture has no assignment", err)
+				}
+				wanted := initial[0]
+				artifactID := parent.ID
+				if endpoint == "child" {
+					artifactID = wanted.Artifact.ID
+				}
+				sessions := 0
+				factory := func() func(string) (model.PlatformArtifact, error) {
+					sessions++
+					parentReads := 0
+					load := s.store.NewPlatformArtifactReadSession()
+					return func(id string) (model.PlatformArtifact, error) {
+						artifact, err := load(id)
+						if id == parent.ID && err == nil {
+							parentReads++
+							if parentReads == 2 {
+								if scenario == "fresh-read-unavailable" {
+									return model.PlatformArtifact{}, errors.New("synthetic fresh read outage")
+								}
+								if sessions == 1 || scenario == "keeps-changing" {
+									artifact.UpdatedAt = artifact.UpdatedAt.Add(time.Second)
+								}
+							}
+						}
+						return artifact, err
+					}
+				}
+				if endpoint == "assignment" {
+					items, _, err := s.readCheckedConsumerAssignments(t.Context(), claims, false, time.Now(), factory)
+					if (err == nil && len(items) > 0) != (scenario == "stabilizes") {
+						t.Fatal("unexpected assignment result", len(items), err)
+					}
+				} else {
+					item, status, message := s.readCheckedConsumerArtifact(t.Context(), claims, artifactID, wanted.Assignment.ExpectedConsumerSetID, factory)
+					if scenario == "stabilizes" {
+						if status != http.StatusOK || item.Artifact.ID != artifactID || !reflect.DeepEqual(item.Assignment, wanted.Assignment) || !reflect.DeepEqual(item.Release, wanted.Release) {
+							t.Fatal("fresh result lost exact artifact or assignment", status, message)
+						}
+					} else if status != http.StatusServiceUnavailable || item.Artifact.ID != "" {
+						t.Fatal("unstable authority disclosed artifact", status, message)
+					}
+				}
+				wantSessions := 2
+				if scenario == "fresh-read-unavailable" {
+					wantSessions = 1
+				}
+				if sessions != wantSessions {
+					t.Fatalf("made %d sessions, want %d", sessions, wantSessions)
+				}
+			})
+		}
+	}
+}
 
 func assignmentReadStageCounts(t *testing.T, s *Server) map[string]uint64 {
 	t.Helper()

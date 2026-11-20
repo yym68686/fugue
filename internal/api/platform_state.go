@@ -1556,42 +1556,16 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 		httpx.WriteError(w, http.StatusBadRequest, "one expected_consumer_set_id is required")
 		return
 	}
-	loadArtifact := s.store.NewPlatformArtifactReadSession()
-	readArtifact := newConsumerArtifactReader(loadArtifact)
-	resolved, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, readArtifact)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	result, status, message := s.readCheckedConsumerArtifact(r.Context(), claims, r.PathValue("artifact_id"), setIDs[0], func() func(string) (model.PlatformArtifact, error) {
+		return s.store.NewPlatformArtifactReadSessionContext(r.Context())
+	})
+	if status != http.StatusOK {
+		httpx.WriteError(w, status, message)
 		return
 	}
-	for _, result := range resolved {
-		if result.Assignment.ReleaseSetID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
-			parent, err := readArtifact(result.Assignment.ReleaseSetID)
-			if err != nil || parent.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || !validateReleaseSetReferences(parent, readArtifact).Pass {
-				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer parent artifact unavailable")
-				return
-			}
-			if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false, loadArtifact); err != nil {
-				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
-				return
-			}
-			result.Artifact = parent
-			w.Header().Set("Cache-Control", "private, no-store")
-			w.Header().Set("ETag", strconv.Quote(parent.ContentHash))
-			httpx.WriteJSON(w, http.StatusOK, result)
-			return
-		}
-		if result.Artifact.ID == r.PathValue("artifact_id") && result.Assignment.ExpectedConsumerSetID == setIDs[0] {
-			if err := s.checkConsumerInputReadsWithLoader(r.Context(), claims, []consumerArtifactLookup{result}, readArtifact, false, loadArtifact); err != nil {
-				httpx.WriteError(w, http.StatusServiceUnavailable, "consumer input dependencies unavailable or changed")
-				return
-			}
-			w.Header().Set("Cache-Control", "private, no-store")
-			w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))
-			httpx.WriteJSON(w, http.StatusOK, result)
-			return
-		}
-	}
-	httpx.WriteError(w, http.StatusNotFound, "consumer artifact assignment not found")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))
+	httpx.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {
