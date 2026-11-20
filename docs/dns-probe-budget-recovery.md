@@ -19,6 +19,11 @@ unobserved or aged work, expiry ordering on subsequent rounds and connection
 backoff. Route-source variants share only their physical scheduling preference,
 never proof authority or readiness.
 
+The bounded priority queue treats the signed `physical-edge-network-v1`
+candidate order like the fixed physical order. When an explicit availability
+pool exists, it keeps precedence. This does not change business-allocation
+policy, probe concurrency, deadlines, or which proofs can authorize an answer.
+
 The two changes address missed work without increasing the declared probe
 budget, relaxing quorum or changing endpoint eligibility. If the target really
 fails, records still fail closed when their original valid proofs expire.

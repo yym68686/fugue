@@ -73,6 +73,87 @@ func TestDNSProbePreferencesFollowVerifiedRuntimePathWithoutExtendingEligibility
 	}
 }
 
+func TestDNSHistoricalQualityOrderUsesBoundedCandidateQueue(t *testing.T) {
+	for _, withAvailability := range []bool{false, true} {
+		t.Run(fmt.Sprintf("availability=%t", withAvailability), func(t *testing.T) {
+			view, signed, policy, _, now := queryExecutionFixture()
+			view.Records[0].AnswerPolicy = physicalSelectionTestRecord(now).AnswerPolicy
+			if withAvailability {
+				view.Records[0].AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{
+					Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-b"},
+					RecoverySuccesses: 3, RecoveryMinSeconds: 60,
+				}
+			}
+			// This is a separate signed dependency, not part of the measured
+			// order. It may be probed normally but must not get priority.
+			background := signed.Probes[0]
+			background.ID, background.EdgeID, background.Path = "outside-order", "edge-other", "/unranked"
+			target := signed.Records[0].Targets[0]
+			target.EdgeID, target.ProbeIDs = background.EdgeID, []string{background.ID}
+			signed.Probes = append(signed.Probes, background)
+			signed.Records[0].Targets = append(signed.Records[0].Targets, target)
+			payload := dnsServingPayload{Plan: &signed, Queries: []platformconfig.DNSQueryView{view}}
+			original := mustDNSJSON(t, payload)
+			runtimePlan := &platformconfig.DNSReadinessPlan{}
+			for _, p := range signed.Probes {
+				p.ID += "-live"
+				p.Path = "/live" + p.Path
+				runtimePlan.Probes = append(runtimePlan.Probes, p)
+			}
+			for _, plan := range []*platformconfig.DNSReadinessPlan{nil, runtimePlan} {
+				probes := signed.Probes
+				if plan != nil {
+					probes = plan.Probes
+				}
+				preferred, candidates := dnsProbePriorities(payload, view.NodeID, plan)
+				for _, p := range probes {
+					key := dnsroutesource.ProbeKey(p)
+					wantCandidate := p.EdgeID == "edge-b" || p.EdgeID == "edge-a" && !withAvailability
+					if candidates[key] != wantCandidate || preferred[key] != (p.EdgeID == "edge-b") {
+						t.Fatalf("edge %q path %q: promoted=%v, want %v", p.EdgeID, p.Path, candidates[key], wantCandidate)
+					}
+				}
+			}
+			if withAvailability {
+				return
+			}
+			// Cut off the sweep after a single probe. Ordinary work is aged and
+			// near proof expiry, so a mere preference cannot reach the signed
+			// secondary first; only the existing bounded queue can do that.
+			runtimePlan.Probes = nil
+			var secondary platformconfig.DNSReadinessProbe
+			for _, p := range signed.Probes {
+				if p.EdgeID == "edge-a" {
+					secondary = p
+					break
+				}
+			}
+			runtimePlan.Probes = append(runtimePlan.Probes, background, secondary)
+			policy.MaxConcurrency = 1
+			preferred, candidates := dnsProbePriorities(payload, view.NodeID, runtimePlan)
+			scheduler := (&dnsReadinessScheduler{}).prioritize(preferred, candidates)
+			scheduler.collect(t.Context(), runtimePlan, &policy, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+				return routeprobe.Proof{}, errors.New("synthetic rejected probe")
+			})
+			scheduler.expires[background.ID] = time.Now().Add(2 * time.Second)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			calls := make(chan string, 2)
+			facts := scheduler.collect(ctx, runtimePlan, &policy, func(_ context.Context, _, path, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+				calls <- path
+				cancel()
+				return routeprobe.Proof{}, errors.New("synthetic rejected probe")
+			})
+			if len(calls) != 1 || <-calls != secondary.Path || facts[0].Reason != "not_observed" || facts[1].Ready {
+				t.Fatalf("bounded probe order did not protect signed work without fabricating readiness: %+v", facts)
+			}
+			if !reflect.DeepEqual(original, mustDNSJSON(t, payload)) {
+				t.Fatal("probe scheduling modified the signed payload")
+			}
+		})
+	}
+}
+
 func TestDNSReadinessPrioritizesEveryAvailabilityCandidate(t *testing.T) {
 	view, plan, policy, _, _ := queryExecutionFixture()
 	policy.MaxConcurrency = 1

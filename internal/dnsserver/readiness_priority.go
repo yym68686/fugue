@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"fugue/internal/dnsroutesource"
+	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
 
@@ -21,7 +22,8 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 		for _, record := range view.Records {
 			primary := ""
 			order := record.AnswerPolicy.PhysicalOrder
-			if selection := record.AnswerPolicy.PhysicalSelection; selection != nil {
+			selection := record.AnswerPolicy.PhysicalSelection
+			if selection != nil {
 				primary = selection.PrimaryEdgeID
 			} else if order != nil && len(order.OrderedEdgeIDs) > 0 {
 				primary = order.OrderedEdgeIDs[0]
@@ -34,6 +36,13 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 				ordered = policy.OrderedEdgeIDs
 			} else if order != nil {
 				ordered = order.OrderedEdgeIDs
+			} else if record.AnswerPolicy.PolicyKind == model.DNSAnswerPolicyKindPhysicalQuality &&
+				selection != nil && selection.Version == model.DNSPhysicalSelectionVersion {
+				// The verified historical quality order is used by the same
+				// serving selector as the fixed order. Keep its already signed
+				// dependencies in the same bounded renewal queue. The business
+				// selector has a separate admission model; leave it unchanged.
+				ordered = selection.OrderedEdgeIDs
 			}
 			for _, edgeID := range ordered {
 				pool[hostEdge{record.Name, edgeID}] = true
