@@ -1,0 +1,48 @@
+# Isolated verification only. Do not merge this file or the CI exclusion.
+name: verify-dns-source-plan
+
+on:
+  push:
+    branches: ['verify/fugue-dns-source-plan-20261120']
+
+permissions:
+  contents: read
+
+env:
+  FUGUE_SOURCE: 4155d58bc6c1f6b84a9ceefbcd2478e0e1c770b9
+  FUGUE_BASE: 254f3763d26995ede9265c1604f82ff646d595f3
+  FUGUE_PLAN_DIGEST: sha256:768bc932c007c25156d74db003b8b3ce2a48af84de98eefc440021783e848507
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  verify:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-source-plan-20261120'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.FUGUE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Verify exact candidate and production component plan without deploying
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FUGUE_SOURCE"
+          test "$(git rev-parse HEAD^)" = "$FUGUE_BASE"
+          test -z "$(git status --porcelain)"
+          git diff --no-renames --name-only "$FUGUE_BASE...$FUGUE_SOURCE" -- > "$RUNNER_TEMP/changed"
+          go run ./cmd/fugue-declarative-release plan deploy/releases/components.json "$FUGUE_BASE" "$FUGUE_SOURCE" "$RUNNER_TEMP/changed" > "$RUNNER_TEMP/plan"
+          jq -e --arg plan "$FUGUE_PLAN_DIGEST" --arg base "$FUGUE_BASE" '.planDigest == $plan and (.releases | length == 1 and .[0].component == "api" and .[0].expectedPreviousConfigSha == $base)' "$RUNNER_TEMP/plan"
+      - name: Verify complete test suite and bounded preflight race regression
+        run: |
+          set -euo pipefail
+          make test GOCACHE="$(go env GOCACHE)"
+          go test -race ./internal/api -run 'Test(DNSPreflightFactWitness|DNSPreflightReceipts|DNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities)' -count=3
