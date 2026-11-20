@@ -498,10 +498,17 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", summary)
 	}
-	if err = checkAssignment(); err != nil {
-		return err
+	checkApplyAuthority := func() error {
+		if p.routeSources == nil {
+			return checkAssignment()
+		}
+		// The selected route-source endpoint checks exact serving ownership
+		// on both sides of its ledger read. The client also compares the
+		// entire assignment and the release, and we compare the source digest.
+		// A separate serving-list read adds work but not a later guard.
+		return s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources)
 	}
-	if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
+	if err = checkApplyAuthority(); err != nil {
 		return err
 	}
 	if err = s.signDNSCheckpoint(&st.record); err != nil {
@@ -520,11 +527,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return err
 	}
-	if err = checkAssignment(); err != nil {
-		rollback()
-		return err
-	}
-	if err = s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
+	if err = checkApplyAuthority(); err != nil {
 		rollback()
 		return err
 	}

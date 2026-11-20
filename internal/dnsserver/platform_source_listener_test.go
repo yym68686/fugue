@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,12 +34,14 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 	assignment := model.PlatformConsumerAssignment{ArtifactID: compiled.DNSArtifact.ID, ArtifactKind: compiled.DNSArtifact.ArtifactKind, ArtifactReleaseID: release.ID, ReleaseSetID: compiled.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: compiled.DNSArtifact.ScopeKey, ExpectedGeneration: compiled.DNSArtifact.Generation, GenerationSequence: compiled.DNSArtifact.GenerationSequence, ContentHash: compiled.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "full"}
 	candidate := dnsPlatformCandidate{Artifact: compiled.DNSArtifact, Assignment: assignment, Release: release}
 	consumer, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
+	var assignmentReads, sourceReads, receipts, driftOnRead atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
 		var value any
 		switch {
 		case strings.HasSuffix(incoming.URL.Path, "/identity"):
 			value = platformconsumer.Identity{Token: "scoped", ExpiresAt: now.Add(time.Hour), Component: "dns-server", NodeID: "dns-a", AuthorityID: "cell-dns", ConsumerID: consumer, ScopeKey: compiled.DNSArtifact.ScopeKey, ArtifactKinds: []string{compiled.DNSArtifact.ArtifactKind}}
 		case strings.HasSuffix(incoming.URL.Path, "/assignment"):
+			assignmentReads.Add(1)
 			value = model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}}
 		case strings.HasSuffix(incoming.URL.Path, "/retained-route-sources"):
 			// This fixture has no remotely verified positive LKG. A failed current
@@ -46,8 +49,18 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 			writer.WriteHeader(http.StatusNotFound)
 			return
 		case strings.HasSuffix(incoming.URL.Path, "/route-sources"):
-			value = model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: snapshot}
+			read := sourceReads.Add(1)
+			response := model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: snapshot}
+			if read == driftOnRead.Load() {
+				if read == 3 {
+					response.Assignment.Revision++
+				} else {
+					response.Snapshot.SelectionDigest = "changed"
+				}
+			}
+			value = response
 		case strings.HasSuffix(incoming.URL.Path, "/trusted-heartbeat"):
+			receipts.Add(1)
 			var heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope
 			json.NewDecoder(incoming.Body).Decode(&heartbeat)
 			value = model.PlatformConsumerHeartbeatResponse{Consumer: model.PlatformConsumerInstance{IdentityVerified: true, ConsumerID: heartbeat.ConsumerID, Sequence: heartbeat.Sequence, EvidenceHash: heartbeat.EvidenceHash, ExpectedConsumerSetID: heartbeat.ExpectedConsumerSetID}}
@@ -63,11 +76,15 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 		json.NewEncoder(writer).Encode(value)
 	}))
 	defer server.Close()
-	directory := t.TempDir()
-	service := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: compiled.DNSArtifact.ScopeKey, Zone: "example.test", CachePath: filepath.Join(directory, "cache"), BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
-	service.PlatformTokenFile = filepath.Join(directory, "token")
-	if err := os.WriteFile(service.PlatformTokenFile, []byte("scoped"), 0600); err != nil {
-		t.Fatal(err)
+	newService := func(t *testing.T) *Service {
+		t.Helper()
+		directory := t.TempDir()
+		service := NewService(config.DNSConfig{APIURL: server.URL, DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: compiled.DNSArtifact.ScopeKey, Zone: "example.test", CachePath: filepath.Join(directory, "cache"), BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
+		service.PlatformTokenFile = filepath.Join(directory, "token")
+		if err := os.WriteFile(service.PlatformTokenFile, []byte("scoped"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return service
 	}
 	plans, err := dnsroutesource.Build(compiled.DNSArtifact, snapshot, keys, now)
 	if err != nil {
@@ -86,8 +103,31 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 		}
 		return routeprobe.Proof{}, errors.New("missing probe")
 	}
+	for _, tc := range []struct {
+		name string
+		read int32
+		wire bool
+	}{{"assignment drift before wire", 3, false}, {"source drift after wire", 4, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			sourceReads.Store(0)
+			driftOnRead.Store(tc.read)
+			service := newService(t)
+			wire := false
+			err := service.syncPlatformDNSServingOnce(context.Background(), probe, func(*dnsServingState) error { wire = true; return nil })
+			if !errors.Is(err, platformconsumer.ErrAssignmentChanged) || wire != tc.wire || receipts.Load() != 0 || service.platformServing.Load() != nil || service.platformCheckpoint.Load() != nil {
+				t.Fatalf("drift admitted: error=%v wire=%v receipts=%d", err, wire, receipts.Load())
+			}
+		})
+	}
+	assignmentReads.Store(0)
+	sourceReads.Store(0)
+	driftOnRead.Store(0)
+	service := newService(t)
 	if err := service.syncPlatformDNSServingOnce(context.Background(), probe, func(*dnsServingState) error { return nil }); err != nil {
 		t.Fatal(err)
+	}
+	if assignmentReads.Load() != 2 || sourceReads.Load() != 4 || receipts.Load() != 1 {
+		t.Fatalf("unexpected pre/post apply and receipt checks: assignments=%d sources=%d receipts=%d", assignmentReads.Load(), sourceReads.Load(), receipts.Load())
 	}
 	previous := service.platformServing.Load()
 	if previous == nil || !previous.record.Positive {
