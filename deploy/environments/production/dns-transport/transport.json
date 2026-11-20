@@ -1,7 +1,22 @@
 {
   "apiVersion": "transport.fugue.dev/v4",
-  "generation": 96,
-  "handoffs": [],
+  "generation": 97,
+  "handoffs": [
+    {
+      "address": "51.38.126.103",
+      "previous_revision": "f9e131bbc61c2fbf19fc393bbc7cb7a268d8b493",
+      "candidate_revision": "b23fdf448b82b89c3e20cb63a6827e3c676df451",
+      "recovery_fallback": {
+        "selector": {
+          "app.kubernetes.io/component": "dns-de-g",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/name": "fugue"
+        },
+        "revision": "4744562cf2dc342dc1c90d0989e9f054355c113c",
+        "pod_uid": "89e1b147-65bc-43bc-9336-834b82e2ce2c"
+      }
+    }
+  ],
   "kind": "DNSLocalTransport",
   "listeners": [
     {
@@ -31,7 +46,7 @@
       "name": "fugue-dns-public-de",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-de-e",
+        "app.kubernetes.io/component": "dns-de-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -49,5 +64,6 @@
       "targetPort": 53
     }
   ],
-  "namespace": "fugue-system"
+  "namespace": "fugue-system",
+  "rollback_generation": 98
 }
