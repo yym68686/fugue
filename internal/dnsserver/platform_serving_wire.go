@@ -146,12 +146,17 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 	stage, hint := capture.begin(st, req, remote, now)
 	var passiveScope uint8
 	returnedTransition := false
-	defer func() {
-		if capture != nil && !returnedTransition && stage != nil {
+	if capture != nil && stage != nil {
+		stageNumber := capture.currentStageNumber()
+		defer func() {
+			if returnedTransition {
+				return
+			}
 			publication := stage.Publication
 			capture.answerPublication = &publication
-		}
-	}()
+			capture.answerStage = stageNumber
+		}()
+	}
 	q := req.Question[0]
 	name := normalizeName(q.Name)
 	zone := ""

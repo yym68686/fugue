@@ -119,6 +119,9 @@ func (journal *dnsDecisionJournal) enqueue(request, response *dns.Msg, capture *
 	}
 	capture.input.Query = queryWire
 	capture.input.FilterReasonsVersion = dnsDecisionFilterReasonsVersion
+	if capture.input.ServingSelection != nil {
+		capture.input.ReturnedStage = capture.answerStage
+	}
 	sequence := journal.sequence.Add(1)
 	receipt := DNSDecisionReceipt{Schema: DNSDecisionSchema, DecisionID: fmt.Sprintf("%s-%d", journal.processID, sequence),
 		ProcessID: journal.processID, NodeID: journal.nodeID, ObservedAt: observedAt,

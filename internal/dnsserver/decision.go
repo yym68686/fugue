@@ -156,14 +156,39 @@ type dnsDecisionStage struct {
 	Hint               dnsDecisionHint                     `json:"hint"`
 	Selections         []*dnsDecisionSelection             `json:"selections"`
 	QueryAt            time.Time                           `json:"query_at"`
+	ReadinessCheckedAt time.Time                           `json:"readiness_checked_at,omitzero"`
+	RouteSourceDigest  string                              `json:"route_source_selection_digest,omitempty"`
 }
 
 type dnsDecisionReplay struct {
-	Version              string              `json:"version"`
-	FilterReasonsVersion int                 `json:"filter_reasons_version,omitempty"`
-	Query                []byte              `json:"query"`
-	Stages               []*dnsDecisionStage `json:"stages"`
-	NoServingState       bool                `json:"no_serving_state,omitempty"`
+	Version              string                       `json:"version"`
+	FilterReasonsVersion int                          `json:"filter_reasons_version,omitempty"`
+	Query                []byte                       `json:"query"`
+	Stages               []*dnsDecisionStage          `json:"stages"`
+	NoServingState       bool                         `json:"no_serving_state,omitempty"`
+	ServingSelection     *dnsDecisionServingSelection `json:"serving_selection,omitempty"`
+	ReturnedStage        int                          `json:"returned_stage,omitempty"`
+}
+
+// The path is the initial selection on this query, not the publication status
+// read separately by the journal. BaseWriter describes only that atomic base
+// load; in the renewal case it never attributes the renewal itself to a writer.
+type dnsDecisionServingSelection struct {
+	Path       string           `json:"path"`
+	BaseWriter dnsServingWriter `json:"base_writer,omitempty"`
+}
+
+func decisionServingSelection(selection dnsServingSelection) *dnsDecisionServingSelection {
+	out := &dnsDecisionServingSelection{Path: "base"}
+	if selection.state == nil {
+		out.Path = "absent"
+	} else if selection.renewalSelected {
+		out.Path = "renewal"
+	}
+	if selection.base != nil {
+		out.BaseWriter = selection.base.writer
+	}
+	return out
 }
 
 type dnsDecisionCapture struct {
@@ -175,6 +200,7 @@ type dnsDecisionCapture struct {
 	err               error
 	observations      []dnsDecisionRecordInput
 	answerPublication *DNSDecisionPublication
+	answerStage       int
 }
 
 type dnsDecisionRecordInput struct {
@@ -234,6 +260,12 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 		GenerationSequence: state.record.Candidate.Artifact.GenerationSequence, MaxStaleSeconds: state.payload.Policy.MaxStaleSeconds,
 		Readiness: state.payload.Policy.DNSReadiness, QueryAt: now, Entries: []dnsDecisionEntry{}, Selections: []*dnsDecisionSelection{},
 		Hint: dnsDecisionHint{Country: hint.Country, Region: hint.Region, ASN: hint.ASN, EdgeGroupID: hint.EdgeGroupID, Source: hint.Source}}
+	if capture.input.ServingSelection != nil {
+		stage.ReadinessCheckedAt = state.checkedAt
+		if source := state.record.RouteSources; source != nil {
+			stage.RouteSourceDigest = source.Snapshot.SelectionDigest
+		}
+	}
 	name := ""
 	if len(request.Question) == 1 {
 		name = normalizeName(request.Question[0].Name)
@@ -270,6 +302,13 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 	}
 	capture.input.Stages = append(capture.input.Stages, stage)
 	return stage, hint
+}
+
+func (capture *dnsDecisionCapture) currentStageNumber() int {
+	if capture.replaying {
+		return capture.stageCursor
+	}
+	return len(capture.input.Stages)
 }
 
 func (capture *dnsDecisionCapture) selection(stage *dnsDecisionStage, hint dnsGeoHint) (time.Time, dnsGeoHint) {
@@ -535,7 +574,9 @@ func ReplayDNSDecision(receipt DNSDecisionReceipt) (result DNSDecisionReplayResu
 		response := new(dns.Msg)
 		response.SetRcode(&query, dns.RcodeServerFailure)
 		result = DNSDecisionReplayResult{DecisionID: receipt.DecisionID, RCode: response.Rcode, RRSet: dnsRRStrings(response.Answer), Authority: dnsRRStrings(response.Ns), Records: []DNSDecisionRecord{}}
-		result.Matched = len(input.Stages) == 0 && receipt.Publication.Loaded == nil && receipt.AnswerPublication == nil && result.RCode == receipt.RCode && reflect.DeepEqual(result.RRSet, receipt.RRSet) && reflect.DeepEqual(result.Authority, receipt.Authority) && reflect.DeepEqual([]string{}, receipt.Additional) && reflect.DeepEqual(result.Records, receipt.Records)
+		result.Matched = len(input.Stages) == 0 && input.ReturnedStage == 0 &&
+			(input.ServingSelection == nil || input.ServingSelection.Path == "absent") &&
+			receipt.Publication.Loaded == nil && receipt.AnswerPublication == nil && result.RCode == receipt.RCode && reflect.DeepEqual(result.RRSet, receipt.RRSet) && reflect.DeepEqual(result.Authority, receipt.Authority) && reflect.DeepEqual([]string{}, receipt.Additional) && reflect.DeepEqual(result.Records, receipt.Records)
 		if !result.Matched {
 			return result, errors.New("absent serving state replay differs")
 		}
@@ -584,6 +625,10 @@ func ReplayDNSDecision(receipt DNSDecisionReceipt) (result DNSDecisionReplayResu
 	}
 	if capture.stageCursor != len(input.Stages) {
 		return DNSDecisionReplayResult{}, errors.New("unconsumed replay stages")
+	}
+	if input.ServingSelection != nil && (input.ServingSelection.Path != "base" && input.ServingSelection.Path != "renewal" ||
+		input.ReturnedStage == 0 || input.ReturnedStage != capture.answerStage) {
+		return DNSDecisionReplayResult{}, errors.New("decision returned stage differs")
 	}
 	for _, stage := range input.Stages {
 		for _, selection := range stage.Selections {

@@ -887,7 +887,8 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if s.platformServingRequired() {
-		st := s.currentDNSServingState()
+		serving := s.currentDNSServingSelection()
+		st := serving.state
 		if st == nil {
 			reply := new(miekgdns.Msg)
 			reply.SetRcode(r, miekgdns.RcodeServerFailure)
@@ -895,6 +896,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 			writeErr := w.WriteMsg(reply)
 			if journal := s.decisionAudit.Load(); journal != nil {
 				capture := &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema, NoServingState: true}, records: []DNSDecisionRecord{}}
+				capture.input.ServingSelection = decisionServingSelection(serving)
 				transport := "unknown"
 				if w.RemoteAddr() != nil {
 					transport = w.RemoteAddr().Network()
@@ -911,6 +913,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		journal := s.decisionAudit.Load()
 		if journal != nil {
 			capture = &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
+			capture.input.ServingSelection = decisionServingSelection(serving)
 		}
 		observed := s.decisionPublication.Load()
 		queryAt := time.Now().UTC()
