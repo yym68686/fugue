@@ -63,13 +63,21 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 		return
 	}
 	status := model.ProjectHostRoutePublicationStatus{State: "pending", Reason: "no exact full global publication with fresh consumer evidence"}
+	desired := false
 	err := s.store.EditProjectHostRoutes(r.Context(), project.ID, plan.Edit.Hostname, false, func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {
-		current, _, _, err := buildProjectHostRoutePlan(in, plan.Edit)
+		current, _, changed, err := buildProjectHostRoutePlan(in, plan.Edit)
 		if err != nil {
 			return nil, err
 		}
-		if current.HostnameOwnerAppID != plan.HostnameOwnerAppID || !maps.Equal(current.Before, plan.After) {
-			status.State, status.Reason = "superseded", "current desired routes or hostname owner differ from the plan"
+		switch {
+		case current.HostnameOwnerAppID != plan.HostnameOwnerAppID:
+			status.State, status.Reason = "superseded", "current hostname owner differs from the plan"
+		case !changed && maps.Equal(current.Before, plan.After):
+			desired = true
+		case current.PlanID == plan.PlanID && maps.Equal(current.Before, plan.Before) && maps.Equal(current.After, plan.After):
+			status.Reason = "hostname plan has not been applied"
+		default:
+			status.State, status.Reason = "superseded", "current desired routes differ from the plan"
 		}
 		return nil, nil
 	})
@@ -81,7 +89,7 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	if status.State == "pending" {
+	if status.State == "pending" && desired {
 		snapshot, healthy, err := s.publishedRouteDiagnostics(r.Context(), "")
 		if err == nil {
 			status = projectHostPublicationStatus(plan, snapshot, healthy)

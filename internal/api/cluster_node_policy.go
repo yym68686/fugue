@@ -366,6 +366,7 @@ func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeOb
 		desired[runtimepkg.SharedPoolLabelKey] = runtimepkg.SharedPoolLabelValue
 	}
 	applyNodeHealthLabels(desired, nodeSchedulingHealthy(node))
+	retainPlacement := (machine.Policy.AllowEdge || machine.Policy.AllowDNS) && retainDataPlanePlacementWhileUnreachable(node)
 
 	keys := []string{
 		runtimepkg.NodeKeyIDLabelKey,
@@ -404,6 +405,9 @@ func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeOb
 	patch := map[string]any{}
 	changed := false
 	for _, key := range keys {
+		if retainPlacement && key == runtimepkg.NodeSchedulableLabelKey {
+			continue
+		}
 		currentValue, hasCurrent := "", false
 		if current != nil {
 			currentValue, hasCurrent = current[key]
@@ -509,6 +513,26 @@ func applyNodeHealthLabels(labels map[string]string, healthy bool) {
 func nodeSchedulingHealthy(node kubeNode) bool {
 	return kubeNodeConditionStatus(node, clusterNodeConditionReady) == "true" &&
 		kubeNodeConditionStatus(node, clusterNodeConditionDisk) != "true"
+}
+
+// Legacy Edge/DNS DaemonSets use schedulable=true as a placement selector.
+// Removing that selector match on an unknown kubelet heartbeat deletes running
+// replicas, even if they can still serve traffic. Keep only existing placement;
+// node-health and the NoSchedule taint must still block new scheduling. A known
+// failure, disk pressure, or explicit removal of the machine's role is distinct.
+func retainDataPlanePlacementWhileUnreachable(node kubeNode) bool {
+	labels := node.Metadata.Labels
+	if labels[runtimepkg.NodeSchedulableLabelKey] != "true" ||
+		(labels[runtimepkg.EdgeRoleLabelKey] != runtimepkg.NodeRoleLabelValue && labels[runtimepkg.DNSRoleLabelKey] != runtimepkg.NodeRoleLabelValue) ||
+		kubeNodeConditionStatus(node, clusterNodeConditionDisk) == "true" {
+		return false
+	}
+	for _, condition := range node.Status.Conditions {
+		if strings.EqualFold(strings.TrimSpace(condition.Type), clusterNodeConditionReady) {
+			return normalizeKubeConditionStatus(condition.Status) == "unknown" && condition.Reason == "NodeStatusUnknown"
+		}
+	}
+	return false
 }
 
 func kubeNodeConditionStatus(node kubeNode, conditionType string) string {

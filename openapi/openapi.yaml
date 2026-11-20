@@ -6190,7 +6190,7 @@ paths:
               $ref: "#/components/schemas/ProjectHostRoutePlan"
       responses:
         '200':
-          description: Exact full global publication and its consumer evidence; does not attest independent authoritative DNS or public HTTPS responses
+          description: A current preview that has not been applied is pending, not superseded. Published requires exact full global publication and fresh consumer evidence; it does not attest independent authoritative DNS or public HTTPS responses.
           content:
             application/json:
               schema:

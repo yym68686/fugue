@@ -1192,6 +1192,68 @@ func TestBuildMachineNodeMergePatchBlocksDiskPressureNodes(t *testing.T) {
 	}
 }
 
+func TestNodeReconciliationDoesNotDescheduleExistingDataPlaneOnUnknownHeartbeat(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, role, schedulable, ready, reason, disk string
+		policy                                       model.MachinePolicy
+		retain                                       bool
+	}{
+		{"edge unreachable", runtimepkg.EdgeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{AllowEdge: true}, true},
+		{"dns unreachable", runtimepkg.DNSRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{AllowDNS: true}, true},
+		{"app unreachable", runtimepkg.AppRuntimeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{AllowAppRuntime: true}, false},
+		{"edge explicitly disabled", runtimepkg.EdgeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{}, false},
+		{"already ineligible", runtimepkg.EdgeRoleLabelKey, "false", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{AllowEdge: true}, false},
+		{"known disk pressure", runtimepkg.EdgeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "True", model.MachinePolicy{AllowEdge: true}, false},
+		{"known not ready", runtimepkg.EdgeRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowEdge: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var node kubeNode
+			node.Metadata.Labels = map[string]string{
+				tc.role:                            runtimepkg.NodeRoleLabelValue,
+				runtimepkg.NodeSchedulableLabelKey: tc.schedulable,
+				runtimepkg.NodeHealthLabelKey:      runtimepkg.NodeHealthReadyValue,
+			}
+			node.Status.Conditions = []kubeNodeCondition{
+				{Type: clusterNodeConditionReady, Status: tc.ready, Reason: tc.reason},
+				{Type: clusterNodeConditionDisk, Status: tc.disk},
+			}
+			machine := model.Machine{ID: "test-machine", Policy: tc.policy}
+			runtimeObj := model.Runtime{ID: "test-runtime"}
+			for _, reconcile := range []struct {
+				name  string
+				build func() (map[string]any, bool)
+			}{
+				{"machine", func() (map[string]any, bool) { return buildMachineNodeMergePatch(node, machine, nil) }},
+				{"runtime", func() (map[string]any, bool) {
+					return buildRuntimeNodeMergePatchWithMachinePolicy(node, runtimeObj, &machine)
+				}},
+			} {
+				t.Run(reconcile.name, func(t *testing.T) {
+					patch, changed := reconcile.build()
+					if !changed {
+						t.Fatal("the unhealthy scheduling gate did not update")
+					}
+					labels := patch["metadata"].(map[string]any)["labels"].(map[string]any)
+					value, writesPlacement := labels[runtimepkg.NodeSchedulableLabelKey]
+					if writesPlacement == tc.retain || writesPlacement && value != "false" {
+						t.Fatalf("unexpected placement change (%t): %+v", tc.retain, labels)
+					}
+					if labels[runtimepkg.NodeHealthLabelKey] != runtimepkg.NodeHealthBlockedValue {
+						t.Fatalf("node health must remain blocked: %+v", labels)
+					}
+					for _, taint := range patch["spec"].(map[string]any)["taints"].([]kubeNodeTaint) {
+						if taint.Key == runtimepkg.NodeUnhealthyTaintKey && taint.Effect == "NoSchedule" {
+							return
+						}
+					}
+					t.Fatal("new workload scheduling was not blocked")
+				})
+			}
+		})
+	}
+}
+
 func TestBuildClusterNodePolicyStatusSurfacesFilesystemPressureBeforeDiskPressure(t *testing.T) {
 	t.Parallel()
 

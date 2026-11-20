@@ -203,7 +203,9 @@ func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[st
 
 func buildRuntimeNodeMergePatchWithMachinePolicy(node kubeNode, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	healthy := nodeSchedulingHealthy(node)
-	labelsPatch, labelsChanged := buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(node.Metadata.Labels, healthy, runtimeObj, machine)
+	retainPlacement := retainDataPlanePlacementWhileUnreachable(node) &&
+		(!machineHasSavedPolicy(machine) || machine.Policy.AllowEdge || machine.Policy.AllowDNS)
+	labelsPatch, labelsChanged := runtimeNodeLabelsPatch(node.Metadata.Labels, healthy, retainPlacement, runtimeObj, machine)
 	taints, taintsChanged := buildRuntimeNodeTaintsForHealth(node.Spec.Taints, healthy, runtimeObj)
 	if !labelsChanged && !taintsChanged {
 		return nil, false
@@ -228,6 +230,10 @@ func buildRuntimeNodeLabelsPatchForHealth(current map[string]string, healthy boo
 }
 
 func buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current map[string]string, healthy bool, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
+	return runtimeNodeLabelsPatch(current, healthy, false, runtimeObj, machine)
+}
+
+func runtimeNodeLabelsPatch(current map[string]string, healthy, retainPlacement bool, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	desired := runtimepkg.JoinNodeLabelMap(runtimeObj)
 	if desiredRuntimeNodeAppRole(runtimeObj, machine) {
 		desired[runtimepkg.AppRuntimeRoleLabelKey] = runtimepkg.NodeRoleLabelValue
@@ -236,6 +242,9 @@ func buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current map[string]st
 	patch := map[string]any{}
 	changed := false
 	for _, key := range managedRuntimeNodeLabelKeys() {
+		if retainPlacement && key == runtimepkg.NodeSchedulableLabelKey {
+			continue
+		}
 		currentValue, hasCurrent := "", false
 		if current != nil {
 			currentValue, hasCurrent = current[key]

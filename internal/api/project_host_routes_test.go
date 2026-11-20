@@ -17,7 +17,7 @@ import (
 )
 
 func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
-	st, srv, token, _, owner, _ := setupAppDomainTestServer(t)
+	st, srv, token, admin, owner, _ := setupAppDomainTestServer(t)
 	spec := model.AppSpec{Image: "example.test/web:v1", Ports: []int{3000}, Replicas: 1, RuntimeID: "runtime_managed_shared"}
 	web, err := st.CreateApp(owner.TenantID, owner.ProjectID, "web", "", spec)
 	if err != nil {
@@ -56,6 +56,18 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 			}
 		}
 	}
+	status := func(plan model.ProjectHostRoutePlan, state, reason string) {
+		t.Helper()
+		rec := performJSONRequest(t, srv, http.MethodPost, base+"host-status", admin, plan)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+		var result model.ProjectHostRoutePublicationStatus
+		mustDecodeJSON(t, rec, &result)
+		if result.State != state || !strings.Contains(result.Reason, reason) {
+			t.Fatalf("publication status: got %+v, want %s containing %q", result, state, reason)
+		}
+	}
 	preview(model.ProjectHostRouteEdit{Hostname: host, Paths: map[string]string{"/": web.ID}}, http.StatusConflict)
 	original := preview(edit, http.StatusOK)
 	if !maps.Equal(original.Before, map[string]string{"/": owner.ID}) || !maps.Equal(original.After, edit.Paths) {
@@ -64,13 +76,16 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 	if _, err := st.GetProjectRouteTable(owner.ProjectID); err == nil {
 		t.Fatal("preview wrote an explicit table")
 	}
+	status(original, "pending", "has not been applied")
 	other := model.ProjectRouteEntrypoint{Name: "other", Domain: owner.Route.Hostname, Routes: []model.ProjectRouteEntrypointRoute{{PathPrefix: "/health", AppID: owner.ID}}}
 	if _, err = st.PutProjectRouteTable(owner.ProjectID, model.ProjectRouteTable{Entrypoints: []model.ProjectRouteEntrypoint{other}}); err != nil {
 		t.Fatal(err)
 	}
 	apply(original, http.StatusConflict, "")
+	status(original, "superseded", "desired routes differ")
 	current := preview(edit, http.StatusOK)
 	apply(current, http.StatusOK, "saved")
+	status(current, "pending", "no exact full global publication")
 	apply(current, http.StatusOK, "already_current")
 	table, err := st.GetProjectRouteTable(owner.ProjectID)
 	if err != nil || len(table.Entrypoints) != 2 || !reflect.DeepEqual(table.Entrypoints[0], model.NormalizeProjectRouteEntrypoint(other)) {
