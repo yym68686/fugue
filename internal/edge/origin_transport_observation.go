@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -35,6 +36,17 @@ func originTransportErrorKind(err error) string {
 	}
 	if originTransportTimeout(err) {
 		return "timeout"
+	}
+	var dns *net.DNSError
+	if errors.As(err, &dns) {
+		if dns.IsNotFound {
+			return "dns_not_found"
+		}
+		return "dns"
+	}
+	var certificate *tls.CertificateVerificationError
+	if errors.As(err, &certificate) {
+		return "tls_certificate"
 	}
 	return "other"
 }

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -141,6 +143,7 @@ type Service struct {
 	platformCandidate        PlatformCandidateStatus
 	platformTLSReadiness     *platformTLSReadinessReceipt
 	platformTLSCandidate     PlatformTLSCandidateStatus
+	peerLookupIP             func(context.Context, string, string) ([]netip.Addr, error)
 }
 
 type Status struct {
@@ -420,6 +423,10 @@ type edgeProxyObservation struct {
 	Streaming               bool
 	Upload                  bool
 	PeerFallback            bool
+	PeerFallbackSkip        string
+	PeerAddress             string
+	peerObservation         *edgeProxyObservation
+	originAttempts          []edgeOriginAttempt
 	InternalWarmup          bool
 	HealthProbe             bool
 	HealthProbeID           string
@@ -458,6 +465,8 @@ type edgeProxyObservation struct {
 	OriginConnectionWasIdle     bool
 	OriginConnectionIdle        time.Duration
 	OriginTransportErrorKind    string
+	OriginTLSProtocol           string
+	OriginTLSErrorKind          string
 	OriginResponseBodyErrorKind string
 	ResponseWriteErrorKind      string
 }
@@ -1337,6 +1346,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	clientContext := r.Context()
 	defer func() {
 		completed := observed.originTraceSnapshot()
+		completed.completePeerOutcome()
 		// ReverseProxy aborts the handler when copying an already-started
 		// response fails. Keep that panic intact, but retain its outcome even
 		// though the code after ServeHTTP is not reached. A canceled client
@@ -1382,6 +1392,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var releaseRequestBodyPolicy func()
+	// Body instrumentation can wrap http.NoBody. Determine eligibility from
+	// the original request before applying either wrapper.
+	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
 	r, releaseRequestBodyPolicy, handled, policyStatus := s.applyEdgeRequestBodyPolicy(w, r, selectedRoute)
 	if handled {
 		observed.StatusCode = policyStatus
@@ -1418,7 +1431,6 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
 	bufferedBody := false
 	if handled, status := s.bufferRequestBodyForOrigin(observedWriter, r, &observed); handled {
 		observed.StatusCode = status
@@ -1441,10 +1453,14 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if s.proxyPeerFallback(w, r, host, selectedRoute, &observed) {
 			return
 		}
+		if r.Context().Err() != nil {
+			observed.ClientCanceled = true
+			observed.StatusCode = edgeStatusClientClosedRequest
+			return
+		}
 	}
 	if observed.UpstreamError != "" && !observedWriter.wroteHeader {
-		http.Error(w, "upstream app is unavailable", http.StatusBadGateway)
-		observed.StatusCode = http.StatusBadGateway
+		http.Error(observedWriter, "upstream app is unavailable", http.StatusBadGateway)
 		return
 	}
 	observed.StatusCode = observedWriter.statusCode()
@@ -1609,6 +1625,10 @@ func (s *Service) finishEdgeCacheRevalidation(key string) {
 }
 
 func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation, suppressErrorResponse bool, cacheDecision *edgeHTTPCacheDecision) *httputil.ReverseProxy {
+	return newEdgeReverseProxy(host, target, route, observed, suppressErrorResponse, cacheDecision, s.newEdgeProxyTransport(observed), s.Config.EdgeID)
+}
+
+func newEdgeReverseProxy(host string, target *url.URL, route model.EdgeRouteBinding, observed *edgeProxyObservation, suppressErrorResponse bool, cacheDecision *edgeHTTPCacheDecision, transport http.RoundTripper, edgeID string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(req *httputil.ProxyRequest) {
 			req.SetURL(target)
@@ -1624,7 +1644,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 					req.Out.Header.Set(edgeCacheWarmupDiscoveryHeader, "1")
 				}
 				req.Out.Header.Set(edgeCacheWarmupIDHeader, firstNonEmpty(observed.CacheWarmupID, "unknown"))
-				req.Out.Header.Set(edgeCacheWarmupSourceHeader, strings.TrimSpace(s.Config.EdgeID))
+				req.Out.Header.Set(edgeCacheWarmupSourceHeader, strings.TrimSpace(edgeID))
 			}
 			if observed != nil && observed.HealthProbe {
 				req.Out.Header.Set(edgeHealthProbeHeader, "1")
@@ -1659,7 +1679,7 @@ func (s *Service) newEdgeReverseProxy(host string, target *url.URL, route model.
 				}
 			}
 		},
-		Transport: s.newEdgeProxyTransport(observed),
+		Transport: transport,
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if observed != nil {
 				observed.UpstreamError = strings.TrimSpace(proxyErr.Error())
@@ -2748,6 +2768,12 @@ func (t *edgeProxyTransport) RoundTrip(req *http.Request) (*http.Response, error
 					}
 				})
 			},
+			TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
+					observed.OriginTLSProtocol = state.NegotiatedProtocol
+					observed.OriginTLSErrorKind = originTransportErrorKind(err)
+				})
+			},
 			WroteHeaders: func() {
 				t.observation.withOriginTraceUpdate(func(observed *edgeProxyObservation) {
 					observed.OriginWroteHeaders = true
@@ -2834,49 +2860,6 @@ func (b *edgeOriginTimingBody) finish() {
 	})
 }
 
-func (s *Service) peerFallbackAllowed(r *http.Request, observed edgeProxyObservation) bool {
-	if !s.Config.PeerFallbackEnabled || r == nil {
-		return false
-	}
-	if strings.TrimSpace(r.Header.Get(edgePeerFallbackHeader)) != "" {
-		return false
-	}
-	if observed.Streaming || observed.Upload {
-		return false
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *Service) proxyPeerFallback(w http.ResponseWriter, r *http.Request, host string, route model.EdgeRouteBinding, observed *edgeProxyObservation) bool {
-	target := &url.URL{Scheme: "https", Host: host}
-	if strings.TrimSpace(host) == "" {
-		return false
-	}
-	peerRoute := route
-	peerRoute.UpstreamURL = target.String()
-	if observed != nil {
-		observed.PeerFallback = true
-		observed.FallbackHit = true
-		observed.UpstreamError = ""
-	}
-	peerRequest := r.Clone(r.Context())
-	peerRequest.Header = r.Header.Clone()
-	peerRequest.Header.Set(edgePeerFallbackHeader, "1")
-	peerRequest.Header.Set("X-Fugue-Edge-Route-Host", host)
-	proxy := s.newEdgeReverseProxy(host, target, peerRoute, observed, false, nil)
-	writer := newEdgeProxyObservationResponseWriter(w, time.Now(), observed)
-	proxy.ServeHTTP(writer, peerRequest)
-	if observed != nil {
-		observed.StatusCode = writer.statusCode()
-	}
-	return writer.wroteHeader
-}
-
 func newDefaultEdgeProxyTransport() http.RoundTripper {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
@@ -2884,10 +2867,9 @@ func newDefaultEdgeProxyTransport() http.RoundTripper {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}
-		return &http.Transport{
+		base = &http.Transport{
 			Proxy:               nil,
-			DialContext:         rootedKubernetesServiceDialContext(dialer.DialContext),
-			ForceAttemptHTTP2:   false,
+			DialContext:         dialer.DialContext,
 			TLSHandshakeTimeout: 10 * time.Second,
 			MaxIdleConns:        edgeOriginMaxIdleConns,
 			MaxIdleConnsPerHost: edgeOriginMaxIdleConnsPerHost,
@@ -2896,7 +2878,7 @@ func newDefaultEdgeProxyTransport() http.RoundTripper {
 	transport := base.Clone()
 	transport.Proxy = nil
 	transport.DialContext = rootedKubernetesServiceDialContext(transport.DialContext)
-	transport.ForceAttemptHTTP2 = false
+	configureEdgeHTTP1(transport)
 	transport.MaxIdleConns = edgeOriginMaxIdleConns
 	transport.MaxIdleConnsPerHost = edgeOriginMaxIdleConnsPerHost
 	return transport

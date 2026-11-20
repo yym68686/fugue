@@ -115,6 +115,19 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 	if observed.OriginTransportErrorKind != "" {
 		summary["origin_transport_error_kind"] = observed.OriginTransportErrorKind
 	}
+	if observed.PeerFallback {
+		summary["origin_resolution_mode"] = "peer_https"
+		summary["origin_attempts"] = observed.originAttempts
+	}
+	if observed.PeerFallbackSkip != "" {
+		summary["peer_fallback_skip"] = observed.PeerFallbackSkip
+	}
+	if observed.OriginTLSProtocol != "" {
+		summary["origin_tls_protocol"] = observed.OriginTLSProtocol
+	}
+	if observed.OriginTLSErrorKind != "" {
+		summary["origin_tls_error_kind"] = observed.OriginTLSErrorKind
+	}
 	if observed.RequestBytes > 0 {
 		summary["request_content_length"] = observed.RequestBytes
 		summary["request_body_read_bytes"] = nonNegativeInt64(observed.RequestBodyReadBytes)
@@ -278,6 +291,11 @@ func edgePlatformErrorClass(observed edgeProxyObservation) string {
 		return model.PlatformErrorClassOriginUnavailable
 	}
 	if observed.StatusCode >= 500 {
+		if observed.PeerFallback {
+			// A connected peer can itself generate a proxy error. Its HTTP
+			// response alone does not prove that the app was reached.
+			return model.PlatformErrorClassEvidenceUnknown
+		}
 		if observed.Proxied && observed.OriginGotConn {
 			return model.PlatformErrorClassOriginConnectedApp5xx
 		}
