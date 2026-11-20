@@ -1192,7 +1192,7 @@ func TestBuildMachineNodeMergePatchBlocksDiskPressureNodes(t *testing.T) {
 	}
 }
 
-func TestNodeReconciliationDoesNotDescheduleExistingDataPlaneOnUnknownHeartbeat(t *testing.T) {
+func TestNodeReconciliationDoesNotDescheduleExistingDataPlaneOnKubeletFailure(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, role, schedulable, ready, reason, disk string
@@ -1205,7 +1205,12 @@ func TestNodeReconciliationDoesNotDescheduleExistingDataPlaneOnUnknownHeartbeat(
 		{"edge explicitly disabled", runtimepkg.EdgeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{}, false},
 		{"already ineligible", runtimepkg.EdgeRoleLabelKey, "false", "Unknown", "NodeStatusUnknown", "Unknown", model.MachinePolicy{AllowEdge: true}, false},
 		{"known disk pressure", runtimepkg.EdgeRoleLabelKey, "true", "Unknown", "NodeStatusUnknown", "True", model.MachinePolicy{AllowEdge: true}, false},
-		{"known not ready", runtimepkg.EdgeRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowEdge: true}, false},
+		{"edge kubelet not ready", runtimepkg.EdgeRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowEdge: true}, true},
+		{"dns kubelet not ready", runtimepkg.DNSRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowDNS: true}, true},
+		{"app kubelet not ready", runtimepkg.AppRuntimeRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowAppRuntime: true}, false},
+		{"edge disabled while kubelet not ready", runtimepkg.EdgeRoleLabelKey, "true", "False", "KubeletNotReady", "False", model.MachinePolicy{}, false},
+		{"edge not yet placed while kubelet not ready", runtimepkg.EdgeRoleLabelKey, "", "False", "KubeletNotReady", "False", model.MachinePolicy{AllowEdge: true}, false},
+		{"edge disk pressure while kubelet not ready", runtimepkg.EdgeRoleLabelKey, "true", "False", "KubeletNotReady", "True", model.MachinePolicy{AllowEdge: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var node kubeNode

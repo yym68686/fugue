@@ -366,7 +366,7 @@ func buildMachineNodeLabelsPatch(node kubeNode, machine model.Machine, runtimeOb
 		desired[runtimepkg.SharedPoolLabelKey] = runtimepkg.SharedPoolLabelValue
 	}
 	applyNodeHealthLabels(desired, nodeSchedulingHealthy(node))
-	retainPlacement := (machine.Policy.AllowEdge || machine.Policy.AllowDNS) && retainDataPlanePlacementWhileUnreachable(node)
+	retainPlacement := (machine.Policy.AllowEdge || machine.Policy.AllowDNS) && retainDataPlanePlacementWhileNotReady(node)
 
 	keys := []string{
 		runtimepkg.NodeKeyIDLabelKey,
@@ -516,11 +516,12 @@ func nodeSchedulingHealthy(node kubeNode) bool {
 }
 
 // Legacy Edge/DNS DaemonSets use schedulable=true as a placement selector.
-// Removing that selector match on an unknown kubelet heartbeat deletes running
-// replicas, even if they can still serve traffic. Keep only existing placement;
-// node-health and the NoSchedule taint must still block new scheduling. A known
-// failure, disk pressure, or explicit removal of the machine's role is distinct.
-func retainDataPlanePlacementWhileUnreachable(node kubeNode) bool {
+// Losing the kubelet heartbeat or container runtime can mark a node NotReady
+// without stopping its running processes. Removing this selector match would
+// make the DaemonSet controller delete both Workers, bypassing their drain.
+// Retain only existing placement. Node health and the NoSchedule taint still
+// block new scheduling. Disk pressure and explicit role removal remain distinct.
+func retainDataPlanePlacementWhileNotReady(node kubeNode) bool {
 	labels := node.Metadata.Labels
 	if labels[runtimepkg.NodeSchedulableLabelKey] != "true" ||
 		(labels[runtimepkg.EdgeRoleLabelKey] != runtimepkg.NodeRoleLabelValue && labels[runtimepkg.DNSRoleLabelKey] != runtimepkg.NodeRoleLabelValue) ||
@@ -529,7 +530,13 @@ func retainDataPlanePlacementWhileUnreachable(node kubeNode) bool {
 	}
 	for _, condition := range node.Status.Conditions {
 		if strings.EqualFold(strings.TrimSpace(condition.Type), clusterNodeConditionReady) {
-			return normalizeKubeConditionStatus(condition.Status) == "unknown" && condition.Reason == "NodeStatusUnknown"
+			switch normalizeKubeConditionStatus(condition.Status) {
+			case "unknown":
+				return condition.Reason == "NodeStatusUnknown"
+			case "false":
+				return condition.Reason == "KubeletNotReady"
+			}
+			return false
 		}
 	}
 	return false

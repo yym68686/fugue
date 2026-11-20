@@ -203,7 +203,7 @@ func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[st
 
 func buildRuntimeNodeMergePatchWithMachinePolicy(node kubeNode, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	healthy := nodeSchedulingHealthy(node)
-	retainPlacement := retainDataPlanePlacementWhileUnreachable(node) &&
+	retainPlacement := retainDataPlanePlacementWhileNotReady(node) &&
 		(!machineHasSavedPolicy(machine) || machine.Policy.AllowEdge || machine.Policy.AllowDNS)
 	labelsPatch, labelsChanged := runtimeNodeLabelsPatch(node.Metadata.Labels, healthy, retainPlacement, runtimeObj, machine)
 	taints, taintsChanged := buildRuntimeNodeTaintsForHealth(node.Spec.Taints, healthy, runtimeObj)
