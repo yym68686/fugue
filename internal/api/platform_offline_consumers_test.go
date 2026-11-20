@@ -138,5 +138,16 @@ func TestGlobalOfflineMembershipUsesPinnedInputAndPreservesRequiredSurvivors(t *
 		if err != nil || len(selected.EdgeNodes) != 2 || len(selected.WorkerEnrollments) != 1 || selected.WorkerEnrollments[hold.EdgeID] != hold.WorkerEnrollment.ID {
 			t.Fatal("published topology lost exact replacement identity", selected, err)
 		}
+		for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig} {
+			set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: "parent", ArtifactReleaseID: "full", ArtifactKind: kind, ScopeKey: "global", Generation: "generation", PreparedAt: at, Topology: selected})
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := platformcontrol.ProjectExpectedConsumerSetToTopology(set, topology)
+			current := platformcontrol.ProjectExpectedConsumerSetToTopology(set, selected)
+			if legacy.RequiredCardinality != 1 || current.RequiredCardinality != 2 || !reflect.DeepEqual(current.Consumers, platformcontrol.ProjectExpectedConsumerOwners(set).Consumers) {
+				t.Fatal("convergence projection must retain the pinned Worker enrollment", kind, legacy.Consumers, current.Consumers)
+			}
+		}
 	})
 }

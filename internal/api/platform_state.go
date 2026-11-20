@@ -916,10 +916,30 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 	var legacyTopology *platformcontrol.ExpectedConsumerTopology
 	declaredTopologies := map[string]platformcontrol.ExpectedConsumerTopology{}
 	declaredParents := map[string]model.PlatformArtifact{}
+	read := newConsumerArtifactReader(s.store.GetPlatformArtifact)
 	for _, set := range sets {
 		topology, known := declaredTopologies[set.ReleaseSetID]
+		if !known && set.ScopeKey == platformconfig.GlobalScopeKey && set.ArtifactReleaseID != "" {
+			parent, readErr := read(set.ReleaseSetID)
+			if readErr != nil && !errors.Is(readErr, store.ErrNotFound) {
+				s.writeStoreError(w, readErr)
+				return
+			}
+			if readErr == nil && parent.Metadata[platformproducer.DNSPolicyIDMetadata] != "" {
+				// A replacement Worker is bound to the publication's signed
+				// enrollment, not the bare physical node in live inventory.
+				topology, err = s.releaseConsumerTopology(r.Context(), principal, parent)
+				if err != nil {
+					s.writeStoreError(w, err)
+					return
+				}
+				declaredTopologies[set.ReleaseSetID] = topology
+				declaredParents[set.ReleaseSetID] = parent
+				known = true
+			}
+		}
 		if !known && strings.HasPrefix(set.ScopeKey, "authority-cell:") {
-			parent, err := s.store.GetPlatformArtifact(set.ReleaseSetID)
+			parent, err := read(set.ReleaseSetID)
 			if err == nil {
 				topology, err = s.releaseConsumerTopology(r.Context(), principal, parent)
 			}
@@ -950,7 +970,7 @@ func (s *Server) handleListPlatformConsumerConvergence(w http.ResponseWriter, r 
 			s.writeStoreError(w, consumerErr)
 			return
 		}
-		statuses = append(statuses, s.evaluateLiveConsumerConvergence(r.Context(), set, consumers, s.platformConvergenceBinding(set)))
+		statuses = append(statuses, s.evaluateLiveConsumerConvergence(r.Context(), set, consumers, s.platformConvergenceBindingWithReader(set, read)))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"convergence": statuses, "generated_at": time.Now().UTC()})
 }

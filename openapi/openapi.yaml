@@ -4166,7 +4166,7 @@ paths:
             default: 50
       responses:
         '200':
-          description: Current consumer convergence assessments
+          description: Current consumer convergence assessments. Global producer publications preserve replacement Worker identities from the publication's pinned enrollment policy.
           content:
             application/json:
               schema:
