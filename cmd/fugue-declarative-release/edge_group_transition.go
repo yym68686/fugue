@@ -159,6 +159,7 @@ type edgeWorkerHealth struct {
 
 type edgeFrontHealth struct {
 	ActiveSlot         string
+	ActivationOnly     bool
 	ActivationPresent  bool
 	Generation         uint64
 	BundleGeneration   string
@@ -325,7 +326,7 @@ func validateCommittedEdgeGroupState(state edgeGroupState, current releaseguardi
 		return err
 	}
 	for _, health := range state.FrontHealth {
-		if !edgeFrontHealthMatchesServingAuthority(health, current) {
+		if health.ActivationOnly || !edgeFrontHealthMatchesServingAuthority(health, current) {
 			return errors.New("Edge Front does not serve the exact committed CurrentAuthority")
 		}
 	}
@@ -636,6 +637,12 @@ func repairEdgeGroupStandby(ctx context.Context, runtime edgeGroupTransitionRunt
 
 func verifyEdgeGroupTransition(ctx context.Context, runtime edgeGroupTransitionRuntime, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity, plan edgeGroupABPlan, standbyConverged bool) error {
 	final, err := runtime.Snapshot(ctx)
+	// Re-observe the entire cohort after a bounded read timeout, not just the
+	// node that was unavailable. A read timeout after the commit is not itself
+	// evidence of an unhealthy candidate. Never retry a contradictory snapshot.
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		final, err = runtime.Snapshot(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("capture final edge group state: %w", err)
 	}
@@ -654,6 +661,11 @@ func verifyEdgeGroupTransition(ctx context.Context, runtime edgeGroupTransitionR
 	}
 	if final.ActiveSlot != plan.inactiveSlot {
 		return errors.New("edge group activation did not converge to the promoted slot")
+	}
+	for _, health := range final.FrontHealth {
+		if health.ActivationOnly {
+			return errors.New("live Edge Front readiness is not proven by activation state alone")
+		}
 	}
 	return nil
 }
@@ -2020,6 +2032,7 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 			// recovery. The activation file is a group-local CAS witness; it does
 			// not claim that traffic is healthy and is only used to plan repair.
 			health = edgeFrontHealthFromActivation(*activation)
+			health.ActivationOnly = true
 		}
 		if activationExists && health.ActiveSlot != activation.ActiveSlot {
 			return edgeGroupState{}, errors.New("edge front health disagrees with activation evidence")
@@ -2048,6 +2061,7 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 	var canonical *edgeActivationState
 	canonicalAdmitted := false
 	admitted := func(node string) bool { return cluster.edgeCohorts[transition.GroupID].Admitted[node] }
+	missing := false
 	for _, node := range sortedEdgeNodes(front) {
 		state, exists, err := cluster.readEdgeActivationStateFromPod(ctx, release, transition, front[node], "edge-front")
 		if err != nil {
@@ -2057,7 +2071,11 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 			if canonical != nil {
 				return nil, false, errors.New("edge Front activation evidence is incomplete")
 			}
+			missing = true
 			continue
+		}
+		if missing {
+			return nil, false, errors.New("edge Front activation evidence is incomplete")
 		}
 		if canonical == nil {
 			copy := state
@@ -2086,6 +2104,7 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 		return candidates[i].Name < candidates[j].Name
 	})
 	seenNodes := map[string]bool{}
+	missing = false
 	for _, pod := range candidates {
 		if seenNodes[pod.NodeName] {
 			continue
@@ -2099,7 +2118,11 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 			if canonical != nil {
 				return nil, false, errors.New("edge Worker activation evidence is incomplete")
 			}
+			missing = true
 			continue
+		}
+		if missing {
+			return nil, false, errors.New("edge Worker activation evidence is incomplete")
 		}
 		if canonical == nil {
 			copy := state

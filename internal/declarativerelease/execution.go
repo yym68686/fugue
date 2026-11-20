@@ -873,9 +873,13 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		return sealResult(result)
 	}
 	result.Reason = "lkg-unproven"
+	rollbackDetail := lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release)
+	if rollbackErr != nil {
+		rollbackDetail = "LKG apply: " + boundedFailureDetail(rollbackErr.Error()) + "; " + rollbackDetail
+	}
 	result.FailureDetail = combinedFailureDetail(
 		result.FailureDetail,
-		lkgFailureDetail(lkgHealthErr, lkgConvergedErr, lkgObservation, prepared.LKG, release),
+		rollbackDetail,
 	)
 	result.Final = lkgObservation
 	return sealResult(result)

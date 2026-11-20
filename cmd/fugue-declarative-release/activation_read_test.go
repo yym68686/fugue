@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,28 @@ func TestActivationEvidenceReadRetriesTransportFailure(t *testing.T) {
 				if !errors.Is(readCtx.Err(), context.Canceled) {
 					t.Fatal("completed read attempt context was not canceled")
 				}
+			}
+		})
+	}
+}
+
+func TestActivationEvidenceCannotSkipAnEarlierMissingNode(t *testing.T) {
+	pods := map[string]edgeGroupPod{
+		"node-a": {Name: "pod-a", NodeName: "node-a"},
+		"node-b": {Name: "pod-b", NodeName: "node-b"},
+	}
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{Namespace: "control"}}
+	transition := declarativerelease.EdgeGroupABTransition{GroupID: "edge-group-test", WorkerContainer: "edge", ActivationStatePath: "/state/activation.json"}
+	for _, container := range []string{"edge-front", "edge"} {
+		t.Run(container, func(t *testing.T) {
+			cluster := &kubectlCluster{readCommand: func(_ context.Context, _ []byte, _ string, args ...string) ([]byte, error) {
+				if args[3] == "pod-a" || args[5] != container {
+					return []byte("absent\n"), nil
+				}
+				return []byte(`{"schema":"` + edgeActivationStateSchema + `","edge_group_id":"edge-group-test","generation":1,"authority":"` + edgeActivationAuthority + `","active_slot":"a"}`), nil
+			}}
+			if _, ok, err := cluster.readEdgeGroupActivation(context.Background(), release, transition, pods, pods, nil); ok || err == nil || !strings.Contains(err.Error(), "evidence is incomplete") {
+				t.Fatalf("partial cohort was accepted: present=%v err=%v", ok, err)
 			}
 		})
 	}

@@ -968,6 +968,7 @@ func TestServingAuthorityWitnessOmitsLegacyUnboundFront(t *testing.T) {
 
 type fakeEdgeGroupRuntime struct {
 	snapshots           []edgeGroupState
+	snapshotErrors      []error
 	rolls               map[string]map[string]edgeGroupPod
 	rollTargets         map[string]declarativerelease.TargetIdentity
 	waits               []map[string]edgeFrontHealth
@@ -988,12 +989,47 @@ type fakeEdgeGroupRuntime struct {
 
 func (fake *fakeEdgeGroupRuntime) Snapshot(context.Context) (edgeGroupState, error) {
 	fake.calls = append(fake.calls, "snapshot")
+	if len(fake.snapshotErrors) > 0 {
+		err := fake.snapshotErrors[0]
+		fake.snapshotErrors = fake.snapshotErrors[1:]
+		if err != nil {
+			return edgeGroupState{}, err
+		}
+	}
 	if len(fake.snapshots) == 0 {
 		return edgeGroupState{}, fmt.Errorf("no snapshot")
 	}
 	value := fake.snapshots[0]
 	fake.snapshots = fake.snapshots[1:]
 	return value, nil
+}
+
+func TestVerifyEdgeGroupTransitionRetriesOnlyAnObservationTimeout(t *testing.T) {
+	transition := edgeTransitionFixture()
+	target := edgeTargetFixture("2", "b")
+	health := edgeFrontHealth{ActiveSlot: "b"}
+	plan := edgeGroupABPlan{inactiveSlot: "b", frontTarget: target}
+	for _, tc := range []struct {
+		name        string
+		initialErr  error
+		witnessOnly bool
+		wantErr     bool
+		wantCalls   int
+	}{
+		{"read timeout", fmt.Errorf("read Front: %w", context.DeadlineExceeded), false, false, 2},
+		{"conflicting evidence", errors.New("activation evidence disagrees across nodes"), false, true, 1},
+		{"durable record is not readiness", nil, true, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			observed := health
+			observed.ActivationOnly = tc.witnessOnly
+			runtime := &fakeEdgeGroupRuntime{snapshots: []edgeGroupState{edgeStateFixture("b", target, observed)}, snapshotErrors: []error{tc.initialErr}}
+			err := verifyEdgeGroupTransition(context.Background(), runtime, transition, target, plan, false)
+			if (err != nil) != tc.wantErr || len(runtime.calls) != tc.wantCalls {
+				t.Fatalf("verification got err=%v, reads=%v", err, runtime.calls)
+			}
+		})
+	}
 }
 
 func (fake *fakeEdgeGroupRuntime) RequireFrontReplacementDrained(context.Context, edgeGroupState, declarativerelease.TargetIdentity) error {

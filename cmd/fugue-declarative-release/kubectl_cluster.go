@@ -3435,9 +3435,13 @@ func (cluster *kubectlCluster) kubectlRead(ctx context.Context, input []byte, ar
 	for attempt := 0; attempt < attempts; attempt++ {
 		readCtx, cancel := context.WithTimeout(ctx, timeout)
 		output, err := run(readCtx, input, cluster.kubectl, arguments...)
+		readErr := readCtx.Err()
 		cancel()
 		if err == nil {
 			return output, nil
+		}
+		if readErr != nil {
+			err = fmt.Errorf("%w: %v", readErr, err)
 		}
 		lastErr = err
 		if ctx.Err() != nil || attempt+1 == attempts {

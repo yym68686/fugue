@@ -179,7 +179,7 @@ func TestKubectlGetTimeoutIsBounded(t *testing.T) {
 	cluster := &kubectlCluster{kubectl: kubectl, readTimeout: 250 * time.Millisecond, readAttempts: 1}
 	started := time.Now()
 	_, err := cluster.kubectlRun(context.Background(), nil, "get", "pods", "--output", "json")
-	if err == nil || time.Since(started) >= 2*time.Second {
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= 2*time.Second {
 		t.Fatalf("bounded read timeout elapsed=%s err=%v", time.Since(started), err)
 	}
 }
