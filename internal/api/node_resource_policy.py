@@ -147,19 +147,27 @@ def reconcile(policy, dry_run=False, persist=False):
     # for the next reconcile even when the control plane is disconnected.
     if persist:
         atomic_write(POLICY_PATH, json.dumps(policy, sort_keys=True) + "\n")
-    atomic_write(SYSCTL_PATH, "# Managed by Fugue node resource policy; limits are never automatically lowered.\n" + "".join("fs.inotify.%s = %d\n" % item for item in sorted(desired.items())))
-    for key, value in desired.items():
-        if value > current[key]:
-            (PROC / "sys/fs/inotify" / key).write_text(str(value) + "\n")
-    result["effective"] = limits()
+    result["effective"] = apply_limits(current, desired)
     result["probe"] = allocation_probe()
     if result["effective"] != desired or result["probe"]["status"] != "pass":
         raise RuntimeError("inotify policy verification failed: " + json.dumps(result))
     return result
 
 
-def observation():
-    result = {"probe": allocation_probe()}
+def apply_limits(current, desired):
+    atomic_write(SYSCTL_PATH, "# Managed by Fugue node resource policy; limits are never automatically lowered.\n" + "".join("fs.inotify.%s = %d\n" % item for item in sorted(desired.items())))
+    for key, value in desired.items():
+        if value > current[key]:
+            (PROC / "sys/fs/inotify" / key).write_text(str(value) + "\n")
+    return limits()
+
+
+def observation(reconcile_current=False):
+    # The periodic updater reconciles and observes the same host. Use one
+    # descriptor census and one CRI inventory in that invocation, but always
+    # read back live limits and allocate after reconciliation. Never share this
+    # volatile sample with a later heartbeat (including after a task).
+    result = {}
     try:
         result.update(inventory())
         result["limits"] = limits()
@@ -167,25 +175,28 @@ def observation():
         result["warning_percent"] = policy["warning_percent"]
         result["policy_enabled"] = policy["enabled"]
         result["desired"], result["capacity_unmet"] = planned_limits(policy, container_density(), result, result["limits"])
-        result["status"] = result["probe"]["status"]
-        if (result["capacity_unmet"] or result["desired"] != result["limits"]) and result["status"] == "pass":
-            result["status"] = "warning"
-        for row in result["by_uid_upper_bounds"].values():
-            for key, limit in (("instances_upper_bound", "max_user_instances"), ("watches_upper_bound", "max_user_watches")):
-                if row[key] * 100 >= result["limits"][limit] * policy["warning_percent"] and result["status"] == "pass":
-                    result["status"] = "warning"
-        if result["unreadable"] and result["status"] == "pass":
-            result["status"] = "warning"
+        if reconcile_current and policy["enabled"]:
+            result["limits"] = apply_limits(result["limits"], result["desired"])
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        result["status"] = "fail" if result["probe"]["status"] == "fail" else "warning"
         result["observation_state"] = "partial"
         result["error"] = str(exc)
+    result["probe"] = allocation_probe()
+    result["status"] = result["probe"]["status"]
+    if result["status"] == "pass":
+        if (result.get("observation_state") == "partial" or result["capacity_unmet"] or
+                result["desired"] != result["limits"] or result["unreadable"]):
+            result["status"] = "warning"
+        elif any(row[key] * 100 >= result["limits"][limit] * result["warning_percent"]
+                 for row in result["by_uid_upper_bounds"].values()
+                 for key, limit in (("instances_upper_bound", "max_user_instances"),
+                                    ("watches_upper_bound", "max_user_watches"))):
+            result["status"] = "warning"
     return result
 
 
 def main(mode):
-    if mode == "observe":
-        return observation()
+    if mode in ("observe", "reconcile-observe"):
+        return observation(reconcile_current=mode == "reconcile-observe")
     if mode == "task":
         policy = json.loads(os.environ.get("FUGUE_NODE_UPDATE_TASK_POLICY_JSON", ""))
         return reconcile(policy, dry_run=os.environ.get("FUGUE_NODE_UPDATE_TASK_DRY_RUN", "true") != "false", persist=True)

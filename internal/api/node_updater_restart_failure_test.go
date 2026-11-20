@@ -8,6 +8,39 @@ import (
 	"testing"
 )
 
+func TestNodeUpdaterReportsHeartbeatTransportFailure(t *testing.T) {
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.invalid")
+	_, tail, found := strings.Cut(script, "\nheartbeat() {\n")
+	if !found {
+		t.Fatal("missing node updater heartbeat")
+	}
+	body, _, found := strings.Cut(tail, "\n}\n")
+	if !found {
+		t.Fatal("missing node updater heartbeat body")
+	}
+	harness := `
+set -e
+k3s_version() { printf v1.34.0; }
+command() { [ "$*" = "-v python3" ]; }
+node_deep_health_heartbeat_json() {
+  [ "$*" = "v1.34.0 reconcile-observe" ] || return 70
+  printf '{}'
+}
+api_json() { [ "$*" = "POST /v1/node-updater/heartbeat {}" ] && return 22; return 71; }
+heartbeat() {
+` + body + `
+}
+if heartbeat reconcile-observe; then exit 99; else exit "$?"; fi
+`
+	cmd := exec.Command("bash", "-c", harness)
+	out, err := cmd.CombinedOutput()
+	exit, ok := err.(*exec.ExitError)
+	if !ok || exit.ExitCode() != 22 {
+		t.Fatalf("heartbeat did not preserve transport failure: %v\n%s", err, out)
+	}
+}
+
 func TestNodeUpdaterSelfUpgradePreservesInstalledScriptOnFailure(t *testing.T) {
 	var server Server
 	script := server.nodeUpdaterInstallScript("https://api.invalid")

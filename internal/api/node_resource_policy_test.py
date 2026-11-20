@@ -64,6 +64,37 @@ class ResourcePolicyTests(unittest.TestCase):
         with patch.object(policy, "allocation_probe", return_value={"status": "fail", "errno": 24}), patch.object(policy, "inventory", return_value=self.facts), patch.object(policy, "limits", return_value=self.current), patch.object(policy, "POLICY_PATH", Path("/nonexistent-fugue-test-policy")):
             self.assertEqual(policy.observation()["status"], "fail")
 
+    def test_periodic_tick_shares_exactly_one_sample_and_checks_post_apply_health(self):
+        wanted, _ = policy.planned_limits(self.intent, 100, self.facts, self.current)
+        for scenario in ("applied", "write_failed", "readback_mismatch", "allocation_failed", "disabled"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                intent = dict(self.intent, enabled=scenario != "disabled")
+                path = Path(directory) / "policy.json"
+                path.write_text(json.dumps(intent))
+                actions = []
+                def apply(current, target):
+                    actions.append("apply")
+                    self.assertEqual((current, target), (self.current, wanted))
+                    if scenario == "write_failed":
+                        raise PermissionError("denied")
+                    return self.current if scenario == "readback_mismatch" else wanted
+                def probe():
+                    actions.append("probe")
+                    return {"status": "fail" if scenario == "allocation_failed" else "pass"}
+                with patch.object(policy, "POLICY_PATH", path), \
+                        patch.object(policy, "inventory", return_value=copy.deepcopy(self.facts)) as inventory, \
+                        patch.object(policy, "container_density", return_value=100) as density, \
+                        patch.object(policy, "limits", return_value=self.current), \
+                        patch.object(policy, "apply_limits", side_effect=apply), \
+                        patch.object(policy, "allocation_probe", side_effect=probe):
+                    result = policy.main("reconcile-observe")
+                inventory.assert_called_once_with()
+                density.assert_called_once_with()
+                self.assertEqual(actions, ["probe"] if scenario == "disabled" else ["apply", "probe"])
+                self.assertEqual(result["status"], {"applied": "pass", "allocation_failed": "fail"}.get(scenario, "warning"))
+                if scenario == "write_failed":
+                    self.assertEqual(result["observation_state"], "partial")
+
 
 if __name__ == "__main__":
     unittest.main()

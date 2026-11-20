@@ -3453,6 +3453,7 @@ PY_NODE_DEEP_HEALTH_EDGE_ROLE
 
 node_deep_health_heartbeat_json() {
   local current_k3s="$1"
+  local inotify_mode="${2:-observe}"
   FUGUE_HEARTBEAT_K3S_VERSION="${current_k3s}" \
   FUGUE_HEARTBEAT_K3S_SERVER="$(current_k3s_server)" \
   FUGUE_HEARTBEAT_K3S_FALLBACK_SERVERS="$(current_k3s_fallback_servers)" \
@@ -3467,7 +3468,7 @@ node_deep_health_heartbeat_json() {
   FUGUE_HEARTBEAT_LAST_ERROR="$(last_error)" \
   FUGUE_HEARTBEAT_CLUSTER_NODE_NAME="$(node_deep_health_cluster_node_name)" \
   FUGUE_HEARTBEAT_EDGE_ROLE="$(node_deep_health_edge_role)" \
-  FUGUE_HEARTBEAT_INOTIFY="$(node_resource_policy observe)" \
+  FUGUE_HEARTBEAT_INOTIFY="$(node_resource_policy "${inotify_mode}")" \
   FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT="$(localpv_boot_unit_observation observe)" \
   FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT_APPLY="${FUGUE_LOCALPV_UNIT_LAST_APPLY:-}" \
   FUGUE_HEARTBEAT_DESIRED_STATE_FILE="${FUGUE_NODE_UPDATER_DESIRED_STATE_FILE}" \
@@ -4345,9 +4346,9 @@ heartbeat() {
   local body=""
   current_k3s="$(k3s_version)"
   if command -v python3 >/dev/null 2>&1; then
-    body="$(node_deep_health_heartbeat_json "${current_k3s}")"
+    body="$(node_deep_health_heartbeat_json "${current_k3s}" "${1:-observe}")"
     api_json POST /v1/node-updater/heartbeat "${body}" >/dev/null
-    return 0
+    return $?
   fi
   api_form POST /v1/node-updater/heartbeat \
     --data-urlencode "updater_version=${FUGUE_NODE_UPDATER_VERSION}" \
@@ -5859,8 +5860,7 @@ run_once() {
   else
     log "node state reconciliation did not make changes or could not complete"
   fi
-  node_resource_policy reconcile || log "node resource policy reconciliation failed; existing limits retained"
-  heartbeat || log "heartbeat failed"
+  heartbeat reconcile-observe || log "heartbeat failed"
   task_env="$(mktemp)"
   if ! api_form GET "/v1/node-updater/tasks?format=env&limit=1" >"${task_env}"; then
     record_last_error "task poll failed; continuing in degraded offline mode"
