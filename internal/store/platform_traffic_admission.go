@@ -247,7 +247,7 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 				found = true
 			}
 			if !found {
-				return fail("required capability fact missing for " + expected.ConsumerID + "/" + child.ArtifactKind)
+				return platformReleaseRejected(PlatformReleaseStageTrafficCapabilityPending, fail("required capability fact missing for "+expected.ConsumerID+"/"+child.ArtifactKind))
 			}
 			count++
 			cohorts[expected.Cohort] = true

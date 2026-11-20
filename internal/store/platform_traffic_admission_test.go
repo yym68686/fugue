@@ -359,6 +359,16 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 					t.Fatal("failed admission changed release ledger", err)
 				}
 			}
+			switch scenario {
+			case "stale issued", "stale received", "missing issued":
+				if PlatformReleaseFailureStage(err) != PlatformReleaseStageTrafficCapabilityPending {
+					t.Fatal("stale evidence was not classified as awaiting fresh capability", err)
+				}
+			case "paired missing route":
+				if PlatformReleaseFailureStage(err) == PlatformReleaseStageTrafficCapabilityPending {
+					t.Fatal("fresh incompatible reader was mistaken for pending evidence", err)
+				}
+			}
 			for _, kind := range []string{model.PlatformArtifactKindReleaseSet, model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindPolicySnapshot} {
 				if lkg, err := s.GetPlatformLKG(kind, scope); err != nil || lkg != nil {
 					t.Fatal("capability admission claimed a positive LKG", kind, err)

@@ -2,6 +2,10 @@ package store
 
 import "errors"
 
+// Absence of fresh trusted capability evidence is distinct from a fresh
+// report proving an incompatible reader or a change of release authority.
+const PlatformReleaseStageTrafficCapabilityPending = "traffic_capability_pending"
+
 // Fixed internal stages are safe to expose in operator logs. The underlying
 // error remains unchanged for callers; request bodies and database errors are
 // never copied into the diagnostic fields.

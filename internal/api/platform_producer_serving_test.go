@@ -49,6 +49,32 @@ func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(
 	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{delayedShadow: true})
 }
 
+func TestDNSProducerKeepsShadowOnlyWhileAwaitingFreshCapability(t *testing.T) {
+	now := time.Now().UTC()
+	p := platformproducer.Policy{PublicationRole: platformconfig.PublicationRoleCellDNS, Serving: &platformproducer.ServingPolicy{RolloutTimeoutSeconds: 120}}
+	for _, tc := range []struct {
+		name, role, stage string
+		age               time.Duration
+		want              bool
+	}{
+		{"missing capability", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, time.Minute, true},
+		{"expired shadow", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, 2 * time.Minute, false},
+		{"future shadow", p.PublicationRole, store.PlatformReleaseStageTrafficCapabilityPending, -time.Second, false},
+		{"incompatible reader", p.PublicationRole, "capability_admission", time.Minute, false},
+		{"source superseded", p.PublicationRole, "routing_source_selection", time.Minute, false},
+		{"global producer", "", store.PlatformReleaseStageTrafficCapabilityPending, time.Minute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := p
+			policy.PublicationRole = tc.role
+			release := model.PlatformArtifactRelease{ReleasedAt: now.Add(-tc.age)}
+			if keepDNSShadowForPendingCapability(policy, release, tc.stage, now) != tc.want {
+				t.Fatalf("incorrect shadow capture decision for %s", tc.name)
+			}
+		})
+	}
+}
+
 func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gated bool, options ...servingProducerTestOptions) {
 	signedGate := len(options) == 1 && options[0].signedInputGate
 	delayedShadow := len(options) == 1 && options[0].delayedShadow
