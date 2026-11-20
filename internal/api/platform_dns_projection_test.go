@@ -90,3 +90,58 @@ func TestBusinessDNSProjectionResolvesNamesToStableOwnedApplicationIDs(t *testin
 		t.Fatal("ambiguous name silently selected an app")
 	}
 }
+
+func TestManagedHostedDNSProjectsAllSameProjectPathsWithoutChangingRecord(t *testing.T) {
+	host := "customer.test"
+	zones := []model.HostedZone{{ID: "zone", ZoneName: host, TenantID: "tenant", Status: model.HostedZoneStatusActive}}
+	domain := model.AppDomain{Hostname: host, AppID: "api", TenantID: "tenant", DNSMode: model.AppDomainDNSModeManaged, DNSZoneID: "zone", DNSRecordID: "record", Status: model.AppDomainStatusVerified}
+	row := model.DNSRecord{ID: "record", ZoneID: "zone", TenantID: "tenant", FQDN: host, Type: model.DNSRecordTypeFUGUEAPP, Values: []string{"api"}, Source: model.DNSRecordSourceAppDomain, SourceRefType: model.DNSRecordSourceRefTypeAppDomain, SourceRefID: host, TTL: 60, FlattenIPv4Policy: "ipv4_only"}
+	for _, scenario := range []string{"split", "single", "user record", "wrong DNS link", "foreign project", "foreign tenant", "missing original owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			apps := map[string]model.App{"api": {ID: "api", ProjectID: "project", TenantID: "tenant"}, "web": {ID: "web", ProjectID: "project", TenantID: "tenant"}}
+			result := platformIntentProjectionResponse{Intent: platformconfig.PlatformIntent{Routes: []platformconfig.RouteIntent{
+				{Hostname: host, PathPrefix: "/", AppID: "web", TenantID: "tenant"},
+				{Hostname: host, PathPrefix: "/api", AppID: "api", TenantID: "tenant"},
+			}}}
+			record, claim := row, domain
+			switch scenario {
+			case "single":
+				result.Intent.Routes[0].AppID = "api"
+			case "user record":
+				record.Source = model.DNSRecordSourceUser
+			case "wrong DNS link":
+				claim.DNSRecordID = "other"
+			case "foreign project":
+				apps["web"] = model.App{ID: "web", ProjectID: "other", TenantID: "tenant"}
+			case "foreign tenant":
+				result.Intent.Routes[0].TenantID = "other"
+			case "missing original owner":
+				result.Intent.Routes[1].AppID = "web"
+			}
+			intents, excluded := projectBusinessDNSDraft(&result, apps, zones, []model.DNSRecord{record}, nil, claim)
+			if len(intents) != 1 || len(excluded) != 0 {
+				t.Fatalf("unexpected projection %v %v", intents, excluded)
+			}
+			got := intents[0]
+			if scenario != "split" {
+				if got.Type != model.DNSRecordTypeFUGUEAPP || got.Route != nil {
+					t.Fatalf("unowned/unnecessary path adaptation: %+v", got)
+				}
+				return
+			}
+			if got.Type != "FUGUE_ROUTE" || got.Application != nil || got.Route == nil || got.AppID != domain.AppID || got.TTL != row.TTL || got.Route.IPv4Policy != "ipv4_only" || len(got.Values) != 0 {
+				t.Fatalf("record policy or owner changed: %+v", got)
+			}
+			routes := []platformconfig.CompiledRoute{{RouteIntent: result.Intent.Routes[0]}, {RouteIntent: result.Intent.Routes[1]}}
+			if err := platformconfig.ValidateDNSRouteOwners(got, routes); err != nil {
+				t.Fatal(err)
+			}
+			if err := platformconfig.ValidateDNSRouteOwners(got, routes[:1]); err == nil {
+				t.Fatal("a missing API path was accepted")
+			}
+			if row.Values[0] != "api" {
+				t.Fatal("source record rewritten")
+			}
+		})
+	}
+}

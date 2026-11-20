@@ -153,9 +153,27 @@ func compileCellDNSReadinessProjection(intent PlatformIntent, publications []Cel
 			byHost[route.Hostname] = append(byHost[route.Hostname], route)
 		}
 		refDigest, _ := Digest(pub.Reference)
+		var managedBindings map[string]managedHostDNSBinding
+		var tlsByHost map[string]model.EdgeTLSAllowlistEntry
+		if runtime {
+			managedBindings, err = readManagedHostDNSBindings(pub.Route)
+			if err != nil {
+				return nil, err
+			}
+			tlsByHost = make(map[string]model.EdgeTLSAllowlistEntry, len(projection.TLSAllowlist))
+			for _, entry := range projection.TLSAllowlist {
+				tlsByHost[entry.Hostname] = entry
+			}
+		}
 		for _, record := range intent.DNS {
 			if DNSPlacementOptions(record) == nil {
 				continue
+			}
+			if runtime {
+				record, err = runtimeManagedHostDNSRecord(record, managedBindings[record.Hostname], tlsByHost[record.Hostname])
+				if err != nil {
+					return nil, err
+				}
 			}
 			complete, owners := true, []CompiledRoute{}
 			requiredProjection := projection

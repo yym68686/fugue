@@ -101,8 +101,9 @@ type DNSApplicationIntent struct {
 // aliases whose DNS owner differs from the HTTP/TLS hostnames they represent.
 type DNSRouteIntent struct {
 	DNSApplicationIntent
-	Hostnames []string          `json:"hostnames"`
-	Bindings  []DNSRouteBinding `json:"bindings,omitempty"`
+	Hostnames   []string          `json:"hostnames"`
+	Bindings    []DNSRouteBinding `json:"bindings,omitempty"`
+	ManagedHost bool              `json:"managed_host,omitempty"`
 }
 
 // DNSRouteBinding is an explicit hostname/path/app dependency for a route
@@ -463,6 +464,9 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 	if len(tlsAllowlist) > 0 {
 		routePayload["tls_allowlist"] = tlsAllowlist
+	}
+	if err := addManagedHostDNSBindings(routePayload, intent, tlsAllowlist); err != nil {
+		return CompileResult{}, err
 	}
 	if len(policy.EdgeSelectionConstraints) > 0 && intent.PublicationRole != PublicationRoleCellDNS {
 		projected, err := ProjectRouteArtifact(model.PlatformArtifact{Generation: intent.Generation, Content: routePayload})

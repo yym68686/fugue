@@ -16,6 +16,41 @@ credential-free public HTTP observation. Ordinary verification only checks the
 workload. A reachable older release, or a healthy Pod with a public 503, does
 not verify the new rollout. An HTTP response alone cannot identify a release.
 
+### Change paths without transferring a verified custom hostname
+
+For an existing custom hostname with ready DNS and TLS, plan a scoped path
+change instead of deleting the domain binding or replacing the project table:
+
+```sh
+fugue project routes plan example --host site.example.net \
+  --route /=APP_WEB_ID --route /api=APP_API_ID > host-plan.json
+fugue project routes apply example --plan host-plan.json --wait
+```
+
+Review the effective `before` and `after` maps, including inherited paths.
+The root is a catch-all: changing it changes every unlisted path that would
+otherwise match it. Include every existing API prefix that must keep its
+upstream. DNS records and certificate ownership do not move; at least one
+path must retain the hostname owner. A concurrent configuration change can
+invalidate the plan. Re-preview; do not blindly retry a stale plan.
+
+For managed cross-application hostname changes, the API rejects the write
+until every required consumer of the verified global and independent DNS
+authorities reports live host-route continuity support.
+The DNS runtime can follow the predecessor or successor using that source's
+complete exact path proofs, subject to the original DNS endpoint and policy
+constraints. Existing probes never become proof of a changed route.
+
+`saved` means desired state was committed, not that the data plane switched.
+The platform-admin `--wait` and `routes status --plan` report `published` only
+for the exact full global publication with fresh consumer evidence. This is
+not public serving proof: an independent authoritative DNS Cell can still
+use the predecessor. Verify the delegated authorities and HTTPS endpoints
+before accepting a production change. If a path was newly made
+explicit, `plan --remove-path /path` restores its inherited matching; for a
+previously explicit path plan a replacement with its old app. This uses the
+same signed publication flow rather than deleting the hostname.
+
 Before gray publication and full promotion, a proposed removal of a healthy
 path for stable-release unreadiness is checked against its current selection
 and managed workload. An obsolete negative must not replace that route. A

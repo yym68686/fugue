@@ -23,6 +23,8 @@ func (c *CLI) newProjectRoutesCommand() *cobra.Command {
 		c.newProjectRoutesShowCommand(),
 		c.newProjectRoutesApplyCommand(),
 		c.newProjectRoutesDeleteCommand(),
+		c.newProjectHostRoutePlanCommand(),
+		c.newProjectHostRouteStatusCommand(),
 	)
 	return cmd
 }
@@ -56,19 +58,20 @@ func (c *CLI) newProjectRoutesShowCommand() *cobra.Command {
 
 func (c *CLI) newProjectRoutesApplyCommand() *cobra.Command {
 	opts := struct {
-		File string
+		File, Plan string
+		Wait       bool
 	}{}
 	cmd := &cobra.Command{
 		Use:   "apply <project>",
-		Short: "Replace the project route table from a fugue.yaml-style file",
+		Short: "Apply a reviewed hostname plan or replace the complete route table",
 		Example: strings.TrimSpace(`
 fugue project routes apply sample-api-web --file fugue.yaml
 fugue project routes apply sample-api-web --file routes.yaml
 `),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if strings.TrimSpace(opts.File) == "" {
-				return fmt.Errorf("--file is required")
+			if (opts.File == "") == (opts.Plan == "") || opts.Wait && opts.Plan == "" {
+				return fmt.Errorf("choose exactly one of --plan or --file; --wait requires --plan")
 			}
 			client, err := c.newClient()
 			if err != nil {
@@ -77,6 +80,9 @@ fugue project routes apply sample-api-web --file routes.yaml
 			project, err := c.resolveNamedProject(client, args[0])
 			if err != nil {
 				return err
+			}
+			if opts.Plan != "" {
+				return c.applyProjectHostRoutePlan(cmd.Context(), client, project.ID, opts.Plan, opts.Wait)
 			}
 			table, err := readProjectRouteTableFile(opts.File)
 			if err != nil {
@@ -93,6 +99,8 @@ fugue project routes apply sample-api-web --file routes.yaml
 		},
 	}
 	cmd.Flags().StringVarP(&opts.File, "file", "f", "", "YAML or JSON file containing domains and entrypoints")
+	cmd.Flags().StringVar(&opts.Plan, "plan", "", "JSON plan from project routes plan; - reads stdin")
+	cmd.Flags().BoolVar(&opts.Wait, "wait", false, "Wait for the exact full publication (platform admin)")
 	return cmd
 }
 

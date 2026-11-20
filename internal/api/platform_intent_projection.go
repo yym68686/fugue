@@ -174,7 +174,7 @@ func (s *Server) projectPlatformIntentWithInputs(ctx context.Context, principal 
 			defaults = &value
 		}
 	}
-	projection, err := projectBusinessRouteDraftWithPolicy(snapshot, source.apps, observed, static.Routes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, static.DNS, defaults)
+	projection, err := projectBusinessRouteDraftWithPolicy(snapshot, source.apps, observed, static.Routes, business.RoutePolicies, business.TrafficPolicies, business.Releases, business.HostedZones, business.DNSRecords, static.DNS, defaults, business.Domains...)
 	if err != nil {
 		return platformIntentProjectionResponse{}, errors.New("business route draft cannot be captured")
 	}
@@ -425,7 +425,7 @@ func projectBusinessRouteDraft(snapshot model.EdgeRouteIntentSnapshot, apps, obs
 	return projectBusinessRouteDraftWithPolicy(snapshot, apps, observed, platformRoutes, routePolicies, trafficPolicies, releases, hostedZones, dnsRecords, staticRecords, nil)
 }
 
-func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord, defaults *platformconfig.PolicySnapshot) (platformIntentProjectionResponse, error) {
+func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot, apps, observed map[string]model.App, platformRoutes []model.PlatformRoute, routePolicies []model.EdgeRoutePolicy, trafficPolicies []model.AppTrafficPolicy, releases []model.AppRelease, hostedZones []model.HostedZone, dnsRecords []model.DNSRecord, staticRecords []model.EdgeDNSRecord, defaults *platformconfig.PolicySnapshot, domains ...model.AppDomain) (platformIntentProjectionResponse, error) {
 	result := platformIntentProjectionResponse{SourceGeneration: snapshot.Generation, CapturedAt: snapshot.GeneratedAt,
 		Issues:               []platformProjectionIssue{{Code: "transaction_snapshot_not_frozen"}, {Code: "dns_output_equivalence_not_verified"}, {Code: "dns_acme_not_projected"}},
 		OmittedRuntimeFields: []string{"selected_edge_group", "decision_id", "exclusion_evidence"},
@@ -569,7 +569,8 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 	}
 	intent = platformconfig.NormalizePlatformIntent(intent)
 	if defaults == nil || defaults.PublicationRole != platformconfig.PublicationRoleCellRoutes {
-		intent.DNS, result.DNSExclusions = projectBusinessDNSDraft(&result, apps, hostedZones, dnsRecords, staticRecords)
+		result.Intent.Routes = intent.Routes
+		intent.DNS, result.DNSExclusions = projectBusinessDNSDraft(&result, apps, hostedZones, dnsRecords, staticRecords, domains...)
 	}
 	// TLS policy is desired route configuration and can be projected without
 	// copying certificate readiness or other runtime facts.

@@ -51,6 +51,12 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 		if platformconfig.DNSArtifactRequiresTrafficRelease(parent) {
 			return fail("DNS value expiration requires a complete traffic ReleaseSet")
 		}
+		if parent.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle {
+			shared, err := routeArtifactRequiresSharedHostTLS(parent)
+			if err != nil || shared {
+				return fail("shared custom-host TLS requires a complete traffic ReleaseSet")
+			}
+		}
 		return nil
 	}
 	ids, _ := parent.Content["artifact_ids"].([]any)
@@ -58,6 +64,7 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 	cellRoutes := role == platformconfig.PublicationRoleCellRoutes
 	cellDNS := role == platformconfig.PublicationRoleCellDNS
 	leased := false
+	sharedHostTLS := false
 	trace.advance(admissionExpiry)
 	for _, id := range ids {
 		value, ok := id.(string)
@@ -68,12 +75,20 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 		if index < 0 {
 			return fail("member unavailable")
 		}
-		if err := validateRetainedTrafficExpiry(state.PlatformArtifacts[index], now); err != nil {
+		member := state.PlatformArtifacts[index]
+		if err := validateRetainedTrafficExpiry(member, now); err != nil {
 			return err
 		}
-		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(state.PlatformArtifacts[index])
+		leased = leased || platformconfig.DNSArtifactRequiresTrafficRelease(member)
+		if member.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle {
+			required, err := routeArtifactRequiresSharedHostTLS(member)
+			if err != nil {
+				return fail("route membership cannot be decoded")
+			}
+			sharedHostTLS = sharedHostTLS || required
+		}
 	}
-	if !leased && !cellRoutes && !cellDNS {
+	if !leased && !cellRoutes && !cellDNS && !sharedHostTLS {
 		return nil
 	}
 	kinds, _ := parent.Content["artifact_kinds"].([]any)
@@ -193,6 +208,9 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 				if !trafficCapabilityFactFresh(expected, fact, now) {
 					continue
 				}
+				if sharedHostTLS && component == model.PlatformConsumerComponentEdgeWorker && !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.SharedCustomHostTLSCapabilityV1) {
+					return platformReleaseRejected(PlatformReleaseStageTrafficCapabilityPending, fail("required worker lacks shared custom-host TLS capability"))
+				}
 				if deliveryRequired && (!slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalNetworkDeliveryCapabilityV4) || !slices.Contains(fact.CompatibilityCapabilities, platformcontrol.PhysicalDynamicQualityCapabilityV1)) {
 					return fail("required consumer lacks physical network delivery v4 capability")
 				}
@@ -264,6 +282,50 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 		}
 	}
 	return nil
+}
+
+func routeArtifactRequiresSharedHostTLS(artifact model.PlatformArtifact) (bool, error) {
+	type hostRoute struct {
+		Hostname  string `json:"hostname"`
+		AppID     string `json:"app_id"`
+		TLSPolicy string `json:"tls_policy"`
+	}
+	raw, err := json.Marshal(artifact.Content["routes"])
+	if err != nil {
+		return false, err
+	}
+	var routes []json.RawMessage
+	if err = json.Unmarshal(raw, &routes); err != nil {
+		return false, err
+	}
+	type ownership struct {
+		app              string
+		custom, multiple bool
+	}
+	hosts := make(map[string]ownership)
+	for _, row := range routes {
+		// Old, unversioned standalone artifacts can carry opaque legacy
+		// route identifiers. They cannot declare TLS policy or path owners.
+		if artifact.Content["schema_version"] == nil && len(row) > 0 && row[0] == '"' {
+			continue
+		}
+		var route hostRoute
+		if err := json.Unmarshal(row, &route); err != nil {
+			return false, err
+		}
+		if route.AppID == "" {
+			continue
+		}
+		seen := hosts[route.Hostname]
+		seen.multiple = seen.multiple || seen.app != "" && seen.app != route.AppID
+		seen.custom = seen.custom || route.TLSPolicy == model.EdgeRouteTLSPolicyCustomDomain
+		seen.app = route.AppID
+		if seen.multiple && seen.custom {
+			return true, nil
+		}
+		hosts[route.Hostname] = seen
+	}
+	return false, nil
 }
 
 type physicalCapabilities struct{ network, delivery, failureAware, comparableDelivery, pairedContinuity, lastValid, order, projection, business, businessDNSBaseline, businessUnified, availability, redundantAvailability, retainedRoutes, staticEdge, staticEdgePolicy bool }

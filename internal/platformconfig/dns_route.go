@@ -51,6 +51,9 @@ func validateDNSRouteConfiguration(record DNSIntent) error {
 	if len(record.Route.Bindings) > 4096 || (len(record.Route.Bindings) > 0 && record.AppID == "") {
 		return fmt.Errorf("DNS route bindings require a tenant owner and at most 4096 paths")
 	}
+	if record.Route.ManagedHost && (len(record.Route.Hostnames) != 1 || record.Route.Hostnames[0] != record.Hostname || len(record.Route.Bindings) < 2) {
+		return fmt.Errorf("managed host DNS requires exact local path bindings")
+	}
 	bindings, ownerHosts := map[string]bool{}, map[string]bool{}
 	for _, binding := range record.Route.Bindings {
 		key := binding.Hostname + "\x00" + binding.PathPrefix

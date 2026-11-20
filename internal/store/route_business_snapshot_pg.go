@@ -132,8 +132,8 @@ const routeBusinessAppSelectColumns = `id, tenant_id, project_id, name, descript
 CASE WHEN jsonb_typeof(spec_json)='object' THEN spec_json - ARRAY['files','generated_env','command','args'] ELSE spec_json END AS spec_json,
 status_json, created_at, updated_at`
 
-func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string, scan func(sqlScanner) (T, error)) ([]T, error) {
-	rows, err := tx.QueryContext(ctx, query)
+func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string, scan func(sqlScanner) (T, error), args ...any) ([]T, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

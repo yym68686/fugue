@@ -230,6 +230,12 @@ func (s *Server) deriveEdgeRouteIntentSnapshotWithCapture(ctx context.Context, s
 			if !ok {
 				continue
 			}
+			if domain != nil {
+				owner, exists := appByID[domain.AppID]
+				if !exists || domain.TenantID != app.TenantID || owner.TenantID != app.TenantID || owner.ProjectID != app.ProjectID {
+					continue
+				}
+			}
 			binding := compileBinding(app, hostname, routeBinding.PathPrefix, routeBinding.ServicePort, routeKind, tlsPolicy, table.CreatedAt, table.UpdatedAt)
 			if domain != nil {
 				binding = applyCustomDomainReadiness(binding, *domain)

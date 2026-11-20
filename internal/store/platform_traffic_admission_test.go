@@ -40,7 +40,7 @@ func testLeasedTrafficAdmission(t *testing.T, address string) {
 }
 
 func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) {
-	for _, scenario := range append([]string{"last valid supported", "last valid missing DNS", "last valid missing route", "last valid missing TLS", "paired supported", "paired missing DNS", "paired missing route", "paired missing TLS", "static supported", "static missing DNS", "static missing route", "static missing TLS"}, []string{"availability redundant supported", "availability redundant missing DNS", "availability redundant missing route", "availability redundant missing TLS", "availability supported", "availability missing DNS", "availability missing route", "availability missing TLS", "supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "failure aware missing route", "failure aware missing TLS", "comparable supported", "comparable missing DNS", "comparable missing route", "comparable missing TLS", "business supported", "business missing DNS", "business missing route", "business missing TLS", "business unified supported", "business unified missing DNS", "business unified missing route", "business unified missing TLS", "business DNS baseline supported", "business DNS baseline missing DNS", "business DNS baseline missing route", "business DNS baseline missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"}...) {
+	for _, scenario := range append([]string{"shared host supported", "shared host missing route", "shared host missing TLS", "shared host standalone", "last valid supported", "last valid missing DNS", "last valid missing route", "last valid missing TLS", "paired supported", "paired missing DNS", "paired missing route", "paired missing TLS", "static supported", "static missing DNS", "static missing route", "static missing TLS"}, []string{"availability redundant supported", "availability redundant missing DNS", "availability redundant missing route", "availability redundant missing TLS", "availability supported", "availability missing DNS", "availability missing route", "availability missing TLS", "supported", "physical supported", "physical missing DNS", "physical missing route", "physical missing TLS", "failure aware supported", "failure aware missing DNS", "failure aware missing route", "failure aware missing TLS", "comparable supported", "comparable missing DNS", "comparable missing route", "comparable missing TLS", "business supported", "business missing DNS", "business missing route", "business missing TLS", "business unified supported", "business unified missing DNS", "business unified missing route", "business unified missing TLS", "business DNS baseline supported", "business DNS baseline missing DNS", "business DNS baseline missing route", "business DNS baseline missing TLS", "projection supported", "projection missing DNS", "projection missing route", "projection missing TLS", "failed facts still support recovery", "missing route capability", "missing DNS capability", "missing TLS capability", "stale issued", "missing issued", "stale received", "unverified", "new topology", "empty cohort member", "standalone", "soft override", "rollback", "rollback missing capability", "queued revocation"}...) {
 		t.Run(scenario, func(t *testing.T) {
 			if strings.HasPrefix(scenario, "static ") && !planning {
 				t.Skip("independent static endpoints require consumer readiness")
@@ -71,6 +71,13 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				input.Policy.DNSReadiness, input.Policy.TLSReadiness = probe, probe
 				input.Policy.DNSClientPolicies = []platformconfig.DNSClientPolicy{{NodeID: "dns-a"}}
 				input.Policy.DNSAuthorities = []platformconfig.DNSAuthorityPolicy{{NodeID: "dns-a", Zone: "example.test", Nameservers: []string{"ns.example.test"}, TTLSeconds: 60, RefreshSeconds: 300, RetrySeconds: 60, ExpireSeconds: 3600}}
+			}
+			if strings.HasPrefix(scenario, "shared host ") {
+				root := &input.Intent.Routes[0]
+				root.AppID, root.TenantID, root.TLSPolicy = "web", "tenant", model.EdgeRouteTLSPolicyCustomDomain
+				api := *root
+				api.AppID, api.PathPrefix, api.UpstreamURL = "api", "/api", "http://api-origin:8080"
+				input.Intent.Routes = append(input.Intent.Routes, api)
 			}
 			if strings.HasPrefix(scenario, "availability ") {
 				input.Policy.DNSQueryPolicy = &platformconfig.DNSQueryPolicy{RankingMode: "active", PreferenceMode: "runtime_locality", MinimumTTLSeconds: 60, MaximumTTLSeconds: 120,
@@ -151,6 +158,11 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				missing := scenario == "missing route capability" && old.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || (scenario == "missing DNS capability" || scenario == "soft override" || scenario == "rollback missing capability") && old.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle || scenario == "missing TLS capability" && old.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig
 				if missing {
 					h.CompatibilityCapabilities = nil
+				}
+				if strings.HasPrefix(scenario, "shared host ") && old.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle &&
+					!(scenario == "shared host missing route" && old.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle) &&
+					!(scenario == "shared host missing TLS" && old.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) {
+					h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.SharedCustomHostTLSCapabilityV1)
 				}
 				if strings.HasPrefix(scenario, "static ") {
 					h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.DNSAvailabilityCapabilityV1)
@@ -272,6 +284,16 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if scenario == "standalone" {
 				id = f.parent.Content["artifact_ids"].([]any)[1].(string)
 			}
+			if scenario == "shared host standalone" {
+				for i, kind := range f.parent.Content["artifact_kinds"].([]any) {
+					if kind == model.PlatformArtifactKindEdgeRouteBundle {
+						id = f.parent.Content["artifact_ids"].([]any)[i].(string)
+					}
+				}
+				if id == f.parent.ID {
+					t.Fatal("route child missing")
+				}
+			}
 			before, err := s.ListPlatformReleaseMessages(model.PlatformArtifactKindReleaseSet, scope, time.Time{}, 100)
 			if err != nil {
 				t.Fatal(err)
@@ -350,7 +372,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				t.Fatal(e)
 			}
 			valid := scenario == "paired supported" || scenario == "static supported" || scenario == "availability supported" || scenario == "supported" || scenario == "physical supported" || scenario == "failure aware supported" || scenario == "comparable supported" || scenario == "business supported" || scenario == "business unified supported" || scenario == "business DNS baseline supported" || scenario == "projection supported" || scenario == "failed facts still support recovery" || scenario == "rollback"
-			if valid || scenario == "availability redundant supported" || scenario == "last valid supported" {
+			if valid || scenario == "availability redundant supported" || scenario == "last valid supported" || scenario == "shared host supported" {
 				if err != nil || len(after) != len(before)+1 {
 					t.Fatal("supported release rejected", err)
 				}
@@ -360,7 +382,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				}
 			}
 			switch scenario {
-			case "stale issued", "stale received", "missing issued":
+			case "stale issued", "stale received", "missing issued", "shared host missing route", "shared host missing TLS":
 				if PlatformReleaseFailureStage(err) != PlatformReleaseStageTrafficCapabilityPending {
 					t.Fatal("stale evidence was not classified as awaiting fresh capability", err)
 				}

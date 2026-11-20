@@ -63,10 +63,22 @@ func captureDNSFlattenFacts(ctx context.Context, result *platformIntentProjectio
 	})
 }
 
-func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[string]model.App, zones []model.HostedZone, records []model.DNSRecord, static []model.EdgeDNSRecord) ([]platformconfig.DNSIntent, []platformDNSExclusion) {
+func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[string]model.App, zones []model.HostedZone, records []model.DNSRecord, static []model.EdgeDNSRecord, domains ...model.AppDomain) ([]platformconfig.DNSIntent, []platformDNSExclusion) {
 	byID := make(map[string]model.HostedZone, len(zones))
 	for _, zone := range zones {
 		byID[zone.ID] = zone
+	}
+	domainByRecord := make(map[string]model.AppDomain, len(domains))
+	for _, domain := range domains {
+		if domain.DNSRecordID != "" && domain.DNSMode == model.AppDomainDNSModeManaged && domain.Status == model.AppDomainStatusVerified {
+			domainByRecord[domain.DNSRecordID] = domain
+		}
+	}
+	routesByHost := make(map[string][]platformconfig.RouteIntent)
+	if len(domainByRecord) != 0 {
+		for _, route := range result.Intent.Routes {
+			routesByHost[route.Hostname] = append(routesByHost[route.Hostname], route)
+		}
 	}
 	out := []platformconfig.DNSIntent{}
 	exclusions := []platformDNSExclusion{}
@@ -119,6 +131,7 @@ func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[
 			if app, ok := resolveDNSIntentApp(record, apps); ok {
 				desired.AppID = app.ID
 				desired.Values = []string{app.ID}
+				bindManagedHostedDNSPaths(&desired, record, domainByRecord[record.ID], app, apps, routesByHost[host])
 			} else {
 				issue("dns_app_reference_unresolved", host)
 			}
@@ -134,6 +147,33 @@ func projectBusinessDNSDraft(result *platformIntentProjectionResponse, apps map[
 	}
 	sort.Slice(exclusions, func(i, j int) bool { return exclusions[i].RecordID < exclusions[j].RecordID })
 	return platformconfig.NormalizePlatformIntent(platformconfig.PlatformIntent{DNS: out}).DNS, exclusions
+}
+
+// An app-domain-managed RRset represents one hostname, not only its default
+// upstream. Use the existing signed path-dependency contract when the route
+// table splits that hostname. The underlying DNS row and domain claim remain
+// untouched. User records and unrelated projects retain strict app ownership.
+func bindManagedHostedDNSPaths(desired *platformconfig.DNSIntent, record model.DNSRecord, domain model.AppDomain, owner model.App, apps map[string]model.App, routes []platformconfig.RouteIntent) {
+	if len(routes) < 2 || owner.ProjectID == "" || domain.Hostname != desired.Hostname ||
+		domain.AppID != owner.ID || domain.TenantID != owner.TenantID || domain.DNSZoneID != record.ZoneID ||
+		record.Source != model.DNSRecordSourceAppDomain || record.SourceRefType != model.DNSRecordSourceRefTypeAppDomain || record.SourceRefID != domain.Hostname {
+		return
+	}
+	var ownerPresent, shared bool
+	bindings := make([]platformconfig.DNSRouteBinding, 0, len(routes))
+	for _, route := range routes {
+		app, exists := apps[route.AppID]
+		if !exists || app.ProjectID != owner.ProjectID || app.TenantID != owner.TenantID || route.TenantID != owner.TenantID {
+			return
+		}
+		ownerPresent = ownerPresent || route.AppID == owner.ID
+		shared = shared || route.AppID != owner.ID
+		bindings = append(bindings, platformconfig.DNSRouteBinding{Hostname: route.Hostname, PathPrefix: route.PathPrefix, AppID: route.AppID})
+	}
+	if ownerPresent && shared {
+		desired.Route = &platformconfig.DNSRouteIntent{DNSApplicationIntent: *desired.Application, Hostnames: []string{desired.Hostname}, Bindings: bindings, ManagedHost: true}
+		desired.Application, desired.Type, desired.Values = nil, "FUGUE_ROUTE", []string{}
+	}
 }
 
 // Names are accepted by the legacy UI, but ambiguous names must not pick a

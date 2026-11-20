@@ -6120,6 +6120,83 @@ paths:
                 $ref: "#/components/schemas/ProjectRouteTableDeleteResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/routes/host-plan:
+    post:
+      operationId: planProjectHostRoutes
+      summary: Preview a scoped edit to a verified custom hostname
+      tags: [Projects]
+      x-fugue-handler: handlePlanProjectHostRoutes
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectHostRouteEdit"
+      responses:
+        '200':
+          description: Read-only plan; no DNS, certificate, or route mutation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectHostRoutePlan"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/routes/host-apply:
+    post:
+      operationId: applyProjectHostRoutes
+      summary: Save an unchanged hostname plan as desired configuration
+      tags: [Projects]
+      x-fugue-handler: handleApplyProjectHostRoutes
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectHostRoutePlan"
+      responses:
+        '200':
+          description: Intent saved or already current; does not attest production serving
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectHostRoutePlan"
+        '409':
+          $ref: "#/components/responses/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
+  /v1/projects/{id}/routes/host-status:
+    post:
+      operationId: getProjectHostRoutePublicationStatus
+      summary: Check whether the planned hostname routes match the verified global publication (platform admin)
+      tags: [Projects]
+      x-fugue-handler: handleProjectHostRouteStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProjectHostRoutePlan"
+      responses:
+        '200':
+          description: Exact full global publication and its consumer evidence; does not attest independent authoritative DNS or public HTTPS responses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProjectHostRoutePublicationStatus"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/projects/{id}/split-plan:
     post:
       operationId: planProjectSplit
@@ -28293,6 +28370,62 @@ components:
         ready:
           type: boolean
           default: true
+    ProjectHostRouteEdit:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+        paths:
+          type: object
+          description: Map of canonical path prefixes to application IDs in the same project. Unlisted paths are not edited.
+          maxProperties: 64
+          additionalProperties:
+            type: string
+        remove_paths:
+          type: array
+          maxItems: 64
+          items:
+            type: string
+    ProjectHostRoutePlan:
+      type: object
+      additionalProperties: false
+      required: [plan_id, project_id, edit, hostname_owner_app_id, before, after, state]
+      properties:
+        plan_id:
+          type: string
+          description: Opaque precondition over the exact route table and relevant hostname configuration.
+        project_id:
+          type: string
+        edit:
+          $ref: "#/components/schemas/ProjectHostRouteEdit"
+        hostname_owner_app_id:
+          type: string
+          description: DNS and TLS ownership is retained by this app; upstream paths can use other apps.
+        before:
+          type: object
+          additionalProperties:
+            type: string
+        after:
+          type: object
+          additionalProperties:
+            type: string
+        state:
+          type: string
+          enum: [planned, saved, already_current]
+    ProjectHostRoutePublicationStatus:
+      type: object
+      additionalProperties: false
+      required: [state, reason]
+      properties:
+        state:
+          type: string
+          enum: [pending, published, superseded]
+        reason:
+          type: string
+        release_id:
+          type: string
     PutProjectRouteTableRequest:
       type: object
       additionalProperties: false
