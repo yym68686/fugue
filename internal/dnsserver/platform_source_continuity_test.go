@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,6 +18,41 @@ import (
 	"fugue/internal/routeprobe"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestDNSRouteRecoveryDoesNotRequireRoomForPublicationAliases(t *testing.T) {
+	req, policies, activations := celldns.SourceAuthorizedRequest(t, false)
+	artifact := celldns.Compile(t, req).DNSArtifact
+	now := time.Now().UTC()
+	plans, err := dnsroutesource.Build(artifact, celldns.SourceSnapshot(t, req, artifact, policies, activations, now), celldns.Keys(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := dnsRouteRecoveryKeys(artifact, plans)
+	if err != nil || len(keys) == 0 {
+		t.Fatalf("test source recovery keys unavailable: %v", err)
+	}
+	var probeID, key string
+	for probeID, key = range keys {
+		break
+	}
+	s := NewService(config.DNSConfig{}, nil)
+	history := s.probeHistoryStore()
+	history.values = make(map[string]dnsProbeHistory, 16384)
+	for i := 1; i < 16384; i++ {
+		history.values[fmt.Sprint(i)] = dnsProbeHistory{observedAt: now}
+	}
+	history.values[key] = dnsProbeHistory{observedAt: now, successes: []time.Time{now.Add(-time.Second)}}
+	facts := []dnsReadinessFact{{ProbeID: probeID, Reason: "probe_unavailable"}}
+	if err := s.observeDNSRouteRecovery(artifact, plans, facts, &platformconfig.DNSReadinessPolicy{FactFreshnessSeconds: 60}, now); err != nil {
+		t.Fatal("a new publication alias prevented processing existing history", err)
+	}
+	if entry := history.values[key]; len(entry.successes) != 0 || !entry.failedAt.Equal(now) {
+		t.Fatalf("real failure did not reset exact continuity: %+v", entry)
+	}
+	if len(history.values) != 16384 {
+		t.Fatal("bounded history unexpectedly grew or dropped unrelated live records")
+	}
+}
 
 func TestApprovedSourceAdvancePreservesContinuousRecovery(t *testing.T) {
 	testApprovedSourceAdvance(t, false)
@@ -249,8 +285,22 @@ func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 				f := makeFact()
 				f.Ready = false
 				f.Reason = "probe_unavailable"
-				retained := (&dnsReadinessScheduler{}).shareHistory(&s.dnsProbeHistories)
-				retained.observeProbeHistory(&f, policy, at)
+				keys, err := dnsRouteRecoveryKeys(compiled.DNSArtifact, plans)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A retained failure resolves through the original authenticated
+				// plan, even if a shadow artifact observed this same probe ID.
+				other := compiled.DNSArtifact
+				other.ID += "-shadow"
+				if err := s.observeDNSRouteRecovery(other, plans, []dnsReadinessFact{makeFact()}, policy, at); err != nil {
+					t.Fatal(err)
+				}
+				old := &dnsServingState{payload: dnsServingPayload{
+					routeSources: &dnsroutesource.Context{Snapshot: snapshot}, sourceRecoveryKeys: keys,
+					Policy: platformconfig.PolicySnapshot{DNSReadiness: policy},
+				}}
+				s.observeRetainedDNSRouteRecovery(old, []dnsReadinessFact{f}, at)
 			case "unobserved":
 				f := makeFact()
 				f.Ready = false

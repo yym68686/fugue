@@ -41,7 +41,6 @@ type dnsProbeHistoryStore struct {
 
 type dnsProbeHistory struct {
 	observation dnsProbeHistoryObservation
-	recoveryKey string // authenticated dynamic-source alias; never carries authority
 	successes   []time.Time
 	failedAt    time.Time
 	observedAt  time.Time
@@ -55,18 +54,6 @@ func (scheduler *dnsReadinessScheduler) shareHistory(history *dnsProbeHistorySto
 }
 
 func (scheduler *dnsReadinessScheduler) observeProbeHistory(fact *dnsReadinessFact, policy *platformconfig.DNSReadinessPolicy, observedAt time.Time) {
-	// A retained-LKG scheduler can observe a real failure while the current
-	// source refresh is unavailable. Propagate that barrier to its authenticated
-	// continuity key so a later source refresh cannot revive pre-failure history.
-	if !fact.Ready && scheduler.historyStore != nil {
-		store := scheduler.historyStore
-		store.mu.Lock()
-		key := store.values[fact.ProbeID].recoveryKey
-		store.mu.Unlock()
-		if key != "" {
-			scheduler.observeProbeHistoryKey(key, fact, policy, observedAt)
-		}
-	}
 	scheduler.observeProbeHistoryKey(fact.ProbeID, fact, policy, observedAt)
 }
 

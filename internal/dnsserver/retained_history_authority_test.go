@@ -25,7 +25,7 @@ import (
 // same DNS-authorized recovery history. A publication-specific raw probe ID
 // cannot replace its continuous history when the control-plane read fails.
 func TestRetainedLocalProbePreservesAuthorizedSourceHistory(t *testing.T) {
-	for _, scenario := range []string{"local-probe", "assignment-race", "assignment-race-delayed-observation", "foreign-alias", "negative", "foreign-proof", "restart"} {
+	for _, scenario := range []string{"local-probe", "assignment-race", "assignment-race-delayed-observation", "foreign-history", "negative", "foreign-proof", "restart"} {
 		t.Run(scenario, func(t *testing.T) { testRetainedSourceHistory(t, scenario) })
 	}
 }
@@ -124,12 +124,10 @@ func testRetainedSourceHistory(t *testing.T, scenario string) {
 		t.Fatal("renewed source baseline not serving", a)
 	}
 	checked = time.Now().UTC()
-	if scenario == "foreign-alias" {
+	if scenario == "foreign-history" {
 		service.dnsProbeHistories.mu.Lock()
 		for _, f := range old.facts {
-			entry := service.dnsProbeHistories.values[f.ProbeID]
-			entry.recoveryKey = "foreign-candidate-history"
-			service.dnsProbeHistories.values[f.ProbeID] = entry
+			service.dnsProbeHistories.values[f.ProbeID] = dnsProbeHistory{failedAt: checked, observedAt: checked}
 		}
 		service.dnsProbeHistories.mu.Unlock()
 	}

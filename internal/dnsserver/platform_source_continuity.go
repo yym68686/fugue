@@ -125,23 +125,10 @@ func (s *Service) observeDNSRouteRecovery(dns model.PlatformArtifact, plans *dns
 		// a failed endpoint observation and must not erase that success.
 		observation := facts[chosen]
 		scheduler.observeProbeHistoryKey(key, &observation, policy, observedAt)
-		history := scheduler.historyStore
-		history.mu.Lock()
-		for _, i := range indices {
-			id := facts[i].ProbeID
-			entry, exists := history.values[id]
-			if !exists && len(history.values) >= 16384 {
-				history.mu.Unlock()
-				return errors.New("DNS recovery history bound exceeded")
-			}
-			entry.recoveryKey = key
-			if observedAt.After(entry.observedAt) {
-				entry.observedAt = observedAt
-			}
-			history.values[id] = entry
-		}
-		history.mu.Unlock()
-
+		// Do not retain aliases indexed by the transient probe/publication ID.
+		// They consumed the shared history limit on release churn and a
+		// shadow assignment could overwrite a serving assignment's alias.
+		// Retained probes use their verified plan's own sourceRecoveryKeys.
 		for _, i := range indices {
 			facts[i].HistoryObservation = cloneDNSHistoryObservation(observation.HistoryObservation)
 			if facts[i].Ready {
