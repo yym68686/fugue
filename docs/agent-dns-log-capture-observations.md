@@ -160,6 +160,14 @@ observation proves cache corruption: enrolled consumers still require current
 serving/cache readiness, independently of historical inventory error counters.
 Only diagnostic wording changes; all existing preflight gates remain intact.
 
+For an exhausted selected-backend search, the private failed preflight receipt
+can retain `dns_source_exhaustion` from that same fact read, even after its
+child ring entry is evicted. It counts inventory records, identity filters,
+stale heartbeats, fresh candidates and backend 403/409 decisions before the
+bounded refusal sample is truncated. Incomplete captures do not infer counts.
+These are local decisions, not public DNS failures or permission to reuse a
+stale or unselected source.
+
 The Edge worker's owner-only observation socket exposes
 `GET /v1/snapshots/traffic-serving`. It keeps the latest completed serving check
 and a separate 24-entry failure ring, with completed/failed/evicted counts. Each

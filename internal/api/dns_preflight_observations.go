@@ -44,16 +44,28 @@ type dnsPreflightFactFailure struct {
 }
 
 type dnsPreflightFactPredicate struct {
-	Stage           string            `json:"stage"`
-	Rejection       string            `json:"rejection,omitempty"`
-	ErrorClass      string            `json:"error_class,omitempty"`
-	HTTPStatus      int               `json:"http_status,omitempty"`
-	ExpectedSetHash string            `json:"expected_set_hash,omitempty"`
-	ObservedSetHash string            `json:"observed_set_hash,omitempty"`
-	ExpectedFence   int64             `json:"expected_fence,omitempty"`
-	ObservedFence   int64             `json:"observed_fence,omitempty"`
-	ObservedSource  string            `json:"observed_source,omitempty"`
-	DNSParent       *captureDNSParent `json:"dns_parent,omitempty"`
+	Stage           string                      `json:"stage"`
+	Rejection       string                      `json:"rejection,omitempty"`
+	ErrorClass      string                      `json:"error_class,omitempty"`
+	HTTPStatus      int                         `json:"http_status,omitempty"`
+	ExpectedSetHash string                      `json:"expected_set_hash,omitempty"`
+	ObservedSetHash string                      `json:"observed_set_hash,omitempty"`
+	ExpectedFence   int64                       `json:"expected_fence,omitempty"`
+	ObservedFence   int64                       `json:"observed_fence,omitempty"`
+	ObservedSource  string                      `json:"observed_source,omitempty"`
+	DNSParent       *captureDNSParent           `json:"dns_parent,omitempty"`
+	DNSSource       *captureDNSSourceExhaustion `json:"dns_source_exhaustion,omitempty"`
+}
+
+// Exact counts from the source-selection attempt that reached no_current_source.
+// These are branch counts, not node health, and include no identities.
+type captureDNSSourceExhaustion struct {
+	Inventory        int `json:"inventory"`
+	IdentityFiltered int `json:"identity_filtered"`
+	HeartbeatStale   int `json:"heartbeat_stale"`
+	FreshCandidates  int `json:"fresh_candidates"`
+	BackendForbidden int `json:"backend_forbidden"`
+	BackendConflict  int `json:"backend_conflict"`
 }
 
 // The receipt belongs to this read, not a lookup in either shared ring. Keep
@@ -70,6 +82,10 @@ func dnsPreflightFactFailureFromReceipt(receipt captureReceipt) *dnsPreflightFac
 		if event.DNSParent != nil {
 			parent := *event.DNSParent
 			result.DNSParent = &parent
+		}
+		if event.Stage == "source_rejected" && event.Rejection == "no_current_source" && event.DNSSource != nil {
+			source := *event.DNSSource
+			result.DNSSource = &source
 		}
 		if authority := event.DNSAuthority; authority != nil {
 			result.ExpectedSetHash, result.ExpectedFence = authority.Expected.ExpectedSetHash, authority.Expected.FencingToken
@@ -95,6 +111,10 @@ func dnsPreflightFactFailureFromReceipt(receipt captureReceipt) *dnsPreflightFac
 				failure.Predicate = project(event)
 			}
 		case (receipt.Outcome == "source" || receipt.Outcome == "authority_recheck") && event.Stage == "source_assignment_rejected":
+			if failure.Input == nil {
+				failure.Input = project(event)
+			}
+		case receipt.Outcome == "authority_recheck" && event.Stage == "source_rejected" && event.Rejection == "no_current_source":
 			if failure.Input == nil {
 				failure.Input = project(event)
 			}

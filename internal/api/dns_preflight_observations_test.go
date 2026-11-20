@@ -131,6 +131,27 @@ func TestDNSPreflightFactWitnessLeavesDroppedTerminalPredicateUnknown(t *testing
 	}
 }
 
+func TestDNSPreflightFactWitnessPreservesOnlySameAttemptSourceExhaustion(t *testing.T) {
+	source := captureDNSSourceExhaustion{Inventory: 4, IdentityFiltered: 2, HeartbeatStale: 2}
+	event := captureEvent{Stage: "source_rejected", Rejection: "no_current_source", DNSSource: &source}
+	initial := dnsPreflightFactFailureFromReceipt(captureReceipt{Outcome: "source", Events: []captureEvent{event}})
+	recheck := dnsPreflightFactFailureFromReceipt(captureReceipt{Outcome: "authority_recheck", Events: []captureEvent{
+		event, {Stage: "authority_recheck_rejected", Rejection: "source_unavailable"},
+	}})
+	for _, got := range []*dnsPreflightFactPredicate{initial.Predicate, recheck.Input} {
+		if got == nil || got.DNSSource == nil || got.DNSSource == &source || *got.DNSSource != source {
+			t.Fatalf("same-attempt exhaustion not detached: %+v", got)
+		}
+	}
+	unrelated := dnsPreflightFactFailureFromReceipt(captureReceipt{Outcome: "authority_recheck", Events: []captureEvent{
+		event, {Stage: "authority_recheck_rejected", Rejection: "context"},
+	}})
+	dropped := dnsPreflightFactFailureFromReceipt(captureReceipt{Outcome: "source", Dropped: 1, Events: []captureEvent{event}})
+	if initial.Input != nil || unrelated.Input != nil || dropped.Predicate != nil || dropped.Input != nil {
+		t.Fatal("unrelated or incomplete read inherited exhaustion counts")
+	}
+}
+
 func TestDNSPreflightFactWitnessRetainsParentDigestComparison(t *testing.T) {
 	parent := captureDNSParentEvidence("expected-parent", "reported-parent", "backend-uid")
 	got := dnsPreflightFactFailureFromReceipt(captureReceipt{Outcome: "snapshot_validation", Events: []captureEvent{
