@@ -63,6 +63,20 @@ var nodeName = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,126}[a-z0-9])?$`)
 var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
 var requestPath = regexp.MustCompile(`^/[a-zA-Z0-9_/-]{1,255}$`)
 
+// ValidEndpoint is also used by the listener bootstrap, which has to bind
+// its exact Pod address before a publisher can issue a matching policy.
+func ValidEndpoint(e Endpoint) bool {
+	_, ok := endpointAddress(e)
+	return ok
+}
+
+func endpointAddress(e Endpoint) (netip.AddrPort, bool) {
+	addr, err := netip.ParseAddrPort(e.Address)
+	return addr, err == nil && addr.Addr().IsPrivate() && !addr.Addr().Is4In6() &&
+		addr.Addr().Zone() == "" && addr.Port() >= 1024 && nodeName.MatchString(e.Edge) &&
+		nodeName.MatchString(e.Slot) && len(e.TLSName) <= 253 && dnsName.MatchString(e.TLSName)
+}
+
 func Decode(r io.Reader, out any) error {
 	decoder := json.NewDecoder(r)
 	decoder.DisallowUnknownFields()
@@ -123,10 +137,8 @@ func (p *Policy) validate(now time.Time) error {
 	}
 	nodes, names, addresses := map[string]bool{}, map[string]bool{}, map[netip.AddrPort]bool{}
 	for _, e := range p.Endpoints {
-		addr, err := netip.ParseAddrPort(e.Address)
-		if err != nil || !addr.Addr().IsPrivate() || addr.Addr().Is4In6() || addr.Addr().Zone() != "" ||
-			addr.Port() < 1024 || !nodeName.MatchString(e.Edge) || !nodeName.MatchString(e.Slot) ||
-			!dnsName.MatchString(e.TLSName) || len(e.TLSName) > 253 || nodes[e.Edge] || names[e.TLSName] || addresses[addr] {
+		addr, ok := endpointAddress(e)
+		if !ok || nodes[e.Edge] || names[e.TLSName] || addresses[addr] {
 			return bad
 		}
 		nodes[e.Edge], names[e.TLSName], addresses[addr] = true, true, true

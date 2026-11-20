@@ -25,7 +25,7 @@ import (
 	"fugue/internal/model"
 )
 
-func relayFixtureCertificates(t *testing.T, now time.Time) (*x509.CertPool, func(string, int64) tls.Certificate) {
+func relayFixtureCertificates(t *testing.T, now time.Time) (*x509.Certificate, *x509.CertPool, func(string, int64) tls.Certificate) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -43,7 +43,7 @@ func relayFixtureCertificates(t *testing.T, now time.Time) (*x509.CertPool, func
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(root)
-	return pool, func(name string, serial int64) tls.Certificate {
+	return root, pool, func(name string, serial int64) tls.Certificate {
 		t.Helper()
 		pub, key, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
@@ -65,7 +65,7 @@ func relayFixtureCertificates(t *testing.T, now time.Time) (*x509.CertPool, func
 
 func TestOriginRelayFirstDispatch(t *testing.T) {
 	now := time.Now()
-	roots, cert := relayFixtureCertificates(t, now)
+	_, roots, cert := relayFixtureCertificates(t, now)
 	aID, bID := "edge-a", "edge-b"
 	host, path := "tenant.example.test", "/v1/stream"
 	originURL := "http://service.ns.svc.cluster.local:8000"

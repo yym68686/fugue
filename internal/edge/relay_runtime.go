@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +81,10 @@ func relayReadFile(path string, limit int64) ([]byte, error) {
 
 // A failed optional relay listener must not take down public ingress.
 func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
+	return s.initOriginRelayWithListen(net.Listen)
+}
+
+func (s *Service) initOriginRelayWithListen(listen func(string, string) (net.Listener, error)) (*http.Server, net.Listener, error) {
 	envPath := func(suffix string) string {
 		return strings.TrimSpace(os.Getenv("FUGUE_EDGE_ORIGIN_RELAY_" + suffix))
 	}
@@ -110,7 +113,7 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 		return nil, nil, errors.New("relay private key unavailable")
 	}
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil || cert.Leaf == nil {
+	if err != nil || cert.Leaf == nil || len(cert.Leaf.DNSNames) != 1 {
 		return nil, nil, errors.New("relay certificate invalid")
 	}
 	ca, err := relayReadFile(envPath("CA_FILE"), 64<<10)
@@ -118,32 +121,21 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 	if err != nil || !pool.AppendCertsFromPEM(ca) {
 		return nil, nil, errors.New("relay CA invalid")
 	}
+	local := relayroute.Endpoint{Edge: s.Config.EdgeID, Slot: s.Config.EdgeSlot, Address: envPath("LISTEN_ADDR"), TLSName: cert.Leaf.DNSNames[0]}
+	if !relayroute.ValidEndpoint(local) {
+		return nil, nil, errors.New("relay private listener identity invalid")
+	}
 	e := &edgeOriginRelay{s: s, policyFile: policyFile, key: key, certificate: cert, roots: pool, fence: fence, process: relayRandomID(),
+		local:  local,
 		probes: map[relayProbeKey]relayroute.Window{}, remote: map[string]relayRemote{}, clients: map[relayroute.Endpoint]*http.Client{},
 		permits: map[string]relayPermit{}, dispatches: map[relayDispatchKey]time.Time{}}
-	p, err := e.loadPolicy(time.Now())
-	if err != nil {
-		return nil, nil, err
-	}
-	local, ok := p.Endpoint(s.Config.EdgeID)
-	if p.Mode == "off" {
-		if err := fence.accept(p); err != nil {
-			return nil, nil, err
-		}
-	}
-	if !ok || local.Slot != s.Config.EdgeSlot || !relayCertificateName(cert.Leaf, local.TLSName) {
-		return nil, nil, errors.New("relay local slot identity not authorized")
-	}
-	if err := fence.accept(p); err != nil {
-		return nil, nil, err
-	}
-	// The mounted directory must pin the actual private listener, not a public
-	// wildcard or a Service that can load balance to a different worker.
-	listener, err := net.Listen("tcp", local.Address)
+	// The declaration pins this process's private address. The listener is
+	// closed to all operations until a verified lease matches it exactly; a
+	// publisher can now observe the assigned Pod IP before issuing that lease.
+	listener, err := listen("tcp", local.Address)
 	if err != nil {
 		return nil, nil, errors.New("relay private listener unavailable")
 	}
-	e.local = local
 	srv := &http.Server{Handler: e, ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
 		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}, ClientAuth: tls.RequireAndVerifyClientCert, ClientCAs: pool}}
 	srv.Protocols = new(http.Protocols)
@@ -153,7 +145,7 @@ func (s *Service) initOriginRelay() (*http.Server, net.Listener, error) {
 }
 
 func relayCertificateName(cert *x509.Certificate, expected string) bool {
-	return cert != nil && slices.Contains(cert.DNSNames, expected) // exact SAN, not wildcard
+	return cert != nil && len(cert.DNSNames) == 1 && cert.DNSNames[0] == expected // exact SAN, not wildcard or alias
 }
 
 func (e *edgeOriginRelay) loadPolicy(now time.Time) (*relayroute.Policy, error) {

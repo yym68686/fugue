@@ -47,7 +47,7 @@ func TestRelayWithdrawalPersistsWithoutEndpointAcrossRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, cert := relayFixtureCertificates(t, now)
+	_, _, cert := relayFixtureCertificates(t, now)
 	leaf := cert(ep.TLSName, 7)
 	start := func() *edgeOriginRelay {
 		t.Helper()

@@ -14,11 +14,12 @@ SAN per worker. Use a dedicated private IP and port on each worker, reachable
 only from authorized peers; do not use a public hostname, wildcard bind, NAT
 or load-balanced Service in place of a pinned worker. Mount those files
 through the normal declarative release mechanism. The worker never needs the
-policy signing private key. The following are process-level file paths:
+policy signing private key. The following settings are process-local:
 
-| Variable prefix `FUGUE_EDGE_ORIGIN_RELAY_` | File |
+| Variable prefix `FUGUE_EDGE_ORIGIN_RELAY_` | Setting |
 | --- | --- |
-| `POLICY_FILE` | Signed JSON envelope (optional; unset means no listener or probes) |
+| `POLICY_FILE` | Signed JSON envelope path (optional; unset means no listener or probes) |
+| `LISTEN_ADDR` | Exact private Pod IP and relay port; use the declared Pod IP projected by Kubernetes, never a wildcard or Service VIP |
 | `POLICY_VERIFY_KEY_FILE` | Hex-encoded raw 32-byte Ed25519 public key |
 | `TLS_CERT_FILE` | PEM leaf certificate and chain |
 | `TLS_KEY_FILE` | PEM TLS private key |
@@ -80,9 +81,11 @@ The output is a signed envelope, not an applied change. Active policies
 require an explicit `-allow-active` after review. An `off` lease can be issued
 without live route files so withdrawal does not depend on origin health.
 
-Publish atomically and keep the trusted mount current across restarts. Start
-with a signed `off` lease containing the exact listener endpoints so each worker
-can persist its initial generation and bind the private listener before shadow.
+Publish atomically and keep the trusted mount current across restarts. The
+listener can bind before a policy exists, but rejects all relay operations
+until an authorized, exact local endpoint is present in a current lease. After
+confirming the running endpoint, publish a signed `off` lease to initialize the
+retained fence before shadow.
 Workers persist the generation and exact payload hash before allowing use, and
 reject a regressed or conflicting generation across restarts. An `off` lease
 can withdraw even if the local endpoint has been omitted. Each fence directory
@@ -92,9 +95,10 @@ Expiry, invalid content, changed slot, listener identity or a failed fence
 write stop new relays. Certificates and CA are read at startup;
 rotate through the normal drain/restart procedure. Automatic policy issuance,
 renewal and production secret/endpoint provisioning are not part of the
-initial worker release. Initial material must be mounted before startup;
-if the worker started without a valid private listener configuration, it stays
-direct-only until restarted with valid material.
+initial worker release. Certificates, trust, the policy path, listener address
+and retained directory must be supplied before startup. The envelope itself
+can arrive later and is read periodically; a changed Pod IP or slot requires
+a new lease bound to that concrete listener.
 
 ## What changes traffic, and what does not
 
