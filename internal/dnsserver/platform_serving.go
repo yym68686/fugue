@@ -430,6 +430,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 					delete(deferrable, id)
 				}
 			}
+			dnsDeferRecoveredProbes(p, s.Config.DNSNodeID, deferrable, started)
 		}
 		preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
 		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(preferred, availability)

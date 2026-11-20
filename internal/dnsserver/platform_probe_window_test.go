@@ -200,3 +200,82 @@ func TestDNSProbeDeferralLeavesTimeForFullCheckpointRefresh(t *testing.T) {
 		t.Fatal("a previous negative observation prevented positive apply")
 	}
 }
+
+func TestFreshUnrecoveredAvailabilityProofDoesNotDeferNextObservation(t *testing.T) {
+	for _, scenario := range []string{"needs-success", "needs-span", "failed", "other-node", "other-family", "outside-pool"} {
+		t.Run(scenario, func(t *testing.T) {
+			st, now := decisionTestState(t)
+			p := st.payload
+			p.Policy.DNSReadiness.FactFreshnessSeconds = 120
+			record := &p.Queries[0].Records[0]
+			record.AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{
+				Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"},
+				RecoverySuccesses: 2, RecoveryMinSeconds: 10,
+			}
+			scheduler := &dnsReadinessScheduler{}
+			for i := range st.facts {
+				fact := &st.facts[i]
+				fact.Proof.CheckedAt = now.Add(-12 * time.Second)
+				fact.Proof.ValidUntil = fact.Proof.CheckedAt.Add(120 * time.Second)
+				if i != 0 || scenario == "needs-span" {
+					older := *fact
+					gap := 11 * time.Second
+					if i == 0 {
+						gap = time.Second
+					}
+					older.Proof.CheckedAt = older.Proof.CheckedAt.Add(-gap)
+					scheduler.observeProbeHistory(&older, p.Policy.DNSReadiness, now)
+				}
+				scheduler.observeProbeHistory(fact, p.Policy.DNSReadiness, now)
+			}
+			deferrable := validDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, st.facts, now)
+			switch scenario {
+			case "other-node":
+				p.Queries[0].NodeID = "different-dns"
+			case "other-family":
+				record.Type = "AAAA"
+			case "outside-pool":
+				record.AnswerPolicy.Availability.OrderedEdgeIDs = []string{"edge-b"}
+			}
+			dnsDeferRecoveredProbes(p, "dns-a", deferrable, now)
+			if scenario == "other-node" || scenario == "other-family" || scenario == "outside-pool" {
+				if len(deferrable) != len(st.facts) {
+					t.Fatal("policy changed scheduling of unrelated or recovered proofs")
+				}
+				return
+			}
+			before, err := buildDNSServingState(st.record, p, st.routeID, "dns-a", "edge-group-a", st.facts, now)
+			if err != nil || checkDNSServingSnapshot(before, now, false) == nil {
+				t.Fatal("incomplete history satisfied signed recovery", err)
+			}
+			var attempted atomic.Int32
+			collected := scheduler.collectWindow(context.Background(), p.Plan, p.Policy.DNSReadiness, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+				attempted.Add(1)
+				requirement := p.Plan.Probes[0]
+				if host != requirement.Hostname || path != requirement.Path || address != requirement.Address {
+					t.Error("a recovered proof should have been deferred")
+					return routeprobe.Proof{}, errors.New("unexpected probe")
+				}
+				if scenario == "failed" {
+					return routeprobe.Proof{}, routeprobe.ErrUnavailable
+				}
+				proof := st.facts[0].Proof
+				proof.CheckedAt = time.Now().UTC()
+				proof.ValidUntil = proof.CheckedAt.Add(120 * time.Second)
+				return proof, nil
+			}, nil, deferrable)
+			if attempted.Load() != 1 {
+				t.Fatalf("expected exactly the unresolved recovery probe, got %d requests", attempted.Load())
+			}
+			evaluatedAt := time.Now().UTC()
+			facts := retainValidDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, st.facts, collected, evaluatedAt)
+			after, err := buildDNSServingState(st.record, p, st.routeID, "dns-a", "edge-group-a", facts, evaluatedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if passed := checkDNSServingSnapshot(after, evaluatedAt, false) == nil; passed != (scenario != "failed") {
+				t.Fatalf("snapshot result disagrees with the new recovery observation: passed=%t history=%v", passed, facts[0].ProbeHistory)
+			}
+		})
+	}
+}
