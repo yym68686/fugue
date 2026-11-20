@@ -104,3 +104,34 @@ class PublishNodePolicyTests(unittest.TestCase):
         for version in ("v0", "v047", "latest", 47, "v47\n"):
             with self.assertRaisesRegex(ValueError, "minimum_updater_version"):
                 publish(api, ["selected"], self.policy, minimum_updater_version=version)
+
+    @patch("scripts.publish_node_resource_policy.time.sleep")
+    def test_only_explicit_canary_requires_successor_updater(self, sleep):
+        writes, observed = [], []
+        def api(method, path, body=None):
+            if path == "/v1/node-updaters":
+                observed.append(1)
+                return {"node_updaters": [
+                    {"id": node, "cluster_node_name": node, "status": "active", "last_seen_at": self.now,
+                     "updater_version": "v50" if node == "canary" and len(observed) > 1 else "v49",
+                     "capabilities": [TASK]} for node in ("canary", "steady")]}
+            if path == "/install/node-updater.sh":
+                return 'FUGUE_NODE_UPDATER_SCRIPT_VERSION="v50"\n' + TASK
+            if method == "POST":
+                writes.append(body)
+                return {"task": {"id": "task-" + body["node_updater_id"]}}
+            return {"tasks": [{"id": path.split("task_id=", 1)[1].split("&", 1)[0], "status": "completed"}]}
+        result = publish(api, ["canary", "steady"], self.policy, apply=True, wait_seconds=30, upgrade_updaters=True,
+                         minimum_updater_version="v49", minimum_updater_version_by_node={"canary": "v50"})
+        self.assertEqual(set(result), {"canary", "steady"})
+        upgrades = [w for w in writes if w["type"] == "upgrade-node-updater"]
+        self.assertEqual([(w["node_updater_id"], w["payload"]["target_version"]) for w in upgrades], [("canary", "v50")])
+        sleep.assert_called_once()
+
+    def test_invalid_canary_rejected_before_any_api_call(self):
+        def api(*args):
+            self.fail("invalid canary must not access API")
+        for overrides in ({"unselected": "v50"}, {"selected": "v48"}, {"selected": "latest"}, ["selected"]):
+            with self.assertRaisesRegex(ValueError, "minimum_updater_version_by_node"):
+                publish(api, ["selected"], self.policy, minimum_updater_version="v49",
+                        minimum_updater_version_by_node=overrides)

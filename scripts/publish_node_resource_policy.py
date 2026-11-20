@@ -44,13 +44,19 @@ def version_number(value):
     return int(value[1:]) if isinstance(value, str) and re.fullmatch(r"v[1-9][0-9]*", value) else 0
 
 
-def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=False, minimum_updater_version=None):
+def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=False, minimum_updater_version=None,
+            minimum_updater_version_by_node=None):
     validate(policy)
     minimum = version_number(minimum_updater_version)
     if minimum_updater_version is not None and not minimum:
         raise ValueError("minimum_updater_version must be a numbered v release")
     if not targets or len(set(targets)) != len(targets):
         raise ValueError("explicit unique node target list required")
+    overrides = {} if minimum_updater_version_by_node is None else minimum_updater_version_by_node
+    if not isinstance(overrides, dict) or any(node not in targets or not version_number(version) or
+                                               version_number(version) < minimum for node, version in overrides.items()):
+        raise ValueError("minimum_updater_version_by_node must pin valid versions on declared targets")
+    floors = {node: version_number(overrides[node]) if node in overrides else minimum for node in targets}
     deadline = time.monotonic() + wait_seconds
     remaining, submitted, results, upgrades = set(targets), {}, {}, set()
     while remaining:
@@ -77,7 +83,7 @@ def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=
                 continue
             capable = TASK in updater.get("capabilities", [])
             current = version_number(updater.get("updater_version"))
-            upgrade_needed = not capable or (upgrade_updaters and current < minimum)
+            upgrade_needed = not capable or (upgrade_updaters and current < floors[node])
             if upgrade_needed and node not in upgrades and upgrade_updaters:
                 upgrade_candidates.append((node, updater["id"], current))
             if not capable:
@@ -103,7 +109,7 @@ def publish(api, targets, policy, apply=False, wait_seconds=0, upgrade_updaters=
             match = re.search(r'^FUGUE_NODE_UPDATER_SCRIPT_VERSION="(v[1-9][0-9]*)"$', script, re.MULTILINE)
             served = version_number(match[1]) if match else 0
             for node, updater_id, current in upgrade_candidates:
-                if served >= minimum and served > current and TASK in script:
+                if served >= floors[node] and served > current and TASK in script:
                     api("POST", "/v1/node-update-tasks", {"node_updater_id": updater_id, "type": "upgrade-node-updater", "payload": {"target_version": match[1], "reason": "node-resource-policy-version"}})
                     upgrades.add(node)
         if not remaining:
@@ -126,7 +132,9 @@ def main():
     token = os.environ.pop("FUGUE_API_KEY", "")
     if not token:
         raise ValueError("configuration writer credential missing")
-    results = publish(API(config["origin"], token), config["nodes"], policy, args.apply, args.wait_seconds, args.upgrade_updaters, config.get("minimum_updater_version"))
+    results = publish(API(config["origin"], token), config["nodes"], policy, args.apply, args.wait_seconds,
+                      args.upgrade_updaters, config.get("minimum_updater_version"),
+                      config.get("minimum_updater_version_by_node"))
     print(json.dumps({"applied": args.apply, "results": results}, sort_keys=True))
 
 
