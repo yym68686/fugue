@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,40 @@ import (
 
 	"fugue/internal/declarativerelease"
 )
+
+func TestExecuteAcknowledgesGuardianNoWriteOnlyAfterFinalization(t *testing.T) {
+	const guardian = "guardian:pod-uid:0123456789abcdef:edge-worker-test"
+	const direct = "github:org/repo:123:1:config-sha:edge-worker-test"
+	finalizeErr := errors.New("lease CAS failed")
+	recordErr := errors.New("monitor CAS failed")
+	for _, tc := range []struct {
+		name, holder, result string
+		leaseErr, monitorErr error
+		wantErr              error
+		wantText             string
+	}{
+		{name: "known no-write", holder: guardian, result: "failed-no-write"},
+		{name: "direct caller retains failure", holder: direct, result: "failed-no-write", wantText: "ended with status=failed-no-write"},
+		{name: "different component", holder: "guardian:pod-uid:0123456789abcdef:other", result: "failed-no-write", wantText: "ended with status=failed-no-write"},
+		{name: "unproven lease CAS", holder: guardian, result: "failed-no-write", leaseErr: finalizeErr, wantErr: finalizeErr, wantText: "lease release is unproven"},
+		{name: "unproven monitor CAS", holder: guardian, result: "verified", monitorErr: recordErr, wantErr: recordErr, wantText: "rollback record is unproven"},
+		{name: "unknown rollout", holder: guardian, result: "recovery-required", wantText: "ended with status=recovery-required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := declarativerelease.ExecutionResult{Component: "edge-worker-test", Status: tc.result, Reason: "front-drain-preflight"}
+			err := executeTerminalError(result, tc.holder, tc.leaseErr, tc.monitorErr)
+			if tc.wantText == "" {
+				if err != nil {
+					t.Fatalf("Guardian did not receive the known terminal result: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+				t.Fatalf("unproven or unsuccessful direct operation was accepted: %v", err)
+			}
+		})
+	}
+}
 
 func TestExecuteReportsTimeWindowRejectionBeforeClusterAccess(t *testing.T) {
 	for _, offset := range []time.Duration{-16 * time.Minute, time.Minute} {

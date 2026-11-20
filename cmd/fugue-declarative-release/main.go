@@ -879,11 +879,23 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	if _, err := output.Write(append(encoded, '\n')); err != nil {
 		return err
 	}
+	return executeTerminalError(result, heldLease.Holder, leaseReleaseErr, monitorRecordErr)
+}
+
+func executeTerminalError(result declarativerelease.ExecutionResult, holder string, leaseReleaseErr, monitorRecordErr error) error {
 	if leaseReleaseErr != nil {
 		return fmt.Errorf("component release terminal state is recorded but lease release is unproven: %w", leaseReleaseErr)
 	}
 	if monitorRecordErr != nil {
 		return fmt.Errorf("component release is verified but its continuous rollback record is unproven: %w", monitorRecordErr)
+	}
+	// For the Guardian subprocess, exit zero acknowledges delivery of a known
+	// outcome, not a successful rollout. A verified no-write refusal (for
+	// example, a Front still draining) must reach Guardian's safe terminal
+	// branch instead of masquerading as a lost result. Direct CI callers
+	// still use the process exit status to fail an unsuccessful deploy.
+	if _, guardian := guardianLeasePodUID(holder, result.Component); guardian && result.Status == "failed-no-write" {
+		return nil
 	}
 	if result.Status != "verified" {
 		return fmt.Errorf("component release ended with status=%s reason=%s", result.Status, result.Reason)

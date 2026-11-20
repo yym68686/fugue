@@ -27,6 +27,20 @@ func TestProcessExecutorBindsGuardianLeaseAndCanonicalReceipt(t *testing.T) {
 		t.Fatalf("rollout receipt=%+v err=%v", receipt, err)
 	}
 
+	noWrite := processResult(t, "failed-no-write", "forward-apply-rejected-before-commit")
+	noWrite.FailureClass, noWrite.FailureDetail = "forward_apply", "Front still serves active connections"
+	noWrite = resealProcessResult(t, noWrite)
+	binary = writeExecutorFixture(t, "execute", snapshot.Record.RecordDigest, noWrite)
+	executor, err = NewProcessExecutor(binary, "pod-uid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = executor.Rollout(context.Background(), snapshot)
+	if err != nil || receipt.Status != "failed-no-write" || receipt.FailureCode != noWrite.FailureClass ||
+		receipt.Reason != noWrite.Reason+": "+noWrite.FailureDetail || receipt.ReceiptDigest != noWrite.ReceiptDigest {
+		t.Fatalf("known no-write result was lost or reported as success: receipt=%+v err=%v", receipt, err)
+	}
+
 	compensated := processResult(t, "compensated", "continuous-health-threshold-lkg-restored")
 	binary = writeExecutorFixture(t, "restore-monitor", snapshot.Record.RecordDigest, compensated)
 	executor, err = NewProcessExecutor(binary, "pod-uid")
