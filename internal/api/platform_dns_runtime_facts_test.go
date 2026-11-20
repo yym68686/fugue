@@ -260,8 +260,14 @@ func TestDNSRuntimeFactsChoosePublicBackendAcrossRetainedAuthorities(t *testing.
 			if status := s.evaluateLiveConsumerConvergence(context.Background(), selectedSet, consumers, binding); status.Pass || status.RequiredPassing != 0 {
 				t.Fatal("unselected authority retained convergence", status)
 			}
-			if _, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID); err == nil {
+			failedRead, err := s.readPlatformDNSRuntimeFacts(context.Background(), f.claims.NodeID)
+			if err == nil {
 				t.Fatal("no selected backend reused retained receipt")
+			}
+			wantExhaustion := captureDNSSourceExhaustion{Inventory: 5, FreshCandidates: 5, BackendConflict: 5}
+			if got := failedRead.preflightFailure; got == nil || got.Predicate == nil ||
+				got.Predicate.Rejection != "no_current_source" || got.Predicate.DNSSource == nil || *got.Predicate.DNSSource != wantExhaustion {
+				t.Fatalf("compact preflight lost the exact refusal count: %+v", got)
 			}
 			rows := captureReceipts(t, s)
 			var foundSourceRejection, foundSelectorRejection, foundTruncation bool

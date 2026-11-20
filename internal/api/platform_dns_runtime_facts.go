@@ -86,12 +86,13 @@ func (s *Server) currentDNSFactSource(ctx context.Context, node string) (dnsFact
 }
 
 func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node string, loadArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (dnsFactSource, error) {
+	var exhausted *captureDNSSourceExhaustion
 	fail := func(reason string) (dnsFactSource, error) {
 		if err := ctx.Err(); err != nil {
-			observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason, ErrorClass: captureErrorClass(err)})
+			observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason, ErrorClass: captureErrorClass(err), DNSSource: exhausted})
 			return dnsFactSource{}, err
 		}
-		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason})
+		observeCapture(ctx, captureEvent{Stage: "source_rejected", Node: node, Rejection: reason, DNSSource: exhausted})
 		return dnsFactSource{}, errDNSRuntimeFacts
 	}
 	finish := startDNSReadStage(ctx, dnsReadConsumerInventory)
@@ -105,10 +106,12 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 		claims platformcontrol.PlatformComponentIdentityClaims
 	}
 	var candidates []candidate
+	stale, filtered := 0, 0
 	seen := map[string]bool{}
 	for i := range consumers {
 		c := &consumers[i]
 		if !c.IdentityVerified || c.NodeID != node || c.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(c.CredentialID, "kubernetes:") {
+			filtered++
 			continue
 		}
 		finish = startDNSReadStage(ctx, dnsReadExpectedInventory)
@@ -135,6 +138,7 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 			return fail("consumer_identity")
 		}
 		if c.LastHeartbeatAt.IsZero() || !c.LastHeartbeatAt.Add(time.Duration(member.HeartbeatFreshnessSeconds)*time.Second).After(time.Now().UTC()) {
+			stale++
 			observeCapture(ctx, captureEvent{Stage: "source_heartbeat_rejected", Node: node, Rejection: "consumer_heartbeat_stale"})
 			continue
 		}
@@ -150,6 +154,7 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 	// if none of the candidates can provide current facts.
 	var rejected [4]captureEvent
 	rejectedCount := 0
+	forbidden := 0
 	for _, candidate := range candidates {
 		if len(candidates) > 1 {
 			// Only transport can choose among retained authority receipts. Do
@@ -159,6 +164,9 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 			status := s.inspectDNSBackendTransport(ctx, candidate.claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{}, nil, false, nil, &reason)
 			finish()
 			if status == http.StatusForbidden || status == http.StatusConflict {
+				if status == http.StatusForbidden {
+					forbidden++
+				}
 				if rejectedCount < len(rejected) {
 					rejected[rejectedCount] = captureEvent{Stage: "source_backend_rejected", Node: node, HTTPStatus: status, Rejection: reason}
 				}
@@ -180,6 +188,10 @@ func (s *Server) currentDNSFactSourceWithReaders(ctx context.Context, node strin
 		selected = &source
 	}
 	if selected == nil {
+		exhausted = &captureDNSSourceExhaustion{
+			Inventory: len(consumers), IdentityFiltered: filtered, HeartbeatStale: stale,
+			FreshCandidates: len(candidates), BackendForbidden: forbidden, BackendConflict: rejectedCount - forbidden,
+		}
 		for _, refusal := range rejected[:min(rejectedCount, len(rejected))] {
 			observeCapture(ctx, refusal)
 		}

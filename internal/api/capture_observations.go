@@ -62,18 +62,19 @@ type captureReceipt struct {
 }
 
 type captureEvent struct {
-	Stage          string                  `json:"stage"`
-	Node           string                  `json:"node,omitempty"`
-	ErrorClass     string                  `json:"error_class,omitempty"`
-	DurationMS     int64                   `json:"duration_ms"`
-	Capacity       *captureCapacity        `json:"capacity,omitempty"`
-	Mismatches     []string                `json:"mismatches,omitempty"`
-	HTTPStatus     int                     `json:"http_status,omitempty"`
-	Rejection      string                  `json:"rejection,omitempty"`
-	Publication    *capturePublicationPair `json:"publication,omitempty"`
-	DNSAuthority   *captureDNSAuthority    `json:"dns_authority,omitempty"`
-	DNSParent      *captureDNSParent       `json:"dns_parent,omitempty"`
-	DNSReplacement *captureDNSReplacement  `json:"dns_replacement,omitempty"`
+	Stage          string                      `json:"stage"`
+	Node           string                      `json:"node,omitempty"`
+	ErrorClass     string                      `json:"error_class,omitempty"`
+	DurationMS     int64                       `json:"duration_ms"`
+	Capacity       *captureCapacity            `json:"capacity,omitempty"`
+	Mismatches     []string                    `json:"mismatches,omitempty"`
+	HTTPStatus     int                         `json:"http_status,omitempty"`
+	Rejection      string                      `json:"rejection,omitempty"`
+	Publication    *capturePublicationPair     `json:"publication,omitempty"`
+	DNSAuthority   *captureDNSAuthority        `json:"dns_authority,omitempty"`
+	DNSParent      *captureDNSParent           `json:"dns_parent,omitempty"`
+	DNSReplacement *captureDNSReplacement      `json:"dns_replacement,omitempty"`
+	DNSSource      *captureDNSSourceExhaustion `json:"dns_source_exhaustion,omitempty"`
 }
 
 // Observe only the two inputs to the rejected comparison. A backend UID is
@@ -309,6 +310,10 @@ func observeCapture(ctx context.Context, event captureEvent) {
 	if event.DNSParent != nil {
 		copy := *event.DNSParent
 		event.DNSParent = &copy
+	}
+	if event.DNSSource != nil {
+		copy := *event.DNSSource
+		event.DNSSource = &copy
 	}
 	trace.receipt.Events = append(trace.receipt.Events, event)
 }
