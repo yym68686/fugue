@@ -142,8 +142,9 @@ type kubeCloudNativePGCluster struct {
 		} `json:"ownerReferences,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
-		Instances int            `json:"instances,omitempty"`
-		Affinity  map[string]any `json:"affinity,omitempty"`
+		Instances int                      `json:"instances,omitempty"`
+		Affinity  map[string]any           `json:"affinity,omitempty"`
+		Resources kubeResourceRequirements `json:"resources,omitempty"`
 		Managed   struct {
 			Roles []struct {
 				Name           string `json:"name"`

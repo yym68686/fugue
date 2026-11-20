@@ -73,7 +73,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 			continue
 		}
 		if op.Type == model.OperationTypeDatabaseResize && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged &&
-			strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
+			(strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") || strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/")) {
 			s.operationClaimMu.Lock()
 			owner := new(int)
 			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
@@ -83,13 +83,18 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
 					err = s.executeManagedDatabaseResizeOperation(call, op, app)
+					if strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/") && err != nil &&
+						!errors.Is(err, errManagedPostgresResizeUnsettled) && !errors.Is(err, errManagedPostgresLifecycleOwnershipUnknown) &&
+						!errors.Is(err, errOperationNoLongerActive) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+						_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
+					}
 				}
 				cancel()
 				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
 				// This path may own an accepted mutation. Read or probe failure
 				// cannot release its lock or turn an unknown state into Failed.
 				if err != nil && s.Logger != nil {
-					s.Logger.Printf("automatic PostgreSQL memory resize recovery %s remains pending: %v", op.ID, err)
+					s.Logger.Printf("automatic PostgreSQL resource resize recovery %s remains pending: %v", op.ID, err)
 				}
 			}
 			continue

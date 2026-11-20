@@ -4127,6 +4127,14 @@ func (s *Store) pgListOperationsFiltered(tenantID string, platformAdmin bool, fi
 		where = append(where, fmt.Sprintf("o.app_id = $%d", len(args)+1))
 		args = append(args, appID)
 	}
+	if serviceID := strings.TrimSpace(filter.ServiceID); serviceID != "" {
+		where = append(where, fmt.Sprintf("o.service_id = $%d", len(args)+1))
+		args = append(args, serviceID)
+	}
+	if actorID := strings.TrimSpace(filter.ActorID); actorID != "" {
+		where = append(where, fmt.Sprintf("o.requested_by_id = $%d", len(args)+1))
+		args = append(args, actorID)
+	}
 	if types := normalizedOperationFilterValues(filter.Types); len(types) > 0 {
 		where = append(where, fmt.Sprintf("lower(o.type) IN (%s)", sqlPlaceholderList(len(args)+1, len(types))))
 		for _, value := range types {

@@ -92,6 +92,7 @@ func TestPostgresImageMigrationExecutorPreservesDataAndRecoversLostPatch(t *test
 func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 	scenarios := []string{"ready", "lost-patch-response", "changed-volume", "wrong-source-digest", "fenced", "resized-up", "resized-down", "resized-unlimited", "resized-lost-patch-response", "resized-lost-before-patch", "resized-changed-volume", "resized-unapplied", "resized-extra-resource-drift", "resized-extra-resource-preserved", "unpersisted-resource-drift", "resized-cas-conflict", "resized-replacement-drift", "resized-bootstrap-patch-lost-patch-response", "custom-pod-patch"}
 	if independent {
+		scenarios = append(scenarios, "reverted-bootstrap-patch-lost-patch-response", "reverted-without-proof", "reverted-wrong-system", "reverted-source-drift", "reverted-request-growth")
 		scenarios = append(scenarios, "cold-target-lost-patch-response", "cold-target-marker-removed", "fast-ready", "fast-blocked-before-stage", "fast-blocked-after-stage", "fast-stage-response-lost", "fast-image-lost-patch-response", "fast-restore-response-lost")
 		scenarios = append(scenarios, "shared-bootstrap-patch-lost-patch-response", "shared-wrong-location", "shared-wrong-pool", "shared-duplicate-hostname", "shared-affinity-alternative", "shared-wrong-volume-node", "shared-local-volume-unpinned", "shared-node-recreated")
 	}
@@ -140,7 +141,8 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 				appSpec.Postgres.RuntimeID = physical.ID
 			}
-			if scenario == "resized-unlimited" {
+			reverted := strings.HasPrefix(scenario, "reverted-")
+			if scenario == "resized-unlimited" || reverted {
 				appSpec.Postgres.Resources.CPULimitMilliCores = 0
 			}
 			postgresSpec := appSpec.Postgres
@@ -198,14 +200,24 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 				service = app.BackingServices[0]
 			}
-			resized := strings.HasPrefix(scenario, "resized-")
+			resized := strings.HasPrefix(scenario, "resized-") || reverted
+			var resizeID string
 			if resized {
 				target := *service.Spec.Postgres.Resources
 				target.MemoryMebibytes, target.MemoryLimitMebibytes = 1024, 2048
 				if scenario == "resized-down" {
 					target.MemoryMebibytes, target.MemoryLimitMebibytes = 128, 384
 				}
-				resize, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: model.OperationTypeDatabaseResize, RequestedByType: model.ActorTypeSystem, RequestedByID: store.ManagedPostgresAutoMemoryRequestActorPrefix + "/synthetic", DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{RuntimeResources: &target}}})
+				actor := store.ManagedPostgresAutoMemoryRequestActorPrefix + "/synthetic"
+				if reverted {
+					target = *service.Spec.Postgres.Resources
+					target.CPUMilliCores, target.CPULimitMilliCores = 25, 200
+					actor = managedPostgresAutoCPUActor + "/cluster-uid/123456"
+					if scenario == "reverted-request-growth" {
+						target.MemoryMebibytes += 32
+					}
+				}
+				resize, err := state.CreateOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, ServiceID: service.ID, Type: model.OperationTypeDatabaseResize, RequestedByType: model.ActorTypeSystem, RequestedByID: actor, DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{RuntimeResources: &target}}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -217,6 +229,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					t.Fatal(err)
 				}
 				service = app.BackingServices[0]
+				resizeID = resize.ID
 			}
 			postgres := store.ManagedPostgresSpecForOperation(app, service.ID)
 			catalog, err := pgimage.ApprovedCatalog()
@@ -273,6 +286,30 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			}
 			resources := resourceMap(model.ManagedPostgresRuntimeResources(*postgres))
 			spec["resources"] = resourceMap(*postgres.Resources)
+			liveResources := resources
+			if reverted {
+				imageObject(cluster["metadata"])["labels"] = map[string]string{runtime.FugueLabelBackingServiceID: service.ID}
+				liveResources = resourceMap(*postgres.Resources)
+				if scenario == "reverted-source-drift" {
+					imageObject(liveResources["requests"])["cpu"] = "150m"
+				}
+				if scenario != "reverted-without-proof" {
+					payload := map[string]any{"cluster_name": name, "cluster_uid": "cluster-uid", "pod_uid": "prior-pod-uid", "resources": resources}
+					// The incident predates explicit system_id evidence. An
+					// exact legacy system actor is sufficient, but it cannot
+					// override an explicitly different database identifier.
+					if scenario == "reverted-wrong-system" {
+						payload["system_id"] = "654321"
+					}
+					if _, err := state.RecordOperationEvidence(model.OperationEvidence{
+						TenantID: app.TenantID, AppID: app.ID, OperationID: resizeID, Type: model.OperationEvidenceTypePostgresResizeVerified,
+						SubjectKind: "Pod", SubjectNamespace: ns, SubjectName: "database-1", SubjectUID: "prior-pod-uid",
+						Source: model.OperationEvidenceSourceKubernetesAPI, PayloadVersion: managedPostgresResizeEvidencePayloadVersion, Payload: payload,
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			if scenario == "resized-extra-resource-drift" {
 				imageObject(resources["requests"])["ephemeral-storage"] = "1Gi"
 			}
@@ -288,10 +325,10 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			imageObject(imageObject(pod["metadata"])["labels"])[cloudNativePGClusterLabel] = name
 			imageObjects(imageObject(pod["metadata"])["ownerReferences"])[0]["name"] = name
 			main := imageContainer(pod)
-			main["resources"] = resources
+			main["resources"] = liveResources
 			main["image"] = source
 			status := imageObjects(imageObject(pod["status"])["containerStatuses"])[0]
-			status["resources"] = resources
+			status["resources"] = liveResources
 			if scenario == "resized-unapplied" {
 				status["resources"] = spec["resources"]
 			}
@@ -342,6 +379,8 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 						t.Error("PATCH sent without the marked target recorded in durable intent")
 					} else if shared && proofs[0].Payload["shared_node_uid"] != "node-a-uid" {
 						t.Error("PATCH sent without the shared node identity recorded in durable intent")
+					} else if reverted && (proofs[0].Payload["source_resources_hash"] != pgimage.Hash(liveResources) || proofs[0].Payload["source_resize_id"] != resizeID) {
+						t.Error("PATCH sent without a durable source resize and its distinct resource hash")
 					}
 					var patch []map[string]any
 					json.NewDecoder(r.Body).Decode(&patch)
@@ -391,6 +430,10 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 							t.Fatal("restart template was not aligned atomically", patch)
 						}
 						spec["resources"] = patch[4]["value"]
+						if reverted {
+							imageContainer(pod)["resources"] = resources
+							status["resources"] = resources
+						}
 					}
 					if bootstrapPatch {
 						expected := removeImageMigrationPodPatch(migrationTestBootstrapPodPatch)
@@ -557,6 +600,12 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				}
 				if scenario == "custom-pod-patch" && (!strings.Contains(err.Error(), "cnpg.io/podPatch") || errors.Is(err, errPostgresImageMigrationUnsettled)) {
 					t.Fatalf("custom patch must fail before intent: %v", err)
+				}
+				return
+			}
+			if reverted && !strings.HasSuffix(scenario, "lost-patch-response") {
+				if err == nil || patches != 0 || probes != 0 || errors.Is(err, errPostgresImageMigrationUnsettled) {
+					t.Fatalf("unsafe restoration passed migration preflight: patches=%d probes=%d err=%v", patches, probes, err)
 				}
 				return
 			}

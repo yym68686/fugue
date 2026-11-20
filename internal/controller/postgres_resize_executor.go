@@ -46,6 +46,7 @@ type managedPostgresResizeExecutionHooks struct {
 	Patch             func(context.Context, managedPostgresResizeObservation, kubeResourceRequirements) (managedPostgresResizeObservation, error)
 	Probe             func(context.Context, managedPostgresResizeSnapshot) error
 	EnsureOwned       func() error
+	BeforePatch       func(context.Context, managedPostgresResizeSnapshot, kubeResourceRequirements) error
 	Report            func(managedPostgresResizeExecutionEvent) error
 	Wait              func(context.Context, time.Duration) error
 }
@@ -61,24 +62,44 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	app model.App,
 ) (executionErr error) {
 	var acceptedBaseline *managedPostgresResizeInvariantBaseline
+	var restoreIntent *managedPostgresResizeInvariantBaseline
+	restoring := strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/")
+	var restoreIntentEvidence model.OperationEvidence
 	// An accepted automatic mutation remains owned across process/leader loss.
 	// A transient preflight/read failure on replay cannot prove it was undone.
-	if strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
+	if restoring || strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
 		accepted, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{model.OperationEvidenceTypePostgresResizeAccepted}, Limit: 1})
 		if err != nil {
-			return fmt.Errorf("%w: read accepted automatic memory resize evidence: %v", errManagedPostgresResizeUnsettled, err)
+			return fmt.Errorf("%w: read accepted automatic resize evidence: %v", errManagedPostgresResizeUnsettled, err)
 		}
-		if len(accepted) > 0 {
+		if restoring && len(accepted) == 0 {
+			intent, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{model.OperationEvidenceTypePostgresResizeApplying}, Limit: 1})
+			if err != nil {
+				return fmt.Errorf("%w: read runtime restoration intent: %v", errManagedPostgresResizeUnsettled, err)
+			}
+			if len(intent) > 0 {
+				restoreIntentEvidence = intent[0]
+			}
+		}
+		if len(accepted) > 0 || restoreIntentEvidence.ID != "" {
 			defer func() {
 				if executionErr != nil && !errors.Is(executionErr, errOperationNoLongerActive) && !errors.Is(executionErr, errManagedPostgresResizeUnsettled) {
 					executionErr = fmt.Errorf("%w: %v", errManagedPostgresResizeUnsettled, executionErr)
 				}
 			}()
-			baseline, err := managedPostgresResizeAcceptedBaseline(accepted[0])
-			if err != nil {
-				return err
+			if len(accepted) > 0 {
+				baseline, err := managedPostgresResizeAcceptedBaseline(accepted[0])
+				if err != nil {
+					return err
+				}
+				acceptedBaseline = &baseline
+			} else {
+				baseline, err := managedPostgresResizeEvidenceBaseline(restoreIntentEvidence, model.OperationEvidenceTypePostgresResizeApplying)
+				if err != nil {
+					return err
+				}
+				restoreIntent = &baseline
 			}
-			acceptedBaseline = &baseline
 		}
 	}
 	if !s.Config.KubectlApply {
@@ -131,6 +152,45 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	if enrollment != nil {
 		gates.CPURequestDownscaleEnabled = true
 	}
+	var restoreBootstrap kubeResourceRequirements
+	if restoring {
+		if op.RequestedByType != model.ActorTypeSystem || !gates.RecoveryEnabled || target.Postgres.RuntimeResources == nil ||
+			*target.Postgres.RuntimeResources != *op.DesiredSpec.Postgres.RuntimeResources {
+			return fmt.Errorf("PostgreSQL runtime restoration requires recovery and the exact persisted target")
+		}
+		snapshot, err := observeManagedPostgresResizeSnapshot(ctx, client, namespace, clusterName)
+		if err != nil {
+			return err
+		}
+		if !postgresRuntimeRestoreMatches(snapshot, op.RequestedByID) {
+			return fmt.Errorf("PostgreSQL runtime restoration database or replacement Pod identity changed")
+		}
+		restoreBootstrap, _, err = postgresRuntimeRestoreBaseline(target.ServiceID, target.Postgres, snapshot)
+		if err != nil {
+			return err
+		}
+		prior, err := s.postgresRuntimeRestoreProof(app, target.ServiceID, target.Postgres, snapshot)
+		if err != nil {
+			return err
+		}
+		if op.RequestedByID != postgresRuntimeRestoreActor(snapshot, prior.ID) {
+			return fmt.Errorf("PostgreSQL runtime restoration source resize changed")
+		}
+		if restoreIntent != nil {
+			if !postgresRuntimeRestoreAtBootstrap(snapshot, restoreBootstrap) {
+				if err := validatePostgresRestoreAcceptedIntent(restoreIntent, restoreIntentEvidence, snapshot, targetResources); err != nil {
+					return err
+				}
+				acceptedBaseline = restoreIntent
+			} else if err := validateManagedPostgresResizeInvariantBaseline(*restoreIntent, snapshot.Cluster, snapshot.Observation); err != nil {
+				return err
+			}
+		}
+		if acceptedBaseline == nil && !postgresRuntimeRestoreAtBootstrap(snapshot, restoreBootstrap) {
+			return fmt.Errorf("PostgreSQL runtime restoration source no longer matches the bootstrap template")
+		}
+	}
+	restoreApplying := acceptedBaseline != nil
 	hooks := managedPostgresResizeExecutionHooks{
 		AcceptedBaseline: acceptedBaseline,
 		InspectCapability: func(callCtx context.Context) (managedPostgresResizeCapability, error) {
@@ -163,6 +223,15 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 					err = validateManagedPostgresAutoMemoryNode(node, found, op.DesiredSpec.Postgres.RuntimeResources.MemoryMebibytes < source)
 				}
 			}
+			if err == nil && restoring {
+				_, _, err = postgresRuntimeRestoreBaseline(target.ServiceID, target.Postgres, snapshot)
+				if err == nil && !postgresRuntimeRestoreMatches(snapshot, op.RequestedByID) {
+					err = fmt.Errorf("PostgreSQL runtime restoration database or replacement Pod identity changed")
+				}
+				if err == nil && !restoreApplying && !postgresRuntimeRestoreAtBootstrap(snapshot, restoreBootstrap) {
+					err = fmt.Errorf("PostgreSQL runtime restoration source no longer matches the bootstrap template")
+				}
+			}
 			return snapshot, err
 		},
 		Patch: func(
@@ -183,6 +252,7 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			if patchErr != nil {
 				return managedPostgresResizeObservation{}, patchErr
 			}
+			restoreApplying = true
 			return observeManagedPostgresResize(pod, managedPostgresMainContainerName)
 		},
 		Probe: func(callCtx context.Context, snapshot managedPostgresResizeSnapshot) error {
@@ -195,6 +265,14 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			return s.reportManagedPostgresResizeExecutionEvent(op, app, namespace, clusterName, event)
 		},
 		Wait: waitManagedPostgresResizePollInterval,
+	}
+	if restoring {
+		hooks.BeforePatch = func(callCtx context.Context, snapshot managedPostgresResizeSnapshot, resources kubeResourceRequirements) error {
+			if !managedPostgresResizeResourcesEqual(resources, targetResources) {
+				return fmt.Errorf("PostgreSQL runtime restoration requires the exact target in one stage")
+			}
+			return s.postgresRuntimeRestoreRequestPolicy(callCtx, client, app, target.ServiceID, snapshot, restoreBootstrap, targetResources, gates)
+		}
 	}
 
 	timeout := s.Config.ManagedAppRolloutTimeout
@@ -242,7 +320,12 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	}
 
 	message := fmt.Sprintf("managed postgres service %s resized in place", strings.TrimSpace(target.ServiceID))
-	completed, err := s.Store.CompleteManagedOperation(op.ID, "", message)
+	var completed model.Operation
+	if restoring {
+		completed, err = s.Store.CompleteManagedOperationGuarded(op, &app, "", message+" to restore the verified runtime target", nil, nil, nil)
+	} else {
+		completed, err = s.Store.CompleteManagedOperation(op.ID, "", message)
+	}
 	if err != nil {
 		return fmt.Errorf(
 			"%w: persist managed postgres runtime resources after verified resize %s: %v",
@@ -524,23 +607,31 @@ func executeManagedPostgresResizeStages(
 				err,
 			)
 		}
-		if err := hooks.Report(managedPostgresResizeExecutionEvent{
-			EvidenceType:     model.OperationEvidenceTypePostgresResizeApplying,
-			State:            managedPostgresResizeStateReady,
-			Reason:           "applying_stage",
-			Message:          fmt.Sprintf("applying managed postgres resize stage %s", stage.Name),
-			StageName:        stage.Name,
-			StageIndex:       stageIndex,
-			ChangedResources: stage.ChangedResources,
-			Resources:        stage.Resources,
-			Snapshot:         &before,
-		}); err != nil {
-			return managedPostgresResizeSnapshot{}, fmt.Errorf("record managed postgres resize stage %s intent: %w", stage.Name, err)
-		}
-
 		var acceptedObservation managedPostgresResizeObservation
 		patchConflictReported := false
+		intentReported := false
 		for {
+			if hooks.BeforePatch != nil {
+				if err := hooks.BeforePatch(executionCtx, before, stage.Resources); err != nil {
+					return managedPostgresResizeSnapshot{}, err
+				}
+			}
+			if !intentReported {
+				if err := hooks.Report(managedPostgresResizeExecutionEvent{
+					EvidenceType:     model.OperationEvidenceTypePostgresResizeApplying,
+					State:            managedPostgresResizeStateReady,
+					Reason:           "applying_stage",
+					Message:          fmt.Sprintf("applying managed postgres resize stage %s", stage.Name),
+					StageName:        stage.Name,
+					StageIndex:       stageIndex,
+					ChangedResources: stage.ChangedResources,
+					Resources:        stage.Resources,
+					Snapshot:         &before,
+				}); err != nil {
+					return managedPostgresResizeSnapshot{}, fmt.Errorf("record managed postgres resize stage %s intent: %w", stage.Name, err)
+				}
+				intentReported = true
+			}
 			acceptedObservation, err = hooks.Patch(executionCtx, before.Observation, stage.Resources)
 			if err == nil {
 				// A successful /resize response proves that the apiserver accepted
@@ -714,6 +805,10 @@ func executeManagedPostgresResizeStages(
 // Restore the immutable fence from durable evidence, never from a fresh live
 // baseline that could legitimize an unrelated replacement or configuration edit.
 func managedPostgresResizeAcceptedBaseline(evidence model.OperationEvidence) (managedPostgresResizeInvariantBaseline, error) {
+	return managedPostgresResizeEvidenceBaseline(evidence, model.OperationEvidenceTypePostgresResizeAccepted)
+}
+
+func managedPostgresResizeEvidenceBaseline(evidence model.OperationEvidence, evidenceType string) (managedPostgresResizeInvariantBaseline, error) {
 	var payload struct {
 		ClusterName        string `json:"cluster_name"`
 		ClusterUID         string `json:"cluster_uid"`
@@ -730,7 +825,7 @@ func managedPostgresResizeAcceptedBaseline(evidence model.OperationEvidence) (ma
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		return managedPostgresResizeInvariantBaseline{}, err
 	}
-	if evidence.Type != model.OperationEvidenceTypePostgresResizeAccepted || evidence.PayloadVersion != managedPostgresResizeEvidencePayloadVersion ||
+	if evidence.Type != evidenceType || evidence.PayloadVersion != managedPostgresResizeEvidencePayloadVersion ||
 		evidence.SubjectNamespace == "" || evidence.PodName == "" || evidence.NodeName == "" || evidence.ContainerName == "" ||
 		payload.ClusterName == "" || payload.ClusterUID == "" || payload.ClusterGeneration <= 0 ||
 		payload.PodUID == "" || payload.PodUID != evidence.SubjectUID || payload.PodGeneration <= 0 || payload.ContainerStartedAt == "" {
@@ -742,6 +837,24 @@ func managedPostgresResizeAcceptedBaseline(evidence model.OperationEvidence) (ma
 		PodGeneration: payload.PodGeneration, NodeName: evidence.NodeName, ContainerName: evidence.ContainerName,
 		RestartCount: payload.RestartCount, ContainerStartedAt: payload.ContainerStartedAt,
 	}, nil
+}
+
+// A lost PATCH response may leave only the durable pre-mutation intent.
+// Promote it to an accepted baseline only for the one expected generation
+// increment and exact target. The executor will observe without another PATCH.
+func validatePostgresRestoreAcceptedIntent(baseline *managedPostgresResizeInvariantBaseline, intent model.OperationEvidence, snapshot managedPostgresResizeSnapshot, target kubeResourceRequirements) error {
+	var payload struct {
+		SystemID  string                   `json:"system_id"`
+		Resources kubeResourceRequirements `json:"resources"`
+	}
+	raw, err := json.Marshal(intent.Payload)
+	if err != nil || json.Unmarshal(raw, &payload) != nil ||
+		payload.SystemID == "" || payload.SystemID != snapshot.Cluster.Status.SystemID ||
+		!managedPostgresResizeResourcesEqual(payload.Resources, target) ||
+		!managedPostgresResizeResourcesEqual(snapshot.Observation.DesiredResources, target) {
+		return fmt.Errorf("PostgreSQL runtime restoration mutation outcome is unknown; live state does not prove the recorded intent")
+	}
+	return advanceManagedPostgresResizeInvariantBaseline(baseline, snapshot.Cluster, snapshot.Observation)
 }
 
 func waitForManagedPostgresResizeStage(
@@ -1212,6 +1325,7 @@ func (s *Service) reportManagedPostgresResizeExecutionEvent(
 		evidence.ContainerName = observation.ContainerName
 		payload["cluster_name"] = event.Snapshot.Cluster.Metadata.Name
 		payload["cluster_uid"] = event.Snapshot.Cluster.Metadata.UID
+		payload["system_id"] = event.Snapshot.Cluster.Status.SystemID
 		payload["cluster_generation"] = event.Snapshot.Cluster.Metadata.Generation
 		payload["pod_uid"] = observation.PodUID
 		payload["pod_generation"] = observation.Generation
@@ -1219,6 +1333,11 @@ func (s *Service) reportManagedPostgresResizeExecutionEvent(
 		payload["pod_resource_version"] = observation.ResourceVersion
 		payload["restart_count"] = observation.RestartCount
 		payload["container_started_at"] = observation.ContainerStartedAt
+	}
+	if strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/") &&
+		(evidence.Type == model.OperationEvidenceTypePostgresResizeApplying || evidence.Type == model.OperationEvidenceTypePostgresResizeAccepted || evidence.Type == model.OperationEvidenceTypePostgresResizeVerified) {
+		_, err := s.Store.RecordOperationEvidence(evidence)
+		return err
 	}
 	s.recordOperationEvidenceBestEffort(evidence)
 	return nil

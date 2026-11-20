@@ -41,7 +41,7 @@ recovery and an actively fenced, hibernating, or paused Cluster still block migr
 
 Before mutation, Fugue checks the rehearsed operator, current Cluster/primary
 identity, healthy node, unambiguous existing runtime affinity, the fully applied
-persisted resource envelope, original bound PVC/PVs, physical database system ID, and writable
+resource envelope, original bound PVC/PVs, physical database system ID, and writable
 SQL. It persists a credential-free witness and intent before compare-and-swapping
 `Cluster.spec.imageName`. When a prior in-place resize left a stale restart template,
 the same atomic PATCH also aligns `Cluster.spec.resources` with the verified running
@@ -50,6 +50,16 @@ unknown drift and changes to other resource dimensions are rejected. The source 
 target specification hashes are retained for recovery. There is no separate template
 update or extra resource-change rollout. CNPG performs the primary replacement using its
 existing lifecycle and storage. Fugue does not delete the Pod or PVC itself.
+
+If CNPG already recreated the primary at its bootstrap requests and limits,
+Fugue may restore the exact persisted envelope in that same approved image
+switch. The live template, Pod spec and actual resources must agree with the
+stored bootstrap values. The latest completed resize must have verified the
+target on an earlier Pod of the same Cluster UID and PostgreSQL system ID.
+Fugue records the source resize and distinct source and replacement resource
+hashes. A change that increases requests or lowers the memory limit must be
+aligned separately before restarting; unknown identity or unrelated drift still
+blocks the migration.
 
 For a managed shared runtime, a hard Cluster affinity to the current primary's
 hostname is also accepted. The hostname must uniquely select that Node, the Node

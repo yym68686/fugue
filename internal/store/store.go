@@ -3559,6 +3559,8 @@ type OperationListFilter struct {
 	TenantID  string
 	AppID     string
 	ProjectID string
+	ServiceID string
+	ActorID   string
 	Types     []string
 	Statuses  []string
 	Limit     int
@@ -3658,6 +3660,12 @@ func operationMatchesListFilter(op model.Operation, tenantID string, platformAdm
 		return false
 	}
 	if appID := strings.TrimSpace(filter.AppID); appID != "" && strings.TrimSpace(op.AppID) != appID {
+		return false
+	}
+	if serviceID := strings.TrimSpace(filter.ServiceID); serviceID != "" && op.ServiceID != serviceID {
+		return false
+	}
+	if actorID := strings.TrimSpace(filter.ActorID); actorID != "" && op.RequestedByID != actorID {
 		return false
 	}
 	if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" {

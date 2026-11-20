@@ -42,6 +42,8 @@ type postgresImageWitness struct {
 	RestartResources      map[string]any             `json:"restart_resources,omitempty"`
 	RestartSpecHash       string                     `json:"restart_spec_hash,omitempty"`
 	RestartResourceTarget *model.ResourceSpec        `json:"restart_resource_target,omitempty"`
+	SourceResourcesHash   string                     `json:"source_resources_hash,omitempty"`
+	SourceResizeID        string                     `json:"source_resize_id,omitempty"`
 	Drain                 *postgresImageDrainWitness `json:"drain,omitempty"`
 	DrainRestored         bool                       `json:"drain_restored,omitempty"`
 	// Nil means the intent predates podPatch compatibility checks.
@@ -161,7 +163,28 @@ func imageRestartSpecHash(cluster map[string]any, resources map[string]any) stri
 	return imagePreservedSpecHash(map[string]any{"spec": spec})
 }
 
+func imageResourcesWithRuntimeTarget(source any, target kubeResourceRequirements) map[string]any {
+	resources := imageNonRuntimeResources(source)
+	for scope, quantities := range map[string]map[string]string{"requests": target.Requests, "limits": target.Limits} {
+		values := imageObject(resources[scope])
+		if values == nil {
+			values = map[string]any{}
+		}
+		for name, value := range quantities {
+			// Kubernetes serializes an applied quantity in canonical form.
+			q, _ := parseResizeQuantity(value)
+			values[name] = q.String()
+		}
+		resources[scope] = values
+	}
+	return resources
+}
+
 func validateImageRestartResources(w postgresImageWitness, cluster map[string]any, target bool) error {
+	if (w.SourceResourcesHash == "") != (w.SourceResizeID == "") ||
+		(w.SourceResourcesHash != "" && (w.RestartResourceTarget == nil || w.SourceResourcesHash == w.ResourcesHash)) {
+		return fmt.Errorf("incomplete source resize witness")
+	}
 	if w.RestartResourceTarget == nil {
 		if w.RestartResources != nil || w.RestartSpecHash != "" {
 			return fmt.Errorf("incomplete restart resource witness")
@@ -306,7 +329,7 @@ func (c *kubeClient) observeImageMigration(ctx context.Context, ns, serviceID st
 	return cluster, pod, managedPostgresResizeSnapshot{Cluster: typed, Observation: observation}, nil
 }
 
-func (s *Service) captureImageWitness(ctx context.Context, c *kubeClient, ns, serviceID, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
+func (s *Service) captureImageWitness(ctx context.Context, c *kubeClient, app model.App, ns, serviceID, target string, postgres model.AppPostgresSpec, catalog pgimage.Catalog) (postgresImageWitness, error) {
 	name := postgres.ServiceName
 	cluster, pod, snapshot, err := c.observeImageMigration(ctx, ns, serviceID, postgres)
 	if err != nil {
@@ -336,13 +359,38 @@ func (s *Service) captureImageWitness(ctx context.Context, c *kubeClient, ns, se
 		return postgresImageWitness{}, fmt.Errorf("running database image digest does not match the verified source")
 	}
 	authorized, err := managedPostgresKubeResources(model.ManagedPostgresRuntimeResources(postgres))
-	if err != nil || !managedPostgresResizeResourcesEqual(snapshot.Observation.DesiredResources, authorized) {
-		return postgresImageWitness{}, fmt.Errorf("live resources differ from the persisted resource intent")
+	if err != nil {
+		return postgresImageWitness{}, fmt.Errorf("invalid persisted resource intent: %w", err)
 	}
 	if snapshot.Observation.ActualResources == nil || !managedPostgresResizeResourcesEqual(snapshot.Observation.DesiredResources, *snapshot.Observation.ActualResources) {
 		return postgresImageWitness{}, fmt.Errorf("database resource resize is not fully applied")
 	}
-	alignResources := pgimage.Hash(main["resources"]) != pgimage.Hash(spec["resources"])
+	restartResources := imageObject(main["resources"])
+	var sourceResizeID string
+	if !managedPostgresResizeResourcesEqual(snapshot.Observation.DesiredResources, authorized) {
+		bootstrap, _, err := postgresRuntimeRestoreBaseline(serviceID, postgres, snapshot)
+		if err != nil {
+			return postgresImageWitness{}, fmt.Errorf("live resources differ from the persisted resource intent: %w", err)
+		}
+		if !postgresRuntimeRestoreAtBootstrap(snapshot, bootstrap) {
+			return postgresImageWitness{}, fmt.Errorf("live resources differ from both the persisted resource intent and the CNPG bootstrap template")
+		}
+		// The same-node image switch does not reserve any additional capacity.
+		// Never require greater requests or impose a smaller memory limit at
+		// this cutover based only on an earlier process's resource evidence.
+		_, raised, reduced := compareResizeResources(bootstrap, authorized)
+		if containsResizeResource(raised, "requests.cpu") || containsResizeResource(raised, "requests.memory") ||
+			containsResizeResource(reduced, "limits.memory") {
+			return postgresImageWitness{}, fmt.Errorf("restoring the persisted resources would increase requests or lower the memory limit; align resources before restarting")
+		}
+		prior, err := s.postgresRuntimeRestoreProof(app, serviceID, postgres, snapshot)
+		if err != nil {
+			return postgresImageWitness{}, fmt.Errorf("live resources reverted to bootstrap; no verified resize to restore: %w", err)
+		}
+		sourceResizeID = prior.ID
+		restartResources = imageResourcesWithRuntimeTarget(main["resources"], authorized)
+	}
+	alignResources := pgimage.Hash(restartResources) != pgimage.Hash(spec["resources"])
 	if alignResources && (postgres.RuntimeResources == nil || pgimage.Hash(imageNonRuntimeResources(main["resources"])) != pgimage.Hash(imageNonRuntimeResources(spec["resources"]))) {
 		return postgresImageWitness{}, fmt.Errorf("live resources differ from the restart template without a matching persisted in-place resource target")
 	}
@@ -421,9 +469,14 @@ func (s *Service) captureImageWitness(ctx context.Context, c *kubeClient, ns, se
 	witness.BootstrapPodPatch = &patchValue
 	witness.ColdMigration = snapshot.Cluster.Metadata.Annotations[coldMigrationAnnotation]
 	if alignResources {
-		witness.RestartResources = imageObject(main["resources"])
+		witness.RestartResources = restartResources
 		witness.RestartResourceTarget = model.CloneResourceSpec(postgres.RuntimeResources)
 		witness.RestartSpecHash = imageRestartSpecHash(cluster, witness.RestartResources)
+	}
+	if sourceResizeID != "" {
+		witness.SourceResizeID = sourceResizeID
+		witness.SourceResourcesHash = witness.ResourcesHash
+		witness.ResourcesHash = pgimage.Hash(restartResources)
 	}
 	return witness, nil
 }
@@ -472,7 +525,11 @@ func validateImageWitness(w postgresImageWitness, cluster, pod map[string]any, s
 	if imageString(imageObject(cluster["metadata"]), "uid") != w.ClusterUID || imagePreservedSpecHash(original) != expectedSpecHash || snapshot.Cluster.Status.SystemID != w.SystemID {
 		return fmt.Errorf("database Cluster identity or preserved specification changed")
 	}
-	if snapshot.Observation.PodName != w.Pod || snapshot.Observation.NodeName != w.Node || pgimage.Hash(imageContainer(pod)["resources"]) != w.ResourcesHash {
+	expectedResourcesHash := w.ResourcesHash
+	if w.SourceResourcesHash != "" && snapshot.Observation.PodUID == w.PodUID {
+		expectedResourcesHash = w.SourceResourcesHash
+	}
+	if snapshot.Observation.PodName != w.Pod || snapshot.Observation.NodeName != w.Node || pgimage.Hash(imageContainer(pod)["resources"]) != expectedResourcesHash {
 		return fmt.Errorf("database primary, node or resources changed")
 	}
 	if snapshot.Observation.ActualResources == nil || !managedPostgresResizeResourcesEqual(snapshot.Observation.DesiredResources, *snapshot.Observation.ActualResources) {
@@ -574,7 +631,7 @@ func (s *Service) executePostgresImageMigration(ctx context.Context, op model.Op
 		}
 		armDeadline = recordedIntent.CollectedAt.Add(30 * time.Second)
 	} else {
-		witness, err = s.captureImageWitness(ctx, client, ns, op.ServiceID, image, target.Postgres, catalog)
+		witness, err = s.captureImageWitness(ctx, client, app, ns, op.ServiceID, image, target.Postgres, catalog)
 		if err != nil {
 			return err
 		}

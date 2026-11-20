@@ -9,6 +9,7 @@ import (
 
 const ManagedPostgresAutoCPURequestActorPrefix = "fugue-controller/postgres-cpu-request-downscale"
 const ManagedPostgresAutoMemoryRequestActorPrefix = "fugue-controller/postgres-memory-request"
+const ManagedPostgresRestoreRuntimeActorPrefix = "fugue-controller/postgres-restore-runtime-resources"
 
 // normalizeManagedPostgresResizeTarget requires a complete resource envelope.
 // A zero CPU limit preserves an existing unlimited allowance. The live resize
@@ -47,10 +48,15 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 		return ErrInvalidInput
 	}
 	// The public resize contract remains app-owned. Only the internal automatic
-	// request-only operations may resize an exclusively bound standalone database.
+	// operations may resize an exclusively bound standalone database.
+	restore := strings.HasPrefix(op.RequestedByID, ManagedPostgresRestoreRuntimeActorPrefix+"/")
+	if restore && (op.RequestedByType != model.ActorTypeSystem || target.Postgres.RuntimeResources == nil ||
+		*target.Postgres.RuntimeResources != *targetResources) {
+		return ErrConflict
+	}
 	if !target.AppOwned && (op.RequestedByType != model.ActorTypeSystem ||
 		(!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoCPURequestActorPrefix+"/") &&
-			!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoMemoryRequestActorPrefix+"/"))) {
+			!strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoMemoryRequestActorPrefix+"/") && !restore)) {
 		return ErrConflict
 	}
 	if target.Postgres.Suspended {

@@ -62,3 +62,21 @@ and actual Pod resources, UID, restart count and container start time. Merely
 seeing the enabled environment flag is not proof that a database was resized.
 Controller logs identify queued targets and pre-queue blockers, including missing
 identity or recommendations that require explicit limit authorization.
+# Runtime resource recovery after CNPG replaces a Pod
+
+A Pod-only resize does not change the CNPG restart template. After CNPG
+replaces a Pod, Fugue compares its fully applied resources with the saved
+runtime target before computing a new recommendation. It can restore the
+target through the normal guarded `/resize` path when the previous verified
+resize proves the same database and the replacement is running at its
+bootstrap resources. This does not restart the database. Recovery must be
+enabled, both current policy and the single-stage resize safety checks must
+allow the exact change, and a memory request decrease still needs fresh
+samples from the new process and a node without memory pressure.
+
+The background recovery does not change limits. If the latest resize cannot
+be proven or a restore is unsafe, the saved target is not rewritten on the
+basis of the fallback resources. Use operation evidence and the controller's
+resource restoration messages to investigate. An explicitly approved
+[baked-image migration](../postgres-baked-image-migration.md) can also carry a
+verified target forward when its preflight allows it.
