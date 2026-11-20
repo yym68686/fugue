@@ -404,6 +404,117 @@ class TransportTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "immutable"):
                 transport.verify_staged_backend(candidate, "system", port + 1)
 
+    def test_only_recovery_predecessor_may_lack_complete_materialization(self):
+        from scripts.recover_dns_transport import DNSObservationRejected
+
+        port = 53
+        pod = self.backend()
+        pod["spec"]["containers"][0]["image"] = "registry.example/dns@sha256:" + "a"*64
+        for category in ("wire_materialization", "positive_proof", "artifact_authentication",
+                         "proof_membership", "record_readiness", "expired"):
+            for role, recovery in (("predecessor", True), ("predecessor", False),
+                                   ("candidate", True), ("fallback", True)):
+                with self.subTest(category=category, role=role, recovery=recovery), \
+                     patch("scripts.recover_dns_transport.verify_candidate",
+                           side_effect=DNSObservationRejected(category)), \
+                     patch.object(transport, "read_json", return_value=pod) as read:
+                    if category == "wire_materialization" and role == "predecessor" and recovery:
+                        transport.verify_handoff_backend(role, {"pod": pod}, "system", port, recovery=recovery)
+                        read.assert_called_once_with("get", "pod", pod["metadata"]["name"], "-n", "system", "-o", "json")
+                    else:
+                        with self.assertRaises(DNSObservationRejected) as caught:
+                            transport.verify_handoff_backend(role, {"pod": pod}, "system", port, recovery=recovery)
+                        self.assertEqual(caught.exception.backend_role, role)
+                        read.assert_not_called()
+
+    def recovery_fixture(self):
+        config = self.config()
+        public = dict(config["listeners"][0], name="public", port=53, selector={"app": "new"})
+        diagnostic = dict(public, name="diagnostic", port=15353)
+        fallback = {"selector": {"app": "fallback"}, "revision": "3"*40,
+                    "pod_uid": "00000000-0000-0000-0000-000000000003"}
+        stage = {"address": public["address"], "previous_revision": "1"*40,
+                 "candidate_revision": "2"*40, "recovery_fallback": fallback}
+        config.update(apiVersion="transport.fugue.dev/v4", generation=2, rollback_generation=3,
+                      listeners=[diagnostic, public], handoffs=[stage])
+        return self.load(config), stage, public
+
+    def test_recovery_declaration_rejects_ambiguous_fallbacks(self):
+        config, _, public = self.recovery_fixture()
+        for change in ({"pod_uid": "unknown"}, {"revision": "main"}, {"selector": {}},
+                       {"selector": public["selector"]}, {"port": 53}):
+            changed = copy.deepcopy(config)
+            changed["handoffs"][0]["recovery_fallback"].update(change)
+            with self.assertRaisesRegex(ValueError, "fallback"):
+                self.load(changed)
+
+    def test_recovery_rolls_back_public_only_to_independent_verified_fallback(self):
+        config, stage, public = self.recovery_fixture()
+        fallback = stage["recovery_fallback"]
+        before = transport.service(dict(config, generation=1), dict(public, selector={"app": "old"}))
+        before["metadata"].update(uid="service", resourceVersion="11")
+        before["spec"]["clusterIP"] = "10.0.0.1"
+        witness = {"node_uid":"node", "old_uid":"old", "candidate_uid":"new", "fallback_uid":fallback["pod_uid"],
+                   "previous_revision":stage["previous_revision"], "assignment":{"fencing_token":1},
+                   "parent_digest":"parent", "plan_digest":"plan"}
+        operation = (["patch", "public"], "{}", public, before, witness)
+
+        def live(listener, generation, rv):
+            service = copy.deepcopy(before)
+            declaration = transport.service(dict(config, generation=generation), listener)
+            service["metadata"]["annotations"].update(declaration["metadata"]["annotations"])
+            service["metadata"]["resourceVersion"] = rv
+            service["spec"].update(declaration["spec"])
+            return service
+
+        current = live(public, 2, "12")
+        recovered = live(dict(public, selector=fallback["selector"]), 3, "13")
+        verified = dict(witness, candidate_uid=fallback["pod_uid"])
+        evidence = {"applied": []}
+        observations = []
+
+        def observe(_, reported_stage, binding, port):
+            observations.append((reported_stage["candidate_revision"], port))
+            if port != 53:
+                return {"verified_backend": witness}
+            if binding["candidate_uid"] == witness["old_uid"]:
+                self.assertTrue(reported_stage["require_observed_predecessor"])
+                return {"verified_backend": dict(witness, candidate_uid=witness["old_uid"])}
+            if binding["candidate_uid"] == witness["candidate_uid"]:
+                raise transport.PublicDNSVerificationFailed([])
+            self.assertEqual(binding["candidate_uid"], fallback["pod_uid"])
+            return {"passed": True}
+
+        with patch.object(transport, "revalidate_handoff_witness", return_value=witness), \
+             patch.object(transport, "read_json", side_effect=[current, recovered]), \
+             patch.object(transport, "kubectl") as write, \
+             patch.object(transport, "verify_staged_backend") as old_check:
+            fallback_observations = []
+            def verify_fallback(_, spec, listener, service, proof):
+                self.assertEqual((spec, listener, proof), (stage, public, witness))
+                fallback_observations.append(service["metadata"]["resourceVersion"])
+                return verified
+            with self.assertRaises(transport.PublicDNSVerificationFailed):
+                transport.apply_transport_steps(config, [operation], evidence, lambda: None, observe, verify_fallback)
+            self.assertEqual(fallback_observations, ["11", "12"])
+            self.assertEqual(observations, [(stage["candidate_revision"], 15353), (stage["previous_revision"], 53),
+                                            (stage["candidate_revision"], 53), (fallback["revision"], 53)])
+            self.assertEqual(evidence["compensations"], [
+                {"listener":"public", "result":"restored", "public_verification":{"passed":True}}])
+            self.assertEqual(evidence["fallback_verifications"], [verified])
+            self.assertEqual(write.call_count, 2)
+            self.assertIn({"op":"add", "path":"/spec/selector", "value":fallback["selector"]},
+                          json.loads(write.call_args.kwargs["body"]))
+            old_check.assert_not_called()
+
+        for relaxation in ({"candidate_uid": "unreviewed"}, {"assignment": {"fencing_token": 2}},
+                           {"parent_digest": "different"}, {"plan_digest": "different"}):
+            with self.subTest(relaxation=relaxation), patch.object(transport, "kubectl") as write:
+                with self.assertRaisesRegex(ValueError, "assignment changed"):
+                    transport.apply_transport_steps(config, [operation], {"applied": []}, lambda: None, observe,
+                                                     lambda *_: dict(verified, **relaxation))
+                write.assert_not_called()
+
     def test_staged_handoff_compensates_only_attempted_stage_and_reverifies_on_resume(self):
         one = dict(self.config()["listeners"][0], name="public-one", port=53)
         two = dict(one, name="public-two", address="9.9.9.9")

@@ -104,6 +104,25 @@ Pod identities and immutable candidate image. Duplicate listener recovery entrie
 are rejected. An unhealthy predecessor is never silently treated as a valid
 rollback target.
 
+### Recovering a degraded serving executor
+
+A staged v4 handoff may declare a `recovery_fallback` with the selector,
+immutable source revision and exact Pod UID of a third, already staged executor
+on the same node. It must be distinct from both the incumbent and the candidate.
+The candidate and fallback each independently pass full signed verification
+against the same release, plan, and fence. The fallback also answers the
+configured authoritative UDP and TCP queries at its private Pod address.
+
+Only the incumbent's authenticated `wire_materialization` rejection can use
+this recovery path. The current public socket must still pass the configured
+signed UDP/TCP checks before its selector changes. A changed trust binding,
+missing membership, invalid proof, or failed public observation stops the change.
+If the public candidate fails verification, compensation rechecks the fallback
+and selects it by Service CAS in the reserved generation, then reads and probes
+the actual public socket. A verified diagnostic canary stays in place for
+investigation. This mode neither changes delegation nor makes the degraded
+executor an eligible rollback target.
+
 ## Staged public handoff for ordinary DNS code releases
 
 Resolve the serving Pod from the live Service and EndpointSlice. Publish the
