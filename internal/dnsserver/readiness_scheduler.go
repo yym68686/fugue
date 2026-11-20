@@ -33,18 +33,53 @@ type dnsReadinessScheduler struct {
 	attempts     map[string]time.Time
 	expires      map[string]time.Time
 	targets      map[string]dnsProbeTargetState
-	preferred    map[string]bool
-	candidates   map[string]bool
+	priority     dnsProbePriority
 	logger       *log.Logger
 	path         string
 }
 
-func (scheduler *dnsReadinessScheduler) prioritize(preferred, candidates map[string]bool) *dnsReadinessScheduler {
+func (scheduler *dnsReadinessScheduler) prioritize(priority dnsProbePriority) *dnsReadinessScheduler {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	scheduler.preferred = maps.Clone(preferred)
-	scheduler.candidates = maps.Clone(candidates)
+	scheduler.priority = dnsProbePriority{maps.Clone(priority.preferred), maps.Clone(priority.candidates), maps.Clone(priority.availability)}
 	return scheduler
+}
+
+func (scheduler *dnsReadinessScheduler) candidatePriority(plan *platformconfig.DNSReadinessPlan, indices []int) map[int]int {
+	// Both classes share the original eight-slot budget. An explicitly
+	// recovered availability group must not compete with all ranked routes
+	// for the first probe. Leave ranked work at least half the priority slots
+	// when both classes have enough work, and keep oldest-attempt rotation.
+	const maxPriority = 8
+	var availability, ranked []int
+	if len(scheduler.priority.candidates) != 0 || len(scheduler.priority.availability) != 0 {
+		for _, i := range indices {
+			key := dnsroutesource.ProbeKey(plan.Probes[i])
+			switch {
+			case scheduler.priority.availability[key]:
+				availability = append(availability, i)
+			case scheduler.priority.candidates[key]:
+				ranked = append(ranked, i)
+			}
+		}
+	}
+	oldestFirst := func(ordered []int) {
+		sort.SliceStable(ordered, func(i, j int) bool {
+			return scheduler.attempts[plan.Probes[ordered[i]].ID].Before(scheduler.attempts[plan.Probes[ordered[j]].ID])
+		})
+	}
+	oldestFirst(availability)
+	oldestFirst(ranked)
+	first := min(len(availability), max(maxPriority/2, maxPriority-len(ranked)))
+	second := min(len(ranked), maxPriority-first)
+	result := make(map[int]int, first+second)
+	for rank, i := range availability[:first] {
+		result[i] = rank + 1
+	}
+	for rank, i := range ranked[:second] {
+		result[i] = first + rank + 1
+	}
+	return result
 }
 
 func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAssignment, logger *log.Logger, paths ...string) *dnsReadinessScheduler {
@@ -153,22 +188,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 		// in every sweep, even when ordinary proofs have the same deadline.
 		// Rotating the oldest attempts first prevents a large pool pinning its
 		// same members to the head. The remaining queue keeps normal fairness.
-		const maxCandidatePriorityPerTarget = 8
-		candidates := make([]int, 0, min(len(indices), maxCandidatePriorityPerTarget))
-		if len(scheduler.candidates) != 0 {
-			for _, index := range indices {
-				if scheduler.candidates[dnsroutesource.ProbeKey(plan.Probes[index])] {
-					candidates = append(candidates, index)
-				}
-			}
-		}
-		sort.SliceStable(candidates, func(i, j int) bool {
-			return scheduler.attempts[plan.Probes[candidates[i]].ID].Before(scheduler.attempts[plan.Probes[candidates[j]].ID])
-		})
-		priority := make(map[int]int, min(len(candidates), maxCandidatePriorityPerTarget))
-		for rank, index := range candidates[:min(len(candidates), maxCandidatePriorityPerTarget)] {
-			priority[index] = rank + 1
-		}
+		priority := scheduler.candidatePriority(plan, indices)
 		sort.SliceStable(indices, func(left, right int) bool {
 			if first, second := priority[indices[left]], priority[indices[right]]; first != second {
 				return first != 0 && (second == 0 || first < second)
@@ -193,8 +213,8 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 			}
 			if firstAged {
 				if firstAttempt.Equal(secondAttempt) {
-					firstPreferred := scheduler.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[left]])]
-					secondPreferred := scheduler.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[right]])]
+					firstPreferred := scheduler.priority.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[left]])]
+					secondPreferred := scheduler.priority.preferred[dnsroutesource.ProbeKey(plan.Probes[indices[right]])]
 					if firstPreferred != secondPreferred {
 						return firstPreferred
 					}

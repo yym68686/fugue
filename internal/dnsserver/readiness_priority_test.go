@@ -37,14 +37,15 @@ func TestDNSProbePreferencesFollowLocalDeclaredCandidates(t *testing.T) {
 			foreign.Records[0].AnswerPolicy.PhysicalOrder = &model.DNSPhysicalOrder{Version: "physical-order-v1", OrderedEdgeIDs: []string{"edge-a", "edge-b"}}
 			payload := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view, foreign}}
 			before := mustDNSJSON(t, payload)
-			preferred, candidates := dnsProbePriorities(payload, view.NodeID, nil)
+			priority := dnsProbePriorities(payload, view.NodeID, nil)
 			for _, probe := range plan.Probes {
 				key := dnsroutesource.ProbeKey(probe)
-				if preferred[key] != wantPreferred[probe.EdgeID] || candidates[key] != wantCandidates[probe.EdgeID] {
-					t.Fatal("priority differs from local declared DNS policy", probe, preferred, candidates)
+				if priority.preferred[key] != wantPreferred[probe.EdgeID] || priority.candidates[key] != wantCandidates[probe.EdgeID] ||
+					priority.availability[key] != (kind == "availability" && wantCandidates[probe.EdgeID]) {
+					t.Fatal("priority differs from local declared DNS policy", probe, priority)
 				}
 			}
-			if preferred, candidates := dnsProbePriorities(payload, "absent-node", nil); len(preferred) != 0 || len(candidates) != 0 || !reflect.DeepEqual(before, mustDNSJSON(t, payload)) {
+			if other := dnsProbePriorities(payload, "absent-node", nil); len(other.preferred)+len(other.candidates)+len(other.availability) != 0 || !reflect.DeepEqual(before, mustDNSJSON(t, payload)) {
 				t.Fatal("priority changed signed inputs or crossed DNS identity")
 			}
 		})
@@ -67,10 +68,10 @@ func TestDNSReadinessProbesRankedFallbackDuringPartialSweep(t *testing.T) {
 	background := platformconfig.DNSReadinessProbe{ID: "background", EdgeID: "edge-b", EdgeGroupID: "edge-group-b",
 		Address: "9.9.9.9", Hostname: "other.example.test", Path: "/", RouteDigest: digest}
 	plan.Probes = append([]platformconfig.DNSReadinessProbe{background}, plan.Probes...)
-	preferred, candidates := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, nil)
+	priority := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	scheduler := (&dnsReadinessScheduler{}).prioritize(preferred, candidates)
+	scheduler := (&dnsReadinessScheduler{}).prioritize(priority)
 	calls := 0
 	facts := scheduler.collect(ctx, &plan, &policy, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
 		calls++
@@ -94,7 +95,7 @@ func TestDNSReadinessProbesRankedFallbackDuringPartialSweep(t *testing.T) {
 	if answers, err := executeDNSQueryRecord(records[0], dnsGeoHint{}, now); err != nil || len(answers) != 1 {
 		t.Fatalf("no authorized fallback answer: %v %v", answers, err)
 	}
-	if candidates[dnsroutesource.ProbeKey(background)] || facts[0].Ready {
+	if priority.candidates[dnsroutesource.ProbeKey(background)] || facts[0].Ready {
 		t.Fatal("partial sweep prioritized or accepted an unrelated target")
 	}
 }
@@ -106,16 +107,28 @@ func TestDNSProbePreferencesFollowVerifiedRuntimePathWithoutExtendingEligibility
 		current := baseline
 		current.ID += "-runtime"
 		current.Path = "/current"
-		foreign := current
-		foreign.ID += "-foreign"
-		foreign.Address = "192.0.2.44"
-		runtime.Probes = append(runtime.Probes, current, foreign)
+		foreignAddr, foreignGroup := current, current
+		foreignAddr.ID += "-foreign-address"
+		foreignAddr.Address = "192.0.2.44"
+		foreignGroup.ID += "-foreign-group"
+		foreignGroup.EdgeGroupID += "-other"
+		// When the wire key is identical, one request serves multiple variants
+		// and the signed plan separately verifies the matching group and digest.
+		foreignGroup.Path = "/unbound-group"
+		runtime.Probes = append(runtime.Probes, current, foreignAddr, foreignGroup)
 	}
-	preferred, candidates := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, runtime)
-	for i, p := range runtime.Probes {
-		key := dnsroutesource.ProbeKey(p)
-		if candidates[key] != (i%2 == 0) || preferred[key] != (i%2 == 0 && p.EdgeID == "edge-a") {
-			t.Fatal("runtime priority omitted a verified path or admitted a foreign target", p, preferred, candidates)
+	for _, availability := range []bool{false, true} {
+		if availability {
+			view.Records[0].AnswerPolicy.PhysicalOrder = nil
+			view.Records[0].AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
+		}
+		priority := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, runtime)
+		for i, p := range runtime.Probes {
+			key := dnsroutesource.ProbeKey(p)
+			match := i%3 == 0
+			if priority.candidates[key] != match || priority.preferred[key] != (match && !availability && p.EdgeID == "edge-a") || priority.availability[key] != (match && availability) {
+				t.Fatal("runtime priority omitted a verified path or admitted a foreign target", p, priority)
+			}
 		}
 	}
 }
@@ -127,8 +140,8 @@ func TestDNSReadinessPrioritizesEveryAvailabilityCandidate(t *testing.T) {
 	background := platformconfig.DNSReadinessProbe{ID: "background", EdgeID: "edge-b", EdgeGroupID: "edge-group-b", Address: "9.9.9.9", Hostname: "other.example.test", Path: "/", RouteDigest: "sha256:" + strings.Repeat("c", 64)}
 	plan.Probes = append([]platformconfig.DNSReadinessProbe{background}, plan.Probes...)
 	view.Records[0].AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
-	preferred, availability := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, nil)
-	scheduler := (&dnsReadinessScheduler{}).prioritize(preferred, availability)
+	priority := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, nil)
+	scheduler := (&dnsReadinessScheduler{}).prioritize(priority)
 	for _, age := range []time.Duration{70 * time.Second, 35 * time.Second, 0} {
 		ctx, cancel := context.WithCancel(context.Background())
 		var observed []string
@@ -161,7 +174,7 @@ func TestDNSReadinessPrioritizesEveryAvailabilityCandidate(t *testing.T) {
 			}
 		}
 	}
-	if availability[dnsroutesource.ProbeKey(background)] {
+	if priority.availability[dnsroutesource.ProbeKey(background)] {
 		t.Fatal("unrelated hostname was incorrectly promoted by the signed availability pool")
 	}
 }
@@ -178,7 +191,7 @@ func TestDNSReadinessRotatesAndBoundsAvailabilityPriority(t *testing.T) {
 			availability[dnsroutesource.ProbeKey(p)] = true
 		}
 	}
-	scheduler := (&dnsReadinessScheduler{}).prioritize(nil, availability)
+	scheduler := (&dnsReadinessScheduler{}).prioritize(dnsProbePriority{availability: availability})
 	for _, first := range []string{"route-1.example.test", "route-9.example.test"} {
 		ctx, cancel := context.WithCancel(context.Background())
 		var observed []string
@@ -198,6 +211,52 @@ func TestDNSReadinessRotatesAndBoundsAvailabilityPriority(t *testing.T) {
 	}
 }
 
+func TestDNSReadinessReservesPriorityForAvailabilityAndRankedCandidates(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	plan.Probes = nil
+	policy.MaxConcurrency = 1
+	priority := dnsProbePriority{candidates: map[string]bool{}, availability: map[string]bool{}}
+	add := func(class string, i int) {
+		id := fmt.Sprintf("%s-%d", class, i)
+		p := platformconfig.DNSReadinessProbe{ID: id, Hostname: id + ".example.test", Address: "8.8.8.8", Path: "/"}
+		plan.Probes = append(plan.Probes, p)
+		key := dnsroutesource.ProbeKey(p)
+		if class != "background" {
+			priority.candidates[key] = true
+		}
+		if class == "availability" {
+			priority.availability[key] = true
+		}
+	}
+	add("background", 0)
+	for i := range 200 {
+		add("ranked", i)
+	}
+	for i := range 6 {
+		add("availability", i)
+	}
+	scheduler := (&dnsReadinessScheduler{}).prioritize(priority)
+	for _, want := range [][]string{
+		{"availability-0", "availability-1", "availability-2", "availability-3", "ranked-0", "ranked-1", "ranked-2", "ranked-3", "background-0"},
+		{"availability-4", "availability-5", "availability-0", "availability-1", "ranked-4", "ranked-5", "ranked-6", "ranked-7", "background-0"},
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		var observed []string
+		scheduler.collect(ctx, &plan, &policy, func(_ context.Context, host, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+			observed = append(observed, strings.TrimSuffix(host, ".example.test"))
+			if len(observed) == len(want) {
+				cancel()
+			}
+			return routeprobe.Proof{}, errors.New("synthetic route rejection")
+		})
+		cancel()
+		if !reflect.DeepEqual(observed, want) {
+			t.Fatalf("partial sweep lost reserved slots, rotation or background progress: got %v, want %v", observed, want)
+		}
+		scheduler.expires["background-0"] = time.Now().Add(time.Second)
+	}
+}
+
 func TestDNSProbePreferencesPreserveExpiryAgingAndConnectionBackoff(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{Probes: []platformconfig.DNSReadinessProbe{
 		{ID: "other", Hostname: "other.example.test", Address: "192.0.2.1", Path: "/"},
@@ -206,7 +265,7 @@ func TestDNSProbePreferencesPreserveExpiryAgingAndConnectionBackoff(t *testing.T
 	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, MaxConcurrency: 1}
 	for _, scenario := range []string{"expiry", "aged", "backoff"} {
 		t.Run(scenario, func(t *testing.T) {
-			scheduler := (&dnsReadinessScheduler{}).prioritize(map[string]bool{dnsroutesource.ProbeKey(plan.Probes[1]): true}, nil)
+			scheduler := (&dnsReadinessScheduler{}).prioritize(dnsProbePriority{preferred: map[string]bool{dnsroutesource.ProbeKey(plan.Probes[1]): true}})
 			scheduler.collect(context.Background(), plan, policy, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
 				return routeprobe.Proof{}, errors.New("observed rejection")
 			})
@@ -247,7 +306,7 @@ func TestDNSProbePreferencesStartNewAssignmentsWithoutStarvingOtherWork(t *testi
 	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, MaxConcurrency: 1}
 	preferences := map[string]bool{dnsroutesource.ProbeKey(plan.Probes[2]): true}
 	assignment := model.PlatformConsumerAssignment{FencingToken: 1}
-	scheduler := (&dnsReadinessScheduler{}).bind(assignment, nil).prioritize(preferences, nil)
+	scheduler := (&dnsReadinessScheduler{}).bind(assignment, nil).prioritize(dnsProbePriority{preferred: preferences})
 	delete(preferences, dnsroutesource.ProbeKey(plan.Probes[2]))
 	before := mustDNSJSON(t, plan)
 	for _, expected := range []string{"primary.example.test", "first.example.test", "second.example.test"} {

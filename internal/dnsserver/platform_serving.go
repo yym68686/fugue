@@ -432,8 +432,8 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			}
 			dnsDeferRecoveredProbes(p, s.Config.DNSNodeID, deferrable, started)
 		}
-		preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
-		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(preferred, availability)
+		priority := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
+		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(priority)
 		facts = scheduler.collectWindow(ctx, p.Plan, p.Policy.DNSReadiness, probe, nil, deferrable)
 	}
 	// Keep the original observations for the retained release. Candidate
@@ -628,8 +628,8 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 		old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
 		ctx = routeprobe.WithRetainedLKG(ctx)
 	}
-	preferred, availability := dnsProbePriorities(old.payload, s.Config.DNSNodeID, nil)
-	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(s.probeHistoryStore()).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
+	priority := dnsProbePriorities(old.payload, s.Config.DNSNodeID, nil)
+	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(s.probeHistoryStore()).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(priority))
 	s.observeRetainedDNSRouteRecovery(old, facts, time.Now().UTC())
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe

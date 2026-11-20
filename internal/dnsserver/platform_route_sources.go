@@ -100,9 +100,9 @@ func (s *Service) observeDNSRouteSourcesWithReader(ctx context.Context, c dnsPla
 		union.Probes = append(union.Probes, requirement)
 	}
 	sort.Slice(union.Probes, func(i, j int) bool { return union.Probes[i].ID < union.Probes[j].ID })
-	preferred, availability := dnsProbePriorities(p, s.Config.DNSNodeID, union)
+	priority := dnsProbePriorities(p, s.Config.DNSNodeID, union)
 	source := &dnsroutesource.Context{Snapshot: snapshot}
-	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, plans.Matches, source.ProofDeadline, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(preferred, availability))
+	facts := collectDNSRouteSourceFacts(ctx, union, p.Policy.DNSReadiness, probe, plans.Matches, source.ProofDeadline, s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(c.Assignment, s.Logger, s.Config.CachePath).prioritize(priority))
 	recheck := func() error {
 		next, err := read(ctx)
 		if err != nil {
