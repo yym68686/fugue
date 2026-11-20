@@ -8,7 +8,7 @@ import (
 )
 
 func TestCustomDomainCertificateOwnerRequiresSignedReferenceAndLocalOwner(t *testing.T) {
-	for _, scenario := range []string{"custom", "shared platform reference", "foreign hostname", "duplicate reference", "missing reference", "missing custom route", "missing platform path", "unverified domain", "foreign domain", "duplicate domain", "foreign custom path", "foreign reference", "disabled route"} {
+	for _, scenario := range []string{"custom", "shared custom paths", "shared platform reference", "foreign hostname", "duplicate reference", "missing reference", "missing custom route", "missing owner path", "missing platform path", "unverified domain", "foreign domain", "duplicate domain", "foreign custom path", "foreign reference", "disabled route"} {
 		t.Run(scenario, func(t *testing.T) {
 			host := "shared.example.test"
 			refs := []platformconfig.TLSIntent{{Hostname: host, Policy: model.EdgeRouteTLSPolicyCustomDomain, AppID: "app-one", TenantID: "tenant-one"}}
@@ -27,6 +27,12 @@ func TestCustomDomainCertificateOwnerRequiresSignedReferenceAndLocalOwner(t *tes
 				refs = nil
 			case "missing custom route":
 				bundle.Routes = bundle.Routes[1:]
+			case "missing owner path":
+				bundle.Routes[0].AppID = "app-two"
+			case "shared custom paths":
+				route := bundle.Routes[0]
+				route.PathPrefix, route.AppID = "/frontend", "app-two"
+				bundle.Routes = append(bundle.Routes, route)
 			case "unverified domain":
 				bundle.TLSAllowlist[0].Status = model.AppDomainStatusPending
 			case "foreign domain":
@@ -43,7 +49,7 @@ func TestCustomDomainCertificateOwnerRequiresSignedReferenceAndLocalOwner(t *tes
 				bundle.Routes[0].RoutePolicy = model.EdgeRoutePolicyRouteAOnly
 			}
 			owner, err := CustomDomainCertificateOwner(refs, bundle, host)
-			allowed := scenario == "custom" || scenario == "shared platform reference"
+			allowed := scenario == "custom" || scenario == "shared custom paths" || scenario == "shared platform reference"
 			if allowed {
 				if err != nil || owner != (CertificateOwner{Hostname: host, AppID: "app-one", TenantID: "tenant-one"}) {
 					t.Fatal("signed owner unavailable", err)

@@ -150,7 +150,7 @@ func (s *Service) tlsReadinessHostAuthorized(ref platformconfig.TLSIntent, expec
 		if want.Hostname != ref.Hostname || want.TLSPolicy != ref.Policy {
 			continue
 		}
-		if ref.Policy == model.EdgeRouteTLSPolicyCustomDomain && (ref.AppID != want.AppID || ref.TenantID != want.TenantID) {
+		if ref.Policy == model.EdgeRouteTLSPolicyCustomDomain && (want.AppID == "" || ref.TenantID != want.TenantID) {
 			return false
 		}
 		found := false
@@ -172,17 +172,7 @@ func (s *Service) tlsReadinessHostAuthorized(ref platformconfig.TLSIntent, expec
 		matched++
 	}
 	if ref.Policy == model.EdgeRouteTLSPolicyCustomDomain {
-		count := 0
-		for _, a := range bundle.TLSAllowlist {
-			if a.Hostname != ref.Hostname {
-				continue
-			}
-			if a.AppID != ref.AppID || a.TenantID != ref.TenantID || a.Status != model.AppDomainStatusVerified {
-				return false
-			}
-			count++
-		}
-		if count != 1 {
+		if _, err := routeartifact.CustomDomainCertificateOwner([]platformconfig.TLSIntent{ref}, bundle, ref.Hostname); err != nil {
 			return false
 		}
 	}

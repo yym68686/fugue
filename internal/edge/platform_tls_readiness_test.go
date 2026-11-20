@@ -261,6 +261,32 @@ func TestTLSReadinessPlatformCertificateUsesSignedRouteOwner(t *testing.T) {
 	}
 }
 
+func TestTLSReadinessSharedCustomHostnameRequiresExactSignedPaths(t *testing.T) {
+	s, _, r, p, _ := tlsReadinessFixture(t)
+	b, err := routeartifact.MaterializeForGroup(r, "edge-group-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := p.Certificates[0]
+	api := b.Routes[0]
+	api.PathPrefix = "/api"
+	web := b.Routes[0]
+	web.AppID, web.PathPrefix = "second-app", "/"
+	b.Routes = []model.EdgeRouteBinding{web, api}
+	if !s.tlsReadinessHostAuthorized(ref, []model.EdgeRouteBinding{web, api}, b) {
+		t.Fatal("same-tenant signed paths could not use the existing certificate")
+	}
+	b.Routes[0].AppID = "different-app"
+	if s.tlsReadinessHostAuthorized(ref, []model.EdgeRouteBinding{web, api}, b) {
+		t.Fatal("mismatched root path accepted")
+	}
+	b.Routes[0] = web
+	b.Routes = b.Routes[:1]
+	if s.tlsReadinessHostAuthorized(ref, []model.EdgeRouteBinding{web}, b) {
+		t.Fatal("hostname certificate owner no longer on any path was accepted")
+	}
+}
+
 func TestTLSReadinessProbeTimeoutIsBounded(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
