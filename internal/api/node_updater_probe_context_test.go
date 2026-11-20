@@ -6,6 +6,64 @@ import (
 	"testing"
 )
 
+func TestNodeUpdaterCRIStatusRequiresExplicitRuntimeEvidence(t *testing.T) {
+	var server Server
+	script := server.nodeUpdaterInstallScript("https://api.invalid")
+	const start = "def observe_cri_status():"
+	_, tail, found := strings.Cut(script, start)
+	if !found {
+		t.Fatal("missing CRI status observer")
+	}
+	source, _, found := strings.Cut(tail, "\nchecks.append(observe_cri_status())")
+	if !found {
+		t.Fatal("missing CRI status observer boundary")
+	}
+	harness := `
+import json
+import subprocess
+from types import SimpleNamespace
+
+shutil = SimpleNamespace(which=lambda _: True)
+def check(name, category, status, detail, expected, hard=False, repair_action="", evidence=None):
+    assert name == "pod_sandbox_creation" and category == "cri"
+    return status, hard, repair_action, evidence or {}
+def command_env():
+    return {}
+` + start + source + `
+def check_case(response, exit_code, outcome, hard=False, hint="", timeout=False):
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs["timeout"] == 5 and kwargs["capture_output"] is True
+        if timeout:
+            raise subprocess.TimeoutExpired(argv, 5)
+        return SimpleNamespace(stdout=response, stderr="must not affect status JSON", returncode=exit_code)
+    subprocess.run = run
+    actual = observe_cri_status()
+    assert calls == [["crictl", "info", "--quiet"]], calls
+    assert actual == (outcome, hard, hint, {"observation_state": "not_observed"} if outcome == "warning" else {}), actual
+
+def status(*entries):
+    return json.dumps({"status": {"conditions": [
+        {"type": name, "status": ready} for name, ready in entries
+    ]}})
+
+ready = status(("NetworkReady", True), ("RuntimeReady", True))
+check_case(ready, 0, "pass")
+check_case(status(("RuntimeReady", False), ("NetworkReady", True)), 0, "fail", True, "restart-k3s-agent")
+check_case(status(("RuntimeReady", True), ("NetworkReady", False)), 0, "fail", True)
+check_case(ready, 1, "warning")
+check_case("", 0, "warning", timeout=True)
+check_case("not JSON", 0, "warning")
+check_case(status(("RuntimeReady", True)), 0, "warning")
+check_case(status(("RuntimeReady", "true"), ("NetworkReady", True)), 0, "warning")
+check_case(status(("RuntimeReady", False), ("RuntimeReady", True), ("NetworkReady", True)), 0, "warning")
+`
+	if out, err := exec.Command("python3", "-c", harness).CombinedOutput(); err != nil {
+		t.Fatalf("release-installed CRI status observer: %v\n%s", err, out)
+	}
+}
+
 func TestNodeUpdaterProbesOnlyUntilFirstEligibleSandboxWithService(t *testing.T) {
 	var server Server
 	script := server.nodeUpdaterInstallScript("https://api.invalid")

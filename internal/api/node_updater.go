@@ -3797,13 +3797,54 @@ if kubectl_base:
 else:
     checks.append(check("node_lease_freshness", "kubernetes", "warning", "kubectl unavailable", "node lease readable"))
 
-ok_cri, cri_out = run(["crictl", "info"], 5)
-if ok_cri is None:
-    checks.append(check("pod_sandbox_creation", "cri", "warning", cri_out, "CRI runtime reachable for pod sandbox creation preflight"))
-elif ok_cri:
-    checks.append(check("pod_sandbox_creation", "cri", "pass", "crictl info ok", "CRI runtime reachable for pod sandbox creation preflight"))
-else:
-    checks.append(check("pod_sandbox_creation", "cri", "fail", cri_out, "CRI runtime reachable for pod sandbox creation preflight", True, repair_action="restart-k3s-agent"))
+def observe_cri_status():
+    name = "pod_sandbox_creation"
+    expected = "CRI reports RuntimeReady and NetworkReady for sandbox creation preflight"
+
+    def unavailable(detail):
+        return check(name, "cri", "warning", detail, expected, evidence={"observation_state": "not_observed"})
+
+    if not shutil.which("crictl"):
+        return unavailable("crictl unavailable")
+    try:
+        result = subprocess.run(["crictl", "info", "--quiet"], text=True, capture_output=True, timeout=5, env=command_env())
+    except subprocess.TimeoutExpired:
+        # A client deadline on a contended node does not tell us whether the
+        # runtime itself reported NotReady. Do not retry or recommend a restart.
+        return unavailable("CRI status query timed out")
+    except (OSError, UnicodeError):
+        return unavailable("CRI status query could not be read")
+    if result.returncode:
+        return unavailable("CRI status query failed")
+
+    def statuses():
+        response = json.loads(result.stdout)
+        conditions = response["status"]["conditions"]
+        observed = {}
+        if not isinstance(conditions, list):
+            raise ValueError("invalid CRI conditions")
+        for condition in conditions:
+            kind = condition["type"]
+            if kind not in ("RuntimeReady", "NetworkReady"):
+                continue
+            if kind in observed or not isinstance(condition.get("status"), bool):
+                raise ValueError("ambiguous CRI condition")
+            observed[kind] = condition["status"]
+        return observed
+
+    try:
+        observed = statuses()
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return unavailable("CRI status response was malformed or ambiguous")
+    if observed.get("RuntimeReady") is False:
+        return check(name, "cri", "fail", "CRI reported RuntimeReady=false", expected, True, repair_action="restart-k3s-agent")
+    if observed.get("NetworkReady") is False:
+        return check(name, "cri", "fail", "CRI reported NetworkReady=false", expected, True)
+    if len(observed) != 2:
+        return unavailable("CRI readiness conditions were incomplete")
+    return check(name, "cri", "pass", "CRI reported RuntimeReady=true and NetworkReady=true", expected)
+
+checks.append(observe_cri_status())
 
 def run_capture(argv, timeout=5):
     if not argv or not shutil.which(argv[0]):
