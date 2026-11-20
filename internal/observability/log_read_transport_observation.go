@@ -46,6 +46,29 @@ type logHTTPExchangeObservation struct {
 	AuditState string `json:"audit_id_state"`
 }
 
+// A caller-side milestone for the selected stream, not proof that any server
+// or proxy received a request. Empty means insufficient trace coverage.
+func (r *logReadTransportObservation) boundary() string {
+	switch {
+	case r == nil:
+		return ""
+	case r.StreamOpened && r.BodyReadError:
+		return "body_read_error"
+	case r.HTTPExchange.Status != 0:
+		return "http_response_observed"
+	case r.FirstResponseByte:
+		return "first_byte_observed"
+	case r.RequestWritten:
+		return "client_write_completed"
+	case r.ConnectionReady:
+		return "connection_ready"
+	case r.Attempts > 0:
+		return "connection_requested"
+	default:
+		return ""
+	}
+}
+
 type logHTTPAttemptKey struct{}
 type observedLogTransport struct{ http.RoundTripper }
 

@@ -122,6 +122,9 @@ func TestCursorGapOnNodeBackoffPreservesOtherSourcesTrigger(t *testing.T) {
 	if exchange := row.NodeBackoff.LastReadExchange; exchange.RoundTrips != 1 || exchange.Status != http.StatusOK || row.NodeBackoff.ErrorHTTPStatus != 0 {
 		t.Fatalf("body error confused with last HTTP response: %+v", row.NodeBackoff)
 	}
+	if row.ReadBoundary != "" || row.NodeBackoff.LastReadBoundary != "body_read_error" {
+		t.Fatalf("trigger boundary attributed to the skipped request: %+v", row)
+	}
 	if p.sourceObservations[key].NodeBackoff != nil || p.sourceObservations[key].Attempts != 1 || !c.cursors[key].Time.Equal(now.Add(-time.Hour)) {
 		t.Fatal("diagnostics changed cursor, source attempts or per-source retention")
 	}

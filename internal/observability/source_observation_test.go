@@ -368,12 +368,27 @@ func TestGapHTTPExchangeOnlyDescribesItsOwnSourceTurn(t *testing.T) {
 	}
 	receipts := view()
 	if len(receipts) != 2 || receipts[0].ReadExchange == nil || *receipts[0].ReadExchange != read.HTTPExchange ||
-		receipts[0].ReadPhase != read.Phase || receipts[1].ReadExchange != nil || receipts[1].ReadPhase != "" {
+		receipts[0].ReadPhase != read.Phase || receipts[0].ReadBoundary != "http_response_observed" ||
+		receipts[1].ReadExchange != nil || receipts[1].ReadPhase != "" || receipts[1].ReadBoundary != "" {
 		t.Fatalf("gap exchange attribution is not exact: %+v", receipts)
 	}
 	receipts[0].ReadExchange.Status = 0
 	if view()[0].ReadExchange.Status != 404 {
 		t.Fatal("diagnostic projection shares mutable gap exchange")
+	}
+	read = &logReadTransportObservation{Phase: "pod_log", Attempts: 1, ConnectionReady: true, RequestWritten: true,
+		HTTPExchange: logHTTPExchangeObservation{RoundTrips: 1, AuditState: "no_response"}}
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now.Add(2 * time.Second),
+		Outcome: "open_error", ErrorClass: "deadline", LastErrorRead: read, GapEvents: 1, GapReason: "retention_window"})
+	p.observeLogSource(logSourceObservation{Identity: "source", ObservedAt: now.Add(3 * time.Second),
+		Outcome: "open_error", ErrorClass: "deadline", GapEvents: 1, GapReason: "retention_window"})
+	receipts = view()
+	if got := receipts[2]; got.ReadBoundary != "client_write_completed" || got.ReadPhase != "pod_log" ||
+		got.ReadExchange == nil || got.ReadExchange.Status != 0 {
+		t.Fatal("no-response request lost its client write witness", got)
+	}
+	if got := receipts[3]; got.ReadBoundary != "" || got.ReadPhase != "" || got.ReadExchange != nil {
+		t.Fatal("later failure inherited previous attempt's witness", got)
 	}
 }
 

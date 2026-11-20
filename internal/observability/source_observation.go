@@ -103,6 +103,7 @@ type logGapObservation struct {
 	LastErrorStage string                       `json:"last_error_stage,omitempty"`
 	ReadExchange   *logHTTPExchangeObservation  `json:"read_http_exchange,omitempty"`
 	ReadPhase      string                       `json:"read_phase,omitempty"`
+	ReadBoundary   string                       `json:"read_boundary,omitempty"`
 	Target         logTargetObservation         `json:"target,omitzero"`
 	LastAdmission  *logAdmissionObservation     `json:"last_admission,omitempty"`
 	InvalidRecord  *logInvalidRecordObservation `json:"invalid_record,omitempty"`
@@ -181,12 +182,19 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 	p.sourceObservations[v.Identity] = v
 	if newGapEvents > 0 {
 		var exchange *logHTTPExchangeObservation
-		var phase string
+		var phase, readBoundary string
 		// A prior source error is context only; do not imply it was the
 		// HTTP exchange of this gap observation.
-		if failed && v.LastErrorRead != nil && v.LastErrorRead.HTTPExchange.RoundTrips != 0 {
-			copy := v.LastErrorRead.HTTPExchange
-			exchange, phase = &copy, v.LastErrorRead.Phase
+		if failed && v.LastErrorRead != nil {
+			read := v.LastErrorRead
+			readBoundary = read.boundary()
+			if read.HTTPExchange.RoundTrips != 0 {
+				copy := read.HTTPExchange
+				exchange = &copy
+			}
+			if exchange != nil || readBoundary != "" {
+				phase = read.Phase
+			}
 		}
 		p.sourceGapReceiptTotal++
 		if len(p.sourceGapReceipts) == logGapReceiptLimit {
@@ -201,7 +209,7 @@ func (p *Pipeline) observeLogSource(v logSourceObservation) {
 			CursorBefore: v.CursorBefore, CursorAfter: v.CursorAfter, PendingAt: v.PendingAt, DrainedThrough: v.DrainedThrough,
 			Lines: v.Lines, RotationFiles: v.RotationFiles, RotationBytes: v.RotationBytes,
 			LastErrorAt: v.LastErrorAt, LastErrorClass: v.LastErrorClass, LastErrorStage: v.LastErrorStage,
-			ReadExchange: exchange, ReadPhase: phase,
+			ReadExchange: exchange, ReadPhase: phase, ReadBoundary: readBoundary,
 			Target:        v.Target,
 			LastAdmission: v.LastAdmission, InvalidRecord: v.InvalidRecord,
 			BoundaryCheck: v.BoundaryCheck,

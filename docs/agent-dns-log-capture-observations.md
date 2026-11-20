@@ -149,6 +149,15 @@ not that an HTTP error response had no headers. No trace callback
 arguments, addresses, URLs, headers, bodies or raw errors are retained. A new
 failure without transport evidence cannot borrow a previous failure's receipt.
 
+The 64-entry gap history retains a fixed `read_boundary` for the same
+failing read. A skipped source can instead retain
+`node_backoff_trigger.last_read_boundary` from the read that opened its circuit
+epoch. This preserves the observed caller milestone when a later read
+overwrites the source's detailed timing. The fixed values distinguish connection
+requested/ready, successful client write, first byte, HTTP response, and body
+read error. A missing boundary means unknown coverage; a client write does not
+establish server arrival. This adds no requests, headers, or retry behavior.
+
 All these observations are metadata-only. They do not authorize an Edge, renew
 an evidence lease, loosen a capacity threshold, change a collector cursor,
 change public DNS transport, or recover traffic on their own.

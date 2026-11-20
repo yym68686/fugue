@@ -342,6 +342,31 @@ func TestSourceObservationRetainsFailureTransportMetadataAndClonesIt(t *testing.
 	}
 }
 
+func TestLogReadTransportBoundaryPreservesOnlyObservedMilestones(t *testing.T) {
+	r := &logReadTransportObservation{}
+	if got := (*logReadTransportObservation)(nil).boundary(); got != "" {
+		t.Fatalf("without a trace: %q", got)
+	}
+	for _, step := range []struct {
+		set  func()
+		want string
+	}{
+		{func() {}, ""},
+		{func() { r.Attempts = 1 }, "connection_requested"},
+		{func() { r.ConnectionReady = true }, "connection_ready"},
+		{func() { r.RequestWritten = true }, "client_write_completed"},
+		{func() { r.FirstResponseByte = true }, "first_byte_observed"},
+		{func() { r.HTTPExchange.Status = 200 }, "http_response_observed"},
+		{func() { r.BodyReadError = true }, "http_response_observed"},
+		{func() { r.StreamOpened = true }, "body_read_error"},
+	} {
+		step.set()
+		if got := r.boundary(); got != step.want {
+			t.Fatalf("boundary = %q, want %q", got, step.want)
+		}
+	}
+}
+
 func TestLogReadTransportTimingsFitSourceSnapshotResponseBudget(t *testing.T) {
 	p := NewPipeline(Config{}, nil)
 	now := time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)

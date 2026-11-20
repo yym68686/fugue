@@ -44,6 +44,7 @@ type logNodeBackoffObservation struct {
 	ErrorClass       string                     `json:"error_class"`
 	ErrorHTTPStatus  int                        `json:"error_http_status,omitempty"`
 	LastReadPhase    string                     `json:"last_read_phase,omitempty"`
+	LastReadBoundary string                     `json:"last_read_boundary,omitempty"`
 	LastReadExchange logHTTPExchangeObservation `json:"last_read_http_exchange,omitzero"`
 	HalfOpenProbe    bool                       `json:"half_open_probe_in_flight,omitempty"`
 }

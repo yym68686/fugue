@@ -229,6 +229,7 @@ func (c *kubernetesLogCollector) collectReservedCursorTarget(parent context.Cont
 			}
 			if read := readTrace.snapshot(); read != nil {
 				fact.LastReadPhase, fact.LastReadExchange = read.Phase, read.HTTPExchange
+				fact.LastReadBoundary = read.boundary()
 			}
 			return fact
 		})
