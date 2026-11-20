@@ -112,6 +112,19 @@ func edgeProxyObservationRequestFactFields(observed edgeProxyObservation, cfg co
 		"origin_first_byte":       observed.OriginTTFB > 0,
 		"request_body_eof":        observed.RequestBodyEOF,
 	}
+	if observed.RelayMode != "" || observed.RelayReason != "" {
+		relay := map[string]any{
+			"mode": observed.RelayMode, "reason": observed.RelayReason, "peer": observed.RelayPeer,
+			"origin_health": observed.RelayLocalState, "dispatch_id": observed.RelayDispatchID,
+			"dispatched": observed.RelayDispatched, "prepare_ms": observed.RelayPrepare.Milliseconds(),
+			"peer_connect_ms": observed.RelayConnect.Milliseconds(), "peer_write_ms": observed.RelayWrite.Milliseconds(),
+			"peer_ttfb_ms": observed.RelayTTFB.Milliseconds(), "peer_error": observed.RelayError,
+		}
+		if observed.RelayEvidence != nil {
+			relay["evidence"] = observed.RelayEvidence.logFields()
+		}
+		summary["origin_relay"] = relay
+	}
 	if observed.OriginTransportErrorKind != "" {
 		summary["origin_transport_error_kind"] = observed.OriginTransportErrorKind
 	}

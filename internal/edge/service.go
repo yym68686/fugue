@@ -91,6 +91,7 @@ type Service struct {
 	caddyImportedTLSRoots         *x509.CertPool
 	cacheWarmupClientFactory      func(string, string) *http.Client
 	proxyBase                     http.RoundTripper
+	originRelay                   *edgeOriginRelay // assigned before serving starts
 	proxyTransportMu              sync.Mutex
 	proxyTransportPrototype       *http.Transport
 	proxyAppServiceTransport      *http.Transport
@@ -427,6 +428,18 @@ type edgeProxyObservation struct {
 	PeerAddress             string
 	peerObservation         *edgeProxyObservation
 	originAttempts          []edgeOriginAttempt
+	RelayMode               string
+	RelayReason             string
+	RelayPeer               string
+	RelayLocalState         string
+	RelayEvidence           *relayDecisionEvidence
+	RelayDispatchID         string
+	RelayDispatched         bool
+	RelayPrepare            time.Duration
+	RelayConnect            time.Duration
+	RelayWrite              time.Duration
+	RelayTTFB               time.Duration
+	RelayError              string
 	InternalWarmup          bool
 	HealthProbe             bool
 	HealthProbeID           string
@@ -637,6 +650,27 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("edge route cache unavailable: %v", err)
+	}
+
+	if relayServer, relayListener, err := s.initOriginRelay(); err != nil {
+		s.Logger.Printf("edge origin relay disabled: %v", err)
+	} else if relayServer != nil {
+		relayCtx, cancelRelay := context.WithCancel(ctx)
+		go s.originRelay.run(relayCtx)
+		go func() {
+			if err := relayServer.ServeTLS(relayListener, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				cancelRelay()
+				s.Logger.Printf("edge origin relay listener stopped")
+			}
+		}()
+		defer func() {
+			cancelRelay()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if relayServer.Shutdown(shutdownCtx) != nil {
+				_ = relayServer.Close()
+			}
+		}()
 	}
 
 	proxyShutdown, err := s.startProxyServer()
@@ -1261,6 +1295,9 @@ func (s *Service) routeCanIssueTLS(route model.EdgeRouteBinding, allowlist []mod
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
+	if s.originRelay != nil {
+		stripOriginRelayHeaders(r.Header)
+	}
 	if strings.HasPrefix(r.URL.Path, "/.well-known/acme-challenge/") && s.Config.CaddyHTTPListenAddr != "" {
 		s.handleSharedHTTP01Challenge(w, r)
 		return
@@ -1440,6 +1477,9 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	if bufferedBody && r.Body != nil {
 		defer r.Body.Close()
+	}
+	if s.originRelay != nil && s.originRelay.tryForward(observedWriter, r, host, &observed) {
+		return
 	}
 	proxy := s.newEdgeReverseProxy(host, target, selectedRoute, &observed, peerFallbackAllowed, &cacheDecision)
 	proxy.ServeHTTP(observedWriter, r)
