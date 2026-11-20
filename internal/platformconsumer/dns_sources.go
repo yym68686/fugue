@@ -63,10 +63,38 @@ func (c Client) DNSRouteSources(ctx context.Context, id Identity, a model.Platfo
 		}
 		return result.Snapshot, err
 	}
-	if !reflect.DeepEqual(result.Assignment, a) || !reflect.DeepEqual(result.Release, r) {
+	if !reflect.DeepEqual(result.Assignment, a) || !sameDNSRouteSourceRelease(r, result.Release) {
 		return result.Snapshot, ErrAssignmentChanged
 	}
 	return result.Snapshot, nil
+}
+
+// A serving DNS checkpoint can predate verification of the same full release.
+// Verification records a result on that release row, not a new assignment.
+// Allow only the forward transition written by the store, keeping the exact
+// artifact, lane, fence, activation, rollback and override fields unchanged.
+func sameDNSRouteSourceRelease(previous, current model.PlatformArtifactRelease) bool {
+	if reflect.DeepEqual(previous, current) {
+		return true
+	}
+	if previous.ReleaseChannel != model.PlatformArtifactReleaseChannelFull ||
+		previous.Status != model.PlatformArtifactReleaseStatusActive ||
+		previous.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+		current.VerificationState != model.PlatformArtifactVerificationStateVerified ||
+		current.VerifiedLKGGeneration != previous.Generation || current.ServingUnverifiedGeneration != "" ||
+		previous.Version <= 0 || current.Version <= previous.Version || current.Version-previous.Version != 1 ||
+		current.VerifiedAt == nil || current.VerifiedAt.Before(previous.UpdatedAt) ||
+		!current.VerifiedAt.Equal(current.UpdatedAt) {
+		return false
+	}
+	previous.VerificationState = current.VerificationState
+	previous.VerificationEvidence = current.VerificationEvidence
+	previous.VerifiedLKGGeneration = current.VerifiedLKGGeneration
+	previous.ServingUnverifiedGeneration = current.ServingUnverifiedGeneration
+	previous.VerifiedAt = current.VerifiedAt
+	previous.Version = current.Version
+	previous.UpdatedAt = current.UpdatedAt
+	return reflect.DeepEqual(previous, current)
 }
 
 // RetainedDNSRouteSources reads only the authority's current positive LKG.

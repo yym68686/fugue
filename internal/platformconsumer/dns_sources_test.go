@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fugue/internal/model"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"fugue/internal/model"
 )
 
 func TestDNSRouteSourcesAreBoundToExactAssignment(t *testing.T) {
@@ -53,6 +55,59 @@ func TestDNSRouteSourcesAreBoundToExactAssignment(t *testing.T) {
 				t.Fatal("authorization/outage hidden as convergence", err)
 			}
 		})
+	}
+}
+
+func TestDNSRouteSourcesAllowInPlaceFullVerification(t *testing.T) {
+	at := time.Now().UTC().Truncate(time.Second)
+	verifiedAt := at.Add(time.Second)
+	a := model.PlatformConsumerAssignment{ArtifactID: "dns", ContentHash: "dns-digest", ExpectedConsumerSetID: "expected", ArtifactReleaseID: "release", FencingToken: 42, ReleaseChannel: "full"}
+	before := model.PlatformArtifactRelease{ID: a.ArtifactReleaseID, ArtifactID: "parent", ScopeKey: "authority-cell:cell-dns", Generation: "generation", ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: a.FencingToken, Version: 1, VerificationState: model.PlatformArtifactVerificationStateServingUnverified, ServingUnverifiedGeneration: "generation", ReleasedAt: at, UpdatedAt: at}
+	verified := before
+	verified.Version++
+	verified.VerificationState = model.PlatformArtifactVerificationStateVerified
+	verified.VerificationEvidence = map[string]string{"outcome": "passed"}
+	verified.ServingUnverifiedGeneration = ""
+	verified.VerifiedLKGGeneration = before.Generation
+	verified.VerifiedAt = &verifiedAt
+	verified.UpdatedAt = verifiedAt
+	for _, tc := range []struct {
+		name   string
+		change func(*model.PlatformArtifactRelease)
+	}{
+		{name: "same full release verified"},
+		{name: "fenced off", change: func(r *model.PlatformArtifactRelease) { r.FencingToken++ }},
+		{name: "superseded", change: func(r *model.PlatformArtifactRelease) { r.Status = model.PlatformArtifactReleaseStatusSuperseded }},
+		{name: "rolled back", change: func(r *model.PlatformArtifactRelease) { r.RollbackTargetGeneration = "older" }},
+		{name: "verification failed", change: func(r *model.PlatformArtifactRelease) {
+			r.VerificationState = model.PlatformArtifactVerificationStateFailed
+		}},
+		{name: "verification regressed", change: func(r *model.PlatformArtifactRelease) { r.Version = before.Version }},
+		{name: "different verified generation", change: func(r *model.PlatformArtifactRelease) { r.VerifiedLKGGeneration = "other" }},
+		{name: "verification lacks timestamp", change: func(r *model.PlatformArtifactRelease) { r.VerifiedAt = nil }},
+		{name: "artifact replaced", change: func(r *model.PlatformArtifactRelease) { r.ArtifactID = "other" }},
+		{name: "override changed", change: func(r *model.PlatformArtifactRelease) { r.OverrideMode = model.PlatformArtifactOverrideModeSoft }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fresh := verified
+			if tc.change != nil {
+				tc.change(&fresh)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(model.PlatformConsumerDNSRouteSourcesResponse{Assignment: a, Release: fresh, Snapshot: model.PlatformDNSRouteSourceSnapshot{SelectionDigest: "selection"}})
+			}))
+			defer server.Close()
+			got, err := (Client{BaseURL: server.URL}).DNSRouteSources(context.Background(), Identity{Token: "scoped"}, a, before)
+			if tc.change == nil && (err != nil || got.SelectionDigest != "selection") {
+				t.Fatalf("in-place verification invalidated exact source observation: %v", err)
+			}
+			if tc.change != nil && !errors.Is(err, ErrAssignmentChanged) {
+				t.Fatalf("invalid release change accepted: %v", err)
+			}
+		})
+	}
+	if sameDNSRouteSourceRelease(verified, before) {
+		t.Fatal("a previously verified release regressed to unverified")
 	}
 }
 
