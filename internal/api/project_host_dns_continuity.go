@@ -16,7 +16,8 @@ import (
 func (s *Server) checkProjectHostDNSContinuity(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	if !s.projectHostDNSAuthoritySupportsContinuity(ctx, platformconfig.GlobalScopeKey, "") {
+	requirement := projectHostConsumerCapability{model.PlatformArtifactKindDNSAnswerBundle, platformconfig.DNSManagedHostContinuityCapabilityV1}
+	if !s.projectHostAuthoritySupports(ctx, platformconfig.GlobalScopeKey, "", requirement) {
 		return errProjectHostDNSContinuity
 	}
 	scopes, err := s.store.ListPlatformProducerScopes()
@@ -35,7 +36,7 @@ func (s *Server) checkProjectHostDNSContinuity(ctx context.Context) error {
 		if policy.PublicationRole != platformconfig.PublicationRoleCellDNS || policy.Mode != "serving" {
 			continue
 		}
-		if !s.projectHostDNSAuthoritySupportsContinuity(ctx, policy.TargetScope, platformconfig.PublicationRoleCellDNS) {
+		if !s.projectHostAuthoritySupports(ctx, policy.TargetScope, platformconfig.PublicationRoleCellDNS, requirement) {
 			return errProjectHostDNSContinuity
 		}
 	}
@@ -45,14 +46,41 @@ func (s *Server) checkProjectHostDNSContinuity(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) projectHostDNSAuthoritySupportsContinuity(ctx context.Context, scope, expectedRole string) bool {
+func (s *Server) checkProjectHostWorkerTLS(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	tls := platformcontrol.SharedCustomHostTLSCapabilityV1
+	if !s.projectHostAuthoritySupports(ctx, platformconfig.GlobalScopeKey, "",
+		projectHostConsumerCapability{model.PlatformArtifactKindEdgeRouteBundle, tls},
+		projectHostConsumerCapability{model.PlatformArtifactKindCaddyRouteConfig, tls}) {
+		return errProjectHostWorkerTLS
+	}
+	return nil
+}
+
+type projectHostConsumerCapability struct {
+	kind, capability string
+}
+
+func (s *Server) projectHostAuthoritySupports(ctx context.Context, scope, expectedRole string, requirements ...projectHostConsumerCapability) bool {
 	parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, model.PlatformArtifactReleaseChannelFull)
 	role, _ := parent.Content["publication_role"].(string)
 	if err != nil || !found || s.store.VerifyPlatformArtifactIntegrity(parent) != nil || role != expectedRole ||
 		release.VerificationState != model.PlatformArtifactVerificationStateVerified {
 		return false
 	}
-	sets, err := s.store.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ScopeKey: scope})
+	for _, requirement := range requirements {
+		if !s.projectHostPublishedConsumerCapability(ctx, parent, release, requirement) {
+			return false
+		}
+	}
+	// Recheck the fence after reading the selected consumers and transports.
+	_, current, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, model.PlatformArtifactReleaseChannelFull)
+	return ctx.Err() == nil && err == nil && found && current.ID == release.ID && current.FencingToken == release.FencingToken && current.VerificationState == release.VerificationState
+}
+
+func (s *Server) projectHostPublishedConsumerCapability(ctx context.Context, parent model.PlatformArtifact, release model.PlatformArtifactRelease, requirement projectHostConsumerCapability) bool {
+	sets, err := s.store.ListPlatformExpectedConsumerSetsContext(ctx, model.PlatformExpectedConsumerSetFilter{ReleaseSetID: parent.ID, ArtifactReleaseID: release.ID, ArtifactKind: requirement.kind, ScopeKey: parent.ScopeKey})
 	if err != nil {
 		return false
 	}
@@ -69,20 +97,15 @@ func (s *Server) projectHostDNSAuthoritySupportsContinuity(ctx context.Context, 
 		return false
 	}
 	binding := s.platformConvergenceBinding(latest)
-	consumers, err := s.store.ListPlatformConsumers(latest.ArtifactKind, scope)
+	consumers, err := s.store.ListPlatformConsumers(latest.ArtifactKind, parent.ScopeKey)
 	if err != nil || binding == nil || binding.ArtifactReleaseID != release.ID {
 		return false
 	}
 	status := s.evaluateLiveConsumerConvergence(ctx, latest, consumers, binding)
-	if !projectHostDNSConsumersReady(status) {
-		return false
-	}
-	// Recheck the fence after observing actual backend bindings.
-	_, current, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, model.PlatformArtifactReleaseChannelFull)
-	return ctx.Err() == nil && err == nil && found && current.ID == release.ID && current.FencingToken == release.FencingToken && current.VerificationState == release.VerificationState
+	return projectHostConsumersReady(status, requirement.capability)
 }
 
-func projectHostDNSConsumersReady(status model.PlatformConsumerConvergenceStatus) bool {
+func projectHostConsumersReady(status model.PlatformConsumerConvergenceStatus, capability string) bool {
 	if !status.Pass || status.RequiredPassing == 0 || status.RequiredPassing != status.RequiredExpected || len(status.UnexpectedConsumers) != 0 {
 		return false
 	}
@@ -93,7 +116,7 @@ func projectHostDNSConsumersReady(status model.PlatformConsumerConvergenceStatus
 		}
 		count++
 		if item.State != model.InvariantEvidenceStatePass || item.Observed == nil ||
-			!slices.Contains(item.Observed.CompatibilityCapabilities, platformconfig.DNSManagedHostContinuityCapabilityV1) {
+			!slices.Contains(item.Observed.CompatibilityCapabilities, capability) {
 			return false
 		}
 	}

@@ -6149,6 +6149,7 @@ paths:
     post:
       operationId: applyProjectHostRoutes
       summary: Save an unchanged hostname plan as desired configuration
+      description: A managed hostname edit that introduces or retains shared application paths requires both the current authoritative DNS consumers and Edge Workers to attest the required compatibility before the edit is saved. A conflict leaves the existing routes unchanged.
       tags: [Projects]
       x-fugue-handler: handleApplyProjectHostRoutes
       security:

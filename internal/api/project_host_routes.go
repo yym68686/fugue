@@ -18,6 +18,7 @@ var errProjectHostPlanChanged = errors.New("hostname plan is stale; preview curr
 var errProjectHostDomainNotReady = errors.New("hostname must have a verified DNS and ready TLS binding")
 var errProjectHostOwnerPath = errors.New("at least one effective path must continue serving the hostname owner")
 var errProjectHostDNSContinuity = errors.New("managed hostname route changes require verified, continuity-capable authoritative DNS consumers")
+var errProjectHostWorkerTLS = errors.New("managed hostname route changes require all required Edge Workers to support shared hostname TLS")
 
 func (s *Server) handlePlanProjectHostRoutes(w http.ResponseWriter, r *http.Request) {
 	var edit model.ProjectHostRouteEdit
@@ -142,11 +143,14 @@ func (s *Server) projectHostRoutes(w http.ResponseWriter, r *http.Request, edit 
 		return
 	}
 	slices.Sort(edit.RemovePaths)
-	var dnsContinuityErr error
+	var dnsContinuityErr, workerTLSErr error
 	if apply {
 		// Observe production outside the project write transaction. This is a
 		// compatibility gate; fresh signed data-plane probes remain mandatory.
 		dnsContinuityErr = s.checkProjectHostDNSContinuity(r.Context())
+		if dnsContinuityErr == nil {
+			workerTLSErr = s.checkProjectHostWorkerTLS(r.Context())
+		}
 	}
 	var plan model.ProjectHostRoutePlan
 	err := s.store.EditProjectHostRoutes(r.Context(), project.ID, edit.Hostname, apply, func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {
@@ -168,16 +172,17 @@ func (s *Server) projectHostRoutes(w http.ResponseWriter, r *http.Request, edit 
 		if plan.PlanID != expected {
 			return nil, errProjectHostPlanChanged
 		}
-		if in.Domain.DNSMode == model.AppDomainDNSModeManaged && dnsContinuityErr != nil &&
-			(projectHostHasSharedPaths(plan.Before, plan.HostnameOwnerAppID) || projectHostHasSharedPaths(plan.After, plan.HostnameOwnerAppID)) {
-			return nil, dnsContinuityErr
+		if in.Domain.DNSMode == model.AppDomainDNSModeManaged {
+			if err := projectHostManagedPreflight(plan, dnsContinuityErr, workerTLSErr); err != nil {
+				return nil, err
+			}
 		}
 		plan.State = "saved"
 		return &next, nil
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, errProjectHostPlanChanged), errors.Is(err, errProjectHostDomainNotReady), errors.Is(err, errProjectHostOwnerPath), errors.Is(err, errProjectHostDNSContinuity):
+		case errors.Is(err, errProjectHostPlanChanged), errors.Is(err, errProjectHostDomainNotReady), errors.Is(err, errProjectHostOwnerPath), errors.Is(err, errProjectHostDNSContinuity), errors.Is(err, errProjectHostWorkerTLS):
 			httpx.WriteError(w, http.StatusConflict, err.Error())
 		default:
 			s.writeStoreError(w, err)
@@ -189,6 +194,20 @@ func (s *Server) projectHostRoutes(w http.ResponseWriter, r *http.Request, edit 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, plan)
+}
+
+func projectHostManagedPreflight(plan model.ProjectHostRoutePlan, dnsContinuityErr, workerTLSErr error) error {
+	beforeShared := projectHostHasSharedPaths(plan.Before, plan.HostnameOwnerAppID)
+	afterShared := projectHostHasSharedPaths(plan.After, plan.HostnameOwnerAppID)
+	if (beforeShared || afterShared) && dnsContinuityErr != nil {
+		return dnsContinuityErr
+	}
+	// Reverting to the owner's single-application routing no longer
+	// relies on Worker support for shared hostname TLS.
+	if afterShared {
+		return workerTLSErr
+	}
+	return nil
 }
 
 func projectHostHasSharedPaths(paths map[string]string, owner string) bool {
