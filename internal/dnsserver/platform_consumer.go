@@ -66,6 +66,8 @@ func dnsLegacyPlatformExecutionCapabilities() []string {
 	return []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellDNSCapabilityV1, platformcontrol.DNSAuthorityTransitionCapabilityV1, platformcontrol.DNSRouteSourcesCapabilityV1, platformcontrol.DNSRetainedRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6, platformcontrol.PhysicalPairedContinuityCapabilityV7, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1, platformcontrol.BusinessEdgeExplorationCapabilityV1, platformcontrol.BusinessDNSBaselineCapabilityV1, platformcontrol.BusinessUnifiedCapabilityV2, platformcontrol.DNSAvailabilityCapabilityV1, platformcontrol.DNSAvailabilityRedundantCapabilityV2}
 }
 
+const platformDNSConsumerPollInterval = 30 * time.Second
+
 func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 	if s.PlatformTokenFile == "" {
 		return
@@ -85,7 +87,7 @@ func (s *Service) runPlatformShadowConsumer(ctx context.Context) {
 		go func() { defer close(done); s.runIsolatedDNSShadow(ctx, worker) }()
 		defer func() { cancel(); <-done }()
 	}
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(platformDNSConsumerPollInterval)
 	defer ticker.Stop()
 	for {
 		s.syncPlatformConsumersOnce(ctx)

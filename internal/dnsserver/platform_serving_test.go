@@ -118,6 +118,37 @@ func TestDNSServingTemporaryReadinessLossDoesNotPublishEmptyPositiveAnswer(t *te
 	}
 }
 
+func TestDNSServingOnlySkipsProbeSweepWithAnAnswerThroughTheNextWindow(t *testing.T) {
+	_, old, now := runtimeFactsFixture(t)
+	if !dnsServingReady(old, now) || checkDNSServingSnapshot(old, now, false) != nil {
+		t.Fatal("fixture must still answer at the current instant")
+	}
+	if dnsServingCanSkipProbeSweep(old, now) {
+		t.Fatal("currently fresh proofs would expire before the deferred sweep")
+	}
+
+	// New live observations cover the next poll and all of its scan budget.
+	payload := old.payload
+	policy := *payload.Policy.DNSReadiness
+	policy.FactFreshnessSeconds = 120
+	payload.Policy.DNSReadiness = &policy
+	facts := append([]dnsReadinessFact(nil), old.facts...)
+	for i := range facts {
+		facts[i].Proof.ValidUntil = now.Add(2 * time.Minute)
+	}
+	fresh, err := buildDNSServingState(old.record, payload, old.routeID, old.record.NodeID, old.record.GroupID, facts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dnsServingCanSkipProbeSweep(fresh, now) {
+		t.Fatal("a complete, sufficiently fresh proof window was needlessly reprobed")
+	}
+	fresh.checkedAt = now.Add(time.Second)
+	if dnsServingCanSkipProbeSweep(fresh, now) {
+		t.Fatal("a future observation suppressed a new probe")
+	}
+}
+
 func TestCompatibleDNSReleaseProofRequiresEquivalentPublication(t *testing.T) {
 	parent, previous := dnsServingFixture(t, true)
 	s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "edge-group-a", Zone: "example.test", BundleSigningKey: "synthetic-dns-serving-secret", BundleSigningKeyID: "key"}, nil)

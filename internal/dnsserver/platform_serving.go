@@ -376,9 +376,8 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
-	if now := time.Now().UTC(); same && old.record.Positive && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
-		!old.checkedAt.After(now) && now.Sub(old.checkedAt) < time.Duration(p.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second &&
-		dnsServingReady(old, now) && checkDNSServingSnapshot(old, now, false) == nil {
+	if same && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
+		dnsServingCanSkipProbeSweep(old, time.Now().UTC()) {
 		if old.fallback != "" {
 			recovered := *old
 			recovered.fallback = ""
@@ -624,6 +623,24 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 		}
 	}
 	return st, err
+}
+
+// Skipping a scan defers evidence collection for a consumer poll and another
+// bounded sweep. A record which can answer now may lose its only eligible
+// proof before that sweep completes. Re-evaluate the actual signed selectors
+// at that horizon; do not treat today's readiness as a renewal of any proof.
+func dnsServingCanSkipProbeSweep(st *dnsServingState, now time.Time) bool {
+	if st == nil || !st.record.Positive || st.transition != nil || st.payload.Policy.DNSReadiness == nil {
+		return false
+	}
+	policy := st.payload.Policy.DNSReadiness
+	sweep := time.Duration(policy.ProbeIntervalSeconds) * time.Second
+	if st.checkedAt.After(now) || now.Sub(st.checkedAt) >= sweep {
+		return false
+	}
+	horizon := now.Add(platformDNSConsumerPollInterval + sweep + time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
+	return dnsServingReady(st, now) && checkDNSServingSnapshot(st, now, false) == nil &&
+		dnsServingReady(st, horizon) && checkDNSServingSnapshot(st, horizon, false) == nil
 }
 
 // A failed candidate scan already contains current observations for unchanged
