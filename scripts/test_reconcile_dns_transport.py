@@ -374,7 +374,7 @@ class TransportTests(unittest.TestCase):
         def save():
             pass
         def run(remaining, fail_port=None, fail_address=None, changed_diagnostic=False,
-                write_failure=None, restore_failure=False, predecessor_failure=False):
+                write_failure=None, restore_failure=False, predecessor_failure=False, changed_predecessor=None):
             evidence, history = {"applied": []}, []
             def verify(_, stage, binding, port):
                 history.append((stage["address"], port, binding))
@@ -383,7 +383,12 @@ class TransportTests(unittest.TestCase):
                 if binding == predecessor_binding and predecessor_failure:
                     raise transport.PublicDNSVerificationFailed([{"hostname": "app.example.test",
                                                                   "transport": "udp", "response_code": 2}])
-                result = dict(witness, assignment={"fencing_token": 2}) if changed_diagnostic else witness
+                if binding == predecessor_binding:
+                    result = dict(witness, candidate_uid=witness["old_uid"])
+                    if changed_predecessor:
+                        result.update(changed_predecessor)
+                else:
+                    result = dict(witness, assignment={"fencing_token": 2}) if changed_diagnostic else witness
                 return {"passed": True, "verified_backend": result}
             def write(_, name, **kwargs):
                 if name == write_failure:
@@ -401,6 +406,9 @@ class TransportTests(unittest.TestCase):
                  patch.object(transport, "restore_staged_listener", side_effect=restore):
                 if changed_diagnostic:
                     with self.assertRaisesRegex(ValueError, "assignment changed after diagnostic"):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                elif changed_predecessor:
+                    with self.assertRaisesRegex(ValueError, "assignment changed after predecessor"):
                         transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 elif write_failure:
                     with self.assertRaisesRegex(RuntimeError, "could not be fully verified" if restore_failure else "response lost"):
@@ -440,6 +448,13 @@ class TransportTests(unittest.TestCase):
         evidence, history = run(operations, changed_diagnostic=True)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
         self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
+        for drift in ({"assignment": {"fencing_token": 2}}, {"parent_digest": "other"},
+                      {"plan_digest": "other"}, {"candidate_uid": "replacement"}):
+            with self.subTest(predecessor=drift):
+                evidence, history = run(operations, changed_predecessor=drift)
+                self.assertEqual(evidence["applied"], ["diagnostic-one"])
+                self.assertEqual([x["listener"] for x in evidence["compensations"]], ["diagnostic-one"])
+                self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
         evidence, history = run([op(two), op(diagnose_two)])
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),

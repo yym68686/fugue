@@ -610,13 +610,15 @@ def restore_staged_listener(config, operation, witness, write_acknowledged, *, r
 
 
 def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage):
-    def apply_one(operation, diagnostic_policy=None, attempted=None):
+    def apply_one(operation, *, diagnostic_policy=None, predecessor_policy=None, attempted=None):
         command, body, listener, current, witness = operation
         if witness is not None:
             witness = revalidate_handoff_witness(config, listener, current, witness)
-        if diagnostic_policy is not None and any(
-                diagnostic_policy[k] != witness[k] for k in ("candidate_uid", "assignment", "parent_digest", "plan_digest")):
-            raise ValueError("DNS handoff assignment changed after diagnostic verification")
+        for role, policy, uid_key in (("diagnostic", diagnostic_policy, "candidate_uid"),
+                                      ("predecessor", predecessor_policy, "old_uid")):
+            if policy is not None and (witness is None or policy["candidate_uid"] != witness[uid_key] or any(
+                    policy[k] != witness[k] for k in ("assignment", "parent_digest", "plan_digest"))):
+                raise ValueError("DNS handoff assignment changed after " + role + " verification")
         if attempted is not None:
             attempted.append([operation, witness, False])
         kubectl(*command, body=body)
@@ -640,6 +642,7 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         try:
             for port, report in [(diagnostic["port"], "diagnostic_verifications"), (53, "public_verifications")]:
                 operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
+                predecessor_policy = None
                 if port == 53 and operation:
                     _, _, listener, previous, witness = operation
                     # Reconstructing a signed answer does not show that the
@@ -647,9 +650,11 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                     # that exact backend as the fallback before changing :53.
                     old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
                     old_stage, old_binding = predecessor_stage_identity(stage, witness)
-                    observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
-                                         "predecessor_verifications", save_evidence)
-                witness = apply_one(operation, diagnostic_policy, attempted) if operation else None
+                    verified = observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
+                                                    "predecessor_verifications", save_evidence)
+                    predecessor_policy = verified["verified_backend"]
+                witness = apply_one(operation, diagnostic_policy=diagnostic_policy,
+                                    predecessor_policy=predecessor_policy, attempted=attempted) if operation else None
                 # Re-observe even if the socket was switched by a previous run.
                 observed = observe_stage_result(verify_stage, config, stage, witness, port, evidence, report, save_evidence)
                 if port == diagnostic["port"]:
