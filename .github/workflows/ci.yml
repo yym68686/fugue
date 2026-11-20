@@ -3046,11 +3046,11 @@ jobs:
                 go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
               fi
             fi
-            python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
             echo 'selected=true' >> "$GITHUB_OUTPUT"
+            python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
           fi
       - name: Retain DNS transport prewrite witness
-        if: steps.dns_transport.outputs.selected == 'true'
+        if: always() && steps.dns_transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-dns-transport-prewrite-${{ github.run_id }}-${{ github.run_attempt }}
@@ -3058,7 +3058,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Apply the independently verified DNS transport declaration
-        if: steps.dns_transport.outputs.selected == 'true'
+        if: success() && steps.dns_transport.outcome == 'success' && steps.dns_transport.outputs.selected == 'true'
         env:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: |
@@ -3077,7 +3077,7 @@ jobs:
           python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport
           python3 -m scripts.reconcile_dns_transport "$config" --apply --evidence "$RUNNER_TEMP/dns-transport-result.json" "${args[@]}"
       - name: Retain DNS transport execution result
-        if: always() && steps.dns_transport.outputs.selected == 'true'
+        if: always() && steps.dns_transport.outcome == 'success' && steps.dns_transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: fugue-dns-transport-result-${{ github.run_id }}-${{ github.run_attempt }}

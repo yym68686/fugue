@@ -369,6 +369,7 @@ def handoff_witness(config, listener, current):
                         verify_staged_backend(backend, namespace, port)
                     except DNSObservationRejected as error:
                         # Include the side, not the private verifier input.
+                        error.backend_role = role
                         error.add_note("DNS staged listener " + listener["name"] + " " + role)
                         raise
             validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
@@ -696,16 +697,11 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
             raise
 
 
-def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
-    if apply and (config.get('recovery') or config.get('recoveries') or config.get('handoffs')) and not evidence_path:
-        raise ValueError('DNS handoff or recovery requires durable prewrite evidence')
-    if apply and config.get('handoffs') and not verify_stage:
-        raise ValueError("DNS staged handoff requires a public verifier")
-    if apply and config.get('handoffs') and "rollback_generation" not in config:
-        raise ValueError("DNS staged handoff requires a reserved compensation generation")
+def prepare_transport_steps(config, preflight, operations):
     planned = []
     inventory = json.loads(kubectl("get", "services", "--all-namespaces", "-o", "json"))["items"]
     for listener in config["listeners"]:
+        preflight.update(listener=listener["name"], gate="service_contract")
         desired = service(config, listener)
         for other in inventory:
             if other["metadata"]["name"] == listener["name"] and other["metadata"]["namespace"] == config["namespace"]:
@@ -724,6 +720,7 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
                 current["spec"]["externalIPs"] != [listener["address"]] or
                 {p.get("port") for p in current["spec"]["ports"]} != {listener["port"]}):
             raise ValueError("staged DNS handoff can only update declared sites on their existing sockets")
+        preflight["gate"] = "node_local_backend"
         selector = ",".join(k + "=" + v for k, v in sorted(listener["selector"].items()))
         pods = json.loads(kubectl("get", "pods", "-n", config["namespace"], "-l", selector, "-o", "json"))["items"]
         ready = [pod for pod in pods if not pod["metadata"].get("deletionTimestamp") and any(c.get("type") == "Ready" and c.get("status") == "True" for c in pod.get("status", {}).get("conditions", []))]
@@ -738,9 +735,11 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
             addresses.extend(a["address"] for a in info.get("status", {}).get("addresses", []))
         if listener["address"] not in addresses:
             raise ValueError("public listener address has no ready node-local backend")
+        preflight["gate"] = "handoff_witness"
         witness = handoff_witness(config, listener, current)
         if "handoffs" in config and witness is None:
             raise ValueError("staged DNS handoff requires a verified change of backend")
+        preflight["gate"] = "server_dry_run"
         if current:
             command = ["patch", "service", listener["name"], "-n", config["namespace"], "--type=json", "--field-manager=" + MANAGER, "--patch-file=/dev/stdin"]
             body = json.dumps(update_patch(current, desired))
@@ -749,18 +748,54 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
             body = json.dumps(desired)
         kubectl(*command, "--dry-run=server", body=body)
         planned.append((command, body, listener, current, witness))
+        operations.append({"listener": listener["name"], "patch": json.loads(body), "witness": witness})
+    return planned
+
+
+def reconcile(config, apply=False, evidence_path=None, verify_stage=None):
+    from scripts.recover_dns_transport import DNSObservationRejected
+
+    if apply and (config.get('recovery') or config.get('recoveries') or config.get('handoffs')) and not evidence_path:
+        raise ValueError('DNS handoff or recovery requires durable prewrite evidence')
+    if apply and config.get('handoffs') and not verify_stage:
+        raise ValueError("DNS staged handoff requires a public verifier")
+    if apply and config.get('handoffs') and "rollback_generation" not in config:
+        raise ValueError("DNS staged handoff requires a reserved compensation generation")
+    preflight = {"status": "started", "gate": "service_inventory"}
     evidence = {'schema': 'fugue.dns-transport-execution/v1', 'generation': config['generation'],
                 'declaration_digest': 'sha256:' + hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
-                'operations': [{'listener': listener['name'], 'patch': json.loads(body), 'witness': witness}
-                               for _, body, listener, _, witness in planned], 'applied': []}
+                'operations': [], 'applied': [], 'preflight': preflight}
     if "rollback_generation" in config:
         evidence["rollback_generation"] = config["rollback_generation"]
     def save_evidence():
         if evidence_path:
             evidence_path.parent.mkdir(parents=True, exist_ok=True)
-            evidence_path.touch(mode=0o600, exist_ok=True)
-            evidence_path.chmod(0o600)
-            evidence_path.write_text(json.dumps(evidence, sort_keys=True) + '\n')
+            descriptor, path = tempfile.mkstemp(prefix=".dns-transport-", dir=evidence_path.parent)
+            try:
+                with os.fdopen(descriptor, "w") as receipt:
+                    receipt.write(json.dumps(evidence, sort_keys=True) + '\n')
+                os.replace(path, evidence_path)
+            finally:
+                Path(path).unlink(missing_ok=True)
+    save_evidence()
+    try:
+        planned = prepare_transport_steps(config, preflight, evidence["operations"])
+    except (Exception, KeyboardInterrupt) as error:
+        preflight["status"] = "rejected"
+        if isinstance(error, DNSObservationRejected):
+            preflight["reason"] = error.category
+            role = getattr(error, "backend_role", None)
+            if role in ("predecessor", "candidate"):
+                preflight["backend_role"] = role
+        elif isinstance(error, (ObservationUnavailable, subprocess.TimeoutExpired)):
+            preflight["reason"] = "observation_unavailable"
+        elif isinstance(error, KeyboardInterrupt):
+            preflight["reason"] = "interrupted"
+        # Do not copy arbitrary error details or command output to the receipt.
+        save_evidence()
+        raise
+    preflight.clear()
+    preflight["status"] = "verified"
     save_evidence()
     if apply:
         apply_transport_steps(config, planned, evidence, save_evidence, verify_stage)

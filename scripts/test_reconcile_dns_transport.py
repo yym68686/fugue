@@ -140,6 +140,39 @@ class TransportTests(unittest.TestCase):
             with self.assertRaises(ValueError): transport.reconcile(config, apply=True)
             self.assertFalse(any(c[0] == "create" and "--dry-run=server" not in c for c in calls))
 
+    def test_rejected_preflight_retains_safe_evidence_without_applying_partial_plan(self):
+        from scripts.recover_dns_transport import DNSObservationRejected
+
+        config = self.config()
+        config["listeners"].append(dict(config["listeners"][0], name="public", port=53))
+        rejected = DNSObservationRejected("wire_materialization")
+        rejected.backend_role = "predecessor"
+        rejected.add_note("private subprocess details")
+        pod = {"metadata": {"name": "backend"}, "spec": {"nodeName": "node"},
+               "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+        reads = ['{"items":[]}', "", json.dumps({"items": [pod]}),
+                 '{"status":{"addresses":[{"address":"8.8.8.8"}]}}', "{}",
+                 "", json.dumps({"items": [pod]}), '{"status":{"addresses":[{"address":"8.8.8.8"}]}}']
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(transport, "kubectl", side_effect=reads) as kubectl, \
+             patch.object(transport, "handoff_witness", side_effect=[None, rejected]):
+            path = Path(directory) / "receipt.json"
+            path.write_text("stale successful receipt")
+            path.chmod(0o644)
+            with self.assertRaises(DNSObservationRejected):
+                transport.reconcile(config, apply=True, evidence_path=path)
+            raw = path.read_text()
+            self.assertNotIn("private subprocess details", raw)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            receipt = json.loads(raw)
+            self.assertEqual(receipt["preflight"], {"status": "rejected", "gate": "handoff_witness",
+                                                   "listener": "public", "backend_role": "predecessor",
+                                                   "reason": "wire_materialization"})
+            self.assertEqual([operation["listener"] for operation in receipt["operations"]], ["listener"])
+            self.assertEqual(receipt["applied"], [])
+            self.assertFalse(any(call.args[0] != "get" and "--dry-run=server" not in call.args
+                                 for call in kubectl.call_args_list))
+
     def snapshot(self):
         now = datetime.datetime.now(datetime.timezone.utc)
         stamp = lambda delta: (now + datetime.timedelta(seconds=delta)).isoformat()

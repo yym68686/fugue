@@ -31,6 +31,12 @@ These diagnostics do not authorize degraded recovery or change the health gate.
 A later successful probe cannot explain an earlier failure whose evidence was
 not retained; do not infer its historical cause from current readiness.
 
+For DNS transport, download the `fugue-dns-transport-prewrite-*` artifact even
+if the job failed. A `rejected` preflight records the failed listener and gate
+and may include an allowlisted verifier reason and the backend role. Its list of
+operations covers successful server dry runs only, with no production writes.
+The separate result artifact records the apply phase.
+
 ## Safety Rules
 
 - Do not continue a normal rollout while a `block_publish` incident is active.
