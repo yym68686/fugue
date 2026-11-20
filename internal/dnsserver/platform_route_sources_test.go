@@ -2,10 +2,13 @@ package dnsserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -321,13 +324,36 @@ func TestDNSRouteSourceSchedulerRenewsMatchedNonRepresentativeProof(t *testing.T
 		return p.ID == matched.ID && proof.TrafficRelease == binding
 	}
 	deadline := func(*model.TrafficReleaseBinding) time.Time { return sourceEnd }
-	scheduler := &dnsReadinessScheduler{}
+	path := filepath.Join(t.TempDir(), "cache")
+	scheduler := (&dnsReadinessScheduler{}).bind(model.PlatformConsumerAssignment{FencingToken: 1}, nil, path)
 	facts := collectDNSRouteSourceFacts(t.Context(), plan, policy, probe, match, deadline, scheduler)
 	if facts[1].Ready || !facts[2].Ready || facts[2].ProbeID != matched.ID || !facts[2].Proof.ValidUntil.After(sourceEnd) {
 		t.Fatal("scheduling projection replaced the original proof or its variant", facts)
 	}
 	if !scheduler.expires[representative.ID].Equal(sourceEnd) || !scheduler.expires[background.ID].IsZero() {
 		t.Fatal("scheduler lost the verified alternate expiry or credited an unmatched binding", scheduler.expires)
+	}
+	raw, err := os.ReadFile(path + ".probe-observations.json")
+	var rows []struct {
+		ID       string                   `json:"observation_id"`
+		Dispatch dnsProbeDispatchSnapshot `json:"probe_dispatch"`
+	}
+	if err != nil || json.Unmarshal(raw, &rows) != nil || len(rows) != 1 || len(rows[0].Dispatch.Samples) != 2 || rows[0].ID != facts[1].ObservationID || rows[0].ID != facts[2].ObservationID {
+		t.Fatalf("missing shared physical sweep identity: %v", err)
+	}
+	physical := sha256.Sum256([]byte(dnsroutesource.ProbeKey(matched)))
+	physicalDigest := fmt.Sprintf("%x", physical[:12])
+	matchedSamples := 0
+	for _, sample := range rows[0].Dispatch.Samples {
+		if sample.PhysicalDigest == physicalDigest {
+			matchedSamples++
+			if sample.Result != "scheduler_proof_observed" || !sample.ObservedProofUntil.Equal(sourceEnd) {
+				t.Fatalf("lost matched physical scheduler result: %+v", sample)
+			}
+		}
+	}
+	if matchedSamples != 1 {
+		t.Fatalf("physical request appears %d times", matchedSamples)
 	}
 	// Make the ordinary route overdue so that it would beat a variant whose
 	// expiry was lost. Stop after one probe: a saturated sweep models that gap.

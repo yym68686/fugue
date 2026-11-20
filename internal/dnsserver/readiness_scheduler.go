@@ -130,6 +130,10 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 	}
 	sort.Strings(addresses)
 	queues := make([]dnsProbeTargetQueue, 0, len(addresses))
+	var dispatch []dnsProbeDispatchTiming
+	if scheduler.path != "" {
+		dispatch = make([]dnsProbeDispatchTiming, len(plan.Probes))
+	}
 	for _, address := range addresses {
 		indices := byAddress[address]
 		// Prioritize a bounded batch of explicitly ordered candidate probes
@@ -151,6 +155,9 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 		priority := make(map[int]int, min(len(candidates), maxCandidatePriorityPerTarget))
 		for rank, index := range candidates[:min(len(candidates), maxCandidatePriorityPerTarget)] {
 			priority[index] = rank + 1
+			if dispatch != nil {
+				dispatch[index].priority = rank + 1
+			}
 		}
 		sort.SliceStable(indices, func(left, right int) bool {
 			if first, second := priority[indices[left]], priority[indices[right]]; first != second {
@@ -204,6 +211,8 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 	concurrency := min(policy.MaxConcurrency, len(plan.Probes))
 	results := make(chan dnsProbeResult, concurrency)
 	active, attempted := 0, 0
+	var stopped time.Time
+	var stopErr error
 	for {
 		for active < concurrency && ctx.Err() == nil {
 			eligible := 0
@@ -232,6 +241,10 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			queue.started++
 			scheduler.cursor = (selected + 1) % len(queues)
 			scheduler.attempts[plan.Probes[index].ID] = time.Now().UTC()
+			if dispatch != nil {
+				dispatch[index].previousExpiry = scheduler.expires[plan.Probes[index].ID]
+				dispatch[index].dispatched = scheduler.attempts[plan.Probes[index].ID]
+			}
 			active++
 			attempted++
 			go func(index, target int) {
@@ -255,9 +268,16 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			}(index, selected)
 		}
 		if active == 0 {
+			if dispatch != nil {
+				stopped, stopErr = time.Now().UTC(), ctx.Err()
+			}
 			break
 		}
 		result := <-results
+		if dispatch != nil {
+			dispatch[result.index].started = result.started
+			dispatch[result.index].finished = result.finished
+		}
 		active--
 		queue := &queues[result.target]
 		queue.active--
@@ -303,12 +323,19 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 			targets = append(targets, map[string]any{"address": queue.address, "probes": len(queue.indices), "started": queue.started, "unobserved": len(queue.indices) - queue.started, "outcomes": queue.outcomes, "duration_ms": queue.duration.Milliseconds(), "retry_at": scheduler.targets[queue.address].retryAt})
 		}
 		traceID, tracePhase := dnsSyncTraceIdentity(ctx)
-		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
+		reportFields := map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "unobserved": len(facts) - attempted, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)}
+		report, err := json.Marshal(reportFields)
 		if err == nil {
 			if scheduler.logger != nil {
 				scheduler.logger.Print(string(report))
 			}
 			if scheduler.path != "" {
+				// Keep per-probe detail in the private file only. The existing
+				// journal event contains the same aggregate fields as before.
+				reportFields["probe_dispatch"] = scheduler.probeDispatchObservation(plan, facts, dispatch, queues, stopped, stopErr)
+				if detailed, err := json.Marshal(reportFields); err == nil {
+					report = detailed
+				}
 				scheduler.saveObservation(report)
 			}
 		}
@@ -317,8 +344,9 @@ func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context
 }
 
 func (scheduler *dnsReadinessScheduler) saveObservation(report json.RawMessage) {
+	const maxBytes = 128 << 10
 	var previous []json.RawMessage
-	if stat, err := os.Stat(scheduler.path); err == nil && stat.Size() <= 128<<10 {
+	if stat, err := os.Stat(scheduler.path); err == nil && stat.Size() <= maxBytes {
 		if raw, err := os.ReadFile(scheduler.path); err == nil {
 			_ = json.Unmarshal(raw, &previous)
 		}
@@ -328,8 +356,14 @@ func (scheduler *dnsReadinessScheduler) saveObservation(report json.RawMessage) 
 	}
 	previous = append(previous, report)
 	raw, err := json.Marshal(previous)
-	if err == nil && len(raw) <= 128<<10 {
+	for err == nil && len(raw) > maxBytes && len(previous) > 1 {
+		previous = previous[1:]
+		raw, err = json.Marshal(previous)
+	}
+	if err == nil && len(raw) <= maxBytes {
 		err = lkgcache.AtomicWriteFile(scheduler.path, raw, 0600)
+	} else if err == nil {
+		err = errors.New("DNS probe observation exceeds budget")
 	}
 	if err != nil && scheduler.logger != nil {
 		scheduler.logger.Print("DNS probe observation persistence unavailable")

@@ -27,3 +27,21 @@ policy, probe concurrency, deadlines, or which proofs can authorize an answer.
 The two changes address missed work without increasing the declared probe
 budget, relaxing quorum or changing endpoint eligibility. If the target really
 fails, records still fail closed when their original valid proofs expire.
+
+For investigation, the existing private `.probe-observations.json` contains a
+`probe_dispatch` sample of at most 24 physical requests per sweep. Join on the
+same process and sweep `observation_id`, then on either the first 12 bytes of
+SHA-256 of the requirement ID or of the physical `ProbeKey` (the latter also
+matches authorized variants sharing that request). The sample includes actual
+queue position, candidate rank, previous scheduler expiry, dispatch, worker
+start and completion, the scheduler's result and expiry, and target retry
+state when dispatch stopped. It prefers earliest previous expiries and, when
+no expiry is known, unstarted or rejected work. Absent entries are unknown.
+
+Physical scheduler success does not prove a particular signed variant matched
+or that any query saw the result. Check the query's own facts and clock before
+attributing adoption or denial. Stop state and retry time describe the point
+dispatch ended; they do not reconstruct earlier target backoff. The file
+remains private (`0600`), retains at most eight sweeps and 128 KiB, and evicts
+the oldest rows first when needed. No per-probe fields enter the journal, DNS
+answer, proof, or recovery history.
