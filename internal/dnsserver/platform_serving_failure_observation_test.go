@@ -29,7 +29,7 @@ func TestReportDNSAssignmentFailureJoinsOneExactResponse(t *testing.T) {
 		{"no heartbeat response", "trusted-heartbeat", "heartbeat_post", "", 0, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			a := model.PlatformConsumerAssignment{ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle}
+			a := model.PlatformConsumerAssignment{ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ReleaseChannel: model.PlatformArtifactReleaseChannelFull}
 			var calls, posts atomic.Int32
 			const prefix = "/v1/platform-state/consumers/"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

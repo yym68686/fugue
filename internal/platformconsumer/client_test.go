@@ -240,6 +240,71 @@ func TestDownloadConflictRetriesOnlyAfterObservedAssignmentChange(t *testing.T) 
 	}
 }
 
+func TestServingDownloadsRecheckSelectedLaneNotRetainedAssignment(t *testing.T) {
+	for _, scenario := range []string{"same", "promoted", "ambiguous", "unavailable"} {
+		t.Run(scenario, func(t *testing.T) {
+			gray := model.PlatformConsumerAssignment{ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ArtifactID: "dns", ReleaseSetID: "parent", ArtifactReleaseID: "gray-release", ScopeKey: "global", ReleaseChannel: "gray", ExpectedConsumerSetID: "gray-set", FencingToken: 2}
+			full := gray
+			full.ReleaseChannel, full.ArtifactReleaseID, full.ExpectedConsumerSetID, full.FencingToken = "full", "full-release", "full-set", 3
+			readServing := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/platform-state/consumers/identity":
+					_ = json.NewEncoder(w).Encode(Identity{Token: "identity", Component: "dns-server", NodeID: "node", ScopeKey: gray.ScopeKey, ArtifactKinds: []string{gray.ArtifactKind}, ExpiresAt: time.Now().Add(time.Minute)})
+				case "/v1/platform-state/consumers/assignment":
+					rows := []model.PlatformConsumerAssignment{gray}
+					if r.URL.Query().Get("serving_only") == "true" {
+						readServing++
+						if readServing > 1 {
+							switch scenario {
+							case "promoted":
+								rows = []model.PlatformConsumerAssignment{full}
+							case "ambiguous":
+								rows = append(rows, full)
+							case "unavailable":
+								w.WriteHeader(http.StatusServiceUnavailable)
+								return
+							}
+						}
+					} else {
+						// Both historic channels can still be discovered.
+						rows = append(rows, full)
+					}
+					_ = json.NewEncoder(w).Encode(model.PlatformConsumerAssignmentResponse{Assignments: rows})
+				case "/v1/platform-state/consumers/artifacts/parent":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"assignment": full,
+						"artifact":   model.PlatformArtifact{ID: gray.ReleaseSetID, ScopeKey: gray.ScopeKey, ArtifactKind: model.PlatformArtifactKindReleaseSet},
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte("pod-token"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			client := Client{BaseURL: server.URL, TokenFile: path}
+			wantRace := scenario == "promoted" || scenario == "ambiguous"
+			_, _, _, _, err := client.SyncServing(ctx, "dns-server", "node", gray.ScopeKey, gray.ArtifactKind)
+			if err == nil || errors.Is(err, ErrAssignmentChanged) != wantRace {
+				t.Fatalf("child: race=%t err=%v", wantRace, err)
+			}
+			id := Identity{Token: "identity", ScopeKey: gray.ScopeKey, ArtifactKinds: []string{gray.ArtifactKind}}
+			_, err = client.ServingReleaseSet(ctx, id, gray, model.PlatformArtifactRelease{})
+			if err == nil || errors.Is(err, ErrAssignmentChanged) != wantRace {
+				t.Fatalf("parent: race=%t err=%v", wantRace, err)
+			}
+			_, err = client.ReleaseSet(ctx, id, gray, model.PlatformArtifactRelease{})
+			if err == nil || errors.Is(err, ErrAssignmentChanged) {
+				t.Fatalf("explicit lane compared against serving selection: %v", err)
+			}
+		})
+	}
+}
+
 func TestCheckAssignmentRejectsChangedMissingAndDuplicateAuthority(t *testing.T) {
 	want := model.PlatformConsumerAssignment{ScopeKey: "global", ArtifactKind: "edge_route_bundle", ReleaseChannel: "shadow", ExpectedConsumerSetID: "expected", ArtifactID: "artifact", FencingToken: 5}
 	for _, scenario := range []string{"same", "other lanes", "missing", "new fence", "new revision", "duplicate", "unavailable"} {

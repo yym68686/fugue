@@ -192,7 +192,7 @@ func (c Client) syncChannelWithSnapshot(ctx context.Context, component, nodeID, 
 	}
 	endpoint := base + "/v1/platform-state/consumers/artifacts/" + url.PathEscape(chosen.ArtifactID) + "?expected_consumer_set_id=" + url.QueryEscape(chosen.ExpectedConsumerSetID)
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &envelope); err != nil {
-		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, c.classifyAssignmentReadError(ctx, id, *chosen, err)
+		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, c.classifyAssignmentReadError(ctx, id, *chosen, channel == "serving", err)
 	}
 	if !reflect.DeepEqual(envelope.Assignment, *chosen) {
 		return Identity{}, model.PlatformConsumerAssignment{}, model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrAssignmentChanged
@@ -242,9 +242,9 @@ func (c Client) checkAssignments(ctx context.Context, identity Identity, serving
 		matches := 0
 		for _, item := range current.Assignments {
 			sameLane := item.ReleaseChannel == assignment.ReleaseChannel
-			// A combined serving snapshot must not report two possible
-			// serving lanes for either kind, even when one matches exactly.
-			if serving && len(assignments) > 1 {
+			// The exact selected assignment must be the only serving lane
+			// for this kind, even if another row matches exactly.
+			if serving {
 				sameLane = item.ReleaseChannel == "serving" || item.ReleaseChannel == "gray" || item.ReleaseChannel == "full"
 			}
 			if item.ScopeKey == assignment.ScopeKey && item.ArtifactKind == assignment.ArtifactKind && sameLane {
@@ -412,10 +412,10 @@ func ReadFile(path string, limit int64) ([]byte, error) {
 // A download can lose its assignment between discovery and retrieval. A
 // 404/409 is retryable only when a fresh read proves that exact assignment
 // changed; authorization and integrity conflicts remain hard failures.
-func (c Client) classifyAssignmentReadError(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, original error) error {
+func (c Client) classifyAssignmentReadError(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, serving bool, original error) error {
 	var status *responseStatusError
 	if errors.As(original, &status) && (status.Code == http.StatusNotFound || status.Code == http.StatusConflict) {
-		if err := c.CheckAssignment(ctx, id, a); errors.Is(err, ErrAssignmentChanged) {
+		if err := c.checkAssignment(ctx, id, a, serving); errors.Is(err, ErrAssignmentChanged) {
 			return ErrAssignmentChanged
 		}
 	}
@@ -425,6 +425,16 @@ func (c Client) classifyAssignmentReadError(ctx context.Context, id Identity, a 
 // ReleaseSet downloads the exact signed parent through an existing child
 // assignment; this never broadens the caller's scope or artifact capability.
 func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformArtifact, error) {
+	return c.releaseSet(ctx, id, a, r, false)
+}
+
+// ServingReleaseSet uses the serving selection to resolve races. A superseded
+// gray or full assignment can remain discoverable after it ceases to serve.
+func (c Client) ServingReleaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease) (model.PlatformArtifact, error) {
+	return c.releaseSet(ctx, id, a, r, true)
+}
+
+func (c Client) releaseSet(ctx context.Context, id Identity, a model.PlatformConsumerAssignment, r model.PlatformArtifactRelease, serving bool) (model.PlatformArtifact, error) {
 	if a.ReleaseSetID == "" || a.ExpectedConsumerSetID == "" || id.ScopeKey != a.ScopeKey || !slices.Contains(id.ArtifactKinds, a.ArtifactKind) {
 		return model.PlatformArtifact{}, errors.New("parent assignment identity invalid")
 	}
@@ -444,10 +454,10 @@ func (c Client) ReleaseSet(ctx context.Context, id Identity, a model.PlatformCon
 		Release    model.PlatformArtifactRelease    `json:"release"`
 	}
 	if err := c.json(ctx, endpoint, id.Token, http.MethodGet, nil, &reply); err != nil {
-		return model.PlatformArtifact{}, c.classifyAssignmentReadError(ctx, id, a, err)
+		return model.PlatformArtifact{}, c.classifyAssignmentReadError(ctx, id, a, serving, err)
 	}
 	if !reflect.DeepEqual(reply.Assignment, a) || !sameReleaseAuthority(r, reply.Release) || reply.Artifact.ID != a.ReleaseSetID || reply.Artifact.ArtifactKind != model.PlatformArtifactKindReleaseSet || reply.Artifact.ScopeKey != a.ScopeKey {
-		if err := c.CheckAssignment(ctx, id, a); errors.Is(err, ErrAssignmentChanged) {
+		if err := c.checkAssignment(ctx, id, a, serving); errors.Is(err, ErrAssignmentChanged) {
 			return model.PlatformArtifact{}, ErrAssignmentChanged
 		}
 		return model.PlatformArtifact{}, errors.New("parent release binding changed")

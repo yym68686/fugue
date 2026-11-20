@@ -345,7 +345,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 	}
 	readCtx, finishRead = observeDNSSyncPhase(ctx, "candidate_parent_read")
-	parent, err := client.ReleaseSet(readCtx, id, a, release)
+	parent, err := client.ServingReleaseSet(readCtx, id, a, release)
 	finishRead(err)
 	if err != nil {
 		return err
