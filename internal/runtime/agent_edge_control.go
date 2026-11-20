@@ -31,6 +31,13 @@ func (s *AgentService) startEdgeControl(ctx context.Context) error {
 	last := ""
 	observe := func() {
 		err := control.Step(ctx)
+		failures := control.CaptureFailures()
+		if failures.SelectedEdge != "" {
+			s.logf("agent_edge_capture_failure attempt=selected_edge correlation_id=%s", failures.SelectedEdge)
+		}
+		if failures.Origin != "" {
+			s.logf("agent_edge_capture_failure attempt=origin correlation_id=%s", failures.Origin)
+		}
 		status, _ := json.Marshal(control.Status())
 		result := string(status)
 		if err != nil {

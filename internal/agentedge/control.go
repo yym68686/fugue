@@ -31,21 +31,22 @@ type ControlOptions struct {
 // acquisition uses ordinary hostname resolution after dynamic routing has
 // activated; heartbeat, operation polling and completion never fall back to it.
 type Control struct {
-	stepMu      sync.Mutex
-	mu          sync.RWMutex
-	options     ControlOptions
-	checkpoint  clientCheckpoint
-	keys        map[string]TrustKey
-	refreshDone chan struct{}
-	selector    *Selector
-	selected    *http.Client
-	acquisition *http.Client
-	now         func() time.Time
-	lastProbe   time.Time
-	refreshAt   time.Time
-	fetch       func(context.Context, string) ([]byte, error)
-	probe       func(context.Context, Grant, Candidate) Measurement
-	routeProbe  func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
+	stepMu          sync.Mutex
+	mu              sync.RWMutex
+	options         ControlOptions
+	checkpoint      clientCheckpoint
+	keys            map[string]TrustKey
+	refreshDone     chan struct{}
+	selector        *Selector
+	selected        *http.Client
+	acquisition     *http.Client
+	now             func() time.Time
+	lastProbe       time.Time
+	refreshAt       time.Time
+	captureFailures CaptureFailureWitnesses // under stepMu
+	fetch           func(context.Context, string) ([]byte, error)
+	probe           func(context.Context, Grant, Candidate) Measurement
+	routeProbe      func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 }
 
 type ControlStatus struct {
@@ -216,8 +217,12 @@ func (m *Control) fetchGrant(ctx context.Context, hint string) ([]byte, error) {
 	clients = append(clients, m.acquisition)
 	var err error
 	for _, client := range clients {
+		attempt := "origin"
+		if client == m.selected {
+			attempt = "selected_edge"
+		}
 		var raw []byte
-		raw, err = m.fetchGrantThrough(ctx, hint, client)
+		raw, err = m.fetchGrantThrough(ctx, hint, client, attempt)
 		if err == nil {
 			return raw, nil
 		}
@@ -228,7 +233,7 @@ func (m *Control) fetchGrant(ctx context.Context, hint string) ([]byte, error) {
 	return nil, err
 }
 
-func (m *Control) fetchGrantThrough(ctx context.Context, hint string, client *http.Client) ([]byte, error) {
+func (m *Control) fetchGrantThrough(ctx context.Context, hint string, client *http.Client, attempt string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(context.WithValue(ctx, grantAcquisitionContextKey{}, true), http.MethodGet, m.options.Origin+"/v1/agent/edge-candidates", nil)
 	if err != nil {
 		return nil, errors.New("Agent Edge acquisition request invalid")
@@ -243,6 +248,14 @@ func (m *Control) fetchGrantThrough(ctx context.Context, hint string, client *ht
 	}
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
+		if id := captureFailureID(response, req); id != "" {
+			switch attempt {
+			case "selected_edge":
+				m.captureFailures.SelectedEdge = id
+			case "origin":
+				m.captureFailures.Origin = id
+			}
+		}
 		return nil, fmt.Errorf("Agent Edge acquisition returned HTTP %d", response.StatusCode)
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, MaxGrantBytes+1))
@@ -257,6 +270,7 @@ func (m *Control) fetchGrantThrough(ctx context.Context, hint string, client *ht
 func (m *Control) Step(ctx context.Context) error {
 	m.stepMu.Lock()
 	defer m.stepMu.Unlock()
+	m.captureFailures = CaptureFailureWitnesses{}
 	trustErr := m.reloadTrust()
 	keys := m.currentKeys()
 	v, permissionErr := m.selector.permission(keys, m.now())
@@ -349,6 +363,15 @@ func (m *Control) Step(ctx context.Context) error {
 		}
 	}
 	return errors.Join(trustErr, fetchErr, permissionErr, probeErr)
+}
+
+// CaptureFailures returns the previous Step's two bounded acquisition hints.
+// A fallback can succeed after a recorded failure. Read after Step so logging
+// cannot add latency to acquisition or change which fallback is attempted.
+func (m *Control) CaptureFailures() CaptureFailureWitnesses {
+	m.stepMu.Lock()
+	defer m.stepMu.Unlock()
+	return m.captureFailures
 }
 
 // NextStepDelay keeps trust checks bounded while waking at a verified grant's

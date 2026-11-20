@@ -98,8 +98,14 @@ func (s *Server) handleAgentEdgeCandidates(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-store")
-	grant, policy, _, err := s.captureAgentEdgeGrant(context.WithValue(r.Context(), capturePurposeKey{}, "agent-request"), p.ActorID, hint)
+	var failureID string
+	ctx := context.WithValue(r.Context(), capturePurposeKey{}, "agent-request")
+	ctx = context.WithValue(ctx, agentCaptureFailureIDKey{}, &failureID)
+	grant, policy, _, err := s.captureAgentEdgeGrant(ctx, p.ActorID, hint)
 	if err != nil {
+		if failureID != "" {
+			w.Header().Set(agentedge.CaptureFailureIDHeader, failureID)
+		}
 		s.operationObservations().Observe("agent-response-capture-failed", 0)
 		if errors.Is(err, context.DeadlineExceeded) {
 			s.operationObservations().Observe("agent-response-context-deadline", 0)

@@ -12,6 +12,19 @@ statuses, and mismatched route-proof **field names**. DNS runtime-fact failures
 retain only allowlisted rejection codes. They do not retain audiences, origins,
 paths, response bodies, credentials or raw error text.
 
+A runtime-authenticated Agent capture failure (not a preview, an auth
+rejection, a signing failure, or an Edge-generated error) can return
+`X-Fugue-Agent-Capture-Failure-Id` on its existing 503. The API generates the
+opaque value independently of all request headers and retains it as
+`agent_failure_id` in the bounded private `agent_failures` ring. An updated
+Agent can log at most two strictly validated IDs after each acquisition step,
+tagged `selected_edge` and `origin`. A selected-path failure is observable
+even when the origin fallback succeeds. Only an exact match against the API
+receipt is evidence of the same failure: missing, malformed, duplicate,
+evicted or unmatched values cannot distinguish the source of a 503. The ID
+is not an authorization or retry input and is not stored in the grant,
+checkpoint, or error body. No extra requests are made.
+
 For a backend `503 state_replaced`, an updated DNS executor can attach fixed
 metadata to the existing failure. The API retains it as `dns_replacement` only
 if all three fields are present and allowlisted. `base` identifies the writer of

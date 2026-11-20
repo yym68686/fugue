@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -48,6 +49,7 @@ type captureObservations struct {
 
 type captureReceipt struct {
 	Sequence            uint64                    `json:"sequence"`
+	AgentFailureID      string                    `json:"agent_failure_id,omitempty"`
 	DatabaseOperationID uint64                    `json:"database_operation_id,omitempty"`
 	Kind                string                    `json:"kind"`
 	StartedAt           time.Time                 `json:"started_at"`
@@ -250,14 +252,16 @@ type captureCapacity struct {
 }
 
 type captureTrace struct {
-	mu            sync.Mutex
-	receipt       captureReceipt
-	dnsRead       *dnsReadTimings
-	dnsReadClosed bool
+	mu             sync.Mutex
+	receipt        captureReceipt
+	agentFailureID *string
+	dnsRead        *dnsReadTimings
+	dnsReadClosed  bool
 }
 
 type captureTraceKey struct{}
 type capturePurposeKey struct{}
+type agentCaptureFailureIDKey struct{}
 
 func (s *Server) beginCaptureTrace(ctx context.Context, kind string) (context.Context, *captureTrace) {
 	s.captures.mu.Lock()
@@ -265,6 +269,9 @@ func (s *Server) beginCaptureTrace(ctx context.Context, kind string) (context.Co
 	sequence := s.captures.sequence
 	s.captures.mu.Unlock()
 	t := &captureTrace{receipt: captureReceipt{Sequence: sequence, Kind: kind, StartedAt: time.Now().UTC()}}
+	if kind == "agent-request" {
+		t.agentFailureID, _ = ctx.Value(agentCaptureFailureIDKey{}).(*string)
+	}
 	return context.WithValue(ctx, captureTraceKey{}, t), t
 }
 
@@ -331,6 +338,12 @@ func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err err
 	receipt.FinishedAt = time.Now().UTC()
 	receipt.Candidates, receipt.Minimum = candidates, minimum
 	trace.mu.Unlock()
+	if err != nil && trace.agentFailureID != nil {
+		var token [16]byte
+		if _, err := rand.Read(token[:]); err == nil {
+			receipt.AgentFailureID = hex.EncodeToString(token[:])
+		}
+	}
 	s.captures.mu.Lock()
 	defer s.captures.mu.Unlock()
 	s.captures.completed++
@@ -350,6 +363,9 @@ func (s *Server) finishCaptureTrace(trace *captureTrace, outcome string, err err
 			s.captures.agentFailureEvicted++
 		}
 		s.captures.agentFailures = append(s.captures.agentFailures, receipt)
+		if trace.agentFailureID != nil {
+			*trace.agentFailureID = receipt.AgentFailureID
+		}
 	}
 	// Frequent successful management reads must not erase the failed comparison
 	// before an operator can correlate it with the exact release metadata.
