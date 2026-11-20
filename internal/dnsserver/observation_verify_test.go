@@ -24,7 +24,7 @@ func TestServingObservationAuthenticatesCheckpointAndEveryPositiveProof(t *testi
 	if err := VerifyServingObservation(service.Config, checkpoint, snapshot, now); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"signature", "assignment", "quorum", "omitted", "duplicate", "expiry", "future", "binding", "route", "checkpoint lease", "proof lease", "revoked"} {
+	for _, scenario := range []string{"signature", "assignment", "quorum", "omitted", "duplicate", "expiry", "future", "binding", "route", "checkpoint lease", "proof lease", "revoked", "not ready", "expired observation", "future observation", "foreign unready observation"} {
 		t.Run(scenario, func(t *testing.T) {
 			raw, _ := json.Marshal(snapshot)
 			var changed dnsfacts.Snapshot
@@ -33,6 +33,7 @@ func TestServingObservationAuthenticatesCheckpointAndEveryPositiveProof(t *testi
 			}
 			encoded := append([]byte(nil), checkpoint...)
 			configuration := service.Config
+			var expected string
 			switch scenario {
 			case "signature":
 				encoded[len(encoded)-3] ^= 1
@@ -60,9 +61,25 @@ func TestServingObservationAuthenticatesCheckpointAndEveryPositiveProof(t *testi
 				changed.Facts[0].Proof.ValidUntil = now.Add(time.Hour)
 			case "revoked":
 				configuration.BundleRevokedKeyIDs = []string{configuration.BundleSigningKeyID}
+			case "not ready":
+				changed.Ready = false
+				expected = "DNS observation lacks complete record readiness"
+			case "expired observation":
+				changed.ObservedAt = now.Add(-time.Hour)
+				changed.EvaluatedAt = changed.ObservedAt
+				expected = "DNS observation has expired"
+			case "future observation":
+				changed.EvaluatedAt = now.Add(time.Second)
+				expected = "DNS observation temporal ordering mismatch"
+			case "foreign unready observation":
+				changed.PlanDigest = "foreign"
+				changed.Ready = false
+				expected = "DNS observation authority mismatch"
 			}
 			if err := VerifyServingObservation(configuration, encoded, changed, now); err == nil {
 				t.Fatal("untrusted observation accepted")
+			} else if expected != "" && err.Error() != expected {
+				t.Fatalf("got %q, want %q", err, expected)
 			}
 		})
 	}

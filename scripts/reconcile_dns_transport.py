@@ -390,7 +390,7 @@ def handoff_witness(config, listener, current):
             if isinstance(error, DNSObservationRejected):
                 # A transiently incomplete set can get a fresh observation;
                 # an identity, signature, or positive-proof defect cannot.
-                retryable = stage is not None and error.category in ("record_readiness", "wire_materialization")
+                retryable = stage is not None and error.category in ("expired", "record_readiness", "wire_materialization")
             if not retryable or attempt + 1 == attempts:
                 raise
             time.sleep(HANDOFF_RETRY_SECONDS)

@@ -45,11 +45,18 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 	if err != nil || snapshot.Schema != dnsfacts.Schema || snapshot.NodeID != record.NodeID || snapshot.EdgeGroupID != record.GroupID ||
 		snapshot.PlanDigest != planDigest || snapshot.ParentDigest != record.Parent.ContentHash || snapshot.RouteArtifactID != routeID ||
 		!reflect.DeepEqual(snapshot.Assignment, record.Candidate.Assignment) || !reflect.DeepEqual(snapshot.RouteSources, record.RouteSources) ||
-		!snapshot.CheckpointValidUntil.Equal(until) || !until.After(now) || record.AppliedAt.After(now) ||
-		snapshot.ObservedAt.IsZero() || snapshot.ObservedAt.After(snapshot.EvaluatedAt) || snapshot.EvaluatedAt.After(now) ||
-		now.Sub(snapshot.EvaluatedAt) > time.Duration(payload.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second || !snapshot.Ready ||
-		len(snapshot.Facts) != len(payload.Plan.Probes) {
-		return errors.New("DNS observation authority or freshness mismatch")
+		!snapshot.CheckpointValidUntil.Equal(until) || len(snapshot.Facts) != len(payload.Plan.Probes) {
+		return errors.New("DNS observation authority mismatch")
+	}
+	if record.AppliedAt.After(now) || snapshot.ObservedAt.IsZero() ||
+		snapshot.ObservedAt.After(snapshot.EvaluatedAt) || snapshot.EvaluatedAt.After(now) {
+		return errors.New("DNS observation temporal ordering mismatch")
+	}
+	if !until.After(now) || now.Sub(snapshot.EvaluatedAt) > time.Duration(payload.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second {
+		return errors.New("DNS observation has expired")
+	}
+	if !snapshot.Ready {
+		return errors.New("DNS observation lacks complete record readiness")
 	}
 	requirements := make(map[string]platformconfig.DNSReadinessProbe, len(payload.Plan.Probes))
 	for _, requirement := range payload.Plan.Probes {
