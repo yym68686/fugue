@@ -113,9 +113,12 @@ forward generation for compensation. It verifies both the live predecessor and
 the candidate against fresh signed serving evidence before changing a socket,
 then verifies the candidate's diagnostic UDP/TCP listener and the predecessor's
 actual public UDP/TCP port 53 before changing any public traffic.
-If public observations fail, it may restore only this site's attempted changes,
-in reverse order. Compensation rechecks the exact predecessor and uses a CAS
-on the complete Service state; it cannot overwrite unrelated updates or a
+If the diagnostic listener passed but no public write was attempted, it stays
+staged when the public guard fails; a resumed run must independently verify the
+diagnostic socket again. A failed diagnostic observation never retains a stage.
+If a public write was attempted and the stage fails, it may restore only this
+site's attempted changes, in reverse order. Compensation rechecks the exact
+predecessor and uses a CAS on the complete Service state; it cannot overwrite unrelated updates or a
 replaced Service. After a public restoration it verifies UDP/TCP again and
 reports failure if the restoration or observation cannot be confirmed. A new
 handoff after compensation needs a reviewed generation above the reserved one.

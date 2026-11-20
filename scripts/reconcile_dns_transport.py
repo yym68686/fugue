@@ -661,10 +661,18 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                     diagnostic_policy = observed["verified_backend"]
         except (Exception, KeyboardInterrupt):
             compensation_errors, public = [], None
+            public_attempted = any(operation[2]["port"] == 53 for operation, _, _ in attempted)
             for operation, witness, acknowledged in reversed(attempted):
                 listener = operation[2]
                 entry = {"listener": listener["name"], "result": "unverified"}
                 evidence["compensations"].append(entry)
+                if not public_attempted and listener["port"] == diagnostic["port"] and diagnostic_policy is not None:
+                    # The diagnostic socket independently passed signed/wire
+                    # verification and public traffic has not been written.
+                    # Keep it staged rather than moving it to an unverified
+                    # predecessor. A resumed run must verify it again.
+                    entry["result"] = "retained_diagnostic_stage"
+                    continue
                 try:
                     rollback = restore_staged_listener(config, operation, witness, acknowledged)
                     entry["result"] = "restored" if rollback is not None else "not_applied"

@@ -437,7 +437,7 @@ class TransportTests(unittest.TestCase):
                                    (one["address"], 53, witness), (one["address"], 53, predecessor_binding)])
         evidence, history = run(operations, predecessor_failure=True)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
-        self.assertEqual([x["listener"] for x in evidence["compensations"]], ["diagnostic-one"])
+        self.assertEqual(evidence["compensations"], [{"listener": "diagnostic-one", "result": "retained_diagnostic_stage"}])
         self.assertEqual(evidence["predecessor_verifications"][0]["failed_samples"][0]["response_code"], 2)
         self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
         evidence, _ = run(operations, fail_port=53, fail_address=two["address"])
@@ -455,8 +455,12 @@ class TransportTests(unittest.TestCase):
             with self.subTest(predecessor=drift):
                 evidence, history = run(operations, changed_predecessor=drift)
                 self.assertEqual(evidence["applied"], ["diagnostic-one"])
-                self.assertEqual([x["listener"] for x in evidence["compensations"]], ["diagnostic-one"])
+                self.assertEqual(evidence["compensations"], [{"listener": "diagnostic-one", "result": "retained_diagnostic_stage"}])
                 self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
+        evidence, history = run([op(one)])
+        self.assertEqual(evidence["applied"], ["public-one"])
+        self.assertEqual(history[:3], [(one["address"], 15353, None), (one["address"], 53, predecessor_binding),
+                                      (one["address"], 53, witness)])
         evidence, history = run([op(two), op(diagnose_two)])
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),
