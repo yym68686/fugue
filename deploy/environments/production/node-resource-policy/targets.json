@@ -1,9 +1,9 @@
 {
   "enabled": true,
-  "generation": 8,
+  "generation": 9,
   "minimum_updater_version": "v49",
   "minimum_updater_version_by_node": {
-    "86eabf26-42a9-4f9d-998a-754115f8b829": "v50"
+    "86eabf26-42a9-4f9d-998a-754115f8b829": "v51"
   },
   "origin": "https://api.fugue.pro",
   "policy_file": "policy.json",
