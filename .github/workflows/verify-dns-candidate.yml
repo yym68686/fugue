@@ -1,0 +1,81 @@
+# Branch-only runner harness. Never merge this file or its branch exclusion.
+name: verify-dns-candidate
+
+on:
+  push:
+    branches: ['verify/fugue-dns-20261120-76bd1805']
+
+permissions:
+  contents: read
+
+env:
+  FUGUE_SOURCE: 76bd1805eb5a80ac6d21df3191de4e3f24bdacea
+  FUGUE_BASE: 026e8392a4052906c9ed1c2703172665e4977b8d
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  full-test:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.FUGUE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa4d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Verify candidate identity and run all tests
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FUGUE_SOURCE"
+          git merge-base --is-ancestor "$FUGUE_BASE" HEAD
+          test -z "$(git status --porcelain)"
+          df -h .
+          make test GOCACHE="$(go env GOCACHE)"
+  bounded-prepush:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ env.FUGUE_SOURCE }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa4d006ae7abdb4310
+        with:
+          version: v4.2.0
+      - name: Warm exactly the CI test binaries
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$FUGUE_SOURCE"
+          git merge-base --is-ancestor "$FUGUE_BASE" HEAD
+          test -z "$(git status --porcelain)"
+          go mod download
+          go test ./... -run '^$'
+      - name: Run the production CI test contract without the deploy plan
+        env:
+          PREPUSH_BASE_REF: ${{ env.FUGUE_BASE }}
+          PREPUSH_TIMEOUT_SECONDS: '360'
+          PREPUSH_MAX_ELAPSED_SECONDS: '360'
+          PREPUSH_RECEIPT: ${{ runner.temp }}/fugue-prepush-receipt.json
+        run: make prepush
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: candidate-test-receipt
+          path: ${{ runner.temp }}/fugue-prepush-receipt.json
+          if-no-files-found: ignore
+          retention-days: 7

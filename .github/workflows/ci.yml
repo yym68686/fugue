@@ -2,6 +2,7 @@ name: ci
 
 on:
   push:
+    branches-ignore: ['verify/fugue-dns-20261120-76bd1805']
   pull_request:
   schedule:
     - cron: '23 18 * * *'
