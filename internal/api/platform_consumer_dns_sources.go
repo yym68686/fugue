@@ -32,15 +32,15 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 	observeSources := s.store.NewDNSRouteSourceObserver()
 	response, err := observeAssignedDNSRouteSources(r.Context(), func() (consumerArtifactLookup, error) {
 		return s.assignedDNSRouteSourceOwnerWithReader(claims, r.PathValue("artifact_id"), ids[0], loadArtifact)
-	}, func(ctx context.Context, dns model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error) {
+	}, func(ctx context.Context, owner consumerArtifactLookup) (model.PlatformDNSRouteSourceSnapshot, error) {
+		dns := owner.Artifact
 		snapshot, err := observeSources(ctx, dns)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
 		}
-		owner, err := s.assignedDNSRouteSourceOwnerWithReader(claims, dns.ID, ids[0], loadArtifact)
-		if err != nil {
-			return model.PlatformDNSRouteSourceSnapshot{}, err
-		}
+		// Admit the inputs of the original exact owner, not an owner
+		// resolved midway through the observation. The outer read checks
+		// that owner again after both closure admission and ledger reread.
 		parent, err := loadArtifact(owner.Assignment.ReleaseSetID)
 		if err != nil {
 			return model.PlatformDNSRouteSourceSnapshot{}, err
@@ -78,12 +78,12 @@ func (s *Server) handleGetPlatformConsumerDNSRouteSources(w http.ResponseWriter,
 	_, _ = w.Write(raw)
 }
 
-func observeAssignedDNSRouteSources(ctx context.Context, lookup func() (consumerArtifactLookup, error), observe func(context.Context, model.PlatformArtifact) (model.PlatformDNSRouteSourceSnapshot, error)) (model.PlatformConsumerDNSRouteSourcesResponse, error) {
+func observeAssignedDNSRouteSources(ctx context.Context, lookup func() (consumerArtifactLookup, error), observe func(context.Context, consumerArtifactLookup) (model.PlatformDNSRouteSourceSnapshot, error)) (model.PlatformConsumerDNSRouteSourcesResponse, error) {
 	before, err := lookup()
 	if err != nil {
 		return model.PlatformConsumerDNSRouteSourcesResponse{}, err
 	}
-	snapshot, err := observe(ctx, before.Artifact)
+	snapshot, err := observe(ctx, before)
 	if err != nil {
 		return model.PlatformConsumerDNSRouteSourcesResponse{}, err
 	}
