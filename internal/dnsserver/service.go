@@ -93,6 +93,7 @@ type Service struct {
 	retainedDNSProbes             dnsReadinessScheduler
 	platformCandidate             PlatformCandidateStatus
 	platformDNSRouteFacts         []dnsReadinessFact     // guarded by platformConsumerMu; never persisted
+	shadowDNSRouteSource          *dnsShadowRouteSource  // guarded by platformConsumerMu; transport hint only
 	pendingDNSProbeWindow         *dnsServingProbeWindow // guarded by platformConsumerMu; never persisted
 	routeSourceCompiler           dnsroutesource.Compiler
 	Config                        config.DNSConfig

@@ -193,11 +193,15 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 	client := s.platformConsumerClient()
 	identity, assignment, artifact, release, err := client.Sync(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
+		if errors.Is(err, platformconsumer.ErrNoShadowAssignment) {
+			s.shadowDNSRouteSource = nil
+		}
 		return err
 	}
 	chosen := &assignment
 	candidate := dnsPlatformCandidate{Artifact: artifact, Assignment: assignment, Release: release}
 	if s.dnsShadowAlreadyAdvanced(ctx, client, identity, candidate) {
+		s.shadowDNSRouteSource = nil
 		return errDNSShadowAlreadyAdvanced
 	}
 	counts, payload, err := s.decodePlatformDNSCandidate(candidate, *chosen)
@@ -224,18 +228,24 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 		// The final source read rechecks both the exact shadow assignment and the
 		// complete source digest after probes and query evaluation. Do that once;
 		// no candidate, receipt or cursor is written before it succeeds.
-		_, _, err = s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe, func(p dnsServingPayload, facts []dnsReadinessFact) error {
+		evaluate := func(p dnsServingPayload, facts []dnsReadinessFact) error {
 			now := time.Now().UTC()
 			digest, _ := platformconfig.Digest(p.Plan)
 			readiness = &dnsReadinessReceipt{ArtifactID: artifact.ID, ArtifactDigest: artifact.ContentHash, ReleaseSetID: chosen.ReleaseSetID, ExpectedConsumerSetID: chosen.ExpectedConsumerSetID, FencingToken: chosen.FencingToken, NodeID: s.Config.DNSNodeID, Facts: facts, payload: &p, Status: summarizeDNSReadiness(p.Plan, p.Policy.DNSReadiness, facts, digest, now, now)}
 			var queryErr error
 			query, queryErr = s.evaluatePlatformDNSQueries(candidate, *chosen, readiness)
 			return queryErr
-		})
+		}
+		if s.shadowValidationParent != nil {
+			err = s.observeShadowDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, routeprobe.Probe, evaluate)
+		} else {
+			_, _, err = s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe, evaluate)
+		}
 		if err != nil {
 			return err
 		}
 	} else {
+		s.shadowDNSRouteSource = nil
 		readiness, err = s.observeDecodedPlatformDNSReadiness(ctx, candidate, *chosen, payload)
 		if err != nil {
 			return err

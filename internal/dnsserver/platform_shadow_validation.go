@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"time"
 
@@ -12,6 +13,41 @@ import (
 )
 
 var errDNSShadowAlreadyAdvanced = errors.New("exact DNS shadow release set already advanced to serving")
+
+type dnsShadowRouteSource struct {
+	assignment model.PlatformConsumerAssignment
+	release    model.PlatformArtifactRelease
+	snapshot   model.PlatformDNSRouteSourceSnapshot
+}
+
+// Back-to-back shadow sweeps need distinct physical observations, not full
+// downloads of the same source closure. Keep one authenticated response for
+// conditional transport revalidation, including while the candidate is
+// recovering. A fresh API observation, signature verification, a physical
+// probe sweep and both source-selection rechecks are still required for an ACK.
+func (s *Service) observeShadowDNSRouteSources(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, candidate dnsPlatformCandidate, payload dnsServingPayload, probe dnsReadinessProbeFunc, evaluate dnsSourceEvaluation) error {
+	var prior []model.PlatformDNSRouteSourceSnapshot
+	if cached := s.shadowDNSRouteSource; cached != nil &&
+		reflect.DeepEqual(cached.assignment, candidate.Assignment) && reflect.DeepEqual(cached.release, candidate.Release) {
+		prior = []model.PlatformDNSRouteSourceSnapshot{cached.snapshot}
+	} else {
+		s.shadowDNSRouteSource = nil
+	}
+	// Record a hint only after the source was verified and rechecked against
+	// the live ledger. A later query or recheck failure must not persist a
+	// cursor, apply a candidate or acknowledge that release.
+	read := dnsSelectedRouteSourceReader(client, id, candidate, prior...)
+	_, _, err := s.observeDNSRouteSourcesWithReader(ctx, candidate, payload, nil, probe, read, func(observed dnsServingPayload, facts []dnsReadinessFact) error {
+		snapshot := observed.routeSources.Snapshot
+		if serving := s.shadowValidationParent.currentDNSServingState(); serving != nil {
+			// Share exactly equal immutable content with the loaded closure.
+			reuseDNSRouteSourceContent(&snapshot, serving.record.RouteSources)
+		}
+		s.shadowDNSRouteSource = &dnsShadowRouteSource{candidate.Assignment, candidate.Release, snapshot}
+		return evaluate(observed, facts)
+	})
+	return err
+}
 
 // A shadow lane can still reference the exact ReleaseSet that has already
 // advanced to gray or full. The heartbeat API only accepts the newest active

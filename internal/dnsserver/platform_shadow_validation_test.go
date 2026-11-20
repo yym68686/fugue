@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -16,12 +17,119 @@ import (
 
 	"fugue/internal/config"
 	"fugue/internal/dnsroutesource"
+	"fugue/internal/dnsroutewire"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/routeprobe"
 	"fugue/internal/testfixture/celldns"
 )
+
+func TestIsolatedDNSShadowRevalidatesSourceBetweenRecoveringSweeps(t *testing.T) {
+	req, policies, activations := celldns.SourceAuthorizedRequest(t, true)
+	celldns.RetainGlobalOnly(&req)
+	compiled := celldns.Compile(t, req)
+	keys := celldns.Keys()
+	now := time.Now().UTC()
+	snapshot := celldns.SourceSnapshot(t, req, compiled.DNSArtifact, policies, activations, now)
+	assignment := model.PlatformConsumerAssignment{
+		ArtifactID: compiled.DNSArtifact.ID, ArtifactKind: compiled.DNSArtifact.ArtifactKind, ArtifactReleaseID: "shadow",
+		ReleaseSetID: compiled.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: compiled.DNSArtifact.ScopeKey,
+		ExpectedGeneration: compiled.DNSArtifact.Generation, GenerationSequence: compiled.DNSArtifact.GenerationSequence,
+		ContentHash: compiled.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "shadow",
+	}
+	release := model.PlatformArtifactRelease{
+		ID: assignment.ArtifactReleaseID, ArtifactID: assignment.ReleaseSetID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind,
+		ScopeKey: assignment.ScopeKey, Generation: compiled.ReleaseArtifact.Generation, ReleaseChannel: "shadow", FencingToken: assignment.FencingToken,
+		Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now,
+	}
+	candidate := dnsPlatformCandidate{Artifact: compiled.DNSArtifact, Assignment: assignment, Release: release}
+	parent := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "cell-dns", PlatformScopeKey: assignment.ScopeKey,
+		Zone: "example.test", CachePath: filepath.Join(t.TempDir(), "dns"), BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID}, nil)
+	parent.PlatformTokenFile = "unused"
+	worker := parent.newIsolatedDNSShadowValidator()
+	_, payload, err := worker.decodePlatformDNSCandidate(candidate, assignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _, err = worker.verifyDecodedDNSRelease(compiled.ReleaseArtifact, candidate, false, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans, err := dnsroutesource.Build(compiled.DNSArtifact, snapshot, keys, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads, bodies, probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := reads.Add(1)
+		response := model.PlatformConsumerDNSRouteSourcesResponse{Assignment: assignment, Release: release, Snapshot: snapshot}
+		if n >= 6 {
+			// A new expected-set revision is not the previous candidate,
+			// even when the underlying DNS artifact and source bytes match.
+			response.Assignment.Revision++
+		}
+		response.Snapshot.ObservedAt = time.Now().UTC()
+		validator, err := dnsroutewire.Validator(response, nil)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		got := r.Header.Get("If-None-Match")
+		if (n == 1 || n == 6) && got != "" || n != 1 && n != 6 && got != validator {
+			t.Errorf("unexpected cache validator on read %d: %q", n, got)
+		}
+		if got != "" && got == validator {
+			w.Header().Set("ETag", validator)
+			w.Header().Set(dnsroutewire.ObservedAtHeader, response.Snapshot.ObservedAt.Format(time.RFC3339Nano))
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		bodies.Add(1)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+	client := platformconsumer.Client{BaseURL: server.URL}
+	id := platformconsumer.Identity{Token: "test"}
+	probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
+		probes.Add(1)
+		for _, p := range plans.Probes {
+			if p.Hostname == host && p.Path == path && p.Address == address {
+				checked := time.Now().UTC()
+				return routeprobe.Proof{EdgeID: p.EdgeID, GroupID: p.PreviousAuthority.EdgeGroupID, Digest: p.PreviousAuthority.RouteDigest,
+					Version: "observed", State: state, TrafficRelease: plans.Bindings[p.CellPublicationDigest], CheckedAt: checked, ValidUntil: checked.Add(time.Minute)}, nil
+			}
+		}
+		return routeprobe.Proof{}, errors.New("unexpected physical probe")
+	}
+	unrecovered := errors.New("signed recovery not reached")
+	err = worker.observeShadowDNSRouteSources(t.Context(), client, id, candidate, payload, probe, func(dnsServingPayload, []dnsReadinessFact) error { return unrecovered })
+	if !errors.Is(err, unrecovered) || reads.Load() != 2 || bodies.Load() != 1 || probes.Load() == 0 {
+		t.Fatalf("first sweep: %v; reads=%d bodies=%d probes=%d", err, reads.Load(), bodies.Load(), probes.Load())
+	}
+	cursor := worker.Config.CachePath + ".platform-source-cursor.json"
+	if _, err := os.Stat(cursor); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("unrecovered shadow wrote cursor", err)
+	}
+	firstProbes := probes.Load()
+	evaluate := func(_ dnsServingPayload, facts []dnsReadinessFact) error {
+		if len(facts) == 0 || probes.Load() <= firstProbes {
+			return errors.New("shadow reused physical evidence in place of observing")
+		}
+		return nil
+	}
+	err = worker.observeShadowDNSRouteSources(t.Context(), client, id, candidate, payload, probe, evaluate)
+	if err != nil || reads.Load() != 5 || bodies.Load() != 1 {
+		t.Fatalf("second sweep did not revalidate each source read: %v; reads=%d bodies=%d", err, reads.Load(), bodies.Load())
+	}
+	candidate.Assignment.Revision++
+	err = worker.observeShadowDNSRouteSources(t.Context(), client, id, candidate, payload, probe, evaluate)
+	if err != nil || reads.Load() != 8 || bodies.Load() != 2 || parent.shadowDNSRouteSource != nil {
+		t.Fatalf("new assignment did not fetch its own closure: %v; reads=%d bodies=%d", err, reads.Load(), bodies.Load())
+	}
+}
 
 func TestIsolatedDNSShadowDefersOnlyAfterExactServingAdvance(t *testing.T) {
 	now := time.Now().UTC()

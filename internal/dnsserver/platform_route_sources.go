@@ -49,13 +49,17 @@ func (s *Service) observeDNSRouteSources(ctx context.Context, client platformcon
 	if previous != nil {
 		prior = []model.PlatformDNSRouteSourceSnapshot{previous.Snapshot}
 	}
-	return s.observeDNSRouteSourcesWithReader(ctx, c, p, previous, probe, func(ctx context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
+	return s.observeDNSRouteSourcesWithReader(ctx, c, p, previous, probe, dnsSelectedRouteSourceReader(client, id, c, prior...), evaluate...)
+}
+
+func dnsSelectedRouteSourceReader(client platformconsumer.Client, id platformconsumer.Identity, c dnsPlatformCandidate, prior ...model.PlatformDNSRouteSourceSnapshot) func(context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
+	return func(ctx context.Context) (model.PlatformDNSRouteSourceSnapshot, error) {
 		snapshot, err := client.DNSRouteSources(ctx, id, c.Assignment, c.Release, prior...)
 		if err == nil {
 			prior = []model.PlatformDNSRouteSourceSnapshot{snapshot}
 		}
 		return snapshot, err
-	}, evaluate...)
+	}
 }
 
 // Both selected and retained DNS use the same authenticated source compilation,
