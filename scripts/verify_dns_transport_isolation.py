@@ -19,6 +19,17 @@ def run(arguments, timeout=120, body=None, env=None):
     return result.stdout
 
 
+def require_json_patch_rejection(result):
+    # kubectl can render a generic Kubernetes Invalid status for a JSON Patch
+    # test failure, without including the failing operation in the message.
+    message = result.stderr.decode(errors='replace').strip()
+    if result.returncode != 1 or not (message.startswith('The request is invalid:') or
+                                      message.startswith('Error from server (Invalid):')):
+        raise ValueError('expected Kubernetes Invalid for stale JSON Patch, got '
+                         + str(result.returncode) + ': ' + message[-1000:])
+    return {'status': 'Invalid', 'exit': result.returncode, 'message': message[:1000]}
+
+
 def verify():
     root = Path(__file__).resolve().parents[1]
     cluster = 'fugue-dns-isolation-' + uuid.uuid4().hex[:10]
@@ -141,14 +152,35 @@ def verify():
                     time.sleep(1)
                 raise ValueError('isolated Service did not select the expected Ready fixture')
 
+            def read_service():
+                return json.loads(run(kube + ['get', 'service', 'entry', '-n', namespace, '-o', 'json']))
+
             rollback = service_patch('previous', 2)
             run(update_command(rollback))
             wait_selected('previous')
             time.sleep(3)
             query(address, 'previous', 'explicit-cas-rollback')
-            stale = subprocess.run(update_command(rollback), capture_output=True, timeout=20)
-            if stale.returncode == 0 or not any(s in stale.stderr.lower() for s in (b'test operation', b'json patch test', b'invalid request')):
-                raise ValueError('isolated Service did not reject the stale rollback CAS as expected')
+            before_stale = read_service()
+            desired = transport.service({'namespace': namespace, 'generation': 3},
+                                        {'name': 'entry', 'address': address, 'port': 53,
+                                         'targetPort': 53, 'selector': {'fixture': 'candidate'}})
+            fresh = transport.update_patch(before_stale, desired)
+            command = update_command(fresh)
+            dry = json.loads(run(command + ['--dry-run=server', '-o', 'json']))
+            if dry['spec']['selector'] != {'fixture': 'candidate'}:
+                raise ValueError('fresh CAS positive control did not select the candidate')
+            prior_rv = [op['value'] for op in rollback if op['path'] == '/metadata/resourceVersion']
+            fresh_rv = [op['value'] for op in fresh if op['path'] == '/metadata/resourceVersion']
+            if len(prior_rv) != 1 or fresh_rv != [before_stale['metadata']['resourceVersion']] or prior_rv == fresh_rv:
+                raise ValueError('rollback did not produce a different resourceVersion')
+            stale = [dict(op, value=prior_rv[0]) if op['path'] == '/metadata/resourceVersion' else op for op in fresh]
+            rejected = require_json_patch_rejection(subprocess.run(update_command(stale), capture_output=True, timeout=20))
+            after_stale = read_service()
+            for key in ('uid', 'resourceVersion', 'annotations'):
+                if before_stale['metadata'][key] != after_stale['metadata'][key]:
+                    raise ValueError('stale CAS changed isolated Service metadata: ' + key)
+            if after_stale['spec'] != before_stale['spec']:
+                raise ValueError('stale CAS changed isolated Service spec')
             wait_selected('previous')
             query(address, 'previous', 'stale-cas-left-previous')
             run(kube + ['exec', '-n', namespace, 'candidate', '--', '/fixture', 'restore'])
@@ -162,7 +194,7 @@ def verify():
                 raise ValueError('isolated executors restarted unexpectedly')
             return {'schema': 'fugue.dns-transport-isolation/v1', 'verified': True, 'cluster': cluster,
                     'checks': ['udp-tcp-exact-executor', 'real-retirement-cas-patch', 'retained-predecessor-alive', 'empty-ready-endpoints-no-fallback', 'predecessor-receive-counter-unchanged', 'explicit-cas-rollback', 'stale-cas-rejected', 'candidate-recovery'],
-                    'observations': observations, 'elapsed_seconds': round(time.monotonic() - started, 2)}
+                    'stale_cas': rejected, 'observations': observations, 'elapsed_seconds': round(time.monotonic() - started, 2)}
         except Exception:
             if created:
                 for arguments in [['get', 'pods', '-A', '-o', 'wide'], ['get', 'events', '-n', 'dns-isolation', '--sort-by=.lastTimestamp'], ['logs', '-n', 'dns-isolation', 'candidate', '--tail=20']]:

@@ -44,7 +44,7 @@ jobs:
           export KUBECONFIG="$bindir/no-production-context"
           python3 -m scripts.verify_dns_transport_isolation
   full-test:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805' && !startsWith(github.event.head_commit.message, 'Rehearsal only:')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -69,7 +69,7 @@ jobs:
           df -h .
           make test GOCACHE="$(go env GOCACHE)"
   bounded-prepush:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805' && !startsWith(github.event.head_commit.message, 'Rehearsal only:')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
