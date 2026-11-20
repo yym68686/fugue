@@ -23,9 +23,8 @@ func TestDNSProbePreferencesFollowLocalDeclaredCandidates(t *testing.T) {
 			wantCandidates := map[string]bool{"edge-a": true, "edge-b": true}
 			if kind == "selection" {
 				view.Records[0].AnswerPolicy.PhysicalOrder = nil
-				view.Records[0].AnswerPolicy.PhysicalSelection = &model.DNSPhysicalSelection{PrimaryEdgeID: "edge-b"}
+				view.Records[0].AnswerPolicy.PhysicalSelection = &model.DNSPhysicalSelection{PrimaryEdgeID: "edge-b", OrderedEdgeIDs: []string{"edge-b", "edge-a"}}
 				wantPreferred = map[string]bool{"edge-b": true}
-				wantCandidates = map[string]bool{}
 			} else if kind == "availability" {
 				view.Records[0].AnswerPolicy.PhysicalOrder = nil
 				view.Records[0].AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion, OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 3, RecoveryMinSeconds: 60}
@@ -49,6 +48,54 @@ func TestDNSProbePreferencesFollowLocalDeclaredCandidates(t *testing.T) {
 				t.Fatal("priority changed signed inputs or crossed DNS identity")
 			}
 		})
+	}
+}
+
+func TestDNSReadinessProbesRankedFallbackDuringPartialSweep(t *testing.T) {
+	view, plan, policy, _, _ := queryExecutionFixture()
+	policy.MaxConcurrency = 1
+	record := &view.Records[0]
+	record.AnswerPolicy.PolicyKind = model.DNSAnswerPolicyKindPhysicalQuality
+	record.AnswerPolicy.PhysicalOrder = nil
+	digest := "sha256:" + strings.Repeat("a", 64)
+	record.AnswerPolicy.PhysicalSelection = &model.DNSPhysicalSelection{
+		Version: model.DNSPhysicalSelectionVersion, Scope: "global", PrimaryEdgeID: "edge-a",
+		OrderedEdgeIDs: []string{"edge-a", "edge-b"}, CapturedAt: time.Now().UTC(),
+		DNSReceiptID: "receipt", EvidenceDigest: digest, LoadedDigest: digest, PolicyDigest: digest,
+	}
+	plan.Records[0].MinimumHealthyEdges = 1
+	background := platformconfig.DNSReadinessProbe{ID: "background", EdgeID: "edge-b", EdgeGroupID: "edge-group-b",
+		Address: "9.9.9.9", Hostname: "other.example.test", Path: "/", RouteDigest: digest}
+	plan.Probes = append([]platformconfig.DNSReadinessProbe{background}, plan.Probes...)
+	preferred, candidates := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, view.NodeID, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	scheduler := (&dnsReadinessScheduler{}).prioritize(preferred, candidates)
+	calls := 0
+	facts := scheduler.collect(ctx, &plan, &policy, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		calls++
+		if calls == 4 {
+			cancel()
+		}
+		for _, p := range plan.Probes[1:] {
+			if p.EdgeID == "edge-b" && p.Hostname == host && p.Path == path && p.Address == address {
+				now := time.Now().UTC()
+				return routeprobe.Proof{Version: "serving", EdgeID: p.EdgeID, GroupID: p.EdgeGroupID, Digest: p.RouteDigest,
+					CheckedAt: now, ValidUntil: now.Add(30 * time.Second)}, nil
+			}
+		}
+		return routeprobe.Proof{}, errors.New("unreachable or unrelated")
+	})
+	now := time.Now().UTC()
+	records, err := materializeDNSQueries(view, &plan, &policy, facts, now)
+	if err != nil || len(records[0].Candidates) != 1 || records[0].Candidates[0].EdgeID != "edge-b" {
+		t.Fatalf("partial sweep did not collect complete fallback evidence: %+v %v", records, err)
+	}
+	if answers, err := executeDNSQueryRecord(records[0], dnsGeoHint{}, now); err != nil || len(answers) != 1 {
+		t.Fatalf("no authorized fallback answer: %v %v", answers, err)
+	}
+	if candidates[dnsroutesource.ProbeKey(background)] || facts[0].Ready {
+		t.Fatal("partial sweep prioritized or accepted an unrelated target")
 	}
 }
 

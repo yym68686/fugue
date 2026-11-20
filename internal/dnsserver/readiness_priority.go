@@ -20,20 +20,22 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 		}
 		for _, record := range view.Records {
 			primary := ""
-			order := record.AnswerPolicy.PhysicalOrder
-			if selection := record.AnswerPolicy.PhysicalSelection; selection != nil {
+			var ordered []string
+			policy := record.AnswerPolicy
+			if selection := policy.PhysicalSelection; selection != nil {
 				primary = selection.PrimaryEdgeID
-			} else if order != nil && len(order.OrderedEdgeIDs) > 0 {
+				ordered = selection.OrderedEdgeIDs
+			} else if order := policy.PhysicalOrder; order != nil && len(order.OrderedEdgeIDs) > 0 {
 				primary = order.OrderedEdgeIDs[0]
+				ordered = order.OrderedEdgeIDs
 			}
 			if primary != "" {
 				primaries[hostEdge{record.Name, primary}] = true
 			}
-			var ordered []string
-			if policy := record.AnswerPolicy.Availability; policy != nil {
-				ordered = policy.OrderedEdgeIDs
-			} else if order != nil {
-				ordered = order.OrderedEdgeIDs
+			if availability := policy.Availability; availability != nil {
+				// With explicit availability, materialization only keeps
+				// targets in its independently authorized recovery pool.
+				ordered = availability.OrderedEdgeIDs
 			}
 			for _, edgeID := range ordered {
 				pool[hostEdge{record.Name, edgeID}] = true
