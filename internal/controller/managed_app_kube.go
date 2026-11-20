@@ -367,6 +367,11 @@ func (c *kubeClient) shouldSkipApply(ctx context.Context, apiPath string, obj ma
 	if cloudNativePGObject(obj) && coldFencedSource(current) {
 		return "apply_skipped_cold_fenced_source", true, nil
 	}
+	if cloudNativePGObject(obj) && objectStringField(objectMapField(objectMapField(current, "metadata"), "annotations"), postgresStageWitnessAnnotation) != "" {
+		// Ordinary applies must not undo the staged placement while a
+		// join still owns (or could provision) storage on its destination.
+		return "apply_skipped_postgres_placement_unsettled", true, nil
+	}
 	if cloudNativePGObject(obj) {
 		preserveColdMigrationAnnotation(current, obj)
 		preserveRetiredPostgresReplicaAffinity(current, obj)

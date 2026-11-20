@@ -483,6 +483,7 @@ func (s *Service) rollbackManagedPostgresStage(
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), managedPostgresStageRollbackTimeout)
 	defer cancel()
 	rollbackCtx = withForceExistingCloudNativePGWrites(rollbackCtx)
+	rollbackCtx = context.WithValue(rollbackCtx, postgresStageRollbackContextKey{}, true)
 	s.updateManagedPostgresTransitionProgress(op.ID, "managed postgres standby preparation failed; restoring the previous stable state")
 	if err := rollback(rollbackCtx); err != nil {
 		return recoverableManagedPostgresTransitionError("rollback verification", fmt.Errorf("%w; automatic staged-state rollback failed or service recovery is unverified: %v", cause, err))

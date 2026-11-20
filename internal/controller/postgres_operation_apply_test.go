@@ -62,7 +62,14 @@ func TestPostgresPlacementOperationWritesOnlyExactExistingCluster(t *testing.T) 
 			}
 			meta := objectMapField(live, "metadata")
 			meta["uid"], meta["resourceVersion"] = "cluster-uid", "10"
-			meta["annotations"] = map[string]any{"external.example/setting": "keep", runtime.CloudNativePGReconcilePodSpecAnno: runtime.CloudNativePGReconcilePodSpecHold}
+			meta["annotations"] = map[string]any{"external.example/setting": "keep"}
+			live["status"] = map[string]any{"currentPrimary": "sample-postgres-1", "targetPrimary": "sample-postgres-1", "latestGeneratedNode": 1}
+			if scenario == "release hold" {
+				meta["annotations"].(map[string]any)[runtime.CloudNativePGReconcilePodSpecAnno] = runtime.CloudNativePGReconcilePodSpecHold
+				meta["annotations"].(map[string]any)[postgresStageWitnessAnnotation] = postgresStageAnnotation(live, &postgresStageWitness{
+					Operation: op.ID, UID: "cluster-uid", Primary: "sample-postgres-1", Instances: 1, Serial: 1,
+				})[postgresStageWitnessAnnotation]
+			}
 			spec := objectMapField(live, "spec")
 			spec["instances"] = 1
 			spec["imageName"] = "example.invalid/postgres:previous"
@@ -160,6 +167,11 @@ func TestPostgresPlacementOperationWritesOnlyExactExistingCluster(t *testing.T) 
 			_, held := annotations[runtime.CloudNativePGReconcilePodSpecAnno]
 			if held != (scenario == "stage") {
 				t.Fatal("hold did not follow operation phase")
+			}
+			witness, err := postgresStageWitnessFrom(live, op.ID)
+			if err != nil || (witness != nil) != (scenario == "stage") ||
+				(witness != nil && (witness.Instances != 1 || witness.Serial != 1 || witness.Primary != "sample-postgres-1")) {
+				t.Fatalf("unexpected original placement witness: %+v (%v)", witness, err)
 			}
 		})
 	}

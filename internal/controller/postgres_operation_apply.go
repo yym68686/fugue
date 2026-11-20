@@ -81,6 +81,9 @@ func (s *Service) applyManagedPostgresOperationObjects(ctx context.Context, oper
 	if err != nil {
 		return err
 	}
+	if op.Type == model.OperationTypeDatabaseSwitchover || op.Type == model.OperationTypeDatabaseLocalize {
+		return s.applyGuardedPostgresPlacement(ctx, client, op, ns, target.Postgres.ServiceName, current, selected[0], patch)
+	}
 	_, err = client.doRequest(ctx, http.MethodPatch, cloudNativePGClusterAPIPath(ns, target.Postgres.ServiceName), "application/json-patch+json", patch, nil)
 	return err
 }

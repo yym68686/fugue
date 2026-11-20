@@ -83,3 +83,23 @@ isolated PostgreSQL crash/copy/replay rehearsal in
 `scripts/tests/cold_postgres_rehearsal.py`. That rehearsal also detects a deliberate
 WAL bit flip and verifies committed rows after replay; it does not replace live
 operator/CSI readiness checks during execution.
+
+## Placement rollback and uninitialized orphans
+
+Placement rollback records the original Cluster UID, primary, instance count,
+and CNPG generation before staging. An exact, never-scheduled surplus join is
+first suspended and drained. Fugue retains its unbound PGDATA claim outside
+CNPG ownership, restores source placement, and removes only the stopped Job.
+Rollback success also requires the primary's read-write endpoint and SQL to
+be verified. A started join, selected or bound claim, identity conflict, or
+missing witness requires explicit recovery; a normal apply must not overwrite
+the guarded placement in the meantime. This does not retire replicas or
+automatically rewrite historical drift.
+
+An orphan requested to suspend before its first `initdb` has ever been
+scheduled does not need to initialize just to reach CNPG hibernation. When
+the exact bootstrap Job and its unbound delayed-binding claim can be verified,
+Fugue suspends the Job and retains the Cluster and claim. It reports
+`suspended` only after the Job acknowledges suspension and its Pods are gone.
+This does not convert an uninitialized orphan into an adoptable database or
+waive the existing safeguards for deleting retained resources.

@@ -1553,7 +1553,16 @@ func (s *Service) reconcileMissingStoreManagedPostgresLifecycle(
 			}
 			cluster = waitForRetainedManagedPostgresClusterStatus(ctx, client, namespace, deployment, cluster)
 		}
-		statuses = append(statuses, buildManagedBackingServiceClusterStatus(managed.Status, deployment, cluster, true))
+		status := buildManagedBackingServiceClusterStatus(managed.Status, deployment, cluster, true)
+		bootstrapPaused, err := s.reconcileOrphanPostgresBootstrap(ctx, client, namespace, managed, app, deployment, cluster)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile retained cluster %s bootstrap: %w", deployment.ResourceName, err)
+		}
+		if bootstrapPaused {
+			status.Phase = model.ManagedPostgresRuntimePhaseSuspended
+			status.Message = "orphan PostgreSQL initialization paused before scheduling; unbound storage claim retained"
+		}
+		statuses = append(statuses, status)
 	}
 	return statuses, nil
 }
