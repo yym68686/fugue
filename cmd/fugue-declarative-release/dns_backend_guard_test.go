@@ -3,11 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/declarativerelease"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -43,17 +42,7 @@ func TestDNSCodeReplacementRequiresTransportHandoff(t *testing.T) {
 			if scenario == "truncated services" {
 				list["metadata"] = map[string]any{"continue": "next"}
 			}
-			raw, _ := json.Marshal(list)
-			dir := t.TempDir()
-			script := filepath.Join(dir, "kubectl")
-			program := "#!/bin/sh\ncat <<'JSON'\n" + string(raw) + "\nJSON\n"
-			if scenario == "transport unavailable" {
-				program = "#!/bin/sh\nexit 1\n"
-			}
-			if err := os.WriteFile(script, []byte(program), 0700); err != nil {
-				t.Fatal(err)
-			}
-			cluster := &kubectlCluster{kubectl: script, resources: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...), timeout: time.Second, readAttempts: 1}
+			cluster := backendGuardTestCluster(t, objects, list, identity.Namespace, scenario == "transport unavailable")
 			err := cluster.requireUnselectedDNSBackend(context.Background(), identity, workload)
 			blocked := scenario == "selected" || scenario == "transport unavailable" || scenario == "truncated services"
 			if (err != nil) != blocked {
@@ -99,17 +88,7 @@ func TestIndependentFrontReplacementRequiresPublicTransportHandoff(t *testing.T)
 			if scenario == "truncated services" {
 				list["metadata"] = map[string]any{"continue": "next"}
 			}
-			raw, _ := json.Marshal(list)
-			dir := t.TempDir()
-			script := filepath.Join(dir, "kubectl")
-			program := "#!/bin/sh\ncat <<'JSON'\n" + string(raw) + "\nJSON\n"
-			if scenario == "transport unavailable" {
-				program = "#!/bin/sh\nexit 1\n"
-			}
-			if err := os.WriteFile(script, []byte(program), 0700); err != nil {
-				t.Fatal(err)
-			}
-			cluster := &kubectlCluster{kubectl: script, resources: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...), timeout: time.Second, readAttempts: 1}
+			cluster := backendGuardTestCluster(t, objects, list, identity.Namespace, scenario == "transport unavailable")
 			err := cluster.requireUnselectedDNSBackend(context.Background(), identity, workload)
 			blocked := scenario == "selected" || scenario == "transport unavailable" || scenario == "truncated services"
 			if (err != nil) != blocked {
@@ -124,5 +103,25 @@ func TestIndependentFrontReplacementRequiresPublicTransportHandoff(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func backendGuardTestCluster(t *testing.T, objects []runtime.Object, services map[string]any, namespace string, unavailable bool) *kubectlCluster {
+	t.Helper()
+	raw, err := json.Marshal(services)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &kubectlCluster{
+		kubectl: "kubectl", resources: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...), readAttempts: 1,
+		readCommand: func(_ context.Context, input []byte, binary string, args ...string) ([]byte, error) {
+			if binary != "kubectl" || len(input) != 0 || !slices.Equal(args, []string{"get", "services", "-n", namespace, "-o", "json"}) {
+				t.Fatalf("unexpected transport guard command: %s %q", binary, args)
+			}
+			if unavailable {
+				return nil, errors.New("service list unavailable")
+			}
+			return raw, nil
+		},
 	}
 }
