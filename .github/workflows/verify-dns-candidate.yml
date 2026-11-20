@@ -33,7 +33,7 @@ jobs:
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$FUGUE_SOURCE" HEAD
-          unexpected="$(git diff --name-only "$FUGUE_SOURCE" HEAD -- . ':!.github/workflows/ci.yml' ':!.github/workflows/verify-dns-candidate.yml' ':!scripts/verify_dns_transport_isolation.py' ':!scripts/testdata/dns_checkpoint_compatibility_test.go')"
+          unexpected="$(git diff --name-only "$FUGUE_SOURCE" HEAD -- . ':!.github/workflows/ci.yml' ':!.github/workflows/verify-dns-candidate.yml' ':!scripts/verify_dns_transport_isolation.py' ':!scripts/testdata/dns_checkpoint_compatibility_test.go' ':!scripts/testdata/dns_oci_smoke.go')"
           test -z "$unexpected"
           bindir="$(mktemp -d "$RUNNER_TEMP/fugue-kind.XXXXXX")"
           curl -fsSL --retry 3 https://github.com/kubernetes-sigs/kind/releases/download/v0.30.0/kind-linux-amd64 -o "$bindir/kind"
@@ -48,7 +48,7 @@ jobs:
   checkpoint-compatibility:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       FUGUE_CURRENT_DNS: f9e131bbc61c2fbf19fc393bbc7cb7a268d8b493
       FUGUE_ROLLBACK_DNS: a7db1ac3ec17660a3b15329f3cb46e5f9b2e16ef
@@ -68,6 +68,7 @@ jobs:
           git merge-base --is-ancestor "$FUGUE_ROLLBACK_DNS" "$FUGUE_BASE"
           git merge-base --is-ancestor "$FUGUE_CURRENT_DNS" "$FUGUE_BASE"
           workspace="$(mktemp -d "$RUNNER_TEMP/fugue-dns-checkpoints.XXXXXX")"
+          echo "FUGUE_FIXTURE_WORK=$workspace" >> "$GITHUB_ENV"
           for revision in "$FUGUE_CURRENT_DNS" "$FUGUE_ROLLBACK_DNS" "$FUGUE_SOURCE"; do
             git worktree add --detach "$workspace/$revision" "$revision"
             cp scripts/testdata/dns_checkpoint_compatibility_test.go "$workspace/$revision/internal/dnsserver/hosted_global_checkpoint_test.go"
@@ -87,6 +88,53 @@ jobs:
               FUGUE_CHECKPOINT_FIXTURE="$workspace/$writer-cache" FUGUE_CHECKPOINT_MODE=read \
                 "$workspace/test-$reader" -test.v -test.run '^TestHostedGlobalDNSCheckpointCrossVersion$' -test.timeout 45s
             done
+          done
+      - name: Start the production-recipe OCI image with no network
+        if: >-
+          startsWith(github.event.head_commit.message, 'Rehearsal only: verify DNS checkpoints and OCI')
+        timeout-minutes: 18
+        run: |
+          set -euo pipefail
+          source_tree="$FUGUE_FIXTURE_WORK/$FUGUE_SOURCE"
+          test "$(git -C "$source_tree" rev-parse HEAD)" = "$FUGUE_SOURCE"
+          test -z "$(git -C "$source_tree" status --short --untracked-files=no)"
+          # Keep branch-only injected tests outside the Docker build context.
+          image_context="$FUGUE_FIXTURE_WORK/oci-source"
+          mkdir "$image_context"
+          git archive "$FUGUE_SOURCE" | tar -x -C "$image_context"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$FUGUE_FIXTURE_WORK/dns-probe" scripts/testdata/dns_oci_smoke.go
+          image="fugue-dns-oci-smoke:$FUGUE_SOURCE"
+          docker build --label "org.opencontainers.image.revision=$FUGUE_SOURCE" --platform linux/amd64 \
+            -f "$image_context/Dockerfile.edge" -t "$image" "$image_context"
+          docker image inspect "$image" --format 'image={{.Id}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}'
+          for writer in "$FUGUE_CURRENT_DNS" "$FUGUE_ROLLBACK_DNS"; do
+            state="$(mktemp -d "$FUGUE_FIXTURE_WORK/state.XXXXXX")"
+            install -m 0600 "$FUGUE_FIXTURE_WORK/$writer-cache.platform-serving.json" "$state/cache.platform-serving.json"
+            name="fugue-dns-oci-smoke-${writer:0:12}"
+            trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+            docker run -d --name "$name" --network none --read-only --security-opt=no-new-privileges \
+              --memory 256m --memory-swap 256m --pids-limit 64 --tmpfs /tmp:rw,size=8m \
+              --mount "type=bind,src=$state,dst=/state" \
+              --mount "type=bind,src=$FUGUE_FIXTURE_WORK/dns-probe,dst=/smoke,readonly" \
+              -e FUGUE_API_URL=http://127.0.0.1:1 -e FUGUE_PLATFORM_ARTIFACT_SCOPE=global \
+              -e FUGUE_DNS_ZONE=example.test -e FUGUE_DNS_NODE_ID=dns-a -e FUGUE_EDGE_GROUP_ID=edge-group-a \
+              -e FUGUE_DNS_PUBLIC_IPV4=192.0.2.10 -e FUGUE_DNS_PLATFORM_TOKEN_FILE=/state/not-a-real-token \
+              -e FUGUE_DNS_CACHE_PATH=/state/cache -e FUGUE_DNS_LISTEN_ADDR=127.0.0.1:7834 \
+              -e FUGUE_DNS_UDP_ADDR=:53 -e FUGUE_DNS_TCP_ADDR=:53 -e GOMEMLIMIT=48MiB \
+              -e FUGUE_BUNDLE_SIGNING_KEY=synthetic-dns-serving-secret -e FUGUE_BUNDLE_SIGNING_KEY_ID=key \
+              --entrypoint /usr/local/bin/fugue-dns "$image"
+            ready=false
+            for attempt in $(seq 1 15); do
+              if docker exec "$name" /smoke; then ready=true; break; fi
+              sleep 1
+            done
+            if [[ "$ready" != true ]]; then docker logs --tail 16 "$name"; exit 1; fi
+            test "$(docker inspect "$name" --format '{{.State.Running}} {{.State.OOMKilled}} {{.HostConfig.NetworkMode}} {{.HostConfig.Memory}}')" = 'true false none 268435456'
+            cmp "$FUGUE_FIXTURE_WORK/$writer-cache.platform-serving.json" "$state/cache.platform-serving.json"
+            echo "runtime_candidate=$FUGUE_SOURCE checkpoint_writer=$writer"
+            docker stop --time 8 "$name" >/dev/null
+            docker rm "$name" >/dev/null
+            trap - EXIT
           done
   full-test:
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/fugue-dns-20261120-76bd1805' && !startsWith(github.event.head_commit.message, 'Rehearsal only:')
