@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -39,24 +40,21 @@ func main() {
 		if len(os.Args) != 4 || os.Args[3] != "udp" && os.Args[3] != "tcp" {
 			panic("query address and transport required")
 		}
-		request := new(dns.Msg)
-		request.SetQuestion("transport.example.test.", dns.TypeTXT)
-		client := dns.Client{Net: os.Args[3], Timeout: time.Second}
-		response, _, err := client.Exchange(request, net.JoinHostPort(os.Args[2], "53"))
-		result := map[string]any{"reachable": false, "transport": os.Args[3], "query_id": request.Id}
+		identity, queryID, err := query(os.Args[2], os.Args[3])
+		result := map[string]any{"reachable": err == nil, "transport": os.Args[3], "query_id": queryID}
 		if err == nil {
-			if response.Id != request.Id || !response.Authoritative || response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
-				panic("invalid isolated DNS answer")
-			}
-			answer, valid := response.Answer[0].(*dns.TXT)
-			if !valid || len(answer.Txt) != 1 {
-				panic("invalid isolated DNS identity")
-			}
-			result["reachable"], result["identity"] = true, answer.Txt[0]
+			result["identity"] = identity
 		}
-		if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
-			panic(err)
+		writeJSON(os.Stdout, result)
+	case "watch":
+		if len(os.Args) != 4 {
+			panic("watch address and duration required")
 		}
+		duration, err := time.ParseDuration(os.Args[3])
+		if err != nil || duration < time.Second || duration > time.Minute {
+			panic("invalid bounded watch duration")
+		}
+		watch(os.Args[2], duration)
 	case "serve":
 		if len(os.Args) != 3 {
 			panic("server identity required")
@@ -95,4 +93,61 @@ func main() {
 	default:
 		panic("unknown fixture mode")
 	}
+}
+
+func writeJSON(output io.Writer, value any) {
+	if err := json.NewEncoder(output).Encode(value); err != nil {
+		panic(err)
+	}
+}
+
+func query(address, transport string) (string, uint16, error) {
+	request := new(dns.Msg)
+	request.SetQuestion("transport.example.test.", dns.TypeTXT)
+	client := dns.Client{Net: transport, Timeout: time.Second}
+	response, _, err := client.Exchange(request, net.JoinHostPort(address, "53"))
+	if err != nil {
+		return "", request.Id, err
+	}
+	if response.Id != request.Id || !response.Authoritative || response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+		panic("invalid isolated DNS answer")
+	}
+	answer, valid := response.Answer[0].(*dns.TXT)
+	if !valid || len(answer.Txt) != 1 {
+		panic("invalid isolated DNS identity")
+	}
+	return answer.Txt[0], request.Id, nil
+}
+
+func watch(address string, duration time.Duration) {
+	type report struct {
+		Transport string         `json:"transport"`
+		Answers   map[string]int `json:"answers"`
+		Failures  int            `json:"failures"`
+	}
+	reports := make(chan report, 2)
+	started := make(chan struct{}, 2)
+	deadline := time.Now().Add(duration)
+	for _, transport := range []string{"udp", "tcp"} {
+		go func() {
+			current := report{Transport: transport, Answers: make(map[string]int)}
+			for first := true; time.Now().Before(deadline); first = false {
+				identity, _, err := query(address, transport)
+				if err != nil {
+					current.Failures++
+				} else {
+					current.Answers[identity]++
+				}
+				if first {
+					started <- struct{}{}
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			reports <- current
+		}()
+	}
+	<-started
+	<-started
+	writeJSON(os.Stdout, map[string]bool{"ready": true})
+	writeJSON(os.Stdout, []report{<-reports, <-reports})
 }

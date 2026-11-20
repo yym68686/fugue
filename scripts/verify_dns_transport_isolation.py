@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import selectors
 import shutil
 import subprocess
 import sys
@@ -67,6 +68,7 @@ def verify():
                           'spec': {'selector': {'matchLabels': {'fixture': 'previous'}}, 'updateStrategy': {'type': 'RollingUpdate'},
                                    'template': {'metadata': {'labels': {'fixture': 'previous'}}, 'spec': spec('previous', True)}}},
                          {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'candidate', 'namespace': namespace, 'labels': {'fixture': 'candidate'}}, 'spec': spec('candidate')},
+                         {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'fallback', 'namespace': namespace, 'labels': {'fixture': 'fallback'}}, 'spec': spec('fallback')},
                          {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'entry', 'namespace': namespace},
                           'spec': {'selector': {'fixture': 'candidate'}, 'externalTrafficPolicy': 'Local', 'publishNotReadyAddresses': False, 'externalIPs': [address],
                                    'ports': [{'port': 53, 'targetPort': 53, 'protocol': protocol, 'name': protocol.lower()} for protocol in ['UDP', 'TCP']]}}]
@@ -115,11 +117,56 @@ def verify():
             run(kube + ['wait', '-n', namespace, '--for=condition=Ready', 'pod/candidate', '--timeout=30s'])
             time.sleep(3)
             query(address, 'candidate', 'candidate-recovered')
+
+            def switch(source, destination):
+                current = json.loads(run(kube + ['get', 'service', 'entry', '-n', namespace, '-o', 'json']))
+                operations = [
+                    {'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
+                    {'op': 'test', 'path': '/spec/selector', 'value': {'fixture': source}},
+                    {'op': 'replace', 'path': '/spec/selector', 'value': {'fixture': destination}},
+                ]
+                run(kube + ['patch', 'service', 'entry', '-n', namespace, '--type=json', '-p', json.dumps(operations)])
+                deadline = time.monotonic() + 6
+                while True:
+                    slices = json.loads(run(kube + ['get', 'endpointslice', '-n', namespace, '-l', 'kubernetes.io/service-name=entry', '-o', 'json']))['items']
+                    ready = [endpoint['targetRef']['name'] for item in slices for endpoint in item['endpoints']
+                             if endpoint.get('conditions', {}).get('ready') is True]
+                    if ready == [destination]:
+                        return
+                    if time.monotonic() >= deadline:
+                        raise ValueError('isolated Service did not converge to the declared executor')
+                    time.sleep(0.1)
+
+            # A real external observer starts before any selector CAS and runs
+            # through both switches. No retries hide a failed wire sample.
+            for source, destination in [('candidate', 'fallback'), ('fallback', 'candidate')]:
+                watch = subprocess.Popen(['docker', 'run', '--rm', '--network', 'kind', image, 'watch', address, '10s'],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    with selectors.DefaultSelector() as ready:
+                        ready.register(watch.stdout, selectors.EVENT_READ)
+                        if not ready.select(timeout=12) or json.loads(watch.stdout.readline()) != {'ready': True}:
+                            raise ValueError('isolated DNS wire observer failed to start')
+                    switch(source, destination)
+                    stdout, stderr = watch.communicate(timeout=15)
+                    if watch.returncode:
+                        raise ValueError('isolated DNS wire observer failed: ' + stderr.decode()[-1000:])
+                    samples = json.loads(stdout)
+                    if {sample['transport'] for sample in samples} != {'udp', 'tcp'} or any(
+                            sample['failures'] or set(sample['answers']) != {source, destination} or
+                            any(count < 1 for count in sample['answers'].values()) for sample in samples):
+                        raise ValueError('isolated DNS handoff lost an answer: ' + json.dumps(samples))
+                    observations.append({'stage': 'live-cas-' + destination, 'samples': samples})
+                finally:
+                    if watch.poll() is None:
+                        watch.kill()
+                        watch.communicate(timeout=5)
             pods = json.loads(run(kube + ['get', 'pods', '-n', namespace, '-o', 'json']))['items']
             if any(status.get('restartCount') != 0 for pod in pods for status in pod['status']['containerStatuses']):
                 raise ValueError('isolated executors restarted unexpectedly')
             return {'schema': 'fugue.dns-transport-isolation/v1', 'verified': True, 'cluster': cluster,
-                    'checks': ['udp-tcp-exact-executor', 'real-retirement-cas-patch', 'retained-predecessor-alive', 'empty-ready-endpoints-no-fallback', 'predecessor-receive-counter-unchanged', 'candidate-recovery'],
+                    'checks': ['udp-tcp-exact-executor', 'real-retirement-cas-patch', 'retained-predecessor-alive', 'empty-ready-endpoints-no-fallback', 'predecessor-receive-counter-unchanged', 'candidate-recovery', 'live-udp-tcp-fallback-cas'],
                     'observations': observations, 'elapsed_seconds': round(time.monotonic() - started, 2)}
         except Exception:
             if created:
