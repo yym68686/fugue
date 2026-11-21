@@ -96,8 +96,9 @@ declarative CI workflow. Its public declaration at
 `deploy/environments/production/edge-origin-relay/trust.json` pins the group,
 namespace, exact two Kubernetes node UIDs, each target slot DaemonSet UID,
 the immutable installer image already declared by a target slot, the CA and
-leaf SHA-256 fingerprints, and the policy verification key. The protected
-`FUGUE_ORIGIN_RELAY_LEAF_PACKAGES` input contains only `ca_pem` and a `packages`
+leaf SHA-256 fingerprints, and the policy verification key. The dedicated
+`production-edge-origin-relay` Actions environment permits only `main`; its
+temporary `FUGUE_ORIGIN_RELAY_LEAF_PACKAGES` input contains only `ca_pem` and a `packages`
 array of `{edge, slot, cert_pem, key_pem}`. CI validates all recipients and both
 certificate purposes before creating bounded disposable install Jobs. A Job
 mounts only that node and slot's exact CA-fingerprinted `origin-relay-v1`

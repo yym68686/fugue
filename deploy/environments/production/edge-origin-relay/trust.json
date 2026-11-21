@@ -1,0 +1,46 @@
+{
+  "schema": "fugue.edge.origin-relay-trust-stage/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "installer_image": "ghcr.io/yym68686/fugue-edge@sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
+  "ca_sha256": "sha256:41594ca37346b2d1df774f7e24497da7720199f88f11cc71180893b636b33f2e",
+  "policy_verify_key": "eed9b8446cc059e7606e17b38aff6f22654e412eb1f9c61f6e20fac846a53c34",
+  "targets": [
+    {
+      "edge": "bwg",
+      "slot": "a",
+      "tls_name": "slot-a.bwg.origin-relay.invalid",
+      "leaf_sha256": "sha256:86979bb1d5c74d922ca8eec9cc1c7b0eaa4a7e030a9962e838a3b09639b9d072",
+      "node_uid": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+      "workload": "fugue-fugue-edge-worker-a",
+      "workload_uid": "5332a5de-7721-4d6d-9d3a-2540375a2bf3"
+    },
+    {
+      "edge": "bwg",
+      "slot": "b",
+      "tls_name": "slot-b.bwg.origin-relay.invalid",
+      "leaf_sha256": "sha256:9460804e26420f55cabce2aa1abdbe93a7acdc5f7d642d626fb63301284e3781",
+      "node_uid": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+      "workload": "fugue-fugue-edge-worker-b",
+      "workload_uid": "08ca7fcc-bf05-40bd-ab13-415d1474a62a"
+    },
+    {
+      "edge": "vps-591f4447",
+      "slot": "a",
+      "tls_name": "slot-a.vps-591f4447.origin-relay.invalid",
+      "leaf_sha256": "sha256:5da8c8f5a6f7d3a2b9ca2872d288dbd00e4110a5c3a972a7a64744c62c8297b1",
+      "node_uid": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+      "workload": "fugue-fugue-edge-worker-a",
+      "workload_uid": "5332a5de-7721-4d6d-9d3a-2540375a2bf3"
+    },
+    {
+      "edge": "vps-591f4447",
+      "slot": "b",
+      "tls_name": "slot-b.vps-591f4447.origin-relay.invalid",
+      "leaf_sha256": "sha256:0731863573ae68517fdef04cd4c867bede5be781d14cd8a2efa7d96b6904d30e",
+      "node_uid": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+      "workload": "fugue-fugue-edge-worker-b",
+      "workload_uid": "08ca7fcc-bf05-40bd-ab13-415d1474a62a"
+    }
+  ]
+}

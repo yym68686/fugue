@@ -2384,8 +2384,9 @@ jobs:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.edge_origin_relay_trust == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
-    environment: production
-    concurrency: {group: fugue-production-edge-origin-relay-trust, cancel-in-progress: false}
+    # The leaf input is only available to main in this dedicated environment.
+    environment: production-edge-origin-relay
+    concurrency: {group: fugue-production-edge-origin-relay-trust, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
@@ -2406,7 +2407,7 @@ jobs:
           set -euo pipefail
           config=deploy/environments/production/edge-origin-relay/trust.json
           git fetch origin main
-          git diff --quiet HEAD origin/main -- "$config" cmd/fugue-edge-relay-trust scripts/stage_edge_origin_relay_trust.py internal/edge/relayroute
+          git diff --quiet HEAD origin/main -- "$config" cmd/fugue-edge-relay-trust scripts/stage_edge_origin_relay_trust.py scripts/verify_dns_configuration_revision.py internal/edge/relayroute
           python3 - "$GITHUB_SHA" <<'PY'
           import subprocess, sys
           from scripts.verify_dns_configuration_revision import workflow_projection
