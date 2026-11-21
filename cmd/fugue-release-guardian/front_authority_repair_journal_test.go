@@ -124,8 +124,40 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	}
 	acquire()
 	store := newStore()
-	if err := store.create(ctx, journal); err != nil {
-		t.Fatal(err)
+	reviewed := frontRepairReviewedIntent{Group: before.GroupID, PlanDigest: plan.Digest, AuthorizationDigest: journal.AuthorizationDigest, Nodes: cohort}
+	witnessCalls := 0
+	observeForOpen := func(_ context.Context, actual releaseguardian.CurrentAuthority, nodes []frontRepairNode) ([]frontRepairWitness, error) {
+		witnessCalls++
+		if actual != before || len(nodes) != len(cohort) {
+			return nil, errors.New("unexpected reviewed predecessor")
+		}
+		refreshed := append([]frontRepairWitness(nil), witnesses...)
+		for i := range refreshed {
+			refreshed[i].ObservedAt = time.Now().UTC()
+		}
+		return refreshed, nil
+	}
+	wrong := reviewed
+	wrong.PlanDigest = "sha256:" + strings.Repeat("e", 64)
+	if _, err := store.openReviewed(ctx, wrong, observeForOpen); err == nil {
+		t.Fatal("unreviewed preview reached the journal")
+	}
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, fenceName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("preview drift left a fence: %v", err)
+	}
+	opened, err := store.openReviewed(ctx, reviewed, observeForOpen)
+	if err != nil || opened.completed || opened.journal.Plan.Digest != plan.Digest || witnessCalls != 2 {
+		t.Fatalf("reviewed repair could not start: %+v observations=%d err=%v", opened, witnessCalls, err)
+	}
+	journal = opened.journal
+	resumed, err := store.openReviewed(ctx, reviewed, nil)
+	if err != nil || resumed.completed || resumed.journal.Digest != journal.Digest {
+		t.Fatalf("existing repair unexpectedly needed another preview: %+v err=%v", resumed, err)
+	}
+	subset := reviewed
+	subset.Nodes = cohort[:2]
+	if _, err := store.openReviewed(ctx, subset, nil); err == nil {
+		t.Fatal("subset of the cohort reopened its journal")
 	}
 	if err := store.create(ctx, journal); err != nil {
 		t.Fatalf("creation was not idempotent: %v", err)
@@ -274,6 +306,13 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	}
 	if _, err := restarted.loadCompletion(ctx, before.GroupID, other.AuthorizationDigest); !apierrors.IsNotFound(err) {
 		t.Fatalf("unrelated approval reused completion receipt: %v", err)
+	}
+	recovered, err := restarted.openReviewed(ctx, reviewed, nil)
+	if err != nil || !recovered.completed || recovered.journal.Digest != journal.Digest {
+		t.Fatalf("completed approval attempted to reopen: %+v err=%v", recovered, err)
+	}
+	if _, err := restarted.openReviewed(ctx, wrong, nil); err == nil {
+		t.Fatal("receipt was accepted for a different preview")
 	}
 	if err := restarted.create(ctx, journal); err == nil || !strings.Contains(err.Error(), "already has a completion archive") {
 		t.Fatalf("completed approval could start again: %v", err)
