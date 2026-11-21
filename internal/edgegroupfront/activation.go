@@ -3,7 +3,7 @@ package edgegroupfront
 import (
 	"time"
 
-	"fugue/internal/edgefrontstate"
+	"fugue/internal/edgegroupfront/edgefrontstate"
 )
 
 // Preserve the Front package's existing state API while keeping the

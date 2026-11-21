@@ -15,7 +15,7 @@ import (
 	"os"
 	"time"
 
-	"fugue/internal/edgefrontstate"
+	"fugue/internal/edgegroupfront/edgefrontstate"
 )
 
 func main() {

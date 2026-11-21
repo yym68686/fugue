@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fugue/internal/edgefrontstate"
+	"fugue/internal/edgegroupfront/edgefrontstate"
 	"fugue/internal/frontnetwork"
 	"fugue/internal/model"
 	"fugue/internal/proxyproto"

@@ -64,6 +64,12 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The disposable, file-only helper must not acquire third-party runtime
+	// dependencies. The retained Worker's scratch limit is not negotiable.
+	if len(info.Deps) != 0 {
+		t.Fatalf("standalone Front CAS tool has external runtime dependencies: %v", info.Deps)
+	}
+	t.Logf("static Linux/%s Front CAS: %d bytes (limit %d)", runtime.GOARCH, len(code), frontRepairToolMaxBytes)
 	var revision, modified string
 	for _, field := range info.Settings {
 		switch field.Key {
