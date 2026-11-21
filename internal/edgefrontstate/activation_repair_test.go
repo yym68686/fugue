@@ -1,4 +1,4 @@
-package edgegroupfront
+package edgefrontstate
 
 import (
 	"errors"
@@ -217,5 +217,13 @@ func TestActivationRepairPreparationHasBoundedExactLocalWrite(t *testing.T) {
 	}
 	if state, found, err := ReadActivationState(path); err != nil || !found || state != request.Expected {
 		t.Fatalf("preparation changed the serving activation: %+v, err=%v", state, err)
+	}
+}
+
+func activationRequest(operation string, expectedGeneration uint64, expectedSlot, targetSlot, bundle string, rollbackOf uint64) ActivationCASRequest {
+	return ActivationCASRequest{
+		GroupID: "edge-group-fixture", ExpectedGeneration: expectedGeneration, ExpectedSlot: expectedSlot, TargetSlot: targetSlot,
+		BundleGeneration: bundle, WorkerSourceCommit: strings.Repeat("a", 40), WorkerImageDigest: "sha256:" + strings.Repeat("a", 64),
+		Operation: operation, RollbackOfGeneration: rollbackOf, Reason: "edge group activation test",
 	}
 }

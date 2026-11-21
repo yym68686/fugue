@@ -15,7 +15,7 @@ import (
 	"os"
 	"time"
 
-	"fugue/internal/edgegroupfront"
+	"fugue/internal/edgefrontstate"
 )
 
 func main() {
@@ -66,7 +66,7 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 		}
 		return runRepair(*stateFile, *repairRequest, false, stdout)
 	}
-	request := edgegroupfront.ActivationCASRequest{
+	request := edgefrontstate.ActivationCASRequest{
 		RequirePublicationPreparation: *requirePreparation,
 		GroupID:                       *groupID, ExpectedGeneration: *expectedGeneration, InitialGeneration: *initialGeneration, ExpectedSlot: *expectedSlot, TargetSlot: *targetSlot,
 		BundleGeneration: *bundleGeneration, WorkerSourceCommit: *workerSourceCommit, WorkerImageDigest: *workerImageDigest,
@@ -75,9 +75,9 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	var receipt any
 	var err error
 	if *prepare {
-		receipt, err = edgegroupfront.PreparePublication(*stateFile, request, now)
+		receipt, err = edgefrontstate.PreparePublication(*stateFile, request, now)
 	} else {
-		receipt, err = edgegroupfront.ApplyActivationCAS(*stateFile, request, now)
+		receipt, err = edgefrontstate.ApplyActivationCAS(*stateFile, request, now)
 	}
 	if err != nil {
 		return err
@@ -100,18 +100,18 @@ func runRepair(path, encoded string, prepare bool, stdout io.Writer) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	var write edgegroupfront.ActivationRepairWrite
-	if decoder.Decode(&write) != nil || decoder.Decode(&struct{}{}) != io.EOF || write.Schema != edgegroupfront.ActivationRepairWriteSchemaV1 {
+	var write edgefrontstate.ActivationRepairWrite
+	if decoder.Decode(&write) != nil || decoder.Decode(&struct{}{}) != io.EOF || write.Schema != edgefrontstate.ActivationRepairWriteSchemaV1 {
 		return errors.New("Front repair request schema is invalid")
 	}
 	if prepare {
-		receipt, err := edgegroupfront.PrepareActivationRepairPublication(path, write.Request, write.ExpiresAt)
+		receipt, err := edgefrontstate.PrepareActivationRepairPublication(path, write.Request, write.ExpiresAt)
 		if err != nil {
 			return err
 		}
 		return writeReceipt(stdout, receipt)
 	}
-	receipt, err := edgegroupfront.ApplyActivationRepairCAS(path, write.Request, write.ExpiresAt)
+	receipt, err := edgefrontstate.ApplyActivationRepairCAS(path, write.Request, write.ExpiresAt)
 	if err != nil {
 		return err
 	}

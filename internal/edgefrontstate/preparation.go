@@ -1,4 +1,4 @@
-package edgegroupfront
+package edgefrontstate
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ type PublicationPreparation struct {
 
 func (p PublicationPreparation) Matches(current ActivationState, slot, source string, now time.Time) bool {
 	return p.Schema == PublicationPreparationSchema && validateActivationState(p.Previous) == nil &&
-		p.Previous == current && p.TargetSlot != "" && p.TargetSlot == normalizeSlot(slot) && p.TargetSlot != current.ActiveSlot &&
+		p.Previous == current && p.TargetSlot != "" && p.TargetSlot == NormalizeSlot(slot) && p.TargetSlot != current.ActiveSlot &&
 		p.WorkerSourceCommit == source && activationCommitPattern.MatchString(source) &&
 		activationDigestPattern.MatchString(p.WorkerImageDigest) && p.BundleGeneration != "" &&
 		!p.CreatedAt.IsZero() && !p.CreatedAt.Before(current.UpdatedAt) && !p.CreatedAt.After(now) && p.ExpiresAt.After(now) &&
@@ -59,10 +59,10 @@ func PreparePublication(path string, request ActivationCASRequest, now time.Time
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
 	current, exists, err := ReadActivationState(path)
-	if err != nil || !exists || current.GroupID != request.GroupID || current.Generation != request.ExpectedGeneration || current.Generation == ^uint64(0) || now.Before(current.UpdatedAt) || current.ActiveSlot != normalizeSlot(request.ExpectedSlot) || current.ActiveSlot == normalizeSlot(request.TargetSlot) {
+	if err != nil || !exists || current.GroupID != request.GroupID || current.Generation != request.ExpectedGeneration || current.Generation == ^uint64(0) || now.Before(current.UpdatedAt) || current.ActiveSlot != NormalizeSlot(request.ExpectedSlot) || current.ActiveSlot == NormalizeSlot(request.TargetSlot) {
 		return PublicationPreparation{}, ErrActivationCASConflict
 	}
-	return writePublicationPreparation(path, current, normalizeSlot(request.TargetSlot), request.BundleGeneration,
+	return writePublicationPreparation(path, current, NormalizeSlot(request.TargetSlot), request.BundleGeneration,
 		request.WorkerSourceCommit, request.WorkerImageDigest, now, nil)
 }
 

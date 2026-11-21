@@ -1,4 +1,4 @@
-package edgegroupfront
+package edgefrontstate
 
 import (
 	"errors"
@@ -177,7 +177,7 @@ func (request ActivationRepairCASRequest) validate() error {
 }
 
 func (release ActivationRepairRelease) valid() bool {
-	return normalizeSlot(release.Slot) != "" && normalizeSlot(release.Slot) == release.Slot &&
+	return NormalizeSlot(release.Slot) != "" && NormalizeSlot(release.Slot) == release.Slot &&
 		activationCommitPattern.MatchString(release.WorkerSourceCommit) && activationDigestPattern.MatchString(release.WorkerImageDigest) &&
 		len(release.BundleGeneration) <= 255 && release.BundleGeneration != "" && strings.TrimSpace(release.BundleGeneration) == release.BundleGeneration
 }
