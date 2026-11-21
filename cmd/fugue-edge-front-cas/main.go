@@ -46,16 +46,25 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	prepare := flags.Bool("prepare-publication", false, "prepare signed current publication without changing Front activation")
 	requirePreparation := flags.Bool("require-publication-preparation", false, "require exact unexpired preparation before activation")
 	repairRequest := flags.String("repair-request", "", "base64url of an exact short-lived journaled repair write")
+	repairPrepare := flags.String("repair-prepare-request", "", "base64url of an exact short-lived journaled inactive Worker preparation")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid edge front CAS arguments")
 	}
-	isRepair := false
-	flags.Visit(func(f *flag.Flag) { isRepair = isRepair || f.Name == "repair-request" })
-	if isRepair {
-		if flags.NFlag() != 2 || *stateFile == "" {
-			return errors.New("Front repair mode requires only state-file and repair-request")
+	repairMode := ""
+	flags.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "repair-request", "repair-prepare-request":
+			repairMode = f.Name
 		}
-		return runRepair(*stateFile, *repairRequest, stdout)
+	})
+	if repairMode != "" {
+		if flags.NFlag() != 2 || *stateFile == "" {
+			return errors.New("Front repair requires state-file and exactly one repair command")
+		}
+		if repairMode == "repair-prepare-request" {
+			return runRepair(*stateFile, *repairPrepare, true, stdout)
+		}
+		return runRepair(*stateFile, *repairRequest, false, stdout)
 	}
 	request := edgegroupfront.ActivationCASRequest{
 		RequirePublicationPreparation: *requirePreparation,
@@ -76,7 +85,7 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	return writeReceipt(stdout, receipt)
 }
 
-func runRepair(path, encoded string, stdout io.Writer) error {
+func runRepair(path, encoded string, prepare bool, stdout io.Writer) error {
 	if len(encoded) == 0 || len(encoded) > 16<<10 {
 		return errors.New("Front repair request size is invalid")
 	}
@@ -94,6 +103,13 @@ func runRepair(path, encoded string, stdout io.Writer) error {
 	var write edgegroupfront.ActivationRepairWrite
 	if decoder.Decode(&write) != nil || decoder.Decode(&struct{}{}) != io.EOF || write.Schema != edgegroupfront.ActivationRepairWriteSchemaV1 {
 		return errors.New("Front repair request schema is invalid")
+	}
+	if prepare {
+		receipt, err := edgegroupfront.PrepareActivationRepairPublication(path, write.Request, write.ExpiresAt)
+		if err != nil {
+			return err
+		}
+		return writeReceipt(stdout, receipt)
 	}
 	receipt, err := edgegroupfront.ApplyActivationRepairCAS(path, write.Request, write.ExpiresAt)
 	if err != nil {

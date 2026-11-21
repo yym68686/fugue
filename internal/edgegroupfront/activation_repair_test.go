@@ -163,3 +163,59 @@ func TestActivationRepairDeadlineSurvivesContentionAndDelayBeforeReplace(t *test
 		t.Fatalf("expired write reached disk: state=%+v err=%v", read, err)
 	}
 }
+
+func TestActivationRepairPreparationHasBoundedExactLocalWrite(t *testing.T) {
+	path, request, _, now := seedPartialRepair(t)
+	deadline := now.Add(5 * time.Second)
+	clock := func() time.Time { return now }
+	if _, err := prepareActivationRepairPublication(path, request, deadline, clock); err == nil {
+		t.Fatal("prepared a serving Worker")
+	}
+	rollback := activationRequest(ActivationOperationRollback, 2, "b", "a", "bundle-a", 2)
+	rollback.WorkerSourceCommit, rollback.WorkerImageDigest = request.Previous.WorkerSourceCommit, request.Previous.WorkerImageDigest
+	phase, err := ApplyActivationCAS(path, rollback, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Expected = phase.Current
+	changed := request
+	changed.Expected.Reason = "not the journal predecessor"
+	if _, err := prepareActivationRepairPublication(path, changed, deadline, clock); !errors.Is(err, ErrActivationCASConflict) {
+		t.Fatalf("preparation did not fence complete predecessor: %v", err)
+	}
+	lock, err := acquireActivationLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, busyErr := prepareActivationRepairPublication(path, request, deadline, clock)
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(busyErr, ErrActivationCASConflict) {
+		t.Fatalf("preparation did not reject lock contention: %v", busyErr)
+	}
+	checks := 0
+	if _, err := prepareActivationRepairPublication(path, request, deadline, func() time.Time {
+		checks++
+		if checks == 3 {
+			return deadline
+		}
+		return now
+	}); err == nil || checks != 3 {
+		t.Fatalf("preparation did not check deadline before atomic replacement: checks=%d err=%v", checks, err)
+	}
+	if _, found, err := ReadPublicationPreparation(path); err != nil || found {
+		t.Fatalf("expired preparation reached disk: found=%v err=%v", found, err)
+	}
+	first, err := prepareActivationRepairPublication(path, request, deadline, clock)
+	if err != nil || first.TargetSlot != "b" || first.ExpiresAt.Sub(first.CreatedAt) != PublicationPreparationLifetime {
+		t.Fatalf("bad preparation: %+v, err=%v", first, err)
+	}
+	second, err := prepareActivationRepairPublication(path, request, deadline, func() time.Time { return now.Add(time.Second) })
+	if err != nil || second != first {
+		t.Fatalf("preparation replay changed the original expiration: %+v, err=%v", second, err)
+	}
+	if state, found, err := ReadActivationState(path); err != nil || !found || state != request.Expected {
+		t.Fatalf("preparation changed the serving activation: %+v, err=%v", state, err)
+	}
+}

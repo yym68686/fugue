@@ -3,6 +3,7 @@ package edgegroupfront
 import (
 	"errors"
 	"math"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -43,21 +44,8 @@ func ApplyActivationRepairCAS(path string, request ActivationRepairCASRequest, e
 }
 
 func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, expiresAt time.Time, clock func() time.Time) (ActivationReceipt, error) {
-	if err := validateActivationPath(path); err != nil {
-		return ActivationReceipt{}, err
-	}
-	if err := request.validate(); err != nil {
-		return ActivationReceipt{}, err
-	}
-	started := clock().UTC()
-	if expiresAt.IsZero() || !started.Before(expiresAt) || expiresAt.Sub(started) > 15*time.Second {
-		return ActivationReceipt{}, errors.New("Front repair write deadline is missing, expired or excessive")
-	}
-	lock, err := acquireActivationLockMode(path, syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, started, err := beginActivationRepairWrite(path, request, expiresAt, clock)
 	if err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
-			return ActivationReceipt{}, errors.Join(ErrActivationCASConflict, err)
-		}
 		return ActivationReceipt{}, err
 	}
 	defer lock.Close()
@@ -98,6 +86,61 @@ func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, e
 		}
 		return nil
 	})
+}
+
+// PrepareActivationRepairPublication makes the same bounded local write as
+// activation repair, but only to the inactive Worker's short-lived preparation
+// file. It never refreshes an existing grant or changes the serving pointer.
+func PrepareActivationRepairPublication(path string, request ActivationRepairCASRequest, expiresAt time.Time) (PublicationPreparation, error) {
+	return prepareActivationRepairPublication(path, request, expiresAt, time.Now)
+}
+
+func prepareActivationRepairPublication(path string, request ActivationRepairCASRequest, expiresAt time.Time, clock func() time.Time) (PublicationPreparation, error) {
+	if request.Expected.ActiveSlot == request.Committed.Slot {
+		return PublicationPreparation{}, errors.New("Front repair preparation requires a divergent member")
+	}
+	lock, started, err := beginActivationRepairWrite(path, request, expiresAt, clock)
+	if err != nil {
+		return PublicationPreparation{}, err
+	}
+	defer lock.Close()
+	current, found, err := ReadActivationState(path)
+	if err != nil || !found || !sameRepairActivation(current, request.Expected) {
+		return PublicationPreparation{}, errors.Join(ErrActivationCASConflict, err)
+	}
+	now := clock().UTC()
+	if now.Before(started) || now.Before(current.UpdatedAt) || !now.Before(expiresAt) {
+		return PublicationPreparation{}, errors.New("Front repair preparation clock or deadline is invalid")
+	}
+	return writePublicationPreparation(path, current, request.Committed.Slot, request.Committed.BundleGeneration,
+		request.Committed.WorkerSourceCommit, request.Committed.WorkerImageDigest, now, func() error {
+			checked := clock().UTC()
+			if checked.Before(now) || !checked.Before(expiresAt) {
+				return errors.New("Front repair preparation deadline expired before replacing preparation")
+			}
+			return nil
+		})
+}
+
+func beginActivationRepairWrite(path string, request ActivationRepairCASRequest, expiresAt time.Time, clock func() time.Time) (*os.File, time.Time, error) {
+	if err := validateActivationPath(path); err != nil {
+		return nil, time.Time{}, err
+	}
+	if err := request.validate(); err != nil {
+		return nil, time.Time{}, err
+	}
+	started := clock().UTC()
+	if expiresAt.IsZero() || !started.Before(expiresAt) || expiresAt.Sub(started) > 15*time.Second {
+		return nil, time.Time{}, errors.New("Front repair write deadline is missing, expired or excessive")
+	}
+	lock, err := acquireActivationLockMode(path, syscall.LOCK_EX|syscall.LOCK_NB)
+	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, time.Time{}, errors.Join(ErrActivationCASConflict, err)
+		}
+		return nil, time.Time{}, err
+	}
+	return lock, started, nil
 }
 
 func (request ActivationRepairCASRequest) validate() error {

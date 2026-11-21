@@ -271,10 +271,6 @@ func validateActivationPath(path string) error {
 	return nil
 }
 
-func replaceActivationState(path string, raw []byte) error {
-	return replaceActivationStateGuarded(path, raw, nil)
-}
-
 func replaceActivationStateGuarded(path string, raw []byte, beforeReplace func() error) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".edge-front-activation-*")

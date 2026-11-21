@@ -133,6 +133,9 @@ func TestRunRepairRequiresExactBoundedWrite(t *testing.T) {
 	if err := run(args(""), &bytes.Buffer{}, now); err == nil {
 		t.Fatal("expired repair was not rejected")
 	}
+	if err := run(append(args(""), "--repair-prepare-request", "invalid"), &bytes.Buffer{}, now); err == nil {
+		t.Fatal("combined repair modes were not rejected")
+	}
 	write.ExpiresAt = time.Now().Add(10 * time.Second)
 	if err := run(args(`,"unknown":true}`), &bytes.Buffer{}, now); err == nil {
 		t.Fatal("unknown repair request data was not rejected")
