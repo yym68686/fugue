@@ -117,7 +117,7 @@ def load_config(path):
         seen = set()
         for stage in stages:
             mandatory = {"address", "previous_revision", "candidate_revision"}
-            if not isinstance(stage, dict) or (set(stage) - {"recovery_fallback"}) != mandatory:
+            if not isinstance(stage, dict) or (set(stage) - {"recovery_fallback", "failed_predecessor"}) != mandatory:
                 raise ValueError("DNS handoff stage requires an address and exact revisions")
             address = stage["address"]
             public = [x for x in listeners if x["address"] == address and x["port"] == 53]
@@ -136,6 +136,11 @@ def load_config(path):
                         not isinstance(fallback["pod_uid"], str) or not re.fullmatch(
                             r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", fallback["pod_uid"])):
                     raise ValueError("DNS recovery fallback must declare a distinct selector, revision and Pod UID")
+            if "failed_predecessor" in stage:
+                from scripts.dns_transport_failed_predecessor import validate_stage
+                if "rollback_generation" not in config:
+                    raise ValueError("DNS failed predecessor recovery requires a reserved compensation generation")
+                validate_stage(stage)
     return config
 
 
@@ -373,6 +378,7 @@ def handoff_witness(config, listener, current):
     node = owner["metadata"]["name"]
     last_error = None
     stage = next((s for s in config.get("handoffs", []) if s["address"] == listener["address"]), None)
+    failed = stage is not None and "failed_predecessor" in stage
     from scripts.recover_dns_transport import DNSObservationRejected
     attempts = RECOVERY_ATTEMPTS if selected else HANDOFF_ATTEMPTS
     for attempt in range(attempts):
@@ -387,7 +393,8 @@ def handoff_witness(config, listener, current):
                 # Both calls are read-only and independently recheck Pod UID
                 # and resourceVersion; later EndpointSlice/CAS checks remain.
                 with ThreadPoolExecutor(max_workers=2) as pool:
-                    old_read = pool.submit(handoff_backend, namespace, current["spec"]["selector"], node, old_port)
+                    old_args = {"read_runtime": False} if failed else {}
+                    old_read = pool.submit(handoff_backend, namespace, current["spec"]["selector"], node, old_port, **old_args)
                     candidate_read = pool.submit(handoff_backend, namespace, listener["selector"], node, listener["targetPort"])
                     old, candidate = old_read.result(), candidate_read.result()
             else:
@@ -408,13 +415,16 @@ def handoff_witness(config, listener, current):
             if stage:
                 for role, backend, port in (("predecessor", old, old_port),
                                             ("candidate", candidate, listener["targetPort"])):
+                    if failed and role == "predecessor":
+                        continue  # Requires a signed *unready* snapshot, not the normal ready predecessor.
                     try:
                         verify_handoff_backend(role, backend, namespace, port, recovery="recovery_fallback" in stage)
                     except DNSObservationRejected as error:
                         # Include the side, not the private verifier input.
                         error.add_note("DNS staged listener " + listener["name"] + " " + role)
                         raise
-            validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
+            if not failed:
+                validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
             if stage and "recovery_fallback" in stage:
                 try:
                     fallback = recovery_fallback_backend(config, listener, stage, node)
@@ -424,8 +434,13 @@ def handoff_witness(config, listener, current):
                     raise
                 if fallback["pod"]["metadata"]["uid"] in (old["pod"]["metadata"]["uid"], candidate["pod"]["metadata"]["uid"]):
                     raise ValueError("DNS recovery fallback must be an independent backend")
-                validate_handoff_snapshots(candidate["snapshot"], fallback["snapshot"], node)
                 revisions["fallback_uid"] = fallback["pod"]["metadata"]["uid"]
+                if failed:
+                    from scripts.dns_transport_failed_predecessor import witness
+                    revisions["failed_predecessor"] = witness(config, stage, listener, current, owner["metadata"],
+                                                               old, candidate, fallback)
+                else:
+                    validate_handoff_snapshots(candidate["snapshot"], fallback["snapshot"], node)
             return {"node_uid": owner["metadata"]["uid"], "old_uid": old["pod"]["metadata"]["uid"],
                     "candidate_uid": candidate["pod"]["metadata"]["uid"], **revisions,
                     "assignment": candidate["snapshot"]["assignment"], "parent_digest": candidate["snapshot"]["parent_digest"],
@@ -557,6 +572,10 @@ def observe_recovery_fallback(config, stage, listener, public_service, witness, 
 
     namespace = config["namespace"]
     owner = listener_node(listener)["metadata"]
+    failure = stage.get("failed_predecessor")
+    if failure:
+        from scripts.dns_transport_failed_predecessor import require_listener_identity
+        require_listener_identity(listener, public_service, owner, failure)
     if owner["uid"] != witness["node_uid"]:
         raise ValueError("DNS recovery fallback node was replaced")
     backend = recovery_fallback_backend(config, listener, stage, owner["name"], verifier=verifier)
@@ -596,6 +615,9 @@ def observe_recovery_fallback(config, stage, listener, public_service, witness, 
     snapshot = backend["snapshot"]
     if policy["assignment"] != snapshot["assignment"] or policy["parent_digest"] != snapshot["parent_digest"]:
         raise ValueError("DNS recovery fallback changed assignment during UDP/TCP observation")
+    if failure:
+        from scripts.dns_transport_rollback_authority import require_current_rollback
+        require_current_rollback(snapshot, failure)
     unchanged_backend(namespace, public_service, pod)
     return {"candidate_uid": witness["fallback_uid"], "assignment": snapshot["assignment"],
             "parent_digest": snapshot["parent_digest"], "plan_digest": snapshot["plan_digest"]}
@@ -606,6 +628,7 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
 
     address = stage["address"]
     degraded_predecessor = stage.get("require_observed_predecessor") is True
+    failure = stage.get("failed_predecessor")
     listener = next(x for x in config["listeners"] if x["address"] == address and x["port"] == port)
     namespace = config["namespace"]
     owner = listener_node(listener)["metadata"]
@@ -626,6 +649,13 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
             candidate = handoff_backend(namespace, listener["selector"], owner["name"], listener["targetPort"])
             pod = candidate["pod"]
             uid = pod["metadata"]["uid"]
+            if failure:
+                from scripts.dns_transport_failed_predecessor import require_listener_identity
+                require_listener_identity(listener, service_before, owner, failure)
+                fallback = stage["recovery_fallback"]
+                expected_uid = fallback["pod_uid"] if listener["selector"] == fallback["selector"] else failure["candidate_pod_uid"]
+                if uid != expected_uid:
+                    raise ValueError("DNS recovery socket does not select its declared backend")
             if pod["metadata"].get("annotations", {}).get("fugue.pro/oci-revision") != stage["candidate_revision"] or (
                     witness and (uid != witness["candidate_uid"] or owner["uid"] != witness["node_uid"])):
                 raise ValueError("DNS handoff candidate revised or replaced before public verification")
@@ -658,6 +688,9 @@ def observe_stage(config, stage, witness, port, *, policy_path, observer, verifi
             policy = expectations["servers"][0]["policy"]
             if signed["assignment"] != policy["assignment"] or signed["parent_digest"] != policy["parent_digest"]:
                 raise ValueError("DNS handoff assignment changed during socket verification")
+            if failure:
+                from scripts.dns_transport_rollback_authority import require_current_rollback
+                require_current_rollback(signed, failure)
             unchanged_backend(namespace, service_before, pod)
             accepted["verified_backend"] = {"candidate_uid": uid, "assignment": signed["assignment"],
                                             "parent_digest": signed["parent_digest"], "plan_digest": signed["plan_digest"]}
@@ -707,7 +740,8 @@ def restore_staged_listener(config, operation, witness, write_acknowledged, *, r
         raise ValueError("DNS compensation refuses Service state not written by this handoff")
     validate_existing(live, desired)
     stage = next((item for item in config.get("handoffs", [])
-                  if item["address"] == listener["address"] and listener["port"] == 53), None)
+                  if item["address"] == listener["address"] and
+                  (listener["port"] == 53 or "failed_predecessor" in item)), None)
     use_recovery = stage is not None and "recovery_fallback" in stage
     if use_recovery:
         if verify_fallback is None:
@@ -756,8 +790,11 @@ def validate_witness_policy(policy, witness, uid_key):
         raise ValueError("DNS handoff assignment changed after " + uid_key + " verification")
 
 
-def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage, verify_fallback=None):
-    def apply_one(operation, *, diagnostic_policy=None, predecessor_policy=None, fallback_policy=None, attempted=None):
+def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage, verify_fallback=None, verify_failure=None):
+    from scripts.dns_transport_failed_predecessor import validate_failure_observation
+
+    def apply_one(operation, *, diagnostic_policy=None, predecessor_policy=None, fallback_policy=None,
+                  failure_observation=None, stage=None, attempted=None):
         command, body, listener, current, witness = operation
         if witness is not None:
             witness = revalidate_handoff_witness(config, listener, current, witness)
@@ -769,6 +806,8 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                     validate_witness_policy(policy, witness, uid_key)
                 except ValueError as error:
                     raise ValueError("DNS handoff assignment changed after " + role + " verification") from error
+        if failure_observation is not None:
+            validate_failure_observation(failure_observation, stage, current, witness)
         if attempted is not None:
             attempted.append([operation, witness, False])
         kubectl(*command, body=body)
@@ -787,6 +826,7 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         evidence[name] = []
     for stage in config["handoffs"]:
         use_recovery = "recovery_fallback" in stage
+        recover_failure = "failed_predecessor" in stage
         if use_recovery:
             evidence.setdefault("fallback_verifications", [])
         diagnostic = stage_diagnostic(config, stage["address"])
@@ -797,30 +837,39 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                 operation = next((op for op in planned if (op[2]["address"], op[2]["port"]) == (stage["address"], port)), None)
                 predecessor_policy = None
                 fallback_policy = None
-                if port == 53 and operation:
+                failure_observation = None
+                if operation and (port == 53 or recover_failure):
                     _, _, listener, previous, witness = operation
                     if use_recovery:
                         fallback_policy = verify_fallback(config, stage, listener, previous, witness)
                         validate_witness_policy(fallback_policy, witness, "fallback_uid")
                         evidence["fallback_verifications"].append(fallback_policy)
                         save_evidence()
-                    # Reconstructing a signed answer does not show that the
-                    # public predecessor's actual socket can serve it. Verify
-                    # that exact backend as the fallback before changing :53.
-                    old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
-                    old_stage, old_binding = predecessor_stage_identity(stage, witness)
-                    verified = observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
-                                                    "predecessor_verifications", save_evidence)
-                    predecessor_policy = verified["verified_backend"]
+                    if port == 53:
+                        if recover_failure:
+                            failure_observation = verify_failure(config, stage, listener, previous)
+                            validate_failure_observation(failure_observation, stage, previous, witness)
+                            evidence["predecessor_verifications"].append(failure_observation)
+                            save_evidence()
+                        else:
+                            # A signed expected answer does not prove the
+                            # predecessor can serve it on the public socket.
+                            old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
+                            old_stage, old_binding = predecessor_stage_identity(stage, witness)
+                            verified = observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
+                                                            "predecessor_verifications", save_evidence)
+                            predecessor_policy = verified["verified_backend"]
                 witness = apply_one(operation, diagnostic_policy=diagnostic_policy,
                                     predecessor_policy=predecessor_policy, fallback_policy=fallback_policy,
-                                    attempted=attempted) if operation else None
+                                    failure_observation=failure_observation, stage=stage, attempted=attempted) if operation else None
                 # Re-observe even if the socket was switched by a previous run.
                 observed = observe_stage_result(verify_stage, config, stage, witness, port, evidence, report, save_evidence)
+                if recover_failure and witness is not None:
+                    validate_witness_policy(observed["verified_backend"], witness, "candidate_uid")
                 if port == diagnostic["port"]:
                     diagnostic_policy = observed["verified_backend"]
         except (Exception, KeyboardInterrupt):
-            compensation_errors, public = [], None
+            compensation_errors, restored_sockets = [], []
             public_attempted = any(operation[2]["port"] == 53 for operation, _, _ in attempted)
             for operation, witness, acknowledged in reversed(attempted):
                 listener = operation[2]
@@ -834,27 +883,29 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                     entry["result"] = "retained_diagnostic_stage"
                     continue
                 try:
-                    if use_recovery and listener["port"] == 53:
+                    if use_recovery and (listener["port"] == 53 or recover_failure):
                         rollback = restore_staged_listener(config, operation, witness, acknowledged,
                                                            verify_fallback=verify_fallback)
                     else:
                         rollback = restore_staged_listener(config, operation, witness, acknowledged)
                     entry["result"] = "restored" if rollback is not None else "not_applied"
-                    if rollback is not None and listener["port"] == 53:
-                        public = (rollback, witness, entry)
+                    if rollback is not None and (listener["port"] == 53 or recover_failure):
+                        restored_sockets.append((rollback, witness, entry, listener["port"]))
                 except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                     compensation_errors.append(error)
-            if public is not None:
-                rollback, witness, entry = public
+            for rollback, witness, entry, port in restored_sockets:
                 try:
                     if use_recovery:
                         restored_stage = dict(stage, candidate_revision=stage["recovery_fallback"]["revision"])
                         restored_binding = {"candidate_uid": witness["fallback_uid"], "node_uid": witness["node_uid"]}
                     else:
                         restored_stage, restored_binding = predecessor_stage_identity(stage, witness)
-                    entry["public_verification"] = verify_stage(rollback, restored_stage, restored_binding, 53)
+                    key = "public_verification" if port == 53 else "diagnostic_verification"
+                    entry[key] = verify_stage(rollback, restored_stage, restored_binding, port)
+                    if recover_failure:
+                        validate_witness_policy(entry[key]["verified_backend"], witness, "fallback_uid")
                 except (ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-                    entry["result"] = "restored_public_unverified"
+                    entry["result"] = "restored_public_unverified" if port == 53 else "restored_diagnostic_unverified"
                     compensation_errors.append(error)
             if attempted:
                 save_evidence()
@@ -919,7 +970,7 @@ def prepare_transport_steps(config, preflight, operations):
     return planned
 
 
-def reconcile(config, apply=False, evidence_path=None, verify_stage=None, verify_fallback=None):
+def reconcile(config, apply=False, evidence_path=None, verify_stage=None, verify_fallback=None, verify_failure=None):
     from scripts.recover_dns_transport import DNSObservationRejected
 
     if apply and (config.get('recovery') or config.get('recoveries') or config.get('handoffs')) and not evidence_path:
@@ -930,6 +981,8 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None, verify
         raise ValueError("DNS staged handoff requires a reserved compensation generation")
     if apply and any("recovery_fallback" in stage for stage in config.get("handoffs", [])) and not verify_fallback:
         raise ValueError("DNS staged recovery requires independent fallback verification")
+    if apply and any("failed_predecessor" in stage for stage in config.get("handoffs", [])) and not verify_failure:
+        raise ValueError("DNS failed predecessor recovery requires real public failure observation")
     preflight = {"status": "started", "gate": "service_inventory"}
     evidence = {'schema': 'fugue.dns-transport-execution/v1', 'generation': config['generation'],
                 'declaration_digest': 'sha256:' + hashlib.sha256(json.dumps(config, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
@@ -967,7 +1020,7 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None, verify
     preflight["status"] = "verified"
     save_evidence()
     if apply:
-        apply_transport_steps(config, planned, evidence, save_evidence, verify_stage, verify_fallback)
+        apply_transport_steps(config, planned, evidence, save_evidence, verify_stage, verify_fallback, verify_failure)
     return len(planned)
 
 
@@ -982,6 +1035,8 @@ def revalidate_handoff_witness(config, listener, current, witness):
             raise ValueError("DNS handoff identity changed before selector CAS")
         if fresh == witness:
             return fresh
+        if "failed_predecessor" in witness:
+            raise ValueError("DNS failed predecessor recovery assignment changed before selector CAS")
         witness = fresh
         if attempt + 1 < HANDOFF_ATTEMPTS:
             time.sleep(HANDOFF_RETRY_SECONDS)
@@ -1002,6 +1057,7 @@ def main():
         os.environ["FUGUE_DNS_OBSERVATION_VERIFIER"] = str(args.verifier.resolve())
     verify_stage = None
     verify_fallback = None
+    verify_failure = None
     if args.apply and config.get("handoffs"):
         if not args.public_observation or not args.observer or not args.verifier:
             parser.error("staged handoff requires public observation declaration, observer and verifier")
@@ -1013,7 +1069,10 @@ def main():
                                verifier=str(args.verifier.resolve()))
         verify_fallback = partial(observe_recovery_fallback, policy_path=args.public_observation,
                                   observer=str(args.observer.resolve()), verifier=str(args.verifier.resolve()))
-    print("listeners=" + str(reconcile(config, args.apply, args.evidence, verify_stage, verify_fallback)))
+        from scripts.dns_transport_failed_predecessor import observe_failed_predecessor
+        verify_failure = partial(observe_failed_predecessor, policy_path=args.public_observation,
+                                 observer=str(args.observer.resolve()), verifier=str(args.verifier.resolve()))
+    print("listeners=" + str(reconcile(config, args.apply, args.evidence, verify_stage, verify_fallback, verify_failure)))
 
 
 if __name__ == "__main__":

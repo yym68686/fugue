@@ -3,12 +3,21 @@ import json
 import subprocess
 import sys
 
+TRANSPORT_DECLARATION = 'deploy/environments/production/dns-transport/transport.json'
+TRANSPORT_EXECUTORS = {
+    'scripts/reconcile_dns_transport.py',
+    'scripts/recover_dns_transport.py',
+    'scripts/inspect_dns_predecessor.py',
+    'scripts/dns_transport_failed_predecessor.py',
+    'scripts/dns_transport_rollback_authority.py',
+    'scripts/capture_dns_observation_policy.py',
+}
+
 
 def select(paths):
     paths = set(paths)
     return {
-        'transport': bool(paths & {'deploy/environments/production/dns-transport/transport.json',
-                                  'scripts/reconcile_dns_transport.py', 'scripts/recover_dns_transport.py'}),
+        'transport': bool(paths & (TRANSPORT_EXECUTORS | {TRANSPORT_DECLARATION})),
         'ports': any(path.startswith('deploy/environments/production/dns-port-retirement/') for path in paths),
         'slots': 'deploy/environments/production/dns-slot-retirement/intent.json' in paths,
     }

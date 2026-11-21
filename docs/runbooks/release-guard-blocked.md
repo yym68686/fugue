@@ -48,6 +48,28 @@ different publication or unavailable read does not prove this failure. The
 result is explicitly non-authorizing: it neither admits a handoff nor replaces
 independent healthy candidate and compensation checks.
 
+DNS transport tool-only changes run the regression suite without replaying the
+last production listener declaration. Resume a partially reconciled listener
+with a reviewed declaration or rerun the GitHub push that actually changed the
+declaration; a later unrelated push does not retry the write.
+
+If the predecessor is Kubernetes Ready but fails the authenticated wire check,
+use the `failed_predecessor` branch of the v4 handoff declaration. Bind both
+listener Service UIDs, node UID, predecessor and candidate Pod UIDs, predecessor
+release ID/digest/fence, one declared positive address query, a pinned HTTPS API
+origin, and the exact current full rollback with its reviewed LKG evidence.
+This branch requires a separate, declared, node-local `recovery_fallback` Pod
+and a reserved compensation generation. The candidate and fallback must both
+serve the same signed rollback; a historical LKG alone is not current authority.
+The fallback is checked directly, the candidate is checked on the diagnostic
+socket, and a fresh authenticated UDP/TCP SERVFAIL pair is bound to the current
+public Service CAS before the public switch. A failed switch is compensated
+only to the independently verified fallback, never to the known-broken
+predecessor. If an authorized independent fallback is absent, stop the handoff
+and report the missing prerequisite. This path restores degraded transport;
+it does not mark the signed global DNS release verified or authorize new DNS
+content. The normal DNS handoff health gates are unchanged.
+
 ## Safety Rules
 
 - Do not continue a normal rollout while a `block_publish` incident is active.

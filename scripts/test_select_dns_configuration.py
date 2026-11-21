@@ -17,3 +17,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(select(['scripts/retire_dns_slots.py', 'scripts/retire_dns_hostport.py']),
                          {'transport': False, 'ports': False, 'slots': False})
         self.assertTrue(select(['scripts/recover_dns_transport.py'])['transport'])
+        for module in ('dns_transport_failed_predecessor', 'dns_transport_rollback_authority', 'inspect_dns_predecessor'):
+            self.assertEqual(select(['scripts/' + module + '.py']),
+                             {'transport': True, 'ports': False, 'slots': False})

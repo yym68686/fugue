@@ -3,6 +3,16 @@ import re
 import subprocess
 import sys
 
+from scripts.select_dns_configuration import TRANSPORT_DECLARATION, TRANSPORT_EXECUTORS
+
+
+TRANSPORT_FENCE_PATHS = sorted(TRANSPORT_EXECUTORS | {
+    TRANSPORT_DECLARATION, 'deploy/environments/production/dns-observation/public.json',
+    'scripts/select_dns_configuration.py', 'scripts/verify_dns_configuration_revision.py',
+    'scripts/build_dns_observation_verifier.sh', 'cmd/fugue-dns-observe', 'cmd/fugue-dns-observation-verify',
+    'internal/dnsserver', 'go.mod', 'go.sum',
+})
+
 
 def workflow_projection(raw, names):
     # This repository uses canonical two-space top-level job indentation. Fail
@@ -36,6 +46,8 @@ def main():
     sources = [subprocess.check_output(['git', 'show', revision + ':' + workflow], text=True) for revision in [before, after]]
     if workflow_projection(sources[0], names) != workflow_projection(sources[1], names):
         raise ValueError('DNS workflow execution or global authority changed')
+    if subprocess.run(['git', 'diff', '--quiet', before, after, '--', *TRANSPORT_FENCE_PATHS]).returncode:
+        raise ValueError('DNS transport declaration, verifier or execution code changed')
 
 
 if __name__ == '__main__':

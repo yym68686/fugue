@@ -25,6 +25,12 @@ def validate(config):
         raise ValueError('DNS recovery requires distinct instances')
     if not re.fullmatch(r'[^\s@]+@sha256:[a-f0-9]{64}', recovery['candidate_image']):
         raise ValueError('DNS recovery requires an immutable candidate image')
+    validate_api_origin(recovery)
+
+
+def validate_api_origin(recovery):
+    if not isinstance(recovery.get('origin'), str) or not isinstance(recovery.get('api_address'), str):
+        raise ValueError('DNS recovery requires a pinned HTTPS API origin')
     origin = urllib.parse.urlsplit(recovery['origin'])
     if origin.scheme != 'https' or recovery['origin'] != 'https://' + str(origin.hostname) or not re.fullmatch(r'[a-z0-9][a-z0-9.-]*', str(origin.hostname)):
         raise ValueError('DNS recovery requires an authenticated HTTPS API origin')
@@ -34,15 +40,22 @@ def validate(config):
 
 
 def current_publication(config):
-    recovery = config['recovery']
+    return read_recovery_api(config['recovery'], '/v1/platform-state/artifacts/release_set?scope_key=global&channel=full')
+
+
+def read_recovery_api(recovery, path):
+    validate_api_origin(recovery)
     token = os.environ.get('FUGUE_API_KEY', '')
     if not token or any(character in token for character in '\r\n'):
         raise ValueError('DNS recovery API credential unavailable')
     host = urllib.parse.urlsplit(recovery['origin']).hostname
     headers = 'header = ' + json.dumps('Authorization: Bearer ' + token) + '\n'
-    result = subprocess.run(['curl', '--silent', '--show-error', '--fail', '--noproxy', '*', '--max-time', '15',
-                             '--resolve', host + ':443:' + recovery['api_address'], '--config', '-',
-                             recovery['origin'] + '/v1/platform-state/artifacts/release_set?scope_key=global&channel=full'],
+    address = recovery['api_address']
+    if ':' in address:
+        address = '[' + address + ']'
+    result = subprocess.run(['curl', '--disable', '--silent', '--show-error', '--fail', '--noproxy', '*', '--max-time', '15',
+                             '--resolve', host + ':443:' + address, '--config', '-',
+                             recovery['origin'] + path],
                             input=headers, text=True, capture_output=True, timeout=20)
     if result.returncode or len(result.stdout) > 16 << 20:
         raise ValueError('DNS recovery current publication unavailable')

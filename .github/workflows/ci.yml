@@ -3102,25 +3102,28 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          if ! git diff --quiet "$base" HEAD -- "$config" scripts/reconcile_dns_transport.py scripts/test_reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/test_recover_dns_transport.py .github/workflows/ci.yml; then
-            git fetch origin main
-            if ! git diff --quiet HEAD origin/main -- "$config" scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py || ! python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport; then
-              echo "Newer DNS transport configuration supersedes this run."
-              exit 0
-            fi
-            python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport
-            if jq -e 'has("recovery") or has("recoveries") or has("handoffs")' "$config" >/dev/null; then
-              export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
-              verifier_revision="$(jq -r '.verifier_revision // empty' "$config")"
-              if [[ -n "$verifier_revision" ]]; then
-                bash scripts/build_dns_observation_verifier.sh "$verifier_revision" "$FUGUE_DNS_OBSERVATION_VERIFIER"
-              else
-                go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
-              fi
-            fi
-            echo 'selected=true' >> "$GITHUB_OUTPUT"
-            python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
+          python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_inspect_dns_predecessor scripts.test_dns_transport_failed_predecessor scripts.test_dns_transport_rollback_authority scripts.test_verify_dns_configuration_revision scripts.test_select_dns_configuration
+          declaration_delta="$(git diff --name-only "$base" HEAD -- "$config")"
+          if [[ -z "$declaration_delta" ]]; then
+            echo "DNS transport tooling validated; no new listener declaration to apply."
+            exit 0
           fi
+          git fetch origin main
+          if ! python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport; then
+            echo "Newer DNS transport configuration supersedes this run."
+            exit 0
+          fi
+          if jq -e 'has("recovery") or has("recoveries") or has("handoffs")' "$config" >/dev/null; then
+            export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-dns-observation-verify"
+            verifier_revision="$(jq -r '.verifier_revision // empty' "$config")"
+            if [[ -n "$verifier_revision" ]]; then
+              bash scripts/build_dns_observation_verifier.sh "$verifier_revision" "$FUGUE_DNS_OBSERVATION_VERIFIER"
+            else
+              go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+            fi
+          fi
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
+          python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
       - name: Retain DNS transport prewrite witness
         if: always() && steps.dns_transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -3145,7 +3148,6 @@ jobs:
                    --observer "$RUNNER_TEMP/fugue-dns-observe" --verifier "$FUGUE_DNS_OBSERVATION_VERIFIER")
           fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- "$config" deploy/environments/production/dns-observation/public.json scripts/reconcile_dns_transport.py scripts/recover_dns_transport.py scripts/capture_dns_observation_policy.py scripts/build_dns_observation_verifier.sh scripts/verify_dns_configuration_revision.py scripts/select_dns_configuration.py cmd/fugue-dns-observe cmd/fugue-dns-observation-verify
           python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport
           python3 -m scripts.reconcile_dns_transport "$config" --apply --evidence "$RUNNER_TEMP/dns-transport-result.json" "${args[@]}"
       - name: Retain DNS transport execution result

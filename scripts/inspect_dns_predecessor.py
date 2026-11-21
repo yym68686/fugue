@@ -28,6 +28,18 @@ def observe_failure_samples(report, address, query):
         for sample in samples]
 
 
+def verify_unready_backend(config, listener, backend, verifier=None):
+    pod = backend["pod"]
+    images = [c["image"] for c in pod["spec"]["containers"] if
+              all(any(p.get("containerPort") == listener["targetPort"] and p.get("protocol", "TCP") == protocol
+                      for p in c.get("ports", [])) for protocol in ("UDP", "TCP"))]
+    if len(images) != 1 or not re.fullmatch(r"[^\s@]+@sha256:[a-f0-9]{64}", images[0]):
+        raise ValueError("immutable predecessor image required")
+    binding = dict(config, recovery={"candidate_image": images[0], "candidate_pod_uid": pod["metadata"]["uid"]})
+    recovery.verify_unready_predecessor(backend, binding, verifier)
+    return {key: backend["snapshot"][key] for key in ("assignment", "parent_digest", "plan_digest")}
+
+
 def inspect(config, listener_name, policy_path, hostname, record_type, verifier, observer):
     if not all(os.path.isabs(path) for path in (verifier, observer)):
         raise ValueError("absolute DNS verifier and observer paths required")
@@ -54,22 +66,15 @@ def inspect(config, listener_name, policy_path, hostname, record_type, verifier,
     owner = transport.listener_node(listener)["metadata"]
     backend = transport.handoff_backend(namespace, current["spec"]["selector"], owner["name"], listener["targetPort"], read_runtime=False)
     pod = backend["pod"]
-    images = [c["image"] for c in pod["spec"]["containers"] if
-              all(any(p.get("containerPort") == listener["targetPort"] and p.get("protocol", "TCP") == protocol
-                      for p in c.get("ports", [])) for protocol in ("UDP", "TCP"))]
-    if len(images) != 1 or not re.fullmatch(r"[^\s@]+@sha256:[a-f0-9]{64}", images[0]):
-        raise ValueError("immutable predecessor image required")
-    binding = dict(config, recovery={"candidate_image": images[0], "candidate_pod_uid": pod["metadata"]["uid"]})
-
     def check():
         slices = transport.read_json("get", "endpointslices", "-n", namespace, "-l",
                                      "kubernetes.io/service-name=" + listener_name, "-o", "json")["items"]
         transport.validate_handoff_endpoints(current, pod, slices, listener["targetPort"])
-        recovery.verify_unready_predecessor(backend, binding, verifier)
+        assignment = verify_unready_backend(config, listener, backend, verifier)
         unchanged_backend(namespace, current, pod)
         if transport.listener_node(listener)["metadata"]["uid"] != owner["uid"]:
             raise ValueError("DNS predecessor node changed during observation")
-        return {key: backend["snapshot"][key] for key in ("assignment", "parent_digest", "plan_digest")}
+        return assignment
 
     before = check()
     expected = capture(declaration, raw, config, verifier)
@@ -91,6 +96,7 @@ def inspect(config, listener_name, policy_path, hostname, record_type, verifier,
         raise ValueError("DNS predecessor assignment changed during wire observation")
     return {"schema": "fugue.dns-unready-predecessor-observation/v1", "authorizes_traffic": False,
             "service_uid": current["metadata"]["uid"], "node_uid": owner["uid"], "pod_uid": pod["metadata"]["uid"],
+            "service_resource_version": current["metadata"]["resourceVersion"],
             "declaration_digest": "sha256:" + hashlib.sha256(raw).hexdigest(), **before, "samples": samples}
 
 
