@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"time"
 
@@ -14,6 +15,8 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 )
+
+var errHostedDNSPathTopology = errors.New("hosted DNS paths and DNS address authority must change in separate publications")
 
 // Keep old routing intent intact while a DNS authority is upgrading. No
 // timestamp, process version, or merely staged consumer counts as readiness.
@@ -90,8 +93,10 @@ func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, 
 func hostedDNSProbePathsChanged(before, after model.PlatformArtifact) (bool, error) {
 	type owner struct{ host, app, tenant string }
 	type evidence struct {
-		owners map[owner]bool
-		paths  map[string]map[string]bool
+		owners  map[owner]bool
+		records map[string][]platformconfig.DNSIntent
+		targets map[string]platformconfig.DNSReadinessRecord
+		paths   map[string]map[string]bool
 	}
 	read := func(artifact model.PlatformArtifact) (evidence, error) {
 		data, err := json.Marshal(struct {
@@ -105,14 +110,31 @@ func hostedDNSProbePathsChanged(before, after model.PlatformArtifact) (bool, err
 		if err != nil || json.Unmarshal(data, &payload) != nil {
 			return evidence{}, errors.New("hosted DNS transition input is invalid")
 		}
-		out := evidence{map[owner]bool{}, map[string]map[string]bool{}}
+		out := evidence{
+			owners:  map[owner]bool{},
+			records: map[string][]platformconfig.DNSIntent{},
+			targets: map[string]platformconfig.DNSReadinessRecord{},
+			paths:   map[string]map[string]bool{},
+		}
 		for _, record := range payload.Records {
+			if record.Type == "A" || record.Type == "AAAA" || record.Type == "CNAME" {
+				out.records[record.Hostname] = append(out.records[record.Hostname], record)
+			}
 			if record.RecordKind == "hosted" && (record.Type == "A" || record.Type == "AAAA") &&
 				record.Hostname != "" && record.AppID != "" && record.TenantID != "" {
 				out.owners[owner{record.Hostname, record.AppID, record.TenantID}] = true
 			}
 		}
 		if payload.Plan != nil {
+			for _, record := range payload.Plan.Records {
+				if _, found := out.targets[record.Hostname]; found {
+					return evidence{}, errors.New("hosted DNS transition has duplicate readiness records")
+				}
+				for i := range record.Targets {
+					record.Targets[i].ProbeIDs = nil
+				}
+				out.targets[record.Hostname] = record
+			}
 			for _, probe := range payload.Plan.Probes {
 				if out.paths[probe.Hostname] == nil {
 					out.paths[probe.Hostname] = map[string]bool{}
@@ -130,12 +152,23 @@ func hostedDNSProbePathsChanged(before, after model.PlatformArtifact) (bool, err
 	if err != nil {
 		return false, err
 	}
+	changed := false
 	for key := range old.owners {
-		if current.owners[key] && !maps.Equal(old.paths[key.host], current.paths[key.host]) {
-			return true, nil
+		previousPaths, nextPaths := old.paths[key.host], current.paths[key.host]
+		// A complete route withdrawal is covered by its independent live
+		// safety checks. It has no native root on one side to transition.
+		if current.owners[key] && len(previousPaths) != 0 && len(nextPaths) != 0 && !maps.Equal(previousPaths, nextPaths) {
+			// The global record transition cannot combine different signed
+			// address authorities. Hold the path edit if a recapture also
+			// adds, drops, or changes endpoints, TTL, or quorum.
+			if !previousPaths["/"] || !nextPaths["/"] || !reflect.DeepEqual(old.records[key.host], current.records[key.host]) ||
+				!reflect.DeepEqual(old.targets[key.host], current.targets[key.host]) {
+				return false, errHostedDNSPathTopology
+			}
+			changed = true
 		}
 	}
-	return false, nil
+	return changed, nil
 }
 
 func (s *Server) checkProjectHostWorkerTLS(ctx context.Context) error {

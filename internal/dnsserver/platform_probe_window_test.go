@@ -23,9 +23,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
+func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 	const first, second, group = "app.example.test", "other.example.test", "edge-group-a"
-	for _, mode := range []string{"same-assignment", "changed-fence", "expired", "explicit-negative", "restart"} {
+	for _, mode := range []string{"same-assignment", "changed-fence", "expired", "explicit-negative", "restart", "standby-rejected-successor"} {
 		t.Run(mode, func(t *testing.T) {
 			parent, candidate := dnsServingFixtureWithIntent(t, group, "global", func(r *platformconfig.CompileRequest) {
 				r.Policy.DNSReadiness.FactFreshnessSeconds = 120
@@ -44,9 +44,11 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 			next.Assignment.ArtifactReleaseID = "next"
 			next.Release.FencingToken = next.Assignment.FencingToken
 			next.Release.ID = next.Assignment.ArtifactReleaseID
+			next.Release.ReleasedAt = candidate.Release.ReleasedAt.Add(time.Second)
+			standby := mode == "standby-rejected-successor"
 			var round, reports, firstAttempts atomic.Int32
 			current := func() dnsPlatformCandidate {
-				if round.Load() > 0 && mode == "changed-fence" {
+				if (round.Load() > 0 && mode == "changed-fence") || (round.Load() >= 0 && standby) {
 					return next
 				}
 				return candidate
@@ -65,6 +67,18 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 				case "/v1/platform-state/consumers/trusted-heartbeat":
 					reports.Add(1)
 					var h platformcontrol.PlatformConsumerHeartbeatEnvelope
+					if standby {
+						want := "passed"
+						if round.Load() == 0 {
+							want = "failed"
+						}
+						if json.NewDecoder(r.Body).Decode(&h) != nil || h.ProbeStatus != want || h.FencingToken != c.Assignment.FencingToken {
+							t.Error("unexpected standby receipt", h.ProbeStatus, h.FencingToken)
+						}
+						w.WriteHeader(http.StatusConflict)
+						_ = json.NewEncoder(w).Encode(map[string]string{"code": "dns_backend_not_selected", "error": "not selected"})
+						return
+					}
 					if json.NewDecoder(r.Body).Decode(&h) != nil || h.ProbeStatus != "passed" || h.FencingToken != c.Assignment.FencingToken {
 						t.Error("unexpected serving receipt")
 					}
@@ -89,7 +103,7 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 			}
 			probe := func(_ context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
 				c := current()
-				if host == first {
+				if host == first && round.Load() >= 0 {
 					firstAttempts.Add(1)
 					if round.Load() > 0 {
 						// A genuine rejection must invalidate even a still-live
@@ -110,6 +124,17 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 				return routeprobe.Proof{}, errors.New("unexpected route probe")
 			}
 			ctx := context.Background()
+			var baseline model.PlatformConsumerAssignment
+			var wantReports int32
+			if standby {
+				round.Store(-1)
+				if err := s.syncPlatformDNSServingOnce(ctx, probe, func(*dnsServingState) error { return nil }); !errors.Is(err, platformconsumer.ErrDNSBackendNotSelected) || s.platformServing.Load() == nil {
+					t.Fatal("warm standby did not preserve ordinary heartbeat rejection", err)
+				}
+				baseline = s.platformServing.Load().record.Candidate.Assignment
+				round.Store(0)
+				wantReports = 2 // failed successor observation, on top of the baseline
+			}
 			prohibitedWire := func(*dnsServingState) error {
 				t.Error("incomplete candidate reached listener apply")
 				return errors.New("incomplete candidate")
@@ -117,10 +142,12 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 			if err := s.syncPlatformDNSServingOnce(ctx, probe, prohibitedWire); err == nil || !strings.Contains(err.Error(), "readiness is incomplete") {
 				t.Fatal("first incomplete observation passed", err)
 			}
-			if s.platformServing.Load() != nil || reports.Load() != 0 || s.pendingDNSProbeWindow == nil || len(s.pendingDNSProbeWindow.facts) != 1 {
+			loaded := s.platformServing.Load()
+			if (standby && (loaded == nil || loaded.record.Candidate.Assignment.ArtifactReleaseID != baseline.ArtifactReleaseID)) ||
+				(!standby && loaded != nil) || reports.Load() != wantReports || s.pendingDNSProbeWindow == nil || len(s.pendingDNSProbeWindow.facts) != 1 {
 				t.Fatal("a private observation was lost, served or acknowledged")
 			}
-			if _, err := os.Stat(cfg.CachePath + ".platform-serving.json"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(cfg.CachePath + ".platform-serving.json"); !standby && !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("incomplete observation created a checkpoint", err)
 			}
 			original := s.pendingDNSProbeWindow.facts[0]
@@ -138,7 +165,7 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 				s = NewService(cfg, nil)
 				s.PlatformTokenFile = tokenFile
 			}
-			if mode != "same-assignment" {
+			if mode != "same-assignment" && !standby {
 				if err := s.syncPlatformDNSServingOnce(ctx, probe, prohibitedWire); err == nil || firstAttempts.Load() != 2 || s.platformServing.Load() != nil || reports.Load() != 0 {
 					t.Fatal("non-current proof was deferred or permitted publication", err, firstAttempts.Load(), reports.Load())
 				}
@@ -160,10 +187,15 @@ func TestDNSColdStartCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testin
 			go tcpServer.ActivateAndServe()
 			defer udpServer.Shutdown()
 			defer tcpServer.Shutdown()
-			if err := s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err != nil || firstAttempts.Load() != 1 || reports.Load() != 1 || s.pendingDNSProbeWindow != nil {
+			err = s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener)
+			if (standby && !errors.Is(err, platformconsumer.ErrDNSBackendNotSelected)) || (!standby && err != nil) ||
+				firstAttempts.Load() != 1 || reports.Load() != wantReports+1 || s.pendingDNSProbeWindow != nil {
 				t.Fatal("the missing observation did not complete the exact release", err, firstAttempts.Load(), reports.Load())
 			}
 			st := s.platformServing.Load()
+			if standby && (st.record.Candidate.Assignment.ArtifactReleaseID != next.Assignment.ArtifactReleaseID || !s.Status().PlatformServing.ReportedAt.IsZero()) {
+				t.Fatal("standby did not load the new fence locally, or claimed a trusted receipt")
+			}
 			got := validDNSReadinessFacts(p.Plan, p.Policy.DNSReadiness, st.facts, time.Now())[original.ProbeID]
 			if !got.Proof.CheckedAt.Equal(original.Proof.CheckedAt) || !got.Proof.ValidUntil.Equal(original.Proof.ValidUntil) ||
 				got.ObservationID != original.ObservationID || len(got.ProbeHistory) != len(original.ProbeHistory) {

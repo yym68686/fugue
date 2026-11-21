@@ -143,15 +143,20 @@ retained publication/source deadline. Original probe timestamps remain intact
 and their validity is capped by the retained policy. Offline proofs still expire
 normally. Roll out DNS code to an unselected standby, verify all readiness probes
 and UDP/TCP answers, then use the separate signed transport intent for handoff.
+An unselected backend may keep its verified, in-memory probe window across
+refused heartbeat writes. This neither acknowledges the release nor changes
+listener selection. A changed or unavailable assignment still fences the window.
 
 For a hosted address record whose paths change, the global producer keeps the
 candidate in shadow until every required, selected global DNS backend reports
 `dns_hosted_path_transition_v1` on the current verified full release. The
 hostname plan checks the same capability before saving. Pod readiness,
 independent authority readiness, and a passing query to just one hostname do
-not replace the signed global receipts. Observe the unselected replacement and
-its rollback backend before any public listener handoff; move one authority at
-a time.
+not replace the signed global receipts. If the compiler also changed the
+hosted address record or its endpoint/quorum authority, finish that change
+under the old routes before publishing the path transition. Observe the
+unselected replacement and its rollback backend before any public listener
+handoff; move one authority at a time.
 
 ## Comparing application latency with different request mixes
 

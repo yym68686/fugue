@@ -79,6 +79,7 @@ func TestHostedDNSProbePathGuardIgnoresUnrelatedPublicationChanges(t *testing.T)
 		{"external DNS", single, dnsArtifact(host, "api", "tenant", "static", "new", "/", "/api"), false},
 		{"separate owner", single, dnsArtifact(host, "new", "tenant", "hosted", "new", "/", "/api"), false},
 		{"separate tenant", single, dnsArtifact(host, "api", "other", "hosted", "new", "/", "/api"), false},
+		{"complete route withdrawal", shared, dnsArtifact(host, "api", "tenant", "hosted", "new"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := hostedDNSProbePathsChanged(tc.before, tc.after)
@@ -86,6 +87,47 @@ func TestHostedDNSProbePathGuardIgnoresUnrelatedPublicationChanges(t *testing.T)
 				t.Fatalf("transition=%t, want %t; err=%v", got, tc.want, err)
 			}
 		})
+	}
+}
+
+func TestHostedDNSPathChangeCannotAlsoChangeAddressAuthority(t *testing.T) {
+	const hostname = "api.example.test"
+	build := func(pathSplit bool, addresses []string, ttl, quorum int) model.PlatformArtifact {
+		plan := platformconfig.DNSReadinessPlan{}
+		record := platformconfig.DNSReadinessRecord{Hostname: hostname, MinimumHealthyEdges: quorum}
+		for _, address := range addresses {
+			target := platformconfig.DNSReadinessTarget{EdgeID: "edge-" + address, Address: address, Family: "A", ProbeIDs: []string{"root-" + address}}
+			plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{Hostname: hostname, Path: "/", Address: address, ID: target.ProbeIDs[0]})
+			if pathSplit {
+				id := "api-" + address
+				target.ProbeIDs = append(target.ProbeIDs, id)
+				plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{Hostname: hostname, Path: "/v1", Address: address, ID: id})
+			}
+			record.Targets = append(record.Targets, target)
+		}
+		plan.Records = []platformconfig.DNSReadinessRecord{record}
+		return model.PlatformArtifact{Content: map[string]any{
+			"records":        []platformconfig.DNSIntent{{Hostname: hostname, AppID: "api", TenantID: "tenant", RecordKind: "hosted", Type: "A", TTL: ttl, Values: addresses}},
+			"readiness_plan": plan,
+		}}
+	}
+	oldAddrs := []string{"192.0.2.1", "192.0.2.2"}
+	before := build(false, oldAddrs, 60, 1)
+	for _, after := range []model.PlatformArtifact{
+		build(true, oldAddrs[:1], 60, 1),
+		build(true, append(append([]string(nil), oldAddrs...), "192.0.2.3"), 60, 1),
+		build(true, oldAddrs, 90, 1),
+		build(true, oldAddrs, 60, 2),
+	} {
+		if changed, err := hostedDNSProbePathsChanged(before, after); changed || !errors.Is(err, errHostedDNSPathTopology) {
+			t.Fatalf("combined path and address authority changes were admitted: changed=%t err=%v", changed, err)
+		}
+	}
+	if changed, err := hostedDNSProbePathsChanged(before, build(true, oldAddrs, 60, 1)); !changed || err != nil {
+		t.Fatalf("changed proof membership alone must still reach the capability gate: changed=%t err=%v", changed, err)
+	}
+	if changed, err := hostedDNSProbePathsChanged(before, build(false, oldAddrs[:1], 60, 1)); changed || err != nil {
+		t.Fatalf("standalone endpoint withdrawal must keep its own path: changed=%t err=%v", changed, err)
 	}
 }
 

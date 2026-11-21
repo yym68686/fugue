@@ -211,9 +211,10 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	s.platformConsumerMu.Lock()
 	finishLock(nil)
 	defer s.platformConsumerMu.Unlock()
+	var rejectedStandbyReceipt bool
 	defer func() {
 		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) ||
-			errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected) ||
+			(!rejectedStandbyReceipt && errors.Is(syncErr, platformconsumer.ErrDNSBackendNotSelected)) ||
 			errors.Is(syncErr, platformconsumer.ErrNoServingAssignment) {
 			s.pendingDNSProbeWindow = nil
 		}
@@ -384,7 +385,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// A rejected successor must not make the running backend disappear.
 		// Report the current assignment's failure and the retained generation;
 		// this cannot acknowledge or checkpoint the candidate.
-		syncErr = errors.Join(syncErr, s.reportDNSRejectedSuccessor(ctx, client, id, a, retained))
+		reportErr := s.reportDNSRejectedSuccessor(ctx, client, id, a, retained)
+		// A standby can read and recheck the serving assignment, but it
+		// must not report the selected backend's heartbeat. This rejection
+		// says nothing about its exact, uncommitted local probe window.
+		rejectedStandbyReceipt = errors.Is(reportErr, platformconsumer.ErrDNSBackendNotSelected)
+		syncErr = errors.Join(syncErr, reportErr)
 	}()
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
