@@ -43,7 +43,7 @@ func TestFrontRepairRequiresSignedScopeExactArtifactAndLiveApproval(t *testing.T
 	}
 	now := time.Date(2026, 2, 9, 12, 0, 0, 0, time.UTC)
 	executor := strings.Repeat("a", 40)
-	build := frontRepairArtifactIdentity{RepositoryID: 1, WorkflowRunID: 2, RunAttempt: 1, ArtifactID: 3, ArchiveDigest: digest("4")}
+	build := frontRepairArtifactIdentity{RepositoryID: 1, WorkflowRunID: 2, ProducerJobID: 25, RunAttempt: 1, ArtifactID: 3, ArchiveDigest: digest("4")}
 	trust := frontRepairApprovalTrust{Scope: "fixture-protected", PublicKey: pub, ExecutorCommit: executor, Artifact: build}
 	tools := frontRepairToolSet{digest: digest("5"), source: executor, tools: map[string]frontRepairTool{"amd64": {}}}
 	base := frontRepairApprovalEnvelope{Schema: frontRepairApprovalEnvelopeSchema, Scope: trust.Scope, Artifact: build,

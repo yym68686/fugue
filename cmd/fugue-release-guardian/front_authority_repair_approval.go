@@ -16,6 +16,7 @@ const frontRepairApprovalSignatureDomain = "fugue-edge-front-authority-repair/v1
 type frontRepairArtifactIdentity struct {
 	RepositoryID  uint64 `json:"repositoryId"`
 	WorkflowRunID uint64 `json:"workflowRunId"`
+	ProducerJobID uint64 `json:"producerJobId"`
 	RunAttempt    uint32 `json:"runAttempt"`
 	ArtifactID    uint64 `json:"artifactId"`
 	ArchiveDigest string `json:"archiveDigest"`
@@ -23,7 +24,7 @@ type frontRepairArtifactIdentity struct {
 
 func (a frontRepairArtifactIdentity) valid() bool {
 	return a.RepositoryID != 0 && a.WorkflowRunID != 0 && a.RunAttempt != 0 &&
-		a.ArtifactID != 0 && exactSHA256Digest(a.ArchiveDigest)
+		a.ProducerJobID != 0 && a.ArtifactID != 0 && exactSHA256Digest(a.ArchiveDigest)
 }
 
 type frontRepairApprovalEnvelope struct {

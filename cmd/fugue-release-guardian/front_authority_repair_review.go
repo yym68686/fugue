@@ -228,7 +228,7 @@ func (r frontRepairRuntime) preview(ctx context.Context, selection frontRepairSe
 // runApproved is for the protected launcher. It must obtain the trusted key
 // and artifact evidence independently of the approval. There is no write CLI.
 func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepairSelection,
-	preview frontRepairPreview, envelope frontRepairApprovalEnvelope, trust frontRepairApprovalTrust, tools frontRepairToolSet) (frontRepairOpened, error) {
+	preview frontRepairPreview, envelope frontRepairApprovalEnvelope, trust frontRepairApprovalTrust, artifact frontRepairVerifiedArtifact) (frontRepairOpened, error) {
 	if r.activator == nil || r.activator.config != selection.runtime ||
 		preview.Release.Component != selection.target.Key.Component || preview.Release.Namespace != selection.target.Namespace ||
 		preview.Release.GroupID != selection.runtime.GroupID {
@@ -237,6 +237,10 @@ func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepa
 	if _, supported := r.activator.executor.(frontRepairToolExecutor); !supported {
 		return frontRepairOpened{}, errors.New("Front repair has no protected temporary tool transport")
 	}
+	if !artifact.identity.valid() || artifact.identity != trust.Artifact {
+		return frontRepairOpened{}, errors.New("Front repair requires authenticated Actions artifact intake")
+	}
+	tools := artifact.tools
 	intent, err := envelope.verify(preview, trust, tools, r.activator.now().UTC())
 	if err != nil {
 		return frontRepairOpened{}, err
