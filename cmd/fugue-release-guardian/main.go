@@ -41,6 +41,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "front-repair-preview" {
+		return runFrontRepairPreview(os.Args[2:], os.Stdout)
+	}
 	role := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_ROLE"))
 	if role != "guardian" && role != "canary-prober" {
 		return errors.New("FUGUE_RELEASE_GUARDIAN_ROLE must be guardian or canary-prober")

@@ -147,7 +147,12 @@ const (
 // runReviewed obtains and releases the existing Worker component and Front
 // authority Leases using the same Kubernetes client as the runtime observer.
 // It is only for a launcher that has already selected an immutable release.
-func (r frontRepairRuntime) runReviewed(ctx context.Context, release declarativerelease.PlanRelease, intent frontRepairReviewedIntent) (_ frontRepairOpened, err error) {
+func (r frontRepairRuntime) runReviewed(ctx context.Context, release declarativerelease.PlanRelease, intent frontRepairReviewedIntent) (frontRepairOpened, error) {
+	return r.runReviewedWithReleaseCheck(ctx, release, intent, nil)
+}
+
+func (r frontRepairRuntime) runReviewedWithReleaseCheck(ctx context.Context, release declarativerelease.PlanRelease,
+	intent frontRepairReviewedIntent, recheck func(context.Context, frontRepairStore) error) (_ frontRepairOpened, err error) {
 	if r.activator == nil || release.Workload.Namespace != r.activator.config.Namespace || intent.Group != r.activator.config.GroupID {
 		return frontRepairOpened{}, errors.New("Front repair release does not bind the exact runtime namespace and group")
 	}
@@ -161,6 +166,11 @@ func (r frontRepairRuntime) runReviewed(ctx context.Context, release declarative
 	store, err := newFrontRepairStore(locks)
 	if err != nil {
 		return frontRepairOpened{}, err
+	}
+	if recheck != nil {
+		if err := recheck(ctx, store); err != nil {
+			return frontRepairOpened{}, err
+		}
 	}
 	return r.executeReviewed(ctx, store, intent)
 }
