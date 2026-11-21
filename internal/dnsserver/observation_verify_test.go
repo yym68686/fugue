@@ -84,3 +84,63 @@ func TestServingObservationAuthenticatesCheckpointAndEveryPositiveProof(t *testi
 		})
 	}
 }
+
+func TestUnreadyPredecessorObservationIsNotServingAuthorization(t *testing.T) {
+	service, state, now := runtimeFactsFixture(t)
+	if err := service.signDNSCheckpoint(&state.record); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, err := json.Marshal(state.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy, err := dnsRuntimeFacts(state, now)
+	if err != nil || !healthy.Ready {
+		t.Fatal("expected ready observation", err)
+	}
+	if err := VerifyUnreadyPredecessorObservation(service.Config, checkpoint, healthy, now); err == nil {
+		t.Fatal("ready observation was classified as unready")
+	}
+	snapshot := healthy
+	snapshot.Ready = false
+	if err := VerifyUnreadyPredecessorObservation(service.Config, checkpoint, snapshot, now); err == nil {
+		t.Fatal("a negative flag alone proved an unready predecessor")
+	}
+	for _, scenario := range []string{"exact", "assignment", "plan", "foreign proof", "foreign member", "omitted", "expired"} {
+		t.Run(scenario, func(t *testing.T) {
+			raw, err := json.Marshal(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var unready dnsfacts.Snapshot
+			if err := json.Unmarshal(raw, &unready); err != nil {
+				t.Fatal(err)
+			}
+			for i := range unready.Facts {
+				unready.Facts[i].Ready = false
+			}
+			switch scenario {
+			case "assignment":
+				unready.Assignment.FencingToken++
+			case "plan":
+				unready.PlanDigest = "sha256:foreign"
+			case "foreign proof":
+				unready.Facts[0].Ready = true
+				unready.Facts[0].Proof.TrafficRelease.FencingToken++
+			case "foreign member":
+				unready.Facts[0].ProbeID = "sha256:foreign"
+			case "omitted":
+				unready.Facts = nil
+			case "expired":
+				unready.ObservedAt, unready.EvaluatedAt = now.Add(-time.Hour), now.Add(-time.Hour)
+			}
+			err = VerifyUnreadyPredecessorObservation(service.Config, checkpoint, unready, now)
+			if (err == nil) != (scenario == "exact") {
+				t.Fatalf("unexpected unready verdict: %v", err)
+			}
+			if VerifyServingObservation(service.Config, checkpoint, unready, now) == nil {
+				t.Fatal("unready evidence authorized serving")
+			}
+		})
+	}
+}

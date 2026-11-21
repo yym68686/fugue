@@ -196,6 +196,23 @@ class RecoveryTests(unittest.TestCase):
                     if scenario == 'healthy':
                         verify.assert_not_called()
 
+    def test_unready_witness_cannot_be_used_as_serving_proof(self):
+        candidate, config = self.candidate(), self.config()
+        for method, flags, output in [
+            (recovery.verify_unready_predecessor, ['--verify-unready-predecessor'],
+             '{"verified_unready_predecessor":true,"authorizes_traffic":false}'),
+            (recovery.verify_candidate, [], '{"verified":true}'),
+        ]:
+            with self.subTest(method=method.__name__), patch.object(recovery, 'candidate_request', return_value={}), \
+                    patch.object(recovery.subprocess, 'run') as run:
+                run.return_value = subprocess.CompletedProcess([], 0, output, '')
+                method(candidate, config, '/approved/verify')
+                self.assertEqual(run.call_args.args[0], ['/approved/verify'] + flags)
+                foreign = '{"verified":true}' if flags else '{"verified_unready_predecessor":true,"authorizes_traffic":false}'
+                run.return_value = subprocess.CompletedProcess([], 0, foreign, '')
+                with self.assertRaises(recovery.DNSObservationRejected):
+                    method(candidate, config, '/approved/verify')
+
     def test_unchanged_unready_listener_does_not_block_another_configuration(self):
         config = fixtures.TransportTests().config()
         old = transport.service(config, config['listeners'][0])

@@ -112,16 +112,26 @@ class DNSObservationRejected(ValueError):
 
 
 def verify_candidate(candidate, config, verifier=None):
+    _verify_observation(candidate, config, verifier, [], '{"verified":true}')
+
+
+def verify_unready_predecessor(candidate, config, verifier=None):
+    """Authenticate an unready observation; it cannot substitute for verify_candidate."""
+    _verify_observation(candidate, config, verifier, ['--verify-unready-predecessor'],
+                        '{"verified_unready_predecessor":true,"authorizes_traffic":false}')
+
+
+def _verify_observation(candidate, config, verifier, mode, expected):
     if verifier is None:
         verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
     if not verifier or not os.path.isabs(verifier):
         raise ValueError('DNS recovery observation verifier unavailable')
     request = candidate_request(candidate, config)
     try:
-        result = subprocess.run([verifier], input=json.dumps(request), text=True, capture_output=True, timeout=30)
+        result = subprocess.run([verifier, *mode], input=json.dumps(request), text=True, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
         raise transport.ObservationUnavailable('DNS serving observation verification timed out') from None
-    if result.returncode or result.stdout.strip() != '{"verified":true}':
+    if result.returncode or result.stdout.strip() != expected:
         categories = {'invalid bounded DNS verification input': 'input',
                       'DNS observation checkpoint authentication failed': 'checkpoint_authentication',
                       'DNS observation artifact authentication failed': 'artifact_authentication',
@@ -131,6 +141,8 @@ def verify_candidate(candidate, config, verifier=None):
                       'DNS observation has expired': 'expired',
                       'DNS observation proof membership mismatch': 'proof_membership',
                       'DNS observation contains an invalid positive proof': 'positive_proof',
+                      'DNS predecessor observation reports ready': 'predecessor_ready',
+                      'DNS predecessor has complete record readiness': 'predecessor_ready',
                       'DNS observation lacks complete record readiness': 'record_readiness',
                       'DNS observation cannot materialize all declared answers': 'wire_materialization'}
         category = categories.get(result.stderr.strip(), 'verifier_failed')

@@ -529,8 +529,8 @@ def main() -> int:
             non_go_tasks["affected-vet"] = vet_task
         else:
             go_dependent_tasks["affected-vet"] = vet_task
-    if any(name in {"scripts/reconcile_dns_transport.py", "scripts/test_reconcile_dns_transport.py", "scripts/recover_dns_transport.py", "scripts/test_recover_dns_transport.py", "scripts/retire_dns_hostport.py", "scripts/test_retire_dns_hostport.py"} or name.startswith(("deploy/environments/production/dns-transport/", "deploy/environments/production/dns-port-retirement/")) for name in paths):
-        non_go_tasks["dns-transport-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_transport", "scripts.test_recover_dns_transport", "scripts.test_retire_dns_hostport"]
+    if any(name in {"scripts/reconcile_dns_transport.py", "scripts/test_reconcile_dns_transport.py", "scripts/recover_dns_transport.py", "scripts/test_recover_dns_transport.py", "scripts/inspect_dns_predecessor.py", "scripts/test_inspect_dns_predecessor.py", "scripts/retire_dns_hostport.py", "scripts/test_retire_dns_hostport.py"} or name.startswith(("deploy/environments/production/dns-transport/", "deploy/environments/production/dns-port-retirement/")) for name in paths):
+        non_go_tasks["dns-transport-tests"] = ["python3", "-m", "unittest", "scripts.test_reconcile_dns_transport", "scripts.test_recover_dns_transport", "scripts.test_inspect_dns_predecessor", "scripts.test_retire_dns_hostport"]
     if any(name in {"scripts/renew_producer_publication.py", "scripts/test_renew_producer_publication.py"} or name.startswith("deploy/environments/production/producer-renewal/") for name in paths):
         non_go_tasks["producer-renewal-tests"] = ["python3", "-m", "unittest", "scripts.test_renew_producer_publication"]
     if any(name in {"scripts/bootstrap_cell_producer.py", "scripts/test_bootstrap_cell_producer.py", "scripts/bootstrap_dns_producer.py", "scripts/test_bootstrap_dns_producer.py"} or name.startswith("deploy/environments/production/cell-producers/") for name in paths):

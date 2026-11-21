@@ -16,7 +16,12 @@ import (
 	"fugue/internal/platformconfig"
 )
 
-func verify(input io.Reader, output io.Writer, exportPolicy bool) error {
+const (
+	exportPolicyMode   = "--export-policy"
+	unreadyBackendMode = "--verify-unready-predecessor"
+)
+
+func verify(input io.Reader, output io.Writer, mode string) error {
 	var request struct {
 		ObservationQueries []dnsobservation.Query               `json:"observation_queries,omitempty"`
 		HandoffPrevious    *model.PlatformArtifact              `json:"handoff_previous,omitempty"`
@@ -41,7 +46,7 @@ func verify(input io.Reader, output io.Writer, exportPolicy bool) error {
 	configuration := config.DNSConfig{DNSNodeID: request.NodeID, EdgeGroupID: request.GroupID, Zone: request.Zone, PlatformScopeKey: request.Scope,
 		BundleSigningKey: request.SigningKey, BundleSigningKeyID: request.SigningKeyID,
 		BundleSigningPreviousKey: request.PreviousKey, BundleSigningPreviousKeyID: request.PreviousKeyID, BundleRevokedKeyIDs: request.RevokedKeyIDs}
-	if exportPolicy {
+	if mode == exportPolicyMode {
 		if request.HandoffPrevious != nil || request.AvailabilityRoute != nil {
 			return errors.New("observation policy export cannot authorize a handoff")
 		}
@@ -53,6 +58,16 @@ func verify(input io.Reader, output io.Writer, exportPolicy bool) error {
 	}
 	if len(request.ObservationQueries) != 0 {
 		return errors.New("observation queries require explicit policy export")
+	}
+	if mode == unreadyBackendMode {
+		if request.HandoffPrevious != nil || request.AvailabilityRoute != nil {
+			return errors.New("unready predecessor verification cannot authorize a handoff")
+		}
+		if err := dnsserver.VerifyUnreadyPredecessorObservation(configuration, request.Checkpoint, request.Snapshot, time.Now().UTC()); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintln(output, `{"verified_unready_predecessor":true,"authorizes_traffic":false}`)
+		return err
 	}
 	var err error
 	if request.HandoffPrevious != nil {
@@ -70,12 +85,14 @@ func verify(input io.Reader, output io.Writer, exportPolicy bool) error {
 }
 
 func main() {
-	exportPolicy := len(os.Args) == 2 && os.Args[1] == "--export-policy"
-	if len(os.Args) != 1 && !exportPolicy {
+	var mode string
+	if len(os.Args) == 2 && (os.Args[1] == exportPolicyMode || os.Args[1] == unreadyBackendMode) {
+		mode = os.Args[1]
+	} else if len(os.Args) != 1 {
 		fmt.Fprintln(os.Stderr, "unsupported DNS verification mode")
 		os.Exit(1)
 	}
-	if err := verify(os.Stdin, os.Stdout, exportPolicy); err != nil {
+	if err := verify(os.Stdin, os.Stdout, mode); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}

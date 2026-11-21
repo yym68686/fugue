@@ -37,6 +37,17 @@ and may include an allowlisted verifier reason and the backend role. Its list of
 operations covers successful server dry runs only, with no production writes.
 The separate result artifact records the apply phase.
 
+A DNS Pod can be Kubernetes Ready while its signed serving publication is
+unready. From a host with the existing read-only observation access, use
+`python3 -m scripts.inspect_dns_predecessor --help` to bind one declared
+positive address query to the exact current Service, EndpointSlice, Pod and
+checkpoint. Build the verifier and wire observer from the reviewed source.
+The diagnostic requires an authenticated, unready snapshot before and after
+authoritative SERVFAIL over both UDP and TCP on port 53. A timeout, stale proof,
+different publication or unavailable read does not prove this failure. The
+result is explicitly non-authorizing: it neither admits a handoff nor replaces
+independent healthy candidate and compensation checks.
+
 ## Safety Rules
 
 - Do not continue a normal rollout while a `block_publish` incident is active.

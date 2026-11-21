@@ -31,6 +31,18 @@ func VerifyServingAuthorityHandoff(configuration config.DNSConfig, checkpoint []
 }
 
 func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
+	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, true)
+}
+
+// VerifyUnreadyPredecessorObservation verifies the authority and probe membership
+// of a degraded executor without treating it as a verified serving backend.
+// Callers still need independent wire evidence tied to the selected listener;
+// this verification never authorizes selection, rollback or a positive ACK.
+func VerifyUnreadyPredecessorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
+	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, false)
+}
+
+func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time, requireReady bool) error {
 	service := &Service{Config: configuration}
 	record, err := service.decodeDNSCheckpoint(checkpoint)
 	if err != nil {
@@ -55,8 +67,17 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 	if !until.After(now) || now.Sub(snapshot.EvaluatedAt) > time.Duration(payload.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second {
 		return errors.New("DNS observation has expired")
 	}
-	if !snapshot.Ready {
+	if requireReady && !snapshot.Ready {
 		return errors.New("DNS observation lacks complete record readiness")
+	}
+	if !requireReady && snapshot.Ready {
+		return errors.New("DNS predecessor observation reports ready")
+	}
+	evaluateAt := now
+	if !requireReady {
+		// Do not turn proof expiry in transit into evidence that the
+		// predecessor was broken when the runtime snapshot was captured.
+		evaluateAt = snapshot.EvaluatedAt
 	}
 	requirements := make(map[string]platformconfig.DNSReadinessProbe, len(payload.Plan.Probes))
 	for _, requirement := range payload.Plan.Probes {
@@ -82,7 +103,7 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 				!dnsFactMatchesRelease(fact, record.Parent, record.Candidate, routeID, payload) {
 				return errors.New("DNS observation contains an invalid positive proof")
 			}
-			fact = evaluateDNSReadinessFact(requirement, payload.Policy.DNSReadiness, observed.Proof, nil, now)
+			fact = evaluateDNSReadinessFact(requirement, payload.Policy.DNSReadiness, observed.Proof, nil, evaluateAt)
 		}
 		if len(observed.ProbeHistory) > dnsProbeHistoryLimit {
 			return errors.New("DNS observation recovery history exceeds bound")
@@ -98,9 +119,18 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 		fact.ProbeHistory = append([]time.Time(nil), observed.ProbeHistory...)
 		facts = append(facts, fact)
 	}
-	boundDNSRouteSourceFacts(payload, facts, now)
+	boundDNSRouteSourceFacts(payload, facts, evaluateAt)
 	state, err := buildDNSServingState(record, payload, routeID, configuration.DNSNodeID, configuration.EdgeGroupID, facts, snapshot.ObservedAt)
-	if err != nil || !dnsServingReady(state, now) {
+	if err != nil {
+		return errors.New("DNS observation lacks complete record readiness")
+	}
+	if !requireReady {
+		if dnsServingReady(state, evaluateAt) && checkDNSServingSnapshot(state, evaluateAt, false) == nil {
+			return errors.New("DNS predecessor has complete record readiness")
+		}
+		return nil
+	}
+	if !dnsServingReady(state, now) {
 		return errors.New("DNS observation lacks complete record readiness")
 	}
 	if err := probeDNSServingSnapshot(state); err != nil {
