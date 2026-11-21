@@ -1,6 +1,8 @@
 package dnsserver
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -8,6 +10,48 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
 )
+
+func TestRecoveryHistoryOrdersDelayedFailuresByPhysicalProbe(t *testing.T) {
+	_, plan, policy, facts, now := queryExecutionFixture()
+	policy.FactFreshnessSeconds = 120
+	start := now.Add(-time.Minute)
+	history := &dnsProbeHistoryStore{}
+	serving := (&dnsReadinessScheduler{}).shareHistory(history)
+	retained := (&dnsReadinessScheduler{}).shareHistory(history)
+	probe := plan.Probes[0]
+	success := func(seconds int) dnsReadinessFact {
+		at := start.Add(time.Duration(seconds) * time.Second)
+		fact := facts[0]
+		fact.ProbeID = probe.ID
+		fact.Proof.CheckedAt, fact.Proof.ValidUntil = at, now.Add(time.Minute)
+		serving.observeProbeHistory(&fact, &policy, now)
+		return fact
+	}
+	for _, second := range []int{5, 20, 30, 40} {
+		success(second)
+	}
+	// The retained worker publishes its batch after the serving worker, but
+	// actually saw the failure at t=15. A later batch must not re-date it.
+	failedAt := start.Add(15 * time.Second)
+	failed := evaluateDNSReadinessFact(probe, &policy, routeprobe.Proof{}, errors.New("test probe failed"), failedAt)
+	retained.observeProbeHistory(&failed, &policy, now)
+	if failed.Ready || len(failed.ProbeHistory) != 0 || failed.HistoryObservation == nil || !failed.HistoryObservation.ResetAt.Equal(failedAt) || failed.HistoryObservation.PreviousSuccessCount != 1 {
+		t.Fatal("delayed failure was treated like a new failure or a success", failed)
+	}
+	if got := success(10); len(got.ProbeHistory) != 0 {
+		t.Fatal("late pre-failure proof crossed the barrier", got.ProbeHistory)
+	}
+	want := []time.Time{start.Add(20 * time.Second), start.Add(30 * time.Second), start.Add(40 * time.Second), start.Add(50 * time.Second)}
+	if got := success(50); !slices.Equal(got.ProbeHistory, want) {
+		t.Fatal("delayed failure erased real post-failure recovery", got.ProbeHistory)
+	}
+	// A result with no trustworthy completion time still fails closed at
+	// processing time. No older proof can then reestablish continuity.
+	retained.observeProbeHistory(&dnsReadinessFact{ProbeID: probe.ID, Reason: "probe_failed"}, &policy, now)
+	if got := success(55); len(got.ProbeHistory) != 0 {
+		t.Fatal("missing local completion time weakened the failure barrier", got.ProbeHistory)
+	}
+}
 
 func TestRecoveryHistoryObservationExplainsResetWithoutRenewingProof(t *testing.T) {
 	scheduler := &dnsReadinessScheduler{}

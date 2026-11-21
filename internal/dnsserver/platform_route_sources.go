@@ -270,6 +270,7 @@ func collectDNSRouteSourceFacts(ctx context.Context, plan *platformconfig.DNSRea
 		fact.ObservationID = physicalFact.ObservationID
 		if fact.Ready && !fact.Proof.ValidUntil.After(now) {
 			fact.Ready, fact.Reason = false, "proof_not_fresh"
+			fact.probeObservedAt = now // expiration was established here, not during the request
 		}
 	}
 	return facts

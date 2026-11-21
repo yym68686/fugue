@@ -30,6 +30,9 @@ type DNSReadinessStatus struct {
 }
 
 type dnsReadinessFact struct {
+	// Process-local completion time for an actual probe, including failures
+	// without a proof. Never accept it from a receipt or replay payload.
+	probeObservedAt    time.Time
 	HistoryObservation *dnsProbeHistoryObservation `json:"history_observation,omitempty"`
 	ProbeHistory       []time.Time                 `json:"probe_history,omitempty"`
 	ObservationID      string                      `json:"observation_id,omitempty"`
@@ -109,7 +112,7 @@ func collectDNSReadinessFacts(ctx context.Context, plan *platformconfig.DNSReadi
 }
 
 func evaluateDNSReadinessFact(requirement platformconfig.DNSReadinessProbe, policy *platformconfig.DNSReadinessPolicy, proof routeprobe.Proof, err error, now time.Time) dnsReadinessFact {
-	fact := dnsReadinessFact{ProbeID: requirement.ID, Proof: proof}
+	fact := dnsReadinessFact{ProbeID: requirement.ID, Proof: proof, probeObservedAt: now}
 	switch {
 	case errors.Is(err, routeprobe.ErrUnavailable):
 		fact.Reason = "probe_unavailable"

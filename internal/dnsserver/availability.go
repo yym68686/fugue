@@ -97,13 +97,25 @@ func (scheduler *dnsReadinessScheduler) observeProbeHistoryKey(key string, fact 
 		}
 	}
 	if !fact.Ready {
-		if len(entry.successes) > 0 || entry.observation.ResetReason == "history_started" {
-			entry.observation = dnsHistoryObservation(key, "negative_observation", observedAt, entry.successes, fact.Reason)
+		failureAt := fact.probeObservedAt
+		if failureAt.IsZero() || failureAt.After(observedAt) {
+			failureAt = observedAt
 		}
-		if observedAt.After(entry.failedAt) {
-			entry.failedAt = observedAt
+		if !failureAt.After(entry.failedAt) {
+			return
 		}
-		entry.successes = nil
+		// The serving, retained and shadow sweeps can finish out of order.
+		// A confirmed negative result breaks the history at the time the
+		// endpoint was actually observed, not when the sweep was committed.
+		// Never count that probe, or keep a success at/before its barrier.
+		firstAfterFailure := sort.Search(len(entry.successes), func(i int) bool {
+			return entry.successes[i].After(failureAt)
+		})
+		if firstAfterFailure > 0 || entry.observation.ResetReason == "history_started" {
+			entry.observation = dnsHistoryObservation(key, "negative_observation", failureAt, entry.successes[:firstAfterFailure], fact.Reason)
+		}
+		entry.failedAt = failureAt
+		entry.successes = slices.Clone(entry.successes[firstAfterFailure:])
 		if observedAt.After(entry.observedAt) {
 			entry.observedAt = observedAt
 		}
