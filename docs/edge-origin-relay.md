@@ -136,6 +136,12 @@ adding any relay settings. Stage the egress first, then observe in shadow.
 Against an isolated, countable origin, verify both directions on the intended
 private network, expiry, wrong certificates, capacity, client cancellation,
 POST execution count and streaming flush. Do not replay production payloads.
+On a disposable Linux runner, `bash scripts/rehearse_edge_origin_relay.sh`
+creates three network namespaces with no external route. Ingress cannot
+reach the origin directly; the two functioning legs use real TCP probes,
+private mTLS, signed leases and the production 25% canary gate. The hosted
+prepush lane runs it when relay code changes. This does not prove connectivity
+or trust provisioning between any particular production workers.
 Only then use an explicitly scoped active policy. To stop submitting new
 relay traffic, publish a higher-generation signed `off` policy, first on
 ingress and then on egress; allow already dispatched streams to complete

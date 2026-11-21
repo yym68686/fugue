@@ -1090,6 +1090,16 @@ jobs:
           PREPUSH_TIMEOUT_SECONDS: "360"
           PREPUSH_MAX_ELAPSED_SECONDS: "360"
         run: make prepush
+      - name: Rehearse Edge origin relay over isolated private network hops
+        timeout-minutes: 4
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- internal/edge internal/routeproof internal/tcpdiag scripts/rehearse_edge_origin_relay.sh; then exit 0; fi
+          bash scripts/rehearse_edge_origin_relay.sh
       - name: Rehearse PostgreSQL fast drain on the pinned production operator
         timeout-minutes: 8
         env:
