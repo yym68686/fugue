@@ -226,7 +226,7 @@ func (r frontRepairRuntime) preview(ctx context.Context, selection frontRepairSe
 }
 
 // runApproved is for the protected launcher. It must obtain the trusted key
-// and artifact evidence independently of the approval. There is no write CLI.
+// and artifact evidence independently of the approval.
 func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepairSelection,
 	preview frontRepairPreview, envelope frontRepairApprovalEnvelope, trust frontRepairApprovalTrust, artifact frontRepairVerifiedArtifact) (frontRepairOpened, error) {
 	if r.activator == nil || r.activator.config != selection.runtime ||

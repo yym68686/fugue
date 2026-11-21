@@ -1065,6 +1065,7 @@ jobs:
       traffic_safety_changed: ${{ steps.release.outputs.traffic_safety_changed }}
       edge_origin_relay_trust: ${{ steps.edge_origin_relay_trust.outputs.selected }}
       edge_origin_relay_policy: ${{ steps.edge_origin_relay_policy.outputs.selected }}
+      edge_front_repair: ${{ steps.edge_front_repair.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1124,6 +1125,27 @@ jobs:
           path: ${{ steps.front_repair_tools.outputs.directory }}
           if-no-files-found: error
           retention-days: 30
+      - name: Select one declaration-only Front repair
+        id: edge_front_repair
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          approval=deploy/environments/production/edge-front-repair/approval.json
+          preview=deploy/environments/production/edge-front-repair/preview.json
+          base="$BASE_SHA"
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != 0000000000000000000000000000000000000000 ]]
+          if git diff --quiet "$base" HEAD -- "$approval"; then exit 0; fi
+          mapfile -t paths < <(git diff --no-renames --name-only "$base" HEAD --)
+          for path in "${paths[@]}"; do
+            [[ "$path" == "$approval" || "$path" == "$preview" ]]
+          done
+          for path in "$approval" "$preview"; do
+            [[ "$(git ls-tree HEAD -- "$path" | awk '{print $1}')" == 100644 ]]
+          done
+          [[ "$GITHUB_REF_PROTECTED" == true ]]
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
         env:
@@ -2522,6 +2544,63 @@ jobs:
           name: fugue-edge-origin-relay-policy-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/edge-origin-relay-policy-receipt.json
           if-no-files-found: ignore
+          retention-days: 30
+
+  edge_front_repair:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected && needs.prepush.result == 'success' && needs.prepush.outputs.edge_front_repair == 'true' && needs.prepush.outputs.release_count == '0' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production-edge-front-repair
+    timeout-minutes: 12
+    permissions: {contents: read, actions: read}
+    concurrency: {group: fugue-production-edge-front-repair, cancel-in-progress: false}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - name: Checkout exact repair declaration
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Setup Go for approved repair launcher
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod, cache: false}
+      - name: Execute independently approved exact Front repair
+        env:
+          FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY }}
+          GH_TOKEN: ${{ github.token }}
+          GOFLAGS: ""
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          [[ -n "$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY" ]]
+          executor="$(jq -er '.executorCommit' <<<"$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY")"
+          [[ "$executor" =~ ^[0-9a-f]{40}$ && "$executor" != "$GITHUB_SHA" ]]
+          git merge-base --is-ancestor "$executor" "$GITHUB_SHA"
+          git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
+          git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/edge-groups.json go.mod go.sum \
+            cmd/fugue-release-guardian cmd/fugue-edge-front-cas internal/edgegroupfront internal/releaseguardian internal/declarativerelease
+          inputs="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-inputs.XXXXXXXX")"
+          for file in approval.json preview.json; do
+            git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/$file" > "$inputs/$file"
+          done
+          work="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-build.XXXXXXXX")"
+          git worktree add --detach "$work/source" "$executor"
+          trap 'git worktree remove "$work/source"' EXIT
+          export FUGUE_EDGE_FRONT_REPAIR_INPUTS="$inputs"
+          (
+            cd "$work/source"
+            test -z "$(git status --porcelain --untracked-files=all)"
+            go build -trimpath -buildvcs=true -buildmode=exe -o "$work/guardian" ./cmd/fugue-release-guardian
+            "$work/guardian" front-repair-approved
+          ) > "$RUNNER_TEMP/edge-front-repair-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+      - name: Retain completed Front repair receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-edge-front-repair-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-front-repair-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
           retention-days: 30
 
   worker_standby_observation:
