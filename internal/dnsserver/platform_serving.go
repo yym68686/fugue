@@ -486,6 +486,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if err = checkAssignment(); err != nil {
 			return err
 		}
+		if p.routeSources != nil {
+			s.servingDNSProbes.noteSnapshotBlocker(a, snapshotErr)
+		}
 		if !same && p.routeSources == nil && ctx.Err() == nil {
 			s.pendingDNSProbeWindow = newDNSServingProbeWindow(a, parent, routeID, p, facts, now)
 		}
@@ -601,6 +604,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return err
 	}
 	s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(raw), st.record})
+	s.servingDNSProbes.clearQueryBlockers(a)
 	return s.reportDNSServing(ctx, client, id, st)
 }
 
@@ -759,6 +763,13 @@ func (failure *dnsSnapshotProbeFailure) Error() string {
 	question := failure.request.Question[0]
 	nameDigest := sha256.Sum256([]byte(normalizeName(question.Name)))
 	return fmt.Sprintf("DNS artifact wire probe failed: name_digest=%x type=%d rcode=%d", nameDigest, question.Qtype, failure.response.Rcode)
+}
+
+func (scheduler *dnsReadinessScheduler) noteSnapshotBlocker(a model.PlatformConsumerAssignment, err error) {
+	var failure *dnsSnapshotProbeFailure
+	if errors.As(err, &failure) && len(failure.request.Question) == 1 {
+		scheduler.noteQueryBlocker(a, failure.request.Question[0].Name, failure.observedAt)
+	}
 }
 
 func probeDNSServingSnapshot(st *dnsServingState) error {

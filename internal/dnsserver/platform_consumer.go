@@ -244,6 +244,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 		if err != nil {
 			return err
 		}
+		s.servingDNSProbes.clearQueryBlockers(*chosen)
 	} else {
 		s.shadowDNSRouteSource = nil
 		readiness, err = s.observeDecodedPlatformDNSReadiness(ctx, candidate, *chosen, payload)

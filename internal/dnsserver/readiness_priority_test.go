@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
 	"testing"
@@ -292,6 +293,86 @@ func TestDNSProbePreferencesPreserveExpiryAgingAndConnectionBackoff(t *testing.T
 			})
 			if scenario == "backoff" && len(calls) != 0 || scenario != "backoff" && !reflect.DeepEqual(calls, []string{"other.example.test"}) {
 				t.Fatal("preference bypassed expiry, fairness or connection backoff", scenario, calls)
+			}
+		})
+	}
+}
+
+func TestDNSReadinessPublicationBlockerIsBoundedAndAssignmentScoped(t *testing.T) {
+	plan, policy := readinessTestPlan()
+	plan.Probes = nil
+	policy.MaxConcurrency = 1
+	now := time.Now().UTC()
+	policy.FactFreshnessSeconds = 120
+	priority := dnsProbePriority{preferred: map[string]bool{}, candidates: map[string]bool{}, availability: map[string]bool{}}
+	add := func(id, host, path string, ranked, availability, primary bool) {
+		p := platformconfig.DNSReadinessProbe{ID: id, Hostname: host + ".example.test", Address: "192.0.2.1", Path: path}
+		plan.Probes = append(plan.Probes, p)
+		key := dnsroutesource.ProbeKey(p)
+		priority.candidates[key], priority.availability[key], priority.preferred[key] = ranked, availability, primary
+	}
+	add("ordinary", "ordinary", "/", false, false, false)
+	for i := range 9 {
+		add(fmt.Sprint("availability-", i), fmt.Sprint("availability-", i), "/", true, true, false)
+		add(fmt.Sprint("ranked-", i), fmt.Sprint("ranked-", i), "/", true, false, false)
+	}
+	add("blocked-fallback", "blocked", "/alternate", true, false, false)
+	add("blocked-primary", "blocked", "/primary", true, false, true)
+	add("blocked-extra", "blocked", "/extra", true, false, false)
+	for _, scenario := range []string{"exact", "changed-fence", "expired", "cleared"} {
+		t.Run(scenario, func(t *testing.T) {
+			a := model.PlatformConsumerAssignment{ExpectedConsumerSetID: "set", ArtifactID: "dns", ReleaseChannel: "gray", FencingToken: 3}
+			scheduler := (&dnsReadinessScheduler{}).prioritize(priority)
+			at := now
+			if scenario == "expired" {
+				at = at.Add(-3 * time.Minute)
+			}
+			for _, name := range []string{"irrelevant-one", "irrelevant-two", "irrelevant-three", "irrelevant-four"} {
+				scheduler.noteQueryBlocker(a, name+".example.test", at.Add(-time.Second))
+			}
+			scheduler.noteQueryBlocker(a, "blocked.example.test.", at)
+			if len(scheduler.blockers) != 4 || !scheduler.blockers["blocked.example.test"].Equal(at) {
+				t.Fatal("unbounded blocker history")
+			}
+			if scenario == "changed-fence" {
+				a.FencingToken++
+			}
+			if scenario == "cleared" {
+				scheduler.clearQueryBlockers(a)
+			}
+			var observation strings.Builder
+			scheduler.bind(a, log.New(&observation, "", 0))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var order []string
+			facts := scheduler.collect(ctx, &plan, &policy, func(_ context.Context, host, path, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+				for _, p := range plan.Probes {
+					if p.Hostname == host && p.Path == path {
+						order = append(order, p.ID)
+						break
+					}
+				}
+				if len(order) == 9 {
+					cancel()
+				}
+				return routeprobe.Proof{}, errors.New("test endpoint not ready")
+			})
+			want := []string{"availability-0", "availability-1", "availability-2", "availability-3", "ranked-0", "ranked-1", "ranked-2", "ranked-3", "blocked-primary"}
+			attempts := 0
+			if scenario == "exact" {
+				want = []string{"blocked-primary", "blocked-fallback", "availability-0", "availability-1", "availability-2", "ranked-0", "ranked-1", "ranked-2", "ordinary"}
+				attempts = 2
+			}
+			if !reflect.DeepEqual(order, want) {
+				t.Fatalf("unexpected limited sweep order: got %v want %v", order, want)
+			}
+			if !strings.Contains(observation.String(), fmt.Sprintf("\"query_blocker_attempts\":%d", attempts)) {
+				t.Fatal("missing bounded probe diagnostic")
+			}
+			for _, fact := range facts {
+				if fact.Ready || len(fact.ProbeHistory) != 0 {
+					t.Fatal("scheduling hint substituted for real positive evidence")
+				}
 			}
 		})
 	}

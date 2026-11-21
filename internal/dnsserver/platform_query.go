@@ -153,6 +153,9 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 			for _, hint := range hints {
 				answers, err := executeDNSQueryRecord(record, hint, now)
 				if err != nil {
+					if s.shadowValidationParent != nil {
+						s.servingDNSProbes.noteQueryBlocker(a, record.Name, now)
+					}
 					s.retainDNSQueryFailure(c, a, view, record, payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, now, hint, err)
 					return nil, err
 				}
@@ -172,6 +175,9 @@ func (s *Service) evaluatePlatformDNSQueries(c dnsPlatformCandidate, a model.Pla
 			return nil, err
 		}
 		if err = probeDNSServingSnapshot(st); err != nil {
+			if s.shadowValidationParent != nil {
+				s.servingDNSProbes.noteSnapshotBlocker(a, err)
+			}
 			checked := time.Now().UTC()
 			status := summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, readiness.Status.PlanDigest, now, checked)
 			return nil, fmt.Errorf("%w (readiness: ready_probes=%d/%d ready_records=%d/%d; %s)", err, status.ReadyProbes, status.Probes, status.ReadyRecords, status.Records, dnsReadinessFailureSummary(payload.Plan, payload.Policy.DNSReadiness, readiness.Facts, checked))

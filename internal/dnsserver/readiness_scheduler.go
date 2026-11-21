@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -34,6 +35,8 @@ type dnsReadinessScheduler struct {
 	expires      map[string]time.Time
 	targets      map[string]dnsProbeTargetState
 	priority     dnsProbePriority
+	blockerScope string
+	blockers     map[string]time.Time
 	logger       *log.Logger
 	path         string
 }
@@ -45,15 +48,85 @@ func (scheduler *dnsReadinessScheduler) prioritize(priority dnsProbePriority) *d
 	return scheduler
 }
 
-func (scheduler *dnsReadinessScheduler) candidatePriority(plan *platformconfig.DNSReadinessPlan, indices []int) map[int]int {
-	// Both classes share the original eight-slot budget. An explicitly
-	// recovered availability group must not compete with all ranked routes
-	// for the first probe. Leave ranked work at least half the priority slots
-	// when both classes have enough work, and keep oldest-attempt rotation.
+// A failed detached query diagnoses scheduling demand, not readiness. Keep
+// only a few recent host hints for the exact assignment that failed.
+func (scheduler *dnsReadinessScheduler) noteQueryBlocker(a model.PlatformConsumerAssignment, hostname string, at time.Time) {
+	if a.ExpectedConsumerSetID == "" || hostname == "" || at.IsZero() {
+		return
+	}
+	scope, err := platformconfig.Digest(a)
+	if err != nil {
+		return
+	}
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	if scheduler.blockerScope != scope {
+		scheduler.blockerScope = scope
+		scheduler.blockers = make(map[string]time.Time)
+	}
+	host := normalizeName(hostname)
+	if newest := scheduler.blockers[host]; !at.After(newest) {
+		return
+	}
+	scheduler.blockers[host] = at
+	if len(scheduler.blockers) > 4 {
+		oldest := host
+		for key, checked := range scheduler.blockers {
+			if checked.Before(scheduler.blockers[oldest]) || checked.Equal(scheduler.blockers[oldest]) && key > oldest {
+				oldest = key
+			}
+		}
+		delete(scheduler.blockers, oldest)
+	}
+}
+
+func (scheduler *dnsReadinessScheduler) clearQueryBlockers(a model.PlatformConsumerAssignment) {
+	scheduler.mu.Lock()
+	defer scheduler.mu.Unlock()
+	if len(scheduler.blockers) == 0 {
+		return
+	}
+	scope, err := platformconfig.Digest(a)
+	if err == nil && scheduler.blockerScope == scope {
+		scheduler.blockerScope = ""
+		scheduler.blockers = nil
+	}
+}
+
+func (scheduler *dnsReadinessScheduler) candidatePriority(plan *platformconfig.DNSReadinessPlan, indices []int, now time.Time, freshness time.Duration) (map[int]int, int) {
+	// All classes share the original eight-slot priority budget. Leave
+	// reserved slots for availability and ranked work even when an exact
+	// publication blocker is present, and keep oldest-attempt rotation.
 	const maxPriority = 8
-	var availability, ranked []int
+	const maxBlocked = 2
+	var blocked, availability, ranked []int
+	if scheduler.scope == scheduler.blockerScope && len(scheduler.blockers) > 0 {
+		for _, i := range indices {
+			at := scheduler.blockers[plan.Probes[i].Hostname]
+			if !at.IsZero() && !at.After(now) && now.Sub(at) < freshness {
+				blocked = append(blocked, i)
+			}
+		}
+	}
+	oldestFirst := func(ordered []int) {
+		sort.SliceStable(ordered, func(i, j int) bool {
+			return scheduler.attempts[plan.Probes[ordered[i]].ID].Before(scheduler.attempts[plan.Probes[ordered[j]].ID])
+		})
+	}
+	sort.SliceStable(blocked, func(i, j int) bool {
+		left, right := plan.Probes[blocked[i]], plan.Probes[blocked[j]]
+		first, second := scheduler.priority.preferred[dnsroutesource.ProbeKey(left)], scheduler.priority.preferred[dnsroutesource.ProbeKey(right)]
+		if first != second {
+			return first
+		}
+		return scheduler.attempts[left.ID].Before(scheduler.attempts[right.ID])
+	})
+	blocked = blocked[:min(len(blocked), maxBlocked)]
 	if len(scheduler.priority.candidates) != 0 || len(scheduler.priority.availability) != 0 {
 		for _, i := range indices {
+			if slices.Contains(blocked, i) {
+				continue
+			}
 			key := dnsroutesource.ProbeKey(plan.Probes[i])
 			switch {
 			case scheduler.priority.availability[key]:
@@ -63,23 +136,22 @@ func (scheduler *dnsReadinessScheduler) candidatePriority(plan *platformconfig.D
 			}
 		}
 	}
-	oldestFirst := func(ordered []int) {
-		sort.SliceStable(ordered, func(i, j int) bool {
-			return scheduler.attempts[plan.Probes[ordered[i]].ID].Before(scheduler.attempts[plan.Probes[ordered[j]].ID])
-		})
-	}
 	oldestFirst(availability)
 	oldestFirst(ranked)
-	first := min(len(availability), max(maxPriority/2, maxPriority-len(ranked)))
-	second := min(len(ranked), maxPriority-first)
-	result := make(map[int]int, first+second)
-	for rank, i := range availability[:first] {
+	unreserved := maxPriority - len(blocked)
+	first := min(len(availability), max(unreserved/2, unreserved-len(ranked)))
+	second := min(len(ranked), unreserved-first)
+	result := make(map[int]int, len(blocked)+first+second)
+	for rank, i := range blocked {
 		result[i] = rank + 1
 	}
-	for rank, i := range ranked[:second] {
-		result[i] = first + rank + 1
+	for rank, i := range availability[:first] {
+		result[i] = len(blocked) + rank + 1
 	}
-	return result
+	for rank, i := range ranked[:second] {
+		result[i] = len(blocked) + first + rank + 1
+	}
+	return result, len(blocked)
 }
 
 func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAssignment, logger *log.Logger, paths ...string) *dnsReadinessScheduler {
@@ -94,13 +166,14 @@ func (scheduler *dnsReadinessScheduler) bind(assignment model.PlatformConsumerAs
 }
 
 type dnsProbeTargetQueue struct {
-	address  string
-	indices  []int
-	next     int
-	active   int
-	started  int
-	outcomes map[string]int
-	duration time.Duration
+	address       string
+	indices       []int
+	next          int
+	active        int
+	started       int
+	blockerProbes int
+	outcomes      map[string]int
+	duration      time.Duration
 }
 
 type dnsProbeResult struct {
@@ -188,7 +261,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 		// in every sweep, even when ordinary proofs have the same deadline.
 		// Rotating the oldest attempts first prevents a large pool pinning its
 		// same members to the head. The remaining queue keeps normal fairness.
-		priority := scheduler.candidatePriority(plan, indices)
+		priority, blockerProbes := scheduler.candidatePriority(plan, indices, started, time.Duration(policy.FactFreshnessSeconds)*time.Second)
 		sort.SliceStable(indices, func(left, right int) bool {
 			if first, second := priority[indices[left]], priority[indices[right]]; first != second {
 				return first != 0 && (second == 0 || first < second)
@@ -233,7 +306,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 			}
 			return firstAttempt.Before(secondAttempt)
 		})
-		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, outcomes: map[string]int{}})
+		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, blockerProbes: blockerProbes, outcomes: map[string]int{}})
 	}
 	concurrency := max(0, min(policy.MaxConcurrency, len(plan.Probes)-deferred))
 	results := make(chan dnsProbeResult, concurrency)
@@ -342,11 +415,15 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 		deadline, _ := ctx.Deadline()
 		planDigest, _ := platformconfig.Digest(plan)
 		targets := make([]map[string]any, 0, min(32, len(queues)))
+		blockerAttempts := 0
+		for _, queue := range queues {
+			blockerAttempts += min(queue.started, queue.blockerProbes)
+		}
 		for _, queue := range queues[:min(32, len(queues))] {
 			targets = append(targets, map[string]any{"address": queue.address, "probes": len(queue.indices), "started": queue.started, "unobserved": len(queue.indices) - queue.started, "outcomes": queue.outcomes, "duration_ms": queue.duration.Milliseconds(), "retry_at": scheduler.targets[queue.address].retryAt})
 		}
 		traceID, tracePhase := dnsSyncTraceIdentity(ctx)
-		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "deferred_fresh": deferred, "unobserved": len(facts) - attempted - deferred, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
+		report, err := json.Marshal(map[string]any{"event": "dns_readiness_sweep", "sync_trace_id": traceID, "sync_phase": tracePhase, "observation_id": observationID, "scope_digest": scheduler.scope, "plan_digest": planDigest, "started_at": started, "finished_at": time.Now().UTC(), "deadline": deadline, "budget_exhausted": errors.Is(ctx.Err(), context.DeadlineExceeded), "probes": len(facts), "targets": len(queues), "attempted": attempted, "query_blocker_attempts": blockerAttempts, "deferred_fresh": deferred, "unobserved": len(facts) - attempted - deferred, "outcomes": counts, "target_observations": targets, "targets_omitted": len(queues) - len(targets)})
 		if err == nil {
 			if scheduler.logger != nil {
 				scheduler.logger.Print(string(report))
