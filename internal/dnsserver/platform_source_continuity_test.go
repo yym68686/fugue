@@ -236,6 +236,10 @@ func testApprovedSourceAdvance(t *testing.T, changePolicy bool, retained ...bool
 func TestRetainedSourceCannotResetRecoveryForAuthenticatedSuccessor(t *testing.T) {
 	request, policies, activations := celldns.SourceAuthorizedRequest(t, false)
 	artifact := celldns.Compile(t, request).DNSArtifact
+	decoded, err := platformconfig.DecodeDNSArtifact(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	makePlans := func(advance bool) (*dnsroutesource.Plans, dnsServingPayload) {
 		t.Helper()
@@ -265,7 +269,7 @@ func TestRetainedSourceCannotResetRecoveryForAuthenticatedSuccessor(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := dnsServingPayload{Plan: plan, routeSources: sources, sourceBindings: plans.Bindings, sourceRecoveryKeys: keys, Policy: request.Policy}
+		p := dnsServingPayload{Plan: plan, Queries: decoded.QueryViews, routeSources: sources, sourceBindings: plans.Bindings, sourceRecoveryKeys: keys, Policy: decoded.Policy}
 		p.indexSourceRequirements()
 		return plans, p
 	}
@@ -284,7 +288,7 @@ func TestRetainedSourceCannotResetRecoveryForAuthenticatedSuccessor(t *testing.T
 	}
 	for _, scenario := range []string{"verified successor", "unknown binding", "different DNS artifact", "unverified source", "physical failure"} {
 		t.Run(scenario, func(t *testing.T) {
-			s := NewService(config.DNSConfig{}, nil)
+			s := NewService(config.DNSConfig{DNSNodeID: "dns-a", EdgeGroupID: "cell-dns"}, nil)
 			candidate := dnsPlatformCandidate{Artifact: artifact}
 			old := &dnsServingState{record: dnsServingCheckpoint{Candidate: candidate}, payload: previous}
 			bridge := &dnsReleaseBridge{payload: next, candidate: candidate}
@@ -318,16 +322,43 @@ func TestRetainedSourceCannotResetRecoveryForAuthenticatedSuccessor(t *testing.T
 			case "physical failure":
 				retained.Ready, retained.Reason = false, "probe_unavailable"
 			}
-			facts := []dnsReadinessFact{retained}
-			s.observeRetainedDNSRouteRecovery(old, facts, at, bridge)
-			if len(facts[0].ProbeHistory) != 0 || dnsFactMatchesRelease(facts[0], old.record.Parent, old.record.Candidate, old.routeID, previous) {
+			var fallback dnsReadinessFact
+			if scenario == "verified successor" {
+				// Exercise the local fallback used by a rejected update of the
+				// current assignment's source context. There is no separate
+				// retained grant, and the physical target now presents the
+				// successfully observed successor proof.
+				observations := observe()
+				refreshed, err := s.refreshedDNSServingFacts(context.Background(), old, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+					if host == oldProbe.Hostname && path == oldProbe.Path && address == oldProbe.Address {
+						return retained.Proof, nil
+					}
+					return routeprobe.Proof{}, routeprobe.ErrUnavailable
+				}, "readiness_incomplete", bridge, observations)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, f := range refreshed.facts {
+					if f.ProbeID == oldProbe.ID {
+						fallback = f
+					}
+				}
+				if fallback.ProbeID == "" || fallback.Ready {
+					t.Fatal("fallback accepted the successor under retained authority")
+				}
+			} else {
+				facts := []dnsReadinessFact{retained}
+				s.observeRetainedDNSRouteRecovery(old, facts, at, bridge)
+				fallback = facts[0]
+			}
+			if len(fallback.ProbeHistory) != 0 || dnsFactMatchesRelease(fallback, old.record.Parent, old.record.Candidate, old.routeID, previous) {
 				t.Fatal("fallback borrowed readiness from the successor")
 			}
 			at = at.Add(time.Second)
 			got := len(observe()[0].ProbeHistory)
 			want := 1
 			if scenario == "verified successor" {
-				want = 3
+				want = 4
 			}
 			if got != want {
 				t.Fatalf("the successor's valid current sample got %d successes, want %d", got, want)

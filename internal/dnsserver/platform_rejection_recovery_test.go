@@ -225,14 +225,28 @@ func TestRetainedDNSRefreshReusesOnlyBoundObservations(t *testing.T) {
 		}})
 	}
 	old := &dnsServingState{record: dnsServingCheckpoint{Parent: parent, Candidate: candidate}, payload: payload, routeID: routeID}
-	for _, scenario := range []string{"unchanged", "missing", "not observed", "changed requirement", "duplicate", "foreign release", "negative", "stricter freshness"} {
+	for _, scenario := range []string{"unchanged", "equal decoded authority", "changed decoded authority", "missing", "not observed", "changed requirement", "duplicate", "foreign release", "negative", "stricter freshness"} {
 		t.Run(scenario, func(t *testing.T) {
+			old := *old
 			observed := append([]dnsReadinessFact(nil), facts...)
 			binding := *observed[0].Proof.TrafficRelease
 			observed[0].Proof.TrafficRelease = &binding
 			bridge := &dnsReleaseBridge{parent: parent, candidate: candidate, payload: payload, routeID: routeID}
 			wantCalls := 0
 			switch scenario {
+			case "equal decoded authority", "changed decoded authority":
+				left, right := *payload.Plan, *payload.Plan
+				left.Probes = append([]platformconfig.DNSReadinessProbe(nil), payload.Plan.Probes...)
+				right.Probes = append([]platformconfig.DNSReadinessProbe(nil), payload.Plan.Probes...)
+				authority := platformconfig.DNSPreviousAuthority{EdgeGroupID: "previous", RouteDigest: "previous-digest"}
+				other := authority
+				if scenario == "changed decoded authority" {
+					other.RouteDigest += "-changed"
+					wantCalls = 1
+				}
+				left.Probes[0].PreviousAuthority, right.Probes[0].PreviousAuthority = &authority, &other
+				old.payload.Plan = &left
+				bridge.payload.Plan = &right
 			case "missing":
 				observed = observed[1:]
 				wantCalls = 1
@@ -259,7 +273,7 @@ func TestRetainedDNSRefreshReusesOnlyBoundObservations(t *testing.T) {
 			}
 			before := mustDNSJSON(t, observed)
 			var calls atomic.Int32
-			got := collectRetainedDNSReadinessFacts(context.Background(), old, bridge, observed, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
+			got := collectRetainedDNSReadinessFacts(context.Background(), &old, bridge, observed, func(_ context.Context, host, path, address, _ string, _ time.Duration) (routeprobe.Proof, error) {
 				calls.Add(1)
 				for i, requirement := range payload.Plan.Probes {
 					if requirement.Hostname == host && requirement.Path == path && requirement.Address == address {

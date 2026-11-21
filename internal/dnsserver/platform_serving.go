@@ -502,7 +502,11 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			if old.record.Positive && dnsSameSourceContext(old.record.RouteSources, p.routeSources) {
 				st.record = old.record
 			} else if old.record.Positive {
-				st, err = s.refreshedDNSServingFacts(ctx, old, probe, "readiness_incomplete", nil, nil, retainedReader)
+				// The DNS assignment stayed the same, but its independently
+				// signed route sources advanced. Keep the verified observation
+				// context so retained fallback doesn't classify a proof of the
+				// selected source as a physical failure of unchanged behavior.
+				st, err = s.refreshedDNSServingFacts(ctx, old, probe, "readiness_incomplete", bridge, observations, retainedReader)
 				if err != nil {
 					return err
 				}
@@ -668,9 +672,10 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	st, err := buildDNSServingState(old.record, old.payload, old.routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err == nil {
 		st.fallback = reason
-		if bridge == nil {
-			// Control-plane loss cannot renew pending evidence. Late exact
-			// observations may complete it only within its original deadlines.
+		if bridge == nil || reflect.DeepEqual(old.record.Candidate.Assignment, bridge.candidate.Assignment) {
+			// Neither loss of authority nor an updated source observation of
+			// the current assignment can renew another pending assignment.
+			// Late exact observations may only use its original deadlines.
 			st.transition = old.transition
 			if old.transition != nil && old.transition.state != nil {
 				pending := old.transition.state
@@ -740,7 +745,10 @@ func collectRetainedDNSReadinessFacts(ctx context.Context, old *dnsServingState,
 			bridgeAllowed[requirement.ID] && dnsFactMatchesRelease(fact, bridge.parent, bridge.candidate, bridge.routeID, bridge.payload)
 		// A skipped probe is not a negative observation. The bounded retained
 		// scan must still try it before the old serving proof expires.
-		if observedRequirements[requirement.ID] == requirement && found && !duplicates[requirement.ID] && usable && fact.Reason != "not_observed" {
+		// Plans decoded or compiled separately may reference distinct copies
+		// of the same prior source authority. Compare their signed values.
+		if found && !duplicates[requirement.ID] && usable && fact.Reason != "not_observed" &&
+			reflect.DeepEqual(observedRequirements[requirement.ID], requirement) {
 			limit := fact.Proof.CheckedAt.Add(time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, old.payload.Policy.DNSReadiness)) * time.Second)
 			if limit.Before(fact.Proof.ValidUntil) {
 				fact.Proof.ValidUntil = limit
