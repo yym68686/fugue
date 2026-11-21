@@ -492,9 +492,6 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		if err = checkAssignment(); err != nil {
 			return err
 		}
-		if p.routeSources != nil {
-			s.servingDNSProbes.noteSnapshotBlocker(a, snapshotErr)
-		}
 		if !same && p.routeSources == nil && ctx.Err() == nil {
 			s.pendingDNSProbeWindow = newDNSServingProbeWindow(a, parent, routeID, p, facts, now)
 		}
@@ -548,6 +545,10 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			s.platformServing.publish(retained, dnsServingWriterRecordTransition)
 		}
 		if snapshotErr != nil {
+			// Global DNS can also pass route quorum while its signed
+			// selector has no ready endpoint. Record the exact name after
+			// any extra retained probes and their authority recheck.
+			s.servingDNSProbes.noteSnapshotBlocker(a, snapshotErr)
 			return snapshotErr
 		}
 		if !same && old != nil && old.record.Positive && a.ConvergenceDeadline.After(now) &&

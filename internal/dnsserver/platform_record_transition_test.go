@@ -566,9 +566,17 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil || s.platformServing.Load() != old || reports.Load() != 0 {
 			t.Fatal("superseded wire-failed candidate changed serving authority", err)
 		}
+		if len(s.servingDNSProbes.blockers) != 0 {
+			t.Fatal("superseded assignment changed probe priorities")
+		}
 		raceAssignment.Store(false)
 		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err == nil {
 			t.Fatal("wire-incomplete candidate promoted")
+		}
+		scope, err := platformconfig.Digest(candidate.Assignment)
+		if err != nil || s.servingDNSProbes.blockerScope != scope ||
+			len(s.servingDNSProbes.blockers) != 1 || s.servingDNSProbes.blockers["other.example.test"].IsZero() {
+			t.Fatal("global DNS lost exact wire blocker for the next sweep", err, s.servingDNSProbes.blockers)
 		}
 		active := s.platformServing.Load()
 		if !reflect.DeepEqual(active.record, checkpoint) || reports.Load() != 0 {
@@ -604,6 +612,9 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 		complete.Store(true)
 		if err := s.syncPlatformDNSServingOnce(context.Background(), probe, s.probeDNSServingListener); err != nil || reports.Load() != 1 {
 			t.Fatal("complete successor did not activate normally", err)
+		}
+		if len(s.servingDNSProbes.blockers) != 0 {
+			t.Fatal("successful global publication did not clear recovered blocker")
 		}
 		return
 	}
