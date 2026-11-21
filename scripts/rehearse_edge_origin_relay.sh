@@ -18,6 +18,7 @@ origin_ns="fugue-relay-o-$suffix"
 namespaces=()
 host_files=()
 children=()
+phase='build synthetic fixture'
 cleanup() {
   local rc=$? ns path pid
   trap - EXIT
@@ -33,6 +34,7 @@ cleanup() {
     sudo -n rmdir -- "$path" || rc=1
   done
   if (( rc != 0 )); then
+    printf 'Edge origin relay rehearsal failed during: %s\n' "$phase" >&2
     for path in "$dir/egress.log" "$dir/origin.log"; do
       if [[ -f "$path" ]]; then sed -n '1,120p' "$path"; fi
     done
@@ -48,11 +50,13 @@ go test -c -o "$dir/rehearsal.test" ./internal/edge
 FUGUE_RELAY_REHEARSAL_ROLE=material FUGUE_RELAY_REHEARSAL_DIR="$dir" \
   "$dir/rehearsal.test" -test.run '^TestOriginRelayPrivateNetworkRehearsal$' -test.timeout=10s
 
+phase='create isolated namespaces'
 for ns in "$source_ns" "$peer_ns" "$origin_ns"; do
   sudo -n ip netns add "$ns"
   namespaces+=("$ns")
   sudo -n ip -n "$ns" link set lo up
 done
+phase='attach private fixture interfaces'
 sudo -n ip -n "$source_ns" link add to-peer type veth peer name to-source netns "$peer_ns"
 sudo -n ip -n "$peer_ns" link add to-origin type veth peer name to-peer netns "$origin_ns"
 while read -r ns link addr; do
@@ -64,12 +68,17 @@ $peer_ns to-source 10.231.1.2/30
 $peer_ns to-origin 10.231.2.1/30
 $origin_ns to-peer 10.231.2.2/30
 EOF
+phase='install isolated hosts resolution'
+# ip netns exec consults this directory, but ip netns add does not create it.
+# A fresh hosted runner may have no per-namespace DNS overrides yet.
+sudo -n mkdir -p -- /etc/netns
 for ns in "$source_ns" "$peer_ns"; do
   path="/etc/netns/$ns"
   sudo -n mkdir -m 0755 -- "$path"
   host_files+=("$path")
   printf '10.231.2.2 origin.rehearsal.svc.cluster.local\n' | sudo -n tee "$path/hosts" >/dev/null
 done
+phase='verify no external route'
 for ns in "${namespaces[@]}"; do
   if [[ -n "$(sudo -n ip -n "$ns" route show default)" || -n "$(sudo -n ip -n "$ns" -6 route show default)" ]]; then
     echo "unexpected external route in fixture namespace" >&2
@@ -82,6 +91,7 @@ run_role() {
     GODEBUG=netdns=go FUGUE_RELAY_REHEARSAL_ROLE="$2" FUGUE_RELAY_REHEARSAL_DIR="$dir" \
     "$dir/rehearsal.test" -test.v -test.run '^TestOriginRelayPrivateNetworkRehearsal$' -test.timeout="$3"
 }
+phase='run origin probes, forward and withdraw'
 run_role "$origin_ns" origin 105s >"$dir/origin.log" 2>&1 &
 children+=("$!")
 run_role "$peer_ns" egress 105s >"$dir/egress.log" 2>&1 &
