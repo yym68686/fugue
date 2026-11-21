@@ -101,6 +101,67 @@ func requireFrontRepairCurrentDeclaration(ctx context.Context, launch frontRepai
 	return nil
 }
 
+// requireFrontRepairEnvironment checks the actual GitHub configuration,
+// not merely a workflow environment name or the presence of its secrets.
+func requireFrontRepairEnvironment(ctx context.Context, launch frontRepairActionsLaunch, get frontRepairActionsGet) error {
+	const environment = "production-edge-front-repair"
+	endpoint := "repos/" + launch.policy.Repository + "/environments/" + environment
+	var live struct {
+		Name                   string `json:"name"`
+		CanAdminsBypass        *bool  `json:"can_admins_bypass"`
+		DeploymentBranchPolicy struct {
+			ProtectedBranches    bool `json:"protected_branches"`
+			CustomBranchPolicies bool `json:"custom_branch_policies"`
+		} `json:"deployment_branch_policy"`
+		Rules []struct {
+			Type              string `json:"type"`
+			PreventSelfReview bool   `json:"prevent_self_review"`
+			Reviewers         []struct {
+				Type     string `json:"type"`
+				Reviewer struct {
+					ID int64 `json:"id"`
+				} `json:"reviewer"`
+			} `json:"reviewers"`
+		} `json:"protection_rules"`
+	}
+	raw, err := get(ctx, endpoint, frontRepairActionsMetadataMax)
+	if err != nil || json.Unmarshal(raw, &live) != nil || live.Name != environment || live.CanAdminsBypass == nil ||
+		*live.CanAdminsBypass || live.DeploymentBranchPolicy.ProtectedBranches || !live.DeploymentBranchPolicy.CustomBranchPolicies {
+		return errors.New("Front repair requires its dedicated non-bypassable production environment")
+	}
+	reviewerRules := 0
+	for _, rule := range live.Rules {
+		if rule.Type != "required_reviewers" {
+			continue
+		}
+		reviewerRules++
+		if !rule.PreventSelfReview || len(rule.Reviewers) == 0 {
+			return errors.New("Front repair requires independent deployment review")
+		}
+		for _, reviewer := range rule.Reviewers {
+			if reviewer.Reviewer.ID <= 0 || (reviewer.Type != "User" && reviewer.Type != "Team") {
+				return errors.New("Front repair environment has an invalid deployment reviewer")
+			}
+		}
+	}
+	if reviewerRules != 1 {
+		return errors.New("Front repair environment has no unambiguous reviewer rule")
+	}
+	var branches struct {
+		TotalCount int `json:"total_count"`
+		Policies   []struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"branch_policies"`
+	}
+	raw, err = get(ctx, endpoint+"/deployment-branch-policies", frontRepairActionsMetadataMax)
+	if err != nil || json.Unmarshal(raw, &branches) != nil || branches.TotalCount != 1 || len(branches.Policies) != 1 ||
+		branches.Policies[0].Name != "main" || branches.Policies[0].Type != "branch" {
+		return errors.New("Front repair production environment must allow exactly the main branch")
+	}
+	return nil
+}
+
 type frontRepairApprovedReceipt struct {
 	Schema              string `json:"schema"`
 	DeclarationCommit   string `json:"declarationCommit"`
@@ -154,6 +215,9 @@ func runFrontRepairApproved(args []string, stdout io.Writer) error {
 		return err
 	}
 	if err := requireFrontRepairCurrentDeclaration(ctx, launch, readFrontRepairGitHubCLI); err != nil {
+		return err
+	}
+	if err := requireFrontRepairEnvironment(ctx, launch, readFrontRepairGitHubCLI); err != nil {
 		return err
 	}
 	config, err := loadKubeConfig()

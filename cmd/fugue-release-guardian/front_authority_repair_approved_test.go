@@ -60,6 +60,49 @@ func TestFrontRepairApprovedRequiresProtectedExactMainJobAndCleanExecutor(t *tes
 	}
 }
 
+func TestFrontRepairApprovedRequiresIndependentLiveEnvironmentProtection(t *testing.T) {
+	launch := frontRepairActionsLaunch{policy: frontRepairReleasePolicy{Repository: "fixture/fugue"}}
+	const endpoint = "repos/fixture/fugue/environments/production-edge-front-repair"
+	const environment = `{"name":"production-edge-front-repair","can_admins_bypass":false,"deployment_branch_policy":{"custom_branch_policies":true,"protected_branches":false},"protection_rules":[{"type":"required_reviewers","prevent_self_review":true,"reviewers":[{"type":"User","reviewer":{"id":123}}]}]}`
+	const mainOnly = `{"total_count":1,"branch_policies":[{"name":"main","type":"branch"}]}`
+	for _, tc := range []struct {
+		name, environment, policies string
+		wantOK                      bool
+	}{
+		{"exact", environment, mainOnly, true},
+		{"missing environment", "", mainOnly, false},
+		{"admin bypass", strings.Replace(environment, `"can_admins_bypass":false`, `"can_admins_bypass":true`, 1), mainOnly, false},
+		{"unknown admin bypass", strings.Replace(environment, `"can_admins_bypass":false,`, "", 1), mainOnly, false},
+		{"self approval", strings.Replace(environment, `"prevent_self_review":true`, `"prevent_self_review":false`, 1), mainOnly, false},
+		{"missing reviewer", strings.Replace(environment, `[{"type":"User","reviewer":{"id":123}}]`, "[]", 1), mainOnly, false},
+		{"unknown reviewer", strings.Replace(environment, `"id":123`, `"id":0`, 1), mainOnly, false},
+		{"branch policies unavailable", environment, "", false},
+		{"tag named main", environment, strings.Replace(mainOnly, `"type":"branch"`, `"type":"tag"`, 1), false},
+		{"wildcard", environment, strings.Replace(mainOnly, `"name":"main"`, `"name":"*"`, 1), false},
+		{"another page or extra ref", environment, strings.Replace(mainOnly, `"total_count":1`, `"total_count":2`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			get := func(_ context.Context, path string, limit int64) ([]byte, error) {
+				if limit != frontRepairActionsMetadataMax {
+					t.Fatalf("unbounded request: %d", limit)
+				}
+				switch path {
+				case endpoint:
+					return []byte(tc.environment), nil
+				case endpoint + "/deployment-branch-policies":
+					return []byte(tc.policies), nil
+				default:
+					t.Fatalf("unscoped environment lookup: %s", path)
+					return nil, errors.New("unexpected path")
+				}
+			}
+			if err := requireFrontRepairEnvironment(context.Background(), launch, get); (err == nil) != tc.wantOK {
+				t.Fatalf("authorization result: %v, want accepted=%v", err, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestFrontRepairApprovedRequiresStillCurrentProtectedDeclaration(t *testing.T) {
 	launch := frontRepairActionsLaunch{
 		policy: frontRepairReleasePolicy{Repository: "fixture/fugue"}, declaration: strings.Repeat("a", 40)}
