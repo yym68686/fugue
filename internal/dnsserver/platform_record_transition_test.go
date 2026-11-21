@@ -113,6 +113,32 @@ func TestHostedDNSPathTransitionRequiresEverySuccessorPath(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			s := NewService(config.DNSConfig{Zone: view.Zone, DNSNodeID: view.NodeID, EdgeGroupID: view.EdgeGroupID}, nil)
+			s.platformServingBound.Store(true)
+			udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tcp, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				udp.Close()
+				t.Fatal(err)
+			}
+			u, v := &dns.Server{PacketConn: udp, Handler: s}, &dns.Server{Listener: tcp, Handler: s}
+			started := make(chan struct{}, 2)
+			u.NotifyStartedFunc = func() { started <- struct{}{} }
+			v.NotifyStartedFunc = func() { started <- struct{}{} }
+			go u.ActivateAndServe()
+			go v.ActivateAndServe()
+			defer u.Shutdown()
+			defer v.Shutdown()
+			for range 2 {
+				select {
+				case <-started:
+				case <-time.After(time.Second):
+					t.Fatal("DNS test listener did not start")
+				}
+			}
 			q := new(dns.Msg).SetQuestion(dns.Fqdn(host), dns.TypeA)
 			for _, incomplete := range []bool{true, false} {
 				facts := []dnsReadinessFact{}
@@ -129,11 +155,15 @@ func TestHostedDNSPathTransitionRequiresEverySuccessorPath(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				base.transition = &dnsRecordTransition{state: next, hosts: hosts}
-				response := base.answer(q, "", now)
-				if incomplete && response.Rcode != dns.RcodeServerFailure ||
-					!incomplete && (response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].Header().Ttl > 30) {
-					t.Fatalf("unexpected successor response with incomplete=%t: %v", incomplete, response)
+				active := *base
+				active.transition = &dnsRecordTransition{state: next, hosts: hosts}
+				s.platformServing.Store(&active)
+				for network, address := range map[string]string{"udp": udp.LocalAddr().String(), "tcp": tcp.Addr().String()} {
+					response, _, err := (&dns.Client{Net: network, Timeout: time.Second}).Exchange(q, address)
+					if err != nil || !response.Authoritative || (incomplete && response.Rcode != dns.RcodeServerFailure) ||
+						(!incomplete && (response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].Header().Ttl > 30)) {
+						t.Fatalf("unexpected %s successor response with incomplete=%t: %v %v", network, incomplete, response, err)
+					}
 				}
 			}
 		})
