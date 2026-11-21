@@ -177,7 +177,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	}
 	apply := func(node string, request edgegroupfront.ActivationRepairCASRequest) {
 		t.Helper()
-		if _, err := edgegroupfront.ApplyActivationRepairCAS(paths[node], request); err != nil {
+		if _, err := edgegroupfront.ApplyActivationRepairCAS(paths[node], request, time.Now().Add(10*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}

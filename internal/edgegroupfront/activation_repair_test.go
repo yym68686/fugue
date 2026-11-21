@@ -33,6 +33,10 @@ func seedPartialRepair(t *testing.T) (string, ActivationRepairCASRequest, Activa
 		Committed: identity(current), Previous: identity(prior), Expected: current}, current, now.Add(2 * time.Second)
 }
 
+func applyTestRepairAt(path string, request ActivationRepairCASRequest, at time.Time) (ActivationReceipt, error) {
+	return applyActivationRepairCAS(path, request, at.Add(10*time.Second), func() time.Time { return at })
+}
+
 func TestActivationRepairRecordsSameTargetOnKeptAndRolledBackMembers(t *testing.T) {
 	stablePath, stable, current, now := seedPartialRepair(t)
 	rolledBackPath, repair, _, _ := seedPartialRepair(t)
@@ -43,7 +47,7 @@ func TestActivationRepairRecordsSameTargetOnKeptAndRolledBackMembers(t *testing.
 		t.Fatal(err)
 	}
 	repair.Expected = rolledBack.Current
-	if _, err := applyActivationRepairCAS(rolledBackPath, repair, func() time.Time { return now }); err == nil {
+	if _, err := applyTestRepairAt(rolledBackPath, repair, now); err == nil {
 		t.Fatal("divergent node switched before preparation")
 	}
 	prepare := activationRequest(ActivationOperationPromote, 3, "a", "b", "bundle-b", 0)
@@ -52,25 +56,25 @@ func TestActivationRepairRecordsSameTargetOnKeptAndRolledBackMembers(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := applyActivationRepairCAS(rolledBackPath, repair, func() time.Time { return p.ExpiresAt.Add(-5 * time.Second) }); err == nil {
+	if _, err := applyTestRepairAt(rolledBackPath, repair, p.ExpiresAt.Add(-5*time.Second)); err == nil {
 		t.Fatal("expired or near-expiry preparation was accepted")
 	}
 	read, _, err := ReadActivationState(rolledBackPath)
 	if err != nil || read != rolledBack.Current {
 		t.Fatalf("failed repair changed the file: %+v, error=%v", read, err)
 	}
-	kept, err := applyActivationRepairCAS(stablePath, stable, func() time.Time { return now })
+	kept, err := applyTestRepairAt(stablePath, stable, now)
 	if err != nil || !stable.Committed.matches(kept.Current) || kept.Previous == nil || *kept.Previous != current {
 		t.Fatalf("same-slot rebase changed serving identity: %+v, error=%v", kept, err)
 	}
-	recovered, err := applyActivationRepairCAS(rolledBackPath, repair, func() time.Time { return now.Add(time.Second) })
+	recovered, err := applyTestRepairAt(rolledBackPath, repair, now.Add(time.Second))
 	if err != nil || recovered.Previous == nil || *recovered.Previous != rolledBack.Current ||
 		kept.Current.Generation != 4 || !stable.MatchesActivation(kept.Current) || !repair.MatchesActivation(recovered.Current) ||
 		activationWithoutTime(kept.Current) != activationWithoutTime(recovered.Current) ||
 		kept.StateDigest == "" || recovered.StateDigest == "" {
 		t.Fatalf("different group target: kept=%+v repaired=%+v err=%v", kept, recovered, err)
 	}
-	if _, err := applyActivationRepairCAS(rolledBackPath, repair, func() time.Time { return now.Add(2 * time.Second) }); !errors.Is(err, ErrActivationCASConflict) {
+	if _, err := applyTestRepairAt(rolledBackPath, repair, now.Add(2*time.Second)); !errors.Is(err, ErrActivationCASConflict) {
 		t.Fatalf("replay did not preserve the newer generation: %v", err)
 	}
 	wrongJournal := repair
@@ -91,12 +95,12 @@ func TestActivationRepairCASMatchesCompletePredecessorAndFencesConcurrentWriters
 	path, input, current, now := seedPartialRepair(t)
 	incorrect := input
 	incorrect.Expected.Reason = "another otherwise valid audit marker"
-	if _, err := applyActivationRepairCAS(path, incorrect, func() time.Time { return now }); !errors.Is(err, ErrActivationCASConflict) {
+	if _, err := applyTestRepairAt(path, incorrect, now); !errors.Is(err, ErrActivationCASConflict) {
 		t.Fatalf("changed predecessor did not conflict: %v", err)
 	}
 	incorrect = input
 	incorrect.Committed.BundleGeneration = "unproven-bundle"
-	if _, err := applyActivationRepairCAS(path, incorrect, func() time.Time { return now }); err == nil {
+	if _, err := applyTestRepairAt(path, incorrect, now); err == nil {
 		t.Fatal("same-slot repair would change the serving bundle")
 	}
 	got, _, err := ReadActivationState(path)
@@ -108,7 +112,7 @@ func TestActivationRepairCASMatchesCompletePredecessorAndFencesConcurrentWriters
 	var wg sync.WaitGroup
 	for i := 0; i < writers; i++ {
 		wg.Go(func() {
-			_, err := applyActivationRepairCAS(path, input, func() time.Time { return now })
+			_, err := applyTestRepairAt(path, input, now)
 			results <- err
 		})
 	}
@@ -124,5 +128,38 @@ func TestActivationRepairCASMatchesCompletePredecessorAndFencesConcurrentWriters
 	}
 	if accepted != 1 {
 		t.Fatalf("accepted %d of %d writers, want exactly one", accepted, writers)
+	}
+}
+
+func TestActivationRepairDeadlineSurvivesContentionAndDelayBeforeReplace(t *testing.T) {
+	path, request, current, now := seedPartialRepair(t)
+	lock, err := acquireActivationLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyTestRepairAt(path, request, now); !errors.Is(err, ErrActivationCASConflict) {
+		t.Fatalf("repair did not immediately reject a busy lock: %v", err)
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, deadline := range []time.Time{now, now.Add(time.Minute)} {
+		if _, err := applyActivationRepairCAS(path, request, deadline, func() time.Time { return now }); err == nil {
+			t.Fatal("invalid write deadline was accepted")
+		}
+	}
+	deadline := now.Add(5 * time.Second)
+	calls := 0
+	if _, err := applyActivationRepairCAS(path, request, deadline, func() time.Time {
+		calls++
+		if calls == 3 {
+			return deadline
+		}
+		return now
+	}); err == nil || calls != 3 {
+		t.Fatalf("deadline missed just before atomic replace: checks=%d err=%v", calls, err)
+	}
+	if read, _, err := ReadActivationState(path); err != nil || read != current {
+		t.Fatalf("expired write reached disk: state=%+v err=%v", read, err)
 	}
 }

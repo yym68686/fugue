@@ -143,11 +143,15 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 }
 
 func acquireActivationLock(path string) (*os.File, error) {
+	return acquireActivationLockMode(path, syscall.LOCK_EX)
+}
+
+func acquireActivationLockMode(path string, mode int) (*os.File, error) {
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open edge front activation lock: %w", err)
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := syscall.Flock(int(lock.Fd()), mode); err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("lock edge front activation: %w", err)
 	}
@@ -155,6 +159,10 @@ func acquireActivationLock(path string) (*os.File, error) {
 }
 
 func commitActivationState(path string, previous ActivationState, exists bool, next ActivationState) (ActivationReceipt, error) {
+	return commitActivationStateGuarded(path, previous, exists, next, nil)
+}
+
+func commitActivationStateGuarded(path string, previous ActivationState, exists bool, next ActivationState, beforeReplace func() error) (ActivationReceipt, error) {
 	if err := validateActivationState(next); err != nil {
 		return ActivationReceipt{}, err
 	}
@@ -163,7 +171,7 @@ func commitActivationState(path string, previous ActivationState, exists bool, n
 		return ActivationReceipt{}, err
 	}
 	encoded = append(encoded, '\n')
-	if err := replaceActivationState(path, encoded); err != nil {
+	if err := replaceActivationStateGuarded(path, encoded, beforeReplace); err != nil {
 		return ActivationReceipt{}, err
 	}
 	digest := sha256.Sum256(encoded)
@@ -264,6 +272,10 @@ func validateActivationPath(path string) error {
 }
 
 func replaceActivationState(path string, raw []byte) error {
+	return replaceActivationStateGuarded(path, raw, nil)
+}
+
+func replaceActivationStateGuarded(path string, raw []byte, beforeReplace func() error) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, ".edge-front-activation-*")
 	if err != nil {
@@ -285,6 +297,11 @@ func replaceActivationState(path string, raw []byte) error {
 	}
 	if err := temporary.Close(); err != nil {
 		return err
+	}
+	if beforeReplace != nil {
+		if err := beforeReplace(); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace edge front activation state: %w", err)

@@ -5,6 +5,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,8 +45,17 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	reason := flags.String("reason", "", "auditable activation reason")
 	prepare := flags.Bool("prepare-publication", false, "prepare signed current publication without changing Front activation")
 	requirePreparation := flags.Bool("require-publication-preparation", false, "require exact unexpired preparation before activation")
+	repairRequest := flags.String("repair-request", "", "base64url of an exact short-lived journaled repair write")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return errors.New("invalid edge front CAS arguments")
+	}
+	isRepair := false
+	flags.Visit(func(f *flag.Flag) { isRepair = isRepair || f.Name == "repair-request" })
+	if isRepair {
+		if flags.NFlag() != 2 || *stateFile == "" {
+			return errors.New("Front repair mode requires only state-file and repair-request")
+		}
+		return runRepair(*stateFile, *repairRequest, stdout)
 	}
 	request := edgegroupfront.ActivationCASRequest{
 		RequirePublicationPreparation: *requirePreparation,
@@ -62,6 +73,36 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	return writeReceipt(stdout, receipt)
+}
+
+func runRepair(path, encoded string, stdout io.Writer) error {
+	if len(encoded) == 0 || len(encoded) > 16<<10 {
+		return errors.New("Front repair request size is invalid")
+	}
+	for _, c := range encoded {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return errors.New("Front repair request encoding is invalid")
+		}
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil {
+		return errors.New("Front repair request encoding is invalid")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var write edgegroupfront.ActivationRepairWrite
+	if decoder.Decode(&write) != nil || decoder.Decode(&struct{}{}) != io.EOF || write.Schema != edgegroupfront.ActivationRepairWriteSchemaV1 {
+		return errors.New("Front repair request schema is invalid")
+	}
+	receipt, err := edgegroupfront.ApplyActivationRepairCAS(path, write.Request, write.ExpiresAt)
+	if err != nil {
+		return err
+	}
+	return writeReceipt(stdout, receipt)
+}
+
+func writeReceipt(stdout io.Writer, receipt any) error {
 	encoder := json.NewEncoder(stdout)
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(receipt)

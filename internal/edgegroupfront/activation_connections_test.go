@@ -106,7 +106,7 @@ func TestFrontActivationPreservesEstablishedWorkerStreams(t *testing.T) {
 	}
 	repair := ActivationRepairCASRequest{JournalDigest: "sha256:" + strings.Repeat("c", 64), CommittedGeneration: 2,
 		Expected: active, Committed: identity(active), Previous: identity(initial)}
-	if _, err := ApplyActivationRepairCAS(path, repair); err != nil {
+	if _, err := ApplyActivationRepairCAS(path, repair, time.Now().Add(10*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	rebased, rebasedReader := dial()
@@ -126,7 +126,7 @@ func TestFrontActivationPreservesEstablishedWorkerStreams(t *testing.T) {
 	if _, err := PreparePublication(path, activationRequest(ActivationOperationPromote, 5, "a", "b", "bundle-b", 0), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyActivationRepairCAS(path, repair); err != nil {
+	if _, err := ApplyActivationRepairCAS(path, repair, time.Now().Add(10*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	repaired, repairedReader := dial()

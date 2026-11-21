@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,19 +28,36 @@ type ActivationRepairCASRequest struct {
 	Previous            ActivationRepairRelease
 }
 
-func ApplyActivationRepairCAS(path string, request ActivationRepairCASRequest) (ActivationReceipt, error) {
-	return applyActivationRepairCAS(path, request, time.Now)
+const ActivationRepairWriteSchemaV1 = "edge-front-repair-write/v1"
+
+type ActivationRepairWrite struct {
+	Schema    string                     `json:"schema"`
+	ExpiresAt time.Time                  `json:"expires_at"`
+	Request   ActivationRepairCASRequest `json:"request"`
 }
 
-func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, clock func() time.Time) (ActivationReceipt, error) {
+// Do not let a detached executor regain write authority after its caller's
+// lease window. The caller supplies a deadline strictly within that window.
+func ApplyActivationRepairCAS(path string, request ActivationRepairCASRequest, expiresAt time.Time) (ActivationReceipt, error) {
+	return applyActivationRepairCAS(path, request, expiresAt, time.Now)
+}
+
+func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, expiresAt time.Time, clock func() time.Time) (ActivationReceipt, error) {
 	if err := validateActivationPath(path); err != nil {
 		return ActivationReceipt{}, err
 	}
 	if err := request.validate(); err != nil {
 		return ActivationReceipt{}, err
 	}
-	lock, err := acquireActivationLock(path)
+	started := clock().UTC()
+	if expiresAt.IsZero() || !started.Before(expiresAt) || expiresAt.Sub(started) > 15*time.Second {
+		return ActivationReceipt{}, errors.New("Front repair write deadline is missing, expired or excessive")
+	}
+	lock, err := acquireActivationLockMode(path, syscall.LOCK_EX|syscall.LOCK_NB)
 	if err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return ActivationReceipt{}, errors.Join(ErrActivationCASConflict, err)
+		}
 		return ActivationReceipt{}, err
 	}
 	defer lock.Close()
@@ -53,9 +71,13 @@ func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, c
 	// Take the clock after acquiring the lock so waiting for an unrelated
 	// writer cannot consume the preparation TTL and then reuse stale time.
 	now := clock().UTC()
-	if now.IsZero() || now.Before(current.UpdatedAt) {
+	if now.IsZero() || now.Before(started) || now.Before(current.UpdatedAt) {
 		return ActivationReceipt{}, errors.New("Front repair clock precedes the exact predecessor")
 	}
+	if !now.Before(expiresAt) {
+		return ActivationReceipt{}, errors.New("Front repair write deadline expired after acquiring activation lock")
+	}
+	commitDeadline := expiresAt
 	if current.ActiveSlot != request.Committed.Slot {
 		prepared, found, err := ReadPublicationPreparation(path)
 		if err != nil || !found || !prepared.Matches(current, request.Committed.Slot, request.Committed.WorkerSourceCommit, now) ||
@@ -63,10 +85,19 @@ func applyActivationRepairCAS(path string, request ActivationRepairCASRequest, c
 			!now.Add(5*time.Second).Before(prepared.ExpiresAt) {
 			return ActivationReceipt{}, errors.New("Front repair lacks exact unexpired publication preparation")
 		}
+		if prepared.ExpiresAt.Before(commitDeadline) {
+			commitDeadline = prepared.ExpiresAt
+		}
 	}
 	next := request.target()
 	next.UpdatedAt = now
-	return commitActivationState(path, current, true, next)
+	return commitActivationStateGuarded(path, current, true, next, func() error {
+		checked := clock().UTC()
+		if checked.Before(now) || !checked.Before(commitDeadline) {
+			return errors.New("Front repair write deadline expired before replacing activation")
+		}
+		return nil
+	})
 }
 
 func (request ActivationRepairCASRequest) validate() error {
