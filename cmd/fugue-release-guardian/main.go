@@ -34,6 +34,12 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "front-repair-tool-manifest" {
+		if err := runFrontRepairToolManifest(os.Args[2:], os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Printf("release-guardian: %v", err)
 		os.Exit(1)

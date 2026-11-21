@@ -1092,6 +1092,38 @@ jobs:
           PREPUSH_TIMEOUT_SECONDS: "360"
           PREPUSH_MAX_ELAPSED_SECONDS: "360"
         run: make prepush
+      - name: Build and validate standalone Front repair artifacts
+        id: front_repair_tools
+        timeout-minutes: 5
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          GOFLAGS: ""
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- .github/workflows/ci.yml cmd/fugue-edge-front-cas cmd/fugue-release-guardian internal/edgegroupfront internal/edgetopology/authority go.mod go.sum; then exit 0; fi
+          source="$(git rev-parse HEAD)"
+          test "$source" = "$GITHUB_SHA"
+          root="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-build.XXXXXXXX")"
+          mkdir -m 0700 "$root/tools"
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -buildvcs=true -buildmode=exe -ldflags='-s -w' \
+              -o "$root/tools/fugue-edge-front-cas-linux-$arch" ./cmd/fugue-edge-front-cas
+          done
+          go build -trimpath -o "$root/guardian" ./cmd/fugue-release-guardian
+          "$root/guardian" front-repair-tool-manifest --dir "$root/tools" --source-commit "$source" > "$root/manifest.json"
+          mv -- "$root/manifest.json" "$root/tools/manifest.json"
+          cat "$root/tools/manifest.json"
+          echo "directory=$root/tools" >> "$GITHUB_OUTPUT"
+      - name: Upload immutable Front repair tool inventory
+        if: steps.front_repair_tools.outputs.directory != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: front-repair-tools-${{ github.sha }}
+          path: ${{ steps.front_repair_tools.outputs.directory }}
+          if-no-files-found: error
+          retention-days: 30
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
         env:
