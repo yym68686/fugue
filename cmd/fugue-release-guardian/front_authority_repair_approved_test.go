@@ -20,13 +20,14 @@ func TestFrontRepairApprovedRequiresProtectedExactMainJobAndCleanExecutor(t *tes
 	if err := os.Mkdir(inputDir, 0700); err != nil {
 		t.Fatal(err)
 	}
+	fixtureFence := fmt.Sprintf(`{"sourceCommit":"%s","imageDigest":"sha256:%s","platformDigest":"sha256:%s"}`, source, strings.Repeat("c", 64), strings.Repeat("d", 64))
 	env := map[string]string{
 		"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/main", "GITHUB_REF_PROTECTED": "true",
 		"GITHUB_JOB": frontRepairActionsApplyJob, "RUNNER_ENVIRONMENT": "self-hosted", "GITHUB_SERVER_URL": "https://github.com",
 		"GITHUB_SHA": declaration, "GITHUB_WORKFLOW_SHA": declaration, "GITHUB_REPOSITORY": repo, "GITHUB_REPOSITORY_ID": "3",
 		"GITHUB_WORKFLOW_REF": repo + "/.github/workflows/ci.yml@refs/heads/main", "RUNNER_TEMP": temp,
 		"FUGUE_EDGE_FRONT_REPAIR_INPUTS": inputDir,
-		frontRepairProtectedPolicyEnv:    fmt.Sprintf(`{"schema":"%s","scope":"fixture-front","component":"edge-worker-fixture","repository":"%s","repositoryId":3,"workflowId":5,"executorCommit":"%s","verifierKey":"%s"}`, frontRepairReleasePolicySchema, repo, source, strings.Repeat("A", 43)),
+		frontRepairProtectedPolicyEnv:    fmt.Sprintf(`{"schema":"%s","scope":"fixture-front","component":"edge-worker-fixture","repository":"%s","repositoryId":3,"workflowId":5,"executorCommit":"%s","verifierKey":"%s","apiFence":%s,"guardianFence":%s}`, frontRepairReleasePolicySchema, repo, source, strings.Repeat("A", 43), fixtureFence, fixtureFence),
 	}
 	info := &debug.BuildInfo{Path: "fugue/cmd/fugue-release-guardian", Main: debug.Module{Path: "fugue"},
 		Settings: []debug.BuildSetting{{Key: "GOOS", Value: "linux"}, {Key: "-buildmode", Value: "exe"},

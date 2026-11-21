@@ -2576,8 +2576,12 @@ jobs:
           executor="$(jq -er '.executorCommit' <<<"$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY")"
           [[ "$executor" =~ ^[0-9a-f]{40}$ && "$executor" != "$GITHUB_SHA" ]] || exit 1
           git merge-base --is-ancestor "$executor" "$GITHUB_SHA"
+          api_fence="$(jq -er '.apiFence.sourceCommit' <<<"$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY")"
+          [[ "$api_fence" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          git merge-base --is-ancestor "$api_fence" "$executor"
+          git diff --quiet "$api_fence" "$executor" -- internal/api/cluster_node_edge_admission.go internal/api/platform_capacity_code.go
           git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
-          git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/edge-groups.json go.mod go.sum \
+          git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/components.json deploy/releases/edge-groups.json go.mod go.sum \
             cmd/fugue-release-guardian cmd/fugue-edge-front-repair-cas internal/frontrepairstate internal/edgegroupfront internal/releaseguardian internal/declarativerelease
           # Public source contains only exact byte digests, never the signed
           # approval or the preview with production Node and Pod identities.

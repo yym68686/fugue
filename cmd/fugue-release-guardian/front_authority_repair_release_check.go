@@ -18,14 +18,16 @@ import (
 const frontRepairReleasePolicySchema = "edge-front-repair-release-policy/v1"
 
 type frontRepairReleasePolicy struct {
-	Schema         string `json:"schema"`
-	Scope          string `json:"scope"`
-	Component      string `json:"component"`
-	Repository     string `json:"repository"`
-	RepositoryID   uint64 `json:"repositoryId"`
-	WorkflowID     uint64 `json:"workflowId"`
-	ExecutorCommit string `json:"executorCommit"`
-	VerifierKey    string `json:"verifierKey"`
+	Schema         string                  `json:"schema"`
+	Scope          string                  `json:"scope"`
+	Component      string                  `json:"component"`
+	Repository     string                  `json:"repository"`
+	RepositoryID   uint64                  `json:"repositoryId"`
+	WorkflowID     uint64                  `json:"workflowId"`
+	ExecutorCommit string                  `json:"executorCommit"`
+	VerifierKey    string                  `json:"verifierKey"`
+	APIFence       frontRepairFenceRelease `json:"apiFence"`
+	GuardianFence  frontRepairFenceRelease `json:"guardianFence"`
 }
 
 func (policy frontRepairReleasePolicy) approvalTrust() (frontRepairApprovalTrust, error) {

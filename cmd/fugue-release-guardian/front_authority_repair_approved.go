@@ -48,6 +48,9 @@ func frontRepairActionsLaunchContext(getenv func(string) string, build *debug.Bu
 	if _, err := policy.approvalTrust(); err != nil {
 		return frontRepairActionsLaunch{}, err
 	}
+	if err := policy.requireFenceRevisions(); err != nil {
+		return frontRepairActionsLaunch{}, err
+	}
 	if !frontRepairExecutorBuildMatches(build, policy.ExecutorCommit) {
 		return frontRepairActionsLaunch{}, errors.New("Front repair launch does not use the exact clean approved Guardian build")
 	}
@@ -210,6 +213,10 @@ func runFrontRepairApproved(args []string, stdout io.Writer) error {
 	if err != nil || closeErr != nil {
 		return errors.Join(err, closeErr)
 	}
+	controlRegistry, err := loadFrontRepairControlRegistry()
+	if err != nil {
+		return err
+	}
 	selection, err := selectFrontRepairWorker(registry, launch.policy.Component)
 	if err != nil {
 		return err
@@ -233,7 +240,11 @@ func runFrontRepairApproved(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	result, err := newFrontRepairRuntime(activator).runApproved(ctx, selection, preview, envelope, qualification.trust, qualification.artifact)
+	runtime := newFrontRepairRuntime(activator)
+	runtime.requireControlPlaneFences = func(ctx context.Context) error {
+		return requireLiveFrontRepairFences(ctx, client, controlRegistry, launch.policy)
+	}
+	result, err := runtime.runApproved(ctx, selection, preview, envelope, qualification.trust, qualification.artifact)
 	// A failed invocation never emits a success receipt. The immutable
 	// journal resolves partial writes and unknown acknowledgements.
 	if err != nil {

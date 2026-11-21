@@ -178,8 +178,7 @@ func (r frontRepairRuntime) runReviewedWithReleaseCheck(ctx context.Context, rel
 
 // executeReviewed keeps preparation, per-node writes and pointer commit in
 // one group-fenced transaction. Only the verified declaration launcher may
-// invoke this function with leases from the selected release. No production
-// command invokes it yet.
+// invoke this function in production with leases from the selected release.
 func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepairStore, intent frontRepairReviewedIntent) (frontRepairOpened, error) {
 	ctx, cancel := context.WithTimeout(ctx, frontRepairRunBudget)
 	defer cancel()
@@ -205,6 +204,11 @@ func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepa
 		}
 		if err := store.requireRepairPredecessor(ctx, journal, progress.Converged); err != nil {
 			return opened, err
+		}
+		if r.requireControlPlaneFences != nil {
+			if err := r.requireControlPlaneFences(ctx); err != nil {
+				return opened, err
+			}
 		}
 		if progress.Converged {
 			if err := store.commit(ctx, group, journal.Digest, witnesses); err != nil {

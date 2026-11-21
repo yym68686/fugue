@@ -24,9 +24,10 @@ import (
 )
 
 type frontRepairRuntime struct {
-	activator *frontAuthorityActivator
-	read      func(context.Context, string, any) error
-	nodeTools *frontRepairToolSet // required by runApproved; nil is only the isolated executor path
+	activator                 *frontAuthorityActivator
+	read                      func(context.Context, string, any) error
+	nodeTools                 *frontRepairToolSet         // required by runApproved; nil is only the isolated executor path
+	requireControlPlaneFences func(context.Context) error // mandatory on the protected live entrypoint
 }
 
 type frontRepairRuntimeMember struct {

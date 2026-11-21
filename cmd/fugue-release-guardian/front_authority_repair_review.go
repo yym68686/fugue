@@ -237,6 +237,9 @@ func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepa
 	if _, supported := r.activator.executor.(frontRepairToolExecutor); !supported {
 		return frontRepairOpened{}, errors.New("Front repair has no protected temporary tool transport")
 	}
+	if r.requireControlPlaneFences == nil {
+		return frontRepairOpened{}, errors.New("Front repair live control-plane fence checker is missing")
+	}
 	if !artifact.identity.valid() || artifact.identity != trust.Artifact {
 		return frontRepairOpened{}, errors.New("Front repair requires authenticated Actions artifact intake")
 	}
@@ -250,6 +253,9 @@ func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepa
 	// must expire before the approval. Never extend the caller deadline.
 	ctx, cancel := context.WithDeadline(ctx, envelope.Statement.ExpiresAt.Add(-frontRepairNodeClockBound))
 	defer cancel()
+	if err := r.requireControlPlaneFences(ctx); err != nil {
+		return frontRepairOpened{}, err
+	}
 	client := r.activator.client
 	store, err := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{selection.target})
 	if err != nil {
@@ -280,6 +286,9 @@ func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepa
 	}
 	return r.runReviewedWithReleaseCheck(ctx, release, intent, func(ctx context.Context, locked frontRepairStore) error {
 		if err := locked.requireHeld(ctx, intent.Group); err != nil {
+			return err
+		}
+		if err := r.requireControlPlaneFences(ctx); err != nil {
 			return err
 		}
 		if _, err := readBoundRelease(ctx, locked.authority); err != nil {
