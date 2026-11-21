@@ -1103,14 +1103,14 @@ jobs:
           set -euo pipefail
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
-          if git diff --quiet "$base" HEAD -- .github/workflows/ci.yml cmd/fugue-edge-front-cas cmd/fugue-release-guardian internal/edgegroupfront internal/edgetopology/authority go.mod go.sum; then exit 0; fi
+          if git diff --quiet "$base" HEAD -- .github/workflows/ci.yml cmd/fugue-edge-front-repair-cas cmd/fugue-release-guardian internal/frontrepairstate go.mod go.sum; then exit 0; fi
           source="$(git rev-parse HEAD)"
           test "$source" = "$GITHUB_SHA"
           root="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-build.XXXXXXXX")"
           mkdir -m 0700 "$root/tools"
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -buildvcs=true -buildmode=exe -ldflags='-s -w' \
-              -o "$root/tools/fugue-edge-front-cas-linux-$arch" ./cmd/fugue-edge-front-cas
+              -o "$root/tools/fugue-edge-front-repair-cas-linux-$arch" ./cmd/fugue-edge-front-repair-cas
           done
           go build -trimpath -o "$root/guardian" ./cmd/fugue-release-guardian
           "$root/guardian" front-repair-tool-manifest --dir "$root/tools" --source-commit "$source" > "$root/manifest.json"
@@ -2578,7 +2578,7 @@ jobs:
           git merge-base --is-ancestor "$executor" "$GITHUB_SHA"
           git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
           git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/edge-groups.json go.mod go.sum \
-            cmd/fugue-release-guardian cmd/fugue-edge-front-cas internal/edgegroupfront internal/releaseguardian internal/declarativerelease
+            cmd/fugue-release-guardian cmd/fugue-edge-front-repair-cas internal/frontrepairstate internal/edgegroupfront internal/releaseguardian internal/declarativerelease
           # Public source contains only exact byte digests, never the signed
           # approval or the preview with production Node and Pod identities.
           intent="$(git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/intent.json")"

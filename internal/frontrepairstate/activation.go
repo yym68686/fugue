@@ -1,6 +1,6 @@
-// Package edgefrontstate owns the group-local durable Front activation and
+// Package frontrepairstate owns the group-local durable Front activation and
 // publication-preparation records. It has no networking or cluster clients.
-package edgefrontstate
+package frontrepairstate
 
 import (
 	"bytes"
@@ -16,9 +16,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"fugue/internal/edgetopology/authority"
 )
+
+// authorityIDPattern is part of the retained durable Front v1 format.
+const authorityIDPattern = `^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$`
 
 const (
 	ActivationStateSchemaV1     = "edge-front-group-activation/v1"
@@ -30,7 +31,7 @@ const (
 )
 
 var (
-	activationGroupPattern  = regexp.MustCompile(authority.IDPattern)
+	activationGroupPattern  = regexp.MustCompile(authorityIDPattern)
 	activationCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	activationDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	activationReasonPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 ._:/-]{7,255}$`)

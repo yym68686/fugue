@@ -9,14 +9,15 @@ import (
 	"sort"
 	"strings"
 
-	"fugue/internal/edgetopology/authority"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const SchemaVersion = "edge-topology/v1"
 
-// AuthorityIDPattern is the common on-disk and topology authority syntax.
-const AuthorityIDPattern = authority.IDPattern
+// AuthorityIDPattern accepts explicit neutral cell identities and the legacy
+// group namespace during migration. Neither form encodes placement or country
+// semantics; callers must verify exact signed scope and current authority.
+const AuthorityIDPattern = `^(?:edge-group-|cell-)[a-z0-9]+(?:-[a-z0-9]+)*$`
 
 var authorityIDPattern = regexp.MustCompile(AuthorityIDPattern)
 

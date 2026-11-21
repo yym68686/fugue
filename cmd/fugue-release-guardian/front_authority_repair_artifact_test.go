@@ -154,7 +154,7 @@ func frontRepairBuildFixtureArchive(t *testing.T) (string, frontRepairToolManife
 	for _, arch := range []string{"amd64", "arm64"} {
 		name := frontRepairToolArtifactPrefix + arch
 		path := filepath.Join(dir, name)
-		build := exec.Command("go", "build", "-trimpath", "-buildvcs=true", "-buildmode=exe", "-ldflags=-s -w", "-o", path, "../fugue-edge-front-cas")
+		build := exec.Command("go", "build", "-trimpath", "-buildvcs=true", "-buildmode=exe", "-ldflags=-s -w", "-o", path, "../fugue-edge-front-repair-cas")
 		build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+arch)
 		if out, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build repair helper for %s: %v: %s", arch, err, out)

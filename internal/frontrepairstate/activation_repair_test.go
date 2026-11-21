@@ -1,4 +1,4 @@
-package edgefrontstate
+package frontrepairstate
 
 import (
 	"errors"

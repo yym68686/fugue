@@ -27,10 +27,6 @@ func TestFrontActivationPreservesEstablishedWorkerStreams(t *testing.T) {
 		}
 	}
 	change(ActivationOperationInit, 0, "a", "a", 0)
-	initial, _, err := ReadActivationState(path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	worker := func(slot string) string {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = fmt.Fprint(w, slot+":"+r.URL.Path)
@@ -96,41 +92,9 @@ func TestFrontActivationPreservesEstablishedWorkerStreams(t *testing.T) {
 	promoted, promotedReader := dial()
 	roundTrip(promoted, promotedReader, "new-after-promotion", "b")
 	roundTrip(old, oldReader, "existing-after-promotion", "a")
-	active, _, err := ReadActivationState(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity := func(state ActivationState) ActivationRepairRelease {
-		return ActivationRepairRelease{Slot: state.ActiveSlot, BundleGeneration: state.BundleGeneration,
-			WorkerSourceCommit: state.WorkerSourceCommit, WorkerImageDigest: state.WorkerImageDigest}
-	}
-	repair := ActivationRepairCASRequest{JournalDigest: "sha256:" + strings.Repeat("c", 64), CommittedGeneration: 2,
-		Expected: active, Committed: identity(active), Previous: identity(initial)}
-	if _, err := ApplyActivationRepairCAS(path, repair, time.Now().Add(10*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	rebased, rebasedReader := dial()
-	roundTrip(rebased, rebasedReader, "new-after-same-slot-repair", "b")
-	roundTrip(promoted, promotedReader, "existing-after-same-slot-repair", "b")
-	roundTrip(old, oldReader, "prior-slot-existing-after-same-slot-repair", "a")
-	change(ActivationOperationRollback, 4, "b", "a", 4)
+	change(ActivationOperationRollback, 2, "b", "a", 2)
 	restored, restoredReader := dial()
 	roundTrip(restored, restoredReader, "new-after-rollback", "a")
 	roundTrip(old, oldReader, "existing-after-rollback", "a")
 	roundTrip(promoted, promotedReader, "promoted-session-after-rollback", "b")
-	diverged, _, err := ReadActivationState(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	repair.Expected, repair.CommittedGeneration = diverged, 4
-	if _, err := PreparePublication(path, activationRequest(ActivationOperationPromote, 5, "a", "b", "bundle-b", 0), time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ApplyActivationRepairCAS(path, repair, time.Now().Add(10*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	repaired, repairedReader := dial()
-	roundTrip(repaired, repairedReader, "new-after-rollback-repair", "b")
-	roundTrip(restored, restoredReader, "previously-rolled-back-session", "a")
-	roundTrip(rebased, rebasedReader, "previously-rebased-session", "b")
 }

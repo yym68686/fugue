@@ -75,7 +75,7 @@ func loadFrontRepairToolSet(manifest frontRepairToolManifest, files map[string][
 }
 
 func frontRepairToolBuildMatches(info *debug.BuildInfo, record frontRepairToolRecord) bool {
-	if info == nil || info.Path != "fugue/cmd/fugue-edge-front-cas" || info.Main.Path != "fugue" || len(info.Deps) != 0 {
+	if info == nil || info.Path != "fugue/cmd/fugue-edge-front-repair-cas" || info.Main.Path != "fugue" || len(info.Deps) != 0 {
 		return false
 	}
 	wanted := map[string]string{"GOOS": "linux", "GOARCH": record.Architecture, "CGO_ENABLED": "0", "-buildmode": "exe",

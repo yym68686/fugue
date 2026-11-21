@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"fugue/internal/edgegroupfront/edgefrontstate"
 	"fugue/internal/frontnetwork"
 	"fugue/internal/model"
 	"fugue/internal/proxyproto"
@@ -237,7 +236,7 @@ func (s *Service) withDefaults() Config {
 	if strings.TrimSpace(cfg.DefaultSlot) == "" {
 		cfg.DefaultSlot = "a"
 	}
-	cfg.DefaultSlot = edgefrontstate.NormalizeSlot(cfg.DefaultSlot)
+	cfg.DefaultSlot = normalizeSlot(cfg.DefaultSlot)
 	if cfg.DialTimeout <= 0 {
 		cfg.DialTimeout = 5 * time.Second
 	}
@@ -912,7 +911,7 @@ func readActiveSlot(path, expectedGroupID string) (string, *ActivationState, err
 	}
 	trimmed := strings.TrimSpace(string(raw))
 	if !strings.HasPrefix(trimmed, "{") {
-		slot := edgefrontstate.NormalizeSlot(trimmed)
+		slot := normalizeSlot(trimmed)
 		if slot == "" {
 			return "", nil, errors.New("edge front active slot file contains invalid slot")
 		}
@@ -1101,4 +1100,16 @@ func logSafeTCPValue(value string) string {
 		return value[:maxLogValueLength] + "..."
 	}
 	return value
+}
+
+func normalizeSlot(value string) string {
+	slot := strings.ToLower(strings.TrimSpace(value))
+	switch slot {
+	case "a", "slot-a", "worker-a":
+		return "a"
+	case "b", "slot-b", "worker-b":
+		return "b"
+	default:
+		return ""
+	}
 }

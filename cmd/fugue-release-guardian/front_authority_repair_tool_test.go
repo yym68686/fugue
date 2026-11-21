@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontrepairstate"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
@@ -50,7 +51,7 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 		t.Skip("requires the production Linux process and procfs execution model")
 	}
 	binaryPath := filepath.Join(t.TempDir(), "cas")
-	build := exec.Command("go", "build", "-trimpath", "-buildvcs=true", "-buildmode=exe", "-ldflags=-s -w", "-o", binaryPath, "../fugue-edge-front-cas")
+	build := exec.Command("go", "build", "-trimpath", "-buildvcs=true", "-buildmode=exe", "-ldflags=-s -w", "-o", binaryPath, "../fugue-edge-front-repair-cas")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("compile actual static Front CAS tool: %v: %s", err, output)
@@ -137,7 +138,7 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 	scratch := t.TempDir()
 	run := func(phase string, bytesOnWire []byte) ([]byte, error) {
 		t.Helper()
-		write := edgegroupfront.ActivationRepairWrite{Schema: edgegroupfront.ActivationRepairWriteSchemaV1,
+		write := frontrepairstate.ActivationRepairWrite{Schema: frontrepairstate.ActivationRepairWriteSchemaV1,
 			ExpiresAt: time.Now().Add(8 * time.Second).UTC(), Request: input}
 		encoded, err := json.Marshal(write)
 		if err != nil {
@@ -178,7 +179,7 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 	}
 	ack, err = run("--repair-request", code)
 	var activated edgegroupfront.ActivationReceipt
-	if err != nil || decodeStrictJSON(ack, &activated) != nil || !input.MatchesActivation(activated.Current) {
+	if err != nil || decodeStrictJSON(ack, &activated) != nil || !input.MatchesActivation(frontrepairstate.ActivationState(activated.Current)) {
 		t.Fatalf("temporary helper did not execute the exact repair CAS: %s err=%v", ack, err)
 	}
 	if _, err := run("--repair-request", code); err == nil {

@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontrepairstate"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -207,9 +208,9 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err != nil || len(initial.Remaining) != 3 {
 		t.Fatalf("exact preparation did not authorize node requests: %+v, err=%v", initial, err)
 	}
-	apply := func(node string, request edgegroupfront.ActivationRepairCASRequest) {
+	apply := func(node string, request frontrepairstate.ActivationRepairCASRequest) {
 		t.Helper()
-		if _, err := edgegroupfront.ApplyActivationRepairCAS(paths[node], request, time.Now().Add(10*time.Second)); err != nil {
+		if _, err := frontrepairstate.ApplyActivationRepairCAS(paths[node], request, time.Now().Add(10*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontrepairstate"
 	"fugue/internal/model/edgecohort"
 	"fugue/internal/releaseguardian"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -209,7 +210,7 @@ func TestExecuteReviewedFrontRepairUsesDiskAndDoesNotReplay(t *testing.T) {
 		paths[worker.Node.Name] = file
 	}
 	var commands []string
-	var preparations []edgegroupfront.PublicationPreparation
+	var preparations []frontrepairstate.PublicationPreparation
 	simulateStoppedNode := true
 	reader.activator.executor = repairRuntimeExecFixture(func(_ context.Context, namespace, pod, container string, args ...string) ([]byte, error) {
 		worker, found := workers[pod]
@@ -224,14 +225,14 @@ func TestExecuteReviewedFrontRepairUsesDiskAndDoesNotReplay(t *testing.T) {
 			return []byte(strconv.FormatInt(time.Now().Unix(), 10) + "\n"), nil
 		case len(args) == 5 && slices.Equal(args[:3], []string{frontActivationCASBinary, "--state-file", frontActivationStatePath}):
 			decoded, err := base64.RawURLEncoding.Strict().DecodeString(args[4])
-			var write edgegroupfront.ActivationRepairWrite
-			if err != nil || decodeStrictJSON(decoded, &write) != nil || write.Schema != edgegroupfront.ActivationRepairWriteSchemaV1 ||
+			var write frontrepairstate.ActivationRepairWrite
+			if err != nil || decodeStrictJSON(decoded, &write) != nil || write.Schema != frontrepairstate.ActivationRepairWriteSchemaV1 ||
 				!time.Now().Before(write.ExpiresAt) || time.Until(write.ExpiresAt) > frontRepairMutationTimeout {
 				t.Fatalf("unbounded or ambiguous repair command: %q, err=%v", decoded, err)
 			}
 			commands = append(commands, args[3]+":"+worker.Node.Name)
 			if args[3] == "--repair-prepare-request" {
-				p, err := edgegroupfront.PrepareActivationRepairPublication(file, write.Request, write.ExpiresAt)
+				p, err := frontrepairstate.PrepareActivationRepairPublication(file, write.Request, write.ExpiresAt)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -244,7 +245,7 @@ func TestExecuteReviewedFrontRepairUsesDiskAndDoesNotReplay(t *testing.T) {
 			if simulateStoppedNode && worker.Node.Name == "edge-b" {
 				return []byte("unknown result without local write"), nil
 			}
-			receipt, err := edgegroupfront.ApplyActivationRepairCAS(file, write.Request, write.ExpiresAt)
+			receipt, err := frontrepairstate.ApplyActivationRepairCAS(file, write.Request, write.ExpiresAt)
 			if err != nil {
 				t.Fatal(err)
 			}

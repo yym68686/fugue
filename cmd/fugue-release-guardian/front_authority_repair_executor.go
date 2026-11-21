@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontrepairstate"
 	"fugue/internal/releaseguardian"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -231,7 +232,7 @@ func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepa
 			}
 			p, present := preparations[name]
 			if present {
-				if !frontRepairPreparationReady(p, request.Expected, before, now) {
+				if !frontRepairPreparationReady(p, edgegroupfront.ActivationState(request.Expected), before, now) {
 					return opened, fmt.Errorf("Front repair preparation on %s expired; no automatic refresh", name)
 				}
 				continue
@@ -239,7 +240,7 @@ func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepa
 			var receipt edgegroupfront.PublicationPreparation
 			raw, execErr := r.issueRepairNodeCommand(ctx, store, member, request, true)
 			if execErr != nil || decodeStrictJSON(raw, &receipt) != nil ||
-				!frontRepairPreparationReady(receipt, request.Expected, before, store.locks.now().UTC()) {
+				!frontRepairPreparationReady(receipt, edgegroupfront.ActivationState(request.Expected), before, store.locks.now().UTC()) {
 				return opened, errors.Join(fmt.Errorf("Front repair cannot confirm non-serving preparation on %s", name), execErr)
 			}
 			preparations[name] = receipt
@@ -269,7 +270,7 @@ func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepa
 		var receipt edgegroupfront.ActivationReceipt
 		acknowledged := execErr == nil && decodeStrictJSON(raw, &receipt) == nil && receipt.Schema == edgegroupfront.ActivationReceiptSchemaV1 &&
 			receipt.PreviousExists && receipt.Previous != nil && receipt.Previous.UpdatedAt.Equal(request.Expected.UpdatedAt) &&
-			*receipt.Previous == request.Expected && exactSHA256Digest(receipt.StateDigest) && request.MatchesActivation(receipt.Current)
+			frontrepairstate.ActivationState(*receipt.Previous) == request.Expected && exactSHA256Digest(receipt.StateDigest) && request.MatchesActivation(frontrepairstate.ActivationState(receipt.Current))
 		// Local disk and live Front are the proof, never a successful exec.
 		// If left at the predecessor the same command is not issued again.
 		if err := r.requireRepairApplied(ctx, member, request, journal.CreatedAt); err != nil {
@@ -297,7 +298,7 @@ func (store frontRepairStore) requireRepairPredecessor(ctx context.Context, jour
 	return errors.New("Front repair authority no longer proves the exact predecessor or completed pointer")
 }
 
-func nextFrontRepairMember(members []frontRepairRuntimeMember, progress frontRepairProgress) (frontRepairRuntimeMember, edgegroupfront.ActivationRepairCASRequest, bool) {
+func nextFrontRepairMember(members []frontRepairRuntimeMember, progress frontRepairProgress) (frontRepairRuntimeMember, frontrepairstate.ActivationRepairCASRequest, bool) {
 	// observe sorts on Node name; preserve the order within each class.
 	for _, switchSlot := range []bool{false, true} {
 		for _, member := range members {
@@ -307,11 +308,11 @@ func nextFrontRepairMember(members []frontRepairRuntimeMember, progress frontRep
 			}
 		}
 	}
-	return frontRepairRuntimeMember{}, edgegroupfront.ActivationRepairCASRequest{}, false
+	return frontRepairRuntimeMember{}, frontrepairstate.ActivationRepairCASRequest{}, false
 }
 
 func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store frontRepairStore, member frontRepairRuntimeMember,
-	request edgegroupfront.ActivationRepairCASRequest, prepare bool) ([]byte, error) {
+	request frontrepairstate.ActivationRepairCASRequest, prepare bool) ([]byte, error) {
 	if err := r.requireSameMember(ctx, member); err != nil {
 		return nil, err
 	}
@@ -362,8 +363,8 @@ func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store fr
 	if prepare {
 		flag = "--repair-prepare-request"
 	}
-	raw, err := json.Marshal(edgegroupfront.ActivationRepairWrite{
-		Schema: edgegroupfront.ActivationRepairWriteSchemaV1, Request: request, ExpiresAt: deadline.UTC(),
+	raw, err := json.Marshal(frontrepairstate.ActivationRepairWrite{
+		Schema: frontrepairstate.ActivationRepairWriteSchemaV1, Request: request, ExpiresAt: deadline.UTC(),
 	})
 	if err != nil {
 		cancel()
@@ -394,7 +395,7 @@ func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store fr
 }
 
 func (r frontRepairRuntime) requireRepairApplied(ctx context.Context, member frontRepairRuntimeMember,
-	request edgegroupfront.ActivationRepairCASRequest, created time.Time) error {
+	request frontrepairstate.ActivationRepairCASRequest, created time.Time) error {
 	observe, cancel := context.WithTimeout(ctx, frontRepairFrontFollowBudget)
 	defer cancel()
 	a := r.activator
@@ -403,7 +404,7 @@ func (r frontRepairRuntime) requireRepairApplied(ctx context.Context, member fro
 			return err
 		}
 		disk, err := a.readActivation(observe, member.worker.Name)
-		if err != nil || !request.MatchesActivation(disk) || disk.UpdatedAt.Before(created) {
+		if err != nil || !request.MatchesActivation(frontrepairstate.ActivationState(disk)) || disk.UpdatedAt.Before(created) {
 			return errors.Join(errors.New("Front repair disk activation did not advance exactly"), err)
 		}
 		var live observedFront
@@ -411,7 +412,7 @@ func (r frontRepairRuntime) requireRepairApplied(ctx context.Context, member fro
 		if probeErr == nil && frontRepairLiveMatches(live, disk) {
 			return r.requireSameMember(observe, member)
 		}
-		if probeErr == nil && !frontRepairLiveMatches(live, request.Expected) {
+		if probeErr == nil && !frontRepairLiveMatches(live, edgegroupfront.ActivationState(request.Expected)) {
 			return errors.New("live Front reported a different activation during repair")
 		}
 		if err := waitFrontRepairObservation(observe); err != nil {

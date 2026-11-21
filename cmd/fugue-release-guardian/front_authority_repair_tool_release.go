@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 )
 
-const frontRepairToolArtifactPrefix = "fugue-edge-front-cas-linux-"
+const frontRepairToolArtifactPrefix = "fugue-edge-front-repair-cas-linux-"
 
 // frontRepairToolBuildManifest has no Kubernetes or execution path. It verifies
 // the exact two clean builds in a fresh artifact directory before CI publishes

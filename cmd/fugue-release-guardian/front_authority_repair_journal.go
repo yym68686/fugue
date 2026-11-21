@@ -9,6 +9,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontrepairstate"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -76,15 +77,15 @@ func (journal frontRepairJournal) validate() error {
 	return nil
 }
 
-func (journal frontRepairJournal) activationRequest(member frontRepairMember) edgegroupfront.ActivationRepairCASRequest {
+func (journal frontRepairJournal) activationRequest(member frontRepairMember) frontrepairstate.ActivationRepairCASRequest {
 	before := journal.Plan.Before
-	return edgegroupfront.ActivationRepairCASRequest{JournalDigest: journal.Digest, Expected: member.Activation, CommittedGeneration: before.CurrentFrontGeneration,
-		Committed: edgegroupfront.ActivationRepairRelease{Slot: string(before.CurrentWorkerSlot), BundleGeneration: before.CurrentBundleGeneration, WorkerSourceCommit: before.CurrentWorkerSourceSHA, WorkerImageDigest: before.CurrentWorkerImageDigest},
-		Previous:  edgegroupfront.ActivationRepairRelease{Slot: string(before.PreviousWorkerSlot), BundleGeneration: before.PreviousBundleGeneration, WorkerSourceCommit: before.PreviousWorkerSourceSHA, WorkerImageDigest: before.PreviousWorkerImageDigest}}
+	return frontrepairstate.ActivationRepairCASRequest{JournalDigest: journal.Digest, Expected: frontrepairstate.ActivationState(member.Activation), CommittedGeneration: before.CurrentFrontGeneration,
+		Committed: frontrepairstate.ActivationRepairRelease{Slot: string(before.CurrentWorkerSlot), BundleGeneration: before.CurrentBundleGeneration, WorkerSourceCommit: before.CurrentWorkerSourceSHA, WorkerImageDigest: before.CurrentWorkerImageDigest},
+		Previous:  frontrepairstate.ActivationRepairRelease{Slot: string(before.PreviousWorkerSlot), BundleGeneration: before.PreviousBundleGeneration, WorkerSourceCommit: before.PreviousWorkerSourceSHA, WorkerImageDigest: before.PreviousWorkerImageDigest}}
 }
 
 type frontRepairProgress struct {
-	Remaining    map[string]edgegroupfront.ActivationRepairCASRequest
+	Remaining    map[string]frontrepairstate.ActivationRepairCASRequest
 	WorkersReady bool
 	Converged    bool
 }
@@ -100,7 +101,7 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness, now tim
 	for _, member := range journal.Plan.Members {
 		want[member.Node.Name] = member
 	}
-	pending := make(map[string]edgegroupfront.ActivationRepairCASRequest)
+	pending := make(map[string]frontrepairstate.ActivationRepairCASRequest)
 	healthy := true
 	var publication string
 	before := journal.Plan.Before
@@ -121,7 +122,7 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness, now tim
 		original.UpdatedAt = original.UpdatedAt.UTC()
 		if observed == original {
 			pending[name] = request
-		} else if !request.MatchesActivation(observed) || observed.UpdatedAt.Before(journal.CreatedAt) {
+		} else if !request.MatchesActivation(frontrepairstate.ActivationState(observed)) || observed.UpdatedAt.Before(journal.CreatedAt) {
 			return frontRepairProgress{}, fmt.Errorf("Front repair member %s is outside the journal's exact transition", name)
 		}
 		worker := seen.TargetWorkerHealth
@@ -252,7 +253,7 @@ func (store frontRepairStore) writePlan(ctx context.Context, group, journalDiges
 			continue
 		}
 		p, found := preparations[node]
-		if !found || !frontRepairPreparationReady(p, request.Expected, plan.Before, now) {
+		if !found || !frontRepairPreparationReady(p, edgegroupfront.ActivationState(request.Expected), plan.Before, now) {
 			return frontRepairProgress{}, fmt.Errorf("Front repair member %s has no fresh publication preparation", node)
 		}
 	}
