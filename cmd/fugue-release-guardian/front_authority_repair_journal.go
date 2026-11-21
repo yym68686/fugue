@@ -1,0 +1,303 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"time"
+
+	"fugue/internal/declarativerelease"
+	"fugue/internal/edgegroupfront"
+	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+)
+
+const frontRepairJournalSchema = "edge-front-authority-repair/v1"
+
+type frontRepairJournal struct {
+	Schema              string
+	Plan                frontRepairPlan
+	AuthorizationDigest string
+	CreatedAt           time.Time
+	Digest              string
+}
+
+func sealFrontRepairJournal(plan frontRepairPlan, authorizationDigest string, now time.Time) (frontRepairJournal, error) {
+	journal := frontRepairJournal{Schema: frontRepairJournalSchema, Plan: plan, AuthorizationDigest: authorizationDigest, CreatedAt: now.UTC()}
+	value, err := journal.validatedDigest()
+	if err != nil {
+		return frontRepairJournal{}, err
+	}
+	journal.Digest = value
+	return journal, nil
+}
+
+func (journal frontRepairJournal) validatedDigest() (string, error) {
+	plan := journal.Plan
+	before := plan.Before
+	planDigest, err := frontRepairPlanDigest(plan)
+	if err != nil || plan.Digest != planDigest || before.Validate() != nil || before.CurrentFrontGeneration <= before.PreviousFrontGeneration ||
+		before.PreviousFrontGeneration == 0 || before.CurrentFrontGeneration > math.MaxUint64-3 || before.AuthorityEpoch == math.MaxInt64 ||
+		plan.TargetGeneration != before.CurrentFrontGeneration+2 || !frontRepairIdentity(plan.CurrentUID) || !frontRepairIdentity(plan.CurrentResourceVersion) ||
+		len(plan.Members) < 2 || len(plan.Members) > 100 || journal.Schema != frontRepairJournalSchema ||
+		!exactSHA256Digest(journal.AuthorizationDigest) || journal.CreatedAt.IsZero() {
+		return "", errors.New("Front repair journal identity is invalid")
+	}
+	// Revalidate the sealed roster and per-node predecessor classifications;
+	// these are journal facts, not live readiness observations.
+	var expected []frontRepairNode
+	for _, member := range plan.Members {
+		expected = append(expected, member.Node)
+		if member.Activation.UpdatedAt.After(journal.CreatedAt) {
+			return "", errors.New("Front repair journal predates its node witness")
+		}
+	}
+	rederived, err := bindFrontRepairPredecessors(before, plan.CurrentUID, plan.CurrentResourceVersion, expected, plan.Members)
+	if err != nil || rederived.Digest != plan.Digest {
+		return "", errors.New("Front repair journal roster or predecessor binding is invalid")
+	}
+	journal.Digest = ""
+	raw, err := declarativerelease.CanonicalJSON(journal)
+	if err != nil || len(raw) > 256<<10 {
+		return "", errors.New("Front repair journal encoding is invalid")
+	}
+	return shaDigest(raw), nil
+}
+
+func (journal frontRepairJournal) validate() error {
+	value, err := journal.validatedDigest()
+	if err != nil || value != journal.Digest {
+		return errors.Join(errors.New("Front repair journal digest is invalid"), err)
+	}
+	return nil
+}
+
+func (journal frontRepairJournal) activationRequest(member frontRepairMember) edgegroupfront.ActivationRepairCASRequest {
+	before := journal.Plan.Before
+	return edgegroupfront.ActivationRepairCASRequest{JournalDigest: journal.Digest, Expected: member.Activation, CommittedGeneration: before.CurrentFrontGeneration,
+		Committed: edgegroupfront.ActivationRepairRelease{Slot: string(before.CurrentWorkerSlot), BundleGeneration: before.CurrentBundleGeneration, WorkerSourceCommit: before.CurrentWorkerSourceSHA, WorkerImageDigest: before.CurrentWorkerImageDigest},
+		Previous:  edgegroupfront.ActivationRepairRelease{Slot: string(before.PreviousWorkerSlot), BundleGeneration: before.PreviousBundleGeneration, WorkerSourceCommit: before.PreviousWorkerSourceSHA, WorkerImageDigest: before.PreviousWorkerImageDigest}}
+}
+
+type frontRepairProgress struct {
+	Remaining    map[string]edgegroupfront.ActivationRepairCASRequest
+	WorkersReady bool
+	Converged    bool
+}
+
+// resume recognizes only the journal's exact predecessor or exact new state
+// on each original Node/Pod. Lost replies become observations, never rewrites.
+// Every live Front and target Worker must be healthy before Converged is true.
+func (journal frontRepairJournal) resume(refreshed []frontRepairWitness) (frontRepairProgress, error) {
+	if journal.validate() != nil || len(refreshed) != len(journal.Plan.Members) {
+		return frontRepairProgress{}, errors.New("Front repair evidence does not cover the durable journal")
+	}
+	want := make(map[string]frontRepairMember, len(journal.Plan.Members))
+	for _, member := range journal.Plan.Members {
+		want[member.Node.Name] = member
+	}
+	pending := make(map[string]edgegroupfront.ActivationRepairCASRequest)
+	healthy := true
+	var publication string
+	before := journal.Plan.Before
+	target := releaseguardian.FrontAuthorityTarget{GroupID: before.GroupID, FrontBundleGeneration: before.CurrentBundleGeneration}
+	for _, seen := range refreshed {
+		name := seen.Node.Name
+		member, exists := want[name]
+		identity := seen.frontRepairMember
+		identity.Activation = member.Activation
+		if !exists || identity != member || !frontRepairLiveMatches(seen.LiveFront, seen.Activation) {
+			return frontRepairProgress{}, fmt.Errorf("Front repair member %s no longer proves its Node/Pod and live activation", name)
+		}
+		delete(want, name)
+		request := journal.activationRequest(member)
+		observed := seen.Activation
+		observed.UpdatedAt = observed.UpdatedAt.UTC()
+		original := member.Activation
+		original.UpdatedAt = original.UpdatedAt.UTC()
+		if observed == original {
+			pending[name] = request
+		} else if !request.MatchesActivation(observed) || observed.UpdatedAt.Before(journal.CreatedAt) {
+			return frontRepairProgress{}, fmt.Errorf("Front repair member %s is outside the journal's exact transition", name)
+		}
+		worker := seen.TargetWorkerHealth
+		if !preparedWorkerPublicationReady(worker, target) || (publication != "" && publication != worker.BundleVersion) {
+			healthy = false
+		}
+		publication = worker.BundleVersion
+	}
+	return frontRepairProgress{Remaining: pending, WorkersReady: healthy, Converged: healthy && len(pending) == 0}, nil
+}
+
+func frontRepairJournalName(group string) string { return "fugue-authority-front-repair-" + group }
+
+// frontRepairStore is used only from the reviewed repair path (not normal
+// promotion). held must check both membership and group authority locks.
+// No production command is wired to this store until the repair lane exists.
+type frontRepairStore struct {
+	client    kubernetes.Interface
+	namespace string
+	authority *releaseguardian.AuthorityStore
+	held      func(context.Context) error
+}
+
+func (store frontRepairStore) requireHeld(ctx context.Context) error {
+	if store.client == nil || store.authority == nil || store.held == nil {
+		return errors.New("Front repair store must be bound to both authority locks")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return store.held(ctx)
+}
+
+func (store frontRepairStore) load(ctx context.Context, group string) (frontRepairJournal, error) {
+	cms := store.client.CoreV1().ConfigMaps(store.namespace)
+	object, err := cms.Get(ctx, frontRepairJournalName(group), metav1.GetOptions{})
+	if err != nil {
+		return frontRepairJournal{}, err
+	}
+	var journal frontRepairJournal
+	if object.DeletionTimestamp != nil || object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 || len(object.BinaryData) != 0 ||
+		object.Labels["fugue.pro/group"] != group || object.Labels["fugue.pro/authority-kind"] != "front-repair-journal" ||
+		len(object.Data["journal.json"]) > 256<<10 || decodeStrictJSON([]byte(object.Data["journal.json"]), &journal) != nil ||
+		journal.validate() != nil || journal.Plan.Before.GroupID != group {
+		return frontRepairJournal{}, errors.New("persisted Front repair journal is invalid")
+	}
+	return journal, nil
+}
+
+func (store frontRepairStore) create(ctx context.Context, journal frontRepairJournal) error {
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	if err := journal.validate(); err != nil {
+		return err
+	}
+	plan := journal.Plan
+	group := plan.Before.GroupID
+	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
+		return errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	}
+	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
+	if err != nil || current != plan.Before || string(uid) != plan.CurrentUID || rv != plan.CurrentResourceVersion {
+		return errors.Join(errors.New("Front repair journal predecessor changed before creation"), err)
+	}
+	raw, err := declarativerelease.CanonicalJSON(journal)
+	if err != nil {
+		return err
+	}
+	immutable := true
+	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: frontRepairJournalName(group), Namespace: store.namespace, Labels: map[string]string{
+		"fugue.pro/group": group, "fugue.pro/authority-kind": "front-repair-journal",
+	}}, Immutable: &immutable, Data: map[string]string{"journal.json": string(raw)}}
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	if _, err := store.client.CoreV1().ConfigMaps(store.namespace).Create(ctx, object, metav1.CreateOptions{}); err != nil {
+		existing, loadErr := store.load(ctx, group)
+		if loadErr != nil || existing.Digest != journal.Digest {
+			return errors.Join(err, loadErr)
+		}
+	}
+	return nil
+}
+
+// writePlan reauthorizes only the outstanding CAS requests from the durable
+// journal. It must be repeated after every observation or failed reply; the
+// node CAS independently rechecks the predecessor and preparation at write.
+func (store frontRepairStore) writePlan(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness,
+	preparations map[string]edgegroupfront.PublicationPreparation, now time.Time) (frontRepairProgress, error) {
+	if err := store.requireHeld(ctx); err != nil {
+		return frontRepairProgress{}, err
+	}
+	journal, err := store.load(ctx, group)
+	if err != nil || journal.Digest != journalDigest || now.IsZero() {
+		return frontRepairProgress{}, errors.Join(errors.New("Front repair must resume the exact durable journal"), err)
+	}
+	plan := journal.Plan
+	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
+		return frontRepairProgress{}, errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	}
+	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
+	if err != nil || current != plan.Before || string(uid) != plan.CurrentUID || rv != plan.CurrentResourceVersion {
+		return frontRepairProgress{}, errors.Join(errors.New("Front repair CurrentAuthority changed before node writes"), err)
+	}
+	progress, err := journal.resume(refreshed)
+	if err != nil || !progress.WorkersReady {
+		return frontRepairProgress{}, errors.Join(errors.New("Front repair target Workers do not prove one healthy applied publication"), err)
+	}
+	for node, request := range progress.Remaining {
+		if request.Expected.ActiveSlot == request.Committed.Slot {
+			continue
+		}
+		p, found := preparations[node]
+		if !found || !frontRepairPreparationReady(p, request.Expected, plan.Before, now) {
+			return frontRepairProgress{}, fmt.Errorf("Front repair member %s has no fresh publication preparation", node)
+		}
+	}
+	if err := store.requireHeld(ctx); err != nil {
+		return frontRepairProgress{}, err
+	}
+	return progress, nil
+}
+
+// commit advances only the group generation and its epoch after exact runtime
+// convergence. Refresh the witnesses under both locks directly before calling.
+func (store frontRepairStore) commit(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness) error {
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	journal, err := store.load(ctx, group)
+	if err != nil || journal.Digest != journalDigest {
+		return errors.Join(errors.New("Front repair cannot commit without the exact durable journal"), err)
+	}
+	progress, err := journal.resume(refreshed)
+	if err != nil || !progress.Converged {
+		return errors.Join(errors.New("Front repair cohort has not converged"), err)
+	}
+	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
+		return errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	}
+	plan := journal.Plan
+	after := plan.Before
+	after.CurrentFrontGeneration, after.AuthorityEpoch = plan.TargetGeneration, after.AuthorityEpoch+1
+	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
+	if err != nil || string(uid) != plan.CurrentUID {
+		return errors.Join(errors.New("Front repair CurrentAuthority was replaced"), err)
+	}
+	if current == after {
+		return nil // recover an unknown Update outcome; no repeated write
+	}
+	if current != plan.Before || rv != plan.CurrentResourceVersion {
+		return errors.New("Front repair CurrentAuthority changed before commit")
+	}
+	cms := store.client.CoreV1().ConfigMaps(store.namespace)
+	object, err := cms.Get(ctx, "fugue-current-authority-"+group, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	var check releaseguardian.CurrentAuthority
+	if object.UID != uid || object.ResourceVersion != rv || decodeStrictJSON([]byte(object.Data["authority.json"]), &check) != nil || check != current {
+		return errors.New("Front repair CurrentAuthority CAS changed")
+	}
+	raw, err := declarativerelease.CanonicalJSON(after)
+	if err != nil {
+		return err
+	}
+	object.Data["authority.json"] = string(raw)
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	if _, err := cms.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		actual, observedUID, _, readErr := store.authority.LoadCurrent(ctx, group)
+		if apierrors.IsConflict(err) || readErr != nil || observedUID != uid || actual != after {
+			return errors.Join(err, readErr)
+		}
+	}
+	return nil
+}

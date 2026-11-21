@@ -54,6 +54,18 @@ type frontRepairPlan struct {
 // locks, re-read witnesses and persist a journal before applying this plan.
 func planPartialFrontRollbackRepair(before releaseguardian.CurrentAuthority, currentUID, currentRV string,
 	expected []frontRepairNode, observed []frontRepairWitness) (frontRepairPlan, error) {
+	members := make([]frontRepairMember, 0, len(observed))
+	for _, witness := range observed {
+		if !frontRepairLiveMatches(witness.LiveFront, witness.Activation) {
+			return frontRepairPlan{}, fmt.Errorf("node %s live Front does not match its durable activation", witness.Node.Name)
+		}
+		members = append(members, witness.frontRepairMember)
+	}
+	return bindFrontRepairPredecessors(before, currentUID, currentRV, expected, members)
+}
+
+func bindFrontRepairPredecessors(before releaseguardian.CurrentAuthority, currentUID, currentRV string,
+	expected []frontRepairNode, observed []frontRepairMember) (frontRepairPlan, error) {
 	if before.Validate() != nil || before.CurrentFrontGeneration <= before.PreviousFrontGeneration ||
 		before.PreviousFrontGeneration == 0 || before.CurrentFrontGeneration > math.MaxUint64-3 ||
 		before.AuthorityEpoch == math.MaxInt64 || !frontRepairIdentity(currentUID) || !frontRepairIdentity(currentRV) {
@@ -84,12 +96,10 @@ func planPartialFrontRollbackRepair(before releaseguardian.CurrentAuthority, cur
 		if member.TargetWorkerSlot != before.CurrentWorkerSlot || member.TargetWorkerSourceSHA != before.CurrentWorkerSourceSHA || member.TargetWorkerImage != before.CurrentWorkerImageDigest {
 			return frontRepairPlan{}, fmt.Errorf("node %s lacks the exact committed Worker identity", member.Node.Name)
 		}
-		state, live := member.Activation, member.LiveFront
+		state := member.Activation
 		if state.GroupID != before.GroupID || state.Schema != edgegroupfront.ActivationStateSchemaV1 ||
-			state.Authority != edgegroupfront.ActivationAuthority || state.UpdatedAt.IsZero() || live.Status != "ok" ||
-			live.Generation != state.Generation || live.ActiveSlot != state.ActiveSlot || live.RouteAuthority != state.Authority ||
-			live.BundleGeneration != state.BundleGeneration || live.WorkerSourceCommit != state.WorkerSourceCommit || live.WorkerImageDigest != state.WorkerImageDigest {
-			return frontRepairPlan{}, fmt.Errorf("node %s live Front does not match its durable activation", member.Node.Name)
+			state.Authority != edgegroupfront.ActivationAuthority || state.UpdatedAt.IsZero() {
+			return frontRepairPlan{}, fmt.Errorf("node %s durable activation is invalid", member.Node.Name)
 		}
 		switch {
 		case frontRepairMatchesCommitted(before, member):
@@ -99,7 +109,7 @@ func planPartialFrontRollbackRepair(before releaseguardian.CurrentAuthority, cur
 		default:
 			return frontRepairPlan{}, fmt.Errorf("node %s is neither committed nor an exact one-step rollback", member.Node.Name)
 		}
-		members = append(members, member.frontRepairMember)
+		members = append(members, member)
 	}
 	if kept == 0 || rolledBack == 0 {
 		return frontRepairPlan{}, errors.New("partial Front repair requires both committed and rolled-back members")
@@ -175,9 +185,7 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 	for _, member := range refreshed {
 		if member.Activation.ActiveSlot != string(current.CurrentWorkerSlot) {
 			p, exists := preparations[member.Node.Name]
-			if !exists || !p.Matches(member.Activation, string(current.CurrentWorkerSlot), current.CurrentWorkerSourceSHA, now) ||
-				p.WorkerImageDigest != current.CurrentWorkerImageDigest || p.BundleGeneration != current.CurrentBundleGeneration ||
-				!now.Add(5*time.Second).Before(p.ExpiresAt) {
+			if !exists || !frontRepairPreparationReady(p, member.Activation, current, now) {
 				return fmt.Errorf("node %s lacks fresh publication preparation for its exact predecessor", member.Node.Name)
 			}
 			checked++
@@ -197,7 +205,13 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 	return nil
 }
 
-func frontRepairMatchesCommitted(before releaseguardian.CurrentAuthority, member frontRepairWitness) bool {
+func frontRepairPreparationReady(p edgegroupfront.PublicationPreparation, predecessor edgegroupfront.ActivationState, target releaseguardian.CurrentAuthority, now time.Time) bool {
+	return p.Matches(predecessor, string(target.CurrentWorkerSlot), target.CurrentWorkerSourceSHA, now) &&
+		p.WorkerImageDigest == target.CurrentWorkerImageDigest && p.BundleGeneration == target.CurrentBundleGeneration &&
+		now.Add(5*time.Second).Before(p.ExpiresAt)
+}
+
+func frontRepairMatchesCommitted(before releaseguardian.CurrentAuthority, member frontRepairMember) bool {
 	state := member.Activation
 	if state.Generation != before.CurrentFrontGeneration || state.ActiveSlot != string(before.CurrentWorkerSlot) ||
 		state.WorkerSourceCommit != before.CurrentWorkerSourceSHA || state.WorkerImageDigest != before.CurrentWorkerImageDigest ||
@@ -229,4 +243,11 @@ func frontRepairMatchesRollback(before releaseguardian.CurrentAuthority, state e
 
 func frontRepairIdentity(value string) bool {
 	return value != "" && strings.TrimSpace(value) == value
+}
+
+func frontRepairLiveMatches(live observedFront, state edgegroupfront.ActivationState) bool {
+	return state.Schema == edgegroupfront.ActivationStateSchemaV1 && state.Authority == edgegroupfront.ActivationAuthority &&
+		!state.UpdatedAt.IsZero() && live.Status == "ok" && live.Generation == state.Generation &&
+		live.ActiveSlot == state.ActiveSlot && live.RouteAuthority == state.Authority && live.BundleGeneration == state.BundleGeneration &&
+		live.WorkerSourceCommit == state.WorkerSourceCommit && live.WorkerImageDigest == state.WorkerImageDigest
 }
