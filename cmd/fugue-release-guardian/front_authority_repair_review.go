@@ -319,39 +319,43 @@ func runFrontRepairPreview(args []string, stdout io.Writer) error {
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *component == "" || stdout == nil {
 		return errors.New("front-repair-preview requires --component and accepts only an optional --registry")
 	}
-	file, err := os.Open(*registryPath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	registry, err := declarativerelease.DecodeEdgeGroupRegistry(file)
-	if err != nil {
-		return err
-	}
-	selection, err := selectFrontRepairWorker(registry, *component)
-	if err != nil {
-		return err
-	}
-	config, err := loadKubeConfig()
-	if err != nil {
-		return err
-	}
-	config.QPS, config.Burst = guardianKubeClientQPS, guardianKubeClientBurst
-	client, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return err
-	}
-	a, err := newFrontAuthorityActivator(client, &kubePodExecutor{config: config, client: client}, selection.runtime, "front-repair-preview")
-	if err != nil {
-		return err
-	}
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithTimeout(signalCtx, 45*time.Second)
 	defer cancel()
-	preview, err := newFrontRepairRuntime(a).preview(ctx, selection)
+	preview, err := captureFrontRepairPreview(ctx, *registryPath, *component)
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(preview)
+}
+
+func captureFrontRepairPreview(ctx context.Context, registryPath, component string) (frontRepairPreview, error) {
+	file, err := os.Open(registryPath)
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	defer file.Close()
+	registry, err := declarativerelease.DecodeEdgeGroupRegistry(file)
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	selection, err := selectFrontRepairWorker(registry, component)
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	config, err := loadKubeConfig()
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	config.QPS, config.Burst = guardianKubeClientQPS, guardianKubeClientBurst
+	client, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	a, err := newFrontAuthorityActivator(client, &kubePodExecutor{config: config, client: client}, selection.runtime, "front-repair-preview")
+	if err != nil {
+		return frontRepairPreview{}, err
+	}
+	return newFrontRepairRuntime(a).preview(ctx, selection)
 }

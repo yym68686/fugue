@@ -1066,6 +1066,7 @@ jobs:
       edge_origin_relay_trust: ${{ steps.edge_origin_relay_trust.outputs.selected }}
       edge_origin_relay_policy: ${{ steps.edge_origin_relay_policy.outputs.selected }}
       edge_front_repair: ${{ steps.edge_front_repair.outputs.selected }}
+      edge_front_repair_preview: ${{ steps.edge_front_repair_preview.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1140,6 +1141,23 @@ jobs:
           all_changed="$(git diff --no-renames --name-only "$base" HEAD --)"
           [[ "$all_changed" == "$intent" ]] || exit 1
           [[ "$(git ls-tree HEAD -- "$intent" | awk '{print $1}')" == 100644 ]] || exit 1
+          [[ "$GITHUB_REF_PROTECTED" == true ]] || exit 1
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
+      - name: Select an exact read-only Front preview request
+        id: edge_front_repair_preview
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          request=deploy/environments/production/edge-front-repair/preview-request.json
+          base="$BASE_SHA"
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != 0000000000000000000000000000000000000000 ]] || exit 1
+          changed="$(git diff --no-renames --name-only "$base" HEAD -- "$request")"
+          if [[ -z "$changed" ]]; then exit 0; fi
+          all_changed="$(git diff --no-renames --name-only "$base" HEAD --)"
+          [[ "$all_changed" == "$request" ]] || exit 1
+          [[ "$(git ls-tree HEAD -- "$request" | awk '{print $1}')" == 100644 ]] || exit 1
           [[ "$GITHUB_REF_PROTECTED" == true ]] || exit 1
           echo 'selected=true' >> "$GITHUB_OUTPUT"
       - name: Rehearse Edge origin relay over isolated private network hops
@@ -2541,6 +2559,72 @@ jobs:
           path: ${{ runner.temp }}/edge-origin-relay-policy-receipt.json
           if-no-files-found: ignore
           retention-days: 30
+
+  edge_front_repair_preview:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected && needs.prepush.result == 'success' && needs.prepush.outputs.edge_front_repair_preview == 'true' && needs.prepush.outputs.release_count == '0' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production-edge-front-repair
+    timeout-minutes: 12
+    permissions: {contents: read, actions: read}
+    concurrency: {group: fugue-production-edge-front-repair, cancel-in-progress: false, queue: max}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - name: Checkout exact read-only preview request
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false, persist-credentials: false}
+      - name: Setup Go for the pinned read-only observer
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod, cache: false}
+      - name: Capture the exact preview directly into a sealed artifact
+        env:
+          FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY }}
+          FUGUE_EDGE_FRONT_REPAIR_PREVIEW_RECIPIENT: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_PREVIEW_RECIPIENT }}
+          GH_TOKEN: ${{ github.token }}
+          GOFLAGS: ""
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          executor="$(jq -er '.executorCommit' <<<"$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY")"
+          [[ "$executor" =~ ^[0-9a-f]{40}$ && "$executor" != "$GITHUB_SHA" ]] || exit 1
+          git merge-base --is-ancestor "$executor" "$GITHUB_SHA"
+          git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
+          git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/components.json deploy/releases/edge-groups.json go.mod go.sum \
+            cmd/fugue-release-guardian cmd/fugue-edge-front-repair-cas internal/frontrepairstate internal/edgegroupfront internal/releaseguardian internal/declarativerelease
+          inputs="$(mktemp -d "$RUNNER_TEMP/fugue-front-preview-inputs.XXXXXXXX")"
+          work=
+          cleanup() {
+            rm -f -- "$inputs/preview-request.json"
+            rmdir -- "$inputs"
+            if [[ -n "$work" ]]; then
+              if [[ -d "$work/source" ]]; then git worktree remove "$work/source"; fi
+              rm -f -- "$work/guardian"
+              rmdir -- "$work"
+            fi
+          }
+          trap cleanup EXIT
+          git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/preview-request.json" > "$inputs/preview-request.json"
+          work="$(mktemp -d "$RUNNER_TEMP/fugue-front-preview.XXXXXXXX")"
+          git worktree add --detach "$work/source" "$executor"
+          export FUGUE_EDGE_FRONT_REPAIR_INPUTS="$inputs"
+          (
+            cd "$work/source"
+            checkout_state="$(git status --porcelain --untracked-files=all)"
+            [[ -z "$checkout_state" ]] || exit 1
+            go build -trimpath -buildvcs=true -buildmode=exe -o "$work/guardian" ./cmd/fugue-release-guardian
+            "$work/guardian" front-repair-preview-sealed
+          ) > "$RUNNER_TEMP/edge-front-repair-preview-sealed-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
+      - name: Retain only the sealed Front repair preview
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-edge-front-repair-preview-sealed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-front-repair-preview-sealed-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: error
+          retention-days: 3
 
   edge_front_repair:
     needs: prepush

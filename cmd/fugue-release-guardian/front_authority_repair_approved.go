@@ -27,12 +27,17 @@ type frontRepairActionsLaunch struct {
 }
 
 func frontRepairActionsLaunchContext(getenv func(string) string, build *debug.BuildInfo) (frontRepairActionsLaunch, error) {
+	return frontRepairActionsContext(getenv, build, frontRepairActionsApplyJob)
+}
+
+func frontRepairActionsContext(getenv func(string) string, build *debug.BuildInfo, job string) (frontRepairActionsLaunch, error) {
 	declaration := getenv("GITHUB_SHA")
 	repo := getenv("GITHUB_REPOSITORY")
 	repositoryID, idErr := strconv.ParseUint(getenv("GITHUB_REPOSITORY_ID"), 10, 64)
 	if getenv("GITHUB_ACTIONS") != "true" || getenv("GITHUB_EVENT_NAME") != "push" ||
 		getenv("GITHUB_REF") != "refs/heads/main" || getenv("GITHUB_REF_PROTECTED") != "true" ||
-		getenv("GITHUB_JOB") != frontRepairActionsApplyJob || getenv("RUNNER_ENVIRONMENT") != "self-hosted" ||
+		(job != frontRepairActionsApplyJob && job != frontRepairActionsPreviewJob) ||
+		getenv("GITHUB_JOB") != job || getenv("RUNNER_ENVIRONMENT") != "self-hosted" ||
 		getenv("GITHUB_SERVER_URL") != "https://github.com" ||
 		!exactSourceSHA(declaration) || !frontRepairGitHubRepositoryName.MatchString(repo) || idErr != nil || repositoryID == 0 ||
 		getenv("GITHUB_WORKFLOW_REF") != repo+"/"+frontRepairActionsWorkflowPath+"@refs/heads/main" ||

@@ -56,6 +56,12 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "front-repair-artifact-check" {
 		return runFrontRepairArtifactCheck(os.Args[2:], os.Stdout)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "front-repair-preview-sealed" {
+		return runFrontRepairPreviewSealed(os.Args[2:], os.Stdout)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "front-repair-preview-open" {
+		return runFrontRepairPreviewOpen(os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "front-repair-preview" {
 		return runFrontRepairPreview(os.Args[2:], os.Stdout)
 	}

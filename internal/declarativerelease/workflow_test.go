@@ -300,7 +300,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"agent_edge_activation", "agent_edge_shadow_policy", "agent_edge_trust", "app_tcp_transport", "audit", "cell_inventory_enrollment", "cell_inventory_plan", "cell_member_enrollment", "cell_producer_plan", "cell_producer_reconfiguration", "cell_producer_shadow", "cell_route_promotion", "cell_route_promotion_plan", "cell_trust", "cell_trust_plan", "cnpg_backup_count_retention", "cnpg_candidate_artifact", "compiler_input_storage", "component-build", "deploy_api", "deploy_controller", "deploy_edge_client", "deploy_edge_control", "deploy_edge_image_gc", "deploy_edge_worker",
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_promotion", "dns_authority_promotion_plan", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_capacity_external_observation", "edge_member_recovery", "edge_member_recovery_plan", "edge_offline_configuration", "edge_release_hold", "edge_release_hold_plan", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "k3s_transport_integration", "longhorn_gc_build", "longhorn_gc_install", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_bootstrap_cpu", "postgres_bootstrap_cpu_plan", "postgres_protection", "postgres_volume_recovery", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}
-	expectedJobs = append(expectedJobs, "longhorn_local_snapshot_cleanup", "dns_observation_policy", "automatic_node_participation", "edge_origin_relay_trust", "edge_origin_relay_policy", "edge_front_repair")
+	expectedJobs = append(expectedJobs, "longhorn_local_snapshot_cleanup", "dns_observation_policy", "automatic_node_participation", "edge_origin_relay_trust", "edge_origin_relay_policy", "edge_front_repair", "edge_front_repair_preview")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
@@ -343,7 +343,36 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatalf("Front repair exposed raw inputs or bypassed Guardian: %s", forbidden)
 		}
 	}
+	preview := yamlMappingValue(t, jobs, "edge_front_repair_preview")
+	previewWhen := yamlMappingValue(t, preview, "if").Value
+	previewQueue := yamlMappingValue(t, preview, "concurrency")
+	if yamlMappingValue(t, preview, "needs").Value != "prepush" ||
+		yamlMappingValue(t, preview, "environment").Value != "production-edge-front-repair" ||
+		yamlMappingValue(t, previewQueue, "group").Value != yamlMappingValue(t, repairQueue, "group").Value ||
+		!strings.Contains(previewWhen, "github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected") ||
+		!strings.Contains(previewWhen, "needs.prepush.result == 'success'") ||
+		!strings.Contains(previewWhen, "needs.prepush.outputs.edge_front_repair_preview == 'true'") ||
+		!strings.Contains(previewWhen, "needs.prepush.outputs.release_count == '0'") {
+		t.Fatal("read-only Front preview lost its protected declaration or isolation from mutation")
+	}
+	previewYAML, err := yaml.Marshal(preview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"edge-front-repair/preview-request.json", "front-repair-preview-sealed", "FUGUE_EDGE_FRONT_REPAIR_PREVIEW_RECIPIENT", "edge-front-repair-preview-sealed-"} {
+		if !strings.Contains(string(previewYAML), required) {
+			t.Fatalf("Front preview must publish only an exact sealed result: %s", required)
+		}
+	}
+	for _, forbidden := range []string{"front-repair-approved", "secrets.FUGUE_EDGE_FRONT_REPAIR_APPROVAL", "kubectl "} {
+		if strings.Contains(string(previewYAML), forbidden) {
+			t.Fatalf("read-only Front preview has a mutating input or command: %s", forbidden)
+		}
+	}
 	prepush := yamlMappingValue(t, jobs, "prepush")
+	if yamlMappingValue(t, yamlMappingValue(t, prepush, "outputs"), "edge_front_repair_preview").Value != "${{ steps.edge_front_repair_preview.outputs.selected }}" {
+		t.Fatal("read-only Front preview must be selected from a tested declaration-only push")
+	}
 	if yamlMappingValue(t, yamlMappingValue(t, prepush, "outputs"), "edge_front_repair").Value != "${{ steps.edge_front_repair.outputs.selected }}" {
 		t.Fatal("Front repair dispatch is not bound to the prepush selection step")
 	}
