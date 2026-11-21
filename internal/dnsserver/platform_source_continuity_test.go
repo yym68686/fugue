@@ -233,6 +233,109 @@ func testApprovedSourceAdvance(t *testing.T, changePolicy bool, retained ...bool
 	}
 }
 
+func TestRetainedSourceCannotResetRecoveryForAuthenticatedSuccessor(t *testing.T) {
+	request, policies, activations := celldns.SourceAuthorizedRequest(t, false)
+	artifact := celldns.Compile(t, request).DNSArtifact
+	now := time.Now().UTC()
+	makePlans := func(advance bool) (*dnsroutesource.Plans, dnsServingPayload) {
+		t.Helper()
+		snapshot := celldns.SourceSnapshot(t, request, artifact, policies, activations, now)
+		if advance {
+			for i := range snapshot.Scopes {
+				scope := &snapshot.Scopes[i]
+				release := &scope.Publications[0].Release
+				release.ID += "-next"
+				release.FencingToken++
+				lane := &scope.Lanes[0]
+				lane.ActiveReleaseID, lane.FencingToken = release.ID, release.FencingToken
+				lane.Version++
+			}
+			snapshot.SelectionDigest, _ = dnsroutesource.SelectionDigest(snapshot)
+		}
+		plans, err := dnsroutesource.Build(artifact, snapshot, celldns.Keys(), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources := plans.Choose(func(string) bool { return true })
+		plan, err := plans.Replay(sources)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys, err := dnsRouteRecoveryKeys(artifact, plans)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := dnsServingPayload{Plan: plan, routeSources: sources, sourceBindings: plans.Bindings, sourceRecoveryKeys: keys, Policy: request.Policy}
+		p.indexSourceRequirements()
+		return plans, p
+	}
+	_, previous := makePlans(false)
+	plans, next := makePlans(true)
+	oldProbe := previous.Plan.Probes[0]
+	var newProbe platformconfig.DNSReadinessProbe
+	for _, probe := range next.Plan.Probes {
+		if next.sourceRecoveryKeys[probe.ID] == previous.sourceRecoveryKeys[oldProbe.ID] {
+			newProbe = probe
+			break
+		}
+	}
+	if newProbe.ID == "" || newProbe.ID == oldProbe.ID {
+		t.Fatal("fixture must change binding while preserving exact behavior")
+	}
+	for _, scenario := range []string{"verified successor", "unknown binding", "different DNS artifact", "unverified source", "physical failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			s := NewService(config.DNSConfig{}, nil)
+			candidate := dnsPlatformCandidate{Artifact: artifact}
+			old := &dnsServingState{record: dnsServingCheckpoint{Candidate: candidate}, payload: previous}
+			bridge := &dnsReleaseBridge{payload: next, candidate: candidate}
+			at := now.Add(-40 * time.Second)
+			fact := func() dnsReadinessFact {
+				return dnsReadinessFact{ProbeID: newProbe.ID, Ready: true, Proof: routeprobe.Proof{EdgeID: newProbe.EdgeID, GroupID: newProbe.EdgeGroupID, Digest: newProbe.RouteDigest, Version: "observed", State: newProbe.State, TrafficRelease: plans.Bindings[newProbe.CellPublicationDigest], CheckedAt: at, ValidUntil: at.Add(time.Minute)}}
+			}
+			observe := func() []dnsReadinessFact {
+				t.Helper()
+				facts := []dnsReadinessFact{fact()}
+				if err := s.observeDNSRouteRecovery(artifact, plans, facts, next.Policy.DNSReadiness, at); err != nil {
+					t.Fatal(err)
+				}
+				return facts
+			}
+			observe()
+			at = at.Add(10 * time.Second)
+			observe()
+			at = at.Add(10 * time.Second)
+			retained := fact()
+			retained.ProbeID = oldProbe.ID
+			switch scenario {
+			case "unknown binding":
+				binding := *retained.Proof.TrafficRelease
+				binding.FencingToken++
+				retained.Proof.TrafficRelease = &binding
+			case "different DNS artifact":
+				bridge.candidate.Artifact.ID += "-unrelated"
+			case "unverified source":
+				bridge = nil
+			case "physical failure":
+				retained.Ready, retained.Reason = false, "probe_unavailable"
+			}
+			facts := []dnsReadinessFact{retained}
+			s.observeRetainedDNSRouteRecovery(old, facts, at, bridge)
+			if len(facts[0].ProbeHistory) != 0 || dnsFactMatchesRelease(facts[0], old.record.Parent, old.record.Candidate, old.routeID, previous) {
+				t.Fatal("fallback borrowed readiness from the successor")
+			}
+			at = at.Add(time.Second)
+			got := len(observe()[0].ProbeHistory)
+			want := 1
+			if scenario == "verified successor" {
+				want = 3
+			}
+			if got != want {
+				t.Fatalf("the successor's valid current sample got %d successes, want %d", got, want)
+			}
+		})
+	}
+}
+
 func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 	for _, scenario := range []string{"failed", "retained failure", "unobserved", "cached", "wrong binding", "restart", "changed DNS", "changed producer", "unrelated source policy", "changed constraints", "removed eligibility", "changed endpoint", "changed route", "overlap"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -300,7 +403,7 @@ func TestDNSRouteRecoverySemanticBoundaries(t *testing.T) {
 					routeSources: &dnsroutesource.Context{Snapshot: snapshot}, sourceRecoveryKeys: keys,
 					Policy: platformconfig.PolicySnapshot{DNSReadiness: policy},
 				}}
-				s.observeRetainedDNSRouteRecovery(old, []dnsReadinessFact{f}, at)
+				s.observeRetainedDNSRouteRecovery(old, []dnsReadinessFact{f}, at, nil)
 			case "unobserved":
 				f := makeFact()
 				f.Ready = false

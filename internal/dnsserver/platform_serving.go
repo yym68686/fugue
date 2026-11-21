@@ -640,7 +640,13 @@ func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingS
 	}
 	priority := dnsProbePriorities(old.payload, s.Config.DNSNodeID, nil)
 	facts := collectRetainedDNSReadinessFacts(ctx, old, bridge, observations, probe, s.retainedDNSProbes.shareHistory(s.probeHistoryStore()).bind(old.record.Candidate.Assignment, s.Logger, s.Config.CachePath).prioritize(priority))
-	s.observeRetainedDNSRouteRecovery(old, facts, time.Now().UTC())
+	var observedSuccessor *dnsReleaseBridge
+	if len(observations) > 0 {
+		// Only compare with a source plan that completed its observation and
+		// authority recheck, not a partially loaded or superseded candidate.
+		observedSuccessor = bridge
+	}
+	s.observeRetainedDNSRouteRecovery(old, facts, time.Now().UTC(), observedSuccessor)
 	now := time.Now().UTC()
 	// A retained positive release may keep serving while an individual probe
 	// has a transient transport failure. Keep only proofs that are still valid;
