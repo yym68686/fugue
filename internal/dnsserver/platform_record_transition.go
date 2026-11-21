@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"reflect"
 	"slices"
 	"time"
 
@@ -198,6 +199,7 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 	if previous.payload.Plan == nil || next.payload.Plan == nil {
 		return nil
 	}
+	projectHostedDNSPathTransition(old.payload, bridge.payload, previous.payload.Plan, next.payload.Plan)
 	allowed, records := dnsReleaseCompatibility(&previous, &next)
 	hosts := map[string]bool{}
 	for _, record := range previous.payload.Plan.Records {
@@ -215,6 +217,113 @@ func dnsTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge) map[st
 		}
 	}
 	return hosts
+}
+
+// Global DNS stores a managed hostname as a hosted address RRset. A signed
+// route publication can change its local paths without changing that RRset's
+// owner or endpoint authority. Compare the common root shape for authorization
+// only. Query execution still requires every original successor path proof.
+// The exact old-proof bridge does not use this projection.
+func projectHostedDNSPathTransition(before, after dnsServingPayload, oldPlan, newPlan *platformconfig.DNSReadinessPlan) {
+	if before.CellDNSSource != nil || after.CellDNSSource != nil ||
+		before.routeSources != nil || after.routeSources != nil {
+		return
+	}
+	oldIntents, newIntents := dnsBridgeRecordIntents(before.Records), dnsBridgeRecordIntents(after.Records)
+	oldRoots, newRoots := hostedDNSRootShapes(oldPlan), hostedDNSRootShapes(newPlan)
+	for host, oldShape := range oldRoots {
+		newShape, ok := newRoots[host]
+		if !ok || !oldShape.shared && !newShape.shared || !reflect.DeepEqual(oldShape.record, newShape.record) ||
+			!sameHostedDNSAddressOwner(oldIntents[host], newIntents[host]) {
+			continue
+		}
+		oldPlan.Records[oldShape.index] = oldShape.record
+		newPlan.Records[newShape.index] = newShape.record
+	}
+}
+
+func sameHostedDNSAddressOwner(before, after []platformconfig.DNSIntent) bool {
+	if len(before) == 0 || !reflect.DeepEqual(before, after) {
+		return false
+	}
+	owner := before[0]
+	if owner.AppID == "" || owner.TenantID == "" {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, record := range before {
+		if record.AppID != owner.AppID || record.TenantID != owner.TenantID || record.RecordKind != "hosted" ||
+			record.Flatten != nil || record.Route != nil || record.Application != nil ||
+			(record.Type != "A" && record.Type != "AAAA") || seen[record.Type] {
+			return false
+		}
+		seen[record.Type] = true
+	}
+	return true
+}
+
+type hostedDNSRootShape struct {
+	record platformconfig.DNSReadinessRecord
+	index  int
+	shared bool
+}
+
+func hostedDNSRootShapes(plan *platformconfig.DNSReadinessPlan) map[string]hostedDNSRootShape {
+	probes := make(map[string]platformconfig.DNSReadinessProbe, len(plan.Probes))
+	for _, probe := range plan.Probes {
+		probes[probe.ID] = probe
+	}
+	result, seen := map[string]hostedDNSRootShape{}, map[string]bool{}
+	for index, record := range plan.Records {
+		if seen[record.Hostname] {
+			delete(result, record.Hostname)
+			continue
+		}
+		seen[record.Hostname] = true
+		record.Targets = slices.Clone(record.Targets)
+		shape := hostedDNSRootShape{index: index}
+		valid := len(record.Targets) != 0
+		for i := range record.Targets {
+			target := &record.Targets[i]
+			root, ok := hostedDNSRootProbe(record.Hostname, *target, probes)
+			if !ok {
+				valid = false
+				break
+			}
+			shape.shared = shape.shared || len(target.ProbeIDs) > 1
+			target.ProbeIDs = []string{root}
+		}
+		if valid {
+			shape.record = record
+			result[record.Hostname] = shape
+		}
+	}
+	return result
+}
+
+func hostedDNSRootProbe(host string, target platformconfig.DNSReadinessTarget, probes map[string]platformconfig.DNSReadinessProbe) (string, bool) {
+	var baseline platformconfig.DNSReadinessProbe
+	paths := map[string]bool{}
+	root := ""
+	for i, id := range target.ProbeIDs {
+		probe, ok := probes[id]
+		if !ok || probe.Hostname != host || probe.EdgeID != target.EdgeID || probe.EdgeGroupID != target.EdgeGroupID ||
+			probe.Address != target.Address || probe.Path == "" || model.NormalizeAppRoutePathPrefix(probe.Path) != probe.Path ||
+			probe.StaticEdge != nil || probe.PreviousAuthority != nil || probe.CellPublicationDigest != "" || paths[probe.Path] {
+			return "", false
+		}
+		paths[probe.Path] = true
+		if probe.Path == "/" {
+			root = id
+		}
+		probe.ID, probe.Path = "", ""
+		if i == 0 {
+			baseline = probe
+		} else if probe != baseline {
+			return "", false
+		}
+	}
+	return root, root != ""
 }
 
 // An application release transition does not change DNS endpoint authority.

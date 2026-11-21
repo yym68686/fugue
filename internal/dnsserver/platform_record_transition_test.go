@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,6 +23,122 @@ import (
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
+
+func TestHostedDNSPathTransitionRequiresEverySuccessorPath(t *testing.T) {
+	view, shared, policy, _, now := queryExecutionFixture()
+	host := shared.Records[0].Hostname
+	for i := range shared.Probes {
+		probe := &shared.Probes[i]
+		before := probe.ID
+		probe.Hostname = host
+		probe.ID, _ = platformconfig.DNSReadinessProbeID(*probe)
+		for j := range shared.Records[0].Targets {
+			for k, id := range shared.Records[0].Targets[j].ProbeIDs {
+				if id == before {
+					shared.Records[0].Targets[j].ProbeIDs[k] = probe.ID
+				}
+			}
+		}
+	}
+	row := &view.Records[0]
+	row.AppID, row.TenantID = "api", "tenant"
+	payload := dnsServingPayload{
+		Plan: &shared, Queries: []platformconfig.DNSQueryView{view},
+		Records: []platformconfig.DNSIntent{{Hostname: host, Type: "A", RecordKind: "hosted",
+			AppID: row.AppID, TenantID: row.TenantID, TTL: row.TTL, Values: row.Values}},
+		Policy: platformconfig.PolicySnapshot{
+			MaxStaleSeconds: 3600, DNSReadiness: &policy,
+			DNSAuthorities:    []platformconfig.DNSAuthorityPolicy{{NodeID: view.NodeID, Zone: view.Zone, Nameservers: []string{"ns.example.test"}, TTLSeconds: 60}},
+			DNSClientPolicies: []platformconfig.DNSClientPolicy{{NodeID: view.NodeID}},
+		},
+	}
+	single := shared
+	single.Probes = slices.DeleteFunc(slices.Clone(shared.Probes), func(p platformconfig.DNSReadinessProbe) bool { return p.Path != "/" })
+	single.Records = slices.Clone(shared.Records)
+	single.Records[0].Targets = slices.Clone(shared.Records[0].Targets)
+	for i := range single.Records[0].Targets {
+		single.Records[0].Targets[i].ProbeIDs = []string{single.Probes[i].ID}
+	}
+	for _, scenario := range []string{"split", "split after losing ranking", "join", "tenant", "owner", "ttl", "not hosted", "target", "quorum", "alias path", "root missing"} {
+		t.Run(scenario, func(t *testing.T) {
+			var oldPayload, newPayload dnsServingPayload
+			for _, dst := range []*dnsServingPayload{&oldPayload, &newPayload} {
+				if err := json.Unmarshal(mustDNSJSON(t, payload), dst); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldPayload.Plan = &single
+			switch scenario {
+			case "split after losing ranking":
+				p := &oldPayload.Queries[0].Records[0].AnswerPolicy
+				p.PolicyKind, p.PhysicalOrder = model.DNSAnswerPolicyKindPhysicalQuality, nil
+				p.RankingVersion, p.RankingScope = model.DNSPhysicalSelectionVersion, "global"
+				p.PhysicalSelection = &model.DNSPhysicalSelection{Version: model.DNSPhysicalSelectionVersion,
+					Scope: "global", PrimaryEdgeID: "edge-b", OrderedEdgeIDs: []string{"edge-b"}}
+			case "join":
+				oldPayload, newPayload = newPayload, oldPayload
+			case "tenant":
+				newPayload.Records[0].TenantID = "foreign"
+			case "owner":
+				newPayload.Records[0].AppID = "another"
+			case "ttl":
+				newPayload.Records[0].TTL++
+			case "not hosted":
+				oldPayload.Records[0].RecordKind, newPayload.Records[0].RecordKind = "platform", "platform"
+			case "target":
+				newPayload.Plan.Records[0].Targets[0].FailureDomains = map[string]string{"rack": "different"}
+			case "quorum":
+				newPayload.Plan.Records[0].MinimumHealthyEdges--
+			case "alias path":
+				newPayload.Plan.Probes[1].Hostname = "other.example.test"
+			case "root missing":
+				newPayload.Plan.Records[0].Targets[0].ProbeIDs = newPayload.Plan.Records[0].Targets[0].ProbeIDs[1:]
+			}
+			old := &dnsServingState{payload: oldPayload, record: dnsServingCheckpoint{AppliedAt: now.Add(-time.Minute), Candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "old", ReleasedAt: now.Add(-time.Minute)}}}}
+			bridge := &dnsReleaseBridge{payload: newPayload, candidate: dnsPlatformCandidate{Release: model.PlatformArtifactRelease{ID: "new", ReleasedAt: now}}}
+			original := mustDNSJSON(t, newPayload)
+			hosts := dnsTransitionRecords(old, bridge)
+			want := scenario == "split" || scenario == "split after losing ranking" || scenario == "join"
+			if hosts[host] != want || !slices.Equal(original, mustDNSJSON(t, newPayload)) {
+				t.Fatalf("unexpected eligibility or mutation: hosts=%v want=%t", hosts, want)
+			}
+			if !want {
+				return
+			}
+			_, retained := dnsReleaseCompatibilityForProof(old, bridge, true)
+			if retained[host] {
+				t.Fatal("path changes also authorized old-proof rebinding")
+			}
+			base, err := buildDNSServingState(old.record, oldPayload, "route", view.NodeID, view.EdgeGroupID, nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := new(dns.Msg).SetQuestion(dns.Fqdn(host), dns.TypeA)
+			for _, incomplete := range []bool{true, false} {
+				facts := []dnsReadinessFact{}
+				for _, probe := range newPayload.Plan.Probes {
+					if incomplete && (probe.Path != "/" || scenario == "join" && probe.EdgeID == "edge-a") {
+						continue
+					}
+					facts = append(facts, dnsReadinessFact{ProbeID: probe.ID, Ready: true, Proof: routeprobe.Proof{
+						Digest: probe.RouteDigest, Version: "serving", EdgeID: probe.EdgeID, GroupID: probe.EdgeGroupID,
+						CheckedAt: now, ValidUntil: now.Add(30 * time.Second),
+					}})
+				}
+				next, err := buildDNSServingState(dnsServingCheckpoint{AppliedAt: old.record.AppliedAt, Candidate: bridge.candidate}, newPayload, "route", view.NodeID, view.EdgeGroupID, facts, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				base.transition = &dnsRecordTransition{state: next, hosts: hosts}
+				response := base.answer(q, "", now)
+				if incomplete && response.Rcode != dns.RcodeServerFailure ||
+					!incomplete && (response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 || response.Answer[0].Header().Ttl > 30) {
+					t.Fatalf("unexpected successor response with incomplete=%t: %v", incomplete, response)
+				}
+			}
+		})
+	}
+}
 
 func TestDNSRecordTransitionPreservesAuthorizationAndCompleteQuorum(t *testing.T) {
 	view, plan, readiness, facts, now := queryExecutionFixture()
