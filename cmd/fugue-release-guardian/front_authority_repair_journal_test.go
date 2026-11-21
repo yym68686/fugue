@@ -53,6 +53,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 			}
 		}
 		witnesses[i].Activation, witnesses[i].LiveFront = receipt.Current, liveFrontRepairFixture(receipt.Current)
+		witnesses[i].ObservedAt = now
 	}
 	plan, err := planPartialFrontRollbackRepair(before, "pointer-uid", "101", cohort, witnesses)
 	if err != nil {
@@ -189,6 +190,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 				t.Fatalf("fixture member evidence is absent: error=%v", err)
 			}
 			result[i].Activation, result[i].LiveFront = state, liveFrontRepairFixture(state)
+			result[i].ObservedAt = time.Now().UTC()
 		}
 		return result
 	}

@@ -23,7 +23,10 @@ type frontRepairNode struct {
 type frontRepairMember struct {
 	Node                  frontRepairNode
 	FrontPodUID           string
+	FrontProcessID        string
 	TargetWorkerPodUID    string
+	TargetWorkerProcessID string
+	TargetCaddyProcessID  string
 	Activation            edgegroupfront.ActivationState
 	TargetWorkerSlot      releaseguardian.AuthoritySlot
 	TargetWorkerSourceSHA string
@@ -37,6 +40,7 @@ type frontRepairWitness struct {
 	frontRepairMember
 	LiveFront          observedFront
 	TargetWorkerHealth authorityWorkerHealth
+	ObservedAt         time.Time
 }
 
 type frontRepairPlan struct {
@@ -76,6 +80,7 @@ func bindFrontRepairPredecessors(before releaseguardian.CurrentAuthority, curren
 	}
 	want := make(map[string]frontRepairNode, len(expected))
 	uids := map[string]bool{currentUID: true}
+	processes := make(map[string]bool, 3*len(expected))
 	for _, node := range expected {
 		if len(validation.IsDNS1123Subdomain(node.Name)) != 0 || !frontRepairIdentity(node.UID) ||
 			uids[node.UID] || want[node.Name].Name != "" {
@@ -90,6 +95,12 @@ func bindFrontRepairPredecessors(before releaseguardian.CurrentAuthority, curren
 		if !exists || identity != member.Node || !frontRepairIdentity(member.FrontPodUID) || !frontRepairIdentity(member.TargetWorkerPodUID) ||
 			member.FrontPodUID == member.TargetWorkerPodUID || uids[member.FrontPodUID] || uids[member.TargetWorkerPodUID] {
 			return frontRepairPlan{}, errors.New("partial Front repair observed a changed or duplicate Node/Pod identity")
+		}
+		for _, process := range []string{member.FrontProcessID, member.TargetWorkerProcessID, member.TargetCaddyProcessID} {
+			if !frontRepairIdentity(process) || processes[process] {
+				return frontRepairPlan{}, errors.New("partial Front repair observed an invalid or duplicate process identity")
+			}
+			processes[process] = true
 		}
 		delete(want, member.Node.Name)
 		uids[member.FrontPodUID], uids[member.TargetWorkerPodUID] = true, true
@@ -190,7 +201,7 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 			}
 			checked++
 		}
-		if !frontRepairWorkerReady(member.TargetWorkerHealth, target, now) {
+		if !frontRepairWorkerReady(member, target, now) {
 			return fmt.Errorf("node %s has not applied a healthy current publication", member.Node.Name)
 		}
 		if appliedBundle == "" {
@@ -207,8 +218,10 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 
 // A healthy standby process can still be serving expired or fallback routes.
 // Require explicit freshness and a validity window larger than one mutation.
-func frontRepairWorkerReady(health authorityWorkerHealth, target releaseguardian.FrontAuthorityTarget, now time.Time) bool {
-	return !now.IsZero() && health.StaleCache != nil && !*health.StaleCache && !health.MaxStaleExceeded && health.CaddyLastError == "" &&
+func frontRepairWorkerReady(witness frontRepairWitness, target releaseguardian.FrontAuthorityTarget, now time.Time) bool {
+	health, observed := witness.TargetWorkerHealth, witness.ObservedAt
+	return !now.IsZero() && !observed.IsZero() && !observed.After(now) && now.Sub(observed) < 20*time.Second &&
+		health.StaleCache != nil && !*health.StaleCache && !health.MaxStaleExceeded && health.CaddyLastError == "" &&
 		now.Add(30*time.Second).Before(health.BundleValidUntil) && preparedWorkerPublicationReady(health, target)
 }
 
@@ -249,7 +262,7 @@ func frontRepairMatchesRollback(before releaseguardian.CurrentAuthority, state e
 }
 
 func frontRepairIdentity(value string) bool {
-	return value != "" && strings.TrimSpace(value) == value
+	return value != "" && len(value) <= 253 && strings.IndexFunc(value, func(r rune) bool { return r <= ' ' || r == '\u007f' }) < 0
 }
 
 func frontRepairLiveMatches(live observedFront, state edgegroupfront.ActivationState) bool {

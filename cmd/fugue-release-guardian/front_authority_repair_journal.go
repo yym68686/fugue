@@ -125,7 +125,7 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness, now tim
 			return frontRepairProgress{}, fmt.Errorf("Front repair member %s is outside the journal's exact transition", name)
 		}
 		worker := seen.TargetWorkerHealth
-		if !frontRepairWorkerReady(worker, target, now) || (publication != "" && publication != worker.BundleVersion) {
+		if !frontRepairWorkerReady(seen, target, now) || (publication != "" && publication != worker.BundleVersion) {
 			healthy = false
 		}
 		publication = worker.BundleVersion

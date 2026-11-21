@@ -39,6 +39,7 @@ func partialFrontRollbackFixture() (releaseguardian.CurrentAuthority, []frontRep
 			state.WorkerSourceCommit, state.WorkerImageDigest = before.PreviousWorkerSourceSHA, before.PreviousWorkerImageDigest
 		}
 		observed = append(observed, frontRepairWitness{frontRepairMember: frontRepairMember{Node: node, FrontPodUID: node.Name + "-front-uid", TargetWorkerPodUID: node.Name + "-target-uid",
+			FrontProcessID: node.Name + "-front-process", TargetWorkerProcessID: node.Name + "-worker-process", TargetCaddyProcessID: node.Name + "-caddy-process",
 			Activation: state, TargetWorkerSlot: before.CurrentWorkerSlot, TargetWorkerSourceSHA: before.CurrentWorkerSourceSHA, TargetWorkerImage: before.CurrentWorkerImageDigest}, LiveFront: liveFrontRepairFixture(state),
 			TargetWorkerHealth: authorityWorkerHealth{Healthy: true, Status: "ok", EdgeGroupID: before.GroupID, BundleVersion: "live.p43.r3",
 				CaddyAppliedVersion: "live.p43.r3", PublicationSequence: 43, ServingGeneration: "live", StaleCache: &stale,
@@ -162,6 +163,9 @@ func TestPartialFrontRollbackRepairPlanRequiresPreparedWorkerBeforeSwitch(t *tes
 		t.Fatalf("inactive LKG prevented sealing the predecessor: %v", err)
 	}
 	now := observed[0].Activation.UpdatedAt.Add(time.Minute)
+	for i := range observed {
+		observed[i].ObservedAt = now
+	}
 	p := edgegroupfront.PublicationPreparation{Schema: edgegroupfront.PublicationPreparationSchema,
 		Previous: observed[0].Activation, TargetSlot: string(before.CurrentWorkerSlot), BundleGeneration: before.CurrentBundleGeneration,
 		WorkerSourceCommit: before.CurrentWorkerSourceSHA, WorkerImageDigest: before.CurrentWorkerImageDigest,
@@ -198,6 +202,8 @@ func TestPartialFrontRollbackRepairPlanRequiresPreparedWorkerBeforeSwitch(t *tes
 		}},
 		{"missing stale route report", func(w *frontRepairWitness) { w.TargetWorkerHealth.StaleCache = nil }},
 		{"publication is about to expire", func(w *frontRepairWitness) { w.TargetWorkerHealth.BundleValidUntil = now.Add(30 * time.Second) }},
+		{"expired runtime sample", func(w *frontRepairWitness) { w.ObservedAt = now.Add(-20 * time.Second) }},
+		{"future runtime sample", func(w *frontRepairWitness) { w.ObservedAt = now.Add(time.Second) }},
 		{"Caddy apply failure", func(w *frontRepairWitness) { w.TargetWorkerHealth.CaddyLastError = "fixture failure" }},
 		{"unapplied route", func(w *frontRepairWitness) { w.TargetWorkerHealth.CaddyAppliedVersion = "" }},
 		{"another applied publication", func(w *frontRepairWitness) {
@@ -262,6 +268,9 @@ func TestPartialFrontRollbackRepairOnlyPreparesDivergedMemberWithoutSwitch(t *te
 	stored, exists, err := edgegroupfront.ReadActivationState(path)
 	if err != nil || !exists || stored != old.Current {
 		t.Fatalf("preparation changed the serving pointer: %+v, error=%v", stored, err)
+	}
+	for i := range observed {
+		observed[i].ObservedAt = now
 	}
 	if err := verifyFrontRepairPrepared(plan, before, "pointer-uid", "101", cohort, observed,
 		map[string]edgegroupfront.PublicationPreparation{observed[0].Node.Name: prepared}, now.Add(time.Second)); err != nil {
