@@ -1,6 +1,5 @@
 import base64
 import copy
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -16,10 +15,11 @@ def uid(i):
 
 
 def fixture():
-    return relay.validate_declaration({"schema": "fugue.edge.origin-relay-trust-stage/v1", "namespace": "test-system", "group": "edge-group-test",
-            "installer_image": "registry.example.test/team/edge@sha256:" + "7" * 64, "ca_sha256": "sha256:" + "2" * 64,
+    return relay.validate_declaration({"schema": "fugue.edge.origin-relay-trust-stage/v2", "namespace": "test-system", "group": "edge-group-test",
+            "ca_sha256": "sha256:" + "2" * 64,
             "policy_verify_key": "4" * 64, "targets": [
                 {"edge": f"node-{i}", "slot": "b", "tls_name": f"slot-b.node-{i}.example.test", "leaf_sha256": "sha256:" + str(i) * 64,
+                 "retained_image": "registry.example.test/team/edge@sha256:" + "7" * 64,
                  "node_uid": uid(i), "workload": "test-worker-b", "workload_uid": uid(10)} for i in (1, 2)]})
 
 
@@ -28,11 +28,26 @@ def private(d):
         {"edge": t["edge"], "slot": t["slot"], "cert_pem": f"certificate for {t['edge']}", "key_pem": f"PRIVATE for {t['edge']}"} for t in d["targets"]]}
 
 
-def observed_pod(job):
-    return {"metadata": {"name": job["metadata"]["name"] + "-f01", "namespace": job["metadata"]["namespace"], "uid": uid(80),
-            "ownerReferences": [{"kind": "Job", "controller": True, "uid": uid(72)}]},
-            "spec": copy.deepcopy(job["spec"]["template"]["spec"]),
-            "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
+def observed(d, t):
+    worker = {"name": "edge", "image": t["retained_image"], "resources": {"limits": {"memory": "1Gi"}},
+              "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+              "volumeMounts": [{"name": "worker-state", "mountPath": relay.MOUNT}]}
+    spec = {"nodeName": t["edge"], "automountServiceAccountToken": False, "containers": [worker],
+            "volumes": [{"name": "worker-state", "hostPath": {"type": "DirectoryOrCreate", "path": relay.slot_home(d, t)}}]}
+    node = {"metadata": {"name": t["edge"], "uid": t["node_uid"]}, "status": {"conditions": [
+        {"type": "Ready", "status": "True"},
+        *({"type": c, "status": "False"} for c in ("MemoryPressure", "DiskPressure", "PIDPressure")),
+    ]}}
+    ds = {"metadata": {"name": t["workload"], "namespace": d["namespace"], "uid": t["workload_uid"]},
+          "spec": {"template": {"spec": copy.deepcopy(spec)}}}
+    pod = {"metadata": {"name": "test-worker-b-pod", "namespace": d["namespace"], "uid": uid(72),
+                        "labels": {"fugue.io/edge-slot": t["slot"]},
+                        "ownerReferences": [{"kind": "DaemonSet", "apiVersion": "apps/v1", "controller": True,
+                                             "name": t["workload"], "uid": t["workload_uid"]}]},
+           "spec": spec, "status": {"conditions": [{"type": "Ready", "status": "True"}], "containerStatuses": [
+               {"name": "edge", "state": {"running": {"startedAt": "fixture"}}, "ready": True, "started": True,
+                "imageID": t["retained_image"], "containerID": "containerd://fixture"}]}}
+    return node, ds, pod
 
 
 class StageRelayTest(unittest.TestCase):
@@ -52,83 +67,114 @@ class StageRelayTest(unittest.TestCase):
     def test_exact_node_and_workload_uid_and_slot_mount(self):
         d = fixture()
         t = d["targets"][0]
-        n = {"metadata": {"name": t["edge"], "uid": t["node_uid"]}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}
-        ds = {"metadata": {"name": t["workload"], "namespace": d["namespace"], "uid": t["workload_uid"]}, "spec": {"template": {"spec": {
-            "containers": [{"name": "edge", "image": d["installer_image"], "volumeMounts": [{"name": "worker-state", "mountPath": "/var/lib/fugue/edge"}]}],
-            "volumes": [{"name": "worker-state", "hostPath": {"type": "DirectoryOrCreate", "path": relay.slot_home(d, t)}}]}}}}
-        self.assertEqual(d["installer_image"], relay.attest(d, t, n, ds))
+        n, ds, pod = observed(d, t)
+        worker = relay.attest_workload(d, t, n, ds)
+        self.assertEqual(("test-worker-b-pod", uid(72), "containerd://fixture"), relay.attest_retained(d, t, pod, worker))
         with self.assertRaises(ValueError):
-            relay.attest(d, t, {**n, "metadata": {**n["metadata"], "uid": uid(3)}}, ds)
+            relay.attest_workload(d, t, {**n, "metadata": {**n["metadata"], "uid": uid(3)}}, ds)
         with self.assertRaises(ValueError):
-            relay.attest(d, {**t, "slot": "a"}, n, ds)
+            relay.attest_workload(d, {**t, "slot": "a"}, n, ds)
+        n["status"]["conditions"][1]["status"] = "True"
+        with self.assertRaises(ValueError):
+            relay.attest_workload(d, t, n, ds)
 
-    def test_installer_cannot_see_other_slots_or_service_account(self):
+    def test_reject_inexact_retained_container(self):
         d = fixture()
         t = d["targets"][0]
-        job = relay.installer(d, t, "attempt")
-        spec = job["spec"]["template"]["spec"]
-        self.assertEqual(t["edge"], spec["nodeName"])
-        self.assertFalse(spec["automountServiceAccountToken"])
-        self.assertEqual(relay.slot_home(d, t) + "/origin-relay-v1/" + "2" * 64, spec["volumes"][0]["hostPath"]["path"])
-        self.assertNotEqual(relay.trust_home(d, t), relay.trust_home({**d, "ca_sha256": "sha256:" + "6" * 64}, t))
-        pod = observed_pod(job)
-        relay.verify_installer_pod(pod, job, uid(72))
-        with self.assertRaises(ValueError):
-            relay.verify_installer_pod(pod, job, uid(73))
-        pod["spec"]["containers"].append({"name": "unexpected"})
-        with self.assertRaises(ValueError):
-            relay.verify_installer_pod(pod, job, uid(72))
+        for keys, value in (
+            (("metadata", "ownerReferences", 0, "name"), "other-workload"),
+            (("metadata", "labels", "fugue.io/edge-slot"), "a"),
+            (("spec", "nodeName"), "other-node"),
+            (("spec", "automountServiceAccountToken"), True),
+            (("spec", "hostNetwork"), True),
+            (("spec", "containers", 0, "resources"), {"limits": {"memory": "2Gi"}}),
+            (("spec", "containers", 0, "volumeMounts", 0, "subPath"), "foreign"),
+            (("status", "containerStatuses", 0, "ready"), False),
+            (("status", "containerStatuses", 0, "imageID"), "untrusted-image"),
+        ):
+            with self.subTest(keys=keys):
+                n, ds, pod = observed(d, t)
+                changed = pod
+                for k in keys[:-1]:
+                    changed = changed[k]
+                changed[keys[-1]] = value
+                with self.assertRaises(ValueError):
+                    relay.attest_retained(d, t, pod, relay.attest_workload(d, t, n, ds))
 
-    def test_private_stream_is_sent_only_to_owned_job_after_all_prechecks(self):
+    def test_private_stream_is_sent_only_to_retained_container_after_all_prechecks(self):
         d = fixture()
         checked = relay.pair_packages(d, private(d))
-        live_job = None
-        stages, deliveries = [], []
+        calls = []
 
         def kube(*args, data=None, **_):
-            nonlocal live_job
-            if "create" in args:
-                self.assertNotIn(b"PRIVATE", data)
-                if "--dry-run=server" in args:
-                    stages.append("precheck")
-                    return b""
-                live_job = json.loads(data)
-                stages.append("create")
-                return relay.canonical({"metadata": {"name": live_job["metadata"]["name"], "uid": uid(72)}})
-            if "get" in args:
-                return relay.canonical({"items": [observed_pod(live_job)]})
-            if "exec" in args:
-                deliveries.append((live_job["spec"]["template"]["spec"]["nodeName"], base64.b64decode(data.splitlines()[2]).decode()))
-                return b"relay-trust-staged\n"
-            if "wait" in args:
-                return b""
-            raise AssertionError("unexpected Kube operation")
+            self.assertEqual("exec", args[2])
+            self.assertIn("edge", args)
+            self.assertNotIn("PRIVATE", repr(args))
+            edge = args[-4]
+            if data is None:
+                self.assertNotIn("-i", args)
+                calls.append(("check", edge))
+                return b"relay-trust-checked\n"
+            self.assertIn("-i", args)
+            self.assertIn("pod-" + edge, args)
+            calls.append((edge, base64.b64decode(data.splitlines()[2]).decode()))
+            return b"relay-trust-staged\n"
 
-        with patch.object(relay, "read_checkpoint", return_value=d["installer_image"]) as checkpoint, patch.object(relay, "kubectl", side_effect=kube):
+        def retained(d, t):
+            return ("pod-" + t["edge"], uid(72), "containerd://" + t["edge"])
+
+        with patch.object(relay, "read_checkpoint", side_effect=retained) as checkpoint, patch.object(relay, "kubectl", side_effect=kube):
             receipt = relay.stage(d, checked)
-        self.assertEqual(stages, ["precheck", "precheck", "create", "create"])
+        self.assertEqual(calls, [("check", "node-1"), ("check", "node-2"),
+                                 ("node-1", "PRIVATE for node-1"), ("node-2", "PRIVATE for node-2")])
         self.assertGreaterEqual(checkpoint.call_count, 6)
-        self.assertEqual(deliveries, [("node-1", "PRIVATE for node-1"), ("node-2", "PRIVATE for node-2")])
         self.assertNotIn(b"PRIVATE", relay.canonical(receipt))
         self.assertFalse(receipt["lease_published"])
+
+    def test_no_leaf_streamed_on_preflight_failure_or_container_churn(self):
+        d = fixture()
+        checked = relay.pair_packages(d, private(d))
+        for checkpoints, replies in (
+            ([("pod-one", uid(72), "containerd://one"), ("pod-two", uid(73), "containerd://two")],
+             [b"relay-trust-checked\n", b"rejected"]),
+            ([("pod-one", uid(72), "containerd://one"), ("pod-two", uid(73), "containerd://two"),
+              ("pod-one", uid(72), "containerd://replacement")], [b"relay-trust-checked\n"] * 2),
+        ):
+            with patch.object(relay, "read_checkpoint", side_effect=checkpoints), patch.object(relay, "worker_exec", side_effect=replies) as execute:
+                with self.assertRaises(ValueError):
+                    relay.stage(d, checked)
+                self.assertTrue(all(not c.kwargs for c in execute.call_args_list))
 
     @unittest.skipUnless(sys.platform == "linux", "requires Linux coreutils support for durable publication")
     def test_installer_is_atomic_write_once(self):
         with tempfile.TemporaryDirectory() as root:
-            destination, done = Path(root) / "mount", Path(root) / "exit"
+            destination, identity = Path(root) / "mount", Path(root) / "identity"
             destination.mkdir()
-            done.mkdir()
-            script = relay.INSTALL.replace("/relay", str(destination)).replace("/exit", str(done))
+            identity.mkdir()
+            for key, value in (("edge_id", "node-1"), ("slot", "b"), ("edge_group_id", "test-group")):
+                (identity / key).write_text(value)
+            script = relay.INSTALL.replace(relay.MOUNT, str(destination)).replace("/var/run/fugue/edge-identity", str(identity))
+            epoch = destination / "origin-relay-v1" / ("2" * 64)
 
-            def install(key):
+            def install(key, edge="node-1"):
                 data = b"".join(base64.b64encode(x) + b"\n" for x in (b"root", b"leaf", key, b"verify"))
-                return subprocess.run(["/bin/sh", "-ec", script], input=data, capture_output=True, timeout=10)
+                return subprocess.run(["/bin/sh", "-ec", script, "fixture", edge, "b", "test-group", "2" * 64],
+                                      input=data, capture_output=True, timeout=10)
 
+            self.assertNotEqual(install(b"key-1", "wrong-node").returncode, 0)
+            self.assertFalse(epoch.exists())
             self.assertEqual(install(b"key-1").returncode, 0)
             self.assertEqual(install(b"key-1").returncode, 0)
             self.assertNotEqual(install(b"foreign-key").returncode, 0)
-            self.assertEqual((destination / "trust" / "key.pem").read_bytes(), b"key-1")
-            self.assertEqual({p.name for p in destination.iterdir()}, {"trust"})
+            key_path = epoch / "trust" / "key.pem"
+            self.assertEqual(key_path.read_bytes(), b"key-1")
+            self.assertEqual({p.name for p in epoch.iterdir()}, {"trust"})
+            key_path.unlink()
+            external = Path(root) / "foreign"
+            external.write_bytes(b"key-1")
+            key_path.symlink_to(external)
+            self.assertNotEqual(install(b"key-1").returncode, 0)
+            self.assertEqual(external.read_bytes(), b"key-1")
 
 
 if __name__ == "__main__":

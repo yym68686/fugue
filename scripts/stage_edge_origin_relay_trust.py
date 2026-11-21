@@ -1,40 +1,58 @@
 #!/usr/bin/env python3
 """Stage only offline-leaf trust through the declared production lane.
 
-No worker, Service, NetworkPolicy, Secret or lease is changed here. Each
-ephemeral installer mounts only the intended node's exact slot relay directory.
-Private material is streamed over authenticated Kubernetes exec, not embedded
-in a Pod/Job object, command line, CI receipt or artifact.
+No Kubernetes object, Worker process or lease is changed here. A bounded
+installer runs in the already authorized Worker cgroup and writes only to its
+attested slot mount. Credentials enter via stdin, never the command line.
 """
 import argparse
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import secrets
 import subprocess
-import time
 
 
-MANAGER = "fugue-edge-relay-trust"
 STATE = "/var/lib/fugue/edge-owned"
 VOLUME = "worker-state"
-WORKDIR = "origin-relay-v1"
-MOUNT = "/relay"
-FILES = ("ca.pem", "leaf.pem", "key.pem", "policy-verify-key")
+MOUNT = "/var/lib/fugue/edge"
 DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 UID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 IMAGE = re.compile(r"[a-z0-9][a-z0-9.:/-]*@sha256:[0-9a-f]{64}")
 LIMIT = 48 << 10
 
-IDLE = 'i=0; until [ -f /exit/success ]; do [ "$i" -lt 150 ] || exit 1; i=$((i+1)); sleep 1; done'
-INSTALL = r'''
+# No teardown/restart, additional pod allocation, token, or caller-selected
+# filesystem path. In-container identity files are init-created and read-only.
+CHECK = r'''
+root=/var/lib/fugue/edge
+identity=/var/run/fugue/edge-identity
+[ "$(cat "$identity/edge_id")" = "$1" ]
+[ "$(cat "$identity/slot")" = "$2" ]
+[ "$(cat "$identity/edge_group_id")" = "$3" ]
+owner=$(id -u)
+[ ! -L "$root" ]
+[ -d "$root" ]
+[ -w "$root" ]
+parent="$root/origin-relay-v1"
+epoch="$parent/$4"
+for dir in "$parent" "$epoch"; do
+  [ ! -L "$dir" ]
+  if [ -e "$dir" ]; then
+    [ -d "$dir" ]
+    [ "$(stat -c '%u:%a' "$dir")" = "$owner:700" ]
+  fi
+done
+'''
+INSTALL = CHECK + r'''
 umask 077
-chmod 0700 /relay
-stage=$(mktemp -d /relay/.incoming.XXXXXXXX)
+for dir in "$parent" "$epoch"; do
+  if [ ! -d "$dir" ]; then mkdir -m 0700 -- "$dir"; fi
+  [ ! -L "$dir" ]
+  [ "$(stat -c '%u:%a' "$dir")" = "$owner:700" ]
+done
+stage=$(mktemp -d "$epoch/.incoming.XXXXXXXX")
 trap 'rm -f -- "$stage/ca.pem" "$stage/leaf.pem" "$stage/key.pem" "$stage/policy-verify-key"; rmdir -- "$stage" 2>/dev/null || true' EXIT
 for f in ca.pem leaf.pem key.pem policy-verify-key; do
   IFS= read -r line
@@ -42,24 +60,25 @@ for f in ca.pem leaf.pem key.pem policy-verify-key; do
   [ -s "$stage/$f" ]
 done
 if IFS= read -r extra; then exit 21; fi
-[ ! -L /relay/trust ]
-if [ -e /relay/trust ]; then
-  [ -d /relay/trust ]
-  [ "$(stat -c '%a' /relay/trust)" = 700 ]
+trust="$epoch/trust"
+[ ! -L "$trust" ]
+if [ -e "$trust" ]; then
+  [ -d "$trust" ]
+  [ "$(stat -c '%u:%a' "$trust")" = "$owner:700" ]
   for f in ca.pem leaf.pem key.pem policy-verify-key; do
-    [ ! -L "/relay/trust/$f" ] && [ -f "/relay/trust/$f" ]
-    [ "$(stat -c '%a' "/relay/trust/$f")" = 600 ]
-    cmp -s "$stage/$f" "/relay/trust/$f"
+    [ ! -L "$trust/$f" ]
+    [ -f "$trust/$f" ]
+    [ "$(stat -c '%u:%a:%h' "$trust/$f")" = "$owner:600:1" ]
+    cmp -s "$stage/$f" "$trust/$f"
   done
 else
   # -T never treats an unexpectedly appearing trust directory as a container;
   # rename into a nonempty existing directory fails rather than overwriting it.
   sync "$stage/ca.pem" "$stage/leaf.pem" "$stage/key.pem" "$stage/policy-verify-key" "$stage"
-  mv -T -- "$stage" /relay/trust
-  sync /relay
+  mv -T -- "$stage" "$trust"
+  sync "$epoch" "$parent" "$root"
 fi
 printf 'relay-trust-staged\n'
-touch /exit/success
 '''
 
 
@@ -87,10 +106,10 @@ def loc(target):
 
 
 def validate_declaration(d):
-    keys = {"schema", "namespace", "group", "installer_image", "ca_sha256", "policy_verify_key", "targets"}
-    if not isinstance(d, dict) or set(d) != keys or d["schema"] != "fugue.edge.origin-relay-trust-stage/v1":
+    keys = {"schema", "namespace", "group", "ca_sha256", "policy_verify_key", "targets"}
+    if not isinstance(d, dict) or set(d) != keys or d["schema"] != "fugue.edge.origin-relay-trust-stage/v2":
         raise ValueError("declaration schema invalid")
-    if not (matches(DNS_LABEL, d["namespace"]) and matches(DNS_LABEL, d["group"]) and matches(IMAGE, d["installer_image"])
+    if not (matches(DNS_LABEL, d["namespace"]) and matches(DNS_LABEL, d["group"])
             and matches(DIGEST, d["ca_sha256"]) and matches(re.compile(r"[0-9a-f]{64}"), d["policy_verify_key"])):
         raise ValueError("declaration identities invalid")
     targets = d["targets"]
@@ -98,10 +117,11 @@ def validate_declaration(d):
         raise ValueError("stage authorizes no more than two nodes and two slots each")
     names, recipients, nodes, workloads = set(), set(), {}, {}
     for target in targets:
-        fields = {"edge", "slot", "tls_name", "leaf_sha256", "node_uid", "workload", "workload_uid"}
+        fields = {"edge", "slot", "tls_name", "leaf_sha256", "node_uid", "workload", "workload_uid", "retained_image"}
         if not isinstance(target, dict) or set(target) != fields or not (
             matches(DNS_LABEL, target["edge"]) and target["slot"] in ("a", "b") and matches(DNS_LABEL, target["workload"])
             and matches(UID, target["node_uid"]) and matches(UID, target["workload_uid"]) and matches(DIGEST, target["leaf_sha256"])
+            and matches(IMAGE, target["retained_image"])
             and isinstance(target["tls_name"], str) and 1 <= len(target["tls_name"]) <= 253
         ):
             raise ValueError("invalid exact slot target")
@@ -155,120 +175,101 @@ def slot_home(d, target):
     return f'{STATE}/{d["group"]}/slot-{target["slot"]}'
 
 
-def trust_home(d, target):
-    # Rotation stages a new immutable directory. Previous epochs and their
-    # withdrawal fences are not overwritten by a newer certificate package.
-    return f'{slot_home(d, target)}/{WORKDIR}/{d["ca_sha256"].removeprefix("sha256:")}'
-
-
-def attest(d, target, node, daemonset):
+def attest_workload(d, target, node, daemonset):
     nm, dm = node["metadata"], daemonset["metadata"]
     if (nm.get("name"), nm.get("uid")) != (target["edge"], target["node_uid"]) or nm.get("deletionTimestamp") or not ready(node):
         raise ValueError("declared node is not the exact ready node")
+    health = {c["type"]: c["status"] for c in node["status"]["conditions"]}
+    if any(health.get(c) != "False" for c in ("MemoryPressure", "DiskPressure", "PIDPressure")):
+        raise ValueError("declared node has resource pressure or unknown resource state")
     if (dm.get("namespace"), dm.get("name"), dm.get("uid")) != (d["namespace"], target["workload"], target["workload_uid"]) or dm.get("deletionTimestamp"):
         raise ValueError("declared slot workload changed identity")
-    spec = daemonset["spec"]["template"]["spec"]
+    return attest_mount(d, target, daemonset["spec"]["template"]["spec"])
+
+
+def attest_mount(d, target, spec):
     vol = [v for v in spec["volumes"] if v.get("name") == VOLUME]
     workers = [c for c in spec["containers"] if c.get("name") == "edge"]
     if len(vol) != 1 or vol[0].get("hostPath") != {"path": slot_home(d, target), "type": "DirectoryOrCreate"} or len(workers) != 1:
         raise ValueError("slot does not own the declared state directory")
     m = [a for a in workers[0]["volumeMounts"] if a.get("name") == VOLUME]
-    if len(m) != 1 or m[0].get("mountPath") != "/var/lib/fugue/edge" or m[0].get("subPath") or m[0].get("subPathExpr") or m[0].get("readOnly"):
+    if len(m) != 1 or m[0].get("mountPath") != MOUNT or any(m[0].get(k) for k in ("subPath", "subPathExpr", "readOnly", "mountPropagation")):
         raise ValueError("worker does not own the exact writable state mount")
-    return workers[0]["image"]
+    return workers[0]
+
+
+def owned_slot(d, target, pod):
+    meta, spec = pod["metadata"], pod["spec"]
+    return meta.get("namespace") == d["namespace"] and spec.get("nodeName") == target["edge"] and any(
+        ref.get("controller") is True and ref.get("kind") == "DaemonSet" and ref.get("apiVersion") == "apps/v1"
+        and (ref.get("name"), ref.get("uid")) == (target["workload"], target["workload_uid"])
+        for ref in meta.get("ownerReferences", [])
+    )
+
+
+def attest_retained(d, target, pod, template_worker):
+    meta, spec = pod["metadata"], pod["spec"]
+    if (not owned_slot(d, target, pod) or not ready(pod) or meta.get("deletionTimestamp")
+            or meta.get("labels", {}).get("fugue.io/edge-slot") != target["slot"]
+            or not matches(DNS_LABEL, meta.get("name")) or not matches(UID, meta.get("uid"))):
+        raise ValueError("retained Pod identity is not exact and Ready")
+    if spec.get("automountServiceAccountToken") is not False or any(spec.get(k) for k in (
+            "hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace", "ephemeralContainers")):
+        raise ValueError("retained Pod is not confined")
+    worker = attest_mount(d, target, spec)
+    security = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+    status = [c for c in pod["status"].get("containerStatuses", []) if c.get("name") == "edge"]
+    if (worker.get("securityContext") != security or worker.get("resources") != template_worker.get("resources")
+            or not worker.get("resources", {}).get("limits", {}).get("memory") or len(status) != 1):
+        raise ValueError("retained container is not confined to the declared Worker budget")
+    c = status[0]
+    if (worker.get("image") != target["retained_image"] or not isinstance(c.get("imageID"), str)
+            or c["imageID"].removeprefix("docker-pullable://") != target["retained_image"]
+            or c.get("ready") is not True or c.get("started") is not True or not c.get("state", {}).get("running")
+            or not isinstance(c.get("containerID"), str) or not c["containerID"]):
+        raise ValueError("exact pinned Worker container is not running and ready")
+    return meta["name"], meta["uid"], c["containerID"]
 
 
 def read_checkpoint(d, target):
     node = strict_json(kubectl("get", "node", target["edge"], "-o", "json"))
     ds = strict_json(kubectl("-n", d["namespace"], "get", "daemonset", target["workload"], "-o", "json"))
-    image = attest(d, target, node, ds)
+    template_worker = attest_workload(d, target, node, ds)
     pods = strict_json(kubectl("-n", d["namespace"], "get", "pods", "--field-selector", f'spec.nodeName={target["edge"]}', "-o", "json"))["items"]
-    slots = [p for p in pods if any(ref.get("controller") and ref.get("kind") == "DaemonSet" and ref.get("uid") == target["workload_uid"]
-                                    for ref in p["metadata"].get("ownerReferences", []))]
-    if len(slots) != 1 or not ready(slots[0]):
-        raise ValueError("expected one ready slot Pod owned by the exact workload on the target node")
-    pod = slots[0]
-    if pod["metadata"].get("deletionTimestamp") or pod["spec"].get("nodeName") != target["edge"]:
-        raise ValueError("slot Pod is not retained on the exact node")
-    # The live slot may still serve its previous image (OnDelete); only the
-    # volume needs to agree. The signed release handles code promotion.
-    observed = {"metadata": ds["metadata"], "spec": {"template": {"spec": pod["spec"]}}}
-    attest(d, target, node, observed)
-    return image
+    slots = [p for p in pods if owned_slot(d, target, p)]
+    if len(slots) != 1:
+        raise ValueError("expected exactly one retained slot Pod")
+    return attest_retained(d, target, slots[0], template_worker)
 
 
-def installer(d, t, run_id):
-    identity = hashlib.sha256(canonical([t["node_uid"], t["slot"], t["leaf_sha256"], run_id])).hexdigest()[:24]
-    labels = {"app.kubernetes.io/managed-by": MANAGER, "fugue.dev/relay-trust-stage": identity}
-    return {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": f"relay-trust-{identity}", "namespace": d["namespace"], "labels": labels},
-            "spec": {"activeDeadlineSeconds": 180, "backoffLimit": 0, "ttlSecondsAfterFinished": 300,
-                     "template": {"metadata": {"labels": labels}, "spec": {
-                         "nodeName": t["edge"], "automountServiceAccountToken": False, "enableServiceLinks": False,
-                         "restartPolicy": "Never", "terminationGracePeriodSeconds": 1,
-                         "securityContext": {"runAsUser": 0, "runAsGroup": 0, "seccompProfile": {"type": "RuntimeDefault"}},
-                         "containers": [{"name": "installer", "image": d["installer_image"], "command": ["/bin/sh", "-ec", IDLE],
-                                         "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
-                                         "resources": {"requests": {"cpu": "10m", "memory": "8Mi"}, "limits": {"cpu": "100m", "memory": "32Mi"}},
-                                         "volumeMounts": [{"name": "relay", "mountPath": MOUNT}, {"name": "exit", "mountPath": "/exit"}]}],
-                         "volumes": [{"name": "relay", "hostPath": {"path": trust_home(d, t), "type": "DirectoryOrCreate"}},
-                                     {"name": "exit", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}}]}}}}
-
-
-def verify_installer_pod(pod, desired, job_uid):
-    meta, actual = pod["metadata"], pod["spec"]
-    expected = desired["spec"]["template"]["spec"]
-    if meta.get("deletionTimestamp") or meta.get("namespace") != desired["metadata"]["namespace"] or not meta.get("uid") or not any(
-        ref.get("kind") == "Job" and ref.get("uid") == job_uid and ref.get("controller") for ref in meta.get("ownerReferences", [])
-    ):
-        raise ValueError("installer Pod is not owned by the exact Job")
-    for key in ("nodeName", "automountServiceAccountToken", "enableServiceLinks", "restartPolicy", "securityContext", "volumes"):
-        if actual.get(key) != expected[key]:
-            raise ValueError("installer Pod mount, node or security contract differs")
-    if actual.get("initContainers") or actual.get("ephemeralContainers") or any(actual.get(k) for k in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace")):
-        raise ValueError("unexpected installer privileges or additional container")
-    c = actual["containers"]
-    a = expected["containers"][0]
-    if len(c) != 1 or any(c[0].get(k) != a[k] for k in ("name", "image", "command", "securityContext", "volumeMounts")) or any(c[0].get(k) for k in ("env", "envFrom", "args", "ports", "volumeDevices", "lifecycle")):
-        raise ValueError("installer execution contract differs")
+def worker_exec(d, target, pod, script, data=None):
+    command = ["-n", d["namespace"], "exec"]
+    if data is not None:
+        command.append("-i")
+    command += [pod, "-c", "edge", "--", "/bin/sh", "-ec", script, "edge-relay-trust",
+                target["edge"], target["slot"], d["group"], d["ca_sha256"].removeprefix("sha256:")]
+    return kubectl(*command, data=data)
 
 
 def stage(d, checked):
-    ns = d["namespace"]
-    jobs = [(t, p, installer(d, t, secrets.token_hex(12))) for t, p in zip(d["targets"], checked["packages"], strict=True)]
-    # Validate every target and server-side Job shape before creating any Job.
-    images = {read_checkpoint(d, t) for t, _, _ in jobs}
-    if d["installer_image"] not in images:
-        raise ValueError("installer image not declared by a witnessed slot workload")
-    for _, _, job in jobs:
-        kubectl("create", "--dry-run=server", "-f", "-", data=canonical(job))
+    targets = list(zip(d["targets"], checked["packages"], strict=True))
+    witnesses = []
+    # Complete read-only checks for all recipients before streaming any leaf.
+    for t, _ in targets:
+        witness = read_checkpoint(d, t)
+        if worker_exec(d, t, witness[0], CHECK + "\nprintf 'relay-trust-checked\\n'\n") != b"relay-trust-checked\n":
+            raise ValueError("retained Worker identity and filesystem check rejected")
+        witnesses.append(witness)
     receipt = []
-    for t, p, job in jobs:
-        read_checkpoint(d, t)
-        created = strict_json(kubectl("create", "-f", "-", "-o", "json", data=canonical(job)))
-        name, uid = created["metadata"]["name"], created["metadata"]["uid"]
-        if name != job["metadata"]["name"] or not matches(UID, uid):
-            raise ValueError("created Job identity differs from declaration")
-        match = f"batch.kubernetes.io/controller-uid={uid}"
-        deadline = time.monotonic() + 45
-        while True:
-            pods = strict_json(kubectl("-n", ns, "get", "pods", "-l", match, "-o", "json"))["items"]
-            if len(pods) > 1:
-                raise ValueError("installer produced duplicate Pods")
-            if pods:
-                verify_installer_pod(pods[0], job, uid)
-                if ready(pods[0]):
-                    break
-            if time.monotonic() >= deadline:
-                raise ValueError("installer Pod did not become ready")
-            time.sleep(1)
-        pod = pods[0]["metadata"]
-        read_checkpoint(d, t)
+    for (t, p), witness in zip(targets, witnesses, strict=True):
+        if read_checkpoint(d, t) != witness:
+            raise ValueError("retained recipient changed before delivery")
         data = b"".join(base64.b64encode(s.encode()) + b"\n" for s in (checked["ca_pem"], p["cert_pem"], p["key_pem"], checked["policy_verify_key"] + "\n"))
-        ack = kubectl("-n", ns, "exec", "-i", pod["name"], "-c", "installer", "--", "/bin/sh", "-ec", INSTALL, data=data)
-        if ack != b"relay-trust-staged\n":
-            raise ValueError("private delivery acknowledgement is missing")
-        kubectl("-n", ns, "wait", "--for=condition=complete", f"job/{name}", "--timeout=10s")
-        receipt.append({"edge": t["edge"], "slot": t["slot"], "node_uid": t["node_uid"], "leaf_sha256": t["leaf_sha256"], "job_uid": uid, "pod_uid": pod["uid"]})
+        ack = worker_exec(d, t, witness[0], INSTALL, data=data)
+        if ack != b"relay-trust-staged\n" or read_checkpoint(d, t) != witness:
+            raise ValueError("private delivery acknowledgment is missing or recipient changed")
+        receipt.append({"edge": t["edge"], "slot": t["slot"], "node_uid": t["node_uid"], "leaf_sha256": t["leaf_sha256"],
+                        "pod_uid": witness[1], "retained_image": t["retained_image"]})
     return {"staged": receipt, "ca_sha256": d["ca_sha256"], "policy_verify_key": d["policy_verify_key"], "lease_published": False}
 
 

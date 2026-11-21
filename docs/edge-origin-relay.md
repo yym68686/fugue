@@ -95,16 +95,19 @@ Production staging uses the `edge_origin_relay_trust` lane in the sole
 declarative CI workflow. Its public declaration at
 `deploy/environments/production/edge-origin-relay/trust.json` pins the group,
 namespace, exact two Kubernetes node UIDs, each target slot DaemonSet UID,
-the immutable installer image already declared by a target slot, the CA and
+each retained Worker image digest, the CA and
 leaf SHA-256 fingerprints, and the policy verification key. The dedicated
 `production-edge-origin-relay` Actions environment permits only `main`; its
 temporary `FUGUE_ORIGIN_RELAY_LEAF_PACKAGES` input contains only `ca_pem` and a `packages`
 array of `{edge, slot, cert_pem, key_pem}`. CI validates all recipients and both
-certificate purposes before creating bounded disposable install Jobs. A Job
-mounts only that node and slot's exact CA-fingerprinted `origin-relay-v1`
-epoch directory, with no Kubernetes
-service-account token. It receives one leaf package on stdin, stages atomically
-and refuses to overwrite different trust in that epoch. Rotation must stage
+certificate purposes, confirms resource pressure is false, and verifies the
+exact Ready retained Pod, pinned running image, slot mount and in-container
+identity before streaming any package. The bounded writer runs inside the
+existing Worker container resource limits. It creates no Pods, exposes no
+token, and does not change scheduling or evict workloads. It receives only
+that slot's leaf package on stdin and atomically stages it in its existing
+state mount under the CA-fingerprinted `origin-relay-v1` epoch. It refuses
+symlinks and different trust in that epoch. Rotation must stage
 a separate epoch without overriding the retained withdrawal fence. The public receipt
 contains no private material. This transaction does not publish a lease,
 change Worker startup, restart a Pod or alter network traffic. A subsequent
