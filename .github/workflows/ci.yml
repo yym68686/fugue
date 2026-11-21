@@ -1134,12 +1134,13 @@ jobs:
           set -euo pipefail
           intent=deploy/environments/production/edge-front-repair/intent.json
           base="$BASE_SHA"
-          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != 0000000000000000000000000000000000000000 ]]
+          [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != 0000000000000000000000000000000000000000 ]] || exit 1
           changed="$(git diff --no-renames --name-only "$base" HEAD -- "$intent")"
           if [[ -z "$changed" ]]; then exit 0; fi
-          [[ "$(git diff --no-renames --name-only "$base" HEAD --)" == "$intent" ]]
-          [[ "$(git ls-tree HEAD -- "$intent" | awk '{print $1}')" == 100644 ]]
-          [[ "$GITHUB_REF_PROTECTED" == true ]]
+          all_changed="$(git diff --no-renames --name-only "$base" HEAD --)"
+          [[ "$all_changed" == "$intent" ]] || exit 1
+          [[ "$(git ls-tree HEAD -- "$intent" | awk '{print $1}')" == 100644 ]] || exit 1
+          [[ "$GITHUB_REF_PROTECTED" == true ]] || exit 1
           echo 'selected=true' >> "$GITHUB_OUTPUT"
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
@@ -2570,10 +2571,10 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          [[ -n "$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY" ]]
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -n "$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY" ]] || exit 1
           executor="$(jq -er '.executorCommit' <<<"$FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY")"
-          [[ "$executor" =~ ^[0-9a-f]{40}$ && "$executor" != "$GITHUB_SHA" ]]
+          [[ "$executor" =~ ^[0-9a-f]{40}$ && "$executor" != "$GITHUB_SHA" ]] || exit 1
           git merge-base --is-ancestor "$executor" "$GITHUB_SHA"
           git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
           git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/edge-groups.json go.mod go.sum \
