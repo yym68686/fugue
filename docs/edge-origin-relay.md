@@ -112,6 +112,11 @@ a separate epoch without overriding the retained withdrawal fence. The public re
 contains no private material. This transaction does not publish a lease,
 change Worker startup, restart a Pod or alter network traffic. A subsequent
 guarded Worker release and closed-mode transport proof are separate steps.
+The US A/B Worker declaration pins the prepared CA epoch and configures a
+listener only where all four trust files exist. It uses the Downward API Pod
+IP on TCP 8443 with no Service, host port, DNS or Front change. An unprovisioned
+Worker launches with relay disabled. The signed lease and persisted fence are
+outside the immutable trust directory, but on the same retained slot mount.
 
 Publish atomically and keep the trusted mount current across restarts. The
 listener can bind before a policy exists, but rejects all relay operations

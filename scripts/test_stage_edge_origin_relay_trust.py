@@ -1,5 +1,6 @@
 import base64
 import copy
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -51,6 +52,58 @@ def observed(d, t):
 
 
 class StageRelayTest(unittest.TestCase):
+    def test_worker_bootstrap_does_not_extend_public_sockets_or_require_a_lease(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "internal/edge/component/resources.inventory-producer.us.json").read_bytes())
+        epoch = "3" * 64
+        prefix = "FUGUE_EDGE_ORIGIN_RELAY_"
+        slots = []
+        declared_epochs = set()
+        for item in manifest["items"]:
+            if item["metadata"]["name"] not in ("@@WORKER_A_NAME@@", "@@WORKER_B_NAME@@"):
+                continue
+            pod = item["spec"]["template"]["spec"]
+            worker = next(c for c in pod["containers"] if c["name"] == "edge")
+            self.assertFalse(pod.get("hostNetwork"))
+            self.assertTrue(all(p.get("hostPort") != 8443 for c in pod["containers"] for p in c.get("ports", [])))
+            self.assertEqual(worker["command"], ["/bin/sh", "-ec"])
+            env = {e["name"]: e for e in worker["env"] if e["name"].startswith(prefix)}
+            self.assertEqual(set(env), {prefix + "TRUST_EPOCH", prefix + "POD_IP"})
+            self.assertEqual(env[prefix + "POD_IP"]["valueFrom"], {"fieldRef": {"apiVersion": "v1", "fieldPath": "status.podIP"}})
+            configured_epoch = env[prefix + "TRUST_EPOCH"]["value"]
+            self.assertRegex(configured_epoch, r"^[0-9a-f]{64}$")
+            declared_epochs.add(configured_epoch)
+            slots.append(worker["args"])
+        self.assertEqual(len(slots), 2)
+        self.assertEqual(slots[0], slots[1])
+        self.assertEqual(len(slots[0]), 1)
+        self.assertEqual(len(declared_epochs), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mount = Path(tmp)
+            script = slots[0][0].replace(relay.MOUNT, str(mount)).replace("exec /usr/local/bin/fugue-edge", "exec /usr/bin/env")
+
+            def startup(ip):
+                environment = {prefix + "POD_IP": ip, prefix + "TRUST_EPOCH": epoch}
+                out = subprocess.check_output(["/bin/sh", "-ec", script], env=environment, text=True, timeout=5)
+                return dict(line.split("=", 1) for line in out.splitlines())
+
+            self.assertNotIn(prefix + "LISTEN_ADDR", startup("10.42.1.4"))
+            trust_dir = mount / "origin-relay-v1" / epoch / "trust"
+            trust_dir.mkdir(parents=True)
+            for name in ("ca.pem", "leaf.pem", "key.pem"):
+                (trust_dir / name).touch()
+            self.assertNotIn(prefix + "LISTEN_ADDR", startup("10.42.1.4"))
+            (trust_dir / "policy-verify-key").touch()
+            self.assertNotIn(prefix + "LISTEN_ADDR", startup(""))
+            for ip, expected in (("10.42.1.4", "10.42.1.4:8443"), ("fd01::7", "[fd01::7]:8443")):
+                env = startup(ip)
+                self.assertEqual(env[prefix + "LISTEN_ADDR"], expected)
+                self.assertEqual(Path(env[prefix + "TLS_KEY_FILE"]), trust_dir / "key.pem")
+                self.assertEqual(Path(env[prefix + "POLICY_FILE"]), trust_dir.parent / "policy.json")
+                self.assertEqual(Path(env[prefix + "STATE_FILE"]), trust_dir.parent / "fence.json")
+                self.assertFalse(Path(env[prefix + "POLICY_FILE"]).exists())
+
     def test_package_is_bound_and_no_issuer_private_material_accepted(self):
         d = fixture()
         p = private(d)

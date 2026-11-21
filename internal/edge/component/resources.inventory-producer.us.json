@@ -294,7 +294,27 @@
             "automountServiceAccountToken": false,
             "containers": [
               {
+                "args": [
+                  "set -eu\nrelay_root=\"/var/lib/fugue/edge/origin-relay-v1/${FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH:-}\"\npod_ip=\"${FUGUE_EDGE_ORIGIN_RELAY_POD_IP:-}\"\nif [ -n \"${FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH:-}\" ] && [ -n \"$pod_ip\" ] &&\n   [ -r \"$relay_root/trust/ca.pem\" ] && [ -r \"$relay_root/trust/leaf.pem\" ] &&\n   [ -r \"$relay_root/trust/key.pem\" ] && [ -r \"$relay_root/trust/policy-verify-key\" ]; then\n  case \"$pod_ip\" in *:*) pod_ip=\"[$pod_ip]\";; esac\n  export FUGUE_EDGE_ORIGIN_RELAY_LISTEN_ADDR=\"$pod_ip:8443\"\n  export FUGUE_EDGE_ORIGIN_RELAY_POLICY_FILE=\"$relay_root/policy.json\"\n  export FUGUE_EDGE_ORIGIN_RELAY_STATE_FILE=\"$relay_root/fence.json\"\n  export FUGUE_EDGE_ORIGIN_RELAY_TLS_CERT_FILE=\"$relay_root/trust/leaf.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_TLS_KEY_FILE=\"$relay_root/trust/key.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_CA_FILE=\"$relay_root/trust/ca.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_POLICY_VERIFY_KEY_FILE=\"$relay_root/trust/policy-verify-key\"\nfi\nexec /usr/local/bin/fugue-edge"
+                ],
+                "command": [
+                  "/bin/sh",
+                  "-ec"
+                ],
                 "env": [
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH",
+                    "value": "41594ca37346b2d1df774f7e24497da7720199f88f11cc71180893b636b33f2e"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_RELAY_POD_IP",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "status.podIP"
+                      }
+                    }
+                  },
                   {
                     "name": "FUGUE_API_URL",
                     "value": "http://fugue-fugue.fugue-system.svc:80"
@@ -940,7 +960,27 @@
             "automountServiceAccountToken": false,
             "containers": [
               {
+                "args": [
+                  "set -eu\nrelay_root=\"/var/lib/fugue/edge/origin-relay-v1/${FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH:-}\"\npod_ip=\"${FUGUE_EDGE_ORIGIN_RELAY_POD_IP:-}\"\nif [ -n \"${FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH:-}\" ] && [ -n \"$pod_ip\" ] &&\n   [ -r \"$relay_root/trust/ca.pem\" ] && [ -r \"$relay_root/trust/leaf.pem\" ] &&\n   [ -r \"$relay_root/trust/key.pem\" ] && [ -r \"$relay_root/trust/policy-verify-key\" ]; then\n  case \"$pod_ip\" in *:*) pod_ip=\"[$pod_ip]\";; esac\n  export FUGUE_EDGE_ORIGIN_RELAY_LISTEN_ADDR=\"$pod_ip:8443\"\n  export FUGUE_EDGE_ORIGIN_RELAY_POLICY_FILE=\"$relay_root/policy.json\"\n  export FUGUE_EDGE_ORIGIN_RELAY_STATE_FILE=\"$relay_root/fence.json\"\n  export FUGUE_EDGE_ORIGIN_RELAY_TLS_CERT_FILE=\"$relay_root/trust/leaf.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_TLS_KEY_FILE=\"$relay_root/trust/key.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_CA_FILE=\"$relay_root/trust/ca.pem\"\n  export FUGUE_EDGE_ORIGIN_RELAY_POLICY_VERIFY_KEY_FILE=\"$relay_root/trust/policy-verify-key\"\nfi\nexec /usr/local/bin/fugue-edge"
+                ],
+                "command": [
+                  "/bin/sh",
+                  "-ec"
+                ],
                 "env": [
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_RELAY_TRUST_EPOCH",
+                    "value": "41594ca37346b2d1df774f7e24497da7720199f88f11cc71180893b636b33f2e"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_ORIGIN_RELAY_POD_IP",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "status.podIP"
+                      }
+                    }
+                  },
                   {
                     "name": "FUGUE_API_URL",
                     "value": "http://fugue-fugue.fugue-system.svc:80"
