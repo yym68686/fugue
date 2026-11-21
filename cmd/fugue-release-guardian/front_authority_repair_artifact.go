@@ -95,21 +95,35 @@ type frontRepairVerifiedArtifact struct {
 // the signed approval. This verifier performs no network or Kubernetes writes.
 func readFrontRepairActionsArtifact(policy frontRepairActionsPolicy, expected frontRepairArtifactIdentity,
 	runResponse, jobResponse, artifactResponse, archive io.Reader, now time.Time) (frontRepairVerifiedArtifact, error) {
+	artifact, err := readFrontRepairActionsMetadata(policy, expected, runResponse, jobResponse, artifactResponse, now)
+	if err != nil {
+		return frontRepairVerifiedArtifact{}, err
+	}
+	return readFrontRepairActionsArchive(policy, expected, artifact, archive)
+}
+
+func readFrontRepairActionsMetadata(policy frontRepairActionsPolicy, expected frontRepairArtifactIdentity,
+	runResponse, jobResponse, artifactResponse io.Reader, now time.Time) (frontRepairActionsArtifact, error) {
 	var run frontRepairActionsRun
 	var job frontRepairActionsJob
 	var artifact frontRepairActionsArtifact
 	if err := decodeFrontRepairActionsMetadata(runResponse, &run); err != nil {
-		return frontRepairVerifiedArtifact{}, fmt.Errorf("Front repair workflow attempt metadata: %w", err)
+		return frontRepairActionsArtifact{}, fmt.Errorf("Front repair workflow attempt metadata: %w", err)
 	}
 	if err := decodeFrontRepairActionsMetadata(jobResponse, &job); err != nil {
-		return frontRepairVerifiedArtifact{}, fmt.Errorf("Front repair producer job metadata: %w", err)
+		return frontRepairActionsArtifact{}, fmt.Errorf("Front repair producer job metadata: %w", err)
 	}
 	if err := decodeFrontRepairActionsMetadata(artifactResponse, &artifact); err != nil {
-		return frontRepairVerifiedArtifact{}, fmt.Errorf("Front repair artifact metadata: %w", err)
+		return frontRepairActionsArtifact{}, fmt.Errorf("Front repair artifact metadata: %w", err)
 	}
 	if err := validateFrontRepairActionsMetadata(policy, expected, run, job, artifact, now); err != nil {
-		return frontRepairVerifiedArtifact{}, err
+		return frontRepairActionsArtifact{}, err
 	}
+	return artifact, nil
+}
+
+func readFrontRepairActionsArchive(policy frontRepairActionsPolicy, expected frontRepairArtifactIdentity,
+	artifact frontRepairActionsArtifact, archive io.Reader) (frontRepairVerifiedArtifact, error) {
 	if archive == nil {
 		return frontRepairVerifiedArtifact{}, errors.New("Front repair artifact archive is missing")
 	}
