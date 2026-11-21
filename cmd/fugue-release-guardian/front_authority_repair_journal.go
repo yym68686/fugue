@@ -133,8 +133,6 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness) (frontR
 	return frontRepairProgress{Remaining: pending, WorkersReady: healthy, Converged: healthy && len(pending) == 0}, nil
 }
 
-func frontRepairJournalName(group string) string { return "fugue-authority-front-repair-" + group }
-
 // frontRepairStore is used only from the reviewed repair path (not normal
 // promotion). held must check both membership and group authority locks.
 // No production command is wired to this store until the repair lane exists.
@@ -157,13 +155,17 @@ func (store frontRepairStore) requireHeld(ctx context.Context) error {
 
 func (store frontRepairStore) load(ctx context.Context, group string) (frontRepairJournal, error) {
 	cms := store.client.CoreV1().ConfigMaps(store.namespace)
-	object, err := cms.Get(ctx, frontRepairJournalName(group), metav1.GetOptions{})
+	object, err := cms.Get(ctx, releaseguardian.FrontRepairFenceName(group), metav1.GetOptions{})
 	if err != nil {
 		return frontRepairJournal{}, err
 	}
+	return decodeFrontRepairJournal(object, group, releaseguardian.FrontRepairJournalKind)
+}
+
+func decodeFrontRepairJournal(object *corev1.ConfigMap, group, kind string) (frontRepairJournal, error) {
 	var journal frontRepairJournal
 	if object.DeletionTimestamp != nil || object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 || len(object.BinaryData) != 0 ||
-		object.Labels["fugue.pro/group"] != group || object.Labels["fugue.pro/authority-kind"] != "front-repair-journal" ||
+		object.Labels["fugue.pro/group"] != group || object.Labels["fugue.pro/authority-kind"] != kind ||
 		len(object.Data["journal.json"]) > 256<<10 || decodeStrictJSON([]byte(object.Data["journal.json"]), &journal) != nil ||
 		journal.validate() != nil || journal.Plan.Before.GroupID != group {
 		return frontRepairJournal{}, errors.New("persisted Front repair journal is invalid")
@@ -180,8 +182,8 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 	}
 	plan := journal.Plan
 	group := plan.Before.GroupID
-	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
-		return errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
 	}
 	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
 	if err != nil || current != plan.Before || string(uid) != plan.CurrentUID || rv != plan.CurrentResourceVersion {
@@ -192,8 +194,8 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 		return err
 	}
 	immutable := true
-	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: frontRepairJournalName(group), Namespace: store.namespace, Labels: map[string]string{
-		"fugue.pro/group": group, "fugue.pro/authority-kind": "front-repair-journal",
+	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: releaseguardian.FrontRepairFenceName(group), Namespace: store.namespace, Labels: map[string]string{
+		"fugue.pro/group": group, "fugue.pro/authority-kind": releaseguardian.FrontRepairJournalKind,
 	}}, Immutable: &immutable, Data: map[string]string{"journal.json": string(raw)}}
 	if err := store.requireHeld(ctx); err != nil {
 		return err
@@ -220,8 +222,8 @@ func (store frontRepairStore) writePlan(ctx context.Context, group, journalDiges
 		return frontRepairProgress{}, errors.Join(errors.New("Front repair must resume the exact durable journal"), err)
 	}
 	plan := journal.Plan
-	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
-		return frontRepairProgress{}, errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
+		return frontRepairProgress{}, err
 	}
 	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
 	if err != nil || current != plan.Before || string(uid) != plan.CurrentUID || rv != plan.CurrentResourceVersion {
@@ -260,12 +262,11 @@ func (store frontRepairStore) commit(ctx context.Context, group, journalDigest s
 	if err != nil || !progress.Converged {
 		return errors.Join(errors.New("Front repair cohort has not converged"), err)
 	}
-	if _, active, err := store.authority.LoadTransitionJournal(ctx, group); active || err != nil {
-		return errors.Join(errors.New("an ordinary Front transition may already be active"), err)
+	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
 	}
 	plan := journal.Plan
-	after := plan.Before
-	after.CurrentFrontGeneration, after.AuthorityEpoch = plan.TargetGeneration, after.AuthorityEpoch+1
+	after := journal.committedAuthority()
 	current, uid, rv, err := store.authority.LoadCurrent(ctx, group)
 	if err != nil || string(uid) != plan.CurrentUID {
 		return errors.Join(errors.New("Front repair CurrentAuthority was replaced"), err)
@@ -300,4 +301,76 @@ func (store frontRepairStore) commit(ctx context.Context, group, journalDigest s
 		}
 	}
 	return nil
+}
+
+func (journal frontRepairJournal) committedAuthority() releaseguardian.CurrentAuthority {
+	after := journal.Plan.Before
+	after.CurrentFrontGeneration, after.AuthorityEpoch = journal.Plan.TargetGeneration, after.AuthorityEpoch+1
+	return after
+}
+
+// finish archives exact completion before releasing the shared fence. It
+// never deletes a pending, replaced, or ordinary promotion journal.
+func (store frontRepairStore) finish(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness) error {
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	if !exactSHA256Digest(journalDigest) {
+		return errors.New("Front repair completion digest is invalid")
+	}
+	const archiveKind = "front-repair-completed"
+	cms := store.client.CoreV1().ConfigMaps(store.namespace)
+	archiveName := "fugue-front-repair-completed-" + group + "-" + journalDigest[7:31]
+	verifyArchive := func() error {
+		object, err := cms.Get(ctx, archiveName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		stored, err := decodeFrontRepairJournal(object, group, archiveKind)
+		if err != nil || stored.Digest != journalDigest {
+			return errors.Join(errors.New("Front repair completion archive conflicts"), err)
+		}
+		return nil
+	}
+	fenceName := releaseguardian.FrontRepairFenceName(group)
+	fence, err := cms.Get(ctx, fenceName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return verifyArchive()
+	}
+	if err != nil {
+		return err
+	}
+	journal, err := decodeFrontRepairJournal(fence, group, releaseguardian.FrontRepairJournalKind)
+	if err != nil || journal.Digest != journalDigest || fence.UID == "" || fence.ResourceVersion == "" {
+		return errors.Join(errors.New("Front repair completion fence changed"), err)
+	}
+	progress, err := journal.resume(refreshed)
+	if err != nil || !progress.Converged {
+		return errors.Join(errors.New("Front repair cannot release the fence without live convergence"), err)
+	}
+	current, uid, _, err := store.authority.LoadCurrent(ctx, group)
+	if err != nil || string(uid) != journal.Plan.CurrentUID || current != journal.committedAuthority() {
+		return errors.Join(errors.New("Front repair authority is not committed"), err)
+	}
+	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
+	}
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	archive := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: archiveName, Namespace: store.namespace, Labels: map[string]string{
+		"fugue.pro/group": group, "fugue.pro/authority-kind": archiveKind,
+	}}, Immutable: fence.Immutable, Data: map[string]string{"journal.json": fence.Data["journal.json"]}}
+	_, createErr := cms.Create(ctx, archive, metav1.CreateOptions{})
+	if err := verifyArchive(); err != nil {
+		return errors.Join(createErr, err)
+	}
+	if err := store.requireHeld(ctx); err != nil {
+		return err
+	}
+	err = cms.Delete(ctx, fenceName, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fence.UID, ResourceVersion: &fence.ResourceVersion}})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }

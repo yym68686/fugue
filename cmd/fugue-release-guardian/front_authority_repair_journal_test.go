@@ -11,6 +11,7 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,7 +70,16 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 		t.Fatal(err)
 	}
 	client := fake.NewSimpleClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pointerName, UID: "pointer-uid", ResourceVersion: "101",
-		Labels: map[string]string{"fugue.pro/group": before.GroupID, "fugue.pro/authority-store": "true"}}, Data: map[string]string{"authority.json": string(payload)}})
+		Labels: map[string]string{"fugue.pro/group": before.GroupID, "fugue.pro/authority-store": "true"}}, Data: map[string]string{"authority.json": string(payload)}},
+		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "fugue-authority-" + before.GroupID, UID: "lease-uid", ResourceVersion: "42"}})
+	fenceName := releaseguardian.FrontRepairFenceName(before.GroupID)
+	client.PrependReactor("create", "configmaps", func(action k8stest.Action) (bool, runtime.Object, error) {
+		object := action.(k8stest.CreateAction).GetObject().(*corev1.ConfigMap)
+		if object.Name == fenceName {
+			object.UID, object.ResourceVersion = "prepared-fence-uid", "41"
+		}
+		return false, nil, nil
+	})
 	pointerWrites := 0
 	client.PrependReactor("update", "configmaps", func(action k8stest.Action) (bool, runtime.Object, error) {
 		object := action.(k8stest.UpdateAction).GetObject().(*corev1.ConfigMap)
@@ -113,6 +123,16 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	}
 	if err := store.create(ctx, journal); err != nil {
 		t.Fatalf("creation was not idempotent: %v", err)
+	}
+	if _, _, err := store.authority.LoadTransitionJournal(ctx, before.GroupID); !errors.Is(err, releaseguardian.ErrFrontRepairInProgress) {
+		t.Fatalf("ordinary reconciler did not see the durable repair fence: %v", err)
+	}
+	ordinary, err := newFrontAuthorityActivator(client, activationFixtureExecutor{}, frontAuthorityConfig{Namespace: namespace, GroupID: before.GroupID, ExpectedNodes: len(cohort)}, "ordinary-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ordinary.BeginRestore(ctx, before); !errors.Is(err, releaseguardian.ErrFrontRepairInProgress) {
+		t.Fatalf("rollback could proceed with a repair fence after the lease was reacquired: %v", err)
 	}
 	other, err := sealFrontRepairJournal(plan, "sha256:"+strings.Repeat("e", 64), now)
 	if err != nil || store.create(ctx, other) == nil {
@@ -177,6 +197,9 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err := restarted.commit(ctx, before.GroupID, journal.Digest, partial); err == nil || pointerWrites != 0 {
 		t.Fatalf("partial recovery advanced pointer: writes=%d, error=%v", pointerWrites, err)
 	}
+	if err := restarted.finish(ctx, before.GroupID, journal.Digest, partial); err == nil {
+		t.Fatal("partial recovery released the fence")
+	}
 	for node, request := range remaining.Remaining {
 		apply(node, request)
 	}
@@ -207,5 +230,18 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	want.CurrentFrontGeneration, want.AuthorityEpoch = plan.TargetGeneration, before.AuthorityEpoch+1
 	if err != nil || got != want {
 		t.Fatalf("repair changed other authority fields: got=%+v, want=%+v, error=%v", got, want, err)
+	}
+	if err := restarted.finish(ctx, before.GroupID, journal.Digest, final); err != nil {
+		t.Fatalf("converged recovery could not release its exact fence: %v", err)
+	}
+	if err := restarted.finish(ctx, before.GroupID, journal.Digest, nil); err != nil {
+		t.Fatalf("completion could not be recovered from the immutable receipt: %v", err)
+	}
+	lease, err := ordinary.acquireOrdinaryAuthorityLease(ctx)
+	if err != nil {
+		t.Fatalf("finished repair still blocks normal operations: %v", err)
+	}
+	if err := lease.release(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

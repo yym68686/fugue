@@ -539,7 +539,8 @@ func TestLoadedCandidateReplacementIsBounded(t *testing.T) {
 func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *testing.T) {
 	ctx := context.Background()
 	client := fake.NewSimpleClientset()
-	store, _ := NewAuthorityStore(client, "fugue-system")
+	const namespace = "fugue-system"
+	store, _ := NewAuthorityStore(client, namespace)
 	now := time.Unix(8_000, 0).UTC()
 	candidate := bindCandidatePromotionWitness(CandidateAuthority{APIVersion: APIVersion, Kind: CandidateAuthorityKind, GroupID: "edge-pool-a",
 		RecordDigest: otherDigest, BundleGeneration: testCandidateBundle, WorkerSlot: AuthoritySlotB, ReleaseRecordDigest: testDigest,
@@ -556,6 +557,16 @@ func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *tes
 	if err != nil || store.CreateTransitionJournal(ctx, prepared) != nil {
 		t.Fatalf("create prepared journal: %v", err)
 	}
+	if err := RequireNoFrontRepair(ctx, client, namespace, candidate.GroupID); err != nil {
+		t.Fatalf("valid ordinary prepared journal did not pass the release fence: %v", err)
+	}
+	immutable := true
+	repair := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: FrontRepairFenceName(candidate.GroupID), Namespace: namespace,
+		Labels: map[string]string{"fugue.pro/group": candidate.GroupID, "fugue.pro/authority-kind": FrontRepairJournalKind}},
+		Immutable: &immutable, Data: map[string]string{"journal.json": "test repair claim"}}
+	if _, err := client.CoreV1().ConfigMaps(namespace).Create(ctx, repair, metav1.CreateOptions{}); !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("repair could claim a group with a prepared ordinary transition: %v", err)
+	}
 	activation := FrontAuthorityReceipt{GroupID: candidate.GroupID, PreviousSlot: AuthoritySlotA, PreviousGeneration: 7,
 		PreviousBundleGeneration: "previous-bundle-7", PreviousWorkerSourceSHA: testSHA, PreviousWorkerImageDigest: testDigest,
 		TargetSlot: AuthoritySlotB, TargetGeneration: 8, TargetBundleGeneration: "candidate-serving.p8.r0",
@@ -569,11 +580,23 @@ func TestAuthorityTransitionJournalAdvancesImmutablePhasesAndDeletesByCAS(t *tes
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, transitionJournalName(candidate.GroupID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatal("prepared journal remained after activated witness")
 	}
+	if err := store.RequireNoActivatedTransition(ctx, candidate.GroupID); err == nil {
+		t.Fatal("repair could ignore an activated ordinary transition")
+	}
 	if err := store.DeleteTransitionJournal(ctx, activated); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, transitionActivatedJournalName(candidate.GroupID), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatal("activated journal remained after terminal delete")
+	}
+	if _, err := client.CoreV1().ConfigMaps(namespace).Create(ctx, repair, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("repair could not claim the settled group: %v", err)
+	}
+	if err := store.CreateTransitionJournal(ctx, prepared); err == nil {
+		t.Fatal("ordinary transition overwrote the repair claim")
+	}
+	if err := RequireNoFrontRepair(ctx, client, namespace, candidate.GroupID); !errors.Is(err, ErrFrontRepairInProgress) {
+		t.Fatalf("ordinary writer did not see the repair claim: %v", err)
 	}
 }
 

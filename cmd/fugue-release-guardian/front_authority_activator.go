@@ -180,7 +180,7 @@ func (activator *frontAuthorityActivator) begin(ctx context.Context, target rele
 }
 
 func (activator *frontAuthorityActivator) beginWithOperation(ctx context.Context, target releaseguardian.FrontAuthorityTarget, operation string, rollbackOf uint64, reason string) (releaseguardian.FrontAuthorityTransaction, error) {
-	lease, err := activator.acquireLease(ctx)
+	lease, err := activator.acquireOrdinaryAuthorityLease(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -993,6 +993,22 @@ func (activator *frontAuthorityActivator) rollbackReceipts(ctx context.Context, 
 		}
 	}
 	return nil
+}
+
+func (activator *frontAuthorityActivator) acquireOrdinaryAuthorityLease(ctx context.Context) (*heldAuthorityLease, error) {
+	lease, err := activator.acquireLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// This must run with the lease held. Repair creates its fence while holding
+	// the same lease; the durable fence continues to exclude ordinary writes
+	// if the repairing process crashes and its lease expires.
+	if err := releaseguardian.RequireNoFrontRepair(ctx, activator.client, activator.config.Namespace, activator.config.GroupID); err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		return nil, errors.Join(err, lease.release(cleanup))
+	}
+	return lease, nil
 }
 
 func (activator *frontAuthorityActivator) acquireLease(ctx context.Context) (*heldAuthorityLease, error) {

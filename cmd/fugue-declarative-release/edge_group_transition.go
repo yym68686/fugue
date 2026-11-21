@@ -25,9 +25,11 @@ import (
 	"fugue/internal/edgecontrol"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -222,8 +224,33 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 	if err != nil {
 		return fmt.Errorf("create Kubernetes dynamic client: %w", err)
 	}
+	// The caller holds the Worker component lease. A crashed Front repair can
+	// leave its journal after leases expire; do not apply or replace any slot
+	// until the journal has been independently finalized.
+	if err := requireEdgeWorkloadNoFrontRepair(ctx, client, release.Workload.Namespace, transition.GroupID); err != nil {
+		return err
+	}
 	runtime := &kubectlEdgeGroupRuntime{cluster: cluster, client: client, release: release, transition: transition, manifest: manifest}
 	return executeEdgeGroupAB(ctx, runtime, release, transition, target)
+}
+
+func requireEdgeWorkloadNoFrontRepair(ctx context.Context, client dynamic.Interface, namespace, group string) error {
+	resource := client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace(namespace)
+	object, err := resource.Get(ctx, releaseguardian.FrontRepairFenceName(group), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read group Front repair fence: %w", err)
+	}
+	var fence corev1.ConfigMap
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &fence); err != nil {
+		return fmt.Errorf("decode group Front repair fence: %w", err)
+	}
+	if err := releaseguardian.RequireOrdinaryFrontJournal(&fence, group); err != nil {
+		return fmt.Errorf("edge Worker release cannot write: %w", err)
+	}
+	return nil
 }
 
 func requireEdgeGroupOnDelete(namespace string, transition declarativerelease.EdgeGroupABTransition, manifest []byte) error {

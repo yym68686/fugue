@@ -17,6 +17,48 @@ import (
 )
 
 var ErrCandidateCanaryUnavailable = errors.New("candidate canary result is unavailable")
+var ErrFrontRepairInProgress = errors.New("group Front authority repair is in progress")
+
+const FrontRepairJournalKind = "front-repair-journal"
+
+// FrontRepairFenceName intentionally shares the ordinary prepared journal's
+// object name. Kubernetes Create, not the ordering of two reads, excludes
+// competing claims. The last step of repair must retire this exact object.
+func FrontRepairFenceName(groupID string) string { return transitionJournalName(groupID) }
+
+// RequireNoFrontRepair is used after acquiring the group lease for ordinary
+// traffic authority mutations. An unreadable or unexpected fence fails closed.
+func RequireNoFrontRepair(ctx context.Context, client kubernetes.Interface, namespace, groupID string) error {
+	if client == nil || !groupPattern.MatchString(groupID) || !componentPattern.MatchString(namespace) {
+		return errors.New("Front repair fence lookup is invalid")
+	}
+	object, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, FrontRepairFenceName(groupID), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return RequireOrdinaryFrontJournal(object, groupID)
+}
+
+// RequireOrdinaryFrontJournal validates a present fence obtained from the
+// Kubernetes API. Workload and authority writers use the same discriminator.
+func RequireOrdinaryFrontJournal(object *corev1.ConfigMap, groupID string) error {
+	if object == nil || object.Name != FrontRepairFenceName(groupID) || !groupPattern.MatchString(groupID) {
+		return errors.New("prepared group authority fence identity is invalid")
+	}
+	if object.Labels["fugue.pro/group"] == groupID && object.Labels["fugue.pro/authority-kind"] == FrontRepairJournalKind {
+		return ErrFrontRepairInProgress
+	}
+	var journal AuthorityTransitionJournal
+	if object.DeletionTimestamp != nil || object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 || len(object.BinaryData) != 0 ||
+		object.Labels["fugue.pro/group"] != groupID || object.Labels["fugue.pro/authority-kind"] != "transition-journal" ||
+		decodeStrict([]byte(object.Data["journal.json"]), &journal) != nil || journal.Validate() != nil || journal.GroupID != groupID || journal.Phase != AuthorityTransitionPrepared {
+		return errors.New("prepared group authority fence is invalid")
+	}
+	return nil
+}
 
 // AuthorityStore persists only group-local authority records. It is not wired
 // into the rollout controller until the inactive candidate path is proven.
@@ -83,6 +125,11 @@ func (store *AuthorityStore) LoadTransitionJournal(ctx context.Context, groupID 
 		if err != nil {
 			return AuthorityTransitionJournal{}, false, err
 		}
+		if name == FrontRepairFenceName(groupID) {
+			if err := RequireOrdinaryFrontJournal(object, groupID); err != nil {
+				return AuthorityTransitionJournal{}, false, err
+			}
+		}
 		var journal AuthorityTransitionJournal
 		if object.Immutable == nil || !*object.Immutable || object.Labels["fugue.pro/group"] != groupID ||
 			object.Labels["fugue.pro/authority-kind"] != "transition-journal" || len(object.Data) != 1 ||
@@ -92,6 +139,20 @@ func (store *AuthorityStore) LoadTransitionJournal(ctx context.Context, groupID 
 		return journal, true, nil
 	}
 	return AuthorityTransitionJournal{}, false, nil
+}
+
+// RequireNoActivatedTransition is for repair's own claimed fence. Repair
+// cannot call LoadTransitionJournal here because its own prepared claim is
+// deliberately unreadable as an ordinary promotion journal.
+func (store *AuthorityStore) RequireNoActivatedTransition(ctx context.Context, groupID string) error {
+	if !groupPattern.MatchString(groupID) {
+		return errors.New("authority transition group is invalid")
+	}
+	_, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, transitionActivatedJournalName(groupID), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return errors.Join(errors.New("ordinary Front activation may still be in progress"), err)
 }
 
 func (store *AuthorityStore) UpdateTransitionJournal(ctx context.Context, before, after AuthorityTransitionJournal) error {
