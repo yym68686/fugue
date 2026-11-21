@@ -87,15 +87,11 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 	if now.IsZero() {
 		return ActivationReceipt{}, errors.New("edge front activation timestamp is required")
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := acquireActivationLock(path)
 	if err != nil {
-		return ActivationReceipt{}, fmt.Errorf("open edge front activation lock: %w", err)
+		return ActivationReceipt{}, err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return ActivationReceipt{}, fmt.Errorf("lock edge front activation: %w", err)
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
 
 	previous, exists, err := ReadActivationState(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -143,6 +139,22 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 		WorkerImageDigest: request.WorkerImageDigest, Authority: ActivationAuthority, Operation: request.Operation,
 		RollbackOfGeneration: request.RollbackOfGeneration, Reason: request.Reason, UpdatedAt: now.UTC(),
 	}
+	return commitActivationState(path, previous, exists, next)
+}
+
+func acquireActivationLock(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open edge front activation lock: %w", err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		_ = lock.Close()
+		return nil, fmt.Errorf("lock edge front activation: %w", err)
+	}
+	return lock, nil
+}
+
+func commitActivationState(path string, previous ActivationState, exists bool, next ActivationState) (ActivationReceipt, error) {
 	if err := validateActivationState(next); err != nil {
 		return ActivationReceipt{}, err
 	}
@@ -156,7 +168,7 @@ func ApplyActivationCAS(path string, request ActivationCASRequest, now time.Time
 	}
 	digest := sha256.Sum256(encoded)
 	receipt := ActivationReceipt{
-		Schema: ActivationReceiptSchemaV1, GroupID: request.GroupID, PreviousExists: exists,
+		Schema: ActivationReceiptSchemaV1, GroupID: next.GroupID, PreviousExists: exists,
 		Current: next, StateDigest: "sha256:" + hex.EncodeToString(digest[:]),
 	}
 	if exists {
