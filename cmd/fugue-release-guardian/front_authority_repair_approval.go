@@ -59,12 +59,20 @@ func (envelope frontRepairApprovalEnvelope) signingBytes() ([]byte, error) {
 
 func (envelope frontRepairApprovalEnvelope) verify(preview frontRepairPreview, trust frontRepairApprovalTrust,
 	tools frontRepairToolSet, now time.Time) (frontRepairReviewedIntent, error) {
+	if !trust.Artifact.valid() || envelope.Artifact != trust.Artifact || tools.source != trust.ExecutorCommit ||
+		len(tools.tools) == 0 || tools.digest != envelope.Statement.ToolManifestDigest {
+		return frontRepairReviewedIntent{}, errors.New("Front repair approval lacks exact verified build")
+	}
+	return envelope.authenticatePreview(preview, trust, now)
+}
+
+// Verify the signed address of the artifact before downloading it; callers
+// must still separately verify the downloaded artifact and its producer.
+func (envelope frontRepairApprovalEnvelope) authenticatePreview(preview frontRepairPreview, trust frontRepairApprovalTrust, now time.Time) (frontRepairReviewedIntent, error) {
 	if envelope.Schema != frontRepairApprovalEnvelopeSchema || envelope.Scope != trust.Scope ||
 		(releaseguardian.Key{Component: trust.Scope}).Validate() != nil ||
-		len(trust.PublicKey) != ed25519.PublicKeySize || !trust.Artifact.valid() || envelope.Artifact != trust.Artifact ||
-		tools.source != trust.ExecutorCommit || len(tools.tools) == 0 ||
-		tools.digest != envelope.Statement.ToolManifestDigest {
-		return frontRepairReviewedIntent{}, errors.New("Front repair approval lacks exact protected scope or verified build")
+		len(trust.PublicKey) != ed25519.PublicKeySize || !envelope.Artifact.valid() {
+		return frontRepairReviewedIntent{}, errors.New("Front repair approval lacks the protected scope or artifact binding")
 	}
 	encoding := base64.RawURLEncoding.Strict()
 	if len(envelope.Signature) != encoding.EncodedLen(ed25519.SignatureSize) {

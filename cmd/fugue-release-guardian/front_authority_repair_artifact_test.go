@@ -141,7 +141,8 @@ func TestFrontRepairActionsArchiveRejectsUnexpectedEntriesWithoutExtraction(t *t
 	}
 }
 
-func TestFrontRepairActionsIntakeChecksRealCrossBuiltArchiveBytes(t *testing.T) {
+func frontRepairBuildFixtureArchive(t *testing.T) (string, frontRepairToolManifest, []byte, bool) {
+	t.Helper()
 	if runtime.GOOS != "linux" {
 		t.Skip("rehearses the hosted Linux build and intake")
 	}
@@ -191,7 +192,11 @@ func TestFrontRepairActionsIntakeChecksRealCrossBuiltArchiveBytes(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := frontRepairZIPFixture(t, append(entries, frontRepairZIPFixtureEntry{"manifest.json", 0600, m}))
+	return source, manifest, frontRepairZIPFixture(t, append(entries, frontRepairZIPFixtureEntry{"manifest.json", 0600, m})), dirty
+}
+
+func TestFrontRepairActionsIntakeChecksRealCrossBuiltArchiveBytes(t *testing.T) {
+	source, manifest, raw, dirty := frontRepairBuildFixtureArchive(t)
 	policy, expected, run, job, artifact, now := frontRepairActionsFixture(source, raw)
 	read := func(r any) *bytes.Reader {
 		b, err := json.Marshal(r)
