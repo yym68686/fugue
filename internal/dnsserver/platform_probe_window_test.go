@@ -117,7 +117,11 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 				for _, req := range p.Plan.Probes {
 					if req.Hostname == host && req.Path == path && req.Address == address {
 						now := time.Now().UTC()
-						return routeprobe.Proof{Version: "serving", Digest: req.RouteDigest, State: state, EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(120 * time.Second),
+						validFor := 120 * time.Second
+						if standby && round.Load() == 0 && host == first {
+							validFor = 80 * time.Second
+						}
+						return routeprobe.Proof{Version: "serving", Digest: req.RouteDigest, State: state, EdgeID: req.EdgeID, GroupID: req.EdgeGroupID, CheckedAt: now, ValidUntil: now.Add(validFor),
 							TrafficRelease: &model.TrafficReleaseBinding{ReleaseSetID: parent.ID, ReleaseSetDigest: parent.ContentHash, RouteArtifactID: routeID, PolicyDigest: p.Lineage.PolicyDigest, IntentDigest: p.Lineage.IntentDigest, InputSnapshotDigest: p.Lineage.InputSnapshotDigest, ReleaseID: c.Release.ID, ReleaseChannel: c.Release.ReleaseChannel, FencingToken: c.Release.FencingToken, ScopeKey: "global"}}, nil
 					}
 				}
@@ -149,6 +153,12 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 			}
 			if _, err := os.Stat(cfg.CachePath + ".platform-serving.json"); !standby && !errors.Is(err, os.ErrNotExist) {
 				t.Fatal("incomplete observation created a checkpoint", err)
+			}
+			if standby {
+				// A partial candidate's previous sweep also paid for the
+				// retained LKG. This proof can cover the next scan and poll,
+				// even though it cannot cover another slow rejection cycle.
+				s.servingDNSProbes.lastStarted = time.Now().Add(-70 * time.Second)
 			}
 			original := s.pendingDNSProbeWindow.facts[0]
 			round.Add(1)
@@ -295,7 +305,7 @@ func TestFreshUnrecoveredAvailabilityProofDoesNotDeferNextObservation(t *testing
 				proof.CheckedAt = time.Now().UTC()
 				proof.ValidUntil = proof.CheckedAt.Add(120 * time.Second)
 				return proof, nil
-			}, nil, deferrable)
+			}, nil, deferrable, false)
 			if attempted.Load() != 1 {
 				t.Fatalf("expected exactly the unresolved recovery probe, got %d requests", attempted.Load())
 			}

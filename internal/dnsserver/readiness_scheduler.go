@@ -193,13 +193,13 @@ func (scheduler *dnsReadinessScheduler) collect(ctx context.Context, plan *platf
 // Its scheduler must use the expiry of the matched variant, not the expiry (or
 // mismatch) of whichever variant supplied its wire request.
 func (scheduler *dnsReadinessScheduler) collectWithEvaluator(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact) []dnsReadinessFact {
-	return scheduler.collectWindow(ctx, plan, policy, probe, evaluate, nil)
+	return scheduler.collectWindow(ctx, plan, policy, probe, evaluate, nil, false)
 }
 
 // previous is supplied only by a caller that has verified the unexpired facts
 // against the exact signed assignment and plan. A deferred request returns no
 // observation and cannot update recovery history or the original deadline.
-func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact, previous map[string]dnsReadinessFact) []dnsReadinessFact {
+func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, probe dnsReadinessProbeFunc, evaluate func(int, routeprobe.Proof, error, time.Time) dnsReadinessFact, previous map[string]dnsReadinessFact, pending bool) []dnsReadinessFact {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
 	started := time.Now().UTC()
@@ -238,7 +238,12 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 	deferred := 0
 	nextSweep := started.Add(platformDNSConsumerPollInterval + interval + time.Duration(policy.ProbeTimeoutSeconds)*time.Second)
 	deferUntil := refreshHorizon
-	if nextSweep.After(deferUntil) {
+	// A rejected candidate also measures the cost of its retained LKG
+	// scan and rejection reporting. Charging that entire gap again can
+	// starve never-observed probes. Pending proofs must still cover this
+	// full scan, a poll interval and a probe timeout; applying/serving
+	// continues to check their exact original deadlines.
+	if pending || nextSweep.After(deferUntil) {
 		deferUntil = nextSweep
 	}
 	for index, requirement := range plan.Probes {

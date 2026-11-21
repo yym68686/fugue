@@ -146,6 +146,10 @@ and UDP/TCP answers, then use the separate signed transport intent for handoff.
 An unselected backend may keep its verified, in-memory probe window across
 refused heartbeat writes. This neither acknowledges the release nor changes
 listener selection. A changed or unavailable assignment still fences the window.
+The next candidate scan reserves a full sweep, a poll interval and a probe
+timeout before deferring an already observed proof. It does not also budget
+another rejected-candidate fallback scan. Active snapshot renewal still uses
+the measured sweep gap; neither path extends proof validity.
 
 For a hosted address record whose paths change, the global producer keeps the
 candidate in shadow until every required, selected global DNS backend reports

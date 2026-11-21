@@ -446,7 +446,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		priority := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
 		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(priority)
-		facts = scheduler.collectWindow(ctx, p.Plan, p.Policy.DNSReadiness, probe, nil, deferrable)
+		facts = scheduler.collectWindow(ctx, p.Plan, p.Policy.DNSReadiness, probe, nil, deferrable, !same)
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
