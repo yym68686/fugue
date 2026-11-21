@@ -1064,6 +1064,7 @@ jobs:
       edge_worker_matrix: ${{ steps.release.outputs.edge_worker_matrix }}
       traffic_safety_changed: ${{ steps.release.outputs.traffic_safety_changed }}
       edge_origin_relay_trust: ${{ steps.edge_origin_relay_trust.outputs.selected }}
+      edge_origin_relay_policy: ${{ steps.edge_origin_relay_policy.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1113,6 +1114,22 @@ jobs:
           if ! git diff --quiet "$base" HEAD -- "$config" cmd/fugue-edge-relay-trust scripts/stage_edge_origin_relay_trust.py scripts/test_stage_edge_origin_relay_trust.py; then
             go test ./cmd/fugue-edge-relay-trust
             python3 -m unittest scripts.test_stage_edge_origin_relay_trust
+          fi
+          if [[ -f "$config" ]] && ! git diff --quiet "$base" HEAD -- "$config"; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Verify and select declared Edge origin relay policy release
+        id: edge_origin_relay_policy
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/edge-origin-relay/policy.json
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- "$config" cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/test_release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py internal/edge/relayroute; then
+            go test ./cmd/fugue-edge-relay-policy ./internal/edge/relayroute
+            python3 -m unittest scripts.test_release_edge_origin_relay_policy
           fi
           if [[ -f "$config" ]] && ! git diff --quiet "$base" HEAD -- "$config"; then
             echo 'selected=true' >> "$GITHUB_OUTPUT"
@@ -2423,6 +2440,56 @@ jobs:
           name: fugue-edge-origin-relay-trust-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/edge-origin-relay-trust-receipt.json
           if-no-files-found: error
+          retention-days: 30
+
+  edge_origin_relay_policy:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.edge_origin_relay_policy == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production-edge-origin-relay
+    concurrency: {group: fugue-production-edge-origin-relay-trust, cancel-in-progress: false, queue: max}
+    timeout-minutes: 6
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Build public verifier before accessing a signed lease
+        run: go build -trimpath -o "$RUNNER_TEMP/fugue-edge-relay-policy" ./cmd/fugue-edge-relay-policy
+      - name: Preview or deliver the exact short-lived signed lease
+        env:
+          FUGUE_ORIGIN_RELAY_SIGNED_LEASE: ${{ secrets.FUGUE_ORIGIN_RELAY_SIGNED_LEASE }}
+        run: |
+          set -euo pipefail
+          directory=deploy/environments/production/edge-origin-relay
+          git fetch origin main
+          git diff --quiet HEAD origin/main -- "$directory" deploy/releases/edge-groups.json cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py scripts/verify_dns_configuration_revision.py internal/edge/relayroute
+          python3 - "$GITHUB_SHA" "$directory/trust.json" <<'PY'
+          import json, subprocess, sys
+          from scripts.verify_dns_configuration_revision import workflow_projection
+          with open(sys.argv[2]) as f:
+              group = json.load(f)['group']
+          with open('deploy/releases/edge-groups.json') as f:
+              worker, = [g['worker'] for g in json.load(f)['groups'] if g['groupId'] == group]
+          subprocess.run(['git', '--literal-pathspecs', 'diff', '--quiet', 'HEAD', 'origin/main', '--', worker['intentPath'], worker['manifestPath']], check=True)
+          job = ['edge_origin_relay_policy']
+          a, b = [subprocess.check_output(['git', 'show', rev + ':.github/workflows/ci.yml'], text=True) for rev in [sys.argv[1], 'origin/main']]
+          if workflow_projection(a, job) != workflow_projection(b, job):
+              raise SystemExit('origin relay policy execution declaration has changed')
+          PY
+          python3 -m scripts.release_edge_origin_relay_policy "$directory/policy.json" --trust "$directory/trust.json" --verifier "$RUNNER_TEMP/fugue-edge-relay-policy" | tee "$RUNNER_TEMP/edge-origin-relay-policy-receipt.json"
+      - name: Retain the redacted policy receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-edge-origin-relay-policy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-origin-relay-policy-receipt.json
+          if-no-files-found: ignore
           retention-days: 30
 
   worker_standby_observation:

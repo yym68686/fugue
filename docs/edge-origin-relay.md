@@ -118,6 +118,29 @@ IP on TCP 8443 with no Service, host port, DNS or Front change. An unprovisioned
 Worker launches with relay disabled. The signed lease and persisted fence are
 outside the immutable trust directory, but on the same retained slot mount.
 
+The same workflow's `edge_origin_relay_policy` job selects a change to the
+public pilot declaration only after prepush. An empty encrypted input runs
+read-only and produces a preview. After re-observing the running pair and
+signing a fresh lease locally, provide **only the signed envelope** in the
+same protected environment's temporary `FUGUE_ORIGIN_RELAY_SIGNED_LEASE`
+input and rerun the exact job. An expired lease, fewer than two minutes of
+remaining validity, changed manifest or incompatible current Worker causes
+the job to reject delivery. Do not put raw leases or the signer in Git.
+Remove the temporary input after verifying the receipt. The input does not
+grant authority to renew or mint a future lease.
+
+For non-off phases, the job requires the verified immutable Worker release
+currently served by both Fronts, exact Pod addresses and slot identities, and
+current nonce-based proofs of the applied route at each pinned public Front.
+It installs egress first; the ingress is not changed until the egress has
+acknowledged the exact policy in its retained fence. For withdrawal it tries
+the ingress first, independently of the peer and of public route health. A
+partial receipt is a failure, not a completed rollout. The pilot is capped
+at a 512 KiB body, one concurrent relay, and 1% of eligible traffic. Active
+delivery requires the previous live shadow lease in both fences; an operator
+must still independently review the mTLS and shadow evidence before
+declaring active. No job manufactures direct-path failure in production.
+
 Publish atomically and keep the trusted mount current across restarts. The
 listener can bind before a policy exists, but rejects all relay operations
 until an authorized, exact local endpoint is present in a current lease. After
