@@ -1,5 +1,5 @@
-// fugue-edge-relay-trust creates one offline trust epoch for a relay pilot.
-// It never contacts Kubernetes or publishes a lease.
+// fugue-edge-relay-trust creates and checks offline relay trust. It never
+// contacts Kubernetes or publishes a lease.
 package main
 
 import (
@@ -58,6 +58,15 @@ type trustReceipt struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "check" {
+		if len(os.Args) != 2 {
+			fail(errors.New("check reads its bounded input from stdin"))
+		}
+		if err := checkPackages(os.Stdin, time.Now().UTC()); err != nil {
+			fail(err)
+		}
+		return
+	}
 	in := flag.String("identities", "", "JSON declaration of exact Edge/slot TLS identities")
 	out := flag.String("output", "", "new absolute directory on a trusted offline filesystem")
 	ttl := flag.Duration("leaf-ttl", 72*time.Hour, "leaf validity; at most 168h")

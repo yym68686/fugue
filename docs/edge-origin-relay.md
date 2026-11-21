@@ -91,6 +91,24 @@ the `issuer/` directory offline; deliver only the corresponding `peer-NN/`
 package to each exact Edge/slot. Do not commit packages, copy them into a
 shared DaemonSet Secret or use this generator as a deployment command.
 
+Production staging uses the `edge_origin_relay_trust` lane in the sole
+declarative CI workflow. Its public declaration at
+`deploy/environments/production/edge-origin-relay/trust.json` pins the group,
+namespace, exact two Kubernetes node UIDs, each target slot DaemonSet UID,
+the immutable installer image already declared by a target slot, the CA and
+leaf SHA-256 fingerprints, and the policy verification key. The protected
+`FUGUE_ORIGIN_RELAY_LEAF_PACKAGES` input contains only `ca_pem` and a `packages`
+array of `{edge, slot, cert_pem, key_pem}`. CI validates all recipients and both
+certificate purposes before creating bounded disposable install Jobs. A Job
+mounts only that node and slot's exact CA-fingerprinted `origin-relay-v1`
+epoch directory, with no Kubernetes
+service-account token. It receives one leaf package on stdin, stages atomically
+and refuses to overwrite different trust in that epoch. Rotation must stage
+a separate epoch without overriding the retained withdrawal fence. The public receipt
+contains no private material. This transaction does not publish a lease,
+change Worker startup, restart a Pod or alter network traffic. A subsequent
+guarded Worker release and closed-mode transport proof are separate steps.
+
 Publish atomically and keep the trusted mount current across restarts. The
 listener can bind before a policy exists, but rejects all relay operations
 until an authorized, exact local endpoint is present in a current lease. After

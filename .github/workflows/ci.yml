@@ -1063,6 +1063,7 @@ jobs:
       edge_worker_count: ${{ steps.release.outputs.edge_worker_count }}
       edge_worker_matrix: ${{ steps.release.outputs.edge_worker_matrix }}
       traffic_safety_changed: ${{ steps.release.outputs.traffic_safety_changed }}
+      edge_origin_relay_trust: ${{ steps.edge_origin_relay_trust.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1100,6 +1101,22 @@ jobs:
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
           if git diff --quiet "$base" HEAD -- internal/edge internal/routeproof internal/tcpdiag scripts/rehearse_edge_origin_relay.sh; then exit 0; fi
           bash scripts/rehearse_edge_origin_relay.sh
+      - name: Verify and select declared Edge origin relay trust staging
+        id: edge_origin_relay_trust
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/edge-origin-relay/trust.json
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if ! git diff --quiet "$base" HEAD -- "$config" cmd/fugue-edge-relay-trust scripts/stage_edge_origin_relay_trust.py scripts/test_stage_edge_origin_relay_trust.py; then
+            go test ./cmd/fugue-edge-relay-trust
+            python3 -m unittest scripts.test_stage_edge_origin_relay_trust
+          fi
+          if [[ -f "$config" ]] && ! git diff --quiet "$base" HEAD -- "$config"; then
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Rehearse PostgreSQL fast drain on the pinned production operator
         timeout-minutes: 8
         env:
@@ -2362,6 +2379,50 @@ jobs:
           config=deploy/environments/production/agent-edge-trust/package.json
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring"
           python3 scripts/reconcile_agent_edge_trust.py "$config" --validator "$RUNNER_TEMP/fugue-agent-edge-keyring" --check
+
+  edge_origin_relay_trust:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.outputs.edge_origin_relay_trust == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-edge-origin-relay-trust, cancel-in-progress: false}
+    timeout-minutes: 10
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Build leaf-only verifier before exposing encrypted input
+        run: go build -trimpath -o "$RUNNER_TEMP/fugue-edge-relay-trust" ./cmd/fugue-edge-relay-trust
+      - name: Stage exact node-slot credentials without publishing a lease
+        env:
+          FUGUE_ORIGIN_RELAY_LEAF_PACKAGES: ${{ secrets.FUGUE_ORIGIN_RELAY_LEAF_PACKAGES }}
+        run: |
+          set -euo pipefail
+          config=deploy/environments/production/edge-origin-relay/trust.json
+          git fetch origin main
+          git diff --quiet HEAD origin/main -- "$config" cmd/fugue-edge-relay-trust scripts/stage_edge_origin_relay_trust.py internal/edge/relayroute
+          python3 - "$GITHUB_SHA" <<'PY'
+          import subprocess, sys
+          from scripts.verify_dns_configuration_revision import workflow_projection
+          job = ['edge_origin_relay_trust']
+          a, b = [subprocess.check_output(['git', 'show', rev + ':.github/workflows/ci.yml'], text=True) for rev in [sys.argv[1], 'origin/main']]
+          if workflow_projection(a, job) != workflow_projection(b, job):
+              raise SystemExit('origin relay trust execution declaration has changed')
+          PY
+          python3 -m scripts.stage_edge_origin_relay_trust "$config" --validator "$RUNNER_TEMP/fugue-edge-relay-trust" | tee "$RUNNER_TEMP/edge-origin-relay-trust-receipt.json"
+      - name: Retain public leaf installation receipts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-edge-origin-relay-trust-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/edge-origin-relay-trust-receipt.json
+          if-no-files-found: error
+          retention-days: 30
 
   worker_standby_observation:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
