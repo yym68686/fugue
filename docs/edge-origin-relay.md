@@ -81,6 +81,16 @@ The output is a signed envelope, not an applied change. Active policies
 require an explicit `-allow-active` after review. An `off` lease can be issued
 without live route files so withdrawal does not depend on origin health.
 
+For a new trust epoch, run `go run ./cmd/fugue-edge-relay-trust -identities
+peers.json -output /absolute/new/private/path` on a trusted offline filesystem.
+The identity file has schema `fugue.edge.origin-relay-trust/v1` and a `peers`
+array of `{ "edge": "…", "slot": "…", "tls_name": "…" }` entries. Do not
+supply a Pod IP until the signed lease is issued. The generator writes distinct
+certificates and keys per Edge/slot plus a public fingerprint receipt. Keep
+the `issuer/` directory offline; deliver only the corresponding `peer-NN/`
+package to each exact Edge/slot. Do not commit packages, copy them into a
+shared DaemonSet Secret or use this generator as a deployment command.
+
 Publish atomically and keep the trusted mount current across restarts. The
 listener can bind before a policy exists, but rejects all relay operations
 until an authorized, exact local endpoint is present in a current lease. After
