@@ -30,13 +30,9 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 	executor := strings.Repeat("a", 40)
 	approval := frontRepairApproval{Schema: frontRepairApprovalSchema, PreviewDigest: preview.Digest, ExecutorCommit: executor,
 		ToolManifestDigest: digest("7"), ApprovedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
-	intent, err := approval.reviewedIntent(preview, executor, now)
-	if err != nil || intent.PlanDigest != plan.Digest || len(intent.Nodes) != len(nodes) || !exactSHA256Digest(intent.AuthorizationDigest) {
+	intent, err := approval.bindPreview(preview, executor, now)
+	if err != nil || intent.PlanDigest != plan.Digest || len(intent.Nodes) != len(nodes) || intent.AuthorizationDigest != "" {
 		t.Fatalf("exact preview did not bind review intent: %+v err=%v", intent, err)
-	}
-	repeated, err := approval.reviewedIntent(preview, executor, now.Add(time.Minute))
-	if err != nil || repeated.AuthorizationDigest != intent.AuthorizationDigest {
-		t.Fatalf("retry changed the approval digest: %+v err=%v", repeated, err)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -71,16 +67,10 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p, a, commit, clock := preview, approval, executor, now
 			tc.mutate(&p, &a, &commit, &clock)
-			if _, err := a.reviewedIntent(p, commit, clock); err == nil {
+			if _, err := a.bindPreview(p, commit, clock); err == nil {
 				t.Fatal("drifted preview or approval was accepted")
 			}
 		})
-	}
-	otherTools := approval
-	otherTools.ToolManifestDigest = digest("8")
-	changedIntent, err := otherTools.reviewedIntent(preview, executor, now)
-	if err != nil || changedIntent.AuthorizationDigest == intent.AuthorizationDigest {
-		t.Fatalf("a different tool inventory was not bound to its own approval: %v", err)
 	}
 	changed := preview
 	changed.Release.MonitorDigest = digest("6")
@@ -88,7 +78,7 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 	if err != nil || changed.Digest == preview.Digest {
 		t.Fatalf("alternate immutable monitor did not yield a different preview: err=%v", err)
 	}
-	if _, err := approval.reviewedIntent(changed, executor, now); err == nil {
+	if _, err := approval.bindPreview(changed, executor, now); err == nil {
 		t.Fatal("approval was reused even though preview digest changed")
 	}
 }

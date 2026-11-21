@@ -133,9 +133,8 @@ type frontRepairApproval struct {
 	ExpiresAt          time.Time `json:"expiresAt"`
 }
 
-// This function binds an approval already authenticated by the release lane.
-// A digest, timestamp or local file alone is never write authorization.
-func (approval frontRepairApproval) reviewedIntent(preview frontRepairPreview, verifiedExecutorCommit string, now time.Time) (frontRepairReviewedIntent, error) {
+// bindPreview is structural validation only; it cannot authorize a journal.
+func (approval frontRepairApproval) bindPreview(preview frontRepairPreview, verifiedExecutorCommit string, now time.Time) (frontRepairReviewedIntent, error) {
 	previewDigest, err := preview.validatedDigest()
 	if err != nil || preview.Digest != previewDigest || approval.PreviewDigest != previewDigest ||
 		approval.Schema != frontRepairApprovalSchema || !exactSourceSHA(verifiedExecutorCommit) || approval.ExecutorCommit != verifiedExecutorCommit ||
@@ -144,12 +143,7 @@ func (approval frontRepairApproval) reviewedIntent(preview frontRepairPreview, v
 		approval.ExpiresAt.Sub(approval.ApprovedAt) > frontRepairApprovalMaxAge {
 		return frontRepairReviewedIntent{}, errors.Join(errors.New("Front repair approval does not name the exact preview, executor and live approval window"), err)
 	}
-	approval.ApprovedAt, approval.ExpiresAt = approval.ApprovedAt.UTC(), approval.ExpiresAt.UTC()
-	raw, err := declarativerelease.CanonicalJSON(approval)
-	if err != nil {
-		return frontRepairReviewedIntent{}, err
-	}
-	return frontRepairReviewedIntent{Group: preview.Release.GroupID, PlanDigest: preview.Plan.Digest, AuthorizationDigest: shaDigest(raw),
+	return frontRepairReviewedIntent{Group: preview.Release.GroupID, PlanDigest: preview.Plan.Digest,
 		Nodes: frontRepairPlanNodes(preview.Plan)}, nil
 }
 
@@ -231,28 +225,26 @@ func (r frontRepairRuntime) preview(ctx context.Context, selection frontRepairSe
 	return preview, err
 }
 
-// runApproved is for the protected production launcher, once it has verified
-// the external approval and its own immutable executor revision. It has no
-// CLI caller until that launcher and its node-tool delivery gates are wired.
+// runApproved is for the protected launcher. It must obtain the trusted key
+// and artifact evidence independently of the approval. There is no write CLI.
 func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepairSelection,
-	preview frontRepairPreview, approval frontRepairApproval, verifiedExecutorCommit string, tools frontRepairToolSet) (frontRepairOpened, error) {
+	preview frontRepairPreview, envelope frontRepairApprovalEnvelope, trust frontRepairApprovalTrust, tools frontRepairToolSet) (frontRepairOpened, error) {
 	if r.activator == nil || r.activator.config != selection.runtime ||
 		preview.Release.Component != selection.target.Key.Component || preview.Release.Namespace != selection.target.Namespace ||
 		preview.Release.GroupID != selection.runtime.GroupID {
 		return frontRepairOpened{}, errors.New("Front repair approval does not belong to this declared Worker lane")
 	}
-	if _, supported := r.activator.executor.(frontRepairToolExecutor); !supported || tools.source != verifiedExecutorCommit ||
-		tools.digest != approval.ToolManifestDigest || len(tools.tools) == 0 {
-		return frontRepairOpened{}, errors.New("Front repair has no verified temporary tool set for this executor and approval")
+	if _, supported := r.activator.executor.(frontRepairToolExecutor); !supported {
+		return frontRepairOpened{}, errors.New("Front repair has no protected temporary tool transport")
 	}
-	r.nodeTools = &tools
-	intent, err := approval.reviewedIntent(preview, verifiedExecutorCommit, r.activator.now().UTC())
+	intent, err := envelope.verify(preview, trust, tools, r.activator.now().UTC())
 	if err != nil {
 		return frontRepairOpened{}, err
 	}
+	r.nodeTools = &tools
 	// Even a detached node command with the maximum allowed clock skew
 	// must expire before the approval. Never extend the caller deadline.
-	ctx, cancel := context.WithDeadline(ctx, approval.ExpiresAt.Add(-frontRepairNodeClockBound))
+	ctx, cancel := context.WithDeadline(ctx, envelope.Statement.ExpiresAt.Add(-frontRepairNodeClockBound))
 	defer cancel()
 	client := r.activator.client
 	store, err := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{selection.target})
