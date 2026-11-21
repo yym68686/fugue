@@ -254,6 +254,15 @@ class Recovery:
     def get(self, kind, name):
         return json.loads(self.kube('-n', self.config['namespace'], 'get', kind, name, '-o', 'json'))
 
+    def require_settled_group(self):
+        c = self.config
+        for phase in ('prepared', 'activated'):
+            name = 'fugue-authority-transition-' + phase + '-' + c['group']
+            # An empty success from a named --ignore-not-found GET proves
+            # absence. API, authorization and transport failures still raise.
+            if self.kube('-n', c['namespace'], 'get', 'configmap', name, '--ignore-not-found', '-o', 'name').strip():
+                raise ValueError('Group authority has an unfinished transition or Front repair')
+
     def activation(self, pod):
         raw = self.kube('-n', self.config['namespace'], 'exec', pod, '-c', 'edge-front', '--', 'cat', self.config['activationPath'])
         return json.loads(raw), raw
@@ -349,9 +358,7 @@ class Recovery:
             if not allow_refresh or not c.get('refreshInactiveWorker'):
                 raise
             validate_inactive_refresh(c, self.get('daemonset', c['refreshInactiveWorker']['daemonset']), self.get('node', c['node']), source, previous, worker, reference)
-        journals = json.loads(self.kube('-n', c['namespace'], 'get', 'configmaps', '-l', 'fugue.pro/group=' + c['group'] + ',fugue.pro/authority-kind=transition-journal', '-o', 'json'))
-        if journals['items']:
-            raise ValueError('Group authority has an unfinished transition')
+        self.require_settled_group()
         return owner, source, previous, raw, worker, reference
 
     def refresh_inactive_worker(self, held, owner, target, previous, raw, worker, reference):
@@ -436,6 +443,9 @@ class Recovery:
                          {'op': 'replace', 'path': '/spec', 'value': desired}]
                 after = json.loads(self.kube('-n', c['namespace'], 'patch', 'lease', name, '--type=json', '-p', canonical(patch), '-o', 'json'))
                 held.append(after)
+            # Both the unattended participation job and ordinary member
+            # recovery share this lock pair. A repair journal outlives it.
+            self.require_settled_group()
             yield held
         finally:
             for obj in reversed(held):

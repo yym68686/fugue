@@ -65,7 +65,7 @@ func acquireEdgeEnrollmentLease(ctx context.Context, c *clusterNodeClient, names
 	if err := c.doJSONWithBody(ctx, http.MethodPut, path, &lease, &acquired); err != nil {
 		return nil, err
 	}
-	return func() error {
+	release := func() error {
 		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		var current coordinationv1.Lease
@@ -80,7 +80,14 @@ func acquireEdgeEnrollmentLease(ctx context.Context, c *clusterNodeClient, names
 		current.Spec.AcquireTime = nil
 		current.Spec.RenewTime = nil
 		return c.doJSONWithBody(releaseCtx, http.MethodPut, path, &current, nil)
-	}, nil
+	}
+	// Check after claiming the same lease as Guardian. Membership remains
+	// frozen when a repair process exits and leaves the durable fence behind.
+	pending, err := edgeAuthorityTransitionPending(ctx, c, namespace, group)
+	if err != nil || pending {
+		return nil, errors.Join(errors.New("group authority has an unfinished or unverified transition; retry after release completes"), err, release())
+	}
+	return release, nil
 }
 
 func (s *Server) admitManagedEdgeEnrollment(parent context.Context, machine model.Machine, id string) (result error) {

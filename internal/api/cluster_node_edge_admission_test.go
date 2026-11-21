@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +47,23 @@ func TestEdgeAdmissionRespectsAndReleasesAuthorityLease(t *testing.T) {
 	now := metav1.NewMicroTime(time.Now().UTC())
 	lease := coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{UID: "fixture-uid", ResourceVersion: "1"}, Spec: coordinationv1.LeaseSpec{HolderIdentity: &other, RenewTime: &now, LeaseDurationSeconds: &seconds}}
 	writes := 0
+	fenceStatus := http.StatusNotFound
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/configmaps/") {
+			if r.Method != http.MethodGet || lease.Spec.HolderIdentity == nil || !strings.HasPrefix(*lease.Spec.HolderIdentity, "edge-admission") {
+				t.Error("journal must be read under the admission lease")
+			}
+			if strings.Contains(r.URL.Path, "transition-prepared-") && fenceStatus == http.StatusOK {
+				_, _ = w.Write([]byte(`{"metadata":{"labels":{"fugue.pro/authority-kind":"front-repair-journal"}}}`))
+				return
+			}
+			if fenceStatus != http.StatusOK {
+				w.WriteHeader(fenceStatus)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.Method == "PUT" {
 			writes++
 			var next coordinationv1.Lease
@@ -66,6 +83,17 @@ func TestEdgeAdmissionRespectsAndReleasesAuthorityLease(t *testing.T) {
 	}
 	empty := ""
 	lease.Spec.HolderIdentity = &empty
+	for _, status := range []int{http.StatusOK, http.StatusForbidden} {
+		fenceStatus = status
+		before := writes
+		if release, err := acquireEdgeEnrollmentLease(context.Background(), c, "fixture-system", "edge-group-fixture"); err == nil || release != nil {
+			t.Fatalf("journal response status %d did not block membership change", status)
+		}
+		if writes-before != 2 || lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != "" {
+			t.Fatalf("lease leaked after blocking admission: journal status %d", status)
+		}
+	}
+	fenceStatus, writes = http.StatusNotFound, 0
 	release, err := acquireEdgeEnrollmentLease(context.Background(), c, "fixture-system", "edge-group-fixture")
 	if err != nil {
 		t.Fatal(err)
