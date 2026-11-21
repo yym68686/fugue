@@ -189,6 +189,9 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 	if err := journal.validate(); err != nil {
 		return err
 	}
+	if _, err := store.loadCompletion(ctx, group, journal.AuthorizationDigest); !apierrors.IsNotFound(err) {
+		return errors.Join(errors.New("Front repair approval already has a completion archive or cannot be checked"), err)
+	}
 	plan := journal.Plan
 	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
 		return err
@@ -322,24 +325,44 @@ func (journal frontRepairJournal) committedAuthority() releaseguardian.CurrentAu
 	return after
 }
 
+const frontRepairArchiveKind = "front-repair-completed"
+
+func frontRepairArchiveName(group, authorization string) string {
+	return "fugue-front-repair-completed-" + group + "-" + authorization[7:31]
+}
+
+// Key completion by the approved intent, which is stable across retries.
+// The journal's own digest also includes creation time and is only known
+// after preparation. An absent fence must not allow a completed intent to
+// silently start another transaction.
+func (store frontRepairStore) loadCompletion(ctx context.Context, group, authorization string) (frontRepairJournal, error) {
+	if !exactSHA256Digest(authorization) {
+		return frontRepairJournal{}, errors.New("Front repair completion authorization is invalid")
+	}
+	object, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, frontRepairArchiveName(group, authorization), metav1.GetOptions{})
+	if err != nil {
+		return frontRepairJournal{}, err
+	}
+	stored, err := decodeFrontRepairJournal(object, group, frontRepairArchiveKind)
+	if err != nil || stored.AuthorizationDigest != authorization {
+		return frontRepairJournal{}, errors.Join(errors.New("Front repair completion archive conflicts"), err)
+	}
+	return stored, nil
+}
+
 // finish archives exact completion before releasing the shared fence. It
 // never deletes a pending, replaced, or ordinary promotion journal.
-func (store frontRepairStore) finish(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness) error {
+func (store frontRepairStore) finish(ctx context.Context, wanted frontRepairJournal, refreshed []frontRepairWitness) error {
+	group, journalDigest := wanted.Plan.Before.GroupID, wanted.Digest
 	if err := store.requireHeld(ctx, group); err != nil {
 		return err
 	}
-	if !exactSHA256Digest(journalDigest) {
+	if wanted.validate() != nil {
 		return errors.New("Front repair completion digest is invalid")
 	}
-	const archiveKind = "front-repair-completed"
 	cms := store.client.CoreV1().ConfigMaps(store.namespace)
-	archiveName := "fugue-front-repair-completed-" + group + "-" + journalDigest[7:31]
 	verifyArchive := func() error {
-		object, err := cms.Get(ctx, archiveName, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		stored, err := decodeFrontRepairJournal(object, group, archiveKind)
+		stored, err := store.loadCompletion(ctx, group, wanted.AuthorizationDigest)
 		if err != nil || stored.Digest != journalDigest {
 			return errors.Join(errors.New("Front repair completion archive conflicts"), err)
 		}
@@ -368,8 +391,8 @@ func (store frontRepairStore) finish(ctx context.Context, group, journalDigest s
 	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
 		return err
 	}
-	archive := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: archiveName, Namespace: store.namespace, Labels: map[string]string{
-		"fugue.pro/group": group, "fugue.pro/authority-kind": archiveKind,
+	archive := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: frontRepairArchiveName(group, journal.AuthorizationDigest), Namespace: store.namespace, Labels: map[string]string{
+		"fugue.pro/group": group, "fugue.pro/authority-kind": frontRepairArchiveKind,
 	}}, Immutable: fence.Immutable, Data: map[string]string{"journal.json": fence.Data["journal.json"]}}
 	writeCtx, cancel, err := store.locks.mutationContext(ctx, group)
 	if err != nil {
@@ -387,7 +410,19 @@ func (store frontRepairStore) finish(ctx context.Context, group, journalDigest s
 	defer cancel()
 	err = cms.Delete(writeCtx, fenceName, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fence.UID, ResourceVersion: &fence.ResourceVersion}})
 	if apierrors.IsNotFound(err) {
-		return nil
+		return verifyArchive()
+	}
+	if err != nil && !apierrors.IsConflict(err) {
+		// A timed-out Delete may have already released the exact fence. Read
+		// back rather than deleting a potential replacement.
+		readCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+		if _, readErr := cms.Get(readCtx, fenceName, metav1.GetOptions{}); apierrors.IsNotFound(readErr) {
+			stored, verifyErr := store.loadCompletion(readCtx, group, journal.AuthorizationDigest)
+			if verifyErr == nil && stored.Digest == journalDigest {
+				return nil
+			}
+		}
 	}
 	return err
 }

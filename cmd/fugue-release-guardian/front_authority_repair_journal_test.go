@@ -209,7 +209,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err := restarted.commit(ctx, before.GroupID, journal.Digest, partial); err == nil || pointerWrites != 0 {
 		t.Fatalf("partial recovery advanced pointer: writes=%d, error=%v", pointerWrites, err)
 	}
-	if err := restarted.finish(ctx, before.GroupID, journal.Digest, partial); err == nil {
+	if err := restarted.finish(ctx, journal, partial); err == nil {
 		t.Fatal("partial recovery released the fence")
 	}
 	for node, request := range remaining.Remaining {
@@ -246,11 +246,37 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err != nil || got != want {
 		t.Fatalf("repair changed other authority fields: got=%+v, want=%+v, error=%v", got, want, err)
 	}
-	if err := restarted.finish(ctx, before.GroupID, journal.Digest, final); err != nil {
+	fenceDeletes := 0
+	client.PrependReactor("delete", "configmaps", func(action k8stest.Action) (bool, runtime.Object, error) {
+		deleting := action.(k8stest.DeleteAction)
+		if deleting.GetName() != fenceName {
+			return false, nil, nil
+		}
+		fenceDeletes++
+		p := deleting.GetDeleteOptions().Preconditions
+		if p == nil || p.UID == nil || *p.UID != "prepared-fence-uid" || p.ResourceVersion == nil || *p.ResourceVersion != "41" {
+			t.Fatalf("fence release without exact UID/resourceVersion: %+v", p)
+		}
+		if err := client.Tracker().Delete(action.GetResource(), namespace, fenceName); err != nil {
+			return true, nil, err
+		}
+		return true, nil, errors.New("simulated reply loss after fence removal")
+	})
+	if err := restarted.finish(ctx, journal, final); err != nil {
 		t.Fatalf("converged recovery could not release its exact fence: %v", err)
 	}
-	if err := restarted.finish(ctx, before.GroupID, journal.Digest, nil); err != nil {
-		t.Fatalf("completion could not be recovered from the immutable receipt: %v", err)
+	if err := restarted.finish(ctx, journal, nil); err != nil || fenceDeletes != 1 {
+		t.Fatalf("completion was not recoverable without replay: deletes=%d err=%v", fenceDeletes, err)
+	}
+	archived, err := restarted.loadCompletion(ctx, before.GroupID, journal.AuthorizationDigest)
+	if err != nil || archived.Digest != journal.Digest {
+		t.Fatalf("could not recover by approved intent after cleanup: %v", err)
+	}
+	if _, err := restarted.loadCompletion(ctx, before.GroupID, other.AuthorizationDigest); !apierrors.IsNotFound(err) {
+		t.Fatalf("unrelated approval reused completion receipt: %v", err)
+	}
+	if err := restarted.create(ctx, journal); err == nil || !strings.Contains(err.Error(), "already has a completion archive") {
+		t.Fatalf("completed approval could start again: %v", err)
 	}
 	if err := locks.release(ctx); err != nil {
 		t.Fatal(err)
