@@ -540,9 +540,16 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 				if err := s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources); err != nil {
 					return err
 				}
-				st, err = buildDNSServingState(st.record, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, supplemented, time.Now().UTC())
+				validatedAt := time.Now().UTC()
+				st, err = buildDNSServingState(st.record, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, supplemented, validatedAt)
 				if err != nil {
 					return err
+				}
+				// A late, exact successor observation also counts toward the
+				// next bounded scan. Keep its original deadline in the same
+				// volatile window; it is not an apply or a positive receipt.
+				if p.routeSources == nil && ctx.Err() == nil {
+					s.pendingDNSProbeWindow = newDNSServingProbeWindow(a, parent, routeID, p, supplemented, validatedAt)
 				}
 			}
 			st.record.Positive = false

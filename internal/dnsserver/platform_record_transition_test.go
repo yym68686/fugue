@@ -679,7 +679,7 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 			t.Fatal("partial candidate reported whole-artifact success")
 		}
 		if race {
-			if s.platformServing.Load() != old || reports.Load() != 0 {
+			if s.platformServing.Load() != old || reports.Load() != 0 || s.pendingDNSProbeWindow != nil {
 				t.Fatal("late successor evidence bypassed the final assignment check")
 			}
 			continue
@@ -689,6 +689,14 @@ func testDNSDeploymentTransition(t *testing.T, phase string) {
 		active := s.platformServing.Load()
 		if got := active.answer(q, "", time.Now()); got.Rcode != dns.RcodeSuccess || len(got.Answer) != 1 {
 			t.Fatal("new successor proof from the retained scan was lost", got)
+		}
+		window := s.pendingDNSProbeWindow
+		if !window.matches(candidate.Assignment, parent, nextRoute) || len(window.facts) != 1 {
+			t.Fatal("authenticated successor proof from the retained scan was lost before the next sweep")
+		}
+		pending := validDNSReadinessFacts(nextPayload.Plan, nextPayload.Policy.DNSReadiness, active.transition.state.facts, time.Now())
+		if !reflect.DeepEqual(window.facts[0], pending[window.facts[0].ProbeID]) {
+			t.Fatal("the next sweep changed late successor proof timestamps, identity or recovery history")
 		}
 		receipt := captureDecision(t, active, q, "", time.Now())
 		replayed, err := ReplayDNSDecision(receipt)
