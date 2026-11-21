@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"debug/buildinfo"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -49,7 +50,7 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 		t.Skip("requires the production Linux process and procfs execution model")
 	}
 	binaryPath := filepath.Join(t.TempDir(), "cas")
-	build := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-buildmode=exe", "-ldflags=-s -w", "-o", binaryPath, "../fugue-edge-front-cas")
+	build := exec.Command("go", "build", "-trimpath", "-buildvcs=true", "-buildmode=exe", "-ldflags=-s -w", "-o", binaryPath, "../fugue-edge-front-cas")
 	build.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("compile actual static Front CAS tool: %v: %s", err, output)
@@ -59,6 +60,38 @@ func TestFrontRepairToolRunsExactCASWithoutLeavingAnInstalledCommand(t *testing.
 		t.Fatal(err)
 	}
 	record := frontRepairToolRecord{SourceCommit: strings.Repeat("a", 40), Architecture: runtime.GOARCH, BinaryDigest: shaDigest(code), BinaryBytes: len(code)}
+	info, err := buildinfo.Read(bytes.NewReader(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revision, modified string
+	for _, field := range info.Settings {
+		switch field.Key {
+		case "vcs.revision":
+			revision = field.Value
+		case "vcs.modified":
+			modified = field.Value
+		}
+	}
+	if !exactSourceSHA(revision) || (modified != "true" && modified != "false") {
+		t.Fatalf("test build did not carry a supported VCS identity: revision=%s status=%s", revision, modified)
+	}
+	record.SourceCommit = revision
+	manifest := frontRepairToolManifest{Schema: frontRepairToolManifestSchema, SourceCommit: revision, Tools: []frontRepairToolRecord{record}}
+	manifest.Digest, err = manifest.validatedDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, provenanceErr := loadFrontRepairToolSet(manifest, map[string][]byte{runtime.GOARCH: code})
+	if modified == "false" && (provenanceErr != nil || set.digest != manifest.Digest || len(set.tools) != 1) {
+		t.Fatalf("clean temporary tool failed build provenance: %v", provenanceErr)
+	}
+	if modified == "true" && provenanceErr == nil {
+		t.Fatal("dirty temporary tool accepted as a protected release artifact")
+	}
+	if _, err := loadFrontRepairToolSet(manifest, map[string][]byte{"not-the-declared-arch": code}); err == nil {
+		t.Fatal("accepted unexpected artifact inventory")
+	}
 	tool, err := loadFrontRepairTool(record, code)
 	if err != nil {
 		t.Fatalf("tool does not fit production isolated scratch: size=%d err=%v", len(code), err)

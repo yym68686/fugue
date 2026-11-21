@@ -125,11 +125,12 @@ func frontRepairPlanNodes(plan frontRepairPlan) []frontRepairNode {
 }
 
 type frontRepairApproval struct {
-	Schema         string    `json:"schema"`
-	PreviewDigest  string    `json:"previewDigest"`
-	ExecutorCommit string    `json:"executorCommit"`
-	ApprovedAt     time.Time `json:"approvedAt"`
-	ExpiresAt      time.Time `json:"expiresAt"`
+	Schema             string    `json:"schema"`
+	PreviewDigest      string    `json:"previewDigest"`
+	ExecutorCommit     string    `json:"executorCommit"`
+	ToolManifestDigest string    `json:"toolManifestDigest"`
+	ApprovedAt         time.Time `json:"approvedAt"`
+	ExpiresAt          time.Time `json:"expiresAt"`
 }
 
 // This function binds an approval already authenticated by the release lane.
@@ -138,6 +139,7 @@ func (approval frontRepairApproval) reviewedIntent(preview frontRepairPreview, v
 	previewDigest, err := preview.validatedDigest()
 	if err != nil || preview.Digest != previewDigest || approval.PreviewDigest != previewDigest ||
 		approval.Schema != frontRepairApprovalSchema || !exactSourceSHA(verifiedExecutorCommit) || approval.ExecutorCommit != verifiedExecutorCommit ||
+		!exactSHA256Digest(approval.ToolManifestDigest) ||
 		now.IsZero() || approval.ApprovedAt.IsZero() || approval.ApprovedAt.After(now) || !now.Before(approval.ExpiresAt) ||
 		approval.ExpiresAt.Sub(approval.ApprovedAt) > frontRepairApprovalMaxAge {
 		return frontRepairReviewedIntent{}, errors.Join(errors.New("Front repair approval does not name the exact preview, executor and live approval window"), err)
@@ -233,12 +235,17 @@ func (r frontRepairRuntime) preview(ctx context.Context, selection frontRepairSe
 // the external approval and its own immutable executor revision. It has no
 // CLI caller until that launcher and its node-tool delivery gates are wired.
 func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepairSelection,
-	preview frontRepairPreview, approval frontRepairApproval, verifiedExecutorCommit string) (frontRepairOpened, error) {
+	preview frontRepairPreview, approval frontRepairApproval, verifiedExecutorCommit string, tools frontRepairToolSet) (frontRepairOpened, error) {
 	if r.activator == nil || r.activator.config != selection.runtime ||
 		preview.Release.Component != selection.target.Key.Component || preview.Release.Namespace != selection.target.Namespace ||
 		preview.Release.GroupID != selection.runtime.GroupID {
 		return frontRepairOpened{}, errors.New("Front repair approval does not belong to this declared Worker lane")
 	}
+	if _, supported := r.activator.executor.(frontRepairToolExecutor); !supported || tools.source != verifiedExecutorCommit ||
+		tools.digest != approval.ToolManifestDigest || len(tools.tools) == 0 {
+		return frontRepairOpened{}, errors.New("Front repair has no verified temporary tool set for this executor and approval")
+	}
+	r.nodeTools = &tools
 	intent, err := approval.reviewedIntent(preview, verifiedExecutorCommit, r.activator.now().UTC())
 	if err != nil {
 		return frontRepairOpened{}, err
@@ -279,8 +286,21 @@ func (r frontRepairRuntime) runApproved(ctx context.Context, selection frontRepa
 		if err := locked.requireHeld(ctx, intent.Group); err != nil {
 			return err
 		}
-		_, err := readBoundRelease(ctx, locked.authority)
-		return err
+		if _, err := readBoundRelease(ctx, locked.authority); err != nil {
+			return err
+		}
+		// Verify every recipient before opening a mutating transaction. An
+		// unsupported peer must never strand a partly applied repair.
+		members, err := r.observe(ctx, preview.Plan.Before, intent.Nodes)
+		if err != nil {
+			return err
+		}
+		for _, member := range members {
+			if _, err := r.stagedToolForMember(ctx, member); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

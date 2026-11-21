@@ -335,6 +335,20 @@ func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store fr
 	if now := store.locks.now().UTC(); member.ObservedAt.IsZero() || member.ObservedAt.After(now) || now.Sub(member.ObservedAt) >= 20*time.Second {
 		return nil, errors.New("Front repair node observation expired before exec")
 	}
+	var tool frontRepairTool
+	var staged frontRepairToolExecutor
+	if r.nodeTools != nil {
+		var err error
+		tool, err = r.stagedToolForMember(ctx, member)
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		staged, ok = a.executor.(frontRepairToolExecutor)
+		if !ok {
+			return nil, errors.New("Front repair does not have the approved temporary tool transport")
+		}
+	}
 	writeCtx, cancel, err := store.locks.mutationContext(ctx, a.config.GroupID)
 	if err != nil {
 		return nil, err
@@ -355,8 +369,16 @@ func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store fr
 		cancel()
 		return nil, err
 	}
-	receipt, err := a.executor.Exec(writeCtx, a.config.Namespace, member.worker.Name, "edge",
-		frontActivationCASBinary, "--state-file", frontActivationStatePath, flag, base64.RawURLEncoding.EncodeToString(raw))
+	envelope := base64.RawURLEncoding.EncodeToString(raw)
+	var receipt []byte
+	if staged != nil {
+		receipt, err = staged.execFrontRepairTool(writeCtx, a.config.Namespace, member.worker.Name, tool, flag, envelope)
+	} else {
+		// Used by the isolated executor rehearsal. The protected path
+		// requires staged tools even if the retained image contains a CAS.
+		receipt, err = a.executor.Exec(writeCtx, a.config.Namespace, member.worker.Name, "edge",
+			frontActivationCASBinary, "--state-file", frontActivationStatePath, flag, envelope)
+	}
 	cancel()
 	if err != nil {
 		// Kubernetes exec cancellation does not prove that the process exited.

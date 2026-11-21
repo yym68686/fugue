@@ -26,6 +26,7 @@ import (
 type frontRepairRuntime struct {
 	activator *frontAuthorityActivator
 	read      func(context.Context, string, any) error
+	nodeTools *frontRepairToolSet // required by runApproved; nil is only the isolated executor path
 }
 
 type frontRepairRuntimeMember struct {

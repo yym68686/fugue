@@ -29,7 +29,7 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 	now := time.Now().UTC()
 	executor := strings.Repeat("a", 40)
 	approval := frontRepairApproval{Schema: frontRepairApprovalSchema, PreviewDigest: preview.Digest, ExecutorCommit: executor,
-		ApprovedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
+		ToolManifestDigest: digest("7"), ApprovedAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour)}
 	intent, err := approval.reviewedIntent(preview, executor, now)
 	if err != nil || intent.PlanDigest != plan.Digest || len(intent.Nodes) != len(nodes) || !exactSHA256Digest(intent.AuthorizationDigest) {
 		t.Fatalf("exact preview did not bind review intent: %+v err=%v", intent, err)
@@ -42,6 +42,9 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 		name   string
 		mutate func(*frontRepairPreview, *frontRepairApproval, *string, *time.Time)
 	}{
+		{"missing approved tool manifest", func(_ *frontRepairPreview, a *frontRepairApproval, _ *string, _ *time.Time) {
+			a.ToolManifestDigest = ""
+		}},
 		{"executor revision", func(_ *frontRepairPreview, _ *frontRepairApproval, commit *string, _ *time.Time) {
 			*commit = strings.Repeat("b", 40)
 		}},
@@ -72,6 +75,12 @@ func TestFrontRepairPreviewApprovalRejectsScopeAndExecutorDrift(t *testing.T) {
 				t.Fatal("drifted preview or approval was accepted")
 			}
 		})
+	}
+	otherTools := approval
+	otherTools.ToolManifestDigest = digest("8")
+	changedIntent, err := otherTools.reviewedIntent(preview, executor, now)
+	if err != nil || changedIntent.AuthorizationDigest == intent.AuthorizationDigest {
+		t.Fatalf("a different tool inventory was not bound to its own approval: %v", err)
 	}
 	changed := preview
 	changed.Release.MonitorDigest = digest("6")
