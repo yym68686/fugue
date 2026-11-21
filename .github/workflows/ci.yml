@@ -2582,15 +2582,15 @@ jobs:
           # Public source contains only exact byte digests, never the signed
           # approval or the preview with production Node and Pod identities.
           intent="$(git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/intent.json")"
-          [[ "$(jq -cS . <<<"$intent")" == "$intent" ]]
-          jq -e 'keys == ["approvalSha256","previewSha256","schema"] and .schema == "edge-front-repair-intent/v1"' <<<"$intent" >/dev/null
+          [[ "$(jq -cS . <<<"$intent")" == "$intent" ]] || exit 1
+          jq -e 'keys == ["approvalSha256","previewSha256","schema"] and .schema == "edge-front-repair-intent/v1"' <<<"$intent" >/dev/null || exit 1
           approval_digest="$(jq -er '.approvalSha256 | strings' <<<"$intent")"
           preview_digest="$(jq -er '.previewSha256 | strings' <<<"$intent")"
-          [[ "$approval_digest" =~ ^[0-9a-f]{64}$ && "$preview_digest" =~ ^[0-9a-f]{64}$ ]]
-          [[ -n "$REPAIR_APPROVAL_JSON" && -n "$REPAIR_PREVIEW_JSON" ]]
+          [[ "$approval_digest" =~ ^[0-9a-f]{64}$ && "$preview_digest" =~ ^[0-9a-f]{64}$ ]] || exit 1
+          [[ -n "$REPAIR_APPROVAL_JSON" && -n "$REPAIR_PREVIEW_JSON" ]] || exit 1
           actual_approval="$(printf '%s' "$REPAIR_APPROVAL_JSON" | sha256sum)"
           actual_preview="$(printf '%s' "$REPAIR_PREVIEW_JSON" | sha256sum)"
-          [[ "${actual_approval%% *}" == "$approval_digest" && "${actual_preview%% *}" == "$preview_digest" ]]
+          [[ "${actual_approval%% *}" == "$approval_digest" && "${actual_preview%% *}" == "$preview_digest" ]] || exit 1
           inputs="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-inputs.XXXXXXXX")"
           work=
           cleanup() {
@@ -2611,7 +2611,8 @@ jobs:
           export FUGUE_EDGE_FRONT_REPAIR_INPUTS="$inputs"
           (
             cd "$work/source"
-            test -z "$(git status --porcelain --untracked-files=all)"
+            checkout_state="$(git status --porcelain --untracked-files=all)"
+            [[ -z "$checkout_state" ]] || exit 1
             go build -trimpath -buildvcs=true -buildmode=exe -o "$work/guardian" ./cmd/fugue-release-guardian
             if ! "$work/guardian" front-repair-approved 2>"$inputs/executor.stderr"; then
               echo '::error::Approved Front repair did not complete; inspect the group journal through the private observer.' >&2
