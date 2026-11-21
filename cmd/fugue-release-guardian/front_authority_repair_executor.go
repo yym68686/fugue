@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
+	"fugue/internal/declarativerelease"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
@@ -130,4 +136,265 @@ func (store frontRepairStore) openReviewed(ctx context.Context, intent frontRepa
 		return frontRepairOpened{}, err
 	}
 	return frontRepairOpened{journal: journal}, nil
+}
+
+const (
+	frontRepairRunBudget         = 95 * time.Second
+	frontRepairNodeClockBound    = 4 * time.Second
+	frontRepairFrontFollowBudget = 6 * time.Second
+)
+
+// runReviewed obtains and releases the existing Worker component and Front
+// authority Leases using the same Kubernetes client as the runtime observer.
+// It is only for a launcher that has already selected an immutable release.
+func (r frontRepairRuntime) runReviewed(ctx context.Context, release declarativerelease.PlanRelease, intent frontRepairReviewedIntent) (_ frontRepairOpened, err error) {
+	if r.activator == nil || release.Workload.Namespace != r.activator.config.Namespace || intent.Group != r.activator.config.GroupID {
+		return frontRepairOpened{}, errors.New("Front repair release does not bind the exact runtime namespace and group")
+	}
+	lockCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	locks, err := acquireFrontRepairLeases(lockCtx, r.activator.client, release, intent.Group, r.activator.now)
+	cancel()
+	if err != nil {
+		return frontRepairOpened{}, err
+	}
+	defer func() { err = errors.Join(err, locks.release(ctx)) }()
+	store, err := newFrontRepairStore(locks)
+	if err != nil {
+		return frontRepairOpened{}, err
+	}
+	return r.executeReviewed(ctx, store, intent)
+}
+
+// executeReviewed keeps preparation, per-node writes and pointer commit in
+// one group-fenced transaction. Only the verified declaration launcher may
+// invoke this function with leases from the selected release. No production
+// command invokes it yet.
+func (r frontRepairRuntime) executeReviewed(ctx context.Context, store frontRepairStore, intent frontRepairReviewedIntent) (frontRepairOpened, error) {
+	ctx, cancel := context.WithTimeout(ctx, frontRepairRunBudget)
+	defer cancel()
+	opened, err := r.openReviewed(ctx, store, intent)
+	if err != nil || opened.completed {
+		return opened, err
+	}
+	journal := opened.journal
+	before, group := journal.Plan.Before, intent.Group
+	preparations := make(map[string]edgegroupfront.PublicationPreparation)
+	for {
+		if err := store.requireHeld(ctx, group); err != nil {
+			return opened, err
+		}
+		members, err := r.observe(ctx, before, intent.Nodes)
+		if err != nil {
+			return opened, err
+		}
+		witnesses := frontRepairWitnesses(members)
+		progress, err := journal.resume(witnesses, store.locks.now().UTC())
+		if err != nil {
+			return opened, err
+		}
+		if err := store.requireRepairPredecessor(ctx, journal, progress.Converged); err != nil {
+			return opened, err
+		}
+		if progress.Converged {
+			if err := store.commit(ctx, group, journal.Digest, witnesses); err != nil {
+				return opened, err
+			}
+			// Confirm the committed group pointer and live roster again before
+			// archiving and releasing the shared fence.
+			final, err := r.observe(ctx, before, intent.Nodes)
+			if err != nil {
+				return opened, err
+			}
+			if err := store.finish(ctx, journal, frontRepairWitnesses(final)); err != nil {
+				return opened, err
+			}
+			opened.completed = true
+			return opened, nil
+		}
+		now := store.locks.now().UTC()
+		preparedThisPass := false
+		for _, member := range members {
+			name := member.Node.Name
+			request, pending := progress.Remaining[name]
+			if !pending || request.Expected.ActiveSlot == request.Committed.Slot {
+				continue
+			}
+			p, present := preparations[name]
+			if present {
+				if !frontRepairPreparationReady(p, request.Expected, before, now) {
+					return opened, fmt.Errorf("Front repair preparation on %s expired; no automatic refresh", name)
+				}
+				continue
+			}
+			var receipt edgegroupfront.PublicationPreparation
+			raw, execErr := r.issueRepairNodeCommand(ctx, store, member, request, true)
+			if execErr != nil || decodeStrictJSON(raw, &receipt) != nil ||
+				!frontRepairPreparationReady(receipt, request.Expected, before, store.locks.now().UTC()) {
+				return opened, errors.Join(fmt.Errorf("Front repair cannot confirm non-serving preparation on %s", name), execErr)
+			}
+			preparations[name] = receipt
+			preparedThisPass = true
+			break // reobserve the entire cohort after every node command
+		}
+		if preparedThisPass {
+			continue
+		}
+		if !progress.WorkersReady {
+			if err := waitFrontRepairObservation(ctx); err != nil {
+				return opened, fmt.Errorf("Front repair Workers did not converge on one healthy signed publication: %w", err)
+			}
+			continue
+		}
+		checked, err := store.writePlan(ctx, group, journal.Digest, witnesses, preparations)
+		if err != nil {
+			return opened, err
+		}
+		// No-traffic-change generation bumps first. A divergent member is not
+		// switched if the already-serving members could not be fenced.
+		member, request, found := nextFrontRepairMember(members, checked)
+		if !found {
+			return opened, errors.New("Front repair has no observed member for an outstanding activation")
+		}
+		raw, execErr := r.issueRepairNodeCommand(ctx, store, member, request, false)
+		var receipt edgegroupfront.ActivationReceipt
+		acknowledged := execErr == nil && decodeStrictJSON(raw, &receipt) == nil && receipt.Schema == edgegroupfront.ActivationReceiptSchemaV1 &&
+			receipt.PreviousExists && receipt.Previous != nil && receipt.Previous.UpdatedAt.Equal(request.Expected.UpdatedAt) &&
+			*receipt.Previous == request.Expected && exactSHA256Digest(receipt.StateDigest) && request.MatchesActivation(receipt.Current)
+		// Local disk and live Front are the proof, never a successful exec.
+		// If left at the predecessor the same command is not issued again.
+		if err := r.requireRepairApplied(ctx, member, request, journal.CreatedAt); err != nil {
+			return opened, errors.Join(fmt.Errorf("Front repair activation on %s is unconfirmed (acknowledged=%t)", member.Node.Name, acknowledged), execErr, err)
+		}
+	}
+}
+
+func (store frontRepairStore) requireRepairPredecessor(ctx context.Context, journal frontRepairJournal, converged bool) error {
+	plan, group := journal.Plan, journal.Plan.Before.GroupID
+	stored, err := store.load(ctx, group)
+	if err != nil || stored.Digest != journal.Digest {
+		return errors.Join(errors.New("Front repair journal changed during execution"), err)
+	}
+	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
+	}
+	actual, uid, rv, err := store.authority.LoadCurrent(ctx, group)
+	if err != nil || string(uid) != plan.CurrentUID {
+		return errors.Join(errors.New("Front repair authority identity changed during execution"), err)
+	}
+	if actual == plan.Before && rv == plan.CurrentResourceVersion || converged && actual == journal.committedAuthority() {
+		return nil
+	}
+	return errors.New("Front repair authority no longer proves the exact predecessor or completed pointer")
+}
+
+func nextFrontRepairMember(members []frontRepairRuntimeMember, progress frontRepairProgress) (frontRepairRuntimeMember, edgegroupfront.ActivationRepairCASRequest, bool) {
+	// observe sorts on Node name; preserve the order within each class.
+	for _, switchSlot := range []bool{false, true} {
+		for _, member := range members {
+			request, ok := progress.Remaining[member.Node.Name]
+			if ok && (request.Expected.ActiveSlot != request.Committed.Slot) == switchSlot {
+				return member, request, true
+			}
+		}
+	}
+	return frontRepairRuntimeMember{}, edgegroupfront.ActivationRepairCASRequest{}, false
+}
+
+func (r frontRepairRuntime) issueRepairNodeCommand(ctx context.Context, store frontRepairStore, member frontRepairRuntimeMember,
+	request edgegroupfront.ActivationRepairCASRequest, prepare bool) ([]byte, error) {
+	if err := r.requireSameMember(ctx, member); err != nil {
+		return nil, err
+	}
+	a := r.activator
+	// A short remote write deadline only protects the lock if the node's
+	// clock agrees. Bracket the read; a slow response is not a usable proof.
+	clockCtx, cancelClock := context.WithTimeout(ctx, 3*time.Second)
+	start := time.Now()
+	clockReply, clockErr := a.executor.Exec(clockCtx, a.config.Namespace, member.worker.Name, "edge", "date", "-u", "+%s")
+	end := time.Now()
+	cancelClock()
+	epoch, parseErr := strconv.ParseInt(strings.TrimSpace(string(clockReply)), 10, 64)
+	nodeTime := time.Unix(epoch, 0)
+	if clockErr != nil || parseErr != nil || nodeTime.Before(end.Add(-frontRepairNodeClockBound)) ||
+		nodeTime.Add(time.Second).After(start.Add(frontRepairNodeClockBound)) {
+		return nil, errors.Join(errors.New("Front repair cannot establish the pinned node clock bound"), clockErr, parseErr)
+	}
+	if err := r.requireSameMember(ctx, member); err != nil {
+		return nil, err
+	}
+	if now := store.locks.now().UTC(); member.ObservedAt.IsZero() || member.ObservedAt.After(now) || now.Sub(member.ObservedAt) >= 20*time.Second {
+		return nil, errors.New("Front repair node observation expired before exec")
+	}
+	writeCtx, cancel, err := store.locks.mutationContext(ctx, a.config.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	deadline, ok := writeCtx.Deadline()
+	if !ok || writeCtx.Err() != nil {
+		cancel()
+		return nil, errors.New("Front repair node command has no live write deadline")
+	}
+	flag := "--repair-request"
+	if prepare {
+		flag = "--repair-prepare-request"
+	}
+	raw, err := json.Marshal(edgegroupfront.ActivationRepairWrite{
+		Schema: edgegroupfront.ActivationRepairWriteSchemaV1, Request: request, ExpiresAt: deadline.UTC(),
+	})
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	receipt, err := a.executor.Exec(writeCtx, a.config.Namespace, member.worker.Name, "edge",
+		frontActivationCASBinary, "--state-file", frontActivationStatePath, flag, base64.RawURLEncoding.EncodeToString(raw))
+	cancel()
+	if err != nil {
+		// Kubernetes exec cancellation does not prove that the process exited.
+		// Do not allow the caller to release the leases before a detached
+		// process would reject its exact short write deadline. If the whole
+		// executor is killed, the unrenewed group Lease remains in place.
+		if remaining := time.Until(deadline.Add(frontRepairNodeClockBound)); remaining > 0 {
+			timer := time.NewTimer(remaining)
+			<-timer.C
+		}
+	}
+	return receipt, err
+}
+
+func (r frontRepairRuntime) requireRepairApplied(ctx context.Context, member frontRepairRuntimeMember,
+	request edgegroupfront.ActivationRepairCASRequest, created time.Time) error {
+	observe, cancel := context.WithTimeout(ctx, frontRepairFrontFollowBudget)
+	defer cancel()
+	a := r.activator
+	for {
+		if err := r.requireSameMember(observe, member); err != nil {
+			return err
+		}
+		disk, err := a.readActivation(observe, member.worker.Name)
+		if err != nil || !request.MatchesActivation(disk) || disk.UpdatedAt.Before(created) {
+			return errors.Join(errors.New("Front repair disk activation did not advance exactly"), err)
+		}
+		var live observedFront
+		probeErr := r.read(observe, repairHealthEndpoint(member.front.Status.PodIP, frontHealthPort, "/readyz"), &live)
+		if probeErr == nil && frontRepairLiveMatches(live, disk) {
+			return r.requireSameMember(observe, member)
+		}
+		if probeErr == nil && !frontRepairLiveMatches(live, request.Expected) {
+			return errors.New("live Front reported a different activation during repair")
+		}
+		if err := waitFrontRepairObservation(observe); err != nil {
+			return errors.Join(errors.New("live Front did not follow the exact repaired activation"), probeErr, err)
+		}
+	}
+}
+
+func waitFrontRepairObservation(ctx context.Context) error {
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
