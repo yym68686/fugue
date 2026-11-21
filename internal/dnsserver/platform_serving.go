@@ -389,6 +389,12 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
+	if same && old.record.RouteSources != nil && release.ReleaseChannel == model.PlatformArtifactReleaseChannelFull &&
+		release.VerificationState == model.PlatformArtifactVerificationStateVerified && old.record.Parent.ContentHash == parent.ContentHash && old.routeID == routeID {
+		if attempted, err := s.reportFreshDNSRouteSourceHeartbeat(ctx, client, id, old, wireProbe); attempted {
+			return err
+		}
+	}
 	if same && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
 		dnsServingCanSkipProbeSweep(old, time.Now().UTC()) {
 		if old.fallback != "" {
@@ -897,11 +903,15 @@ func (s *Service) reportDNSRejectedSuccessor(ctx context.Context, client platfor
 	return s.reportDNSAssignmentState(ctx, client, id, a, retained, h)
 }
 
-func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) (resultErr error) {
+func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope) error {
+	return s.reportDNSAssignmentStateGuarded(ctx, client, id, a, loaded, h, nil)
+}
+
+func (s *Service) reportDNSAssignmentStateGuarded(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope, stillReady func() bool) (resultErr error) {
 	step := "serving_state"
 	ctx, finish := observeDNSSyncPhaseWithFailureStep(ctx, "report_assignment_state", func() string { return step })
 	defer func() { finish(resultErr) }()
-	if s.platformServing.Load() != loaded {
+	if s.platformServing.Load() != loaded || (stillReady != nil && !stillReady()) {
 		return errors.New("DNS serving evidence changed")
 	}
 	step = "assignment_recheck"
@@ -942,6 +952,12 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse
+	if stillReady != nil {
+		step = "serving_state"
+		if s.platformServing.Load() != loaded || !stillReady() {
+			return errors.New("DNS serving evidence changed")
+		}
+	}
 	step = "heartbeat_post"
 	if err := client.PostIdentityJSON(ctx, "/v1/platform-state/consumers/trusted-heartbeat", id, h, &receipt); err != nil {
 		return err

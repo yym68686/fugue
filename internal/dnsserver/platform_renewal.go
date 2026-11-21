@@ -65,6 +65,48 @@ func (s *Service) freshDNSRenewalCovers(base *dnsServingState) bool {
 	return dnsServingReady(current, horizon) && checkDNSServingSnapshot(current, horizon, false) == nil
 }
 
+// The serving loop calls this only for the already loaded, verified full
+// assignment. A fresh exact runtime observation can support a new transport
+// receipt without another whole sweep. It cannot apply a release, renew the
+// checkpoint, or extend any proof. The normal scan handles misses and drift.
+func (s *Service) reportFreshDNSRouteSourceHeartbeat(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, base *dnsServingState, wireProbe func(*dnsServingState) error) (attempted bool, resultErr error) {
+	checkpoint := s.platformCheckpoint.Load()
+	if checkpoint == nil || base.record.Signature == "" || checkpoint.record.Signature != base.record.Signature ||
+		base.fallback != "" || base.transition != nil {
+		return false, nil
+	}
+	selected := s.currentDNSServingState()
+	now := time.Now().UTC()
+	if !sameDNSRenewalPublication(base, selected) || selected.fallback != "" || selected.record.RouteSources == nil ||
+		selected.record.RouteSources.RetainedDNSLKG != nil || !dnsServingMayDeferProbes(selected, now) ||
+		!dnsServingCanSkipProbeSweep(selected, now) {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, platformDNSConsumerPollInterval)
+	defer cancel()
+	ctx, finish := observeDNSSyncPhase(ctx, "fresh_route_source_heartbeat")
+	defer func() { finish(resultErr) }()
+	stillReady := func() bool {
+		return ctx.Err() == nil && s.platformServing.Load() == base && s.currentDNSServingState() == selected
+	}
+	if err := wireProbe(selected); err != nil {
+		// A fresh proof from another loop is not evidence that the UDP/TCP
+		// listeners still answer. Let normal serving validation handle it.
+		return false, err
+	}
+	if err := s.checkDNSRouteSources(ctx, client, id, selected.record.Candidate, selected.record.RouteSources); err != nil {
+		// Even with the same DNS fence, the independently signed route lanes
+		// may have advanced. A full observation must rebuild the source plan.
+		return false, err
+	}
+	if !stillReady() {
+		return false, errors.New("DNS serving evidence changed")
+	}
+	a := selected.record.Candidate.Assignment
+	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+	return true, s.reportDNSAssignmentStateGuarded(ctx, client, id, a, base, h, stillReady)
+}
+
 func (s *Service) newDNSRenewalWorker() *Service {
 	authority := platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)
 	if s.PlatformTokenFile == "" || strings.TrimSpace(s.Config.CachePath) == "" || authority == "" || s.Config.PlatformScopeKey != "authority-cell:"+authority {

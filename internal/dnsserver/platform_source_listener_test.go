@@ -26,23 +26,27 @@ import (
 
 func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandidate(t *testing.T) {
 	request, policies, activations := celldns.SourceAuthorizedRequest(t, false)
+	request.Policy.EdgeSelectionConstraints[0].FactMaxAgeSeconds = 60
 	compiled := celldns.Compile(t, request)
 	keys := celldns.Keys()
 	now := time.Now().UTC()
 	snapshot := celldns.SourceSnapshot(t, request, compiled.DNSArtifact, policies, activations, now)
-	release := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: compiled.ReleaseArtifact.ID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind, ScopeKey: compiled.ReleaseArtifact.ScopeKey, Generation: compiled.ReleaseArtifact.Generation, ReleaseChannel: "full", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now}
+	release := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: compiled.ReleaseArtifact.ID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind, ScopeKey: compiled.ReleaseArtifact.ScopeKey, Generation: compiled.ReleaseArtifact.Generation, ReleaseChannel: "full", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, VerificationState: model.PlatformArtifactVerificationStateVerified, ReleasedAt: now}
 	assignment := model.PlatformConsumerAssignment{ArtifactID: compiled.DNSArtifact.ID, ArtifactKind: compiled.DNSArtifact.ArtifactKind, ArtifactReleaseID: release.ID, ReleaseSetID: compiled.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: compiled.DNSArtifact.ScopeKey, ExpectedGeneration: compiled.DNSArtifact.Generation, GenerationSequence: compiled.DNSArtifact.GenerationSequence, ContentHash: compiled.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "full"}
 	candidate := dnsPlatformCandidate{Artifact: compiled.DNSArtifact, Assignment: assignment, Release: release}
 	consumer, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
-	var assignmentReads, sourceReads, receipts, driftOnRead atomic.Int32
+	var assignmentReads, sourceReads, receipts, driftOnRead, driftOnAssignmentRead atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, incoming *http.Request) {
 		var value any
 		switch {
 		case strings.HasSuffix(incoming.URL.Path, "/identity"):
 			value = platformconsumer.Identity{Token: "scoped", ExpiresAt: now.Add(time.Hour), Component: "dns-server", NodeID: "dns-a", AuthorityID: "cell-dns", ConsumerID: consumer, ScopeKey: compiled.DNSArtifact.ScopeKey, ArtifactKinds: []string{compiled.DNSArtifact.ArtifactKind}}
 		case strings.HasSuffix(incoming.URL.Path, "/assignment"):
-			assignmentReads.Add(1)
-			value = model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{assignment}}
+			candidate := assignment
+			if assignmentReads.Add(1) == driftOnAssignmentRead.Load() {
+				candidate.Revision++
+			}
+			value = model.PlatformConsumerAssignmentResponse{Assignments: []model.PlatformConsumerAssignment{candidate}}
 		case strings.HasSuffix(incoming.URL.Path, "/retained-route-sources"):
 			// This fixture has no remotely verified positive LKG. A failed current
 			// source scan must still preserve the listener without inventing quorum.
@@ -99,7 +103,7 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 			if negative && requirement.EdgeID == "edge-b" {
 				return routeprobe.Proof{}, errors.New("authenticated route rejection")
 			}
-			return routeprobe.Proof{EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID, Digest: requirement.RouteDigest, Version: "actual", State: state, TrafficRelease: plans.Bindings[requirement.CellPublicationDigest], CheckedAt: time.Now().Add(-time.Millisecond), ValidUntil: time.Now().Add(20 * time.Second)}, nil
+			return routeprobe.Proof{EdgeID: requirement.EdgeID, GroupID: requirement.EdgeGroupID, Digest: requirement.RouteDigest, Version: "actual", State: state, TrafficRelease: plans.Bindings[requirement.CellPublicationDigest], CheckedAt: time.Now().Add(-time.Millisecond), ValidUntil: time.Now().Add(time.Minute)}, nil
 		}
 		return routeprobe.Proof{}, errors.New("missing probe")
 	}
@@ -133,6 +137,45 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 	if previous == nil || !previous.record.Positive {
 		t.Fatal("initial source context not admitted")
 	}
+	checkpoint := service.platformCheckpoint.Load()
+	unexpectedProbe := func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		t.Error("fresh exact receipt repeated a network sweep")
+		return routeprobe.Proof{}, errors.New("unexpected probe")
+	}
+	wireCalls := 0
+	checkWire := func(state *dnsServingState) error {
+		wireCalls++
+		if state != previous {
+			t.Error("heartbeat changed the loaded publication")
+		}
+		return nil
+	}
+	driftOnAssignmentRead.Store(4)
+	if err := service.syncPlatformDNSServingOnce(t.Context(), unexpectedProbe, checkWire); !errors.Is(err, platformconsumer.ErrAssignmentChanged) || receipts.Load() != 1 || wireCalls != 1 {
+		t.Fatalf("superseded assignment was not fenced: %v (receipts=%d, wire=%d)", err, receipts.Load(), wireCalls)
+	}
+	driftOnAssignmentRead.Store(0)
+	if err := service.syncPlatformDNSServingOnce(t.Context(), unexpectedProbe, checkWire); err != nil {
+		t.Fatal(err)
+	}
+	if assignmentReads.Load() != 6 || sourceReads.Load() != 6 || receipts.Load() != 2 || wireCalls != 2 || service.platformServing.Load() != previous || service.platformCheckpoint.Load() != checkpoint {
+		t.Fatalf("receipt did not take the bounded no-apply path: assignments=%d sources=%d receipts=%d wire=%d", assignmentReads.Load(), sourceReads.Load(), receipts.Load(), wireCalls)
+	}
+	listenerFailure := errors.New("listener stopped")
+	if tried, err := service.reportFreshDNSRouteSourceHeartbeat(t.Context(), service.platformConsumerClient(), platformconsumer.Identity{}, previous, func(*dnsServingState) error { return listenerFailure }); tried || !errors.Is(err, listenerFailure) || receipts.Load() != 2 {
+		t.Fatalf("listener failure could acknowledge the old publication: tried=%v err=%v", tried, err)
+	}
+	failedRenewal := *previous
+	failedRenewal.checkedAt = time.Now().UTC()
+	failedRenewal.facts = nil
+	service.platformRenewal.Store(&dnsServingRenewal{base: previous, state: &failedRenewal})
+	if tried, err := service.reportFreshDNSRouteSourceHeartbeat(t.Context(), service.platformConsumerClient(), platformconsumer.Identity{}, previous, func(*dnsServingState) error {
+		t.Error("used an older positive scan despite newer negative evidence")
+		return nil
+	}); tried || err != nil || receipts.Load() != 2 {
+		t.Fatal("negative evidence produced a positive heartbeat", err)
+	}
+	service.platformRenewal.Store(nil)
 	for index := range snapshot.Scopes {
 		scope := &snapshot.Scopes[index]
 		scope.Publications[0].Release.ID += "-next"
