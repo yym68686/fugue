@@ -134,23 +134,31 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness) (frontR
 }
 
 // frontRepairStore is used only from the reviewed repair path (not normal
-// promotion). held must check both membership and group authority locks.
+// promotion). Both Lease claims must be live on the Kubernetes API server.
 // No production command is wired to this store until the repair lane exists.
 type frontRepairStore struct {
 	client    kubernetes.Interface
 	namespace string
 	authority *releaseguardian.AuthorityStore
-	held      func(context.Context) error
+	locks     *frontRepairLeasePair
 }
 
-func (store frontRepairStore) requireHeld(ctx context.Context) error {
-	if store.client == nil || store.authority == nil || store.held == nil {
+func newFrontRepairStore(locks *frontRepairLeasePair) (frontRepairStore, error) {
+	if locks == nil {
+		return frontRepairStore{}, errors.New("Front repair requires the exact Kubernetes Lease pair")
+	}
+	authority, err := releaseguardian.NewAuthorityStore(locks.client, locks.namespace)
+	if err != nil {
+		return frontRepairStore{}, err
+	}
+	return frontRepairStore{client: locks.client, namespace: locks.namespace, authority: authority, locks: locks}, nil
+}
+
+func (store frontRepairStore) requireHeld(ctx context.Context, group string) error {
+	if store.client == nil || store.authority == nil || store.locks == nil || store.namespace != store.locks.namespace {
 		return errors.New("Front repair store must be bound to both authority locks")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return store.held(ctx)
+	return store.locks.requireHeld(ctx, group)
 }
 
 func (store frontRepairStore) load(ctx context.Context, group string) (frontRepairJournal, error) {
@@ -174,14 +182,14 @@ func decodeFrontRepairJournal(object *corev1.ConfigMap, group, kind string) (fro
 }
 
 func (store frontRepairStore) create(ctx context.Context, journal frontRepairJournal) error {
-	if err := store.requireHeld(ctx); err != nil {
+	group := journal.Plan.Before.GroupID
+	if err := store.requireHeld(ctx, group); err != nil {
 		return err
 	}
 	if err := journal.validate(); err != nil {
 		return err
 	}
 	plan := journal.Plan
-	group := plan.Before.GroupID
 	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
 		return err
 	}
@@ -197,10 +205,12 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: releaseguardian.FrontRepairFenceName(group), Namespace: store.namespace, Labels: map[string]string{
 		"fugue.pro/group": group, "fugue.pro/authority-kind": releaseguardian.FrontRepairJournalKind,
 	}}, Immutable: &immutable, Data: map[string]string{"journal.json": string(raw)}}
-	if err := store.requireHeld(ctx); err != nil {
+	writeCtx, cancel, err := store.locks.mutationContext(ctx, group)
+	if err != nil {
 		return err
 	}
-	if _, err := store.client.CoreV1().ConfigMaps(store.namespace).Create(ctx, object, metav1.CreateOptions{}); err != nil {
+	defer cancel()
+	if _, err := store.client.CoreV1().ConfigMaps(store.namespace).Create(writeCtx, object, metav1.CreateOptions{}); err != nil {
 		existing, loadErr := store.load(ctx, group)
 		if loadErr != nil || existing.Digest != journal.Digest {
 			return errors.Join(err, loadErr)
@@ -214,7 +224,7 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 // node CAS independently rechecks the predecessor and preparation at write.
 func (store frontRepairStore) writePlan(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness,
 	preparations map[string]edgegroupfront.PublicationPreparation, now time.Time) (frontRepairProgress, error) {
-	if err := store.requireHeld(ctx); err != nil {
+	if err := store.requireHeld(ctx, group); err != nil {
 		return frontRepairProgress{}, err
 	}
 	journal, err := store.load(ctx, group)
@@ -242,7 +252,7 @@ func (store frontRepairStore) writePlan(ctx context.Context, group, journalDiges
 			return frontRepairProgress{}, fmt.Errorf("Front repair member %s has no fresh publication preparation", node)
 		}
 	}
-	if err := store.requireHeld(ctx); err != nil {
+	if err := store.requireHeld(ctx, group); err != nil {
 		return frontRepairProgress{}, err
 	}
 	return progress, nil
@@ -251,7 +261,7 @@ func (store frontRepairStore) writePlan(ctx context.Context, group, journalDiges
 // commit advances only the group generation and its epoch after exact runtime
 // convergence. Refresh the witnesses under both locks directly before calling.
 func (store frontRepairStore) commit(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness) error {
-	if err := store.requireHeld(ctx); err != nil {
+	if err := store.requireHeld(ctx, group); err != nil {
 		return err
 	}
 	journal, err := store.load(ctx, group)
@@ -291,10 +301,12 @@ func (store frontRepairStore) commit(ctx context.Context, group, journalDigest s
 		return err
 	}
 	object.Data["authority.json"] = string(raw)
-	if err := store.requireHeld(ctx); err != nil {
+	writeCtx, cancel, err := store.locks.mutationContext(ctx, group)
+	if err != nil {
 		return err
 	}
-	if _, err := cms.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+	defer cancel()
+	if _, err := cms.Update(writeCtx, object, metav1.UpdateOptions{}); err != nil {
 		actual, observedUID, _, readErr := store.authority.LoadCurrent(ctx, group)
 		if apierrors.IsConflict(err) || readErr != nil || observedUID != uid || actual != after {
 			return errors.Join(err, readErr)
@@ -312,7 +324,7 @@ func (journal frontRepairJournal) committedAuthority() releaseguardian.CurrentAu
 // finish archives exact completion before releasing the shared fence. It
 // never deletes a pending, replaced, or ordinary promotion journal.
 func (store frontRepairStore) finish(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness) error {
-	if err := store.requireHeld(ctx); err != nil {
+	if err := store.requireHeld(ctx, group); err != nil {
 		return err
 	}
 	if !exactSHA256Digest(journalDigest) {
@@ -355,20 +367,24 @@ func (store frontRepairStore) finish(ctx context.Context, group, journalDigest s
 	if err := store.authority.RequireNoActivatedTransition(ctx, group); err != nil {
 		return err
 	}
-	if err := store.requireHeld(ctx); err != nil {
-		return err
-	}
 	archive := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: archiveName, Namespace: store.namespace, Labels: map[string]string{
 		"fugue.pro/group": group, "fugue.pro/authority-kind": archiveKind,
 	}}, Immutable: fence.Immutable, Data: map[string]string{"journal.json": fence.Data["journal.json"]}}
-	_, createErr := cms.Create(ctx, archive, metav1.CreateOptions{})
+	writeCtx, cancel, err := store.locks.mutationContext(ctx, group)
+	if err != nil {
+		return err
+	}
+	_, createErr := cms.Create(writeCtx, archive, metav1.CreateOptions{})
+	cancel()
 	if err := verifyArchive(); err != nil {
 		return errors.Join(createErr, err)
 	}
-	if err := store.requireHeld(ctx); err != nil {
+	writeCtx, cancel, err = store.locks.mutationContext(ctx, group)
+	if err != nil {
 		return err
 	}
-	err = cms.Delete(ctx, fenceName, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fence.UID, ResourceVersion: &fence.ResourceVersion}})
+	defer cancel()
+	err = cms.Delete(writeCtx, fenceName, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &fence.UID, ResourceVersion: &fence.ResourceVersion}})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}

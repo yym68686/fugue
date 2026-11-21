@@ -11,7 +11,6 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,9 +68,11 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	release, componentLease, groupLease := frontRepairLeaseFixtures(namespace, before.GroupID)
 	client := fake.NewSimpleClientset(&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: pointerName, UID: "pointer-uid", ResourceVersion: "101",
 		Labels: map[string]string{"fugue.pro/group": before.GroupID, "fugue.pro/authority-store": "true"}}, Data: map[string]string{"authority.json": string(payload)}},
-		&coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: "fugue-authority-" + before.GroupID, UID: "lease-uid", ResourceVersion: "42"}})
+		componentLease, groupLease)
+	trackFrontRepairLeaseCAS(t, client, namespace)
 	fenceName := releaseguardian.FrontRepairFenceName(before.GroupID)
 	client.PrependReactor("create", "configmaps", func(action k8stest.Action) (bool, runtime.Object, error) {
 		object := action.(k8stest.CreateAction).GetObject().(*corev1.ConfigMap)
@@ -97,27 +98,31 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 		}
 		return true, nil, errors.New("simulated reply loss after pointer write")
 	})
-	locksHeld := false
-	newStore := func() frontRepairStore {
-		store, err := releaseguardian.NewAuthorityStore(client, namespace)
+	var locks *frontRepairLeasePair
+	acquire := func() {
+		t.Helper()
+		var err error
+		locks, err = acquireFrontRepairLeases(ctx, client, release, before.GroupID, time.Now)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return frontRepairStore{client: client, namespace: namespace, authority: store, held: func(context.Context) error {
-			if !locksHeld {
-				return errors.New("fixture lease pair is not held")
-			}
-			return nil
-		}}
 	}
-	store := newStore()
-	if err := store.create(ctx, journal); err == nil {
+	newStore := func() frontRepairStore {
+		t.Helper()
+		store, err := newFrontRepairStore(locks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	if err := (frontRepairStore{}).create(ctx, journal); err == nil {
 		t.Fatal("created a journal without locks")
 	}
-	if _, err := store.load(ctx, before.GroupID); !apierrors.IsNotFound(err) {
+	if _, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, fenceName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("unauthorized journal create left state: %v", err)
 	}
-	locksHeld = true
+	acquire()
+	store := newStore()
 	if err := store.create(ctx, journal); err != nil {
 		t.Fatal(err)
 	}
@@ -131,9 +136,14 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := locks.release(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ordinary.BeginRestore(ctx, before); !errors.Is(err, releaseguardian.ErrFrontRepairInProgress) {
 		t.Fatalf("rollback could proceed with a repair fence after the lease was reacquired: %v", err)
 	}
+	acquire()
+	store = newStore()
 	other, err := sealFrontRepairJournal(plan, "sha256:"+strings.Repeat("e", 64), now)
 	if err != nil || store.create(ctx, other) == nil {
 		t.Fatalf("another authorization replaced the existing journal: err=%v", err)
@@ -214,11 +224,14 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err := restarted.commit(ctx, before.GroupID, journal.Digest, replaced); err == nil || pointerWrites != 0 {
 		t.Fatalf("replacement Pod advanced pointer: writes=%d, error=%v", pointerWrites, err)
 	}
-	locksHeld = false
-	if err := restarted.commit(ctx, before.GroupID, journal.Digest, final); err == nil || pointerWrites != 0 {
-		t.Fatalf("lost locks did not prevent pointer commit: writes=%d, error=%v", pointerWrites, err)
+	if err := locks.release(ctx); err != nil {
+		t.Fatal(err)
 	}
-	locksHeld = true
+	acquire()
+	if err := restarted.commit(ctx, before.GroupID, journal.Digest, final); err == nil || pointerWrites != 0 {
+		t.Fatalf("superseded locks did not prevent pointer commit: writes=%d, error=%v", pointerWrites, err)
+	}
+	restarted = newStore()
 	if err := restarted.commit(ctx, before.GroupID, journal.Digest, final); err != nil {
 		t.Fatalf("cannot reconcile lost update reply: %v", err)
 	}
@@ -236,6 +249,9 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	}
 	if err := restarted.finish(ctx, before.GroupID, journal.Digest, nil); err != nil {
 		t.Fatalf("completion could not be recovered from the immutable receipt: %v", err)
+	}
+	if err := locks.release(ctx); err != nil {
+		t.Fatal(err)
 	}
 	lease, err := ordinary.acquireOrdinaryAuthorityLease(ctx)
 	if err != nil {
