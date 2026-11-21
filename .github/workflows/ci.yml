@@ -1132,18 +1132,13 @@ jobs:
           BASE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          approval=deploy/environments/production/edge-front-repair/approval.json
-          preview=deploy/environments/production/edge-front-repair/preview.json
+          intent=deploy/environments/production/edge-front-repair/intent.json
           base="$BASE_SHA"
           [[ "$base" =~ ^[0-9a-f]{40}$ && "$base" != 0000000000000000000000000000000000000000 ]]
-          if git diff --quiet "$base" HEAD -- "$approval"; then exit 0; fi
-          mapfile -t paths < <(git diff --no-renames --name-only "$base" HEAD --)
-          for path in "${paths[@]}"; do
-            [[ "$path" == "$approval" || "$path" == "$preview" ]]
-          done
-          for path in "$approval" "$preview"; do
-            [[ "$(git ls-tree HEAD -- "$path" | awk '{print $1}')" == 100644 ]]
-          done
+          changed="$(git diff --no-renames --name-only "$base" HEAD -- "$intent")"
+          if [[ -z "$changed" ]]; then exit 0; fi
+          [[ "$(git diff --no-renames --name-only "$base" HEAD --)" == "$intent" ]]
+          [[ "$(git ls-tree HEAD -- "$intent" | awk '{print $1}')" == 100644 ]]
           [[ "$GITHUB_REF_PROTECTED" == true ]]
           echo 'selected=true' >> "$GITHUB_OUTPUT"
       - name: Rehearse Edge origin relay over isolated private network hops
@@ -2553,20 +2548,22 @@ jobs:
     environment: production-edge-front-repair
     timeout-minutes: 12
     permissions: {contents: read, actions: read}
-    concurrency: {group: fugue-production-edge-front-repair, cancel-in-progress: false}
+    concurrency: {group: fugue-production-edge-front-repair, cancel-in-progress: false, queue: max}
     steps:
       - name: Inspect generated metadata before checkout
         working-directory: ${{ runner.temp }}
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - name: Checkout exact repair declaration
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
-        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false, persist-credentials: false}
       - name: Setup Go for approved repair launcher
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with: {go-version-file: go.mod, cache: false}
       - name: Execute independently approved exact Front repair
         env:
           FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_PROTECTED_POLICY }}
+          REPAIR_APPROVAL_JSON: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_APPROVAL }}
+          REPAIR_PREVIEW_JSON: ${{ secrets.FUGUE_EDGE_FRONT_REPAIR_PREVIEW }}
           GH_TOKEN: ${{ github.token }}
           GOFLAGS: ""
           GOTOOLCHAIN: local
@@ -2581,19 +2578,44 @@ jobs:
           git diff --quiet "$GITHUB_WORKFLOW_SHA" "$GITHUB_SHA" -- .github/workflows/ci.yml
           git diff --quiet "$executor" "$GITHUB_SHA" -- .github/workflows/ci.yml deploy/releases/edge-groups.json go.mod go.sum \
             cmd/fugue-release-guardian cmd/fugue-edge-front-cas internal/edgegroupfront internal/releaseguardian internal/declarativerelease
+          # Public source contains only exact byte digests, never the signed
+          # approval or the preview with production Node and Pod identities.
+          intent="$(git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/intent.json")"
+          [[ "$(jq -cS . <<<"$intent")" == "$intent" ]]
+          jq -e 'keys == ["approvalSha256","previewSha256","schema"] and .schema == "edge-front-repair-intent/v1"' <<<"$intent" >/dev/null
+          approval_digest="$(jq -er '.approvalSha256 | strings' <<<"$intent")"
+          preview_digest="$(jq -er '.previewSha256 | strings' <<<"$intent")"
+          [[ "$approval_digest" =~ ^[0-9a-f]{64}$ && "$preview_digest" =~ ^[0-9a-f]{64}$ ]]
+          [[ -n "$REPAIR_APPROVAL_JSON" && -n "$REPAIR_PREVIEW_JSON" ]]
+          actual_approval="$(printf '%s' "$REPAIR_APPROVAL_JSON" | sha256sum)"
+          actual_preview="$(printf '%s' "$REPAIR_PREVIEW_JSON" | sha256sum)"
+          [[ "${actual_approval%% *}" == "$approval_digest" && "${actual_preview%% *}" == "$preview_digest" ]]
           inputs="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-inputs.XXXXXXXX")"
-          for file in approval.json preview.json; do
-            git show "$GITHUB_SHA:deploy/environments/production/edge-front-repair/$file" > "$inputs/$file"
-          done
+          work=
+          cleanup() {
+            rm -f -- "$inputs/approval.json" "$inputs/preview.json" "$inputs/executor.stderr"
+            rmdir -- "$inputs"
+            if [[ -n "$work" ]]; then
+              if [[ -d "$work/source" ]]; then git worktree remove "$work/source"; fi
+              rm -f -- "$work/guardian"
+              rmdir -- "$work"
+            fi
+          }
+          trap cleanup EXIT
+          printf '%s' "$REPAIR_APPROVAL_JSON" > "$inputs/approval.json"
+          printf '%s' "$REPAIR_PREVIEW_JSON" > "$inputs/preview.json"
+          unset REPAIR_APPROVAL_JSON REPAIR_PREVIEW_JSON
           work="$(mktemp -d "$RUNNER_TEMP/fugue-front-repair-build.XXXXXXXX")"
           git worktree add --detach "$work/source" "$executor"
-          trap 'git worktree remove "$work/source"' EXIT
           export FUGUE_EDGE_FRONT_REPAIR_INPUTS="$inputs"
           (
             cd "$work/source"
             test -z "$(git status --porcelain --untracked-files=all)"
             go build -trimpath -buildvcs=true -buildmode=exe -o "$work/guardian" ./cmd/fugue-release-guardian
-            "$work/guardian" front-repair-approved
+            if ! "$work/guardian" front-repair-approved 2>"$inputs/executor.stderr"; then
+              echo '::error::Approved Front repair did not complete; inspect the group journal through the private observer.' >&2
+              exit 1
+            fi
           ) > "$RUNNER_TEMP/edge-front-repair-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json"
       - name: Retain completed Front repair receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
