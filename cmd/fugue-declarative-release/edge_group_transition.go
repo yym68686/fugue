@@ -697,10 +697,9 @@ func verifyEdgeGroupTransition(ctx context.Context, runtime edgeGroupTransitionR
 	return nil
 }
 
-// restoreEdgeLKGActivation switches traffic to the exact predecessor Worker
-// while that immutable standby is still present. The generic LKG apply rolls
-// code after this boundary, so it must not be allowed to leave a newer durable
-// activation pointer selecting code that rollback has already replaced.
+// restoreEdgeLKGActivation requires the exact predecessor Worker to be serving
+// before the generic LKG apply rolls code. A single-node group can switch here;
+// a multi-node group must already be converged by the authority transaction.
 func restoreEdgeLKGActivation(ctx context.Context, runtime edgeGroupTransitionRuntime, before edgeGroupState, transition declarativerelease.EdgeGroupABTransition, target declarativerelease.TargetIdentity) error {
 	if runtime == nil || (before.ActiveSlot != "a" && before.ActiveSlot != "b") {
 		return errors.New("rollback activation state is unavailable")
@@ -708,6 +707,28 @@ func restoreEdgeLKGActivation(ctx context.Context, runtime edgeGroupTransitionRu
 	desiredDigest, err := immutableDigestFromRef(target.ImageRef)
 	if err != nil {
 		return err
+	}
+	if transition.ExpectedNodes < 1 || len(before.Front) != transition.ExpectedNodes ||
+		!sameEdgeNodes(before.Front, before.WorkerA) || !sameEdgeNodes(before.Front, before.WorkerB) {
+		return errors.New("rollback activation has an incomplete edge group cohort")
+	}
+	// The generic executor's CAS writes a host-local activation file. It must
+	// never switch one member of a multi-node cohort and then wait for the
+	// others: a timeout would leave different serving authorities. Only the
+	// journaled Guardian group transition may change authority on that cohort.
+	// The snapshot has already compared every member's durable record.
+	if transition.ExpectedNodes > 1 {
+		current := before.FrontActivation
+		if current == nil || current.Schema != edgeActivationStateSchema || current.GroupID != transition.GroupID ||
+			current.Authority != edgeActivationAuthority || current.Generation == 0 || current.ActiveSlot != before.ActiveSlot ||
+			current.WorkerSourceCommit != target.ConfigSHA || current.WorkerImageDigest != desiredDigest {
+			return errors.New("multi-node edge LKG workload restore requires an already-converged Front cohort on the exact LKG; switch traffic through Guardian first")
+		}
+		bundle, bundleErr := exactEdgeWorkerBundle(edgeWorkerPods(before, current.ActiveSlot), target)
+		if bundleErr != nil || bundle != current.BundleGeneration {
+			return errors.New("current activation claims the LKG without exact Worker evidence")
+		}
+		return nil
 	}
 	allPods := make([]edgeGroupPod, 0, len(before.WorkerA)+len(before.WorkerB))
 	for _, pods := range []map[string]edgeGroupPod{before.WorkerA, before.WorkerB} {

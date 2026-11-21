@@ -1586,6 +1586,73 @@ func TestExecuteEdgeGroupABCompensationSwitchesBeforeRestoringFront(t *testing.T
 	}
 }
 
+func TestMultiNodeLKGRestoreNeverWritesHostLocalActivation(t *testing.T) {
+	transition := edgeTransitionFixture()
+	transition.ExpectedNodes = 3
+	lkg := edgeTargetFixture("1", "a")
+	forward := edgeTargetFixture("2", "b")
+	for _, tc := range []struct {
+		name       string
+		activeLKG  bool
+		incomplete bool
+		badBundle  bool
+		wantErr    string
+	}{
+		{name: "standby LKG cannot be selected on just one host", wantErr: "requires an already-converged"},
+		{name: "already converged LKG allows workload repair", activeLKG: true},
+		{name: "a missing Worker member blocks workload repair", activeLKG: true, incomplete: true, wantErr: "incomplete edge group cohort"},
+		{name: "an unproven Worker bundle blocks workload repair", activeLKG: true, badBundle: true, wantErr: "without exact Worker evidence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			activeSlot, activeTarget := "b", forward
+			if tc.activeLKG {
+				activeSlot, activeTarget = "a", lkg
+			}
+			before := edgeStateFixture(activeSlot, activeTarget, edgeFrontHealth{ActiveSlot: activeSlot})
+			before.WorkerA = edgeStateFixture("a", lkg, edgeFrontHealth{}).WorkerA
+			before.WorkerB = edgeStateFixture("b", forward, edgeFrontHealth{}).WorkerB
+			before.FrontActivation = &edgeActivationState{
+				Schema: edgeActivationStateSchema, Authority: edgeActivationAuthority, GroupID: transition.GroupID,
+				Generation: 8, ActiveSlot: activeSlot, BundleGeneration: "bundle-" + activeSlot,
+				WorkerSourceCommit: activeTarget.ConfigSHA, WorkerImageDigest: digestFromTarget(t, activeTarget),
+			}
+			for _, cohort := range []map[string]edgeGroupPod{before.Front, before.WorkerA, before.WorkerB} {
+				for _, node := range []string{"node-2", "node-3"} {
+					pod := cohort["node-1"]
+					pod.Name, pod.UID, pod.NodeName = pod.Name+"-"+node, pod.UID+"-"+node, node
+					cohort[node] = pod
+				}
+			}
+			if tc.incomplete {
+				delete(before.WorkerA, "node-3")
+			}
+			if tc.badBundle {
+				pod := before.WorkerA["node-3"]
+				pod.BundleGeneration = "different-bundle"
+				before.WorkerA["node-3"] = pod
+			}
+			runtime := &fakeEdgeGroupRuntime{
+				snapshots: []edgeGroupState{before}, activationState: before.FrontActivation,
+				declared: map[string]declarativerelease.TargetIdentity{transition.WorkerAName: lkg, transition.WorkerBName: lkg, transition.FrontName: lkg},
+				rolls:    map[string]map[string]edgeGroupPod{transition.WorkerAName: before.WorkerA, transition.WorkerBName: before.WorkerB, transition.FrontName: before.Front},
+			}
+			err := executeEdgeGroupAB(context.Background(), runtime, declarativerelease.PlanRelease{ExpectedPreviousConfigSHA: lkg.ConfigSHA}, transition, lkg)
+			want := []string{"snapshot"}
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				want = append(want, "apply:", "roll:"+transition.WorkerBName, "roll:"+transition.WorkerAName, "roll:"+transition.FrontName)
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("restore error=%v; want %q", err, tc.wantErr)
+			}
+			if strings.Join(runtime.calls, "\n") != strings.Join(want, "\n") || len(runtime.requests) != 0 {
+				t.Fatalf("restore calls=%v; want %v and no local CAS requests; got %v", runtime.calls, want, runtime.requests)
+			}
+		})
+	}
+}
+
 func TestEdgeGroupAuthorityRequiresPublicationOnBothSlotsAndInventoryOnActive(t *testing.T) {
 	transition := edgeTransitionFixture()
 	target := edgeTargetFixture("2", "b")
