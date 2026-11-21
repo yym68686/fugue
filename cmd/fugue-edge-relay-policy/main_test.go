@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"os"
@@ -15,6 +17,33 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/routeproof"
 )
+
+func TestVerifyDeliveryAuthenticatesBeforeLeasePublication(t *testing.T) {
+	now := time.Unix(1800000000, 0).UTC()
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := relayroute.Policy{Schema: relayroute.Schema, Mode: "off", Generation: 4,
+		NotBefore: now.Add(-time.Second), Expires: now.Add(3 * time.Minute), MaxConcurrent: 1}
+	raw, _ := json.Marshal(off)
+	envelope, err := issue(raw, model.EdgeRouteBinding{}, model.EdgeRouteBinding{}, key, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, _ := json.Marshal(map[string]any{"verify_key": hex.EncodeToString(pub), "envelope": json.RawMessage(envelope)})
+	verified, err := verifyDelivery(bytes.NewReader(input), now)
+	if err != nil || verified.Policy.Generation != 4 || len(verified.PayloadSHA256) != 64 {
+		t.Fatalf("a current verified off lease was not bound to its hash: %v", err)
+	}
+	if _, err := verifyDelivery(bytes.NewReader(input), now.Add(time.Minute+time.Second)); err == nil {
+		t.Fatal("delivery accepted a lease with under two minutes remaining")
+	}
+	input, _ = json.Marshal(map[string]any{"verify_key": hex.EncodeToString(make([]byte, ed25519.PublicKeySize)), "envelope": json.RawMessage(envelope)})
+	if _, err := verifyDelivery(bytes.NewReader(input), now); err == nil {
+		t.Fatal("delivery accepted a lease signed outside the pinned epoch")
+	}
+}
 
 func TestReadSigningKeyFileRejectsLoosePermissionsAndLinks(t *testing.T) {
 	dir := t.TempDir()

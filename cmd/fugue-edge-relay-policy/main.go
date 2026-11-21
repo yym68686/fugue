@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -23,6 +24,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		if len(os.Args) != 2 {
+			fail(errors.New("verify reads its bounded input from stdin"))
+		}
+		out, err := verifyDelivery(os.Stdin, time.Now().UTC())
+		if err != nil {
+			fail(err)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {
+			fail(errors.New("unable to write verified lease facts"))
+		}
+		return
+	}
 	payload := flag.String("policy", "", "policy payload JSON including independently observed route proof digests")
 	keyFile := flag.String("signing-key", "", "dedicated Ed25519 PKCS#8 PEM file (owner-only permissions)")
 	source := flag.String("source-route", "", "exact source EdgeRouteBinding JSON (required for shadow and active)")
@@ -66,6 +80,35 @@ func main() {
 	if _, err := os.Stdout.Write(append(out, '\n')); err != nil {
 		fail(errors.New("unable to write signed relay policy"))
 	}
+}
+
+type verifiedDelivery struct {
+	Policy        *relayroute.Policy `json:"policy"`
+	PayloadSHA256 string             `json:"payload_sha256"`
+}
+
+// The release publisher can authenticate a separately supplied envelope with
+// only the trust epoch's public key. It never needs access to the signer.
+func verifyDelivery(r io.Reader, now time.Time) (verifiedDelivery, error) {
+	const limit = relayroute.MaxPolicyBytes + 1024
+	var input struct {
+		VerifyKey string          `json:"verify_key"`
+		Envelope  json.RawMessage `json:"envelope"`
+	}
+	bad := errors.New("invalid, expired or too-short remaining relay lease")
+	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil || len(raw) > limit || relayroute.Decode(bytes.NewReader(raw), &input) != nil {
+		return verifiedDelivery{}, bad
+	}
+	key, err := hex.DecodeString(input.VerifyKey)
+	if err != nil || len(key) != ed25519.PublicKeySize || hex.EncodeToString(key) != input.VerifyKey {
+		return verifiedDelivery{}, bad
+	}
+	policy, err := relayroute.Verify(input.Envelope, key, now)
+	if err != nil || policy.Expires.Sub(now) < 2*time.Minute {
+		return verifiedDelivery{}, bad
+	}
+	return verifiedDelivery{Policy: policy, PayloadSHA256: hex.EncodeToString(policy.Hash[:])}, nil
 }
 
 func fail(err error) {
