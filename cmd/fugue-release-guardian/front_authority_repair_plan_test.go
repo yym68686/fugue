@@ -24,6 +24,7 @@ func partialFrontRollbackFixture() (releaseguardian.CurrentAuthority, []frontRep
 	}
 	cohort := []frontRepairNode{{Name: "edge-c", UID: "uid-node-c", Admitted: true}, {Name: "edge-b", UID: "uid-node-b"}, {Name: "edge-a", UID: "uid-node-a"}}
 	var observed []frontRepairWitness
+	stale := false
 	for _, node := range cohort {
 		state := edgegroupfront.ActivationState{
 			GroupID: before.GroupID, Schema: edgegroupfront.ActivationStateSchemaV1, Authority: edgegroupfront.ActivationAuthority,
@@ -40,7 +41,8 @@ func partialFrontRollbackFixture() (releaseguardian.CurrentAuthority, []frontRep
 		observed = append(observed, frontRepairWitness{frontRepairMember: frontRepairMember{Node: node, FrontPodUID: node.Name + "-front-uid", TargetWorkerPodUID: node.Name + "-target-uid",
 			Activation: state, TargetWorkerSlot: before.CurrentWorkerSlot, TargetWorkerSourceSHA: before.CurrentWorkerSourceSHA, TargetWorkerImage: before.CurrentWorkerImageDigest}, LiveFront: liveFrontRepairFixture(state),
 			TargetWorkerHealth: authorityWorkerHealth{Healthy: true, Status: "ok", EdgeGroupID: before.GroupID, BundleVersion: "live.p43.r3",
-				CaddyAppliedVersion: "live.p43.r3", PublicationSequence: 43, ServingGeneration: "live"}})
+				CaddyAppliedVersion: "live.p43.r3", PublicationSequence: 43, ServingGeneration: "live", StaleCache: &stale,
+				BundleValidUntil: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)}})
 	}
 	return before, cohort, observed
 }
@@ -190,6 +192,13 @@ func TestPartialFrontRollbackRepairPlanRequiresPreparedWorkerBeforeSwitch(t *tes
 	}{
 		{"replaced target Worker", func(w *frontRepairWitness) { w.TargetWorkerPodUID = "replacement-pod-uid" }},
 		{"target is unhealthy", func(w *frontRepairWitness) { w.TargetWorkerHealth.Healthy = false }},
+		{"stale route with otherwise healthy Worker", func(w *frontRepairWitness) {
+			stale := true
+			w.TargetWorkerHealth.StaleCache = &stale
+		}},
+		{"missing stale route report", func(w *frontRepairWitness) { w.TargetWorkerHealth.StaleCache = nil }},
+		{"publication is about to expire", func(w *frontRepairWitness) { w.TargetWorkerHealth.BundleValidUntil = now.Add(30 * time.Second) }},
+		{"Caddy apply failure", func(w *frontRepairWitness) { w.TargetWorkerHealth.CaddyLastError = "fixture failure" }},
 		{"unapplied route", func(w *frontRepairWitness) { w.TargetWorkerHealth.CaddyAppliedVersion = "" }},
 		{"another applied publication", func(w *frontRepairWitness) {
 			h := &w.TargetWorkerHealth

@@ -148,10 +148,10 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 	if err != nil || store.create(ctx, other) == nil {
 		t.Fatalf("another authorization replaced the existing journal: err=%v", err)
 	}
-	if _, err := store.writePlan(ctx, before.GroupID, other.Digest, witnesses, nil, now); err == nil {
+	if _, err := store.writePlan(ctx, before.GroupID, other.Digest, witnesses, nil); err == nil {
 		t.Fatal("another authorization could resume the durable journal")
 	}
-	initial, err := journal.resume(witnesses)
+	initial, err := journal.resume(witnesses, now)
 	if err != nil || len(initial.Remaining) != 3 || initial.Converged {
 		t.Fatalf("unstarted repair misclassified: %+v, err=%v", initial, err)
 	}
@@ -160,7 +160,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 		t.Fatalf("unexpected prepare requests: %+v, err=%v", prepareRequests, err)
 	}
 	preparations := make(map[string]edgegroupfront.PublicationPreparation)
-	if _, err := store.writePlan(ctx, before.GroupID, journal.Digest, witnesses, preparations, now); err == nil {
+	if _, err := store.writePlan(ctx, before.GroupID, journal.Digest, witnesses, preparations); err == nil {
 		t.Fatal("journal authorized traffic before missing preparation")
 	}
 	for node, request := range prepareRequests {
@@ -170,7 +170,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 		}
 		preparations[node] = p
 	}
-	initial, err = store.writePlan(ctx, before.GroupID, journal.Digest, witnesses, preparations, now)
+	initial, err = store.writePlan(ctx, before.GroupID, journal.Digest, witnesses, preparations)
 	if err != nil || len(initial.Remaining) != 3 {
 		t.Fatalf("exact preparation did not authorize node requests: %+v, err=%v", initial, err)
 	}
@@ -200,7 +200,7 @@ func TestFrontRepairJournalResumesPartialDiskWritesAndLostPointerReply(t *testin
 		t.Fatalf("durable journal lost on restart: error=%v", err)
 	}
 	partial := observe()
-	remaining, err := restarted.writePlan(ctx, before.GroupID, loaded.Digest, partial, preparations, time.Now())
+	remaining, err := restarted.writePlan(ctx, before.GroupID, loaded.Digest, partial, preparations)
 	if err != nil || len(remaining.Remaining) != 2 || remaining.Remaining[first].JournalDigest != "" || remaining.Converged {
 		t.Fatalf("partial repair rescheduled a committed member: %+v, err=%v", remaining, err)
 	}

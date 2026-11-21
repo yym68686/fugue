@@ -92,7 +92,7 @@ type frontRepairProgress struct {
 // resume recognizes only the journal's exact predecessor or exact new state
 // on each original Node/Pod. Lost replies become observations, never rewrites.
 // Every live Front and target Worker must be healthy before Converged is true.
-func (journal frontRepairJournal) resume(refreshed []frontRepairWitness) (frontRepairProgress, error) {
+func (journal frontRepairJournal) resume(refreshed []frontRepairWitness, now time.Time) (frontRepairProgress, error) {
 	if journal.validate() != nil || len(refreshed) != len(journal.Plan.Members) {
 		return frontRepairProgress{}, errors.New("Front repair evidence does not cover the durable journal")
 	}
@@ -125,7 +125,7 @@ func (journal frontRepairJournal) resume(refreshed []frontRepairWitness) (frontR
 			return frontRepairProgress{}, fmt.Errorf("Front repair member %s is outside the journal's exact transition", name)
 		}
 		worker := seen.TargetWorkerHealth
-		if !preparedWorkerPublicationReady(worker, target) || (publication != "" && publication != worker.BundleVersion) {
+		if !frontRepairWorkerReady(worker, target, now) || (publication != "" && publication != worker.BundleVersion) {
 			healthy = false
 		}
 		publication = worker.BundleVersion
@@ -223,12 +223,12 @@ func (store frontRepairStore) create(ctx context.Context, journal frontRepairJou
 // journal. It must be repeated after every observation or failed reply; the
 // node CAS independently rechecks the predecessor and preparation at write.
 func (store frontRepairStore) writePlan(ctx context.Context, group, journalDigest string, refreshed []frontRepairWitness,
-	preparations map[string]edgegroupfront.PublicationPreparation, now time.Time) (frontRepairProgress, error) {
+	preparations map[string]edgegroupfront.PublicationPreparation) (frontRepairProgress, error) {
 	if err := store.requireHeld(ctx, group); err != nil {
 		return frontRepairProgress{}, err
 	}
 	journal, err := store.load(ctx, group)
-	if err != nil || journal.Digest != journalDigest || now.IsZero() {
+	if err != nil || journal.Digest != journalDigest {
 		return frontRepairProgress{}, errors.Join(errors.New("Front repair must resume the exact durable journal"), err)
 	}
 	plan := journal.Plan
@@ -239,7 +239,8 @@ func (store frontRepairStore) writePlan(ctx context.Context, group, journalDiges
 	if err != nil || current != plan.Before || string(uid) != plan.CurrentUID || rv != plan.CurrentResourceVersion {
 		return frontRepairProgress{}, errors.Join(errors.New("Front repair CurrentAuthority changed before node writes"), err)
 	}
-	progress, err := journal.resume(refreshed)
+	now := store.locks.now().UTC()
+	progress, err := journal.resume(refreshed, now)
 	if err != nil || !progress.WorkersReady {
 		return frontRepairProgress{}, errors.Join(errors.New("Front repair target Workers do not prove one healthy applied publication"), err)
 	}
@@ -268,7 +269,7 @@ func (store frontRepairStore) commit(ctx context.Context, group, journalDigest s
 	if err != nil || journal.Digest != journalDigest {
 		return errors.Join(errors.New("Front repair cannot commit without the exact durable journal"), err)
 	}
-	progress, err := journal.resume(refreshed)
+	progress, err := journal.resume(refreshed, store.locks.now().UTC())
 	if err != nil || !progress.Converged {
 		return errors.Join(errors.New("Front repair cohort has not converged"), err)
 	}
@@ -356,7 +357,7 @@ func (store frontRepairStore) finish(ctx context.Context, group, journalDigest s
 	if err != nil || journal.Digest != journalDigest || fence.UID == "" || fence.ResourceVersion == "" {
 		return errors.Join(errors.New("Front repair completion fence changed"), err)
 	}
-	progress, err := journal.resume(refreshed)
+	progress, err := journal.resume(refreshed, store.locks.now().UTC())
 	if err != nil || !progress.Converged {
 		return errors.Join(errors.New("Front repair cannot release the fence without live convergence"), err)
 	}

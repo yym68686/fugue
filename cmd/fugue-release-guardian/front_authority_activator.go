@@ -52,16 +52,20 @@ type frontAuthorityConfig struct {
 }
 
 type authorityWorkerHealth struct {
-	CaddyAppliedVersion   string `json:"caddy_applied_version"`
-	Status                string `json:"status"`
-	Healthy               bool   `json:"healthy"`
-	EdgeGroupID           string `json:"edge_group_id"`
-	BundleVersion         string `json:"bundle_version"`
-	PublicationSequence   uint64 `json:"publication_sequence"`
-	ServingGeneration     string `json:"serving_generation"`
-	CandidateBundleLoaded bool   `json:"candidate_bundle_loaded"`
-	CandidateRecordDigest string `json:"candidate_record_digest"`
-	CandidateWorkerSlot   string `json:"candidate_worker_slot"`
+	CaddyAppliedVersion   string    `json:"caddy_applied_version"`
+	Status                string    `json:"status"`
+	Healthy               bool      `json:"healthy"`
+	EdgeGroupID           string    `json:"edge_group_id"`
+	BundleVersion         string    `json:"bundle_version"`
+	PublicationSequence   uint64    `json:"publication_sequence"`
+	ServingGeneration     string    `json:"serving_generation"`
+	CandidateBundleLoaded bool      `json:"candidate_bundle_loaded"`
+	CandidateRecordDigest string    `json:"candidate_record_digest"`
+	CandidateWorkerSlot   string    `json:"candidate_worker_slot"`
+	BundleValidUntil      time.Time `json:"bundle_valid_until"`
+	StaleCache            *bool     `json:"stale_cache"`
+	MaxStaleExceeded      bool      `json:"max_stale_exceeded"`
+	CaddyLastError        string    `json:"caddy_last_error"`
 }
 
 func authorityRuntimeCohortLimit(expectedNodes int) int64 {

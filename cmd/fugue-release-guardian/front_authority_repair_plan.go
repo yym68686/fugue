@@ -190,7 +190,7 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 			}
 			checked++
 		}
-		if !preparedWorkerPublicationReady(member.TargetWorkerHealth, target) {
+		if !frontRepairWorkerReady(member.TargetWorkerHealth, target, now) {
 			return fmt.Errorf("node %s has not applied a healthy current publication", member.Node.Name)
 		}
 		if appliedBundle == "" {
@@ -203,6 +203,13 @@ func verifyFrontRepairPrepared(plan frontRepairPlan, current releaseguardian.Cur
 		return errors.New("partial Front repair has unexpected publication preparations")
 	}
 	return nil
+}
+
+// A healthy standby process can still be serving expired or fallback routes.
+// Require explicit freshness and a validity window larger than one mutation.
+func frontRepairWorkerReady(health authorityWorkerHealth, target releaseguardian.FrontAuthorityTarget, now time.Time) bool {
+	return !now.IsZero() && health.StaleCache != nil && !*health.StaleCache && !health.MaxStaleExceeded && health.CaddyLastError == "" &&
+		now.Add(30*time.Second).Before(health.BundleValidUntil) && preparedWorkerPublicationReady(health, target)
 }
 
 func frontRepairPreparationReady(p edgegroupfront.PublicationPreparation, predecessor edgegroupfront.ActivationState, target releaseguardian.CurrentAuthority, now time.Time) bool {
