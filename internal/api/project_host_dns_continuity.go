@@ -2,6 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -16,10 +20,10 @@ import (
 func (s *Server) checkProjectHostDNSContinuity(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	requirement := projectHostConsumerCapability{model.PlatformArtifactKindDNSAnswerBundle, platformconfig.DNSManagedHostContinuityCapabilityV1}
-	if !s.projectHostAuthoritySupports(ctx, platformconfig.GlobalScopeKey, "", requirement) {
-		return errProjectHostDNSContinuity
+	if err := s.checkGlobalHostedPathTransition(ctx); err != nil {
+		return err
 	}
+	requirement := projectHostConsumerCapability{model.PlatformArtifactKindDNSAnswerBundle, platformconfig.DNSManagedHostContinuityCapabilityV1}
 	scopes, err := s.store.ListPlatformProducerScopes()
 	if err != nil || ctx.Err() != nil {
 		return errProjectHostDNSContinuity
@@ -44,6 +48,94 @@ func (s *Server) checkProjectHostDNSContinuity(ctx context.Context) error {
 		return errProjectHostDNSContinuity
 	}
 	return nil
+}
+
+func (s *Server) checkGlobalHostedPathTransition(ctx context.Context) error {
+	if !s.projectHostAuthoritySupports(ctx, platformconfig.GlobalScopeKey, "",
+		projectHostConsumerCapability{model.PlatformArtifactKindDNSAnswerBundle, platformconfig.DNSHostedPathTransitionCapabilityV1}) {
+		return fmt.Errorf("%w: selected global DNS backends must report %s on the current verified release",
+			errProjectHostDNSContinuity, platformconfig.DNSHostedPathTransitionCapabilityV1)
+	}
+	return nil
+}
+
+// The producer can recapture saved intent without another CLI write, even
+// after a failed gray publication. Recheck the real selected global DNS
+// backends against the verified full publication before moving Edge traffic.
+func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, next model.PlatformArtifact) error {
+	if next.ScopeKey != platformconfig.GlobalScopeKey || full.ScopeKey != next.ScopeKey ||
+		next.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
+		return nil
+	}
+	before, err := s.consumerAssignmentChild(full, model.PlatformArtifactKindDNSAnswerBundle)
+	if err != nil {
+		return err
+	}
+	after, err := s.consumerAssignmentChild(next, model.PlatformArtifactKindDNSAnswerBundle)
+	if err != nil {
+		return err
+	}
+	changed, err := hostedDNSProbePathsChanged(before, after)
+	if err != nil || !changed {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	return s.checkGlobalHostedPathTransition(ctx)
+}
+
+// Match existing hosted address records by owner, not just by hostname.
+// New and removed domains, external records and deployment-only digest
+// changes must not block unrelated publications during a binary rollout.
+func hostedDNSProbePathsChanged(before, after model.PlatformArtifact) (bool, error) {
+	type owner struct{ host, app, tenant string }
+	type evidence struct {
+		owners map[owner]bool
+		paths  map[string]map[string]bool
+	}
+	read := func(artifact model.PlatformArtifact) (evidence, error) {
+		data, err := json.Marshal(struct {
+			Records any `json:"records"`
+			Plan    any `json:"readiness_plan"`
+		}{artifact.Content["records"], artifact.Content["readiness_plan"]})
+		var payload struct {
+			Records []platformconfig.DNSIntent       `json:"records"`
+			Plan    *platformconfig.DNSReadinessPlan `json:"readiness_plan"`
+		}
+		if err != nil || json.Unmarshal(data, &payload) != nil {
+			return evidence{}, errors.New("hosted DNS transition input is invalid")
+		}
+		out := evidence{map[owner]bool{}, map[string]map[string]bool{}}
+		for _, record := range payload.Records {
+			if record.RecordKind == "hosted" && (record.Type == "A" || record.Type == "AAAA") &&
+				record.Hostname != "" && record.AppID != "" && record.TenantID != "" {
+				out.owners[owner{record.Hostname, record.AppID, record.TenantID}] = true
+			}
+		}
+		if payload.Plan != nil {
+			for _, probe := range payload.Plan.Probes {
+				if out.paths[probe.Hostname] == nil {
+					out.paths[probe.Hostname] = map[string]bool{}
+				}
+				out.paths[probe.Hostname][probe.Path] = true
+			}
+		}
+		return out, nil
+	}
+	old, err := read(before)
+	if err != nil {
+		return false, err
+	}
+	current, err := read(after)
+	if err != nil {
+		return false, err
+	}
+	for key := range old.owners {
+		if current.owners[key] && !maps.Equal(old.paths[key.host], current.paths[key.host]) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Server) checkProjectHostWorkerTLS(ctx context.Context) error {

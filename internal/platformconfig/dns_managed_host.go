@@ -13,6 +13,11 @@ const managedHostDNSBindingsField = "managed_host_dns_bindings"
 // signed route publication while preserving the active DNS record's owner.
 const DNSManagedHostContinuityCapabilityV1 = "dns_managed_host_continuity_v1"
 
+// DNSHostedPathTransitionCapabilityV1 is the global authoritative DNS
+// consumer's support for keeping an unchanged hosted address RRset usable
+// with exact successor proofs when a signed publication changes its paths.
+const DNSHostedPathTransitionCapabilityV1 = "dns_hosted_path_transition_v1"
+
 // A route publication can explicitly authorize the same managed DNS owner to
 // follow its exact set of paths. Neither a TLS allowlist nor same-tenant routes
 // alone authorize a change to an older DNS configuration.

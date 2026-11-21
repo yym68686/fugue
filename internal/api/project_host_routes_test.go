@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/schemamigrate"
 	"fugue/internal/store"
 )
@@ -144,7 +145,7 @@ func TestProjectHostRouteStatusPreflightDoesNotApplyManagedChange(t *testing.T) 
 	}{
 		{token, "?preflight=true", http.StatusForbidden, "", ""},
 		{admin, "", http.StatusOK, "", ""},
-		{admin, "?preflight=true", http.StatusOK, "blocked", errProjectHostDNSContinuity.Error()},
+		{admin, "?preflight=true", http.StatusOK, "blocked", platformconfig.DNSHostedPathTransitionCapabilityV1},
 	} {
 		rec := performJSONRequest(t, srv, http.MethodPost, base+"host-status"+tc.suffix, tc.credential, plan)
 		if rec.Code != tc.code {
@@ -155,7 +156,7 @@ func TestProjectHostRouteStatusPreflightDoesNotApplyManagedChange(t *testing.T) 
 			mustDecodeJSON(t, rec, &status)
 			if status.State != "pending" || !strings.Contains(status.Reason, "has not been applied") ||
 				(tc.state == "" && status.ApplyPreflight != nil) ||
-				(tc.state != "" && (status.ApplyPreflight == nil || status.ApplyPreflight.State != tc.state || status.ApplyPreflight.Reason != tc.reason)) {
+				(tc.state != "" && (status.ApplyPreflight == nil || status.ApplyPreflight.State != tc.state || !strings.Contains(status.ApplyPreflight.Reason, tc.reason))) {
 				t.Fatalf("unexpected status: %+v, preflight: %+v", status, status.ApplyPreflight)
 			}
 		}

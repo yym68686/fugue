@@ -10,7 +10,7 @@ import (
 )
 
 func TestProjectHostDNSContinuityRequiresAllLiveConsumers(t *testing.T) {
-	for _, name := range []string{"both_ready", "old_binary", "stale", "no_receipt", "unexpected", "missing"} {
+	for _, name := range []string{"both_ready", "old_binary", "legacy_continuity", "stale", "no_receipt", "unexpected", "missing"} {
 		t.Run(name, func(t *testing.T) {
 			fact := &model.PlatformConsumerInstance{CompatibilityCapabilities: []string{platformconfig.DNSManagedHostContinuityCapabilityV1}}
 			status := model.PlatformConsumerConvergenceStatus{Pass: true, RequiredExpected: 2, RequiredPassing: 2, Assessments: []model.PlatformConsumerEvidenceAssessment{
@@ -29,15 +29,61 @@ func TestProjectHostDNSContinuityRequiresAllLiveConsumers(t *testing.T) {
 			case "missing":
 				status.Assessments = status.Assessments[:1]
 			}
-			if ready := projectHostConsumersReady(status, platformconfig.DNSManagedHostContinuityCapabilityV1); ready != (name == "both_ready") {
+			if ready := projectHostConsumersReady(status, platformconfig.DNSManagedHostContinuityCapabilityV1); ready != (name == "both_ready" || name == "legacy_continuity") {
 				t.Fatalf("ready=%t for %s", ready, name)
+			}
+			if projectHostConsumersReady(status, platformconfig.DNSHostedPathTransitionCapabilityV1) {
+				t.Fatal("standby or legacy continuity was mistaken for global path-transition support")
+			}
+			if name == "both_ready" {
+				fact.CompatibilityCapabilities = append(fact.CompatibilityCapabilities, platformconfig.DNSHostedPathTransitionCapabilityV1)
+				if !projectHostConsumersReady(status, platformconfig.DNSHostedPathTransitionCapabilityV1) {
+					t.Fatal("two fresh required witnesses did not admit global path-transition support")
+				}
 			}
 			if projectHostConsumersReady(status, platformcontrol.SharedCustomHostTLSCapabilityV1) {
 				t.Fatal("DNS continuity cannot substitute for the Worker TLS capability")
 			}
 			fact.CompatibilityCapabilities = append(fact.CompatibilityCapabilities, platformcontrol.SharedCustomHostTLSCapabilityV1)
-			if ready := projectHostConsumersReady(status, platformcontrol.SharedCustomHostTLSCapabilityV1); ready != (name == "both_ready") {
+			if ready := projectHostConsumersReady(status, platformcontrol.SharedCustomHostTLSCapabilityV1); ready != (name == "both_ready" || name == "legacy_continuity") {
 				t.Fatalf("worker ready=%t for %s", ready, name)
+			}
+		})
+	}
+}
+
+func TestHostedDNSProbePathGuardIgnoresUnrelatedPublicationChanges(t *testing.T) {
+	host := "app.example.test"
+	dnsArtifact := func(name, owner, tenant, kind, digest string, paths ...string) model.PlatformArtifact {
+		plan := platformconfig.DNSReadinessPlan{}
+		for _, path := range paths {
+			plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{Hostname: name, Path: path, RouteDigest: digest})
+		}
+		return model.PlatformArtifact{Content: map[string]any{
+			"records":        []platformconfig.DNSIntent{{Hostname: name, AppID: owner, TenantID: tenant, Type: "A", RecordKind: kind}},
+			"readiness_plan": plan,
+		}}
+	}
+	single := dnsArtifact(host, "api", "tenant", "hosted", "old", "/")
+	shared := dnsArtifact(host, "api", "tenant", "hosted", "new", "/", "/api")
+	for _, tc := range []struct {
+		name          string
+		before, after model.PlatformArtifact
+		want          bool
+	}{
+		{"split", single, shared, true},
+		{"rollback merge", shared, single, true},
+		{"change shared path", shared, dnsArtifact(host, "api", "tenant", "hosted", "new", "/", "/next"), true},
+		{"digest and membership only", shared, dnsArtifact(host, "api", "tenant", "hosted", "newer", "/api", "/", "/"), false},
+		{"new or removed hostname", single, dnsArtifact("other.example.test", "api", "tenant", "hosted", "new", "/", "/api"), false},
+		{"external DNS", single, dnsArtifact(host, "api", "tenant", "static", "new", "/", "/api"), false},
+		{"separate owner", single, dnsArtifact(host, "new", "tenant", "hosted", "new", "/", "/api"), false},
+		{"separate tenant", single, dnsArtifact(host, "api", "other", "hosted", "new", "/", "/api"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := hostedDNSProbePathsChanged(tc.before, tc.after)
+			if err != nil || got != tc.want {
+				t.Fatalf("transition=%t, want %t; err=%v", got, tc.want, err)
 			}
 		})
 	}

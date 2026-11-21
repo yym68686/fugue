@@ -59,7 +59,8 @@ func dnsExecutionCapabilities() []string {
 }
 
 func dnsPlatformExecutionCapabilities() []string {
-	return append(dnsLegacyPlatformExecutionCapabilities(), platformcontrol.PhysicalLastValidCapabilityV8, platformconfig.DNSManagedHostContinuityCapabilityV1)
+	return append(dnsLegacyPlatformExecutionCapabilities(), platformcontrol.PhysicalLastValidCapabilityV8,
+		platformconfig.DNSManagedHostContinuityCapabilityV1, platformconfig.DNSHostedPathTransitionCapabilityV1)
 }
 
 func dnsLegacyPlatformExecutionCapabilities() []string {

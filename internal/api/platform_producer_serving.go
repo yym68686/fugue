@@ -212,6 +212,15 @@ func (s *Server) resumeProducedShadow(ctx context.Context, policy platformproduc
 	if _, err = s.preparePlatformReleaseSetConsumers(ctx, platformProducerPrincipal(), parent, shadow); err == nil {
 		err = s.stageProducedTraffic(ctx, policy, authority, parent)
 		stage := store.PlatformReleaseFailureStage(err)
+		if errors.Is(err, errProjectHostDNSContinuity) && ctx.Err() == nil {
+			// The caller only resumes a shadow inside its original timeout.
+			// Avoid replacing a still-current signed shadow every time
+			// the selected global listeners are on the old binary.
+			if s.log != nil {
+				s.log.Printf("producer waiting on hosted DNS path transition capability artifact=%s release=%s: %v", parent.ID, shadow.ID, err)
+			}
+			return true, nil
+		}
 		if keepDNSShadowForRetryableAdmission(policy, shadow, stage, time.Now()) && ctx.Err() == nil {
 			// The next reconcile checks the same signed candidate. Do not
 			// repeatedly move the fence while the consumers are still probing.
@@ -246,6 +255,9 @@ func (s *Server) stageProducedTraffic(ctx context.Context, policy platformproduc
 		return err
 	}
 	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.recheckProducedHostedPathTransition(ctx, state.fullArtifact, parent); err != nil {
 		return err
 	}
 	if err := s.recheckTrafficWithdrawal(ctx, parent, state.fullArtifact); err != nil {
