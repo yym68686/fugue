@@ -47,7 +47,7 @@ class TransportTests(unittest.TestCase):
                 self.assertEqual(sum(p.get('containerPort') == listener['targetPort'] and
                                      p.get('protocol', 'TCP') == protocol for p in ports), 1)
 
-    def test_staged_dns_recovery_executor_has_no_public_listener_or_shared_checkpoint(self):
+    def test_staged_dns_receivers_isolate_rollback_from_the_declared_listener_target(self):
         root = Path(__file__).resolve().parents[1]
         resources = root / 'deploy/releases'
         config = transport.load_config(root / 'deploy/environments/production/dns-transport/transport.json')
@@ -60,24 +60,29 @@ class TransportTests(unittest.TestCase):
         def cache(template):
             return next(v['hostPath']['path'] for v in template['spec']['volumes'] if v['name'] == 'dns-cache')
 
-        spare = placement('g')
-        self.assertFalse(spare['spec'].get('hostNetwork'))
-        self.assertTrue(spare['spec']['nodeSelector'].get('kubernetes.io/hostname'))
-        self.assertFalse(any(port.get('hostPort') for c in spare['spec']['containers'] for port in c['ports']))
-        self.assertEqual(len({cache(spare), cache(placement('e')), cache(placement('f'))}), 3)
-        self.assertFalse(any(all(spare['metadata']['labels'].get(k) == v for k, v in listener['selector'].items())
-                             for listener in config['listeners'] if listener['port'] == 53))
-        # The independent rollback executor must not share any slot identity or
-        # persistent state with the staged candidate or the failed incumbent.
-        rollback = placement('h')
         cohort = [placement(slot) for slot in ('e', 'f', 'g', 'h')]
         self.assertEqual(len({cache(slot) for slot in cohort}), len(cohort))
         self.assertEqual(len({slot['spec']['serviceAccountName'] for slot in cohort}), len(cohort))
-        self.assertEqual(rollback['spec']['nodeSelector'], spare['spec']['nodeSelector'])
-        self.assertFalse(rollback['spec'].get('hostNetwork'))
-        self.assertFalse(any(port.get('hostPort') for c in rollback['spec']['containers'] for port in c['ports']))
-        self.assertFalse(any(all(rollback['metadata']['labels'].get(k) == v for k, v in listener['selector'].items())
-                             for listener in config['listeners']))
+        def matches(slot, selector):
+            return all(slot['metadata']['labels'].get(k) == v for k, v in selector.items())
+        for slot in cohort:
+            self.assertFalse(slot['spec'].get('hostNetwork'))
+            self.assertFalse(any(p.get('hostPort') for c in slot['spec']['containers'] for p in c['ports']))
+        for slot in cohort[-2:]:
+            self.assertTrue(slot['spec']['nodeSelector'].get('kubernetes.io/hostname'))
+        # A former spare can become the serving slot. The declared fallback,
+        # not a slot letter, must remain disjoint from *every* listener.
+        for stage in config.get('handoffs', []):
+            rollback_selector = stage.get('recovery_fallback', {}).get('selector')
+            listeners = [x for x in config['listeners'] if x['address'] == stage['address']]
+            targets = [s for s in cohort if any(matches(s,x['selector']) for x in listeners)]
+            if not targets or not rollback_selector:
+                continue
+            self.assertEqual(len(targets), 1)
+            self.assertTrue(all(matches(targets[0], x['selector']) for x in listeners))
+            rollback, = [s for s in cohort if matches(s, rollback_selector)]
+            self.assertTrue(targets[0]['spec']['nodeSelector'].items() <= rollback['spec']['nodeSelector'].items())
+            self.assertFalse(any(matches(rollback, x['selector']) for x in config['listeners']))
 
     def config(self):
         return {"apiVersion": "transport.fugue.dev/v1", "kind": "DNSLocalTransport", "generation": 1,
