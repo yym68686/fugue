@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 TRANSPORT_DECLARATION = 'deploy/environments/production/dns-transport/transport.json'
+LEDGER_INSPECTION = 'deploy/environments/production/dns-transport/ledger-inspection.json'
 TRANSPORT_EXECUTORS = {
     'scripts/reconcile_dns_transport.py',
     'scripts/recover_dns_transport.py',
@@ -17,7 +18,7 @@ TRANSPORT_EXECUTORS = {
 def select(paths):
     paths = set(paths)
     return {
-        'transport': bool(paths & (TRANSPORT_EXECUTORS | {TRANSPORT_DECLARATION})),
+        'transport': bool(paths & (TRANSPORT_EXECUTORS | {TRANSPORT_DECLARATION, LEDGER_INSPECTION})),
         'ports': any(path.startswith('deploy/environments/production/dns-port-retirement/') for path in paths),
         'slots': 'deploy/environments/production/dns-slot-retirement/intent.json' in paths,
     }

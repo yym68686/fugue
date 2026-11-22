@@ -24,7 +24,14 @@ def utc_timestamp(value):
 
 
 def validate_rollback(snapshot, publication, lkg, reference, now=None):
-    """Check current full selection, without changing its verification verdict."""
+    """Recovery requires BOTH live readiness and the exact historical binding."""
+    if snapshot.get("ready") is not True:
+        raise ValueError("DNS transport backend is not ready for the exact current full rollback")
+    validate_rollback_binding(snapshot, publication, lkg, reference, now)
+
+
+def validate_rollback_binding(snapshot, publication, lkg, reference, now=None):
+    """Read-only identity check. It does not establish runtime readiness."""
     validate_reference(reference)
     now = now or datetime.datetime.now(datetime.timezone.utc)
     artifact, release = publication.get("artifact", {}), publication.get("release", {})
@@ -32,7 +39,7 @@ def validate_rollback(snapshot, publication, lkg, reference, now=None):
     generation = artifact.get("generation")
     identity = {"artifact_id": reference["artifact_id"], "artifact_kind": "release_set", "scope_key": "global",
                 "generation": generation}
-    if (not generation or snapshot.get("ready") is not True or
+    if (not generation or
             artifact.get("status") != "validated" or artifact.get("id") != reference["artifact_id"] or
             artifact.get("artifact_kind") != "release_set" or artifact.get("scope_key") != "global" or
             artifact.get("content_hash") != reference["parent_digest"] or

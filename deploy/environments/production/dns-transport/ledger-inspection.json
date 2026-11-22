@@ -1,0 +1,19 @@
+{
+  "schema": "fugue.dns.rollback-ledger-inspection/v1",
+  "namespace": "fugue-system",
+  "node": "vps-84c8f0a9",
+  "node_uid": "5fc22742-672c-48e3-b847-60726919f16c",
+  "api_address": "15.204.94.71",
+  "rollback": {
+    "artifact_id": "artifact_1795225327_3c4aa1e74666",
+    "parent_digest": "sha256:72a8d99c11b5d05116243504223a54818aeb88976821c1367225f21297188117",
+    "release_id": "artifactrel_1795229972_9235ef8371cd",
+    "fencing_token": 9059,
+    "lkg_release_id": "artifactrel_1795229016_c643f9afd45f",
+    "lkg_evidence_hash": "sha256:d94bb57afc82d306b70c92e383761054e4be35b77de18585eb27b83e2f238e9a"
+  },
+  "backends": [
+    {"component":"dns-de-g","service_account":"fugue-dns-de-g","pod_uid":"43e40bc0-4c09-41cc-9aeb-8fb0e95a6d6f","target_port":53,"revision":"c63ea1f53f6ba44c220eeac07b683b057a64e6d3","image":"ghcr.io/yym68686/fugue-edge@sha256:5b2036583df445f60048b43b4c973f61e17d251b5cd2e637541f9bce3802718c"},
+    {"component":"dns-de-h","service_account":"fugue-dns-de-h","pod_uid":"c9e66cab-2d80-4ba3-b9e1-fe1285b1d322","target_port":53,"revision":"05f53a5bda77c99a59e2ae63e1622a58a40a8911","image":"ghcr.io/yym68686/fugue-edge@sha256:8320f48c768e509364830853969a9b22af0c8d2e7f05d77c25b6b564d0d14f61"}
+  ]
+}

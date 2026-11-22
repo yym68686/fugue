@@ -3162,6 +3162,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.before }}
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+          FUGUE_LEDGER_API_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN }}
         run: |
           set -euo pipefail
           config=deploy/environments/production/dns-transport/transport.json
@@ -3171,6 +3172,18 @@ jobs:
           fi
           python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_inspect_dns_predecessor scripts.test_dns_transport_failed_predecessor scripts.test_dns_transport_rollback_authority scripts.test_verify_dns_configuration_revision scripts.test_select_dns_configuration
           declaration_delta="$(git diff --name-only "$base" HEAD -- "$config")"
+          inspection=deploy/environments/production/dns-transport/ledger-inspection.json
+          inspection_delta="$(git diff --name-only "$base" HEAD -- "$inspection")"
+          if [[ -f "$inspection" && -n "$inspection_delta" ]]; then
+            if [[ -n "$declaration_delta" ]]; then echo "Ledger inspection must be isolated from listener mutations." >&2; exit 1; fi
+            git fetch origin main
+            python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport
+            git diff --quiet HEAD origin/main -- "$inspection" scripts/inspect_dns_rollback_ledger.py
+            python3 -m unittest scripts.test_inspect_dns_rollback_ledger
+            echo 'inspected=true' >> "$GITHUB_OUTPUT"
+            python3 -m scripts.inspect_dns_rollback_ledger "$inspection" | tee "$RUNNER_TEMP/dns-rollback-ledger-inspection.json"
+            exit 0
+          fi
           if [[ -z "$declaration_delta" ]]; then
             echo "DNS transport tooling validated; no new listener declaration to apply."
             exit 0
@@ -3191,6 +3204,14 @@ jobs:
           fi
           echo 'selected=true' >> "$GITHUB_OUTPUT"
           python3 -m scripts.reconcile_dns_transport "$config" --evidence "$RUNNER_TEMP/dns-transport-prewrite.json"
+      - name: Retain read-only DNS rollback ledger inspection
+        if: always() && steps.dns_transport.outputs.inspected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-dns-rollback-ledger-inspection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/dns-rollback-ledger-inspection.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Retain DNS transport prewrite witness
         if: always() && steps.dns_transport.outputs.selected == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
