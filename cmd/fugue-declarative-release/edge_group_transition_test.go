@@ -19,10 +19,48 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgecontrol"
 	"fugue/internal/releaseguardian"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stest "k8s.io/client-go/testing"
 )
+
+func TestEdgeWorkloadRefusesDurableFrontRepairFence(t *testing.T) {
+	const group, namespace = "edge-group-fixture", "fixture-system"
+	for _, tc := range []struct {
+		name, kind, owner string
+		readError         bool
+		wantError         bool
+	}{
+		{name: "no fence"},
+		{name: "ordinary label without a valid prepared journal", kind: "transition-journal", owner: group, wantError: true},
+		{name: "durable repair", kind: releaseguardian.FrontRepairJournalKind, owner: group, wantError: true},
+		{name: "mismatched owner", kind: "transition-journal", owner: "edge-group-other", wantError: true},
+		{name: "unexpected kind", kind: "unknown", owner: group, wantError: true},
+		{name: "cannot read", readError: true, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tc.kind != "" {
+				objects = append(objects, &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{
+					"name": releaseguardian.FrontRepairFenceName(group), "namespace": namespace,
+					"labels": map[string]any{"fugue.pro/group": tc.owner, "fugue.pro/authority-kind": tc.kind},
+				}}})
+			}
+			client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
+			if tc.readError {
+				client.PrependReactor("get", "configmaps", func(action k8stest.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "configmaps"}, releaseguardian.FrontRepairFenceName(group), errors.New("fixture denied"))
+				})
+			}
+			if err := requireEdgeWorkloadNoFrontRepair(context.Background(), client, namespace, group); (err != nil) != tc.wantError {
+				t.Fatalf("unexpected release gate decision: %v", err)
+			}
+		})
+	}
+}
 
 func TestExactFrontConnectionCountRequiresCompleteUniqueInventory(t *testing.T) {
 	active := []any{map[string]any{"id": "conn-a"}, map[string]any{"id": "conn-b"}}

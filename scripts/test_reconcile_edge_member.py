@@ -53,6 +53,44 @@ def inactive_fixture():
 
 
 class MemberRecoveryTest(unittest.TestCase):
+    def test_member_writers_do_not_enter_after_repair_lease_expiry(self):
+        c, _, _, _ = fixture()
+        for blocker in ('prepared', 'activated', 'unreadable', ''):
+            with self.subTest(blocker=blocker):
+                recovery = Recovery(c)
+                patched = []
+                reads = []
+
+                def get(kind, name):
+                    self.assertEqual(kind, 'lease')
+                    return {'metadata': {'uid': name + '-uid', 'resourceVersion': '1'}, 'spec': {'leaseDurationSeconds': 120}}
+
+                def kube(*args):
+                    if args[2:4] == ('get', 'configmap'):
+                        self.assertEqual(len(patched), 2, 'fence check must happen under both locks')
+                        phase = next(phase for phase in ('prepared', 'activated') if args[4] == 'fugue-authority-transition-' + phase + '-' + c['group'])
+                        self.assertIn('--ignore-not-found', args)
+                        reads.append(phase)
+                        if blocker == 'unreadable':
+                            raise subprocess.CalledProcessError(1, 'kubectl')
+                        return 'configmap/' + args[4] if blocker == phase else ''
+                    self.assertEqual(args[2:4], ('patch', 'lease'))
+                    operations = json.loads(args[args.index('-p') + 1])
+                    name = args[4]
+                    patched.append((name, operations[-1]['path']))
+                    return json.dumps({'metadata': {'name': name, 'uid': name + '-uid', 'resourceVersion': '2'}})
+
+                with patch.object(recovery, 'get', side_effect=get), patch.object(recovery, 'kube', side_effect=kube):
+                    if blocker:
+                        with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                            with recovery.leases():
+                                self.fail('membership write was not blocked')
+                    else:
+                        with recovery.leases():
+                            self.assertEqual(reads, ['prepared', 'activated'])
+                self.assertEqual([operation for _, operation in patched], ['/spec', '/spec', '/spec/holderIdentity', '/spec/holderIdentity'])
+                self.assertEqual([name for name, _ in patched[:2]], [name for name, _ in reversed(patched[2:])])
+
     def test_read_only_serving_front_cannot_be_the_activation_writer(self):
         c, _, _, _ = fixture()
         mount = dict(name='state', mountPath='/var/lib/fugue-edge-front')

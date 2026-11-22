@@ -64,18 +64,12 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if authority.UID == "" || authority.DeletionTimestamp != nil || authority.Labels["fugue.pro/authority-store"] != "true" {
 		return fail("code_identity_conflict", "authority_metadata")
 	}
-	// Guardian's protocol has exactly two journal names. Reading those
-	// objects needs no ConfigMap enumeration permission. Only authenticated
-	// not-found responses establish absence; authorization/transport errors do not.
-	for _, prefix := range []string{"fugue-authority-transition-prepared-", "fugue-authority-transition-activated-"} {
-		var journal corev1.ConfigMap
-		err := readCapacityMetadata(ctx, client, base+"/configmaps/"+url.PathEscape(prefix+edge.EdgeGroupID), &journal)
-		if err == nil {
-			return fail("code_transition_in_progress", "transition_journal")
-		}
-		if !errors.Is(err, errCapacityMetadataNotFound) {
-			return fail("code_observation_unavailable", "transition_journal")
-		}
+	pending, err := edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID)
+	if err != nil {
+		return fail("code_observation_unavailable", "transition_journal")
+	}
+	if pending {
+		return fail("code_transition_in_progress", "transition_journal")
 	}
 	if !read(base+"/services?limit=256", &services) || services.Continue != "" {
 		return fail("code_observation_unavailable", "service_inventory")
@@ -221,6 +215,20 @@ func runningCapacityImage(pod corev1.Pod, containerName string) string {
 }
 
 var errCapacityMetadataNotFound = errors.New("capacity metadata object not found")
+
+// Either journal name implies an unsettled cohort, including the prepared
+// name claimed by Front repair. Only an authenticated not-found proves absence.
+func edgeAuthorityTransitionPending(ctx context.Context, client *clusterNodeClient, namespace, group string) (bool, error) {
+	base := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/configmaps/"
+	for _, phase := range []string{"prepared", "activated"} {
+		var journal corev1.ConfigMap
+		err := readCapacityMetadata(ctx, client, base+url.PathEscape("fugue-authority-transition-"+phase+"-"+group), &journal)
+		if !errors.Is(err, errCapacityMetadataNotFound) {
+			return err == nil, err
+		}
+	}
+	return false, nil
+}
 
 // Kubernetes metadata is trusted for identity, but every response still has a
 // memory bound. Unlike the exact Front health contract, Kubernetes objects may

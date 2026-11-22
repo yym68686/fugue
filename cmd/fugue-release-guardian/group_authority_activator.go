@@ -193,7 +193,7 @@ func (activator *groupAuthorityActivator) BeginPromote(ctx context.Context, targ
 		!exactSHA256Digest(target.PublishedBundleDigest) || strings.TrimSpace(target.PreviousServingGeneration) == "" {
 		return nil, errors.New("group authority promotion target is invalid")
 	}
-	lease, err := activator.front.acquireLease(ctx)
+	lease, err := activator.front.acquireOrdinaryAuthorityLease(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +263,7 @@ func (activator *groupAuthorityActivator) BeginRestore(ctx context.Context, curr
 }
 
 func (activator *groupAuthorityActivator) Finalize(ctx context.Context) error {
-	lease, err := activator.front.acquireLease(ctx)
+	lease, err := activator.front.acquireOrdinaryAuthorityLease(ctx)
 	if err != nil {
 		return err
 	}
