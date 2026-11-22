@@ -285,6 +285,30 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 	// Count physical artifact reads across discovery AND the independent
 	// authority recheck. A serving-only reader cannot use a shadow artifact.
 	claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", AuthorityID: "cell-dns", ScopeKey: "authority-cell:cell-dns", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
+	t.Run("exact source owner does not load unrelated lanes", func(t *testing.T) {
+		var current model.PlatformConsumerAssignmentResponse
+		mustDecodeJSON(t, servingOnly, &current)
+		if len(current.Assignments) != 1 {
+			t.Fatal("expected one selected consumer")
+		}
+		a := current.Assignments[0]
+		counts := map[string]int{}
+		load := s.store.NewPlatformArtifactReadSession()
+		got, err := s.assignedDNSRouteSourceOwnerContext(t.Context(), claims, a.ArtifactID, a.ExpectedConsumerSetID, func(id string) (model.PlatformArtifact, error) {
+			counts[id]++
+			if id == cold.DNSArtifact.ID || id == cold.ReleaseArtifact.ID {
+				return model.PlatformArtifact{}, store.ErrConflict
+			}
+			return load(id)
+		})
+		if err != nil || got.Assignment.ExpectedConsumerSetID != a.ExpectedConsumerSetID || counts[cold.ReleaseArtifact.ID]+counts[cold.DNSArtifact.ID] != 0 || counts[compiled.ReleaseArtifact.ID] < 2 {
+			t.Fatalf("wrong lookup or skipped fresh selection: reads=%v err=%v", counts, err)
+		}
+		t.Logf("exact source reads: shadow parent/child=0; serving parent=%d", counts[compiled.ReleaseArtifact.ID])
+		if _, err := s.assignedDNSRouteSourceOwnerContext(t.Context(), claims, a.ArtifactID, coldSet.ID, load); !errors.Is(err, store.ErrNotFound) {
+			t.Fatal("foreign set exposed other lane", err)
+		}
+	})
 	for _, only := range []bool{true, false} {
 		counts := map[string]int{}
 		items, _, readErr := s.readCheckedConsumerAssignments(context.Background(), claims, only, time.Now(), func() func(string) (model.PlatformArtifact, error) {

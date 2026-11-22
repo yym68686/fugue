@@ -1328,15 +1328,18 @@ func (s *Server) resolvePlatformConsumerAssignmentsWithReaderContext(ctx context
 }
 
 func (s *Server) resolveConsumerAssignmentLanes(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error), servingOnly bool) ([]consumerArtifactLookup, error) {
+	lanes := []string{model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull}
+	if !servingOnly {
+		lanes = append([]string{model.PlatformArtifactReleaseChannelShadow}, lanes...)
+	}
+	return s.resolveConsumerAssignmentChannels(ctx, claims, readArtifact, lanes)
+}
+
+func (s *Server) resolveConsumerAssignmentChannels(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, readArtifact func(string) (model.PlatformArtifact, error), lanes []string) ([]consumerArtifactLookup, error) {
 	defer s.observeOperation("consumer-resolve")()
 	assignments := make([]consumerArtifactLookup, 0)
 	validatedParents := map[string]bool{}
-	for _, channel := range []string{model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull} {
-		// Shadow can never be selected for serving. Do not make its
-		// independent publication tree a dependency of a serving-only read.
-		if servingOnly && channel == model.PlatformArtifactReleaseChannelShadow {
-			continue
-		}
+	for _, channel := range lanes {
 		releaseSet, release, found, err := s.store.GetActivePlatformArtifactWithReaderContext(ctx, model.PlatformArtifactKindReleaseSet, claims.ScopeKey, channel, readArtifact)
 		if err != nil {
 			return nil, errors.New("consumer release assignment unavailable")

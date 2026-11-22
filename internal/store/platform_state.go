@@ -930,12 +930,21 @@ func (s *Store) CurrentFullRollbackMessage(ctx context.Context, expected model.P
 // Consumers use this read-only lookup to bind runtime evidence to the exact
 // fencing token selected by the release controller.
 func (s *Store) GetPlatformArtifactRelease(id string) (model.PlatformArtifactRelease, error) {
+	return s.GetPlatformArtifactReleaseContext(context.Background(), id)
+}
+
+func (s *Store) GetPlatformArtifactReleaseContext(ctx context.Context, id string) (model.PlatformArtifactRelease, error) {
 	id = strings.TrimSpace(id)
 	if s == nil || id == "" {
 		return model.PlatformArtifactRelease{}, ErrInvalidInput
 	}
+	if err := ctx.Err(); err != nil {
+		return model.PlatformArtifactRelease{}, err
+	}
 	if s.usingDatabase() {
-		return s.pgGetPlatformArtifactReleaseByID(id)
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return pgGetPlatformArtifactRelease(ctx, s.db, id, false)
 	}
 	var out model.PlatformArtifactRelease
 	err := s.withLockedState(false, func(state *model.State) error {
