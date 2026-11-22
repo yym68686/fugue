@@ -1,12 +1,12 @@
 {
-  "preview_attempt": 2,
+  "preview_attempt": 3,
   "apiVersion": "transport.fugue.dev/v4",
   "generation": 99,
   "handoffs": [
     {
       "address": "51.38.126.103",
       "previous_revision": "b23fdf448b82b89c3e20cb63a6827e3c676df451",
-      "candidate_revision": "999a023f1ed81d3e1af402e9d936022c44a577bf",
+      "candidate_revision": "98f7098802572205ed731d8833ba4f523a650bfd",
       "recovery_fallback": {
         "selector": {
           "app.kubernetes.io/component": "dns-de-h",
@@ -21,7 +21,7 @@
         "public_service_uid": "be149bb0-24a0-4835-9f82-40aae5645323",
         "diagnostic_service_uid": "c6d910fa-e7ae-4ae0-8b1f-ff132417b1eb",
         "pod_uid": "847ee18b-f722-4ba6-b7a1-1777303661e7",
-        "candidate_pod_uid": "2a994bae-3fa7-4392-868b-f58a216a3833",
+        "candidate_pod_uid": "14d61753-9e68-4d15-b091-75bf38e034c2",
         "release_id": "artifactrel_1795229322_9092a1b3571a",
         "parent_digest": "sha256:95af9c85f1d1bba45899951ec4eb03235269086d09658610d990728bb8c03f41",
         "fencing_token": 9048,
