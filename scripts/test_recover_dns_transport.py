@@ -12,6 +12,53 @@ from scripts import test_reconcile_dns_transport as fixtures
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_only_same_publication_forward_renewal_can_repeat_complete_serving_verification(self):
+        pod = {'metadata': {'name':'receiver','uid':'id','resourceVersion':'8'},
+               'status': {'phase':'Running','conditions':[{'type':'Ready','status':'True'}]}}
+        initial = {'checkpoint':{'applied_at':'2020-01-01T00:00:00Z', 'signature':'first',
+                                 'parent':{'content_hash':'parent'},'candidate':{'assignment':{'fence':1}}},
+                   'snapshot':{'assignment':{'fence':1},'checkpoint_valid_until':'2020-01-01T00:03:00Z',
+                               'node_id':'node','facts':['old']}}
+        for case in ('ok','same_disk','older_disk','new_parent','new_disk_assignment','new_assignment',
+                     'new_deadline','new_node','pod_before','pod_after','bad_fresh_signature',
+                     'other_failure','wrong_signature','unready_verifier','trust_change','still_wrong_authority'):
+            with self.subTest(case=case):
+                new = copy.deepcopy(initial)
+                new['checkpoint'].update(applied_at='2020-01-01T00:01:00Z', signature='second')
+                new['snapshot']['facts'] = ['fresh']
+                if case == 'same_disk': new['checkpoint']['applied_at'] = initial['checkpoint']['applied_at']
+                if case == 'older_disk': new['checkpoint']['applied_at'] = '2019-01-01T00:00:00Z'
+                if case == 'new_parent': new['checkpoint']['parent'] = {}
+                if case == 'new_disk_assignment': new['checkpoint']['candidate'] = {}
+                if case == 'new_assignment': new['snapshot']['assignment'] = {}
+                if case == 'new_deadline': new['snapshot']['checkpoint_valid_until'] = '2020-01-01T00:04:00Z'
+                if case == 'new_node': new['snapshot']['node_id'] = 'replacement'
+                if case == 'trust_change': new['signing_key_id'] = 'replacement'
+                pods = [copy.deepcopy(pod),copy.deepcopy(pod)]
+                if case.startswith('pod_'): pods[int(case=='pod_after')]['metadata']['uid'] = 'other'
+                fault = recovery.DNSObservationRejected({'other_failure':'temporal_ordering',
+                    'wrong_signature':'artifact_authentication'}.get(case,'authority_mismatch'))
+                follow = recovery.DNSObservationRejected('positive_proof') if case == 'bad_fresh_signature' else None
+                bridge = fault if case == 'still_wrong_authority' else None
+                with patch.object(recovery,'candidate_request',side_effect=[initial,new]) as read, \
+                     patch.object(recovery,'verify_observation_input',side_effect=[fault,bridge,follow]) as verify, \
+                     patch.object(transport,'read_json',side_effect=pods),patch.object(recovery.time,'sleep'):
+                    method = recovery.verify_unready_predecessor if case=='unready_verifier' else recovery.verify_candidate
+                    call = lambda:method({'pod':pod},{'namespace':'dns'},'/protected/verify')
+                    if case == 'ok':
+                        call()
+                    else:
+                        with self.assertRaises(recovery.DNSObservationRejected): call()
+                    verified = 3 if case in ('ok','bad_fresh_signature','pod_after') else 2 if case == 'still_wrong_authority' else 1
+                    self.assertEqual(verify.call_count,verified)
+                    if verified >= 2:
+                        stitched = verify.call_args_list[1].args[0]
+                        self.assertIs(stitched['checkpoint'],new['checkpoint'])
+                        self.assertIs(stitched['snapshot'],initial['snapshot'])
+                    if verified == 3: self.assertIs(verify.call_args.args[0],new)
+                    self.assertEqual(read.call_count, 1 if case in ('pod_before','other_failure',
+                                     'wrong_signature','unready_verifier') else 2)
+
     def config(self):
         config = fixtures.TransportTests().config()
         config['apiVersion'] = 'transport.fugue.dev/v2'

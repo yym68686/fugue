@@ -5,6 +5,7 @@ import os
 from pathlib import PurePosixPath
 import re
 import subprocess
+import time
 import urllib.parse
 
 from scripts import reconcile_dns_transport as transport
@@ -143,7 +144,41 @@ def verify_expired_predecessor(candidate, config, verifier=None):
 def _verify_observation(candidate, config, verifier, mode, expected):
     verifier = observation_verifier(verifier)
     request = candidate_request(candidate, config)
-    verify_observation_input(request, verifier, mode, expected)
+    try:
+        verify_observation_input(request, verifier, mode, expected)
+    except DNSObservationRejected as error:
+        if mode or error.category != 'authority_mismatch':
+            raise
+        # A listener publishes the new in-memory observation before persisting
+        # its signed checkpoint. Retry only a forward, same-publication renewal,
+        # and never pass any facts from the rejected pair to the second check.
+        from scripts.dns_transport_rollback_authority import utc_timestamp
+        pod = candidate['pod']['metadata']
+        def same_pod():
+            actual = transport.read_json('get', 'pod', pod['name'], '-n', config['namespace'], '-o', 'json')
+            return (transport.ready_pod(actual) and all(pod.get(k) and actual['metadata'].get(k) == pod[k]
+                                                       for k in ('uid', 'resourceVersion')))
+        if not same_pod():
+            raise
+        time.sleep(2)
+        fresh = candidate_request(candidate, config)
+        a, b = request['checkpoint'], fresh['checkpoint']
+        if (utc_timestamp(b['applied_at']) <= utc_timestamp(a['applied_at']) or
+                {k:v for k,v in request.items() if k not in ('checkpoint','snapshot')} !=
+                {k:v for k,v in fresh.items() if k not in ('checkpoint','snapshot')} or
+                {k:v for k,v in a.items() if k not in ('signature','applied_at')} !=
+                {k:v for k,v in b.items() if k not in ('signature','applied_at')} or
+                any(request['snapshot'].get(k) != fresh['snapshot'].get(k) for k in
+                    ('node_id','edge_group_id','parent_digest','assignment','route_artifact_id',
+                     'plan_digest','route_sources','checkpoint_valid_until'))):
+            raise
+        # Prove that changing ONLY the checkpoint resolves the original
+        # rejection. Both snapshots and all their deadlines are untouched;
+        # the standard verifier authenticates both pairs on its own clock.
+        verify_observation_input({**request, 'checkpoint': b}, verifier, mode, expected)
+        verify_observation_input(fresh, verifier, mode, expected)
+        if not same_pod():
+            raise
 
 
 def observation_verifier(verifier):

@@ -1,6 +1,6 @@
 {
   "apiVersion": "transport.fugue.dev/v4",
-  "generation": 105,
+  "generation": 107,
   "handoffs": [
     {
       "address": "15.204.94.71",
@@ -56,5 +56,5 @@
     }
   ],
   "namespace": "fugue-system",
-  "rollback_generation": 106
+  "rollback_generation": 108
 }
