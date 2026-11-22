@@ -63,8 +63,9 @@ func (s *Server) checkGlobalHostedPathTransition(ctx context.Context) error {
 }
 
 // The producer can recapture saved intent without another CLI write, even
-// after a failed gray publication. Recheck the real selected global DNS
-// backends against the verified full publication before moving Edge traffic.
+// after a failed gray publication. The selected global DNS capability alone
+// is not sufficient: restoring owner-only routing would also require every
+// serving DNS authority to pass the normal managed-host continuity preflight.
 func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, next model.PlatformArtifact) error {
 	if next.ScopeKey != platformconfig.GlobalScopeKey || full.ScopeKey != next.ScopeKey ||
 		next.Content["publication_role"] == platformconfig.PublicationRoleCellDNS {
@@ -78,13 +79,15 @@ func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, 
 	if err != nil {
 		return err
 	}
+	return guardProducedHostedDNSPaths(ctx, before, after, s.checkProjectHostDNSContinuity)
+}
+
+func guardProducedHostedDNSPaths(ctx context.Context, before, after model.PlatformArtifact, rollbackDNS func(context.Context) error) error {
 	changed, err := hostedDNSProbePathsChanged(before, after)
 	if err != nil || !changed {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	return s.checkGlobalHostedPathTransition(ctx)
+	return rollbackDNS(ctx)
 }
 
 // Match existing hosted address records by owner, not just by hostname.

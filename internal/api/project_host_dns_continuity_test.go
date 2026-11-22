@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -8,6 +9,41 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 )
+
+func TestAutomaticHostedPathChangeRequiresTheRollbackDNSCheck(t *testing.T) {
+	record := platformconfig.DNSIntent{Hostname: "service.example.test", Type: "A", RecordKind: "hosted", AppID: "owner", TenantID: "tenant"}
+	graph := func(paths ...string) model.PlatformArtifact {
+		plan := platformconfig.DNSReadinessPlan{}
+		for _, path := range paths {
+			plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{Hostname: record.Hostname, Path: path})
+		}
+		return model.PlatformArtifact{Content: map[string]any{"records": []platformconfig.DNSIntent{record}, "readiness_plan": plan}}
+	}
+	unavailable := errors.New("required cell receipt is stale even though the global release is verified")
+	single, shared := graph("/"), graph("/", "/api")
+	for _, tc := range []struct {
+		name          string
+		before, after model.PlatformArtifact
+		fail, checked bool
+	}{
+		{"forward blocked", single, shared, true, true}, {"revert blocked", shared, single, true, true},
+		{"forward verified", single, shared, false, true}, {"no path change during DNS recovery", single, single, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := guardProducedHostedDNSPaths(context.Background(), tc.before, tc.after, func(context.Context) error {
+				calls++
+				if tc.fail {
+					return unavailable
+				}
+				return nil
+			})
+			if (calls == 1) != tc.checked || (err != nil) != (tc.checked && tc.fail) || err != nil && !errors.Is(err, unavailable) {
+				t.Fatalf("checks=%d err=%v", calls, err)
+			}
+		})
+	}
+}
 
 func TestProjectHostDNSContinuityRequiresAllLiveConsumers(t *testing.T) {
 	for _, name := range []string{"both_ready", "old_binary", "legacy_continuity", "stale", "no_receipt", "unexpected", "missing"} {
