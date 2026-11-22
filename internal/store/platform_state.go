@@ -879,6 +879,53 @@ func (s *Store) GetActivePlatformArtifactWithReaderContext(ctx context.Context, 
 	return artifact, release, found, err
 }
 
+// CurrentFullRollbackMessage returns historical identity, never serving authority.
+// Uniqueness and the identity of the selected row must hold in the same snapshot.
+func (s *Store) CurrentFullRollbackMessage(ctx context.Context, expected model.PlatformArtifactRelease) (*model.PlatformReleaseMessage, error) {
+	if s == nil || expected.ID == "" || expected.Status != model.PlatformArtifactReleaseStatusActive ||
+		expected.ReleaseChannel != model.PlatformArtifactReleaseChannelFull {
+		return nil, ErrInvalidInput
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.usingDatabase() {
+		return s.pgCurrentFullRollbackMessage(ctx, expected)
+	}
+	var result *model.PlatformReleaseMessage
+	err := s.withLockedState(false, func(state *model.State) error {
+		var current *model.PlatformArtifactRelease
+		for i := range state.PlatformArtifactReleases {
+			r := &state.PlatformArtifactReleases[i]
+			if r.ArtifactKind == expected.ArtifactKind && r.ScopeKey == expected.ScopeKey && r.ReleaseChannel == expected.ReleaseChannel && r.Status == expected.Status &&
+				(current == nil || r.ReleasedAt.After(current.ReleasedAt) || r.ReleasedAt.Equal(current.ReleasedAt) && r.ID < current.ID) {
+				current = r
+			}
+		}
+		if current == nil || current.ID != expected.ID || current.Version != expected.Version || current.FencingToken != expected.FencingToken ||
+			current.ArtifactID != expected.ArtifactID || current.Generation != expected.Generation || current.Scope != expected.Scope || !current.ReleasedAt.Equal(expected.ReleasedAt) {
+			return ErrConflict
+		}
+		for _, m := range state.PlatformReleaseMessages {
+			if m.ReleaseID == expected.ID && m.MessageType == model.PlatformReleaseMessageTypeRollback &&
+				m.ArtifactID == expected.ArtifactID && m.ArtifactKind == expected.ArtifactKind &&
+				m.ScopeKey == expected.ScopeKey && m.Generation == expected.Generation &&
+				m.ReleaseChannel == expected.ReleaseChannel && m.CreatedAt.Equal(expected.ReleasedAt) {
+				if result != nil || m.Scope != expected.Scope || m.ID == "" {
+					return ErrConflict
+				}
+				msg := m
+				result = &msg
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // GetPlatformArtifactRelease returns an immutable release ledger entry by ID.
 // Consumers use this read-only lookup to bind runtime evidence to the exact
 // fencing token selected by the release controller.

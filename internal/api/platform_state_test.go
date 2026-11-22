@@ -163,11 +163,25 @@ func TestPlatformArtifactAPIReleaseConsumerAndFailureContracts(t *testing.T) {
 	}
 	var pulled model.PlatformStateArtifactResponse
 	mustDecodeJSON(t, pull, &pulled)
+	if strings.Contains(pull.Body.String(), "current_rollback_message") {
+		t.Fatal("default feed unexpectedly included historical proof")
+	}
 	if pulled.Artifact == nil || pulled.Artifact.Generation != created.Artifact.Generation || pulled.LKG == nil {
 		t.Fatalf("expected active artifact and LKG in pull response, got %+v", pulled)
 	}
 
 	heartbeatIssuedAt := time.Now().UTC().Add(-time.Second).Truncate(time.Millisecond)
+	for suffix, want := range map[string]int{
+		"channel=full&include_current_rollback_message=true":                           http.StatusOK,
+		"channel=gray&include_current_rollback_message=true":                           http.StatusBadRequest,
+		"include_current_rollback_message=maybe":                                       http.StatusBadRequest,
+		"include_current_rollback_message=false&include_current_rollback_message=true": http.StatusBadRequest,
+	} {
+		got := performJSONRequest(t, server, http.MethodGet, "/v1/platform-state/artifacts/edge_ranking_policy?"+suffix, platformAdminKey, nil)
+		if got.Code != want || strings.Contains(got.Body.String(), `"current_rollback_message":`) {
+			t.Fatalf("normal forward selection %s: %d %s", suffix, got.Code, got.Body.String())
+		}
+	}
 	heartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/platform-state/consumers/heartbeat", platformAdminKey, model.PlatformConsumerHeartbeatRequest{
 		ConsumerID:                "edge-worker-api-test",
 		Component:                 "edge-worker",

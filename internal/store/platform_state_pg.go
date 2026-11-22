@@ -1643,6 +1643,81 @@ LIMIT 1`, kind, scopeKey, channel, model.PlatformArtifactReleaseStatusActive))
 	return artifact, release, true, nil
 }
 
+// Compare the complete stored JSON scope as well as the fields this binary
+// understands. A newer scope field must not disappear during decoding.
+type rollbackScopeRow struct {
+	*sql.Rows
+	exact bool
+}
+
+func (r *rollbackScopeRow) Scan(fields ...any) error {
+	return r.Rows.Scan(append(fields, &r.exact)...)
+}
+
+func (s *Store) pgCurrentFullRollbackMessage(ctx context.Context, expected model.PlatformArtifactRelease) (*model.PlatformReleaseMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer tx.Rollback()
+	var id, artifact, generation string
+	var fence, version int64
+	var releasedAt time.Time
+	var scopeJSON []byte
+	err = tx.QueryRowContext(ctx, `
+SELECT id, artifact_id, generation, fencing_token, version, released_at, scope_json
+FROM fugue_platform_artifact_releases
+WHERE artifact_kind=$1 AND scope_key=$2 AND release_channel=$3 AND status=$4
+ORDER BY released_at DESC, id ASC LIMIT 1`, expected.ArtifactKind, expected.ScopeKey, expected.ReleaseChannel, expected.Status).
+		Scan(&id, &artifact, &generation, &fence, &version, &releasedAt, &scopeJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflict
+	}
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	var scope model.PlatformArtifactScope
+	if err := json.Unmarshal(scopeJSON, &scope); err != nil {
+		return nil, err
+	}
+	if id != expected.ID || artifact != expected.ArtifactID || generation != expected.Generation || fence != expected.FencingToken ||
+		version != expected.Version || scope != expected.Scope || !releasedAt.Equal(expected.ReleasedAt) {
+		return nil, ErrConflict
+	}
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, release_id, artifact_id, artifact_kind, scope_key, scope_json, generation,
+	release_channel, message_type, created_at, expires_at, ack_count, scope_json=$9::jsonb
+FROM fugue_platform_release_messages
+WHERE release_id=$1 AND artifact_id=$2 AND artifact_kind=$3 AND scope_key=$4 AND generation=$5
+  AND release_channel=$6 AND message_type=$7 AND created_at=$8
+ORDER BY id LIMIT 2`, id, artifact, expected.ArtifactKind, expected.ScopeKey, generation, expected.ReleaseChannel, model.PlatformReleaseMessageTypeRollback, releasedAt, string(scopeJSON))
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	var result *model.PlatformReleaseMessage
+	for rows.Next() {
+		row := &rollbackScopeRow{Rows: rows}
+		msg, err := scanPlatformReleaseMessage(row)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil || !row.exact || msg.Scope != scope || msg.ID == "" {
+			return nil, ErrConflict
+		}
+		result = &msg
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	return result, nil
+}
+
 func (s *Store) pgListPlatformReleaseMessages(kind, scopeKey string, since time.Time, limit int) ([]model.PlatformReleaseMessage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

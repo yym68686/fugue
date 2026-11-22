@@ -1108,6 +1108,18 @@ func (s *Server) handleGetPlatformStateArtifact(w http.ResponseWriter, r *http.R
 		httpx.WriteError(w, http.StatusBadRequest, "channel must be shadow, gray, or full")
 		return
 	}
+	includeRollback := false
+	if values, present := r.URL.Query()["include_current_rollback_message"]; present {
+		if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+			httpx.WriteError(w, http.StatusBadRequest, "include_current_rollback_message must be true or false")
+			return
+		}
+		includeRollback = values[0] == "true"
+		if includeRollback && channel != model.PlatformArtifactReleaseChannelFull {
+			httpx.WriteError(w, http.StatusBadRequest, "rollback message requires the full channel")
+			return
+		}
+	}
 	currentGeneration := strings.TrimSpace(r.URL.Query().Get("current_generation"))
 	waitSeconds := queryIntDefault(r, "wait_seconds", 0)
 	if waitSeconds < 0 {
@@ -1144,15 +1156,25 @@ func (s *Server) handleGetPlatformStateArtifact(w http.ResponseWriter, r *http.R
 		s.writeStoreError(w, err)
 		return
 	}
-	response := model.PlatformStateArtifactResponse{
+	response := struct {
+		model.PlatformStateArtifactResponse
+		CurrentRollbackMessage *model.PlatformReleaseMessage `json:"current_rollback_message,omitempty"`
+	}{PlatformStateArtifactResponse: model.PlatformStateArtifactResponse{
 		Messages: messages,
 		LKG:      lkg,
 		Waited:   waited,
-	}
+	}}
 	if found {
 		response.Artifact = &artifact
 		response.Release = &release
 		response.Generation = artifact.Generation
+		if includeRollback {
+			response.CurrentRollbackMessage, err = s.store.CurrentFullRollbackMessage(r.Context(), release)
+			if err != nil {
+				s.writeStoreError(w, err)
+				return
+			}
+		}
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
 }

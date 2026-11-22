@@ -4424,6 +4424,7 @@ paths:
     get:
       operationId: getPlatformStateArtifact
       summary: Pull Platform State Artifact
+      description: By default messages is a bounded recent feed. Set include_current_rollback_message=true with channel=full to request the unique original rollback ledger entry of the selected active full release, independently of feed age or pagination. A missing entry is omitted; ambiguous evidence or a changed selection conflicts. This read does not verify serving or grant traffic authority.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformStateArtifact
       security:
@@ -4450,6 +4451,12 @@ paths:
           required: false
           schema:
             type: string
+        - in: query
+          name: include_current_rollback_message
+          required: false
+          schema:
+            type: boolean
+            default: false
         - in: query
           name: wait_seconds
           required: false
@@ -40873,6 +40880,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlatformReleaseMessage"
+        current_rollback_message:
+          $ref: "#/components/schemas/PlatformReleaseMessage"
         lkg:
           $ref: "#/components/schemas/PlatformLKGSnapshot"
         generation:

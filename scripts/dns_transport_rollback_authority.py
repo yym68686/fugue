@@ -51,11 +51,14 @@ def validate_rollback(snapshot, publication, lkg, reference, now=None):
                 "verified_lkg_generation", "pinned_rollback_generation", "rollback_target_generation"))):
         raise ValueError("DNS transport backend does not match the exact current full rollback")
     released_at = utc_timestamp(release.get("released_at"))
-    if released_at > now or sum(
-            message.get("message_type") == "rollback" and message.get("release_id") == reference["release_id"] and
-            message.get("release_channel") == "full" and all(message.get(k) == v for k, v in identity.items()) and
-            utc_timestamp(message.get("created_at")) == released_at
-            for message in publication.get("messages", [])) != 1:
+    # The feed is a recent display window, not an identity proof. Only the
+    # server can exclude duplicates hidden outside that window in its snapshot.
+    message = publication.get("current_rollback_message")
+    if (released_at > now or not isinstance(message, dict) or not message.get("id") or
+            message.get("message_type") != "rollback" or message.get("release_id") != reference["release_id"] or
+            message.get("release_channel") != "full" or any(message.get(k) != v for k, v in identity.items()) or
+            not isinstance(release.get("scope"), dict) or message.get("scope") != release["scope"] or
+            message.get("created_at") != release.get("released_at")):
         raise ValueError("DNS transport lacks the exact current rollback ledger message")
     if (any(lkg.get(key) != value for key, value in identity.items()) or
             lkg.get("content_hash") != reference["parent_digest"] or utc_timestamp(lkg.get("expires_at")) <= now):
@@ -77,5 +80,6 @@ def require_current_rollback(snapshot, failure):
     lkg = read_recovery_api(failure["api"], "/v1/admin/artifacts/" + ref["artifact_id"] + "/lkg")
     # Read the selected full last. A historic, but still retained, rollback
     # record cannot substitute for the publication currently being served.
-    full = read_recovery_api(failure["api"], "/v1/platform-state/artifacts/release_set?scope_key=global&channel=full")
+    full = read_recovery_api(failure["api"], "/v1/platform-state/artifacts/release_set?"
+                             "scope_key=global&channel=full&include_current_rollback_message=true")
     validate_rollback(snapshot, full, lkg["lkg"], ref)
