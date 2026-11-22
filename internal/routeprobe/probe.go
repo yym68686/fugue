@@ -100,6 +100,10 @@ func Probe(ctx context.Context, host, path, address, expectedState string, timeo
 	return probeWithPool(ctx, host, path, address, expectedState, timeout, &probeTransports)
 }
 
+func (o *FanoutObserver) Probe(ctx context.Context, host, path, address, expectedState string, timeout time.Duration) (Proof, error) {
+	return probeWithPool(ctx, host, path, address, expectedState, timeout, &o.pool)
+}
+
 func probeWithPool(ctx context.Context, host, path, address, expectedState string, timeout time.Duration, pool *probeTransportPool) (Proof, error) {
 	if timeout < time.Second || timeout > 10*time.Second {
 		return Proof{}, errors.New("invalid route probe timeout")

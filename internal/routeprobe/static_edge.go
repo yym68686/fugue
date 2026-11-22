@@ -23,11 +23,19 @@ const StaticNonceHeader = "X-Fugue-Static-Nonce"
 // certificate and our bounded observation lease are the only expiry authority;
 // it never impersonates a platform route release or prolongs one.
 func ProbeStatic(ctx context.Context, requirement platformconfig.DNSReadinessProbe, timeout, freshness time.Duration) (Proof, error) {
+	return probeStaticWithPool(ctx, requirement, timeout, freshness, &probeTransports)
+}
+
+func (o *FanoutObserver) ProbeStatic(ctx context.Context, requirement platformconfig.DNSReadinessProbe, timeout, freshness time.Duration) (Proof, error) {
+	return probeStaticWithPool(ctx, requirement, timeout, freshness, &o.pool)
+}
+
+func probeStaticWithPool(ctx context.Context, requirement platformconfig.DNSReadinessProbe, timeout, freshness time.Duration, pool *probeTransportPool) (Proof, error) {
 	ip, err := netip.ParseAddr(requirement.Address)
 	if err != nil || !platformconfig.PublicDNSFlattenIP(ip) || requirement.StaticEdge == nil || requirement.State != "" || requirement.EdgeGroupID != platformconfig.StaticEdgeDNSGroup(requirement.EdgeID) || timeout < time.Second || timeout > 10*time.Second || freshness < time.Second || freshness > 600*time.Second {
 		return Proof{}, errors.New("invalid static edge probe requirement")
 	}
-	return probeStaticWithTransport(ctx, requirement, timeout, freshness, probeTransports.get(requirement.Hostname, requirement.Address))
+	return probeStaticWithTransport(ctx, requirement, timeout, freshness, pool.get(requirement.Hostname, ip.String()))
 }
 
 func probeStaticWithTransport(ctx context.Context, p platformconfig.DNSReadinessProbe, timeout, freshness time.Duration, transport http.RoundTripper) (Proof, error) {

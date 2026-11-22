@@ -188,7 +188,7 @@ func (s *Service) loadDNSServingCache() (loaded bool, resultErr error) {
 }
 
 func (s *Service) SyncPlatformDNSServingOnce(ctx context.Context) error {
-	return s.syncPlatformDNSServing(ctx, routeprobe.Probe, s.probeDNSServingListener)
+	return s.syncPlatformDNSServing(ctx, dnsNetworkObserver.Probe, s.probeDNSServingListener)
 }
 
 var errDNSReleaseConverging = errors.New("DNS release is waiting for exact route proofs")

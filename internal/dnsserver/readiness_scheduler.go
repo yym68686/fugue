@@ -355,7 +355,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 				var proof routeprobe.Proof
 				var err error
 				if requirement.StaticEdge != nil {
-					proof, err = routeprobe.ProbeStatic(ctx, requirement, timeout, time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)
+					proof, err = dnsNetworkObserver.ProbeStatic(ctx, requirement, timeout, time.Duration(platformconfig.DNSReadinessFactMaxAge(requirement, policy))*time.Second)
 				} else {
 					proof, err = probe(ctx, requirement.Hostname, requirement.Path, requirement.Address, requirement.State, timeout)
 				}

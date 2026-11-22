@@ -11,7 +11,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/routeprobe"
 )
 
 // A renewal is volatile runtime evidence for an already loaded publication. It
@@ -130,7 +129,7 @@ func (s *Service) runDNSRenewal(ctx context.Context, worker *Service) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := s.observeDNSRenewal(ctx, worker, routeprobe.Probe); err != nil && ctx.Err() == nil && s.Logger != nil {
+		if err := s.observeDNSRenewal(ctx, worker, dnsNetworkObserver.Probe); err != nil && ctx.Err() == nil && s.Logger != nil {
 			// Details are recorded by bounded phase diagnostics. Credentials or
 			// response bodies never become log text here.
 			s.Logger.Print("DNS independent serving renewal unavailable; original deadlines retained")

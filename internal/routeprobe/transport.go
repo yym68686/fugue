@@ -14,21 +14,47 @@ import (
 // of the key: pooling by hostname alone could silently probe the wrong Edge.
 // Each request still has its own deadline, nonce and complete proof validation.
 type probeTransportPool struct {
-	mu      sync.Mutex
-	entries map[string]*list.Element
-	lru     list.List
-	limit   int
+	mu         sync.Mutex
+	entries    map[string]*list.Element
+	lru        list.List
+	limit      int
+	perAddress int
+	addresses  map[string]*list.List
 }
 
 type probeTransportEntry struct {
-	key       string
-	transport *http.Transport
-	createdAt time.Time
+	key            string
+	transport      *http.Transport
+	createdAt      time.Time
+	address        string
+	addressElement *list.Element
 }
 
 const probeTransportMaxAge = time.Minute
 
 var probeTransports = probeTransportPool{limit: 512}
+
+// FanoutObserver shares one budget across the DNS serving, candidate, static
+// and renewal scans in this process. Limits bound reusable transports, not the
+// signed scheduler's concurrency or live TLS requests. Never copy an observer.
+type FanoutObserver struct{ pool probeTransportPool }
+
+func NewFanoutObserver() *FanoutObserver {
+	return &FanoutObserver{pool: probeTransportPool{limit: 512, perAddress: 32}}
+}
+
+func (p *probeTransportPool) remove(element *list.Element) {
+	entry := element.Value.(probeTransportEntry)
+	delete(p.entries, entry.key)
+	p.lru.Remove(element)
+	if group := p.addresses[entry.address]; group != nil {
+		group.Remove(entry.addressElement)
+		if group.Len() == 0 {
+			delete(p.addresses, entry.address)
+		}
+	}
+	entry.transport.CloseIdleConnections()
+}
 
 func (p *probeTransportPool) get(host, address string) *http.Transport {
 	p.mu.Lock()
@@ -38,14 +64,15 @@ func (p *probeTransportPool) get(host, address string) *http.Transport {
 		current := entry.Value.(probeTransportEntry)
 		if time.Since(current.createdAt) < probeTransportMaxAge {
 			p.lru.MoveToFront(entry)
+			if group := p.addresses[address]; group != nil {
+				group.MoveToFront(current.addressElement)
+			}
 			return current.transport
 		}
 		// IdleConnTimeout alone does not bound affinity when probes arrive
 		// more frequently than that timeout. Retire aged idle connections while
 		// allowing in-flight requests to finish on their existing transport.
-		current.transport.CloseIdleConnections()
-		p.lru.Remove(entry)
-		delete(p.entries, key)
+		p.remove(entry)
 	}
 	transport := &http.Transport{
 		Proxy: nil, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host},
@@ -65,15 +92,27 @@ func (p *probeTransportPool) get(host, address string) *http.Transport {
 	if p.entries == nil {
 		p.entries = make(map[string]*list.Element)
 	}
-	p.entries[key] = p.lru.PushFront(probeTransportEntry{key: key, transport: transport, createdAt: time.Now()})
+	entry := probeTransportEntry{key: key, address: address, transport: transport, createdAt: time.Now()}
+	if p.perAddress > 0 {
+		if p.addresses == nil {
+			p.addresses = make(map[string]*list.List)
+		}
+		group := p.addresses[address]
+		if group != nil && group.Len() >= p.perAddress {
+			p.remove(p.entries[group.Back().Value.(string)])
+			group = p.addresses[address]
+		}
+		if group == nil {
+			group = list.New()
+			p.addresses[address] = group
+		}
+		entry.addressElement = group.PushFront(key)
+	}
+	p.entries[key] = p.lru.PushFront(entry)
 	if p.lru.Len() > max(1, p.limit) {
-		old := p.lru.Back()
-		entry := old.Value.(probeTransportEntry)
-		delete(p.entries, entry.key)
-		p.lru.Remove(old)
 		// This leaves active observations untouched. Idle resources are bounded
 		// even when untrusted target names churn through the pool.
-		entry.transport.CloseIdleConnections()
+		p.remove(p.lru.Back())
 	}
 	return transport
 }

@@ -56,6 +56,8 @@ type dnsReadinessReceipt struct {
 
 type dnsReadinessProbeFunc func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error)
 
+var dnsNetworkObserver = routeprobe.NewFanoutObserver()
+
 func (s *Service) observePlatformDNSReadiness(ctx context.Context, c dnsPlatformCandidate, a model.PlatformConsumerAssignment) (*dnsReadinessReceipt, error) {
 	var payload dnsServingPayload
 	raw, err := json.Marshal(c.Artifact.Content)
@@ -96,7 +98,7 @@ func (s *Service) observeDecodedPlatformDNSReadiness(ctx context.Context, c dnsP
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, errors.New("DNS readiness facts cache unavailable")
 	}
-	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, routeprobe.Probe, s.candidateDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath))
+	facts := collectDNSReadinessFacts(ctx, payload.Plan, payload.Policy.DNSReadiness, dnsNetworkObserver.Probe, s.candidateDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath))
 	checkedAt := time.Now().UTC()
 	receipt.Facts = facts
 	receipt.Status = summarizeDNSReadiness(payload.Plan, payload.Policy.DNSReadiness, facts, planDigest, checkedAt, checkedAt)

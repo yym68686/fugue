@@ -21,7 +21,6 @@ import (
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
-	"fugue/internal/routeprobe"
 	dns "github.com/miekg/dns"
 )
 
@@ -238,9 +237,9 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) (resultErr error) 
 			return queryErr
 		}
 		if s.shadowValidationParent != nil {
-			err = s.observeShadowDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, routeprobe.Probe, evaluate)
+			err = s.observeShadowDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, dnsNetworkObserver.Probe, evaluate)
 		} else {
-			_, _, err = s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, routeprobe.Probe, evaluate)
+			_, _, err = s.observeDNSRouteSources(ctx, client, identity, candidate, *sourcePayload, nil, dnsNetworkObserver.Probe, evaluate)
 		}
 		if err != nil {
 			return err
