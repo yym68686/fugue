@@ -141,11 +141,21 @@ def verify_expired_predecessor(candidate, config, verifier=None):
 
 
 def _verify_observation(candidate, config, verifier, mode, expected):
+    verifier = observation_verifier(verifier)
+    request = candidate_request(candidate, config)
+    verify_observation_input(request, verifier, mode, expected)
+
+
+def observation_verifier(verifier):
     if verifier is None:
         verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')
     if not verifier or not os.path.isabs(verifier):
         raise ValueError('DNS recovery observation verifier unavailable')
-    request = candidate_request(candidate, config)
+    return verifier
+
+
+def verify_observation_input(request, verifier, mode, expected):
+    verifier = observation_verifier(verifier)
     try:
         result = subprocess.run([verifier, *mode], input=json.dumps(request), text=True, capture_output=True, timeout=30)
     except subprocess.TimeoutExpired:
@@ -164,12 +174,21 @@ def _verify_observation(candidate, config, verifier, mode, expected):
                       'DNS predecessor has complete record readiness': 'predecessor_ready',
                       'DNS observation lacks complete record readiness': 'record_readiness',
                       'DNS observation cannot materialize all declared answers': 'wire_materialization'}
-        category = categories.get(result.stderr.strip(), 'verifier_failed')
+        diagnostic = result.stderr.strip()
+        role = None
+        if mode == ['--verify-serving-pair']:
+            prefix, sep, reason = diagnostic.partition(': ')
+            if sep and prefix in ('candidate', 'fallback'):
+                role, diagnostic = prefix, reason
+        category = categories.get(diagnostic, 'verifier_failed')
         error = DNSObservationRejected(category)
+        if role:
+            error.backend_role = role
+            error.add_note('refused listener signed pair: '+role)
         if category == 'record_readiness':
             # Only an observation, never an alternative to the verifier.
             # Do not emit the request: it also contains the verification keys.
-            snapshot = request.get('snapshot')
+            snapshot = (request[role] if role else request).get('snapshot')
             ready = snapshot.get('ready') if isinstance(snapshot, dict) else None
             error.add_note('snapshot ready at capture: ' +
                            ('yes' if ready is True else 'no' if ready is False else 'unknown'))

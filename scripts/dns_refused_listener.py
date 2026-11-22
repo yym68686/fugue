@@ -46,12 +46,14 @@ def handoff(config,stage,listener,current,owner):
     from scripts.dns_transport_failed_predecessor import require_listener_identity
     from scripts.dns_transport_rollback_authority import require_current_rollback
     from scripts.inspect_dns_predecessor import verify_unready_backend
-    from scripts.recover_dns_transport import DNSObservationRejected
+    from scripts.recover_dns_transport import DNSObservationRejected, candidate_request, observation_verifier, verify_observation_input
     from scripts.capture_dns_observation_policy import unchanged_backend
     ns,node,port=config["namespace"],owner["metadata"]["name"],listener["targetPort"]
     failed,rollback=stage["failed_predecessor"],stage["recovery_fallback"]
     require_listener_identity(listener,current,owner["metadata"],failed)
+    verifier=observation_verifier(None)
     def read(role):
+        request=None
         try:
             if role=="predecessor":
                 item=backend(config,stage,listener,current)
@@ -66,14 +68,17 @@ def handoff(config,stage,listener,current,owner):
                              m.get("annotations",{}).get("fugue.pro/oci-revision")==
                              (rollback["revision"] if fallback else stage["candidate_revision"]),
                              "recovery recipient changed")
-                transport.verify_handoff_backend(role,item,ns,port)
-            return item
+                request=candidate_request(item,transport.staged_backend_binding(item,ns,port))
+                verify_observation_input(request,verifier,[], '{"verified":true}')
+            # Private inputs stay in this stack frame and its caller only;
+            # neither the witness nor a failure report can serialize them.
+            return item,request
         except DNSObservationRejected as exc:
             exc.backend_role=role
             exc.add_note("refused listener signed pair: "+role)
             raise
     with ThreadPoolExecutor(max_workers=3) as pool:
-        old,candidate,fallback=pool.map(read,("predecessor","candidate","fallback"))
+        (old,_),(candidate,c_input),(fallback,f_input)=pool.map(read,("predecessor","candidate","fallback"))
     negative=old["negative"]
     wire.require(negative["parent_digest"]==failed["parent_digest"] and
                  negative["assignment"]["artifact_release_id"]==failed["release_id"] and
@@ -86,7 +91,8 @@ def handoff(config,stage,listener,current,owner):
     require_current_rollback(snap,failed)
     with ThreadPoolExecutor(max_workers=3) as pool:
         list(pool.map(lambda p:unchanged_backend(ns,current,p),items))
-    transport.validate_handoff_snapshots(snap,fallback["snapshot"],node)
+    transport.validate_handoff_snapshots(snap,fallback["snapshot"],node,
+                                         serving_pair_inputs={"candidate":c_input,"fallback":f_input})
     return {"node_uid":owner["metadata"]["uid"],"old_uid":failed["pod_uid"],"candidate_uid":failed["candidate_pod_uid"],
             "fallback_uid":rollback["pod_uid"],"previous_revision":stage["previous_revision"],"candidate_revision":stage["candidate_revision"],
             "assignment":snap["assignment"],"parent_digest":snap["parent_digest"],"plan_digest":snap["plan_digest"],"failed_predecessor":negative}

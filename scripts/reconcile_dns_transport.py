@@ -275,8 +275,13 @@ def bound_backend(namespace, pod, target_port, *, read_runtime):
     return {"pod": pod, "snapshot": snapshot, "snapshot_path": path}
 
 
-def validate_handoff_snapshots(old, candidate, node_name, now=None):
+def validate_handoff_snapshots(old, candidate, node_name, now=None, *, serving_pair_inputs=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    if serving_pair_inputs is not None and (
+            set(serving_pair_inputs) != {"candidate", "fallback"} or
+            serving_pair_inputs["candidate"].get("snapshot") is not old or
+            serving_pair_inputs["fallback"].get("snapshot") is not candidate):
+        raise ValueError("DNS serving pair verifier inputs do not bind the compared snapshots")
     def timestamp(value):
         parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
@@ -307,7 +312,11 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
             seen.add(identity)
             if fact.get("ready") is not True:
                 continue
-            if not timestamp(proof["checked_at"]) <= evaluated <= now < timestamp(proof["valid_until"]):
+            # No one can repair a false positive at capture. In transit a
+            # redundant proof may elapse. Only a new cryptographic check of
+            # both full inputs at one verifier time can decide if it mattered.
+            expires = timestamp(proof["valid_until"])
+            if not timestamp(proof["checked_at"]) <= evaluated < expires or (expires <= now and serving_pair_inputs is None):
                 raise ValueError("DNS handoff proof is expired or from the future")
             if any(binding.get(k) != v for k,v in {
                 "release_set_id": assignment["release_set_id"], "release_set_digest": snapshot["parent_digest"],
@@ -319,19 +328,27 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None):
             raise ValueError("DNS handoff backends have different artifact assignments")
     if {f["probe_id"] for f in old["facts"]} != {f["probe_id"] for f in candidate["facts"]}:
         raise ValueError("DNS handoff backends have different probe membership")
+    if serving_pair_inputs is not None:
+        from scripts.recover_dns_transport import verify_observation_input
+        verify_observation_input(serving_pair_inputs, None, ["--verify-serving-pair"], '{"verified_serving_pair":true}')
 
 
-def verify_staged_backend(candidate, namespace, port, verifier=None, *, degraded_predecessor=False):
-    from scripts.recover_dns_transport import DNSObservationRejected, verify_candidate
-
+def staged_backend_binding(candidate, namespace, port):
     pod = candidate["pod"]
     images = [c["image"] for c in pod["spec"]["containers"]
               if all(any(p.get("containerPort") == port and p.get("protocol", "TCP") == protocol
                          for p in c.get("ports", [])) for protocol in ("UDP", "TCP"))]
     if len(images) != 1 or not re.fullmatch(r"[^\s@]+@sha256:[a-f0-9]{64}", images[0]):
         raise ValueError("immutable DNS handoff backend image required")
-    binding = {"namespace": namespace, "recovery": {"candidate_image": images[0],
+    return {"namespace": namespace, "recovery": {"candidate_image": images[0],
                "candidate_pod_uid": pod["metadata"]["uid"]}}
+
+
+def verify_staged_backend(candidate, namespace, port, verifier=None, *, degraded_predecessor=False):
+    from scripts.recover_dns_transport import DNSObservationRejected, verify_candidate
+
+    pod = candidate["pod"]
+    binding = staged_backend_binding(candidate, namespace, port)
     try:
         verify_candidate(candidate, binding, verifier)
     except DNSObservationRejected as error:

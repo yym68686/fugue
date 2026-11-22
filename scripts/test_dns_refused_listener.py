@@ -21,6 +21,19 @@ def sites():
             "image":"registry.example/probe@sha256:"+"1"*64} for i,(ip,v) in enumerate((("8.8.8.8","us"),("9.9.9.9","de")))]}
 
 class RefusedTests(unittest.TestCase):
+    def test_pair_rejects_single_receipt_and_keeps_role_without_private_input(self):
+        from scripts import recover_dns_transport as recovery
+        data = {"candidate":{"snapshot":{"ready":True}},"fallback":{"snapshot":{"ready":False},"signing_key":"private-value"}}
+        for result, category, role in (
+            (subprocess.CompletedProcess([],0,'{"verified":true}',""),"verifier_failed",None),
+            (subprocess.CompletedProcess([],1,"","fallback: DNS observation lacks complete record readiness"),"record_readiness","fallback")):
+            with patch.object(recovery.subprocess,"run",return_value=result), self.assertRaises(recovery.DNSObservationRejected) as raised:
+                recovery.verify_observation_input(data,"/test/verifier",["--verify-serving-pair"],'{"verified_serving_pair":true}')
+            self.assertEqual(raised.exception.category,category)
+            self.assertEqual(getattr(raised.exception,"backend_role",None),role)
+            if role:
+                self.assertEqual(raised.exception.__notes__,["refused listener signed pair: fallback","snapshot ready at capture: no"])
+
     def test_signed_readiness_rejection_reports_only_the_capture_flag(self):
         from scripts import recover_dns_transport as recovery
         for flag, expected in ((True, "yes"), (False, "no"), ("private-input", "unknown")):

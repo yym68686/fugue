@@ -220,6 +220,28 @@ class TransportTests(unittest.TestCase):
                 "observed_at":stamp(-2), "evaluated_at":stamp(-1), "checkpoint_valid_until":stamp(300), "ready":True,
                 "facts":[{"probe_id":digest, "ready":True, "proof":{"checked_at":stamp(-3), "valid_until":stamp(60), "traffic_release":binding}}]}
 
+    def test_expiry_after_capture_requires_reverification_of_both_exact_inputs(self):
+        from scripts import recover_dns_transport as recovery
+        left, right = self.snapshot(), self.snapshot()
+        t = datetime.datetime.fromisoformat(left["evaluated_at"])
+        left["facts"][0]["proof"]["valid_until"] = (t+datetime.timedelta(milliseconds=1)).isoformat()
+        params = {"candidate":{"snapshot":left},"fallback":{"snapshot":right}}
+        with self.assertRaisesRegex(ValueError, "expired"):
+            transport.validate_handoff_snapshots(left,right,"node")
+        with patch.object(recovery,"verify_observation_input") as check:
+            transport.validate_handoff_snapshots(left,right,"node",serving_pair_inputs=params)
+            check.assert_called_once_with(params,None,["--verify-serving-pair"],'{"verified_serving_pair":true}')
+            check.side_effect = recovery.DNSObservationRejected("record_readiness")
+            with self.assertRaises(recovery.DNSObservationRejected):
+                transport.validate_handoff_snapshots(left,right,"node",serving_pair_inputs=params)
+            check.reset_mock()
+            with self.assertRaisesRegex(ValueError,"do not bind"):
+                transport.validate_handoff_snapshots(copy.deepcopy(left),right,"node",serving_pair_inputs=params)
+            left["facts"][0]["proof"]["valid_until"]=left["evaluated_at"]
+            with self.assertRaisesRegex(ValueError,"expired"):
+                transport.validate_handoff_snapshots(left,right,"node",serving_pair_inputs=params)
+            check.assert_not_called()
+
     def test_handoff_requires_same_fresh_artifact_and_proof_membership(self):
         old = self.snapshot()
         transport.validate_handoff_snapshots(old, copy.deepcopy(old), "node")
