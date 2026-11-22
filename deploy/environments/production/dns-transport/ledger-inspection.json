@@ -13,7 +13,7 @@
     "lkg_evidence_hash": "sha256:d94bb57afc82d306b70c92e383761054e4be35b77de18585eb27b83e2f238e9a"
   },
   "backends": [
-    {"component":"dns-de-g","service_account":"fugue-dns-de-g","pod_uid":"43e40bc0-4c09-41cc-9aeb-8fb0e95a6d6f","target_port":53,"revision":"c63ea1f53f6ba44c220eeac07b683b057a64e6d3","image":"ghcr.io/yym68686/fugue-edge@sha256:5b2036583df445f60048b43b4c973f61e17d251b5cd2e637541f9bce3802718c"},
+    {"component":"dns-de-g","service_account":"fugue-dns-de-g","pod_uid":"5af3256f-816f-4c47-b1d1-efe668929d8e","target_port":53,"revision":"fda6f4a03e66b5b0180c386bc938554d40a59c92","image":"ghcr.io/yym68686/fugue-edge@sha256:c493d30edd3b15e9da7f097fdcf4118d6b3e372909825f864e31c1f838db3752"},
     {"component":"dns-de-h","service_account":"fugue-dns-de-h","pod_uid":"c9e66cab-2d80-4ba3-b9e1-fe1285b1d322","target_port":53,"revision":"05f53a5bda77c99a59e2ae63e1622a58a40a8911","image":"ghcr.io/yym68686/fugue-edge@sha256:8320f48c768e509364830853969a9b22af0c8d2e7f05d77c25b6b564d0d14f61"}
   ]
 }
