@@ -1,6 +1,6 @@
 {
   "apiVersion": "transport.fugue.dev/v4",
-  "generation": 101,
+  "generation": 103,
   "handoffs": [
     {
       "address": "51.38.126.103",
@@ -12,8 +12,8 @@
           "app.kubernetes.io/instance": "fugue",
           "app.kubernetes.io/name": "fugue"
         },
-        "revision": "ff34243fe91eef054c961da5ec0a4560700a5141",
-        "pod_uid": "429dab36-8f61-4d41-adf1-5bf684279108"
+        "revision": "fbe367bb445f4829d7aaf5525f575731582f05d7",
+        "pod_uid": "5c2a4394-5473-4863-839e-56c5da8b2fa4"
       },
       "failed_predecessor": {
         "node_uid": "5fc22742-672c-48e3-b847-60726919f16c",
@@ -116,5 +116,5 @@
     }
   ],
   "namespace": "fugue-system",
-  "rollback_generation": 102
+  "rollback_generation": 104
 }
