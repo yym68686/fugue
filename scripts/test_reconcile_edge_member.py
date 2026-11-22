@@ -1,4 +1,6 @@
 import copy
+import contextlib
+import datetime as dt
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.reconcile_edge_member import ACTIVATION_CAS, Recovery, canonical, digest, now, validate, validate_inactive_refresh, retained_source, require_activation_writer, require_idle_front, verify_pair
+from scripts.reconcile_edge_member import STANDBY_ONLY, reconcile
 import base64
 
 
@@ -53,6 +56,105 @@ def inactive_fixture():
 
 
 class MemberRecoveryTest(unittest.TestCase):
+    def test_prepare_only_exact_rollback_cannot_authorize_regular_recovery(self):
+        c, a, target, prev = self.standby_fixture()
+        validate(c, a, target, prev)
+        for change in (lambda x: x[0].update(retainedPrevious=True),
+                       lambda x: x[0].update(refreshInactiveWorker={}),
+                       lambda x: x[1].update(previousWorkerSourceSha='0'*40),
+                       lambda x: x[1].update(previousFrontGeneration=True),
+                       lambda x: x[1].update(previousRecordDigest=x[1]['currentRecordDigest']),
+                       lambda x: x[2].update(operation='rollback'),
+                       lambda x: x[3].update(rollback_of_generation=9),
+                       lambda x: x[3].update(generation=12),
+                       lambda x: x[3].update(active_slot='b')):
+            args = copy.deepcopy([c, a, target, prev])
+            change(args)
+            args[0]['previousState'] = copy.deepcopy(args[3])
+            with self.assertRaises(ValueError):
+                validate(*args)
+        c.pop('nodeUID')
+        c.update(schema='fugue.edge-member-recovery/v1')
+        with self.assertRaisesRegex(ValueError, 'strictly older'):
+            validate(c, a, target, prev)
+
+    @staticmethod
+    def standby_fixture():
+        c, a, target, prev = fixture()
+        prev.update(generation=11, rollback_of_generation=10, operation='rollback',
+                    worker_source_commit='f'*40, worker_image_digest='sha256:'+'e'*64)
+        a.update(previousFrontGeneration=9, previousRecordDigest='sha256:'+'d'*64,
+                 previousWorkerSlot='a', previousWorkerSourceSha=prev['worker_source_commit'],
+                 previousWorkerImageDigest=prev['worker_image_digest'], previousBundleGeneration='bundle.p8.r1')
+        c.update(schema=STANDBY_ONLY, nodeUID='10000000-0000-0000-0000-000000000000', previousState=copy.deepcopy(prev))
+        return c, a, target, prev
+
+    def test_standby_uses_only_preparation_and_requires_stable_real_proofs(self):
+        c, _, target, prev = self.standby_fixture()
+        def pod(key, node, names):
+            return dict(metadata=dict(uid=c[key+'UID'], namespace=c['namespace'], labels={'fugue.io/edge-group-id':c['group']}),
+                        spec=dict(nodeName=node), status=dict(phase='Running', podIP='10.0.0.1',
+                        containerStatuses=[dict(name=n, containerID=key+'-'+n, ready=True,
+                                             restartCount=0, state=dict(running=dict(startedAt='time'))) for n in names]))
+        class Fake:
+            def __init__(self, fault):
+                self.config=c
+                self.fault=fault
+                self.events=[]
+                self.pods={c[key]:pod(key, node, names) for key,node,names in (
+                    ('worker',c['node'],['edge','caddy']),('referenceWorker','ref',['edge','caddy']),
+                    ('front',c['node'],['edge-front']),('referenceFront','ref',['edge-front']))}
+            def snapshot(self):
+                return ({'metadata':{'resourceVersion':'5'}}, target, prev, canonical(prev),
+                        self.pods[c['worker']], self.pods[c['referenceWorker']])
+            def get(self, kind, key):
+                if kind=='node': return {'metadata':{'uid':c['nodeUID']}}
+                p=copy.deepcopy(self.pods[key])
+                if self.fault=='restart' and self.events.count('prepare') and key==c['referenceFront']:
+                    p['status']['containerStatuses'][0]['restartCount']+=1
+                return p
+            def health(self, name, *args):
+                if name==c['worker']:
+                    return dict(healthy=True,status='ok',bundle_version='v',caddy_applied_version='v',
+                                edge_group_id=c['group'],bundle_valid_until=(now()+dt.timedelta(seconds=120)).isoformat())
+                st=prev if name==c['front'] else target
+                return dict(st,status='ok',route_authority='edge-control',activation_generation=st['generation'])
+            @contextlib.contextmanager
+            def leases(self):
+                self.events.append('lock')
+                try: yield ['component','group']
+                finally: self.events.append('unlock')
+            def require_inactive_idle(self, w, previous, slot):
+                self.events.append('idle')
+                if self.fault=='busy': raise ValueError('busy')
+            def renew_leases(self, held):
+                if held!=['component','group']: raise AssertionError('wrong leases')
+                self.events.append('renew')
+            def prepare(self, previous, t):
+                self.events.append('prepare')
+                start=now()-dt.timedelta(seconds=120 if self.fault=='expired' else 1)
+                return dict(schema='edge-worker-publication-preparation/v1',previous=previous,
+                            target_slot='a' if self.fault=='slot' else t['active_slot'],
+                            bundle_generation=t['bundle_generation'],worker_source_commit=t['worker_source_commit'],
+                            worker_image_digest=t['worker_image_digest'],created_at=start.isoformat(),
+                            expires_at=(start+dt.timedelta(seconds=90)).isoformat())
+        for fault in ('', 'preview', 'busy', 'expired', 'slot', 'restart', 'route'):
+            f=Fake(fault)
+            receipts=[]
+            with self.subTest(fault=fault), patch('scripts.reconcile_edge_member.Recovery', return_value=f), \
+                    patch('scripts.reconcile_edge_member.verify_pair', return_value=['signed-route'], side_effect=ValueError('wrong route') if fault=='route' else None):
+                if fault not in ('', 'preview'):
+                    with self.assertRaises(ValueError):
+                        reconcile(c, True, lambda r:receipts.append(copy.deepcopy(r)))
+                    self.assertFalse(any(r['prepared'] for r in receipts))
+                else:
+                    outcome=reconcile(c,fault!='preview',lambda r:receipts.append(copy.deepcopy(r)))
+                    self.assertEqual(outcome['prepared'], not fault)
+                self.assertTrue(all(not r['activated'] and not r['authorizes_traffic'] for r in receipts))
+                self.assertEqual(f.events.count('prepare'), 0 if fault in ('preview','busy') else 1)
+                if fault=='preview': self.assertEqual(f.events,[])
+                else: self.assertEqual(f.events[-1],'unlock')
+
     def test_member_writers_do_not_enter_after_repair_lease_expiry(self):
         c, _, _, _ = fixture()
         for blocker in ('prepared', 'activated', 'unreadable', ''):

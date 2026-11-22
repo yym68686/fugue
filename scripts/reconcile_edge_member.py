@@ -26,6 +26,7 @@ import time
 from scripts.observe_front_candidate import parse_proof
 from scripts.observe_worker_standby import socket_counts
 
+STANDBY_ONLY = 'fugue.edge-member-standby-preparation/v1'
 
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'))
@@ -48,7 +49,11 @@ def validate(config, authority, source, previous):
               'worker', 'workerUID', 'referenceFront', 'referenceFrontUID', 'referenceWorker',
               'referenceWorkerUID', 'authorityUID', 'authorityRecord', 'previousState',
               'activationPath', 'workerPort', 'probes'}
-    if not fields <= set(config) or set(config)-fields-{'refreshInactiveWorker','retainedPrevious'} or config['schema'] != 'fugue.edge-member-recovery/v1':
+    prepare_only = config.get('schema') == STANDBY_ONLY
+    if prepare_only:
+        if set(config) != fields | {'nodeUID'} or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', config['nodeUID']):
+            raise ValueError('Standby preparation requires an exact node and forbids replacement or retained recovery')
+    elif not fields <= set(config) or set(config)-fields-{'refreshInactiveWorker','retainedPrevious'} or config['schema'] != 'fugue.edge-member-recovery/v1':
         raise ValueError('Unsupported member recovery declaration')
     if 'retainedPrevious' in config and config['retainedPrevious'] is not True:
         raise ValueError('Retained recovery stage must be explicit')
@@ -84,7 +89,21 @@ def validate(config, authority, source, previous):
         raise ValueError('Only the exact committed activation can recover a member')
     if previous.get('edge_group_id') != config['group'] or previous.get('schema') != source['schema'] or previous.get('authority') != source['authority']:
         raise ValueError('Member belongs to another activation authority')
-    if without_time(previous) != without_time(source) and previous['generation'] >= source['generation']:
+    if prepare_only:
+        gen = authority['currentFrontGeneration']
+        if (previous != config['previousState'] or source['operation'] != 'promote' or
+                any(type(v) is not int for v in (gen, authority['previousFrontGeneration'], previous['generation'], previous.get('rollback_of_generation'))) or
+                not 0 < gen < 2**64-1 or not 0 < authority['previousFrontGeneration'] < gen or
+                not re.fullmatch(r'sha256:[0-9a-f]{64}', authority['previousRecordDigest']) or
+                authority['previousRecordDigest'] == authority['currentRecordDigest'] or
+                previous.get('operation') != 'rollback' or previous.get('rollback_of_generation') != gen or
+                previous['generation'] != gen + 1 or previous['previous_slot'] != source['active_slot'] or
+                previous['active_slot'] == source['active_slot'] or previous['active_slot'] != authority['previousWorkerSlot'] or
+                previous['worker_source_commit'] != authority['previousWorkerSourceSha'] or
+                previous['worker_image_digest'] != authority['previousWorkerImageDigest'] or
+                previous['bundle_generation'] not in (authority['previousBundleGeneration'], authority['currentBundleGeneration'])):
+            raise ValueError('Standby preparation requires the exact recorded one-step member rollback')
+    elif without_time(previous) != without_time(source) and previous['generation'] >= source['generation']:
         raise ValueError('Recovery requires a strictly older member')
     if config['workerPort'] != {'a': 18443, 'b': 28443}[source['active_slot']]:
         raise ValueError('Worker listener does not match committed slot')
@@ -500,8 +519,77 @@ def verify_pair(config, worker, reference, worker_health):
     return evidence
 
 
+def prepare_only_standby(recovery, apply, save):
+    """Use the existing preparation ABI; no activation writer or Pod replacement."""
+    c = recovery.config
+    def observe():
+        owner, target, previous, raw, worker, reference = recovery.snapshot()
+        n = recovery.get('node', c['node'])['metadata']
+        if n['uid'] != c['nodeUID'] or n.get('deletionTimestamp'):
+            raise ValueError('Standby preparation node changed')
+        processes = []
+        for pod, names in [(worker, ('edge', 'caddy')), (reference, ('edge', 'caddy'))]:
+            for name in names:
+                status, = [s for s in pod['status']['containerStatuses'] if s['name'] == name]
+                processes.append((status['containerID'], status['state']['running']['startedAt'], status['restartCount']))
+        for key, state, node in [('front', previous, c['node']), ('referenceFront', target, reference['spec']['nodeName'])]:
+            p = recovery.get('pod', c[key])
+            if (p['metadata']['uid'] != c[key+'UID'] or p['metadata'].get('deletionTimestamp') or
+                    p['metadata']['namespace'] != c['namespace'] or
+                    p['metadata'].get('labels', {}).get('fugue.io/edge-group-id') != c['group'] or
+                    p['spec']['nodeName'] != node or (key=='referenceFront' and node==c['node'])):
+                raise ValueError('Standby preparation Front identity changed')
+            s, = [s for s in p['status']['containerStatuses'] if s['name']=='edge-front']
+            if not s.get('ready') or p['status'].get('phase') != 'Running':
+                raise ValueError('Standby preparation Front is not ready')
+            processes.append((s['containerID'], s['state']['running']['startedAt'], s['restartCount']))
+            require_front_activation(recovery.health(c[key], 7831, 'readyz'), state)
+        if any(not cid or not started for cid, started, _ in processes) or len({p[0] for p in processes}) != len(processes):
+            raise ValueError('Standby preparation process identities incomplete')
+        return (owner['metadata']['resourceVersion'], target, raw, tuple(processes)), previous, worker, reference
+
+    before, previous, worker, reference = observe()
+    result = dict(mode='standby_preparation' if apply else 'standby_preview', node=c['node'],
+                  node_uid=c['nodeUID'], worker_uid=c['workerUID'], front_uid=c['frontUID'],
+                  authority_record=c['authorityRecord'], previous_generation=previous['generation'],
+                  prepared=False, activated=False, authorizes_traffic=False)
+    save(result)
+    if not apply:
+        return result
+    with recovery.leases() as held:
+        if observe()[0] != before:
+            raise ValueError('Standby changed before locking')
+        target = before[1]
+        recovery.require_inactive_idle(worker, previous, target['active_slot'])
+        if observe()[0] != before:
+            raise ValueError('Standby changed during idle check')
+        recovery.renew_leases(held)
+        p = recovery.prepare(previous, target)
+        until = timestamp(p['expires_at'])
+        if (p.get('schema') != 'edge-worker-publication-preparation/v1' or p.get('previous') != previous or
+                p.get('target_slot') != target['active_slot'] or p.get('worker_source_commit') != target['worker_source_commit'] or
+                p.get('worker_image_digest') != target['worker_image_digest'] or p.get('bundle_generation') != target['bundle_generation'] or
+                until-timestamp(p['created_at']) != dt.timedelta(seconds=90) or not timestamp(p['created_at']) <= now() < until):
+            raise ValueError('Unexpected standby-only preparation receipt')
+        deadline = min(time.monotonic()+55, time.monotonic()+(until-now()).total_seconds()-10)
+        while time.monotonic() < deadline:
+            health = recovery.health(c['worker'])
+            if verified_worker_health(health, c):
+                proofs = verify_pair(c, worker, (reference['status']['podIP'], c['workerPort'], reference['spec']['nodeName'], True), health)
+                if observe()[0] != before or now() >= until or time.monotonic() >= deadline:
+                    raise ValueError('Standby changed or preparation expired during proof')
+                recovery.renew_leases(held)
+                result.update(prepared=True, expires_at=p['expires_at'], proofs=proofs)
+                save(result)
+                return result
+            time.sleep(1)
+        raise ValueError('Standby did not obtain the current signed route before expiry; activation unchanged')
+
+
 def reconcile(config, apply=False, write_evidence=lambda value: None):
     recovery = Recovery(config)
+    if config.get('schema') == STANDBY_ONLY:
+        return prepare_only_standby(recovery, apply, write_evidence)
     owner, target, previous, raw, worker, reference = recovery.snapshot(allow_refresh=bool(config.get('refreshInactiveWorker')))
     evidence = {'mode': 'apply' if apply else 'preview', 'node': config['node'], 'previous': previous, 'target': target,
                 'authority_uid': owner['metadata']['uid'], 'authority_record': config['authorityRecord'], 'activated': False}
