@@ -1597,9 +1597,7 @@ func (s *Server) handleGetPlatformConsumerArtifact(w http.ResponseWriter, r *htt
 		httpx.WriteError(w, status, message)
 		return
 	}
-	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("ETag", strconv.Quote(result.Artifact.ContentHash))
-	httpx.WriteJSON(w, http.StatusOK, result)
+	writeAssignedConsumerArtifact(w, r, result)
 }
 
 func (s *Server) consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {

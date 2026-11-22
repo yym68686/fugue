@@ -4738,7 +4738,14 @@ paths:
             minLength: 1
       responses:
         '200':
-          description: Assigned artifact and its release binding.
+          description: Assigned artifact and its release binding. The server may use gzip for an explicitly accepting client reading a signed DNS answer bundle. Decompressed JSON, authorization, signature and assignment rechecks are identical. Other artifacts and errors do not opt into this transport optimization.
+          headers:
+            Content-Encoding:
+              description: Optional transport coding, only when accepted by the reader.
+              schema: {type: string, enum: [gzip]}
+            Vary:
+              description: Content negotiation for eligible DNS bundle responses.
+              schema: {type: string}
           content:
             application/json:
               schema:
