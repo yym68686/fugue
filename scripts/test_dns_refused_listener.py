@@ -2,6 +2,9 @@ import datetime as dt
 import struct
 import subprocess
 import unittest
+import tempfile
+import json
+from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
@@ -18,6 +21,29 @@ def sites():
             "image":"registry.example/probe@sha256:"+"1"*64} for i,(ip,v) in enumerate((("8.8.8.8","us"),("9.9.9.9","de")))]}
 
 class RefusedTests(unittest.TestCase):
+    def test_private_receiver_discards_transient_read_but_not_bad_wire_or_signature(self):
+        t=preview.transport
+        for fault, retries in ((t.ObservationUnavailable("503"),True),(ValueError("wire failure"),False)):
+            with patch.object(t,"_observe_private_receiver",side_effect=[fault,{"current":True}]) as fn,patch.object(t.time,"sleep"):
+                call=lambda:t.observe_recovery_fallback({}, {}, {}, {}, {},policy_path=None,observer=None,verifier=None)
+                if retries:
+                    self.assertEqual(call(),{"current":True})
+                else:
+                    with self.assertRaises(ValueError):call()
+                self.assertEqual(fn.call_count,2 if retries else 1)
+
+    def test_preview_counter_is_not_a_live_transport_declaration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/"intent.json"
+            cfg=staged.FailedPredecessorTests();cfg.setUp()
+            cfg.config["preview_attempt"]=2
+            p.write_text(json.dumps(cfg.config))
+            self.assertNotIn("preview_attempt",preview.transport.load_config(p,preview=True))
+            with self.assertRaises(ValueError):preview.transport.load_config(p)
+            cfg.config["preview_attempt"]=True
+            p.write_text(json.dumps(cfg.config))
+            with self.assertRaises(ValueError):preview.transport.load_config(p,preview=True)
+
     def test_sources(self):
         wire.validate_sources(sites())
         for key in ("node","node_uid","ip","pod","pod_uid","country"):

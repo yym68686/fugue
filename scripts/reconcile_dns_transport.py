@@ -45,8 +45,12 @@ def valid_listener_selector(selector):
         for k, v in selector.items())
 
 
-def load_config(path):
+def load_config(path, *, preview=False):
     config = json.loads(Path(path).read_text())
+    if preview:
+        attempt = config.pop("preview_attempt", 1)
+        if type(attempt) is not int or not 1 <= attempt <= 10000:
+            raise ValueError("invalid read-only preview attempt")
     fields = {"apiVersion", "kind", "generation", "namespace", "listeners"}
     if config.get("apiVersion") == "transport.fugue.dev/v2":
         fields.add("recovery")
@@ -358,7 +362,10 @@ def verify_handoff_backend(role, backend, namespace, port, *, recovery=False):
 
 def recovery_fallback_backend(config, listener, stage, node, *, verifier=None):
     fallback = stage["recovery_fallback"]
-    backend = handoff_backend(config["namespace"], fallback["selector"], node, listener["targetPort"])
+    # verify_staged_backend reads the snapshot together with the authenticated
+    # checkpoint. A preliminary runtime read would be discarded, and can fail
+    # during an otherwise harmless publication snapshot replacement.
+    backend = handoff_backend(config["namespace"], fallback["selector"], node, listener["targetPort"],read_runtime=False)
     meta = backend["pod"]["metadata"]
     if meta["uid"] != fallback["pod_uid"] or meta.get("annotations", {}).get("fugue.pro/oci-revision") != fallback["revision"]:
         raise ValueError("DNS recovery fallback differs from the reviewed Pod UID or revision")
@@ -575,6 +582,21 @@ def observe_dns_socket(raw, expectations, observer):
 
 
 def observe_recovery_fallback(config, stage, listener, public_service, witness, *, policy_path, observer, verifier, role="fallback"):
+    # Start each retry with a new Pod/checkpoint pair. Nothing below mutates a
+    # listener. A negative wire response, invalid signature, changed identity
+    # or different release is not a transient transport read.
+    deadline = time.monotonic()+45
+    for attempt in range(3):
+        try:
+            return _observe_private_receiver(config,stage,listener,public_service,witness,policy_path=policy_path,
+                                             observer=observer,verifier=verifier,role=role)
+        except ObservationUnavailable:
+            if attempt == 2 or time.monotonic()+2>=deadline:
+                raise
+            time.sleep(2)
+
+
+def _observe_private_receiver(config, stage, listener, public_service, witness, *, policy_path, observer, verifier, role):
     from scripts.capture_dns_observation_policy import coherent_policy, unchanged_backend
 
     namespace = config["namespace"]
