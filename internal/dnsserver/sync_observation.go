@@ -75,6 +75,8 @@ func observeDNSSyncPhaseWithFailureStep(ctx context.Context, name string, step d
 		switch {
 		case errors.Is(err, errDNSShadowAlreadyAdvanced):
 			outcome = "already_serving"
+		case errors.Is(err, errDNSRenewalRetired):
+			outcome = "local_publication_replaced"
 		case errors.Is(err, platformconsumer.ErrAssignmentChanged):
 			outcome = "assignment_changed"
 		case errors.Is(err, context.DeadlineExceeded):

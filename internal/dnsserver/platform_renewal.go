@@ -193,6 +193,13 @@ func (s *Service) observeDNSRenewalWithSelection(ctx context.Context, worker *Se
 		!old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
 		return nil
 	}
+	ctx, stop := published.renewalContext(ctx)
+	defer stop()
+	defer func() {
+		if errors.Is(context.Cause(ctx), errDNSRenewalRetired) {
+			resultErr = errDNSRenewalRetired
+		}
+	}()
 	client := worker.platformConsumerClient()
 	id, assignment, err := client.ObserveServingAssignment(ctx, model.PlatformConsumerComponentDNSServer, s.Config.DNSNodeID, platformcontrol.ConfiguredConsumerScope(s.Config.PlatformScopeKey), model.PlatformArtifactKindDNSAnswerBundle)
 	if err != nil {
@@ -238,7 +245,10 @@ func (s *Service) observeDNSRenewalWithSelection(ctx context.Context, worker *Se
 	refreshed.transition = old.transition
 	refreshed.fallback = old.fallback
 	if s.platformServing.publication.Load() != published {
-		return platformconsumer.ErrAssignmentChanged
+		return errDNSRenewalRetired
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	observation := &dnsServingRenewal{base: base, state: refreshed, publication: published}
 	s.platformRenewal.Store(observation)
