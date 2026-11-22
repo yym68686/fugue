@@ -67,6 +67,7 @@ class RelayPolicyReleaseTest(unittest.TestCase):
         self.assertFalse(result["lease_published"])
 
     def test_preview_does_not_write_and_peer_failure_never_enables_ingress(self):
+        self.assertNotIn("withdrawal_of", self.d)
         def witness(_d, _t, edge, _image):
             return self.w[edge]
 
@@ -86,6 +87,52 @@ class RelayPolicyReleaseTest(unittest.TestCase):
         self.assertFalse(preview["lease_published"])
         self.assertFalse(result["lease_published"])
         self.assertEqual(result["unavailable"], ["node-2"])
+
+    def test_retained_withdrawal_no_front_no_record_no_new_authority(self):
+        plan = {**self.d, "mode": "off", "generation": 3, "withdrawal_of":{
+            "generation":1, "payload_sha256":"8"*64, "slots":{"node-1":"b", "node-2":"b"}}}
+        off = {"payload_sha256":"d"*64, "policy":{"mode":"off","generation":3,
+               "relay_percent":0,"max_concurrent":1,"bindings":[],"endpoints":[]}}
+        for edit in ({"mode":"active"},{"mode":"shadow"},{"generation":1},
+                     {"withdrawal_of":{**plan["withdrawal_of"],"slots":{"node-1":"a","node-2":"b"}}}):
+            with self.subTest(edit=edit), self.assertRaises(ValueError):
+                release.validate_declaration({**plan, **edit}, self.trust)
+        with (
+            patch.object(release, "release_image", side_effect=AssertionError("must not read monitor")),
+            patch.object(release, "front_witness", side_effect=AssertionError("must not need Front")),
+            patch.object(release, "route_proof", side_effect=AssertionError("must not require route")),
+            patch.object(release, "verify_envelope", return_value=off) as verify,
+            patch.object(release, "retained_witness", side_effect=lambda t,p:self.w[p["edge"]]) as witness,
+            patch.object(release.trust, "worker_exec", return_value=b"relay-policy-delivered\n") as send,
+            patch.object(release, "assert_confirmed") as ack,
+        ):
+            preview=release.execute(plan,self.trust,b"","verifier")
+            self.assertEqual(preview["available"],["node-1","node-2"])
+            send.assert_not_called()
+            self.w["node-1"]["fence"] = None
+            got=release.execute(plan,self.trust,b"signed","verifier")
+            self.assertEqual((got["verified_fences"],got["unavailable"],got["lease_published"]),(["node-2"],["node-1"],False))
+            self.assertEqual(send.call_args.args[1],self.trust["targets"][1])
+            ack.assert_called_once()
+            send.reset_mock()
+            self.w["node-1"]["fence"] = {"generation":2,"payload_sha256":"e"*64}
+            self.w["node-2"]["fence"] = {"generation":3,"payload_sha256":off["payload_sha256"]}
+            got=release.execute(plan,self.trust,b"signed","verifier")
+            self.assertEqual(got["verified_fences"],["node-2"])
+            send.assert_not_called()  # Exact replay only reads the durable acknowledgement.
+            verify.return_value=deepcopy(off)
+            verify.return_value["policy"]["bindings"]=[{}]
+            with self.assertRaises(ValueError):
+                release.execute(plan,self.trust,b"signed","verifier")
+            send.assert_not_called()
+            verify.return_value=off
+            first=deepcopy(self.w["node-2"])
+            first["fence"]={"generation":1,"payload_sha256":"8"*64}
+            witness.side_effect=[first,{**first,"pod":("replacement","other","other")},ValueError("peer offline")]
+            got=release.execute(plan,self.trust,b"signed","verifier")
+            self.assertFalse(got["lease_published"])
+            self.assertFalse(got["verified_fences"])
+            send.assert_not_called()
 
     def test_active_requires_exact_shadow_loaded_on_both(self):
         for w in self.w.values():

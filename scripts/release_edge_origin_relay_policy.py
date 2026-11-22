@@ -31,7 +31,7 @@ PORT = 8443
 def validate_declaration(d, t):
     keys = {"schema", "worker_config_sha", "monitor", "front", "front_uid", "host", "path",
             "source", "peer", "public_ips", "mode", "generation", "ca_sha256"}
-    if not isinstance(d, dict) or set(d) != keys or d["schema"] != "fugue.edge.origin-relay-policy-release/v1":
+    if not isinstance(d, dict) or set(d) not in (keys, keys | {"withdrawal_of"}) or d["schema"] != "fugue.edge.origin-relay-policy-release/v1":
         raise ValueError("invalid pilot declaration")
     if not (trust.matches(SHA, d["worker_config_sha"]) and trust.matches(trust.DNS_LABEL, d["monitor"])
             and trust.matches(trust.DNS_LABEL, d["front"]) and trust.matches(trust.UID, d["front_uid"])
@@ -47,6 +47,15 @@ def validate_declaration(d, t):
             or any(not isinstance(x, str) or not ipaddress.IPv4Address(x).is_global for x in d["public_ips"].values())
             or len(set(d["public_ips"].values())) != 2):
         raise ValueError("pilot must use exactly the two independently pinned front addresses")
+    if "withdrawal_of" in d:
+        prior = d["withdrawal_of"]
+        if (d["mode"] != "off" or not isinstance(prior, dict) or set(prior) != {"generation", "payload_sha256", "slots"}
+                or type(prior["generation"]) is not int or not 0 < prior["generation"] < d["generation"]
+                or not trust.matches(HEX256, prior["payload_sha256"]) or not isinstance(prior["slots"], dict)
+                or set(prior["slots"]) != edges or any(slot not in ("a", "b") for slot in prior["slots"].values())
+                or not all(any((edge, slot) == (p["edge"], p["slot"]) for p in t["targets"])
+                           for edge, slot in prior["slots"].items())):
+            raise ValueError("withdrawal requires a signed off and a pinned prior fence for each enrolled slot")
     return d
 
 
@@ -179,6 +188,11 @@ cat "$path"
 def slot_witness(d, t, edge, image):
     front = front_witness(d, t, edge, image)
     target, = [{**p, "retained_image": image} for p in t["targets"] if (p["edge"], p["slot"]) == (edge, front[1])]
+    return retained_witness(t, target, front)
+
+
+def retained_witness(t, target, front=None):
+    edge = target["edge"]
     witness = trust.read_checkpoint(t, target)
     pod = trust.strict_json(trust.kubectl("-n", t["namespace"], "get", "pod", witness[0], "-o", "json"))
     daemonset = trust.strict_json(trust.kubectl("-n", t["namespace"], "get", "daemonset", target["workload"], "-o", "json"))
@@ -297,7 +311,47 @@ def assert_confirmed(t, w, d, digest):
     raise ValueError("exact Worker did not acknowledge the policy in its durable fence")
 
 
+def withdraw_retained(d, t, raw, verifier):
+    # All permissions come from the fresh, non-routing off envelope. The
+    # declaration identifies the *previously acknowledged* exact recipients;
+    # this branch cannot enroll a new Worker, renew a lease, or switch slots.
+    validate_declaration(d, t)
+    prior = d["withdrawal_of"]
+    available, delivered, unavailable = [], [], []
+    auth = verify_envelope(verifier, t, raw) if raw else None
+    if auth:
+        admit_policy(d, auth, {}, {})
+    for edge in (d["source"], d["peer"]):
+        target, = [p for p in t["targets"] if (p["edge"], p["slot"]) == (edge, prior["slots"][edge])]
+        try:
+            w = retained_witness(t, target)
+            f = w["fence"]
+            acknowledged = auth is not None and f is not None and (f["generation"], f["payload_sha256"]) == (
+                d["generation"], auth["payload_sha256"])
+            if not acknowledged and (not f or (f["generation"], f["payload_sha256"]) !=
+                                     (prior["generation"], prior["payload_sha256"])):
+                raise ValueError("retained recipient does not hold the declared prior fence")
+            available.append(edge)
+            if not auth:
+                continue
+            if verify_envelope(verifier, t, raw) != auth or retained_witness(t, target) != w:
+                raise ValueError("prior fence, process, or withdrawal envelope changed before delivery")
+            admit_policy(d, auth, {edge: w}, {})
+            if not acknowledged and trust.worker_exec(t, target, w["pod"][0], WRITE_POLICY, data=raw + b"\n") != b"relay-policy-delivered\n":
+                raise ValueError("withdrawal storage not acknowledged")
+            assert_confirmed(t, w, d, auth["payload_sha256"])
+            delivered.append(edge)
+        except Exception:
+            unavailable.append(edge)  # Continue to the other exact recipient; never infer its ACK.
+    return {"mode": "off", "generation": d["generation"], "config_sha": d["worker_config_sha"], "available": available,
+            "verified_fences": delivered, "unavailable": unavailable, "lease_published": len(delivered) == 2,
+            "payload_sha256": auth["payload_sha256"] if auth else "", "route_verified": [],
+            "withdrawal_of": prior}
+
+
 def execute(d, t, raw, verifier):
+    if "withdrawal_of" in d:
+        return withdraw_retained(d, t, raw, verifier)
     image = release_image(d, t)
     source, peer = d["source"], d["peer"]
     order = (source, peer) if d["mode"] == "off" else (peer, source)

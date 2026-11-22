@@ -206,3 +206,18 @@ Only then use an explicitly scoped active policy. To stop submitting new
 relay traffic, publish a higher-generation signed `off` policy, first on
 ingress and then on egress; allow already dispatched streams to complete
 before removing the listener. Never change DNS as a relay rollback.
+
+If the release monitor or Front is unavailable, a withdrawal declaration may
+add `withdrawal_of` to an otherwise normal `off` declaration. Supply the
+previous acknowledged payload SHA-256 (64 lowercase hex digits), its positive
+`generation`, and `slots`, a map from each of the two declared edge names to
+its previously acknowledged slot. Use fields from the original receipt; do
+not discover new recipients by scanning for running Workers. The enclosing
+generation must be higher. A fresh off envelope from the same verifier is
+still mandatory for writes. An unsigned invocation is a read-only preview.
+This mode only uses the exact node/workload/slot/image recorded in the trust
+declaration and an existing matching durable fence; it cannot initialize
+trust, select routing, or expand a pilot. A changed Worker or fence fails
+closed. Read both per-recipient acknowledgements: one unavailable recipient
+is a partial withdrawal, not a successful stop on both. A lease expiring is
+a separate fact and is not an acknowledgement.
