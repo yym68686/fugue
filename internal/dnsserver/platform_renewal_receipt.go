@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"time"
 
@@ -62,9 +63,6 @@ func (s *Service) reportCompletedDNSRenewal(ctx context.Context, observation *dn
 	if err := wire(state); err != nil {
 		return err
 	}
-	if err := s.checkDNSRouteSources(ctx, client, id, state.record.Candidate, state.record.RouteSources); err != nil {
-		return err
-	}
 	if !s.platformReceiptMu.TryLock() {
 		return nil // the main receipt is already under way
 	}
@@ -77,7 +75,28 @@ func (s *Service) reportCompletedDNSRenewal(ctx context.Context, observation *dn
 	}
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ActualGeneration: a.ExpectedGeneration, LKGGeneration: a.ExpectedGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
 	sendCtx, finish := startDNSSyncTrace(ctx, s.Logger, "completed_renewal_receipt")
-	err := s.reportDNSAssignmentStateLocked(sendCtx, client, id, a, base, h, ready)
+	err := s.reportDNSAssignmentStateLocked(sendCtx, client, id, a, base, h, ready, state)
 	finish(err)
 	return err
+}
+
+// No caching, retries or detached reads. If either check fails, stop and
+// join its sibling; the caller then rechecks the local selection and proof
+// deadlines before a successful pair can produce one heartbeat.
+func joinDNSReceiptReads(ctx context.Context, first, second func(context.Context) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch := make(chan error, 1)
+	go func() {
+		err := first(ctx)
+		if err != nil {
+			cancel()
+		}
+		ch <- err
+	}()
+	err := second(ctx)
+	if err != nil {
+		cancel()
+	}
+	return errors.Join(err, <-ch)
 }

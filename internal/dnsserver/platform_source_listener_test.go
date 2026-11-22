@@ -224,6 +224,11 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 			t.Fatal("authority changed after the wire probe")
 		}
 		driftOnRead.Store(0)
+		driftOnAssignmentRead.Store(assignmentReads.Load() + 1)
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, check); !errors.Is(err, platformconsumer.ErrAssignmentChanged) || receipts.Load() != originalCount+1 {
+			t.Fatal("matching source allowed a different unique serving assignment", err)
+		}
+		driftOnAssignmentRead.Store(0)
 		service.platformReceiptMu.Lock()
 		err = service.reportCompletedDNSRenewal(t.Context(), o, id, check)
 		service.platformReceiptMu.Unlock()
