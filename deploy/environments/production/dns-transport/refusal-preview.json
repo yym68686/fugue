@@ -1,0 +1,120 @@
+{
+  "apiVersion": "transport.fugue.dev/v4",
+  "generation": 99,
+  "handoffs": [
+    {
+      "address": "51.38.126.103",
+      "previous_revision": "b23fdf448b82b89c3e20cb63a6827e3c676df451",
+      "candidate_revision": "999a023f1ed81d3e1af402e9d936022c44a577bf",
+      "recovery_fallback": {
+        "selector": {
+          "app.kubernetes.io/component": "dns-de-h",
+          "app.kubernetes.io/instance": "fugue",
+          "app.kubernetes.io/name": "fugue"
+        },
+        "revision": "dd77870ed21c3a25a34b8a7d703b326f1613a21f",
+        "pod_uid": "11c19259-5773-4072-87c9-eecc826e9b54"
+      },
+      "failed_predecessor": {
+        "node_uid": "5fc22742-672c-48e3-b847-60726919f16c",
+        "public_service_uid": "be149bb0-24a0-4835-9f82-40aae5645323",
+        "diagnostic_service_uid": "c6d910fa-e7ae-4ae0-8b1f-ff132417b1eb",
+        "pod_uid": "847ee18b-f722-4ba6-b7a1-1777303661e7",
+        "candidate_pod_uid": "2a994bae-3fa7-4392-868b-f58a216a3833",
+        "release_id": "artifactrel_1795229322_9092a1b3571a",
+        "parent_digest": "sha256:95af9c85f1d1bba45899951ec4eb03235269086d09658610d990728bb8c03f41",
+        "fencing_token": 9048,
+        "query": {
+          "hostname": "i00.pro",
+          "type": "A"
+        },
+        "api": {
+          "origin": "https://api.fugue.pro",
+          "api_address": "15.204.94.71"
+        },
+        "rollback": {
+          "artifact_id": "artifact_1795225327_3c4aa1e74666",
+          "parent_digest": "sha256:72a8d99c11b5d05116243504223a54818aeb88976821c1367225f21297188117",
+          "release_id": "artifactrel_1795229972_9235ef8371cd",
+          "fencing_token": 9059,
+          "lkg_release_id": "artifactrel_1795229016_c643f9afd45f",
+          "lkg_evidence_hash": "sha256:d94bb57afc82d306b70c92e383761054e4be35b77de18585eb27b83e2f238e9a"
+        },
+        "refused_listener": {
+          "control": "15.204.94.71",
+          "sources": [
+            {
+              "node": "v2202605354515455529",
+              "node_uid": "8ccede20-1d93-4672-8025-7fbed684529f",
+              "country": "de",
+              "pod": "fugue-fugue-image-cache-nn2cg",
+              "pod_uid": "2be3f9c0-bb36-4f7c-9634-e718d9e45c35",
+              "ip": "159.195.76.108",
+              "container": "image-cache",
+              "image": "ghcr.io/yym68686/fugue-image-cache@sha256:57d63b594d5c8d08ffaff3439ce42bce038b95268594d7016c81212fa6164e4a"
+            },
+            {
+              "node": "ns101351",
+              "node_uid": "f2c29b3a-155c-4a9b-a8de-16d167056075",
+              "country": "us",
+              "pod": "fugue-fugue-image-cache-8mlzn",
+              "pod_uid": "35d5ff59-4594-4480-bbe7-2ad09f71292d",
+              "ip": "147.135.6.173",
+              "container": "image-cache",
+              "image": "ghcr.io/yym68686/fugue-image-cache@sha256:57d63b594d5c8d08ffaff3439ce42bce038b95268594d7016c81212fa6164e4a"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "kind": "DNSLocalTransport",
+  "listeners": [
+    {
+      "address": "51.38.126.103",
+      "name": "fugue-dns-transport-de",
+      "port": 15353,
+      "selector": {
+        "app.kubernetes.io/component": "dns-de-g",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "targetPort": 53
+    },
+    {
+      "address": "15.204.94.71",
+      "name": "fugue-dns-transport-us",
+      "port": 15353,
+      "selector": {
+        "app.kubernetes.io/component": "dns-us-f",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "targetPort": 53
+    },
+    {
+      "address": "51.38.126.103",
+      "name": "fugue-dns-public-de",
+      "port": 53,
+      "selector": {
+        "app.kubernetes.io/component": "dns-de-g",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "targetPort": 53
+    },
+    {
+      "address": "15.204.94.71",
+      "name": "fugue-dns-public-us",
+      "port": 53,
+      "selector": {
+        "app.kubernetes.io/component": "dns-us-f",
+        "app.kubernetes.io/instance": "fugue",
+        "app.kubernetes.io/name": "fugue"
+      },
+      "targetPort": 53
+    }
+  ],
+  "namespace": "fugue-system",
+  "rollback_generation": 100
+}

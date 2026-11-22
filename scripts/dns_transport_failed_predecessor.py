@@ -11,6 +11,10 @@ def validate_stage(stage):
     recovery = stage["failed_predecessor"]
     identities = {"node_uid", "public_service_uid", "diagnostic_service_uid", "pod_uid", "candidate_pod_uid"}
     fields = identities | {"release_id", "parent_digest", "fencing_token", "query", "api", "rollback"}
+    if isinstance(recovery,dict) and "refused_listener" in recovery:
+        from scripts.dns_refused_wire import validate_sources
+        validate_sources(recovery["refused_listener"])
+        fields.add("refused_listener")
     if "recovery_fallback" not in stage or not isinstance(recovery, dict) or set(recovery) != fields:
         raise ValueError("DNS failed predecessor recovery requires full identity and an independent fallback")
     for key in identities:
@@ -66,6 +70,9 @@ def witness(config, stage, listener, current, owner, old, candidate, fallback):
 
 
 def observe_failed_predecessor(config, stage, listener, current, *, policy_path, observer, verifier):
+    if "refused_listener" in stage["failed_predecessor"]:
+        from scripts.dns_refused_listener import observe
+        return observe(config,stage,listener,current,policy_path)
     from scripts.inspect_dns_predecessor import inspect
 
     predecessor, _ = transport.predecessor_listener_config(config, listener, current, config["generation"])
@@ -75,6 +82,9 @@ def observe_failed_predecessor(config, stage, listener, current, *, policy_path,
 
 def validate_failure_observation(report, stage, current, witness, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    if "refused_listener" in stage["failed_predecessor"]:
+        from scripts.dns_refused_listener import validate
+        return validate(report,stage,current,witness,now)
     query = stage["failed_predecessor"]["query"]
     if (report.get("schema") != "fugue.dns-unready-predecessor-observation/v1" or
             report.get("authorizes_traffic") is not False or report.get("node_uid") != witness["node_uid"] or

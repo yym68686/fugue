@@ -202,6 +202,8 @@ class RecoveryTests(unittest.TestCase):
             (recovery.verify_unready_predecessor, ['--verify-unready-predecessor'],
              '{"verified_unready_predecessor":true,"authorizes_traffic":false}'),
             (recovery.verify_candidate, [], '{"verified":true}'),
+            (recovery.verify_expired_predecessor, ['--verify-expired-predecessor'],
+             '{"verified_expired_predecessor":true,"authorizes_traffic":false}'),
         ]:
             with self.subTest(method=method.__name__), patch.object(recovery, 'candidate_request', return_value={}), \
                     patch.object(recovery.subprocess, 'run') as run:

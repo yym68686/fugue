@@ -1,5 +1,6 @@
 """Read-only checks for restoring transport to exact, previously verified DNS content."""
 import datetime
+import os
 import re
 
 
@@ -83,6 +84,10 @@ def require_current_rollback(snapshot, failure):
     from scripts.recover_dns_transport import read_recovery_api
 
     ref = failure["rollback"]
+    if "refused_listener" in failure:
+        domain = os.environ.get("FUGUE_LEDGER_API_DOMAIN","")
+        if not domain or failure["api"]["origin"] != "https://"+domain:
+            raise ValueError("rollback origin differs from the protected production API")
     validate_reference(ref)
     lkg = read_recovery_api(failure["api"], "/v1/admin/artifacts/" + ref["artifact_id"] + "/lkg")
     # Read the selected full last. A historic, but still retained, rollback

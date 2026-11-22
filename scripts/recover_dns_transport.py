@@ -134,6 +134,12 @@ def verify_unready_predecessor(candidate, config, verifier=None):
                         '{"verified_unready_predecessor":true,"authorizes_traffic":false}')
 
 
+def verify_expired_predecessor(candidate, config, verifier=None):
+    """Authenticate a fresh negative observation of an expired global checkpoint only."""
+    _verify_observation(candidate, config, verifier, ['--verify-expired-predecessor'],
+                        '{"verified_expired_predecessor":true,"authorizes_traffic":false}')
+
+
 def _verify_observation(candidate, config, verifier, mode, expected):
     if verifier is None:
         verifier = os.environ.get('FUGUE_DNS_OBSERVATION_VERIFIER', '')

@@ -8,6 +8,56 @@ import (
 	"fugue/internal/dnsfacts"
 )
 
+func TestExpiredPredecessorCannotAuthorizeTraffic(t *testing.T) {
+	s, st, now := runtimeFactsFixture(t)
+	st.record.AppliedAt = now.Add(-time.Duration(st.payload.Policy.MaxStaleSeconds)*time.Second - time.Second)
+	if err := s.signDNSCheckpoint(&st.record); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(st.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := dnsRuntimeFacts(st, now)
+	if err != nil || base.Ready || len(base.Facts) == 0 {
+		t.Fatal("invalid negative fixture", err)
+	}
+	for _, name := range []string{"exact", "ready", "positive member", "wrong member", "omitted", "substituted assignment", "pre-expiry capture", "stale capture", "forged expiry", "revoked"} {
+		t.Run(name, func(t *testing.T) {
+			snap, cfg := base, s.Config
+			snap.Facts = append([]dnsfacts.Probe(nil), base.Facts...)
+			switch name {
+			case "ready":
+				snap.Ready = true
+			case "positive member":
+				snap.Facts[0].Ready = true
+			case "wrong member":
+				snap.Facts[0].ProbeID = "foreign"
+			case "omitted":
+				snap.Facts = snap.Facts[1:]
+			case "substituted assignment":
+				snap.Assignment.FencingToken++
+			case "pre-expiry capture":
+				snap.EvaluatedAt = snap.CheckpointValidUntil.Add(-time.Nanosecond)
+				snap.ObservedAt = snap.EvaluatedAt
+			case "stale capture":
+				snap.EvaluatedAt = now.Add(-time.Hour)
+				snap.ObservedAt = snap.EvaluatedAt
+			case "forged expiry":
+				snap.CheckpointValidUntil = now
+			case "revoked":
+				cfg.BundleRevokedKeyIDs = []string{cfg.BundleSigningKeyID}
+			}
+			if err := VerifyExpiredPredecessorObservation(cfg, raw, snap, now); (err == nil) != (name == "exact") {
+				t.Fatalf("unexpected expiry result: %v", err)
+			}
+			if VerifyServingObservation(cfg, raw, snap, now) == nil || VerifyUnreadyPredecessorObservation(cfg, raw, snap, now) == nil {
+				t.Fatal("expired evidence accepted as live authority")
+			}
+		})
+	}
+}
+
 func TestServingObservationAuthenticatesCheckpointAndEveryPositiveProof(t *testing.T) {
 	service, state, now := runtimeFactsFixture(t)
 	if err := service.signDNSCheckpoint(&state.record); err != nil {

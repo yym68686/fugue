@@ -28,7 +28,7 @@ def observe_failure_samples(report, address, query):
         for sample in samples]
 
 
-def verify_unready_backend(config, listener, backend, verifier=None):
+def verify_unready_backend(config, listener, backend, verifier=None, *, expired=False):
     pod = backend["pod"]
     images = [c["image"] for c in pod["spec"]["containers"] if
               all(any(p.get("containerPort") == listener["targetPort"] and p.get("protocol", "TCP") == protocol
@@ -36,7 +36,10 @@ def verify_unready_backend(config, listener, backend, verifier=None):
     if len(images) != 1 or not re.fullmatch(r"[^\s@]+@sha256:[a-f0-9]{64}", images[0]):
         raise ValueError("immutable predecessor image required")
     binding = dict(config, recovery={"candidate_image": images[0], "candidate_pod_uid": pod["metadata"]["uid"]})
-    recovery.verify_unready_predecessor(backend, binding, verifier)
+    if expired:
+        recovery.verify_expired_predecessor(backend, binding, verifier)
+    else:
+        recovery.verify_unready_predecessor(backend, binding, verifier)
     return {key: backend["snapshot"][key] for key in ("assignment", "parent_digest", "plan_digest")}
 
 

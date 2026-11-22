@@ -5,7 +5,11 @@ import sys
 
 TRANSPORT_DECLARATION = 'deploy/environments/production/dns-transport/transport.json'
 LEDGER_INSPECTION = 'deploy/environments/production/dns-transport/ledger-inspection.json'
+REFUSED_PREVIEW = 'deploy/environments/production/dns-transport/refusal-preview.json'
 TRANSPORT_EXECUTORS = {
+    'scripts/dns_refused_listener.py',
+    'scripts/dns_refused_wire.py',
+    'scripts/dns_no_endpoint_observation.py',
     'scripts/reconcile_dns_transport.py',
     'scripts/recover_dns_transport.py',
     'scripts/inspect_dns_predecessor.py',
@@ -18,7 +22,7 @@ TRANSPORT_EXECUTORS = {
 def select(paths):
     paths = set(paths)
     return {
-        'transport': bool(paths & (TRANSPORT_EXECUTORS | {TRANSPORT_DECLARATION, LEDGER_INSPECTION})),
+        'transport': bool(paths & (TRANSPORT_EXECUTORS | {TRANSPORT_DECLARATION, LEDGER_INSPECTION, REFUSED_PREVIEW})),
         'ports': any(path.startswith('deploy/environments/production/dns-port-retirement/') for path in paths),
         'slots': 'deploy/environments/production/dns-slot-retirement/intent.json' in paths,
     }

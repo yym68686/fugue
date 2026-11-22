@@ -10,6 +10,7 @@ class SelectionTests(unittest.TestCase):
     def test_each_independent_declaration_selects_only_its_writer(self):
         for path, writer in [('deploy/environments/production/dns-transport/transport.json', 'transport'),
                              ('deploy/environments/production/dns-transport/ledger-inspection.json', 'transport'),
+                             ('deploy/environments/production/dns-transport/refusal-preview.json', 'transport'),
                              ('deploy/environments/production/dns-port-retirement/region.json', 'ports'),
                              ('deploy/environments/production/dns-slot-retirement/intent.json', 'slots')]:
             self.assertEqual(select([path]), {key: key == writer for key in ['transport', 'ports', 'slots']})

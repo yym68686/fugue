@@ -3170,10 +3170,23 @@ jobs:
           if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]] || [[ "$base" == 0000000000000000000000000000000000000000 ]]; then
             base="$(git rev-parse HEAD^)"
           fi
-          python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_inspect_dns_predecessor scripts.test_dns_transport_failed_predecessor scripts.test_dns_transport_rollback_authority scripts.test_verify_dns_configuration_revision scripts.test_select_dns_configuration
+          python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_inspect_dns_predecessor scripts.test_dns_transport_failed_predecessor scripts.test_dns_transport_rollback_authority scripts.test_verify_dns_configuration_revision scripts.test_select_dns_configuration scripts.test_dns_no_endpoint_observation scripts.test_dns_refused_listener
           declaration_delta="$(git diff --name-only "$base" HEAD -- "$config")"
           inspection=deploy/environments/production/dns-transport/ledger-inspection.json
           inspection_delta="$(git diff --name-only "$base" HEAD -- "$inspection")"
+          preview=deploy/environments/production/dns-transport/refusal-preview.json
+          preview_delta="$(git diff --name-only "$base" HEAD -- "$preview")"
+          if [[ -f "$preview" && -n "$preview_delta" ]]; then
+            if [[ -n "$declaration_delta" || -n "$inspection_delta" ]]; then echo "Refusal preview must be isolated from other declarations." >&2; exit 1; fi
+            git fetch origin main
+            python3 -m scripts.verify_dns_configuration_revision HEAD origin/main transport
+            git diff --quiet HEAD origin/main -- "$preview" scripts/preview_dns_refused_stage.py
+            export FUGUE_DNS_OBSERVATION_VERIFIER="$RUNNER_TEMP/fugue-refusal-preview-verify"
+            go build -trimpath -o "$FUGUE_DNS_OBSERVATION_VERIFIER" ./cmd/fugue-dns-observation-verify
+            go build -trimpath -o "$RUNNER_TEMP/fugue-refusal-preview-observe" ./cmd/fugue-dns-observe
+            python3 -m scripts.preview_dns_refused_stage "$preview" deploy/environments/production/dns-observation/public.json "$RUNNER_TEMP/fugue-refusal-preview-observe" "$FUGUE_DNS_OBSERVATION_VERIFIER"
+            exit 0
+          fi
           if [[ -f "$inspection" && -n "$inspection_delta" ]]; then
             if [[ -n "$declaration_delta" ]]; then echo "Ledger inspection must be isolated from listener mutations." >&2; exit 1; fi
             git fetch origin main
@@ -3224,6 +3237,7 @@ jobs:
         if: success() && steps.dns_transport.outcome == 'success' && steps.dns_transport.outputs.selected == 'true'
         env:
           FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
+          FUGUE_LEDGER_API_DOMAIN: ${{ vars.FUGUE_API_PUBLIC_DOMAIN }}
         run: |
           set -euo pipefail
           config=deploy/environments/production/dns-transport/transport.json

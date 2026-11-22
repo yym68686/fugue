@@ -31,7 +31,7 @@ func VerifyServingAuthorityHandoff(configuration config.DNSConfig, checkpoint []
 }
 
 func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
-	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, true)
+	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, servingObservation)
 }
 
 // VerifyUnreadyPredecessorObservation verifies the authority and probe membership
@@ -39,18 +39,29 @@ func VerifyServingObservation(configuration config.DNSConfig, checkpoint []byte,
 // Callers still need independent wire evidence tied to the selected listener;
 // this verification never authorizes selection, rollback or a positive ACK.
 func VerifyUnreadyPredecessorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
-	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, false)
+	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, unreadyObservation)
 }
 
-func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time, requireReady bool) error {
+// VerifyExpiredPredecessorObservation establishes only historical identity and
+// a current observation of expiry. It cannot establish readiness or select a
+// replacement. In particular an observation taken *before* expiry is invalid.
+func VerifyExpiredPredecessorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time) error {
+	return verifyDNSExecutorObservation(configuration, checkpoint, snapshot, now, expiredObservation)
+}
+
+type executorObservationMode uint8
+
+const (
+	servingObservation executorObservationMode = iota
+	unreadyObservation
+	expiredObservation
+)
+
+func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time, mode executorObservationMode) error {
 	service := &Service{Config: configuration}
-	record, err := service.decodeDNSCheckpoint(checkpoint)
+	record, payload, routeID, err := service.decodeDNSCheckpointPayload(checkpoint)
 	if err != nil {
 		return errors.New("DNS observation checkpoint authentication failed")
-	}
-	payload, routeID, err := service.verifiedDNSCheckpointPayload(record)
-	if err != nil {
-		return errors.New("DNS observation artifact authentication failed")
 	}
 	planDigest, err := platformconfig.Digest(payload.Plan)
 	until := record.AppliedAt.Add(time.Duration(payload.Policy.MaxStaleSeconds) * time.Second)
@@ -64,9 +75,17 @@ func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []b
 		snapshot.ObservedAt.After(snapshot.EvaluatedAt) || snapshot.EvaluatedAt.After(now) {
 		return errors.New("DNS observation temporal ordering mismatch")
 	}
-	if !until.After(now) || now.Sub(snapshot.EvaluatedAt) > time.Duration(payload.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second {
+	if now.Sub(snapshot.EvaluatedAt) > time.Duration(payload.Policy.DNSReadiness.ProbeIntervalSeconds)*time.Second ||
+		(mode != expiredObservation && !until.After(now)) {
 		return errors.New("DNS observation has expired")
 	}
+	if mode == expiredObservation {
+		if until.After(snapshot.EvaluatedAt) || snapshot.Ready || snapshot.RouteSources != nil ||
+			snapshot.Assignment.ScopeKey != "global" || len(payload.Plan.Probes) == 0 {
+			return errors.New("DNS predecessor is not an expired unready global checkpoint")
+		}
+	}
+	requireReady := mode == servingObservation
 	if requireReady && !snapshot.Ready {
 		return errors.New("DNS observation lacks complete record readiness")
 	}
@@ -93,6 +112,9 @@ func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []b
 		seen[observed.ProbeID] = true
 		fact := dnsReadinessFact{ProbeID: observed.ProbeID, Proof: observed.Proof}
 		if observed.Ready {
+			if mode == expiredObservation {
+				return errors.New("expired DNS predecessor reports a positive proof")
+			}
 			// A positive claim must be valid at capture, including its original
 			// expiry and release binding. In transit a redundant endpoint may
 			// expire; drop its readiness without renewing its lease or rejecting
@@ -118,6 +140,9 @@ func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []b
 		}
 		fact.ProbeHistory = append([]time.Time(nil), observed.ProbeHistory...)
 		facts = append(facts, fact)
+	}
+	if mode == expiredObservation {
+		return nil // No positive facts, exact authenticated membership; no serving authority.
 	}
 	boundDNSRouteSourceFacts(payload, facts, evaluateAt)
 	state, err := buildDNSServingState(record, payload, routeID, configuration.DNSNodeID, configuration.EdgeGroupID, facts, snapshot.ObservedAt)

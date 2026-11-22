@@ -19,6 +19,7 @@ import (
 const (
 	exportPolicyMode   = "--export-policy"
 	unreadyBackendMode = "--verify-unready-predecessor"
+	expiredBackendMode = "--verify-expired-predecessor"
 )
 
 func verify(input io.Reader, output io.Writer, mode string) error {
@@ -59,9 +60,16 @@ func verify(input io.Reader, output io.Writer, mode string) error {
 	if len(request.ObservationQueries) != 0 {
 		return errors.New("observation queries require explicit policy export")
 	}
-	if mode == unreadyBackendMode {
+	if mode == unreadyBackendMode || mode == expiredBackendMode {
 		if request.HandoffPrevious != nil || request.AvailabilityRoute != nil {
 			return errors.New("unready predecessor verification cannot authorize a handoff")
+		}
+		if mode == expiredBackendMode {
+			if err := dnsserver.VerifyExpiredPredecessorObservation(configuration, request.Checkpoint, request.Snapshot, time.Now().UTC()); err != nil {
+				return err
+			}
+			_, err := fmt.Fprintln(output, `{"verified_expired_predecessor":true,"authorizes_traffic":false}`)
+			return err
 		}
 		if err := dnsserver.VerifyUnreadyPredecessorObservation(configuration, request.Checkpoint, request.Snapshot, time.Now().UTC()); err != nil {
 			return err
@@ -86,7 +94,7 @@ func verify(input io.Reader, output io.Writer, mode string) error {
 
 func main() {
 	var mode string
-	if len(os.Args) == 2 && (os.Args[1] == exportPolicyMode || os.Args[1] == unreadyBackendMode) {
+	if len(os.Args) == 2 && (os.Args[1] == exportPolicyMode || os.Args[1] == unreadyBackendMode || os.Args[1] == expiredBackendMode) {
 		mode = os.Args[1]
 	} else if len(os.Args) != 1 {
 		fmt.Fprintln(os.Stderr, "unsupported DNS verification mode")
