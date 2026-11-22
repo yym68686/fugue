@@ -52,15 +52,16 @@ func (s *Server) readConsumerAssignmentAttempt(ctx context.Context, claims platf
 	}
 	read := newConsumerArtifactReader(load)
 	bindings := routeartifact.NewRequestBindingReader()
-	items, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, read)
+	resolve := func() ([]consumerArtifactLookup, error) {
+		return s.resolveConsumerAssignmentLanes(ctx, claims, read, servingOnly)
+	}
+	items, err := resolve()
 	if err != nil {
 		return nil, "resolve", err
 	}
 	if servingOnly {
-		items, err = selectServingConsumerAssignments(items, func() ([]consumerArtifactLookup, error) {
-			return s.resolvePlatformConsumerAssignmentsWithReader(claims, read)
-		}, func(item consumerArtifactLookup) (bool, error) {
-			set, err := s.store.GetPlatformExpectedConsumerSet(item.Assignment.ExpectedConsumerSetID)
+		items, err = selectServingConsumerAssignments(items, resolve, func(item consumerArtifactLookup) (bool, error) {
+			set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, item.Assignment.ExpectedConsumerSetID)
 			if err != nil {
 				return false, errors.New("serving topology unavailable")
 			}

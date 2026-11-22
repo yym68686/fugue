@@ -282,6 +282,26 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	servingOnly := performJSONRequest(t, s, http.MethodGet, "/v1/platform-state/consumers/assignment?serving_only=true", token, nil)
+	// Count physical artifact reads across discovery AND the independent
+	// authority recheck. A serving-only reader cannot use a shadow artifact.
+	claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", AuthorityID: "cell-dns", ScopeKey: "authority-cell:cell-dns", ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
+	for _, only := range []bool{true, false} {
+		counts := map[string]int{}
+		items, _, readErr := s.readCheckedConsumerAssignments(context.Background(), claims, only, time.Now(), func() func(string) (model.PlatformArtifact, error) {
+			load := s.store.NewPlatformArtifactReadSession()
+			return func(id string) (model.PlatformArtifact, error) {
+				counts[id]++
+				return load(id)
+			}
+		})
+		t.Logf("serving_only=%v: shadow parent=%d child=%d; serving parent=%d", only, counts[cold.ReleaseArtifact.ID], counts[cold.DNSArtifact.ID], counts[compiled.ReleaseArtifact.ID])
+		if only && (readErr != nil || len(items) != 1 || counts[cold.ReleaseArtifact.ID]+counts[cold.DNSArtifact.ID] != 0 || counts[compiled.ReleaseArtifact.ID] < 2) {
+			t.Fatal("serving read loaded shadow or skipped its own authority reread", readErr)
+		}
+		if !only && (readErr == nil || len(items) != 0 || counts[cold.ReleaseArtifact.ID] == 0) {
+			t.Fatal("all-channel read skipped cold shadow failure", readErr)
+		}
+	}
 	if servingOnly.Code != http.StatusOK || strings.Contains(servingOnly.Body.String(), cold.DNSArtifact.ID) {
 		t.Fatal("unselected cold shadow blocked serving-only reads", servingOnly.Code, servingOnly.Body.String())
 	}

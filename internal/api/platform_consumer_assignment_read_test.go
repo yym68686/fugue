@@ -128,9 +128,14 @@ func TestConsumerAssignmentReadRetriesCompleteVerificationTransition(t *testing.
 					if id == f.compiled.ReleaseArtifact.ID {
 						parentReads++
 					}
-					// At the final authority reread, after the first discovery has
-					// captured the old envelope, perform the real LKG transition.
-					if err == nil && parentReads == 2 && !verified {
+					// Mutate after discovery captured the gray release envelope
+					// and before the final gray lookup. In serving-only mode
+					// there is no preliminary read of the shared shadow parent.
+					atBoundary := parentReads == 2
+					if servingOnly {
+						atBoundary = parentReads == 1 && id == f.compiled.RouteArtifact.ID
+					}
+					if err == nil && atBoundary && !verified {
 						verified = true
 						_, _, _, _, verifyErr := s.store.VerifyPlatformArtifactReleaseLKG(gray.ID, model.PlatformArtifactVerifyLKGRequest{FencingToken: gray.FencingToken, AllowInitialLKG: true, Reason: "synthetic concurrent verification", Evidence: model.PlatformArtifactVerificationEvidence{ConsumerConvergence: true, LocalProbe: true, PlatformEvidence: true, WatchWindow: true, BaselineMonotonic: true, DatabaseRollbackCompatible: true, EvidenceRefs: []string{"synthetic"}}}, platformProducerPrincipal())
 						if verifyErr != nil {

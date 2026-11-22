@@ -67,7 +67,7 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 		return err
 	}
 	freshRead := newConsumerArtifactReader(load)
-	current, err := s.resolvePlatformConsumerAssignmentsWithReader(claims, freshRead)
+	current, err := s.resolveConsumerAssignmentLanes(ctx, claims, freshRead, servingOnly)
 	if err != nil {
 		observeConsumerInputReadFailure(ctx, "fresh_authority_resolve", store.PlatformInputReadFailure{}, nil, nil)
 		return err
@@ -89,7 +89,7 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 					return store.ErrConflict
 				}
 				if servingOnly {
-					set, err := s.store.GetPlatformExpectedConsumerSet(after.Assignment.ExpectedConsumerSetID)
+					set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, after.Assignment.ExpectedConsumerSetID)
 					if err != nil {
 						observeConsumerInputReadFailure(ctx, "fresh_expected_set", store.PlatformInputReadFailure{}, nil, nil)
 						return err
