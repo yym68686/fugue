@@ -25,7 +25,7 @@ import (
 
 func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 	const first, second, group = "app.example.test", "other.example.test", "edge-group-a"
-	for _, mode := range []string{"same-assignment", "changed-fence", "expired", "explicit-negative", "restart", "standby-rejected-successor"} {
+	for _, mode := range []string{"same-assignment", "changed-fence", "expired", "explicit-negative", "restart", "standby-rejected-successor", "expired-full-checkpoint"} {
 		t.Run(mode, func(t *testing.T) {
 			parent, candidate := dnsServingFixtureWithIntent(t, group, "global", func(r *platformconfig.CompileRequest) {
 				r.Policy.DNSReadiness.FactFreshnessSeconds = 120
@@ -39,6 +39,11 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 				r.Policy.DNSAnswerRules = append(r.Policy.DNSAnswerRules, rule)
 				r.RuntimeSnapshot.DNSSelections = append(r.RuntimeSnapshot.DNSSelections, selection)
 			}, true)
+			renewal := mode == "expired-full-checkpoint"
+			if renewal {
+				candidate.Assignment.ReleaseChannel = "full"
+				candidate.Release.ReleaseChannel, candidate.Release.CanaryRuleRef = "full", ""
+			}
 			next := candidate
 			next.Assignment.FencingToken++
 			next.Assignment.ArtifactReleaseID = "next"
@@ -79,7 +84,11 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(map[string]string{"code": "dns_backend_not_selected", "error": "not selected"})
 						return
 					}
-					if json.NewDecoder(r.Body).Decode(&h) != nil || h.ProbeStatus != "passed" || h.FencingToken != c.Assignment.FencingToken {
+					want := "passed"
+					if renewal && round.Load() == 2 {
+						want = "failed"
+					}
+					if json.NewDecoder(r.Body).Decode(&h) != nil || h.ProbeStatus != want || h.FencingToken != c.Assignment.FencingToken {
 						t.Error("unexpected serving receipt")
 					}
 					_ = json.NewEncoder(w).Encode(model.PlatformConsumerHeartbeatResponse{Consumer: model.PlatformConsumerInstance{IdentityVerified: true, ConsumerID: h.ConsumerID, Sequence: h.Sequence, EvidenceHash: h.EvidenceHash, ExpectedConsumerSetID: h.ExpectedConsumerSetID}})
@@ -105,13 +114,13 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 				c := current()
 				if host == first && round.Load() >= 0 {
 					firstAttempts.Add(1)
-					if round.Load() > 0 {
+					if round.Load() > 0 && !(renewal && round.Load() == 2) {
 						// A genuine rejection must invalidate even a still-live
 						// proof. This is not the scheduler running out of time.
 						return routeprobe.Proof{}, errors.New("explicit route rejection")
 					}
 				}
-				if host == second && round.Load() == 0 {
+				if host == second && (round.Load() == 0 || (renewal && round.Load() == 2)) {
 					return routeprobe.Proof{}, routeprobe.ErrUnavailable
 				}
 				for _, req := range p.Plan.Probes {
@@ -175,7 +184,7 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 				s = NewService(cfg, nil)
 				s.PlatformTokenFile = tokenFile
 			}
-			if mode != "same-assignment" && !standby {
+			if mode != "same-assignment" && !standby && !renewal {
 				if err := s.syncPlatformDNSServingOnce(ctx, probe, prohibitedWire); err == nil || firstAttempts.Load() != 2 || s.platformServing.Load() != nil || reports.Load() != 0 {
 					t.Fatal("non-current proof was deferred or permitted publication", err, firstAttempts.Load(), reports.Load())
 				}
@@ -210,6 +219,33 @@ func TestDNSCompletesAcrossProbeWindowsOnlyForExactAssignment(t *testing.T) {
 			if !got.Proof.CheckedAt.Equal(original.Proof.CheckedAt) || !got.Proof.ValidUntil.Equal(original.Proof.ValidUntil) ||
 				got.ObservationID != original.ObservationID || len(got.ProbeHistory) != len(original.ProbeHistory) {
 				t.Fatal("deferral minted a new observation, deadline or recovery sample", got)
+			}
+			if renewal {
+				aged := *st
+				aged.record.AppliedAt = time.Now().Add(-time.Duration(p.Policy.MaxStaleSeconds+10) * time.Second)
+				if err := s.signDNSCheckpoint(&aged.record); err != nil {
+					t.Fatal(err)
+				}
+				s.platformServing.publish(&aged, dnsServingWriterCheckpoint)
+				round.Store(2)
+				if err := s.syncPlatformDNSServingOnce(ctx, probe, prohibitedWire); err == nil || !strings.Contains(err.Error(), "checkpoint_expired") ||
+					s.checkpointScan == nil || !s.platformServing.Load().record.AppliedAt.Equal(aged.record.AppliedAt) {
+					t.Fatal("first partial sweep must not renew expired authority", err)
+				}
+				anchor := s.checkpointScan.started
+				round.Store(3)
+				if err := s.syncPlatformDNSServingOnce(ctx, probe, s.probeDNSServingListener); err != nil ||
+					!s.platformServing.Load().record.AppliedAt.Equal(anchor) || !dnsServingReady(s.platformServing.Load(), time.Now()) {
+					t.Fatal("two real partial sweeps did not recover via signed apply and wire validation", err)
+				}
+				disk, err := os.ReadFile(cfg.CachePath + ".platform-serving.json")
+				if err != nil {
+					t.Fatal(err)
+				}
+				saved, err := s.decodeDNSCheckpoint(disk)
+				if err != nil || !saved.AppliedAt.Equal(anchor) {
+					t.Fatal("verified checkpoint not durable", err)
+				}
 			}
 			for network, addr := range map[string]string{"udp": s.Config.UDPAddr, "tcp": s.Config.TCPAddr} {
 				for _, host := range []string{first, second} {

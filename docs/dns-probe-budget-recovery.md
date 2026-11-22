@@ -22,3 +22,21 @@ never proof authority or readiness.
 The two changes address missed work without increasing the declared probe
 budget, relaxing quorum or changing endpoint eligibility. If the target really
 fails, records still fail closed when their original valid proofs expire.
+
+## Renewing an aging full checkpoint
+
+On the same signed full assignment, a standalone-plan reader nearing its
+positive checkpoint deadline may need two normal sweeps to physically
+observe every requirement. Each sweep still has its original time, connection
+backoff and concurrency budget. Only immediately consecutive sweeps from the
+same process, parent, route, assignment and checkpoint can be joined. A
+current explicit negative or transport failure cannot borrow an earlier
+success. All probe identities must be covered, independently valid and bound
+to this release at the second sweep; facts in the served cache, retained
+observations and disk receipts are not eligible inputs.
+
+The resulting lease is anchored to the **start of the first sweep**, not the
+time a proof was reused. Original deadlines and observation IDs are unchanged.
+The normal assignment recheck, signing, real listener checks and atomic
+checkpoint persistence still determine whether the result can serve. A
+standby cannot use this mechanism to acknowledge the public listener.

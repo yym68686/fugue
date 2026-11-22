@@ -95,6 +95,7 @@ type Service struct {
 	platformDNSRouteFacts         []dnsReadinessFact     // guarded by platformConsumerMu; never persisted
 	shadowDNSRouteSource          *dnsShadowRouteSource  // guarded by platformConsumerMu; transport hint only
 	pendingDNSProbeWindow         *dnsServingProbeWindow // guarded by platformConsumerMu; never persisted
+	checkpointScan                *dnsCheckpointScan     // guarded by platformConsumerMu; exactly one previous physical sweep
 	routeSourceCompiler           dnsroutesource.Compiler
 	Config                        config.DNSConfig
 	HTTPClient                    *http.Client

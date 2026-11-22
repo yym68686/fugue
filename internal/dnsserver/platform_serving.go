@@ -211,6 +211,8 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	s.platformConsumerMu.Lock()
 	finishLock(nil)
 	defer s.platformConsumerMu.Unlock()
+	lastScan := s.checkpointScan
+	s.checkpointScan = nil // A lost assignment, early return or restart cannot stitch nonconsecutive passes.
 	var rejectedStandbyReceipt bool
 	defer func() {
 		if errors.Is(syncErr, platformconsumer.ErrAssignmentChanged) ||
@@ -423,6 +425,8 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	facts := sourceFacts
 	var previousFacts []dnsReadinessFact
+	var scanAnchor time.Time
+	var nextScan *dnsCheckpointScan
 	if p.routeSources == nil {
 		pending := s.pendingDNSProbeWindow
 		s.pendingDNSProbeWindow = nil
@@ -432,6 +436,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			previousFacts = pending.facts
 		}
 		started := time.Now().UTC()
+		renewFull := same && old.record.Positive && old.record.RouteSources == nil &&
+			release.ReleaseChannel == model.PlatformArtifactReleaseChannelFull &&
+			old.record.Parent.ContentHash == parent.ContentHash && old.routeID == routeID && !dnsServingMayDeferProbes(old, started)
 		var deferrable map[string]dnsReadinessFact
 		// Keep spending a full sweep budget well before the checkpoint
 		// lease expires. A rolling set of retained proofs never renews it.
@@ -444,9 +451,22 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			}
 			dnsDeferRecoveredProbes(p, s.Config.DNSNodeID, deferrable, started)
 		}
+		if renewFull {
+			deferrable = lastScan.prior(a, parent, routeID, old.record.AppliedAt, p, started)
+			dnsDeferRecoveredProbes(p, s.Config.DNSNodeID, deferrable, started)
+		}
 		priority := dnsProbePriorities(p, s.Config.DNSNodeID, nil)
 		scheduler := s.servingDNSProbes.shareHistory(s.probeHistoryStore()).bind(a, s.Logger, s.Config.CachePath).prioritize(priority)
 		facts = scheduler.collectWindow(ctx, p.Plan, p.Policy.DNSReadiness, probe, nil, deferrable, !same)
+		if renewFull && ctx.Err() == nil {
+			finished := time.Now().UTC()
+			// Save only THIS pass's physical observations, before any fallback
+			// or joining. Evidence cannot roll forward indefinitely.
+			nextScan = newDNSCheckpointScan(a, parent, candidate, routeID, p, old.record.AppliedAt, started, finished, facts)
+			if joint, ok := completeDNSCheckpointScan(p, parent, candidate, routeID, deferrable, facts, started, finished); ok {
+				facts, scanAnchor = joint, lastScan.started
+			}
+		}
 	}
 	// Keep the original observations for the retained release. Candidate
 	// assignment filtering below must not erase a valid old-release proof.
@@ -470,6 +490,11 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	}
 	checkpoint := dnsServingCheckpoint{Schema: "fugue.dns.positive-checkpoint/v1", NodeID: s.Config.DNSNodeID, GroupID: s.Config.EdgeGroupID, Parent: parent, Candidate: candidate, AppliedAt: now, Positive: true, RouteSources: p.routeSources}
 	checkpoint = preserveDNSCheckpointAge(checkpoint, old, facts)
+	if !scanAnchor.IsZero() && checkpoint.AppliedAt.Equal(now) {
+		// A two-pass physical scan cannot give a later lease than if its
+		// observations had all been collected at the beginning of the scan.
+		checkpoint.AppliedAt = scanAnchor
+	}
 	st, err := buildDNSServingState(checkpoint, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err != nil {
 		return err
@@ -497,6 +522,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		// previously positive facts or refreshing with this candidate's bridge.
 		if err = checkAssignment(); err != nil {
 			return err
+		}
+		if same && !ready && ctx.Err() == nil {
+			s.checkpointScan = nextScan
 		}
 		if !same && p.routeSources == nil && ctx.Err() == nil {
 			s.pendingDNSProbeWindow = newDNSServingProbeWindow(a, parent, routeID, p, facts, now)
@@ -628,6 +656,9 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		return err
 	}
 	s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(raw), st.record})
+	if nextScan != nil && st.record.AppliedAt.Equal(nextScan.base) {
+		s.checkpointScan = nextScan
+	}
 	s.servingDNSProbes.clearQueryBlockers(a)
 	return s.reportDNSServing(ctx, client, id, st)
 }
