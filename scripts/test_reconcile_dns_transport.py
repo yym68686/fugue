@@ -67,6 +67,17 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(len({cache(spare), cache(placement('e')), cache(placement('f'))}), 3)
         self.assertFalse(any(all(spare['metadata']['labels'].get(k) == v for k, v in listener['selector'].items())
                              for listener in config['listeners'] if listener['port'] == 53))
+        # The independent rollback executor must not share any slot identity or
+        # persistent state with the staged candidate or the failed incumbent.
+        rollback = placement('h')
+        cohort = [placement(slot) for slot in ('e', 'f', 'g', 'h')]
+        self.assertEqual(len({cache(slot) for slot in cohort}), len(cohort))
+        self.assertEqual(len({slot['spec']['serviceAccountName'] for slot in cohort}), len(cohort))
+        self.assertEqual(rollback['spec']['nodeSelector'], spare['spec']['nodeSelector'])
+        self.assertFalse(rollback['spec'].get('hostNetwork'))
+        self.assertFalse(any(port.get('hostPort') for c in rollback['spec']['containers'] for port in c['ports']))
+        self.assertFalse(any(all(rollback['metadata']['labels'].get(k) == v for k, v in listener['selector'].items())
+                             for listener in config['listeners']))
 
     def config(self):
         return {"apiVersion": "transport.fugue.dev/v1", "kind": "DNSLocalTransport", "generation": 1,
