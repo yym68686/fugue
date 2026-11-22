@@ -70,6 +70,7 @@ def handoff(config,stage,listener,current,owner):
             return item
         except DNSObservationRejected as exc:
             exc.backend_role=role
+            exc.add_note("refused listener signed pair: "+role)
             raise
     with ThreadPoolExecutor(max_workers=3) as pool:
         old,candidate,fallback=pool.map(read,("predecessor","candidate","fallback"))

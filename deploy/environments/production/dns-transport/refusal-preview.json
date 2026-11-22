@@ -1,5 +1,5 @@
 {
-  "preview_attempt": 3,
+  "preview_attempt": 4,
   "apiVersion": "transport.fugue.dev/v4",
   "generation": 99,
   "handoffs": [
@@ -13,8 +13,8 @@
           "app.kubernetes.io/instance": "fugue",
           "app.kubernetes.io/name": "fugue"
         },
-        "revision": "dd77870ed21c3a25a34b8a7d703b326f1613a21f",
-        "pod_uid": "11c19259-5773-4072-87c9-eecc826e9b54"
+        "revision": "ff34243fe91eef054c961da5ec0a4560700a5141",
+        "pod_uid": "429dab36-8f61-4d41-adf1-5bf684279108"
       },
       "failed_predecessor": {
         "node_uid": "5fc22742-672c-48e3-b847-60726919f16c",

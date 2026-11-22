@@ -21,6 +21,18 @@ def sites():
             "image":"registry.example/probe@sha256:"+"1"*64} for i,(ip,v) in enumerate((("8.8.8.8","us"),("9.9.9.9","de")))]}
 
 class RefusedTests(unittest.TestCase):
+    def test_signed_readiness_rejection_reports_only_the_capture_flag(self):
+        from scripts import recover_dns_transport as recovery
+        for flag, expected in ((True, "yes"), (False, "no"), ("private-input", "unknown")):
+            request = {"snapshot": {"ready": flag}, "signing_key": "private-input"}
+            result = subprocess.CompletedProcess([], 1, stdout="", stderr="DNS observation lacks complete record readiness")
+            with patch.object(recovery, "candidate_request", return_value=request), \
+                 patch.object(recovery.subprocess, "run", return_value=result), \
+                 self.assertRaises(recovery.DNSObservationRejected) as raised:
+                recovery.verify_candidate({}, {}, "/test/verifier")
+            self.assertEqual(raised.exception.category, "record_readiness")
+            self.assertEqual(raised.exception.__notes__, ["snapshot ready at capture: "+expected])
+
     def test_private_receiver_discards_transient_read_but_not_bad_wire_or_signature(self):
         t=preview.transport
         for fault, retries in ((t.ObservationUnavailable("503"),True),(ValueError("wire failure"),False)):

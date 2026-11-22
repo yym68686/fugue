@@ -165,7 +165,15 @@ def _verify_observation(candidate, config, verifier, mode, expected):
                       'DNS observation lacks complete record readiness': 'record_readiness',
                       'DNS observation cannot materialize all declared answers': 'wire_materialization'}
         category = categories.get(result.stderr.strip(), 'verifier_failed')
-        raise DNSObservationRejected(category)
+        error = DNSObservationRejected(category)
+        if category == 'record_readiness':
+            # Only an observation, never an alternative to the verifier.
+            # Do not emit the request: it also contains the verification keys.
+            snapshot = request.get('snapshot')
+            ready = snapshot.get('ready') if isinstance(snapshot, dict) else None
+            error.add_note('snapshot ready at capture: ' +
+                           ('yes' if ready is True else 'no' if ready is False else 'unknown'))
+        raise error
 
 
 def witness(config, listener, current, node):
