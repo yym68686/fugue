@@ -76,12 +76,14 @@ type Service struct {
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
 	platformServingBound          atomic.Bool
 	platformServingReported       time.Time
+	platformReceiptSignature      string // loaded positive checkpoint that this process successfully reported
 	platformServingError          string
 	platformServingUnassigned     bool
 	platformServingRecoveryFailed bool
 	platformParent                *Service
 	PlatformTokenFile             string
 	platformConsumerMu            sync.Mutex
+	platformReceiptMu             sync.Mutex // one persisted sequence and one in-flight serving receipt per process
 	isolatedShadowStarted         atomic.Bool
 	shadowValidationParent        *Service
 	dnsProbeHistories             dnsProbeHistoryStore

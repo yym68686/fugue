@@ -990,6 +990,12 @@ func (s *Service) reportDNSAssignmentState(ctx context.Context, client platformc
 }
 
 func (s *Service) reportDNSAssignmentStateGuarded(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope, stillReady func() bool) (resultErr error) {
+	s.platformReceiptMu.Lock()
+	defer s.platformReceiptMu.Unlock()
+	return s.reportDNSAssignmentStateLocked(ctx, client, id, a, loaded, h, stillReady)
+}
+
+func (s *Service) reportDNSAssignmentStateLocked(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope, stillReady func() bool) (resultErr error) {
 	step := "serving_state"
 	ctx, finish := observeDNSSyncPhaseWithFailureStep(ctx, "report_assignment_state", func() string { return step })
 	defer func() { finish(resultErr) }()
@@ -1051,6 +1057,11 @@ func (s *Service) reportDNSAssignmentStateGuarded(ctx context.Context, client pl
 	s.mu.Lock()
 	s.platformServingReported = time.Now().UTC()
 	s.platformServingError = h.LastError
+	s.platformReceiptSignature = ""
+	if h.ApplyStatus == "applied" && h.ProbeStatus == "passed" && loaded != nil && loaded.record.Positive &&
+		loaded.fallback == "" && loaded.transition == nil && reflect.DeepEqual(loaded.record.Candidate.Assignment, a) {
+		s.platformReceiptSignature = loaded.record.Signature
+	}
 	s.mu.Unlock()
 	return nil
 }

@@ -17,8 +17,9 @@ import (
 // cannot install a candidate, acknowledge a release, or replace the publication
 // checkpoint. Its state preserves the original configuration's AppliedAt.
 type dnsServingRenewal struct {
-	base  *dnsServingState
-	state *dnsServingState
+	base        *dnsServingState
+	state       *dnsServingState
+	publication *dnsServingPublication // distinguish a rollback to the same state pointer
 }
 
 func sameDNSRenewalPublication(a, b *dnsServingState) bool {
@@ -126,10 +127,37 @@ func (s *Service) probeHistoryStore() *dnsProbeHistoryStore {
 }
 
 func (s *Service) runDNSRenewal(ctx context.Context, worker *Service) {
+	// Reporting must not delay the next physical sweep. No backlog: a
+	// superseded or dropped observation is never retried as a fresh sample.
+	type completed struct {
+		o  *dnsServingRenewal
+		id platformconsumer.Identity
+	}
+	receipts, done := make(chan completed), make(chan struct{})
+	go func() {
+		defer close(done)
+		for input := range receipts {
+			if err := s.reportCompletedDNSRenewal(ctx, input.o, input.id, s.probeDNSServingListener); err != nil && ctx.Err() == nil && s.Logger != nil {
+				s.Logger.Print("DNS completed renewal transport receipt unavailable; original deadlines retained")
+			}
+		}
+	}()
+	defer func() { close(receipts); <-done }()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := s.observeDNSRenewal(ctx, worker, dnsNetworkObserver.Probe); err != nil && ctx.Err() == nil && s.Logger != nil {
+		var observed *dnsServingRenewal
+		var id platformconsumer.Identity
+		err := s.observeDNSRenewalWithSelection(ctx, worker, dnsNetworkObserver.Probe, func(o *dnsServingRenewal, verified platformconsumer.Identity) {
+			observed, id = o, verified
+		})
+		if err == nil && observed != nil {
+			select {
+			case receipts <- completed{observed, id}:
+			default:
+			}
+		}
+		if err != nil && ctx.Err() == nil && s.Logger != nil {
 			// Details are recorded by bounded phase diagnostics. Credentials or
 			// response bodies never become log text here.
 			s.Logger.Print("DNS independent serving renewal unavailable; original deadlines retained")
@@ -143,6 +171,10 @@ func (s *Service) runDNSRenewal(ctx context.Context, worker *Service) {
 }
 
 func (s *Service) observeDNSRenewal(ctx context.Context, worker *Service, probe dnsReadinessProbeFunc) (resultErr error) {
+	return s.observeDNSRenewalWithSelection(ctx, worker, probe, nil)
+}
+
+func (s *Service) observeDNSRenewalWithSelection(ctx context.Context, worker *Service, probe dnsReadinessProbeFunc, selected func(*dnsServingRenewal, platformconsumer.Identity)) (resultErr error) {
 	// This is a work budget, not an extension of any lease or proof. A
 	// complete sweep can take 30s and still needs the authority recheck after
 	// it. Leave room for that read when assignment resolution and the first
@@ -151,7 +183,11 @@ func (s *Service) observeDNSRenewal(ctx context.Context, worker *Service, probe 
 	defer cancel()
 	ctx, finish := startDNSSyncTrace(ctx, s.Logger, "serving_renewal")
 	defer func() { finish(resultErr) }()
-	base := s.platformServing.Load()
+	published := s.platformServing.publication.Load()
+	if published == nil {
+		return nil
+	}
+	base := published.state
 	old := s.currentDNSServingState()
 	if worker == nil || !sameDNSRenewalPublication(base, old) || old.record.RouteSources == nil ||
 		!old.record.AppliedAt.Add(time.Duration(old.payload.Policy.MaxStaleSeconds)*time.Second).After(time.Now()) {
@@ -201,9 +237,13 @@ func (s *Service) observeDNSRenewal(ctx context.Context, worker *Service, probe 
 	}
 	refreshed.transition = old.transition
 	refreshed.fallback = old.fallback
-	if s.platformServing.Load() != base {
+	if s.platformServing.publication.Load() != published {
 		return platformconsumer.ErrAssignmentChanged
 	}
-	s.platformRenewal.Store(&dnsServingRenewal{base: base, state: refreshed})
+	observation := &dnsServingRenewal{base: base, state: refreshed, publication: published}
+	s.platformRenewal.Store(observation)
+	if selected != nil && reflect.DeepEqual(assignment, old.record.Candidate.Assignment) {
+		selected(observation, id)
+	}
 	return nil
 }

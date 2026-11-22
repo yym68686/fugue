@@ -32,6 +32,7 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 	now := time.Now().UTC()
 	snapshot := celldns.SourceSnapshot(t, request, compiled.DNSArtifact, policies, activations, now)
 	release := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: compiled.ReleaseArtifact.ID, ArtifactKind: compiled.ReleaseArtifact.ArtifactKind, ScopeKey: compiled.ReleaseArtifact.ScopeKey, Generation: compiled.ReleaseArtifact.Generation, ReleaseChannel: "full", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, VerificationState: model.PlatformArtifactVerificationStateVerified, ReleasedAt: now}
+	release.VerifiedAt, release.VerifiedLKGGeneration = &now, release.Generation
 	assignment := model.PlatformConsumerAssignment{ArtifactID: compiled.DNSArtifact.ID, ArtifactKind: compiled.DNSArtifact.ArtifactKind, ArtifactReleaseID: release.ID, ReleaseSetID: compiled.ReleaseArtifact.ID, ExpectedConsumerSetID: "dns-expected", Revision: 1, ScopeKey: compiled.DNSArtifact.ScopeKey, ExpectedGeneration: compiled.DNSArtifact.Generation, GenerationSequence: compiled.DNSArtifact.GenerationSequence, ContentHash: compiled.DNSArtifact.ContentHash, FencingToken: 1, ReleaseChannel: "full"}
 	candidate := dnsPlatformCandidate{Artifact: compiled.DNSArtifact, Assignment: assignment, Release: release}
 	consumer, _ := platformcontrol.PlatformConsumerID(model.PlatformConsumerComponentDNSServer, "dns-a", "cell-dns")
@@ -176,6 +177,68 @@ func TestSourceContextFailureKeepsVerifiedListenerWithoutAdmittingNegativeCandid
 		t.Fatal("negative evidence produced a positive heartbeat", err)
 	}
 	service.platformRenewal.Store(nil)
+	t.Run("completed independent sweep reports only its already verified checkpoint", func(t *testing.T) {
+		worker := service.newDNSRenewalWorker()
+		var o *dnsServingRenewal
+		var id platformconsumer.Identity
+		if err := service.observeDNSRenewalWithSelection(t.Context(), worker, probe, func(observed *dnsServingRenewal, identity platformconsumer.Identity) {
+			o, id = observed, identity
+		}); err != nil || o == nil || o.state != service.currentDNSServingState() {
+			t.Fatalf("no independently selected physical sweep: %v", err)
+		}
+		originalCount := receipts.Load()
+		// Move only the in-process last-report clock, not the signed proof or its deadlines.
+		staleReport := func() {
+			service.mu.Lock()
+			service.platformServingReported = time.Now().Add(-time.Minute)
+			service.mu.Unlock()
+		}
+		staleReport()
+		wire := 0
+		check := func(st *dnsServingState) error {
+			wire++
+			if st != o.state {
+				t.Fatal("listener did not verify observed state")
+			}
+			return nil
+		}
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, check); err != nil || receipts.Load() != originalCount+1 || wire != 1 ||
+			service.platformCheckpoint.Load() != checkpoint || service.platformServing.Load() != previous {
+			t.Fatalf("heartbeat missed, changed configuration, or extended checkpoint: receipts=%d wire=%d err=%v", receipts.Load()-originalCount, wire, err)
+		}
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, check); err != nil || receipts.Load() != originalCount+1 || wire != 1 {
+			t.Fatal("replayed a completed observation")
+		}
+		staleReport()
+		service.mu.Lock()
+		service.platformReceiptSignature = ""
+		service.mu.Unlock()
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, check); err != nil || wire != 1 || receipts.Load() != originalCount+1 {
+			t.Fatal("a newly loaded, never acknowledged checkpoint was reported by the observer")
+		}
+		service.mu.Lock()
+		service.platformReceiptSignature = previous.record.Signature
+		service.mu.Unlock()
+		driftOnRead.Store(sourceReads.Load() + 1)
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, check); !errors.Is(err, platformconsumer.ErrAssignmentChanged) || receipts.Load() != originalCount+1 {
+			t.Fatal("authority changed after the wire probe")
+		}
+		driftOnRead.Store(0)
+		service.platformReceiptMu.Lock()
+		err = service.reportCompletedDNSRenewal(t.Context(), o, id, check)
+		service.platformReceiptMu.Unlock()
+		if err != nil || receipts.Load() != originalCount+1 {
+			t.Fatal("raced the main receipt")
+		}
+		failWire := errors.New("dead listener")
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, func(*dnsServingState) error { return failWire }); !errors.Is(err, failWire) || receipts.Load() != originalCount+1 {
+			t.Fatal("dead listener received a receipt")
+		}
+		if err := service.reportCompletedDNSRenewal(t.Context(), o, id, func(*dnsServingState) error { service.platformRenewal.Store(nil); return nil }); err != nil || receipts.Load() != originalCount+1 {
+			t.Fatal("changed observation received a receipt")
+		}
+		service.platformRenewal.Store(nil)
+	})
 	for index := range snapshot.Scopes {
 		scope := &snapshot.Scopes[index]
 		scope.Publications[0].Release.ID += "-next"
