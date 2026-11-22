@@ -113,6 +113,52 @@ class RefusedTests(unittest.TestCase):
                         {"challenge":""},{"authorizes_traffic":True},{"topology":dict(t,selector={"app":"different"})}):
             with self.assertRaises(ValueError): listener.validate(dict(receipt,**changes),stage,svc,witness,now)
 
+    def test_node_status_revision_requires_a_completely_new_two_site_sample(self):
+        svc,slices,pods,node,d=fixture()
+        t=listener.explicit_unready_snapshot(svc,slices,pods,node,d)
+        def advanced(t):
+            n=t["node"]
+            return dict(t,node=(n[0],n[1],str(int(n[2])+1)))
+        updated=advanced(t)
+        policy={"servers":[d["address"],"1.1.1.1"],"queries":[{"hostname":"example.test","type":"A",
+                "answer_source":"verified_serving_policy","minimum_answers":1}]}
+        stage={"address":d["address"],"failed_predecessor":{"refused_listener":sites(),"query":{"hostname":"example.test","type":"A"}}}
+        for snapshots,ok,nprobes in (([t,updated,updated,updated],True,2),([t,updated,updated,advanced(updated)],False,2),
+                                     ([t,dict(updated,slice=("other",uid(31),"12"))],False,1)):
+            with self.subTest(ok=ok,n=nprobes),patch.object(listener.transport,"read_json",return_value=svc), \
+                    patch.object(listener.transport,"read_observation_declaration",return_value=policy), \
+                    patch.object(listener,"empty",side_effect=[(x,None) for x in snapshots]), \
+                    patch.object(wire,"observe",side_effect=[{"challenge":"a"*32},{"challenge":"b"*32}]) as probe:
+                read=lambda:listener.observe({"listeners":[d],"namespace":d["namespace"]},stage,d,svc,None)
+                if ok:
+                    report=read()
+                    self.assertEqual(report["challenge"],"b"*32)
+                    self.assertEqual(report["public_topology"],updated)
+                else:
+                    with self.assertRaises(ValueError):read()
+                self.assertEqual(probe.call_count,nprobes)
+
+    def test_only_new_node_revision_can_rebind_the_verified_dry_run(self):
+        svc,slices,pods,node,d=fixture()
+        t=listener.explicit_unready_snapshot(svc,slices,pods,node,d)
+        n=t["node"]
+        before={"assignment":"signed","node_uid":n[1],"candidate_uid":"candidate","failed_predecessor":
+                {"assignment":"old","empty_topology":t}}
+        def changed(topology):
+            return dict(before,failed_predecessor=dict(before["failed_predecessor"],empty_topology=topology))
+        updated=dict(t,node=(n[0],n[1],str(int(n[2])+1)))
+        fresh=changed(updated)
+        self.assertTrue(listener.same_plan_after_node_update(before,fresh))
+        for invalid in (dict(fresh,assignment="changed"),dict(fresh,candidate_uid="changed"),
+                        changed(dict(updated,service=("new",uid(39),"100"))),changed(dict(updated,port=8053)),
+                        changed(dict(updated,pod=("new",uid(38),"13"))),changed(dict(updated,node=(n[0],uid(18),"100"))),
+                        changed(dict(updated,node=(n[0],n[1],"0")))):
+            self.assertFalse(listener.same_plan_after_node_update(before,invalid))
+        tr=preview.transport
+        with patch.object(tr,"handoff_witness",return_value=fresh):
+            with self.assertRaises(ValueError):tr.revalidate_handoff_witness({},d,svc,before)
+            self.assertEqual(tr.revalidate_handoff_witness({},d,svc,before,fresh_refusal=True),fresh)
+
     def test_preview_failed_source_never_verifies_or_writes(self):
         stage={"address":"8.8.4.4","failed_predecessor":{"refused_listener":sites()}}
         config={"handoffs":[stage],"namespace":"test"}
@@ -151,3 +197,34 @@ class RefusedTests(unittest.TestCase):
                         with self.assertRaises(ValueError): execute()
                 self.assertEqual(("write","diagnostic") in calls,mode!="fail_first")
                 self.assertEqual(("write","public") in calls,mode=="success")
+
+    def test_node_changes_after_wire_never_authorize_the_interrupted_sample(self):
+        svc,slices,pods,node,d=fixture()
+        old=listener.explicit_unready_snapshot(svc,slices,pods,node,d)
+        n=old["node"]
+        new=dict(old,node=(n[0],n[1],str(int(n[2])+1)))
+        for scenario in ("stable_retry","changed_again","replayed"):
+            fx=staged.FailedPredecessorTests();fx.setUp()
+            fx.failure["refused_listener"]=sites()
+            fresh=dict(fx.witness,failed_predecessor=dict(fx.witness["failed_predecessor"],empty_topology=new))
+            obs=[{"challenge":"1"*32,"topology":old},{"challenge":("1" if scenario=="replayed" else "2")*32,
+                "topology":old if scenario=="changed_again" else new}]
+            def validate(report,stage,current,witness,now):
+                if report["topology"]!=witness["failed_predecessor"]["empty_topology"]:raise ValueError("unbound")
+            def stage_check(config,stage,witness,port):
+                return {"verified_backend":dict(fresh,candidate_uid=fresh["candidate_uid"])}
+            def fallback(*args):return dict(fresh,candidate_uid=fresh["fallback_uid"])
+            with self.subTest(scenario=scenario),patch.object(listener,"validate",side_effect=validate), \
+                    patch.object(listener.transport,"kubectl") as write,patch.object(listener.transport,"revalidate_handoff_witness",return_value=fresh), \
+                    patch.object(wire,"observe",side_effect=obs) as observe:
+                report={"applied":[]}
+                apply=lambda:listener.transport.apply_transport_steps(fx.config,fx.operations[:1],report,
+                    lambda:None,stage_check,fallback,lambda *a:observe())
+                if scenario=="stable_retry":
+                    apply()
+                    self.assertEqual([r["challenge"] for r in report["predecessor_verifications"]],["2"*32])
+                    self.assertEqual(write.call_count,1)
+                else:
+                    with self.assertRaises(ValueError):apply()
+                    write.assert_not_called()
+                self.assertEqual(observe.call_count,2)

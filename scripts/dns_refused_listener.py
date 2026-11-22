@@ -98,7 +98,39 @@ def handoff(config,stage,listener,current,owner):
             "assignment":snap["assignment"],"parent_digest":snap["parent_digest"],"plan_digest":snap["plan_digest"],"failed_predecessor":negative}
 
 
+def node_revision_advanced(a,b):
+    return (isinstance(a,(tuple,list)) and isinstance(b,(tuple,list)) and len(a)==len(b)==3 and
+            a[:2]==b[:2] and all(isinstance(x,str) and re.fullmatch(r"[1-9][0-9]{0,30}",x) for x in (a[2],b[2])) and
+            int(b[2])>int(a[2]))
+
+
+def advanced_node_only(before, after):
+    """Compare two independently validated topologies, never a wire receipt."""
+    return (isinstance(before,dict) and isinstance(after,dict) and
+            before.get("schema")=="fugue.dns.explicit-unready-diagnostic/v1" and
+            node_revision_advanced(before.get("node"),after.get("node")) and dict(before,node=after["node"])==after)
+
+
+def same_plan_after_node_update(before,after):
+    a,b=before.get("failed_predecessor",{}),after.get("failed_predecessor",{})
+    x,y=a.get("empty_topology"),b.get("empty_topology")
+    return (advanced_node_only(x,y) and dict(a,empty_topology=y)==b and
+            dict(before,failed_predecessor=b)==after)
+
+
+class NodeObservationChanged(ValueError):
+    """Never accept the interrupted sample; a new bracket may start."""
+
+
 def observe(config,stage,listener,current,policy_path):
+    for attempt in range(2):
+        try:
+            return _observe_once(config,stage,listener,current,policy_path)
+        except NodeObservationChanged:
+            if attempt: raise
+
+
+def _observe_once(config,stage,listener,current,policy_path):
     failure=stage["failed_predecessor"]
     pub,= [x for x in config["listeners"] if x["address"]==stage["address"] and x["port"]==53]
     policy=transport.read_observation_declaration(policy_path)
@@ -111,6 +143,9 @@ def observe(config,stage,listener,current,policy_path):
         public=transport.read_json("get","service",pub["name"],"-n",config["namespace"],"-o","json")
         first,_=empty(config,stage,pub,public)
         other=first if listener["port"]==53 else empty(config,stage,listener,current)[0]
+        if node_revision_advanced(first["node"],other["node"]):
+            if all(first[k]==other[k] for k in ("selector","pod","pod_ip","target_port")):
+                raise NodeObservationChanged("node revision advanced between reads; discard DNS observation")
         wire.require(first["selector"]==other["selector"] and
                      all(first[k]==other[k] for k in ("pod","node","pod_ip","target_port")) and
                      other["service"][1:]==(current["metadata"]["uid"],current["metadata"]["resourceVersion"]),
@@ -118,7 +153,10 @@ def observe(config,stage,listener,current,policy_path):
         return first,other
     before=snapshot()
     sample=wire.observe(config,stage)
-    wire.require(before==snapshot(),"DNS topology changed around wire challenge")
+    after=snapshot()
+    if before != after and all(a==b or advanced_node_only(a,b) for a,b in zip(before,after)):
+        raise NodeObservationChanged("node revision advanced around DNS challenge; discard both sites")
+    wire.require(before==after,"DNS topology changed around wire challenge")
     result={"schema":"fugue.dns.explicit-refusal/v1","authorizes_traffic":False,"query":query,**sample,
             "topology":before[1],"public_topology":before[0],"finished_at":dt.datetime.now(dt.timezone.utc).isoformat()}
     return result

@@ -852,7 +852,29 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
     def apply_one(operation, *, diagnostic_policy=None, predecessor_policy=None, fallback_policy=None,
                   failure_observation=None, stage=None, attempted=None):
         command, body, listener, current, witness = operation
-        if witness is not None:
+        refused = stage is not None and "refused_listener" in stage.get("failed_predecessor", {})
+        if refused:
+            from scripts.dns_refused_listener import advanced_node_only
+            # The wire challenge and final signed witness must agree exactly.
+            # A kubelet status write can invalidate a whole observation without
+            # changing a single socket. Discard and recollect, with a new nonce;
+            # never re-date the old receipt or relax its temporal checks.
+            for attempt in range(2):
+                failure_observation = verify_failure(config, stage, listener, current)
+                challenge = failure_observation["challenge"]
+                if challenge in used_challenges:
+                    raise ValueError("refused DNS listener challenge reused across writes")
+                used_challenges.add(challenge)
+                fresh = revalidate_handoff_witness(config, listener, current, witness, fresh_refusal=True)
+                if not attempt and advanced_node_only(failure_observation.get("topology"),
+                        fresh.get("failed_predecessor",{}).get("empty_topology")):
+                    continue
+                validate_failure_observation(failure_observation, stage, current, fresh)
+                witness = fresh
+                evidence["predecessor_verifications"].append(failure_observation)
+                save_evidence()
+                break
+        elif witness is not None:
             witness = revalidate_handoff_witness(config, listener, current, witness)
         for role, policy, uid_key in (("diagnostic", diagnostic_policy, "candidate_uid"),
                                       ("predecessor", predecessor_policy, "old_uid"),
@@ -864,11 +886,6 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                     raise ValueError("DNS handoff assignment changed after " + role + " verification") from error
         if failure_observation is not None:
             validate_failure_observation(failure_observation, stage, current, witness)
-            if "refused_listener" in stage["failed_predecessor"]:
-                challenge = failure_observation["challenge"]
-                if challenge in used_challenges:
-                    raise ValueError("refused DNS listener challenge reused across writes")
-                used_challenges.add(challenge)
         if attempted is not None:
             attempted.append([operation, witness, False])
         kubectl(*command, body=body)
@@ -906,17 +923,13 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                         validate_witness_policy(fallback_policy, witness, "fallback_uid")
                         evidence["fallback_verifications"].append(fallback_policy)
                         save_evidence()
-                    if port != 53 and recover_failure and "refused_listener" in stage["failed_predecessor"]:
-                        failure_observation = verify_failure(config, stage, listener, previous)
-                        validate_failure_observation(failure_observation, stage, previous, witness)
-                        evidence["predecessor_verifications"].append(failure_observation)
-                        save_evidence()
                     if port == 53:
                         if recover_failure:
-                            failure_observation = verify_failure(config, stage, listener, previous)
-                            validate_failure_observation(failure_observation, stage, previous, witness)
-                            evidence["predecessor_verifications"].append(failure_observation)
-                            save_evidence()
+                            if "refused_listener" not in stage["failed_predecessor"]:
+                                failure_observation = verify_failure(config, stage, listener, previous)
+                                validate_failure_observation(failure_observation, stage, previous, witness)
+                                evidence["predecessor_verifications"].append(failure_observation)
+                                save_evidence()
                         else:
                             # A signed expected answer does not prove the
                             # predecessor can serve it on the public socket.
@@ -1090,7 +1103,7 @@ def reconcile(config, apply=False, evidence_path=None, verify_stage=None, verify
     return len(planned)
 
 
-def revalidate_handoff_witness(config, listener, current, witness):
+def revalidate_handoff_witness(config, listener, current, witness, *, fresh_refusal=False):
     # Planning several listeners may span a publication. Require two complete
     # matching observations of the latest assignment before this selector CAS;
     # Pod/node replacement or Service CAS failure is never retried here.
@@ -1101,6 +1114,12 @@ def revalidate_handoff_witness(config, listener, current, witness):
             raise ValueError("DNS handoff identity changed before selector CAS")
         if fresh == witness:
             return fresh
+        if fresh_refusal:
+            from scripts.dns_refused_listener import same_plan_after_node_update
+            if same_plan_after_node_update(witness, fresh):
+                # This value alone cannot authorize a write. The caller still
+                # requires an exact new two-site challenge on this Node RV.
+                return fresh
         if "failed_predecessor" in witness:
             raise ValueError("DNS failed predecessor recovery assignment changed before selector CAS")
         witness = fresh
