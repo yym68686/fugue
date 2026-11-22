@@ -44,7 +44,7 @@ type dnsReadinessScheduler struct {
 func (scheduler *dnsReadinessScheduler) prioritize(priority dnsProbePriority) *dnsReadinessScheduler {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	scheduler.priority = dnsProbePriority{maps.Clone(priority.preferred), maps.Clone(priority.candidates), maps.Clone(priority.availability), maps.Clone(priority.sole)}
+	scheduler.priority = dnsProbePriority{maps.Clone(priority.preferred), maps.Clone(priority.candidates), maps.Clone(priority.availability), maps.Clone(priority.sole), maps.Clone(priority.alternateCover)}
 	return scheduler
 }
 
@@ -312,7 +312,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 			return firstAttempt.Before(secondAttempt)
 		})
 		balanceDNSRefreshQueue(indices, priority, plan, previous, started.Add(interval+time.Duration(policy.ProbeTimeoutSeconds)*time.Second))
-		balanceDNSSoleChoiceQueue(indices, priority, plan, scheduler.priority.sole)
+		balanceDNSCoverageQueue(indices, priority, plan, scheduler.priority.sole, scheduler.priority.alternateCover)
 		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, blockerProbes: blockerProbes, outcomes: map[string]int{}})
 	}
 	concurrency := max(0, min(policy.MaxConcurrency, len(plan.Probes)-deferred))
@@ -443,13 +443,13 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 	return facts
 }
 
-// Schedule the sole eligible edge for a signed address RRset before spending
+// Schedule sole dependencies and complementary RRset coverage before spending
 // most of the same physical endpoint's slots on redundant alternatives. The
 // normal explicit priority prefix, per-target backoff/concurrency and exact
 // proof checks stay unchanged. Even under continuous singleton demand, each
 // group of four tail slots still services ordinary work in its incoming order.
-func balanceDNSSoleChoiceQueue(indices []int, priority map[int]int, plan *platformconfig.DNSReadinessPlan, sole map[string]bool) {
-	if len(sole) == 0 || len(indices) < 2 {
+func balanceDNSCoverageQueue(indices []int, priority map[int]int, plan *platformconfig.DNSReadinessPlan, sole, alternate map[string]bool) {
+	if (len(sole) == 0 && len(alternate) == 0) || len(indices) < 2 {
 		return
 	}
 	first := 0
@@ -457,13 +457,26 @@ func balanceDNSSoleChoiceQueue(indices []int, priority map[int]int, plan *platfo
 		first++
 	}
 	tail := indices[first:]
-	var necessary, alternatives []int
+	var necessary, alternatives, complementary, ordinary []int
 	for _, index := range tail {
-		if sole[dnsroutesource.ProbeKey(plan.Probes[index])] {
+		key := dnsroutesource.ProbeKey(plan.Probes[index])
+		if sole[key] {
 			necessary = append(necessary, index)
 		} else {
 			alternatives = append(alternatives, index)
+			if alternate[key] {
+				complementary = append(complementary, index)
+			} else {
+				ordinary = append(ordinary, index)
+			}
 		}
+	}
+	// Preserve the original singleton share. Complementary work orders
+	// only the existing alternatives share and still rotates other probes.
+	interleaveDNSProbeQueues(alternatives, complementary, ordinary, 3)
+	if len(necessary) == 0 {
+		copy(tail, alternatives)
+		return
 	}
 	interleaveDNSProbeQueues(tail, necessary, alternatives, 3)
 }

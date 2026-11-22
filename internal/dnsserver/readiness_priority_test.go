@@ -55,6 +55,68 @@ func TestDNSSoleChoiceIsBoundToSignedLocalFamilyAndPhysicalTarget(t *testing.T) 
 	}
 }
 
+func TestDNSComplementaryCoverageBalancesSignedAlternativesAroundPinnedWork(t *testing.T) {
+	view, original, _, _, _ := queryExecutionFixture()
+	template := view.Records[0]
+	view.Records = nil
+	plan := platformconfig.DNSReadinessPlan{}
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("host-%02d.example.test", i)
+		rr := template
+		rr.Name = name
+		order := []string{"edge-a", "edge-b"}
+		if i < 2 {
+			order = order[:1]
+		}
+		rr.AnswerPolicy.PhysicalOrder = &model.DNSPhysicalOrder{OrderedEdgeIDs: order}
+		view.Records = append(view.Records, rr)
+		rec := original.Records[0]
+		rec.Hostname, rec.MinimumHealthyEdges, rec.RequireDualStack = name, 1, false
+		rec.MinDistinctCells, rec.MinDistinctDomains = 0, nil
+		rec.Targets = append([]platformconfig.DNSReadinessTarget(nil), rec.Targets...)
+		for j := range rec.Targets {
+			tgt := &rec.Targets[j]
+			id := name + ":" + tgt.EdgeID
+			tgt.ProbeIDs = []string{id}
+			plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: id, Hostname: name, EdgeID: tgt.EdgeID, EdgeGroupID: tgt.EdgeGroupID, Address: tgt.Address, Path: "/"})
+		}
+		plan.Records = append(plan.Records, rec)
+	}
+	p := dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view, view}}
+	before := mustDNSJSON(t, p)
+	prefs := dnsProbePriorities(p, view.NodeID, nil)
+	counts, byHost := map[string]int{}, map[string]int{}
+	for _, probe := range plan.Probes {
+		key := dnsroutesource.ProbeKey(probe)
+		if prefs.sole[key] || prefs.alternateCover[key] {
+			counts[probe.EdgeID]++
+			byHost[probe.Hostname]++
+		}
+	}
+	if !reflect.DeepEqual(counts, map[string]int{"edge-a": 5, "edge-b": 5}) || len(byHost) != 10 || len(prefs.sole) != 2 || len(prefs.alternateCover) != 8 {
+		t.Fatal("duplicate views or aligned physical queues left record coverage uneven", counts, byHost)
+	}
+	for _, n := range byHost {
+		if n != 1 {
+			t.Fatal("missing or duplicated dependency")
+		}
+	}
+	if !reflect.DeepEqual(before, mustDNSJSON(t, p)) {
+		t.Fatal("ordering mutated signed input")
+	}
+	if hints := dnsProbePriorities(p, "another-node", nil); len(hints.alternateCover) != 0 || len(hints.sole) != 0 {
+		t.Fatal("crossed node identity")
+	}
+	// The fast path covers only simple one-edge quorum. Other record
+	// contracts retain their ordinary priority and independent validation.
+	for i := range plan.Records {
+		plan.Records[i].MinimumHealthyEdges = 2
+	}
+	if len(dnsProbePriorities(p, view.NodeID, nil).alternateCover) != 0 {
+		t.Fatal("used a single refresh to represent a multi-edge requirement")
+	}
+}
+
 func TestDNSSoleChoiceServesConstrainedRecordsWithoutStarvingAlternatives(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{}
 	sole := map[string]bool{}
@@ -67,10 +129,22 @@ func TestDNSSoleChoiceServesConstrainedRecordsWithoutStarvingAlternatives(t *tes
 			sole[dnsroutesource.ProbeKey(p)] = true
 		}
 	}
-	balanceDNSSoleChoiceQueue(indices, map[int]int{0: 1, 1: 2}, plan, sole)
+	balanceDNSCoverageQueue(indices, map[int]int{0: 1, 1: 2}, plan, sole, nil)
 	want := []int{0, 1, 40, 41, 42, 2, 43, 44, 45, 3}
 	if !reflect.DeepEqual(indices[:len(want)], want) {
 		t.Fatal("critical or non-critical work starved", indices[:len(want)])
+	}
+	alternate := map[string]bool{}
+	for i := 20; i < 40; i++ {
+		alternate[dnsroutesource.ProbeKey(plan.Probes[i])] = true
+	}
+	for i := range indices {
+		indices[i] = i
+	}
+	balanceDNSCoverageQueue(indices, map[int]int{0: 1, 1: 2}, plan, sole, alternate)
+	want = []int{0, 1, 40, 41, 42, 20, 43, 44, 45, 21, 46, 47, 48, 22, 49, 50, 51, 2}
+	if !reflect.DeepEqual(indices[:len(want)], want) {
+		t.Fatal("complementary work displaced singleton, reserved prefix or background", indices[:len(want)])
 	}
 	seen := map[int]bool{}
 	for _, i := range indices {
