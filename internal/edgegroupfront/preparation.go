@@ -62,9 +62,13 @@ func PreparePublication(path string, request ActivationCASRequest, now time.Time
 	if err != nil || !exists || current.GroupID != request.GroupID || current.Generation != request.ExpectedGeneration || current.Generation == ^uint64(0) || now.Before(current.UpdatedAt) || current.ActiveSlot != normalizeSlot(request.ExpectedSlot) || current.ActiveSlot == normalizeSlot(request.TargetSlot) {
 		return PublicationPreparation{}, ErrActivationCASConflict
 	}
+	return writePublicationPreparation(path, current, normalizeSlot(request.TargetSlot), request.BundleGeneration,
+		request.WorkerSourceCommit, request.WorkerImageDigest, now, nil)
+}
+
+func writePublicationPreparation(path string, current ActivationState, targetSlot, bundleGeneration, source, image string, now time.Time, beforeReplace func() error) (PublicationPreparation, error) {
 	p := PublicationPreparation{Schema: PublicationPreparationSchema, Previous: current,
-		TargetSlot: normalizeSlot(request.TargetSlot), BundleGeneration: request.BundleGeneration,
-		WorkerSourceCommit: request.WorkerSourceCommit, WorkerImageDigest: request.WorkerImageDigest,
+		TargetSlot: targetSlot, BundleGeneration: bundleGeneration, WorkerSourceCommit: source, WorkerImageDigest: image,
 		CreatedAt: now.UTC(), ExpiresAt: now.UTC().Add(PublicationPreparationLifetime)}
 	if prior, found, readErr := ReadPublicationPreparation(path); readErr != nil {
 		return PublicationPreparation{}, readErr
@@ -76,7 +80,7 @@ func PreparePublication(path string, request ActivationCASRequest, now time.Time
 	}
 	raw, err := json.Marshal(p)
 	if err == nil {
-		err = replaceActivationState(path+".prepared", append(raw, '\n'))
+		err = replaceActivationStateGuarded(path+".prepared", append(raw, '\n'), beforeReplace)
 	}
 	return p, err
 }

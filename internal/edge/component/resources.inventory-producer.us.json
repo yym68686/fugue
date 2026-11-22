@@ -58,6 +58,10 @@
                     }
                   },
                   {
+                    "name": "FUGUE_EDGE_FRONT_POD_UID",
+                    "valueFrom": { "fieldRef": { "fieldPath": "metadata.uid" } }
+                  },
+                  {
                     "name": "FUGUE_EDGE_FRONT_EDGE_ID",
                     "valueFrom": {
                       "fieldRef": {
@@ -189,6 +193,11 @@
                 },
                 "volumeMounts": [
                   {
+                    "mountPath": "/var/run/fugue-worker-transaction",
+                    "name": "worker-transaction",
+                    "readOnly": true
+                  },
+                  {
                     "mountPath": "/var/lib/fugue-edge-front",
                     "name": "activation-state"
                   },
@@ -221,6 +230,15 @@
               }
             ],
             "volumes": [
+              {
+                "name": "worker-transaction",
+                "configMap": {
+                  "name": "fugue-authority-transition-prepared-@@GROUP_ID@@",
+                  "optional": true,
+                  "defaultMode": 292,
+                  "items": [{ "key": "journal.json", "path": "journal.json" }]
+                }
+              },
               {
                 "hostPath": {
                   "path": "/var/lib/fugue/edge-owned/@@GROUP_ID@@/front",

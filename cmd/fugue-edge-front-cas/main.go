@@ -27,6 +27,9 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	if stdout == nil {
 		return errors.New("stdout is nil")
 	}
+	if len(args) > 0 && (args[0] == "--worker-recipient" || args[0] == "--worker-journal" || args[0] == "--worker-convergence") {
+		return runNativeWorker(args, stdout, localWorkerRecipient)
+	}
 	flags := flag.NewFlagSet("fugue-edge-front-cas", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	stateFile := flags.String("state-file", "", "absolute group-local activation state file")

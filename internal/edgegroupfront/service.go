@@ -192,8 +192,14 @@ func (s *Service) Run(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 	var shutdownErr error
+	// Stop admission on all listeners together; draining an HTTP connection
+	// must not leave HTTPS accepting new connections (or the reverse).
+	finished := make(chan error, len(shutdowns))
 	for _, shutdown := range shutdowns {
-		if err := shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		go func(stop func(context.Context) error) { finished <- stop(shutdownCtx) }(shutdown)
+	}
+	for range shutdowns {
+		if err := <-finished; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			shutdownErr = errors.Join(shutdownErr, err)
 		}
 	}
@@ -389,11 +395,20 @@ func (s *Service) startTCPProxy(cfg Config, protocol string, listenAddr string, 
 	if err != nil {
 		return nil, fmt.Errorf("listen edge front %s on %s: %w", protocol, listenAddr, err)
 	}
-	done := make(chan struct{})
+	return s.serveTCPProxy(cfg, protocol, listener, wg), nil
+}
+
+func (s *Service) serveTCPProxy(cfg Config, protocol string, listener net.Listener, wg *sync.WaitGroup) func(context.Context) error {
+	drained := make(chan struct{})
+	var connections sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer close(done)
+		// Wait only after Accept has stopped: no late Add can race the wait.
+		// This goroutine is owned by Run's WaitGroup. Its drain cannot be
+		// detached: returning from Run exits the production process and
+		// would truncate streams even if the stop helper returned a timeout.
+		defer func() { connections.Wait(); close(drained) }()
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
@@ -403,14 +418,19 @@ func (s *Service) startTCPProxy(cfg Config, protocol string, listenAddr string, 
 				s.Logger.Printf("edge front %s accept failed: %v", protocol, err)
 				continue
 			}
-			go s.handleTCPConnection(cfg, protocol, conn)
+			connections.Add(1)
+			go func() { defer connections.Done(); s.handleTCPConnection(cfg, protocol, conn) }()
 		}
 	}()
-	return func(context.Context) error {
+	return func(ctx context.Context) error {
 		err := listener.Close()
-		<-done
-		return err
-	}, nil
+		select {
+		case <-drained:
+			return err
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		}
+	}
 }
 
 func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream net.Conn) {
