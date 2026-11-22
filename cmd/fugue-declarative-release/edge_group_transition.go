@@ -2107,6 +2107,10 @@ func (cluster *kubectlCluster) readEdgeGroupState(ctx context.Context, release d
 	return edgeGroupState{Front: front, FrontHealth: frontHealth, FrontActivation: activation, WorkerA: workerA, WorkerB: workerB, ActiveSlot: activeSlot}, nil
 }
 
+// A disagreement in durable records is a reason to inspect each member, not
+// permission to pick one of them. Missing or malformed reads remain errors.
+var errEdgeMixedActivation = errors.New("edge activation evidence disagrees across nodes")
+
 func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, front, workerA, workerB map[string]edgeGroupPod) (*edgeActivationState, bool, error) {
 	// Front and Worker mount the same activation state, but the Front is the
 	// process that serves it. Read the file from that container first so a
@@ -2136,7 +2140,7 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 			canonical = &copy
 			canonicalAdmitted = admitted(node)
 		} else if !edgeActivationStatesAgreeForMember(*canonical, state, canonicalAdmitted, admitted(node)) {
-			return nil, false, errors.New("edge Front activation evidence disagrees across nodes")
+			return nil, false, fmt.Errorf("Front: %w", errEdgeMixedActivation)
 		}
 	}
 	if canonical != nil {
@@ -2183,7 +2187,7 @@ func (cluster *kubectlCluster) readEdgeGroupActivation(ctx context.Context, rele
 			canonical = &copy
 			canonicalAdmitted = admitted(pod.NodeName)
 		} else if !edgeActivationStatesAgreeForMember(*canonical, state, canonicalAdmitted, admitted(pod.NodeName)) {
-			return nil, false, errors.New("edge Worker activation evidence disagrees across nodes")
+			return nil, false, fmt.Errorf("Worker: %w", errEdgeMixedActivation)
 		}
 	}
 	return canonical, canonical != nil, nil

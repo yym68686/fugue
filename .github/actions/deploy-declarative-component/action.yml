@@ -41,6 +41,7 @@ runs:
         CANDIDATE_REVISION: ${{ github.sha }}
       run: python3 -m scripts.artifact_content_storage --component "${COMPONENT}" --candidate-revision "${CANDIDATE_REVISION}"
     - name: Prepare the durable server-side apply plan
+      id: prepare
       shell: bash
       env:
         COMPONENT: ${{ inputs.component }}
@@ -53,7 +54,35 @@ runs:
       run: |
         set -euo pipefail
         go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
-        "${RELEASE_TOOL}" prepare "${PLAN}" "${COMPONENT}" "${RECEIPT}" "${EXECUTION}"
+        if "${RELEASE_TOOL}" prepare "${PLAN}" "${COMPONENT}" "${RECEIPT}" "${EXECUTION}"; then
+          exit 0
+        else
+          rc=$?
+        fi
+        if [[ "$rc" == 78 ]]; then
+          echo 'mixed_activation=true' >>"$GITHUB_OUTPUT"
+        fi
+        exit "$rc"
+    - name: Observe mixed Worker members without changing serving state
+      id: mixed_members
+      if: failure() && steps.prepare.outcome == 'failure' && steps.prepare.outputs.mixed_activation == 'true'
+      shell: bash
+      env:
+        PLAN: ${{ runner.temp }}/fugue-release-plan/fugue-production-release-plan.json
+        RECEIPT: ${{ runner.temp }}/fugue-component-artifact/fugue-${{ inputs.component }}-artifact-receipt.json
+      run: |
+        set -euo pipefail
+        dir="$(mktemp -d "${RUNNER_TEMP}/worker-members.XXXXXXXX")"
+        go run ./cmd/fugue-release-guardian worker-front-preflight --plan "$PLAN" --receipt "$RECEIPT" >"$dir/observation.json"
+        echo "file=$dir/observation.json" >>"$GITHUB_OUTPUT"
+    - name: Preserve the read-only mixed Worker observation
+      if: failure() && steps.mixed_members.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-${{ inputs.component }}-mixed-members-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ steps.mixed_members.outputs.file }}
+        if-no-files-found: error
+        retention-days: 30
     - name: Upload the durable prewrite plan before mutation
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:

@@ -29,8 +29,17 @@ func main() {
 	defer stop()
 	if err := runContext(ctx, os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "declarative-release:", err)
-		os.Exit(1)
+		os.Exit(releaseFailureExitCode(os.Args[1:], err))
 	}
+}
+
+// This status routes only a failed *prepare* to the read-only observation
+// step. In particular, no executor failure can select a second writer.
+func releaseFailureExitCode(args []string, err error) int {
+	if len(args) == 5 && args[0] == "prepare" && errors.Is(err, errEdgeMixedActivation) {
+		return 78
+	}
+	return 1
 }
 
 func run(args []string, output io.Writer) error {
