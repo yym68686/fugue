@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -9,6 +10,18 @@ import (
 	"strings"
 	"time"
 )
+
+// IsFugueRouteNotFound identifies the terminal responses from both Edge and
+// its Caddy listener. An application's own 404 (or a page merely quoting one
+// of these messages) is not a Fugue routing miss.
+func IsFugueRouteNotFound(statusCode int, body []byte) bool {
+	if statusCode != http.StatusNotFound {
+		return false
+	}
+	body = bytes.TrimSpace(body)
+	return bytes.EqualFold(body, []byte("edge route not found")) ||
+		bytes.EqualFold(body, []byte("fugue route not found"))
+}
 
 // PublicRouteObservation is availability at one declared HTTP entry point.
 // It is not a release identity proof or authority to change configuration.

@@ -7,6 +7,27 @@ import (
 	"testing"
 )
 
+func TestIsFugueRouteNotFound(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		miss   bool
+	}{
+		{"worker", 404, "edge route not found\n", true},
+		{"caddy", 404, "fugue route not found\n", true},
+		{"app 404", 404, "404 page not found\n", false},
+		{"diagnostic page quotes message", 404, "<p>fugue route not found</p>", false},
+		{"different status", 200, "fugue route not found\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsFugueRouteNotFound(tt.status, []byte(tt.body)); got != tt.miss {
+				t.Fatalf("route miss = %t, want %t", got, tt.miss)
+			}
+		})
+	}
+}
+
 func TestPublicRouteProbeDoesNotFollowRedirectOrSendCredentials(t *testing.T) {
 	hits := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

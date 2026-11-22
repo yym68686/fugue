@@ -65,16 +65,18 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 		// Complete a durable recovery publication after restart. Preparation of
 		// an unverified candidate must never block its timeout recovery below.
 		if isProducedTraffic(state.full) && state.full.ArtifactID == state.lkg.ArtifactID {
-			// An operator successor can repair an unreachable historical baseline.
-			// Do not require that broken rollback to converge first, or mark its
-			// new fence verified using historical facts. The store independently
-			// guards the successor's signed shadow/gray/full and fresh ACKs.
+			// Give an exact rollback time to verify using its own fresh evidence.
+			// After that bounded window, even the same policy and compiler can
+			// reconcile changed input. Keep the positive LKG intact: the normal
+			// failed-source, signed shadow/gray/full and fresh ACK gates still
+			// control whether any successor can serve or become LKG.
 			if state.full.VerificationState == model.PlatformArtifactVerificationStateServingUnverified &&
 				state.full.RollbackTargetGeneration == state.lkg.Generation &&
 				state.full.PinnedRollbackGeneration == state.lkg.Generation &&
 				state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != "" &&
 				(state.fullArtifact.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID ||
-					legacyProducedCompiler(state.fullArtifact)) &&
+					legacyProducedCompiler(state.fullArtifact) ||
+					time.Since(state.full.ReleasedAt) >= time.Duration(policy.Serving.RolloutTimeoutSeconds)*time.Second) &&
 				!s.validateReleaseSetConvergence(ctx, state.fullArtifact).Pass {
 				return false, nil
 			}

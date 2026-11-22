@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/dnsserver"
+	"fugue/internal/httpx"
 	"fugue/internal/model"
 
 	miekgdns "github.com/miekg/dns"
@@ -841,13 +841,15 @@ func probeDNSAnswerHost(ctx context.Context, hostname, answerIP string) dnsAnswe
 		probe.Message = "read Host probe response: " + err.Error()
 		return probe
 	}
-	probe.RouteNotFound = bytes.Contains(bytes.ToLower(body), []byte("edge route not found"))
-	probe.Pass = probe.TLSReady && !probe.RouteNotFound
+	probe.RouteNotFound = httpx.IsFugueRouteNotFound(resp.StatusCode, body)
+	probe.Pass = probe.TLSReady && !probe.RouteNotFound && resp.StatusCode < http.StatusInternalServerError
 	switch {
 	case !probe.TLSReady:
 		probe.Message = "TLS handshake did not complete"
 	case probe.RouteNotFound:
-		probe.Message = "response body contains edge route not found"
+		probe.Message = "Fugue ingress has no matching route"
+	case resp.StatusCode >= http.StatusInternalServerError:
+		probe.Message = fmt.Sprintf("HTTP %d from the HTTPS endpoint", resp.StatusCode)
 	default:
 		probe.Message = fmt.Sprintf("HTTP %d with valid TLS/SNI/Host routing", probe.StatusCode)
 	}

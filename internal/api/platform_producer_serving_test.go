@@ -39,10 +39,14 @@ func TestSignedInputDeferralPreservesRealPendingRecoveryAndObservation(t *testin
 	testServingProducerProgressesRecovers(t, true, false, true, servingProducerTestOptions{signedInputGate: true})
 }
 
-type servingProducerTestOptions struct{ signedInputGate, delayedShadow, legacyRecovery bool }
+type servingProducerTestOptions struct{ signedInputGate, delayedShadow, legacyRecovery, expiredRecovery bool }
 
 func TestServingProducerReplacesUnreachableLegacyRollbackWithFreshV38UnderSameAuthority(t *testing.T) {
 	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{legacyRecovery: true})
+}
+
+func TestServingProducerReconcilesChangedInputAfterSameAuthorityRecoveryTimeout(t *testing.T) {
+	testServingProducerProgressesRecovers(t, false, false, false, servingProducerTestOptions{expiredRecovery: true})
 }
 
 func TestServingProducerResumesShadowAfterDelayedReaderEvidenceWithoutRecapture(t *testing.T) {
@@ -81,6 +85,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	signedGate := len(options) == 1 && options[0].signedInputGate
 	delayedShadow := len(options) == 1 && options[0].delayedShadow
 	legacyRecovery := len(options) == 1 && options[0].legacyRecovery
+	expiredRecovery := len(options) == 1 && options[0].expiredRecovery
 	path := t.TempDir() + "/state.json"
 	state := store.New(path)
 	if err := state.Init(); err != nil {
@@ -481,6 +486,78 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	_, pendingRecovery := active("full")
 	if pendingRecovery.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
 		t.Fatal("historical baseline facts verified a new recovery fence")
+	}
+	if expiredRecovery {
+		captureChangedInput := func(ctx context.Context, principal model.Principal) (platformIntentProjectionResponse, error) {
+			projection, err := server.capturePlatformIntentForProducer(ctx, principal, p)
+			if err != nil {
+				return projection, err
+			}
+			projection.Intent.Routes = append(projection.Intent.Routes, platformconfig.RouteIntent{
+				Hostname: "new.example.test", UpstreamURL: "http://origin:8080", Enabled: true,
+			})
+			projection.Intent = platformconfig.NormalizePlatformIntent(projection.Intent)
+			projection.Intent.Generation, err = platformconfig.PlatformIntentGeneration(projection.Intent)
+			projection.RuntimeSnapshot.IntentGeneration = projection.Intent.Generation
+			return projection, err
+		}
+		captureCalls := 0
+		check := func() {
+			t.Helper()
+			if _, err := server.reconcilePlatformConfigurationWithCapture(ctx, func(ctx context.Context, principal model.Principal) (platformIntentProjectionResponse, error) {
+				captureCalls++
+				return captureChangedInput(ctx, principal)
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		check()
+		if captureCalls != 0 {
+			t.Fatal("changed input interrupted the recovery verification window")
+		}
+		age(recovered.ID, 61)
+		reconcile()
+		_, unchanged := active("gray")
+		if unchanged.ID != badGray.ID {
+			t.Fatal("expired recovery allowed the failed source to be retried")
+		}
+		server = NewServer(state, auth.New(state, ""), nil, config)
+		seedInventory()
+		check()
+		repair, fresh := active("gray")
+		_, pending := active("full")
+		verified, err := state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+		if captureCalls != 1 || fresh.ID == badGray.ID ||
+			repair.Metadata[platformproducer.PolicyReleaseMetadata] != authority.ID ||
+			repair.Metadata["compiler_version"] != platformconfig.CompactOnlyInputCompilerVersion {
+			t.Fatal("changed current-compiler input remained blocked on exact same-authority recovery")
+		}
+		if err != nil || pending.ID != recovered.ID || pending.VerificationState != model.PlatformArtifactVerificationStateServingUnverified ||
+			verified == nil || verified.VerifiedByReleaseID != nextFull.ID {
+			t.Fatal("staging changed traffic or fabricated LKG evidence", err)
+		}
+		_, repairShadow := active("shadow")
+		age(repairShadow.ID, 5)
+		age(fresh.ID, 2)
+		reconcile()
+		_, noGrayProof := active("full")
+		if noGrayProof.ID != recovered.ID {
+			t.Fatal("successor bypassed the gray convergence gate")
+		}
+		report(repair, fresh)
+		reconcile()
+		_, promoted := active("full")
+		if promoted.ArtifactID != repair.ID || promoted.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+			t.Fatal("fresh gray evidence did not advance the successor")
+		}
+		age(promoted.ID, 2)
+		report(repair, promoted)
+		reconcile()
+		verified, err = state.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+		if err != nil || verified == nil || verified.VerifiedByReleaseID != promoted.ID {
+			t.Fatal("successor did not become LKG with fresh full evidence", err)
+		}
+		return
 	}
 	age(recovered.ID, 61)
 	if supersede || legacyRecovery {

@@ -2536,7 +2536,7 @@ func (s *Service) probeEdgeTargetObservation(ctx context.Context, hostname, ip s
 	if err != nil {
 		return observation
 	}
-	observation.Healthy = !bytes.Contains(bytes.ToLower(body), []byte("edge route not found")) && resp.StatusCode < 500
+	observation.Healthy = !httpx.IsFugueRouteNotFound(resp.StatusCode, body) && resp.StatusCode < 500
 	return observation
 }
 

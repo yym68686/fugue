@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"fugue/internal/httpx"
 )
 
 const trafficOverrideProbeTimeout = 5 * time.Second
@@ -62,7 +64,7 @@ func probeTrafficOverrideHostRoute(ctx context.Context, hostname, answer string)
 	if err != nil {
 		return fmt.Errorf("read route probe response: %w", err)
 	}
-	if strings.Contains(strings.ToLower(string(body)), "edge route not found") {
+	if httpx.IsFugueRouteNotFound(resp.StatusCode, body) {
 		return fmt.Errorf("Host route is not loaded")
 	}
 	if resp.StatusCode >= http.StatusInternalServerError {

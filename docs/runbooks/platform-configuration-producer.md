@@ -69,6 +69,12 @@ reason. A convergence timeout restores the verified baseline, records a
 configuration lane loads and verifies the same `FugueTrafficPublicationTimedOut`
 rule as the Helm chart, without restarting Prometheus.
 
+An automatic rollback retains the last verified baseline but must collect
+fresh evidence for its new fence. If that exact rollback still cannot verify
+after the rollout timeout, the producer can capture changed input under the
+same signed policy. This does not move LKG, retry the same failed source, or
+bypass the normal admission and consumer checks for a successor.
+
 Create a `policy_snapshot` artifact with scope
 `{"scope_type":"global","key":"platform-config-producer"}` and this content:
 
