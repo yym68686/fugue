@@ -311,6 +311,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 			}
 			return firstAttempt.Before(secondAttempt)
 		})
+		balanceDNSRefreshQueue(indices, priority, plan, previous, started.Add(interval+time.Duration(policy.ProbeTimeoutSeconds)*time.Second))
 		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, blockerProbes: blockerProbes, outcomes: map[string]int{}})
 	}
 	concurrency := max(0, min(policy.MaxConcurrency, len(plan.Probes)-deferred))
@@ -439,6 +440,44 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 		}
 	}
 	return facts
+}
+
+// A verified fact which covers this whole sweep, but not the next poll, still
+// needs renewal. Spending the whole budget on such facts first can, however,
+// leave the same unsigned gaps in successive incomplete scans. Interleave
+// those two demands within each physical endpoint, keeping the explicit
+// blocker/availability prefix and stable order within either class. This
+// orders requests only: it neither defers an attempt nor manufactures a fact.
+func balanceDNSRefreshQueue(indices []int, priority map[int]int, plan *platformconfig.DNSReadinessPlan, previous map[string]dnsReadinessFact, through time.Time) {
+	if len(previous) == 0 || len(indices) < 2 {
+		return
+	}
+	first := 0
+	for first < len(indices) && priority[indices[first]] != 0 {
+		first++
+	}
+	rest := indices[first:]
+	var needed, renewal []int
+	for _, index := range rest {
+		fact, ok := previous[plan.Probes[index].ID]
+		if ok && fact.Ready && fact.Proof.ValidUntil.After(through) {
+			renewal = append(renewal, index)
+		} else {
+			needed = append(needed, index)
+		}
+	}
+	if len(needed) == 0 || len(renewal) == 0 {
+		return
+	}
+	out := rest[:0]
+	for len(needed) > 0 && len(renewal) > 0 {
+		n := min(2, len(needed))
+		out = append(out, needed[:n]...)
+		out = append(out, renewal[0])
+		needed, renewal = needed[n:], renewal[1:]
+	}
+	out = append(out, needed...)
+	copy(rest[len(out):], renewal)
 }
 
 func dnsProbeSweepInterrupted(ctx context.Context, probeErr error, probeDeadline time.Time) bool {

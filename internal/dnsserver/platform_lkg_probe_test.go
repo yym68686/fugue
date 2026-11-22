@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +29,9 @@ func TestControlPlaneOutageReobservesRetainedDNSWithoutRenewingAuthority(t *test
 				reason = "candidate_rejected"
 			}
 			before := old.record
+			var calls atomic.Int32
 			probe := func(ctx context.Context, host, path, address, state string, _ time.Duration) (routeprobe.Proof, error) {
+				calls.Add(1)
 				allowed := scenario != "checkpoint expired" && scenario != "not positive" && scenario != "candidate rejected"
 				if routeprobe.RetainedLKGAllowed(ctx) != allowed {
 					t.Error("retained mode escaped its accepted checkpoint boundary")
@@ -64,6 +67,13 @@ func TestControlPlaneOutageReobservesRetainedDNSWithoutRenewingAuthority(t *test
 			if !reflect.DeepEqual(got.record, before) || !reflect.DeepEqual(old.record, before) {
 				t.Fatal("runtime observation renewed or replaced configuration authority")
 			}
+			if scenario == "checkpoint expired" {
+				if calls.Load() != 0 || !got.checkedAt.Equal(old.checkedAt) || got.transition != nil {
+					t.Fatal("spent a probe or advanced observation time for an expired checkpoint")
+				}
+			} else if calls.Load() == 0 {
+				t.Fatal("skipped retained probes for a nonexpired checkpoint")
+			}
 			q := new(dns.Msg)
 			q.SetQuestion("app.example.test.", dns.TypeA)
 			answer := got.answer(q, "", time.Now())
@@ -84,5 +94,29 @@ func TestControlPlaneOutageReobservesRetainedDNSWithoutRenewingAuthority(t *test
 				t.Fatal("unavailable or unauthorized edge was admitted", answer)
 			}
 		})
+	}
+}
+
+func TestExpiredGlobalPredecessorDoesNotConsumeSuccessorSweep(t *testing.T) {
+	s, old, now := runtimeFactsFixture(t)
+	limit := time.Duration(old.payload.Policy.MaxStaleSeconds) * time.Second
+	old.record.AppliedAt = now.Add(-limit)
+	if !expiredRetainedGlobalDNS(old, now) || expiredRetainedGlobalDNS(old, now.Add(-time.Nanosecond)) {
+		t.Fatal("incorrect signed checkpoint expiry boundary")
+	}
+	old.transition = &dnsRecordTransition{}
+	prior := old.record
+	window := &dnsServingProbeWindow{}
+	s.pendingDNSProbeWindow = window
+	next := &dnsReleaseBridge{payload: old.payload}
+	var calls atomic.Int32
+	got, err := s.refreshedDNSServingFacts(context.Background(), old, func(context.Context, string, string, string, string, time.Duration) (routeprobe.Proof, error) {
+		calls.Add(1)
+		return routeprobe.Proof{}, errors.New("unexpected expired retained probe")
+	}, "candidate_rejected", next, nil)
+	if err != nil || calls.Load() != 0 || got == old || got.transition != nil || old.transition == nil ||
+		!reflect.DeepEqual(got.record, prior) || got.checkedAt != old.checkedAt || s.pendingDNSProbeWindow != window ||
+		got.fallback != "candidate_rejected" || dnsLiveTransitionRecords(old, next, now) != nil {
+		t.Fatal("expired predecessor consumed successor work or changed publication state", err)
 	}
 }

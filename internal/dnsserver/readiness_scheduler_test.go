@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,71 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/routeprobe"
 )
+
+func TestDNSRefreshQueueProtectsCoverageAndBoundedRenewal(t *testing.T) {
+	now := time.Now().UTC()
+	plan := &platformconfig.DNSReadinessPlan{}
+	// First two indices are explicit blockers. Index 5 expires exactly at
+	// the sweep horizon and 6 carries a negative observation, not coverage.
+	previous := map[string]dnsReadinessFact{}
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprint(i)
+		plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: id})
+		if i < 7 {
+			fact := dnsReadinessFact{Ready: i != 6, Proof: routeprobe.Proof{ValidUntil: now.Add(time.Minute)}}
+			if i == 5 {
+				fact.Proof.ValidUntil = now
+			}
+			previous[id] = fact
+		}
+	}
+	indices := []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	priority := map[int]int{0: 1, 1: 2}
+	balanceDNSRefreshQueue(indices, priority, plan, previous, now)
+	if !slices.Equal(indices, []int{0, 1, 5, 6, 2, 7, 8, 3, 9, 4}) {
+		t.Fatalf("lost prefix, coverage, renewal, or stable tail: %v", indices)
+	}
+	before := slices.Clone(indices)
+	for _, cache := range []map[string]dnsReadinessFact{nil, previous} {
+		balanceDNSRefreshQueue(indices, priority, plan, cache, now.Add(time.Hour))
+		if !slices.Equal(indices, before) {
+			t.Fatal("cold or expired evidence changed ordinary ordering")
+		}
+	}
+}
+
+func TestTruncatedDNSSweepAttemptsUncoveredRoutesAndDoesNotCountOldProofs(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{}
+	policy := &platformconfig.DNSReadinessPolicy{ProbeIntervalSeconds: 30, ProbeTimeoutSeconds: 5, FactFreshnessSeconds: 120, MaxConcurrency: 1}
+	prev := map[string]dnsReadinessFact{}
+	now := time.Now().UTC()
+	for i := range 9 {
+		id := fmt.Sprint(i)
+		plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{ID: id, Hostname: id, Address: "192.0.2.1"})
+		if i < 6 {
+			prev[id] = dnsReadinessFact{ProbeID: id, Ready: true, Proof: routeprobe.Proof{ValidUntil: now.Add(45 * time.Second)}}
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var attempted []string
+	scheduler := &dnsReadinessScheduler{}
+	results := scheduler.collectWindow(ctx, plan, policy, func(_ context.Context, host, _, _, _ string, _ time.Duration) (routeprobe.Proof, error) {
+		attempted = append(attempted, host)
+		if len(attempted) == 3 {
+			cancel()
+		}
+		return routeprobe.Proof{}, errors.New("no authenticated observation")
+	}, nil, prev, false)
+	if !slices.Equal(attempted, []string{"6", "7", "0"}) {
+		t.Fatalf("partial sweep lost uncovered work or starved renewal: %v", attempted)
+	}
+	for _, fact := range results {
+		if fact.Ready || (!slices.Contains(attempted, fact.ProbeID) && fact.Reason != "not_observed") {
+			t.Fatalf("scheduling alone produced evidence for %q", fact.ProbeID)
+		}
+	}
+}
 
 func TestDNSReadinessBlackholeDoesNotStarveHealthyRoutes(t *testing.T) {
 	plan := &platformconfig.DNSReadinessPlan{}

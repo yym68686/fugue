@@ -182,7 +182,14 @@ func TestRejectedDNSCandidateRefreshesRetainedReleaseWithoutRenewingAuthority(t 
 				}
 				return
 			}
-			if probes.Load() == 0 || !actual.checkedAt.After(old.checkedAt) || actual.fallback != "candidate_rejected" {
+			if actual.fallback != "candidate_rejected" {
+				t.Fatal("candidate rejection reason was lost", actual.fallback)
+			}
+			if scenario == "expired-checkpoint" {
+				if probes.Load() != 0 || !actual.checkedAt.Equal(old.checkedAt) {
+					t.Fatal("expired fallback consumed probe budget or invented a fresh observation")
+				}
+			} else if probes.Load() == 0 || !actual.checkedAt.After(old.checkedAt) {
 				t.Fatal("rejected candidate starved retained readiness", actual.fallback, probes.Load())
 			}
 			q := new(dns.Msg)

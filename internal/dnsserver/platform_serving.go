@@ -554,7 +554,7 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 			st.fallback = "readiness_incomplete"
 			s.platformServing.publish(st, dnsServingWriterReadinessIncomplete)
 			_ = s.reportDNSServingState(ctx, client, id, st, false)
-		} else if hosts := dnsTransitionRecords(old, bridge); len(hosts) > 0 {
+		} else if hosts := dnsLiveTransitionRecords(old, bridge, now); len(hosts) > 0 {
 			retained, err := s.refreshedDNSServingFacts(ctx, old, probe, fallbackReason, bridge, observations, retainedReader)
 			if err != nil {
 				return err
@@ -670,9 +670,32 @@ func dnsServingReady(st *dnsServingState, now time.Time) bool {
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
 	return status.ReadyRecords == status.Records
 }
+
+// A retained global checkpoint cannot renew its own lease. Even a partial
+// transition answers through its predecessor's signed MaxStale window. Leave
+// cell route-source renewal and the selected assignment's own sweep alone.
+func expiredRetainedGlobalDNS(st *dnsServingState, now time.Time) bool {
+	return st != nil && st.record.Positive && st.record.RouteSources == nil &&
+		!now.Before(st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds)*time.Second))
+}
+
+func dnsLiveTransitionRecords(old *dnsServingState, bridge *dnsReleaseBridge, now time.Time) map[string]bool {
+	if expiredRetainedGlobalDNS(old, now) {
+		return nil
+	}
+	return dnsTransitionRecords(old, bridge)
+}
+
 func (s *Service) refreshedDNSServingFacts(ctx context.Context, old *dnsServingState, probe dnsReadinessProbeFunc, reason string, bridge *dnsReleaseBridge, observations []dnsReadinessFact, readers ...*dnsRetainedRouteSourceReader) (result *dnsServingState, resultErr error) {
 	ctx, finish := observeDNSSyncPhase(ctx, "retained_facts")
 	defer func() { finish(resultErr) }()
+	if expiredRetainedGlobalDNS(old, time.Now()) {
+		// Do not advance checkedAt or any fact/lease. A fresh assignment still
+		// has to pass its own authenticated probes and wire checks to serve.
+		st := *old
+		st.fallback, st.transition = reason, nil
+		return &st, nil
+	}
 	if len(readers) > 0 && readers[0] != nil && old.record.Positive && old.record.RouteSources != nil {
 		if refreshed, err := s.refreshRetainedDNSRouteSources(ctx, old, probe, reason, *readers[0]); err == nil {
 			return refreshed, nil
