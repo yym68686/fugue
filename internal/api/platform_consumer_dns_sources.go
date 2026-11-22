@@ -103,37 +103,12 @@ func (s *Server) assignedDNSRouteSourceOwnerWithReader(claims platformcontrol.Pl
 }
 
 func (s *Server) assignedDNSRouteSourceOwnerContext(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string, loadArtifact func(string) (model.PlatformArtifact, error)) (consumerArtifactLookup, error) {
-	// This endpoint is a lookup by exact expected set, not a discovery
-	// request. Use its ledger row ONLY to locate a lane; it never grants
-	// membership. Independently resolve that active lane's signed closure,
-	// latest expected set and selected serving owner on each side of the read.
-	// A stale set or superseded row cannot resurrect an earlier assignment.
-	set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, setID)
-	if err != nil {
-		return consumerArtifactLookup{}, err
-	}
-	if set.ID != setID || set.ScopeKey != claims.ScopeKey || set.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || set.ArtifactReleaseID == "" {
-		return consumerArtifactLookup{}, store.ErrNotFound
-	}
-	lane, err := s.store.GetPlatformArtifactReleaseContext(ctx, set.ArtifactReleaseID)
-	if err != nil {
-		return consumerArtifactLookup{}, err
-	}
-	if lane.ScopeKey != set.ScopeKey || lane.ID != set.ArtifactReleaseID || lane.ArtifactID != set.ReleaseSetID || lane.ArtifactKind != model.PlatformArtifactKindReleaseSet || lane.Status != model.PlatformArtifactReleaseStatusActive {
-		return consumerArtifactLookup{}, store.ErrNotFound
-	}
-	switch lane.ReleaseChannel {
-	case model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
-	default:
-		return consumerArtifactLookup{}, store.ErrNotFound
-	}
-	readArtifact := newConsumerArtifactReader(loadArtifact)
-	items, err := s.resolveConsumerAssignmentChannels(ctx, claims, readArtifact, []string{lane.ReleaseChannel})
+	items, err := s.resolveExactDNSSet(ctx, claims, setID, newConsumerArtifactReader(loadArtifact))
 	if err != nil {
 		return consumerArtifactLookup{}, err
 	}
 	for _, item := range items {
-		if item.Release.ID != lane.ID || item.Assignment.ReleaseSetID != set.ReleaseSetID || item.Artifact.ID != artifactID || item.Artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || item.Assignment.ExpectedConsumerSetID != setID {
+		if item.Artifact.ID != artifactID {
 			continue
 		}
 		sources, err := platformconfig.DNSRouteSourceAuthorizations(item.Artifact)
@@ -151,4 +126,43 @@ func (s *Server) assignedDNSRouteSourceOwnerContext(ctx context.Context, claims 
 		return item, nil
 	}
 	return consumerArtifactLookup{}, store.ErrNotFound
+}
+
+func (s *Server) resolveExactDNSSet(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, setID string, readArtifact func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
+	// This endpoint is a lookup by exact expected set, not a discovery
+	// request. Use its ledger row ONLY to locate a lane; it never grants
+	// membership. Independently resolve that active lane's signed closure
+	// and latest expected set. Serving-only callers also check selection.
+	// A stale set or superseded row cannot resurrect an earlier assignment.
+	set, err := s.store.GetPlatformExpectedConsumerSetContext(ctx, setID)
+	if err != nil {
+		return nil, err
+	}
+	if set.ID != setID || set.ScopeKey != claims.ScopeKey || set.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || set.ArtifactReleaseID == "" {
+		return nil, store.ErrNotFound
+	}
+	lane, err := s.store.GetPlatformArtifactReleaseContext(ctx, set.ArtifactReleaseID)
+	if err != nil {
+		return nil, err
+	}
+	if lane.ScopeKey != set.ScopeKey || lane.ID != set.ArtifactReleaseID || lane.ArtifactID != set.ReleaseSetID || lane.ArtifactKind != model.PlatformArtifactKindReleaseSet || lane.Status != model.PlatformArtifactReleaseStatusActive {
+		return nil, store.ErrNotFound
+	}
+	switch lane.ReleaseChannel {
+	case model.PlatformArtifactReleaseChannelShadow, model.PlatformArtifactReleaseChannelGray, model.PlatformArtifactReleaseChannelFull:
+	default:
+		return nil, store.ErrNotFound
+	}
+	items, err := s.resolveConsumerAssignmentChannels(ctx, claims, readArtifact, []string{lane.ReleaseChannel})
+	if err != nil {
+		return nil, err
+	}
+	var owned []consumerArtifactLookup
+	for _, item := range items {
+		if item.Release.ID == lane.ID && item.Assignment.ReleaseSetID == set.ReleaseSetID &&
+			item.Artifact.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && item.Assignment.ExpectedConsumerSetID == setID {
+			owned = append(owned, item)
+		}
+	}
+	return owned, nil
 }

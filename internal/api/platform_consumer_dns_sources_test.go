@@ -309,6 +309,53 @@ func TestDNSRouteSourceAPIRequiresExactPrivateDNSAssignment(t *testing.T) {
 			t.Fatal("foreign set exposed other lane", err)
 		}
 	})
+	t.Run("exact cell DNS artifact and parent do not read an unrelated shadow", func(t *testing.T) {
+		var current model.PlatformConsumerAssignmentResponse
+		mustDecodeJSON(t, servingOnly, &current)
+		if len(current.Assignments) != 1 {
+			t.Fatal("expected one current assignment")
+		}
+		a := current.Assignments[0]
+		for _, target := range []string{a.ArtifactID, a.ReleaseSetID} {
+			counts := map[string]int{}
+			read := func() func(string) (model.PlatformArtifact, error) {
+				load := s.store.NewPlatformArtifactReadSession()
+				return func(id string) (model.PlatformArtifact, error) {
+					counts[id]++
+					if id == cold.DNSArtifact.ID || id == cold.ReleaseArtifact.ID {
+						return model.PlatformArtifact{}, store.ErrConflict
+					}
+					return load(id)
+				}
+			}
+			got, status, msg := s.readCheckedConsumerArtifact(t.Context(), claims, target, a.ExpectedConsumerSetID, read)
+			if status != http.StatusOK || got.Artifact.ID != target || !reflect.DeepEqual(got.Assignment, a) ||
+				counts[cold.DNSArtifact.ID]+counts[cold.ReleaseArtifact.ID] != 0 || counts[a.ReleaseSetID] < 2 {
+				t.Fatalf("unrelated lane loaded or original not rechecked: status=%d msg=%s reads=%v", status, msg, counts)
+			}
+			for _, bad := range []string{"absent-set", coldSet.ID} {
+				if _, status, _ := s.readCheckedConsumerArtifact(t.Context(), claims, target, bad, s.store.NewPlatformArtifactReadSession); status != http.StatusNotFound {
+					t.Fatal("foreign set returned artifact", status)
+				}
+			}
+			parentReads := 0
+			changed := func() func(string) (model.PlatformArtifact, error) {
+				load := s.store.NewPlatformArtifactReadSession()
+				return func(id string) (model.PlatformArtifact, error) {
+					if id == a.ReleaseSetID {
+						parentReads++
+						if parentReads == 2 {
+							return model.PlatformArtifact{}, store.ErrConflict
+						}
+					}
+					return load(id)
+				}
+			}
+			if result, status, _ := s.readCheckedConsumerArtifact(t.Context(), claims, target, a.ExpectedConsumerSetID, changed); status != http.StatusServiceUnavailable || result.Artifact.ID != "" || parentReads != 2 {
+				t.Fatalf("exact artifact exposed without fresh authority: status=%d parent_reads=%d", status, parentReads)
+			}
+		}
+	})
 	for _, only := range []bool{true, false} {
 		counts := map[string]int{}
 		items, _, readErr := s.readCheckedConsumerAssignments(context.Background(), claims, only, time.Now(), func() func(string) (model.PlatformArtifact, error) {

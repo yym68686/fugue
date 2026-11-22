@@ -51,6 +51,12 @@ func (s *Server) checkConsumerInputReads(ctx context.Context, claims platformcon
 }
 
 func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, selected []consumerArtifactLookup, read func(string) (model.PlatformArtifact, error), servingOnly bool, load func(string) (model.PlatformArtifact, error)) error {
+	return s.checkConsumerInputReadsWithResolver(ctx, claims, selected, read, servingOnly, load, func(read func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error) {
+		return s.resolveConsumerAssignmentLanes(ctx, claims, read, servingOnly)
+	})
+}
+
+func (s *Server) checkConsumerInputReadsWithResolver(ctx context.Context, claims platformcontrol.PlatformComponentIdentityClaims, selected []consumerArtifactLookup, read func(string) (model.PlatformArtifact, error), servingOnly bool, load func(string) (model.PlatformArtifact, error), resolve func(func(string) (model.PlatformArtifact, error)) ([]consumerArtifactLookup, error)) error {
 	reads := make([]store.PlatformInputReadSelection, 0, len(selected))
 	parents := make([]model.PlatformArtifact, 0, len(selected))
 	for _, item := range selected {
@@ -67,7 +73,7 @@ func (s *Server) checkConsumerInputReadsWithLoader(ctx context.Context, claims p
 		return err
 	}
 	freshRead := newConsumerArtifactReader(load)
-	current, err := s.resolveConsumerAssignmentLanes(ctx, claims, freshRead, servingOnly)
+	current, err := resolve(freshRead)
 	if err != nil {
 		observeConsumerInputReadFailure(ctx, "fresh_authority_resolve", store.PlatformInputReadFailure{}, nil, nil)
 		return err
