@@ -9,14 +9,17 @@ import (
 // change quorum, reuse proof authority or add an endpoint to the signed plan.
 type dnsProbePriority struct {
 	preferred, candidates, availability map[string]bool
+	sole                                map[string]bool
 }
 
 func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *platformconfig.DNSReadinessPlan) dnsProbePriority {
-	out := dnsProbePriority{preferred: map[string]bool{}, candidates: map[string]bool{}, availability: map[string]bool{}}
+	out := dnsProbePriority{preferred: map[string]bool{}, candidates: map[string]bool{}, availability: map[string]bool{}, sole: map[string]bool{}}
 	if payload.Plan == nil {
 		return out
 	}
 	type hostEdge struct{ host, edge string }
+	type hostFamilyEdge struct{ host, family, edge string }
+	sole := map[hostFamilyEdge]bool{}
 	primaries, pool, availabilityPool := map[hostEdge]bool{}, map[hostEdge]bool{}, map[hostEdge]bool{}
 	for _, view := range payload.Queries {
 		if view.NodeID != nodeID {
@@ -40,6 +43,10 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 				// With explicit availability, materialization only keeps
 				// targets in its independently authorized recovery pool.
 				ordered = availability.OrderedEdgeIDs
+			} else if (record.Type == "A" || record.Type == "AAAA") && len(ordered) == 1 && ordered[0] != "" {
+				// A fresh proof of another physical edge cannot materialize
+				// this RRset, even when the generic route quorum is met.
+				sole[hostFamilyEdge{record.Name, record.Type, ordered[0]}] = true
 			}
 			for _, edgeID := range ordered {
 				key := hostEdge{record.Name, edgeID}
@@ -55,7 +62,7 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 		probes[probe.ID] = probe
 	}
 	type targetKey struct{ host, edge, group, address string }
-	type targetPriority struct{ primary, candidate, availability bool }
+	type targetPriority struct{ primary, candidate, availability, sole bool }
 	targets := map[targetKey]targetPriority{}
 	note := func(probe platformconfig.DNSReadinessProbe, priority targetPriority) {
 		key := dnsroutesource.ProbeKey(probe)
@@ -68,6 +75,9 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 		if priority.availability {
 			out.availability[key] = true
 		}
+		if priority.sole {
+			out.sole[key] = true
+		}
 	}
 	// A verified runtime publication can use a different path than the
 	// embedded baseline plan. Prioritize that actual probe only if its
@@ -75,7 +85,8 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 	for _, record := range payload.Plan.Records {
 		for _, target := range record.Targets {
 			binding := hostEdge{record.Hostname, target.EdgeID}
-			priority := targetPriority{primaries[binding], pool[binding], availabilityPool[binding]}
+			priority := targetPriority{primaries[binding], pool[binding], availabilityPool[binding],
+				sole[hostFamilyEdge{record.Hostname, target.Family, target.EdgeID}]}
 			if !priority.primary && !priority.candidate {
 				continue
 			}
@@ -92,6 +103,7 @@ func dnsProbePriorities(payload dnsServingPayload, nodeID string, runtimePlan *p
 						previous.primary || priority.primary,
 						previous.candidate || priority.candidate,
 						previous.availability || priority.availability,
+						previous.sole || priority.sole,
 					}
 				}
 			}

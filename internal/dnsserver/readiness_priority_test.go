@@ -16,6 +16,71 @@ import (
 	"fugue/internal/routeprobe"
 )
 
+func TestDNSSoleChoiceIsBoundToSignedLocalFamilyAndPhysicalTarget(t *testing.T) {
+	for _, kind := range []string{"order", "quality", "multiple", "other family", "other node", "availability"} {
+		t.Run(kind, func(t *testing.T) {
+			view, plan, _, _, _ := queryExecutionFixture()
+			node := view.NodeID
+			rr := &view.Records[0]
+			rr.AnswerPolicy.PhysicalOrder = &model.DNSPhysicalOrder{OrderedEdgeIDs: []string{"edge-b"}}
+			rr.AnswerPolicy.PhysicalSelection = nil
+			switch kind {
+			case "quality":
+				rr.AnswerPolicy.PhysicalOrder = nil
+				rr.AnswerPolicy.PhysicalSelection = &model.DNSPhysicalSelection{PrimaryEdgeID: "edge-b", OrderedEdgeIDs: []string{"edge-b"}}
+			case "multiple":
+				rr.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs = append(rr.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs, "edge-a")
+			case "other family":
+				rr.Type = "AAAA"
+			case "other node":
+				node = "another-node"
+			case "availability":
+				rr.AnswerPolicy.Availability = &model.DNSAvailabilityPolicy{OrderedEdgeIDs: []string{"edge-b", "edge-a"}}
+			}
+			pr := dnsProbePriorities(dnsServingPayload{Plan: &plan, Queries: []platformconfig.DNSQueryView{view}}, node, nil)
+			n := 0
+			for _, probe := range plan.Probes {
+				want := (kind == "order" || kind == "quality") && probe.EdgeID == "edge-b"
+				if pr.sole[dnsroutesource.ProbeKey(probe)] != want {
+					t.Fatal("changed exact sole-choice membership", kind, probe.ID)
+				}
+				if want {
+					n++
+				}
+			}
+			if (kind == "order" || kind == "quality") && n == 0 {
+				t.Fatal("fixture lacks signed target")
+			}
+		})
+	}
+}
+
+func TestDNSSoleChoiceServesConstrainedRecordsWithoutStarvingAlternatives(t *testing.T) {
+	plan := &platformconfig.DNSReadinessPlan{}
+	sole := map[string]bool{}
+	var indices []int
+	for i := range 80 {
+		p := platformconfig.DNSReadinessProbe{ID: fmt.Sprint(i), Hostname: fmt.Sprintf("host-%d.example.test", i), Address: "192.0.2.10", Path: "/"}
+		plan.Probes = append(plan.Probes, p)
+		indices = append(indices, i)
+		if i >= 40 {
+			sole[dnsroutesource.ProbeKey(p)] = true
+		}
+	}
+	balanceDNSSoleChoiceQueue(indices, map[int]int{0: 1, 1: 2}, plan, sole)
+	want := []int{0, 1, 40, 41, 42, 2, 43, 44, 45, 3}
+	if !reflect.DeepEqual(indices[:len(want)], want) {
+		t.Fatal("critical or non-critical work starved", indices[:len(want)])
+	}
+	seen := map[int]bool{}
+	for _, i := range indices {
+		if i < 0 || i >= 80 || seen[i] {
+			t.Fatal("lost exact plan membership", i)
+		}
+		seen[i] = true
+	}
+}
+
 func TestDNSProbePreferencesFollowLocalDeclaredCandidates(t *testing.T) {
 	for _, kind := range []string{"order", "selection", "availability"} {
 		t.Run(kind, func(t *testing.T) {

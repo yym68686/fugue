@@ -44,7 +44,7 @@ type dnsReadinessScheduler struct {
 func (scheduler *dnsReadinessScheduler) prioritize(priority dnsProbePriority) *dnsReadinessScheduler {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
-	scheduler.priority = dnsProbePriority{maps.Clone(priority.preferred), maps.Clone(priority.candidates), maps.Clone(priority.availability)}
+	scheduler.priority = dnsProbePriority{maps.Clone(priority.preferred), maps.Clone(priority.candidates), maps.Clone(priority.availability), maps.Clone(priority.sole)}
 	return scheduler
 }
 
@@ -312,6 +312,7 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 			return firstAttempt.Before(secondAttempt)
 		})
 		balanceDNSRefreshQueue(indices, priority, plan, previous, started.Add(interval+time.Duration(policy.ProbeTimeoutSeconds)*time.Second))
+		balanceDNSSoleChoiceQueue(indices, priority, plan, scheduler.priority.sole)
 		queues = append(queues, dnsProbeTargetQueue{address: address, indices: indices, blockerProbes: blockerProbes, outcomes: map[string]int{}})
 	}
 	concurrency := max(0, min(policy.MaxConcurrency, len(plan.Probes)-deferred))
@@ -442,6 +443,31 @@ func (scheduler *dnsReadinessScheduler) collectWindow(ctx context.Context, plan 
 	return facts
 }
 
+// Schedule the sole eligible edge for a signed address RRset before spending
+// most of the same physical endpoint's slots on redundant alternatives. The
+// normal explicit priority prefix, per-target backoff/concurrency and exact
+// proof checks stay unchanged. Even under continuous singleton demand, each
+// group of four tail slots still services ordinary work in its incoming order.
+func balanceDNSSoleChoiceQueue(indices []int, priority map[int]int, plan *platformconfig.DNSReadinessPlan, sole map[string]bool) {
+	if len(sole) == 0 || len(indices) < 2 {
+		return
+	}
+	first := 0
+	for first < len(indices) && priority[indices[first]] != 0 {
+		first++
+	}
+	tail := indices[first:]
+	var necessary, alternatives []int
+	for _, index := range tail {
+		if sole[dnsroutesource.ProbeKey(plan.Probes[index])] {
+			necessary = append(necessary, index)
+		} else {
+			alternatives = append(alternatives, index)
+		}
+	}
+	interleaveDNSProbeQueues(tail, necessary, alternatives, 3)
+}
+
 // A verified fact which covers this whole sweep, but not the next poll, still
 // needs renewal. Spending the whole budget on such facts first can, however,
 // leave the same unsigned gaps in successive incomplete scans. Interleave
@@ -466,18 +492,22 @@ func balanceDNSRefreshQueue(indices []int, priority map[int]int, plan *platformc
 			needed = append(needed, index)
 		}
 	}
+	interleaveDNSProbeQueues(rest, needed, renewal, 2)
+}
+
+func interleaveDNSProbeQueues(dest, needed, renewal []int, share int) {
 	if len(needed) == 0 || len(renewal) == 0 {
 		return
 	}
-	out := rest[:0]
+	out := dest[:0]
 	for len(needed) > 0 && len(renewal) > 0 {
-		n := min(2, len(needed))
+		n := min(share, len(needed))
 		out = append(out, needed[:n]...)
 		out = append(out, renewal[0])
 		needed, renewal = needed[n:], renewal[1:]
 	}
 	out = append(out, needed...)
-	copy(rest[len(out):], renewal)
+	copy(dest[len(out):], renewal)
 }
 
 func dnsProbeSweepInterrupted(ctx context.Context, probeErr error, probeDeadline time.Time) bool {
