@@ -9,6 +9,14 @@ import (
 )
 
 func TestHostedPathTransitionSeparatesAddressHoldFromForwardAndReverse(t *testing.T) {
+	testHostedPathTransition(t, false)
+}
+
+func TestHostedPathAliasCompilesOldRootButCannotPublishForeignAddressChange(t *testing.T) {
+	testHostedPathTransition(t, true)
+}
+
+func testHostedPathTransition(t *testing.T, withAlias bool) {
 	r := consumerPlacementFixture()
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	r.Policy.MinimumHealthyEdges = 1
@@ -24,6 +32,24 @@ func TestHostedPathTransitionSeparatesAddressHoldFromForwardAndReverse(t *testin
 	}
 	r.RuntimeSnapshot.Origins = []OriginObservation{fact(*root)}
 	r.RuntimeSnapshot.IntentGeneration = r.Intent.Generation
+	var alias DNSIntent
+	if withAlias {
+		alias = *d
+		alias.Hostname = "edge.example.test"
+		alias.RecordKind = "custom-domain-target"
+		alias.Type = "FUGUE_ROUTE"
+		alias.Values = []string{}
+		alias.Route = &DNSRouteIntent{Hostnames: []string{d.Hostname}, DNSApplicationIntent: *d.Application}
+		alias.Application = nil
+		r.Intent.DNS = append(slices.Clone(r.Intent.DNS), alias)
+		rule := r.Policy.DNSAnswerRules[0]
+		rule.Hostname = alias.Hostname
+		r.Policy.DNSAnswerRules = append(slices.Clone(r.Policy.DNSAnswerRules), rule)
+		observation := r.RuntimeSnapshot.DNSSelections[0]
+		observation.Hostname = alias.Hostname
+		observation.ScopedCandidates = slices.Clone(observation.ScopedCandidates)
+		r.RuntimeSnapshot.DNSSelections = append(slices.Clone(r.RuntimeSnapshot.DNSSelections), observation)
+	}
 	prior, err := Compile(r)
 	if err != nil {
 		t.Fatal(err)
@@ -61,18 +87,38 @@ func TestHostedPathTransitionSeparatesAddressHoldFromForwardAndReverse(t *testin
 	rr.Route = &DNSRouteIntent{DNSApplicationIntent: *d.Application, Hostnames: []string{d.Hostname}, ManagedHost: true, Bindings: []DNSRouteBinding{{Hostname: d.Hostname, PathPrefix: "/", AppID: a.AppID}, {Hostname: d.Hostname, PathPrefix: "/api", AppID: b.AppID}}}
 	rr.Application = nil
 	next.Intent.DNS = []DNSIntent{rr}
+	if withAlias {
+		shared := *alias.Route
+		shared.Bindings = slices.Clone(rr.Route.Bindings)
+		alias.Route = &shared
+		next.Intent.DNS = append(next.Intent.DNS, alias)
+	}
 	next.RuntimeSnapshot.IntentGeneration = next.Intent.Generation
 	next.RuntimeSnapshot.Origins = []OriginObservation{fact(a), fact(b)}
 	next.RuntimeSnapshot.DNSEdgeEndpoints = next.RuntimeSnapshot.DNSEdgeEndpoints[:1]
-	s := &next.RuntimeSnapshot.DNSSelections[0]
-	s.Candidates = s.Candidates[:1]
-	s.SelectedEdgeGroupID = s.Candidates[0].EdgeGroupID
-	s.ScopedCandidates[0].Candidates = s.ScopedCandidates[0].Candidates[:1]
+	for i := range next.RuntimeSnapshot.DNSSelections {
+		s := &next.RuntimeSnapshot.DNSSelections[i]
+		s.Candidates = s.Candidates[:1]
+		s.SelectedEdgeGroupID = s.Candidates[0].EdgeGroupID
+		s.ScopedCandidates[0].Candidates = s.ScopedCandidates[0].Candidates[:1]
+	}
 	intermediate, staged, err := CompileHostedPathTransition(next, src)
 	if err != nil || !staged {
 		t.Fatal("missing address-only baseline", err)
 	}
 	baseline := payload(intermediate)
+	if withAlias {
+		// The staged alias has the old root as its real dependency; no
+		// rejection in the route compiler. Its other RR may still contract
+		// under the hold. The separate serving guard must reject that.
+		if len(baseline.ReadinessPlan.Probes) != 1 || baseline.ReadinessPlan.Probes[0].Path != "/" || reflect.DeepEqual(baseline.Records, src.Prior.Records) {
+			t.Fatal("missing staged alias and independent address change")
+		}
+		if e := ValidateScopedHostedPublicationTransition(prior.DNSArtifact, intermediate.DNSArtifact); e == nil {
+			t.Fatal("alias fix accidentally authorized the mixed DNS release")
+		}
+		return
+	}
 	if len(baseline.ReadinessPlan.Probes) != 1 || baseline.ReadinessPlan.Probes[0].Path != "/" || !reflect.DeepEqual(baseline.Records, src.Prior.Records) {
 		t.Fatal("address-only baseline changed routes or RR")
 	}

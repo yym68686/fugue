@@ -124,6 +124,9 @@ func StageHostedPathBaseline(prior, desired PlatformIntent, hosts []string) (Pla
 		out.Routes = append(out.Routes, currentRoot)
 		out.DNS = append(out.DNS, old)
 	}
+	if err := stageHostedAliasBindings(prior, desired, out, wanted); err != nil {
+		return PlatformIntent{}, err
+	}
 	out = NormalizePlatformIntent(out)
 	out.Generation = ""
 	gen, err := PlatformIntentGeneration(out)
