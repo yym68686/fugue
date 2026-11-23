@@ -2679,7 +2679,23 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 	if err != nil {
 		return nil, err
 	}
-	err = visitEdgeRollNodes(sortedEdgeNodes(current), func(node string) error {
+	// Allow the same staged candidate to finish when existing streams close.
+	// Bound the watch independently from rollout/health deadlines; never
+	// repeat a successful deletion or start a new CI run to observe a drain.
+	drainUntil := time.Now().Add(min(cluster.timeout, 2*time.Minute))
+	err = watchEdgeRollNodes(sortedEdgeNodes(current), func() bool {
+		if time.Until(drainUntil) < 15*time.Second {
+			return false
+		}
+		timer := time.NewTimer(15 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}, func(node string) error {
 		if progress != nil {
 			if err := progress(ctx); err != nil {
 				return err
@@ -2718,16 +2734,27 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 // invalidate the independent drain and replacement gates on later members.
 // Any different failure takes precedence and must not be classified as a wait.
 func visitEdgeRollNodes(nodes []string, visit func(string) error) error {
-	var waiting []error
-	for _, n := range nodes {
-		err := visit(n)
-		if errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) {
-			waiting = append(waiting, fmt.Errorf("node %s: %w", n, err))
-		} else if err != nil {
-			return err
+	return watchEdgeRollNodes(nodes, func() bool { return false }, visit)
+}
+
+func watchEdgeRollNodes(nodes []string, nextObservation func() bool, visit func(string) error) error {
+	for {
+		var waiting []error
+		var pending []string
+		for _, n := range nodes {
+			err := visit(n)
+			if errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) {
+				waiting = append(waiting, fmt.Errorf("node %s: %w", n, err))
+				pending = append(pending, n)
+			} else if err != nil {
+				return err
+			}
 		}
+		if len(pending) == 0 || !nextObservation() {
+			return errors.Join(waiting...)
+		}
+		nodes = pending
 	}
-	return errors.Join(waiting...)
 }
 
 func edgeRollIncludesWorkerHealth(transition declarativerelease.EdgeGroupABTransition, name string) bool {

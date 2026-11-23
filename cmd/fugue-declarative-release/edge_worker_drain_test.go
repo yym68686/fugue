@@ -97,6 +97,23 @@ func TestDrainingMemberDoesNotBlockIndependentReplacement(t *testing.T) {
 	}
 }
 
+func TestEdgeDrainContinuesOnlyThePendingMembersOfSameAttempt(t *testing.T) {
+	var visited []string
+	remaining := map[string]int{"first": 2, "second": 1}
+	waits := 0
+	err := watchEdgeRollNodes([]string{"first", "second", "third"}, func() bool { waits++; return waits <= 2 }, func(node string) error {
+		visited = append(visited, node)
+		if remaining[node] > 0 {
+			remaining[node]--
+			return declarativerelease.ErrInactiveWorkerDraining
+		}
+		return nil
+	})
+	if err != nil || waits != 2 || !slices.Equal(visited, []string{"first", "second", "third", "first", "second", "first"}) {
+		t.Fatal("missed a member or retried completed work", visited, err)
+	}
+}
+
 func TestEdgeWorkerSocketInventoryIncludesBothFamiliesAndFailsClosed(t *testing.T) {
 	const header = "  sl  local_address rem_address   st tx_queue rx_queue\n"
 	const idleV4 = header + "  0: 00000000:480B 00000000:0000 0A 00000000:00000000\n" +
