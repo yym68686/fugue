@@ -63,7 +63,7 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runReceipt(args, output)
 	case "prepare":
 		return runPrepare(args, output)
-	case "execute":
+	case "execute", "resume-worker-drain":
 		return runExecuteContext(ctx, args, output)
 	case "guardian-submit":
 		return runGuardianSubmit(args, output)
@@ -817,7 +817,9 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	}
 	// Validate the complete immutable identity before reporting a time-window
 	// rejection. No client or mutation Lease exists at this point.
-	if _, freshnessErr := declarativerelease.DecodeExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"]); freshnessErr != nil {
+	resuming := args[0] == "resume-worker-drain"
+	originalPrepared := prepared
+	if _, freshnessErr := declarativerelease.DecodeExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"]); freshnessErr != nil && !resuming {
 		result := declarativerelease.ExecutionResult{
 			APIVersion: declarativerelease.ExecutionPlanAPIVersion, Kind: declarativerelease.ExecutionResultKind,
 			Component: prepared.Component, ConfigSHA: prepared.ConfigSHA, ExecutionPlanDigest: prepared.PlanDigest,
@@ -851,6 +853,38 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	}
 	ctx, cancel := context.WithTimeout(parent, executeTimeout)
 	defer cancel()
+	guardianWorker := release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
+		release.Delivery != nil && release.Delivery.Writer == "guardian" && os.Getenv("FUGUE_COMPONENT_LEASE_OWNER") == "guardian"
+	if resuming && !guardianWorker {
+		return errors.New("only an enrolled Guardian Worker can resume a drain")
+	}
+	if guardianWorker && !prepared.AlreadyConverged {
+		if resuming {
+			if err := requireCurrentWorkerWait(ctx, release, prepared); err != nil {
+				return err
+			}
+		}
+		drainErr := cluster.inspectInactiveWorkers(ctx, release, prepared.Forward, files["forward.json"])
+		if errors.Is(drainErr, declarativerelease.ErrInactiveWorkerDraining) {
+			return writeWorkerDrainWait(output, prepared, drainErr)
+		}
+		if resuming {
+			if drainErr != nil {
+				return fmt.Errorf("observe inactive Worker before resuming: %w", drainErr)
+			}
+			fresh, err := prepareAfterWorkerDrain(ctx, cluster, plan, receipt, prepared, files)
+			if err != nil {
+				return err
+			}
+			files["execution-plan.json"], err = declarativerelease.CanonicalJSON(fresh)
+			if err != nil {
+				return err
+			}
+			prepared = fresh
+		}
+	} else if resuming {
+		return errors.New("converged executions cannot resume a Worker drain")
+	}
 	leaseCoordinator, err := newComponentLeaseCoordinator()
 	if err != nil {
 		return err
@@ -858,6 +892,25 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	heldLease, err := leaseCoordinator.acquire(ctx, release, prepared.ConfigSHA)
 	if err != nil {
 		return fmt.Errorf("acquire component mutation lease: %w", err)
+	}
+	// A newer DesiredRelease might have been published during read-only
+	// preparation. Rebind the original wait while holding the mutation lease.
+	if resuming {
+		err := requireCurrentWorkerWait(ctx, release, originalPrepared)
+		if err == nil {
+			err = cluster.inspectInactiveWorkers(ctx, release, prepared.Forward, files["forward.json"])
+		}
+		if err != nil {
+			releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+			defer releaseCancel()
+			if releaseErr := leaseCoordinator.release(releaseCtx, heldLease); releaseErr != nil {
+				return errors.Join(err, releaseErr)
+			}
+			if errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) {
+				return writeWorkerDrainWait(output, originalPrepared, err)
+			}
+			return err
+		}
 	}
 	result := declarativerelease.Execute(ctx, cluster, plan, prepared, files["forward.json"], files["lkg.json"])
 	// Every executor result is a canonical terminal result, including a

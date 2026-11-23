@@ -51,6 +51,9 @@ func NewProcessExecutor(binary, podUID string) (*ProcessExecutor, error) {
 }
 
 func (executor *ProcessExecutor) Rollout(ctx context.Context, snapshot Snapshot) (ExecutionReceipt, error) {
+	if WaitingForWorkerDrain(snapshot) {
+		return executor.execute(ctx, snapshot, "resume-worker-drain", snapshot.Bundle.Files)
+	}
 	return executor.execute(ctx, snapshot, "execute", snapshot.Bundle.Files)
 }
 
@@ -81,7 +84,7 @@ func (executor *ProcessExecutor) Rollback(ctx context.Context, snapshot Snapshot
 
 func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot, operation string, files map[string][]byte) (ExecutionReceipt, error) {
 	if executor == nil || snapshot.Record.Validate() != nil ||
-		(operation != "execute" && operation != "repair-monitor" && operation != "restore-monitor" && operation != "adopt-committed-monitor") {
+		(operation != "execute" && operation != "resume-worker-drain" && operation != "repair-monitor" && operation != "restore-monitor" && operation != "adopt-committed-monitor") {
 		return ExecutionReceipt{}, errors.New("Guardian executor request is invalid")
 	}
 	directory, err := os.MkdirTemp("", "fugue-release-guardian-")
@@ -181,6 +184,17 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	}
 	if result.Component != snapshot.Key.Component || result.ConfigSHA != snapshot.Bundle.Prepared.ConfigSHA || result.ReceiptDigest == "" {
 		return ExecutionReceipt{}, errors.New("Guardian executor receipt binding is invalid")
+	}
+	if result.Reason == "inactive-worker-before-write" {
+		release := snapshot.Bundle.Release
+		if runErr != nil || (operation != "execute" && operation != "resume-worker-drain") ||
+			release.Transition == nil || release.Transition.EdgeGroupAB == nil || release.Delivery == nil || release.Delivery.Writer != "guardian" ||
+			result.Status != "failed-no-write" || result.FailureClass != "connection_drain" ||
+			result.ForwardApplyCount != 0 || result.LKGApplyCount != 0 || result.ExecutionPlanDigest != snapshot.Bundle.Prepared.PlanDigest {
+			return ExecutionReceipt{}, errors.New("unbound Worker drain wait")
+		}
+		return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), RecordDigest: snapshot.Record.RecordDigest,
+			ReceiptDigest: result.ReceiptDigest, WorkerDrainPlanDigest: result.ExecutionPlanDigest}, nil
 	}
 	// The monitor repair/restore commands finish their monitor-pointer CAS and
 	// component Lease finalization before returning success.  A canonical

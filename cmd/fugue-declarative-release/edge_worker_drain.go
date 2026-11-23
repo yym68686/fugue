@@ -41,6 +41,13 @@ END {
 }' /proc/net/tcp /proc/net/tcp6`
 
 func (cluster *kubectlCluster) deleteDrainedEdgeWorkerPod(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, workload string, pod edgeGroupPod) error {
+	if err := cluster.observeEdgeWorkerDrain(ctx, client, release, transition, workload, pod); err != nil {
+		return err
+	}
+	return deleteEdgePodExact(ctx, client, release.Workload.Namespace, pod)
+}
+
+func (cluster *kubectlCluster) observeEdgeWorkerDrain(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, workload string, pod edgeGroupPod) error {
 	var slot string
 	switch workload {
 	case transition.WorkerAName:
@@ -83,7 +90,7 @@ func (cluster *kubectlCluster) deleteDrainedEdgeWorkerPod(ctx context.Context, c
 	if err := verifyEdgeWorkerDrain(slot, time.Now().UTC(), readActivation, readSockets); err != nil {
 		return fmt.Errorf("refuse to replace Worker Pod/%s: %w", pod.Name, err)
 	}
-	return deleteEdgePodExact(ctx, client, namespace, pod)
+	return nil
 }
 
 func edgeWorkerDrainPorts(spec corev1.PodSpec) ([2]int32, error) {

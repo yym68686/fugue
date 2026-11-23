@@ -247,6 +247,7 @@ type ReleaseStatus struct {
 	RolloutReceiptDigest  string         `json:"rolloutReceiptDigest,omitempty"`
 	RollbackReceiptDigest string         `json:"rollbackReceiptDigest,omitempty"`
 	RecoveryRetryCount    uint8          `json:"recoveryRetryCount,omitempty"`
+	WorkerDrainPlanDigest string         `json:"workerDrainPlanDigest,omitempty"`
 	ObservedAt            string         `json:"observedAt"`
 	StatusDigest          string         `json:"statusDigest"`
 }
@@ -285,6 +286,12 @@ func (status ReleaseStatus) Validate(now time.Time) error {
 }
 
 func (status ReleaseStatus) validateUnsigned() error {
+	if status.WorkerDrainPlanDigest != "" && (!digestPattern.MatchString(status.WorkerDrainPlanDigest) ||
+		status.State != StateRolloutPending || status.CurrentRecordDigest != status.LastSuccessfulLKG ||
+		status.CurrentRecordDigest == status.TargetRecordDigest || !digestPattern.MatchString(status.RolloutReceiptDigest) ||
+		status.RollbackReceiptDigest != "") {
+		return errors.New("Worker drain wait is not bound to a pending release and its prewrite receipt")
+	}
 	if status.Key().Validate() != nil || !validReleaseState(status.State) ||
 		!digestPattern.MatchString(status.TargetRecordDigest) || !digestPattern.MatchString(status.LastSuccessfulLKG) ||
 		(status.CurrentRecordDigest != "" && !digestPattern.MatchString(status.CurrentRecordDigest)) ||

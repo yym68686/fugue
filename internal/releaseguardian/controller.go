@@ -58,11 +58,30 @@ type Store interface {
 }
 
 type ExecutionReceipt struct {
-	Status        string
-	Reason        string
-	FailureCode   string
-	RecordDigest  string
-	ReceiptDigest string
+	Status                string
+	Reason                string
+	FailureCode           string
+	RecordDigest          string
+	ReceiptDigest         string
+	WorkerDrainPlanDigest string
+}
+
+// Waiting is authoritative only for the same immutable desired plan and
+// serving LKG. The child revalidates the binding before preparing fresh CAS.
+func WaitingForWorkerDrain(snapshot Snapshot) bool {
+	previous := snapshot.PreviousStatus
+	release, prepared := snapshot.Bundle.Release, snapshot.Bundle.Prepared
+	return snapshot.Managed && !snapshot.DesiredRecordMissing && previous != nil &&
+		previous.Key() == snapshot.Key && previous.State == StateRolloutPending &&
+		release.Transition != nil && release.Transition.Type == "edge-group-ab" && release.Transition.EdgeGroupAB != nil &&
+		release.Delivery != nil && release.Delivery.Writer == "guardian" && release.Delivery.Group == snapshot.Key.Group &&
+		prepared.Component == snapshot.Key.Component && prepared.ConfigSHA == snapshot.Record.ConfigSHA &&
+		digestPattern.MatchString(previous.WorkerDrainPlanDigest) && previous.WorkerDrainPlanDigest == prepared.PlanDigest &&
+		digestPattern.MatchString(previous.RolloutReceiptDigest) && previous.RollbackReceiptDigest == "" &&
+		snapshot.CurrentRecordDigest == previous.CurrentRecordDigest && snapshot.LastSuccessfulLKG == snapshot.CurrentRecordDigest &&
+		previous.LastSuccessfulLKG == snapshot.CurrentRecordDigest && snapshot.Record.LKGRecordDigest == snapshot.CurrentRecordDigest &&
+		snapshot.Desired.RecordDigest == previous.TargetRecordDigest && snapshot.Desired.RecordDigest == snapshot.Record.RecordDigest &&
+		snapshot.Desired.RecordDigest != snapshot.CurrentRecordDigest
 }
 
 type Executor interface {
@@ -171,6 +190,27 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health,
 		Reason: decision.Reason, ObservedAt: now.Format(time.RFC3339Nano),
 	}
+	// Health changes and periodic reconciliation can enqueue the same key
+	// many times. Persist the first wait across restarts; do not launch a
+	// subprocess for each unrelated watch event.
+	if WaitingForWorkerDrain(snapshot) {
+		last, err := time.Parse(time.RFC3339Nano, snapshot.PreviousStatus.ObservedAt)
+		if err != nil || now.Sub(last) < time.Minute {
+			return nil
+		}
+		if controller.mode != ModeWrite || !(decision.RolloutEligible || degradedPredecessorRollout || degradedEdgeRouteRecovery) ||
+			snapshot.Health.Dependency.State != HealthHealthy || snapshot.Health.Route.State != HealthHealthy {
+			status.State = StateRolloutPending
+			status.WorkerDrainPlanDigest = snapshot.PreviousStatus.WorkerDrainPlanDigest
+			status.RolloutReceiptDigest = snapshot.PreviousStatus.RolloutReceiptDigest
+			status.Reason = joinedReason("waiting for healthy release authority before resuming inactive Worker drain", snapshot.Health)
+			sealed, err := status.Seal()
+			if err != nil {
+				return err
+			}
+			return controller.store.UpdateStatus(ctx, snapshot, sealed)
+		}
+	}
 	if pendingUnprovenLKG {
 		status.RecoveryRetryCount = snapshot.PreviousStatus.RecoveryRetryCount
 	}
@@ -264,6 +304,12 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 				status.State = StateVerifying
 				status.CurrentRecordDigest = snapshot.Record.RecordDigest
 			case "compensated", "failed-no-write":
+				if receipt.Status == "failed-no-write" && receipt.WorkerDrainPlanDigest != "" &&
+					receipt.WorkerDrainPlanDigest == snapshot.Bundle.Prepared.PlanDigest && receipt.RecordDigest == snapshot.Record.RecordDigest {
+					status.State = StateRolloutPending
+					status.WorkerDrainPlanDigest = receipt.WorkerDrainPlanDigest
+					break
+				}
 				if err := controller.store.SetDesiredToLKG(ctx, snapshot); err != nil {
 					status.State = StateRecoveryRequired
 					status.Reason = "rollout reached a known safe terminal state but DesiredRelease rollback CAS failed: " + err.Error()

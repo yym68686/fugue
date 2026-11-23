@@ -183,6 +183,17 @@ func publishDesiredEligible(snapshot Snapshot, bundle ExecutionBundle, stableRec
 	if settled && snapshot.Health.Local.State == HealthHealthy && snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthHealthy {
 		return true
 	}
+	// A queued candidate has not touched the workload. A reviewed
+	// successor may replace that exact desired record and retained LKG.
+	// PublishDesired verifies the byte-exact rollback manifest before CAS.
+	if WaitingForWorkerDrain(snapshot) && bundle.Release.Transition != nil && bundle.Release.Transition.EdgeGroupAB != nil &&
+		bundle.Release.Transition.EdgeGroupAB.GroupID == snapshot.Bundle.Release.Transition.EdgeGroupAB.GroupID &&
+		bundle.Release.ComponentID == snapshot.Key.Component && bundle.Release.SupersedesFailedConfigSHA == snapshot.Record.ConfigSHA &&
+		bundle.Release.ExpectedPreviousPresent && snapshot.CurrentRecordDigest == stableRecord.RecordDigest &&
+		bundle.Release.ExpectedPreviousConfigSHA == stableRecord.ConfigSHA && bundle.Release.ExpectedPreviousImageDigest == stableRecord.ImageDigest &&
+		snapshot.Health.Dependency.State == HealthHealthy && snapshot.Health.Route.State == HealthHealthy {
+		return true
+	}
 	return degradedPredecessorPublishEligible(snapshot, bundle) ||
 		degradedEdgeRouteRecoveryEligible(snapshot, bundle) ||
 		orphanedDesiredEdgeRecoveryEligible(snapshot, bundle, stableRecord) ||
@@ -424,6 +435,7 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 		return ReleaseStatus{}, errors.New("release Guardian target is not configured")
 	}
 	started := store.now().UTC().Add(-interval)
+	var drainWait ReleaseStatus
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -433,7 +445,12 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 			if decodeStrict([]byte(value.Data["status.json"]), &status) == nil && status.Key() == key && status.Validate(store.now().UTC()) == nil {
 				observedAt, _ := time.Parse(time.RFC3339Nano, status.ObservedAt)
 				if !observedAt.Before(started) {
+					drainWait = ReleaseStatus{}
 					switch status.State {
+					case StateRolloutPending:
+						if status.TargetRecordDigest == expected.RecordDigest && status.WorkerDrainPlanDigest != "" {
+							drainWait = status
+						}
 					case StateStable:
 						if status.TargetRecordDigest == expected.RecordDigest && status.CurrentRecordDigest == expected.RecordDigest {
 							return status, nil
@@ -470,11 +487,14 @@ func (store *KubeStore) WaitForTerminal(ctx context.Context, key Key, expected D
 					}
 				}
 			}
-		} else if !apierrors.IsNotFound(err) {
+		} else if !apierrors.IsNotFound(err) && ctx.Err() == nil {
 			return ReleaseStatus{}, err
 		}
 		select {
 		case <-ctx.Done():
+			if drainWait.StatusDigest != "" {
+				return drainWait, fmt.Errorf("Guardian retained the desired Worker while connections drain: %w", ctx.Err())
+			}
 			return ReleaseStatus{}, ctx.Err()
 		case <-ticker.C:
 		}

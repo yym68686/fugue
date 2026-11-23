@@ -1549,3 +1549,11 @@ func sealResult(result ExecutionResult) ExecutionResult {
 	result.ReceiptDigest = digestOf(unsigned)
 	return result
 }
+
+// WorkerDrainWait records an admitted candidate that has made no writes.
+func WorkerDrainWait(prepared ExecutionPlan, reason error) ExecutionResult {
+	return sealResult(ExecutionResult{APIVersion: ExecutionPlanAPIVersion, Kind: ExecutionResultKind,
+		Component: prepared.Component, ConfigSHA: prepared.ConfigSHA, ExecutionPlanDigest: prepared.PlanDigest,
+		Status: "failed-no-write", Reason: "inactive-worker-before-write", FailureClass: "connection_drain",
+		FailureDetail: boundedFailureDetail(reason.Error())})
+}

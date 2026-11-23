@@ -47,3 +47,18 @@ or required member set cannot be verified with a green global baseline. The
 optional `host_selection` describes one current fence; `release_id` is
 reserved for the legacy global result. This is a read, not a new probe,
 lease renewal or a substitute for an authorized public A/B exercise.
+
+## Edge Worker release while the standby holds connections
+
+Guardian reads the inactive Workers' own listener sockets before staging a new
+candidate. When every remaining replacement is busy, the release stays in
+`rollout_pending`. Its `workerDrainPlanDigest` identifies the admitted plan.
+Guardian retains the desired record and serving LKG across restarts. The status
+reason names the blocked nodes. The deployment job can time out while the
+cluster continues watching the recorded release.
+
+When a member becomes available, Guardian verifies the desired record and
+serving declaration, prepares a fresh execution plan, compares the workload
+identity and frozen membership, and checks again under the component lease.
+Each Pod replacement still checks its activation and listener sockets.
+An explicit successor can supersede the queued release against the same LKG.
