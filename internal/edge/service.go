@@ -114,6 +114,8 @@ type Service struct {
 	snapshot                 Status
 	bundle                   *model.EdgeRouteBundle
 	routeIndex               atomic.Pointer[edgeRouteIndex]
+	hostedRoutes             map[string]edgeHostedRoute // mutated only under mu
+	hostedAfter              string
 	routeHealthMode          edgeRouteHealthMode
 	etag                     string
 	routePublication         routePublicationMetadata
@@ -651,6 +653,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("edge route cache unavailable: %v", err)
 	}
+	if err := s.reserveHostedRoutesOnRestart(); err != nil {
+		return fmt.Errorf("load host selection directory: %w", err)
+	}
 
 	if relayServer, relayListener, err := s.initOriginRelay(); err != nil {
 		s.Logger.Printf("edge origin relay disabled: %v", err)
@@ -710,6 +715,7 @@ func (s *Service) Run(ctx context.Context) error {
 	s.startHeartbeatLoop(ctx)
 	s.startInventoryProducerLoop(ctx)
 	go s.runPlatformShadowConsumer(ctx)
+	go s.runHostedRoutes(ctx)
 	go s.runHTTPCacheGC(ctx)
 	go s.runOriginNetworkProbes(ctx)
 
@@ -1139,6 +1145,7 @@ func (s *Service) currentRouteIndex() *edgeRouteIndex {
 		return nil
 	}
 	index := buildEdgeRouteIndex(*s.bundle, s.Config.EdgeGroupID, s.routePublication)
+	s.attachHostedRoutes(index, *s.bundle)
 	s.routeIndex.CompareAndSwap(nil, index)
 	return s.routeIndex.Load()
 }
@@ -1368,7 +1375,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		s.observePublicClientNetwork(r, route, bundleVersion, startedAt)
 	}
-	cacheDecision := s.edgeCacheDecision(r, selectedRoute)
+	cacheDecision := s.edgeCacheDecisionForSelection(r, selectedRoute, publication.HostedDecision)
 	if len(route.Upstreams) > 0 {
 		cacheDecision.Enabled = false
 		cacheDecision.Status = edgeCacheStatusBypass
@@ -1431,7 +1438,7 @@ func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var releaseRequestBodyPolicy func()
 	// Body instrumentation can wrap http.NoBody. Determine eligibility from
 	// the original request before applying either wrapper.
-	peerFallbackAllowed := s.peerFallbackAllowed(r, observed)
+	peerFallbackAllowed := publication.HostedDecision == "" && s.peerFallbackAllowed(r, observed)
 	r, releaseRequestBodyPolicy, handled, policyStatus := s.applyEdgeRequestBodyPolicy(w, r, selectedRoute)
 	if handled {
 		observed.StatusCode = policyStatus
@@ -4194,6 +4201,7 @@ func (s *Service) recordCacheLoaded(cached cacheFile) {
 	index := buildEdgeRouteIndex(bundle, s.Config.EdgeGroupID, publication)
 	s.mu.Lock()
 	s.bundle = &bundle
+	s.attachHostedRoutes(index, bundle)
 	s.routeIndex.Store(index)
 	s.routeHealthMode = edgeRouteHealthCurrent
 	s.routePublication = publication
@@ -4224,6 +4232,7 @@ func (s *Service) recordSyncSuccessWithPublication(bundle model.EdgeRouteBundle,
 	index := buildEdgeRouteIndex(bundle, s.Config.EdgeGroupID, publication)
 	s.mu.Lock()
 	s.bundle = &bundle
+	s.attachHostedRoutes(index, bundle)
 	s.routeIndex.Store(index)
 	s.routeHealthMode = edgeRouteHealthCurrent
 	s.routePublication = publication

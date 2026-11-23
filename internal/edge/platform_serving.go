@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -70,9 +71,10 @@ type platformServingEvidence struct {
 
 var errServingTrafficReleaseMismatch = errors.New("serving group bundle belongs to another traffic release")
 var errServingBundleChanged = errors.New("applied serving bundle changed during observation")
+var errServingHasScopedHosts = errors.New("global executor proof cannot attest independently selected hosts")
 
 func servingObservationChanged(err error) bool {
-	return errors.Is(err, errServingTrafficReleaseMismatch) || errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, errServingBundleChanged)
+	return errors.Is(err, errServingHasScopedHosts) || errors.Is(err, errServingTrafficReleaseMismatch) || errors.Is(err, platformconsumer.ErrAssignmentChanged) || errors.Is(err, errServingBundleChanged)
 }
 
 const platformServingBindingRetryAttempts = 3
@@ -88,7 +90,7 @@ func (s *Service) syncPlatformServing(ctx context.Context, routeProbe platformSe
 	var err error
 	for attempt := 0; attempt < platformServingBindingRetryAttempts; attempt++ {
 		err = s.syncPlatformServingOnce(ctx, routeProbe, tlsProbe)
-		if !servingObservationChanged(err) || ctx.Err() != nil || attempt == platformServingBindingRetryAttempts-1 {
+		if errors.Is(err, errServingHasScopedHosts) || !servingObservationChanged(err) || ctx.Err() != nil || attempt == platformServingBindingRetryAttempts-1 {
 			return err
 		}
 		delay := time.Duration(attempt+1) * 100 * time.Millisecond
@@ -473,6 +475,9 @@ func (s *Service) reportPlatformServingFact(ctx context.Context, client platform
 	h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: id.BoundConsumerID(), Component: id.Component, NodeID: id.NodeID, ArtifactKind: assigned.ArtifactKind, ScopeKey: assigned.ScopeKey, ReleaseSetID: assigned.ReleaseSetID, ExpectedConsumerSetID: assigned.ExpectedConsumerSetID, FencingToken: assigned.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", CompatibilityCapabilities: []string{platformcontrol.TrafficReleaseCapabilityV1, platformcontrol.CellRoutesCapabilityV1, platformcontrol.PhysicalNetworkBoundedCapabilityV3, platformcontrol.PhysicalNetworkDeliveryCapabilityV4, platformcontrol.PhysicalNetworkFailureAwareCapabilityV5, platformcontrol.PhysicalComparableDeliveryCapabilityV6, platformcontrol.PhysicalPairedContinuityCapabilityV7, platformcontrol.PhysicalDynamicQualityCapabilityV1, platformcontrol.PhysicalOrderCapabilityV1, platformcontrol.PhysicalOrderProjectionCapabilityV1, platformcontrol.BusinessEdgeExplorationCapabilityV1, platformcontrol.BusinessDNSBaselineCapabilityV1, platformcontrol.BusinessUnifiedCapabilityV2, platformcontrol.DNSAvailabilityCapabilityV1, "caddy_apply_probe"}, Sequence: sequence, IssuedAt: time.Now().UTC(), Nonce: hex.EncodeToString(nonce), GenerationSequence: assigned.GenerationSequence, DesiredGeneration: assigned.ExpectedGeneration, ApplyStatus: "failed", ProbeStatus: "failed", LastError: "traffic serving apply, cache or readiness verification failed"}
 	h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2, platformcontrol.StaticEdgePolicyCapabilityV1, platformcontrol.PhysicalLastValidCapabilityV8, platformcontrol.SharedCustomHostTLSCapabilityV1)
 	if positive {
+		if s.Config.HostedExecutorAdmission && assigned.ReleaseChannel == "full" && assigned.ScopeKey == "global" && s.Config.CachePath != "" && s.Config.CaddyEnabled && s.PlatformTokenFile != "" {
+			h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind)
+		}
 		// The caller has verified this exact signed member, the applied group
 		// projection, its durable cache and fresh route/TLS probes. Status LKG
 		// is the enclosing group bundle's identity, not this member's generation.
@@ -528,6 +533,9 @@ func (s *Service) validatePlatformServingBundle(expected model.EdgeRouteBundle, 
 	}
 	status := s.Status()
 	index := s.currentRouteIndex()
+	if index != nil && len(index.hosted) != 0 {
+		return errServingHasScopedHosts
+	}
 	if !ok || !s.Config.CaddyEnabled || !status.Healthy || status.StaleCache || status.MaxStaleExceeded || !bundle.ValidUntil.After(time.Now()) || status.CaddyAppliedVersion != bundle.Version || status.CaddyLastError != "" || index == nil || index.publication.Candidate || index.bundleVersion != bundle.Version || !reflect.DeepEqual(bundle.TrafficRelease, projection.bundle.TrafficRelease) {
 		return errors.New("traffic artifact is not the healthy applied Caddy bundle")
 	}
@@ -650,6 +658,10 @@ func (s *Service) probePlatformServingRoute(ctx context.Context, route model.Edg
 }
 
 func (s *Service) probePlatformServingRouteWithRoots(ctx context.Context, route model.EdgeRouteBinding, timeout time.Duration, roots *x509.CertPool) (routeprobe.Proof, error) {
+	return s.probeLocalRouteWithRoots(ctx, route, timeout, roots, "", nil)
+}
+
+func (s *Service) probeLocalRouteWithRoots(ctx context.Context, route model.EdgeRouteBinding, timeout time.Duration, roots *x509.CertPool, decision string, sample *routeartifact.HostedSample) (routeprobe.Proof, error) {
 	address, err := localTLSProbeAddress(s.Config.CaddyListenAddr)
 	if err != nil {
 		return routeprobe.Proof{}, err
@@ -683,6 +695,9 @@ func (s *Service) probePlatformServingRouteWithRoots(ctx context.Context, route 
 	}
 	req.Header.Set(routeproof.RequestHeader, "1")
 	req.Header.Set(routeproof.NonceHeader, token)
+	if decision != "" {
+		req.Header.Set(routeproof.HostedDecisionHeader, decision)
+	}
 	if state := s.platformServingRouteProofState(route); state != "" {
 		req.Header.Set(routeproof.StateHeader, state)
 	}
@@ -692,7 +707,12 @@ func (s *Service) probePlatformServingRouteWithRoots(ctx context.Context, route 
 	}
 	defer response.Body.Close()
 	now := time.Now().UTC()
-	proof, err := routeprobe.ParseResponse(response, token, now)
+	var proof routeprobe.Proof
+	if decision == "" {
+		proof, err = routeprobe.ParseResponse(response, token, now)
+	} else {
+		proof, err = routeprobe.ParseHostedResponse(response, token, decision, now)
+	}
 	if err != nil {
 		return proof, err
 	}
@@ -705,5 +725,26 @@ func (s *Service) probePlatformServingRouteWithRoots(ctx context.Context, route 
 		}
 	}
 	proof.CheckedAt = now
+	if sample != nil {
+		sample.Nonce = token
+		sample.ObservedAt = now
+		sample.ValidUntil = proof.ValidUntil
+		sample.RouteDigest = proof.Digest
+		sample.State = proof.State
+		sample.EdgeID = proof.EdgeID
+		sample.GroupID = proof.GroupID
+		if sample.Transport == "tls" {
+			chain := response.TLS.VerifiedChains[0]
+			sum := sha256.Sum256(chain[0].Raw)
+			sample.CertificateDigest = "sha256:" + hex.EncodeToString(sum[:])
+			sample.CertificateNotBefore = chain[0].NotBefore.UTC()
+			sample.ChainValidUntil = chain[0].NotAfter.UTC()
+			for _, cert := range chain {
+				if cert.NotAfter.Before(sample.ChainValidUntil) {
+					sample.ChainValidUntil = cert.NotAfter.UTC()
+				}
+			}
+		}
+	}
 	return proof, nil
 }

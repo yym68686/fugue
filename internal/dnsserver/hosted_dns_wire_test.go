@@ -19,6 +19,10 @@ import (
 // not decide a route/certificate passed just because an IP is unchanged.
 func TestHostedDNSWireIndependentForwardWithdrawalAndRestart(t *testing.T) {
 	view, _, policy, _, at := queryExecutionFixture()
+	// Linux selection clocks can carry sub-microsecond precision. The
+	// signed artifact envelope has a PostgreSQL-compatible microsecond
+	// timestamp, while the signed selection body preserves the instant.
+	at = at.Truncate(time.Microsecond).Add(317 * time.Nanosecond)
 	digest := func(x any) string {
 		d, e := pc.Digest(x)
 		if e != nil {

@@ -104,8 +104,14 @@ func (c HostedCheckpoint) Reserved() (routeartifact.HostedSelectedPacket, error)
 	if err != nil || json.Unmarshal(raw, &p) != nil {
 		return z, errors.New("invalid historical packet")
 	}
+	// The platform signature canonicalizes envelope dates to microseconds.
+	// The signed selection body may carry a finer clock. Match the envelope
+	// at its precision, then replay at the actual signed selection instant.
+	if !p.SelectedAt.UTC().Truncate(time.Microsecond).Equal(a.CreatedAt) {
+		return z, errors.New("historical selection and envelope timestamps disagree")
+	}
 	sel := model.PlatformConsumerAssignment{ArtifactKind: c.Serving.ArtifactKind, ScopeKey: c.Who.ScopeKey, ReleaseChannel: "full", ReleaseSetID: p.Parent, ArtifactID: p.Child, ContentHash: p.ChildDigest, ArtifactReleaseID: p.Delivery.MembershipRelease, ExpectedConsumerSetID: p.Delivery.MembershipSet, Revision: p.Delivery.MembershipRevision, FencingToken: p.Delivery.MembershipFence}
-	return routeartifact.VerifyHostedPacket(a, c.Host, c.Who, sel, cur.Fence, cur.Decision, c.Keys, a.CreatedAt)
+	return routeartifact.VerifyHostedPacket(a, c.Host, c.Who, sel, cur.Fence, cur.Decision, c.Keys, p.SelectedAt)
 }
 
 // Call with the executor's live snapshot locked. Different hosts use

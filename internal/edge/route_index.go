@@ -18,6 +18,7 @@ type edgeRouteIndex struct {
 	edgeGroupID    string
 	publication    routePublicationMetadata
 	byHost         map[string][]edgeIndexedRoute
+	hosted         map[string]*edgeRouteIndex // nil entry means reserved but currently unavailable
 	tlsAllowlist   []model.EdgeTLSAllowlistEntry
 }
 
@@ -92,6 +93,12 @@ func (index *edgeRouteIndex) routeForHost(host string) (model.EdgeRouteBinding, 
 func (index *edgeRouteIndex) routeForRequest(host, requestPath string) (model.EdgeRouteBinding, bool, bool, string, routePublicationMetadata) {
 	if index == nil {
 		return model.EdgeRouteBinding{}, false, false, "", routePublicationMetadata{}
+	}
+	if scoped, selected := index.hosted[normalizeRouteHost(host)]; selected {
+		if scoped == nil || !scoped.validUntil.After(time.Now()) {
+			return model.EdgeRouteBinding{}, false, false, "", routePublicationMetadata{}
+		}
+		return scoped.routeForRequest(host, requestPath)
 	}
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
 	routes := index.byHost[normalizeRouteHost(host)]

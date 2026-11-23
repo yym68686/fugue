@@ -157,6 +157,10 @@ func (w *edgeHTTPCacheCapture) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBinding) edgeHTTPCacheDecision {
+	return s.edgeCacheDecisionForSelection(r, route, "")
+}
+
+func (s *Service) edgeCacheDecisionForSelection(r *http.Request, route model.EdgeRouteBinding, decisionPin string) edgeHTTPCacheDecision {
 	decision := edgeHTTPCacheDecision{
 		Status:     edgeCacheStatusBypass,
 		Reason:     "no cache policy",
@@ -217,6 +221,9 @@ func (s *Service) edgeCacheDecision(r *http.Request, route model.EdgeRouteBindin
 		decision.Policy = policy
 		decision.PolicyID = strings.TrimSpace(policy.ID)
 		decision.Namespace = edgeCacheNamespace(route)
+		if decisionPin != "" {
+			decision.Namespace += "_host_" + strings.TrimPrefix(decisionPin, "sha256:")
+		}
 		decision.Key = edgeCacheKey(r, decision.Namespace, decision.PolicyID)
 		sum := sha256.Sum256([]byte(decision.Key))
 		decision.KeyHash = hex.EncodeToString(sum[:])

@@ -44,6 +44,7 @@ var (
 )
 
 type routePublicationMetadata struct {
+	HostedDecision               string // local request provenance, never part of a group publication
 	Source                       string
 	GroupID                      string
 	Generation                   string

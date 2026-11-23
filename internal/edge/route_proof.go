@@ -40,6 +40,18 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	index := s.currentRouteIndex()
+	requested := r.Header.Values(routeproof.HostedDecisionHeader)
+	var scoped *edgeRouteIndex
+	var selected bool
+	if index != nil {
+		scoped, selected = index.hosted[normalizeRouteHost(r.Host)]
+	}
+	if selected || len(requested) > 0 {
+		if !selected || len(requested) != 1 || scoped == nil || scoped.bundleVersion != requested[0] || hasMode || !s.appTrafficProofApplied(index) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+	}
 	// Only Host selects the route; client-provided internal forwarding headers
 	// cannot obtain a proof for a different TLS hostname.
 	route, ok, fallback, version, _ := index.routeForRequest(normalizeRouteHost(r.Host), r.URL.Path)
@@ -59,6 +71,9 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC()
 	until := index.validUntil
+	if selected {
+		until = scoped.validUntil
+	}
 	retained := hasMode && !until.IsZero() && !until.After(now)
 	if retained {
 		until = s.retainedRouteProofUntil(index, now)
@@ -84,7 +99,7 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set(routeproof.EdgeHeader, s.Config.EdgeID)
 	w.Header().Set(routeproof.GroupHeader, s.Config.EdgeGroupID)
-	if !retained && expectedState == "" && s.appTrafficProofApplied(index) {
+	if !selected && !retained && expectedState == "" && s.appTrafficProofApplied(index) {
 		active := true
 		for _, upstream := range route.Upstreams {
 			if upstream.Status != "" && upstream.Status != model.EdgeRouteStatusActive {
@@ -95,7 +110,13 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(routeproof.AppTrafficHeader, digest)
 		}
 	}
-	if index.trafficRelease != nil {
+	if selected {
+		if s.routeIndex.Load() != index || !until.After(time.Now()) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set(routeproof.HostedDecisionHeader, scoped.bundleVersion)
+	} else if index.trafficRelease != nil {
 		raw, err := json.Marshal(index.trafficRelease)
 		if err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
