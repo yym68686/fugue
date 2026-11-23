@@ -1818,6 +1818,7 @@ func edgeProxyErrorIsClientCanceled(req *http.Request, proxyErr error) bool {
 type edgeProxyObservedRequestBody struct {
 	io.ReadCloser
 	observation *edgeProxyObservation
+	sawEOF      bool
 }
 
 func observeEdgeProxyRequestBody(r *http.Request, observed *edgeProxyObservation) {
@@ -2175,7 +2176,13 @@ func (s *Service) requestBodyBufferEligible(r *http.Request, observed *edgeProxy
 }
 
 func (b *edgeProxyObservedRequestBody) Read(data []byte) (int, error) {
+	// The transport checks again after forwarding Content-Length bytes.
+	// An early response flush can close the server body between those reads.
+	if b.sawEOF {
+		return 0, io.EOF
+	}
 	n, err := b.ReadCloser.Read(data)
+	b.sawEOF = err == io.EOF
 	if b.observation != nil {
 		b.observation.withOriginTraceUpdate(func(o *edgeProxyObservation) {
 			if n > 0 {

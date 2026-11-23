@@ -224,6 +224,9 @@ func (s *Service) warmupEdgeCacheHost(ctx context.Context, dialAddress, scheme, 
 	if client == nil {
 		return report, fmt.Errorf("edge cache warmup client is unavailable")
 	}
+	// This transport belongs to one host's warmup. Release its idle sockets
+	// when the host is done so they do not keep an inactive Worker draining.
+	defer client.CloseIdleConnections()
 	hostCtx, cancel := context.WithTimeout(ctx, s.edgeWarmupTimeout())
 	defer cancel()
 

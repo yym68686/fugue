@@ -2759,6 +2759,33 @@ func TestInstallSharedCaddyTLSCertificateRejectsHostnamePathTraversal(t *testing
 	}
 }
 
+func TestWarmupReleasesItsOwnIdleConnection(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	origin := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	origin.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	origin.Start()
+	defer origin.Close()
+	s := NewService(config.EdgeConfig{CacheWarmupTimeout: time.Second}, log.New(io.Discard, "", 0))
+	report, err := s.warmupEdgeCacheHost(context.Background(), origin.Listener.Addr().String(), "http", "warmup.fixture.test")
+	if err != nil || report.DiscoveryRequests == 0 {
+		t.Fatalf("host warmup = %+v, %v", report, err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("completed host warmup kept its private transport open")
+	}
+}
+
 func TestApplyCaddyConfigWarmsHTTPAssetCache(t *testing.T) {
 	t.Parallel()
 

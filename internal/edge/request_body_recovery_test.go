@@ -337,6 +337,50 @@ func TestBodyBufferRecoveryStreamingStartsBeforeUploadCompletes(t *testing.T) {
 	t.Log("RESULT origin received first byte while client upload was still open")
 }
 
+// The HTTP/1 server can close the inbound body when flushing the first SSE
+// response while the outbound transport is still doing its trailing EOF read.
+func TestBodyBufferRecoveryEOFWhenResponseFlushClosesInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		read int
+		want error
+	}{
+		{"complete", "ab", 2, io.EOF},
+		{"closed-mid-upload", "ab", 1, http.ErrBodyReadAfterClose},
+		{"truncated", "a", 2, io.ErrUnexpectedEOF},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.ReadRequest(bufio.NewReader(strings.NewReader("POST / HTTP/1.1\r\nHost: local\r\nContent-Length: 2\r\n\r\n" + tc.body)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			inbound := req.Body
+			observed := &edgeProxyObservation{}
+			observeEdgeProxyRequestBody(req, observed)
+			streamUnconsumedRequestBody(req, observed, 2)
+			buf := make([]byte, tc.read)
+			_, err = io.ReadFull(req.Body, buf)
+			if tc.want == io.ErrUnexpectedEOF {
+				if err != tc.want {
+					t.Fatalf("short body error = %v", err)
+				}
+				inbound.Close()
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := inbound.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := req.Body.Read(buf); n != 0 || err != tc.want {
+				t.Fatalf("trailing read = %d, %v, want 0, %v", n, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestBodyBufferRecoverySSEFlushesBeforeOriginFinishes(t *testing.T) {
 	release := make(chan struct{})
 	originResult := make(chan string, 1)
