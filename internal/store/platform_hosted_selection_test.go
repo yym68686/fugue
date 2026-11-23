@@ -134,6 +134,14 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 			if s.hostedSelectionHead != h || s.Passing != count || s.Required != len(c.Parts) || s.EvidenceUntil.After(time.Now()) != (count == len(c.Parts)) {
 				return fmt.Errorf("unexpected scoped status: %+v", s)
 			}
+			view := hostedRouteEvidence(s, time.Now())
+			published := h.Phase != "prepare" && count == len(c.Parts)
+			if (view.State == "published") != published || view.ReleaseID != "" || view.HostSelection == nil || view.HostSelection.Decision != h.Decision || view.HostSelection.Passing != count || view.HostSelection.Fence != h.Fence || (view.HostSelection.EvidenceUntil != nil) != (count == len(c.Parts)) {
+				return fmt.Errorf("wrong public status for %s: %+v", c.Claim.Host, view)
+			}
+			if published && hostedRouteEvidence(s, s.EvidenceUntil).State != "pending" {
+				return fmt.Errorf("expired receipts still published for %s", c.Claim.Host)
+			}
 			return nil
 		})
 		if err != nil {

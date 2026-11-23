@@ -128,75 +128,18 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 	if err != nil {
 		return err
 	}
-	type receiver struct{ node, kind, group, component string }
-	need := map[receiver]bool{}
-	slots := map[routeartifact.HostedRecipient]bool{}
-	for _, r := range unit.Required() {
-		need[receiver{r.Node, r.Kind, r.Group, r.Component}] = true
-		slots[r] = true
-	}
-	if len(slots) == 0 || len(slots) > 8192 {
-		return ErrInvalidInput
-	}
-	parts := map[string]string{}
-	var directory []hostedMemberDirectoryEntry
-	for _, spec := range []struct{ kind, id, hash string }{
-		{model.PlatformArtifactKindEdgeRouteBundle, p.Base.RouteArtifactID, p.Base.RouteArtifactDigest},
-		{model.PlatformArtifactKindCaddyRouteConfig, p.Base.TLSArtifactID, p.Base.TLSArtifactDigest},
-		{model.PlatformArtifactKindDNSAnswerBundle, p.Base.DNSArtifactID, p.Base.DNSArtifactDigest}} {
-		set, e := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, hostedCurrentSetSQL, full.ID, p.Base.ReleaseID, spec.kind, pc.GlobalScopeKey))
+	parts, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
+		f, e := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, hostedMemberFactSQL, member.ConsumerID, a.ArtifactKind, pc.GlobalScopeKey))
 		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
-			return nil
+			return false, nil
 		}
 		if e != nil {
-			return e
+			return false, e
 		}
-		if platformcontrol.ValidateDeclaredTrafficConsumerSet(full, set) != nil {
-			return ErrConflict
-		}
-		a := model.PlatformConsumerAssignment{ScopeKey: pc.GlobalScopeKey, ReleaseChannel: "full", ReleaseSetID: full.ID, ArtifactReleaseID: p.Base.ReleaseID, FencingToken: p.Base.FencingToken, ExpectedConsumerSetID: set.ID, Revision: set.Revision, ExpectedGeneration: set.ExpectedGeneration, ArtifactID: spec.id, ArtifactKind: spec.kind, ContentHash: spec.hash}
-		for _, member := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
-			key := receiver{member.NodeID, spec.kind, member.Cohort, member.Component}
-			if !need[key] {
-				continue
-			}
-			f, e := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, hostedMemberFactSQL, member.ConsumerID, spec.kind, pc.GlobalScopeKey))
-			if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
-				return nil
-			}
-			if e != nil {
-				return e
-			}
-			capable, e := pgHostedMemberCapable(ctx, tx, member, a, f, time.Now().UTC())
-			if e != nil {
-				return e
-			}
-			if !capable {
-				return nil
-			}
-			enrollment, e := platformcontrol.ConsumerEnrollmentFromID(member.Component, member.NodeID, member.AuthorityID, member.ScopeKey, member.ConsumerID)
-			if e != nil {
-				return ErrConflict
-			}
-			who := platformcontrol.PlatformComponentIdentityClaims{Component: member.Component, NodeID: member.NodeID, AuthorityID: member.AuthorityID, ScopeKey: member.ScopeKey, ArtifactKinds: f.SupportedKinds, WorkerEnrollmentID: enrollment}
-			delivery, _, e := unit.ForMember(who, a, set)
-			if e != nil {
-				return ErrConflict
-			}
-			for _, part := range delivery.Parts {
-				k, e := delivery.PartKey(part)
-				if e != nil || parts[k] != "" || !slots[part.Recipient] {
-					return ErrConflict
-				}
-				delete(slots, part.Recipient)
-				parts[k] = part.ContentDigest
-			}
-			delete(need, key)
-			directory = append(directory, hostedMemberDirectoryEntry{delivery.Member, spec.kind, set.ID, spec.id})
-		}
-	}
-	if len(need) != 0 || len(slots) != 0 {
-		return nil
+		return pgHostedMemberCapable(ctx, tx, member, a, f, time.Now().UTC())
+	})
+	if err != nil || len(parts) == 0 {
+		return err
 	}
 	c.Business, err = hostedBusinessRevision(in)
 	if err != nil {
@@ -233,4 +176,73 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 	}
 	_, err = tx.ExecContext(ctx, hostedDirectoryInsertSQL, c.Host, string(rows))
 	return err
+}
+
+// Reconstruct exact parts from the selected image and current physical registrations.
+// Only admission requires capability facts; status reads never issue member credentials
+// or turn a registration into an observation.
+func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error)) (map[string]string, []hostedMemberDirectoryEntry, error) {
+	type receiver struct{ node, kind, group, component string }
+	need := map[receiver]bool{}
+	slots := map[routeartifact.HostedRecipient]bool{}
+	for _, r := range unit.Required() {
+		need[receiver{r.Node, r.Kind, r.Group, r.Component}] = true
+		slots[r] = true
+	}
+	if len(slots) == 0 || len(slots) > 8192 {
+		return nil, nil, ErrInvalidInput
+	}
+	parts := map[string]string{}
+	var directory []hostedMemberDirectoryEntry
+	for _, spec := range []struct{ kind, id, hash string }{
+		{model.PlatformArtifactKindEdgeRouteBundle, p.Base.RouteArtifactID, p.Base.RouteArtifactDigest},
+		{model.PlatformArtifactKindCaddyRouteConfig, p.Base.TLSArtifactID, p.Base.TLSArtifactDigest},
+		{model.PlatformArtifactKindDNSAnswerBundle, p.Base.DNSArtifactID, p.Base.DNSArtifactDigest}} {
+		set, e := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, hostedCurrentSetSQL, full.ID, p.Base.ReleaseID, spec.kind, pc.GlobalScopeKey))
+		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
+			return nil, nil, nil
+		}
+		if e != nil {
+			return nil, nil, e
+		}
+		if platformcontrol.ValidateDeclaredTrafficConsumerSet(full, set) != nil {
+			return nil, nil, ErrConflict
+		}
+		a := model.PlatformConsumerAssignment{ScopeKey: pc.GlobalScopeKey, ReleaseChannel: "full", ReleaseSetID: full.ID, ArtifactReleaseID: p.Base.ReleaseID, FencingToken: p.Base.FencingToken, ExpectedConsumerSetID: set.ID, Revision: set.Revision, ExpectedGeneration: set.ExpectedGeneration, ArtifactID: spec.id, ArtifactKind: spec.kind, ContentHash: spec.hash}
+		for _, member := range platformcontrol.ProjectExpectedConsumerOwners(set).Consumers {
+			key := receiver{member.NodeID, spec.kind, member.Cohort, member.Component}
+			if !need[key] {
+				continue
+			}
+			if capable != nil {
+				ok, e := capable(member, a)
+				if e != nil || !ok {
+					return nil, nil, e
+				}
+			}
+			enrollment, e := platformcontrol.ConsumerEnrollmentFromID(member.Component, member.NodeID, member.AuthorityID, member.ScopeKey, member.ConsumerID)
+			if e != nil {
+				return nil, nil, ErrConflict
+			}
+			who := platformcontrol.PlatformComponentIdentityClaims{Component: member.Component, NodeID: member.NodeID, AuthorityID: member.AuthorityID, ScopeKey: member.ScopeKey, ArtifactKinds: []string{a.ArtifactKind}, WorkerEnrollmentID: enrollment}
+			delivery, _, e := unit.ForMember(who, a, set)
+			if e != nil {
+				return nil, nil, ErrConflict
+			}
+			for _, part := range delivery.Parts {
+				k, e := delivery.PartKey(part)
+				if e != nil || parts[k] != "" || !slots[part.Recipient] {
+					return nil, nil, ErrConflict
+				}
+				delete(slots, part.Recipient)
+				parts[k] = part.ContentDigest
+			}
+			delete(need, key)
+			directory = append(directory, hostedMemberDirectoryEntry{delivery.Member, spec.kind, set.ID, spec.id})
+		}
+	}
+	if len(need) != 0 || len(slots) != 0 {
+		return nil, nil, nil
+	}
+	return parts, directory, nil
 }

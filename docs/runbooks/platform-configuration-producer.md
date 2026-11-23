@@ -42,10 +42,13 @@ complete exact path proofs, subject to the original DNS endpoint and policy
 constraints. Existing probes never become proof of a changed route.
 
 `saved` means desired state was committed, not that the data plane switched.
-The platform-admin `--wait` and `routes status --plan` report `published` only
-for the exact full global publication with fresh consumer evidence. This is
-not public serving proof: an independent authoritative DNS Cell can still
-use the predecessor. Verify the delegated authorities and HTTPS endpoints
+The platform-admin `--wait` and `routes status --plan` check the hostname's
+own serving decision when one exists. A prepare or partial withdrawal is
+not a verified change. For an independently selected host, inspect the
+decision, phase, required/passing counts and evidence expiry. Only when
+there is no independent head can the verified global baseline answer.
+Neither result replaces a public acceptance check: verify delegated DNS
+over UDP and TCP, TLS ownership and each public HTTPS path
 before accepting a production change. If a path was newly made
 explicit, `plan --remove-path /path` restores its inherited matching; for a
 previously explicit path plan a replacement with its old app. This uses the

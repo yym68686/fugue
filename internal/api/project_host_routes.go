@@ -94,14 +94,28 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	owned := false
 	if status.State == "pending" && desired {
-		snapshot, healthy, err := s.publishedRouteDiagnostics(r.Context(), "")
-		if err == nil {
-			status = projectHostPublicationStatus(plan, snapshot, healthy)
+		read := func() (model.ProjectHostRoutePublicationStatus, bool, error) {
+			return s.store.ReadHostedRouteStatus(r.Context(), project, plan, func(in store.ProjectHostRouteInputs, p platformconfig.HostedScopeProposal) (string, string, string, error) {
+				b, err := matchHostedProjectIntent(in, p)
+				return b.OwnerDigest, b.PathDigest, b.Direction, err
+			})
+		}
+		status, owned, err = resolveHostPublication(read, func() model.ProjectHostRoutePublicationStatus {
+			snapshot, healthy, e := s.publishedRouteDiagnostics(r.Context(), "")
+			if e != nil {
+				return status
+			}
+			return projectHostPublicationStatus(plan, snapshot, healthy)
+		})
+		if err != nil {
+			httpx.WriteError(w, http.StatusServiceUnavailable, "hostname publication evidence unavailable")
+			return
 		}
 	}
 	if r.URL.Query().Get("preflight") == "true" {
-		if desired && status.State == "pending" && s.pendingHostedPathCandidate(r.Context(), project, plan) {
+		if desired && !owned && status.State == "pending" && s.pendingHostedPathCandidate(r.Context(), project, plan) {
 			status.Reason = "compiler draft matches the saved host-only edit; no verified serving selection for these paths"
 		}
 		check := model.ProjectHostRoutePreflight{State: "not_applicable", Reason: status.Reason}
@@ -121,6 +135,23 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, status)
+}
+
+func resolveHostPublication(scoped func() (model.ProjectHostRoutePublicationStatus, bool, error), global func() model.ProjectHostRoutePublicationStatus) (model.ProjectHostRoutePublicationStatus, bool, error) {
+	h, owned, err := scoped()
+	if owned || err != nil {
+		return h, owned, err
+	}
+	g := global()
+	// Global diagnostics read a different snapshot. A new hostname decision
+	// may have been committed while assembling that result.
+	if g.State == "published" {
+		h, owned, err = scoped()
+		if owned || err != nil {
+			return h, owned, err
+		}
+	}
+	return g, false, nil
 }
 
 func projectHostPublicationStatus(plan model.ProjectHostRoutePlan, snapshot model.EdgeRouteIntentSnapshot, healthy map[string]bool) model.ProjectHostRoutePublicationStatus {

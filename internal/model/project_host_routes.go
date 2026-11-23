@@ -1,5 +1,7 @@
 package model
 
+import "time"
+
 type ProjectHostRouteEdit struct {
 	Hostname    string            `json:"hostname"`
 	Paths       map[string]string `json:"paths,omitempty"`
@@ -17,10 +19,20 @@ type ProjectHostRoutePlan struct {
 }
 
 type ProjectHostRoutePublicationStatus struct {
-	State          string                     `json:"state"`
-	Reason         string                     `json:"reason"`
-	ReleaseID      string                     `json:"release_id,omitempty"`
-	ApplyPreflight *ProjectHostRoutePreflight `json:"apply_preflight,omitempty"`
+	State          string                        `json:"state"`
+	Reason         string                        `json:"reason"`
+	ReleaseID      string                        `json:"release_id,omitempty"`
+	HostSelection  *ProjectHostSelectionEvidence `json:"host_selection,omitempty"`
+	ApplyPreflight *ProjectHostRoutePreflight    `json:"apply_preflight,omitempty"`
+}
+
+type ProjectHostSelectionEvidence struct {
+	Decision      string     `json:"decision"`
+	Fence         int64      `json:"fence"`
+	Phase         string     `json:"phase"`
+	Required      int        `json:"required"`
+	Passing       int        `json:"passing"`
+	EvidenceUntil *time.Time `json:"evidence_until,omitempty"`
 }
 
 type ProjectHostRoutePreflight struct {

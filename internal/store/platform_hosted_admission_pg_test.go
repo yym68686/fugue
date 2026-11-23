@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
@@ -120,6 +121,33 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	if e = json.Unmarshal(rawParts, &members); e != nil || len(members) != 5 {
 		t.Fatal("incomplete member manifest", e)
 	}
+	verifyParts := func(phase string, count int, state string, drift bool) {
+		t.Helper()
+		tx, err := db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, im.Digest, wire, phase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest []byte
+		if err := tx.QueryRow("SELECT members FROM fugue_hosted_selections WHERE hostname=$1", host).Scan(&manifest); err != nil {
+			t.Fatal(err)
+		}
+		out, err := pgHostedPublishedParts(t.Context(), tx, model.PlatformArtifact{ID: base.ReleaseSetID, ScopeKey: "global"}, p, unit, manifest, c, phase, until)
+		if drift {
+			if !errors.Is(err, ErrConflict) {
+				t.Fatal("stale set/child passed", err, out)
+			}
+			return
+		}
+		if err != nil || out.State != state || out.HostSelection == nil || out.HostSelection.Passing != count || out.HostSelection.Required != 5 || out.HostSelection.Phase != phase {
+			t.Fatal("incorrect publication status", err, out)
+		}
+	}
+	verifyParts("prepare", 0, "pending", false)
 	for slot, content := range members {
 		tx, e := db.BeginTx(t.Context(), nil)
 		if e != nil {
@@ -134,6 +162,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(e)
 		}
 	}
+	verifyParts("prepare", 5, "pending", false)
 	// Stop claiming that the entire global DNS release was verified
 	// once the process owns individual records. It may only renew
 	// its own protocol capability, never substitute for host receipts.
@@ -159,6 +188,47 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	}
 	intent := pc.PlatformIntent{Scope: pc.GlobalScopeKey, Routes: []pc.RouteIntent{{Hostname: host, PathPrefix: "/", AppID: "app"}, {Hostname: "other.example.test", PathPrefix: "/", AppID: "another"}}}
 	s := Store{db: db}
+	verifyParts("forward", 0, "pending", false)
+	for slot, content := range members { // Test fixture uses identical forward/prepare bytes, not identical fences.
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var forward string
+		if err = tx.QueryRow("SELECT decision FROM fugue_hosted_selections WHERE hostname=$1", host).Scan(&forward); err == nil {
+			err = pgRecordHostedPart(t.Context(), tx, hostedPartReceipt{Host: host, Fence: fence, Decision: forward, Part: slot, Content: content, Evidence: digest(forward + slot), Passing: true, ObservedAt: time.Now().UTC(), ValidUntil: until})
+		}
+		if err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if err = tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verifyParts("forward", 5, "published", false)
+	exec("UPDATE fugue_hosted_member_directory SET child_id='wrong' WHERE hostname=$1 AND kind=$2", host, kind)
+	verifyParts("forward", 5, "pending", true)
+	exec("UPDATE fugue_hosted_member_directory SET child_id=$3 WHERE hostname=$1 AND kind=$2", host, kind, base.DNSArtifactID)
+	exec("UPDATE fugue_platform_expected_consumer_sets SET revision=revision+1 WHERE artifact_kind=$1", kind)
+	verifyParts("forward", 5, "pending", true)
+	// A simplistic fixture has no real tenant-owned draft. Its persisted
+	// head may never fall back to global diagnostics or disclose a prior
+	// tenant's decision, even for a request naming the same hostname.
+	bind := func(ProjectHostRouteInputs, pc.HostedScopeProposal) (string, string, string, error) {
+		t.Fatal("foreign binding was disclosed")
+		return "", "", "", nil
+	}
+	project := model.Project{ID: c.Project, TenantID: "other-tenant"}
+	plan := model.ProjectHostRoutePlan{HostnameOwnerAppID: "other-owner", Edit: model.ProjectHostRouteEdit{Hostname: host}}
+	v, owned, err := s.ReadHostedRouteStatus(t.Context(), project, plan, bind)
+	if err != nil || !owned || v.State != "pending" || v.HostSelection != nil {
+		t.Fatal("foreign head exposed or ignored", v, owned, err)
+	}
+	plan.Edit.Hostname = "no-head.example.test"
+	if _, owned, err = s.ReadHostedRouteStatus(t.Context(), project, plan, bind); err != nil || owned {
+		t.Fatal("other host inherited selection", owned, err)
+	}
 	targets, _, e := s.HostedWithdrawalHints(t.Context(), intent, "")
 	if e != nil || len(targets) != 1 || targets[0] != host {
 		t.Fatal("reversion to global baseline not discovered", targets, e)

@@ -36,3 +36,14 @@ fall with remaining proof lifetime; this is not a change to configured TTL.
 Do not replace legacy Fronts with live connections or change their slots
 as part of this test. A changed source authority or unsupported enrollment
 must not be treated as permission to serve cached or historical commands.
+
+### Reading the result
+
+For an already desired plan, the platform-admin host-status endpoint reads its
+own hostname decision before consulting any legacy global diagnostics. A
+prepared selection is never a published forward. A partial forward or
+withdrawal, expired evidence, or a changed parent, owner, business revision
+or required member set cannot be verified with a green global baseline. The
+optional `host_selection` describes one current fence; `release_id` is
+reserved for the legacy global result. This is a read, not a new probe,
+lease renewal or a substitute for an authorized public A/B exercise.

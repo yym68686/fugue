@@ -61,7 +61,7 @@ func (c *CLI) newProjectHostRouteStatusCommand() *cobra.Command {
 	var preflight bool
 	cmd := &cobra.Command{
 		Use:   "status <project>",
-		Short: "Check whether a hostname plan is in the verified global publication (platform admin)",
+		Short: "Check fresh publication evidence for a hostname plan (platform admin)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := c.newClient()
@@ -164,5 +164,5 @@ func (c *CLI) applyProjectHostRoutePlan(ctx context.Context, client *Client, pro
 		case <-time.After(10 * time.Second):
 		}
 	}
-	return fmt.Errorf("intent was saved but global publication was not verified; resume with project routes status --plan: %w", ctx.Err())
+	return fmt.Errorf("intent was saved but hostname publication was not verified; resume with project routes status --plan: %w", ctx.Err())
 }

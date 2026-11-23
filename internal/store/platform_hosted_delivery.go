@@ -108,21 +108,9 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 		return empty, err
 	}
 	read := pgDNSRouteSourceReader(ctx, tx)
-	draft, err := read.artifact(packet.Draft)
+	p, err := s.hostedHeadProposal(read, host, packet.Scope, packet.Draft, draftHash, packet.Authority, packet.ValidUntil)
 	if err != nil {
 		return empty, err
-	}
-	keys := s.platformArtifactSigningKeyring()
-	var p pc.HostedScopeProposal
-	raw, err := json.Marshal(draft.Content)
-	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || p.Schema != pc.HostedProposalSchema || p.Host != host || p.Before.Owner.Hostname != host || p.Base.Validate() != nil ||
-		draft.ID != packet.Draft || draft.ContentHash != draftHash || draft.ScopeKey != packet.Scope || draft.ArtifactKind != model.PlatformArtifactKindHostedPathProposal || draft.Status != model.PlatformArtifactStatusDraft || draft.CreatedByID != platformproducer.Actor || draft.CreatedByType != model.ActorTypeBootstrap || !platformsafety.EvaluateArtifactIntegrity(draft, keys).Pass {
-		return empty, ErrConflict
-	}
-	scope, scopeKey := NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: host, TenantID: p.Before.Owner.TenantID, AppID: p.Before.Owner.AppID})
-	auth, err := hostedAuthorityDigest(p)
-	if err != nil || auth != packet.Authority || scope != draft.Scope || scopeKey != packet.Scope || packet.ValidUntil.After(p.Authority.ExpiresAt) {
-		return empty, ErrConflict
 	}
 	f := p.Base
 	if a.ReleaseSetID != f.ReleaseSetID || a.ArtifactReleaseID != f.ReleaseID || a.FencingToken != f.FencingToken {
@@ -174,7 +162,7 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 		return empty, ErrConflict
 	}
 	actual, err := hostedBusinessRevision(in)
-	if err != nil || actual != packet.Business || in.Project.ID != packet.Project || in.Domain.TenantID != scope.TenantID || in.Domain.AppID != scope.AppID || in.Domain.Hostname != host {
+	if err != nil || actual != packet.Business || in.Project.ID != packet.Project || in.Domain.TenantID != p.Before.Owner.TenantID || in.Domain.AppID != p.Before.Owner.AppID || in.Domain.Hostname != host {
 		return empty, ErrConflict
 	}
 	packet.Parent, packet.Child, packet.ChildDigest, packet.Delivery = a.ReleaseSetID, a.ArtifactID, a.ContentHash, view
@@ -182,6 +170,25 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 		return empty, ErrConflict
 	}
 	return packet, nil
+}
+
+func (s *Store) hostedHeadProposal(read dnsRouteSourceReader, host, scopeKey, id, hash, authority string, until time.Time) (pc.HostedScopeProposal, error) {
+	var p pc.HostedScopeProposal
+	draft, err := read.artifact(id)
+	if err != nil {
+		return p, err
+	}
+	raw, err := json.Marshal(draft.Content)
+	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || p.Schema != pc.HostedProposalSchema || p.Host != host || p.Before.Owner.Hostname != host || p.Base.Validate() != nil ||
+		draft.ID != id || draft.ContentHash != hash || draft.ScopeKey != scopeKey || draft.ArtifactKind != model.PlatformArtifactKindHostedPathProposal || draft.Status != model.PlatformArtifactStatusDraft || draft.CreatedByID != platformproducer.Actor || draft.CreatedByType != model.ActorTypeBootstrap || !platformsafety.EvaluateArtifactIntegrity(draft, s.platformArtifactSigningKeyring()).Pass {
+		return p, ErrConflict
+	}
+	scope, key := NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: host, TenantID: p.Before.Owner.TenantID, AppID: p.Before.Owner.AppID})
+	auth, err := hostedAuthorityDigest(p)
+	if err != nil || auth != authority || scope != draft.Scope || key != scopeKey || until.After(p.Authority.ExpiresAt) {
+		return p, ErrConflict
+	}
+	return p, nil
 }
 
 // Resolve the current recipient inside the write transaction. A receipt

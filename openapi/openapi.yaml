@@ -6272,7 +6272,7 @@ paths:
   /v1/projects/{id}/routes/host-status:
     post:
       operationId: getProjectHostRoutePublicationStatus
-      summary: Check whether the planned hostname routes match the verified global publication (platform admin)
+      summary: Check the selected publication and fresh physical evidence for the planned hostname routes (platform admin)
       tags: [Projects]
       x-fugue-handler: handleProjectHostRouteStatus
       security:
@@ -28579,6 +28579,18 @@ components:
           type: string
         release_id:
           type: string
+        host_selection:
+          description: Present when this hostname owns an independent decision. Counts and expiry refer only to its current fence and signed member parts.
+          type: object
+          additionalProperties: false
+          required: [decision, fence, phase, required, passing]
+          properties:
+            decision: {type: string}
+            fence: {type: integer, format: int64}
+            phase: {type: string, enum: [prepare, forward, withdraw]}
+            required: {type: integer}
+            passing: {type: integer}
+            evidence_until: {type: string, format: date-time}
         apply_preflight:
           type: object
           additionalProperties: false

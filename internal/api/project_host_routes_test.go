@@ -19,6 +19,40 @@ import (
 	"fugue/internal/store"
 )
 
+func TestIndependentHostHeadCannotBeMaskedByGlobalPublication(t *testing.T) {
+	positive := model.ProjectHostRoutePublicationStatus{State: "published", ReleaseID: "global"}
+	for _, tc := range []struct {
+		name       string
+		at         int
+		state      string
+		failure    bool
+		wantGlobal int
+	}{
+		{"partial withdrawal", 1, "pending", false, 0},
+		{"all forward receipts", 1, "published", false, 0},
+		{"head appeared during global diagnostics", 2, "pending", false, 1},
+		{"evidence unavailable", 1, "", true, 0},
+		{"other host has no independent head", 3, "", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls, globals := 0, 0
+			got, owned, err := resolveHostPublication(func() (model.ProjectHostRoutePublicationStatus, bool, error) {
+				calls++
+				if calls != tc.at {
+					return model.ProjectHostRoutePublicationStatus{}, false, nil
+				}
+				if tc.failure {
+					return model.ProjectHostRoutePublicationStatus{}, false, errors.New("unavailable")
+				}
+				return model.ProjectHostRoutePublicationStatus{State: tc.state}, true, nil
+			}, func() model.ProjectHostRoutePublicationStatus { globals++; return positive })
+			if globals != tc.wantGlobal || (err != nil) != tc.failure || owned != (tc.at <= 2 && !tc.failure) || tc.at <= 2 && got.ReleaseID != "" || tc.at == 3 && got.ReleaseID != "global" || owned && got.State != tc.state {
+				t.Fatalf("incorrect authority: %+v %v %v global calls=%d", got, owned, err, globals)
+			}
+		})
+	}
+}
+
 func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 	st, srv, token, admin, owner, _ := setupAppDomainTestServer(t)
 	spec := model.AppSpec{Image: "example.test/web:v1", Ports: []int{3000}, Replicas: 1, RuntimeID: "runtime_managed_shared"}
