@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/declarativerelease"
 )
 
 func TestEdgeGroupDrainCannotBeBypassedByAnAutomaticRoll(t *testing.T) {
@@ -44,6 +47,7 @@ func TestVerifyEdgeWorkerDrainRequiresStableInactiveSlotAndNoSockets(t *testing.
 		{name: "original connection remains after promotion or rollback", active: "b", age: time.Minute, sockets: 1, want: "live TCP sockets", readSocket: true},
 		{name: "inventory unavailable", active: "b", age: time.Minute, socketErr: errors.New("read failed"), want: "socket observation unavailable", readSocket: true},
 		{name: "concurrent activation", active: "b", age: time.Minute, race: true, want: "activation changed", readSocket: true},
+		{name: "busy slot changed while observing", active: "b", age: time.Minute, sockets: 6, race: true, want: "activation changed", readSocket: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			original := edgeActivationState{ActiveSlot: tc.active, Generation: 3, UpdatedAt: now.Add(-tc.age)}
@@ -65,7 +69,31 @@ func TestVerifyEdgeWorkerDrainRequiresStableInactiveSlotAndNoSockets(t *testing.
 			if (socketReads == 1) != tc.readSocket {
 				t.Fatalf("socket inventory read %d times, expected %t", socketReads, tc.readSocket)
 			}
+			if errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) != (tc.sockets > 0 && !tc.race) {
+				t.Fatalf("unsafe wait classification: %v", err)
+			}
 		})
+	}
+}
+
+func TestDrainingMemberDoesNotBlockIndependentReplacement(t *testing.T) {
+	nodes := []string{"first", "second", "third"}
+	for _, uncertain := range []bool{false, true} {
+		var visited []string
+		err := visitEdgeRollNodes(nodes, func(n string) error {
+			visited = append(visited, n)
+			if n == "first" {
+				return declarativerelease.ErrInactiveWorkerDraining
+			}
+			if n == "second" && uncertain {
+				return errors.New("incomplete socket inventory")
+			}
+			return nil
+		})
+		if err == nil || errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) == uncertain ||
+			!uncertain && !slices.Equal(visited, nodes) || uncertain && !slices.Equal(visited, nodes[:2]) {
+			t.Fatalf("uncertain=%t visited=%v err=%v", uncertain, visited, err)
+		}
 	}
 }
 

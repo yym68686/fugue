@@ -2679,21 +2679,21 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 	if err != nil {
 		return nil, err
 	}
-	for _, node := range sortedEdgeNodes(current) {
+	err = visitEdgeRollNodes(sortedEdgeNodes(current), func(node string) error {
 		if progress != nil {
 			if err := progress(ctx); err != nil {
-				return nil, err
+				return err
 			}
 		}
 		pod := current[node]
 		if progress != nil && !replaceUnready && pod.SourceCommit == target.ConfigSHA && pod.ImageRef == target.ImageRef {
 			if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, "", target, includeHealth, requireGroupAuthority, progress); err != nil {
-				return nil, err
+				return err
 			}
-			continue
+			return nil
 		}
 		if edgePodMatchesTarget(pod, target) && (!replaceUnready || pod.Ready && (!includeHealth || edgePodHasGroupAuthority(pod))) {
-			continue
+			return nil
 		}
 		if name == transition.FrontName {
 			err = cluster.deleteDrainedEdgeFrontPod(ctx, client, release.Workload.Namespace, pod)
@@ -2701,13 +2701,33 @@ func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, clie
 			err = cluster.deleteDrainedEdgeWorkerPod(ctx, client, release, transition, name, pod)
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if _, err := cluster.waitEdgePodTarget(ctx, release, transition, name, container, node, pod.UID, target, includeHealth, requireGroupAuthority, progress); err != nil {
-			return nil, err
+			return err
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return cluster.readEdgeDaemonSetPods(ctx, release, name, container, transition.ExpectedNodes, transition.GroupID, includeHealth)
+}
+
+// A proven draining inactive member is local to that node; it does not
+// invalidate the independent drain and replacement gates on later members.
+// Any different failure takes precedence and must not be classified as a wait.
+func visitEdgeRollNodes(nodes []string, visit func(string) error) error {
+	var waiting []error
+	for _, n := range nodes {
+		err := visit(n)
+		if errors.Is(err, declarativerelease.ErrInactiveWorkerDraining) {
+			waiting = append(waiting, fmt.Errorf("node %s: %w", n, err))
+		} else if err != nil {
+			return err
+		}
+	}
+	return errors.Join(waiting...)
 }
 
 func edgeRollIncludesWorkerHealth(transition declarativerelease.EdgeGroupABTransition, name string) bool {

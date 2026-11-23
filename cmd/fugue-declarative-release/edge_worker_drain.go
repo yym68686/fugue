@@ -125,12 +125,12 @@ func verifyEdgeWorkerDrain(slot string, now time.Time, readActivation func() (ed
 	if err != nil || busy < 0 {
 		return errors.New("complete Worker socket observation unavailable")
 	}
-	if busy != 0 {
-		return fmt.Errorf("Worker still has %d potentially live TCP sockets", busy)
-	}
 	after, exists, err := readActivation()
 	if err != nil || !exists || !edgeActivationStatesAgree(before, after) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 		return errors.New("Worker slot activation changed during drain observation")
+	}
+	if busy != 0 {
+		return fmt.Errorf("%w: Worker still has %d potentially live TCP sockets", declarativerelease.ErrInactiveWorkerDraining, busy)
 	}
 	return nil
 }

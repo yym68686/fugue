@@ -339,7 +339,7 @@ func TestSuccessfulEdgeGroupTransitionUsesCommittedAuthorityReconciler(t *testin
 }
 
 func TestReconcileExecutionUsesCommittedAuthorityForEdgeGroup(t *testing.T) {
-	forwardManifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[],"kind":"ComponentResourceSet"}`)
+	forwardManifest := []byte(`{"apiVersion":"release.fugue.dev/v2","items":[{"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"edge-front","namespace":"fugue-system"}}],"kind":"ComponentResourceSet"}`)
 	lkgManifest := append([]byte(nil), forwardManifest...)
 	release := PlanRelease{
 		ComponentID: "edge-worker-us", IntentDigest: "sha256:" + strings.Repeat("3", 64), IntentGeneration: 2,
@@ -388,6 +388,14 @@ func TestReconcileExecutionUsesCommittedAuthorityForEdgeGroup(t *testing.T) {
 	if result.Status != "recovery-required" || result.Reason != "committed-forward-reconcile-unproven" || result.FailureDetail != "authority drift" {
 		t.Fatalf("unproven authority was accepted: %+v", result)
 	}
+	t.Run("inactive slot is still draining after other members progressed", func(t *testing.T) {
+		waiting := &fakeCluster{observations: []Observation{prewrite, final}, applyErrors: []error{ErrInactiveWorkerDraining}}
+		got := Execute(t.Context(), waiting, plan, prepared, forwardManifest, lkgManifest)
+		if got.Status != "recovery-required" || got.Reason != "inactive-worker-drain-pending" || got.Final.UID != final.UID ||
+			got.ForwardApplyCount != 1 || got.LKGApplyCount != 0 || waiting.applies != 1 {
+			t.Fatalf("draining was mistaken for completion or rollback: %+v", got)
+		}
+	})
 }
 
 func TestControlledEdgeRecoveryBindsCASWithoutGenericManifestConvergence(t *testing.T) {

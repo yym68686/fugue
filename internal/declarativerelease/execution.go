@@ -170,6 +170,11 @@ var ErrDegradedPredecessorHealth = errors.New("declarative predecessor health is
 // other reviewed resource to converge.
 var ErrPublicRouteHealth = errors.New("independent public route health is degraded")
 
+// Only a complete socket inventory bracketed by the same stable inactive
+// activation can return this error. This is pending work, not a failed
+// traffic promotion. Never compensate another node's safely staged Worker.
+var ErrInactiveWorkerDraining = errors.New("inactive Worker awaiting connection drain")
+
 type prewritePredecessorHealthWaitKey struct{}
 type preservedRouteHealthWaitKey struct{}
 
@@ -782,6 +787,13 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 		healthCtx = withPreservedRouteHealthWait(ctx)
 	}
 	forwardObservation, healthErr, convergedErr := observeForwardResult(healthCtx, cluster, release, prepared.Forward, forwardManifest, applyErr)
+	if release.Transition != nil && release.Transition.Type == "edge-group-ab" &&
+		errors.Is(applyErr, ErrInactiveWorkerDraining) {
+		result.Status, result.Reason = "recovery-required", "inactive-worker-drain-pending"
+		result.FailureClass, result.FailureDetail = "connection_drain", boundedFailureDetail(healthErr.Error())
+		result.Final = forwardObservation
+		return sealResult(result)
+	}
 	preservedRoute := applyErr == nil && prepared.DegradedRoute && errors.Is(healthErr, ErrPublicRouteHealth)
 	if (healthErr == nil || preservedRoute) && convergedErr == nil && forwardObservation.Matches(prepared.Forward, release, false) {
 		result.Status = "verified"
