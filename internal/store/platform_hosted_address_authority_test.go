@@ -40,6 +40,7 @@ func TestHostedAddressServingUsesLockedSignedBaseline(t *testing.T) {
 			dns := p.DNS
 			parent := model.PlatformArtifact{ID: "successor", ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindReleaseSet, Metadata: maps.Clone(p.Parent.Metadata)}
 			child := model.PlatformArtifact{ID: "dns-successor", ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Metadata: map[string]string{}}
+			child.Content = p.DNS.Content
 			r := model.PlatformArtifactRelease{ID: ref.ReleaseID, ArtifactID: ref.ReleaseSetID, FencingToken: ref.FencingToken}
 			lkg := model.PlatformLKGSnapshot{ArtifactID: ref.ReleaseSetID, ContentHash: ref.ReleaseSetDigest, VerifiedByReleaseID: r.ID, ExpiresAt: now.Add(time.Hour)}
 			fixref(ref, &parent)

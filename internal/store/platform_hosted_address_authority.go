@@ -69,8 +69,12 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 		if !ok || kinds[id] == "" {
 			return reject
 		}
-		if _, ok := member(id, kinds[id], hashes[id]); !ok {
+		sourceChild, ok := member(id, kinds[id], hashes[id])
+		if !ok {
 			return reject
+		}
+		if id == ref.DNSArtifactID && platformconfig.ValidateScopedHostedPublicationTransition(sourceChild, dns) != nil {
+			return fmt.Errorf("%w: hosted publication includes unrelated DNS changes", ErrConflict)
 		}
 		delete(kinds, id)
 	}

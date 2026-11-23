@@ -3,6 +3,7 @@ package platformconfig
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -107,5 +108,31 @@ func TestHostedPathTransitionSeparatesAddressHoldFromForwardAndReverse(t *testin
 	}
 	if got := payload(back); !reflect.DeepEqual(got.Records, baseline.Records) || !reflect.DeepEqual(got.QueryViews, baseline.QueryViews) || len(got.ReadinessPlan.Probes) != 1 {
 		t.Fatal("reverse offered held address or did not restore root")
+	}
+	// The intermediate and path-only phases are record-isolated, but retaining
+	// the same address for the same paths is not an indefinite global freeze.
+	intermediate.DNSArtifact.ScopeKey, forward.DNSArtifact.ScopeKey, back.DNSArtifact.ScopeKey = GlobalScopeKey, GlobalScopeKey, GlobalScopeKey
+	for _, pair := range [][2]CompileResult{{prior, intermediate}, {intermediate, forward}, {forward, back}, {forward, forward}} {
+		if e := ValidateScopedHostedPublicationTransition(pair[0].DNSArtifact, pair[1].DNSArtifact); e != nil {
+			t.Fatal("exact path transition", e)
+		}
+	}
+	// Make a real candidate, including the consumer query view and lineage,
+	// exactly as an independently authorized TXT update would be captured.
+	src.PriorIntent = next.Intent
+	next.Intent.DNS = append(slices.Clone(next.Intent.DNS), DNSIntent{Hostname: "note.example.test", Type: "TXT", Values: []string{"new"}, TTL: 60})
+	next.Intent.Generation = "independent-txt"
+	next.RuntimeSnapshot.IntentGeneration = next.Intent.Generation
+	withTXT, _, err := CompileHostedPathTransition(next, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextForward := withTXT.DNSArtifact
+	nextForward.ScopeKey = GlobalScopeKey
+	if e := ValidateScopedHostedPublicationTransition(intermediate.DNSArtifact, nextForward); e == nil {
+		t.Fatal("path transaction included an unrelated DNS edit")
+	}
+	if e := ValidateScopedHostedPublicationTransition(forward.DNSArtifact, nextForward); e != nil {
+		t.Fatal("steady reservation blocked an unrelated normal change", e)
 	}
 }

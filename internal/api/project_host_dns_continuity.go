@@ -83,6 +83,15 @@ func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, 
 }
 
 func guardProducedHostedDNSPaths(ctx context.Context, before, after model.PlatformArtifact, rollbackDNS func(context.Context) error) error {
+	ref, _, srcErr := platformconfig.HostedAddressAuthority(after)
+	if srcErr != nil {
+		return srcErr
+	}
+	if ref != nil {
+		if err := platformconfig.ValidateScopedHostedPublicationTransition(before, after); err != nil {
+			return err
+		}
+	}
 	changed, err := hostedDNSProbePathsChanged(before, after)
 	if err != nil || !changed {
 		return err
