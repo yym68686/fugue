@@ -396,8 +396,8 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		compiled, scoped, err = platformconfig.CompileHostedPathWithCapture(req, source)
 		if err == nil && scoped != nil {
 			advance("record_host_path_proposals")
-			// Independent bounded draft only. A proposal rejection does not
-			// change or suppress ordinary configuration compilation/publication.
+			// Record the compiler-owned offer before constructing a scoped
+			// successor. An offer is never itself a serving publication.
 			proposalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			ids, proposalErr := s.store.EnsureCompiledHostedPathProposals(proposalCtx, source, compiled, scoped)
 			cancel()
@@ -423,6 +423,16 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 					}
 				}
 				done()
+			}
+		}
+		if err == nil {
+			advance("compile_scoped_host_successor")
+			successor, claim, selected, e := s.compileOfferedHostedSuccessor(ctx, req, source, scoped)
+			if e != nil {
+				return interval, e
+			}
+			if selected {
+				compiled, provenance.hostedClaim = successor, claim
 			}
 		}
 		if err == nil && len(compiled.InputSnapshot.HostedAddressReservations) > 0 {

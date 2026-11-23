@@ -68,6 +68,14 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 		}
 	}
 	call("first", d("a"), d("b"), end, 1)
+	readPin := func() (HostedSuccessorClaim, error) {
+		c, _, e := readHostedClaim(tx.QueryRowContext(t.Context(), hostedClaimRowSQL+hostedClaimLatest+" FOR SHARE OF o", "scope"))
+		return c, e
+	}
+	first, e := readPin()
+	if e != nil || first.Sequence != 1 || first.Draft != "first" || first.Prepared != d("d") || first.Forward != d("e") {
+		t.Fatal("cannot bind existing offer", first, e)
+	}
 	var offered time.Time
 	if err := tx.QueryRow("SELECT offered_at FROM fugue_hosted_path_prepare_offers").Scan(&offered); err != nil {
 		t.Fatal(err)
@@ -81,8 +89,15 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 		t.Fatal("retry renewed an observation", err)
 	}
 	add("second", d("1"), "scope", at.Add(time.Second))
+	if _, e := readPin(); !errors.Is(e, sql.ErrNoRows) {
+		t.Fatal("superseded draft retained a claim", e)
+	}
 	call("first", d("a"), d("b"), end, 0)
 	call("second", d("1"), d("2"), end, 0)
 	call("second", d("a"), d("b"), end, 0)
 	call("second", d("1"), d("b"), end, 2)
+	second, e := readPin()
+	if e != nil || second.Sequence != 2 || second.Draft != "second" || second == first {
+		t.Fatal("new offer did not fence previous sequence", second, e)
+	}
 }

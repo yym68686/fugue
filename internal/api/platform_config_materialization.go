@@ -30,6 +30,7 @@ type platformCompilationSource struct {
 	// Never decoded from runtime Facts or HTTP. Bound by the producer after
 	// its independent verified-full selection, then checked again on serving.
 	hostedSource platformconfig.PreviousTrafficPublicationReference
+	hostedClaim  string
 }
 
 func (err *platformConfigReferenceError) Error() string { return err.reason }
@@ -88,6 +89,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		} else {
 			bindingOnly := sources[0]
 			bindingOnly.hostedSource = platformconfig.PreviousTrafficPublicationReference{}
+			bindingOnly.hostedClaim = ""
 			if bindingOnly != source {
 				return platformConfigCompileResponse{}, store.ErrConflict
 			}
@@ -100,6 +102,12 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	if err := ctx.Err(); err != nil {
 		return platformConfigCompileResponse{}, err
+	}
+	if raw, ok := compiled.InputSnapshot.Facts[store.HostedSuccessorMetadata]; ok || len(sources) == 1 && sources[0].hostedClaim != "" {
+		value, typed := raw.(string)
+		if !typed || value == "" || len(sources) != 1 || sources[0].hostedClaim != value || len(compiled.InputSnapshot.HostedAddressReservations) == 0 {
+			return platformConfigCompileResponse{}, store.ErrConflict
+		}
 	}
 	if rs := compiled.InputSnapshot.HostedAddressReservations; len(rs) != 0 {
 		ref, digest, e := platformconfig.HostedAddressAuthority(compiled.DNSArtifact)
@@ -197,6 +205,9 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	if len(sources) == 1 {
 		parent.Metadata[platformproducer.PolicyReleaseMetadata] = sources[0].PolicyReleaseID
+		if sources[0].hostedClaim != "" {
+			parent.Metadata[store.HostedSuccessorMetadata] = sources[0].hostedClaim
+		}
 		parent.Metadata[platformproducer.SourceDigestMetadata] = sources[0].SourceDigest
 		if sources[0].StaticIntentID != "" {
 			parent.Metadata[platformproducer.StaticIntentIDMetadata] = sources[0].StaticIntentID

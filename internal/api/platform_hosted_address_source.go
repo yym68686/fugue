@@ -37,7 +37,14 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 		return plan, err
 	}
 	if ref != nil {
-		return hostedCapturePlan{selected: full, phase: "retained"}, nil
+		phase := "retained"
+		if raw := parent.Metadata[store.HostedSuccessorMetadata]; raw != "" {
+			// A verified phase is a new actionable input even when the
+			// business edit is unchanged. Do not immediately reuse its old
+			// shadow instead of moving to paths or releasing deferred B.
+			phase = "after-scoped/" + full.ID
+		}
+		return hostedCapturePlan{selected: full, phase: phase}, nil
 	}
 	if !slices.ContainsFunc(p.Intent.DNS, func(d platformconfig.DNSIntent) bool {
 		return d.Type == "FUGUE_ROUTE" && d.Route != nil && d.Route.ManagedHost
@@ -67,9 +74,9 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 		// Only a pending root-to-path transition gets a new compilation
 		// contract. Do not churn unrelated steady-state or Cell captures.
 		return platformconfig.Digest(struct {
-			Source, Phase, Contract string
-			Hosts                   []string
-		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/reversible-preparation-v1", p.hosts})
+			Source, Phase, Contract, SelectedFull string
+			Hosts                                 []string
+		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/scoped-successor-v1", p.selected.ID, p.hosts})
 	}
 	return platformconfig.Digest(struct {
 		Source, Phase string

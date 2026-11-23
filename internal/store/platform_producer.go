@@ -247,6 +247,15 @@ func validateProducerReleaseGuardWithTrace(state *model.State, parent model.Plat
 // Lock the producer policy scope before the target scope. Policy writers use
 // the same scope lock; reading its lane first cannot deadlock against a writer.
 func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard) error {
+	if _, claimed := parent.Metadata[HostedSuccessorMetadata]; claimed {
+		if guard == nil || principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor ||
+			parent.CreatedByType != principal.ActorType || parent.CreatedByID != principal.ActorID || s.VerifyPlatformArtifactIntegrity(parent) != nil {
+			return ErrConflict
+		}
+		if err := pgCheckHostedSuccessor(ctx, tx, parent, guard); err != nil {
+			return err
+		}
+	}
 	if guard == nil {
 		return rejectUnboundHostedPublication(parent, req.ReleaseChannel)
 	}
