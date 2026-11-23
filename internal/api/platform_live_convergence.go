@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -27,6 +28,7 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 		}
 	}
 	backend := map[string]int{}
+	var checks []liveDNSBackendCheck
 	for _, assessment := range status.Assessments {
 		fact := assessment.Observed
 		if assessment.State != model.InvariantEvidenceStatePass || fact == nil || fact.Component != model.PlatformConsumerComponentDNSServer || !strings.HasPrefix(fact.CredentialID, "kubernetes:") {
@@ -37,7 +39,13 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 			backend[assessment.ConsumerID] = http.StatusForbidden
 			continue
 		}
-		backend[assessment.ConsumerID] = s.validateDNSHeartbeatBackend(ctx, claims, platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: fact.ApplyStatus, ProbeStatus: fact.ProbeStatus, ReleaseSetID: fact.ReleaseSetID, ExpectedConsumerSetID: fact.ExpectedConsumerSetID, FencingToken: fact.FencingToken, GenerationSequence: fact.GenerationSequence}, set)
+		checks = append(checks, liveDNSBackendCheck{consumer: assessment.ConsumerID, claims: claims, heartbeat: platformcontrol.PlatformConsumerHeartbeatEnvelope{ApplyStatus: fact.ApplyStatus, ProbeStatus: fact.ProbeStatus, ReleaseSetID: fact.ReleaseSetID, ExpectedConsumerSetID: fact.ExpectedConsumerSetID, FencingToken: fact.FencingToken, GenerationSequence: fact.GenerationSequence}})
+	}
+	checkLiveDNSBackends(ctx, checks, func(ctx context.Context, check liveDNSBackendCheck) int {
+		return s.validateDNSHeartbeatBackend(ctx, check.claims, check.heartbeat, set)
+	})
+	for _, check := range checks {
+		backend[check.consumer] = check.code
 	}
 	// Metadata reads take time. Do not return a pass whose source heartbeat
 	// expired while we were observing Kubernetes. Never renew its timestamps.
@@ -64,4 +72,41 @@ func (s *Server) evaluateLiveConsumerConvergence(ctx context.Context, set model.
 		}
 	}
 	return status
+}
+
+type liveDNSBackendCheck struct {
+	consumer  string
+	claims    platformcontrol.PlatformComponentIdentityClaims
+	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope
+	code      int
+}
+
+// Inspect independent members under the original, shared observation deadline.
+// Each inspection keeps its own before/after transport fences. A slow first
+// member must not consume the second member's entire window before it starts.
+// No additional reads, retries, cached passes or per-member deadline extensions.
+func checkLiveDNSBackends(ctx context.Context, checks []liveDNSBackendCheck, inspect func(context.Context, liveDNSBackendCheck) int) {
+	const limit = 2
+	width := min(len(checks), limit)
+	var group sync.WaitGroup
+	run := func(start int) {
+		for i := start; i < len(checks); i += width {
+			code := http.StatusServiceUnavailable
+			if ctx.Err() == nil {
+				code = inspect(ctx, checks[i])
+				if ctx.Err() != nil {
+					code = http.StatusServiceUnavailable
+				}
+			}
+			checks[i].code = code
+		}
+	}
+	if width == 1 {
+		run(0)
+		return
+	}
+	for start := range width {
+		group.Go(func() { run(start) })
+	}
+	group.Wait()
 }
