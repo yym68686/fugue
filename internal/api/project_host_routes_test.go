@@ -32,7 +32,7 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := "/v1/projects/" + owner.ProjectID + "/routes/"
-	edit := model.ProjectHostRouteEdit{Hostname: host, Paths: map[string]string{"/": web.ID, "/v1": owner.ID}}
+	edit := model.ProjectHostRouteEdit{Hostname: host, Paths: map[string]string{"/": web.ID, "/api": owner.ID, "/rpc": owner.ID, "/health": owner.ID}}
 	preview := func(edit model.ProjectHostRouteEdit, status int) model.ProjectHostRoutePlan {
 		t.Helper()
 		rec := performJSONRequest(t, srv, http.MethodPost, base+"host-plan", token, edit)
@@ -84,21 +84,37 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 	if _, err = st.PutProjectRouteTable(owner.ProjectID, model.ProjectRouteTable{Entrypoints: []model.ProjectRouteEntrypoint{other}}); err != nil {
 		t.Fatal(err)
 	}
-	apply(original, http.StatusConflict, "")
-	status(original, "superseded", "desired routes differ")
+	status(original, "pending", "has not been applied")
 	current := preview(edit, http.StatusOK)
-	apply(current, http.StatusOK, "saved")
+	if current.PlanID != original.PlanID {
+		t.Fatal("unrelated hostname invalidated a reviewed plan")
+	}
+	apply(original, http.StatusOK, "saved")
 	status(current, "pending", "no exact full global publication")
 	apply(current, http.StatusOK, "already_current")
 	table, err := st.GetProjectRouteTable(owner.ProjectID)
 	if err != nil || len(table.Entrypoints) != 2 || !reflect.DeepEqual(table.Entrypoints[0], model.NormalizeProjectRouteEntrypoint(other)) {
 		t.Fatalf("unrelated host overwritten: %+v %v", table, err)
 	}
-	rollback := preview(model.ProjectHostRouteEdit{Hostname: host, RemovePaths: []string{"/", "/v1"}}, http.StatusOK)
+	rollback := preview(model.ProjectHostRouteEdit{Hostname: host, RemovePaths: []string{"/", "/api", "/rpc", "/health"}}, http.StatusOK)
 	if !maps.Equal(rollback.After, original.Before) {
 		t.Fatalf("rollback did not restore inherited route: %+v", rollback)
 	}
+	// A different hostname changes *again* after the inverse is reviewed.
+	table.Entrypoints[0].Routes[0].PathPrefix = "/updated"
+	if table, err = st.PutProjectRouteTable(owner.ProjectID, table); err != nil {
+		t.Fatal(err)
+	}
 	apply(rollback, http.StatusOK, "saved")
+	got, err := st.GetProjectRouteTable(owner.ProjectID)
+	if err != nil || !reflect.DeepEqual(got.Entrypoints[0], table.Entrypoints[0]) {
+		t.Fatal("withdrawal lost the other host's later edit", got, err)
+	}
+	// A real concurrent edit of *this* host remains a conflict.
+	stale := preview(edit, http.StatusOK)
+	apply(preview(model.ProjectHostRouteEdit{Hostname: host, Paths: map[string]string{"/extra": owner.ID}}, http.StatusOK), http.StatusOK, "saved")
+	apply(stale, http.StatusConflict, "")
+	status(stale, "superseded", "desired routes differ")
 	after, err := st.GetAppDomain(host)
 	if err != nil || !reflect.DeepEqual(claim, after) {
 		t.Fatalf("hostname ownership or verification mutated: %+v %v", after, err)

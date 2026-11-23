@@ -387,9 +387,24 @@ func buildProjectHostRoutePlan(in store.ProjectHostRouteInputs, edit model.Proje
 	if !slices.Contains(slices.Collect(maps.Values(after)), domain.AppID) {
 		return plan, in.Table, false, errProjectHostOwnerPath
 	}
-	// Bind only business identity and declared routes; recurring certificate
-	// and domain checks update timestamps without changing the plan.
-	id, err := platformconfig.Digest([]any{"project-host-routes-v1", current, original, bindings, edit, inherited, domain.AppID, domain.DNSMode, domain.DNSZoneID, domain.DNSRecordID, domain.RouteTarget, domain.CreatedAt, dnsIdentity})
+	// Only the reviewed hostname is the compare-and-swap unit. The store
+	// serializes this write with whole-table writers and the updated table
+	// above is built from that locked, current input (never the plan's old
+	// table). In particular a rollback cannot restore another host's rows.
+	scoped, err := store.ProjectRoutesForHost(current, edit.Hostname)
+	if err != nil {
+		return plan, in.Table, false, err
+	}
+	hostBindings := func(all []model.ProjectRouteBinding) []model.ProjectRouteBinding {
+		var out []model.ProjectRouteBinding
+		for _, b := range all {
+			if normalizeExternalAppDomain(b.Hostname) == edit.Hostname {
+				out = append(out, b)
+			}
+		}
+		return out
+	}
+	id, err := platformconfig.Digest([]any{"project-host-routes-v2", in.Project.ID, in.Project.TenantID, scoped.Domains, scoped.Entrypoints, hostBindings(original), hostBindings(bindings), edit, inherited, domain.AppID, domain.DNSMode, domain.DNSZoneID, domain.DNSRecordID, domain.RouteTarget, domain.CreatedAt, dnsIdentity})
 	plan = model.ProjectHostRoutePlan{PlanID: id, ProjectID: in.Project.ID, Edit: edit, HostnameOwnerAppID: domain.AppID, Before: before, After: after, State: "planned"}
 	return plan, next, changed, err
 }

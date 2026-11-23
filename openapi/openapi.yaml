@@ -28416,7 +28416,7 @@ components:
       properties:
         plan_id:
           type: string
-          description: Opaque precondition over the exact route table and relevant hostname configuration.
+          description: Opaque precondition over this project's target hostname, its resolved route bindings, ownership, and relevant DNS configuration. Independent edits to other hostnames do not invalidate a newly planned edit. Re-plan if an older precondition is rejected.
         project_id:
           type: string
         edit:
