@@ -12,7 +12,7 @@ func TestHostedPathTransitionSeparatesAddressHoldFromForwardAndReverse(t *testin
 	testHostedPathTransition(t, false)
 }
 
-func TestHostedPathAliasCompilesOldRootButCannotPublishForeignAddressChange(t *testing.T) {
+func TestHostedPathAliasRetainsOnlySameOwnerSharedPhysicalAddress(t *testing.T) {
 	testHostedPathTransition(t, true)
 }
 
@@ -108,16 +108,9 @@ func testHostedPathTransition(t *testing.T, withAlias bool) {
 	}
 	baseline := payload(intermediate)
 	if withAlias {
-		// The staged alias has the old root as its real dependency; no
-		// rejection in the route compiler. Its other RR may still contract
-		// under the hold. The separate serving guard must reject that.
-		if len(baseline.ReadinessPlan.Probes) != 1 || baseline.ReadinessPlan.Probes[0].Path != "/" || reflect.DeepEqual(baseline.Records, src.Prior.Records) {
-			t.Fatal("missing staged alias and independent address change")
+		if len(intermediate.InputSnapshot.HostedAddressReservations) != 2 || !reflect.DeepEqual(src.Prior.Records, baseline.Records) {
+			t.Fatal("same-owner reverse dependency lost its original wire declaration")
 		}
-		if e := ValidateScopedHostedPublicationTransition(prior.DNSArtifact, intermediate.DNSArtifact); e == nil {
-			t.Fatal("alias fix accidentally authorized the mixed DNS release")
-		}
-		return
 	}
 	if len(baseline.ReadinessPlan.Probes) != 1 || baseline.ReadinessPlan.Probes[0].Path != "/" || !reflect.DeepEqual(baseline.Records, src.Prior.Records) {
 		t.Fatal("address-only baseline changed routes or RR")

@@ -40,7 +40,7 @@ func inheritHostedCellRecords(intent PlatformIntent, previous *PreviousTrafficPu
 		}
 		return g
 	}
-	type key struct{ host, family string }
+	type key = hostedRecordKey
 	payload, err := DecodeDNSArtifact(previous.DNS)
 	if err != nil || payload.ReadinessPlan == nil {
 		return nil, bad
@@ -98,6 +98,16 @@ func inheritHostedCellRecords(intent PlatformIntent, previous *PreviousTrafficPu
 	if len(wanted) == 0 {
 		return nil, bad
 	}
+	oldParents := hostedAliasParents(payload.Records, payload.ReadinessPlan)
+	newParents := hostedAliasParents(current, plan)
+	for k, parent := range oldParents {
+		if wanted[parent] && len(src[k].Values) > len(a[k]) {
+			if newParents[k] != parent {
+				return nil, bad
+			}
+			wanted[k] = true
+		}
+	}
 	coverage := map[hostedRecordKey]bool{}
 	for k := range wanted {
 		coverage[hostedRecordKey{k.host, k.family}] = true
@@ -111,7 +121,7 @@ func inheritHostedCellRecords(intent PlatformIntent, previous *PreviousTrafficPu
 			continue
 		}
 		p := src[k]
-		if r.RecordKind != "hosted" || len(p.Values) <= len(r.Values) {
+		if r.RecordKind != p.RecordKind || len(p.Values) <= len(r.Values) {
 			return nil, bad
 		}
 		x, y := p, r

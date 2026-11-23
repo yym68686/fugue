@@ -46,6 +46,10 @@ func hostedPhysicalRoster(in DNSReadinessRecord, family string) DNSReadinessReco
 // roster; a matching IP on a different owner or a disappeared hold is not a
 // reason to keep a reservation. No readiness proof is copied across captures.
 func CaptureHostedAddressReservation(source PreviousTrafficPublicationReference, prior DNSIntent, priorEffective DNSReadinessRecord, priorHolds []HostedAddressHold, inherited *HostedAddressReservation, next DNSIntent, nextEffective DNSReadinessRecord, nextHolds []HostedAddressHold) (HostedAddressReservation, error) {
+	return captureBoundHostedReservation(source, prior, priorEffective, priorHolds, inherited, next, nextEffective, nextHolds, false)
+}
+
+func captureBoundHostedReservation(source PreviousTrafficPublicationReference, prior DNSIntent, priorEffective DNSReadinessRecord, priorHolds []HostedAddressHold, inherited *HostedAddressReservation, next DNSIntent, nextEffective DNSReadinessRecord, nextHolds []HostedAddressHold, alias bool) (HostedAddressReservation, error) {
 	bad := errors.New("cannot establish hosted address reservation lineage")
 	if source.Validate() != nil {
 		return HostedAddressReservation{}, bad
@@ -66,11 +70,11 @@ func CaptureHostedAddressReservation(source PreviousTrafficPublicationReference,
 				oldSelected.Values = append(oldSelected.Values, t.Address)
 			}
 		}
-		if _, err := RetainHostedAddressRecord(prior, oldSelected, physical, priorEffective, priorHolds); err != nil {
+		if _, err := retainBoundHostedRecord(prior, oldSelected, physical, priorEffective, priorHolds, alias); err != nil {
 			return HostedAddressReservation{}, bad
 		}
 	}
-	record, err := RetainHostedAddressRecord(prior, next, physical, nextEffective, nextHolds)
+	record, err := retainBoundHostedRecord(prior, next, physical, nextEffective, nextHolds, alias)
 	if err != nil {
 		return HostedAddressReservation{}, err
 	}
@@ -83,8 +87,16 @@ func CaptureHostedAddressReservation(source PreviousTrafficPublicationReference,
 // Any difference other than removing precisely held targets from selection is
 // a separate topology operation. Never synthesize a DNS value from a hold.
 func RetainHostedAddressRecord(prior, next DNSIntent, before, after DNSReadinessRecord, holds []HostedAddressHold) (DNSIntent, error) {
+	return retainBoundHostedRecord(prior, next, before, after, holds, false)
+}
+
+func retainBoundHostedRecord(prior, next DNSIntent, before, after DNSReadinessRecord, holds []HostedAddressHold, alias bool) (DNSIntent, error) {
 	bad := errors.New("cannot separate hosted address declaration from effective membership")
-	if prior.RecordKind != "hosted" || prior.AppID == "" || prior.TenantID == "" || prior.Hostname == "" ||
+	kind := "hosted"
+	if alias {
+		kind = "custom-domain-target"
+	}
+	if prior.RecordKind != kind || prior.AppID == "" || prior.TenantID == "" || prior.Hostname == "" ||
 		prior.Type != "A" && prior.Type != "AAAA" || prior.TTL < 1 || len(prior.ValueExpirations) != 0 ||
 		prior.Route != nil || prior.Application != nil || prior.Flatten != nil ||
 		before.Hostname != prior.Hostname || after.Hostname != before.Hostname || len(holds) == 0 || len(holds) > 4096 {

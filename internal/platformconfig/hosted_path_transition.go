@@ -62,8 +62,11 @@ func CompileHostedPathTransition(req CompileRequest, source HostedAddressSource)
 	fail := errors.New("hosted path transition cannot prove intermediate topology")
 	source.managedHosts = NewHostedPathReservationHosts(source.Prior, req.Intent, source.EffectiveHolds)
 	for _, retained := range source.Inherited {
-		source.managedHosts[retained.Record.Hostname] = true
+		if retained.Record.RecordKind == "hosted" {
+			source.managedHosts[retained.Record.Hostname] = true
+		}
 	}
+	source.stableAliases = stableHostedAliasDeclarations(source.PriorIntent, req.Intent)
 	with, err := CompileWithHostedAddressSource(req, source)
 	if err != nil {
 		return CompileResult{}, false, err

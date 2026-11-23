@@ -13,8 +13,21 @@ import (
 
 func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 	cell, global := celldns.TransitionRequestWithSource(t)
-	global.Intent.DNS[0].RecordKind = "hosted"
-	cell.Intent.DNS[0].RecordKind = "hosted"
+	const alias = "shared.example.test"
+	for _, req := range []*pc.CompileRequest{&cell, &global} {
+		req.Intent.DNS = slices.Clone(req.Intent.DNS)
+		req.Intent.DNS[0].RecordKind = "hosted"
+		d := req.Intent.DNS[0]
+		d.Route = &pc.DNSRouteIntent{Hostnames: []string{d.Hostname}, DNSApplicationIntent: *d.Application}
+		d.Hostname, d.Type, d.RecordKind, d.Values, d.Application = alias, "FUGUE_ROUTE", "custom-domain-target", []string{}, nil
+		req.Intent.DNS = append(req.Intent.DNS, d)
+		rule := req.Policy.DNSAnswerRules[0]
+		rule.Hostname = alias
+		req.Policy.DNSAnswerRules = append(slices.Clone(req.Policy.DNSAnswerRules), rule)
+		obs := req.RuntimeSnapshot.DNSSelections[0]
+		obs.Hostname = alias
+		req.RuntimeSnapshot.DNSSelections = append(slices.Clone(req.RuntimeSnapshot.DNSSelections), obs)
+	}
 	base, e := pc.Compile(global)
 	if e != nil {
 		t.Fatal(e)
@@ -32,13 +45,31 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 	}
 	old := read(base)
 	const addr = "9.9.9.9"
-	old.Records[0].Values = append(slices.Clone(old.Records[0].Values), addr)
-	rec := &old.ReadinessPlan.Records[0]
-	held := rec.Targets[0]
-	held.EdgeID = "held-member"
-	held.Address = addr
-	rec.Targets = append(slices.Clone(rec.Targets), held)
-	globalResult, e := pc.CompileWithHostedAddressSource(global, pc.HostedAddressSource{Publication: cell.PreviousTrafficPublication.Reference, Prior: old, EffectiveHolds: []pc.HostedAddressHold{{EdgeID: held.EdgeID, EdgeGroupID: held.EdgeGroupID, Address: addr}}})
+	for i := range old.Records {
+		old.Records[i].Values = append(slices.Clone(old.Records[i].Values), addr)
+	}
+	byID := map[string]string{}
+	for _, p := range slices.Clone(old.ReadinessPlan.Probes) {
+		if p.EdgeID != old.ReadinessPlan.Records[0].Targets[0].EdgeID {
+			continue
+		}
+		id := p.ID
+		p.ID, p.EdgeID, p.Address = "held-"+p.ID, "held-member", addr
+		byID[id] = p.ID
+		old.ReadinessPlan.Probes = append(old.ReadinessPlan.Probes, p)
+	}
+	var held pc.DNSReadinessTarget
+	for i := range old.ReadinessPlan.Records {
+		rec := &old.ReadinessPlan.Records[i]
+		held = rec.Targets[0]
+		held.EdgeID, held.Address = "held-member", addr
+		held.ProbeIDs = slices.Clone(held.ProbeIDs)
+		for j, id := range held.ProbeIDs {
+			held.ProbeIDs[j] = byID[id]
+		}
+		rec.Targets = append(slices.Clone(rec.Targets), held)
+	}
+	globalResult, e := pc.CompileHostedAliasCellSourceForTest(global, pc.HostedAddressSource{Publication: cell.PreviousTrafficPublication.Reference, PriorIntent: global.Intent, Prior: old, EffectiveHolds: []pc.HostedAddressHold{{EdgeID: held.EdgeID, EdgeGroupID: held.EdgeGroupID, Address: addr}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -59,8 +90,13 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 	result := celldns.Compile(t, cell)
 	out := read(result)
 	expected := read(globalResult)
-	if !reflect.DeepEqual(out.Records[0].Values, expected.Records[0].Values) || !slices.Contains(out.Records[0].Values, addr) {
-		t.Fatal("cell rebuilt the physical record from the eligible subset")
+	if len(out.Records) != 2 || len(expected.Records) != 2 {
+		t.Fatal("missing hosted root or generated alias")
+	}
+	for i, r := range out.Records {
+		if r.Hostname != expected.Records[i].Hostname || !reflect.DeepEqual(r.Values, expected.Records[i].Values) || !slices.Contains(r.Values, addr) {
+			t.Fatal("cell rebuilt the physical record from the eligible subset", r.Hostname)
+		}
 	}
 	for _, r := range out.ReadinessPlan.Records {
 		for _, v := range r.Targets {

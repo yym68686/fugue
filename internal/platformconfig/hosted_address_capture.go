@@ -16,7 +16,8 @@ type HostedAddressSource struct {
 	PriorHolds, EffectiveHolds []HostedAddressHold
 	// nil is an unrestricted diagnostic compile. Production always supplies
 	// the explicit same-owner transitions and previously retained records.
-	managedHosts map[string]bool
+	managedHosts  map[string]bool
+	stableAliases map[string]string
 }
 
 type hostedRecordKey struct{ host, family string }
@@ -70,7 +71,7 @@ func checkHostedDynamicSelectors(keys map[hostedRecordKey]bool, views []DNSQuery
 // query candidates, policy and observations untouched. Reuse the consumer's
 // verifier and require a dynamic view for every reserved record.
 func ReserveHostedAddressProjection(next DNSArtifactPayload, source HostedAddressSource) ([]DNSIntent, []HostedAddressReservation, error) {
-	reservations, err := captureHostedAddressChanges(source.Publication, source.Prior, source.Inherited, source.PriorHolds, next, source.EffectiveHolds, source.managedHosts)
+	reservations, err := captureHostedAddressChanges(source.Publication, source.Prior, source.Inherited, source.PriorHolds, next, source.EffectiveHolds, source.managedHosts, source.stableAliases)
 	if err != nil || len(reservations) == 0 {
 		return next.Records, nil, err
 	}
@@ -104,16 +105,16 @@ func ReserveHostedAddressProjection(next DNSArtifactPayload, source HostedAddres
 // Other record changes are not explained by this result. The caller must
 // independently classify them; this function does not authorize their release.
 func CaptureHostedAddressChanges(source PreviousTrafficPublicationReference, prior DNSArtifactPayload, inherited []HostedAddressReservation, priorHolds []HostedAddressHold, next DNSArtifactPayload, nextHolds []HostedAddressHold) ([]HostedAddressReservation, error) {
-	return captureHostedAddressChanges(source, prior, inherited, priorHolds, next, nextHolds, nil)
+	return captureHostedAddressChanges(source, prior, inherited, priorHolds, next, nextHolds, nil, nil)
 }
 
-func captureHostedAddressChanges(source PreviousTrafficPublicationReference, prior DNSArtifactPayload, inherited []HostedAddressReservation, priorHolds []HostedAddressHold, next DNSArtifactPayload, nextHolds []HostedAddressHold, hosts map[string]bool) ([]HostedAddressReservation, error) {
+func captureHostedAddressChanges(source PreviousTrafficPublicationReference, prior DNSArtifactPayload, inherited []HostedAddressReservation, priorHolds []HostedAddressHold, next DNSArtifactPayload, nextHolds []HostedAddressHold, hosts map[string]bool, aliases map[string]string) ([]HostedAddressReservation, error) {
 	bad := errors.New("incomplete or ambiguous hosted address projection")
 	if source.Validate() != nil || len(inherited) > 4096 || len(prior.Records) > 20000 || len(next.Records) > 20000 ||
 		prior.ReadinessPlan == nil || next.ReadinessPlan == nil {
 		return nil, bad
 	}
-	type key struct{ host, family string }
+	type key = hostedRecordKey
 	index := func(p DNSArtifactPayload) (map[key]DNSIntent, map[string]DNSReadinessRecord, error) {
 		byKey, byHost := map[key]DNSIntent{}, map[string]DNSReadinessRecord{}
 		for _, r := range p.Records {
@@ -152,6 +153,7 @@ func captureHostedAddressChanges(source PreviousTrafficPublicationReference, pri
 		custody[k] = p
 	}
 	var retained []HostedAddressReservation
+	retainedRoots := map[key]bool{}
 	targetCount := 0
 	for _, r := range next.Records {
 		if hosts != nil && !hosts[r.Hostname] {
@@ -184,6 +186,28 @@ func captureHostedAddressChanges(source PreviousTrafficPublicationReference, pri
 			return nil, bad
 		}
 		retained = append(retained, p)
+		retainedRoots[k] = true
+	}
+	if len(retainedRoots) > 0 && len(aliases) > 0 {
+		oldParents := hostedAliasParents(prior.Records, prior.ReadinessPlan)
+		newParents := hostedAliasParents(next.Records, next.ReadinessPlan)
+		for _, r := range next.Records {
+			k := key{r.Hostname, r.Type}
+			parent, ok := oldParents[k]
+			if !ok || aliases[k.host] != parent.host || newParents[k] != parent || !retainedRoots[parent] {
+				continue
+			}
+			sourceRecord := before[k]
+			p, e := captureBoundHostedReservation(source, sourceRecord, oldPhysical[k.host], priorHolds, custody[k], r, live[k.host], nextHolds, true)
+			if e != nil {
+				return nil, e
+			}
+			targetCount += len(p.Physical.Targets)
+			if targetCount > 32768 || len(retained) >= 4096 {
+				return nil, bad
+			}
+			retained = append(retained, p)
+		}
 	}
 	return retained, nil
 }
