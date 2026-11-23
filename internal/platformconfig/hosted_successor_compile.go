@@ -46,10 +46,17 @@ func CompileHostedSuccessor(req CompileRequest, source HostedAddressSource, p Ho
 	// A path change cannot alter certificate or topology ownership. Do not
 	// use an old cache policy as a substitute for a changed shared definition.
 	if !reflect.DeepEqual(intent.CachePolicies, req.Intent.CachePolicies) ||
-		!reflect.DeepEqual(intent.TLS, req.Intent.TLS) || !reflect.DeepEqual(intent.EdgeTopology, req.Intent.EdgeTopology) ||
+		!reflect.DeepEqual(intent.EdgeTopology, req.Intent.EdgeTopology) ||
 		!reflect.DeepEqual(intent.DNSConsumers, req.Intent.DNSConsumers) || !reflect.DeepEqual(intent.ApplicationDomains, req.Intent.ApplicationDomains) ||
 		!reflect.DeepEqual(intent.ACMEChallenges, req.Intent.ACMEChallenges) {
 		return empty, fmt.Errorf("%w: shared intent", bad)
+	}
+	// The certificate declaration remains exactly the selected full's, even
+	// when a different host's new enrollment is already in the business
+	// projection. Never attach its fact to A, or use yesterday's TLS facts.
+	req.RuntimeSnapshot.TLSDomains, err = scopedHostedTLSFacts(intent.TLS, req.Intent.TLS, owned, req.RuntimeSnapshot.TLSDomains)
+	if err != nil {
+		return empty, err
 	}
 	intent = NormalizePlatformIntent(intent)
 	intent.Generation, err = PlatformIntentGeneration(intent)
@@ -165,4 +172,42 @@ func spliceHostedInput[T any](base, desired []T, owned func(T) bool) []T {
 		}
 	}
 	return out
+}
+
+func scopedHostedTLSFacts(selected, desired []TLSIntent, owned map[string]bool, facts []TLSDomainObservation) ([]TLSDomainObservation, error) {
+	bad := errors.New("host successor TLS declaration or current observation is not independently bound")
+	forHost := func(rows []TLSIntent) []TLSIntent {
+		return slices.DeleteFunc(slices.Clone(rows), func(r TLSIntent) bool { return !owned[r.Hostname] })
+	}
+	if !slices.Equal(forHost(selected), forHost(desired)) {
+		return nil, bad
+	}
+	refs, pending := map[string]TLSIntent{}, map[string]TLSIntent{}
+	for _, r := range selected {
+		if r.DomainRef != "" {
+			refs[r.DomainRef] = r
+		}
+	}
+	for _, r := range desired {
+		if r.DomainRef != "" {
+			pending[r.DomainRef] = r
+		}
+	}
+	out := make([]TLSDomainObservation, 0, len(facts))
+	seen := map[string]bool{}
+	for _, f := range facts {
+		if seen[f.Ref] {
+			return nil, bad
+		}
+		seen[f.Ref] = true
+		if _, keep := refs[f.Ref]; keep {
+			out = append(out, f) // CompileTLSDomains validates exact identity and original timestamps.
+			continue
+		}
+		r, ok := pending[f.Ref]
+		if !ok || owned[f.Hostname] || r.Hostname != f.Hostname || r.AppID != f.AppID || r.TenantID != f.TenantID {
+			return nil, bad
+		}
+	}
+	return out, nil
 }

@@ -43,6 +43,10 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	newForeign.DeploymentGeneration = "deployment-new"
 	edit.Intent.Routes = append(edit.Intent.Routes, newForeign)
 	edit.RuntimeSnapshot.Origins = append(slices.Clone(edit.RuntimeSnapshot.Origins), observation)
+	bTLS := TLSIntent{Hostname: b.Hostname, AppID: foreign.AppID, TenantID: foreign.TenantID, DomainRef: "domain-independent", Policy: "automatic"}
+	edit.Intent.TLS = append(slices.Clone(edit.Intent.TLS), bTLS)
+	bFact := TLSDomainObservation{Hostname: b.Hostname, AppID: bTLS.AppID, TenantID: bTLS.TenantID, Ref: bTLS.DomainRef, Status: "verified", VerifiedAt: edit.RuntimeSnapshot.CapturedAt}
+	edit.RuntimeSnapshot.TLSDomains = append(slices.Clone(edit.RuntimeSnapshot.TLSDomains), bFact)
 	setBase := func(c CompileResult, token int64) {
 		src.Publication.FencingToken = token
 		src.Publication.ReleaseID = "selected-" + c.ReleaseArtifact.Generation
@@ -89,7 +93,16 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	check := func(c CompileResult, count, ttl int) {
 		t.Helper()
 		q, e := ProjectRouteArtifact(c.RouteArtifact)
-		if e != nil || len(q.Routes) != count+1 || len(q.TLSAllowlist) != 1 || q.TLSAllowlist[0] != p.Before.Owner {
+		wantTLS := 1
+		if ttl == 300 {
+			wantTLS = 2
+			if !slices.ContainsFunc(q.TLSAllowlist, func(v model.EdgeTLSAllowlistEntry) bool {
+				return v.Hostname == b.Hostname && v.AppID == bTLS.AppID && v.TenantID == bTLS.TenantID && v.Status == bFact.Status
+			}) {
+				t.Fatal("A altered B's separately published certificate ownership")
+			}
+		}
+		if e != nil || len(q.Routes) != count+1 || len(q.TLSAllowlist) != wantTLS || !slices.Contains(q.TLSAllowlist, p.Before.Owner) {
 			t.Fatal("dispatch/TLS", e)
 		}
 		expect := foreign.DeploymentGeneration
@@ -149,12 +162,17 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		t.Fatal(e)
 	}
 	inverse.RuntimeSnapshot = mid.InputSnapshot
+	inverse.RuntimeSnapshot.TLSDomains = newB.InputSnapshot.TLSDomains
 	inverse.RuntimeSnapshot.HostedAddressReservations = nil
 	back, e := CompileHostedSuccessor(inverse, src, p, "withdraw")
 	if e != nil {
 		t.Fatal("withdraw", e)
 	}
 	check(back, 1, 300)
+	inverse.RuntimeSnapshot.TLSDomains = mid.InputSnapshot.TLSDomains
+	if _, e := CompileHostedSuccessor(inverse, src, p, "withdraw"); e == nil {
+		t.Fatal("withdrawal fabricated current evidence for B's retained certificate")
+	}
 	if _, e := CompileHostedSuccessor(inverse, src, p, "prepare"); e == nil {
 		t.Fatal("stale prepare accepted")
 	}
