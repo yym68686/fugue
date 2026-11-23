@@ -201,6 +201,10 @@ func materializeDNSQueries(view platformconfig.DNSQueryView, plan *platformconfi
 }
 
 func materializeDNSQueriesVersion(view platformconfig.DNSQueryView, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time, validateOriginal bool) ([]model.EdgeDNSRecord, error) {
+	return materializeDNSQueryScope(view, plan, policy, facts, now, validateOriginal, nil)
+}
+
+func materializeDNSQueryScope(view platformconfig.DNSQueryView, plan *platformconfig.DNSReadinessPlan, policy *platformconfig.DNSReadinessPolicy, facts []dnsReadinessFact, now time.Time, validateOriginal bool, host *hostedDNSDecision) ([]model.EdgeDNSRecord, error) {
 	// Validate the signed, unfiltered authorization. Losing all candidates to
 	// current readiness/recovery is a runtime state, not malformed authorization.
 	// Selector retirement is enforced at live admission/execution boundaries;
@@ -220,7 +224,16 @@ func materializeDNSQueriesVersion(view platformconfig.DNSQueryView, plan *platfo
 	if err = json.Unmarshal(raw, &records); err != nil {
 		return nil, err
 	}
-	valid := validDNSReadinessFacts(plan, policy, facts, now)
+	var valid map[string]dnsReadinessFact
+	if host == nil {
+		valid = validDNSReadinessFacts(plan, policy, facts, now)
+	} else {
+		var err error
+		valid, err = host.validFacts(view, plan, policy, facts, now)
+		if err != nil {
+			return nil, err
+		}
+	}
 	byHost := map[string]platformconfig.DNSReadinessRecord{}
 	for _, r := range plan.Records {
 		byHost[r.Hostname] = r
@@ -268,10 +281,16 @@ func materializeDNSQueriesVersion(view platformconfig.DNSQueryView, plan *platfo
 					until = f.Proof.ValidUntil
 				}
 			}
-			ready = ready && platformconfig.DNSReadinessTargetReady(target, func(id string) (string, *model.TrafficReleaseBinding, bool) {
-				fact, ok := valid[id]
-				return fact.Proof.GroupID, fact.Proof.TrafficRelease, ok
-			})
+			if host != nil {
+				// All paths and groups must prove the exact host head, even
+				// when the legacy plan did not require a single publication.
+				ready = ready && host.targetReady(target, valid)
+			} else {
+				ready = ready && platformconfig.DNSReadinessTargetReady(target, func(id string) (string, *model.TrafficReleaseBinding, bool) {
+					fact, ok := valid[id]
+					return fact.Proof.GroupID, fact.Proof.TrafficRelease, ok
+				})
+			}
 			if !ready || until.Sub(now) < time.Second {
 				continue
 			}

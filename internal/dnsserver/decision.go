@@ -24,6 +24,9 @@ const DNSDecisionMaxBytes = 256 << 10
 const dnsDecisionFilterReasonsVersion = 1
 
 type DNSDecisionPublication struct {
+	HostedHostname      string `json:"hosted_hostname,omitempty"`
+	HostedFence         int64  `json:"hosted_fence,omitempty"`
+	HostedDecision      string `json:"hosted_decision,omitempty"`
 	ReleaseSetID        string `json:"release_set_id,omitempty"`
 	ParentDigest        string `json:"parent_digest,omitempty"`
 	ArtifactID          string `json:"artifact_id,omitempty"`
@@ -131,6 +134,7 @@ type dnsDecisionEntropy struct {
 }
 
 type dnsDecisionEntry struct {
+	Hosted *hostedDNSDecision              `json:"hosted,omitempty"`
 	Record model.EdgeDNSRecord             `json:"record"`
 	Plan   platformconfig.DNSReadinessPlan `json:"plan"`
 	Facts  []dnsReadinessFact              `json:"facts"`
@@ -143,6 +147,7 @@ type dnsDecisionSelection struct {
 }
 
 type dnsDecisionStage struct {
+	HostedBlocked      bool                                `json:"hosted_blocked,omitempty"`
 	Publication        DNSDecisionPublication              `json:"publication"`
 	AppliedAt          time.Time                           `json:"applied_at"`
 	GenerationSequence int64                               `json:"generation_sequence"`
@@ -234,6 +239,12 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 		GenerationSequence: state.record.Candidate.Artifact.GenerationSequence, MaxStaleSeconds: state.payload.Policy.MaxStaleSeconds,
 		Readiness: state.payload.Policy.DNSReadiness, QueryAt: now, Entries: []dnsDecisionEntry{}, Selections: []*dnsDecisionSelection{},
 		Hint: dnsDecisionHint{Country: hint.Country, Region: hint.Region, ASN: hint.ASN, EdgeGroupID: hint.EdgeGroupID, Source: hint.Source}}
+	if w := state.hostedWire; w != nil {
+		// An obsolete membership is NOT evidence about the replacement
+		// global release. Record the parent of the actual host decision.
+		stage.Publication = w.publication
+		stage.HostedBlocked = state.hostedBlocked
+	}
 	name := ""
 	if len(request.Question) == 1 {
 		name = normalizeName(request.Question[0].Name)
@@ -252,6 +263,11 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 			entries, exists = value.records[stage.RecordName]
 		}
 		stage.Exists = exists
+		if w := state.hostedWire; w != nil {
+			stage.RecordName = name
+			entries = w.rows
+			stage.Exists = true
+		}
 		if len(entries) > 16 {
 			capture.err = errors.New("decision entry bound exceeded")
 			continue
@@ -261,7 +277,7 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 				capture.err = errors.New("decision candidate or proof bound exceeded")
 				continue
 			}
-			stage.Entries = append(stage.Entries, dnsDecisionEntry{Record: entry.record, Plan: entry.plan, Facts: entry.facts})
+			stage.Entries = append(stage.Entries, dnsDecisionEntry{Record: entry.record, Plan: entry.plan, Facts: entry.facts, Hosted: entry.hosted})
 		}
 	}
 	if len(capture.input.Stages) >= 2 {
@@ -561,13 +577,14 @@ func ReplayDNSDecision(receipt DNSDecisionReceipt) (result DNSDecisionReplayResu
 		}
 		state := &dnsServingState{record: dnsServingCheckpoint{AppliedAt: stage.AppliedAt, Candidate: dnsPlatformCandidate{Artifact: model.PlatformArtifact{GenerationSequence: stage.GenerationSequence}}},
 			payload: dnsServingPayload{Policy: platformconfig.PolicySnapshot{MaxStaleSeconds: stage.MaxStaleSeconds, DNSReadiness: stage.Readiness}}, zones: map[string]dnsServingZone{}}
+		state.hostedBlocked = stage.HostedBlocked
 		for _, authority := range stage.Authorities {
 			state.zoneOrder = append(state.zoneOrder, authority.Zone)
 			zone := dnsServingZone{authority: authority, records: map[string][]dnsServingRecord{}}
 			if authority.Zone == stage.Zone && stage.Exists {
 				zone.records[stage.RecordName] = []dnsServingRecord{}
 				for _, entry := range stage.Entries {
-					zone.records[stage.RecordName] = append(zone.records[stage.RecordName], dnsServingRecord{record: entry.Record, plan: entry.Plan, facts: entry.Facts})
+					zone.records[stage.RecordName] = append(zone.records[stage.RecordName], dnsServingRecord{record: entry.Record, plan: entry.Plan, facts: entry.Facts, hosted: entry.Hosted})
 				}
 			}
 			state.zones[authority.Zone] = zone

@@ -12,6 +12,7 @@ import (
 )
 
 type dnsServingRecord struct {
+	hosted *hostedDNSDecision
 	record model.EdgeDNSRecord
 	plan   platformconfig.DNSReadinessPlan
 	facts  []dnsReadinessFact
@@ -21,6 +22,9 @@ type dnsServingZone struct {
 	records   map[string][]dnsServingRecord
 }
 type dnsServingState struct {
+	// Only set on a per-query copy chosen by the hostname registry (or replay).
+	hostedWire           *hostedDNSWire
+	hostedBlocked        bool
 	record               dnsServingCheckpoint
 	payload              dnsServingPayload
 	routeID              string
@@ -153,6 +157,10 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 		}
 	}()
 	q := req.Question[0]
+	if st.hostedBlocked {
+		resp.Rcode = dns.RcodeServerFailure
+		return resp
+	}
 	name := normalizeName(q.Name)
 	zone := ""
 	for _, z := range st.zoneOrder {
@@ -190,17 +198,29 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 		recordName = edgeDNSWildcardName(name)
 		rows, exists = z.records[recordName]
 	}
+	if st.hostedWire != nil {
+		recordName, rows, exists = name, st.hostedWire.rows, true
+	}
 	answer := func(kind string) {
 		for _, entry := range rows {
 			if entry.record.Type != kind {
 				continue
 			}
-			records, err := materializeDNSQueries(platformconfig.DNSQueryView{Records: []model.EdgeDNSRecord{entry.record}}, &entry.plan, st.payload.Policy.DNSReadiness, entry.facts, now)
+			records, err := materializeDNSQueryScope(platformconfig.DNSQueryView{Records: []model.EdgeDNSRecord{entry.record}}, &entry.plan, st.payload.Policy.DNSReadiness, entry.facts, now, true, entry.hosted)
 			if err != nil || len(records) != 1 {
 				capture.record(entry, nil, hint, now, edgeDNSAnswerAudit{}, "materialization_failed")
 				resp.Rcode = dns.RcodeServerFailure
 				resp.Answer = nil
 				return
+			}
+			if entry.hosted != nil {
+				remaining := int(st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds)*time.Second).Sub(now) / time.Second)
+				if remaining < 1 {
+					resp.Rcode = dns.RcodeServerFailure
+					resp.Answer = nil
+					return
+				}
+				records[0].TTL = min(records[0].TTL, remaining)
 			}
 			if len(entry.plan.Records) > 0 && len(entry.plan.Records[0].Targets) > 0 && len(entry.record.Candidates) > 0 && len(records[0].Values) == 0 {
 				capture.record(entry, &records[0], hint, now, edgeDNSAnswerAudit{}, "readiness_quorum_unavailable")
@@ -213,7 +233,7 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 			var passive *dnsPassiveASNSelection
 			if capture != nil && capture.replaying && stage != nil && capture.selectionCursor > 0 && capture.selectionCursor <= len(stage.Selections) {
 				passive = stage.Selections[capture.selectionCursor-1].PassiveASN
-			} else if len(runtime) == 1 {
+			} else if len(runtime) == 1 && entry.hosted == nil {
 				passive = st.passiveASNSelection(runtime[0], req, remote, records[0], audit, selectionAt, len(entry.plan.Records) > 0 && len(entry.plan.Records[0].Targets) > 0)
 				if stage != nil && len(stage.Selections) > 0 {
 					stage.Selections[len(stage.Selections)-1].PassiveASN = passive

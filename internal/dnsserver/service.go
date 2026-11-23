@@ -71,6 +71,11 @@ type Service struct {
 	udpListening                  atomic.Bool
 	tcpListening                  atomic.Bool
 	platformServing               dnsServingPointer
+	hostedDNS                     atomic.Pointer[hostedDNSRoutes]
+	hostedDNSMu                   sync.Mutex
+	hostedDNSAfter                string
+	hostedDNSHistory              dnsProbeHistoryStore
+	hostedDNSWitnesses            sync.Map // locally issued, short-lived UDP/TCP challenge only
 	passiveASNView                atomic.Pointer[passiveasn.View]
 	platformCheckpoint            atomic.Pointer[dnsPersistedCheckpoint]
 	platformRenewal               atomic.Pointer[dnsServingRenewal]
@@ -612,6 +617,9 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.LoadCache(); err != nil {
 		s.Logger.Printf("dns bundle cache unavailable: %v", err)
 	}
+	if err := s.reserveHostedDNS(); err != nil {
+		return fmt.Errorf("restore reserved DNS record keys: %w", err)
+	}
 	if !s.platformServingRequired() {
 		s.reconcileHostedZoneServices(ctx, false)
 		for _, child := range s.childZoneServices() {
@@ -652,6 +660,7 @@ func (s *Service) Run(ctx context.Context) error {
 		s.Logger.Printf("fugue-dns artifact consumer started; dns_node_id=%s edge_group_id=%s", s.Config.DNSNodeID, s.Config.EdgeGroupID)
 		s.startHeartbeatLoop(ctx)
 		go s.runPlatformShadowConsumer(ctx)
+		go s.runHostedDNS(ctx)
 		go s.runPassiveASNDNS(ctx)
 		<-ctx.Done()
 		return ctx.Err()
@@ -919,6 +928,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		}
 		observed := s.decisionPublication.Load()
 		queryAt := time.Now().UTC()
+		st = s.hostedDNS.Load().forQuery(st, r, queryAt)
 		reply := st.answerObserved(r, remote, queryAt, capture, &dnsPassiveRuntime{view: s.passiveASNView.Load(), node: s.Config.DNSNodeID})
 		qtype := "unknown"
 		if len(r.Question) > 0 {
@@ -926,6 +936,9 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		}
 		s.recordQuery(qtype, miekgdns.RcodeToString[reply.Rcode])
 		writeErr := w.WriteMsg(reply)
+		if st.hostedWire != nil && writeErr == nil && w.RemoteAddr() != nil {
+			s.captureHostedDNSWrite(r, reply, w.RemoteAddr(), st, queryAt)
+		}
 		if journal != nil {
 			transport := "unknown"
 			if w.RemoteAddr() != nil {

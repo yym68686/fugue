@@ -134,6 +134,23 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(e)
 		}
 	}
+	// Stop claiming that the entire global DNS release was verified
+	// once the process owns individual records. It may only renew
+	// its own protocol capability, never substitute for host receipts.
+	kind := model.PlatformArtifactKindDNSAnswerBundle
+	exec("UPDATE fugue_platform_consumer_instances SET issued_at=now()-interval '5 min', last_heartbeat_at=now()-interval '5 min' WHERE artifact_kind=$1", kind)
+	check(1, 5)
+	seen := func(credential, child string) {
+		exec(hostedExecutorSeenSQL, model.PlatformConsumerComponentDNSServer+":charlie", kind, credential, base.ReleaseSetID, child, "set-"+kind, base.FencingToken, time.Now().UTC(), until)
+	}
+	seen("different-pod", base.DNSArtifactID)
+	check(1, 5)
+	seen("cred", "retired-child")
+	check(1, 5)
+	seen("cred", base.DNSArtifactID)
+	exec("UPDATE fugue_platform_consumer_instances SET probe_status='failed' WHERE artifact_kind=$1", kind)
+	check(1, 5)
+	exec("UPDATE fugue_platform_consumer_instances SET probe_status='passed' WHERE artifact_kind=$1", kind)
 	check(0, 5)
 	var fence int64
 	var phase string

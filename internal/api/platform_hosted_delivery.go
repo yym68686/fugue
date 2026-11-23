@@ -3,12 +3,14 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
 	"fugue/internal/store"
 	"fugue/internal/tlsissuance"
@@ -20,6 +22,10 @@ func (s *Server) handleGetPlatformConsumerHostedSelection(w http.ResponseWriter,
 
 func (s *Server) handleListPlatformConsumerHostedSelections(w http.ResponseWriter, r *http.Request) {
 	s.readPlatformConsumerHosted(w, r, true)
+}
+
+func (s *Server) handleRecordPlatformConsumerHostedReceipt(w http.ResponseWriter, r *http.Request) {
+	s.readPlatformConsumerHosted(w, r, false)
 }
 
 func (s *Server) readPlatformConsumerHosted(w http.ResponseWriter, r *http.Request, list bool) {
@@ -38,6 +44,21 @@ func (s *Server) readPlatformConsumerHosted(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	ctx := r.Context()
+	var observation routeartifact.HostedObservation
+	post := r.Method == http.MethodPost
+	if post {
+		// A node token alone does not identify the serving DNS process
+		// behind the public Service; even a negative can invalidate A.
+		if who.Component == model.PlatformConsumerComponentDNSServer && !strings.HasPrefix(who.CredentialID, "kubernetes:") {
+			httpx.WriteError(w, 403, "scoped DNS receipt requires a bound serving Pod")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		if list || httpx.DecodeJSON(r, &observation) != nil || observation.Host != host || observation.Member != who.ConsumerID() || observation.Fence < 1 || observation.Decision == "" {
+			httpx.WriteError(w, 400, "invalid scoped observation")
+			return
+		}
+	}
 	items, _, err := s.readCheckedConsumerAssignments(ctx, who, true, time.Now().UTC(), s.store.NewPlatformArtifactReadSession)
 	if err != nil {
 		httpx.WriteError(w, 503, "serving assignment unavailable")
@@ -72,10 +93,32 @@ func (s *Server) readPlatformConsumerHosted(w http.ResponseWriter, r *http.Reque
 		httpx.WriteJSON(w, 200, page)
 		return
 	}
-	p, err := s.store.ReadHostedMemberSelection(ctx, host, who, selected.Assignment, func(in store.ProjectHostRouteInputs, p pc.HostedScopeProposal) (string, error) {
+	bind := func(in store.ProjectHostRouteInputs, p pc.HostedScopeProposal) (string, error) {
 		b, e := matchHostedProjectIntent(in, p)
 		return b.Direction, e
-	})
+	}
+	if post {
+		load := s.store.NewPlatformArtifactReadSessionContext(ctx)
+		if err = s.checkConsumerInputReadsWithLoader(ctx, who, []consumerArtifactLookup{*selected}, newConsumerArtifactReader(load), true, load); err != nil {
+			httpx.WriteError(w, 409, "serving input dependencies changed")
+			return
+		}
+		h := platformcontrol.PlatformConsumerHeartbeatEnvelope{}
+		if observation.Failure == "" {
+			h.ApplyStatus, h.ProbeStatus = "applied", "passed"
+		}
+		if status, _ := s.validateDNSHeartbeatBackendSelection(ctx, who, h); status != http.StatusOK {
+			httpx.WriteError(w, status, "reporter is not the selected DNS backend")
+			return
+		}
+		if err = s.store.RecordHostedMemberObservation(ctx, host, who, selected.Assignment, observation, bind); err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	p, err := s.store.ReadHostedMemberSelection(ctx, host, who, selected.Assignment, bind)
 	if errors.Is(err, store.ErrNotFound) {
 		httpx.WriteError(w, 404, "no hosted selection for this recipient")
 		return

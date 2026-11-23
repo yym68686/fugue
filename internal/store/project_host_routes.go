@@ -170,6 +170,12 @@ func pgProjectHostInputs(ctx context.Context, tx *sql.Tx, projectID, hostname st
 	if lock {
 		update, share = " FOR UPDATE", " FOR SHARE"
 	}
+	return pgReadProjectHostInputs(ctx, tx, projectID, hostname, update, share)
+}
+
+// Receipts protect the same business rows against writers, but do not
+// modify them. A/B observations can therefore share the project/table lock.
+func pgReadProjectHostInputs(ctx context.Context, tx *sql.Tx, projectID, hostname, update, share string) (in ProjectHostRouteInputs, err error) {
 	in.Project, err = scanProject(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
 FROM fugue_projects WHERE id = $1`+update, projectID))

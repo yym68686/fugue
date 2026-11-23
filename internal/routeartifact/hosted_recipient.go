@@ -63,25 +63,83 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 	if len(groups) != len(phase.Groups) || len(phase.DNS.Views) == 0 {
 		return nil, bad
 	}
+	for _, record := range p.Records {
+		if record.AppID != p.Before.Owner.AppID || record.TenantID != p.Before.Owner.TenantID {
+			return nil, bad
+		}
+	}
+	dns, err := partitionHostedDNS(p.Host, p.Records, phase.DNS)
+	if err != nil {
+		return nil, err
+	}
+	for recipient, part := range dns {
+		out[recipient] = part
+	}
+	return out, nil
+}
+
+// Project the authenticated full independently of the incoming host command.
+// Apply the identical partitioning and per-zone ordering as the compiler.
+func HostedDNSMemberBase(host, node, group string, base pc.DNSArtifactPayload) (map[HostedRecipient]HostedRecipientInput, error) {
+	if base.ReadinessPlan == nil || base.Policy.Scope != pc.GlobalScopeKey || base.Policy.PublicationRole != "" {
+		return nil, errors.New("missing global DNS base")
+	}
+	owned := pc.HostedDNSOwnedRecords(host, base.Records, base.ReadinessPlan)
+	keys := map[[2]string]bool{}
+	probeOwners := map[string]string{}
+	for _, r := range owned {
+		keys[[2]string{r.Hostname, r.Type}] = true
+	}
+	for _, pr := range base.ReadinessPlan.Probes {
+		probeOwners[pr.ID] = pr.Hostname
+	}
+	// A member cannot isolate A if an unowned RR still depends on A's
+	// proofs. Verify reverse edges before pruning the full to local views.
+	for _, rr := range base.ReadinessPlan.Records {
+		for _, target := range rr.Targets {
+			for _, id := range target.ProbeIDs {
+				if owner, ok := probeOwners[id]; !ok || (owner == host) != keys[[2]string{rr.Hostname, target.Family}] {
+					return nil, errors.New("DNS host dependency crosses record ownership")
+				}
+			}
+		}
+	}
+	content := pc.HostedDNSContent{Plan: *base.ReadinessPlan, Rules: base.Policy.DNSAnswerRules}
+	for _, view := range base.QueryViews {
+		if view.NodeID == node && view.EdgeGroupID == group {
+			content.Views = append(content.Views, view)
+		}
+	}
+	content.Views = hostedUnitViews(pc.HostedScopeProposal{Records: owned}, content.Views)
+	content.Plan.Probes = slices.DeleteFunc(slices.Clone(content.Plan.Probes), func(pr pc.DNSReadinessProbe) bool { return pr.Hostname != host })
+	return partitionHostedDNS(host, owned, content)
+}
+
+func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSContent) (map[HostedRecipient]HostedRecipientInput, error) {
+	bad := errors.New("DNS host dependencies cannot be partitioned by node and zone")
+	if len(owned) == 0 || len(dns.Views) == 0 {
+		return nil, bad
+	}
+	out := map[HostedRecipient]HostedRecipientInput{}
 	type key struct{ host, typ string }
 	records := map[key]pc.DNSIntent{}
-	for _, r := range p.Records {
+	for _, r := range owned {
 		k := key{r.Hostname, r.Type}
-		if _, dup := records[k]; dup || r.AppID != p.Before.Owner.AppID || r.TenantID != p.Before.Owner.TenantID {
+		if _, dup := records[k]; dup || r.AppID == "" || r.TenantID == "" || r.AppID != owned[0].AppID || r.TenantID != owned[0].TenantID {
 			return nil, bad
 		}
 		records[k] = r
 	}
 	byHost := map[string]pc.DNSReadinessRecord{}
-	for _, r := range phase.DNS.Plan.Records {
+	for _, r := range dns.Plan.Records {
 		if _, dup := byHost[r.Hostname]; dup {
 			return nil, bad
 		}
 		byHost[r.Hostname] = r
 	}
 	probes := map[string]pc.DNSReadinessProbe{}
-	for _, r := range phase.DNS.Plan.Probes {
-		if r.Hostname != p.Host || r.ID == "" {
+	for _, r := range dns.Plan.Probes {
+		if r.Hostname != host || r.ID == "" {
 			return nil, bad
 		}
 		if _, dup := probes[r.ID]; dup {
@@ -94,14 +152,14 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 		k    key
 	}
 	rules := map[ruleKey]pc.DNSAnswerRule{}
-	for _, r := range phase.DNS.Rules {
+	for _, r := range dns.Rules {
 		k := ruleKey{r.NodeID, key{r.Hostname, r.Type}}
 		if _, dup := rules[k]; dup {
 			return nil, bad
 		}
 		rules[k] = r
 	}
-	for _, v := range phase.DNS.Views {
+	for _, v := range dns.Views {
 		who := HostedRecipient{model.PlatformConsumerComponentDNSServer, model.PlatformArtifactKindDNSAnswerBundle, v.NodeID, v.EdgeGroupID, v.Zone}
 		if _, dup := out[who]; dup || v.Zone == "" || v.NodeID == "" || v.EdgeGroupID == "" || len(v.Records) == 0 {
 			return nil, bad
@@ -146,7 +204,7 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 			item.DNS.Plan.Records = append(item.DNS.Plan.Records, r)
 		}
 		sort.Slice(item.DNS.Plan.Records, func(i, j int) bool { return item.DNS.Plan.Records[i].Hostname < item.DNS.Plan.Records[j].Hostname })
-		for _, probe := range phase.DNS.Plan.Probes {
+		for _, probe := range dns.Plan.Probes {
 			if needed[probe.ID] {
 				item.DNS.Plan.Probes = append(item.DNS.Plan.Probes, probe)
 			}

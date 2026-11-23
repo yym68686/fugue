@@ -122,6 +122,23 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 			t.Fatalf("scoped pull: got %d, want %d: %s", resp.Code, tc.code, resp.Body.String())
 		}
 	}
+	receipt := map[string]any{"host": "assignment.example.test", "member": model.PlatformConsumerComponentEdgeWorker + ":assignment-node", "decision": compiled.RouteArtifact.ContentHash, "fence": 1, "started_at": time.Now().UTC(), "failure": "wire_observation"}
+	for _, tc := range []struct {
+		credential string
+		want       int
+	}{
+		{admin, 401}, {tenant, 401}, {token, 404},
+		{issue(model.PlatformConsumerComponentDNSServer, "assignment-node", "global", model.PlatformArtifactKindDNSAnswerBundle), 403},
+	} {
+		resp := performJSONRequest(t, server, http.MethodPost, path+"?expected_consumer_set_id="+set.ID, tc.credential, receipt)
+		if resp.Code != tc.want {
+			t.Fatalf("scoped report: got %d, want %d: %s", resp.Code, tc.want, resp.Body.String())
+		}
+	}
+	receipt["member"] = "other-member"
+	if resp := performJSONRequest(t, server, http.MethodPost, path+"?expected_consumer_set_id="+set.ID, token, receipt); resp.Code != 400 {
+		t.Fatal("foreign reporter accepted", resp.Code)
+	}
 	if len(body.Assignments) != 1 {
 		t.Fatalf("expected one authorized assignment: %+v", body)
 	}

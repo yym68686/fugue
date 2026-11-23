@@ -75,7 +75,7 @@ func (s *Store) CheckHostedMemberSelection(ctx context.Context, p routeartifact.
 // Original project/owner, full, producer, verified LKG, set and image are
 // checked in one snapshot. No network call is made with the transaction held.
 func (s *Store) ReadHostedMemberSelection(ctx context.Context, host string, who platformcontrol.PlatformComponentIdentityClaims, a model.PlatformConsumerAssignment, bind func(ProjectHostRouteInputs, pc.HostedScopeProposal) (string, error)) (routeartifact.HostedSelectedPacket, error) {
-	var empty, packet routeartifact.HostedSelectedPacket
+	var empty routeartifact.HostedSelectedPacket
 	if s == nil || s.db == nil || bind == nil || host == "" || a.ScopeKey != pc.GlobalScopeKey || who.ScopeKey != a.ScopeKey || a.ReleaseChannel != model.PlatformArtifactReleaseChannelFull || who.CredentialID == "" || who.TokenID == "" || who.ExpiresAtUnix <= time.Now().Unix() {
 		return empty, ErrNotFound
 	}
@@ -86,10 +86,19 @@ func (s *Store) ReadHostedMemberSelection(ctx context.Context, host string, who 
 		return empty, err
 	}
 	defer tx.Rollback()
+	packet, err := s.pgReadHostedMemberSelection(ctx, tx, host, who, a, bind, false)
+	if err != nil {
+		return empty, err
+	}
+	return packet, tx.Commit()
+}
+
+func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, host string, who platformcontrol.PlatformComponentIdentityClaims, a model.PlatformConsumerAssignment, bind func(ProjectHostRouteInputs, pc.HostedScopeProposal) (string, error), lockBusiness bool) (routeartifact.HostedSelectedPacket, error) {
+	var empty, packet routeartifact.HostedSelectedPacket
 	var program, draftHash string
 	var body, manifest, priorManifest []byte
 	var phase string
-	err = tx.QueryRowContext(ctx, `SELECT scope_key,project_id,offer_sequence,draft_id,draft_digest,program_digest,program,
+	err := tx.QueryRowContext(ctx, `SELECT scope_key,project_id,offer_sequence,draft_id,draft_digest,program_digest,program,
  fence,decision,phase,members,authority_digest,business_digest,selected_at,valid_until,previous_decision,previous_members,skipped_forward_from FROM fugue_hosted_selections
  WHERE hostname=$1 AND valid_until>clock_timestamp()`, host).Scan(&packet.Scope, &packet.Project, &packet.Offer, &packet.Draft, &draftHash, &program, &body, &packet.Fence, &packet.Decision, &phase, &manifest, &packet.Authority, &packet.Business, &packet.SelectedAt, &packet.ValidUntil, &packet.Previous, &priorManifest, &packet.SkippedForwardFrom)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -131,6 +140,9 @@ func (s *Store) ReadHostedMemberSelection(ctx context.Context, host string, who 
 	if err != nil {
 		return empty, ErrNotFound
 	}
+	if err = s.checkHostedLiveHolds(ctx, tx, read, p, full, time.Now().UTC()); err != nil {
+		return empty, err
+	}
 	members := map[string]string{}
 	prior := map[string]string{}
 	if err = json.Unmarshal(manifest, &members); err != nil || len(members) > 8192 || json.Unmarshal(priorManifest, &prior) != nil || len(prior) > 8192 {
@@ -149,7 +161,11 @@ func (s *Store) ReadHostedMemberSelection(ctx context.Context, host string, who 
 			packet.PriorParts[k] = prior[k]
 		}
 	}
-	in, err := pgProjectHostInputs(ctx, tx, packet.Project, host, false)
+	lock := ""
+	if lockBusiness {
+		lock = " FOR SHARE"
+	}
+	in, err := pgReadProjectHostInputs(ctx, tx, packet.Project, host, lock, lock)
 	if err != nil {
 		return empty, err
 	}
@@ -165,8 +181,94 @@ func (s *Store) ReadHostedMemberSelection(ctx context.Context, host string, who 
 	if !packet.ValidUntil.After(time.Now()) || who.ExpiresAtUnix <= time.Now().Unix() {
 		return empty, ErrConflict
 	}
-	if err = tx.Commit(); err != nil {
-		return empty, err
-	}
 	return packet, nil
+}
+
+// Resolve the current recipient inside the write transaction. A receipt
+// cannot introduce its own manifest, choose a node/zone, renew a lease or
+// replace another domain. Match the producer's lock order before taking the
+// single host lock; both DNS transports for every zone commit together.
+func (s *Store) RecordHostedMemberObservation(ctx context.Context, host string, who platformcontrol.PlatformComponentIdentityClaims, a model.PlatformConsumerAssignment, o routeartifact.HostedObservation, bind func(ProjectHostRouteInputs, pc.HostedScopeProposal) (string, error)) error {
+	if s == nil || s.db == nil || bind == nil || host == "" || host != o.Host || a.ScopeKey != pc.GlobalScopeKey || who.ScopeKey != a.ScopeKey || a.ReleaseChannel != "full" || who.CredentialID == "" || who.TokenID == "" || who.ConsumerID() != o.Member || who.ExpiresAtUnix <= time.Now().Unix() {
+		return ErrInvalidInput
+	}
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	tx, e := s.db.BeginTx(ctx, nil)
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	if _, e = tx.ExecContext(ctx, "SET LOCAL lock_timeout='400ms'"); e != nil {
+		return e
+	}
+	for _, k := range []string{platformproducer.Scope, pc.GlobalScopeKey} {
+		if e = pgLockPromotionScope(ctx, tx, k, false); e != nil {
+			return e
+		}
+	}
+	p, e := s.pgReadHostedMemberSelection(ctx, tx, host, who, a, bind, true)
+	if e != nil {
+		return e
+	}
+	now := time.Now().UTC()
+	rows, e := o.Evaluate(p, now)
+	if e != nil {
+		return ErrConflict
+	}
+	// The authoritative freshness limit is signed by the parent compiler,
+	// not a duration chosen by the submitting consumer.
+	child, e := pgDNSRouteSourceReader(ctx, tx).artifact(a.ArtifactID)
+	if e != nil {
+		return e
+	}
+	if child.ContentHash != a.ContentHash || !platformsafety.EvaluateArtifactIntegrity(child, s.platformArtifactSigningKeyring()).Pass {
+		return ErrConflict
+	}
+	raw, e := json.Marshal(child.Content["policy"])
+	var policy pc.PolicySnapshot
+	if e != nil || json.Unmarshal(raw, &policy) != nil {
+		return ErrConflict
+	}
+	probes := policy.TLSReadiness
+	if a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+		probes = policy.DNSReadiness
+	}
+	if probes == nil || pc.ValidateReadinessProbePolicy(probes) != nil {
+		return ErrConflict
+	}
+	until := o.StartedAt.Add(time.Duration(probes.FactFreshnessSeconds) * time.Second)
+	if !until.After(now) {
+		return ErrConflict
+	}
+	if e = pgLockPromotionScope(ctx, tx, "hosted-selection:"+host, true); e != nil {
+		return e
+	}
+	for _, r := range rows {
+		if until.Before(r.ValidUntil) {
+			r.ValidUntil = until
+		}
+		e = pgRecordHostedPartLocked(ctx, tx, hostedPartReceipt{Host: host, Decision: p.Decision, Fence: p.Fence, Part: r.Part, Content: r.Content, Evidence: r.Evidence, Passing: r.Passing, ObservedAt: r.ObservedAt, ValidUntil: r.ValidUntil})
+		if e != nil {
+			return e
+		}
+	}
+	if o.Failure != "local_apply" {
+		// A valid wire attempt following local application proves this
+		// executor still speaks the protocol; a failed attempt does not
+		// count as a positive receipt for A (or for another host B).
+		if p.ValidUntil.Before(until) {
+			until = p.ValidUntil
+		}
+		if tokenUntil := time.Unix(who.ExpiresAtUnix, 0); tokenUntil.Before(until) {
+			until = tokenUntil
+		}
+		if _, e = tx.ExecContext(ctx, hostedExecutorSeenSQL, o.Member, a.ArtifactKind, who.CredentialID, a.ReleaseSetID, a.ArtifactID, a.ExpectedConsumerSetID, a.FencingToken, o.StartedAt, until); e != nil {
+			return e
+		}
+	}
+	if who.ExpiresAtUnix <= time.Now().Unix() {
+		return ErrConflict
+	}
+	return tx.Commit()
 }

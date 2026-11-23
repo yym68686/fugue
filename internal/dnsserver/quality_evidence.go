@@ -40,6 +40,12 @@ func QualityEvidenceFromCapturedDNSDecision(receipt DNSDecisionReceipt, captured
 }
 
 func QualityEvidenceFromDNSDecision(receipt DNSDecisionReceipt, now time.Time, maximumAge time.Duration) (QualityAnswerEvidence, error) {
+	// These consumers publish selectors against whole-artifact membership.
+	// A valid scoped answer has a different authority, even if every IP
+	// and the parent artifact digest are byte-for-byte identical.
+	if a := receipt.AnswerPublication; a != nil && (a.HostedHostname != "" || a.HostedFence != 0 || a.HostedDecision != "") {
+		return QualityAnswerEvidence{}, errors.New("scoped DNS decision is not a whole-publication quality receipt")
+	}
 	if maximumAge <= 0 || !receipt.WriteSucceeded || receipt.RCode != 0 || receipt.ObservedAt.IsZero() || receipt.ObservedAt.After(now) || now.Sub(receipt.ObservedAt) > maximumAge || receipt.AnswerPublication == nil {
 		return QualityAnswerEvidence{}, errors.New("actual DNS answer is absent, failed or stale")
 	}

@@ -266,6 +266,7 @@ type AgentConfig struct {
 }
 
 type EdgeConfig struct {
+	HostedExecutorAdmission         bool
 	PlatformScopeKey                string
 	APIURL                          string
 	EdgeNodeEnvFile                 string
@@ -337,6 +338,7 @@ type EdgeConfig struct {
 }
 
 type DNSConfig struct {
+	HostedExecutorAdmission    bool
 	PlatformScopeKey           string
 	APIURL                     string
 	EdgeToken                  string
@@ -676,6 +678,7 @@ func EdgeFromEnv() EdgeConfig {
 	edgeNodeEnv := readSimpleEnvFile(edgeNodeEnvFile)
 	return EdgeConfig{
 		PlatformScopeKey:          strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ARTIFACT_SCOPE")),
+		HostedExecutorAdmission:   getenvBool("FUGUE_HOSTED_EXECUTOR_ADMISSION", false),
 		APIURL:                    getenv("FUGUE_API_URL", ""),
 		EdgeNodeEnvFile:           edgeNodeEnvFile,
 		EdgeDesiredStateURL:       getenvFileFallback(edgeNodeEnv, "FUGUE_EDGE_DESIRED_STATE_URL", ""),
@@ -773,6 +776,7 @@ func DNSFromEnv() DNSConfig {
 	zone := getenv("FUGUE_DNS_ZONE", "")
 	return DNSConfig{
 		PlatformScopeKey:           strings.TrimSpace(os.Getenv("FUGUE_PLATFORM_ARTIFACT_SCOPE")),
+		HostedExecutorAdmission:    getenvBool("FUGUE_HOSTED_EXECUTOR_ADMISSION", false),
 		APIURL:                     getenv("FUGUE_API_URL", ""),
 		EdgeToken:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_TOKEN")),
 		DNSNodeID:                  strings.TrimSpace(os.Getenv("FUGUE_DNS_NODE_ID")),

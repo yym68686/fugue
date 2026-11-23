@@ -50,7 +50,34 @@ func (c Client) hostedReader(ctx context.Context, id Identity, serving model.Pla
 }
 
 func (c Client) HostedSelection(ctx context.Context, id Identity, serving model.PlatformConsumerAssignment, host string, knownFence int64, knownDecision string, keys bundleauth.Keyring) (routeartifact.HostedSelectedPacket, error) {
-	var empty routeartifact.HostedSelectedPacket
+	v, e := c.HostedCommand(ctx, id, serving, host, knownFence, knownDecision, keys)
+	return v.Packet, e
+}
+
+// Retain the actual signed envelope for durable recovery. An executor
+// must not turn a decoded payload back into an apparently signed command.
+type HostedCommand struct {
+	Artifact model.PlatformArtifact
+	Packet   routeartifact.HostedSelectedPacket
+}
+
+func (c Client) ReportHostedObservation(ctx context.Context, id Identity, serving model.PlatformConsumerAssignment, o routeartifact.HostedObservation) error {
+	if !tlsissuance.ValidHostname(o.Host) || o.Member != id.BoundConsumerID() {
+		return errors.New("scoped receipt does not belong to this executor")
+	}
+	id, path, e := c.hostedReader(ctx, id, serving)
+	if e != nil {
+		return e
+	}
+	if e = c.CheckServingAssignment(ctx, id, serving); e != nil {
+		return e
+	}
+	path += "/" + url.PathEscape(o.Host) + "?expected_consumer_set_id=" + url.QueryEscape(serving.ExpectedConsumerSetID)
+	return c.jsonLimit(ctx, path, id.Token, http.MethodPost, o, nil, 1024)
+}
+
+func (c Client) HostedCommand(ctx context.Context, id Identity, serving model.PlatformConsumerAssignment, host string, knownFence int64, knownDecision string, keys bundleauth.Keyring) (HostedCommand, error) {
+	var empty HostedCommand
 	if !tlsissuance.ValidHostname(host) {
 		return empty, errors.New("invalid hostname")
 	}
@@ -75,7 +102,11 @@ func (c Client) HostedSelection(ctx context.Context, id Identity, serving model.
 	if e = c.CheckServingAssignment(ctx, id, serving); e != nil {
 		return empty, e
 	}
-	return routeartifact.VerifyHostedPacket(a.PlatformArtifact, host, who, serving, knownFence, knownDecision, keys, time.Now().UTC())
+	p, e := routeartifact.VerifyHostedPacket(a.PlatformArtifact, host, who, serving, knownFence, knownDecision, keys, time.Now().UTC())
+	if e != nil {
+		return empty, e
+	}
+	return HostedCommand{a.PlatformArtifact, p}, nil
 }
 
 // Bounded discovery. The caller owns the cursor, and re-fetches the signed

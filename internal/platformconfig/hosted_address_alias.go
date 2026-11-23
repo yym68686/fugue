@@ -88,6 +88,23 @@ func sameHostedAddressSet(a, b []string) bool {
 	return slices.Equal(x, y)
 }
 
+// Return the records whose physical dependencies and business owner identify
+// this host in the verified DNS child. A client-provided alias list is never
+// used to determine the local predecessor or the initial reservation.
+func HostedDNSOwnedRecords(host string, records []DNSIntent, plan *DNSReadinessPlan) []DNSIntent {
+	aliases := hostedAliasParents(records, plan)
+	var owned []DNSIntent
+	for _, rr := range records {
+		if rr.Type != "A" && rr.Type != "AAAA" {
+			continue
+		}
+		if (rr.Hostname == host && rr.RecordKind == "hosted") || aliases[hostedRecordKey{rr.Hostname, rr.Type}].host == host {
+			owned = append(owned, rr)
+		}
+	}
+	return owned
+}
+
 // Keep explicit symbolic changes outside this operation. Only the per-path
 // bindings of the one retained host can legitimately differ here. Their
 // actual membership is checked by the regular route compiler and by the

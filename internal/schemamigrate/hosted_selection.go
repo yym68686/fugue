@@ -47,3 +47,12 @@ const HostedMemberDirectorySQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_member
  hostname text COLLATE "C" NOT NULL REFERENCES fugue_hosted_selections(hostname),
  PRIMARY KEY(member_id,kind,set_id,child_id,hostname)
 )`
+
+// One current capability per physical enrollment and artifact kind. This
+// is not a business receipt and never appears in the phase quorum.
+const HostedExecutorPresenceSQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_executor_presence (
+ member_id text NOT NULL, kind text NOT NULL, credential_id text NOT NULL,
+ parent_id text NOT NULL, child_id text NOT NULL, set_id text NOT NULL, parent_fence bigint NOT NULL CHECK(parent_fence>0),
+ observed_at timestamptz NOT NULL, valid_until timestamptz NOT NULL CHECK(valid_until>observed_at),
+ PRIMARY KEY (member_id,kind)
+)`

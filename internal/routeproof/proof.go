@@ -23,6 +23,9 @@ const (
 	GroupHeader   = "X-Fugue-Route-Edge-Group"
 	StateHeader   = "X-Fugue-Route-Probe-State"
 	TrafficHeader = "X-Fugue-Traffic-Release"
+	// A scoped route proof is requested for one exact decision. It never
+	// carries the global TrafficHeader or counts toward global rollout.
+	HostedDecisionHeader = "X-Fugue-Hosted-Route-Decision"
 	// Retained observations describe a previously applied LKG within its
 	// configured offline window. They cannot admit a new release.
 	ModeHeader         = "X-Fugue-Route-Probe-Mode"

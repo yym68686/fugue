@@ -32,6 +32,35 @@ func hostedMemberCapable(member model.PlatformExpectedConsumer, a model.Platform
 		slices.Contains(f.SupportedKinds, a.ArtifactKind) && slices.Contains(f.CompatibilityCapabilities, hostedMemberProtocol)
 }
 
+// A full positive is required on first contact. After an executor takes
+// ownership of any host, it must not say the entire global bundle passed.
+// Retain only the old authenticated capability, renewed by the same actual
+// executor against the same selected parent. Neither path verifies a host.
+func pgHostedMemberCapable(ctx context.Context, tx *sql.Tx, m model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment, f model.PlatformConsumerInstance, now time.Time) (bool, error) {
+	if hostedMemberCapable(m, a, f, now) {
+		return true, nil
+	}
+	if f.LastHeartbeatAt.After(now) || !hostedMemberCapable(m, a, f, f.LastHeartbeatAt) {
+		return false, nil
+	}
+	freshness := time.Duration(m.HeartbeatFreshnessSeconds) * time.Second
+	if freshness <= 0 {
+		freshness = 90 * time.Second
+	}
+	var ok bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_hosted_executor_presence
+ WHERE member_id=$1 AND kind=$2 AND credential_id=$3 AND parent_id=$4 AND child_id=$5 AND set_id=$6 AND parent_fence=$7
+ AND observed_at>=$8 AND observed_at>$9 AND observed_at<=clock_timestamp() AND valid_until>clock_timestamp())`,
+		m.ConsumerID, a.ArtifactKind, f.CredentialID, a.ReleaseSetID, a.ArtifactID, a.ExpectedConsumerSetID, a.FencingToken, f.LastHeartbeatAt, now.Add(-freshness)).Scan(&ok)
+	return ok, err
+}
+
+const hostedExecutorSeenSQL = `INSERT INTO fugue_hosted_executor_presence AS old(member_id,kind,credential_id,parent_id,child_id,set_id,parent_fence,observed_at,valid_until)
+ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ ON CONFLICT(member_id,kind) DO UPDATE SET (credential_id,parent_id,child_id,set_id,parent_fence,observed_at,valid_until)=
+ (EXCLUDED.credential_id,EXCLUDED.parent_id,EXCLUDED.child_id,EXCLUDED.set_id,EXCLUDED.parent_fence,EXCLUDED.observed_at,EXCLUDED.valid_until)
+ WHERE old.observed_at<EXCLUDED.observed_at`
+
 // A change for B may introduce another hold, but a new or lifted veto on
 // A's own physical input must not be hidden by a prepared image.
 func hostedHoldsCurrent(p pc.HostedScopeProposal, holds []pc.HostedAddressHold) bool {
@@ -138,7 +167,11 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 			if e != nil {
 				return e
 			}
-			if !hostedMemberCapable(member, a, f, time.Now().UTC()) {
+			capable, e := pgHostedMemberCapable(ctx, tx, member, a, f, time.Now().UTC())
+			if e != nil {
+				return e
+			}
+			if !capable {
 				return nil
 			}
 			enrollment, e := platformcontrol.ConsumerEnrollmentFromID(member.Component, member.NodeID, member.AuthorityID, member.ScopeKey, member.ConsumerID)

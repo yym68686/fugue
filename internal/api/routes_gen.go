@@ -497,6 +497,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerArtifact)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/host-selections", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleListPlatformConsumerHostedSelections)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/host-selections/{hostname}", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerHostedSelection)))
+	mux.Handle("POST /v1/platform-state/consumers/artifacts/{artifact_id}/host-selections/{hostname}", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleRecordPlatformConsumerHostedReceipt)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/passive-asn", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerPassiveASN)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/retained-route-sources", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerRetainedDNSRouteSources)))
 	mux.Handle("GET /v1/platform-state/consumers/artifacts/{artifact_id}/route-sources", s.auth.RequirePlatformComponent(http.HandlerFunc(s.handleGetPlatformConsumerDNSRouteSources)))

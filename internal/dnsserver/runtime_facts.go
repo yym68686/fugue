@@ -57,6 +57,7 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS serving observations unavailable")
 	}
 	initial := s.currentDNSServingSelection()
+	hosted := s.hostedDNS.Load()
 	st := initial.state
 	if st == nil {
 		fail("state_missing")
@@ -95,6 +96,27 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 	}
 	listenerFailed := s.listenerFailed.Load()
 	observed.Ready = observed.Ready && !listenerFailed
+	if hosted != nil {
+		// Keep independently usable observations for the other hosts, but
+		// never certify a complete global transport handoff using them.
+		observed.Ready = false
+		owned := map[string]bool{}
+		for _, host := range hosted.owners {
+			owned[host] = true
+		}
+		omit := map[string]bool{}
+		for _, p := range st.payload.Plan.Probes {
+			if owned[p.Hostname] {
+				omit[p.ID] = true
+			}
+		}
+		for i, f := range observed.Facts {
+			if omit[f.ProbeID] {
+				observed.Facts[i].Ready = false
+				observed.Facts[i].ProbeHistory = nil
+			}
+		}
+	}
 	raw, err := json.Marshal(observed)
 	if err != nil {
 		fail("response_encoding")
@@ -121,6 +143,8 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set(dnsfacts.ReplacementBaseHeader, baseWriter)
 			w.Header().Set(dnsfacts.ReplacementSelectionHeader, selection)
 			w.Header().Set(dnsfacts.ReplacementRenewalHeader, renewal)
+		} else if s.hostedDNS.Load() != hosted {
+			rejection = "scoped_selection_changed"
 		} else if s.listenerFailed.Load() != listenerFailed {
 			rejection = "listener_changed"
 		}

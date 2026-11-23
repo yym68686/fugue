@@ -4913,6 +4913,24 @@ paths:
         '503': {$ref: "#/components/responses/ErrorResponse"}
         default: {$ref: "#/components/responses/ErrorResponse"}
   /v1/platform-state/consumers/artifacts/{artifact_id}/host-selections/{hostname}:
+    post:
+      operationId: recordPlatformConsumerHostedReceipt
+      x-fugue-handler: handleRecordPlatformConsumerHostedReceipt
+      tags: [Edge]
+      summary: Record an enrolled executor's observations for the current host decision
+      description: Acknowledges only this member's exact selected parts. DNS requires every signed query key over UDP and TCP from the serving backend; Worker route requires every path, and TLS requires the selected owner and a fresh verified SNI observation. A failed attempt invalidates this member's earlier success. Never publishes, renews the host lease, or credits global full. Maximum request body 2 MiB.
+      security: [{PlatformComponentBearerAuth: []}]
+      parameters:
+        - {in: path, name: artifact_id, required: true, schema: {type: string}}
+        - {in: path, name: hostname, required: true, schema: {type: string, format: hostname, maxLength: 253}}
+        - {in: query, name: expected_consumer_set_id, required: true, schema: {type: string, minLength: 1}}
+      requestBody:
+        required: true
+        content:
+          application/json: {schema: {$ref: '#/components/schemas/HostedMemberObservation'}}
+      responses:
+        '204': {description: Recorded for the still-current host decision; an exact duplicate does not renew evidence.}
+        default: {$ref: '#/components/responses/ErrorResponse'}
     get:
       operationId: getPlatformConsumerHostedSelection
       summary: Read one selected hostname revision for an enrolled physical recipient
@@ -23261,10 +23279,60 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/EdgeDNSRecord"
+    HostedMemberObservation:
+      type: object
+      additionalProperties: false
+      required: [host, member, decision, fence, started_at]
+      properties:
+        host: {type: string, format: hostname}
+        member: {type: string, minLength: 1}
+        decision: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        fence: {type: integer, format: int64, minimum: 1}
+        started_at: {type: string, format: date-time}
+        failure: {type: string, enum: [local_apply, wire_observation]}
+        samples:
+          type: array
+          minItems: 1
+          maxItems: 8192
+          items: {$ref: '#/components/schemas/HostedObservationSample'}
+      oneOf:
+        - {required: [failure], not: {required: [samples]}}
+        - {required: [samples], not: {required: [failure]}}
+    HostedObservationSample:
+      type: object
+      additionalProperties: false
+      required: [host, decision, member, part, content, fence, nonce, observed_at, valid_until, transport, name]
+      properties:
+        host: {type: string, format: hostname}
+        member: {type: string}
+        part: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        content: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        decision: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        fence: {type: integer, format: int64, minimum: 1}
+        nonce: {type: string, pattern: '^[0-9a-f]{32}$'}
+        observed_at: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        name: {type: string, format: hostname}
+        transport: {type: string, enum: [udp, tcp, https, tls]}
+        zone: {type: string, format: hostname}
+        family: {type: string, enum: [A, AAAA]}
+        rrset: {type: array, minItems: 1, maxItems: 256, items: {type: string, maxLength: 1024}}
+        path: {type: string}
+        route_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        state: {type: string}
+        edge_id: {type: string}
+        group_id: {type: string}
+        owner_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        certificate_digest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+        certificate_not_before: {type: string, format: date-time}
+        chain_valid_until: {type: string, format: date-time}
     DNSDecisionPublication:
       type: object
       additionalProperties: false
       properties:
+        hosted_hostname: {type: string, format: hostname, description: HTTP hostname that owns a separately selected answer or alias.}
+        hosted_fence: {type: integer, format: int64, minimum: 1}
+        hosted_decision: {type: string, pattern: '^sha256:[0-9a-f]{64}$', description: Independent host decision. The release and child fields identify its membership parent only.}
         release_set_id: {type: string}
         parent_digest: {type: string}
         artifact_id: {type: string}

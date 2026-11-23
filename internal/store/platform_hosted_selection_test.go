@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	pc "fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
 	"fugue/internal/schemamigrate"
 )
 
@@ -47,7 +49,7 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		t.Fatal(e)
 	}
 	defer db.Close()
-	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL} {
+	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL, schemamigrate.HostedExecutorPresenceSQL} {
 		if _, e = db.Exec(ddl); e != nil {
 			t.Fatal(e)
 		}
@@ -185,6 +187,22 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 	mustRecord(receipt(a, ah, d("dns-zone-two"), true))
 	negative := receipt(a, ah, d("dns-zone-one"), false)
 	mustRecord(negative)
+	// The last zone refuses an out-of-order observation. The successful
+	// first zone write in the same receiver transaction must disappear.
+	rejected := negative
+	rejected.ObservedAt = rejected.ObservedAt.Add(-time.Microsecond)
+	rejected.Passing = true
+	if e := txcall(func(tx *sql.Tx) error {
+		if e := pgLockPromotionScope(t.Context(), tx, "hosted-selection:"+a.Claim.Host, true); e != nil {
+			return e
+		}
+		if e := pgRecordHostedPartLocked(t.Context(), tx, receipt(a, ah, d("dns-zone-two"), false)); e != nil {
+			return e
+		}
+		return pgRecordHostedPartLocked(t.Context(), tx, rejected)
+	}); !errors.Is(e, ErrConflict) {
+		t.Fatal("late batch did not roll back", e)
+	}
 	status(a, ah, 2)
 	reject(af)
 	mustRecord(receipt(a, ah, d("dns-zone-one"), true))
@@ -267,4 +285,46 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		}
 	}
 	t.Run("real producer admission with legacy and enrolled members", func(t *testing.T) { qualifyHostedProducerAdmission(t, db) })
+	t.Run("current physical holds", func(t *testing.T) {
+		exec := func(q string, args ...any) {
+			t.Helper()
+			if _, e := db.Exec(q, args...); e != nil {
+				t.Fatal(e)
+			}
+		}
+		exec("CREATE TABLE fugue_edge_nodes (id text PRIMARY KEY, edge_group_id text,public_ipv4 text,public_ipv6 text)")
+		exec("CREATE TABLE fugue_meta (key text PRIMARY KEY,value text)")
+		exec("CREATE TABLE fugue_platform_consumer_retirements (consumer_id text,artifact_kind text,scope_key text)")
+		ip4 := pc.HostedAddressHold{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", Address: "192.0.2.1"}
+		ip6 := ip4
+		ip6.Address = "2001:db8::1"
+		exec("INSERT INTO fugue_edge_nodes VALUES ($1,$2,$3,$4)", ip4.EdgeID, ip4.EdgeGroupID, ip4.Address, ip6.Address)
+		p := pc.HostedScopeProposal{Physical: []pc.HostedAddressHold{ip4, ip6}, Eligible: []pc.HostedAddressHold{ip6}}
+		h := platformproducer.OfflineEdge{EdgeID: ip4.EdgeID, EdgeGroupID: ip4.EdgeGroupID, PublicIPv4: ip4.Address, Reason: "maintenance", Recovery: &platformproducer.OfflineEdgeRecoveryPolicy{Hostname: "recovery.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}}
+		other := h
+		other.EdgeID = "unrelated"
+		other.PublicIPv4 = "192.0.2.2"
+		check := func(allow bool) {
+			t.Helper()
+			e := txcall(func(tx *sql.Tx) error {
+				return pgCheckHostedPhysical(t.Context(), tx, p, []platformproducer.OfflineEdge{h, other}, now)
+			})
+			if allow && e != nil || !allow && !errors.Is(e, ErrConflict) {
+				t.Fatalf("unexpected physical decision allowed=%v error=%v", allow, e)
+			}
+		}
+		check(true)
+		o := platformproducer.OfflineRecoveryObservation{EdgeID: h.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(h), LastSuccess: now, LastAttempt: now, ProofValidUntil: now.Add(time.Hour), Successes: 3, Admitted: true}
+		body, _ := json.Marshal(o)
+		exec("INSERT INTO fugue_meta VALUES($1,$2)", observationCheckpointKey(platformproducer.OfflineRecoveryKey(h)), string(body))
+		check(false) // ready now; a program assuming this endpoint is held is obsolete
+		p.Eligible = p.Physical
+		check(true)
+		exec("INSERT INTO fugue_platform_consumer_retirements VALUES($1,$2,'global')", model.PlatformConsumerComponentEdgeWorker+":"+ip4.EdgeID, model.PlatformArtifactKindCaddyRouteConfig)
+		check(false)
+		p.Eligible = []pc.HostedAddressHold{ip6}
+		check(true)
+		exec("UPDATE fugue_edge_nodes SET public_ipv6='2001:db8::2'")
+		check(false)
+	})
 }

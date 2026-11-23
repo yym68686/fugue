@@ -169,6 +169,10 @@ func pgRecordHostedPart(ctx context.Context, tx *sql.Tx, r hostedPartReceipt) er
 	if err := pgLockPromotionScope(ctx, tx, "hosted-selection:"+r.Host, true); err != nil {
 		return err
 	}
+	return pgRecordHostedPartLocked(ctx, tx, r)
+}
+
+func pgRecordHostedPartLocked(ctx context.Context, tx *sql.Tx, r hostedPartReceipt) error {
 	// Reject stale/changed commands even when a process is still capable of
 	// reporting a healthy global heartbeat.
 	var ok bool

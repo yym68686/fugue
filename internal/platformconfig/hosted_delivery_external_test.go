@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,27 @@ func TestHostedDeliveryUsesExactCurrentMemberWithoutTransferringGlobalProof(t *t
 				a.ArtifactID, a.ContentHash = p.Base.TLSArtifactID, p.Base.TLSArtifactDigest
 			case model.PlatformArtifactKindDNSAnswerBundle:
 				a.ArtifactID, a.ContentHash = p.Base.DNSArtifactID, p.Base.DNSArtifactDigest
+				base, e := routeartifact.HostedDNSMemberBase(p.Host, r.Node, r.Group, source.Prior)
+				if e != nil {
+					t.Fatal("could not independently resolve the full's DNS membership", e)
+				}
+				rr, ok := base[r]
+				if !ok || !reflect.DeepEqual(rr.Records, members[r].Records) {
+					t.Fatal("full disagrees with compiler about wire RR, owner, or TTL")
+				}
+				if _, e := routeartifact.HostedDNSMemberBase(p.Host, r.Node, "another-group", source.Prior); e == nil {
+					t.Fatal("base taken from another group")
+				}
+				foreign := source.Prior
+				plan := *foreign.ReadinessPlan
+				plan.Records = slices.Clone(plan.Records)
+				borrowed := plan.Records[0]
+				borrowed.Hostname = "foreign.example.test"
+				plan.Records = append(plan.Records, borrowed)
+				foreign.ReadinessPlan = &plan
+				if _, e := routeartifact.HostedDNSMemberBase(p.Host, r.Node, r.Group, foreign); e == nil {
+					t.Fatal("reverse dependency of another host dropped")
+				}
 			}
 			send := func(c platformcontrol.PlatformComponentIdentityClaims, x model.PlatformConsumerAssignment, s model.PlatformExpectedConsumerSet, phase string) (routeartifact.HostedDelivery, string, error) {
 				return routeartifact.AddressHostedPreparation(p, draft, img.Digest, img.Wire, phase, c, x, s)
@@ -146,6 +168,40 @@ func TestHostedDeliveryUsesExactCurrentMemberWithoutTransferringGlobalProof(t *t
 			if _, e = run(pf, skipped.Next, baseline); e == nil {
 				t.Fatal("replayed forward after withdraw")
 			}
+			// Restart with no in-memory cursor. Only the signed on-disk
+			// per-host decision can be reopened; it does not prove health.
+			cp := platformconsumer.HostedCheckpoint{Root: t.TempDir(), Who: claims, Serving: a, Host: p.Host, Keys: keys}
+			save := func(v routeartifact.HostedSelectedPacket, actual map[routeartifact.HostedRecipient]routeartifact.HostedRecipientInput) error {
+				cmd, e := routeartifact.SignHostedPacket(v, keys, now)
+				if e != nil {
+					return e
+				}
+				_, e = cp.Commit(cmd, actual, baseline, now)
+				return e
+			}
+			if e = save(p0, baseline); e != nil {
+				t.Fatal("initial durable admission", e)
+			}
+			if v, e := cp.Load(now); e != nil || v.Fence != 1 {
+				t.Fatal("lost selected host on reopen", e)
+			}
+			if e = save(pw, baseline); e != nil {
+				t.Fatal("missed forward on restart", e)
+			}
+			if e = save(pf, baseline); e == nil {
+				t.Fatal("downgraded durable high water")
+			}
+			if v, e := cp.Load(now); e != nil || v.Fence != 3 || v.Delivery.Phase != "withdraw" {
+				t.Fatal("lost withdrawal after replay", e)
+			}
+			if _, e = cp.Load(pw.ValidUntil); e == nil {
+				t.Fatal("expired durable selection served")
+			}
+			cpOld := cp
+			cpOld.Serving.FencingToken++
+			if _, e = cpOld.Load(now); e == nil {
+				t.Fatal("foreign full reopened checkpoint")
+			}
 			fork := preparedCursor.Next
 			fork.Decision = img.Digest
 			if _, e = run(pw, fork, baseline); e == nil {
@@ -180,12 +236,13 @@ func TestHostedDeliveryUsesExactCurrentMemberWithoutTransferringGlobalProof(t *t
 				t.Fatal("signed transport changed content", e)
 			}
 			// Cross a real HTTP transport with the receiver's own client.
-			// The simulated server answers assignment and host reads only; a
-			// successful GET must never be counted as a receipt.
+			// GET must not count as a receipt. Exercise the receiver's own
+			// POST client and the independent server-side evidence verifier.
 			selectedURL := "/v1/platform-state/consumers/artifacts/" + a.ArtifactID + "/host-selections/" + p.Host
 			var missing, changed bool
+			writes := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				if req.Method != "GET" || req.Header.Get("Authorization") != "Bearer local-only" {
+				if req.Header.Get("Authorization") != "Bearer local-only" || req.Method != "GET" && (req.Method != "POST" || req.URL.Path != selectedURL) {
 					w.WriteHeader(403)
 					return
 				}
@@ -200,6 +257,21 @@ func TestHostedDeliveryUsesExactCurrentMemberWithoutTransferringGlobalProof(t *t
 				case selectedURL:
 					if missing || req.URL.Query().Get("expected_consumer_set_id") != set.ID {
 						w.WriteHeader(404)
+						return
+					}
+					if req.Method == "POST" {
+						var o routeartifact.HostedObservation
+						if json.NewDecoder(req.Body).Decode(&o) != nil {
+							w.WriteHeader(400)
+							return
+						}
+						rows, e := o.Evaluate(packet, time.Now().UTC())
+						if e != nil || len(rows) != len(packet.Delivery.Parts) {
+							w.WriteHeader(409)
+							return
+						}
+						writes++
+						w.WriteHeader(204)
 						return
 					}
 					_, _ = w.Write(raw)
@@ -236,7 +308,23 @@ func TestHostedDeliveryUsesExactCurrentMemberWithoutTransferringGlobalProof(t *t
 				server.Close()
 				t.Fatal("real client did not retrieve exact decision", r, err)
 			}
+			o := routeartifact.HostedObservation{Host: p.Host, Member: claims.ConsumerID(), Fence: actual.Fence, Decision: actual.Decision, StartedAt: time.Now().UTC(), Failure: "wire_observation"}
+			report := func() error { return client.ReportHostedObservation(t.Context(), id, a, o) }
+			if writes != 0 || report() != nil || writes != 1 {
+				server.Close()
+				t.Fatal("GET credited or physical failure not delivered")
+			}
+			o.Fence--
+			if report() == nil || writes != 1 {
+				server.Close()
+				t.Fatal("obsolete observation credited")
+			}
+			o.Fence++
 			changed = true
+			if e := report(); !errors.Is(e, platformconsumer.ErrAssignmentChanged) || writes != 1 {
+				server.Close()
+				t.Fatal("obsolete assignment allowed a receipt", e)
+			}
 			if _, err = pull(); !errors.Is(err, platformconsumer.ErrAssignmentChanged) {
 				server.Close()
 				t.Fatal("changed parent authority passed", err)

@@ -105,6 +105,20 @@ func (o *FanoutObserver) Probe(ctx context.Context, host, path, address, expecte
 }
 
 func probeWithPool(ctx context.Context, host, path, address, expectedState string, timeout time.Duration, pool *probeTransportPool) (Proof, error) {
+	return probeDecisionWithPool(ctx, host, path, address, expectedState, "", timeout, pool)
+}
+
+// Use the same SNI authentication, direct physical address, generated nonce,
+// transport budget and chain lifetime as the global probe; select an exact
+// domain decision without allowing retained-LKG or global positive results.
+func (o *FanoutObserver) ProbeHosted(ctx context.Context, host, path, address, state, decision string, timeout time.Duration) (Proof, error) {
+	if !validHostedDecision(decision) || RetainedLKGAllowed(ctx) {
+		return Proof{}, errors.New("explicit active host decision required")
+	}
+	return probeDecisionWithPool(ctx, host, path, address, state, decision, timeout, &o.pool)
+}
+
+func probeDecisionWithPool(ctx context.Context, host, path, address, expectedState, decision string, timeout time.Duration, pool *probeTransportPool) (Proof, error) {
 	if timeout < time.Second || timeout > 10*time.Second {
 		return Proof{}, errors.New("invalid route probe timeout")
 	}
@@ -131,6 +145,9 @@ func probeWithPool(ctx context.Context, host, path, address, expectedState strin
 	}
 	req.Header.Set(routeproof.RequestHeader, "1")
 	req.Header.Set(routeproof.NonceHeader, nonce)
+	if decision != "" {
+		req.Header.Set(routeproof.HostedDecisionHeader, decision)
+	}
 	retained := RetainedLKGAllowed(ctx)
 	if retained {
 		req.Header.Set(routeproof.ModeHeader, routeproof.RetainedLKGMode)
@@ -144,7 +161,12 @@ func probeWithPool(ctx context.Context, host, path, address, expectedState strin
 	}
 	defer response.Body.Close()
 	checkedAt := time.Now().UTC()
-	proof, err := parseResponse(response, nonce, checkedAt, retained)
+	var proof Proof
+	if decision != "" {
+		proof, err = ParseHostedResponse(response, nonce, decision, checkedAt)
+	} else {
+		proof, err = parseResponse(response, nonce, checkedAt, retained)
+	}
 	if err != nil {
 		return Proof{}, err
 	}
@@ -174,6 +196,9 @@ func ParseResponse(response *http.Response, nonce string, now time.Time) (Proof,
 
 func parseResponse(response *http.Response, nonce string, now time.Time, allowRetained bool) (Proof, error) {
 	fail := errors.New("placement route proof invalid")
+	if len(response.Header.Values(routeproof.HostedDecisionHeader)) != 0 {
+		return Proof{}, fail
+	}
 	if response.StatusCode != http.StatusNoContent || !routeproof.ValidNonce(nonce) {
 		return Proof{}, fail
 	}
@@ -234,4 +259,30 @@ func parseResponse(response *http.Response, nonce string, now time.Time, allowRe
 		}
 	}
 	return Proof{BundleValidUntil: bundleExpiry, AppTrafficDigest: appTraffic, TrafficRelease: binding, Digest: digest, Version: response.Header.Get(routeproof.VersionHeader), EdgeID: response.Header.Get(routeproof.EdgeHeader), GroupID: response.Header.Get(routeproof.GroupHeader), ValidUntil: expires, State: state}, nil
+}
+
+// A host result has no global release attribution. Do not expose it to
+// old DNS/application gates as an ordinary (or retained) route proof.
+func validHostedDecision(decision string) bool {
+	decoded, e := hex.DecodeString(strings.TrimPrefix(decision, "sha256:"))
+	return e == nil && len(decoded) == 32 && strings.HasPrefix(decision, "sha256:") && decision == strings.ToLower(decision)
+}
+
+func ParseHostedResponse(resp *http.Response, nonce, decision string, now time.Time) (Proof, error) {
+	if resp == nil || !validHostedDecision(decision) || len(resp.Header.Values(routeproof.HostedDecisionHeader)) != 1 || resp.Header.Get(routeproof.HostedDecisionHeader) != decision || resp.Header.Get(routeproof.VersionHeader) != decision {
+		return Proof{}, errors.New("invalid scoped decision")
+	}
+	for _, h := range []string{routeproof.TrafficHeader, routeproof.ModeHeader, routeproof.AppTrafficHeader, routeproof.BundleExpiryHeader} {
+		if len(resp.Header.Values(h)) != 0 {
+			return Proof{}, errors.New("mixed scoped and global proof")
+		}
+	}
+	copy := *resp
+	copy.Header = resp.Header.Clone()
+	copy.Header.Del(routeproof.HostedDecisionHeader)
+	proof, e := ParseResponse(&copy, nonce, now)
+	if e == nil {
+		proof.Kind = "hosted-route"
+	}
+	return proof, e
 }

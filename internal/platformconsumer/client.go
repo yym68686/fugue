@@ -341,6 +341,9 @@ func (c Client) jsonRevalidatedBudget(ctx context.Context, endpoint, token, meth
 		return &requestFailureError{observation: observation.finish("request", 0, err)}
 	}
 	defer resp.Body.Close()
+	if out == nil && resp.StatusCode == http.StatusNoContent && method == http.MethodPost {
+		return nil
+	}
 	if resp.StatusCode == http.StatusNotModified && validator != "" && unchanged != nil && resp.Header.Get("ETag") == validator {
 		return unchanged(resp.Header)
 	}

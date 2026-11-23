@@ -22,6 +22,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/routeartifact"
 	"fugue/internal/routeprobe"
 	"github.com/miekg/dns"
 )
@@ -996,6 +997,11 @@ func (s *Service) reportDNSAssignmentStateGuarded(ctx context.Context, client pl
 }
 
 func (s *Service) reportDNSAssignmentStateLocked(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope, stillReady func() bool, sourceAfterWire *dnsServingState) (resultErr error) {
+	// A whole-parent positive receipt cannot attest the bytes & evidence
+	// privately selected for a host. Never credit scoped work to old full.
+	if h.ProbeStatus == "passed" && s.hostedDNS.Load() != nil {
+		return errors.New("DNS whole-publication proof excludes independently selected records")
+	}
 	step := "serving_state"
 	ctx, finish := observeDNSSyncPhaseWithFailureStep(ctx, "report_assignment_state", func() string { return step })
 	defer func() { finish(resultErr) }()
@@ -1053,6 +1059,9 @@ func (s *Service) reportDNSAssignmentStateLocked(ctx context.Context, client pla
 	h.Sequence, h.IssuedAt, h.Nonce = sequence, time.Now().UTC(), hex.EncodeToString(nonce)
 	h.GenerationSequence, h.DesiredGeneration = a.GenerationSequence, a.ExpectedGeneration
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
+	if s.Config.HostedExecutorAdmission && h.ApplyStatus == "applied" && h.ProbeStatus == "passed" && a.ReleaseChannel == "full" && a.ScopeKey == "global" && s.Config.CachePath != "" && s.PlatformTokenFile != "" {
+		h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind)
+	}
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse
 	if stillReady != nil {
