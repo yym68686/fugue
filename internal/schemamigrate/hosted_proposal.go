@@ -80,6 +80,11 @@ func MigrateHostedProposalGuards(ctx context.Context, databaseURL string) error 
 	if _, err := tx.ExecContext(ctx, HostedProgramImagesSQL); err != nil {
 		return fmt.Errorf("install isolated host preparation content: %w", err)
 	}
+	for _, q := range []string{HostedSelectionsSQL, HostedSelectionReceiptsSQL, HostedMemberDirectorySQL} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("install host selection storage: %w", err)
+		}
+	}
 	return tx.Commit()
 }
 

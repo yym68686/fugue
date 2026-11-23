@@ -9,7 +9,6 @@ import (
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
-	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
 )
 
@@ -49,7 +48,6 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 	if err != nil {
 		return 0, fmt.Errorf("materialize reversible host program: %w", err)
 	}
-	keys := s.platformArtifactSigningKeyring()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -65,20 +63,9 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 			return 0, err
 		}
 	}
-	read := pgDNSRouteSourceReader(ctx, tx)
-	if err = validateDNSProducerPolicySelection(read, p.Authority.Producer, keys); err != nil {
+	full, err := s.hostedSelectedBase(pgDNSRouteSourceReader(ctx, tx), p)
+	if err != nil {
 		return 0, err
-	}
-	f := p.Base
-	full, rel, err := dnsProducerSelection(read, model.PlatformArtifactKindReleaseSet, pc.GlobalScopeKey, "full", model.PlatformPublicationPrecondition{ArtifactID: f.ReleaseSetID, ContentHash: f.ReleaseSetDigest, ReleaseID: f.ReleaseID, FencingToken: f.FencingToken}, keys)
-	if err != nil || full.Metadata[platformproducer.PolicyReleaseMetadata] != p.Authority.Producer.ReleaseID || full.Content["publication_role"] != nil && full.Content["publication_role"] != "" ||
-		rel.VerificationState != model.PlatformArtifactVerificationStateVerified || rel.VerifiedLKGGeneration != full.Generation {
-		return 0, ErrConflict
-	}
-	lkg, err := read.lkg(pc.GlobalScopeKey)
-	if err != nil || lkg == nil || lkg.ID != p.Authority.LKGID || lkg.VerifiedByReleaseID != rel.ID || lkg.VerificationEvidenceHash != p.Authority.EvidenceHash ||
-		!lkg.ExpiresAt.Equal(p.Authority.ExpiresAt) || !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, full, keys, time.Now().UTC()).Pass {
-		return 0, ErrConflict
 	}
 	in, err := pgProjectHostInputs(ctx, tx, project, p.Host, true)
 	if err != nil {
@@ -95,14 +82,18 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 		return 0, ErrInvalidInput
 	}
 	var epoch int64
-	err = tx.QueryRowContext(ctx, hostedPrepareOfferCAS, key, id, draft.ContentHash, project, owner, paths, program.Prepared, program.Forward, lkg.ExpiresAt).Scan(&epoch)
+	err = tx.QueryRowContext(ctx, hostedPrepareOfferCAS, key, id, draft.ContentHash, project, owner, paths, program.Prepared, program.Forward, p.Authority.ExpiresAt).Scan(&epoch)
 	if err != nil {
 		return 0, mapDBErr(err)
 	}
-	if epoch < 1 || !lkg.ExpiresAt.After(time.Now()) {
+	if epoch < 1 || !p.Authority.ExpiresAt.After(time.Now()) {
 		return 0, ErrConflict
 	}
 	if err = putHostedProgramImage(ctx, tx, key, epoch, id, draft.ContentHash, program); err != nil {
+		return 0, err
+	}
+	claim := HostedSuccessorClaim{Scope: key, Project: project, Host: p.Host, Draft: id, DraftDigest: draft.ContentHash, Owner: owner, Paths: paths, Prepared: program.Prepared, Forward: program.Forward, Phase: "prepare", Sequence: epoch}
+	if err = pgAdmitHostedOffer(ctx, tx, full, p, in, claim, program, source.EffectiveHolds); err != nil {
 		return 0, err
 	}
 	return epoch, tx.Commit()

@@ -106,6 +106,22 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 		persist(noise)
 	}
 	body := get(token, http.StatusOK)
+	// The authenticated component may read its global shadow artifact, but
+	// that is never permission to obtain a hostname serving decision.
+	path := "/v1/platform-state/consumers/artifacts/" + compiled.RouteArtifact.ID + "/host-selections/assignment.example.test"
+	for _, tc := range []struct {
+		token, query string
+		code         int
+	}{
+		{tenant, "?expected_consumer_set_id=" + set.ID, 401}, {admin, "?expected_consumer_set_id=" + set.ID, 401},
+		{token, "", 400}, {token, "?expected_consumer_set_id=one&expected_consumer_set_id=two", 400},
+		{token, "?expected_consumer_set_id=" + set.ID, 404},
+	} {
+		resp := performJSONRequest(t, server, http.MethodGet, path+tc.query, tc.token, nil)
+		if resp.Code != tc.code {
+			t.Fatalf("scoped pull: got %d, want %d: %s", resp.Code, tc.code, resp.Body.String())
+		}
+	}
 	if len(body.Assignments) != 1 {
 		t.Fatalf("expected one authorized assignment: %+v", body)
 	}

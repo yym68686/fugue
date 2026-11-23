@@ -39,6 +39,7 @@ type Server struct {
 	operationOnce                          sync.Once
 	operations                             *runtimeobservation.Operations
 	captures                               captureObservations
+	hostedWithdrawCursor                   atomic.Value // pagination hint only, not authority
 	certificateImportRoots                 *x509.CertPool
 	newObjectStorageClient                 func(string, string) *objectstorage.Client
 	objectStorageB2Transport               http.RoundTripper

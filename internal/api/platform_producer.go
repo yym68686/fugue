@@ -299,6 +299,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, err
 	}
 	cancelCapture()
+	s.reconcileHostedWithdrawals(ctx, policy, authority, projection)
 	s.rememberProducerQualityPlan(policy, projection)
 	advance("source_digest")
 	var sourceDigest string
