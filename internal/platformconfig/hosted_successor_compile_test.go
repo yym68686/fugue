@@ -9,7 +9,7 @@ import (
 	"fugue/internal/model"
 )
 
-func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src HostedAddressSource) {
+func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src HostedAddressSource, fixtures ...func(HostedAddressSource, HostedScopeProposal)) {
 	b := DNSIntent{Hostname: "independent.example.test", Type: "A", Values: []string{"192.0.2.10"}, TTL: 90}
 	old.Intent.DNS = append(slices.Clone(old.Intent.DNS), b)
 	// A separate route under B changes deployment while A is in flight.
@@ -49,6 +49,14 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	edit.Intent.TLS = append(slices.Clone(edit.Intent.TLS), bTLS)
 	bFact := TLSDomainObservation{Hostname: b.Hostname, AppID: bTLS.AppID, TenantID: bTLS.TenantID, Ref: bTLS.DomainRef, Status: "verified", VerifiedAt: edit.RuntimeSnapshot.CapturedAt}
 	edit.RuntimeSnapshot.TLSDomains = append(slices.Clone(edit.RuntimeSnapshot.TLSDomains), bFact)
+	if len(fixtures) > 0 {
+		shared := old.Intent.Routes[0]
+		rule := TrafficPolicyConstraint{ID: "shared-rule", TenantID: shared.TenantID, AppID: shared.AppID, Mode: model.AppTrafficModeSingle, StableReleaseID: "host-stable-v1", StableWeight: 100}
+		for _, req := range []*CompileRequest{&old, &edit} {
+			req.Policy.TrafficConstraints = []TrafficPolicyConstraint{rule}
+			req.RuntimeSnapshot.Releases = []ReleaseObservation{{ID: rule.StableReleaseID, AppID: shared.AppID, TenantID: shared.TenantID, RuntimeID: shared.RuntimeID, Status: "active", UpstreamURL: "http://host-release-v1.example.test", ObservedAt: *req.RuntimeSnapshot.CapturedAt}}
+		}
+	}
 	setBase := func(c CompileResult, token int64) {
 		src.Publication.FencingToken = token
 		src.Publication.ReleaseID = "selected-" + c.ReleaseArtifact.Generation
@@ -93,6 +101,12 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		t.Fatal("offer", e)
 	}
 	p := ps[0]
+	if len(fixtures) > 0 {
+		for _, c := range fixtures {
+			c(src, p)
+		}
+		return
+	}
 	t.Run("unselected dynamic hostname must not enter the scoped DNS compiler", func(t *testing.T) {
 		// A newly enrolled sibling is valid in the complete business capture
 		// but absent in the selected full. Its rule and observation used to

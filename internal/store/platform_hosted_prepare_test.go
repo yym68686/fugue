@@ -1,14 +1,17 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"fugue/internal/routeartifact"
 	"fugue/internal/schemamigrate"
 )
 
@@ -36,7 +39,7 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 	defer tx.Rollback()
 	for _, q := range []string{
 		`CREATE TEMP TABLE fugue_platform_artifacts(id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz) ON COMMIT DROP`,
-		`SET LOCAL search_path TO pg_temp`, schemamigrate.HostedPrepareOffersSQL,
+		`SET LOCAL search_path TO pg_temp`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL,
 	} {
 		if _, err = tx.Exec(q); err != nil {
 			t.Fatal(err)
@@ -68,6 +71,39 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 		}
 	}
 	call("first", d("a"), d("b"), end, 1)
+	wireDigest := func(b []byte) string { return fmt.Sprintf("sha256:%x", sha256.Sum256(b)) }
+	program := routeartifact.CompiledHostedProgram{Prepared: d("d"), Forward: d("e"), Digest: wireDigest([]byte("fixture")), Wire: []byte("fixture")}
+	save := func(key string, sequence int64, id, hash string, p routeartifact.CompiledHostedProgram) error {
+		return putHostedProgramImage(t.Context(), tx, key, sequence, id, hash, p)
+	}
+	if err := save("scope", 1, "first", d("a"), program); err != nil {
+		t.Fatal(err)
+	}
+	tuple := func() string {
+		var revision string
+		if e := tx.QueryRow("SELECT ctid::text FROM fugue_hosted_program_images WHERE scope_key='scope'").Scan(&revision); e != nil {
+			t.Fatal(e)
+		}
+		return revision
+	}
+	version := tuple()
+	if err := save("scope", 1, "first", d("a"), program); err != nil || tuple() != version {
+		t.Fatal("exact retry rewrote body", err)
+	}
+	tampered := program
+	tampered.Wire = []byte("changed")
+	tampered.Digest = wireDigest(tampered.Wire)
+	if e := save("scope", 1, "first", d("a"), tampered); !errors.Is(e, ErrConflict) || tuple() != version {
+		t.Fatal("overwrote existing bytes", e)
+	}
+	// A second host selects the same path digest independently.
+	var otherEpoch int64
+	if e := tx.QueryRow(hostedPrepareOfferCAS, "other", "foreign", d("f"), "project", d("2"), d("c"), d("d"), d("e"), end).Scan(&otherEpoch); e != nil {
+		t.Fatal(e)
+	}
+	if e := save("other", otherEpoch, "foreign", d("f"), tampered); e != nil {
+		t.Fatal(e)
+	}
 	readPin := func() (HostedSuccessorClaim, error) {
 		c, _, e := readHostedClaim(tx.QueryRowContext(t.Context(), hostedClaimRowSQL+hostedClaimLatest+" FOR SHARE OF o", "scope"))
 		return c, e
@@ -77,7 +113,7 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 		t.Fatal("cannot bind existing offer", first, e)
 	}
 	var offered time.Time
-	if err := tx.QueryRow("SELECT offered_at FROM fugue_hosted_path_prepare_offers").Scan(&offered); err != nil {
+	if err := tx.QueryRow("SELECT offered_at FROM fugue_hosted_path_prepare_offers WHERE scope_key='scope'").Scan(&offered); err != nil {
 		t.Fatal(err)
 	}
 	call("first", d("a"), d("b"), end, 1)
@@ -85,7 +121,7 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 	call("first", d("a"), d("b"), at.Add(-time.Minute), 0)
 	call("foreign", d("f"), d("b"), end, 0)
 	var again time.Time
-	if err := tx.QueryRow("SELECT offered_at FROM fugue_hosted_path_prepare_offers").Scan(&again); err != nil || !again.Equal(offered) {
+	if err := tx.QueryRow("SELECT offered_at FROM fugue_hosted_path_prepare_offers WHERE scope_key='scope'").Scan(&again); err != nil || !again.Equal(offered) {
 		t.Fatal("retry renewed an observation", err)
 	}
 	add("second", d("1"), "scope", at.Add(time.Second))
@@ -96,6 +132,18 @@ func TestHostedPreparationOfferPostgresCAS(t *testing.T) {
 	call("second", d("1"), d("2"), end, 0)
 	call("second", d("a"), d("b"), end, 0)
 	call("second", d("1"), d("b"), end, 2)
+	if e := tx.QueryRow(readHostedProgramSQL, "scope", 1, "first", d("a"), program.Prepared, program.Forward).Scan(new(string), new([]byte)); !errors.Is(e, sql.ErrNoRows) {
+		t.Fatal("stale image visible after old writer advanced offer", e)
+	}
+	if e := save("scope", 2, "second", d("1"), tampered); e != nil {
+		t.Fatal(e)
+	}
+	if e := save("scope", 1, "first", d("a"), program); e == nil {
+		t.Fatal("stale writer replaced newer image")
+	}
+	if e := save("other", otherEpoch, "foreign", d("f"), tampered); e != nil {
+		t.Fatal("host B image no longer matches", e)
+	}
 	second, e := readPin()
 	if e != nil || second.Sequence != 2 || second.Draft != "second" || second == first {
 		t.Fatal("new offer did not fence previous sequence", second, e)

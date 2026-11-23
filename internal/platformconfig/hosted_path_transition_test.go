@@ -24,6 +24,14 @@ func HostedTransitionFixtureForTest(t *testing.T, withAlias bool, check func(Hos
 }
 
 func testHostedPathTransition(t *testing.T, withAlias bool, checks ...func(HostedAddressSource, HostedScopeProposal)) {
+	runHostedPathFixture(t, withAlias, nil, checks...)
+}
+
+func HostedFourPathFixtureForTest(t *testing.T, check func(HostedAddressSource, HostedScopeProposal)) {
+	runHostedPathFixture(t, true, check)
+}
+
+func runHostedPathFixture(t *testing.T, withAlias bool, four func(HostedAddressSource, HostedScopeProposal), checks ...func(HostedAddressSource, HostedScopeProposal)) {
 	r := consumerPlacementFixture()
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	r.Policy.MinimumHealthyEdges = 1
@@ -123,6 +131,10 @@ func testHostedPathTransition(t *testing.T, withAlias bool, checks ...func(Hoste
 		t.Fatal("global scoped capture", e)
 	}
 	proposal := proposals[0]
+	if four != nil {
+		testHostSuccessorInterleaving(t, r, next, src, four)
+		return
+	}
 	if withAlias && len(checks) == 0 {
 		t.Run("compile four paths across another publication", func(t *testing.T) {
 			testHostSuccessorInterleaving(t, r, next, src)

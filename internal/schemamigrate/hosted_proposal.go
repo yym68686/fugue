@@ -77,5 +77,19 @@ func MigrateHostedProposalGuards(ctx context.Context, databaseURL string) error 
 	if _, err := tx.ExecContext(ctx, HostedPrepareOffersSQL); err != nil {
 		return fmt.Errorf("install isolated host preparation offers: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, HostedProgramImagesSQL); err != nil {
+		return fmt.Errorf("install isolated host preparation content: %w", err)
+	}
 	return tx.Commit()
 }
+
+// Exactly one staged image per scope, not an unbounded revision log nor
+// an active release. Mixed-version writers may leave no matching image:
+// readers must join on the full offer identity, not just the hostname.
+const HostedProgramImagesSQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_program_images (
+ scope_key text PRIMARY KEY, sequence bigint NOT NULL CHECK(sequence>0),
+ draft_id text NOT NULL, draft_digest text NOT NULL CHECK(draft_digest ~ '^sha256:[a-f0-9]{64}$'),
+ program_digest text NOT NULL CHECK(program_digest ~ '^sha256:[a-f0-9]{64}$'),
+ body bytea NOT NULL CHECK(octet_length(body) BETWEEN 1 AND 4194304),
+ CHECK(program_digest = 'sha256:' || encode(sha256(body),'hex'))
+)`

@@ -12,10 +12,14 @@ import (
 // concurrent release of another host's cache, routes or DNS must not become
 // part of this host's independently withdrawable unit.
 func HostedProgramDigests(source pc.HostedAddressSource, p pc.HostedScopeProposal) (prepared, forward string, err error) {
-	a, b, err := BuildHostedProgram(source, p)
+	a, b, err := BuildHostedProgramUnits(source, p)
 	if err != nil {
 		return "", "", err
 	}
+	return hostedProgramPins(p, a, b)
+}
+
+func hostedProgramPins(p pc.HostedScopeProposal, a, b HostedPhase) (prepared, forward string, err error) {
 	prepared, err = hostedPhaseDigest(p, a)
 	if err != nil {
 		return "", "", err

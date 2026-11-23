@@ -3,6 +3,7 @@ package routeartifact
 import (
 	"errors"
 	"reflect"
+	"strings"
 
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
@@ -21,6 +22,10 @@ type HostedPhase struct {
 // compiler source. Never use a Cell's route artifact as a global group base.
 // Absence of observations for a held ingress must not omit its route.
 func BuildHostedProgram(source pc.HostedAddressSource, p pc.HostedScopeProposal) (prepared, forward HostedPhase, err error) {
+	return buildHostedProgram(source, p, false)
+}
+
+func buildHostedProgram(source pc.HostedAddressSource, p pc.HostedScopeProposal, scoped bool) (prepared, forward HostedPhase, err error) {
 	var empty HostedPhase
 	bad := errors.New("hosted DNS requirements and group routes do not form a reversible program")
 	if p.Base != source.Publication || p.Base.Validate() != nil || !p.Authority.Same(source.Authority) || source.PriorRoute == nil || source.PriorTLS == nil ||
@@ -28,15 +33,31 @@ func BuildHostedProgram(source pc.HostedAddressSource, p pc.HostedScopeProposal)
 		source.PriorTLS.ID != p.Base.TLSArtifactID || source.PriorTLS.ContentHash != p.Base.TLSArtifactDigest ||
 		source.PriorRoute.ScopeKey != pc.GlobalScopeKey || source.PriorTLS.ScopeKey != pc.GlobalScopeKey ||
 		source.PriorRoute.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || source.PriorTLS.ArtifactKind != model.PlatformArtifactKindCaddyRouteConfig ||
-		source.Prior.ReadinessPlan == nil || source.Prior.Policy.Scope != pc.GlobalScopeKey || source.Prior.Policy.PublicationRole != "" || len(p.Physical) == 0 {
+		source.Prior.ReadinessPlan == nil || source.Prior.Policy.Scope != pc.GlobalScopeKey || source.Prior.Policy.PublicationRole != "" || len(p.Physical) == 0 || strings.TrimSpace(source.PriorRoute.Generation) == "" {
 		return empty, empty, bad
 	}
+	if scoped {
+		source.Prior, err = pc.HostedDNSProgramSource(source.Prior, p)
+		if err != nil {
+			return empty, empty, err
+		}
+	}
 	base := map[string]model.EdgeRouteBundle{}
+	snapshot, err := Project(*source.PriorRoute)
+	if err != nil {
+		return empty, empty, err
+	}
 	for _, n := range p.Physical {
 		if _, exists := base[n.EdgeGroupID]; !exists {
-			b, e := MaterializeForGroup(*source.PriorRoute, n.EdgeGroupID)
+			b, e := MaterializeSnapshotForGroup(snapshot, n.EdgeGroupID)
 			if e != nil {
 				return empty, empty, e
+			}
+			if scoped {
+				b, e = hostedGroupSource(b, p)
+				if e != nil {
+					return empty, empty, e
+				}
 			}
 			base[n.EdgeGroupID] = b
 		}

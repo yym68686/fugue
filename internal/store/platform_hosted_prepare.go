@@ -45,7 +45,7 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 		return 0, ErrConflict
 	}
 	project := app.ProjectID
-	prepared, forward, err := routeartifact.HostedProgramDigests(source, p)
+	program, err := routeartifact.FreezeHostedProgram(source, p, draft.ContentHash)
 	if err != nil {
 		return 0, fmt.Errorf("materialize reversible host program: %w", err)
 	}
@@ -95,12 +95,15 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 		return 0, ErrInvalidInput
 	}
 	var epoch int64
-	err = tx.QueryRowContext(ctx, hostedPrepareOfferCAS, key, id, draft.ContentHash, project, owner, paths, prepared, forward, lkg.ExpiresAt).Scan(&epoch)
+	err = tx.QueryRowContext(ctx, hostedPrepareOfferCAS, key, id, draft.ContentHash, project, owner, paths, program.Prepared, program.Forward, lkg.ExpiresAt).Scan(&epoch)
 	if err != nil {
 		return 0, mapDBErr(err)
 	}
 	if epoch < 1 || !lkg.ExpiresAt.After(time.Now()) {
 		return 0, ErrConflict
+	}
+	if err = putHostedProgramImage(ctx, tx, key, epoch, id, draft.ContentHash, program); err != nil {
+		return 0, err
 	}
 	return epoch, tx.Commit()
 }
