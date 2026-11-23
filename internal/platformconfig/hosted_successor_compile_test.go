@@ -5,11 +5,22 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+
+	"fugue/internal/model"
 )
 
 func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src HostedAddressSource) {
 	b := DNSIntent{Hostname: "independent.example.test", Type: "A", Values: []string{"192.0.2.10"}, TTL: 90}
 	old.Intent.DNS = append(slices.Clone(old.Intent.DNS), b)
+	// A separate route under B changes deployment while A is in flight.
+	// Its origin fact is freshly captured and its DNS address stays put.
+	foreign := old.Intent.Routes[0]
+	foreign.Hostname, foreign.AppID, foreign.DeploymentGeneration = b.Hostname, "independent-app", "deployment-old"
+	foreign.RecordOriginForTest(t, "/", "independent-runtime")
+	observation := old.RuntimeSnapshot.Origins[0]
+	observation.Ref, observation.RuntimeID = foreign.OriginRef, foreign.RuntimeID
+	old.Intent.Routes = append(slices.Clone(old.Intent.Routes), foreign)
+	old.RuntimeSnapshot.Origins = append(slices.Clone(old.RuntimeSnapshot.Origins), observation)
 	edit.Intent.DNS = slices.Clone(edit.Intent.DNS)
 	edit.Intent.Routes = slices.Clone(edit.Intent.Routes)
 	for _, path := range []string{"/rpc", "/health"} {
@@ -28,6 +39,10 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	pending := b
 	pending.TTL = 300
 	edit.Intent.DNS = append(edit.Intent.DNS, pending)
+	newForeign := foreign
+	newForeign.DeploymentGeneration = "deployment-new"
+	edit.Intent.Routes = append(edit.Intent.Routes, newForeign)
+	edit.RuntimeSnapshot.Origins = append(slices.Clone(edit.RuntimeSnapshot.Origins), observation)
 	setBase := func(c CompileResult, token int64) {
 		src.Publication.FencingToken = token
 		src.Publication.ReleaseID = "selected-" + c.ReleaseArtifact.Generation
@@ -74,8 +89,17 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	check := func(c CompileResult, count, ttl int) {
 		t.Helper()
 		q, e := ProjectRouteArtifact(c.RouteArtifact)
-		if e != nil || len(q.Routes) != count || len(q.TLSAllowlist) != 1 || q.TLSAllowlist[0] != p.Before.Owner {
+		if e != nil || len(q.Routes) != count+1 || len(q.TLSAllowlist) != 1 || q.TLSAllowlist[0] != p.Before.Owner {
 			t.Fatal("dispatch/TLS", e)
+		}
+		expect := foreign.DeploymentGeneration
+		if ttl == 300 {
+			expect = newForeign.DeploymentGeneration
+		}
+		if !slices.ContainsFunc(q.Routes, func(r model.EdgeRouteIntent) bool {
+			return r.Hostname == b.Hostname && r.DeploymentGeneration == expect
+		}) {
+			t.Fatal("B's independent route was overwritten")
 		}
 		a, e := globalProposalArtifact(c.DNSArtifact, c.DNSArtifact.ArtifactKind)
 		if e != nil {
