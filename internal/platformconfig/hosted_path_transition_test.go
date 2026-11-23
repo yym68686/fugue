@@ -102,11 +102,75 @@ func testHostedPathTransition(t *testing.T, withAlias bool) {
 		s.SelectedEdgeGroupID = s.Candidates[0].EdgeGroupID
 		s.ScopedCandidates[0].Candidates = s.ScopedCandidates[0].Candidates[:1]
 	}
-	intermediate, staged, err := CompileHostedPathTransition(next, src)
-	if err != nil || !staged {
+	intermediate, capture, err := CompileHostedPathWithCapture(next, src)
+	if err != nil || capture == nil {
 		t.Fatal("missing address-only baseline", err)
 	}
+	pr, pt := prior.RouteArtifact, prior.TLSArtifact
+	pr.ID, pr.ContentHash = src.Publication.RouteArtifactID, src.Publication.RouteArtifactDigest
+	pt.ID, pt.ContentHash = src.Publication.TLSArtifactID, src.Publication.TLSArtifactDigest
+	src.PriorRoute, src.PriorTLS = &pr, &pt
+	proposals, e := BuildHostedScopeProposals(src, intermediate, capture)
+	if e != nil || len(proposals) != 1 {
+		t.Fatal("global scoped capture", e)
+	}
+	proposal := proposals[0]
+	if len(proposal.Physical) != 2 || len(proposal.Eligible) != 1 || len(proposal.Before.Routes) != 1 || len(proposal.After.Routes) != 2 ||
+		len(proposal.BaseProbes) != 2 || len(proposal.PathProbes) != 2 || proposal.After.Owner != proposal.Before.Owner || proposal.Base != src.Publication {
+		t.Fatal("wrong physical, route, TLS or probe coverage")
+	}
+	foreign := *capture
+	foreign.Desired.RouteArtifact.Scope.Key = AuthorityCellScope("cell-example")
+	if _, e := BuildHostedScopeProposals(src, intermediate, &foreign); e == nil {
+		t.Fatal("global address borrowed another cell's route authority")
+	}
 	baseline := payload(intermediate)
+	needed := 1
+	if withAlias {
+		needed = 2
+	}
+	requirements, e := SelectHostedHoldRequirements(d.Hostname, src.Prior, baseline, hold)
+	if e != nil || len(requirements) != needed {
+		t.Fatal("cannot isolate physical hold prerequisite", e, len(requirements))
+	}
+	if _, e = SelectHostedHoldRequirements(d.Hostname, src.Prior, baseline, []HostedAddressHold{{"edge-other", "edge-group-b", "93.184.216.35"}}); e == nil {
+		t.Fatal("wrong physical owner authorized removal")
+	}
+	if withAlias {
+		broken := payload(intermediate)
+		previous := payload(prior)
+		unrelated := DNSQueryView{NodeID: "another-reader", EdgeGroupID: "edge-group-other", Zone: "another.test"}
+		previous.QueryViews = append(previous.QueryViews, unrelated)
+		broken.QueryViews = append(broken.QueryViews, unrelated)
+		if _, e = SelectHostedHoldRequirements(d.Hostname, previous, broken, hold); e != nil {
+			t.Fatal("unrelated zone incorrectly had to publish this host", e)
+		}
+		broken.QueryViews[0].NodeID = "replacement-reader"
+		if _, e = SelectHostedHoldRequirements(d.Hostname, previous, broken, hold); e == nil {
+			t.Fatal("unapproved reader accepted")
+		}
+		broken = payload(intermediate)
+		for i := range broken.Records {
+			if broken.Records[i].RecordKind == "custom-domain-target" {
+				broken.Records[i].TenantID = "another-tenant"
+			}
+		}
+		if _, e = SelectHostedHoldRequirements(d.Hostname, src.Prior, broken, hold); e == nil {
+			t.Fatal("foreign alias included in scoped hold")
+		}
+		broken = payload(intermediate)
+		for vi := range broken.QueryViews {
+			for ri := range broken.QueryViews[vi].Records {
+				q := &broken.QueryViews[vi].Records[ri]
+				if q.Name == alias.Hostname && len(q.Candidates) > 0 {
+					q.Candidates[0].IP = hold[0].Address
+				}
+			}
+		}
+		if _, e = SelectHostedHoldRequirements(d.Hostname, src.Prior, broken, hold); e == nil {
+			t.Fatal("held IP still selected in a consumer view")
+		}
+	}
 	if withAlias {
 		if len(intermediate.InputSnapshot.HostedAddressReservations) != 2 || !reflect.DeepEqual(src.Prior.Records, baseline.Records) {
 			t.Fatal("same-owner reverse dependency lost its original wire declaration")

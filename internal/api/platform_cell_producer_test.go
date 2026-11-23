@@ -16,6 +16,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
+	"fugue/internal/store"
 )
 
 func cellProducerFixture(t *testing.T, s *Server, cell string) platformproducer.Policy {
@@ -258,6 +259,45 @@ func testCellRouteProducer(t *testing.T, single bool) {
 		t.Fatal("full LKG absent", err)
 	}
 	if single {
+		// Read through the real signed selection, not a diagnostic rendering.
+		// Before accepting a host it must be present with that exact route
+		// plan; the rest of the Cell cannot become eligible with it.
+		h := "private.example.net"
+		if _, err := s.readHostedDispatchSource(context.Background(), p.TargetScope, h, app.TenantID, app.ID, map[string]string{"/": "foreign-app"}); err == nil {
+			t.Fatal("foreign host target accepted")
+		}
+		rows := map[string]string{}
+		for _, r := range projected.Routes {
+			if r.Hostname == h {
+				rows[r.PathPrefix] = r.AppID
+			}
+		}
+		if len(rows) == 0 {
+			t.Fatal("route fixture must include its custom host")
+		}
+		source, err := s.readHostedDispatchSource(context.Background(), p.TargetScope, h, app.TenantID, app.ID, rows)
+		if err != nil || source.Release != full.ID || source.Fence != full.FencingToken || source.LKG != baseline.ID || !source.ExpiresAt.Equal(baseline.ExpiresAt) || len(source.Host.Routes) != len(rows) {
+			t.Fatalf("scoped projection of current signed full: %v", err)
+		}
+		pin := source.selection()
+		for _, mutate := range []func(*store.HostedDispatchSelection){
+			func(p *store.HostedDispatchSelection) { p.Full.FencingToken++ },
+			func(p *store.HostedDispatchSelection) { p.LKGID = "recreated" },
+			func(p *store.HostedDispatchSelection) { p.EvidenceHash = "borrowed" },
+			func(p *store.HostedDispatchSelection) { p.ExpiresAt = p.ExpiresAt.Add(time.Second) },
+			func(p *store.HostedDispatchSelection) { p.Scope = platformconfig.GlobalScopeKey },
+		} {
+			bad := pin
+			mutate(&bad)
+			if err := st.ValidateHostedDispatchSelections(context.Background(), []store.HostedDispatchSelection{bad}); err == nil {
+				t.Fatal("changed host source, fence or lifetime accepted")
+			}
+		}
+		other := pin
+		other.Scope = platformconfig.GlobalScopeKey
+		if err := st.ValidateHostedDispatchSelections(context.Background(), []store.HostedDispatchSelection{pin, other}); err == nil {
+			t.Fatal("one valid scope covered a second invalid source")
+		}
 		p.Generation, p.Mode = "producer-serving-once", "serving"
 		p.Serving = &platformproducer.ServingPolicy{SinglePublication: true, CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}
 		raw, _ := json.Marshal(p)

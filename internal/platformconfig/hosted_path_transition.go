@@ -59,6 +59,27 @@ func NewHostedPathReservationHosts(prior DNSArtifactPayload, desired PlatformInt
 // There is no direct mixed-topology promotion. If the intermediate full did
 // not verify, recapturing the desired state yields the first step again.
 func CompileHostedPathTransition(req CompileRequest, source HostedAddressSource) (CompileResult, bool, error) {
+	return compileHostedPathTransition(req, source, nil)
+}
+
+// A proposal is extracted from the same original global compile that the
+// ordinary producer already performs. It is not obtained by borrowing a
+// routing Cell's authority for machines outside that Cell's enrollment.
+type HostedTransitionCapture struct {
+	Hosts   []string
+	Desired CompileResult
+}
+
+func CompileHostedPathWithCapture(req CompileRequest, source HostedAddressSource) (CompileResult, *HostedTransitionCapture, error) {
+	var capture HostedTransitionCapture
+	baseline, staged, err := compileHostedPathTransition(req, source, &capture)
+	if err != nil || !staged {
+		return baseline, nil, err
+	}
+	return baseline, &capture, nil
+}
+
+func compileHostedPathTransition(req CompileRequest, source HostedAddressSource, capture *HostedTransitionCapture) (CompileResult, bool, error) {
 	fail := errors.New("hosted path transition cannot prove intermediate topology")
 	source.managedHosts = NewHostedPathReservationHosts(source.Prior, req.Intent, source.EffectiveHolds)
 	for _, retained := range source.Inherited {
@@ -146,6 +167,10 @@ func CompileHostedPathTransition(req CompileRequest, source HostedAddressSource)
 				return CompileResult{}, false, fail
 			}
 		}
+	}
+	if capture != nil {
+		capture.Hosts = slices.Clone(hosts)
+		capture.Desired = with
 	}
 	return staged, true, nil
 }

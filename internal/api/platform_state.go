@@ -117,6 +117,10 @@ func (s *Server) handleValidatePlatformArtifact(w http.ResponseWriter, r *http.R
 		s.writeStoreError(w, err)
 		return
 	}
+	if artifact.ArtifactKind == model.PlatformArtifactKindHostedPathProposal {
+		httpx.WriteError(w, http.StatusConflict, "compiler proposal cannot be validated for release")
+		return
+	}
 	if artifact.ArtifactKind == model.PlatformArtifactKindPolicySnapshot {
 		if err := validatePlatformPolicyArtifact(artifact); err != nil {
 			httpx.WriteError(w, http.StatusConflict, err.Error())

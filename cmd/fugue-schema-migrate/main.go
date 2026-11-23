@@ -183,6 +183,9 @@ func migrateSchema(ctx context.Context, databaseURL string) error {
 	if err := schemamigrate.MigratePlatformShadowConsumers(ctx, databaseURL); err != nil {
 		return err
 	}
+	if err := schemamigrate.MigrateHostedProposalGuards(ctx, databaseURL); err != nil {
+		return err
+	}
 	if err := schemamigrate.MigrateCompilerContract(ctx, databaseURL); err != nil {
 		return err
 	}

@@ -63,6 +63,14 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 	if p.phase == "" {
 		return ordinary, nil
 	}
+	if p.phase == "initial" {
+		// Only a pending root-to-path transition gets a new compilation
+		// contract. Do not churn unrelated steady-state or Cell captures.
+		return platformconfig.Digest(struct {
+			Source, Phase, Contract string
+			Hosts                   []string
+		}{ordinary, p.phase, platformconfig.HostedProposalSchema, p.hosts})
+	}
 	return platformconfig.Digest(struct {
 		Source, Phase string
 		Hosts         []string
@@ -179,5 +187,7 @@ func (s *Server) readHostedAddressSource(ctx context.Context, policy platformpro
 	if err = s.store.ValidateDNSProducerSelection(ctx, model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, model.PlatformPublicationPrecondition{ArtifactID: old.parent.ID, ContentHash: old.parent.ContentHash, ReleaseID: old.release.ID, FencingToken: old.release.FencingToken}); err != nil {
 		return out, err
 	}
-	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, Inherited: old.snapshot.HostedAddressReservations, PriorHolds: holds(previous), EffectiveHolds: effective}, nil
+	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, PriorRoute: &old.route, PriorTLS: &tls,
+		Authority: platformconfig.HostedProposalAuthority{Producer: model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, LKGID: old.lkg.ID, EvidenceHash: old.lkg.VerificationEvidenceHash, ExpiresAt: old.lkg.ExpiresAt},
+		Inherited: old.snapshot.HostedAddressReservations, PriorHolds: holds(previous), EffectiveHolds: effective}, nil
 }

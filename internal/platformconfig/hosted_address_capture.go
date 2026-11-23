@@ -4,14 +4,20 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+
+	"fugue/internal/model"
 )
 
 // HostedAddressSource is supplied by the trusted publisher, not decoded from
 // a public compile request. A syntactically valid reference is not authority.
 type HostedAddressSource struct {
-	Publication                PreviousTrafficPublicationReference
-	PriorIntent                PlatformIntent
-	Prior                      DNSArtifactPayload
+	Publication PreviousTrafficPublicationReference
+	Authority   HostedProposalAuthority
+	PriorIntent PlatformIntent
+	Prior       DNSArtifactPayload
+	// The producer has verified these two children of Publication. They are
+	// never serialized as part of a tenant's host-only proposal.
+	PriorRoute, PriorTLS       *model.PlatformArtifact
 	Inherited                  []HostedAddressReservation
 	PriorHolds, EffectiveHolds []HostedAddressHold
 	// nil is an unrestricted diagnostic compile. Production always supplies

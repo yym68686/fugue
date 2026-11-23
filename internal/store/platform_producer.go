@@ -37,6 +37,11 @@ func (s *Store) ReleaseProducedTrafficArtifact(id, policyReleaseID, channel, pre
 }
 
 func validateProducerPolicyPublication(a model.PlatformArtifact, channel string) error {
+	// Applies to both release and rollback in the file and SQL stores,
+	// including shadow, idempotent retries and administrative overrides.
+	if a.ArtifactKind == model.PlatformArtifactKindHostedPathProposal {
+		return fmt.Errorf("%w: compiler proposal has no publication lane", ErrConflict)
+	}
 	if a.ScopeKey == platformproducer.InputDeferralScope {
 		if _, err := platformproducer.DecodeInputDeferral(a); err != nil || channel != model.PlatformArtifactReleaseChannelShadow {
 			return fmt.Errorf("%w: input deferral requires valid shadow publication", ErrConflict)

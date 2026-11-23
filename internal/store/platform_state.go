@@ -41,6 +41,7 @@ var validPlatformArtifactKinds = map[string]struct{}{
 	model.PlatformArtifactKindPlatformIntent:            {},
 	model.PlatformArtifactKindPolicySnapshot:            {},
 	model.PlatformArtifactKindReleaseSet:                {},
+	model.PlatformArtifactKindHostedPathProposal:        {},
 }
 
 func NormalizePlatformArtifactKind(raw string) string {
@@ -111,6 +112,9 @@ func NormalizePlatformArtifactScope(scope model.PlatformArtifactScope) (model.Pl
 }
 
 func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.PlatformArtifact, error) {
+	if NormalizePlatformArtifactKind(in.ArtifactKind) == model.PlatformArtifactKindHostedPathProposal {
+		return model.PlatformArtifact{}, ErrInvalidInput
+	}
 	artifact, err := normalizePlatformArtifactForStore(in)
 	if err != nil {
 		return model.PlatformArtifact{}, err
@@ -150,6 +154,13 @@ func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 // returns the existing equivalent artifact. A reused generation with different
 // signed inputs is a conflict rather than an update.
 func (s *Store) EnsurePlatformArtifact(in model.PlatformArtifact) (model.PlatformArtifact, bool, error) {
+	if NormalizePlatformArtifactKind(in.ArtifactKind) == model.PlatformArtifactKindHostedPathProposal {
+		return model.PlatformArtifact{}, false, ErrInvalidInput
+	}
+	return s.ensurePlatformArtifact(in)
+}
+
+func (s *Store) ensurePlatformArtifact(in model.PlatformArtifact) (model.PlatformArtifact, bool, error) {
 	artifact, err := normalizePlatformArtifactForStore(in)
 	if err != nil {
 		return model.PlatformArtifact{}, false, err
@@ -374,6 +385,9 @@ func (s *Store) ValidatePlatformArtifact(id string, results []model.PlatformArti
 		for index := range state.PlatformArtifacts {
 			if state.PlatformArtifacts[index].ID != id && state.PlatformArtifacts[index].Generation != id {
 				continue
+			}
+			if state.PlatformArtifacts[index].ArtifactKind == model.PlatformArtifactKindHostedPathProposal {
+				return ErrConflict
 			}
 			state.PlatformArtifacts[index].ValidationResults = results
 			state.PlatformArtifacts[index].Status = platformArtifactStatusFromValidation(results)
@@ -748,7 +762,7 @@ func (s *Store) verifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 			return ErrNotFound
 		}
 		release = state.PlatformArtifactReleases[releaseIndex]
-		if release.Status != model.PlatformArtifactReleaseStatusActive {
+		if release.ArtifactKind == model.PlatformArtifactKindHostedPathProposal || release.Status != model.PlatformArtifactReleaseStatusActive {
 			return ErrConflict
 		}
 		lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, release.LaneKey)

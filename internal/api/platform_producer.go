@@ -392,7 +392,19 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		if source.Publication.ReleaseID != hosted.selected.ID || source.Publication.FencingToken != hosted.selected.FencingToken || source.Publication.ReleaseSetID != hosted.selected.ArtifactID {
 			return interval, fmt.Errorf("hosted address source changed before compilation")
 		}
-		compiled, _, err = platformconfig.CompileHostedPathTransition(req, source)
+		var scoped *platformconfig.HostedTransitionCapture
+		compiled, scoped, err = platformconfig.CompileHostedPathWithCapture(req, source)
+		if err == nil && scoped != nil {
+			advance("record_host_path_proposals")
+			// Independent bounded draft only. A proposal rejection does not
+			// change or suppress ordinary configuration compilation/publication.
+			proposalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			ids, proposalErr := s.store.EnsureCompiledHostedPathProposals(proposalCtx, source, compiled, scoped)
+			cancel()
+			if s.log != nil {
+				s.log.Printf("hosted path compiler proposals policy_release=%s base_release=%s ids=%v error=%v", authority.ID, source.Publication.ReleaseID, ids, proposalErr)
+			}
+		}
 		if err == nil && len(compiled.InputSnapshot.HostedAddressReservations) > 0 {
 			provenance.hostedSource = source.Publication
 		}

@@ -358,10 +358,10 @@ func (s *Store) pgValidatePlatformArtifact(id string, results []model.PlatformAr
 	out, err := scanPlatformArtifact(s.db.QueryRowContext(ctx, `
 UPDATE fugue_platform_artifacts
 SET status = $2, validation_results_json = $3::jsonb, updated_at = $4
-WHERE id = $1 OR generation = $1
+WHERE (id = $1 OR generation = $1) AND artifact_kind <> $5
 RETURNING id, artifact_kind, scope_key, scope_json, schema_version, generation, generation_sequence, status, content_hash,
 	fugue_platform_artifact_body(content_hash, content_json), validation_results_json, compatibility_floor, metadata_json,
-	created_by_type, created_by_id, provenance_json, created_at, updated_at`, id, status, validationJSON, time.Now().UTC()))
+	created_by_type, created_by_id, provenance_json, created_at, updated_at`, id, status, validationJSON, time.Now().UTC(), model.PlatformArtifactKindHostedPathProposal))
 	if err != nil {
 		return model.PlatformArtifact{}, mapDBErr(err)
 	}
@@ -965,7 +965,7 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx context.Cont
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
-	if release.Status != model.PlatformArtifactReleaseStatusActive ||
+	if release.ArtifactKind == model.PlatformArtifactKindHostedPathProposal || release.Status != model.PlatformArtifactReleaseStatusActive ||
 		release.LaneKey != releaseSnapshot.LaneKey ||
 		release.ArtifactKind != releaseSnapshot.ArtifactKind ||
 		release.ScopeKey != releaseSnapshot.ScopeKey {
