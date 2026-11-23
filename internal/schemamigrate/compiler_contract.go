@@ -34,12 +34,6 @@ BEGIN
  END IF;
  RETURN NEW;
 END $$;
-DROP TRIGGER IF EXISTS fugue_compiler_contract_control ON fugue_platform_compiler_contract;
-CREATE TRIGGER fugue_compiler_contract_control BEFORE UPDATE OR DELETE ON fugue_platform_compiler_contract
- FOR EACH ROW EXECUTE FUNCTION fugue_guard_compiler_contract_control();
-DROP TRIGGER IF EXISTS fugue_compiler_contract_truncate ON fugue_platform_compiler_contract;
-CREATE TRIGGER fugue_compiler_contract_truncate BEFORE TRUNCATE ON fugue_platform_compiler_contract
- FOR EACH STATEMENT EXECUTE FUNCTION fugue_guard_compiler_contract_control();
 
 -- The database rejects old direct writers as well as the current application.
 -- Exact equality is intentional: an unknown v39 is not implicitly authorized.
@@ -94,14 +88,33 @@ BEGIN
  RETURN NEW;
 END $$;
 DO $$
-DECLARE t text;
+DECLARE s record;
 BEGIN
- FOREACH t IN ARRAY ARRAY['fugue_platform_artifacts','fugue_platform_artifact_releases',
- 'fugue_platform_release_lanes','fugue_platform_lkg_snapshots','fugue_platform_lkg_snapshot_history',
- 'fugue_platform_consumer_instances','fugue_platform_shadow_consumers'] LOOP
-  EXECUTE format('DROP TRIGGER IF EXISTS fugue_compiler_contract_root ON %I',t);
-  EXECUTE format('CREATE TRIGGER fugue_compiler_contract_root BEFORE INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION fugue_guard_compiler_contract_root()',t);
-  EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER fugue_compiler_contract_root',t);
+ -- tgtype flags: ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32.
+ -- CREATE OR REPLACE FUNCTION above preserves function OIDs. For a trigger
+ -- already attached with the exact semantics no table lock is necessary.
+ FOR s IN
+  SELECT * FROM (VALUES
+   ('fugue_platform_compiler_contract','fugue_compiler_contract_control','fugue_guard_compiler_contract_control','UPDATE OR DELETE','ROW',27,'O'),
+   ('fugue_platform_compiler_contract','fugue_compiler_contract_truncate','fugue_guard_compiler_contract_control','TRUNCATE','STATEMENT',34,'O')
+  ) AS control(rel,trig,fn,events,granularity,bits,mode)
+  UNION ALL
+  SELECT rel,'fugue_compiler_contract_root','fugue_guard_compiler_contract_root','INSERT OR UPDATE','ROW',23,'A'
+  FROM unnest(ARRAY['fugue_platform_artifacts','fugue_platform_artifact_releases',
+   'fugue_platform_release_lanes','fugue_platform_lkg_snapshots','fugue_platform_lkg_snapshot_history',
+   'fugue_platform_consumer_instances','fugue_platform_shadow_consumers']) AS roots(rel)
+ LOOP
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=s.rel::regclass AND tgname=s.trig
+      AND tgfoid=to_regprocedure(s.fn || '()') AND tgtype=s.bits AND tgenabled::text=s.mode
+      AND NOT tgisinternal AND tgconstraint=0 AND tgparentid=0 AND tgnargs=0
+      AND tgattr=''::int2vector AND tgqual IS NULL AND tgoldtable IS NULL AND tgnewtable IS NULL) THEN
+   CONTINUE;
+  END IF;
+  EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I',s.trig,s.rel);
+  EXECUTE format('CREATE TRIGGER %I BEFORE %s ON %I FOR EACH %s EXECUTE FUNCTION %I()',s.trig,s.events,s.rel,s.granularity,s.fn);
+  IF s.mode='A' THEN
+   EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER %I',s.rel,s.trig);
+  END IF;
  END LOOP;
 END $$;
 `

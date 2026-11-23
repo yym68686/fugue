@@ -11,7 +11,12 @@ import (
 // reroutes, or changes a reader. Archive writers and reader routing require a
 // later, separately gated rollout.
 const CompilerInputArchiveSQL = `
-ALTER TABLE fugue_platform_input_manifests ADD COLUMN IF NOT EXISTS storage_location TEXT NOT NULL DEFAULT 'legacy' CHECK (storage_location IN ('legacy','hot'));
+DO $location$
+BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='fugue_platform_input_manifests'::regclass AND attname='storage_location' AND NOT attisdropped) THEN
+  ALTER TABLE fugue_platform_input_manifests ADD COLUMN IF NOT EXISTS storage_location TEXT NOT NULL DEFAULT 'legacy' CHECK (storage_location IN ('legacy','hot'));
+ END IF;
+END $location$;
 CREATE TABLE IF NOT EXISTS fugue_platform_input_hot_chunks (
  content_hash TEXT NOT NULL REFERENCES fugue_platform_input_manifests(content_hash) DEFERRABLE INITIALLY DEFERRED,
  ordinal INTEGER NOT NULL CHECK (ordinal>=0 AND ordinal<1048576),
@@ -100,10 +105,17 @@ CREATE TABLE IF NOT EXISTS fugue_platform_input_archive_control (
  retirement_archive_policy_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_archive_policy_sha256='' OR retirement_archive_policy_sha256 ~ '^[0-9a-f]{64}$'),
  updated_at TIMESTAMPTZ NOT NULL
 );
-ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_plan_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_plan_sha256='' OR retirement_plan_sha256 ~ '^[0-9a-f]{64}$');
-ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_reader_current TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_current='' OR retirement_reader_current ~ '^[0-9a-f]{40}$');
-ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_reader_rollback TEXT NOT NULL DEFAULT '' CHECK (retirement_reader_rollback='' OR retirement_reader_rollback ~ '^[0-9a-f]{40}$');
-ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS retirement_archive_policy_sha256 TEXT NOT NULL DEFAULT '' CHECK (retirement_archive_policy_sha256='' OR retirement_archive_policy_sha256 ~ '^[0-9a-f]{64}$');
+DO $archive_control$
+DECLARE field_name text; pattern text;
+BEGIN
+ FOR field_name,pattern IN VALUES ('retirement_plan_sha256','^[0-9a-f]{64}$'),
+    ('retirement_reader_current','^[0-9a-f]{40}$'),('retirement_reader_rollback','^[0-9a-f]{40}$'),
+    ('retirement_archive_policy_sha256','^[0-9a-f]{64}$') LOOP
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='fugue_platform_input_archive_control'::regclass AND attname=field_name AND NOT attisdropped) THEN
+   EXECUTE format('ALTER TABLE fugue_platform_input_archive_control ADD COLUMN IF NOT EXISTS %1$I TEXT NOT NULL DEFAULT %2$L CHECK (%1$I=%2$L OR %1$I ~ %3$L)',field_name,'',pattern);
+  END IF;
+ END LOOP;
+END $archive_control$;
 INSERT INTO fugue_platform_input_archive_control(singleton,epoch,writes_fenced,updated_at)
  VALUES(TRUE,0,FALSE,now()) ON CONFLICT(singleton) DO NOTHING;
 ` + CompilerInputHistoryAdmissionSQL + `

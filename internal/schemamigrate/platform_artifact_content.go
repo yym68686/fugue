@@ -9,10 +9,18 @@ import (
 // A separate nullable FK protects referenced bodies without scanning/rejecting
 // legacy inline rows. No historical bytes are rewritten during schema rollout.
 const PlatformArtifactContentSQL = `
-ALTER TABLE fugue_platform_artifacts ALTER COLUMN content_json DROP NOT NULL;
-ALTER TABLE fugue_platform_artifacts ADD COLUMN IF NOT EXISTS content_ref_hash TEXT;
 DO $artifact_content$
 BEGIN
+ -- Even a no-op ALTER TABLE takes an exclusive lock. Inspect the catalog
+ -- first so restarting a fully migrated component can coexist with traffic.
+ IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='fugue_platform_artifacts'::regclass
+     AND attname='content_json' AND NOT attisdropped AND NOT attnotnull) THEN
+  ALTER TABLE fugue_platform_artifacts ALTER COLUMN content_json DROP NOT NULL;
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='fugue_platform_artifacts'::regclass
+     AND attname='content_ref_hash' AND NOT attisdropped) THEN
+  ALTER TABLE fugue_platform_artifacts ADD COLUMN IF NOT EXISTS content_ref_hash TEXT;
+ END IF;
  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='fugue_platform_artifacts'::regclass AND conname='fugue_artifact_content_reference_check') THEN
   ALTER TABLE fugue_platform_artifacts ADD CONSTRAINT fugue_artifact_content_reference_check
    CHECK ((content_ref_hash IS NULL AND content_json IS NOT NULL) OR
