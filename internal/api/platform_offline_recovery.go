@@ -254,6 +254,10 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 	if err := projectDNSReadinessWithPolicy(result, nodes, at, &copy); err != nil {
 		return err
 	}
+	result.hostedAddressHolds = nil
+	for _, h := range effective {
+		result.hostedAddressHolds = append(result.hostedAddressHolds, platformconfig.HostedAddressHold{EdgeID: h.EdgeID, EdgeGroupID: h.EdgeGroupID, Address: h.PublicIPv4})
+	}
 	if len(observations) > 0 {
 		if result.RuntimeSnapshot.Facts == nil {
 			result.RuntimeSnapshot.Facts = map[string]any{}

@@ -27,6 +27,9 @@ type platformCompilationSource struct {
 	StaticIntentDigest string
 	DNSPolicyID        string
 	DNSPolicyDigest    string
+	// Never decoded from runtime Facts or HTTP. Bound by the producer after
+	// its independent verified-full selection, then checked again on serving.
+	hostedSource platformconfig.PreviousTrafficPublicationReference
 }
 
 func (err *platformConfigReferenceError) Error() string { return err.reason }
@@ -82,8 +85,12 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 		}
 		if len(sources) == 0 {
 			sources = append(sources, source)
-		} else if sources[0] != source {
-			return platformConfigCompileResponse{}, store.ErrConflict
+		} else {
+			bindingOnly := sources[0]
+			bindingOnly.hostedSource = platformconfig.PreviousTrafficPublicationReference{}
+			if bindingOnly != source {
+				return platformConfigCompileResponse{}, store.ErrConflict
+			}
 		}
 	} else if len(sources) > 0 {
 		return platformConfigCompileResponse{}, store.ErrInvalidInput
@@ -93,6 +100,20 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	if err := ctx.Err(); err != nil {
 		return platformConfigCompileResponse{}, err
+	}
+	if rs := compiled.InputSnapshot.HostedAddressReservations; len(rs) != 0 {
+		ref, digest, e := platformconfig.HostedAddressAuthority(compiled.DNSArtifact)
+		parentRef, parentDigest, pe := platformconfig.HostedAddressAuthority(compiled.ReleaseArtifact)
+		expected, de := platformconfig.Digest(rs)
+		if e != nil || pe != nil || de != nil || ref == nil || parentRef == nil || *ref != *parentRef || expected != digest || digest != parentDigest ||
+			principal.ActorType != model.ActorTypeBootstrap || principal.ActorID != platformproducer.Actor || len(sources) != 1 || sources[0].StaticIntentID == "" || sources[0].DNSPolicyID == "" || sources[0].hostedSource != *ref {
+			return platformConfigCompileResponse{}, store.ErrConflict
+		}
+		for _, r := range rs {
+			if r.Source != *ref {
+				return platformConfigCompileResponse{}, store.ErrConflict
+			}
+		}
 	}
 	if err := s.validateCellDNSCompilation(compiled); err != nil {
 		return platformConfigCompileResponse{}, err
@@ -166,6 +187,11 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	advance("parent_build")
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
+	for _, k := range []string{platformconfig.HostedAddressReservationsDigestMetadata, platformconfig.HostedAddressSourceMetadata} {
+		if value, ok := compiled.ReleaseArtifact.Metadata[k]; ok {
+			parent.Metadata[k] = value
+		}
+	}
 	if digest := compiled.ReleaseArtifact.Metadata[platformconfig.QualityEvidenceDigestMetadata]; digest != "" {
 		parent.Metadata[platformconfig.QualityEvidenceDigestMetadata] = digest
 	}

@@ -62,7 +62,7 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 
 func validateProducerReleaseGuardWithTrace(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard, trace *platformProducerGuardTrace) error {
 	if guard == nil {
-		return nil
+		return rejectUnboundHostedPublication(parent, req.ReleaseChannel)
 	}
 	trace.advance(producerGuardParent)
 	if guard.Phase == "rollback" {
@@ -243,7 +243,7 @@ func validateProducerReleaseGuardWithTrace(state *model.State, parent model.Plat
 // the same scope lock; reading its lane first cannot deadlock against a writer.
 func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard) error {
 	if guard == nil {
-		return nil
+		return rejectUnboundHostedPublication(parent, req.ReleaseChannel)
 	}
 	trace := beginPlatformProducerGuardTrace(ctx)
 	defer trace.finish()

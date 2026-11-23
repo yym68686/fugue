@@ -20,6 +20,16 @@ type OriginObservation struct {
 	RuntimeClusterNode string    `json:"runtime_cluster_node,omitempty"`
 }
 
+// OriginObservationRef is the existing deterministic lookup key. The
+// observation addresses an app/runtime; the key also namespaces it by route.
+func OriginObservationRef(host, path, app, runtime string) (string, error) {
+	ref, err := Digest([]string{host, model.NormalizeAppRoutePathPrefix(path), app, runtime})
+	if err != nil {
+		return "", err
+	}
+	return "origin_" + strings.TrimPrefix(ref, "sha256:"), nil
+}
+
 // CompiledRoute adds fixed origin placement to the declared route. It exists
 // only inside the immutable artifact; its observed status is not persisted
 // back into PlatformIntent.

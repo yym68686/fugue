@@ -698,6 +698,14 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 	if err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, mapDBErr(err)
 	}
+	if guard == nil {
+		if err := rejectUnboundHostedPublication(target, req.ReleaseChannel); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+		if err := rejectUnboundHostedPublication(current, req.ReleaseChannel); err != nil {
+			return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, err
+		}
+	}
 	trace.advance("producer-authority")
 	if guard != nil {
 		if target.ID != guard.BaselineArtifactID {

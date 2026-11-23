@@ -33,6 +33,11 @@ func validateRetainedTrafficBaseline(state *model.State, parent model.PlatformAr
 			return ErrConflict
 		}
 		child := state.PlatformArtifacts[index]
+		if child.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+			if err := validateHostedAddressBaseline(state, parent, child, baseline, lkg, now, keys); err != nil {
+				return err
+			}
+		}
 		if child.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle {
 			continue
 		}
@@ -95,6 +100,13 @@ func retainedTrafficSourceRouteIDs(child model.PlatformArtifact) ([]string, erro
 		return nil, ErrConflict
 	}
 	ids := []string{}
+	ref, _, err := platformconfig.HostedAddressAuthority(child)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if ref != nil {
+		ids = append(ids, ref.ReleaseSetID, ref.RouteArtifactID, ref.DNSArtifactID, ref.TLSArtifactID)
+	}
 	seen := map[string]bool{}
 	for _, part := range parts {
 		if part.RouteArtifactID == "" {

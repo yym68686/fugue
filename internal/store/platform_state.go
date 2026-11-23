@@ -589,6 +589,14 @@ func (s *Store) rollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 			return ErrNotFound
 		}
 		target = state.PlatformArtifacts[targetIndex]
+		if guard == nil {
+			if err := rejectUnboundHostedPublication(target, channel); err != nil {
+				return err
+			}
+			if err := rejectUnboundHostedPublication(current, channel); err != nil {
+				return err
+			}
+		}
 		if guard != nil {
 			if target.ID != guard.BaselineArtifactID {
 				return ErrConflict

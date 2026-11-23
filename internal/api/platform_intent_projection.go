@@ -29,6 +29,9 @@ type platformProjectionIssue struct {
 }
 
 type platformIntentProjectionResponse struct {
+	// Internal output of the actual inventory/recovery selection, never an
+	// externally supplied preview field or a grant to publish.
+	hostedAddressHolds       []platformconfig.HostedAddressHold
 	RuntimeSummary           *platformRuntimePreviewSummary `json:"runtime_summary,omitempty"`
 	PreviewMode              string                         `json:"preview_mode"`
 	DNSExclusions            []platformDNSExclusion         `json:"dns_exclusions"`
@@ -523,11 +526,11 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 			if source.ServicePort <= 0 {
 				addIssue("desired_service_port_missing", source)
 			}
-			ref, err := platformconfig.Digest([]string{host, path, source.AppID, route.RuntimeID})
+			ref, err := platformconfig.OriginObservationRef(host, path, source.AppID, route.RuntimeID)
 			if err != nil {
 				return result, err
 			}
-			route.OriginRef = "origin_" + strings.TrimPrefix(ref, "sha256:")
+			route.OriginRef = ref
 			observation := platformconfig.OriginObservation{Ref: route.OriginRef, Status: source.OriginStatus, StatusReason: source.OriginStatusReason,
 				RuntimeID: source.RuntimeID, RuntimeType: source.RuntimeType, RuntimeEdgeGroupID: source.RuntimeEdgeGroupID, RuntimeClusterNode: source.RuntimeClusterNode}
 			if evidence := observed[source.AppID].ObservedStatus; evidence != nil {

@@ -327,6 +327,14 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	hosted, err := s.discoverHostedCapture(policy, projection)
+	if err != nil {
+		return interval, err
+	}
+	sourceDigest, err = hosted.sourceDigest(sourceDigest)
+	if err != nil {
+		return interval, err
+	}
 	if policy.Mode == "serving" {
 		failed, err := s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, sourceDigest)
 		if err != nil || failed {
@@ -371,7 +379,24 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 	}
 	advance("compile")
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication})
+	req := platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication}
+	var compiled platformconfig.CompileResult
+	provenance := platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest}
+	if hosted.phase == "" {
+		compiled, err = platformconfig.Compile(req)
+	} else {
+		source, e := s.readHostedAddressSource(ctx, policy, authority, projection.hostedAddressHolds)
+		if e != nil {
+			return interval, e
+		}
+		if source.Publication.ReleaseID != hosted.selected.ID || source.Publication.FencingToken != hosted.selected.FencingToken || source.Publication.ReleaseSetID != hosted.selected.ArtifactID {
+			return interval, fmt.Errorf("hosted address source changed before compilation")
+		}
+		compiled, _, err = platformconfig.CompileHostedPathTransition(req, source)
+		if err == nil && len(compiled.InputSnapshot.HostedAddressReservations) > 0 {
+			provenance.hostedSource = source.Publication
+		}
+	}
 	if err == nil && policy.InputSource == platformproducer.DNSProducerInputSource {
 		err = platformproducer.ValidateDNSProducerOutput(policy, compiled.DNSArtifact)
 	}
@@ -392,7 +417,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		return interval, err
 	}
 	advance("persist_artifacts")
-	result, err := s.materializePlatformCompilation(persistCtx, compiled, principal, &inputs, platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest})
+	result, err := s.materializePlatformCompilation(persistCtx, compiled, principal, &inputs, provenance)
 	if err != nil {
 		return interval, err
 	}

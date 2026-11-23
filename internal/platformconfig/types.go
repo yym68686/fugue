@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -226,6 +227,7 @@ type CompileRequest struct {
 type RuntimeSnapshot struct {
 	IsolateTrafficAvailability bool                       `json:"isolate_traffic_availability,omitempty"`
 	RetainedTrafficPartitions  []RetainedTrafficPartition `json:"retained_traffic_partitions,omitempty"`
+	HostedAddressReservations  []HostedAddressReservation `json:"hosted_address_reservations,omitempty"`
 	DNSSelections              []DNSSelectionObservation  `json:"dns_selections,omitempty"`
 	DNSEdgeEndpoints           []DNSEdgeEndpoint          `json:"dns_edge_endpoints,omitempty"`
 	DNSConsumers               []DNSConsumerObservation   `json:"dns_consumers,omitempty"`
@@ -282,6 +284,17 @@ func BuildReleaseSetArtifact(set ReleaseSet, artifactIDs []string, now time.Time
 }
 
 func Compile(req CompileRequest) (CompileResult, error) {
+	return compileWithHostedAddressSource(req, nil)
+}
+
+// CompileWithHostedAddressSource has no public request field for authority.
+// Publication admission must independently revalidate the current source
+// before promoting its result. Existing input generations use Compile.
+func CompileWithHostedAddressSource(req CompileRequest, source HostedAddressSource) (CompileResult, error) {
+	return compileWithHostedAddressSource(req, &source)
+}
+
+func compileWithHostedAddressSource(req CompileRequest, hostedSource *HostedAddressSource) (CompileResult, error) {
 	intent := normalizeIntent(req.Intent)
 	policy := normalizePolicy(req.Policy)
 	if err := validateIntent(intent); err != nil {
@@ -306,6 +319,12 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		return CompileResult{}, fmt.Errorf("digest policy snapshot: %w", err)
 	}
 	runtimeSnapshot := req.RuntimeSnapshot
+	if len(runtimeSnapshot.HostedAddressReservations) != 0 && hostedSource == nil {
+		return CompileResult{}, fmt.Errorf("hosted address reservation requires independently validated publication admission")
+	}
+	if hostedSource != nil && (intent.Scope != GlobalScopeKey || intent.PublicationRole != "" || policy.DNSPlacementMode != DNSPlacementConsumerReadiness) {
+		return CompileResult{}, fmt.Errorf("hosted address source requires global dynamic DNS")
+	}
 	if err := ValidateTrafficPartitionInputs(intent, policy, runtimeSnapshot); err != nil {
 		return CompileResult{}, err
 	}
@@ -406,8 +425,24 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	if err != nil {
 		return CompileResult{}, err
 	}
+	if intent.PublicationRole == PublicationRoleCellDNS && req.PreviousTrafficPublication != nil {
+		compiledDNS, err = inheritHostedCellRecords(intent, req.PreviousTrafficPublication, compiledDNS, readiness, queryViews, policy)
+		if err != nil {
+			return CompileResult{}, err
+		}
+	}
 	if err := ValidateDNSQueryViews(queryViews, compiledDNS, dnsViews, readiness, policy); err != nil {
 		return CompileResult{}, err
+	}
+	if hostedSource != nil {
+		records, reservations, e := ReserveHostedAddressProjection(DNSArtifactPayload{Records: compiledDNS, ConsumerViews: dnsViews, ReadinessPlan: readiness, QueryViews: queryViews, Policy: policy}, *hostedSource)
+		if e != nil {
+			return CompileResult{}, e
+		}
+		if len(runtimeSnapshot.HostedAddressReservations) != 0 && !reflect.DeepEqual(runtimeSnapshot.HostedAddressReservations, reservations) {
+			return CompileResult{}, fmt.Errorf("hosted address compiler input differs from its verified source")
+		}
+		compiledDNS, runtimeSnapshot.HostedAddressReservations = records, reservations
 	}
 	snapshotDigest := ""
 	if runtimeSnapshot.Facts != nil || runtimeSnapshot.IntentGeneration != "" || runtimeSnapshot.PolicyGeneration != "" {
@@ -531,7 +566,21 @@ func Compile(req CompileRequest) (CompileResult, error) {
 		}
 		routeArtifact.Metadata[RetainedTrafficPartitionsMetadata] = string(parts)
 	}
-	dnsArtifact := buildArtifact(model.PlatformArtifactKindDNSAnswerBundle, intent.Scope, "dns-"+configurationGeneration, dnsPayload, metadata, now)
+	dnsMetadata := metadata
+	if len(runtimeSnapshot.HostedAddressReservations) > 0 {
+		dnsMetadata = maps.Clone(metadata)
+		digest, e := Digest(runtimeSnapshot.HostedAddressReservations)
+		if e != nil {
+			return CompileResult{}, e
+		}
+		dnsMetadata[HostedAddressReservationsDigestMetadata] = digest
+		source, e := json.Marshal(runtimeSnapshot.HostedAddressReservations[0].Source)
+		if e != nil {
+			return CompileResult{}, e
+		}
+		dnsMetadata[HostedAddressSourceMetadata] = string(source)
+	}
+	dnsArtifact := buildArtifact(model.PlatformArtifactKindDNSAnswerBundle, intent.Scope, "dns-"+configurationGeneration, dnsPayload, dnsMetadata, now)
 	tlsArtifact := buildArtifact(model.PlatformArtifactKindCaddyRouteConfig, intent.Scope, "tls-"+configurationGeneration, tlsPayload, metadata, now)
 
 	releaseSet := ReleaseSet{
@@ -567,6 +616,12 @@ func Compile(req CompileRequest) (CompileResult, error) {
 	}
 
 	releaseArtifact := buildArtifact(model.PlatformArtifactKindReleaseSet, intent.Scope, releaseSet.Generation, releaseSet, metadata, now)
+	if len(runtimeSnapshot.HostedAddressReservations) > 0 {
+		releaseArtifact.Metadata = maps.Clone(releaseArtifact.Metadata)
+		for _, k := range []string{HostedAddressReservationsDigestMetadata, HostedAddressSourceMetadata} {
+			releaseArtifact.Metadata[k] = dnsMetadata[k]
+		}
+	}
 	if qualityInput != nil {
 		qualityDigest, err := RuntimeSnapshotDigest(*qualityInput)
 		if err != nil {

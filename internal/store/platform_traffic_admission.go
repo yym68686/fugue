@@ -45,6 +45,9 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 		return fmt.Errorf("%w: leased traffic compatibility: %s", ErrConflict, reason)
 	}
 	if parent.ArtifactKind != model.PlatformArtifactKindReleaseSet {
+		if ref, _, e := platformconfig.HostedAddressAuthority(parent); e != nil || ref != nil {
+			return fail("hosted address authority requires the complete signed ReleaseSet")
+		}
 		if _, retained := parent.Metadata[platformconfig.RetainedTrafficPartitionsMetadata]; retained {
 			return fail("retained traffic requires a complete signed ReleaseSet")
 		}
@@ -76,6 +79,13 @@ func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.Pl
 			return fail("member unavailable")
 		}
 		member := state.PlatformArtifacts[index]
+		if member.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+			a, ad, ae := platformconfig.HostedAddressAuthority(parent)
+			b, bd, be := platformconfig.HostedAddressAuthority(member)
+			if ae != nil || be != nil || ad != bd || a != nil && (b == nil || *a != *b) {
+				return fail("hosted address source differs between release and DNS")
+			}
+		}
 		if err := validateRetainedTrafficExpiry(member, now); err != nil {
 			return err
 		}

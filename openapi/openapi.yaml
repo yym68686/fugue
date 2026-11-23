@@ -39871,6 +39871,40 @@ components:
           maxItems: 4096
           description: Exact compiled routes from the pinned signed route artifact, including immutable desired fields, runtime placement, weighted targets and exclusion evidence. Admission compares the entire partition with the source artifact; callers cannot substitute route content.
           items: {$ref: "#/components/schemas/PlatformCompiledTrafficRoute"}
+    PlatformHostedAddressReservation:
+      type: object
+      additionalProperties: false
+      required: [source, record, physical]
+      description: A physical hosted address roster inherited from an exact verified full. Never a grant of new connection eligibility, a source of readiness proofs, or an alternative static DNS answer.
+      properties:
+        source: {$ref: "#/components/schemas/PlatformPreviousTrafficPublicationReference"}
+        record: {$ref: "#/components/schemas/PlatformConfigDNSIntent"}
+        physical:
+          type: object
+          additionalProperties: false
+          required: [hostname, minimum_healthy_edges, require_dual_stack, targets]
+          properties:
+            hostname: {type: string}
+            minimum_healthy_edges: {type: integer, minimum: 1}
+            require_dual_stack: {type: boolean}
+            min_distinct_cells: {type: integer, minimum: 0}
+            min_distinct_domains: {type: object, additionalProperties: {type: integer, minimum: 0}}
+            targets:
+              type: array
+              minItems: 1
+              maxItems: 4096
+              items:
+                type: object
+                additionalProperties: false
+                required: [edge_id, edge_group_id, address, family, probe_ids]
+                properties:
+                  edge_id: {type: string}
+                  edge_group_id: {type: string}
+                  address: {type: string}
+                  family: {type: string, enum: [A, AAAA]}
+                  require_single_publication: {type: boolean}
+                  failure_domains: {type: object, additionalProperties: {type: string}}
+                  probe_ids: {type: array, maxItems: 0, items: {type: string}, description: No predecessor probe may be reused.}
     PlatformRuntimeSnapshot:
       type: object
       additionalProperties: false
@@ -39919,6 +39953,12 @@ components:
           description: Fixed references to unchanged application partitions in a verified full publication. Capture and admission check the exact signed source, positive LKG, current consumer convergence, expiry, and unchanged application configuration. These facts never declare an unavailable new release ready. Invalid or stale references refuse compilation.
           items:
             $ref: "#/components/schemas/PlatformRetainedTrafficPartition"
+        hosted_address_reservations:
+          type: array
+          minItems: 1
+          maxItems: 4096
+          description: Reserved physical records only. These do not alter effective DNS targets, DNS selection, tenant configuration, or traffic authority.
+          items: {$ref: "#/components/schemas/PlatformHostedAddressReservation"}
         isolate_traffic_availability:
           type: boolean
           description: Compiler capture capability for application availability isolation, not serving authorization. A matching trusted retained partition may preserve unchanged routes; otherwise only unavailable application routes close. Ownership, malformed or ambiguous evidence still rejects compilation. Omission preserves strict legacy compilation. This field is not emitted into consumer policy payloads.
