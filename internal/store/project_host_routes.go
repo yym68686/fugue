@@ -4,12 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
 )
 
-// ProjectHostRouteInputs is read under the same lock as a scoped route write.
+// ProjectHostRouteInputs is read from one snapshot, or under write locks for apply.
 // Table is the actual stored table, not the synthetic legacy API view.
 type ProjectHostRouteInputs struct {
 	Project model.Project
@@ -18,6 +19,48 @@ type ProjectHostRouteInputs struct {
 	Zone    model.HostedZone
 	Apps    []model.App
 	Table   model.ProjectRouteTable
+}
+
+// Isolate a hostname for a read-only comparison against its actual saved
+// intent. Resolve aliases and the implicit single-domain case BEFORE
+// filtering: deleting the other domains first would misassign an unnamed
+// entrypoint. Never persist this projected view as the entire project table.
+func ProjectRoutesForHost(table model.ProjectRouteTable, host string) (model.ProjectRouteTable, error) {
+	table = model.NormalizeProjectRouteTable(table)
+	if host == "" || host != strings.ToLower(strings.TrimSpace(host)) {
+		return model.ProjectRouteTable{}, ErrInvalidInput
+	}
+	byName, byHost := map[string]model.ProjectRouteDomain{}, map[string]model.ProjectRouteDomain{}
+	out := model.ProjectRouteTable{ProjectID: table.ProjectID, TenantID: table.TenantID}
+	for _, d := range table.Domains {
+		name := strings.ToLower(d.Name)
+		if name != "" {
+			if prev, exists := byName[name]; exists && (prev.Hostname == host || d.Hostname == host) {
+				return out, ErrConflict
+			}
+			byName[name] = d
+		}
+		if d.Hostname != "" {
+			if _, exists := byHost[d.Hostname]; exists && d.Hostname == host {
+				return out, ErrConflict
+			}
+			byHost[d.Hostname] = d
+		}
+	}
+	for _, ep := range table.Entrypoints {
+		d, ok := resolveProjectRouteEntrypointDomain(ep.Domain, table.Domains, byName, byHost)
+		if !ok || d.Hostname != host {
+			continue
+		}
+		// Freeze the already-resolved hostname, not its mutable alias.
+		ep.Domain = host
+		out.Entrypoints = append(out.Entrypoints, ep)
+	}
+	if d, ok := byHost[host]; ok {
+		d.Name = host
+		out.Domains = []model.ProjectRouteDomain{d}
+	}
+	return out, nil
 }
 
 // EditProjectHostRoutes serializes with whole-table writes. The callback must
@@ -81,7 +124,16 @@ func stampProjectHostRouteTable(in ProjectHostRouteInputs, next model.ProjectRou
 func (s *Store) pgEditProjectHostRoutes(parent context.Context, projectID, hostname string, write bool, edit func(ProjectHostRouteInputs) (*model.ProjectRouteTable, error)) error {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
+	// Planning and receipt readers cannot apply the callback's result. Use
+	// one MVCC snapshot instead of blocking writes to every app in a project.
+	// Real writes still serialize on the project and recheck the entire plan.
+	update, share := " FOR UPDATE", " FOR SHARE"
+	var opts *sql.TxOptions
+	if !write {
+		opts = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
+		update, share = "", ""
+	}
+	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -89,34 +141,34 @@ func (s *Store) pgEditProjectHostRoutes(parent context.Context, projectID, hostn
 	var in ProjectHostRouteInputs
 	in.Project, err = scanProject(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
-FROM fugue_projects WHERE id = $1 FOR UPDATE`, projectID))
+FROM fugue_projects WHERE id = $1`+update, projectID))
 	if err != nil {
 		return mapDBErr(err)
 	}
 	in.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessAppSelectColumns+`
-FROM fugue_apps WHERE project_id = $1 AND `+appVisiblePhasePredicate+` ORDER BY id FOR SHARE`, scanApp, projectID)
+FROM fugue_apps WHERE project_id = $1 AND `+appVisiblePhasePredicate+` ORDER BY id`+share, scanApp, projectID)
 	if err != nil {
 		return err
 	}
 	in.Domain, err = scanAppDomain(tx.QueryRowContext(ctx, `
 SELECT hostname, tenant_id, app_id, status, dns_mode, dns_zone_id, dns_record_id, dns_record_source, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
-FROM fugue_app_domains WHERE lower(hostname) = $1 FOR SHARE`, hostname))
+FROM fugue_app_domains WHERE lower(hostname) = $1`+share, hostname))
 	if err != nil {
 		return mapDBErr(err)
 	}
 	if in.Domain.DNSMode == model.AppDomainDNSModeManaged && in.Domain.DNSZoneID != "" && in.Domain.DNSRecordID != "" {
-		in.Zone, err = scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+` WHERE id = $1 FOR SHARE`, in.Domain.DNSZoneID))
+		in.Zone, err = scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+` WHERE id = $1`+share, in.Domain.DNSZoneID))
 		if err != nil && err != sql.ErrNoRows {
 			return mapDBErr(err)
 		}
-		in.DNS, err = scanDNSRecord(tx.QueryRowContext(ctx, dnsRecordSelect()+` WHERE zone_id = $1 AND id = $2 FOR SHARE`, in.Domain.DNSZoneID, in.Domain.DNSRecordID))
+		in.DNS, err = scanDNSRecord(tx.QueryRowContext(ctx, dnsRecordSelect()+` WHERE zone_id = $1 AND id = $2`+share, in.Domain.DNSZoneID, in.Domain.DNSRecordID))
 		if err != nil && err != sql.ErrNoRows {
 			return mapDBErr(err)
 		}
 	}
 	in.Table, err = scanProjectRouteTable(tx.QueryRowContext(ctx, `
 SELECT project_id, tenant_id, domains_json, entrypoints_json, created_at, updated_at
-FROM fugue_project_route_tables WHERE project_id = $1 FOR UPDATE`, projectID))
+FROM fugue_project_route_tables WHERE project_id = $1`+update, projectID))
 	if err != nil && err != sql.ErrNoRows {
 		return mapDBErr(err)
 	}

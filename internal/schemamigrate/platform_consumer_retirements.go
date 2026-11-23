@@ -97,29 +97,16 @@ BEGIN
  END IF;
  RETURN NEW;
 END $$;
-DO $$
-DECLARE t text;
-BEGIN
- FOREACH t IN ARRAY ARRAY['fugue_platform_consumer_retirement_epoch','fugue_platform_consumer_retirements'] LOOP
-  EXECUTE format('DROP TRIGGER IF EXISTS fugue_consumer_retirement_control ON %I',t);
-  EXECUTE format('CREATE TRIGGER fugue_consumer_retirement_control BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION fugue_guard_consumer_retirement_control()',t);
-  EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER fugue_consumer_retirement_control',t);
-  EXECUTE format('DROP TRIGGER IF EXISTS fugue_consumer_retirement_truncate ON %I',t);
-  EXECUTE format('CREATE TRIGGER fugue_consumer_retirement_truncate BEFORE TRUNCATE ON %I FOR EACH STATEMENT EXECUTE FUNCTION fugue_guard_consumer_retirement_control()',t);
-  EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER fugue_consumer_retirement_truncate',t);
- END LOOP;
- DROP TRIGGER IF EXISTS fugue_consumer_retirement_insert ON fugue_platform_consumer_retirements;
- CREATE TRIGGER fugue_consumer_retirement_insert BEFORE INSERT ON fugue_platform_consumer_retirements
-  FOR EACH ROW EXECUTE FUNCTION fugue_guard_consumer_retirement_insert();
- ALTER TABLE fugue_platform_consumer_retirements ENABLE ALWAYS TRIGGER fugue_consumer_retirement_insert;
- FOREACH t IN ARRAY ARRAY['fugue_platform_consumer_instances','fugue_platform_shadow_consumers',
-  'fugue_platform_expected_consumer_sets','fugue_platform_artifact_releases','fugue_platform_release_lanes'] LOOP
-  EXECUTE format('DROP TRIGGER IF EXISTS fugue_retired_consumer_root ON %I',t);
-  EXECUTE format('CREATE TRIGGER fugue_retired_consumer_root BEFORE INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION fugue_guard_retired_consumer_root()',t);
-  EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER fugue_retired_consumer_root',t);
- END LOOP;
-END $$;
-`
+` + beforeTriggerReplayStart + `
+  SELECT rel,trig,'fugue_guard_consumer_retirement_control' AS fn,events,granularity,bits,'A' AS mode
+  FROM unnest(ARRAY['fugue_platform_consumer_retirement_epoch','fugue_platform_consumer_retirements']) AS ledgers(rel)
+  CROSS JOIN (VALUES ('fugue_consumer_retirement_control','UPDATE OR DELETE','ROW',27),
+                     ('fugue_consumer_retirement_truncate','TRUNCATE','STATEMENT',34)) AS controls(trig,events,granularity,bits)
+  UNION ALL SELECT 'fugue_platform_consumer_retirements','fugue_consumer_retirement_insert','fugue_guard_consumer_retirement_insert','INSERT','ROW',7,'A'
+  UNION ALL SELECT rel,'fugue_retired_consumer_root','fugue_guard_retired_consumer_root','INSERT OR UPDATE','ROW',23,'A'
+  FROM unnest(ARRAY['fugue_platform_consumer_instances','fugue_platform_shadow_consumers',
+   'fugue_platform_expected_consumer_sets','fugue_platform_artifact_releases','fugue_platform_release_lanes']) AS roots(rel)
+` + beforeTriggerReplayEnd
 
 func MigratePlatformConsumerRetirements(ctx context.Context, databaseURL string) error {
 	databaseURL, err := normalizeDatabaseURL(databaseURL)

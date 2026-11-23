@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"maps"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
@@ -220,6 +222,35 @@ func TestProjectHostRoutePostgresSerializesPlans(t *testing.T) {
 		return nil, err
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A status/preflight read must see the prior committed table without
+	// either waiting for an unrelated project writer or returning dirty data.
+	db, err := sql.Open("pgx", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	busy, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Rollback()
+	if _, err = busy.Exec("UPDATE fugue_projects SET name='uncommitted-name' WHERE id=$1", project.ID); err != nil {
+		t.Fatal(err)
+	}
+	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
+	err = st.EditProjectHostRoutes(bounded, project.ID, host, false, func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {
+		if in.Project.Name != project.Name {
+			return nil, errors.New("read an uncommitted project")
+		}
+		return nil, nil
+	})
+	cancel()
+	if err != nil {
+		t.Fatal("preflight failed under an ordinary writer", err)
+	}
+	if err = busy.Rollback(); err != nil {
 		t.Fatal(err)
 	}
 	save := func(in store.ProjectHostRouteInputs) (*model.ProjectRouteTable, error) {

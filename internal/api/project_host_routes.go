@@ -101,6 +101,9 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if r.URL.Query().Get("preflight") == "true" {
+		if desired && status.State == "pending" && s.pendingHostedPathCandidate(r.Context(), project, plan) {
+			status.Reason = "compiler draft matches the saved host-only edit; no verified serving selection for these paths"
+		}
 		check := model.ProjectHostRoutePreflight{State: "not_applicable", Reason: status.Reason}
 		switch {
 		case desired:

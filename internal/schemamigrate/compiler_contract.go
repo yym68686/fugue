@@ -87,13 +87,7 @@ BEGIN
  END IF;
  RETURN NEW;
 END $$;
-DO $$
-DECLARE s record;
-BEGIN
- -- tgtype flags: ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32.
- -- CREATE OR REPLACE FUNCTION above preserves function OIDs. For a trigger
- -- already attached with the exact semantics no table lock is necessary.
- FOR s IN
+` + beforeTriggerReplayStart + `
   SELECT * FROM (VALUES
    ('fugue_platform_compiler_contract','fugue_compiler_contract_control','fugue_guard_compiler_contract_control','UPDATE OR DELETE','ROW',27,'O'),
    ('fugue_platform_compiler_contract','fugue_compiler_contract_truncate','fugue_guard_compiler_contract_control','TRUNCATE','STATEMENT',34,'O')
@@ -103,21 +97,7 @@ BEGIN
   FROM unnest(ARRAY['fugue_platform_artifacts','fugue_platform_artifact_releases',
    'fugue_platform_release_lanes','fugue_platform_lkg_snapshots','fugue_platform_lkg_snapshot_history',
    'fugue_platform_consumer_instances','fugue_platform_shadow_consumers']) AS roots(rel)
- LOOP
-  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid=s.rel::regclass AND tgname=s.trig
-      AND tgfoid=to_regprocedure(s.fn || '()') AND tgtype=s.bits AND tgenabled::text=s.mode
-      AND NOT tgisinternal AND tgconstraint=0 AND tgparentid=0 AND tgnargs=0
-      AND tgattr=''::int2vector AND tgqual IS NULL AND tgoldtable IS NULL AND tgnewtable IS NULL) THEN
-   CONTINUE;
-  END IF;
-  EXECUTE format('DROP TRIGGER IF EXISTS %I ON %I',s.trig,s.rel);
-  EXECUTE format('CREATE TRIGGER %I BEFORE %s ON %I FOR EACH %s EXECUTE FUNCTION %I()',s.trig,s.events,s.rel,s.granularity,s.fn);
-  IF s.mode='A' THEN
-   EXECUTE format('ALTER TABLE %I ENABLE ALWAYS TRIGGER %I',s.rel,s.trig);
-  END IF;
- END LOOP;
-END $$;
-`
+` + beforeTriggerReplayEnd
 
 func MigrateCompilerContract(ctx context.Context, databaseURL string) error {
 	databaseURL, err := normalizeDatabaseURL(databaseURL)
