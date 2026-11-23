@@ -13,8 +13,9 @@ import (
 
 // CompileHostedSuccessor compiles a normal successor, not an overlay applied
 // to an already signed child. The selected full supplies configuration for
-// other hosts; only the live capture supplies observations. Never renew an
-// observation, rewrite its source time or use an old request as a health ACK.
+// other hosts, including their original DNS selector inputs. Only the live
+// capture supplies current runtime evidence. Never renew an observation,
+// rewrite its source time or use an old request as a health ACK.
 func CompileHostedSuccessor(req CompileRequest, source HostedAddressSource, p HostedScopeProposal, phase string) (CompileResult, error) {
 	var empty CompileResult
 	bad := errors.New("host successor would change configuration outside its authorized phase")
@@ -56,6 +57,9 @@ func CompileHostedSuccessor(req CompileRequest, source HostedAddressSource, p Ho
 	// projection. Never attach its fact to A, or use yesterday's TLS facts.
 	req.RuntimeSnapshot.TLSDomains, err = scopedHostedTLSFacts(intent.TLS, req.Intent.TLS, owned, req.RuntimeSnapshot.TLSDomains)
 	if err != nil {
+		return empty, err
+	}
+	if err := bindHostedQueryInputs(&req, source, owned); err != nil {
 		return empty, err
 	}
 	intent = NormalizePlatformIntent(intent)

@@ -15,7 +15,9 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 	// A separate route under B changes deployment while A is in flight.
 	// Its origin fact is freshly captured and its DNS address stays put.
 	foreign := old.Intent.Routes[0]
-	foreign.Hostname, foreign.AppID, foreign.DeploymentGeneration = b.Hostname, "independent-app", "deployment-old"
+	// B is a different host, not a different app: one of A's four paths
+	// addresses this same application. App ID alone is not a DNS boundary.
+	foreign.Hostname, foreign.DeploymentGeneration = b.Hostname, "deployment-old"
 	foreign.RecordOriginForTest(t, "/", "independent-runtime")
 	observation := old.RuntimeSnapshot.Origins[0]
 	observation.Ref, observation.RuntimeID = foreign.OriginRef, foreign.RuntimeID
@@ -75,6 +77,7 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		src.Prior = DNSArtifactPayload{}
 		read(c.DNSArtifact.Content, &src.Prior)
 		src.Inherited = c.InputSnapshot.HostedAddressReservations
+		src.PriorDNSSelections = c.InputSnapshot.DNSSelections
 	}
 	base, e := Compile(old)
 	if e != nil {
@@ -90,6 +93,47 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		t.Fatal("offer", e)
 	}
 	p := ps[0]
+	t.Run("unselected dynamic hostname must not enter the scoped DNS compiler", func(t *testing.T) {
+		// A newly enrolled sibling is valid in the complete business capture
+		// but absent in the selected full. Its rule and observation used to
+		// reach CompileDNSQueryViews after its declaration had been excluded.
+		other := "new-sibling.example.test"
+		next := edit
+		route := old.Intent.Routes[0]
+		route.Hostname = other
+		route.RecordOriginForTest(t, "/", route.RuntimeID)
+		origin := old.RuntimeSnapshot.Origins[0]
+		origin.Ref = route.OriginRef
+		next.Intent.Routes = append(slices.Clone(next.Intent.Routes), route)
+		next.RuntimeSnapshot.Origins = append(slices.Clone(next.RuntimeSnapshot.Origins), origin)
+		record := old.Intent.DNS[0]
+		record.Hostname = other
+		next.Intent.DNS = append(slices.Clone(next.Intent.DNS), record)
+		rule, fact := edit.Policy.DNSAnswerRules[0], edit.RuntimeSnapshot.DNSSelections[0]
+		rule.Hostname, fact.Hostname = other, other
+		next.Policy.DNSAnswerRules = append(slices.Clone(next.Policy.DNSAnswerRules), rule)
+		next.RuntimeSnapshot.DNSSelections = append(slices.Clone(next.RuntimeSnapshot.DNSSelections), fact)
+		if _, err := Compile(next); err != nil {
+			t.Fatal("invalid complete business fixture", err)
+		}
+		scoped, err := CompileHostedSuccessor(next, src, p, "prepare")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range scoped.InputSnapshot.DNSSelections {
+			if v.Hostname == other {
+				t.Fatal("foreign DNS observation entered A's input")
+			}
+		}
+		payload, err := globalProposalArtifact(scoped.DNSArtifact, model.PlatformArtifactKindDNSAnswerBundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dns, err := DecodeDNSArtifact(payload)
+		if err != nil || !reflect.DeepEqual(src.Prior.Records, dns.Records) {
+			t.Fatal("selected wire records not preserved", err)
+		}
+	})
 	check := func(c CompileResult, count, ttl int) {
 		t.Helper()
 		q, e := ProjectRouteArtifact(c.RouteArtifact)

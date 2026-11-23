@@ -15,6 +15,9 @@ type HostedAddressSource struct {
 	Authority   HostedProposalAuthority
 	PriorIntent PlatformIntent
 	Prior       DNSArtifactPayload
+	// Fixed selector inputs that produced the selected signed DNS child, not
+	// consumer readiness/health receipts. Keep their original observation time.
+	PriorDNSSelections []DNSSelectionObservation
 	// The producer has verified these two children of Publication. They are
 	// never serialized as part of a tenant's host-only proposal.
 	PriorRoute, PriorTLS       *model.PlatformArtifact

@@ -76,7 +76,7 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 		return platformconfig.Digest(struct {
 			Source, Phase, Contract, SelectedFull string
 			Hosts                                 []string
-		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/scoped-successor-v1", p.selected.ID, p.hosts})
+		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/scoped-successor-dns-inputs-v2", p.selected.ID, p.hosts})
 	}
 	return platformconfig.Digest(struct {
 		Source, Phase string
@@ -195,6 +195,6 @@ func (s *Server) readHostedAddressSource(ctx context.Context, policy platformpro
 		return out, err
 	}
 	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, PriorRoute: &old.route, PriorTLS: &tls,
-		Authority: platformconfig.HostedProposalAuthority{Producer: model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, LKGID: old.lkg.ID, EvidenceHash: old.lkg.VerificationEvidenceHash, ExpiresAt: old.lkg.ExpiresAt},
-		Inherited: old.snapshot.HostedAddressReservations, PriorHolds: holds(previous), EffectiveHolds: effective}, nil
+		Authority:          platformconfig.HostedProposalAuthority{Producer: model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, LKGID: old.lkg.ID, EvidenceHash: old.lkg.VerificationEvidenceHash, ExpiresAt: old.lkg.ExpiresAt},
+		PriorDNSSelections: old.snapshot.DNSSelections, Inherited: old.snapshot.HostedAddressReservations, PriorHolds: holds(previous), EffectiveHolds: effective}, nil
 }
