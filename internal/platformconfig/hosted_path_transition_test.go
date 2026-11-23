@@ -16,7 +16,14 @@ func TestHostedPathAliasRetainsOnlySameOwnerSharedPhysicalAddress(t *testing.T) 
 	testHostedPathTransition(t, true)
 }
 
-func testHostedPathTransition(t *testing.T, withAlias bool) {
+// Exercise the actual compiler in downstream executor tests without serializing
+// production data or duplicating a handwritten proposal on each side.
+func HostedTransitionFixtureForTest(t *testing.T, withAlias bool, check func(HostedAddressSource, HostedScopeProposal)) {
+	t.Helper()
+	testHostedPathTransition(t, withAlias, check)
+}
+
+func testHostedPathTransition(t *testing.T, withAlias bool, checks ...func(HostedAddressSource, HostedScopeProposal)) {
 	r := consumerPlacementFixture()
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	r.Policy.MinimumHealthyEdges = 1
@@ -110,11 +117,66 @@ func testHostedPathTransition(t *testing.T, withAlias bool) {
 	pr.ID, pr.ContentHash = src.Publication.RouteArtifactID, src.Publication.RouteArtifactDigest
 	pt.ID, pt.ContentHash = src.Publication.TLSArtifactID, src.Publication.TLSArtifactDigest
 	src.PriorRoute, src.PriorTLS = &pr, &pt
+	pr.ScopeKey, pt.ScopeKey = GlobalScopeKey, GlobalScopeKey
 	proposals, e := BuildHostedScopeProposals(src, intermediate, capture)
 	if e != nil || len(proposals) != 1 {
 		t.Fatal("global scoped capture", e)
 	}
 	proposal := proposals[0]
+	for _, check := range checks {
+		check(src, proposal)
+	}
+	original, _ := Digest(src.Prior)
+	held, e := ComposeHostedDNSPhase(src.Prior, proposal, "prepare")
+	if e != nil {
+		t.Fatal("isolated DNS prepare", e)
+	}
+	prepared := src.Prior
+	prepared.ReadinessPlan, prepared.QueryViews = &held.Plan, held.Views
+	advanced, e := ComposeHostedDNSPhase(prepared, proposal, "forward")
+	if e != nil {
+		t.Fatal("isolated DNS paths", e)
+	}
+	active := prepared
+	active.ReadinessPlan, active.QueryViews = &advanced.Plan, advanced.Views
+	undone, e := ComposeHostedDNSPhase(active, proposal, "withdraw")
+	if e != nil || !reflect.DeepEqual(undone, held) {
+		t.Fatal("withdraw changed the prepared DNS selection", e)
+	}
+	if _, e := ComposeHostedDNSPhase(src.Prior, proposal, "forward"); e == nil {
+		t.Fatal("skipped address hold")
+	}
+	if _, e := ComposeHostedDNSPhase(active, proposal, "prepare"); e == nil {
+		t.Fatal("skipped withdrawal")
+	}
+	if current, _ := Digest(src.Prior); current != original {
+		t.Fatal("changed source artifact during execution")
+	}
+	for _, stage := range []struct {
+		base      DNSArtifactPayload
+		direction string
+	}{{prepared, "forward"}, {active, "withdraw"}} {
+		drift := stage.base
+		plan := *drift.ReadinessPlan
+		plan.Records = slices.Clone(plan.Records)
+		for i := range plan.Records {
+			if plan.Records[i].Hostname == proposal.Host {
+				plan.Records[i].Targets = slices.Clone(plan.Records[i].Targets)
+				target := &plan.Records[i].Targets[0]
+				target.RequireSinglePublication = !target.RequireSinglePublication
+			}
+		}
+		drift.ReadinessPlan = &plan
+		if _, err := ComposeHostedDNSPhase(drift, proposal, stage.direction); err == nil {
+			t.Fatal("rebound a changed publication requirement", stage.direction)
+		}
+		changedOwner := proposal
+		changedOwner.Records = slices.Clone(proposal.Records)
+		changedOwner.Records[0].TTL++
+		if _, err := ComposeHostedDNSPhase(stage.base, changedOwner, stage.direction); err == nil {
+			t.Fatal("borrowed a different DNS record", stage.direction)
+		}
+	}
 	if len(proposal.Physical) != 2 || len(proposal.Eligible) != 1 || len(proposal.Before.Routes) != 1 || len(proposal.After.Routes) != 2 ||
 		len(proposal.BaseProbes) != 2 || len(proposal.PathProbes) != 2 || proposal.After.Owner != proposal.Before.Owner || proposal.Base != src.Publication {
 		t.Fatal("wrong physical, route, TLS or probe coverage")

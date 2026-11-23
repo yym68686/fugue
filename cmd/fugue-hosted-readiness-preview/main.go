@@ -67,7 +67,14 @@ func preview(r io.Reader, w io.Writer) error {
 }
 
 func main() {
-	if err := preview(os.Stdin, os.Stdout); err != nil {
+	run := preview
+	if len(os.Args) == 2 && os.Args[1] == "group-content" {
+		run = groupPreview
+	} else if len(os.Args) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: fugue-hosted-readiness-preview [group-content]")
+		os.Exit(2)
+	}
+	if err := run(os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -27,6 +27,12 @@ type HostedProposalAuthority struct {
 	ExpiresAt    time.Time                             `json:"expires_at"`
 }
 
+// A signed JSON timestamp is an instant, not Go's location pointer or
+// monotonic clock metadata. Compare original expiry without renewing it.
+func (a HostedProposalAuthority) Same(b HostedProposalAuthority) bool {
+	return a.Producer == b.Producer && a.LKGID == b.LKGID && a.EvidenceHash == b.EvidenceHash && a.ExpiresAt.Equal(b.ExpiresAt)
+}
+
 type HostedScopeProposal struct {
 	Schema    string                              `json:"schema"`
 	Host      string                              `json:"host"`
@@ -45,6 +51,9 @@ type HostedScopeProposal struct {
 	BaseProbes []DNSReadinessProbe `json:"base_probes"`
 	HoldProbes []DNSReadinessProbe `json:"hold_probes"`
 	PathProbes []DNSReadinessProbe `json:"path_probes"`
+	// Optional, only when a held measured primary must yield to an already
+	// declared, independently authorized deterministic fallback.
+	Fallbacks []HostedQueryFallback `json:"query_fallbacks,omitempty"`
 }
 
 func globalProposalArtifact(a model.PlatformArtifact, kind string) (model.PlatformArtifact, error) {
@@ -343,6 +352,10 @@ func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, cap
 			if !owned[edit.Record] || !within(edit.Before, holdIDs) || !within(edit.After, pathIDs) {
 				return nil, bad
 			}
+		}
+		p.Fallbacks, e = captureHostedFallbacks(p, x.dns, y.dns, z.dns)
+		if e != nil {
+			return nil, e
 		}
 		raw, e := json.Marshal(p)
 		if e != nil || len(raw) > 1<<20 {

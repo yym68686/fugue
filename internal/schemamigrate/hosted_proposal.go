@@ -30,6 +30,21 @@ const HostedProposalGuardsReadySQL = `SELECT count(*) = 2 FROM pg_constraint
  OR (conrelid=to_regclass('fugue_platform_artifact_releases') AND conname='fugue_host_proposal_no_lane_v1'
  AND pg_get_expr(conbin,conrelid) = '(artifact_kind <> ''hosted_path_proposal''::text)'))`
 
+// A producer offer, deliberately outside the general release/rollback tables.
+// Old consumers cannot discover a new serving assignment by listing it. No
+// foreign key is added to an existing hot table; claimants must independently
+// re-read and authenticate every referenced object, and reject a missing one.
+const HostedPrepareOffersSQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_path_prepare_offers (
+ scope_key text PRIMARY KEY, draft_id text NOT NULL, draft_digest text NOT NULL,
+ project_id text NOT NULL, owner_digest text NOT NULL, path_digest text NOT NULL,
+ prepared_digest text NOT NULL, forward_digest text NOT NULL,
+ sequence bigint NOT NULL CHECK (sequence > 0),
+ offered_at timestamptz NOT NULL, expires_at timestamptz NOT NULL CHECK (expires_at > offered_at),
+ CHECK (draft_digest ~ '^sha256:[a-f0-9]{64}$' AND owner_digest ~ '^sha256:[a-f0-9]{64}$'
+ AND path_digest ~ '^sha256:[a-f0-9]{64}$' AND prepared_digest ~ '^sha256:[a-f0-9]{64}$'
+ AND forward_digest ~ '^sha256:[a-f0-9]{64}$' AND prepared_digest <> forward_digest)
+)`
+
 func MigrateHostedProposalGuards(ctx context.Context, databaseURL string) error {
 	databaseURL, err := normalizeDatabaseURL(databaseURL)
 	if err != nil {
@@ -58,6 +73,9 @@ func MigrateHostedProposalGuards(ctx context.Context, databaseURL string) error 
 	}
 	if !ok {
 		return fmt.Errorf("host proposal storage guard definition differs")
+	}
+	if _, err := tx.ExecContext(ctx, HostedPrepareOffersSQL); err != nil {
+		return fmt.Errorf("install isolated host preparation offers: %w", err)
 	}
 	return tx.Commit()
 }

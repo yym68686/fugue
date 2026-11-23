@@ -404,6 +404,26 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			if s.log != nil {
 				s.log.Printf("hosted path compiler proposals policy_release=%s base_release=%s ids=%v error=%v", authority.ID, source.Publication.ReleaseID, ids, proposalErr)
 			}
+			if proposalErr == nil && len(ids) > 0 {
+				advance("offer_host_path_preparation")
+				offerCtx, done := context.WithTimeout(ctx, 30*time.Second)
+				for _, id := range ids {
+					if offerCtx.Err() != nil {
+						break
+					}
+					sequence, e := s.store.OfferCompiledHostedPreparation(offerCtx, source, id, func(in store.ProjectHostRouteInputs, p platformconfig.HostedScopeProposal) (string, string, error) {
+						b, err := matchHostedProjectIntent(in, p)
+						if err != nil || b.Direction != "forward" {
+							return "", "", errors.Join(store.ErrConflict, err)
+						}
+						return b.OwnerDigest, b.PathDigest, nil
+					})
+					if s.log != nil {
+						s.log.Printf("hosted path preparation offer draft=%s sequence=%d error=%v", id, sequence, e)
+					}
+				}
+				done()
+			}
 		}
 		if err == nil && len(compiled.InputSnapshot.HostedAddressReservations) > 0 {
 			provenance.hostedSource = source.Publication

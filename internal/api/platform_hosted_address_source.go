@@ -69,7 +69,7 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 		return platformconfig.Digest(struct {
 			Source, Phase, Contract string
 			Hosts                   []string
-		}{ordinary, p.phase, platformconfig.HostedProposalSchema, p.hosts})
+		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/reversible-preparation-v1", p.hosts})
 	}
 	return platformconfig.Digest(struct {
 		Source, Phase string

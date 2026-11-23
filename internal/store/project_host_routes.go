@@ -127,50 +127,18 @@ func (s *Store) pgEditProjectHostRoutes(parent context.Context, projectID, hostn
 	// Planning and receipt readers cannot apply the callback's result. Use
 	// one MVCC snapshot instead of blocking writes to every app in a project.
 	// Real writes still serialize on the project and recheck the entire plan.
-	update, share := " FOR UPDATE", " FOR SHARE"
 	var opts *sql.TxOptions
 	if !write {
 		opts = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
-		update, share = "", ""
 	}
 	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var in ProjectHostRouteInputs
-	in.Project, err = scanProject(tx.QueryRowContext(ctx, `
-SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
-FROM fugue_projects WHERE id = $1`+update, projectID))
-	if err != nil {
-		return mapDBErr(err)
-	}
-	in.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessAppSelectColumns+`
-FROM fugue_apps WHERE project_id = $1 AND `+appVisiblePhasePredicate+` ORDER BY id`+share, scanApp, projectID)
+	in, err := pgProjectHostInputs(ctx, tx, projectID, hostname, write)
 	if err != nil {
 		return err
-	}
-	in.Domain, err = scanAppDomain(tx.QueryRowContext(ctx, `
-SELECT hostname, tenant_id, app_id, status, dns_mode, dns_zone_id, dns_record_id, dns_record_source, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
-FROM fugue_app_domains WHERE lower(hostname) = $1`+share, hostname))
-	if err != nil {
-		return mapDBErr(err)
-	}
-	if in.Domain.DNSMode == model.AppDomainDNSModeManaged && in.Domain.DNSZoneID != "" && in.Domain.DNSRecordID != "" {
-		in.Zone, err = scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+` WHERE id = $1`+share, in.Domain.DNSZoneID))
-		if err != nil && err != sql.ErrNoRows {
-			return mapDBErr(err)
-		}
-		in.DNS, err = scanDNSRecord(tx.QueryRowContext(ctx, dnsRecordSelect()+` WHERE zone_id = $1 AND id = $2`+share, in.Domain.DNSZoneID, in.Domain.DNSRecordID))
-		if err != nil && err != sql.ErrNoRows {
-			return mapDBErr(err)
-		}
-	}
-	in.Table, err = scanProjectRouteTable(tx.QueryRowContext(ctx, `
-SELECT project_id, tenant_id, domains_json, entrypoints_json, created_at, updated_at
-FROM fugue_project_route_tables WHERE project_id = $1`+update, projectID))
-	if err != nil && err != sql.ErrNoRows {
-		return mapDBErr(err)
 	}
 	next, err := edit(in)
 	if err != nil || next == nil || !write {
@@ -193,4 +161,47 @@ ON CONFLICT (project_id) DO UPDATE SET domains_json = EXCLUDED.domains_json, ent
 		return fmt.Errorf("save scoped project routes: %w", err)
 	}
 	return tx.Commit()
+}
+
+// Also used by the host-scoped publisher inside its publication transaction;
+// a new read-only nested transaction would leave a gap before its pointer write.
+func pgProjectHostInputs(ctx context.Context, tx *sql.Tx, projectID, hostname string, lock bool) (in ProjectHostRouteInputs, err error) {
+	update, share := "", ""
+	if lock {
+		update, share = " FOR UPDATE", " FOR SHARE"
+	}
+	in.Project, err = scanProject(tx.QueryRowContext(ctx, `
+SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at
+FROM fugue_projects WHERE id = $1`+update, projectID))
+	if err != nil {
+		return in, mapDBErr(err)
+	}
+	in.Apps, err = readRouteBusinessRows(ctx, tx, `SELECT `+routeBusinessAppSelectColumns+`
+FROM fugue_apps WHERE project_id = $1 AND `+appVisiblePhasePredicate+` ORDER BY id`+share, scanApp, projectID)
+	if err != nil {
+		return in, err
+	}
+	in.Domain, err = scanAppDomain(tx.QueryRowContext(ctx, `
+SELECT hostname, tenant_id, app_id, status, dns_mode, dns_zone_id, dns_record_id, dns_record_source, dns_status, dns_record_kind, tls_status, verification_txt_name, verification_txt_value, route_target, last_message, dns_last_message, tls_last_message, last_checked_at, dns_last_checked_at, verified_at, tls_last_checked_at, tls_ready_at, created_at, updated_at
+FROM fugue_app_domains WHERE lower(hostname) = $1`+share, hostname))
+	if err != nil {
+		return in, mapDBErr(err)
+	}
+	if in.Domain.DNSMode == model.AppDomainDNSModeManaged && in.Domain.DNSZoneID != "" && in.Domain.DNSRecordID != "" {
+		in.Zone, err = scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+` WHERE id = $1`+share, in.Domain.DNSZoneID))
+		if err != nil && err != sql.ErrNoRows {
+			return in, mapDBErr(err)
+		}
+		in.DNS, err = scanDNSRecord(tx.QueryRowContext(ctx, dnsRecordSelect()+` WHERE zone_id = $1 AND id = $2`+share, in.Domain.DNSZoneID, in.Domain.DNSRecordID))
+		if err != nil && err != sql.ErrNoRows {
+			return in, mapDBErr(err)
+		}
+	}
+	in.Table, err = scanProjectRouteTable(tx.QueryRowContext(ctx, `
+SELECT project_id, tenant_id, domains_json, entrypoints_json, created_at, updated_at
+FROM fugue_project_route_tables WHERE project_id = $1`+update, projectID))
+	if err != nil && err != sql.ErrNoRows {
+		return in, mapDBErr(err)
+	}
+	return in, nil
 }
