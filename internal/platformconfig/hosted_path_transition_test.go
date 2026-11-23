@@ -123,6 +123,7 @@ func testHostedPathTransition(t *testing.T, withAlias bool, checks ...func(Hoste
 		t.Fatal("global scoped capture", e)
 	}
 	proposal := proposals[0]
+	testHostedSuccessorWire(t, pr, intermediate.RouteArtifact, capture.Desired.RouteArtifact, proposal)
 	for _, check := range checks {
 		check(src, proposal)
 	}
