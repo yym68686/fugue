@@ -131,9 +131,23 @@ runs:
         RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
       run: |
         set -euo pipefail
-        "${RELEASE_TOOL}" guardian-submit "${EXECUTION}" >"${RESULT}"
+        rc=0
+        "${RELEASE_TOOL}" guardian-submit "${EXECUTION}" >"${RESULT}" || rc=$?
+        if (( rc != 0 )) && jq -es --slurpfile plan "${EXECUTION}/execution-plan.json" '
+          length == 1 and ($plan | length == 1) and (.[0] |
+          .state == "rollout_pending" and .component == $plan[0].component and
+          (.currentRecordDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+          (.targetRecordDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+          (.rolloutReceiptDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+          (.workerDrainPlanDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+          .workerDrainPlanDigest == $plan[0].planDigest and
+          .currentRecordDigest == .lastSuccessfulLkg and .currentRecordDigest != .targetRecordDigest)
+        ' "${RESULT}" >/dev/null; then
+          echo 'worker_drain_wait=true' >>"${GITHUB_OUTPUT}"
+        fi
+        exit "${rc}"
     - name: Adopt a committed Guardian authority after executor failure
-      if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure'
+      if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure' && steps.execute_guardian.outputs.worker_drain_wait != 'true'
       shell: bash
       env:
         EXECUTION: ${{ runner.temp }}/fugue-${{ inputs.component }}-execution-${{ github.run_id }}-${{ github.run_attempt }}
@@ -145,6 +159,12 @@ runs:
         set -euo pipefail
         "${RELEASE_TOOL}" adopt-committed-monitor "${EXECUTION}" >"${RESULT}.adopted"
         mv "${RESULT}.adopted" "${RESULT}"
+    - name: Report retained Worker release waiting for connections
+      if: steps.execute_guardian.outputs.worker_drain_wait == 'true'
+      shell: bash
+      run: |
+        echo 'Guardian retained the desired Worker release. Live connections are still draining. The rollout has not completed.' >>"${GITHUB_STEP_SUMMARY}"
+        exit 1
     - name: Reconcile terminal state read-only after executor failure
       if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'
       shell: bash

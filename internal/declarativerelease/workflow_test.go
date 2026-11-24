@@ -963,7 +963,9 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"Upload the durable prewrite plan before mutation", "Upload terminal component receipt",
 		"cache: false",
 		"if: steps.delivery.outputs.writer == 'direct' && steps.execute_direct.outcome == 'failure'",
-		"if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure'",
+		"if: steps.delivery.outputs.writer == 'guardian' && steps.execute_guardian.outcome == 'failure' && steps.execute_guardian.outputs.worker_drain_wait != 'true'",
+		"if: steps.execute_guardian.outputs.worker_drain_wait == 'true'",
+		".workerDrainPlanDigest == $plan[0].planDigest",
 	} {
 		if strings.Count(action, required) != 1 {
 			t.Fatalf("declarative component action must contain %q exactly once", required)
