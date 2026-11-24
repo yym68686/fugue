@@ -1,9 +1,9 @@
 {
   "apiVersion": "transport.fugue.dev/v4",
-  "generation": 119,
+  "generation": 121,
   "handoffs": [
     {
-      "address": "51.38.126.103",
+      "address": "15.204.94.71",
       "previous_revision": "1de7ec2028988494cd2aa017cef053cd853295c0",
       "candidate_revision": "2e52d8b652b36e9a838925b5c79e15a9793af68f"
     }
@@ -26,7 +26,7 @@
       "name": "fugue-dns-transport-us",
       "port": 15353,
       "selector": {
-        "app.kubernetes.io/component": "dns-us-e",
+        "app.kubernetes.io/component": "dns-us-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -48,7 +48,7 @@
       "name": "fugue-dns-public-us",
       "port": 53,
       "selector": {
-        "app.kubernetes.io/component": "dns-us-e",
+        "app.kubernetes.io/component": "dns-us-f",
         "app.kubernetes.io/instance": "fugue",
         "app.kubernetes.io/name": "fugue"
       },
@@ -56,5 +56,5 @@
     }
   ],
   "namespace": "fugue-system",
-  "rollback_generation": 120
+  "rollback_generation": 122
 }
