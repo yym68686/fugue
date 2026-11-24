@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"fugue/internal/prewarmconfig"
 )
 
 func TestProductionPhysicalPrewarmOwnsOnlyBoundedPrivateJob(t *testing.T) {
@@ -22,6 +24,24 @@ func TestProductionPhysicalPrewarmOwnsOnlyBoundedPrivateJob(t *testing.T) {
 		t.Fatal("unbounded or publicly exposed prewarm")
 	}
 	c := p.Containers[0]
+	hosts, err := prewarmconfig.Parse(j.Spec.Template.Annotations[prewarmconfig.Annotation])
+	if err != nil || len(c.Args) != 1 || strings.Contains(c.Args[0], "FUGUE_EDGE_PRIVATE_PREWARM_HOSTS") {
+		t.Fatal("targets must be typed data, not command input", err)
+	}
+	for _, h := range hosts {
+		if strings.Contains(c.Args[0], h) {
+			t.Fatal("executable contains a hostname")
+		}
+	}
+	projected := false
+	for _, env := range c.Env {
+		if env.Name == "FUGUE_EDGE_PRIVATE_PREWARM_HOSTS" && env.ValueFrom != nil && env.ValueFrom.FieldRef != nil && env.ValueFrom.FieldRef.FieldPath == "metadata.annotations['"+prewarmconfig.Annotation+"']" {
+			projected = true
+		}
+	}
+	if !projected {
+		t.Fatal("private target list projection is missing")
+	}
 	if len(c.Ports) != 0 || c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem || len(c.EnvFrom) != 0 {
 		t.Fatal("non-isolated runner")
 	}

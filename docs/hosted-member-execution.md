@@ -105,7 +105,9 @@ control plane also fences its live credential and inventory instance across
 promotion and rollback. Leaving the process alive is intentional.
 
 Before selecting a new listener, a bounded private Job can verify the
-serving publication with `fugue-edge check-private-prewarm HOST ...`.
+serving publication with `fugue-edge check-private-prewarm`. The Pod
+projects the typed hostname list from the `fugue.pro/private-prewarm-hosts-v1`
+annotation; hostnames are not arguments, shell fragments, or application rules.
 Its declaration pins `FUGUE_EDGE_PREWARM_PREDECESSOR` to the exact
 node and Front activation-file SHA-256 (`node@sha256:...`). It uses
 the normal group signature, a fresh current publication, a loopback Caddy

@@ -29,6 +29,9 @@
               "app.kubernetes.io/name": "fugue-edge-private-prewarm",
               "fugue.io/edge-control-client": "true",
               "fugue.io/edge-group-id": "edge-group-country-us"
+            },
+            "annotations": {
+              "fugue.pro/private-prewarm-hosts-v1": "[\"i00.pro\",\"api2.0-0.pro\"]"
             }
           },
           "spec": {
@@ -67,10 +70,7 @@
                   "-ec"
                 ],
                 "args": [
-                  "umask 077\ncd /var/run/fugue/edge-identity\nprintf '%s\\n' \"$POD_NODE\" >edge_id\nprintf '%s\\n' \"$POD_GROUP\" >edge_group_id\nprintf '%s\\n' \"$POD_UID\" >instance_uid\nprintf '%s\\n' \"$POD_SOURCE\" >release_epoch\nprintf '%s\\n' a >slot\nprintf '%s\\n' '{' ' admin 127.0.0.1:2019' ' persist_config off' '}' >/tmp/Caddyfile\ncaddy start --config /tmp/Caddyfile --adapter caddyfile\ntrap 'caddy stop --address 127.0.0.1:2019 >/dev/null 2>&1 || true' EXIT\nfugue-edge check-private-prewarm \"$@\"\n",
-                  "check",
-                  "i00.pro",
-                  "api2.0-0.pro"
+                  "umask 077\ncd /var/run/fugue/edge-identity\nprintf '%s\\n' \"$POD_NODE\" >edge_id\nprintf '%s\\n' \"$POD_GROUP\" >edge_group_id\nprintf '%s\\n' \"$POD_UID\" >instance_uid\nprintf '%s\\n' \"$POD_SOURCE\" >release_epoch\nprintf '%s\\n' a >slot\nprintf '%s\\n' '{' ' admin 127.0.0.1:2019' ' persist_config off' '}' >/tmp/Caddyfile\ncaddy start --config /tmp/Caddyfile --adapter caddyfile\ntrap 'caddy stop --address 127.0.0.1:2019 >/dev/null 2>&1 || true' EXIT\nfugue-edge check-private-prewarm\n"
                 ],
                 "securityContext": {
                   "allowPrivilegeEscalation": false,
@@ -201,6 +201,14 @@
                   {
                     "name": "FUGUE_EDGE_CACHE_WARMUP_ENABLED",
                     "value": "false"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_PRIVATE_PREWARM_HOSTS",
+                    "valueFrom": {
+                      "fieldRef": {
+                        "fieldPath": "metadata.annotations['fugue.pro/private-prewarm-hosts-v1']"
+                      }
+                    }
                   }
                 ],
                 "volumeMounts": [

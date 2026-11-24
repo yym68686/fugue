@@ -13,6 +13,7 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/edge"
 	"fugue/internal/livediagnostics/runtimeprofile"
+	"fugue/internal/prewarmconfig"
 	"fugue/internal/runtimeobservation"
 )
 
@@ -23,13 +24,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if len(os.Args) > 1 {
-		if os.Args[1] != "check-private-prewarm" {
+		if len(os.Args) != 2 || os.Args[1] != "check-private-prewarm" {
 			logger.Fatal("unknown Edge command")
 		}
 		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
 		s := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfig{}, logger)
-		result, err := s.CheckPrivatePrewarm(ctx, os.Args[2:])
+		hosts, err := prewarmconfig.Parse(os.Getenv("FUGUE_EDGE_PRIVATE_PREWARM_HOSTS"))
+		if err != nil {
+			logger.Fatal(err)
+		}
+		result, err := s.CheckPrivatePrewarm(ctx, hosts)
 		if err != nil {
 			logger.Fatal(err)
 		}

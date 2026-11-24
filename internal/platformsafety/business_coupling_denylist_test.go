@@ -1,6 +1,7 @@
 package platformsafety
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"fugue/internal/prewarmconfig"
 )
 
 func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
@@ -61,6 +64,36 @@ func TestTrackedPlatformSourcesContainNoBusinessCoupling(t *testing.T) {
 // data. Exempt only that typed value, never an entire file or configuration tree:
 // executable fields, comments, unknown schema and adjacent strings stay scanned.
 func businessCouplingSource(path string, body []byte) []byte {
+	if path == "deploy/releases/edge-worker-us-primary-prewarm/resources.json" {
+		// Preserve the complete resource tree in the scan. Only the validated
+		// hostname data on the exact bounded Job is operator configuration.
+		var set map[string]any
+		if json.Unmarshal(body, &set) != nil || set["kind"] != "ComponentResourceSet" || set["apiVersion"] != "release.fugue.dev/v2" {
+			return body
+		}
+		items, _ := set["items"].([]any)
+		if len(items) != 1 {
+			return body
+		}
+		job, _ := items[0].(map[string]any)
+		meta, _ := job["metadata"].(map[string]any)
+		if job["apiVersion"] != "batch/v1" || job["kind"] != "Job" || meta["name"] != "fugue-edge-worker-us-primary-prewarm" {
+			return body
+		}
+		spec, _ := job["spec"].(map[string]any)
+		tmpl, _ := spec["template"].(map[string]any)
+		templateMeta, _ := tmpl["metadata"].(map[string]any)
+		annotations, _ := templateMeta["annotations"].(map[string]any)
+		value, _ := annotations[prewarmconfig.Annotation].(string)
+		if _, err := prewarmconfig.Parse(value); err != nil {
+			return body
+		}
+		encoded, _ := json.Marshal(value)
+		if bytes.Count(body, encoded) != 1 {
+			return body
+		}
+		return bytes.Replace(body, encoded, []byte(`"configuration-hostnames"`), 1)
+	}
 	if path == "deploy/environments/production/tls-issuance/policy.json" {
 		var declaration map[string]json.RawMessage
 		var domains []map[string]json.RawMessage
