@@ -186,8 +186,38 @@ status and error while its artifact and byte counters are reconciled. Platform
 targets have no synthetic application foreign key. Provenance includes source
 ETags, repository config SHA-256, and `restore_verification=not_run`. Repository
 identity verification is not a complete block checksum audit or a PostgreSQL
-restore drill. The CLI does not yet release artifact protection; keep the
-record protected until a separate verified recovery/retirement workflow exists.
+restore drill.
+
+### Retire one recovered control-plane Longhorn backup
+
+After actually restoring a recent replacement into an isolated PostgreSQL
+environment and checking the recovered data, keep the drill receipt and record
+its SHA-256. Do not use the backup status, a restore plan, or a dry-run as
+restore evidence. The operator vouches for the receipt; Fugue records its
+digest, but does not perform or certify the drill.
+
+```sh
+fugue backup artifact retire-recovered OLD_ID --replacement RETAINED_ID \
+  --restore-evidence-sha256 RECEIPT_SHA256 --reason 'reason for retiring the old recovery point'
+# Review the preview. Repeat the same command with --confirm PREVIEW_DIGEST.
+```
+
+Only platform admins can retire an active protected artifact recovered from a
+failed or canceled control-plane Longhorn run. The old artifact must be at
+least seven days old, without another alias, restore reference, live worker
+lease, or future retry. The distinct replacement must be the newest unprotected
+active artifact of the same policy, successful, at most 72 hours old, and belong
+to the same volume and repository.
+Both Longhorn Backup identities and remote backup configuration objects must
+still be present. The commit atomically releases protection, marks only the
+named old artifact deleted, and records the actor, reason and evidence digest
+in the audit log. Original backup-run histories are preserved.
+
+This is logical retirement. The remote collector observes the normal grace
+period and lets Longhorn remove the Backup and manage shared blocks; do not
+remove R2 blocks directly. The local Snapshot has a separate, fenced
+[cleanup process](local-snapshot-cleanup.md) after verified remote retirement.
+Neither the CLI result nor the layer size guarantees physical reclamation.
 
 ## Verification
 

@@ -309,6 +309,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/backups/artifacts", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackupArtifacts)))
 	mux.Handle("GET /v1/backups/artifacts/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackupArtifact)))
 	mux.Handle("DELETE /v1/backups/artifacts/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteBackupArtifact)))
+	mux.Handle("POST /v1/backups/artifacts/{id}/retire-recovered", s.auth.RequireAPI(http.HandlerFunc(s.handleRetireRecoveredBackupArtifact)))
 	mux.Handle("GET /v1/backups/backends", s.auth.RequireAPI(http.HandlerFunc(s.handleListBackupBackends)))
 	mux.Handle("POST /v1/backups/backends", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateBackupBackend)))
 	mux.Handle("GET /v1/backups/backends/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetBackupBackend)))

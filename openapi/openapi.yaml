@@ -14546,6 +14546,40 @@ paths:
                 $ref: "#/components/schemas/BackupArtifactResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/backups/artifacts/{id}/retire-recovered:
+    post:
+      operationId: retireRecoveredBackupArtifact
+      summary: Preview or retire one recovered Longhorn backup artifact
+      description: Platform administrators only. Applies only to protected recovered control-plane Longhorn backups from failed or canceled runs. Without a confirmation digest this is a read-only preview. Confirmation must match current eligibility and the reviewed replacement and operator restore evidence. Execution atomically marks the artifact deleted, releases its hold and records an audit event. This does not perform a restore, verify the operator's evidence contents, physically remove remote objects or purge the local source snapshot.
+      tags: [Backups, Admin]
+      x-fugue-handler: handleRetireRecoveredBackupArtifact
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecoveredBackupRetirementRequest"
+      responses:
+        '200':
+          description: Preview or committed logical retirement
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecoveredBackupRetirementResponse"
+        '409':
+          description: Execution blocked; no retirement committed
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/RecoveredBackupRetirementResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/backups/restore-plans:
     get:
       operationId: listBackupRestorePlans
@@ -18061,6 +18095,31 @@ components:
       properties:
         artifact:
           $ref: "#/components/schemas/BackupArtifact"
+    RecoveredBackupRetirementRequest:
+      type: object
+      additionalProperties: false
+      required: [replacement_artifact_id]
+      properties:
+        replacement_artifact_id: {type: string, minLength: 1, maxLength: 128}
+        restore_evidence_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of a real isolated PostgreSQL restore receipt for the replacement. The operator retains and vouches for the receipt.
+        reason: {type: string, minLength: 1, maxLength: 512}
+        confirmation: {type: string, pattern: '^[0-9a-f]{64}$'}
+    RecoveredBackupRetirementResponse:
+      type: object
+      additionalProperties: false
+      required: [artifact_id, replacement_artifact_id, retired, blockers]
+      properties:
+        artifact_id: {type: string}
+        replacement_artifact_id: {type: string}
+        retired: {type: boolean}
+        blockers:
+          type: array
+          items: {type: string}
+        confirmation: {type: string}
+        audit_id: {type: string}
     BackupArtifactListResponse:
       type: object
       additionalProperties: false

@@ -721,6 +721,7 @@ func (c *CLI) newBackupArtifactCommand() *cobra.Command {
 		c.newBackupArtifactListCommand(),
 		c.newBackupArtifactShowCommand(),
 		c.newBackupArtifactDeleteCommand(),
+		c.newRecoveredBackupRetirementCommand(),
 	)
 	return cmd
 }
