@@ -177,7 +177,7 @@ func (s *Service) applyHostedRoute(a model.PlatformArtifact, host string, who pl
 		return errHostedGroup
 	}
 	activation, e := s.selectRouteBundleSource()
-	if e != nil || activation.candidate || activation.preparation != nil || activation.activeSlot != "" && activation.activeSlot != s.Config.EdgeSlot {
+	if e != nil || activation.reporterInactive || activation.candidate || activation.preparation != nil || activation.activeSlot != "" && activation.activeSlot != s.Config.EdgeSlot {
 		return errHostedGroup
 	}
 	root, e := filepath.Abs(s.Config.CachePath + ".hosted-routes")

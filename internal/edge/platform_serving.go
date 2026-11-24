@@ -145,7 +145,7 @@ func (s *Service) syncPlatformServingOnce(ctx context.Context, routeProbe platfo
 	}
 	bundle, ok := s.Bundle()
 	observation.Bundle, observation.Applied = servingIdentityHash(bundle.Version), servingPublication(bundle.TrafficRelease)
-	if selection.candidate || !ok || bundle.TrafficRelease == nil {
+	if selection.candidate || selection.reporterInactive || !ok || bundle.TrafficRelease == nil {
 		observation.Outcome = "awaiting_release"
 		s.mu.Lock()
 		s.platformServing = PlatformServingStatus{State: "awaiting_release"}
@@ -420,7 +420,7 @@ func (s *Service) reportPlatformServingFailure(ctx context.Context, client platf
 	current := func() error {
 		selected, err := s.selectRouteBundleSource()
 		actual, ok := s.Bundle()
-		if err != nil || selected != selection || selected.candidate || !ok || actual.Version != bundle.Version || !reflect.DeepEqual(actual.TrafficRelease, bundle.TrafficRelease) {
+		if err != nil || selected != selection || selected.candidate || selected.reporterInactive || !ok || actual.Version != bundle.Version || !reflect.DeepEqual(actual.TrafficRelease, bundle.TrafficRelease) {
 			return errors.New("traffic failure observation activation or bundle changed")
 		}
 		return nil

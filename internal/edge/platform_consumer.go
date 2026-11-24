@@ -160,7 +160,7 @@ func (s *Service) SyncPlatformShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return errors.New("edge platform reporting activation unavailable")
 	}
-	if selection.candidate {
+	if selection.candidate || selection.reporterInactive {
 		s.mu.Lock()
 		s.platformCandidate.State = "inactive"
 		s.platformCandidate.ReportedAt = time.Time{}

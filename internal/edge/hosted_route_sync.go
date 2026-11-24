@@ -58,7 +58,7 @@ func (s *Service) syncHostedRoutes(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
-	if act.candidate || act.preparation != nil || act.activeSlot != "" && act.activeSlot != s.Config.EdgeSlot {
+	if act.reporterInactive || act.candidate || act.preparation != nil || act.activeSlot != "" && act.activeSlot != s.Config.EdgeSlot {
 		return nil
 	}
 	cl := platformconsumer.Client{BaseURL: s.Config.APIURL, TokenFile: s.PlatformTokenFile, HTTPClient: s.HTTPClient, AuthorityID: platformcontrol.ConsumerAuthorityID(s.Config.EdgeGroupID)}
@@ -173,6 +173,9 @@ func (s *Service) syncHostedRoutes(ctx context.Context) error {
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if current, err := s.selectRouteBundleSource(); err != nil || current != act || current.reporterInactive {
+				return platformconsumer.ErrAssignmentChanged
 			}
 			return errors.Join(obsErr, cl.ReportHostedObservation(ctx, id, sel, o))
 		}

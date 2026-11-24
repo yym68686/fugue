@@ -143,7 +143,7 @@ func (s *Service) SyncPlatformTLSShadowOnce(ctx context.Context) error {
 	if err != nil {
 		return errors.New("TLS reporting activation unavailable")
 	}
-	if selection.candidate {
+	if selection.candidate || selection.reporterInactive {
 		s.mu.Lock()
 		s.platformTLSCandidate.State, s.platformTLSCandidate.ReportedAt = "inactive", time.Time{}
 		s.platformTLSReadiness = nil

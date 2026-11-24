@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"fugue/internal/config"
+	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 )
@@ -231,7 +232,7 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 	if err != nil {
 		return err
 	}
-	if selection.Slot != strings.TrimSpace(edgeConfig.EdgeSlot) {
+	if selection.Slot != strings.TrimSpace(edgeConfig.EdgeSlot) || !s.physicalReporterMatches(edgeConfig, selection.Activation) {
 		s.recordInventoryProducerInactive()
 		return nil
 	}
@@ -301,6 +302,13 @@ func (s *Service) inventoryHeartbeatAttempt(ctx context.Context, edgeConfig conf
 		current, checkErr := s.selectInventoryEpoch(ctx, edgeConfig)
 		if checkErr != nil || current.Bootstrap == nil || *current.Bootstrap != *selection.Bootstrap || !expiresAt.After(time.Now().UTC()) {
 			return errors.New("initial cell bootstrap authorization changed before inventory publication")
+		}
+	} else if s.physicalMode() {
+		// Cursor lookup and signing run outside the local activation CAS. Do
+		// not send even a well-formed inventory for a superseded selection.
+		current, found, readErr := edgegroupfront.ReadActivationState(s.InventoryProducer.ActivationStateFile)
+		if readErr != nil || !found || current != selection.Activation || !s.physicalReporterMatches(edgeConfig, current) {
+			return errors.New("physical Worker selection changed before inventory publication")
 		}
 	}
 	response, err := s.InventoryProducerHTTPClient.Do(request)

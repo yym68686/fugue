@@ -784,33 +784,9 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 	now := time.Now().UTC()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		var bundle model.EdgeRouteBundle
 		var previousBundle *model.EdgeRouteBundle
-		if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
-			err = fmt.Errorf("decode edge route bundle: %w", err)
-			s.recordSyncError(err)
-			return err
-		}
-		if err := s.verifyBundle(bundle, now); err != nil {
-			// Rejecting a candidate must not replace the serving LKG. Historical
-			// cache recovery belongs to startup or an explicit recovery action.
-			err = fmt.Errorf("verify edge route bundle: %w", err)
-			s.recordSyncError(err)
-			return err
-		}
-		publication, err := routePublicationFromResponse(resp.Header, bundle, s.Config.EdgeGroupID)
+		bundle, publication, err := s.readVerifiedPublication(resp, routeSelection, now)
 		if err != nil {
-			s.recordSyncError(err)
-			return err
-		}
-		if routeSelection.candidate {
-			publication, err = bindCandidatePublication(resp.Header, publication, s.Config.EdgeSlot)
-			if err != nil {
-				s.recordSyncError(err)
-				return err
-			}
-		}
-		if err = validateRouteBundleActivationBinding(routeSelection, publication); err != nil {
 			s.recordSyncError(err)
 			return err
 		}
@@ -839,6 +815,14 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 			err = fmt.Errorf("apply caddy config: %w", err)
 			s.recordSyncError(err)
 			return err
+		}
+		if routeSelection.privatePrewarm {
+			// Applying to an isolated Caddy can block. Never checkpoint a
+			// private observation if the serving predecessor changed meanwhile.
+			if err := s.validateRouteBundleSourceSelection(routeSelection); err != nil {
+				s.recordSyncError(err)
+				return err
+			}
 		}
 		if err := s.writeCache(cacheFile{
 			Version:                      cacheFileVersion,
@@ -3277,6 +3261,14 @@ func (s *Service) startHeartbeatLoop(ctx context.Context) {
 }
 
 func (s *Service) HeartbeatOnce(ctx context.Context) error {
+	var before routeSourceSelection
+	if s.physicalMode() {
+		var err error
+		before, err = s.selectRouteBundleSource()
+		if err != nil || before.reporterInactive {
+			return err
+		}
+	}
 	if !s.heartbeatEnabled() {
 		if err := s.RefreshDesiredState(ctx); err != nil && s.Logger != nil {
 			s.Logger.Printf("edge desired state refresh before heartbeat failed: %s", s.redact(err.Error()))
@@ -3293,6 +3285,12 @@ func (s *Service) HeartbeatOnce(ctx context.Context) error {
 	if err != nil {
 		s.logHeartbeatFailure(err)
 		return err
+	}
+	if s.physicalMode() {
+		after, err := s.selectRouteBundleSource()
+		if err != nil || after != before {
+			return errors.New("physical Worker selection changed before heartbeat")
+		}
 	}
 	resp, err := s.sendHeartbeatWithOptionalNetworkSamples(req)
 	if err != nil {
@@ -3400,14 +3398,14 @@ func (s *Service) newHeartbeatRequest(ctx context.Context) (*http.Request, telem
 func (s *Service) servingActiveForHeartbeat() (bool, bool) {
 	cfg := s.edgeRouteSourceConfig()
 	if cfg.candidateURL == "" {
-		return true, true
+		return !s.physicalMode(), true
 	}
 	selection, err := s.selectRouteBundleSource()
 	if err != nil {
-		return false, false
+		return false, s.physicalMode()
 	}
 	slot := strings.TrimSpace(s.Config.EdgeSlot)
-	return !selection.candidate && selection.activeSlot == slot, true
+	return !selection.reporterInactive && !selection.candidate && selection.activeSlot == slot, true
 }
 
 func (s *Service) commitHeartbeatPerformanceBaseline(metrics telemetry) {

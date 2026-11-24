@@ -84,6 +84,17 @@ func (s *Service) handleRouteProof(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	if s.physicalMode() {
+		// Loading a signed parent into a private Caddy is not public route
+		// proof. Only a selected incarnation or an exact, live Front
+		// preparation may answer; never use a stale local cache as authority.
+		selection, err := s.selectRouteBundleSource()
+		if err != nil || selection.candidate || (selection.reporterInactive && selection.preparation == nil) ||
+			validateRouteBundleActivationBinding(selection, index.publication) != nil || s.validateRouteBundleSourceSelection(selection) != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+	}
 	digest, err := routeproof.Digest(route)
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)

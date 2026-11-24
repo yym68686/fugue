@@ -80,11 +80,27 @@ type RouteBundleSourceConfig struct {
 	TokenFile           string
 	VerifierKeyringFile string
 	ActivationStateFile string
+	// Present only on a Worker with an explicitly declared physical listener.
+	// nil is the legacy A/B protocol, not an empty or missing image projection.
+	ReporterImageRef *string
+	// Optional declarative node@activation-receipt-digest. A private
+	// replacement may read the current stream before any Front write.
+	PrewarmPredecessor *string
 }
 
 // RouteBundleSourceFromEnv reads only the Edge-owned group publication source.
 func RouteBundleSourceFromEnv() RouteBundleSourceConfig {
+	var image *string
+	if v, ok := os.LookupEnv("FUGUE_EDGE_PHYSICAL_WORKER_IMAGE"); ok {
+		image = &v
+	}
+	var predecessor *string
+	if v, ok := os.LookupEnv("FUGUE_EDGE_PREWARM_PREDECESSOR"); ok {
+		predecessor = &v
+	}
 	return RouteBundleSourceConfig{
+		ReporterImageRef:    image,
+		PrewarmPredecessor:  predecessor,
 		URL:                 strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_URL")),
 		CandidateURL:        strings.TrimSpace(os.Getenv("FUGUE_EDGE_CANDIDATE_ROUTE_BUNDLE_URL")),
 		TokenFile:           strings.TrimSpace(os.Getenv("FUGUE_EDGE_ROUTE_BUNDLE_TOKEN_FILE")),
@@ -149,6 +165,8 @@ type configEdgeRouteSource struct {
 }
 
 type routeSourceSelection struct {
+	privatePrewarm              bool
+	reporterInactive            bool // inhibits node writes, not existing traffic or read-only bundle refresh
 	preparation                 *edgegroupfront.PublicationPreparation
 	enrollment                  model.EdgeNodeEnrollment
 	config                      configEdgeRouteSource
@@ -191,7 +209,10 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 	if err := validateEdgeControlRouteSourceConfig(cfg); err != nil {
 		return routeSourceSelection{}, err
 	}
-	selection := routeSourceSelection{config: cfg}
+	selection := routeSourceSelection{config: cfg, reporterInactive: s.RouteBundleSource.ReporterImageRef != nil}
+	if s.RouteBundleSource.PrewarmPredecessor != nil && (cfg.candidateURL == "" || !s.prewarmIdentityBound(s.Config)) {
+		return routeSourceSelection{}, errors.New("private Worker prewarm requires an exact physical identity and local activation")
+	}
 	if cfg.candidateURL == "" {
 		return selection, nil
 	}
@@ -200,7 +221,7 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 		return routeSourceSelection{}, errors.New("candidate route source requires an exact worker slot identity")
 	}
 	activation, exists, err := edgegroupfront.ReadActivationState(cfg.activationFile)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && s.RouteBundleSource.PrewarmPredecessor == nil {
 		enrollment := s.currentEdgeEnrollment()
 		if enrollment != nil && enrollment.Validate(s.Config.EdgeID, s.Config.EdgeGroupID, time.Now().UTC()) == nil {
 			selection.enrollment = *enrollment
@@ -218,6 +239,13 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 	}
 	selection.activationGeneration = activation.Generation
 	selection.activeSlot = activation.ActiveSlot
+	selection.reporterInactive = !s.physicalReporterMatches(s.Config, activation)
+	if s.RouteBundleSource.PrewarmPredecessor != nil && selection.reporterInactive {
+		if !s.canPrewarm(activation) {
+			return routeSourceSelection{}, errors.New("private Worker prewarm predecessor changed")
+		}
+		selection.privatePrewarm = true
+	}
 	if activation.ActiveSlot != slot {
 		selection.candidate = true
 		selection.config.url = cfg.candidateURL
@@ -225,27 +253,30 @@ func (s *Service) selectRouteBundleSource() (routeSourceSelection, error) {
 		if prepareErr != nil {
 			return routeSourceSelection{}, prepareErr
 		}
-		if found && prepared.Matches(activation, slot, strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) {
+		if found && prepared.Matches(activation, slot, strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) && s.matchesPreparedImage(prepared.WorkerImageDigest) {
 			generation, sequence, recovery, parseErr := parseActivatedPublicationVersion(prepared.BundleGeneration)
 			if parseErr != nil {
 				return routeSourceSelection{}, parseErr
 			}
 			selection.candidate = false
+			selection.privatePrewarm = false // explicit, independently rechecked 90-second preparation
 			selection.config.url = cfg.url
 			selection.preparation = &prepared
 			selection.expectedGeneration, selection.expectedPublicationSequence, selection.expectedRecoveryEpoch = generation, sequence, recovery
+			return selection, nil
 		}
-	} else {
-		// Front activation is the traffic authority. Until Edge Control has
-		// promoted the exact verified candidate into its current stream, an
-		// active worker must retain its already-loaded bundle instead of
-		// accepting an older current publication during the CAS window.
-		selection.expectedGeneration = activation.BundleGeneration
-		if generation, sequence, recovery, parseErr := parseActivatedPublicationVersion(activation.BundleGeneration); parseErr == nil {
-			selection.expectedGeneration = generation
-			selection.expectedPublicationSequence = sequence
-			selection.expectedRecoveryEpoch = recovery
+		if !selection.privatePrewarm {
+			return selection, nil
 		}
+		selection.candidate, selection.config.url = false, cfg.url
+	}
+	// The serving Worker and the private prewarm reader both use the
+	// Front's current lower bound, never a superseded candidate stream.
+	selection.expectedGeneration = activation.BundleGeneration
+	if generation, sequence, recovery, parseErr := parseActivatedPublicationVersion(activation.BundleGeneration); parseErr == nil {
+		selection.expectedGeneration = generation
+		selection.expectedPublicationSequence = sequence
+		selection.expectedRecoveryEpoch = recovery
 	}
 	return selection, nil
 }
@@ -323,8 +354,15 @@ func (s *Service) validateRouteBundleSourceSelection(selection routeSourceSelect
 	}
 	if selection.preparation != nil {
 		prepared, found, err := edgegroupfront.ReadPublicationPreparation(selection.config.activationFile)
-		if err != nil || !found || prepared != *selection.preparation || !prepared.Matches(activation, strings.TrimSpace(s.Config.EdgeSlot), strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) {
+		if err != nil || !found || prepared != *selection.preparation || !prepared.Matches(activation, strings.TrimSpace(s.Config.EdgeSlot), strings.TrimSpace(s.Config.EdgeReleaseEpoch), time.Now().UTC()) || !s.matchesPreparedImage(prepared.WorkerImageDigest) {
 			return errors.New("publication preparation changed while loading a bundle")
+		}
+		return nil
+	}
+	if selection.privatePrewarm {
+		current, err := s.selectRouteBundleSource()
+		if err != nil || current != selection {
+			return errors.New("private Worker prewarm predecessor changed during sync")
 		}
 		return nil
 	}

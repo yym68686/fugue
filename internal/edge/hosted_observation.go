@@ -16,7 +16,7 @@ import (
 func (s *Service) hostedObservationState(p routeartifact.HostedSelectedPacket) (*edgeRouteIndex, model.EdgeRouteBundle, error) {
 	var empty model.EdgeRouteBundle
 	activation, e := s.selectRouteBundleSource()
-	if e != nil || activation.candidate || activation.preparation != nil || activation.activeSlot != "" && activation.activeSlot != s.Config.EdgeSlot {
+	if e != nil || activation.reporterInactive || activation.candidate || activation.preparation != nil || activation.activeSlot != "" && activation.activeSlot != s.Config.EdgeSlot {
 		return nil, empty, errHostedGroup
 	}
 	s.mu.Lock()

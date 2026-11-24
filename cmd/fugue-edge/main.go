@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/edge"
@@ -20,6 +22,22 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if len(os.Args) > 1 {
+		if os.Args[1] != "check-private-prewarm" {
+			logger.Fatal("unknown Edge command")
+		}
+		ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		s := edge.NewServiceWithEdgeSources(cfg, edge.RouteBundleSourceFromEnv(), edge.InventoryProducerConfig{}, logger)
+		result, err := s.CheckPrivatePrewarm(ctx, os.Args[2:])
+		if err != nil {
+			logger.Fatal(err)
+		}
+		if err = json.NewEncoder(os.Stdout).Encode(result); err != nil {
+			logger.Fatal(err)
+		}
+		return
+	}
 	if err := runtimeprofile.StartRuntimeEndpoint(ctx, "edge"); err != nil {
 		logger.Printf("live diagnostics runtime endpoint unavailable: %v", err)
 	}

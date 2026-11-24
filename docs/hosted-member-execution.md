@@ -90,3 +90,28 @@ actual route/TLS readiness, binds the public Front and keeps both original
 listeners. Missing state, an unregistered image or a wrong source refuses
 new upstream connections; existing streams are unaffected. A watcher on
 another node or a successful DNS lookup is not evidence of a handoff.
+
+For an overlap Worker, project the Pod template's immutable image reference
+into `FUGUE_EDGE_PHYSICAL_WORKER_IMAGE`. The process reads this at startup
+alongside its existing projected node, group, slot, Pod UID and source.
+Route reads and existing sockets stay independent of the right to report.
+Only the selected group/slot/source/image may publish inventory, ordinary
+heartbeats or host observations; a present but empty image does not select
+legacy behavior. The deployment must ensure a unique process at the
+registered listener for each pin: two copies of the same slot/source/image
+are not distinguishable by that activation. An old binary does not implement
+this protocol. Do not reuse its letter in production until the receiving
+control plane also fences its live credential and inventory instance across
+promotion and rollback. Leaving the process alive is intentional.
+
+Before selecting a new listener, a bounded private Job can verify the
+serving publication with `fugue-edge check-private-prewarm HOST ...`.
+Its declaration pins `FUGUE_EDGE_PREWARM_PREDECESSOR` to the exact
+node and Front activation-file SHA-256 (`node@sha256:...`). It uses
+the normal group signature, a fresh current publication, a loopback Caddy
+and certificate-verified TLS for each named host. Neither the publication
+nor the predecessor may change during the check. The Job mounts activation
+and existing certificate material read-only; its own immutable certificate
+cache is temporary. It has no public Service, hostPort, inventory identity,
+node token, or admission flag. Completion releases the scheduled compute;
+it is not a listener handoff, serving receipt, or hostname acceptance.

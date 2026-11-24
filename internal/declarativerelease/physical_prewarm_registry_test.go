@@ -1,0 +1,50 @@
+package declarativerelease
+
+import (
+	"encoding/json"
+	batchv1 "k8s.io/api/batch/v1"
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestProductionPhysicalPrewarmOwnsOnlyBoundedPrivateJob(t *testing.T) {
+	raw, err := os.ReadFile("../../deploy/releases/edge-worker-us-primary-prewarm/resources.json")
+	var set struct{ Items []batchv1.Job }
+	if err != nil || json.Unmarshal(raw, &set) != nil || len(set.Items) != 1 {
+		t.Fatal("expected exactly one Job")
+	}
+	j := set.Items[0]
+	p := j.Spec.Template.Spec
+	if j.Kind != "Job" || j.Spec.ActiveDeadlineSeconds == nil || *j.Spec.ActiveDeadlineSeconds > 240 || j.Spec.BackoffLimit == nil || *j.Spec.BackoffLimit != 0 ||
+		j.Spec.Parallelism == nil || *j.Spec.Parallelism != 1 || p.RestartPolicy != "Never" || p.NodeSelector["kubernetes.io/hostname"] == "" ||
+		p.AutomountServiceAccountToken == nil || *p.AutomountServiceAccountToken || p.HostNetwork || p.HostPID || len(p.InitContainers) != 0 || len(p.Containers) != 1 {
+		t.Fatal("unbounded or publicly exposed prewarm")
+	}
+	c := p.Containers[0]
+	if len(c.Ports) != 0 || c.SecurityContext == nil || c.SecurityContext.ReadOnlyRootFilesystem == nil || !*c.SecurityContext.ReadOnlyRootFilesystem || len(c.EnvFrom) != 0 {
+		t.Fatal("non-isolated runner")
+	}
+	mounts := map[string]bool{}
+	for _, m := range c.VolumeMounts {
+		mounts[m.Name] = m.ReadOnly
+	}
+	for _, v := range p.Volumes {
+		switch {
+		case v.HostPath != nil:
+			if !mounts[v.Name] || !(strings.HasSuffix(v.HostPath.Path, "/front") || strings.HasSuffix(v.HostPath.Path, "/caddy-data/caddy/certificates")) {
+				t.Fatal("unexpected or writable host mount", v.Name)
+			}
+		case v.Secret != nil:
+			if !mounts[v.Name] || !(v.Name == "reader" || v.Name == "verifier" || v.Name == "static-tls") {
+				t.Fatal("unexpected credential", v.Name)
+			}
+		case v.EmptyDir != nil:
+			if v.EmptyDir.SizeLimit == nil || v.EmptyDir.Medium != "Memory" {
+				t.Fatal("unbounded scratch", v.Name)
+			}
+		default:
+			t.Fatal("unexpected private Job volume", v.Name)
+		}
+	}
+}
