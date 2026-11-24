@@ -72,6 +72,7 @@ jobs:
       protection: ${{ steps.selected.outputs.protection }}
       capacity_access: ${{ steps.selected.outputs.capacity_access }}
       snapshot_request: ${{ steps.selected.outputs.snapshot_request }}
+      cleanup_observer: ${{ steps.selected.outputs.cleanup_observer }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -176,6 +177,64 @@ jobs:
           path: ${{ runner.temp }}/edge-capacity-external.json
           if-no-files-found: ignore
           retention-days: 7
+
+  longhorn_cleanup_observer_release:
+    needs: [prepush, production_maintenance_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.production_maintenance_plan.outputs.cleanup_observer == 'true' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-longhorn-cleanup-observer-release, cancel-in-progress: false, queue: max}
+    timeout-minutes: 12
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Publish and observe the metadata-only Longhorn canary
+        run: |
+          set -euo pipefail
+          path=deploy/environments/production/local-snapshot-cleanup
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$path" .github/workflows/ci.yml
+          python3 -m unittest scripts.test_observe_longhorn_cleanup
+          kubectl apply --server-side --field-manager=fugue-longhorn-cleanup-observer --dry-run=server -k "$path"
+          kubectl apply --server-side --field-manager=fugue-longhorn-cleanup-observer -k "$path"
+          ns="$(jq -er .namespace "$path/policy.json")"
+          storage_ns="$(jq -er .longhornNamespace "$path/policy.json")"
+          name=fugue-longhorn-cleanup-observer
+          identity="system:serviceaccount:$ns:$name"
+          deny() {
+            local result
+            result="$(kubectl auth can-i --as="$identity" --as-group=system:serviceaccounts --as-group="system:serviceaccounts:$ns" --as-group=system:authenticated "$@" || true)"
+            [[ "$result" == no ]]
+          }
+          deny -n "$ns" create pods --subresource=exec
+          deny -n "$storage_ns" create pods --subresource=exec
+          deny -n "$ns" get pods --subresource=exec
+          deny -n "$storage_ns" get pods --subresource=exec
+          deny -n "$ns" get secrets
+          deny -n "$ns" update leases.coordination.k8s.io
+          deny -n "$storage_ns" delete snapshots.longhorn.io
+          expected="$(python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$path/policy.json")"
+          cron="$(kubectl -n "$ns" get cronjob "$name" -o json)"
+          uid="$(jq -er '.metadata.uid' <<< "$cron")"
+          input="$(jq -er '.spec.jobTemplate.spec.template.spec.volumes[] | select(.name == "inputs").configMap.name' <<< "$cron")"
+          for ((i=0; i<36; i++)); do
+            job="$(kubectl -n "$ns" get jobs -l "app.kubernetes.io/name=$name" -o json |
+              jq -r --arg uid "$uid" --arg input "$input" '[.items[] | select(any(.metadata.ownerReferences[]?; .uid == $uid) and any(.spec.template.spec.volumes[]?; .configMap.name == $input)) | select((.status.succeeded // 0) > 0)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
+            if [[ -n "$job" ]]; then
+              receipt="$(kubectl -n "$ns" logs "job/$job" -c inventory --limit-bytes=4096)"
+              printf '%s\n' "$receipt"
+              jq -e --arg expected "$expected" '.schema == "fugue.longhorn-cleanup-observation/v1" and .mode == "metadata-only" and .authorizes_deletion == false and .policy_sha256 == $expected and .phase == "inventory_observed"' <<< "$receipt"
+              exit 0
+            fi
+            sleep 12
+          done
+          kubectl -n "$ns" get jobs -l "app.kubernetes.io/name=$name"
+          echo "::error::No completed metadata-only observation from this CronJob revision."
+          exit 1
 
   longhorn_gc_build:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}

@@ -10,6 +10,7 @@ from scripts.recover_longhorn_snapshot import Recovery
 ROOT = 'deploy/environments/production'
 REVIEW = ROOT + '/local-snapshot-review'
 REQUESTS = REVIEW + '/requests/'
+OBSERVER = ROOT + '/local-snapshot-cleanup/'
 DECLARATIONS = {
     'node_policy': ROOT + '/node-participation/policy.json',
     'expansion': ROOT + '/postgres-volume-expansion/recovery.json',
@@ -36,6 +37,8 @@ def select(before, after):
     selected = {name: changes.get(path) == 'A' or
                 (changes.get(path) == 'M' and read(before, path) != read(after, path))
                 for name, path in DECLARATIONS.items()}
+    selected['cleanup_observer'] = any(changes.get(OBSERVER + path) in {'A', 'M'}
+                                      for path in ('kustomization.yaml', 'observe.py', 'observer.yaml', 'policy.json'))
     requests = {path: status for path, status in changes.items() if path.startswith(REQUESTS)}
     if not requests:
         return selected

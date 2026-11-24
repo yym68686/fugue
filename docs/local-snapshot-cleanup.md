@@ -9,12 +9,28 @@ shared backup/release Lease, including managed tenant databases.
 
 The committed `local-snapshot-cleanup/policy.json` is standing authorization
 for the bounded reconciler in the single production `ci.yml` entrypoint. Deploy
-the coordinating API before enabling the policy. Each push and the existing
-five-minute schedule re-discover the labelled local inventory independently of
+the coordinating API before enabling the policy. The existing schedule, not a
+normal push, re-discovers the labelled local inventory independently of
 worker memory, artifact list display windows, and previous job success. Native
 operations remain serialized with database recovery. V2 executes a bounded
 sequence, re-discovering and measuring after every single native completion.
 No extra capacity, replicas or paid resources are provisioned.
+
+## In-cluster observation canary
+
+A separately deployed Kubernetes CronJob observes the control-plane database's
+Longhorn metadata every five minutes. It reports the policy digest, shared Lease
+occupancy and the count of labelled local snapshots on the bound volume. It
+does not access the backup ledger, inspect physical capacity, classify candidates
+or authorize deletions. Its service account has no exec, secret, Lease-write or
+snapshot-write permissions. It does not accept write-mode configuration.
+
+A successful observation proves that the cluster scheduler and bounded metadata
+reads work independently of Actions. It does not prove parity with the native
+executor. Keep the existing writer until the new execution identity can inspect
+the full cross-volume inventory and run narrowly authorized ledger/physical
+observations, and until all concurrent database writers honor the shared
+fences. Do not give this observer broad pod exec to skip those requirements.
 
 Every alias of a source must be unprotected, terminal, remotely physically
 retired, free of active restores, and owned by a terminal run with no live lease.

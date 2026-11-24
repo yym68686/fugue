@@ -52,14 +52,19 @@ class SelectionTests(unittest.TestCase):
                      '.github/workflows/ci.yml', 'docs/notes.md',
                      plan.REVIEW + '/approval.json'):
             self.write(path, {'changed': True})
-        self.assertEqual(plan.select(self.base, self.commit()), dict.fromkeys(plan.DECLARATIONS, False))
+        self.assertEqual(plan.select(self.base, self.commit()), dict.fromkeys([*plan.DECLARATIONS, 'cleanup_observer'], False))
 
     def test_configuration_intents_select_only_their_own_writer(self):
         for name, path in plan.DECLARATIONS.items():
             with self.subTest(name=name):
                 before = self.git('rev-parse', 'HEAD').strip()
                 self.write(path, {'changed': True})
-                self.assertEqual(plan.select(before, self.commit()), {key: key == name for key in plan.DECLARATIONS})
+                self.assertEqual(plan.select(before, self.commit()), {key: key == name for key in [*plan.DECLARATIONS, 'cleanup_observer']})
+
+    def test_observer_changes_never_select_snapshot_recovery(self):
+        self.write(plan.OBSERVER + 'observe.py', {'updated': True})
+        self.assertEqual(plan.select(self.base, self.commit()),
+                         {**dict.fromkeys(plan.DECLARATIONS, False), 'cleanup_observer': True})
 
     def test_formatting_does_not_replay_configuration_intent(self):
         path = plan.DECLARATIONS['expansion']
