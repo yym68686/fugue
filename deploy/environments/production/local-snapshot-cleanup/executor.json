@@ -1,6 +1,6 @@
 {
   "schema": "fugue.longhorn-cleanup-executor/v1",
-  "mode": "observe",
+  "mode": "active",
   "local_node": "vps-d6d20fa1",
   "local_executor": {
     "namespace": "fugue-system",
