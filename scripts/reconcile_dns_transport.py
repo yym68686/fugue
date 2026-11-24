@@ -26,6 +26,10 @@ HANDOFF_RETRY_SECONDS = 5
 RECOVERY_ATTEMPTS = 24
 
 
+class ElapsedInTransit(ValueError):
+    """A positive proof was valid at capture, but elapsed before comparison."""
+
+
 class ObservationUnavailable(RuntimeError):
     """A read-only Kubernetes observation is temporarily unavailable."""
 
@@ -277,6 +281,7 @@ def bound_backend(namespace, pod, target_port, *, read_runtime):
 
 def validate_handoff_snapshots(old, candidate, node_name, now=None, *, serving_pair_inputs=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    elapsed_in_transit = False
     if serving_pair_inputs is not None and (
             set(serving_pair_inputs) != {"candidate", "fallback"} or
             serving_pair_inputs["candidate"].get("snapshot") is not old or
@@ -316,8 +321,10 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None, *, serving_p
             # redundant proof may elapse. Only a new cryptographic check of
             # both full inputs at one verifier time can decide if it mattered.
             expires = timestamp(proof["valid_until"])
-            if not timestamp(proof["checked_at"]) <= evaluated < expires or (expires <= now and serving_pair_inputs is None):
+            if not timestamp(proof["checked_at"]) <= evaluated < expires:
                 raise ValueError("DNS handoff proof is expired or from the future")
+            if expires <= now and serving_pair_inputs is None:
+                elapsed_in_transit = True
             if any(binding.get(k) != v for k,v in {
                 "release_set_id": assignment["release_set_id"], "release_set_digest": snapshot["parent_digest"],
                 "route_artifact_id": snapshot["route_artifact_id"], "release_id": assignment["artifact_release_id"],
@@ -328,6 +335,8 @@ def validate_handoff_snapshots(old, candidate, node_name, now=None, *, serving_p
             raise ValueError("DNS handoff backends have different artifact assignments")
     if {f["probe_id"] for f in old["facts"]} != {f["probe_id"] for f in candidate["facts"]}:
         raise ValueError("DNS handoff backends have different probe membership")
+    if elapsed_in_transit:
+        raise ElapsedInTransit("DNS handoff proof is expired or from the future")
     if serving_pair_inputs is not None:
         from scripts.recover_dns_transport import verify_observation_input
         verify_observation_input(serving_pair_inputs, None, ["--verify-serving-pair"], '{"verified_serving_pair":true}')
@@ -375,6 +384,32 @@ def verify_handoff_backend(role, backend, namespace, port, *, recovery=False):
     except DNSObservationRejected as error:
         error.backend_role = role
         raise
+
+
+def recheck_ordinary_serving_pair(namespace, node, previous, candidate, previous_port, candidate_port):
+    """Private verifier inputs never enter a witness, artifact, or log."""
+    from scripts.recover_dns_transport import candidate_request
+    def read(backend, port):
+        copy = dict(backend)  # candidate_request replaces the snapshot
+        request = candidate_request(copy, staged_backend_binding(copy, namespace, port))
+        before, after = backend["snapshot"], request["snapshot"]
+        for k in ("node_id", "edge_group_id", "assignment", "parent_digest", "route_artifact_id", "plan_digest"):
+            if before[k] != after[k]:
+                raise ValueError("DNS handoff authority changed during paired read")
+        if {f["probe_id"] for f in before["facts"]} != {f["probe_id"] for f in after["facts"]}:
+            raise ValueError("DNS handoff probe membership changed during paired read")
+        return request
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a = pool.submit(read, previous, previous_port)
+        b = pool.submit(read, candidate, candidate_port)
+        pair = {"candidate": a.result(), "fallback": b.result()}
+    validate_handoff_snapshots(pair["candidate"]["snapshot"], pair["fallback"]["snapshot"], node,
+                               serving_pair_inputs=pair)
+    for backend in (previous, candidate):
+        meta = backend["pod"]["metadata"]
+        pod = read_json("get", "pod", meta["name"], "-n", namespace, "-o", "json")
+        if not ready_pod(pod) or any(not meta.get(k) or pod["metadata"].get(k) != meta[k] for k in ("uid", "resourceVersion")):
+            raise ValueError("DNS handoff backend changed during paired read")
 
 
 def recovery_fallback_backend(config, listener, stage, node, *, verifier=None):
@@ -455,7 +490,12 @@ def handoff_witness(config, listener, current):
                         error.add_note("DNS staged listener " + listener["name"] + " " + role)
                         raise
             if not failed:
-                validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
+                try:
+                    validate_handoff_snapshots(old["snapshot"], candidate["snapshot"], node)
+                except ElapsedInTransit:
+                    if not stage or "recovery_fallback" in stage:
+                        raise
+                    recheck_ordinary_serving_pair(namespace, node, old, candidate, old_port, listener["targetPort"])
             if stage and "recovery_fallback" in stage:
                 try:
                     fallback = recovery_fallback_backend(config, listener, stage, node)

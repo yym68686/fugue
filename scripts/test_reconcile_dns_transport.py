@@ -247,6 +247,35 @@ class TransportTests(unittest.TestCase):
                 transport.validate_handoff_snapshots(left,right,"node",serving_pair_inputs=params)
             check.assert_not_called()
 
+    def test_ordinary_paired_read_rechecks_scope_pods_and_crypto_without_returning_private_inputs(self):
+        from scripts import recover_dns_transport as recovery
+        old = {"snapshot": self.snapshot(), "pod": {"metadata": {"name":"left","uid":"old","resourceVersion":"1"}}}
+        new = {"snapshot": copy.deepcopy(old["snapshot"]), "pod": {"metadata": {"name":"right","uid":"new","resourceVersion":"2"}}}
+        for case in ("ok", "changed_parent", "changed_probes", "changed_uid", "lost_quorum"):
+            def capture(backend, config):
+                snapshot = copy.deepcopy(backend["snapshot"])
+                if backend["pod"]["metadata"]["uid"] == "new":
+                    if case == "changed_parent": snapshot["parent_digest"] = "sha256:"+"c"*64
+                    if case == "changed_probes": snapshot["facts"] = []
+                return {"snapshot":snapshot, "signing_key":"private-fixture"}
+            def live(*args):
+                original = old if args[2] == "left" else new
+                pod = copy.deepcopy(original["pod"])
+                if case == "changed_uid": pod["metadata"]["uid"] += "-changed"
+                return pod
+            with self.subTest(case=case), patch.object(transport,"staged_backend_binding",return_value={}), \
+                 patch.object(recovery,"candidate_request",side_effect=capture), patch.object(transport,"read_json",side_effect=live), \
+                 patch.object(transport,"ready_pod",return_value=True), patch.object(recovery,"verify_observation_input") as verify:
+                if case == "lost_quorum": verify.side_effect = recovery.DNSObservationRejected("record_readiness")
+                if case == "ok":
+                    self.assertIsNone(transport.recheck_ordinary_serving_pair("ns","node",old,new,53,53))
+                    self.assertEqual(verify.call_args.args[2],["--verify-serving-pair"])
+                    self.assertEqual(set(verify.call_args.args[0]),{"candidate","fallback"})
+                else:
+                    with self.assertRaises(ValueError) as denied:
+                        transport.recheck_ordinary_serving_pair("ns","node",old,new,53,53)
+                    self.assertNotIn("private-fixture",str(denied.exception))
+
     def test_handoff_requires_same_fresh_artifact_and_proof_membership(self):
         old = self.snapshot()
         transport.validate_handoff_snapshots(old, copy.deepcopy(old), "node")
@@ -416,9 +445,19 @@ class TransportTests(unittest.TestCase):
             verify.side_effect = None
             now = datetime.datetime.now(datetime.timezone.utc)
             snapshot["facts"][0]["proof"]["valid_until"] = (now - datetime.timedelta(seconds=1)).isoformat()
-            with patch.object(transport, "HANDOFF_ATTEMPTS", 1):
+            with patch.object(transport, "HANDOFF_ATTEMPTS", 1), patch.object(transport, "recheck_ordinary_serving_pair") as pair:
+                pair.side_effect = DNSObservationRejected("record_readiness")
+                with self.assertRaisesRegex(ValueError, "record_readiness"):
+                    transport.handoff_witness(config, listener, current)
+                pair.assert_called_once()
+                pair.reset_mock(side_effect=True)
+                self.assertEqual(transport.handoff_witness(config, listener, current), witness)
+                pair.assert_called_once()
+                pair.reset_mock()
+                snapshot["facts"][0]["proof"]["valid_until"] = snapshot["evaluated_at"]
                 with self.assertRaisesRegex(ValueError, "proof is expired"):
                     transport.handoff_witness(config, listener, current)
+                pair.assert_not_called()
 
     def test_staged_backend_verifies_the_dns_listener_owner_and_rechecks_pod(self):
         from scripts import recover_dns_transport
