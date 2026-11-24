@@ -245,7 +245,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		workflowFiles = append(workflowFiles, entry.Name())
 	}
 	sort.Strings(workflowFiles)
-	if !reflect.DeepEqual(workflowFiles, []string{"build-cli.yml", "ci.yml", "release-cli.yml"}) {
+	if !reflect.DeepEqual(workflowFiles, []string{"build-cli.yml", "ci.yml", "daily-audit.yml", "release-cli.yml"}) {
 		t.Fatalf("legacy or parallel production workflow remains reachable: %v", workflowFiles)
 	}
 
@@ -1047,10 +1047,55 @@ func TestCapacityRecoveryScheduleIsExternalObservationOnly(t *testing.T) {
 			t.Fatalf("external observation cannot release code or access signing keys: %s", forbidden)
 		}
 	}
-	for _, name := range []string{"dns_public_observation", "node_resource_policy", "node_resource_policy_tasks", "workload_memory_policy", "audit"} {
+	for _, name := range []string{"dns_public_observation", "node_resource_policy", "node_resource_policy_tasks", "workload_memory_policy"} {
 		if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, jobs, name), "if").Value, "github.event.schedule == '23 18 * * *'") {
 			t.Fatalf("frequent observation must not reschedule daily work: %s", name)
 		}
+	}
+	audit := yamlMappingValue(t, jobs, "audit")
+	if got := yamlMappingValue(t, audit, "if").Value; got != "github.event_name == 'push' && github.ref == 'refs/heads/main'" {
+		t.Fatalf("production workflow must not run the daily audit: %s", got)
+	}
+}
+
+func TestDailyAuditHasNoProductionAccess(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/daily-audit.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	root := document.Content[0]
+	on := yamlMappingValue(t, root, "on")
+	if got := yamlMappingKeys(t, on); !reflect.DeepEqual(got, []string{"schedule", "workflow_dispatch"}) {
+		t.Fatalf("daily audit triggers: %v", got)
+	}
+	schedule := yamlMappingValue(t, on, "schedule").Content
+	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {
+		t.Fatal("daily audit cadence changed")
+	}
+	if got := yamlMappingKeys(t, yamlMappingValue(t, root, "permissions")); !reflect.DeepEqual(got, []string{"contents"}) ||
+		yamlMappingValue(t, yamlMappingValue(t, root, "permissions"), "contents").Value != "read" {
+		t.Fatal("daily audit should have only repository read permission")
+	}
+	jobs := yamlMappingValue(t, root, "jobs")
+	if got := yamlMappingKeys(t, jobs); !reflect.DeepEqual(got, []string{"test"}) {
+		t.Fatalf("daily audit jobs: %v", got)
+	}
+	test := yamlMappingValue(t, jobs, "test")
+	if got := yamlMappingKeys(t, test); !reflect.DeepEqual(got, []string{"runs-on", "steps", "timeout-minutes"}) ||
+		yamlMappingValue(t, test, "runs-on").Value != "ubuntu-latest" {
+		t.Fatal("daily audit must use only a bounded, hosted test job")
+	}
+	for _, s := range []string{"secrets.", "environment:", "self-hosted", "kubectl", "uses: ./", "deploy-declarative-component"} {
+		if strings.Contains(string(raw), s) {
+			t.Fatalf("daily audit retained production access: %s", s)
+		}
+	}
+	if !strings.Contains(string(raw), "run: make test") || !strings.Contains(string(raw), "persist-credentials: false") {
+		t.Fatal("daily audit must run the full tests without persisting credentials")
 	}
 }
 
