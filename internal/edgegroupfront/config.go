@@ -22,6 +22,7 @@ func ConfigFromEnv() Config {
 		EdgeID:             envValue("FUGUE_EDGE_FRONT_EDGE_ID", nodeHost),
 		EdgeGroupID:        envFileValue(nodeEnv, "FUGUE_EDGE_FRONT_EDGE_GROUP_ID", envFileValue(nodeEnv, "FUGUE_EDGE_GROUP_ID", "")),
 		NodeHost:           nodeHost,
+		WorkerTransport:    os.Getenv("FUGUE_EDGE_FRONT_WORKER_TRANSPORT"),
 		HTTPMode:           envValue("FUGUE_EDGE_FRONT_HTTP_MODE", HTTPModeRedirect),
 		ActiveSlotFile:     envValue("FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "/var/lib/fugue/edge-blue-green/active-slot"),
 		DefaultSlot:        defaultSlot,

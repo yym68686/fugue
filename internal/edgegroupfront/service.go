@@ -53,6 +53,8 @@ type Config struct {
 	ShutdownTimeout        time.Duration
 	ProxyProtocol          bool
 	Slots                  map[string]SlotTargets
+	WorkerTransport        string
+	workerTargets          map[workerImagePin]SlotTargets
 	ProcNetSNMPPath        string
 	ProcNetNetstatPath     string
 }
@@ -126,6 +128,9 @@ func NewService(cfg Config, logger *log.Logger) *Service {
 func (s *Service) Run(ctx context.Context) error {
 	cfg := s.withDefaults()
 	if err := validateConfig(cfg); err != nil {
+		return err
+	}
+	if err := cfg.prepareWorkerTransport(); err != nil {
 		return err
 	}
 	if cfg.RequireActivationState {
@@ -292,15 +297,22 @@ func validateConfig(cfg Config) error {
 func (s *Service) startHealthServer(cfg Config, wg *sync.WaitGroup) (func(context.Context) error, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		slot, activation := s.activeSlotWithActivation(cfg)
-		targets := cfg.Slots[slot]
+		slot, activation, targets, ok := s.selectedWorker(cfg)
+		if !ok {
+			http.Error(w, "Worker transport not selected", http.StatusServiceUnavailable)
+			return
+		}
 		s.writeActivationHealthWithActivation(w, slot, targets.HTTPSAddress, activation)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		slot, activation := s.activeSlotWithActivation(cfg)
-		target := strings.TrimSpace(cfg.Slots[slot].HTTPSAddress)
+		slot, activation, targets, ok := s.selectedWorker(cfg)
+		if !ok {
+			http.Error(w, "Worker transport not selected", http.StatusServiceUnavailable)
+			return
+		}
+		target := strings.TrimSpace(targets.HTTPSAddress)
 		if strings.TrimSpace(cfg.HTTPSListenAddr) == "" {
-			target = strings.TrimSpace(cfg.Slots[slot].HTTPAddress)
+			target = strings.TrimSpace(targets.HTTPAddress)
 		}
 		if target == "" {
 			http.Error(w, "active slot target is missing", http.StatusServiceUnavailable)
@@ -437,14 +449,17 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	startedAt := time.Now()
 	defer downstream.Close()
 
-	slot := s.activeSlot(cfg)
+	slot, _, targets, selected := s.selectedWorker(cfg)
+	if !selected {
+		return
+	}
 	connection, samplePublic := passiveConnection(cfg, protocol, slot, "", downstream, startedAt)
 	if samplePublic {
 		s.passiveState.eligible.Add(1)
 	}
-	target := cfg.Slots[slot].HTTPSAddress
+	target := targets.HTTPSAddress
 	if protocol == ProtocolHTTP {
-		target = cfg.Slots[slot].HTTPAddress
+		target = targets.HTTPAddress
 	}
 	target = strings.TrimSpace(target)
 	if target == "" {

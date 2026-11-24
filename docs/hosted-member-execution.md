@@ -62,3 +62,31 @@ serving declaration, prepares a fresh execution plan, compares the workload
 identity and frozen membership, and checks again under the component lease.
 Each Pod replacement still checks its activation and listener sockets.
 An explicit successor can supersede the queued release against the same LKG.
+
+### Retaining both physical listeners on a node
+
+A logical A/B slot is not a TCP connection. A node may keep the old A
+and B processes (and their existing streams) while a normal release stages
+one replacement on a distinct, node-local listener. In an enrolled Front,
+new connections resolve the local activation's **slot, Worker source and
+immutable image** to a physical listener. Reusing the letter A for a new
+image therefore does not require deleting the old A Pod. Rollback selects
+the declared retained Worker for new connections; it does not close sockets
+to the candidate. Each other node continues using its own activation.
+
+The optional `FUGUE_EDGE_FRONT_WORKER_TRANSPORT` release input is a
+canonical JSON object with fields, in order: `schema`
+(`fugue.worker-transport/v1`), `group`, `node`, `retained` (exact
+pins for A then B), `candidate`, `candidate_http_port` (38080) and
+`candidate_https_port` (38443). Pins consist of `slot`, `source`
+(full commit) and `image` (sha256 digest). The node and group must match
+the configured process; all targets stay on the declared node IP. The
+input does not admit a consumer, open a listener, create capacity, or write
+activation. Without this input the existing A/B behavior is unchanged.
+
+Do not enable overlap in a serving Front until the ordinary release owns the
+exact replacement listener and immutable Worker on that node, verifies its
+actual route/TLS readiness, binds the public Front and keeps both original
+listeners. Missing state, an unregistered image or a wrong source refuses
+new upstream connections; existing streams are unaffected. A watcher on
+another node or a successful DNS lookup is not evidence of a handoff.
