@@ -49,6 +49,16 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(self.queue.get('remote-backup-resource-version'), '10')
         self.assertEqual(self.queue.count(), {})
 
+    def test_watch_reset_requests_catchup_and_does_not_lose_enqueued_work(self):
+        self.queue.checkpoint('10', KEY)
+        self.watch.ready.set()
+        with patch.object(self.watch, 'list_version', return_value='20'):
+            self.watch.reset()
+        self.assertFalse(self.watch.ready.is_set())
+        self.assertTrue(self.watch.backfill.is_set())
+        self.assertEqual(self.queue.get('remote-backup-resource-version'), '20')
+        self.assertEqual(self.queue.count(), {'pending': 1})
+
     def test_capacity_deferral_does_not_delay_another_volume_and_keeps_reason(self):
         self.queue.refill([KEY, SECOND], 100)
         worker.reconcile_job(self.queue, self.queue.due(100), dict(

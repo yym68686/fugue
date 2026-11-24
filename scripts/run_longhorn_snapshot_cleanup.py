@@ -114,6 +114,7 @@ class Queue:
 class RemoteWatch:
     def __init__(self, kube, namespace, queue, stop, ready):
         self.kube, self.queue, self.stop, self.ready = kube, queue, stop, ready
+        self.backfill = threading.Event()
         self.path = '/apis/longhorn.io/v1beta2/namespaces/' + namespace + '/backups'
 
     def list_version(self):
@@ -138,6 +139,11 @@ class RemoteWatch:
             emit('enqueued', source='remote-delete-event', volume=key[0], snapshot=key[1], run=key[2])
         return True
 
+    def reset(self):
+        self.ready.clear()
+        self.backfill.set()
+        self.queue.checkpoint(self.list_version())
+
     def watch(self, version):
         query = urllib.parse.urlencode(dict(watch='true', labelSelector=WATCH_LABEL, allowWatchBookmarks='true',
                                             resourceVersion=version, timeoutSeconds=50))
@@ -149,14 +155,13 @@ class RemoteWatch:
                         return
                     require(len(line) <= (2 << 20), 'remote watch event exceeds bound')
                     if not self.accept(line):
-                        self.queue.checkpoint(self.list_version())
+                        self.reset()
                         return
                     self.ready.set()
                 if process.wait(timeout=5) != 0:
                     # An expired resourceVersion can be returned as an HTTP
                     # error before a watch stream starts. Backfill covers it.
-                    self.ready.clear()
-                    self.queue.checkpoint(self.list_version())
+                    self.reset()
                     emit('watch-reconnect', reason='watch closed with an HTTP or transport error')
                     self.stop.wait(5)
                 else:
@@ -250,7 +255,7 @@ def run(kube, policy, directory, revision, mode, once=False):
     watch = RemoteWatch(kube, policy['longhornNamespace'], queue, stop, watch_ready)
     if not once:
         threading.Thread(target=watch.run, daemon=True).start()
-    refill_at, inspect_at, checked_at = 0, 0, 0
+    refill_at, inspect_at, checked_at, last_refill = 0, 0, 0, 0
     policy_digest = hashlib.sha256(canonical(policy).encode()).hexdigest()
     status = {'phase': 'starting'}
     last_heartbeat, last_watch = 0, None
@@ -265,7 +270,9 @@ def run(kube, policy, directory, revision, mode, once=False):
     try:
         while True:
             now = int(time.time())
-            if now >= refill_at:
+            if now >= refill_at or (watch.backfill.is_set() and now >= last_refill + 60):
+                watch.backfill.clear()
+                last_refill = now
                 try:
                     found = inventory(kube, policy) if policy['enabled'] else []
                     new = queue.refill(found, now)
