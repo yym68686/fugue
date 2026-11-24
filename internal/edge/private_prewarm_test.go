@@ -8,18 +8,20 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/config"
 	"fugue/internal/edgegroupfront"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 func TestPrivatePrewarmTLSAndEndFences(t *testing.T) {
-	for _, mode := range []string{"good", "untrusted TLS", "publication changed", "activation changed"} {
+	for _, mode := range []string{"good", "startup refused", "identity denied", "untrusted TLS", "publication changed", "activation changed"} {
 		t.Run(mode, func(t *testing.T) {
 			group, node, source := "edge-group-fixture", "node-test", strings.Repeat("d", 40)
 			image := "registry.example.test/worker@sha256:" + strings.Repeat("e", 64)
@@ -80,15 +82,30 @@ func TestPrivatePrewarmTLSAndEndFences(t *testing.T) {
 			defer admin.Close()
 			s := NewServiceWithRouteBundleSource(config.EdgeConfig{EdgeID: node, EdgeGroupID: group, EdgeInstanceUID: "pod-test", EdgeSlot: "a", EdgeReleaseEpoch: source, CaddyEnabled: true, CaddyAdminURL: admin.URL, CaddyListenAddr: tlsServer.Listener.Addr().String(), CaddyProxyListenAddr: "127.0.0.1:38081", CaddyTLSMode: caddyTLSModeSharedOnly, CaddyDataDir: dir, CaddySharedTLSEnabled: true}, RouteBundleSourceConfig{URL: authority.URL + edgeControlBundlePath, CandidateURL: authority.URL + edgeControlCandidateBundlePath, TokenFile: token, VerifierKeyringFile: keyfile, ReporterImageRef: &image, ActivationStateFile: path, PrewarmPredecessor: &pin}, nil)
 			s.caddyImportedTLSRoots = x509.NewCertPool()
+			calls := 0
+			tr := s.RouteBundleHTTPClient.Transport
+			s.RouteBundleHTTPClient.Transport = inventoryRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 && mode == "startup refused" {
+					return nil, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+				}
+				if mode == "identity denied" {
+					return inventoryJSONResponse(http.StatusForbidden, map[string]string{"error": "not authorized"}), nil
+				}
+				return tr.RoundTrip(r)
+			})
 			if mode != "untrusted TLS" {
 				s.caddyImportedTLSRoots.AddCert(tlsServer.Certificate())
 			}
 			out, err := s.CheckPrivatePrewarm(t.Context(), []string{host})
-			if mode == "good" {
+			if mode == "good" || mode == "startup refused" {
 				if err != nil || out == nil || out.TLS[host] != fmt.Sprintf("%x", sha256.Sum256(tlsServer.Certificate().Raw)) {
 					t.Fatal(out, err)
 				}
 				return
+			}
+			if mode == "identity denied" && calls != 1 {
+				t.Fatal("retried a rejected identity", calls)
 			}
 			if err == nil || out != nil {
 				t.Fatal("unsafe private result", out, err)

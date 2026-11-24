@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"fugue/internal/model"
@@ -64,7 +66,7 @@ func (s *Service) CheckPrivatePrewarm(ctx context.Context, hosts []string) (*Pri
 	if !sel.privatePrewarm || !sel.reporterInactive || sel.candidate || sel.preparation != nil || req.Header.Get("If-None-Match") != "" {
 		return nil, errors.New("private check requires a fresh, unselected physical Worker")
 	}
-	resp, err := s.RouteBundleHTTPClient.Do(req)
+	resp, err := s.firstPrivatePublication(ctx, req, sel, 40*time.Second, 500*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -126,4 +128,38 @@ func (s *Service) CheckPrivatePrewarm(ctx context.Context, hosts []string) (*Pri
 		return nil, err
 	}
 	return out, nil
+}
+
+// New Pods can resolve the authority Service before a TCP connection is
+// accepted. Retry only connection establishment, before receiving any HTTP
+// evidence. Always re-read the physical predecessor; never retry a rejected
+// credential, signature, publication, redirect, TLS handshake or final CAS.
+func (s *Service) firstPrivatePublication(ctx context.Context, req *http.Request, sel routeSourceSelection, window, delay time.Duration) (*http.Response, error) {
+	deadline := time.Now().Add(window)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := s.validateRouteBundleSourceSelection(sel); err != nil {
+			return nil, err
+		}
+		r, err := s.RouteBundleHTTPClient.Do(req.Clone(ctx))
+		if err == nil {
+			return r, nil
+		}
+		var op *net.OpError
+		if !sel.privatePrewarm || !errors.As(err, &op) || op.Op != "dial" ||
+			!(errors.Is(op, syscall.ECONNREFUSED) || errors.Is(op, syscall.EHOSTUNREACH) || errors.Is(op, syscall.ENETUNREACH) || op.Timeout()) ||
+			time.Until(deadline) <= delay {
+			return nil, err
+		}
+		t := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+		delay = min(2*delay, 5*time.Second)
+	}
 }
