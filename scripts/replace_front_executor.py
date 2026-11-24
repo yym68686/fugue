@@ -16,12 +16,17 @@ from scripts import reconcile_front_probe_transport as transport
 from scripts import stage_front_serving_transport as stage
 
 
+PROBE_FOLLOW = "fugue.front-executor-probe-replacement/v1"
+
+
 def validate(config):
     fields = {"schema", "service", "serviceUID", "address", "expectedGeneration", "generation", "rollbackGeneration", "verificationSeconds", "observation"}
     mode = config.get("schema")
-    if mode == "fugue.front-executor-replacement/v2":
+    if mode in {"fugue.front-executor-replacement/v2", PROBE_FOLLOW}:
         fields.update({"candidateAuthority", "candidateImageDigest"})
-    if set(config) != fields or mode not in {"fugue.front-executor-replacement/v1", "fugue.front-executor-replacement/v2"}:
+    if mode == PROBE_FOLLOW:
+        fields.update({"probePort", "servingSource"})
+    if set(config) != fields or mode not in {"fugue.front-executor-replacement/v1", "fugue.front-executor-replacement/v2", PROBE_FOLLOW}:
         raise ValueError("explicit executor replacement declaration required")
     for key in ["service", "serviceUID"]:
         if not isinstance(config[key], str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", config[key]):
@@ -35,22 +40,36 @@ def validate(config):
     if not address.is_global or address.version != 4 or str(address) != config["address"]:
         raise ValueError("explicit public IPv4 required")
     front.validate(config["observation"])
-    if mode == "fugue.front-executor-replacement/v2":
+    if mode in {"fugue.front-executor-replacement/v2", PROBE_FOLLOW}:
         profile = config["observation"]
         if (config["candidateAuthority"] != "node-worker-v1"
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", config["candidateImageDigest"])
                 or profile["candidateSelector"].get("fugue.io/edge-node") != profile["node"]
                 or profile["activationPath"] != "/var/lib/fugue-edge-front/activation.json"):
             raise ValueError("node Worker Front replacement needs the exact node selector and local state path")
+    if mode == PROBE_FOLLOW:
+        source = config["servingSource"]
+        if (not isinstance(source, dict) or set(source) != {"service", "serviceUID", "generation", "podUID"}
+                or any(not isinstance(source[k], str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", source[k]) for k in ["service", "serviceUID", "podUID"])
+                or type(source["generation"]) is not int or source["generation"] < 1
+                or source["service"] == config["service"] or source["serviceUID"] == config["serviceUID"]
+                or type(config["probePort"]) is not int or not 1024 <= config["probePort"] <= 65535
+                or profile["legacySelector"] == profile["candidateSelector"]
+                or profile["legacySelector"].get("fugue.io/edge-node") != profile["node"]):
+            raise ValueError("probe replacement requires a separate serving Service, exact local executors and non-serving port")
     return config
 
 
 def current(config):
-    return front.read("get", "service", config["service"], "-n", config["observation"]["namespace"], "-o", "json")
+    extra = ["--show-managed-fields"] if "probePort" in config else []
+    return front.read("get", "service", config["service"], "-n", config["observation"]["namespace"], "-o", "json", *extra)
 
 
-def projection(spec):
-    result = {key: copy.deepcopy(spec.get(key)) for key in ["type", "selector", "ports", "externalIPs", "externalTrafficPolicy", "publishNotReadyAddresses"]}
+def projection(spec, *, probe=False):
+    keys = ["type", "selector", "ports", "externalIPs", "externalTrafficPolicy", "publishNotReadyAddresses"]
+    if probe:
+        keys.append("internalTrafficPolicy")
+    result = {key: copy.deepcopy(spec.get(key)) for key in keys}
     result["publishNotReadyAddresses"] = bool(result["publishNotReadyAddresses"])
     return result
 
@@ -60,6 +79,21 @@ def baseline(config, value):
     annotations = meta.get("annotations", {})
     if meta.get("uid") != config["serviceUID"] or meta.get("deletionTimestamp") or not meta.get("resourceVersion") or meta.get("name") != config["service"] or meta.get("namespace") != config["observation"]["namespace"]:
         raise ValueError("Service identity changed")
+    if "probePort" in config:
+        profile = config["observation"]
+        listener = {"name": config["service"], "address": config["address"], "port": config["probePort"]}
+        target = transport.desired({"namespace": profile["namespace"], "generation": config["expectedGeneration"]}, listener,
+                                   dict(profile, candidateSelector=profile["legacySelector"]))
+        transport.validate_existing(value, target)
+        allowed_annotations = {stage.GENERATION, stage.DIGEST}
+        prior_rollback = "transport.fugue.dev/rollback-of-generation"
+        if annotations.get(prior_rollback) == str(config["expectedGeneration"] - 1):
+            allowed_annotations.add(prior_rollback)
+        if (not meta.get("managedFields") or set(annotations) != allowed_annotations
+                or annotations.get(stage.GENERATION) != str(config["expectedGeneration"])
+                or projection(spec, probe=True) != target["spec"]):
+            raise ValueError("probe Service listener, owner, generation or selector differs from the exact baseline")
+        return value
     if meta.get("labels", {}).get("app.kubernetes.io/managed-by") != stage.MANAGER or annotations.get(stage.GENERATION) != str(config["expectedGeneration"]) or annotations.get("transport.fugue.dev/phase") != "serving" or annotations.get(stage.DIGEST) != transport.digest(projection(spec)):
         raise ValueError("Service ownership, generation or serving digest changed")
     if spec.get("selector") != config["observation"]["legacySelector"] or spec.get("type") != "ClusterIP" or spec.get("externalIPs") != [config["address"]] or spec.get("externalTrafficPolicy") != "Local" or spec.get("publishNotReadyAddresses", False):
@@ -75,7 +109,10 @@ def selected(config, previous, rollback=False):
         spec["selector"] = config["observation"]["candidateSelector"]
     annotations = copy.deepcopy(previous["metadata"]["annotations"])
     annotations[stage.GENERATION] = str(config["rollbackGeneration"] if rollback else config["generation"])
-    annotations[stage.DIGEST] = transport.digest(projection(spec))
+    annotations[stage.DIGEST] = transport.digest(projection(spec, probe="probePort" in config))
+    if "probePort" in config and not rollback:
+        annotations[transport.FOLLOWS_SERVING] = config["servingSource"]["serviceUID"]
+        annotations.pop("transport.fugue.dev/rollback-of-generation", None)
     if rollback:
         annotations["transport.fugue.dev/rollback-of-generation"] = str(config["generation"])
     return spec, annotations
@@ -93,7 +130,8 @@ def cas_patch(observed, spec, annotations):
 
 
 def write(config, observed, spec, annotations, dry_run=False):
-    args = ["patch", "service", config["service"], "-n", config["observation"]["namespace"], "--type=json", "--patch-file", "-", "--field-manager=" + stage.MANAGER, "-o", "json"]
+    manager = transport.MANAGER if "probePort" in config else stage.MANAGER
+    args = ["patch", "service", config["service"], "-n", config["observation"]["namespace"], "--type=json", "--patch-file", "-", "--field-manager=" + manager, "-o", "json"]
     if dry_run:
         args.append("--dry-run=server")
     return transport.kubectl(*args, body=front.canonical(cas_patch(observed, spec, annotations)))
@@ -128,21 +166,65 @@ def executor_identities(pods):
     return [(pod["metadata"]["uid"], pod["status"]["podIP"]) for pod in pods]
 
 
+def endpoint(config, pod, service):
+    profile = config["observation"]
+    return stage.selected_endpoint_witness(profile, {"name": config["service"]}, profile, pod, service,
+                                           **({"probe": True} if "probePort" in config else {}))
+
+
+def serving_source(config, candidate):
+    if "probePort" not in config:
+        return None
+    source, profile = config["servingSource"], config["observation"]
+    if candidate["metadata"]["uid"] != source["podUID"]:
+        raise ValueError("probe candidate is not the exact in-service Front")
+    source_config = {"service": source["service"], "serviceUID": source["serviceUID"], "address": config["address"],
+                     "expectedGeneration": source["generation"],
+                     "observation": dict(profile, legacySelector=profile["candidateSelector"])}
+    service = baseline(source_config, current(source_config))
+    return {"service": service, "endpoint": endpoint(source_config, candidate, service)}
+
+
+def require_source(config, candidate, expected):
+    if serving_source(config, candidate) != expected:
+        raise ValueError("public serving Service or endpoint changed during probe replacement")
+
+
+def held_tls(config, host):
+    if "probePort" in config:
+        return connection.HeldTLS(config["address"], host, config["probePort"])
+    return connection.HeldTLS(config["address"], host)
+
+
+def listener_proof(config, target):
+    if "probePort" in config:
+        return front.proof(config["address"], target["host"], target["path"], config["probePort"])
+    handoff.redirect(config["address"], target["host"])
+    return front.proof(config["address"], target["host"], target["path"])
+
+
 def prepare(config):
     profile = config["observation"]
     previous = baseline(config, current(config))
     old, candidate = executors(config)
-    stage.selected_endpoint_witness(profile, {"name": config["service"]}, profile, old, previous)
+    endpoint(config, old, previous)
+    source = serving_source(config, candidate)
     observed = front.observe(profile, node_worker=config.get("candidateAuthority") == "node-worker-v1")
     for target in profile["probes"]:
-        handoff.redirect(config["address"], target["host"])
-        handoff.redirect(candidate["status"]["podIP"], target["host"])
+        if source is None:
+            handoff.redirect(config["address"], target["host"])
+            handoff.redirect(candidate["status"]["podIP"], target["host"])
+        elif listener_proof(config, target) != front.proof(candidate["status"]["podIP"], target["host"], target["path"]):
+            raise ValueError("probe listener and serving candidate have different authority")
     if executor_identities(executors(config)) != executor_identities((old, candidate)) or current(config) != previous:
         raise ValueError("executor or Service changed during replacement preparation")
+    require_source(config, candidate, source)
     spec, annotations = selected(config, previous)
     write(config, previous, spec, annotations, dry_run=True)
     result = {"schema": "fugue.front-executor-replacement-evidence/v1", "declaration_digest": transport.digest(config), "at": front.now().isoformat(), "baseline": previous,
               "old_uid": old["metadata"]["uid"], "candidate_uid": candidate["metadata"]["uid"], "observations": observed}
+    if source is not None:
+        result["serving_source"] = source
     result["digest"] = transport.digest(result)
     return result
 
@@ -153,6 +235,13 @@ def validate_evidence(config, evidence, minutes=5):
     if digest != transport.digest(unsigned) or evidence.get("schema") != "fugue.front-executor-replacement-evidence/v1" or evidence.get("declaration_digest") != transport.digest(config) or not front.now() - datetime.timedelta(minutes=minutes) < front.timestamp(evidence["at"]) <= front.now():
         raise ValueError("replacement evidence is stale or changed")
     baseline(config, evidence["baseline"])
+    if "probePort" in config:
+        expected = config["servingSource"]
+        source = evidence.get("serving_source", {})
+        if (source.get("service", {}).get("metadata", {}).get("uid") != expected["serviceUID"]
+                or source.get("endpoint", {}).get("pod_uid") != expected["podUID"]
+                or evidence["candidate_uid"] != expected["podUID"]):
+            raise ValueError("probe replacement evidence omits the exact public serving baseline")
 
 
 def recover(config, evidence):
@@ -180,11 +269,13 @@ def recover(config, evidence):
     for attempt in range(10):
         restored = None
         try:
-            restored = connection.HeldTLS(config["address"], target["host"])
+            restored = held_tls(config, target["host"])
             proof = restored.proof(target["path"])
             fact = connection.fact(profile, old, restored)
             if proof["edge"] != profile["node"] or proof["group"] != profile["group"] or not exact_state(current(config), previous, restored_spec, restored_annotations):
                 raise ValueError("restored public path changed authority")
+            if "probePort" in config:
+                endpoint(config, old, current(config))
             return {"result": "compensated", "generation": config["rollbackGeneration"], "both_executors_retained": True, "restored_connection": fact}
         except (ValueError, OSError):
             if attempt == 9:
@@ -201,6 +292,10 @@ def apply(config, evidence):
     old, candidate = executors(config)
     if current(config) != previous or old["metadata"]["uid"] != evidence["old_uid"] or candidate["metadata"]["uid"] != evidence["candidate_uid"]:
         raise ValueError("executor or Service changed before replacement")
+    source = evidence.get("serving_source")
+    require_source(config, candidate, source)
+    if source is not None:
+        endpoint(config, old, previous)
     activation = front.state(profile, old)
     if activation != front.state(profile, candidate) or activation != evidence["observations"]["observations"][-1]["activation"]:
         raise ValueError("activation changed before replacement")
@@ -208,13 +303,14 @@ def apply(config, evidence):
     held, fresh = None, None
     attempted = False
     try:
-        held = connection.HeldTLS(config["address"], target["host"])
+        held = held_tls(config, target["host"])
         proof = held.proof(target["path"])
         original = connection.fact(profile, old, held)
         if proof != front.proof(candidate["status"]["podIP"], target["host"], target["path"]):
             raise ValueError("candidate authority differs before replacement")
         if executor_identities(executors(config)) != executor_identities((old, candidate)):
             raise ValueError("executor changed during pre-switch connection proof")
+        require_source(config, candidate, source)
         spec, annotations = selected(config, previous)
         attempted = True
         write(config, previous, spec, annotations)
@@ -225,7 +321,7 @@ def apply(config, evidence):
             if connection.fact(profile, old, held) != original:
                 raise ValueError("existing public connection changed during replacement")
             if fresh is None:
-                fresh = connection.HeldTLS(config["address"], target["host"])
+                fresh = held_tls(config, target["host"])
             new_proof = fresh.proof(target["path"])
             try:
                 new_fact = connection.fact(profile, candidate, fresh)
@@ -236,9 +332,10 @@ def apply(config, evidence):
                 continue
             if old_proof != new_proof or new_proof["edge"] != profile["node"] or new_proof["group"] != profile["group"]:
                 raise ValueError("new public connection differs from preserved authority")
+            if source is not None and any(new_fact[key] != original[key] for key in ["slot", "target"]):
+                raise ValueError("probe replacement changed the selected Worker")
             for route in profile["probes"]:
-                handoff.redirect(config["address"], route["host"])
-                if front.proof(config["address"], route["host"], route["path"]) != front.proof(candidate["status"]["podIP"], route["host"], route["path"]):
+                if listener_proof(config, route) != front.proof(candidate["status"]["podIP"], route["host"], route["path"]):
                     raise ValueError("public route differs after executor replacement")
             observations.append({"at": front.now().isoformat(), "old_connection": original, "new_connection": new_fact})
             time.sleep(5)
@@ -248,8 +345,14 @@ def apply(config, evidence):
         live = current(config)
         if latest_old["metadata"]["uid"] != evidence["old_uid"] or latest_candidate["metadata"]["uid"] != evidence["candidate_uid"] or not exact_state(live, previous, spec, annotations):
             raise ValueError("executor identity or Service changed during verification")
-        stage.selected_endpoint_witness(profile, {"name": config["service"]}, profile, candidate, live)
-        return {"schema": "fugue.front-executor-replacement-result/v1", "result": "verified", "declaration_digest": transport.digest(config), "generation": config["generation"], "both_executors_retained": True, "observations": observations}
+        endpoint(config, latest_candidate, live)
+        require_source(config, latest_candidate, source)
+        result = {"schema": "fugue.front-executor-replacement-result/v1", "result": "verified", "declaration_digest": transport.digest(config), "generation": config["generation"], "both_executors_retained": True, "observations": observations}
+        if source is not None:
+            if front.state(profile, latest_old) != activation or front.state(profile, latest_candidate) != activation:
+                raise ValueError("Worker activation changed during probe replacement")
+            result.update(listener_port=config["probePort"], serving_source=source, activation=activation)
+        return result
     except BaseException:
         if attempted:
             print(front.canonical(recover(config, evidence)), flush=True)
@@ -266,15 +369,17 @@ def external(config):
     for index in range(5):
         proofs = []
         for route in profile["probes"]:
-            value = front.proof(config["address"], route["host"], route["path"])
+            value = listener_proof(config, route)
             if value["edge"] != profile["node"] or value["group"] != profile["group"]:
                 raise ValueError("external ingress changed physical route authority")
-            handoff.redirect(config["address"], route["host"])
             proofs.append({"host": route["host"], "path": route["path"], "proof": value})
         observations.append({"at": front.now().isoformat(), "proofs": proofs})
         if index < 4:
             time.sleep(15)
-    return {"schema": "fugue.front-executor-external-evidence/v1", "declaration_digest": transport.digest(config), "observations": observations}
+    result = {"schema": "fugue.front-executor-external-evidence/v1", "declaration_digest": transport.digest(config), "observations": observations}
+    if "probePort" in config:
+        result["listener_port"] = config["probePort"]
+    return result
 
 
 def main():

@@ -67,7 +67,7 @@ def endpoint_witness(config, service, profile, candidate):
     return selected_endpoint_witness(config, service, profile, candidate, current)
 
 
-def selected_endpoint_witness(config, service, profile, candidate, current):
+def selected_endpoint_witness(config, service, profile, candidate, current, *, probe=False):
     # Local traffic policy does not isolate every in-cluster externalIP path.
     # Require the entire Service endpoint set to contain this one executor.
     if current["metadata"].get("name") != service["name"] or current["metadata"].get("namespace") != config["namespace"] or not current["metadata"].get("uid") or not current["metadata"].get("resourceVersion"):
@@ -80,7 +80,9 @@ def selected_endpoint_witness(config, service, profile, candidate, current):
         owners = item["metadata"].get("ownerReferences", [])
         if item["metadata"].get("deletionTimestamp") or not any(o.get("kind") == "Service" and o.get("uid") == current["metadata"]["uid"] and o.get("controller") is True for o in owners):
             raise ValueError("Front EndpointSlice has foreign ownership")
-        if {(p.get("name"), p.get("protocol"), p.get("port")) for p in item.get("ports", [])} != {("http", "TCP", 80), ("https", "TCP", 443)}:
+        expected = {("https-probe", "TCP", 443)} if probe else {("http", "TCP", 80), ("https", "TCP", 443)}
+        ports = item.get("ports", [])
+        if len(ports) != len(expected) or {(p.get("name"), p.get("protocol"), p.get("port")) for p in ports} != expected:
             raise ValueError("Front endpoint ports differ from declared listeners")
         for endpoint in item.get("endpoints", []):
             if endpoint.get("nodeName") != profile["node"]:

@@ -75,6 +75,25 @@ class InternalFrontStageTests(unittest.TestCase):
                 else:
                     self.assertEqual(stage.endpoint_witness(value, value["services"][0], p, candidate)["pod_uid"], "pod-one")
 
+    def test_probe_endpoint_uses_https_backend_not_probe_or_serving_ports(self):
+        current, p = service(), profile()
+        declaration = config()["services"][0]
+        candidate = {"metadata": {"uid": "pod-one", "name": "candidate"}, "status": {"podIP": "10.0.0.2"}}
+        owner = {"ownerReferences": [{"kind": "Service", "uid": "service-one", "controller": True}]}
+        endpoint = {"nodeName": "node-a", "addresses": ["10.0.0.2"], "conditions": {"ready": True},
+                    "targetRef": {"kind": "Pod", "uid": "pod-one", "name": "candidate", "namespace": "test-system"}}
+        port = {"name": "https-probe", "protocol": "TCP", "port": 443}
+        for ports in [[port], [dict(port, port=15443)], [dict(port, name="https")], [port, port]]:
+            slices = {"items": [{"metadata": owner, "ports": ports, "endpoints": [endpoint]}]}
+            with self.subTest(ports=ports), patch.object(stage.front, "read", return_value=slices):
+                if ports == [port]:
+                    self.assertEqual(stage.selected_endpoint_witness(p, declaration, p, candidate, current, probe=True)["pod_uid"], "pod-one")
+                    with self.assertRaises(ValueError):
+                        stage.selected_endpoint_witness(p, declaration, p, candidate, current)
+                else:
+                    with self.assertRaises(ValueError):
+                        stage.selected_endpoint_witness(p, declaration, p, candidate, current, probe=True)
+
 
 if __name__ == "__main__":
     unittest.main()

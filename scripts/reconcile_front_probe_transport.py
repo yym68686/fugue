@@ -19,6 +19,7 @@ except ImportError:
 MANAGER = "fugue-front-probe-transport"
 GENERATION = "transport.fugue.dev/generation"
 DIGEST = "transport.fugue.dev/digest"
+FOLLOWS_SERVING = "transport.fugue.dev/follows-serving-uid"
 
 
 def digest(value):
@@ -111,7 +112,7 @@ def validate_existing(current, target):
         if owner.get("manager") != MANAGER:
             fields = owner.get("fieldsV1", {})
             metadata = fields.get("f:metadata", {})
-            if fields.get("f:spec") or any("f:" + k in metadata.get("f:annotations", {}) for k in [GENERATION, DIGEST]) or "f:app.kubernetes.io/managed-by" in metadata.get("f:labels", {}):
+            if fields.get("f:spec") or any("f:" + k in metadata.get("f:annotations", {}) for k in [GENERATION, DIGEST, FOLLOWS_SERVING]) or "f:app.kubernetes.io/managed-by" in metadata.get("f:labels", {}):
                 raise ValueError("Front probe transport has a foreign field writer")
 
 
@@ -119,6 +120,8 @@ def mutation(current, target):
     validate_existing(current, target)
     if current is None:
         return ["create", "-f", "-", "--field-manager=" + MANAGER], front.canonical(target)
+    if FOLLOWS_SERVING in current["metadata"]["annotations"]:
+        raise ValueError("probe Service follows public serving; a legacy transport declaration cannot move it")
     patch = [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]}, {"op": "test", "path": "/metadata/resourceVersion", "value": current["metadata"]["resourceVersion"]}, {"op": "test", "path": "/spec", "value": current["spec"]}, {"op": "test", "path": "/metadata/annotations", "value": current["metadata"]["annotations"]}]
     for key, value in target["spec"].items():
         actual = current["spec"].get(key)

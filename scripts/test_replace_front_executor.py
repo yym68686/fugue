@@ -19,7 +19,152 @@ def fixture():
     return config, previous, evidence
 
 
+def probe_fixture():
+    config, source, evidence = fixture()
+    transport = replacement.transport
+    profile = config["observation"]
+    profile["legacySelector"]["fugue.io/edge-node"] = profile["node"]
+    profile["candidateSelector"]["fugue.io/edge-node"] = profile["node"]
+    profile["activationPath"] = "/var/lib/fugue-edge-front/activation.json"
+    config.update(schema=replacement.PROBE_FOLLOW, candidateAuthority="node-worker-v1", candidateImageDigest="sha256:"+"b"*64,
+                  service="probe-front", serviceUID="probe-uid", probePort=15443,
+                  servingSource={"service": "public-front", "serviceUID": "service-one", "generation": 7, "podUID": "new"})
+    probe = transport.desired({"namespace": profile["namespace"], "generation": 2},
+                              {"name": config["service"], "address": config["address"], "port": config["probePort"]},
+                              dict(profile, candidateSelector=profile["legacySelector"]))
+    probe["spec"]["clusterIP"] = "10.1.0.2"
+    probe["metadata"].update(uid="probe-uid", resourceVersion="12", managedFields=[{"manager": transport.MANAGER}])
+    source["spec"]["selector"] = profile["candidateSelector"]
+    source["metadata"]["annotations"][replacement.stage.GENERATION] = "7"
+    source["spec"]["ports"][0]["name"] = "http"
+    source["spec"]["ports"][1]["name"] = "https"
+    source["metadata"]["annotations"][replacement.stage.DIGEST] = transport.digest(replacement.projection(source["spec"]))
+    evidence.update(baseline=probe, declaration_digest=transport.digest(config),
+                    serving_source={"service": source, "endpoint": {"pod_uid": "new"}})
+    evidence["digest"] = transport.digest({k:v for k,v in evidence.items() if k != "digest"})
+    return config, probe, source, evidence
+
+
 class ReplacementTests(unittest.TestCase):
+    def test_probe_replacement_accepts_only_an_owned_separate_listener_with_exact_baseline(self):
+        config, probe, source, evidence = probe_fixture()
+        transport = replacement.transport
+        replacement.validate(config)
+        replacement.validate_evidence(config, evidence)
+        for bad in (dict(config, probePort=443), dict(config, probePort=80),
+                    dict(config, service=source["metadata"]["name"]),
+                    dict(config, serviceUID=source["metadata"]["uid"])):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                replacement.validate(bad)
+        for fault in ["port", "internal_policy", "conflicting_writer", "annotations", "selector"]:
+            changed = copy.deepcopy(probe)
+            if fault == "port":
+                changed["spec"]["ports"][0]["port"] = 443
+            if fault == "internal_policy":
+                changed["spec"]["internalTrafficPolicy"] = "Cluster"
+            if fault == "conflicting_writer":
+                changed["metadata"]["managedFields"].append({"manager": "other-writer", "fieldsV1": {"f:spec": {"f:selector": {}}}})
+            if fault == "annotations":
+                changed["metadata"]["annotations"][transport.FOLLOWS_SERVING] = "other-service"
+            if fault == "selector":
+                changed["spec"]["selector"] = config["observation"]["candidateSelector"]
+            # A valid digest does not override the exact listener contract.
+            changed["metadata"]["annotations"][transport.DIGEST] = transport.digest(replacement.projection(changed["spec"], probe=True))
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                replacement.baseline(config, changed)
+        spec, annotations = replacement.selected(config, probe)
+        migrated = copy.deepcopy(probe)
+        migrated["spec"], migrated["metadata"]["annotations"] = spec, annotations
+        self.assertEqual(annotations[transport.FOLLOWS_SERVING], source["metadata"]["uid"])
+        self.assertEqual(spec["ports"], probe["spec"]["ports"])
+        self.assertEqual(spec["externalIPs"], probe["spec"]["externalIPs"])
+        self.assertEqual(spec["clusterIP"], probe["spec"]["clusterIP"])
+        legacy_intent = copy.deepcopy(probe)
+        del legacy_intent["spec"]["clusterIP"]
+        legacy_intent["metadata"]["annotations"][transport.GENERATION] = "8"
+        with self.assertRaisesRegex(ValueError, "legacy transport"):
+            transport.mutation(migrated, legacy_intent)
+        with patch.object(transport, "kubectl") as kubectl:
+            replacement.write(config, probe, spec, annotations, dry_run=True)
+            self.assertIn("--field-manager=" + transport.MANAGER, kubectl.call_args.args)
+            self.assertIn("--dry-run=server", kubectl.call_args.args)
+        restored, compensated = replacement.selected(config, probe, rollback=True)
+        self.assertEqual(restored, probe["spec"])
+        self.assertNotIn(transport.FOLLOWS_SERVING, compensated)
+        self.assertEqual(compensated[transport.GENERATION], "4")
+        self.assertEqual(compensated[transport.DIGEST], probe["metadata"]["annotations"][transport.DIGEST])
+
+    def test_probe_handoff_preserves_held_connection_and_never_writes_serving(self):
+        for fault in [None, "source_before", "source_after", "worker_after", "candidate_is_not_serving"]:
+            with self.subTest(fault=fault), ExitStack() as stack:
+                config, probe, source, evidence = probe_fixture()
+                live, writes, sockets, clock = [copy.deepcopy(probe)], [], [], [0.0]
+                old = {"metadata": {"uid": "old", "name": "old"}, "status": {"podIP": "10.0.0.1"}}
+                candidate = {"metadata": {"uid": "new", "name": "new"}, "status": {"podIP": "10.0.0.2"}}
+                proof = {"edge": "node-a", "group": "group-a"}
+
+                class Socket:
+                    def __init__(self, address, host, port):
+                        self.index = len(sockets)
+                        self.closed = False
+                        sockets.append((self, address, port))
+
+                    def proof(self, _):
+                        return proof
+
+                    def close(self):
+                        self.closed = True
+
+                def read(config):
+                    obj = copy.deepcopy(live[0] if config["service"] == "probe-front" else source)
+                    if config["service"] != "probe-front" and (fault == "source_before" or fault == "source_after" and writes):
+                        obj["metadata"]["resourceVersion"] = "drift"
+                    return obj
+
+                def write(config, observed, spec, annotations):
+                    self.assertEqual(config["service"], "probe-front")
+                    self.assertEqual(observed, live[0])
+                    live[0]["spec"], live[0]["metadata"]["annotations"] = copy.deepcopy(spec), copy.deepcopy(annotations)
+                    writes.append(annotations[replacement.stage.GENERATION])
+
+                def endpoint(_, service, __, pod, value, *, probe=False):
+                    self.assertEqual(probe, service["name"] == "probe-front")
+                    self.assertEqual(value["spec"]["selector"], config["observation"]["legacySelector" if pod is old else "candidateSelector"])
+                    return {"pod_uid": pod["metadata"]["uid"]}
+
+                def route(address, _, __, port=443):
+                    self.assertEqual(port, 15443 if address == config["address"] else 443)
+                    return proof
+
+                def fact(_, pod, socket):
+                    return {"pod_uid": pod["metadata"]["uid"], "connection_id": str(socket.index), "slot": "b",
+                            "target": "wrong-worker" if fault == "worker_after" and pod is candidate else "worker"}
+
+                if fault == "candidate_is_not_serving":
+                    candidate["metadata"]["uid"] = evidence["candidate_uid"] = "other"
+                    evidence["digest"] = replacement.transport.digest({k:v for k,v in evidence.items() if k != "digest"})
+
+                for module, name, substitute in [
+                        (replacement, "current", read), (replacement, "write", write), (replacement, "executors", lambda _: (old, candidate)),
+                        (replacement.stage, "selected_endpoint_witness", endpoint), (replacement.connection, "HeldTLS", Socket),
+                        (replacement.connection, "fact", fact), (replacement.front, "proof", route), (replacement.front, "pod", lambda *_, **__: old),
+                        (replacement.front, "state", lambda *_: {"generation": 10}), (replacement.handoff, "redirect", lambda *_: self.fail("public redirect touched")),
+                        (replacement.time, "monotonic", lambda: clock[0]), (replacement.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))]:
+                    stack.enter_context(patch.object(module, name, substitute))
+
+                if fault:
+                    with self.assertRaises(ValueError):
+                        replacement.apply(config, evidence)
+                    self.assertEqual(writes, ["3", "4"] if fault in {"source_after", "worker_after"} else [])
+                    self.assertEqual(live[0]["spec"], probe["spec"])
+                else:
+                    result = replacement.apply(config, evidence)
+                    self.assertEqual(writes, ["3"])
+                    self.assertEqual(result["listener_port"], 15443)
+                    self.assertEqual({(row["old_connection"]["connection_id"], row["new_connection"]["connection_id"])
+                                      for row in result["observations"]}, {("0", "1")})
+                self.assertTrue(all(s.closed and ip == config["address"] and port == 15443 for s, ip, port in sockets))
+
     def test_node_worker_front_is_explicit_and_has_one_writable_mount(self):
         config, _, _ = fixture()
         profile = config["observation"]

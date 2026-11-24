@@ -2881,7 +2881,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-probe-transport, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     outputs:
@@ -3053,7 +3053,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-serving-stage, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     steps:
