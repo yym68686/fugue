@@ -21,6 +21,7 @@ import (
 	"fugue/internal/kubeauth"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
+	"fugue/internal/platformconfig"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
@@ -47,6 +48,10 @@ func main() {
 		cfg.EdgeActivationPlanSigningKeyGeneration = keySnapshot.Generation
 	}
 	logger := log.Default()
+	restore, err := platformconfig.ParseHostedDeclarationRestorePlan(os.Getenv("FUGUE_HOSTED_DNS_DECLARATION_RESTORE"))
+	if err != nil {
+		logger.Fatal(err)
+	}
 	store := store.New(cfg.StorePath, cfg.DatabaseURL)
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
@@ -60,6 +65,7 @@ func main() {
 	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
+		HostedDeclarationRestore:        restore,
 		BackupInventory:                 api.BackupInventoryConfigFromEnv(),
 		DatabaseURL:                     cfg.DatabaseURL,
 		ObjectStorageUsageTimeout:       cfg.ObjectStorageUsageTimeout,

@@ -367,6 +367,19 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, child)
 		if guard.Phase != "" {
+			restore, err := platformconfig.HostedDeclarationRestoreAuthority(child)
+			if err != nil {
+				return ErrConflict
+			}
+			if restore != nil {
+				history, err := pgGetPlatformArtifactRelease(ctx, tx, restore.History.ReleaseID, false)
+				if err != nil {
+					return err
+				}
+				if platformArtifactReleaseIndex(state.PlatformArtifactReleases, history.ID) < 0 {
+					state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, history)
+				}
+			}
 			sources, err := retainedTrafficSourceRouteIDs(child)
 			if err != nil {
 				return err

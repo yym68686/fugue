@@ -18,6 +18,13 @@ type ExternalPathAnchor struct {
 	EffectiveShape string              `json:"effective_shape_digest,omitempty"`
 }
 
+// PredecessorWithheld means the signed predecessor already excludes all held
+// addresses from readiness. Equal digests pin that exact effective shape for
+// both sides of prepare; a newly imposed hold always changes its roster digest.
+func (a *ExternalPathAnchor) PredecessorWithheld() bool {
+	return a != nil && len(a.Held) > 0 && a.Shape != "" && a.Shape == a.EffectiveShape
+}
+
 // The authenticated parent and the proposal both bind the exact wire RR in
 // ComposeExternalPathRequirements. Independently pin quorum and targeting:
 // concurrent path decisions may change probe IDs but not this topology.

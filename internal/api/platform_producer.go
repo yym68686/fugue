@@ -350,10 +350,21 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	restore, restoreBase, err := s.discoverHostedDeclarationRestore(ctx, policy)
+	if err != nil {
+		return interval, err
+	}
 	ordinaryOffers := hosted.ordinaryPathOffers()
 	sourceDigest, err = hosted.sourceDigest(sourceDigest)
 	if err != nil {
 		return interval, err
+	}
+	if restore != nil {
+		sourceDigest, err = platformconfig.Digest([]any{platformconfig.HostedDeclarationRestoreMetadata, sourceDigest, restoreBase.ID, restore})
+		if err != nil {
+			return interval, err
+		}
+		ordinaryOffers = false // don't keep resubmitting a failed restore
 	}
 	var failed bool
 	if policy.Mode == "serving" {
@@ -404,7 +415,10 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	req := platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication}
 	var compiled platformconfig.CompileResult
 	provenance := platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest}
-	if hosted.phase == "" {
+	if restore != nil {
+		advance("compile_hosted_declaration_restore")
+		compiled, provenance.hostedSource, err = s.compileHostedDeclarationRestore(ctx, policy, authority, restoreBase, projection.hostedAddressHolds, req, *restore)
+	} else if hosted.phase == "" {
 		compiled, err = platformconfig.Compile(req)
 	} else {
 		source, e := s.readHostedAddressSource(ctx, policy, authority, projection.hostedAddressHolds)
@@ -438,14 +452,18 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			// still requires positive current convergence of the full cohort.
 			return interval, errors.Join(globalGate, err)
 		}
-		isolate := scoped != nil && (len(scoped.StableHosts) > 0 || (len(scoped.ExternalHosts) > 0 && len(scoped.Hosts) == 0 && len(source.Inherited) == 0))
+		managedCustody := false
+		for _, r := range source.Inherited {
+			managedCustody = managedCustody || r.Record.RecordKind == "hosted"
+		}
+		isolate := scoped != nil && (len(scoped.StableHosts) > 0 || (len(scoped.ExternalHosts) > 0 && len(scoped.Hosts) == 0 && !managedCustody))
 		if err == nil && isolate {
 			baseline, e := platformconfig.IndependentManagedBaselineRequest(source, req, scoped)
 			if e != nil {
 				return interval, e
 			}
 			var ordinaryInput string
-			if ordinaryOffers && len(source.Inherited) == 0 {
+			if ordinaryOffers {
 				ordinaryInput, e = isolatedBaselineDigest(baseline, authority.ID, compiler, source.EffectiveHolds)
 				if e != nil {
 					return interval, e

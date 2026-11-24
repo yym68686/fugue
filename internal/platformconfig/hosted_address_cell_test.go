@@ -12,6 +12,12 @@ import (
 )
 
 func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
+	t.Run("managed root and alias", func(t *testing.T) { testCellInheritsReservedAddress(t, false) })
+	t.Run("independent external target", func(t *testing.T) { testCellInheritsReservedAddress(t, true) })
+}
+
+func testCellInheritsReservedAddress(t *testing.T, shared bool) {
+	t.Helper()
 	cell, global := celldns.TransitionRequestWithSource(t)
 	const alias = "shared.example.test"
 	for _, req := range []*pc.CompileRequest{&cell, &global} {
@@ -27,6 +33,11 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 		obs := req.RuntimeSnapshot.DNSSelections[0]
 		obs.Hostname = alias
 		req.RuntimeSnapshot.DNSSelections = append(slices.Clone(req.RuntimeSnapshot.DNSSelections), obs)
+		if shared {
+			req.Intent.DNS = req.Intent.DNS[1:]
+			req.Policy.DNSAnswerRules = req.Policy.DNSAnswerRules[1:]
+			req.RuntimeSnapshot.DNSSelections = req.RuntimeSnapshot.DNSSelections[1:]
+		}
 	}
 	base, e := pc.Compile(global)
 	if e != nil {
@@ -54,7 +65,11 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 			continue
 		}
 		id := p.ID
-		p.ID, p.EdgeID, p.Address = "held-"+p.ID, "held-member", addr
+		p.EdgeID, p.Address = "held-member", addr
+		p.ID, e = pc.DNSReadinessProbeID(p)
+		if e != nil {
+			t.Fatal(e)
+		}
 		byID[id] = p.ID
 		old.ReadinessPlan.Probes = append(old.ReadinessPlan.Probes, p)
 	}
@@ -69,7 +84,19 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 		}
 		rec.Targets = append(slices.Clone(rec.Targets), held)
 	}
-	globalResult, e := pc.CompileHostedAliasCellSourceForTest(global, pc.HostedAddressSource{Publication: cell.PreviousTrafficPublication.Reference, PriorIntent: global.Intent, Prior: old, EffectiveHolds: []pc.HostedAddressHold{{EdgeID: held.EdgeID, EdgeGroupID: held.EdgeGroupID, Address: addr}}})
+	hold := pc.HostedAddressHold{EdgeID: held.EdgeID, EdgeGroupID: held.EdgeGroupID, Address: addr}
+	source := pc.HostedAddressSource{Publication: cell.PreviousTrafficPublication.Reference, PriorIntent: global.Intent, Prior: old, EffectiveHolds: []pc.HostedAddressHold{hold}}
+	var globalResult pc.CompileResult
+	if shared {
+		history := source.Publication
+		history.ReleaseID, history.ReleaseSetID = "historic-release", "historic-parent"
+		source.Publication.FencingToken++
+		source.Prior, source.PriorHolds = read(base), source.EffectiveHolds
+		source.PriorRoute, source.PriorTLS = &base.RouteArtifact, &base.TLSArtifact
+		globalResult, e = pc.CompileHostedDeclarationRestore(global, source, pc.HostedDeclarationRestorePlan{History: history, Target: alias, Family: "A", Held: hold}, old)
+	} else {
+		globalResult, e = pc.CompileHostedAliasCellSourceForTest(global, source)
+	}
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -82,7 +109,7 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 		parent.Metadata[k] = globalResult.ReleaseArtifact.Metadata[k]
 	}
 	p.Parent = celldns.Sign(t, parent, "source-parent", 2)
-	p.Reference = pc.PreviousTrafficPublicationReference{ReleaseSetID: p.Parent.ID, ReleaseSetDigest: p.Parent.ContentHash, ReleaseID: "source-full", FencingToken: 2, RouteArtifactID: p.Route.ID, RouteArtifactDigest: p.Route.ContentHash, TLSArtifactID: p.TLS.ID, TLSArtifactDigest: p.TLS.ContentHash, DNSArtifactID: p.DNS.ID, DNSArtifactDigest: p.DNS.ContentHash}
+	p.Reference = pc.PreviousTrafficPublicationReference{ReleaseSetID: p.Parent.ID, ReleaseSetDigest: p.Parent.ContentHash, ReleaseID: "source-full", FencingToken: source.Publication.FencingToken + 1, RouteArtifactID: p.Route.ID, RouteArtifactDigest: p.Route.ContentHash, TLSArtifactID: p.TLS.ID, TLSArtifactDigest: p.TLS.ContentHash, DNSArtifactID: p.DNS.ID, DNSArtifactDigest: p.DNS.ContentHash}
 	cell.Intent.RouteAuthorityTransition.PreviousPublication = p.Reference
 	cell.Intent.RouteAuthorityTransition.ReferenceMode = pc.DNSRetainedGlobalReferenceV1
 	cell.CellRoutePublications = nil
@@ -90,7 +117,7 @@ func TestCellInheritsReservedAddressOnlyFromExactGlobalFull(t *testing.T) {
 	result := celldns.Compile(t, cell)
 	out := read(result)
 	expected := read(globalResult)
-	if len(out.Records) != 2 || len(expected.Records) != 2 {
+	if len(out.Records) != len(expected.Records) || len(out.Records) != len(cell.Intent.DNS) {
 		t.Fatal("missing hosted root or generated alias")
 	}
 	for i, r := range out.Records {

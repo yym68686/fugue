@@ -14,7 +14,20 @@ import (
 )
 
 func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
-	s, p := pc.ExternalHeldFixtureForTest(t)
+	for _, tc := range []struct {
+		name    string
+		fixture func(*testing.T) (pc.HostedAddressSource, pc.HostedScopeProposal)
+	}{
+		{"newly withheld", pc.ExternalHeldFixtureForTest},
+		{"already withheld", pc.ExternalWithheldRosterFixtureForTest},
+	} {
+		t.Run(tc.name, func(t *testing.T) { assertExternalHeldRecipients(t, tc.fixture) })
+	}
+}
+
+func assertExternalHeldRecipients(t *testing.T, fixture func(*testing.T) (pc.HostedAddressSource, pc.HostedScopeProposal)) {
+	t.Helper()
+	s, p := fixture(t)
 	digest, err := pc.Digest(p)
 	if err != nil {
 		t.Fatal(err)
@@ -33,10 +46,14 @@ func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
 			t.Fatal(i, err)
 		}
 		dns, tls, routes := 0, 0, 0
-		for _, part := range parts {
+		for who, part := range parts {
 			switch {
 			case part.DNS != nil:
 				dns++
+				base, err := routeartifact.HostedDNSMemberBase(p.Host, who.Node, who.Group, s.Prior)
+				if err != nil || !reflect.DeepEqual(base[who].Records, part.Records) {
+					t.Fatal("selected DNS parent and signed program disagree about declaration", err)
+				}
 				if !slices.Equal(part.DNS.Withheld, p.ExternalPath.Held) || !reflect.DeepEqual(part.Records, p.Records) {
 					t.Fatal("DNS declaration or hold lost")
 				}

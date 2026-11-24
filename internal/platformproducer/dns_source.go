@@ -127,6 +127,10 @@ func ComposeDNSProjection(p Policy, previous platformconfig.PreviousTrafficPubli
 	}
 	*pol = projectedPolicy
 	facts.Origins, facts.Releases, facts.TLSDomains, facts.DNSPlacements, facts.Facts = nil, nil, nil, nil, nil
+	// Global reservations are not Cell runtime inputs or serving evidence.
+	// The Cell compiler rebinds the wire roster to its verified global DNS
+	// source and independently proves its own eligible endpoint set.
+	facts.HostedAddressReservations = nil
 	for i := range facts.DNSEdgeEndpoints {
 		e := &facts.DNSEdgeEndpoints[i]
 		if members[e.EdgeID] == "" || members[e.EdgeID] != remap(e.EdgeGroupID) {

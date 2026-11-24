@@ -22,6 +22,9 @@ type HostedAddressReservation struct {
 	Source   PreviousTrafficPublicationReference `json:"source"`
 	Record   DNSIntent                           `json:"record"`
 	Physical DNSReadinessRecord                  `json:"physical"`
+	// Shared is present only for an independently verified external target.
+	// A legacy alias reservation inherits from its one managed host instead.
+	Shared *ExternalPathTarget `json:"shared,omitempty"`
 }
 
 func hostedPhysicalRoster(in DNSReadinessRecord, family string) DNSReadinessRecord {

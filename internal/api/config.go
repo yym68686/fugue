@@ -8,6 +8,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/observability"
+	"fugue/internal/platformconfig"
 )
 
 func imageStoreMinimumReplicasFromEnv() int {
@@ -19,6 +20,7 @@ func imageStoreMinimumReplicasFromEnv() int {
 }
 
 type ServerConfig struct {
+	HostedDeclarationRestore               *platformconfig.HostedDeclarationRestorePlan
 	CompilerInputOmitOriginal              bool
 	BackupInventory                        BackupInventoryConfig
 	DatabaseURL                            string

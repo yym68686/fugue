@@ -25,10 +25,16 @@ func dnsProducerFixture(t testing.TB) (platformproducer.Policy, platformconfig.C
 
 func TestDNSProducerPreservesCompleteVerifiedBehavior(t *testing.T) {
 	p, req, source := dnsProducerFixture(t)
+	// This global-only custody cannot be replayed into the Cell input. The
+	// compiler independently derives its DNS-only wire record from the pin.
+	source.RuntimeSnapshot.HostedAddressReservations = []platformconfig.HostedAddressReservation{{Source: req.PreviousTrafficPublication.Reference}}
 	before, _ := json.Marshal(source)
 	projected, err := platformproducer.ComposeDNSProjection(p, *req.PreviousTrafficPublication, source.Intent, source.Policy, source.RuntimeSnapshot)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(projected.RuntimeSnapshot.HostedAddressReservations) != 0 {
+		t.Fatal("projection copied global-only authorization into Cell inputs")
 	}
 	compiled := celldns.Compile(t, projected)
 	if err := platformproducer.ValidateDNSProducerOutput(p, compiled.DNSArtifact); err != nil {

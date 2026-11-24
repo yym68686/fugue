@@ -125,6 +125,14 @@ func externalEffectiveRows(target string, full []DNSIntent, held []HostedAddress
 	return out, nil
 }
 
+func externalAddressKeys(target string, rows []DNSIntent) map[hostedRecordKey]bool {
+	keys := make(map[hostedRecordKey]bool, 2)
+	for _, r := range viewScopedAddressRecords(rows, target) {
+		keys[hostedRecordKey{r.Hostname, r.Type}] = true
+	}
+	return keys
+}
+
 func externalProposalHolds(members, effective []HostedAddressHold) []HostedAddressHold {
 	veto := map[HostedAddressHold]bool{}
 	for _, h := range effective {
@@ -139,14 +147,47 @@ func externalProposalHolds(members, effective []HostedAddressHold) []HostedAddre
 	return held
 }
 
+// A missing effective member is physical only when its IP is already in the
+// signed, same-owner RR and its complete identity is bound to both policies.
+// Never restore a declaration here or derive an identity from an IP alone.
+func externalPredecessorHolds(target ExternalPathTarget, base DNSArtifactPayload, members, prior, effective []HostedAddressHold) ([]HostedAddressHold, error) {
+	bad := errors.New("external path retained address lacks an unchanged physical hold")
+	seen := map[string]bool{}
+	for _, n := range members {
+		seen[n.Address] = true
+	}
+	byAddress := map[string]HostedAddressHold{}
+	for _, h := range externalProposalHolds(prior, effective) {
+		if _, duplicate := byAddress[h.Address]; duplicate {
+			return nil, bad
+		}
+		byAddress[h.Address] = h
+	}
+	var held []HostedAddressHold
+	for _, r := range base.Records {
+		if r.Hostname != target.Target || r.Type != "A" && r.Type != "AAAA" {
+			continue
+		}
+		for _, ip := range r.Values {
+			if seen[ip] {
+				continue
+			}
+			h, ok := byAddress[ip]
+			if !ok {
+				return nil, bad
+			}
+			held = append(held, h)
+			seen[ip] = true
+		}
+	}
+	return held, nil
+}
+
 func replayExternalHeldPhase(base DNSArtifactPayload, p HostedScopeProposal, phase string) (HostedDNSContent, error) {
 	empty := HostedDNSContent{}
 	a := p.ExternalPath
 	bad := errors.New("external path hold differs from selected declaration or eligible roster")
-	targetRecords := func(rows []DNSIntent) []DNSIntent {
-		return slices.DeleteFunc(slices.Clone(rows), func(r DNSIntent) bool { return r.Hostname != a.Target.Target || r.Type != "A" && r.Type != "AAAA" })
-	}
-	if !reflect.DeepEqual(targetRecords(base.Records), p.Records) || len(p.Physical) != len(p.Eligible)+len(a.Held) || a.Shape == "" || a.EffectiveShape == "" {
+	if !reflect.DeepEqual(viewScopedAddressRecords(base.Records, a.Target.Target), p.Records) || len(p.Physical) != len(p.Eligible)+len(a.Held) || a.Shape == "" || a.EffectiveShape == "" {
 		return empty, bad
 	}
 	before, members, e := externalPathShape(a.Target, base)
@@ -162,8 +203,20 @@ func replayExternalHeldPhase(base DNSArtifactPayload, p HostedScopeProposal, pha
 	if !slices.Equal(live, p.Eligible) || !slices.Equal(block, a.Held) {
 		return empty, bad
 	}
+	already := a.PredecessorWithheld()
+	if already {
+		// A pre-existing veto must also hold in the independently loaded
+		// dynamic selectors, even before its scoped packet reaches DNS.
+		if err := checkHostedDynamicSelectors(externalAddressKeys(a.Target.Target, p.Records), base.QueryViews, base.ReadinessPlan, base.Policy); err != nil {
+			return empty, errors.Join(bad, err)
+		}
+	}
 	if phase == "prepare" {
-		if before != a.Shape || !slices.Equal(members, p.Physical) {
+		expected := p.Physical
+		if already {
+			expected = p.Eligible
+		}
+		if before != a.Shape || !slices.Equal(members, expected) {
 			return empty, bad
 		}
 		var own []DNSReadinessProbe
@@ -178,7 +231,7 @@ func replayExternalHeldPhase(base DNSArtifactPayload, p HostedScopeProposal, pha
 	} else if before != a.EffectiveShape || !slices.Equal(members, p.Eligible) {
 		return empty, bad
 	}
-	projected, e := externalHeldView(base, a.Target, a.Held, phase != "prepare")
+	projected, e := externalHeldView(base, a.Target, a.Held, already || phase != "prepare")
 	if e != nil {
 		return empty, e
 	}
@@ -191,7 +244,7 @@ func replayExternalHeldPhase(base DNSArtifactPayload, p HostedScopeProposal, pha
 		return empty, e
 	}
 	p.ExternalPath = &ExternalPathAnchor{Target: a.Target, Shape: shape}
-	p.Records = targetRecords(projected.Records)
+	p.Records = viewScopedAddressRecords(projected.Records, a.Target.Target)
 	p.BaseProbes = p.HoldProbes
 	p.Physical = p.Eligible
 	out, e := replayExternalDNSPhase(projected, p, phase)

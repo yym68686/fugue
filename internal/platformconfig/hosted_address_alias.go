@@ -124,7 +124,22 @@ func HostedDNSOwnedRecords(host string, records []DNSIntent, plan *DNSReadinessP
 // declarations. Resolve a host from the signed record-to-probe graph. This
 // is a dependency list, not authority to edit any peer's bindings.
 func HostedExternalDNSMembers(host string, records []DNSIntent, plan *DNSReadinessPlan) (members []string, target, app, tenant string, ok bool) {
-	if !validDNSConsumerZone(host) || plan == nil {
+	return hostedExternalDNSMembers(host, "", records, plan)
+}
+
+// HostedExternalDNSSharedTarget resolves the platform-owned wire name without
+// selecting, embedding, or granting authority to a particular customer host.
+func HostedExternalDNSSharedTarget(target string, records []DNSIntent, plan *DNSReadinessPlan) (ExternalPathTarget, bool) {
+	members, name, app, tenant, ok := hostedExternalDNSMembers("", target, records, plan)
+	if !ok || len(members) == 0 {
+		return ExternalPathTarget{}, false
+	}
+	return ExternalPathTarget{Hostname: members[0], Target: name, AppID: app, TenantID: tenant, Members: members}, true
+}
+
+func hostedExternalDNSMembers(host, requestedTarget string, records []DNSIntent, plan *DNSReadinessPlan) (members []string, target, app, tenant string, ok bool) {
+	switch {
+	case plan == nil, host == "" && !validDNSConsumerZone(requestedTarget), host != "" && !validDNSConsumerZone(host):
 		return nil, "", "", "", false
 	}
 	probes := make(map[string]DNSReadinessProbe, len(plan.Probes))
@@ -147,10 +162,10 @@ func HostedExternalDNSMembers(host string, records []DNSIntent, plan *DNSReadine
 				names[pr.Hostname] = true
 			}
 		}
-		if !hasHost {
+		if host != "" && !hasHost || host == "" && r.Hostname != requestedTarget {
 			continue
 		}
-		if target != "" || !validDNSConsumerZone(r.Hostname) || len(names) > 128 {
+		if target != "" || !validDNSConsumerZone(r.Hostname) || len(names) == 0 || len(names) > 128 {
 			return nil, "", "", "", false
 		}
 		target, members = r.Hostname, slices.Sorted(maps.Keys(names))
@@ -160,7 +175,7 @@ func HostedExternalDNSMembers(host string, records []DNSIntent, plan *DNSReadine
 	}
 	families := map[string]bool{}
 	for _, rr := range records {
-		if rr.Hostname == host {
+		if rr.Hostname == host || host == "" && slices.Contains(members, rr.Hostname) {
 			return nil, "", "", "", false
 		}
 		if rr.Hostname != target || rr.Type != "A" && rr.Type != "AAAA" {

@@ -131,7 +131,7 @@ func stageSelectedManagedPaths(prior PlatformIntent, req CompileRequest, hosts [
 // publisher cannot refresh an unrelated input it cannot consume either
 // domain's route edits or invalidate their already-built proposals.
 func IndependentManagedBaselineRequest(source HostedAddressSource, req CompileRequest, c *HostedTransitionCapture) (CompileRequest, error) {
-	if c == nil || len(c.StableHosts)+len(c.ExternalHosts) == 0 {
+	if c == nil || c.baseline == nil && len(c.StableHosts)+len(c.ExternalHosts) == 0 {
 		return CompileRequest{}, errors.New("missing ordinary managed path capture")
 	}
 	if c.baseline != nil {

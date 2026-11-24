@@ -27,6 +27,7 @@ type HostedAddressSource struct {
 	// the explicit same-owner transitions and previously retained records.
 	managedHosts  map[string]bool
 	stableAliases map[string]string
+	restoring     *hostedDeclarationRestoreSource
 }
 
 type hostedRecordKey struct{ host, family string }
@@ -81,6 +82,10 @@ func checkHostedDynamicSelectors(keys map[hostedRecordKey]bool, views []DNSQuery
 // verifier and require a dynamic view for every reserved record.
 func ReserveHostedAddressProjection(next DNSArtifactPayload, source HostedAddressSource) ([]DNSIntent, []HostedAddressReservation, error) {
 	reservations, err := captureHostedAddressChanges(source.Publication, source.Prior, source.Inherited, source.PriorHolds, next, source.EffectiveHolds, source.managedHosts, source.stableAliases)
+	if err != nil {
+		return nil, nil, err
+	}
+	reservations, err = appendHostedDeclarationRecovery(next, source, reservations)
 	if err != nil || len(reservations) == 0 {
 		return next.Records, nil, err
 	}
@@ -148,7 +153,7 @@ func captureHostedAddressChanges(source PreviousTrafficPublicationReference, pri
 	if err != nil {
 		return nil, err
 	}
-	_, live, err := index(next)
+	after, live, err := index(next)
 	if err != nil {
 		return nil, err
 	}
@@ -164,6 +169,40 @@ func captureHostedAddressChanges(source PreviousTrafficPublicationReference, pri
 	var retained []HostedAddressReservation
 	retainedRoots := map[key]bool{}
 	targetCount := 0
+	// Revalidate existing shared custody independently of newly proposed
+	// managed hosts, in compiler record order. A refresh cannot quietly
+	// delete the shared record or turn its veto into an eligible target.
+	pendingShared := 0
+	for _, p := range inherited {
+		if p.Shared != nil {
+			pendingShared++
+		}
+	}
+	for _, r := range next.Records {
+		k := key{r.Hostname, r.Type}
+		previous := custody[k]
+		if previous == nil || previous.Shared == nil {
+			continue
+		}
+		old := before[k]
+		if !sharedDeclarationMatches(prior, previous.Shared, old) || !sharedDeclarationMatches(next, previous.Shared, after[k]) {
+			return nil, bad
+		}
+		p, e := captureBoundHostedReservation(source, old, oldPhysical[k.host], priorHolds, previous, r, live[k.host], nextHolds, true)
+		if e != nil {
+			return nil, e
+		}
+		p.Shared = copySharedDeclaration(previous.Shared)
+		targetCount += len(p.Physical.Targets)
+		if targetCount > 32768 || len(retained) >= 4096 {
+			return nil, bad
+		}
+		retained = append(retained, p)
+		pendingShared--
+	}
+	if pendingShared != 0 {
+		return nil, bad
+	}
 	for _, r := range next.Records {
 		if hosts != nil && !hosts[r.Hostname] {
 			continue
@@ -203,7 +242,7 @@ func captureHostedAddressChanges(source PreviousTrafficPublicationReference, pri
 		for _, r := range next.Records {
 			k := key{r.Hostname, r.Type}
 			parent, ok := oldParents[k]
-			if !ok || aliases[k.host] != parent.host || newParents[k] != parent || !retainedRoots[parent] {
+			if !ok || aliases[k.host] != parent.host || newParents[k] != parent || !retainedRoots[parent] || custody[k] != nil && custody[k].Shared != nil {
 				continue
 			}
 			sourceRecord := before[k]

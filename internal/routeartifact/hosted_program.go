@@ -91,7 +91,11 @@ func buildHostedProgram(source pc.HostedAddressSource, p pc.HostedScopeProposal,
 		}
 		return out, nil
 	}
-	if !hostedCoverage(base, source.Prior.ReadinessPlan, p, p.Before, p.Physical) {
+	before := p.Physical
+	if p.ExternalPath.PredecessorWithheld() {
+		before = p.Eligible
+	}
+	if !hostedCoverage(base, source.Prior.ReadinessPlan, p, p.Before, before) {
 		return empty, empty, bad
 	}
 	prepared, e := run(base, source.Prior, "prepare")

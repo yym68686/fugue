@@ -107,6 +107,14 @@ func retainedTrafficSourceRouteIDs(child model.PlatformArtifact) ([]string, erro
 	if ref != nil {
 		ids = append(ids, ref.ReleaseSetID, ref.RouteArtifactID, ref.DNSArtifactID, ref.TLSArtifactID)
 	}
+	restore, err := platformconfig.HostedDeclarationRestoreAuthority(child)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if restore != nil {
+		h := restore.History
+		ids = append(ids, h.ReleaseSetID, h.RouteArtifactID, h.DNSArtifactID, h.TLSArtifactID)
+	}
 	seen := map[string]bool{}
 	for _, part := range parts {
 		if part.RouteArtifactID == "" {

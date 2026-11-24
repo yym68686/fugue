@@ -95,9 +95,6 @@ func inheritHostedCellRecords(intent PlatformIntent, previous *PreviousTrafficPu
 			wanted[k] = true
 		}
 	}
-	if len(wanted) == 0 {
-		return nil, bad
-	}
 	oldParents := hostedAliasParents(payload.Records, payload.ReadinessPlan)
 	newParents := hostedAliasParents(current, plan)
 	for k, parent := range oldParents {
@@ -107,6 +104,27 @@ func inheritHostedCellRecords(intent PlatformIntent, previous *PreviousTrafficPu
 			}
 			wanted[k] = true
 		}
+	}
+	for k, r := range src {
+		if r.RecordKind != "custom-domain-target" || len(a[k]) == 0 || len(r.Values) <= len(a[k]) {
+			continue
+		}
+		if oldParents[k].host != "" {
+			// A managed alias is still subject to its exact parent check.
+			if !wanted[k] {
+				return nil, bad
+			}
+			continue
+		}
+		before, beforeOK := HostedExternalDNSSharedTarget(k.host, payload.Records, payload.ReadinessPlan)
+		after, afterOK := HostedExternalDNSSharedTarget(k.host, current, plan)
+		if !beforeOK || !afterOK || !reflect.DeepEqual(before, after) {
+			return nil, bad
+		}
+		wanted[k] = true
+	}
+	if len(wanted) == 0 {
+		return nil, bad
 	}
 	coverage := map[hostedRecordKey]bool{}
 	for k := range wanted {

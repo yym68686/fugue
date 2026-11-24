@@ -116,12 +116,22 @@ func buildExternalPathProposal(src HostedAddressSource, original, desired hostPr
 		return empty, errors.Join(bad, err)
 	}
 	held := externalProposalHolds(members, src.EffectiveHolds)
+	retained, err := externalPredecessorHolds(target, original.dns, members, src.PriorHolds, src.EffectiveHolds)
+	if err != nil {
+		return empty, err
+	}
+	if len(retained) > 0 {
+		if len(held) > 0 {
+			return empty, errors.New("external path cannot add another hold to a retained roster")
+		}
+		held = retained
+	}
 	staged := original
 	eligible := members
 	anchor := &ExternalPathAnchor{Target: target, Shape: shape}
 	rows := original.dns.Records
 	if len(held) > 0 {
-		staged.dns, err = externalHeldView(original.dns, target, held, false)
+		staged.dns, err = externalHeldView(original.dns, target, held, len(retained) != 0)
 		if err != nil {
 			return empty, err
 		}
@@ -130,13 +140,33 @@ func buildExternalPathProposal(src HostedAddressSource, original, desired hostPr
 			return empty, err
 		}
 		anchor.Held = held
+		if len(retained) > 0 {
+			members = append(slices.Clone(members), held...)
+		}
 		rows, err = externalEffectiveRows(target.Target, rows, held)
 		if err != nil {
 			return empty, err
 		}
 	}
+	desiredRows := desired.dns.Records
+	if len(retained) > 0 && sameScopedAddressRecords(original.dns.Records, desiredRows, target.Target) {
+		// An ordinary compile may preserve signed shared custody itself.
+		// Compare like with like, but only after proving the complete original
+		// declaration and detecting any candidate that re-enables a held IP.
+		projected, e := externalHeldView(desired.dns, target, retained, true)
+		if e != nil {
+			return empty, e
+		}
+		if e = checkHostedDynamicSelectors(externalAddressKeys(target.Target, desiredRows), projected.QueryViews, projected.ReadinessPlan, projected.Policy); e != nil {
+			return empty, e
+		}
+		desiredRows, err = externalEffectiveRows(target.Target, desiredRows, retained)
+		if err != nil {
+			return empty, err
+		}
+	}
 	_, delta, err := ComposeExternalPathRequirements(target, staged.dns.ReadinessPlan, desired.dns.ReadinessPlan, original.dns.Policy.DNSReadiness,
-		slices.Sorted(maps.Keys(change.before)), slices.Sorted(maps.Keys(change.after)), rows, desired.dns.Records)
+		slices.Sorted(maps.Keys(change.before)), slices.Sorted(maps.Keys(change.after)), rows, desiredRows)
 	if err != nil {
 		var conflict *ExternalTargetConflict
 		if errors.As(err, &conflict) {

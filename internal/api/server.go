@@ -27,6 +27,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/runtime"
 	"fugue/internal/runtimeobservation"
@@ -35,6 +36,7 @@ import (
 )
 
 type Server struct {
+	hostedDeclarationRestore               *platformconfig.HostedDeclarationRestorePlan
 	compilerInputOmitOriginal              bool
 	operationOnce                          sync.Once
 	operations                             *runtimeobservation.Operations
@@ -241,6 +243,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
+		hostedDeclarationRestore:        cfg.HostedDeclarationRestore,
 		compilerInputOmitOriginal:       true,
 		store:                           store,
 		auth:                            authn,

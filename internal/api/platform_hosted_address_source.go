@@ -88,9 +88,6 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 	if len(external)+len(hint.managed) > 0 {
 		plan = hostedCapturePlan{selected: full, phase: "external", external: external, managed: hint.managed}
 	}
-	if len(p.hostedAddressHolds) == 0 {
-		return plan, nil
-	}
 	ref, _, err := platformconfig.HostedAddressAuthority(parent)
 	if err != nil {
 		return plan, err
@@ -104,6 +101,9 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 			phase = "after-scoped/" + full.ID
 		}
 		return hostedCapturePlan{selected: full, phase: phase, external: external, managed: hint.managed}, nil
+	}
+	if len(p.hostedAddressHolds) == 0 {
+		return plan, nil
 	}
 	if !slices.ContainsFunc(p.Intent.DNS, func(d platformconfig.DNSIntent) bool {
 		return d.Type == "FUGUE_ROUTE" && d.Route != nil && d.Route.ManagedHost
@@ -162,7 +162,7 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 const isolatedBaselineInput = "producer_isolated_baseline_input_v1"
 
 func (p hostedCapturePlan) ordinaryPathOffers() bool {
-	return p.phase == "external" && len(p.managed)+len(p.external) > 0
+	return (p.phase == "external" || p.phase == "retained") && len(p.managed)+len(p.external) > 0
 }
 
 func isolatedBaselineDigest(req platformconfig.CompileRequest, authority, compiler string, holds []platformconfig.HostedAddressHold) (string, error) {

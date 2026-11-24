@@ -16,7 +16,8 @@ import (
 // direct artifact rollback uses the producer's existing exact LKG recovery.
 func rejectUnboundHostedPublication(parent model.PlatformArtifact, channel string) error {
 	ref, _, err := platformconfig.HostedAddressAuthority(parent)
-	if err != nil || ref != nil && NormalizePlatformReleaseChannel(channel) != model.PlatformArtifactReleaseChannelShadow {
+	_, restoreErr := platformconfig.HostedDeclarationRestoreAuthority(parent)
+	if err != nil || restoreErr != nil || ref != nil && NormalizePlatformReleaseChannel(channel) != model.PlatformArtifactReleaseChannelShadow {
 		return fmt.Errorf("%w: hosted address publication requires its fenced producer", ErrConflict)
 	}
 	return nil
@@ -28,7 +29,10 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 	reject := fmt.Errorf("%w: hosted address publication lost its verified predecessor or member identity", ErrConflict)
 	ref, digest, err := platformconfig.HostedAddressAuthority(dns)
 	parentRef, parentDigest, parentErr := platformconfig.HostedAddressAuthority(parent)
-	if err != nil || parentErr != nil || digest != parentDigest {
+	restore, restoreErr := platformconfig.HostedDeclarationRestoreAuthority(dns)
+	parentRestore, parentRestoreErr := platformconfig.HostedDeclarationRestoreAuthority(parent)
+	if err != nil || parentErr != nil || digest != parentDigest || restoreErr != nil || parentRestoreErr != nil ||
+		(restore == nil) != (parentRestore == nil) || restore != nil && *restore != *parentRestore {
 		return reject
 	}
 	if ref == nil {
@@ -73,8 +77,14 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 		if !ok {
 			return reject
 		}
-		if id == ref.DNSArtifactID && platformconfig.ValidateScopedHostedPublicationTransition(sourceChild, dns) != nil {
-			return fmt.Errorf("%w: hosted publication includes unrelated DNS changes", ErrConflict)
+		if id == ref.DNSArtifactID {
+			if restore != nil {
+				if err := validateHostedDeclarationRestore(state, src, parent, dns, sourceChild, *ref, *restore, keys); err != nil {
+					return err
+				}
+			} else if platformconfig.ValidateScopedHostedPublicationTransition(sourceChild, dns) != nil {
+				return fmt.Errorf("%w: hosted publication includes unrelated DNS changes", ErrConflict)
+			}
 		}
 		delete(kinds, id)
 	}
