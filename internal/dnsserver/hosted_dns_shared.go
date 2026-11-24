@@ -177,6 +177,13 @@ type hostedDNSLease struct {
 	SelectedAt, ValidUntil time.Time
 }
 
+func sameSharedMembership(a, b *routeartifact.HostedSelectedPacket) bool {
+	return a.Parent == b.Parent && a.Child == b.Child && a.ChildDigest == b.ChildDigest &&
+		a.Delivery.Member == b.Delivery.Member && a.Delivery.MembershipSet == b.Delivery.MembershipSet &&
+		a.Delivery.MembershipRevision == b.Delivery.MembershipRevision && a.Delivery.MembershipRelease == b.Delivery.MembershipRelease &&
+		a.Delivery.MembershipFence == b.Delivery.MembershipFence
+}
+
 // Each member read its immutable global parent, which may predate its peers'
 // newest commands. Never copy its peer requirements (or facts) over a peer
 // checkpoint. Rebuild the effective union in stable order, including when
@@ -214,11 +221,23 @@ func (w *hostedDNSWire) mergeShared(old *hostedDNSWire, member sharedDNSMember, 
 		m, selected := w.shared[name]
 		if selected {
 			common, ok := m.part.without(deny)
-			if !ok || !common.sameShape(v) || m.packet.Parent != member.packet.Parent || m.packet.ChildDigest != member.packet.ChildDigest ||
-				m.packet.Child != member.packet.Child || m.packet.Delivery.MembershipSet != member.packet.Delivery.MembershipSet ||
-				m.packet.Delivery.MembershipRevision != member.packet.Delivery.MembershipRevision || m.packet.Delivery.MembershipRelease != member.packet.Delivery.MembershipRelease ||
-				m.packet.Delivery.MembershipFence != member.packet.Delivery.MembershipFence {
+			if !ok || !common.sameShape(v) {
 				return errors.New("shared DNS membership or wire record changed")
+			}
+			if !sameSharedMembership(m.packet, member.packet) {
+				// Only an independently checked, later same-host continuation
+				// can explain a split. Keep BOTH reservations across restart,
+				// never return a wire row or credit mixed-parent evidence.
+				later, earlier := member.packet, m.packet
+				if later.Delivery.MembershipFence < earlier.Delivery.MembershipFence {
+					later, earlier = earlier, later
+				}
+				if later.MembershipRebind == nil || earlier.MemberBaseline == "" || later.Parent == earlier.Parent ||
+					later.Delivery.Member != earlier.Delivery.Member || later.Delivery.MembershipFence <= earlier.Delivery.MembershipFence {
+					return errors.New("incompatible shared DNS memberships")
+				}
+				w.awaitingPeer = true
+				usable = false
 			}
 			chunks = common.hosts[name]
 			h.Peers[name] = hostedDNSLease{m.packet.Decision, m.packet.SelectedAt, m.packet.ValidUntil}

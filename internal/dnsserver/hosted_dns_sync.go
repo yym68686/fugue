@@ -22,6 +22,8 @@ func dnsHostParts(p routeartifact.HostedSelectedPacket) map[routeartifact.Hosted
 	return live
 }
 
+var errHostedDNSPeerPending = errors.New("shared DNS records await a peer's independently signed membership")
+
 // The network caller has re-read the private selection after the probes.
 // Compare it with the independently verified full, actual zone rows and
 // durable predecessor; one pointer publishes every zone of this host.
@@ -71,8 +73,17 @@ func (s *Service) installHostedDNS(cp platformconsumer.HostedCheckpoint, command
 	// answer. For a repeat, install negative/partial facts promptly instead
 	// of extending an old positive observation.
 	if p.Fence != old.Fence {
+		if next.pending[cp.Host] && (old.Parent == p.Parent || p.MembershipRebind == nil) {
+			return errHostedDNSPeerPending // do not stage an unrelated forward or withdrawal
+		}
 		for k, w := range next.keys {
 			if w.forHost(cp.Host) != nil {
+				// The old parent is already no longer selected. Persisting
+				// this exact continuation reserves the key; it cannot serve,
+				// be witnessed or erase a peer's checkpoint.
+				if w.awaitingPeer {
+					continue
+				}
 				effective := w.effectiveRows(parent, k)
 				if len(effective) != 1 {
 					return errors.New("DNS selection awaiting fresh path proofs")
@@ -101,6 +112,9 @@ func (s *Service) installHostedDNS(cp platformconsumer.HostedCheckpoint, command
 		return e
 	}
 	s.hostedDNS.Store(next)
+	if next.pending[cp.Host] {
+		return errHostedDNSPeerPending
+	}
 	return nil
 }
 
@@ -189,7 +203,11 @@ func (s *Service) syncHostedDNS(ctx context.Context) error {
 			return platformconsumer.ErrAssignmentChanged
 		}
 		s.hostedDNSRecovery(cmd.Packet, parent.payload.Policy.DNSReadiness, facts, time.Now().UTC())
-		applyErr := errors.Join(obsErr, s.installHostedDNS(cp, current.Artifact, parent, base, facts))
+		installErr := s.installHostedDNS(cp, current.Artifact, parent, base, facts)
+		if obsErr == nil && errors.Is(installErr, errHostedDNSPeerPending) {
+			return nil
+		} // no positive or negative wire receipt for staging
+		applyErr := errors.Join(obsErr, installErr)
 		if applyErr != nil {
 			observation.Failure = "local_apply"
 		} else {

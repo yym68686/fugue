@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"errors"
 	"net"
 	"path/filepath"
 	"reflect"
@@ -25,10 +26,11 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 		if held {
 			name = "physical-hold"
 		}
-		t.Run(name, func(t *testing.T) { testSharedWireDecisions(t, held) })
+		t.Run(name, func(t *testing.T) { testSharedWireDecisions(t, held, false) })
+		t.Run(name+"/parent-handoff", func(t *testing.T) { testSharedWireDecisions(t, held, true) })
 	}
 }
-func testSharedWireDecisions(t *testing.T, hold bool) {
+func testSharedWireDecisions(t *testing.T, hold, carry bool) {
 	const a, b, name = "first.example.org", "second.example.org", "target.example.test"
 	view, template, policy, _, at := queryExecutionFixture()
 	if hold {
@@ -157,6 +159,7 @@ func testSharedWireDecisions(t *testing.T, hold bool) {
 	}
 	heads := map[string]head{}
 	first := map[string]string{}
+	awaitPeer := false
 	install := func(host string, h head) error {
 		cp, err := s.dnsHostCheckpoint(host)
 		if err != nil {
@@ -184,6 +187,30 @@ func testSharedWireDecisions(t *testing.T, hold bool) {
 		if phase == "withdraw" {
 			p.SkippedForwardFrom = first[host]
 		}
+		if carry {
+			var err error
+			p.MemberBaseline, err = routeartifact.HostedDNSBaselinePin(p.Delivery, signedBase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if assign.ReleaseSetID != "full" {
+				p.Draft, p.Offer, p.Delivery.DraftDigest, p.Delivery.ImageDigest, p.Authority = "next-"+host, 2, digest([]string{"next-draft", host}), digest([]string{"next-image", host}), digest("next-authority")
+				if phase == "withdraw" {
+					p.ExactWithdrawal, p.SkippedForwardFrom = true, ""
+				}
+				if old.Parent != p.Parent {
+					key, e := p.Delivery.PartKey(part)
+					if e != nil {
+						t.Fatal(e)
+					}
+					p.PriorParts = map[string]string{key: old.Delivery.Parts[0].ContentDigest}
+					p.MembershipRebind, err = routeartifact.BindHostedContinuation(old, p, old.MemberBaseline, p.MemberBaseline)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
 		sig, err := routeartifact.SignHostedPacket(p, s.platformDNSKeys(), at)
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +223,16 @@ func testSharedWireDecisions(t *testing.T, hold bool) {
 				h.fs[r] = append(h.fs[r], f)
 			}
 		}
-		if err := install(host, h); err != nil {
+		err = install(host, h)
+		if awaitPeer {
+			if !errors.Is(err, errHostedDNSPeerPending) {
+				t.Fatal("first peer did not reserve the new membership", err)
+			}
+			heads[host] = h
+			query(dns.RcodeServerFailure)
+			return
+		}
+		if err != nil {
 			t.Fatalf("install %s/%s: %v", host, phase, err)
 		}
 		heads[host] = h
@@ -215,6 +251,39 @@ func testSharedWireDecisions(t *testing.T, hold bool) {
 	apply(b, "forward", withHold(unit(root, two)))
 	setGlobal(nil)
 	query(dns.RcodeSuccess)
+	if carry {
+		// A and B already share the same RR and have their own forward
+		// changes. The new full release does not authorize the old facts.
+		assign.ReleaseSetID, assign.ArtifactReleaseID, assign.ArtifactID, assign.ContentHash, assign.ExpectedConsumerSetID = "full-next", "release-next", "child-next", digest("child-next"), "members-next"
+		assign.FencingToken++
+		assign.Revision++
+		n := *parent
+		n.record.Parent = model.PlatformArtifact{ID: assign.ReleaseSetID, ContentHash: digest("parent-next")}
+		n.record.Candidate.Assignment = assign
+		n.record.Candidate.Artifact = model.PlatformArtifact{ID: assign.ArtifactID, ContentHash: assign.ContentHash}
+		n.record.Candidate.Release.ID, n.record.Candidate.Release.FencingToken = assign.ArtifactReleaseID, assign.FencingToken
+		parent = &n
+		s.platformServing.Store(parent)
+		query(dns.RcodeServerFailure)
+		awaitPeer = true
+		apply(a, "forward", unit(four, root))
+		if got := s.hostedDNS.Load().keys[hostedZoneKey{view.Zone, hostedRRKey{name, dns.TypeA}}].forHost(b); got.Decision != heads[b].p.Decision {
+			t.Fatal("staging A replaced B")
+		}
+		// Crash after A's durable rename and before B's. Reserve both;
+		// never reconstruct an answer out of two parents or old facts.
+		s = NewService(config, nil)
+		if err := s.reserveHostedDNS(); err != nil {
+			t.Fatal("mixed checkpoint restart failed", err)
+		}
+		start()
+		query(dns.RcodeServerFailure)
+		if err := install(a, heads[a]); !errors.Is(err, errHostedDNSPeerPending) {
+			t.Fatal("mixed snapshot accepted a receipt", err)
+		}
+		awaitPeer = false
+		apply(b, "forward", withHold(unit(root, two)))
+	}
 	oldA := heads[a]
 	apply(a, "withdraw", base)
 	if err := install(a, oldA); err == nil {

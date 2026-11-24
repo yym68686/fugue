@@ -25,14 +25,16 @@ type hostedZoneKey struct {
 	hostedRRKey
 }
 type hostedDNSWire struct {
-	publication DNSDecisionPublication
-	packet      *routeartifact.HostedSelectedPacket
-	rows        []dnsServingRecord
-	shared      map[string]sharedDNSMember
+	awaitingPeer bool // reservation, not a serveable selection
+	publication  DNSDecisionPublication
+	packet       *routeartifact.HostedSelectedPacket
+	rows         []dnsServingRecord
+	shared       map[string]sharedDNSMember
 }
 type hostedDNSRoutes struct {
-	keys   map[hostedZoneKey]*hostedDNSWire
-	owners map[hostedRRKey]string
+	pending map[string]bool // block all zones/keys of any host in a partial handoff
+	keys    map[hostedZoneKey]*hostedDNSWire
+	owners  map[hostedRRKey]string
 }
 
 func (idx *hostedDNSRoutes) forQuery(parent *dnsServingState, q *dns.Msg, now time.Time) *dnsServingState {
@@ -65,12 +67,12 @@ func (idx *hostedDNSRoutes) forQuery(parent *dnsServingState, q *dns.Msg, now ti
 		return &c
 	}
 	c.hostedWire = w
-	if w.packet != nil && w.packet.ValidUntil.After(now) && len(w.rows) > 0 && parent.record.Positive {
+	if w.packet != nil && !idx.pending[w.packet.Delivery.Host] && w.packet.ValidUntil.After(now) && len(w.rows) > 0 && parent.record.Positive {
 		a := parent.record.Candidate.Assignment
 		p := w.packet
 		c.hostedBlocked = !(a.ReleaseChannel == "full" && a.ScopeKey == "global" && p.Parent == a.ReleaseSetID && w.publication.ParentDigest == parent.record.Parent.ContentHash && p.Child == a.ArtifactID && p.ChildDigest == a.ContentHash && p.Delivery.MembershipRelease == a.ArtifactReleaseID && p.Delivery.MembershipRevision == a.Revision && p.Delivery.MembershipSet == a.ExpectedConsumerSetID && p.Delivery.MembershipFence == a.FencingToken)
 		for _, m := range w.shared {
-			if !m.packet.ValidUntil.After(now) {
+			if idx.pending[m.packet.Delivery.Host] || !m.packet.ValidUntil.After(now) {
 				c.hostedBlocked = true
 			}
 		}
@@ -142,6 +144,14 @@ func (idx *hostedDNSRoutes) withPacket(p routeartifact.HostedSelectedPacket, par
 		}
 	}
 	for k, v := range next.keys {
+		if v.awaitingPeer {
+			if next.pending == nil {
+				next.pending = map[string]bool{}
+			}
+			for name := range v.shared {
+				next.pending[name] = true
+			}
+		}
 		if v.forHost(p.Delivery.Host) != nil && !wanted[k] {
 			return nil, errors.New("DNS selection cannot silently drop an existing owned key")
 		}
