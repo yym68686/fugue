@@ -341,12 +341,21 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	for key, entry := range server.dynamicQuality.entries {
 		beforeAttempts[key] = entry.Attempted
 	}
-	_, refreshErr := server.reconcilePlatformConfigurationWithCapture(ctx, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
+	hostWakeups := 0
+	_, refreshErr := server.reconcilePlatformConfigurationScope(ctx, platformproducer.Scope, func(context.Context, model.Principal) (platformIntentProjectionResponse, error) {
 		t.Fatal("pending quality refresh re-entered configuration capture")
 		return platformIntentProjectionResponse{}, errors.New("business publication inputs not ready")
+	}, func(policy platformproducer.Policy, release model.PlatformArtifactRelease) {
+		if release.ID != authority.ID || !canCapturePendingHosts(platformproducer.Scope, policy) {
+			t.Fatal("host work borrowed another producer")
+		}
+		hostWakeups++
 	})
 	if refreshErr != nil {
 		t.Fatal(refreshErr)
+	}
+	if hostWakeups != 1 {
+		t.Fatal("pending gray suppressed the independent host wakeup")
 	}
 	if dynamic {
 		if len(beforeAttempts) == 0 {

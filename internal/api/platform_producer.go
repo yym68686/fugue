@@ -109,6 +109,10 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 				s.log.Printf("platform configuration producer leadership acquired scope=%s", scope)
 			}
 			var nextRun time.Time
+			// Pending whole-release observation must keep its own cadence.
+			// Host captures are coalesced, canceled and joined with this leader.
+			kick, stop := s.pendingHostWorker(ctx, scope)
+			defer stop()
 			lastAuthority := ""
 			failures := 0
 			for ctx.Err() == nil {
@@ -121,7 +125,7 @@ func (s *Server) runPlatformConfigurationScope(ctx context.Context, scope string
 					if authority.ID != lastAuthority {
 						failures = 0
 					}
-					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil)
+					interval, err := s.reconcilePlatformConfigurationScope(ctx, scope, nil, kick)
 					if err != nil {
 						failures = min(failures+1, 4)
 					} else {
@@ -171,7 +175,7 @@ func (s *Server) reconcilePlatformConfigurationWithCapture(ctx context.Context, 
 	return s.reconcilePlatformConfigurationScope(ctx, platformproducer.Scope, capture)
 }
 
-func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error)) (interval time.Duration, resultErr error) {
+func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope string, capture func(context.Context, model.Principal) (platformIntentProjectionResponse, error), pending ...func(platformproducer.Policy, model.PlatformArtifactRelease)) (interval time.Duration, resultErr error) {
 	s.markPlatformProducerCaptureStarted()
 	interval = 30 * time.Second
 	started, phaseStarted, phase := time.Now(), time.Now(), "load_policy"
@@ -209,6 +213,9 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			return interval, err
 		}
 		if handled {
+			if len(pending) == 1 && pending[0] != nil && canCapturePendingHosts(scope, policy) {
+				pending[0](policy, authority)
+			}
 			decision = "pending_observation"
 			advance("refresh_pending_quality")
 			return interval, s.refreshPendingProducerQuality(ctx, policy)
@@ -232,6 +239,9 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		// arrived executable-reader ACKs authenticate.
 		handled, err := s.resumeProducedShadow(ctx, policy, authority, current)
 		if handled || err != nil {
+			if handled && err == nil && len(pending) == 1 && pending[0] != nil && canCapturePendingHosts(scope, policy) {
+				pending[0](policy, authority)
+			}
 			decision = "resume_shadow"
 			return interval, err
 		}
@@ -255,6 +265,14 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if deferred {
 		decision = "new_input_deferred"
 		return interval, s.refreshPendingProducerQuality(ctx, policy)
+	}
+	if scope == platformproducer.Scope {
+		_, done, acquired := s.hostedCaptureGate.enter(ctx, false)
+		if !acquired {
+			decision = "returning_from_host_only_capture"
+			return 30 * time.Second, s.refreshPendingProducerQuality(ctx, policy)
+		}
+		defer done()
 	}
 	defer s.platformProducerRuntime().input(scope)()
 	if s.producerCaptureAdmission != nil {
@@ -406,32 +424,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			advance("record_host_path_proposals")
 			// Record the compiler-owned offer before constructing a scoped
 			// successor. An offer is never itself a serving publication.
-			proposalCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			ids, proposalErr := s.store.EnsureCompiledHostedPathProposals(proposalCtx, source, compiled, scoped)
-			cancel()
-			if s.log != nil {
-				s.log.Printf("hosted path compiler proposals policy_release=%s base_release=%s ids=%v error=%v", authority.ID, source.Publication.ReleaseID, ids, proposalErr)
-			}
-			if len(ids) > 0 {
-				advance("offer_host_path_preparation")
-				offerCtx, done := context.WithTimeout(ctx, 30*time.Second)
-				for _, id := range ids {
-					if offerCtx.Err() != nil {
-						break
-					}
-					sequence, e := s.store.OfferCompiledHostedPreparation(offerCtx, source, id, func(in store.ProjectHostRouteInputs, p platformconfig.HostedScopeProposal) (string, string, error) {
-						b, err := matchHostedProjectIntent(in, p)
-						if err != nil || b.Direction != "forward" {
-							return "", "", errors.Join(store.ErrConflict, err)
-						}
-						return b.OwnerDigest, b.PathDigest, nil
-					})
-					if s.log != nil {
-						s.log.Printf("hosted path preparation offer draft=%s sequence=%d error=%v", id, sequence, e)
-					}
-				}
-				done()
-			}
+			s.recordPathOffers(ctx, authority, source, compiled, scoped)
 		}
 		if failed {
 			// A failed ordinary shadow is not a failed hostname program.
