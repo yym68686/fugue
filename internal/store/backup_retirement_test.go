@@ -82,9 +82,14 @@ func testRecoveredBackupRetirement(t *testing.T, s *Store) {
 	}
 	req := model.RecoveredBackupRetirementRequest{ReplacementArtifactID: replacement.ID, Reason: "verified replacement"}
 	if blocked, err := s.RecoveredBackupRetirement(ctx, old.ID, req, admin); err != nil || len(blocked.Blockers) != 1 || blocked.Confirmation != "" {
-		t.Fatalf("missing evidence must block: %+v, %v", blocked, err)
+		t.Fatalf("fewer than three retained points must block: %+v, %v", blocked, err)
 	}
-	req.RestoreEvidenceSHA256 = strings.Repeat("a", 64)
+	create(model.BackupRunStatusSucceeded, "", "new", 18*time.Hour)
+	second := create(model.BackupRunStatusSucceeded, "", "second", 24*time.Hour)
+	if blocked, err := s.RecoveredBackupRetirement(ctx, old.ID, req, admin); err != nil || len(blocked.Blockers) != 1 || blocked.Confirmation != "" {
+		t.Fatalf("alias did not count as an independent point: %+v, %v", blocked, err)
+	}
+	third := create(model.BackupRunStatusSucceeded, "", "third", 48*time.Hour)
 	if blocked, err := s.RecoveredBackupRetirement(ctx, restoring.ID, req, admin); err != nil || len(blocked.Blockers) == 0 || !strings.Contains(strings.Join(blocked.Blockers, " "), "restore plan or run") {
 		t.Fatalf("existing restore reference must block: %+v, %v", blocked, err)
 	}
@@ -92,8 +97,14 @@ func testRecoveredBackupRetirement(t *testing.T, s *Store) {
 		t.Fatalf("ordinary delete bypassed protection: %v", err)
 	}
 	preview, err := s.RecoveredBackupRetirement(ctx, old.ID, req, admin)
-	if err != nil || preview.Confirmation == "" || preview.Retired || len(preview.Blockers) != 0 {
+	if err != nil || preview.Confirmation == "" || preview.Retired || len(preview.Blockers) != 0 || preview.RestoreEvidenceStatus != "not_provided" ||
+		strings.Join(preview.RetainedArtifactIDs, ",") != strings.Join([]string{replacement.ID, second.ID, third.ID}, ",") {
 		t.Fatalf("bad preview: %+v, %v", preview, err)
+	}
+	withEvidence := req
+	withEvidence.RestoreEvidenceSHA256 = strings.Repeat("a", 64)
+	if got, err := s.RecoveredBackupRetirement(ctx, old.ID, withEvidence, admin); err != nil || got.RestoreEvidenceStatus != "operator_attested" || got.Confirmation == "" || got.Confirmation == preview.Confirmation {
+		t.Fatalf("optional receipt must be bound to confirmation: %+v, %v", got, err)
 	}
 	before, err := s.GetBackupArtifact(old.ID, "", true)
 	if err != nil || !before.Protected || before.DeletedAt != nil {
@@ -149,7 +160,8 @@ func testRecoveredBackupRetirement(t *testing.T, s *Store) {
 		if event.TargetID == old.ID && event.Action == recoveredBackupRetirementAction {
 			matching++
 			if event.ID != retired.AuditID || event.Metadata["restore_evidence_sha256"] != req.RestoreEvidenceSHA256 ||
-				event.Metadata["evidence_source"] != "operator_attested" || event.ActorID != admin.ActorID {
+				event.Metadata["evidence_source"] != "not_provided" ||
+				event.Metadata["retained_artifact_ids"] != strings.Join(preview.RetainedArtifactIDs, ",") || event.ActorID != admin.ActorID {
 				t.Fatalf("bad audit event: %+v", event)
 			}
 		}

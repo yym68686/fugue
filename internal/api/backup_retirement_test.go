@@ -32,7 +32,7 @@ func TestRecoveredBackupRetirementAPI(t *testing.T) {
 			return
 		}
 		name := filepath.Base(r.URL.Path)
-		if missingRemote.Load() && name == "backup-new" {
+		if missingRemote.Load() && name == "backup-retained-two" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -80,6 +80,8 @@ func TestRecoveredBackupRetirementAPI(t *testing.T) {
 	}
 	create("old", model.BackupRunStatusFailed, "completed-longhorn-orphan-manifest", 30*24*time.Hour)
 	create("new", model.BackupRunStatusSucceeded, "", time.Hour)
+	create("retained-one", model.BackupRunStatusSucceeded, "", 2*time.Hour)
+	create("retained-two", model.BackupRunStatusSucceeded, "", 3*time.Hour)
 	api := NewServer(db, auth.New(db, "fixture-admin"), nil, ServerConfig{})
 	api.newBackupLonghornClient = func(string) (*kubeLogsClient, error) {
 		return &kubeLogsClient{baseURL: kube.URL, client: kube.Client()}, nil
@@ -109,12 +111,7 @@ func TestRecoveredBackupRetirementAPI(t *testing.T) {
 	req := model.RecoveredBackupRetirementRequest{ReplacementArtifactID: "new", Reason: "retire historical point"}
 	call("", req, http.StatusUnauthorized)
 	preview := call("fixture-admin", req, http.StatusOK)
-	if preview.Confirmation != "" || len(preview.Blockers) != 1 {
-		t.Fatalf("preview falsely ready without evidence: %+v", preview)
-	}
-	req.RestoreEvidenceSHA256 = strings.Repeat("a", 64)
-	preview = call("fixture-admin", req, http.StatusOK)
-	if preview.Confirmation == "" || preview.Retired || len(preview.Blockers) != 0 {
+	if preview.Confirmation == "" || preview.Retired || len(preview.Blockers) != 0 || preview.RestoreEvidenceStatus != "not_provided" || len(preview.RetainedArtifactIDs) != 3 {
 		t.Fatalf("preview not ready: %+v", preview)
 	}
 	req.Confirmation = preview.Confirmation

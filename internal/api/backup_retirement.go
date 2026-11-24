@@ -40,11 +40,11 @@ func (s *Server) handleRetireRecoveredBackupArtifact(w http.ResponseWriter, r *h
 		result.Blockers = append(result.Blockers, "confirmation does not match the current preview")
 	}
 	if len(result.Blockers) == 0 {
-		for _, candidate := range []struct{ id, role string }{{id, "recovered backup"}, {req.ReplacementArtifactID, "replacement backup"}} {
-			if err := s.verifyRecoveredBackupRetirementRemote(ctx, candidate.id); err != nil {
+		for _, candidate := range append([]string{id}, result.RetainedArtifactIDs...) {
+			if err := s.verifyRecoveredBackupRetirementRemote(ctx, candidate); err != nil {
 				// Provider errors can include repository URLs. Report the failing
 				// phase without returning any repository credentials or paths.
-				result.Blockers = append(result.Blockers, candidate.role+": matching completed Longhorn Backup or R2 configuration could not be verified")
+				result.Blockers = append(result.Blockers, candidate+": matching completed Longhorn Backup or R2 configuration could not be verified")
 			}
 		}
 	}

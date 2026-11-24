@@ -190,15 +190,15 @@ restore drill.
 
 ### Retire one recovered control-plane Longhorn backup
 
-After actually restoring a recent replacement into an isolated PostgreSQL
-environment and checking the recovered data, keep the drill receipt and record
-its SHA-256. Do not use the backup status, a restore plan, or a dry-run as
-restore evidence. The operator vouches for the receipt; Fugue records its
-digest, but does not perform or certify the drill.
+No restore drill is required to retire an old recovered point. If one was
+performed for the replacement, optionally attach its real receipt digest with
+`--restore-evidence-sha256`. Otherwise the preview and audit explicitly record
+that no receipt was supplied. A backup status, restore plan, or dry-run is not
+restore evidence; Fugue does not perform or certify a drill here.
 
 ```sh
 fugue backup artifact retire-recovered OLD_ID --replacement RETAINED_ID \
-  --restore-evidence-sha256 RECEIPT_SHA256 --reason 'reason for retiring the old recovery point'
+  --reason 'reason for retiring the old recovery point'
 # Review the preview. Repeat the same command with --confirm PREVIEW_DIGEST.
 ```
 
@@ -208,10 +208,13 @@ least seven days old, without another alias, restore reference, live worker
 lease, or future retry. The distinct replacement must be the newest unprotected
 active artifact of the same policy, successful, at most 72 hours old, and belong
 to the same volume and repository.
-Both Longhorn Backup identities and remote backup configuration objects must
-still be present. The commit atomically releases protection, marks only the
-named old artifact deleted, and records the actor, reason and evidence digest
-in the audit log. Original backup-run histories are preserved.
+At least three distinct newer successful points (including the replacement)
+must remain under the same policy, volume and repository. The corresponding
+Longhorn Backup identities and remote backup configuration objects must exist
+for the old point and the retained set. The commit atomically releases
+protection, marks only the named old artifact deleted, and audits the actor,
+reason, retained set and optional evidence digest. Original run histories
+are preserved.
 
 This is logical retirement. The remote collector observes the normal grace
 period and lets Longhorn remove the Backup and manage shared blocks; do not

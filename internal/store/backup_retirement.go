@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ const (
 	recoveredBackupRetirementAction = "backup.artifact.retire_recovered"
 	recoveredBackupMinAge           = 7 * 24 * time.Hour
 	replacementBackupMaxAge         = 72 * time.Hour
+	minRetainedRecoveryPoints       = 3
 )
 
 type recoveredBackupRetirementState struct {
@@ -25,6 +27,7 @@ type recoveredBackupRetirementState struct {
 	Run, ReplacementRun   model.BackupRun
 	HasAlias, Restoring   bool
 	NewerReplacement      bool
+	RetainedCandidates    []model.BackupArtifact
 }
 
 // RecoveredBackupRetirement evaluates a preview or commits a reviewed
@@ -55,7 +58,9 @@ func (s *Store) RecoveredBackupRetirement(ctx context.Context, id string, req mo
 		for _, restore := range state.BackupRestoreRuns {
 			input.Restoring = input.Restoring || restore.ArtifactID == id
 		}
+		runs := make(map[string]model.BackupRun, len(state.BackupRuns))
 		for _, run := range state.BackupRuns {
+			runs[run.ID] = run
 			switch run.ID {
 			case a.RunID:
 				input.Run = run
@@ -70,6 +75,9 @@ func (s *Store) RecoveredBackupRetirement(ctx context.Context, id string, req mo
 			if other.PolicyID == b.PolicyID && other.Status == model.BackupArtifactStatusActive && !other.Protected &&
 				(other.CreatedAt.After(b.CreatedAt) || (other.CreatedAt.Equal(b.CreatedAt) && other.ID > b.ID)) {
 				input.NewerReplacement = true
+			}
+			if isRetirementRetainedCandidate(a, b, other, runs[other.RunID]) {
+				input.RetainedCandidates = append(input.RetainedCandidates, other)
 			}
 		}
 		now := time.Now().UTC()
@@ -166,6 +174,10 @@ WHERE policy_id=$1 AND status='active' AND protected=FALSE AND (created_at>$2 OR
 		b.PolicyID, b.CreatedAt, b.ID).Scan(&input.NewerReplacement); err != nil {
 		return result, mapDBErr(err)
 	}
+	input.RetainedCandidates, err = pgRetirementRetainedCandidates(ctx, tx, a, b)
+	if err != nil {
+		return result, err
+	}
 	now := time.Now().UTC()
 	result, err = reviewRecoveredBackupRetirement(now, input, req, actor)
 	if err != nil || preview || len(result.Blockers) != 0 {
@@ -191,9 +203,92 @@ WHERE id=$1 AND protected=TRUE AND status='active'`, id, now)
 	return result, nil
 }
 
+func pgRetirementRetainedCandidates(ctx context.Context, tx *sql.Tx, old, replacement model.BackupArtifact) ([]model.BackupArtifact, error) {
+	rows, err := tx.QueryContext(ctx, backupArtifactSelectSQL()+`
+ WHERE policy_id=$1 AND backend_id=$2 AND kind='longhorn-snapshot' AND status='active'
+   AND created_at>$3 AND id<>$4
+   AND manifest_json->'metadata'->>'volume_name'=$5
+   AND manifest_json->'metadata'->>'backup_target_name'=$6
+   AND manifest_json->'metadata'->>'backup_target_url'=$7
+   AND EXISTS (SELECT 1 FROM fugue_backup_runs r WHERE r.id=fugue_backup_artifacts.run_id AND r.status='succeeded')`,
+		replacement.PolicyID, replacement.BackendID, old.CreatedAt, replacement.ID,
+		replacement.Manifest.Metadata["volume_name"], replacement.Manifest.Metadata["backup_target_name"], replacement.Manifest.Metadata["backup_target_url"])
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	var candidates []model.BackupArtifact
+	for rows.Next() {
+		a, err := scanBackupArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
+	}
+	var eligible []model.BackupArtifact
+	for _, a := range candidates {
+		run, err := scanBackupRun(tx.QueryRowContext(ctx, backupRunSelectSQL()+" WHERE id=$1", a.RunID))
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if isRetirementRetainedCandidate(old, replacement, a, run) {
+			eligible = append(eligible, a)
+		}
+	}
+	return eligible, nil
+}
+
+func isRetirementRetainedCandidate(old, replacement, a model.BackupArtifact, run model.BackupRun) bool {
+	m, rm := a.Manifest.Metadata, replacement.Manifest.Metadata
+	return a.ID != replacement.ID && a.Status == model.BackupArtifactStatusActive && a.PolicyID == replacement.PolicyID &&
+		a.BackendID == replacement.BackendID && a.CreatedAt.After(old.CreatedAt) && backupRetirementIdentity(a, run) &&
+		run.Status == model.BackupRunStatusSucceeded && m["volume_name"] == rm["volume_name"] &&
+		m["backup_target_name"] == rm["backup_target_name"] && m["backup_target_url"] == rm["backup_target_url"]
+}
+
+func retirementRetainedSet(in recoveredBackupRetirementState, now time.Time) []model.BackupArtifact {
+	sort.Slice(in.RetainedCandidates, func(i, j int) bool {
+		a, b := in.RetainedCandidates[i], in.RetainedCandidates[j]
+		if a.CreatedAt.Equal(b.CreatedAt) {
+			return a.ID > b.ID
+		}
+		return a.CreatedAt.After(b.CreatedAt)
+	})
+	retained := []model.BackupArtifact{in.Replacement}
+	for _, a := range in.RetainedCandidates {
+		if a.CreatedAt.After(now) || backupRetirementAlias(in.Artifact, a) || a.RunID == in.Artifact.RunID {
+			continue
+		}
+		distinct := true
+		for _, b := range retained {
+			if a.RunID == b.RunID || backupRetirementAlias(b, a) || a.Manifest.Metadata["longhorn_backup_name"] == b.Manifest.Metadata["longhorn_backup_name"] {
+				distinct = false
+				break
+			}
+		}
+		if distinct {
+			retained = append(retained, a)
+			if len(retained) == minRetainedRecoveryPoints {
+				break
+			}
+		}
+	}
+	return retained
+}
+
 func reviewRecoveredBackupRetirement(now time.Time, in recoveredBackupRetirementState, req model.RecoveredBackupRetirementRequest, actor model.Principal) (model.RecoveredBackupRetirement, error) {
 	a, b, r, replacementRun := in.Artifact, in.Replacement, in.Run, in.ReplacementRun
-	result := model.RecoveredBackupRetirement{ArtifactID: a.ID, ReplacementArtifactID: b.ID, Blockers: []string{}}
+	result := model.RecoveredBackupRetirement{ArtifactID: a.ID, ReplacementArtifactID: b.ID,
+		Blockers: []string{}, RetainedArtifactIDs: []string{}, RestoreEvidenceStatus: "not_provided"}
+	if req.RestoreEvidenceSHA256 != "" {
+		result.RestoreEvidenceStatus = "operator_attested"
+	}
 	block := func(condition bool, message string) {
 		if condition {
 			result.Blockers = append(result.Blockers, message)
@@ -218,13 +313,18 @@ func reviewRecoveredBackupRetirement(now time.Time, in recoveredBackupRetirement
 	am, bm := a.Manifest.Metadata, b.Manifest.Metadata
 	block(am["volume_name"] != bm["volume_name"] || am["backup_target_url"] != bm["backup_target_url"] ||
 		am["backup_target_name"] != bm["backup_target_name"] || am["longhorn_backup_url"] == bm["longhorn_backup_url"] ||
+		am["longhorn_backup_name"] == bm["longhorn_backup_name"] ||
 		am["snapshot_name"] == bm["snapshot_name"], "replacement must be a distinct recovery point for the same Longhorn volume and repository")
-	block(!backupRetirementDigestValid(req.RestoreEvidenceSHA256), "a SHA-256 reference to a real isolated restore receipt is required")
+	retained := retirementRetainedSet(in, now)
+	block(len(retained) < minRetainedRecoveryPoints, "at least three distinct newer successful recovery points in the same volume and repository must remain")
 	block(strings.TrimSpace(req.Reason) == "", "a retirement reason is required")
 	if len(result.Blockers) != 0 {
 		return result, nil
 	}
-	binding, err := json.Marshal([]any{"fugue.recovered-backup-retirement/v1", actor.ActorType, actor.ActorID, a, b, r, replacementRun, req.Reason, req.RestoreEvidenceSHA256})
+	for _, point := range retained {
+		result.RetainedArtifactIDs = append(result.RetainedArtifactIDs, point.ID)
+	}
+	binding, err := json.Marshal([]any{"fugue.recovered-backup-retirement/v2", actor.ActorType, actor.ActorID, a, retained, r, replacementRun, req.Reason, req.RestoreEvidenceSHA256})
 	if err != nil {
 		return result, err
 	}
@@ -273,6 +373,7 @@ func recoveredBackupRetirementAudit(now time.Time, result model.RecoveredBackupR
 		Action: recoveredBackupRetirementAction, TargetType: "backup_artifact", TargetID: result.ArtifactID,
 		Metadata: map[string]string{
 			"replacement_artifact_id": result.ReplacementArtifactID, "restore_evidence_sha256": req.RestoreEvidenceSHA256,
-			"evidence_source": "operator_attested", "reason": req.Reason, "confirmation": req.Confirmation,
+			"evidence_source": result.RestoreEvidenceStatus, "retained_artifact_ids": strings.Join(result.RetainedArtifactIDs, ","),
+			"reason": req.Reason, "confirmation": req.Confirmation,
 		}}
 }
