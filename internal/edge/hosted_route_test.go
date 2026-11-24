@@ -20,6 +20,7 @@ import (
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformsafety"
 	"fugue/internal/routeartifact"
 	"fugue/internal/routeprobe"
 	"fugue/internal/routeproof"
@@ -118,6 +119,20 @@ func testHostedWorkerOnWire(t *testing.T, carry bool) {
 			wire, e := routeartifact.SignHostedPacket(p, keys, now)
 			if e != nil {
 				t.Fatal(e)
+			}
+			if (wire.ArtifactKind == routeartifact.HostedMembershipPacketKind) != carry {
+				t.Fatal("wrong hosted packet generation")
+			}
+			if carry && i == 0 {
+				mixed := wire
+				mixed.ArtifactKind = routeartifact.HostedPacketKind
+				mixed, e = platformsafety.SignPlatformArtifact(mixed, keys)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if _, e = routeartifact.VerifyHostedPacket(mixed, host, who, sel, 0, "", keys, now); e == nil {
+					t.Fatal("downgraded signed envelope was accepted")
+				}
 			}
 			out = append(out, wire)
 			prev, oldPart = p.Decision, part.ContentDigest

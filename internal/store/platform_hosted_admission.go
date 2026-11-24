@@ -97,6 +97,37 @@ func pgHostedMemberCapable(ctx context.Context, tx *sql.Tx, m model.PlatformExpe
 	return ok, err
 }
 
+// This is only a veto on a conditional continuation. Absence of a newer
+// global fact is not a successful contact. A known incompatible replacement
+// or a failing member on the selected full must not be concealed by older
+// positive scoped observations.
+func pgHostedMemberWithoutVeto(ctx context.Context, tx *sql.Tx, p pc.HostedScopeProposal, m model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
+	f, e := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, hostedMemberFactSQL, m.ConsumerID, a.ArtifactKind, pc.GlobalScopeKey))
+	if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
+		return true, nil
+	}
+	if e != nil {
+		return false, e
+	}
+	if !f.IdentityVerified || f.ConsumerID != m.ConsumerID || f.Component != m.Component || f.NodeID != m.NodeID || f.FencingToken > a.FencingToken {
+		return false, nil
+	}
+	if f.FencingToken < a.FencingToken {
+		return f.ReleaseSetID != a.ReleaseSetID, nil
+	}
+	if f.ReleaseSetID != a.ReleaseSetID || f.ExpectedConsumerSetID != a.ExpectedConsumerSetID || f.LKGExpired ||
+		f.ProbeStatus != "passed" || f.ApplyStatus != "applied" || f.ActualGeneration != a.ExpectedGeneration || f.DesiredGeneration != a.ExpectedGeneration ||
+		!slices.Contains(f.CompatibilityCapabilities, hostedMemberProtocol) || !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedContinuationCapability) {
+		return false, nil
+	}
+	if p.ExternalPath != nil && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+		if !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedTargetCapability) || len(p.ExternalPath.Held) > 0 && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedHoldCapability) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 const hostedExecutorSeenSQL = `INSERT INTO fugue_hosted_executor_presence AS old(member_id,kind,credential_id,parent_id,child_id,set_id,parent_fence,observed_at,valid_until)
  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
  ON CONFLICT(member_id,kind) DO UPDATE SET (credential_id,parent_id,child_id,set_id,parent_fence,observed_at,valid_until)=
@@ -181,6 +212,10 @@ func (s *Store) pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.P
 		capable = func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
 			code, _, err := pgHostedMemberBlocker(ctx, tx, p, member, a, time.Now().UTC(), true)
 			return code == "" && err == nil, err
+		}
+	} else {
+		capable = func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
+			return pgHostedMemberWithoutVeto(ctx, tx, p, member, a)
 		}
 	}
 	unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, program.Digest, program.Wire, c.Phase)

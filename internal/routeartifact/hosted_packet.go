@@ -19,6 +19,7 @@ import (
 // readiness certificate or proof of application. Ordinary global consumers
 // never select this kind. Original selection time/expiry survive retries.
 const HostedPacketKind = "hosted_recipient_selection_v1"
+const HostedMembershipPacketKind = "hosted_recipient_selection_v2"
 
 // DNS execution can compose peer heads over one shared platform target.
 // A v1-only DNS process deliberately rejects such packets.
@@ -52,6 +53,13 @@ type HostedSelectedPacket struct {
 	MembershipRebind *HostedMembershipRebind `json:"membership_rebind,omitempty"`
 }
 
+func (p HostedSelectedPacket) PacketKind() string {
+	if p.MemberBaseline != "" {
+		return HostedMembershipPacketKind
+	}
+	return HostedPacketKind
+}
+
 func (p HostedSelectedPacket) validate(now time.Time) error {
 	d := p.Delivery
 	bad := errors.New("host decision has invalid recipient, content, fence or lifetime")
@@ -65,7 +73,7 @@ func (p HostedSelectedPacket) validate(now time.Time) error {
 		}
 	}
 	one := d.Parts[0].Recipient
-	if p.MemberBaseline != "" && !platformproducer.ValidDigest(p.MemberBaseline) {
+	if p.ExactWithdrawal && p.MemberBaseline == "" || p.MemberBaseline != "" && !platformproducer.ValidDigest(p.MemberBaseline) {
 		return bad
 	}
 	if p.MembershipRebind != nil && (p.Fence < 2 || d.Phase == "withdraw" || p.MembershipRebind.Baseline != p.MemberBaseline || !platformproducer.ValidDigest(p.MembershipRebind.Predecessor) ||
@@ -144,7 +152,7 @@ func SignHostedPacket(p HostedSelectedPacket, keys bundleauth.Keyring, now time.
 	if e != nil {
 		return a, e
 	}
-	return platformsafety.SignPlatformArtifact(model.PlatformArtifact{ID: "host-selection:" + digest, ArtifactKind: HostedPacketKind, SchemaVersion: model.PlatformArtifactSchemaVersionV1, Scope: model.PlatformArtifactScope{ScopeType: "hosted-recipient", Key: p.Scope, ProjectID: p.Project, Hostname: p.Delivery.Host}, ScopeKey: p.Scope, Generation: p.Decision, GenerationSequence: p.Fence, Status: model.PlatformArtifactStatusValidated, Content: body, ContentHash: digest, CreatedAt: p.SelectedAt, UpdatedAt: p.SelectedAt}, keys)
+	return platformsafety.SignPlatformArtifact(model.PlatformArtifact{ID: "host-selection:" + digest, ArtifactKind: p.PacketKind(), SchemaVersion: model.PlatformArtifactSchemaVersionV1, Scope: model.PlatformArtifactScope{ScopeType: "hosted-recipient", Key: p.Scope, ProjectID: p.Project, Hostname: p.Delivery.Host}, ScopeKey: p.Scope, Generation: p.Decision, GenerationSequence: p.Fence, Status: model.PlatformArtifactStatusValidated, Content: body, ContentHash: digest, CreatedAt: p.SelectedAt, UpdatedAt: p.SelectedAt}, keys)
 }
 
 // Verify with the receiver's current private assignment and enrollment even
@@ -153,11 +161,11 @@ func SignHostedPacket(p HostedSelectedPacket, keys bundleauth.Keyring, now time.
 func VerifyHostedPacket(a model.PlatformArtifact, host string, who platformcontrol.PlatformComponentIdentityClaims, serving model.PlatformConsumerAssignment, knownFence int64, knownDecision string, keys bundleauth.Keyring, now time.Time) (HostedSelectedPacket, error) {
 	var p HostedSelectedPacket
 	bad := errors.New("host selection is stale or addressed to another receiver")
-	if a.ArtifactKind != HostedPacketKind || a.ID != "host-selection:"+a.ContentHash || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
+	if (a.ArtifactKind != HostedPacketKind && a.ArtifactKind != HostedMembershipPacketKind) || a.ID != "host-selection:"+a.ContentHash || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
 		return p, bad
 	}
 	raw, e := json.Marshal(a.Content)
-	if e != nil || len(raw) > maxHostedProgramBytes || json.Unmarshal(raw, &p) != nil || p.validate(now) != nil {
+	if e != nil || len(raw) > maxHostedProgramBytes || json.Unmarshal(raw, &p) != nil || p.PacketKind() != a.ArtifactKind || p.validate(now) != nil {
 		return HostedSelectedPacket{}, bad
 	}
 	d := p.Delivery

@@ -54,12 +54,12 @@ func (c HostedCheckpoint) read(path string) (model.PlatformArtifact, routeartifa
 		return model.PlatformArtifact{}, zero, e
 	}
 	a := stored.PlatformArtifact
-	if a.ArtifactKind != routeartifact.HostedPacketKind || a.ID != "host-selection:"+a.ContentHash || a.GenerationSequence < 1 || a.Scope.Hostname != c.Host || !platformsafety.EvaluateArtifactIntegrity(a, c.Keys).Pass {
+	if (a.ArtifactKind != routeartifact.HostedPacketKind && a.ArtifactKind != routeartifact.HostedMembershipPacketKind) || a.ID != "host-selection:"+a.ContentHash || a.GenerationSequence < 1 || a.Scope.Hostname != c.Host || !platformsafety.EvaluateArtifactIntegrity(a, c.Keys).Pass {
 		return model.PlatformArtifact{}, zero, errors.New("corrupt host checkpoint")
 	}
 	body, e := json.Marshal(a.Content)
 	var packet routeartifact.HostedSelectedPacket
-	if e != nil || json.Unmarshal(body, &packet) != nil || packet.Delivery.Host != c.Host || packet.Delivery.Member != c.Who.ConsumerID() || len(packet.Delivery.Parts) == 0 || packet.Delivery.Parts[0].Recipient.Kind != c.Serving.ArtifactKind || packet.Decision != a.Generation || packet.Fence != a.GenerationSequence {
+	if e != nil || json.Unmarshal(body, &packet) != nil || packet.PacketKind() != a.ArtifactKind || packet.Delivery.Host != c.Host || packet.Delivery.Member != c.Who.ConsumerID() || len(packet.Delivery.Parts) == 0 || packet.Delivery.Parts[0].Recipient.Kind != c.Serving.ArtifactKind || packet.Decision != a.Generation || packet.Fence != a.GenerationSequence {
 		return model.PlatformArtifact{}, zero, errors.New("foreign host checkpoint")
 	}
 	return a, routeartifact.HostedMemberCursor{Host: c.Host, Member: c.Who.ConsumerID(), Kind: c.Serving.ArtifactKind, Fence: packet.Fence, Decision: packet.Decision}, nil
