@@ -84,10 +84,13 @@ func TestPhysicalBackupExecutorInstallsThroughIndependentDeclarativeLane(t *test
 		t.Fatal(err)
 	}
 	job := yamlMappingValue(t, yamlMappingValue(t, document.Content[0], "jobs"), "cnpg_backup_count_retention")
-	for _, key := range yamlMappingKeys(t, job) {
-		if key == "needs" {
-			t.Fatal("backup policy executor cannot depend on a database-backed component build")
-		}
+	if got := yamlMappingValue(t, job, "needs").Value; got != "production_maintenance_plan" {
+		t.Fatalf("backup policy executor must depend only on declaration selection, not a database-backed build: %s", got)
+	}
+	when := yamlMappingValue(t, job, "if").Value
+	if !strings.Contains(when, "github.event_name == 'push' && github.ref == 'refs/heads/main'") ||
+		!strings.Contains(when, "needs.production_maintenance_plan.outputs.cnpg_retention == 'true'") {
+		t.Fatalf("unrelated pushes or schedule ticks must not reinstall the backup policy executor: %s", when)
 	}
 	if yamlMappingValue(t, job, "environment").Value != "production" {
 		t.Fatal("backup policy executor requires production environment authorization")
@@ -433,10 +436,17 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatal("private DNS recovery must select an explicit compatible verifier revision")
 	}
 	nodePolicy := yamlMappingValue(t, jobs, "node_resource_policy")
-	for _, key := range yamlMappingKeys(t, nodePolicy) {
-		if key == "needs" {
-			t.Fatal("node capacity policy recovery must remain independent of code builds")
-		}
+	if got := yamlMappingValue(t, nodePolicy, "needs").Value; got != "production_maintenance_plan" {
+		t.Fatalf("local node capacity policy publication must remain independent of code builds: %s", got)
+	}
+	localNodePolicyWhen := yamlMappingValue(t, nodePolicy, "if").Value
+	if strings.Contains(localNodePolicyWhen, "'schedule'") ||
+		!strings.Contains(localNodePolicyWhen, "needs.production_maintenance_plan.outputs.local_node_resources == 'true'") {
+		t.Fatalf("the control-plane host timer must reconcile independently of Actions: %s", localNodePolicyWhen)
+	}
+	remoteNodePolicyWhen := yamlMappingValue(t, yamlMappingValue(t, jobs, "node_resource_policy_tasks"), "if").Value
+	if !strings.Contains(remoteNodePolicyWhen, "github.event_name == 'schedule'") {
+		t.Fatal("preserve remote policy recovery until updater rehydration is verified")
 	}
 	cpuPolicy := yamlMappingValue(t, jobs, "managed_postgres_cpu_policy")
 	// Both lanes mutate the controller but are independent release intents.
@@ -1047,7 +1057,7 @@ func TestCapacityRecoveryScheduleIsExternalObservationOnly(t *testing.T) {
 			t.Fatalf("external observation cannot release code or access signing keys: %s", forbidden)
 		}
 	}
-	for _, name := range []string{"dns_public_observation", "node_resource_policy", "node_resource_policy_tasks", "workload_memory_policy"} {
+	for _, name := range []string{"dns_public_observation", "node_resource_policy_tasks", "workload_memory_policy"} {
 		if !strings.Contains(yamlMappingValue(t, yamlMappingValue(t, jobs, name), "if").Value, "github.event.schedule == '23 18 * * *'") {
 			t.Fatalf("frequent observation must not reschedule daily work: %s", name)
 		}

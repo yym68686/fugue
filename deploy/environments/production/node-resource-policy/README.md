@@ -4,11 +4,14 @@
 serving bundles. `targets.json` explicitly selects seven online updater nodes
 and the control-plane host. Offline nodes are intentionally excluded.
 
-The independent `node_resource_policy` CI lane validates and previews the
-policy, then publishes it through administrator-authenticated node tasks.
-It waits for the served updater to contain the required capability before
-requesting a bounded updater upgrade. The control-plane runner installs a
-separate local timer because that host has no node-updater enrollment.
+The `node_resource_policy` release lane installs the control-plane host's
+systemd timer only when the declared policy, targets or local executor change.
+The enabled timer reconciles every five minutes and starts on boot, without an
+Actions schedule. A rebuilt control-plane host must republish its node policy
+through a declaration change if its persisted policy and timer were not restored.
+The separate `node_resource_policy_tasks` lane publishes to enrolled hosts
+through administrator-authenticated node tasks. Its existing scheduled recovery
+remains until updater policy rehydration is verified.
 
 `minimum_updater_version` declares the minimum diagnostic executor version.
 With `--upgrade-updaters`, publication waits for fresh heartbeats to confirm

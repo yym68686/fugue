@@ -116,9 +116,10 @@ The executor is installed only through the declarative `ci.yml`
 `cnpg_backup_count_retention` lane, configured by
 `deploy/environments/production/control-plane-backup-retention/install.json`.
 It starts **disabled**, uses a digest-pinned existing PostgreSQL/Barman image,
-and reads S3 credentials through existing Secret references. Subsequent code
-releases preserve the independently saved policy. The protection writer rejects
-an attempt to overwrite an owned count policy with a recovery window; changing
+and reads S3 credentials through existing Secret references. Changing its install
+declaration or executor publishes it; unrelated pushes and scheduled runs do not
+reinstall it. Executor updates preserve the independently saved policy. The
+protection writer rejects an attempt to overwrite an owned count policy with a recovery window; changing
 writer code alone does not reapply unrelated protection configuration.
 
 `configure` persists and activates **successful-backup count**, not days:

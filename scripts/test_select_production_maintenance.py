@@ -12,6 +12,8 @@ from scripts.test_recover_longhorn_snapshot import approval, config
 
 
 class SelectionTests(unittest.TestCase):
+    outputs = [*plan.DECLARATIONS, 'cleanup_observer', 'cnpg_retention', 'local_node_resources']
+
     def setUp(self):
         self.repo = tempfile.TemporaryDirectory()
         self.addCleanup(self.repo.cleanup)
@@ -49,22 +51,42 @@ class SelectionTests(unittest.TestCase):
     def test_code_docs_workflow_or_legacy_changes_do_not_select_a_writer(self):
         for path in ('scripts/recover_longhorn_snapshot.py', 'scripts/test_expand_postgres_volume.py',
                      'scripts/reconcile_postgres_protection.py', 'scripts/reconcile_node_participation.py',
-                     '.github/workflows/ci.yml', 'docs/notes.md',
+                     '.github/workflows/ci.yml', '.github/workflows/daily-audit.yml', 'docs/notes.md',
+                     'scripts/test_cnpg_backup_retention.py', 'scripts/cnpg_backup_history.py',
+                     'scripts/publish_node_resource_policy.py', 'scripts/test_install_local_node_resource_policy.py',
                      plan.REVIEW + '/approval.json'):
             self.write(path, {'changed': True})
-        self.assertEqual(plan.select(self.base, self.commit()), dict.fromkeys([*plan.DECLARATIONS, 'cleanup_observer'], False))
+        self.assertEqual(plan.select(self.base, self.commit()), dict.fromkeys(self.outputs, False))
 
     def test_configuration_intents_select_only_their_own_writer(self):
         for name, path in plan.DECLARATIONS.items():
             with self.subTest(name=name):
                 before = self.git('rev-parse', 'HEAD').strip()
                 self.write(path, {'changed': True})
-                self.assertEqual(plan.select(before, self.commit()), {key: key == name for key in [*plan.DECLARATIONS, 'cleanup_observer']})
+                self.assertEqual(plan.select(before, self.commit()), {key: key == name for key in self.outputs})
 
     def test_observer_changes_never_select_snapshot_recovery(self):
         self.write(plan.OBSERVER + 'observe.py', {'updated': True})
         self.assertEqual(plan.select(self.base, self.commit()),
-                         {**dict.fromkeys(plan.DECLARATIONS, False), 'cleanup_observer': True})
+                         {**dict.fromkeys(self.outputs, False), 'cleanup_observer': True})
+
+    def test_cnpg_retention_installs_only_when_its_inputs_change(self):
+        before = self.base
+        for path in plan.CNPG_RETENTION_EXECUTOR:
+            with self.subTest(path=path):
+                self.write(path, {'updated': True})
+                after = self.commit()
+                self.assertEqual(plan.select(before, after), {key: key == 'cnpg_retention' for key in self.outputs})
+                before = after
+
+    def test_local_node_resources_publish_on_declaration_or_local_executor_changes(self):
+        before = self.base
+        for path in plan.LOCAL_NODE_RESOURCE_EXECUTOR:
+            with self.subTest(path=path):
+                self.write(path, {'updated': True})
+                after = self.commit()
+                self.assertEqual(plan.select(before, after), {key: key == 'local_node_resources' for key in self.outputs})
+                before = after
 
     def test_formatting_does_not_replay_configuration_intent(self):
         path = plan.DECLARATIONS['expansion']

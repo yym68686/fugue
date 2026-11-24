@@ -11,6 +11,16 @@ ROOT = 'deploy/environments/production'
 REVIEW = ROOT + '/local-snapshot-review'
 REQUESTS = REVIEW + '/requests/'
 OBSERVER = ROOT + '/local-snapshot-cleanup/'
+CNPG_RETENTION_EXECUTOR = (
+    ROOT + '/control-plane-backup-retention/install.json',
+    'scripts/cnpg_backup_retention.py',
+)
+LOCAL_NODE_RESOURCE_EXECUTOR = (
+    ROOT + '/node-resource-policy/policy.json',
+    ROOT + '/node-resource-policy/targets.json',
+    'scripts/install_local_node_resource_policy.py',
+    'internal/api/node_resource_policy.py',
+)
 DECLARATIONS = {
     'node_policy': ROOT + '/node-participation/policy.json',
     'expansion': ROOT + '/postgres-volume-expansion/recovery.json',
@@ -39,6 +49,8 @@ def select(before, after):
                 for name, path in DECLARATIONS.items()}
     selected['cleanup_observer'] = any(changes.get(OBSERVER + path) in {'A', 'M'}
                                       for path in ('kustomization.yaml', 'observe.py', 'observer.yaml', 'policy.json'))
+    selected['cnpg_retention'] = any(changes.get(path) in {'A', 'M'} for path in CNPG_RETENTION_EXECUTOR)
+    selected['local_node_resources'] = any(changes.get(path) in {'A', 'M'} for path in LOCAL_NODE_RESOURCE_EXECUTOR)
     requests = {path: status for path, status in changes.items() if path.startswith(REQUESTS)}
     if not requests:
         return selected
