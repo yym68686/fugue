@@ -60,6 +60,19 @@ func TestHostedProposalStorageRejectsLegacyPublish(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Installing the continuation journal twice must not mint even one
+	// hostname decision or receipt for a legacy writer. The lookup is by
+	// hostname, not a rewrite of a global release or member roster.
+	var ready bool
+	if err = local.QueryRow(`SELECT EXISTS (
+ SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('fugue_hosted_directory_by_host')
+ AND indrelid=to_regclass('fugue_hosted_member_directory') AND indisready AND indisvalid
+ AND pg_get_indexdef(indexrelid, 1, true)='hostname')
+ AND NOT EXISTS (SELECT 1 FROM fugue_hosted_membership_rebinds)
+ AND NOT EXISTS (SELECT 1 FROM fugue_hosted_selections)
+ AND NOT EXISTS (SELECT 1 FROM fugue_hosted_selection_receipts)`).Scan(&ready); err != nil || !ready {
+		t.Fatalf("continuation migration: ready=%v err=%v", ready, err)
+	}
 	for _, sql := range []string{"INSERT INTO fugue_platform_artifacts VALUES ('hosted_path_proposal','draft')", "INSERT INTO fugue_platform_artifacts VALUES ('edge_route_bundle','validated')", "INSERT INTO fugue_platform_artifact_releases VALUES ('edge_route_bundle')"} {
 		if _, err = local.Exec(sql); err != nil {
 			t.Fatal(err)

@@ -1,5 +1,15 @@
 package schemamigrate
 
+// One small predecessor journal per host, not executable contents and not a
+// receipt. The indexed slot keys belong to the NEW membership. No FK to a
+// mutable offer or an unrelated domain. Writing it and the head is atomic.
+const HostedMembershipRebindSQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_membership_rebinds (
+ hostname text PRIMARY KEY REFERENCES fugue_hosted_selections(hostname),
+ fence bigint NOT NULL CHECK(fence>1), decision text NOT NULL CHECK(decision ~ '^sha256:[a-f0-9]{64}$'),
+ phase text NOT NULL CHECK(phase IN ('prepare','forward')),
+ predecessor_packets jsonb NOT NULL CHECK(jsonb_typeof(predecessor_packets)='object' AND predecessor_packets<>'{}'::jsonb)
+)`
+
 // The current command to the consumers of ONE hostname. Its fence never
 // advances another host, even if they share the same project, app or zone.
 // Keep the chosen executable image here: a preparation offer is replaceable,
@@ -47,6 +57,8 @@ const HostedMemberDirectorySQL = `CREATE TABLE IF NOT EXISTS fugue_hosted_member
  hostname text COLLATE "C" NOT NULL REFERENCES fugue_hosted_selections(hostname),
  PRIMARY KEY(member_id,kind,set_id,child_id,hostname)
 )`
+
+const HostedMemberDirectoryHostIndexSQL = `CREATE INDEX IF NOT EXISTS fugue_hosted_directory_by_host ON fugue_hosted_member_directory(hostname)`
 
 // One current capability per physical enrollment and artifact kind. This
 // is not a business receipt and never appears in the phase quorum.
