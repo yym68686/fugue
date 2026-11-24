@@ -214,18 +214,15 @@
                 "volumeMounts": [
                   {
                     "name": "identity",
-                    "mountPath": "/var/run/fugue/edge-identity",
-                    "readOnly": false
+                    "mountPath": "/var/run/fugue/edge-identity"
                   },
                   {
                     "name": "scratch",
-                    "mountPath": "/tmp",
-                    "readOnly": false
+                    "mountPath": "/tmp"
                   },
                   {
                     "name": "data",
-                    "mountPath": "/data",
-                    "readOnly": false
+                    "mountPath": "/data"
                   },
                   {
                     "name": "certificates",

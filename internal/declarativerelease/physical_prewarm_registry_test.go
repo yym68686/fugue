@@ -17,6 +17,18 @@ func TestProductionPhysicalPrewarmOwnsOnlyBoundedPrivateJob(t *testing.T) {
 		t.Fatal("expected exactly one Job")
 	}
 	j := set.Items[0]
+	// An API round trip omits zero-valued optional fields. The declarative
+	// writer must see its own Job as converged after successful execution,
+	// including the read-only flags protecting the source certificates.
+	var declared struct{ Items []map[string]any }
+	var roundTripped map[string]any
+	live, err := json.Marshal(j)
+	if err != nil || json.Unmarshal(live, &roundTripped) != nil || json.Unmarshal(raw, &declared) != nil {
+		t.Fatal("failed Job API round trip", err)
+	}
+	if path := ResourceDesiredMismatch(declared.Items[0], roundTripped); path != "" {
+		t.Fatal("Job diverges after Kubernetes serialization at", path)
+	}
 	p := j.Spec.Template.Spec
 	if j.Kind != "Job" || j.Spec.ActiveDeadlineSeconds == nil || *j.Spec.ActiveDeadlineSeconds > 240 || j.Spec.BackoffLimit == nil || *j.Spec.BackoffLimit != 0 ||
 		j.Spec.Parallelism == nil || *j.Spec.Parallelism != 1 || p.RestartPolicy != "Never" || p.NodeSelector["kubernetes.io/hostname"] == "" ||
