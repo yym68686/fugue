@@ -67,6 +67,27 @@ func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *test
 	if err != nil || captured == nil || !slices.Equal(captured.ExternalHosts, []string{h}) || len(captured.Hosts) != 0 {
 		t.Fatal("compiler failed to discover external path edit", err)
 	}
+	t.Run("ordinary DNS refresh does not apply pending external paths", func(t *testing.T) {
+		fresh := edit
+		fresh.Intent.Routes = slices.Clone(fresh.Intent.Routes)
+		fresh.Intent.Routes[0].DeploymentGeneration = "current-origin"
+		staged, err := stageBaselineExternalPaths(src.PriorIntent, fresh, captured.ExternalHosts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(staged.Intent.Routes) != 1 || staged.Intent.Routes[0].PathPrefix != "/" ||
+			staged.Intent.Routes[0].DeploymentGeneration != "current-origin" || len(staged.Intent.DNS[0].Route.Bindings) != 0 ||
+			len(fresh.Intent.Routes) != 4 || len(fresh.Intent.DNS[0].Route.Bindings) != 4 {
+			t.Fatal("external baseline replaced live origin or retained a pending binding")
+		}
+		if _, err := Compile(staged); err != nil {
+			t.Fatal("ordinary baseline cannot compile", err)
+		}
+		fresh.Intent.Routes[0].AppID = "different-owner"
+		if _, err := stageBaselineExternalPaths(src.PriorIntent, fresh, captured.ExternalHosts); err == nil {
+			t.Fatal("ordinary baseline revived a previous path with no current owner binding")
+		}
+	})
 	ps, err := BuildHostedScopeProposals(src, stage, captured)
 	if err != nil || len(ps) != 1 {
 		t.Fatal("could not build proposal", err)

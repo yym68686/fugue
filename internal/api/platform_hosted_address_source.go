@@ -123,7 +123,11 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 
 func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 	if len(p.external) > 0 {
-		return platformconfig.Digest([]any{"scoped-external-target/v1", ordinary, p.phase, p.selected.ID, p.hosts, p.external})
+		contract := "scoped-external-target/v1"
+		if p.phase == "initial" {
+			contract += "/ordinary-baseline-refresh-v1"
+		}
+		return platformconfig.Digest([]any{contract, ordinary, p.phase, p.selected.ID, p.hosts, p.external})
 	}
 	if p.phase == "" {
 		return ordinary, nil
@@ -134,7 +138,7 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 		return platformconfig.Digest(struct {
 			Source, Phase, Contract, SelectedFull string
 			Hosts                                 []string
-		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/scoped-successor-dns-inputs-v2", p.selected.ID, p.hosts})
+		}{ordinary, p.phase, platformconfig.HostedProposalSchema + "/ordinary-baseline-refresh-v1", p.selected.ID, p.hosts})
 	}
 	return platformconfig.Digest(struct {
 		Source, Phase string

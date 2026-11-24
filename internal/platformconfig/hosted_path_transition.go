@@ -69,6 +69,7 @@ type HostedTransitionCapture struct {
 	Hosts         []string
 	ExternalHosts []string
 	Desired       CompileResult
+	baseline      *CompileRequest
 }
 
 func CompileHostedPathWithCapture(req CompileRequest, source HostedAddressSource) (CompileResult, *HostedTransitionCapture, error) {
@@ -179,6 +180,7 @@ func compileHostedPathTransition(req CompileRequest, source HostedAddressSource,
 	if capture != nil {
 		capture.Hosts = slices.Clone(hosts)
 		capture.Desired = with
+		capture.baseline = &req
 	}
 	return staged, true, nil
 }

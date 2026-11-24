@@ -177,6 +177,44 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		if !seen {
 			t.Fatal("baseline omitted the independently compiled peer")
 		}
+		if ValidateHostedPublicationIsolation(before.DNSArtifact, stage.DNSArtifact) == nil {
+			t.Fatal("a host preparation must still reject the sibling wire change")
+		}
+		refresh, err := CompileHostedBaselineRefresh(stage, src, capture)
+		if err != nil || len(refresh.InputSnapshot.HostedAddressReservations) != 0 {
+			t.Fatal("ordinary DNS refresh issued new reservation or failed", err)
+		}
+		routes, err := ProjectRouteArtifact(refresh.RouteArtifact)
+		if err != nil || !slices.ContainsFunc(routes.Routes, func(r model.EdgeRouteIntent) bool {
+			return r.Hostname == p.Host && r.PathPrefix == "/" && r.AppID == p.Before.Owner.AppID
+		}) || slices.ContainsFunc(routes.Routes, func(r model.EdgeRouteIntent) bool {
+			return r.Hostname == p.Host && r.PathPrefix != "/"
+		}) {
+			t.Fatal("ordinary DNS refresh changed the active path bindings", err)
+		}
+		setBase(refresh, 2)
+		for _, r := range src.Prior.ReadinessPlan.Records {
+			for _, target := range r.Targets {
+				if (r.Hostname == p.Host || r.Hostname == peer) && target.EdgeID == "edge-b" {
+					t.Fatal("ordinary DNS refresh reoffered the withdrawn endpoint")
+				}
+			}
+		}
+		got, pending, err := CompileHostedPathWithCapture(next, src)
+		if err != nil || pending != nil || len(got.InputSnapshot.HostedAddressReservations) != 0 {
+			t.Fatal("recapture on the refreshed baseline still coupled DNS and paths", err)
+		}
+		dnsArtifact, err := globalProposalArtifact(got.DNSArtifact, model.PlatformArtifactKindDNSAnswerBundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextDNS, err := DecodeDNSArtifact(dnsArtifact)
+		if err != nil || ValidateHostedPublicationIsolation(refresh.DNSArtifact, got.DNSArtifact) != nil ||
+			!slices.ContainsFunc(nextDNS.ReadinessPlan.Probes, func(pr DNSReadinessProbe) bool {
+				return pr.Hostname == p.Host && pr.Path == "/api"
+			}) {
+			t.Fatal("verified DNS refresh did not leave an independent path change", err)
+		}
 	})
 	t.Run("unselected dynamic hostname must not enter the scoped DNS compiler", func(t *testing.T) {
 		// A newly enrolled sibling is valid in the complete business capture

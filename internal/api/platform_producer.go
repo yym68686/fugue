@@ -443,6 +443,11 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 				if !errors.Is(e, platformconfig.ErrHostedSuccessorNeedsBaseline) || !canRefreshHostedBaseline(compiled, source, scoped) {
 					return interval, e
 				}
+				advance("compile_hosted_baseline_refresh")
+				compiled, err = platformconfig.CompileHostedBaselineRefresh(compiled, source, scoped)
+				if err != nil {
+					return interval, errors.Join(e, err)
+				}
 				if s.log != nil {
 					s.log.Printf("hosted path successor deferred for baseline refresh base_release=%s error=%v", source.Publication.ReleaseID, e)
 				}

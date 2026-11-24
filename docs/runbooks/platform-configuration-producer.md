@@ -46,6 +46,9 @@ longer fits the current endpoint roster, the scoped compiler still rejects
 it. The producer can first refresh an already compiled global baseline that
 retains the pending managed path owners. It logs `hosted path successor
 deferred for baseline refresh` and runs the normal signed publication gates.
+If unrelated DNS declarations also changed, the ordinary publication first
+refreshes DNS with unchanged managed and external path ownership, without
+creating a reservation or removing previously verified address custody.
 That refresh is not a path selection or a serving receipt.
 
 `saved` means desired state was committed, not that the data plane switched.
