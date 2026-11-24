@@ -148,12 +148,16 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 // No redacted diagnostic GET, unverified rollback or guessed physical IP can
 // be an input to a route-only publication.
 func (s *Server) readHostedAddressSource(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, effective []platformconfig.HostedAddressHold) (platformconfig.HostedAddressSource, error) {
+	return s.readHostedAddressSourceWith(ctx, policy, authority, effective, s.observeRetainedTrafficSource)
+}
+
+func (s *Server) readHostedAddressSourceWith(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, effective []platformconfig.HostedAddressHold, observe trafficSourceObservation) (platformconfig.HostedAddressSource, error) {
 	var out platformconfig.HostedAddressSource
 	bad := errors.New("hosted DNS reservation requires current verified global producer, full and physical input")
 	if policy.TargetScope != platformconfig.GlobalScopeKey || policy.Mode != "serving" || policy.PublicationRole != "" || policy.InputSource != "business-static-intent" || authority.ID == "" || authority.FencingToken < 1 {
 		return out, bad
 	}
-	old, err := s.readRetainedTrafficSource(ctx, policy.TargetScope)
+	old, err := s.readBoundTrafficSource(ctx, policy.TargetScope, observe)
 	if err != nil {
 		return out, err
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 
@@ -26,6 +27,47 @@ func TestRetainedTrafficCompleteInputProof(t *testing.T) {
 		if err := s.store.CheckPlatformInputRead(t.Context(), []store.PlatformInputReadSelection{read}); err != nil {
 			t.Errorf("original selected dependency proof refused %+v: %v", read, err)
 		}
+	}
+}
+
+func TestScopedDraftReadsVerifiedBaseWithoutRenewingFullConsumerHealth(t *testing.T) {
+	s, _, _, path := retainedTrafficAPIFixture(t)
+	ctx := t.Context()
+	original, err := s.readRetainedTrafficSource(ctx, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st model.State
+	if err = json.Unmarshal(raw, &st); err != nil || len(st.PlatformConsumerInstances) == 0 {
+		t.Fatal("missing consumer records", err)
+	}
+	st.PlatformConsumerInstances = nil
+	save := func() {
+		t.Helper()
+		b, err := json.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(path, b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save()
+	if _, err := s.readRetainedTrafficSource(ctx, "global"); !errors.Is(err, errFullConsumerNotConverged) {
+		t.Fatal("a full publication could reuse absent reader evidence", err)
+	}
+	got, err := s.readBoundTrafficSource(ctx, "global", s.observeHostedDraftBase)
+	if err != nil || got.release.ID != original.release.ID || got.lkg.ID != original.lkg.ID || !got.lkg.ExpiresAt.Equal(original.lkg.ExpiresAt) {
+		t.Fatal("scoped read lost the original positive authority", err)
+	}
+	st.ExpectedConsumerSets = nil
+	save()
+	if _, err := s.readBoundTrafficSource(ctx, "global", s.observeHostedDraftBase); err == nil {
+		t.Fatal("missing topology was accepted by the scoped reader")
 	}
 }
 
@@ -76,6 +118,9 @@ func TestRetainedTrafficMissingOriginalOrSiblingRefusesWithoutRenewing(t *testin
 			}
 			if _, err := s.readRetainedTrafficSource(t.Context(), "global"); err == nil {
 				t.Fatal("retained source bypassed full original closure", scenario)
+			}
+			if _, err := s.readBoundTrafficSource(t.Context(), "global", s.observeHostedDraftBase); err == nil {
+				t.Fatal("scoped draft bypassed original source closure", scenario)
 			}
 			after, err := os.ReadFile(path)
 			if err != nil || string(after) != string(body) {

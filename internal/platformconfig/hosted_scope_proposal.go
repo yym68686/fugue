@@ -3,6 +3,7 @@ package platformconfig
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -79,6 +80,17 @@ type hostProposalSide struct {
 }
 
 func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, capture *HostedTransitionCapture) ([]HostedScopeProposal, error) {
+	proposals, err := BuildIndependentHostedScopeProposals(src, stage, capture)
+	if err != nil {
+		return nil, err
+	}
+	return proposals, nil
+}
+
+// Common signature inputs and cohort integrity are all-or-nothing. Once they
+// are established, a rejected hostname cannot suppress another host's draft.
+// A non-nil error can accompany independently derived, valid proposals.
+func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage CompileResult, capture *HostedTransitionCapture) ([]HostedScopeProposal, error) {
 	bad := errors.New("host-scoped change cannot be derived from the selected global source and its compiled edit")
 	if capture == nil || len(capture.Hosts)+len(capture.ExternalHosts) == 0 || len(capture.Hosts) > 64 || len(capture.ExternalHosts) > 64 ||
 		!slices.IsSorted(capture.Hosts) || !slices.IsSorted(capture.ExternalHosts) || src.Publication.Validate() != nil ||
@@ -170,11 +182,17 @@ func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, cap
 		}
 		return v, nil
 	}
-	var out []HostedScopeProposal
-	for i, h := range capture.Hosts {
-		if i > 0 && capture.Hosts[i-1] == h {
-			return nil, bad
+	seen := map[string]bool{}
+	for _, hosts := range [][]string{capture.Hosts, capture.ExternalHosts} {
+		for _, h := range hosts {
+			if !validDNSConsumerZone(h) || seen[h] {
+				return nil, bad
+			}
+			seen[h] = true
 		}
+	}
+	managed := func(h string) (*HostedScopeProposal, error) {
+		var e error
 		p := HostedScopeProposal{Schema: HostedProposalSchema, Base: src.Publication, Host: h, Authority: src.Authority}
 		owner, tenant := "", ""
 		after := map[string]string{}
@@ -367,21 +385,32 @@ func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, cap
 		if e != nil || len(raw) > 1<<20 {
 			return nil, bad
 		}
-		out = append(out, p)
+		return &p, nil
+	}
+	var out []HostedScopeProposal
+	var rejected error
+	record := func(h string, p *HostedScopeProposal, err error) {
+		if err != nil {
+			rejected = errors.Join(rejected, fmt.Errorf("host %s: %w", h, err))
+			return
+		}
+		out = append(out, *p)
+	}
+	for _, h := range capture.Hosts {
+		p, err := managed(h)
+		record(h, p, err)
 	}
 	if len(capture.ExternalHosts) != 0 {
 		declared := externalPathChanges(src.PriorIntent, intent)
-		for i, host := range capture.ExternalHosts {
+		for _, host := range capture.ExternalHosts {
 			change, ok := declared[host]
-			if !ok || i > 0 && capture.ExternalHosts[i-1] == host || slices.Contains(capture.Hosts, host) {
-				return nil, bad
+			if !ok {
+				record(host, nil, bad)
+				continue
 			}
 			p, err := buildExternalPathProposal(src, x, z, change)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, p)
+			record(host, &p, err)
 		}
 	}
-	return out, nil
+	return out, rejected
 }

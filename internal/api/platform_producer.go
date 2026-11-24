@@ -387,6 +387,10 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		compiled, err = platformconfig.Compile(req)
 	} else {
 		source, e := s.readHostedAddressSource(ctx, policy, authority, projection.hostedAddressHolds)
+		globalGate := e
+		if errors.Is(e, errFullConsumerNotConverged) {
+			source, e = s.readHostedAddressSourceWith(ctx, policy, authority, projection.hostedAddressHolds, s.observeHostedDraftBase)
+		}
 		if e != nil {
 			return interval, e
 		}
@@ -405,7 +409,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			if s.log != nil {
 				s.log.Printf("hosted path compiler proposals policy_release=%s base_release=%s ids=%v error=%v", authority.ID, source.Publication.ReleaseID, ids, proposalErr)
 			}
-			if proposalErr == nil && len(ids) > 0 {
+			if len(ids) > 0 {
 				advance("offer_host_path_preparation")
 				offerCtx, done := context.WithTimeout(ctx, 30*time.Second)
 				for _, id := range ids {
@@ -425,6 +429,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 				}
 				done()
 			}
+		}
+		if globalGate != nil {
+			// Only the per-host offer/selection above can consume this read.
+			// A full successor, including a single-host global successor,
+			// still requires positive current convergence of the full cohort.
+			return interval, errors.Join(globalGate, err)
 		}
 		if err == nil {
 			advance("compile_scoped_host_successor")

@@ -32,9 +32,9 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 			return nil, fmt.Errorf("%w: proposal storage guards are not installed", ErrConflict)
 		}
 	}
-	proposals, err := pc.BuildHostedScopeProposals(src, stage, capture)
-	if err != nil {
-		return nil, err
+	proposals, rejected := pc.BuildIndependentHostedScopeProposals(src, stage, capture)
+	if len(proposals) == 0 {
+		return nil, rejected
 	}
 	a, b := src.Authority, src.Publication
 	full := model.PlatformPublicationPrecondition{ArtifactID: b.ReleaseSetID, ContentHash: b.ReleaseSetDigest, ReleaseID: b.ReleaseID, FencingToken: b.FencingToken}
@@ -62,7 +62,7 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 		}
 		ids = append(ids, stored.ID)
 	}
-	return ids, nil
+	return ids, rejected
 }
 
 func hostedProposalDraft(p pc.HostedScopeProposal, captured, now time.Time) (model.PlatformArtifact, error) {

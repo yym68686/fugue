@@ -72,6 +72,21 @@ func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *test
 		t.Fatal("could not build proposal", err)
 	}
 	p := ps[0]
+	t.Run("ineligible sibling does not suppress valid host", func(t *testing.T) {
+		mixed := *captured
+		mixed.Hosts = []string{"unowned.example.test"}
+		partial, rejected := BuildIndependentHostedScopeProposals(src, stage, &mixed)
+		if rejected == nil || !strings.Contains(rejected.Error(), mixed.Hosts[0]) || !reflect.DeepEqual(partial, ps) {
+			t.Fatal("valid host changed or sibling refusal was lost", rejected)
+		}
+		if all, err := BuildHostedScopeProposals(src, stage, &mixed); err == nil || len(all) != 0 {
+			t.Fatal("all-or-nothing caller accepted a partial result")
+		}
+		mixed.Hosts = []string{h}
+		if ambiguous, err := BuildIndependentHostedScopeProposals(src, stage, &mixed); err == nil || len(ambiguous) != 0 {
+			t.Fatal("duplicate ownership returned a draft")
+		}
+	})
 	if p.ExternalPath == nil || p.ExternalPath.Target.Target != d.Hostname || len(p.Before.Routes) != 1 || len(p.After.Routes) != 4 ||
 		len(p.Hold) != 0 || !reflect.DeepEqual(p.Physical, p.Eligible) {
 		t.Fatal("incorrect scope or address reservation")

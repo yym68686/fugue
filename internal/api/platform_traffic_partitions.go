@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -43,9 +44,15 @@ func (s *Server) newRetainedTrafficSourceReader(ctx context.Context, scope strin
 }
 
 func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (retainedTrafficSource, error) {
+	return s.readBoundTrafficSource(ctx, scope, s.observeRetainedTrafficSource)
+}
+
+type trafficSourceObservation func(context.Context, string) (retainedTrafficSource, error)
+
+func (s *Server) readBoundTrafficSource(ctx context.Context, scope string, observe trafficSourceObservation) (retainedTrafficSource, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	source, err := s.observeRetainedTrafficSource(ctx, scope)
+	source, err := observe(ctx, scope)
 	if err != nil {
 		return source, err
 	}
@@ -61,7 +68,7 @@ func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (r
 	// Re-run the original full selection, convergence, lineage and input read.
 	// A still-signed old publication cannot borrow a successor's current LKG,
 	// and rereading never renews the original input observation timestamps.
-	current, err := s.observeRetainedTrafficSource(ctx, scope)
+	current, err := observe(ctx, scope)
 	if err != nil || !reflect.DeepEqual(source, current) || ctx.Err() != nil {
 		return source, fmt.Errorf("retained partition source changed during read")
 	}
@@ -69,6 +76,19 @@ func (s *Server) readRetainedTrafficSource(ctx context.Context, scope string) (r
 }
 
 func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string) (retainedTrafficSource, error) {
+	return s.observeBoundTrafficSource(ctx, scope, true)
+}
+
+var errFullConsumerNotConverged = errors.New("retained partition current consumer evidence unavailable")
+
+func (s *Server) observeHostedDraftBase(ctx context.Context, scope string) (retainedTrafficSource, error) {
+	if scope != platformconfig.GlobalScopeKey {
+		return retainedTrafficSource{}, errors.New("scoped path drafts require the selected global base")
+	}
+	return s.observeBoundTrafficSource(ctx, scope, false)
+}
+
+func (s *Server) observeBoundTrafficSource(ctx context.Context, scope string, requireLiveConvergence bool) (retainedTrafficSource, error) {
 	var source retainedTrafficSource
 	parent, release, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, scope, "full")
 	if err != nil || !found || release.VerificationState != model.PlatformArtifactVerificationStateVerified || release.VerifiedLKGGeneration != parent.Generation || !s.validateReleaseSetReferences(parent).Pass {
@@ -115,8 +135,11 @@ func (s *Server) observeRetainedTrafficSource(ctx context.Context, scope string)
 		source.routes[r.TenantID+"\x00"+r.AppID] = append(source.routes[r.TenantID+"\x00"+r.AppID], r)
 	}
 	source.parent, source.route, source.release, source.lkg = parent, route, release, *lkg
-	if gate := s.validateReleaseSetConvergence(ctx, parent); !gate.Pass {
-		return source, fmt.Errorf("retained partition current consumer evidence unavailable")
+	if gate := s.checkReleaseConsumerSets(ctx, parent, requireLiveConvergence); !gate.Pass {
+		if requireLiveConvergence && gate.Evidence["expected_consumer_set_id"] != "" {
+			return source, errFullConsumerNotConverged
+		}
+		return source, fmt.Errorf("retained partition current consumer evidence unavailable: %s", gate.Message)
 	}
 	// Preserve the independently checked authority and signed route on a body
 	// read failure. This partial result never authorizes reuse: it only lets the

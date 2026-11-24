@@ -474,6 +474,12 @@ func (s *Server) releaseConsumerTopology(ctx context.Context, principal model.Pr
 }
 
 func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact model.PlatformArtifact) model.PlatformArtifactValidationResult {
+	return s.checkReleaseConsumerSets(ctx, artifact, true)
+}
+
+// A scoped draft uses the same topology, but its delivery transaction checks
+// the actual receivers of this host. Never use topology alone for a full release.
+func (s *Server) checkReleaseConsumerSets(ctx context.Context, artifact model.PlatformArtifact, requireLiveConvergence bool) model.PlatformArtifactValidationResult {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
@@ -499,6 +505,9 @@ func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact mod
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set topology changed; prepare a new immutable expected-set revision before full publication"}
 		}
 		set = projected
+		if !requireLiveConvergence {
+			continue
+		}
 		consumers, consumerErr := s.store.ListPlatformConsumers(set.ArtifactKind, set.ScopeKey)
 		if consumerErr != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
@@ -507,6 +516,9 @@ func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact mod
 		if set.RequiresConsumers && !status.Pass {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged", Evidence: map[string]string{"expected_consumer_set_id": set.ID, "state": status.State, "required_passing": fmt.Sprintf("%d", status.RequiredPassing), "required_expected": fmt.Sprintf("%d", status.RequiredExpected)}}
 		}
+	}
+	if !requireLiveConvergence {
+		return model.PlatformArtifactValidationResult{Name: "release_set.topology", Pass: true, Message: "current topology matches the declared expected sets"}
 	}
 	return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: true, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have converged"}
 }

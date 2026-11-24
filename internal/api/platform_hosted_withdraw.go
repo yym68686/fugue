@@ -34,7 +34,7 @@ func (s *Server) reconcileHostedWithdrawals(ctx context.Context, policy platform
 		s.hostedWithdrawCursor.Store(next)
 		return
 	}
-	source, e := s.readHostedAddressSource(ctx, policy, authority, projection.hostedAddressHolds)
+	source, e := s.readHostedAddressSourceWith(ctx, policy, authority, projection.hostedAddressHolds, s.observeHostedDraftBase)
 	if e != nil {
 		warn("", e)
 		return
