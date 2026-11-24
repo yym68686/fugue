@@ -75,7 +75,7 @@ func CompileHostedSuccessor(req CompileRequest, source HostedAddressSource, p Ho
 	if err != nil {
 		return empty, err
 	}
-	if (capture != nil) != (phase == "prepare") || len(got.InputSnapshot.HostedAddressReservations) == 0 {
+	if (capture != nil && len(capture.Hosts) != 0) != (phase == "prepare") || len(got.InputSnapshot.HostedAddressReservations) == 0 {
 		return empty, fmt.Errorf("%w: reservation phase", bad)
 	}
 	// Compare the complete output against composing exactly one phase on the

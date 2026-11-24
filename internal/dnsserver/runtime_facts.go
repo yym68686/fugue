@@ -101,8 +101,13 @@ func (s *Service) handleRuntimeFacts(w http.ResponseWriter, r *http.Request) {
 		// never certify a complete global transport handoff using them.
 		observed.Ready = false
 		owned := map[string]bool{}
-		for _, host := range hosted.owners {
-			owned[host] = true
+		for _, w := range hosted.keys {
+			if w.packet != nil {
+				owned[w.packet.Delivery.Host] = true
+			}
+			for host := range w.shared {
+				owned[host] = true
+			}
 		}
 		omit := map[string]bool{}
 		for _, p := range st.payload.Plan.Probes {

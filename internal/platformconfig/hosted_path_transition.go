@@ -66,15 +66,23 @@ func CompileHostedPathTransition(req CompileRequest, source HostedAddressSource)
 // ordinary producer already performs. It is not obtained by borrowing a
 // routing Cell's authority for machines outside that Cell's enrollment.
 type HostedTransitionCapture struct {
-	Hosts   []string
-	Desired CompileResult
+	Hosts         []string
+	ExternalHosts []string
+	Desired       CompileResult
 }
 
 func CompileHostedPathWithCapture(req CompileRequest, source HostedAddressSource) (CompileResult, *HostedTransitionCapture, error) {
 	var capture HostedTransitionCapture
 	baseline, staged, err := compileHostedPathTransition(req, source, &capture)
-	if err != nil || !staged {
+	if err != nil {
 		return baseline, nil, err
+	}
+	capture.ExternalHosts = ExternalChangedHosts(source.PriorIntent, req.Intent)
+	if !staged {
+		if len(capture.ExternalHosts) == 0 {
+			return baseline, nil, nil
+		}
+		capture.Desired = baseline
 	}
 	return baseline, &capture, nil
 }

@@ -3,6 +3,7 @@ package platformconfig
 import (
 	"errors"
 	"reflect"
+	"slices"
 )
 
 // HostedDNSProgramSource narrows an already authenticated selected DNS child
@@ -28,13 +29,28 @@ func HostedDNSProgramSource(base DNSArtifactPayload, p HostedScopeProposal) (DNS
 	}
 	out := DNSArtifactPayload{Policy: base.Policy, ConsumerViews: base.ConsumerViews, ReadinessPlan: &DNSReadinessPlan{}}
 	out.Policy.DNSAnswerRules = nil
-	parents := hostedAliasParents(base.Records, base.ReadinessPlan)
-	owned := map[hostedRecordKey]bool{}
-	for _, r := range base.Records {
-		k := hostedRecordKey{r.Hostname, r.Type}
-		if r.Type != "A" && r.Type != "AAAA" || !(r.Hostname == p.Host && r.RecordKind == "hosted" || parents[k].host == p.Host) {
-			continue
+	// The authorization comes from the selected full, never from p.Records.
+	// An external path proposal may read peer prerequisites on this target;
+	// only the probes of p.Host may be replaced.
+	peerIDs := map[string]bool{}
+	if a := p.ExternalPath; a != nil {
+		aliases, name, app, tenant, ok := HostedExternalDNSMembers(p.Host, base.Records, base.ReadinessPlan)
+		if !ok || a.Target.Hostname != p.Host || name != a.Target.Target || app != a.Target.AppID || tenant != a.Target.TenantID || !slices.Equal(aliases, a.Target.Members) {
+			return DNSArtifactPayload{}, bad
 		}
+		for _, r := range base.ReadinessPlan.Records {
+			if r.Hostname == name {
+				for _, t := range r.Targets {
+					for _, id := range t.ProbeIDs {
+						peerIDs[id] = true
+					}
+				}
+			}
+		}
+	}
+	owned := map[hostedRecordKey]bool{}
+	for _, r := range HostedDNSOwnedRecords(p.Host, base.Records, base.ReadinessPlan) {
+		k := hostedRecordKey{r.Hostname, r.Type}
 		declared, ok := want[k]
 		if !ok || owned[k] || !reflect.DeepEqual(declared, r) {
 			return DNSArtifactPayload{}, bad
@@ -56,15 +72,20 @@ func HostedDNSProgramSource(base DNSArtifactPayload, p HostedScopeProposal) (DNS
 		}
 	}
 	for _, probe := range base.ReadinessPlan.Probes {
-		if probe.Hostname == p.Host {
+		if probe.Hostname != p.Host && reserved[probe.ID] {
+			return DNSArtifactPayload{}, bad
+		}
+		if probe.Hostname == p.Host || peerIDs[probe.ID] {
 			if probe.ID == "" || probes[probe.ID] {
 				return DNSArtifactPayload{}, bad
 			}
 			probes[probe.ID] = true
 			out.ReadinessPlan.Probes = append(out.ReadinessPlan.Probes, probe)
-		} else if reserved[probe.ID] {
-			return DNSArtifactPayload{}, bad
 		}
+	}
+	ownIDs := map[string]bool{}
+	for _, probe := range out.ReadinessPlan.Probes {
+		ownIDs[probe.ID] = probe.Hostname == p.Host
 	}
 	for _, record := range base.ReadinessPlan.Records {
 		r := record
@@ -72,7 +93,7 @@ func HostedDNSProgramSource(base DNSArtifactPayload, p HostedScopeProposal) (DNS
 		for _, target := range record.Targets {
 			keep := owned[hostedRecordKey{record.Hostname, target.Family}]
 			for _, id := range target.ProbeIDs {
-				if keep != probes[id] {
+				if keep && !probes[id] || !keep && ownIDs[id] {
 					return DNSArtifactPayload{}, bad
 				}
 			}

@@ -28,6 +28,7 @@ type hostedDNSWire struct {
 	publication DNSDecisionPublication
 	packet      *routeartifact.HostedSelectedPacket
 	rows        []dnsServingRecord
+	shared      map[string]sharedDNSMember
 }
 type hostedDNSRoutes struct {
 	keys   map[hostedZoneKey]*hostedDNSWire
@@ -48,9 +49,11 @@ func (idx *hostedDNSRoutes) forQuery(parent *dnsServingState, q *dns.Msg, now ti
 		return parent
 	}
 	var w *hostedDNSWire
+	var key hostedZoneKey
 	for _, zone := range parent.zoneOrder {
 		if nameWithinZone(k.name, zone) {
-			w = idx.keys[hostedZoneKey{zone, k}]
+			key = hostedZoneKey{zone, k}
+			w = idx.keys[key]
 			break
 		}
 	}
@@ -66,6 +69,14 @@ func (idx *hostedDNSRoutes) forQuery(parent *dnsServingState, q *dns.Msg, now ti
 		a := parent.record.Candidate.Assignment
 		p := w.packet
 		c.hostedBlocked = !(a.ReleaseChannel == "full" && a.ScopeKey == "global" && p.Parent == a.ReleaseSetID && w.publication.ParentDigest == parent.record.Parent.ContentHash && p.Child == a.ArtifactID && p.ChildDigest == a.ContentHash && p.Delivery.MembershipRelease == a.ArtifactReleaseID && p.Delivery.MembershipRevision == a.Revision && p.Delivery.MembershipSet == a.ExpectedConsumerSetID && p.Delivery.MembershipFence == a.FencingToken)
+		for _, m := range w.shared {
+			if !m.packet.ValidUntil.After(now) {
+				c.hostedBlocked = true
+			}
+		}
+		if !c.hostedBlocked {
+			c.hostedRows = w.effectiveRows(parent, key)
+		}
 	}
 	return &c
 }
@@ -95,28 +106,43 @@ func (idx *hostedDNSRoutes) withPacket(p routeartifact.HostedSelectedPacket, par
 		pub = dnsPublication(parent.record)
 	}
 	pub.HostedHostname, pub.HostedDecision, pub.HostedFence = p.Delivery.Host, p.Decision, p.Fence
-	h := hostedDNSDecision{p.Delivery.Host, p.Decision, p.SelectedAt, p.ValidUntil}
+	h := packetDNSDecision(&p)
 	for _, part := range p.Delivery.Parts {
 		r, u := part.Recipient, part.Content.DNS
 		if u == nil || len(u.Views) != 1 || len(u.Views[0].Records) == 0 {
 			return nil, errors.New("DNS selection has no record view")
 		}
+		shared, err := readSharedDNSPart(p.Delivery.Host, part.Content)
+		if err != nil {
+			return nil, err
+		}
 		for _, record := range u.Views[0].Records {
 			family := dns.StringToType[record.Type]
 			k := hostedZoneKey{r.Zone, hostedRRKey{record.Name, family}}
-			if (family != dns.TypeA && family != dns.TypeAAAA) || !nameWithinZone(record.Name, r.Zone) || wanted[k] || next.owners[k.hostedRRKey] != "" && next.owners[k.hostedRRKey] != p.Delivery.Host {
+			prior := next.keys[k]
+			if (family != dns.TypeA && family != dns.TypeAAAA) || !nameWithinZone(record.Name, r.Zone) || wanted[k] ||
+				next.owners[k.hostedRRKey] != "" && next.owners[k.hostedRRKey] != p.Delivery.Host && (shared == nil || prior == nil || prior.shared == nil) ||
+				prior != nil && (prior.shared == nil) != (shared == nil) {
 				return nil, errors.New("conflicting DNS selection key")
 			}
 			wanted[k] = true
 			w := &hostedDNSWire{publication: pub, packet: &p}
-			if rows, seen := facts[r]; seen && parent != nil {
+			rows, seen := facts[r]
+			if shared != nil {
+				if record.Name != shared.shape.Hostname {
+					return nil, errors.New("shared selection contains foreign wire record")
+				}
+				if err := w.mergeShared(prior, sharedDNSMember{&p, shared, rows, seen}, record, parent); err != nil {
+					return nil, err
+				}
+			} else if seen && parent != nil {
 				w.rows = []dnsServingRecord{{hosted: &h, record: record, plan: u.Plan, facts: rows}}
 			}
 			next.keys[k], next.owners[k.hostedRRKey] = w, p.Delivery.Host
 		}
 	}
 	for k, v := range next.keys {
-		if v.publication.HostedHostname == p.Delivery.Host && !wanted[k] {
+		if v.forHost(p.Delivery.Host) != nil && !wanted[k] {
 			return nil, errors.New("DNS selection cannot silently drop an existing owned key")
 		}
 	}
@@ -168,7 +194,7 @@ func hostedDNSParentMatches(parent *dnsServingState, base map[routeartifact.Host
 		src, ok := base[part.Recipient]
 		z, ownsZone := parent.zones[part.Recipient.Zone]
 		u := part.Content.DNS
-		if !ok || !ownsZone || u == nil || len(u.Views) != 1 || !reflect.DeepEqual(src.Records, part.Content.Records) || len(src.DNS.Views[0].Records) != len(u.Views[0].Records) {
+		if !ok || !ownsZone || u == nil || len(u.Views) != 1 || src.DNS == nil || len(src.DNS.Views) != 1 || !reflect.DeepEqual(src.Records, part.Content.Records) || len(src.DNS.Views[0].Records) != len(u.Views[0].Records) || !sameSharedPredecessor(p.Delivery.Host, src, part.Content) {
 			return false
 		}
 		for i, old := range src.DNS.Views[0].Records {

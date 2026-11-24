@@ -26,6 +26,9 @@ type HostedDNSContent struct {
 // the signed addresses (including from the default and every client view).
 // Path withdrawal returns to prepared, not before: it cannot admit an edge.
 func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase string) (HostedDNSContent, error) {
+	if p.ExternalPath != nil {
+		return replayExternalDNSPhase(base, p, phase)
+	}
 	var out, empty HostedDNSContent
 	bad := errors.New("hosted DNS phase does not match its selected predecessor")
 	if p.Schema != HostedProposalSchema || p.Base.Validate() != nil || p.Host != p.Before.Owner.Hostname || p.Before.Owner != p.After.Owner || p.Before.Owner != p.Prepared.Owner ||

@@ -46,8 +46,8 @@ func (s *Service) witnessHostedDNSMember(ctx context.Context, host string, fence
 	// The caller can specify only the head, never which queries to omit.
 	var canonical *routeartifact.HostedSelectedPacket
 	for _, w := range selected.keys {
-		if w.packet != nil && w.packet.Delivery.Host == host && w.packet.Decision == decision && w.packet.Fence == fence {
-			canonical = w.packet
+		if p := w.forHost(host); p != nil && p.Decision == decision && p.Fence == fence {
+			canonical = p
 			break
 		}
 	}
@@ -165,17 +165,18 @@ func (s *Service) witnessHostedDNSQuery(ctx context.Context, p routeartifact.Hos
 		return zero, errors.New("no local DNS selection")
 	}
 	w := idx.keys[k]
-	if w == nil || w.packet == nil || len(w.rows) != 1 || w.packet.Delivery.Member != p.Delivery.Member || w.packet.Fence != p.Fence || w.packet.Decision != p.Decision || w.packet.Delivery.Host != p.Delivery.Host {
+	member := w.forHost(p.Delivery.Host)
+	if member == nil || len(w.rows) != 1 || member.Delivery.Member != p.Delivery.Member || member.Fence != p.Fence || member.Decision != p.Decision {
 		return zero, errors.New("DNS selection not loaded for witness")
 	}
 	bound := false
-	for _, local := range w.packet.Delivery.Parts {
+	for _, local := range member.Delivery.Parts {
 		if local.Recipient == part.Recipient && local.ContentDigest == part.ContentDigest {
 			bound = true
 			break
 		}
 	}
-	pin, e := w.packet.Delivery.PartKey(part)
+	pin, e := member.Delivery.PartKey(part)
 	if !bound || e != nil {
 		return zero, errors.New("DNS witness does not own part")
 	}
@@ -224,7 +225,7 @@ func (s *Service) witnessHostedDNSQuery(ctx context.Context, p routeartifact.Hos
 	if wrote.rcode != response.Rcode || wrote.at.Before(at) || wrote.at.After(now) || !slices.Equal(wrote.rrs, dnsRRStrings(response.Answer)) || !current(now) {
 		return zero, errors.New("listener write, wire answer or selected host changed")
 	}
-	until := w.packet.ValidUntil
+	until := member.ValidUntil
 	for _, rr := range response.Answer {
 		h := rr.Header()
 		if normalizeName(h.Name) != k.name || h.Rrtype != k.family || h.Class != dns.ClassINET || h.Ttl == 0 || uint64(h.Ttl) > uint64(w.rows[0].record.TTL) {

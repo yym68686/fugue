@@ -24,6 +24,7 @@ type dnsServingZone struct {
 type dnsServingState struct {
 	// Only set on a per-query copy chosen by the hostname registry (or replay).
 	hostedWire           *hostedDNSWire
+	hostedRows           []dnsServingRecord
 	hostedBlocked        bool
 	record               dnsServingCheckpoint
 	payload              dnsServingPayload
@@ -199,7 +200,7 @@ func (st *dnsServingState) answerObserved(req *dns.Msg, remote string, now time.
 		rows, exists = z.records[recordName]
 	}
 	if st.hostedWire != nil {
-		recordName, rows, exists = name, st.hostedWire.rows, true
+		recordName, rows, exists = name, st.hostedRows, true
 	}
 	answer := func(kind string) {
 		for _, entry := range rows {

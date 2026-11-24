@@ -23,13 +23,27 @@ type hostedProjectBinding struct {
 }
 
 func matchHostedProjectIntent(in store.ProjectHostRouteInputs, p pc.HostedScopeProposal) (hostedProjectBinding, error) {
-	bad := errors.New("host proposal does not match the saved managed-domain intent")
+	bad := errors.New("host proposal does not match the saved domain intent")
 	d, r, z := in.Domain, in.DNS, in.Zone
 	owner := p.Before.Owner
-	if in.Project.ID == "" || d.CreatedAt.IsZero() || d.DNSMode != model.AppDomainDNSModeManaged ||
+	if in.Project.ID == "" || d.CreatedAt.IsZero() ||
 		p.Host != d.Hostname || owner.Hostname != d.Hostname || owner.AppID != d.AppID || owner.TenantID != d.TenantID || in.Project.TenantID != d.TenantID ||
-		owner != p.After.Owner || owner != p.Prepared.Owner || z.ID == "" || z.ID != d.DNSZoneID || r.ZoneID != z.ID || r.ID == "" || r.ID != d.DNSRecordID || r.TenantID != d.TenantID ||
-		r.CreatedAt.IsZero() || r.TTL <= 0 || len(r.Values) != 1 {
+		owner != p.After.Owner || owner != p.Prepared.Owner {
+		return hostedProjectBinding{}, bad
+	}
+	if a := p.ExternalPath; a != nil {
+		// The proposal does not supply authority over an external zone.
+		// Bind the verified CNAME to its current project domain, and leave
+		// address/TTL validation to the independently selected DNS child.
+		target := a.Target
+		if d.DNSMode != model.AppDomainDNSModeExternal || d.DNSRecordKind != model.AppDomainDNSRecordKindCNAME ||
+			owner.Status != model.AppDomainStatusVerified || d.DNSZoneID != "" || d.DNSRecordID != "" || z.ID != "" || r.ID != "" ||
+			target.Hostname != d.Hostname || target.AppID != d.AppID || target.TenantID != d.TenantID ||
+			d.RouteTarget == "" || d.RouteTarget == d.Hostname || target.Target != d.RouteTarget || !slices.Contains(target.Members, d.Hostname) {
+			return hostedProjectBinding{}, bad
+		}
+	} else if d.DNSMode != model.AppDomainDNSModeManaged || z.ID == "" || z.ID != d.DNSZoneID || r.ZoneID != z.ID || r.ID == "" || r.ID != d.DNSRecordID ||
+		r.TenantID != d.TenantID || r.CreatedAt.IsZero() || r.TTL <= 0 || len(r.Values) != 1 {
 		return hostedProjectBinding{}, bad
 	}
 	// Empty edit: read actual effective intent with the same interpreter as

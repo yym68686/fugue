@@ -265,7 +265,7 @@ func (capture *dnsDecisionCapture) begin(state *dnsServingState, request *dns.Ms
 		stage.Exists = exists
 		if w := state.hostedWire; w != nil {
 			stage.RecordName = name
-			entries = w.rows
+			entries = state.hostedRows
 			stage.Exists = true
 		}
 		if len(entries) > 16 {

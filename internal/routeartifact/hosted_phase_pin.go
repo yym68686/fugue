@@ -68,12 +68,7 @@ func hostedPhaseDigest(p pc.HostedScopeProposal, phase HostedPhase) (string, err
 	for _, r := range p.Records {
 		owned[[2]string{r.Hostname, r.Type}] = true
 	}
-	var probes []pc.DNSReadinessProbe
-	for _, r := range phase.DNS.Plan.Probes {
-		if r.Hostname == p.Host {
-			probes = append(probes, r)
-		}
-	}
+	required := map[string]bool{}
 	var targets []pc.DNSReadinessRecord
 	for _, r := range phase.DNS.Plan.Records {
 		copy := r
@@ -81,10 +76,19 @@ func hostedPhaseDigest(p pc.HostedScopeProposal, phase HostedPhase) (string, err
 		for _, t := range r.Targets {
 			if owned[[2]string{r.Hostname, t.Family}] {
 				copy.Targets = append(copy.Targets, t)
+				for _, id := range t.ProbeIDs {
+					required[id] = true
+				}
 			}
 		}
 		if len(copy.Targets) > 0 {
 			targets = append(targets, copy)
+		}
+	}
+	var probes []pc.DNSReadinessProbe
+	for _, r := range phase.DNS.Plan.Probes {
+		if r.Hostname == p.Host || required[r.ID] {
+			probes = append(probes, r)
 		}
 	}
 	var views []pc.DNSQueryView

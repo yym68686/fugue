@@ -68,7 +68,14 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 			return nil, bad
 		}
 	}
-	dns, err := partitionHostedDNS(p.Host, p.Records, phase.DNS)
+	related := map[string]bool{p.Host: true}
+	if p.ExternalPath != nil {
+		related = map[string]bool{}
+		for _, host := range p.ExternalPath.Target.Members {
+			related[host] = true
+		}
+	}
+	dns, err := partitionHostedDNS(p.Host, p.Records, phase.DNS, related)
 	if err != nil {
 		return nil, err
 	}
@@ -85,21 +92,39 @@ func HostedDNSMemberBase(host, node, group string, base pc.DNSArtifactPayload) (
 		return nil, errors.New("missing global DNS base")
 	}
 	owned := pc.HostedDNSOwnedRecords(host, base.Records, base.ReadinessPlan)
+	relatedHosts := map[string]bool{host: true}
+	if members, _, _, _, ok := pc.HostedExternalDNSMembers(host, base.Records, base.ReadinessPlan); ok {
+		relatedHosts = map[string]bool{}
+		for _, member := range members {
+			relatedHosts[member] = true
+		}
+	}
 	keys := map[[2]string]bool{}
 	probeOwners := map[string]string{}
 	for _, r := range owned {
 		keys[[2]string{r.Hostname, r.Type}] = true
 	}
 	for _, pr := range base.ReadinessPlan.Probes {
+		if pr.ID == "" || probeOwners[pr.ID] != "" || pr.Hostname == "" {
+			return nil, errors.New("ambiguous DNS probe")
+		}
 		probeOwners[pr.ID] = pr.Hostname
 	}
-	// A member cannot isolate A if an unowned RR still depends on A's
-	// proofs. Verify reverse edges before pruning the full to local views.
+	// A shared custom target is one DNS RR whose proof closure can include
+	// several verified aliases. Keep precisely that closure; reject a peer
+	// probe used by an unrelated RR rather than silently dropping it.
+	needed := map[string]bool{}
 	for _, rr := range base.ReadinessPlan.Records {
 		for _, target := range rr.Targets {
 			for _, id := range target.ProbeIDs {
-				if owner, ok := probeOwners[id]; !ok || (owner == host) != keys[[2]string{rr.Hostname, target.Family}] {
+				owner, ok := probeOwners[id]
+				member := relatedHosts[owner]
+				ownedRR := keys[[2]string{rr.Hostname, target.Family}]
+				if !ok || ownedRR && !member || !ownedRR && owner == host {
 					return nil, errors.New("DNS host dependency crosses record ownership")
+				}
+				if ownedRR {
+					needed[id] = true
 				}
 			}
 		}
@@ -111,11 +136,11 @@ func HostedDNSMemberBase(host, node, group string, base pc.DNSArtifactPayload) (
 		}
 	}
 	content.Views = hostedUnitViews(pc.HostedScopeProposal{Records: owned}, content.Views)
-	content.Plan.Probes = slices.DeleteFunc(slices.Clone(content.Plan.Probes), func(pr pc.DNSReadinessProbe) bool { return pr.Hostname != host })
-	return partitionHostedDNS(host, owned, content)
+	content.Plan.Probes = slices.DeleteFunc(slices.Clone(content.Plan.Probes), func(pr pc.DNSReadinessProbe) bool { return !needed[pr.ID] && pr.Hostname != host })
+	return partitionHostedDNS(host, owned, content, relatedHosts)
 }
 
-func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSContent) (map[HostedRecipient]HostedRecipientInput, error) {
+func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSContent, relatedHosts map[string]bool) (map[HostedRecipient]HostedRecipientInput, error) {
 	bad := errors.New("DNS host dependencies cannot be partitioned by node and zone")
 	if len(owned) == 0 || len(dns.Views) == 0 {
 		return nil, bad
@@ -139,7 +164,7 @@ func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSConte
 	}
 	probes := map[string]pc.DNSReadinessProbe{}
 	for _, r := range dns.Plan.Probes {
-		if r.Hostname != host || r.ID == "" {
+		if !relatedHosts[r.Hostname] || r.ID == "" {
 			return nil, bad
 		}
 		if _, dup := probes[r.ID]; dup {
@@ -159,6 +184,7 @@ func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSConte
 		}
 		rules[k] = r
 	}
+	allNeeded := map[string]bool{}
 	for _, v := range dns.Views {
 		who := HostedRecipient{model.PlatformConsumerComponentDNSServer, model.PlatformArtifactKindDNSAnswerBundle, v.NodeID, v.EdgeGroupID, v.Zone}
 		if _, dup := out[who]; dup || v.Zone == "" || v.NodeID == "" || v.EdgeGroupID == "" || len(v.Records) == 0 {
@@ -199,6 +225,7 @@ func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSConte
 						return nil, bad
 					}
 					needed[id] = true
+					allNeeded[id] = true
 				}
 			}
 			item.DNS.Plan.Records = append(item.DNS.Plan.Records, r)
@@ -210,6 +237,9 @@ func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSConte
 			}
 		}
 		out[who] = item
+	}
+	if len(allNeeded) != len(probes) {
+		return nil, bad
 	}
 	return out, nil
 }

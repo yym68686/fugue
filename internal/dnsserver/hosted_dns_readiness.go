@@ -20,6 +20,8 @@ import (
 type hostedDNSDecision struct {
 	Host, Decision         string
 	SelectedAt, ValidUntil time.Time
+	Peers                  map[string]hostedDNSLease `json:"peers,omitempty"`
+	ParentIDs              map[string]bool           `json:"parent_probes,omitempty"`
 }
 
 // Only accept a packet reopened against this node's own current assignment.
@@ -30,7 +32,7 @@ func (s *Service) observeHostedDNSMember(ctx context.Context, p routeartifact.Ho
 	if parent == nil || s.currentDNSServingState() != parent || !parent.record.Positive || len(p.Delivery.Parts) == 0 || p.Delivery.Parts[0].Recipient.Node != s.Config.DNSNodeID || p.Delivery.Parts[0].Recipient.Kind != model.PlatformArtifactKindDNSAnswerBundle || parent.payload.Policy.DNSReadiness == nil {
 		return nil, errors.New("DNS host observation has no current physical parent")
 	}
-	h := hostedDNSDecision{p.Delivery.Host, p.Decision, p.SelectedAt, p.ValidUntil}
+	h := packetDNSDecision(&p)
 	policy := parent.payload.Policy.DNSReadiness
 	required := map[string]pc.DNSReadinessProbe{}
 	for _, part := range p.Delivery.Parts {
@@ -38,10 +40,17 @@ func (s *Service) observeHostedDNSMember(ctx context.Context, p routeartifact.Ho
 		if unit == nil || part.Recipient.Group != s.Config.EdgeGroupID || len(unit.Views) != 1 {
 			return nil, errors.New("empty or foreign DNS part")
 		}
-		if _, e := h.validFacts(unit.Views[0], &unit.Plan, policy, nil, now); e != nil {
+		hLocal, e := observationDNSDecision(h, part.Content)
+		if e != nil {
+			return nil, e
+		}
+		if _, e := hLocal.validFacts(unit.Views[0], &unit.Plan, policy, nil, now); e != nil {
 			return nil, e
 		}
 		for _, pr := range unit.Plan.Probes {
+			if pr.Hostname != h.Host {
+				continue
+			}
 			if old, ok := required[pr.ID]; ok && !reflect.DeepEqual(old, pr) {
 				return nil, errors.New("ambiguous DNS probe")
 			}
@@ -93,13 +102,20 @@ send:
 		unit := part.Content.DNS
 		var rows []dnsReadinessFact
 		for _, pr := range unit.Plan.Probes {
+			if pr.Hostname != h.Host {
+				continue
+			}
 			f, ok := facts[pr.ID]
 			if !ok {
 				f = dnsReadinessFact{ProbeID: pr.ID, Reason: "host_probe_not_completed"}
 			}
 			rows = append(rows, f)
 		}
-		val, e := h.validFacts(unit.Views[0], &unit.Plan, policy, rows, time.Now().UTC())
+		hLocal, e := observationDNSDecision(h, part.Content)
+		if e != nil {
+			return nil, e
+		}
+		val, e := hLocal.validFacts(unit.Views[0], &unit.Plan, policy, rows, time.Now().UTC())
 		if e != nil {
 			return nil, e
 		}
@@ -117,6 +133,19 @@ send:
 		return nil, errors.New("DNS host selection changed during observation")
 	}
 	return out, ctx.Err()
+}
+
+func observationDNSDecision(h hostedDNSDecision, content routeartifact.HostedRecipientInput) (hostedDNSDecision, error) {
+	part, err := readSharedDNSPart(h.Host, content)
+	if err == nil && part != nil {
+		h.ParentIDs = map[string]bool{}
+		for _, p := range content.DNS.Plan.Probes {
+			if p.Hostname != h.Host {
+				h.ParentIDs[p.ID] = true
+			}
+		}
+	}
+	return h, err
 }
 
 // Only called after re-reading the identical privately addressed command.
@@ -156,12 +185,22 @@ func (h hostedDNSDecision) validFacts(view pc.DNSQueryView, plan *pc.DNSReadines
 	}
 	required := map[string]pc.DNSReadinessProbe{}
 	for _, r := range plan.Probes {
-		if r.Hostname != h.Host || r.StaticEdge != nil || r.PreviousAuthority != nil || r.CellPublicationDigest != "" {
+		if r.Hostname != h.Host && h.ParentIDs[r.ID] {
+			continue
+		}
+		if _, peer := h.Peers[r.Hostname]; r.Hostname != h.Host && !peer || r.StaticEdge != nil || r.PreviousAuthority != nil || r.CellPublicationDigest != "" {
 			return nil, bad
 		}
 		required[r.ID] = r
 	}
 	valid := map[string]dnsReadinessFact{}
+	if len(h.ParentIDs) != 0 {
+		for id, f := range validDNSReadinessFacts(plan, policy, facts, now) {
+			if h.ParentIDs[id] {
+				valid[id] = f
+			}
+		}
+	}
 	seen := map[string]bool{}
 	for _, f := range facts {
 		if seen[f.ProbeID] {
@@ -171,14 +210,18 @@ func (h hostedDNSDecision) validFacts(view pc.DNSQueryView, plan *pc.DNSReadines
 		seen[f.ProbeID] = true
 		r, ok := required[f.ProbeID]
 		p := f.Proof
-		if !ok || !f.Ready || p.Kind != "hosted-route" || p.Version != h.Decision || p.TrafficRelease != nil || p.AppTrafficDigest != "" || !p.BundleValidUntil.IsZero() || p.EdgeID != r.EdgeID || p.GroupID != r.EdgeGroupID || p.State != r.State || p.Digest != r.RouteDigest || p.CheckedAt.Before(h.SelectedAt) || p.CheckedAt.After(now) || !p.ValidUntil.After(now) {
+		lease := hostedDNSLease{h.Decision, h.SelectedAt, h.ValidUntil}
+		if r.Hostname != h.Host {
+			lease = h.Peers[r.Hostname]
+		}
+		if !ok || !platformproducer.ValidDigest(lease.Decision) || lease.SelectedAt.IsZero() || !f.Ready || p.Kind != "hosted-route" || p.Version != lease.Decision || p.TrafficRelease != nil || p.AppTrafficDigest != "" || !p.BundleValidUntil.IsZero() || p.EdgeID != r.EdgeID || p.GroupID != r.EdgeGroupID || p.State != r.State || p.Digest != r.RouteDigest || p.CheckedAt.Before(lease.SelectedAt) || p.CheckedAt.After(now) || !p.ValidUntil.After(now) {
 			continue
 		}
 		// Bound the returned TTL by all three independent deadlines. Do
 		// not move the instant of observation forward when re-reading.
 		until := p.CheckedAt.Add(time.Duration(pc.DNSReadinessFactMaxAge(r, policy)) * time.Second)
-		if h.ValidUntil.Before(until) {
-			until = h.ValidUntil
+		if lease.ValidUntil.Before(until) {
+			until = lease.ValidUntil
 		}
 		if until.Before(f.Proof.ValidUntil) {
 			f.Proof.ValidUntil = until
@@ -196,7 +239,8 @@ func (h hostedDNSDecision) targetReady(target pc.DNSReadinessTarget, valid map[s
 	}
 	for _, id := range target.ProbeIDs {
 		f, ok := valid[id]
-		if !ok || f.Proof.Version != h.Decision || f.Proof.GroupID != target.EdgeGroupID || f.Proof.EdgeID != target.EdgeID {
+		shared := len(h.ParentIDs) != 0 || len(h.Peers) > 1
+		if !ok || shared && target.RequireSinglePublication || !shared && f.Proof.Version != h.Decision || f.Proof.GroupID != target.EdgeGroupID || f.Proof.EdgeID != target.EdgeID {
 			return false
 		}
 	}

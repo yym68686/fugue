@@ -4,6 +4,8 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+
+	"fugue/internal/model"
 )
 
 // A generated address alias is not itself a managed host. Its reservation is
@@ -102,7 +104,83 @@ func HostedDNSOwnedRecords(host string, records []DNSIntent, plan *DNSReadinessP
 			owned = append(owned, rr)
 		}
 	}
+	// An external CNAME is not a DNS record we own, but its Fugue target RR is
+	// selected against the combined route proofs of every verified alias.
+	// Return that shared target record to each member's reader; the executor
+	// must merge only the selecting host's probes into the live union.
+	_, target, ownerApp, ownerTenant, ok := HostedExternalDNSMembers(host, records, plan)
+	if ok {
+		for _, rr := range records {
+			if rr.Hostname == target && (rr.Type == "A" || rr.Type == "AAAA") && rr.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget &&
+				rr.AppID == ownerApp && rr.TenantID == ownerTenant {
+				owned = append(owned, rr)
+			}
+		}
+	}
 	return owned
+}
+
+// The selected DNS child contains wire A/AAAA rows, not symbolic FUGUE_ROUTE
+// declarations. Resolve a host from the signed record-to-probe graph. This
+// is a dependency list, not authority to edit any peer's bindings.
+func HostedExternalDNSMembers(host string, records []DNSIntent, plan *DNSReadinessPlan) (members []string, target, app, tenant string, ok bool) {
+	if !validDNSConsumerZone(host) || plan == nil {
+		return nil, "", "", "", false
+	}
+	probes := make(map[string]DNSReadinessProbe, len(plan.Probes))
+	for _, pr := range plan.Probes {
+		if pr.ID == "" || probes[pr.ID].ID != "" {
+			return nil, "", "", "", false
+		}
+		probes[pr.ID] = pr
+	}
+	for _, r := range plan.Records {
+		hasHost := false
+		names := map[string]bool{}
+		for _, t := range r.Targets {
+			for _, id := range t.ProbeIDs {
+				pr, found := probes[id]
+				if !found || pr.EdgeID != t.EdgeID || pr.EdgeGroupID != t.EdgeGroupID || pr.Address != t.Address {
+					return nil, "", "", "", false
+				}
+				hasHost = hasHost || pr.Hostname == host
+				names[pr.Hostname] = true
+			}
+		}
+		if !hasHost {
+			continue
+		}
+		if target != "" || !validDNSConsumerZone(r.Hostname) || len(names) > 128 {
+			return nil, "", "", "", false
+		}
+		target, members = r.Hostname, slices.Sorted(maps.Keys(names))
+	}
+	if target == "" {
+		return nil, "", "", "", false
+	}
+	families := map[string]bool{}
+	for _, rr := range records {
+		if rr.Hostname == host {
+			return nil, "", "", "", false
+		}
+		if rr.Hostname != target || rr.Type != "A" && rr.Type != "AAAA" {
+			continue
+		}
+		if families[rr.Type] || rr.RecordKind != model.EdgeDNSRecordKindCustomDomainTarget || rr.AppID == "" || rr.TenantID == "" ||
+			app != "" && (app != rr.AppID || tenant != rr.TenantID) {
+			return nil, "", "", "", false
+		}
+		app, tenant, families[rr.Type] = rr.AppID, rr.TenantID, true
+	}
+	if len(families) == 0 {
+		return nil, "", "", "", false
+	}
+	for _, member := range members {
+		if !validDNSConsumerZone(member) {
+			return nil, "", "", "", false
+		}
+	}
+	return members, target, app, tenant, true
 }
 
 // Keep explicit symbolic changes outside this operation. Only the per-path

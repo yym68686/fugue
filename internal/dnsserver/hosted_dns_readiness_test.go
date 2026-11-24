@@ -14,7 +14,7 @@ import (
 func TestScopedDNSMaterializationCannotMixProofsOrChangeUnselectedRecord(t *testing.T) {
 	view, plan, policy, global, now := queryExecutionFixture()
 	head := "sha256:" + strings.Repeat("d", 64)
-	h := hostedDNSDecision{plan.Probes[0].Hostname, head, now.Add(-2 * time.Second), now.Add(300 * time.Second)}
+	h := hostedDNSDecision{Host: plan.Probes[0].Hostname, Decision: head, SelectedAt: now.Add(-2 * time.Second), ValidUntil: now.Add(300 * time.Second)}
 	for i := range plan.Records[0].Targets {
 		plan.Records[0].Targets[i].RequireSinglePublication = true
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"slices"
@@ -17,6 +18,50 @@ type hostedCapturePlan struct {
 	selected model.PlatformArtifactRelease
 	phase    string
 	hosts    []string
+	external []string
+}
+
+type externalHostHint struct {
+	full, intent string
+	names        []string
+}
+
+// A cache hit is a discovery hint only. Selection reopens the verified full
+// and the current project intent in their respective transactions.
+func (s *Server) pendingExternalPaths(parent model.PlatformArtifact, intent platformconfig.PlatformIntent) ([]string, error) {
+	if !slices.ContainsFunc(intent.DNS, func(r platformconfig.DNSIntent) bool {
+		return r.Type == "FUGUE_ROUTE" && r.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget && r.Route != nil && !r.Route.ManagedHost
+	}) {
+		return nil, nil
+	}
+	if parent.Metadata["intent_generation"] == intent.Generation && intent.Generation != "" {
+		return nil, nil
+	}
+	if q := s.hostedExternalHint.Load(); q != nil && q.full == parent.ContentHash && q.intent == intent.Generation && q.intent != "" {
+		return q.names, nil
+	}
+	var old platformconfig.PlatformIntent
+	a, err := s.store.GetPlatformArtifactByIdentity(model.PlatformArtifactKindPlatformIntent, platformconfig.GlobalScopeKey, parent.Metadata["intent_generation"])
+	if err != nil {
+		return nil, err
+	}
+	if a.Status != model.PlatformArtifactStatusValidated || s.store.VerifyPlatformArtifactIntegrity(a) != nil {
+		return nil, errors.New("selected external domain intent is not validated")
+	}
+	raw, err := json.Marshal(a.Content)
+	if err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal(raw, &old); err != nil {
+		return nil, err
+	}
+	d, err := platformconfig.Digest(old)
+	if err != nil || d != parent.Metadata["intent_digest"] {
+		return nil, errors.New("selected external domain intent lineage differs")
+	}
+	names := platformconfig.ExternalChangedHosts(old, intent)
+	s.hostedExternalHint.Store(&externalHostHint{parent.ContentHash, intent.Generation, names})
+	return names, nil
 }
 
 // Discovery is cheap and does not authorize compilation. Don't read the full
@@ -25,12 +70,22 @@ type hostedCapturePlan struct {
 // this new-input boundary.
 func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platformIntentProjectionResponse) (hostedCapturePlan, error) {
 	var plan hostedCapturePlan
-	if policy.InputSource != "business-static-intent" || policy.Mode != "serving" || policy.TargetScope != platformconfig.GlobalScopeKey || policy.PublicationRole != "" || policy.DNSPolicyArtifactID == "" || len(p.hostedAddressHolds) == 0 {
+	if policy.InputSource != "business-static-intent" || policy.Mode != "serving" || policy.TargetScope != platformconfig.GlobalScopeKey || policy.PublicationRole != "" || policy.DNSPolicyArtifactID == "" {
 		return plan, nil
 	}
 	parent, full, ok, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "full")
 	if err != nil || !ok {
 		return plan, err
+	}
+	external, err := s.pendingExternalPaths(parent, p.Intent)
+	if err != nil {
+		return plan, err
+	}
+	if len(external) > 0 {
+		plan = hostedCapturePlan{selected: full, phase: "external", external: external}
+	}
+	if len(p.hostedAddressHolds) == 0 {
+		return plan, nil
 	}
 	ref, _, err := platformconfig.HostedAddressAuthority(parent)
 	if err != nil {
@@ -44,7 +99,7 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 			// shadow instead of moving to paths or releasing deferred B.
 			phase = "after-scoped/" + full.ID
 		}
-		return hostedCapturePlan{selected: full, phase: phase}, nil
+		return hostedCapturePlan{selected: full, phase: phase, external: external}, nil
 	}
 	if !slices.ContainsFunc(p.Intent.DNS, func(d platformconfig.DNSIntent) bool {
 		return d.Type == "FUGUE_ROUTE" && d.Route != nil && d.Route.ManagedHost
@@ -61,12 +116,15 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 	}
 	hosts := platformconfig.NewHostedPathReservationHosts(previous, p.Intent, p.hostedAddressHolds)
 	if len(hosts) > 0 {
-		return hostedCapturePlan{full, "initial", slices.Sorted(maps.Keys(hosts))}, nil
+		return hostedCapturePlan{selected: full, phase: "initial", hosts: slices.Sorted(maps.Keys(hosts)), external: external}, nil
 	}
 	return plan, nil
 }
 
 func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
+	if len(p.external) > 0 {
+		return platformconfig.Digest([]any{"scoped-external-target/v1", ordinary, p.phase, p.selected.ID, p.hosts, p.external})
+	}
 	if p.phase == "" {
 		return ordinary, nil
 	}

@@ -46,6 +46,9 @@ type HostedScopeProposal struct {
 	Eligible  []HostedAddressHold                 `json:"eligible"`
 	Hold      []HostedHoldRequirements            `json:"hold"`
 	Changes   []HostedReadinessTargetEdit         `json:"changes"`
+	// A path-only patch for an externally owned hostname never owns the
+	// shared RR. Its signed anchor pins the RR topology, not peer probe IDs.
+	ExternalPath *ExternalPathAnchor `json:"external_path,omitempty"`
 	// Only host-owned requirements, not availability observations, leases
 	// or snapshots of a different tenant's routes.
 	BaseProbes []DNSReadinessProbe `json:"base_probes"`
@@ -69,19 +72,22 @@ func globalProposalArtifact(a model.PlatformArtifact, kind string) (model.Platfo
 // Called only with an authenticated global predecessor and two products of
 // one compiler invocation (old path shape and actual desired path shape).
 // No addresses, node lists, TLS ownership, or upstreams from a request.
+type hostProposalSide struct {
+	dns    DNSArtifactPayload
+	routes model.EdgeRouteIntentSnapshot
+	certs  []model.EdgeTLSAllowlistEntry
+}
+
 func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, capture *HostedTransitionCapture) ([]HostedScopeProposal, error) {
 	bad := errors.New("host-scoped change cannot be derived from the selected global source and its compiled edit")
-	if capture == nil || len(capture.Hosts) == 0 || len(capture.Hosts) > 64 || !slices.IsSorted(capture.Hosts) || src.Publication.Validate() != nil ||
+	if capture == nil || len(capture.Hosts)+len(capture.ExternalHosts) == 0 || len(capture.Hosts) > 64 || len(capture.ExternalHosts) > 64 ||
+		!slices.IsSorted(capture.Hosts) || !slices.IsSorted(capture.ExternalHosts) || src.Publication.Validate() != nil ||
 		src.PriorRoute == nil || src.PriorTLS == nil || src.PriorRoute.ID != src.Publication.RouteArtifactID || src.PriorRoute.ContentHash != src.Publication.RouteArtifactDigest ||
 		src.PriorTLS.ID != src.Publication.TLSArtifactID || src.PriorTLS.ContentHash != src.Publication.TLSArtifactDigest || src.PriorIntent.Scope != GlobalScopeKey || src.Prior.Policy.Scope != GlobalScopeKey {
 		return nil, bad
 	}
 	want := capture.Desired
-	type side struct {
-		dns    DNSArtifactPayload
-		routes model.EdgeRouteIntentSnapshot
-		certs  []model.EdgeTLSAllowlistEntry
-	}
+	type side = hostProposalSide
 	project := func(route, tls model.PlatformArtifact, payload DNSArtifactPayload) (side, error) {
 		a, e := globalProposalArtifact(route, model.PlatformArtifactKindEdgeRouteBundle)
 		if e != nil {
@@ -362,6 +368,20 @@ func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, cap
 			return nil, bad
 		}
 		out = append(out, p)
+	}
+	if len(capture.ExternalHosts) != 0 {
+		declared := externalPathChanges(src.PriorIntent, intent)
+		for i, host := range capture.ExternalHosts {
+			change, ok := declared[host]
+			if !ok || i > 0 && capture.ExternalHosts[i-1] == host || slices.Contains(capture.Hosts, host) {
+				return nil, bad
+			}
+			p, err := buildExternalPathProposal(src, x, z, change)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, p)
+		}
 	}
 	return out, nil
 }

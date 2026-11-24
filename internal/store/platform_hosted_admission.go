@@ -136,6 +136,9 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 		if e != nil {
 			return false, e
 		}
+		if p.ExternalPath != nil && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedTargetCapability) {
+			return false, nil
+		}
 		return pgHostedMemberCapable(ctx, tx, member, a, f, time.Now().UTC())
 	})
 	if err != nil || len(parts) == 0 {

@@ -33,6 +33,13 @@ type HostedReadinessTargetEdit struct {
 // Callers must independently verify both publications and the current route,
 // DNS and TLS ownership; this function has no way to authorize serving.
 func PlanHostedReadinessDelta(host string, base, want *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (HostedReadinessDelta, error) {
+	return planHostedReadinessDelta(host, host, base, want, policy, beforePaths, afterPaths)
+}
+
+// anchor is the name of the actual address record. For a managed domain
+// that is the host; for an external domain it is the separately checked
+// Fugue target. In neither case may a plan with no such record succeed.
+func planHostedReadinessDelta(host, anchor string, base, want *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (HostedReadinessDelta, error) {
 	bad := errors.New("hosted readiness changes are not an isolated path edit")
 	paths := func(v []string) map[string]bool {
 		out := map[string]bool{}
@@ -100,8 +107,16 @@ func PlanHostedReadinessDelta(host string, base, want *DNSReadinessPlan, policy 
 					relevant = true
 					slices.Sort(field.ids)
 					s.owned[k] = field
-				} else if r.Hostname == host {
+				} else if r.Hostname == anchor {
 					return side{}, bad
+				}
+				if anchor != host && r.Hostname == anchor {
+					if t.RequireSinglePublication && len(foreign) > 0 {
+						return side{}, bad
+					}
+					// Compare topology, not another host's path revision.
+					// The overlay always copies these IDs from its current base.
+					foreign = nil
 				}
 				slices.Sort(foreign)
 				r.Targets[i].ProbeIDs = foreign
@@ -117,8 +132,16 @@ func PlanHostedReadinessDelta(host string, base, want *DNSReadinessPlan, policy 
 				s.records[r.Hostname] = r
 			}
 		}
-		if _, ok := s.records[host]; !ok {
+		if _, ok := s.records[anchor]; !ok {
 			return side{}, bad
+		}
+		if anchor != host {
+			// An external edit cannot also change a second alias or a
+			// managed RR. A shared target requiring one publication
+			// cannot mix a host decision with its peers' global proofs.
+			if len(s.records) != 1 {
+				return side{}, bad
+			}
 		}
 		return s, nil
 	}

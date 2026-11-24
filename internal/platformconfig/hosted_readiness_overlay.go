@@ -14,11 +14,25 @@ import (
 // Callers must keep the original base authority and its expiry; an overlay
 // must be discarded if that authority is replaced, expired or withdrawn.
 func ComposeHostedReadinessRequirements(host string, base, desired *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (*DNSReadinessPlan, HostedReadinessDelta, error) {
-	d, err := PlanHostedReadinessDelta(host, base, desired, policy, beforePaths, afterPaths)
+	return composeHostedReadinessAt(host, host, base, desired, policy, beforePaths, afterPaths)
+}
+
+func composeHostedReadinessAt(host, anchor string, base, desired *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (*DNSReadinessPlan, HostedReadinessDelta, error) {
+	d, err := planHostedReadinessDelta(host, anchor, base, desired, policy, beforePaths, afterPaths)
 	if err != nil {
 		return nil, HostedReadinessDelta{}, err
 	}
+	return applyHostedReadinessDelta(host, base, desired.Probes, policy, d)
+}
+
+// A recipient has the current plan and the selected host's new probes, not
+// the producer's global candidate. Classify existing IDs by the current plan:
+// a candidate must never be able to reclassify a peer's proof as its own.
+func applyHostedReadinessDelta(host string, base *DNSReadinessPlan, replacements []DNSReadinessProbe, policy *DNSReadinessPolicy, d HostedReadinessDelta) (*DNSReadinessPlan, HostedReadinessDelta, error) {
 	bad := errors.New("hosted requirements overlay does not exactly cover the dependency closure")
+	if base == nil || ValidateDNSReadinessPlan(base, policy) != nil {
+		return nil, HostedReadinessDelta{}, bad
+	}
 	type key struct{ record, edge, address string }
 	edits := make(map[key]HostedReadinessTargetEdit, len(d.Edits))
 	for _, e := range d.Edits {
@@ -29,11 +43,16 @@ func ComposeHostedReadinessRequirements(host string, base, desired *DNSReadiness
 		edits[k] = e
 	}
 	dict := make(map[string]DNSReadinessProbe, len(base.Probes))
+	baseOwners := make(map[string]string, len(base.Probes))
 	for _, p := range base.Probes {
 		dict[p.ID] = p
+		baseOwners[p.ID] = p.Hostname
 	}
-	for _, p := range desired.Probes {
+	for _, p := range replacements {
 		if p.Hostname == host {
+			if owner, ok := baseOwners[p.ID]; ok && owner != host {
+				return nil, HostedReadinessDelta{}, bad
+			}
 			dict[p.ID] = p
 		}
 	}
@@ -46,7 +65,7 @@ func ComposeHostedReadinessRequirements(host string, base, desired *DNSReadiness
 			if e, ok := edits[k]; ok {
 				var owned, keep []string
 				for _, id := range t.ProbeIDs {
-					if dict[id].Hostname == host {
+					if baseOwners[id] == host {
 						owned = append(owned, id)
 					} else {
 						keep = append(keep, id)

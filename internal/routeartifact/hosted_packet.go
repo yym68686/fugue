@@ -20,6 +20,10 @@ import (
 // never select this kind. Original selection time/expiry survive retries.
 const HostedPacketKind = "hosted_recipient_selection_v1"
 
+// DNS execution can compose peer heads over one shared platform target.
+// A v1-only DNS process deliberately rejects such packets.
+const HostedSharedTargetCapability = "hosted_shared_dns_target_v1"
+
 type HostedSelectedPacket struct {
 	Scope              string            `json:"host_scope"`
 	Project            string            `json:"project_id"`

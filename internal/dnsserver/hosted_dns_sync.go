@@ -49,7 +49,7 @@ func (s *Service) installHostedDNS(cp platformconsumer.HostedCheckpoint, command
 	}
 	if current != nil {
 		for _, w := range current.keys {
-			if w.publication.HostedHostname == cp.Host && (w.packet == nil || w.packet.Decision != old.Decision || w.packet.Fence != old.Fence) {
+			if local := w.forHost(cp.Host); local != nil && (local.Decision != old.Decision || local.Fence != old.Fence) {
 				return errors.New("DNS checkpoint and live host predecessor disagree")
 			}
 		}
@@ -63,11 +63,12 @@ func (s *Service) installHostedDNS(cp platformconsumer.HostedCheckpoint, command
 	// of extending an old positive observation.
 	if p.Fence != old.Fence {
 		for k, w := range next.keys {
-			if w.publication.HostedHostname == cp.Host {
-				if len(w.rows) != 1 {
+			if w.forHost(cp.Host) != nil {
+				effective := w.effectiveRows(parent, k)
+				if len(effective) != 1 {
 					return errors.New("DNS selection awaiting fresh path proofs")
 				}
-				rr := w.rows[0]
+				rr := effective[0]
 				rows, err := materializeDNSQueryScope(pc.DNSQueryView{Records: []model.EdgeDNSRecord{rr.record}}, &rr.plan, parent.payload.Policy.DNSReadiness, rr.facts, now, true, rr.hosted)
 				if err != nil || len(rows) != 1 || len(rows[0].Values) == 0 {
 					return errors.New("DNS selection has no current quorum for " + k.name)
