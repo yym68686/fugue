@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"maps"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -31,7 +34,7 @@ func TestAutomaticHostedPathChangeRequiresTheRollbackDNSCheck(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			err := guardProducedHostedDNSPaths(context.Background(), tc.before, tc.after, func(context.Context) error {
+			err := guardProducedHostedDNSPaths(context.Background(), model.PlatformArtifact{}, model.PlatformArtifact{}, tc.before, tc.after, func(context.Context) error {
 				calls++
 				if tc.fail {
 					return unavailable
@@ -40,6 +43,87 @@ func TestAutomaticHostedPathChangeRequiresTheRollbackDNSCheck(t *testing.T) {
 			})
 			if (calls == 1) != tc.checked || (err != nil) != (tc.checked && tc.fail) || err != nil && !errors.Is(err, unavailable) {
 				t.Fatalf("checks=%d err=%v", calls, err)
+			}
+		})
+	}
+}
+
+func TestProducedHostedDNSDeclarationRestoreReachesLockedAdmission(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	ref := platformconfig.PreviousTrafficPublicationReference{
+		ReleaseSetID: "full-parent", ReleaseSetDigest: digest, ReleaseID: "full-release", FencingToken: 20,
+		RouteArtifactID: "full-route", RouteArtifactDigest: digest, TLSArtifactID: "full-tls", TLSArtifactDigest: digest,
+		DNSArtifactID: "full-dns", DNSArtifactDigest: digest,
+	}
+	history := ref
+	history.ReleaseSetID, history.ReleaseID, history.FencingToken = "history-parent", "history-release", 19
+	plan := platformconfig.HostedDeclarationRestorePlan{
+		History: history, Target: "shared.example.test", Family: "A",
+		Held: platformconfig.HostedAddressHold{EdgeID: "held", EdgeGroupID: "edge-group-test", Address: "93.184.216.36"},
+	}
+	encode := func(v any) string {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	metadata := map[string]string{
+		platformconfig.HostedDeclarationRestoreMetadata:        encode(plan),
+		platformconfig.HostedAddressSourceMetadata:             encode(ref),
+		platformconfig.HostedAddressReservationsDigestMetadata: digest,
+	}
+	full := model.PlatformArtifact{ID: ref.ReleaseSetID, ContentHash: ref.ReleaseSetDigest, ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindReleaseSet}
+	next := model.PlatformArtifact{ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindReleaseSet, Metadata: metadata}
+	build := func(values []string, managedPaths ...string) map[string]any {
+		const managed = "managed.example.test"
+		p := platformconfig.DNSReadinessPlan{}
+		for _, path := range managedPaths {
+			p.Probes = append(p.Probes, platformconfig.DNSReadinessProbe{Hostname: managed, Path: path})
+		}
+		return map[string]any{
+			"records": []any{
+				platformconfig.DNSIntent{Hostname: managed, Type: "A", TTL: 60, RecordKind: "hosted", AppID: "app", TenantID: "tenant", Values: []string{"93.184.216.33"}},
+				platformconfig.DNSIntent{Hostname: plan.Target, Type: "A", TTL: 60, RecordKind: "custom-domain-target", AppID: "app", TenantID: "tenant", Values: values},
+			},
+			"readiness_plan": p,
+		}
+	}
+	eligible := []string{"93.184.216.33", "93.184.216.34"}
+	declared := append([]string{plan.Held.Address}, eligible...)
+	before := model.PlatformArtifact{ID: ref.DNSArtifactID, ContentHash: ref.DNSArtifactDigest, ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Content: build(eligible, "/")}
+	after := model.PlatformArtifact{ScopeKey: "global", ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, Content: build(declared, "/"), Metadata: metadata}
+
+	for _, name := range []string{"exact restore", "ordinary path release", "missing parent claim", "mismatched claim", "different full", "different DNS child", "also changes paths"} {
+		t.Run(name, func(t *testing.T) {
+			full, next, before, after := full, next, before, after
+			switch name {
+			case "ordinary path release":
+				next.Metadata, after.Metadata = maps.Clone(next.Metadata), maps.Clone(after.Metadata)
+				delete(next.Metadata, platformconfig.HostedDeclarationRestoreMetadata)
+				delete(after.Metadata, platformconfig.HostedDeclarationRestoreMetadata)
+			case "missing parent claim":
+				next.Metadata = maps.Clone(next.Metadata)
+				delete(next.Metadata, platformconfig.HostedDeclarationRestoreMetadata)
+			case "mismatched claim":
+				mismatch := plan
+				mismatch.Target = "different.example.test"
+				next.Metadata = maps.Clone(next.Metadata)
+				next.Metadata[platformconfig.HostedDeclarationRestoreMetadata] = encode(mismatch)
+			case "different full":
+				full.ID = "other-full"
+			case "different DNS child":
+				before.ID = "other-dns"
+			case "also changes paths":
+				after.Content = build(declared, "/", "/api")
+			}
+			err := guardProducedHostedDNSPaths(t.Context(), full, next, before, after, func(context.Context) error {
+				t.Fatal("a declaration-only restore must not run the path continuity gate")
+				return nil
+			})
+			if (err == nil) != (name == "exact restore") {
+				t.Fatalf("unexpected prewrite result: %v", err)
 			}
 		})
 	}

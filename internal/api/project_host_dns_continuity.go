@@ -79,15 +79,34 @@ func (s *Server) recheckProducedHostedPathTransition(ctx context.Context, full, 
 	if err != nil {
 		return err
 	}
-	return guardProducedHostedDNSPaths(ctx, before, after, s.checkProjectHostDNSContinuity)
+	return guardProducedHostedDNSPaths(ctx, full, next, before, after, s.checkProjectHostDNSContinuity)
 }
 
-func guardProducedHostedDNSPaths(ctx context.Context, before, after model.PlatformArtifact, rollbackDNS func(context.Context) error) error {
-	ref, _, srcErr := platformconfig.HostedAddressAuthority(after)
+func guardProducedHostedDNSPaths(ctx context.Context, full, next, before, after model.PlatformArtifact, rollbackDNS func(context.Context) error) error {
+	ref, digest, srcErr := platformconfig.HostedAddressAuthority(after)
 	if srcErr != nil {
 		return srcErr
 	}
-	if ref != nil {
+	restore, err := platformconfig.HostedDeclarationRestoreAuthority(after)
+	if err != nil {
+		return err
+	}
+	parentRestore, err := platformconfig.HostedDeclarationRestoreAuthority(next)
+	if err != nil {
+		return err
+	}
+	if restore != nil || parentRestore != nil {
+		// This precheck classifies the candidate. Gray admission still
+		// verifies signed history, holds and the exact declaration-only
+		// delta against the current full and LKG inside the store transaction.
+		parentRef, parentDigest, err := platformconfig.HostedAddressAuthority(next)
+		if err != nil || restore == nil || parentRestore == nil || *restore != *parentRestore ||
+			ref == nil || parentRef == nil || *ref != *parentRef || digest != parentDigest ||
+			ref.ReleaseSetID != full.ID || ref.ReleaseSetDigest != full.ContentHash ||
+			ref.DNSArtifactID != before.ID || ref.DNSArtifactDigest != before.ContentHash {
+			return errors.New("shared DNS restore does not bind the selected parent and DNS child")
+		}
+	} else if ref != nil {
 		if err := platformconfig.ValidateScopedHostedPublicationTransition(before, after); err != nil {
 			return err
 		}
@@ -95,6 +114,9 @@ func guardProducedHostedDNSPaths(ctx context.Context, before, after model.Platfo
 	changed, err := hostedDNSProbePathsChanged(before, after)
 	if err != nil || !changed {
 		return err
+	}
+	if restore != nil {
+		return errHostedDNSPathTopology
 	}
 	return rollbackDNS(ctx)
 }
