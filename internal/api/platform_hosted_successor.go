@@ -29,19 +29,10 @@ func (s *Server) compileOfferedHostedSuccessor(ctx context.Context, req pc.Compi
 			eligible[r.Record.Hostname] = true
 		}
 	}
-	paths := func(intent pc.PlatformIntent, h string) map[string]string {
-		out := map[string]string{}
-		for _, r := range intent.Routes {
-			if r.Hostname == h {
-				out[model.NormalizeAppRoutePathPrefix(r.PathPrefix)] = r.AppID
-			}
-		}
-		return out
-	}
 	var blocked error
 	for _, host := range slices.Sorted(maps.Keys(eligible)) {
-		wanted := paths(req.Intent, host)
-		if maps.Equal(wanted, paths(source.PriorIntent, host)) {
+		wanted := hostedRoutePathOwners(req.Intent.Routes, host)
+		if maps.Equal(wanted, hostedRoutePathOwners(source.PriorIntent.Routes, host)) {
 			continue
 		}
 		for _, r := range source.Prior.Records {
@@ -106,4 +97,40 @@ func (s *Server) compileOfferedHostedSuccessor(ctx context.Context, req pc.Compi
 		}
 	}
 	return empty, "", false, blocked
+}
+
+func hostedRoutePathOwners(routes []pc.RouteIntent, host string) map[string]string {
+	out := map[string]string{}
+	for _, route := range routes {
+		if route.Hostname == host {
+			out[model.NormalizeAppRoutePathPrefix(route.PathPrefix)] = route.AppID
+		}
+	}
+	return out
+}
+
+// Only fall back to the staged compiler product. A desired forward or
+// withdrawal must still carry its own fenced claim, even if another selector
+// needs refreshing. Full publication also runs the ordinary DNS and LKG gates.
+func canRefreshHostedBaseline(staged pc.CompileResult, source pc.HostedAddressSource, capture *pc.HostedTransitionCapture) bool {
+	if capture == nil || len(capture.Hosts) == 0 || len(staged.InputSnapshot.HostedAddressReservations) == 0 {
+		return false
+	}
+	raw, err := json.Marshal(staged.IntentArtifact.Content)
+	var intent pc.PlatformIntent
+	if err != nil || json.Unmarshal(raw, &intent) != nil {
+		return false
+	}
+	hosts := slices.Clone(capture.Hosts)
+	for _, r := range source.Inherited {
+		if r.Record.RecordKind == "hosted" {
+			hosts = append(hosts, r.Record.Hostname)
+		}
+	}
+	for _, host := range hosts {
+		if !maps.Equal(hostedRoutePathOwners(intent.Routes, host), hostedRoutePathOwners(source.PriorIntent.Routes, host)) {
+			return false
+		}
+	}
+	return true
 }

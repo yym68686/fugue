@@ -440,7 +440,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			advance("compile_scoped_host_successor")
 			successor, claim, selected, e := s.compileOfferedHostedSuccessor(ctx, req, source, scoped)
 			if e != nil {
-				return interval, e
+				if !errors.Is(e, platformconfig.ErrHostedSuccessorNeedsBaseline) || !canRefreshHostedBaseline(compiled, source, scoped) {
+					return interval, e
+				}
+				if s.log != nil {
+					s.log.Printf("hosted path successor deferred for baseline refresh base_release=%s error=%v", source.Publication.ReleaseID, e)
+				}
 			}
 			if selected {
 				compiled, provenance.hostedClaim = successor, claim

@@ -41,6 +41,13 @@ The DNS runtime can follow the predecessor or successor using that source's
 complete exact path proofs, subject to the original DNS endpoint and policy
 constraints. Existing probes never become proof of a changed route.
 
+If the full predecessor's measured selector for a different hostname no
+longer fits the current endpoint roster, the scoped compiler still rejects
+it. The producer can first refresh an already compiled global baseline that
+retains the pending managed path owners. It logs `hosted path successor
+deferred for baseline refresh` and runs the normal signed publication gates.
+That refresh is not a path selection or a serving receipt.
+
 `saved` means desired state was committed, not that the data plane switched.
 The platform-admin `--wait` and `routes status --plan` check the hostname's
 own serving decision when one exists. A prepare or partial withdrawal is

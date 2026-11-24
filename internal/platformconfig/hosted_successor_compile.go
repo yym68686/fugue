@@ -11,6 +11,11 @@ import (
 	"fugue/internal/model"
 )
 
+// ErrHostedSuccessorNeedsBaseline means a foreign selector from the selected
+// full no longer matches the currently authorized targets. Only a separately
+// compiled baseline that retains the pending path bindings can resolve it.
+var ErrHostedSuccessorNeedsBaseline = errors.New("host successor requires a fresh global DNS baseline")
+
 // CompileHostedSuccessor compiles a normal successor, not an overlay applied
 // to an already signed child. The selected full supplies configuration for
 // other hosts, including their original DNS selector inputs. Only the live
@@ -73,6 +78,10 @@ func CompileHostedSuccessor(req CompileRequest, source HostedAddressSource, p Ho
 	}
 	got, capture, err := CompileHostedPathWithCapture(req, source)
 	if err != nil {
+		var query *dnsPhysicalQueryCompileError
+		if errors.As(err, &query) && !owned[query.host] && errors.Is(query.cause, errDNSPhysicalSelectionOutsideCandidates) {
+			return empty, fmt.Errorf("%w: %w", ErrHostedSuccessorNeedsBaseline, err)
+		}
 		return empty, err
 	}
 	if (capture != nil && len(capture.Hosts) != 0) != (phase == "prepare") || len(got.InputSnapshot.HostedAddressReservations) == 0 {

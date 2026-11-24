@@ -2,8 +2,10 @@ package platformconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -107,6 +109,75 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 		}
 		return
 	}
+	t.Run("foreign measured selector needs a fresh baseline", func(t *testing.T) {
+		saved := src
+		defer func() { src = saved }()
+		peer := "measured.example.test"
+		measured := physicalQueryFixture()
+		addPeer := func(req CompileRequest, narrow bool) CompileRequest {
+			route := old.Intent.Routes[0]
+			route.Hostname = peer
+			route.RecordOriginForTest(t, "/", route.RuntimeID)
+			origin := old.RuntimeSnapshot.Origins[0]
+			origin.Ref = route.OriginRef
+			req.Intent.Routes = append(slices.Clone(req.Intent.Routes), route)
+			req.RuntimeSnapshot.Origins = append(slices.Clone(req.RuntimeSnapshot.Origins), origin)
+			dns := req.Intent.DNS[0]
+			dns.Hostname, dns.AppID, dns.RecordKind = peer, route.AppID, "custom-domain-target"
+			dns.Type, dns.Route = "FUGUE_ROUTE", &DNSRouteIntent{
+				Hostnames: []string{peer}, DNSApplicationIntent: *measured.Intent.DNS[0].Application,
+			}
+			dns.Application, dns.Values = nil, []string{}
+			req.Intent.DNS = append(slices.Clone(req.Intent.DNS), dns)
+			rule, fact := measured.Policy.DNSAnswerRules[0], measured.RuntimeSnapshot.DNSSelections[0]
+			rule.Hostname, fact.Hostname = peer, peer
+			fact.ObservedAt = *req.RuntimeSnapshot.CapturedAt
+			fact.PhysicalSelection = model.CloneDNSPhysicalSelection(fact.PhysicalSelection)
+			fact.PhysicalSelection.CapturedAt = fact.ObservedAt
+			if narrow {
+				fact.Candidates = fact.Candidates[:1]
+				fact.PhysicalSelection.PrimaryEdgeID = fact.Candidates[0].EdgeID
+				fact.PhysicalSelection.OrderedEdgeIDs = []string{fact.Candidates[0].EdgeID}
+			}
+			req.Policy.DNSAnswerRules = append(slices.Clone(req.Policy.DNSAnswerRules), rule)
+			req.RuntimeSnapshot.DNSSelections = append(slices.Clone(req.RuntimeSnapshot.DNSSelections), fact)
+			return req
+		}
+		withPeer := addPeer(old, false)
+		before, err := Compile(withPeer)
+		if err != nil {
+			t.Fatal("compile selected baseline:", err)
+		}
+		setBase(before, 1)
+		next := addPeer(edit, true)
+		stage, capture, err := CompileHostedPathWithCapture(next, src)
+		if err != nil {
+			t.Fatal("compile baseline with fresh evidence:", err)
+		}
+		proposals, err := BuildHostedScopeProposals(src, stage, capture)
+		if err != nil || len(proposals) != 1 {
+			t.Fatal("build host offer:", err)
+		}
+		_, err = CompileHostedSuccessor(next, src, proposals[0], "prepare")
+		if !errors.Is(err, ErrHostedSuccessorNeedsBaseline) || !strings.Contains(err.Error(), peer) {
+			t.Fatalf("expected foreign selector to defer the scoped successor, got %v", err)
+		}
+		seen := false
+		for _, view := range compiledQueryViews(t, stage) {
+			for _, record := range view.Records {
+				if record.Name == peer {
+					seen = true
+					if !slices.Equal(record.AnswerPolicy.PhysicalSelection.OrderedEdgeIDs, []string{"edge-a"}) ||
+						len(record.Candidates) != 1 || record.Candidates[0].EdgeID != "edge-a" {
+						t.Fatal("fresh baseline did not use exactly the authorized endpoint")
+					}
+				}
+			}
+		}
+		if !seen {
+			t.Fatal("baseline omitted the independently compiled peer")
+		}
+	})
 	t.Run("unselected dynamic hostname must not enter the scoped DNS compiler", func(t *testing.T) {
 		// A newly enrolled sibling is valid in the complete business capture
 		// but absent in the selected full. Its rule and observation used to

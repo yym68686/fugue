@@ -3,6 +3,7 @@ package platformconfig
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/netip"
@@ -345,7 +346,7 @@ func CompileDNSQueryViews(global []DNSIntent, views []DNSConsumerView, plan *DNS
 					return nil, err
 				}
 				if err := validateDNSPhysicalQuery(record); err != nil {
-					return nil, fmt.Errorf("compile physical query %s/%s/%s: %w", view.NodeID, r.Hostname, r.Type, err)
+					return nil, &dnsPhysicalQueryCompileError{view.NodeID, r.Hostname, r.Type, err}
 				}
 				if err := validateDNSBusinessIntent(record, policy, view.NodeID); err != nil {
 					return nil, err
@@ -500,6 +501,19 @@ func ValidateDNSQueryViews(query []DNSQueryView, global []DNSIntent, views []DNS
 	return nil
 }
 
+var errDNSPhysicalSelectionOutsideCandidates = errors.New("physical-edge order contains unauthorized endpoint")
+
+type dnsPhysicalQueryCompileError struct {
+	node, host, family string
+	cause              error
+}
+
+func (e *dnsPhysicalQueryCompileError) Error() string {
+	return fmt.Sprintf("compile physical query %s/%s/%s: %v", e.node, e.host, e.family, e.cause)
+}
+
+func (e *dnsPhysicalQueryCompileError) Unwrap() error { return e.cause }
+
 func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
 	policy := record.AnswerPolicy
 	selection := policy.PhysicalSelection
@@ -543,7 +557,7 @@ func validateDNSPhysicalQuery(record model.EdgeDNSRecord) error {
 	}
 	for _, edgeID := range selection.OrderedEdgeIDs {
 		if !edges[edgeID] {
-			return fmt.Errorf("physical-edge order contains unauthorized endpoint")
+			return errDNSPhysicalSelectionOutsideCandidates
 		}
 	}
 	return nil
