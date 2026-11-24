@@ -78,7 +78,7 @@ func ComposeHostedExecutorChange(groups map[string]model.EdgeRouteBundle, dns pc
 	if e != nil {
 		return empty, e
 	}
-	scoped := pc.HostedDNSContent{Plan: *local.ReadinessPlan, Views: hostedUnitViews(p, local.QueryViews), Rules: local.Policy.DNSAnswerRules}
+	scoped := pc.HostedDNSContent{Plan: *local.ReadinessPlan, Views: hostedUnitViews(p, local.QueryViews), Rules: local.Policy.DNSAnswerRules, Withheld: merged.Withheld}
 	if !reflect.DeepEqual(scoped, expect.DNS) {
 		return empty, bad
 	}

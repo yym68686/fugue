@@ -103,8 +103,28 @@ func buildExternalPathProposal(src HostedAddressSource, original, desired hostPr
 	if err != nil || !reflect.DeepEqual(original.dns.Policy.DNSReadiness, desired.dns.Policy.DNSReadiness) {
 		return empty, errors.Join(bad, err)
 	}
-	_, delta, err := ComposeExternalPathRequirements(target, original.dns.ReadinessPlan, desired.dns.ReadinessPlan, original.dns.Policy.DNSReadiness,
-		slices.Sorted(maps.Keys(change.before)), slices.Sorted(maps.Keys(change.after)), original.dns.Records, desired.dns.Records)
+	held := externalProposalHolds(members, src.EffectiveHolds)
+	staged := original
+	eligible := members
+	anchor := &ExternalPathAnchor{Target: target, Shape: shape}
+	rows := original.dns.Records
+	if len(held) > 0 {
+		staged.dns, err = externalHeldView(original.dns, target, held, false)
+		if err != nil {
+			return empty, err
+		}
+		anchor.EffectiveShape, eligible, err = externalPathShape(target, staged.dns)
+		if err != nil {
+			return empty, err
+		}
+		anchor.Held = held
+		rows, err = externalEffectiveRows(target.Target, rows, held)
+		if err != nil {
+			return empty, err
+		}
+	}
+	_, delta, err := ComposeExternalPathRequirements(target, staged.dns.ReadinessPlan, desired.dns.ReadinessPlan, original.dns.Policy.DNSReadiness,
+		slices.Sorted(maps.Keys(change.before)), slices.Sorted(maps.Keys(change.after)), rows, desired.dns.Records)
 	if err != nil {
 		return empty, err
 	}
@@ -142,8 +162,15 @@ func buildExternalPathProposal(src HostedAddressSource, original, desired hostPr
 	if e != nil || before.Owner != after.Owner {
 		return empty, errors.Join(bad, e)
 	}
-	offer := HostedScopeProposal{Schema: ExternalPathProposalSchema, Host: target.Hostname, Base: src.Publication, Authority: src.Authority, ExternalPath: &ExternalPathAnchor{Target: target, Shape: shape},
-		Before: before, Prepared: before, After: after, BaseProbes: baseProbes, HoldProbes: baseProbes, PathProbes: pathProbes, Physical: members, Eligible: slices.Clone(members), Changes: delta.Edits}
+	holdProbes := baseProbes
+	if len(held) > 0 {
+		_, holdProbes, e = build(staged, change.before)
+		if e != nil {
+			return empty, e
+		}
+	}
+	offer := HostedScopeProposal{Schema: ExternalPathProposalSchema, Host: target.Hostname, Base: src.Publication, Authority: src.Authority, ExternalPath: anchor,
+		Before: before, Prepared: before, After: after, BaseProbes: baseProbes, HoldProbes: holdProbes, PathProbes: pathProbes, Physical: members, Eligible: slices.Clone(eligible), Changes: delta.Edits}
 	for _, r := range original.dns.Records {
 		if r.Hostname == target.Target && (r.Type == "A" || r.Type == "AAAA") {
 			offer.Records = append(offer.Records, r)

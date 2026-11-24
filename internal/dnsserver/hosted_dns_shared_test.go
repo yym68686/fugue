@@ -20,8 +20,20 @@ import (
 // Both domains depend on the SAME RR, not merely on similar records.
 // The producer of each packet sees just the original global parent.
 func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		name := "ordinary"
+		if held {
+			name = "physical-hold"
+		}
+		t.Run(name, func(t *testing.T) { testSharedWireDecisions(t, held) })
+	}
+}
+func testSharedWireDecisions(t *testing.T, hold bool) {
 	const a, b, name = "first.example.org", "second.example.org", "target.example.test"
 	view, template, policy, _, at := queryExecutionFixture()
+	if hold {
+		template.Records[0].MinimumHealthyEdges = 1
+	}
 	digest := func(v any) string {
 		d, err := pc.Digest(v)
 		if err != nil {
@@ -66,7 +78,34 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 		return routeartifact.HostedRecipientInput{Records: []pc.DNSIntent{{Hostname: name, Type: "A", RecordKind: model.EdgeDNSRecordKindCustomDomainTarget, Values: rec.Values, TTL: rec.TTL, TenantID: rec.TenantID, AppID: rec.AppID}}, DNS: &pc.HostedDNSContent{Plan: plan, Views: []pc.DNSQueryView{view}}}
 	}
 	root, four, two := []string{"/"}, []string{"/", "/health", "/v1", "/v2"}, []string{"/", "/new"}
+	for _, peerPaths := range [][]string{nil, root} {
+		projection := unit(root, peerPaths)
+		for i := range projection.DNS.Plan.Records[0].Targets {
+			projection.DNS.Plan.Records[0].Targets[i].RequireSinglePublication = true
+		}
+		part, err := readSharedDNSProjection(a, projection, true)
+		if (err == nil && part != nil) != (len(peerPaths) == 0) {
+			t.Fatal("single-publication requirement must permit exactly one host")
+		}
+	}
 	base := unit(root, root)
+	// B's decision may see an administrative veto which A's earlier
+	// immutable packet could not contain. Drop the preferred endpoint
+	// from requirements only. Both address declarations still list it.
+	withHold := func(v routeartifact.HostedRecipientInput) routeartifact.HostedRecipientInput {
+		if !hold {
+			return v
+		}
+		u := *v.DNS
+		v.DNS = &u
+		u.Plan.Records = slices.Clone(u.Plan.Records)
+		n := u.Plan.Records[0].Targets[0]
+		u.Withheld = []pc.HostedAddressHold{{EdgeID: n.EdgeID, EdgeGroupID: n.EdgeGroupID, Address: n.Address}}
+		u.Plan.Records[0].Targets = slices.Clone(u.Plan.Records[0].Targets[1:])
+		u.Plan.Probes = slices.DeleteFunc(slices.Clone(u.Plan.Probes), func(p pc.DNSReadinessProbe) bool { return p.Address == n.Address })
+		return v
+	}
+	answer := "8.8.8.8"
 	signedBase := map[routeartifact.HostedRecipient]routeartifact.HostedRecipientInput{r: base}
 	fact := func(pr pc.DNSReadinessProbe) dnsReadinessFact {
 		return dnsReadinessFact{ProbeID: pr.ID, Ready: true, Proof: routeprobe.Proof{Digest: pr.RouteDigest, EdgeID: pr.EdgeID, GroupID: pr.EdgeGroupID, Version: "global", CheckedAt: at, ValidUntil: at.Add(50 * time.Second)}}
@@ -106,7 +145,7 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 		t.Helper()
 		for _, pair := range [][2]string{{"udp", s.Config.UDPAddr}, {"tcp", s.Config.TCPAddr}} {
 			v, _, err := (&dns.Client{Net: pair[0], Timeout: time.Second}).Exchange(new(dns.Msg).SetQuestion(dns.Fqdn(name), dns.TypeA), pair[1])
-			if err != nil || v.Rcode != rcode || rcode == dns.RcodeSuccess && (len(v.Answer) != 1 || v.Answer[0].Header().Ttl != 20 || v.Answer[0].(*dns.A).A.String() != "8.8.8.8") || rcode != dns.RcodeSuccess && len(v.Answer) != 0 {
+			if err != nil || v.Rcode != rcode || rcode == dns.RcodeSuccess && (len(v.Answer) != 1 || v.Answer[0].Header().Ttl != 20 || v.Answer[0].(*dns.A).A.String() != answer) || rcode != dns.RcodeSuccess && len(v.Answer) != 0 {
 				t.Fatal(pair[0], v, err)
 			}
 		}
@@ -169,8 +208,11 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 	query(dns.RcodeServerFailure)
 	setGlobal(global)
 	query(dns.RcodeSuccess)
-	apply(b, "prepare", base)
-	apply(b, "forward", unit(root, two))
+	if hold {
+		answer = "9.9.9.9"
+	}
+	apply(b, "prepare", withHold(base))
+	apply(b, "forward", withHold(unit(root, two)))
 	setGlobal(nil)
 	query(dns.RcodeSuccess)
 	oldA := heads[a]
@@ -180,7 +222,7 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 	}
 	k := hostedZoneKey{view.Zone, hostedRRKey{name, dns.TypeA}}
 	w := s.hostedDNS.Load().keys[k]
-	if !reflect.DeepEqual(w.rows[0].plan, unit(root, two).DNS.Plan) || w.forHost(b).Decision != heads[b].p.Decision {
+	if !reflect.DeepEqual(w.rows[0].plan, withHold(unit(root, two)).DNS.Plan) || w.forHost(b).Decision != heads[b].p.Decision {
 		t.Fatal("withdrawal replaced peer's current requirements")
 	}
 	for _, host := range []string{a, b} {
@@ -193,6 +235,25 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 	bad := unit(root, two)
 	if sameSharedPredecessor(a, base, bad) {
 		t.Fatal("borrowed peer paths accepted under A")
+	}
+	if hold {
+		v := withHold(unit(root, two))
+		if !sameSharedPredecessor(b, base, v) {
+			t.Fatal("exact signed policy contraction rejected")
+		}
+		v.DNS.Withheld = nil
+		if sameSharedPredecessor(b, base, v) {
+			t.Fatal("unexplained target contraction accepted")
+		}
+		v = withHold(unit(root, two))
+		v.DNS.Withheld[0].EdgeGroupID = "edge-group-unrelated"
+		if sameSharedPredecessor(b, base, v) {
+			t.Fatal("hold for wrong physical group accepted")
+		}
+		v = withHold(unit(four, two))
+		if sameSharedPredecessor(b, base, v) {
+			t.Fatal("claimed hold copied an unrelated path edit")
+		}
 	}
 	s = NewService(config, nil)
 	if e := s.reserveHostedDNS(); e != nil {
@@ -208,7 +269,7 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 		t.Fatal(e)
 	}
 	query(dns.RcodeSuccess)
-	if !reflect.DeepEqual(s.hostedDNS.Load().keys[k].rows[0].plan, unit(root, two).DNS.Plan) {
+	if !reflect.DeepEqual(s.hostedDNS.Load().keys[k].rows[0].plan, withHold(unit(root, two)).DNS.Plan) {
 		t.Fatal("restart changed merged path sets")
 	}
 }

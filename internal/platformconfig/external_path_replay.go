@@ -7,13 +7,15 @@ import (
 	"slices"
 )
 
-// The envelope is shared; the external form never carries an address hold.
-// An address-hold-only reader therefore cannot apply this proposal.
+// The external form pins the selected physical declaration separately from
+// any policy-withheld readiness targets. Withdrawal does not lift a hold.
 const ExternalPathProposalSchema = HostedProposalSchema
 
 type ExternalPathAnchor struct {
-	Target ExternalPathTarget `json:"target"`
-	Shape  string             `json:"shape_digest"`
+	Target         ExternalPathTarget  `json:"target"`
+	Shape          string              `json:"shape_digest"`
+	Held           []HostedAddressHold `json:"held,omitempty"`
+	EffectiveShape string              `json:"effective_shape_digest,omitempty"`
 }
 
 // The authenticated parent and the proposal both bind the exact wire RR in
@@ -55,6 +57,12 @@ func externalPathShape(target ExternalPathTarget, base DNSArtifactPayload) (stri
 }
 
 func replayExternalDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase string) (HostedDNSContent, error) {
+	if p.ExternalPath != nil && len(p.ExternalPath.Held) > 0 {
+		return replayExternalHeldPhase(base, p, phase)
+	}
+	if p.ExternalPath != nil && p.ExternalPath.EffectiveShape != "" {
+		return HostedDNSContent{}, errors.New("unbound external effective shape")
+	}
 	var empty HostedDNSContent
 	bad := errors.New("external path phase does not match its selected predecessor")
 	a, owner := p.ExternalPath, p.Before.Owner
@@ -140,7 +148,7 @@ func replayExternalDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phas
 	}
 	// The wire view is always the selected one, including each client's
 	// address order, TTL and zone. Detach it before returning to the caller.
-	raw, e := json.Marshal(HostedDNSContent{*view, base.QueryViews, base.Policy.DNSAnswerRules})
+	raw, e := json.Marshal(HostedDNSContent{Plan: *view, Views: base.QueryViews, Rules: base.Policy.DNSAnswerRules})
 	if e != nil {
 		return empty, e
 	}

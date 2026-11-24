@@ -10,9 +10,11 @@ import (
 	"fugue/internal/model"
 )
 
-func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *testing.T) {
+func externalFourRouteEdit(t *testing.T) (HostedAddressSource, CompileRequest) {
+	t.Helper()
 	const h = "outside.example.org"
 	r := consumerPlacementFixture()
+	r.Policy.MinimumHealthyEdges = 1
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	d := &r.Intent.DNS[0]
 	d.Type, d.RecordKind, d.Values = "FUGUE_ROUTE", model.EdgeDNSRecordKindCustomDomainTarget, []string{}
@@ -63,6 +65,39 @@ func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *test
 	}
 	edit.Intent.Generation = "new-routes"
 	edit.RuntimeSnapshot.IntentGeneration = edit.Intent.Generation
+	return src, edit
+}
+
+// Keep the physical RR in the real selected compiler output. Derive the
+// candidate with a declared hold and one fewer eligible endpoint.
+func ExternalHeldFixtureForTest(t *testing.T) (HostedAddressSource, HostedScopeProposal) {
+	t.Helper()
+	bound, partial := externalFourRouteEdit(t)
+	bound.EffectiveHolds = []HostedAddressHold{{"edge-b", "edge-group-b", "93.184.216.35"}}
+	partial.RuntimeSnapshot.DNSEdgeEndpoints = slices.Clone(partial.RuntimeSnapshot.DNSEdgeEndpoints[:1])
+	for i := range partial.RuntimeSnapshot.DNSSelections {
+		s := &partial.RuntimeSnapshot.DNSSelections[i]
+		s.Candidates = slices.Clone(s.Candidates[:1])
+		s.SelectedEdgeGroupID = s.Candidates[0].EdgeGroupID
+		for j := range s.ScopedCandidates {
+			s.ScopedCandidates[j].Candidates = slices.Clone(s.ScopedCandidates[j].Candidates[:1])
+		}
+	}
+	compiled, cap, e := CompileHostedPathWithCapture(partial, bound)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ps, e := BuildHostedScopeProposals(bound, compiled, cap)
+	if e != nil || len(ps) != 1 {
+		t.Fatal("missing external held proposal", e)
+	}
+	return bound, ps[0]
+}
+
+func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *testing.T) {
+	src, edit := externalFourRouteEdit(t)
+	d := &edit.Intent.DNS[0]
+	h := edit.Intent.Routes[0].Hostname
 	stage, captured, err := CompileHostedPathWithCapture(edit, src)
 	if err != nil || captured == nil || !slices.Equal(captured.ExternalHosts, []string{h}) || len(captured.Hosts) != 0 {
 		t.Fatal("compiler failed to discover external path edit", err)
@@ -93,6 +128,68 @@ func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *test
 		t.Fatal("could not build proposal", err)
 	}
 	p := ps[0]
+	t.Run("declared hold preserves physical RR and survives path withdrawal", func(t *testing.T) {
+		bound := src
+		suspended := HostedAddressHold{"edge-b", "edge-group-b", "93.184.216.35"}
+		bound.EffectiveHolds = []HostedAddressHold{suspended}
+		partial := edit
+		partial.RuntimeSnapshot.DNSEdgeEndpoints = slices.Clone(edit.RuntimeSnapshot.DNSEdgeEndpoints[:1])
+		partial.RuntimeSnapshot.DNSSelections = slices.Clone(edit.RuntimeSnapshot.DNSSelections)
+		for i := range partial.RuntimeSnapshot.DNSSelections {
+			s := &partial.RuntimeSnapshot.DNSSelections[i]
+			s.Candidates = slices.Clone(s.Candidates[:1])
+			s.SelectedEdgeGroupID = s.Candidates[0].EdgeGroupID
+			s.ScopedCandidates = slices.Clone(s.ScopedCandidates)
+			for j := range s.ScopedCandidates {
+				s.ScopedCandidates[j].Candidates = slices.Clone(s.ScopedCandidates[j].Candidates[:1])
+			}
+		}
+		compiled, cap, e := CompileHostedPathWithCapture(partial, bound)
+		if e != nil {
+			t.Fatal(e)
+		}
+		ps, e := BuildHostedScopeProposals(bound, compiled, cap)
+		if e != nil || len(ps) != 1 {
+			t.Fatal(e)
+		}
+		pr := ps[0]
+		if len(pr.Physical) != 2 || len(pr.Eligible) != 1 || len(pr.Records) != 1 || !reflect.DeepEqual(pr.Records, p.Records) || !slices.Equal(pr.ExternalPath.Held, []HostedAddressHold{suspended}) {
+			t.Fatal("lost physical declaration or hold")
+		}
+		view := bound.Prior
+		var prepared HostedDNSContent
+		for _, phase := range []string{"prepare", "forward", "withdraw"} {
+			result, e := ComposeHostedDNSPhase(view, pr, phase)
+			if e != nil {
+				t.Fatal(phase, e)
+			}
+			if !reflect.DeepEqual(result.Views, bound.Prior.QueryViews) || !slices.Equal(result.Withheld, pr.ExternalPath.Held) {
+				t.Fatal("wire declaration or veto changed")
+			}
+			for _, probe := range result.Plan.Probes {
+				if probe.Hostname == h && probe.Address == suspended.Address {
+					t.Fatal("disallowed readiness probe")
+				}
+			}
+			if phase == "prepare" {
+				prepared = result
+			}
+			if phase == "withdraw" && !reflect.DeepEqual(prepared, result) {
+				t.Fatal("withdrawal lifted hold")
+			}
+			view.ReadinessPlan = &result.Plan
+		}
+		if _, e := ComposeHostedDNSPhase(bound.Prior, pr, "forward"); e == nil {
+			t.Fatal("skipped hold preparation")
+		}
+		for _, holds := range [][]HostedAddressHold{nil, {{suspended.EdgeID, "edge-group-other", suspended.Address}}, {{suspended.EdgeID, suspended.EdgeGroupID, "93.184.216.36"}}} {
+			wrong := bound
+			wrong.EffectiveHolds = holds
+			if _, e := BuildHostedScopeProposals(wrong, compiled, cap); e == nil {
+				t.Fatal("unexplained target loss accepted")
+			}
+		}
+	})
 	t.Run("ineligible sibling does not suppress valid host", func(t *testing.T) {
 		mixed := *captured
 		mixed.Hosts = []string{"unowned.example.test"}

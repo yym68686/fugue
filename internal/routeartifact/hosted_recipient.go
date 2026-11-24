@@ -69,7 +69,13 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 		}
 	}
 	related := map[string]bool{p.Host: true}
+	if len(phase.DNS.Withheld) > 0 && p.ExternalPath == nil {
+		return nil, bad
+	}
 	if p.ExternalPath != nil {
+		if !slices.Equal(phase.DNS.Withheld, p.ExternalPath.Held) {
+			return nil, bad
+		}
 		related = map[string]bool{}
 		for _, host := range p.ExternalPath.Target.Members {
 			related[host] = true
@@ -208,6 +214,11 @@ func partitionHostedDNS(host string, owned []pc.DNSIntent, dns pc.HostedDNSConte
 			families[k.host][k.typ] = true
 			item.Records = append(item.Records, r)
 			item.DNS.Rules = append(item.DNS.Rules, rule)
+			for _, h := range dns.Withheld {
+				if slices.Contains(r.Values, h.Address) {
+					item.DNS.Withheld = append(item.DNS.Withheld, h)
+				}
+			}
 		}
 		needed := map[string]bool{}
 		for host, fams := range families {

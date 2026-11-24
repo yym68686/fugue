@@ -13,6 +13,58 @@ import (
 	"fugue/internal/routeartifact"
 )
 
+func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
+	s, p := pc.ExternalHeldFixtureForTest(t)
+	digest, err := pc.Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := routeartifact.FreezeHostedProgram(s, p, digest)
+	if err != nil || len(img.Wire) == 0 || img.Prepared == img.Forward {
+		t.Fatal("freeze", err)
+	}
+	prepared, forward, err := routeartifact.BuildHostedProgramUnits(s, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, phase := range []routeartifact.HostedPhase{prepared, forward} {
+		parts, err := routeartifact.HostedRecipientInputs(p, phase)
+		if err != nil {
+			t.Fatal(i, err)
+		}
+		dns, tls, routes := 0, 0, 0
+		for _, part := range parts {
+			switch {
+			case part.DNS != nil:
+				dns++
+				if !slices.Equal(part.DNS.Withheld, p.ExternalPath.Held) || !reflect.DeepEqual(part.Records, p.Records) {
+					t.Fatal("DNS declaration or hold lost")
+				}
+				for _, r := range part.DNS.Plan.Records {
+					for _, target := range r.Targets {
+						if target.Address == p.ExternalPath.Held[0].Address {
+							t.Fatal("DNS hold recovered without a release")
+						}
+					}
+				}
+			case len(part.TLS) > 0:
+				tls++
+				if !reflect.DeepEqual(part.TLS, []model.EdgeTLSAllowlistEntry{p.Before.Owner}) {
+					t.Fatal("changed certificate ownership")
+				}
+			case len(part.Routes) > 0:
+				routes++
+				if len(part.Routes) != []int{1, 4}[i] {
+					t.Fatalf("phase %d: %d routes", i, len(part.Routes))
+				}
+			}
+		}
+		if dns == 0 || tls != len(p.Physical) || routes != tls {
+			t.Fatal("missing physical recipients", dns, tls, routes)
+		}
+	}
+}
+
 func TestCompilerToHostProgramIncludesEveryPhysicalIngressWithoutDNSReadmission(t *testing.T) {
 	pc.HostedTransitionFixtureForTest(t, true, func(s pc.HostedAddressSource, p pc.HostedScopeProposal) {
 		a, b, err := routeartifact.HostedProgramDigests(s, p)

@@ -23,12 +23,16 @@ type sharedDNSProjection struct {
 }
 
 func readSharedDNSPart(host string, part routeartifact.HostedRecipientInput) (*sharedDNSProjection, error) {
+	return readSharedDNSProjection(host, part, false)
+}
+func readSharedDNSProjection(host string, part routeartifact.HostedRecipientInput, includeSingle bool) (*sharedDNSProjection, error) {
 	bad := errors.New("shared DNS selection is not a closed custom-target path edit")
 	u := part.DNS
 	if u == nil {
 		return nil, bad
 	}
-	if !slices.ContainsFunc(u.Plan.Probes, func(p pc.DNSReadinessProbe) bool { return p.Hostname != host }) {
+	multiHost := slices.ContainsFunc(u.Plan.Probes, func(p pc.DNSReadinessProbe) bool { return p.Hostname != host })
+	if !includeSingle && !multiHost {
 		return nil, nil
 	}
 	if len(u.Plan.Records) != 1 || len(u.Views) != 1 || len(u.Plan.Records[0].Targets) == 0 || len(part.Records) == 0 {
@@ -51,7 +55,7 @@ func readSharedDNSPart(host string, part routeartifact.HostedRecipientInput) (*s
 	v.shape.Targets = slices.Clone(rr.Targets)
 	for i, target := range rr.Targets {
 		v.shape.Targets[i].ProbeIDs = nil
-		if target.RequireSinglePublication {
+		if multiHost && target.RequireSinglePublication {
 			return nil, bad
 		}
 		for _, id := range target.ProbeIDs {
@@ -78,6 +82,46 @@ func readSharedDNSPart(host string, part routeartifact.HostedRecipientInput) (*s
 	return v, nil
 }
 
+// Align two valid decisions by physical endpoint identity, never by equal
+// slice lengths. A veto of any currently selected member keeps the shared
+// target out, even when another member withdraws or replays an older packet.
+func (v *sharedDNSProjection) without(deny map[pc.HostedAddressHold]bool) (*sharedDNSProjection, bool) {
+	if v == nil {
+		return nil, false
+	}
+	if len(deny) == 0 {
+		return v, len(v.input.DNS.Withheld) == 0
+	}
+	missing := maps.Clone(deny)
+	for _, h := range v.input.DNS.Withheld {
+		if !missing[h] {
+			return nil, false
+		}
+		delete(missing, h)
+	}
+	out := *v
+	out.shape.Targets = nil
+	out.hosts = map[string][][]pc.DNSReadinessProbe{}
+	for name := range v.hosts {
+		out.hosts[name] = nil
+	}
+	for i, t := range v.shape.Targets {
+		h := pc.HostedAddressHold{EdgeID: t.EdgeID, EdgeGroupID: t.EdgeGroupID, Address: t.Address}
+		if deny[h] {
+			if !missing[h] {
+				return nil, false
+			}
+			delete(missing, h)
+			continue
+		}
+		out.shape.Targets = append(out.shape.Targets, t)
+		for name, parts := range v.hosts {
+			out.hosts[name] = append(out.hosts[name], parts[i])
+		}
+	}
+	return &out, len(missing) == 0
+}
+
 func (v *sharedDNSProjection) sameShape(o *sharedDNSProjection) bool {
 	return v != nil && o != nil && reflect.DeepEqual(v.input.Records, o.input.Records) && reflect.DeepEqual(v.input.DNS.Views, o.input.DNS.Views) &&
 		reflect.DeepEqual(v.input.DNS.Rules, o.input.DNS.Rules) && reflect.DeepEqual(v.shape, o.shape) && len(v.hosts) == len(o.hosts) &&
@@ -85,13 +129,30 @@ func (v *sharedDNSProjection) sameShape(o *sharedDNSProjection) bool {
 }
 
 func sameSharedPredecessor(host string, base, candidate routeartifact.HostedRecipientInput) bool {
-	b, e := readSharedDNSPart(host, base)
-	c, f := readSharedDNSPart(host, candidate)
+	explicit := candidate.DNS != nil && len(candidate.DNS.Withheld) > 0
+	b, e := readSharedDNSProjection(host, base, explicit)
+	c, f := readSharedDNSProjection(host, candidate, explicit)
 	if e != nil || f != nil {
 		return false
 	}
 	if b == nil || c == nil {
 		return b == c
+	}
+	if explicit {
+		deny := map[pc.HostedAddressHold]bool{}
+		for _, h := range candidate.DNS.Withheld {
+			if deny[h] {
+				return false
+			}
+			deny[h] = true
+		}
+		var ok bool
+		if b, ok = b.without(deny); !ok {
+			return false
+		}
+		if c, ok = c.without(deny); !ok {
+			return false
+		}
 	}
 	if !b.sameShape(c) {
 		return false
@@ -130,7 +191,16 @@ func (w *hostedDNSWire) mergeShared(old *hostedDNSWire, member sharedDNSMember, 
 		maps.Copy(w.shared, old.shared)
 	}
 	w.shared[host] = member
-	v := member.part
+	deny := map[pc.HostedAddressHold]bool{}
+	for _, s := range w.shared {
+		for _, h := range s.part.input.DNS.Withheld {
+			deny[h] = true
+		}
+	}
+	v, ok := member.part.without(deny)
+	if !ok {
+		return errors.New("shared DNS hold does not match its physical target")
+	}
 	rr := v.shape
 	rr.Targets = slices.Clone(rr.Targets)
 	plan := pc.DNSReadinessPlan{}
@@ -143,13 +213,14 @@ func (w *hostedDNSWire) mergeShared(old *hostedDNSWire, member sharedDNSMember, 
 		chunks := v.hosts[name]
 		m, selected := w.shared[name]
 		if selected {
-			if !m.part.sameShape(v) || m.packet.Parent != member.packet.Parent || m.packet.ChildDigest != member.packet.ChildDigest ||
+			common, ok := m.part.without(deny)
+			if !ok || !common.sameShape(v) || m.packet.Parent != member.packet.Parent || m.packet.ChildDigest != member.packet.ChildDigest ||
 				m.packet.Child != member.packet.Child || m.packet.Delivery.MembershipSet != member.packet.Delivery.MembershipSet ||
 				m.packet.Delivery.MembershipRevision != member.packet.Delivery.MembershipRevision || m.packet.Delivery.MembershipRelease != member.packet.Delivery.MembershipRelease ||
 				m.packet.Delivery.MembershipFence != member.packet.Delivery.MembershipFence {
 				return errors.New("shared DNS membership or wire record changed")
 			}
-			chunks = m.part.hosts[name]
+			chunks = common.hosts[name]
 			h.Peers[name] = hostedDNSLease{m.packet.Decision, m.packet.SelectedAt, m.packet.ValidUntil}
 			usable = usable && m.observed
 		}
@@ -180,6 +251,9 @@ func (w *hostedDNSWire) mergeShared(old *hostedDNSWire, member sharedDNSMember, 
 	}
 	slices.SortFunc(plan.Probes, func(a, b pc.DNSReadinessProbe) int { return strings.Compare(a.ID, b.ID) })
 	plan.Records = []pc.DNSReadinessRecord{rr}
+	if len(rr.Targets) == 0 {
+		return nil
+	} // no common eligible endpoint; never fall back to the parent
 	if parent != nil && pc.ValidateDNSReadinessPlan(&plan, parent.payload.Policy.DNSReadiness) != nil {
 		return errors.New("invalid combined DNS requirements")
 	}

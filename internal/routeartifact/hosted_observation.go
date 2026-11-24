@@ -85,9 +85,22 @@ func hostedExpectedSamples(p HostedSelectedPacket) (map[observationKey]observati
 				return nil, errHostedObservation
 			}
 			for i := range part.Content.DNS.Views[0].Records {
-				rr := &part.Content.DNS.Views[0].Records[i]
+				rr := part.Content.DNS.Views[0].Records[i]
+				// The packet keeps its physical address declaration. A live
+				// answer containing one of this decision's withheld addresses
+				// is a failure, even when it is in that signed declaration.
+				if len(part.Content.DNS.Withheld) > 0 {
+					veto := map[string]bool{}
+					for _, h := range part.Content.DNS.Withheld {
+						veto[h.Address] = true
+					}
+					rr.Values = slices.DeleteFunc(slices.Clone(rr.Values), func(ip string) bool { return veto[ip] })
+					if len(rr.Values) == 0 {
+						return nil, errHostedObservation
+					}
+				}
 				for _, network := range []string{"udp", "tcp"} {
-					if e := add(observationKey{pin, network, rr.Name, rr.Type, ""}, observationRequirement{rr: rr}); e != nil {
+					if e := add(observationKey{pin, network, rr.Name, rr.Type, ""}, observationRequirement{rr: &rr}); e != nil {
 						return nil, e
 					}
 				}

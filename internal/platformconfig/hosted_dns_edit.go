@@ -19,6 +19,9 @@ type HostedDNSContent struct {
 	Plan  DNSReadinessPlan
 	Views []DNSQueryView
 	Rules []DNSAnswerRule
+	// Subtract only from readiness, never from declared wire records. Older
+	// shared-target executors reject the reduced topology before serving.
+	Withheld []HostedAddressHold `json:"withheld,omitempty"`
 }
 
 // ComposeHostedDNSPhase takes an already authenticated selected base and a
@@ -68,7 +71,7 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 	}
 	// Copy nested values as well. Compiling a failed phase must never
 	// mutate a cached immutable artifact or a concurrent reader's plan.
-	raw, e := json.Marshal(HostedDNSContent{*base.ReadinessPlan, base.QueryViews, base.Policy.DNSAnswerRules})
+	raw, e := json.Marshal(HostedDNSContent{Plan: *base.ReadinessPlan, Views: base.QueryViews, Rules: base.Policy.DNSAnswerRules})
 	if e != nil || json.Unmarshal(raw, &out) != nil {
 		return empty, bad
 	}
