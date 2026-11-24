@@ -134,6 +134,7 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(TargetBlockedPreDelete) as caught:
             database_filesystem(kube, c, predelete_stage='discovery')
         self.assertEqual(caught.exception.budget['database_available_bytes'], 1024)
+        self.assertEqual(caught.exception.scope, 'database-filesystem')
         with self.assertRaises(ValueError) as after:
             database_filesystem(kube, c)
         self.assertNotIsInstance(after.exception, TargetBlockedPreDelete)
@@ -142,7 +143,7 @@ class RecoveryTests(unittest.TestCase):
             database_filesystem(kube, c, predelete_stage='discovery')
 
     def test_fenced_low_database_space_cannot_continue_without_proven_release(self):
-        blocked = TargetBlockedPreDelete(1024, 'fenced')
+        blocked = TargetBlockedPreDelete(dict(database_available_bytes=1024), 'fenced', 'database-filesystem')
         with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
             self.r.health = Mock(side_effect=[{}, blocked])
             with self.assertRaises(TargetBlockedPreDelete):

@@ -91,7 +91,8 @@ class CleanupTests(unittest.TestCase):
             for _ in range(2):
                 result = gc.reconcile(self.kube, policy(), self.path, execute=True)
                 self.assertEqual(result['phase'], 'blocked')
-                self.assertIn('working-space', result['blocked'][0]['reason'])
+                self.assertEqual(result['blocked'][0]['kind'], 'target_blocked_pre_delete')
+                self.assertEqual(result['blocked'][0]['capacity_scope'], 'snapshot-fold')
             executor.return_value.run.assert_not_called()
 
     def test_preview_never_executes_and_apply_runs_one_native_executor(self):
@@ -145,12 +146,12 @@ class CleanupTests(unittest.TestCase):
                 executed, deleted = [], []
                 def filesystem(_, c, **kwargs):
                     if stage == 'discovery' and c['snapshot'] == 'old-point':
-                        raise gc.TargetBlockedPreDelete(1024, stage)
+                        raise gc.TargetBlockedPreDelete(dict(database_available_bytes=1024), stage, 'database-filesystem')
                     return {}, 1 << 30
                 def run(r):
                     executed.append(r.config['snapshot'])
                     if r.config['snapshot'] == 'old-point':
-                        raise gc.TargetBlockedPreDelete(1024, stage)
+                        raise gc.TargetBlockedPreDelete(dict(database_available_bytes=1024), stage, 'database-filesystem')
                     deleted.append(r.config['snapshot'])
                     r.state['phase'] = 'completed'
                 self.filesystem.side_effect = filesystem
@@ -171,6 +172,29 @@ class CleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(gc.ClusterObservationError, 'shared observer unavailable'):
                 gc.drain(self.kube, fixed_policy(), self.path, execute=True)
         self.assertEqual(json.loads(self.path.read_text())['phase'], 'failed')
+
+    def test_fold_budget_denial_only_defers_exact_snapshot_not_its_volume(self):
+        original = self.kube.items
+        def items(path, **selectors):
+            values = original(path, **selectors)
+            if path.endswith('/snapshots'):
+                values.append(dict(metadata=dict(name='second-point', uid='second-snapshot',
+                    labels={'fugue.pro/backup-run': 'second_run'}), spec=dict(volume='pvc-data')))
+            return values
+        self.kube.items = items
+        self.kube.ledger += [{**row(), 'run': 'second_run', 'snapshot': 'second-point', 'id': 'second-artifact'}]
+        executed = []
+        def run(r):
+            executed.append(r.config['snapshot'])
+            if r.config['snapshot'] == 'old-point':
+                raise gc.TargetBlockedPreDelete(dict(remaining_budget_bytes=-1), 'fenced', 'snapshot-fold')
+            r.state['phase'] = 'completed'
+        with patch.object(gc, 'observe', return_value=review()), patch.object(gc.Recovery, 'run', new=run):
+            result = gc.drain(self.kube, {**fixed_policy(), 'maxOperationsPerPass': 2}, self.path, execute=True)
+        self.assertEqual(executed, ['old-point', 'second-point'])
+        self.assertEqual(result['completed'], 1)
+        self.assertEqual(result['deferred_snapshot_uids'], ['snapshot-uid'])
+        self.assertNotIn('deferred_volume_uids', result)
 
     def test_unexpected_native_error_fails_and_preserves_partial_pass_evidence(self):
         def reconcile(kube, policy, path, **kwargs):

@@ -135,23 +135,28 @@ def declaration(kube, policy, platform, snapshot, rows, pod):
     return c
 
 
-def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uids=()):
+def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uids=(), deferred_snapshot_uids=()):
     validate_policy(policy)
     digest = hashlib.sha256(canonical(policy).encode()).hexdigest()
     result = dict(schema=policy['schema'], observed_at=timestamp(), preview=not execute,
                   policy_sha256=digest, completed=0, candidates=0, blocked=[], retained=[], phase='disabled')
     path = Path(evidence_path)
     deferred = set(deferred_volume_uids)
+    deferred_snapshots = set(deferred_snapshot_uids)
 
     def save():
         path.write_text(json.dumps(result, indent=2) + '\n')
 
     def target_blocked(c, error):
-        deferred.add(c['volumeUID'])
+        if error.scope == 'database-filesystem':
+            deferred.add(c['volumeUID'])
+        else:
+            # The fold budget can differ even between snapshots of one volume.
+            deferred_snapshots.add(c['snapshotUID'])
         result['blocked'].append(dict(
             kind='target_blocked_pre_delete', snapshot=c['snapshot'], snapshot_uid=c['snapshotUID'],
             volume=c['volume'], volume_uid=c['volumeUID'], namespace=c['namespace'], cluster=c['cluster'],
-            reason=str(error), admission_stage=error.stage, budget=error.budget,
+            capacity_scope=error.scope, reason=str(error), admission_stage=error.stage, budget=error.budget,
             observed_at=timestamp(), retry='next scheduled reconciliation', deletion_attempted=False))
 
     def execute_recovery(recovery):
@@ -241,7 +246,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
         if snapshot['metadata'].get('deletionTimestamp') or snapshot.get('status', {}).get('markRemoved'):
             continue
         name, volume_name = snapshot['metadata']['name'], snapshot['spec']['volume']
-        if volumes.get(volume_name, {}).get('metadata', {}).get('uid') in deferred:
+        if snapshot['metadata']['uid'] in deferred_snapshots or volumes.get(volume_name, {}).get('metadata', {}).get('uid') in deferred:
             continue
         if volume_name not in ledger_cache:
             require(len(ledger_cache) < 32, 'snapshot volume inventory exceeds observation budget')
@@ -276,7 +281,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
             c = declaration(kube, policy, platform, snapshot, ledger_cache[volume_name], owners[0] if len(owners) == 1 else {})
             review = observe(preflight, c)
             if not review['ready_for_review']:
-                result['blocked'].append(dict(snapshot=name, reason='working-space gate failed; no deletion permitted', budget=review['budget']))
+                target_blocked(c, TargetBlockedPreDelete(review['budget'], 'discovery', 'snapshot-fold'))
                 save()
                 continue
         except ClusterObservationError:
@@ -316,7 +321,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
             result['operation'] = r.operation
             execute_recovery(r)
         return result
-    result['phase'] = 'blocked' if result['blocked'] or deferred else 'idle'
+    result['phase'] = 'blocked' if result['blocked'] or deferred or deferred_snapshots else 'idle'
     save()
     return result
 
@@ -327,7 +332,7 @@ def drain(kube, policy, evidence_path, *, execute=False):
     if not execute or 'recoveryBudget' not in policy:
         return reconcile(kube, policy, evidence_path, execute=execute)
     started, passes = time.monotonic(), []
-    deferred = set()
+    deferred, deferred_snapshots = set(), set()
     result = dict(schema=policy['schema'], observed_at=timestamp(), preview=False, phase='inspecting',
                   completed=0, candidates=0, passes=passes)
     path = Path(evidence_path)
@@ -341,7 +346,8 @@ def drain(kube, policy, evidence_path, *, execute=False):
         path.write_text(json.dumps(result, indent=2) + '\n')
         pass_path = Path(str(path) + '.pass-' + str(index) + '.json')
         try:
-            current = reconcile(kube, policy, str(pass_path), execute=True, deferred_volume_uids=deferred)
+            current = reconcile(kube, policy, str(pass_path), execute=True, deferred_volume_uids=deferred,
+                                deferred_snapshot_uids=deferred_snapshots)
         except Exception as error:
             # Do not leave the aggregate falsely at "inspecting" when an
             # executor fails. Preserve the last partial pass and re-raise.
@@ -356,10 +362,13 @@ def drain(kube, policy, evidence_path, *, execute=False):
             raise
         passes.append(current)
         target_blocks = [b for b in current.get('blocked', []) if b.get('kind') == 'target_blocked_pre_delete']
-        deferred.update(b['volume_uid'] for b in target_blocks)
+        deferred.update(b['volume_uid'] for b in target_blocks if b['capacity_scope'] == 'database-filesystem')
+        deferred_snapshots.update(b['snapshot_uid'] for b in target_blocks if b['capacity_scope'] == 'snapshot-fold')
         result.update(phase=current['phase'], completed=sum(p['completed'] for p in passes), candidates=current['candidates'])
         if deferred:
             result['deferred_volume_uids'] = sorted(deferred)
+        if deferred_snapshots:
+            result['deferred_snapshot_uids'] = sorted(deferred_snapshots)
         path.write_text(json.dumps(result, indent=2) + '\n')
         if (current['phase'] != 'completed' and not current.get('retry_discovery')) or time.monotonic() - started >= policy['maxPassSeconds']:
             break

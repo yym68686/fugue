@@ -41,11 +41,16 @@ class CapacityBlocked(ValueError):
 
 
 class TargetBlockedPreDelete(CapacityBlocked):
-    """The proven target's database filesystem was below its safety floor."""
-    def __init__(self, free, stage):
-        super().__init__(dict(database_available_bytes=free,
-                              minimum_database_available_bytes=MIN_DATABASE_AVAILABLE_BYTES), stage,
-                         'target database space is below the hard stop; no deletion permitted')
+    """A proven target-specific capacity gate denied work before DELETE."""
+    def __init__(self, budget, stage, scope):
+        messages = {
+            'database-filesystem': 'target database space is below the hard stop; no deletion permitted',
+            'snapshot-fold': 'working-space gate failed for this snapshot; no deletion permitted',
+        }
+        if scope not in messages:
+            raise ValueError('invalid pre-delete target capacity scope')
+        super().__init__(budget, stage, messages[scope])
+        self.scope = scope
 
 
 def database_filesystem(kube, c, *, predelete_stage=None):
@@ -67,7 +72,9 @@ def database_filesystem(kube, c, *, predelete_stage=None):
         require(fields[-1] == '/var/lib/postgresql/data', 'database filesystem is not the target mount')
         same(kube.get('pod', c['primary'], c['namespace']), c['primary'], c['primaryUID'])
         same(kube.get('pvc', c['primary'], c['namespace']), c['primary'], c['pvcUID'])
-        raise TargetBlockedPreDelete(free, predelete_stage)
+        raise TargetBlockedPreDelete(dict(database_available_bytes=free,
+                                          minimum_database_available_bytes=MIN_DATABASE_AVAILABLE_BYTES),
+                                     predelete_stage, 'database-filesystem')
     require(free >= MIN_DATABASE_AVAILABLE_BYTES, 'database space is below the hard stop')
     return pod, free
 
@@ -563,7 +570,7 @@ class Recovery:
         if not existing or retry_aborted:
             review = observe(self.kube, c)
             if not review['ready_for_review']:
-                raise CapacityBlocked(review['budget'], 'preflight')
+                raise TargetBlockedPreDelete(review['budget'], 'preflight', 'snapshot-fold')
             try:
                 before = self.health(predelete_stage='preflight')
             except TargetBlockedPreDelete:
@@ -599,7 +606,7 @@ class Recovery:
                 self.install_barriers(review)
                 fresh = observe(self.kube, c, lease_holder=self.holder)
                 if not fresh['ready_for_review']:
-                    raise CapacityBlocked(fresh['budget'], 'fenced')
+                    raise TargetBlockedPreDelete(fresh['budget'], 'fenced', 'snapshot-fold')
                 require(stable_chain(fresh) == stable_chain(review), 'immutable ancestry changed')
                 self.health(predelete_stage='fenced')
                 self.record['data']['review.json'] = canonical(fresh)

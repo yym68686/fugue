@@ -108,6 +108,8 @@ identified target is already below it before DELETE, cleanup records
 `target_blocked_pre_delete`, defers that volume for the current run, and can
 re-observe other volumes within its bounds. A fenced denial only permits this
 after release of that operation's Lease and admission fences is verified.
+Longhorn fold-capacity denials defer the exact snapshot instead of its entire
+volume: another snapshot on the same volume can have a different write budget.
 Unknown DELETE outcomes, observation errors and post-DELETE space or health
 failures do not become deferred-volume results. Operators should inspect
 scheduled cleanup receipts for deferred targets even when the job succeeds.
