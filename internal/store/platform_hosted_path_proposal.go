@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -33,7 +34,8 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 		}
 	}
 	proposals, rejected := pc.BuildIndependentHostedScopeProposals(src, stage, capture)
-	if len(proposals) == 0 {
+	refusals := hostedExternalRefusals(rejected)
+	if len(proposals) == 0 && len(refusals) == 0 {
 		return nil, rejected
 	}
 	a, b := src.Authority, src.Publication
@@ -43,6 +45,11 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 	}
 	if err := s.ValidateHostedDispatchSelections(ctx, []HostedDispatchSelection{{Scope: pc.GlobalScopeKey, Full: full, LKGID: a.LKGID, EvidenceHash: a.EvidenceHash, ExpiresAt: a.ExpiresAt}}); err != nil {
 		return nil, err
+	}
+	// Diagnostic persistence is not a write precondition for an independently
+	// valid sibling. The status read rechecks current authority and desired paths.
+	if err := s.rememberHostedExternalRefusals(ctx, src, *capture.Desired.InputSnapshot.CapturedAt, refusals); err != nil {
+		rejected = errors.Join(rejected, fmt.Errorf("cache host compiler diagnostics: %w", err))
 	}
 	var ids []string
 	for _, p := range proposals {

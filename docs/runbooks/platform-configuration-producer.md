@@ -55,7 +55,17 @@ That refresh is not a path selection or a serving receipt.
 The platform-admin `--wait` and `routes status --plan` check the hostname's
 own serving decision when one exists. A prepare or partial withdrawal is
 not a verified change. For an independently selected host, inspect the
-decision, phase, required/passing counts and evidence expiry. Only when
+decision, phase, required/passing counts, evidence expiry, and receipt states
+for each physical node, artifact kind and DNS zone. A saved request with no
+decision can show `host_preparation` if it has an exact, signed current offer.
+This lists the draft, parent and required member blockers (missing capability
+or missing/outdated evidence). This read never writes a decision or receipt.
+An external shared-target candidate rejected before an offer exists can show
+`host_compile_conflict` with its record, conflicting field and capture time.
+Only a recent refusal for the same desired paths and still-current parent is
+reported; an absent conflict is not evidence of eligibility. The producer
+also reports these refusals in its `hosted path compiler proposals` log.
+Only when
 there is no independent head can the verified global baseline answer.
 Neither result replaces a public acceptance check: verify delegated DNS
 over UDP and TCP, TLS ownership and each public HTTPS path

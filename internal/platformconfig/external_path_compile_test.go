@@ -2,6 +2,7 @@ package platformconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,9 +12,28 @@ import (
 )
 
 func externalFourRouteEdit(t *testing.T) (HostedAddressSource, CompileRequest) {
+	return externalFourRouteEditWithThirdEndpoint(t, false)
+}
+
+func externalFourRouteEditWithThirdEndpoint(t *testing.T, extra bool) (HostedAddressSource, CompileRequest) {
 	t.Helper()
 	const h = "outside.example.org"
 	r := consumerPlacementFixture()
+	if extra {
+		endpoint := r.RuntimeSnapshot.DNSEdgeEndpoints[1]
+		endpoint.EdgeID, endpoint.A, endpoint.AAAA = "edge-c", []string{"93.184.216.36"}, nil
+		r.RuntimeSnapshot.DNSEdgeEndpoints = append(r.RuntimeSnapshot.DNSEdgeEndpoints, endpoint)
+		for i := range r.RuntimeSnapshot.DNSSelections {
+			sel := &r.RuntimeSnapshot.DNSSelections[i]
+			candidate := sel.Candidates[1]
+			candidate.EdgeID, candidate.IP = endpoint.EdgeID, endpoint.A[0]
+			sel.Candidates = append(sel.Candidates, candidate)
+			for j := range sel.ScopedCandidates {
+				scope := &sel.ScopedCandidates[j]
+				scope.Candidates = append(scope.Candidates, candidate)
+			}
+		}
+	}
 	r.Policy.MinimumHealthyEdges = 1
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	d := &r.Intent.DNS[0]
@@ -66,6 +86,41 @@ func externalFourRouteEdit(t *testing.T) (HostedAddressSource, CompileRequest) {
 	edit.Intent.Generation = "new-routes"
 	edit.RuntimeSnapshot.IntentGeneration = edit.Intent.Generation
 	return src, edit
+}
+
+func TestExternalPathThreeAddressReplaySeparatesDeclarationAndEligibility(t *testing.T) {
+	source, edit := externalFourRouteEditWithThirdEndpoint(t, true)
+	target := edit.Intent.DNS[0].Hostname
+	held := HostedAddressHold{"edge-c", "edge-group-b", "93.184.216.36"}
+	edit.RuntimeSnapshot.DNSEdgeEndpoints = edit.RuntimeSnapshot.DNSEdgeEndpoints[:2]
+	for i := range edit.RuntimeSnapshot.DNSSelections {
+		sel := &edit.RuntimeSnapshot.DNSSelections[i]
+		sel.Candidates = sel.Candidates[:2]
+		for j := range sel.ScopedCandidates {
+			s := &sel.ScopedCandidates[j]
+			s.Candidates = s.Candidates[:2]
+		}
+	}
+	stage, capture, err := CompileHostedPathWithCapture(edit, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = BuildHostedScopeProposals(source, stage, capture)
+	var conflict *ExternalTargetConflict
+	if !errors.As(err, &conflict) || conflict.Target != target || conflict.RecordType != "A" ||
+		conflict.Field != "addresses" || conflict.ExpectedAddresses != 3 || conflict.CandidateAddresses != 2 {
+		t.Fatalf("unexplained address removal lacks a precise refusal: %v", err)
+	}
+	source.EffectiveHolds = []HostedAddressHold{held}
+	proposals, err := BuildHostedScopeProposals(source, stage, capture)
+	if err != nil || len(proposals) != 1 {
+		t.Fatal("same effective candidate with a declared hold must remain publishable", err)
+	}
+	p := proposals[0]
+	if len(p.Physical) != 3 || len(p.Eligible) != 2 || len(p.Records) != 1 || len(p.Records[0].Values) != 3 ||
+		!slices.Contains(p.Records[0].Values, held.Address) || !slices.Equal(p.ExternalPath.Held, []HostedAddressHold{held}) {
+		t.Fatalf("expected three declared addresses and two eligible: %+v", p)
+	}
 }
 
 // Keep the physical RR in the real selected compiler output. Derive the

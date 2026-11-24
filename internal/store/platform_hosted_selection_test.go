@@ -292,6 +292,9 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 			t.Fatal("foreign membership disclosed", e)
 		}
 	}
+	if _, err := db.Exec(`CREATE TABLE fugue_meta (key text PRIMARY KEY,value text NOT NULL,updated_at timestamptz NOT NULL DEFAULT clock_timestamp())`); err != nil {
+		t.Fatal(err)
+	}
 	t.Run("real producer admission with legacy and enrolled members", func(t *testing.T) { qualifyHostedProducerAdmission(t, db) })
 	t.Run("current physical holds", func(t *testing.T) {
 		exec := func(q string, args ...any) {
@@ -301,7 +304,6 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 			}
 		}
 		exec("CREATE TABLE fugue_edge_nodes (id text PRIMARY KEY, edge_group_id text,public_ipv4 text,public_ipv6 text)")
-		exec("CREATE TABLE fugue_meta (key text PRIMARY KEY,value text)")
 		exec("CREATE TABLE fugue_platform_consumer_retirements (consumer_id text,artifact_kind text,scope_key text)")
 		ip4 := pc.HostedAddressHold{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", Address: "192.0.2.1"}
 		ip6 := ip4
@@ -324,7 +326,7 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		check(true)
 		o := platformproducer.OfflineRecoveryObservation{EdgeID: h.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(h), LastSuccess: now, LastAttempt: now, ProofValidUntil: now.Add(time.Hour), Successes: 3, Admitted: true}
 		body, _ := json.Marshal(o)
-		exec("INSERT INTO fugue_meta VALUES($1,$2)", observationCheckpointKey(platformproducer.OfflineRecoveryKey(h)), string(body))
+		exec("INSERT INTO fugue_meta(key,value) VALUES($1,$2)", observationCheckpointKey(platformproducer.OfflineRecoveryKey(h)), string(body))
 		check(false) // ready now; a program assuming this endpoint is held is obsolete
 		p.Eligible = p.Physical
 		check(true)

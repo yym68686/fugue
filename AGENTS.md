@@ -96,6 +96,7 @@
 
 - For release work, lead each update with the observed change in production state (or explicitly say that none changed). Separate intent saved, build, component rollout, consumer selection, and real dispatch/withdrawal. Do not substitute a lower stage for the requested outcome.
 - Record the first unsatisfied transition, the evidence or input that could change it, and the next executable action. If the blocker, inputs, and available action are unchanged, do not rerun the same publication, CI, or full probe matrix or report it as progress. Continue required monitoring with bounded, read-only observations; report new state or an actionable blocker.
+- Before a production push, state which observable production fact the exact release should change and how to verify it. After deployment, check that prediction against the exact revision and current serving or consumer evidence. If the push only adds a prerequisite or diagnosis, do not predict production traffic will change.
 
 - `make test` must pass for API changes.
 - `make test` already includes the generated-artifact drift check; if it fails, regenerate instead of bypassing the check.

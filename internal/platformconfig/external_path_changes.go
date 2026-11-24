@@ -19,6 +19,18 @@ type externalPathChange struct {
 	before, after map[string]string
 }
 
+// HostedExternalCompileRefusal binds a structured comparison error to the
+// exact compiler-owned intent. The producer can retain it for diagnostics
+// without turning the rejected candidate into a draft.
+type HostedExternalCompileRefusal struct {
+	Host, TenantID, AppID, DesiredPathsDigest string
+	Conflict                                  *ExternalTargetConflict
+	Cause                                     error
+}
+
+func (r *HostedExternalCompileRefusal) Error() string { return r.Cause.Error() }
+func (r *HostedExternalCompileRefusal) Unwrap() error { return r.Cause }
+
 func externalPathChanges(before, after PlatformIntent) map[string]externalPathChange {
 	type declaration struct {
 		target ExternalPathTarget
@@ -126,6 +138,12 @@ func buildExternalPathProposal(src HostedAddressSource, original, desired hostPr
 	_, delta, err := ComposeExternalPathRequirements(target, staged.dns.ReadinessPlan, desired.dns.ReadinessPlan, original.dns.Policy.DNSReadiness,
 		slices.Sorted(maps.Keys(change.before)), slices.Sorted(maps.Keys(change.after)), rows, desired.dns.Records)
 	if err != nil {
+		var conflict *ExternalTargetConflict
+		if errors.As(err, &conflict) {
+			if digest, digestErr := Digest(change.after); digestErr == nil {
+				return empty, &HostedExternalCompileRefusal{Host: target.Hostname, TenantID: target.TenantID, AppID: target.AppID, DesiredPathsDigest: digest, Conflict: conflict, Cause: err}
+			}
+		}
 		return empty, err
 	}
 	build := func(side hostProposalSide, paths map[string]string) (HostedDispatchRows, []DNSReadinessProbe, error) {

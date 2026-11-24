@@ -17,13 +17,52 @@ import (
 const hostedCurrentSetSQL = `SELECT id,release_set_id,artifact_release_id,artifact_kind,scope_key,scope_json,expected_generation,topology_revision,revision,requires_consumers,required_cardinality,optional_cardinality,heartbeat_deadline,convergence_deadline,consumers_json,created_at,updated_at
  FROM fugue_platform_expected_consumer_sets WHERE release_set_id=$1 AND artifact_release_id=$2 AND artifact_kind=$3 AND scope_key=$4 ORDER BY revision DESC,id LIMIT 1`
 
-const hostedMemberFactSQL = `SELECT id,consumer_id,credential_id,token_id,component,node_id,artifact_kind,scope_key,release_set_id,expected_consumer_set_id,fencing_token,supported_kinds_json,protocol_version,schema_version,compatibility_capabilities_json,sequence,issued_at,nonce,generation_sequence,evidence_hash,identity_verified,desired_generation,actual_generation,candidate_generation,lkg_generation,apply_status,probe_status,serving_lkg,lkg_expired,last_error,last_heartbeat_at,updated_at
- FROM fugue_platform_consumer_instances WHERE consumer_id=$1 AND artifact_kind=$2 AND scope_key=$3 FOR SHARE`
+const hostedMemberFactReadSQL = `SELECT id,consumer_id,credential_id,token_id,component,node_id,artifact_kind,scope_key,release_set_id,expected_consumer_set_id,fencing_token,supported_kinds_json,protocol_version,schema_version,compatibility_capabilities_json,sequence,issued_at,nonce,generation_sequence,evidence_hash,identity_verified,desired_generation,actual_generation,candidate_generation,lkg_generation,apply_status,probe_status,serving_lkg,lkg_expired,last_error,last_heartbeat_at,updated_at
+ FROM fugue_platform_consumer_instances WHERE consumer_id=$1 AND artifact_kind=$2 AND scope_key=$3`
+const hostedMemberFactSQL = hostedMemberFactReadSQL + " FOR SHARE"
 
 // Do not add this capability to a generic client or to old global receipts.
 // Only a process that can persist, serve, observe and withdraw a scoped
 // selection for this kind may advertise it. The fact does not count as an ACK.
 const hostedMemberProtocol = routeartifact.HostedPacketKind
+
+// Return the same refusal for the writer and read-only status. Report no
+// credentials, raw heartbeats, or untrusted consumer error text to callers.
+func pgHostedMemberBlocker(ctx context.Context, tx *sql.Tx, p pc.HostedScopeProposal, m model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment, now time.Time, lock bool) (code, capability string, err error) {
+	q := hostedMemberFactReadSQL
+	if lock {
+		q = hostedMemberFactSQL
+	}
+	f, err := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, q, m.ConsumerID, a.ArtifactKind, pc.GlobalScopeKey))
+	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, ErrNotFound) {
+		return "member_evidence_missing", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	// Do not attribute the absence of a capability to the expected executor
+	// when the stored fact belongs to a different or unauthenticated one.
+	if !f.IdentityVerified || f.ConsumerID != m.ConsumerID || f.Component != m.Component || f.NodeID != m.NodeID ||
+		f.ReleaseSetID != a.ReleaseSetID || f.ExpectedConsumerSetID != a.ExpectedConsumerSetID || f.FencingToken != a.FencingToken {
+		return "member_evidence_not_current", "", nil
+	}
+	if !slices.Contains(f.CompatibilityCapabilities, hostedMemberProtocol) {
+		return "member_capability_missing", hostedMemberProtocol, nil
+	}
+	if p.ExternalPath != nil && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
+		if !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedTargetCapability) {
+			return "member_capability_missing", routeartifact.HostedSharedTargetCapability, nil
+		}
+		if len(p.ExternalPath.Held) > 0 && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedHoldCapability) {
+			return "member_capability_missing", routeartifact.HostedSharedHoldCapability, nil
+		}
+	}
+	ok, err := pgHostedMemberCapable(ctx, tx, m, a, f, now)
+	if !ok && err == nil {
+		return "member_evidence_not_current", "", nil
+	}
+	return "", "", err
+}
 
 func hostedMemberCapable(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment, f model.PlatformConsumerInstance, now time.Time) bool {
 	return trafficCapabilityFactFresh(member, f, now) && f.ConsumerID == member.ConsumerID && f.ArtifactKind == a.ArtifactKind && f.ScopeKey == a.ScopeKey &&
@@ -129,21 +168,9 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 		return err
 	}
 	parts, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
-		f, e := scanPlatformConsumerInstance(tx.QueryRowContext(ctx, hostedMemberFactSQL, member.ConsumerID, a.ArtifactKind, pc.GlobalScopeKey))
-		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
-			return false, nil
-		}
-		if e != nil {
-			return false, e
-		}
-		if p.ExternalPath != nil && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedTargetCapability) {
-			return false, nil
-		}
-		if p.ExternalPath != nil && len(p.ExternalPath.Held) > 0 && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedHoldCapability) {
-			return false, nil
-		}
-		return pgHostedMemberCapable(ctx, tx, member, a, f, time.Now().UTC())
-	})
+		code, _, err := pgHostedMemberBlocker(ctx, tx, p, member, a, time.Now().UTC(), true)
+		return code == "" && err == nil, err
+	}, nil)
 	if err != nil || len(parts) == 0 {
 		return err
 	}
@@ -187,7 +214,7 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 // Reconstruct exact parts from the selected image and current physical registrations.
 // Only admission requires capability facts; status reads never issue member credentials
 // or turn a registration into an observation.
-func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error)) (map[string]string, []hostedMemberDirectoryEntry, error) {
+func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error), visitPart func(string, routeartifact.HostedRecipient)) (map[string]string, []hostedMemberDirectoryEntry, error) {
 	type receiver struct{ node, kind, group, component string }
 	need := map[receiver]bool{}
 	slots := map[routeartifact.HostedRecipient]bool{}
@@ -242,6 +269,9 @@ func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.Platfor
 				}
 				delete(slots, part.Recipient)
 				parts[k] = part.ContentDigest
+				if visitPart != nil {
+					visitPart(k, part.Recipient)
+				}
 			}
 			delete(need, key)
 			directory = append(directory, hostedMemberDirectoryEntry{delivery.Member, spec.kind, set.ID, spec.id})

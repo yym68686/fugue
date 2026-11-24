@@ -115,7 +115,7 @@ func (s *Server) handleProjectHostRouteStatus(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if r.URL.Query().Get("preflight") == "true" {
-		if desired && !owned && status.State == "pending" && s.pendingHostedPathCandidate(r.Context(), project, plan) {
+		if desired && !owned && status.State == "pending" && status.HostPreparation == nil && status.HostCompileConflict == nil && s.pendingHostedPathCandidate(r.Context(), project, plan) {
 			status.Reason = "compiler draft matches the saved host-only edit; no verified serving selection for these paths"
 		}
 		check := model.ProjectHostRoutePreflight{State: "not_applicable", Reason: status.Reason}
@@ -150,6 +150,9 @@ func resolveHostPublication(scoped func() (model.ProjectHostRoutePublicationStat
 		if owned || err != nil {
 			return h, owned, err
 		}
+	}
+	if g.State == "pending" && (h.HostPreparation != nil || h.HostCompileConflict != nil) {
+		return h, false, nil
 	}
 	return g, false, nil
 }

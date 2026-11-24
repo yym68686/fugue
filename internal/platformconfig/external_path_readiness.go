@@ -2,6 +2,7 @@ package platformconfig
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"reflect"
@@ -21,6 +22,20 @@ type ExternalPathTarget struct {
 	TenantID string   `json:"tenant_id"`
 	AppID    string   `json:"app_id"`
 	Members  []string `json:"members"`
+}
+
+// ExternalTargetConflict describes a rejected path-only plan. It is not
+// evidence that the candidate was ever selected or served.
+type ExternalTargetConflict struct {
+	Target             string
+	RecordType         string
+	Field              string
+	ExpectedAddresses  int
+	CandidateAddresses int
+}
+
+func (e *ExternalTargetConflict) Error() string {
+	return fmt.Sprintf("shared DNS target %s %s: different %s (expected addresses=%d candidate addresses=%d)", e.Target, e.RecordType, e.Field, e.ExpectedAddresses, e.CandidateAddresses)
 }
 
 // ComposeExternalPathRequirements returns only a dependency overlay. All
@@ -82,8 +97,26 @@ func ComposeExternalPathRequirements(b ExternalPathTarget, base, want *DNSReadin
 	}
 	left, ok := wire(baseRR, base)
 	right, yes := wire(wantRR, want)
-	if !ok || !yes || !reflect.DeepEqual(left, right) {
+	if !ok || !yes {
 		return nil, HostedReadinessDelta{}, bad
+	}
+	for _, kind := range []string{"A", "AAAA"} {
+		x, a := left[kind]
+		y, present := right[kind]
+		field := ""
+		switch {
+		case a != present:
+			field = "record_presence"
+		case !slices.Equal(slices.Sorted(slices.Values(x.Values)), slices.Sorted(slices.Values(y.Values))):
+			field = "addresses"
+		case x.TTL != y.TTL:
+			field = "ttl"
+		case !reflect.DeepEqual(x, y):
+			field = "record_metadata"
+		}
+		if field != "" {
+			return nil, HostedReadinessDelta{}, errors.Join(bad, &ExternalTargetConflict{b.Target, kind, field, len(x.Values), len(y.Values)})
+		}
 	}
 	return composeHostedReadinessAt(b.Hostname, b.Target, base, want, policy, before, after)
 }

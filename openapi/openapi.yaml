@@ -28579,6 +28579,39 @@ components:
           type: string
         release_id:
           type: string
+        host_compile_conflict:
+          description: Recent rejection of this exact saved hostname change on the still-current DNS parent. An observation, not a draft or decision.
+          type: object
+          additionalProperties: false
+          required: [parent_release_id, observed_at, target, record_type, field, expected_addresses, candidate_addresses]
+          properties:
+            parent_release_id: {type: string}
+            observed_at: {type: string, format: date-time}
+            target: {type: string}
+            record_type: {type: string, enum: [A, AAAA]}
+            field: {type: string}
+            expected_addresses: {type: integer}
+            candidate_addresses: {type: integer}
+        host_preparation:
+          description: Read-only evidence for the current signed offer before an independent decision. It does not authorize or prove serving traffic.
+          type: object
+          additionalProperties: false
+          required: [draft_id, sequence, parent_release_id]
+          properties:
+            draft_id: {type: string}
+            sequence: {type: integer, format: int64}
+            parent_release_id: {type: string}
+            blockers:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [code]
+                properties:
+                  code: {type: string}
+                  node_id: {type: string}
+                  artifact_kind: {type: string}
+                  capability: {type: string}
         host_selection:
           description: Present when this hostname owns an independent decision. Counts and expiry refer only to its current fence and signed member parts.
           type: object
@@ -28591,6 +28624,18 @@ components:
             required: {type: integer}
             passing: {type: integer}
             evidence_until: {type: string, format: date-time}
+            members:
+              type: array
+              description: Physical recipient parts and current receipt state for the exact decision. A missing receipt is not evidence of success or failure.
+              items:
+                type: object
+                additionalProperties: false
+                required: [node_id, artifact_kind, state]
+                properties:
+                  node_id: {type: string}
+                  artifact_kind: {type: string}
+                  zone: {type: string}
+                  state: {type: string, enum: [waiting, failed, expired, passed]}
         apply_preflight:
           type: object
           additionalProperties: false

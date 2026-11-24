@@ -32,6 +32,51 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	until := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)
 	host := "qualification.example.test"
 	base := pc.PreviousTrafficPublicationReference{ReleaseSetID: "parent", ReleaseID: "release", RouteArtifactID: "routes", TLSArtifactID: "certs", DNSArtifactID: "dns", ReleaseSetDigest: d, RouteArtifactDigest: d, TLSArtifactDigest: d, DNSArtifactDigest: d, FencingToken: 1}
+	t.Run("recent refusal is exact and cannot outlive a newer capture", func(t *testing.T) {
+		s := &Store{db: db, databaseURL: "fixture"}
+		source := pc.HostedAddressSource{Publication: base, Authority: pc.HostedProposalAuthority{ExpiresAt: until}}
+		refused := &pc.HostedExternalCompileRefusal{Host: host, TenantID: "tenant", AppID: "app", DesiredPathsDigest: d,
+			Conflict: &pc.ExternalTargetConflict{Target: "shared.example.test", RecordType: "A", Field: "addresses", ExpectedAddresses: 3, CandidateAddresses: 2},
+			Cause:    errors.New("fixture refusal")}
+		refs := hostedExternalRefusals(errors.Join(fmt.Errorf("compiled host: %w", refused), errors.New("other")))
+		if len(refs) != 1 || refs[0] != refused {
+			t.Fatalf("wrong structured refusals: %+v", refs)
+		}
+		at := time.Now().UTC().Truncate(time.Microsecond).Add(-time.Second)
+		if err := s.rememberHostedExternalRefusals(t.Context(), source, at, refs); err != nil {
+			t.Fatal(err)
+		}
+		read := func() (string, time.Time) {
+			t.Helper()
+			var raw string
+			var observed time.Time
+			if err := db.QueryRow(`SELECT value,updated_at FROM fugue_meta WHERE key=$1`, hostedCompileDiagnosticsKey).Scan(&raw, &observed); err != nil {
+				t.Fatal(err)
+			}
+			return raw, observed
+		}
+		raw, observed := read()
+		var report hostedCompileDiagnostics
+		if err := json.Unmarshal([]byte(raw), &report); err != nil {
+			t.Fatal(err)
+		}
+		_, scope := NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: host, TenantID: "tenant", AppID: "app"})
+		got := matchingHostedCompileDiagnostic(report, scope, d, observed)
+		if got == nil || got.CandidateAddresses != 2 || got.ExpectedAddresses != 3 ||
+			matchingHostedCompileDiagnostic(report, scope, digest("new paths"), observed) != nil ||
+			matchingHostedCompileDiagnostic(report, "other hostname", d, observed) != nil {
+			t.Fatalf("refusal escaped its exact domain intent: %+v", got)
+		}
+		if err := s.rememberHostedExternalRefusals(t.Context(), source, at.Add(time.Millisecond), nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.rememberHostedExternalRefusals(t.Context(), source, at, refs); err != nil {
+			t.Fatal(err)
+		}
+		if raw, _ := read(); raw != "" {
+			t.Fatal("out-of-order capture reintroduced superseded refusal")
+		}
+	})
 	owner := model.EdgeTLSAllowlistEntry{Hostname: host, TenantID: "tenant", AppID: "app"}
 	eligible := pc.HostedAddressHold{EdgeID: "alpha", EdgeGroupID: "group", Address: "192.0.2.1"}
 	held := pc.HostedAddressHold{EdgeID: "bravo", EdgeGroupID: "group", Address: "192.0.2.2"}
@@ -72,7 +117,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			m := model.PlatformExpectedConsumer{ConsumerID: id, NodeID: node, Component: component, ArtifactKind: kind, ScopeKey: "global", Cohort: "group", ExpectedGeneration: "gen", Required: true}
 			members = append(members, m)
 			caps := []string{platformcontrol.TrafficReleaseCapabilityV1, hostedMemberProtocol}
-			if i == 1 && node == "bravo" {
+			if node == "bravo" {
 				caps = caps[:1]
 			}
 			raw, _ := json.Marshal(caps)
@@ -102,8 +147,34 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 		}
 	}
 	check(0, 0)
+	checkBlockers := func(want []string) {
+		t.Helper()
+		tx, err := db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, im.Digest, wire, "prepare")
+		if err != nil {
+			t.Fatal(err)
+		}
+		blockers, err := pgHostedPreparationBlockers(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, unit, time.Now().UTC())
+		if err != nil || len(blockers) != len(want) {
+			t.Fatalf("incorrect read-only admission evidence: %+v %v; want %v", blockers, err, want)
+		}
+		for i, b := range blockers {
+			if b.Code != "member_capability_missing" || b.NodeID != "bravo" || b.ArtifactKind != want[i] || b.Capability != hostedMemberProtocol {
+				t.Fatalf("incorrect blocker: %+v", b)
+			}
+		}
+	}
+	checkBlockers(kinds[:2])
 	caps, _ := json.Marshal([]string{platformcontrol.TrafficReleaseCapabilityV1, hostedMemberProtocol})
 	exec("UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=$1 WHERE node_id='bravo' AND artifact_kind=$2", string(caps), kinds[1])
+	checkBlockers(kinds[:1])
+	check(0, 0)
+	exec("UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=$1 WHERE node_id='bravo' AND artifact_kind=$2", string(caps), kinds[0])
+	checkBlockers(nil)
 	check(1, 5)
 	check(1, 5)
 	var facts int
@@ -145,6 +216,20 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 		}
 		if err != nil || out.State != state || out.HostSelection == nil || out.HostSelection.Passing != count || out.HostSelection.Required != 5 || out.HostSelection.Phase != phase {
 			t.Fatal("incorrect publication status", err, out)
+		}
+		seenPassing := 0
+		for _, member := range out.HostSelection.Members {
+			if member.State == "passed" {
+				seenPassing++
+			} else if member.State != "waiting" {
+				t.Fatalf("unexpected test receipt state: %+v", member)
+			}
+			if member.NodeID == "" || member.ArtifactKind == "" || (member.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle) != (member.Zone != "") {
+				t.Fatalf("receipt lost physical identity: %+v", member)
+			}
+		}
+		if len(out.HostSelection.Members) != 5 || seenPassing != count {
+			t.Fatalf("receipt membership differs from aggregate: %+v", out.HostSelection)
 		}
 	}
 	verifyParts("prepare", 0, "pending", false)

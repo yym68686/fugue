@@ -53,6 +53,19 @@ func TestIndependentHostHeadCannotBeMaskedByGlobalPublication(t *testing.T) {
 	}
 }
 
+func TestHostPreparationEvidenceCannotClaimServingOrMaskVerifiedGlobal(t *testing.T) {
+	pending := model.ProjectHostRoutePublicationStatus{State: "pending", HostPreparation: &model.ProjectHostPreparationEvidence{DraftID: "draft", Sequence: 1}}
+	read := func() (model.ProjectHostRoutePublicationStatus, bool, error) { return pending, false, nil }
+	for _, state := range []string{"pending", "published"} {
+		out, owned, err := resolveHostPublication(read, func() model.ProjectHostRoutePublicationStatus {
+			return model.ProjectHostRoutePublicationStatus{State: state}
+		})
+		if err != nil || owned || out.State != state || (out.HostPreparation != nil) != (state == "pending") {
+			t.Fatalf("preparation changed serving authority: %+v %t %v", out, owned, err)
+		}
+	}
+}
+
 func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 	st, srv, token, admin, owner, _ := setupAppDomainTestServer(t)
 	spec := model.AppSpec{Image: "example.test/web:v1", Ports: []int{3000}, Replicas: 1, RuntimeID: "runtime_managed_shared"}

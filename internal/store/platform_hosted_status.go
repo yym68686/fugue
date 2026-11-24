@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -37,7 +39,11 @@ func (s *Store) ReadHostedRouteStatus(ctx context.Context, project model.Project
 	var matches bool
 	err = tx.QueryRowContext(ctx, `SELECT scope_key=$2 AND project_id=$3 FROM fugue_hosted_selections WHERE hostname=$1`, host, key, project.ID).Scan(&matches)
 	if errors.Is(err, sql.ErrNoRows) {
-		return empty, false, nil
+		out, err := s.pgHostedPreparationStatus(ctx, tx, project, plan, key, bind)
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
+			out, err = s.pgHostedExternalRefusalStatus(ctx, tx, project, plan, key)
+		}
+		return out, false, err
 	}
 	if err != nil || !matches {
 		return pending, true, err
@@ -50,6 +56,82 @@ func (s *Store) ReadHostedRouteStatus(ctx context.Context, project model.Project
 		return pending, true, err
 	}
 	return out, true, nil
+}
+
+func (s *Store) pgHostedPreparationStatus(ctx context.Context, tx *sql.Tx, project model.Project, plan model.ProjectHostRoutePlan, key string, bind func(ProjectHostRouteInputs, pc.HostedScopeProposal) (string, string, string, error)) (model.ProjectHostRoutePublicationStatus, error) {
+	var out model.ProjectHostRoutePublicationStatus
+	var offer model.ProjectHostPreparationEvidence
+	var hash, owner, paths, program string
+	var body []byte
+	var until time.Time
+	err := tx.QueryRowContext(ctx, `SELECT o.draft_id,o.sequence,o.draft_digest,o.owner_digest,o.path_digest,i.program_digest,i.body,o.expires_at
+ FROM fugue_hosted_path_prepare_offers o JOIN fugue_hosted_program_images i USING(scope_key,sequence,draft_id,draft_digest)
+ WHERE o.scope_key=$1 AND o.project_id=$2 AND o.expires_at>statement_timestamp()
+ AND (o.draft_id,o.draft_digest)=(SELECT id,content_hash FROM fugue_platform_artifacts
+ WHERE artifact_kind='hosted_path_proposal' AND scope_key=$1 AND status='draft' ORDER BY updated_at DESC,id LIMIT 1)`, key, project.ID).
+		Scan(&offer.DraftID, &offer.Sequence, &hash, &owner, &paths, &program, &body, &until)
+	if err != nil {
+		return out, err
+	}
+	host := plan.Edit.Hostname
+	read := pgDNSRouteSourceReader(ctx, tx)
+	p, err := s.hostedVerifiedDraft(read, host, key, offer.DraftID, hash, until)
+	if err != nil {
+		return out, err
+	}
+	in, err := pgProjectHostInputs(ctx, tx, project.ID, host, false)
+	if err != nil {
+		return out, err
+	}
+	realOwner, realPaths, dir, err := bind(in, p)
+	want, digestErr := pc.Digest(plan.After)
+	if err != nil || digestErr != nil || dir != "forward" || realOwner != owner || realPaths != paths || paths != want {
+		return out, ErrConflict
+	}
+	offer.ParentReleaseID = p.Base.ReleaseID
+	out = model.ProjectHostRoutePublicationStatus{State: "pending", Reason: "signed hostname preparation is not a serving selection", HostPreparation: &offer}
+	full, err := s.hostedSelectedBase(read, p)
+	if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+		offer.Blockers = []model.ProjectHostPreparationBlocker{{Code: "parent_release_not_current"}}
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	if err := s.checkHostedLiveHolds(ctx, tx, read, p, full, time.Now().UTC()); err != nil {
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			offer.Blockers = []model.ProjectHostPreparationBlocker{{Code: "address_authority_not_current"}}
+		} else {
+			return out, err
+		}
+	}
+	unit, err := routeartifact.OpenHostedPhase(p, hash, program, body, "prepare")
+	if err != nil {
+		return out, ErrConflict
+	}
+	blockers, err := pgHostedPreparationBlockers(ctx, tx, full, p, unit, time.Now().UTC())
+	offer.Blockers = append(offer.Blockers, blockers...)
+	return out, err
+}
+
+func pgHostedPreparationBlockers(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, now time.Time) ([]model.ProjectHostPreparationBlocker, error) {
+	var blockers []model.ProjectHostPreparationBlocker
+	parts, _, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(m model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
+		code, capability, err := pgHostedMemberBlocker(ctx, tx, p, m, a, now, false)
+		if code != "" {
+			blockers = append(blockers, model.ProjectHostPreparationBlocker{Code: code, NodeID: m.NodeID, ArtifactKind: a.ArtifactKind, Capability: capability})
+		}
+		// Continue through the remaining recipients to show all blockers.
+		// The parts constructed here are never used to select or serve.
+		return err == nil, err
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(parts) == 0 {
+		blockers = append(blockers, model.ProjectHostPreparationBlocker{Code: "member_manifest_incomplete"})
+	}
+	return blockers, nil
 }
 
 func (s *Store) pgHostedRouteStatus(ctx context.Context, tx *sql.Tx, project model.Project, plan model.ProjectHostRoutePlan, key string, bind func(ProjectHostRouteInputs, pc.HostedScopeProposal) (owner, paths, dir string, err error)) (model.ProjectHostRoutePublicationStatus, error) {
@@ -95,7 +177,10 @@ func (s *Store) pgHostedRouteStatus(ctx context.Context, tx *sql.Tx, project mod
 
 func pgHostedPublishedParts(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, manifest []byte, c HostedSuccessorClaim, phase string, until time.Time) (model.ProjectHostRoutePublicationStatus, error) {
 	var empty model.ProjectHostRoutePublicationStatus
-	current, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, nil)
+	recipients := map[string]routeartifact.HostedRecipient{}
+	current, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, nil, func(key string, r routeartifact.HostedRecipient) {
+		recipients[key] = r
+	})
 	if err != nil {
 		return empty, err
 	}
@@ -128,7 +213,70 @@ func pgHostedPublishedParts(ctx context.Context, tx *sql.Tx, full model.Platform
 	if h.Required != len(current) || h.Phase != phase || !until.After(time.Now()) {
 		return empty, ErrConflict
 	}
-	return hostedRouteEvidence(h, time.Now().UTC()), nil
+	out := hostedRouteEvidence(h, time.Now().UTC())
+	if out.HostSelection == nil {
+		return out, nil
+	}
+	members, passing, err := pgHostedPartObservations(ctx, tx, c, h.hostedSelectionHead, recipients)
+	if err != nil {
+		return empty, err
+	}
+	if passing != h.Passing || out.HostSelection.EvidenceUntil != nil && !out.HostSelection.EvidenceUntil.After(time.Now()) {
+		// The snapshot is immutable, but valid receipts can expire while this
+		// read runs. Do not advertise an older positive result alongside it.
+		h.Passing = passing
+		h.EvidenceUntil = time.Time{}
+		out = hostedRouteEvidence(h, time.Now().UTC())
+	}
+	out.HostSelection.Members = members
+	return out, nil
+}
+
+func pgHostedPartObservations(ctx context.Context, tx *sql.Tx, c HostedSuccessorClaim, h hostedSelectionHead, recipients map[string]routeartifact.HostedRecipient) ([]model.ProjectHostMemberReceipt, int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT m.key, CASE
+ WHEN r.part_key IS NULL THEN 'waiting'
+ WHEN least(h.valid_until,r.valid_until)<=statement_timestamp() THEN 'expired'
+ WHEN r.passing THEN 'passed' ELSE 'failed' END
+ FROM fugue_hosted_selections h CROSS JOIN LATERAL jsonb_each_text(h.members) m
+ LEFT JOIN fugue_hosted_selection_receipts r ON r.hostname=h.hostname AND r.fence=h.fence AND r.decision=h.decision
+ AND r.part_key=m.key AND r.content_digest=m.value AND r.observed_at>=h.selected_at AND r.observed_at<=statement_timestamp()
+ WHERE h.hostname=$1 AND h.scope_key=$2 AND h.project_id=$3 AND h.fence=$4 AND h.decision=$5`, c.Host, c.Scope, c.Project, h.Fence, h.Decision)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	members := make([]model.ProjectHostMemberReceipt, 0, len(recipients))
+	passing := 0
+	for rows.Next() {
+		var key, state string
+		if err := rows.Scan(&key, &state); err != nil {
+			return nil, 0, err
+		}
+		r, ok := recipients[key]
+		if !ok {
+			return nil, 0, ErrConflict
+		}
+		if state == "passed" {
+			passing++
+		}
+		members = append(members, model.ProjectHostMemberReceipt{NodeID: r.Node, ArtifactKind: r.Kind, Zone: r.Zone, State: state})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	if len(members) != len(recipients) {
+		return nil, 0, ErrConflict
+	}
+	slices.SortFunc(members, func(a, b model.ProjectHostMemberReceipt) int {
+		if n := strings.Compare(a.NodeID, b.NodeID); n != 0 {
+			return n
+		}
+		if n := strings.Compare(a.ArtifactKind, b.ArtifactKind); n != 0 {
+			return n
+		}
+		return strings.Compare(a.Zone, b.Zone)
+	})
+	return members, passing, nil
 }
 
 func hostedRouteEvidence(h hostedSelectionStatus, now time.Time) model.ProjectHostRoutePublicationStatus {

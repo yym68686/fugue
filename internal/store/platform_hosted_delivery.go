@@ -173,6 +173,18 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 }
 
 func (s *Store) hostedHeadProposal(read dnsRouteSourceReader, host, scopeKey, id, hash, authority string, until time.Time) (pc.HostedScopeProposal, error) {
+	p, err := s.hostedVerifiedDraft(read, host, scopeKey, id, hash, until)
+	if err != nil {
+		return p, err
+	}
+	auth, err := hostedAuthorityDigest(p)
+	if err != nil || auth != authority {
+		return p, ErrConflict
+	}
+	return p, nil
+}
+
+func (s *Store) hostedVerifiedDraft(read dnsRouteSourceReader, host, scopeKey, id, hash string, until time.Time) (pc.HostedScopeProposal, error) {
 	var p pc.HostedScopeProposal
 	draft, err := read.artifact(id)
 	if err != nil {
@@ -184,8 +196,7 @@ func (s *Store) hostedHeadProposal(read dnsRouteSourceReader, host, scopeKey, id
 		return p, ErrConflict
 	}
 	scope, key := NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: host, TenantID: p.Before.Owner.TenantID, AppID: p.Before.Owner.AppID})
-	auth, err := hostedAuthorityDigest(p)
-	if err != nil || auth != authority || scope != draft.Scope || key != scopeKey || until.After(p.Authority.ExpiresAt) {
+	if scope != draft.Scope || key != scopeKey || until.After(p.Authority.ExpiresAt) {
 		return p, ErrConflict
 	}
 	return p, nil
