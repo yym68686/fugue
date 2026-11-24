@@ -103,6 +103,19 @@ Keep this signed enrollment declaration with the hold after readmission; it
 is the authority for future Worker restarts. Do not use an old declaration or
 remove a tombstone as rollback.
 
+To prepare a node-local singleton without replacing the logical enrollment,
+keep those fields unchanged and add an optional `independent_deployment` with
+its exact `name`, Kubernetes `uid`, and digest-pinned `edge_image` and
+`caddy_image`. The API checks the live Pod → ReplicaSet → Deployment owner
+chain, node and ServiceAccount, the two images, and the singleton `Recreate`
+template. Configure the exact public Front Service UID in the API release
+before using this grant. Issuing the preparation credential neither selects
+traffic nor makes standby reports count: those still require the exact
+selected live Pod at that Service. Guardian's separate stable release
+monitor, preparation and connection witness are still required for cutover.
+Adding this grant does not change the DNS recovery checkpoint key or allow a
+held address to answer.
+
 Archived audit snapshots are deliberately not restoration/retention roots:
 their prior recovery obligations have explicitly been abandoned. Consequently
 the native root inventory stops retaining those old consumer generations without

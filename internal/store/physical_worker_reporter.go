@@ -45,6 +45,8 @@ func (p WorkerReporterPredecessor) Bind(ctx context.Context, digest, credential 
 	return context.WithValue(ctx, workerReporterKey{}, workerReporterAdmission{p, digest, credential})
 }
 
+func (p WorkerReporterPredecessor) Fenced() bool { return p.revision > 0 }
+
 // A held hosted-only recipient may never use legacy credential-only
 // reporting, even if it has not yet created a reporter head.
 func (s *Store) acceptHostedWorker(ctx context.Context, tx *sql.Tx, who platformcontrol.PlatformComponentIdentityClaims, selectedRequired bool) error {
@@ -62,14 +64,23 @@ func (s *Store) acceptPhysicalWorker(ctx context.Context, tx *sql.Tx, who platfo
 	if who.Component != model.PlatformConsumerComponentEdgeWorker || who.ScopeKey != "global" {
 		return nil
 	}
+	if tx == nil {
+		return ErrWorkerReporterChanged
+	}
 	var a workerReporterAdmission
 	var enabled bool
 	if len(observation) == 1 && observation[0] != nil {
 		a, enabled = observation[0].Value(workerReporterKey{}).(workerReporterAdmission)
 	}
 	if !enabled {
+		if who.WorkerFrontServiceUID != "" {
+			return ErrWorkerReporterChanged
+		}
 		// A missing rollout setting must not return an enrolled node to
 		// credential-only reporting. Unenrolled nodes remain unchanged.
+		if err := lockWorkerReporterEnrollment(ctx, tx, who.NodeID, false); err != nil {
+			return err
+		}
 		var exists bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_worker_reporter_heads WHERE node_id=$1)`, who.NodeID).Scan(&exists); err != nil {
 			return err
@@ -79,13 +90,16 @@ func (s *Store) acceptPhysicalWorker(ctx context.Context, tx *sql.Tx, who platfo
 		}
 		return nil
 	}
-	if tx == nil || a.store != s || who.Component != model.PlatformConsumerComponentEdgeWorker || who.ScopeKey != "global" || a.node != who.NodeID || a.credential != who.CredentialID || !inputDigestPattern.MatchString(a.observed) || time.Since(a.started) > 10*time.Second {
+	if a.store != s || a.node != who.NodeID || a.credential != who.CredentialID || !inputDigestPattern.MatchString(a.observed) || time.Since(a.started) > 10*time.Second {
 		return ErrWorkerReporterChanged
 	}
 	var err error
 	var r sql.Result
 	switch {
 	case a.revision == 0:
+		if err := lockWorkerReporterEnrollment(ctx, tx, who.NodeID, true); err != nil {
+			return err
+		}
 		r, err = tx.ExecContext(ctx, `INSERT INTO fugue_worker_reporter_heads (node_id,revision,binding) VALUES ($1,1,$2) ON CONFLICT (node_id) DO NOTHING`, a.node, a.observed)
 	case a.observed != a.binding:
 		r, err = tx.ExecContext(ctx, `UPDATE fugue_worker_reporter_heads SET revision=revision+1,binding=$4 WHERE node_id=$1 AND revision=$2 AND binding=$3`, a.node, a.revision, a.binding, a.observed)
@@ -107,4 +121,24 @@ func (s *Store) acceptPhysicalWorker(ctx context.Context, tx *sql.Tx, who platfo
 		return ErrWorkerReporterChanged
 	}
 	return err
+}
+
+// Until the head exists there is no row to lock. During a rolling activation,
+// an unfenced receipt can commit before the first fence, never after it.
+// Requests do not wait with compiler/publication locks held; the caller can
+// retry against a new observation. Read-committed is required so EXISTS,
+// queried separately after the lock, cannot read an older snapshot.
+func lockWorkerReporterEnrollment(ctx context.Context, tx *sql.Tx, node string, activation bool) error {
+	statement := `SELECT current_setting('transaction_isolation') = 'read committed' AND pg_try_advisory_xact_lock_shared(hashtextextended($1,0))`
+	if activation {
+		statement = `SELECT current_setting('transaction_isolation') = 'read committed' AND pg_try_advisory_xact_lock(hashtextextended($1,0))`
+	}
+	var locked bool
+	if err := tx.QueryRowContext(ctx, statement, "fugue.worker-reporter-enrollment/v1/"+node).Scan(&locked); err != nil {
+		return err
+	}
+	if !locked {
+		return ErrWorkerReporterChanged
+	}
+	return nil
 }

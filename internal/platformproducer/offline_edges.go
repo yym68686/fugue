@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -27,16 +29,27 @@ type OfflineEdge struct {
 // OfflineWorkerEnrollment authorizes a fresh global consumer incarnation on
 // the same physical Node. It cannot inherit a retired identity or its evidence.
 type OfflineWorkerEnrollment struct {
-	ID              string   `json:"id"`
-	NodeUID         string   `json:"node_uid"`
-	ServiceAccount  string   `json:"service_account"`
-	DaemonSetUIDs   []string `json:"daemonset_uids"`
-	PodCreatedAfter string   `json:"pod_created_after"`
+	ID                    string                   `json:"id"`
+	NodeUID               string                   `json:"node_uid"`
+	ServiceAccount        string                   `json:"service_account"`
+	DaemonSetUIDs         []string                 `json:"daemonset_uids"`
+	PodCreatedAfter       string                   `json:"pod_created_after"`
+	IndependentDeployment *OfflineWorkerDeployment `json:"independent_deployment,omitempty"`
+}
+
+// OfflineWorkerDeployment is an additive handoff grant for the same
+// enrolled consumer; it does not replace the signed DNS recovery identity.
+type OfflineWorkerDeployment struct {
+	Name       string `json:"name"`
+	UID        string `json:"uid"`
+	EdgeImage  string `json:"edge_image"`
+	CaddyImage string `json:"caddy_image"`
 }
 
 var offlineIdentity = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,127}$`)
 var offlineGroup = regexp.MustCompile(`^edge-group-[a-z0-9]+(?:-[a-z0-9]+)*$`)
 var offlineKubernetesUID = regexp.MustCompile(`^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$`)
+var offlineWorkerImage = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*(/[a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}$`)
 
 func (e OfflineWorkerEnrollment) Validate() error {
 	cutover, err := time.Parse(time.RFC3339, e.PodCreatedAfter)
@@ -48,6 +61,13 @@ func (e OfflineWorkerEnrollment) Validate() error {
 	for i, uid := range e.DaemonSetUIDs {
 		if !offlineKubernetesUID.MatchString(uid) || i > 0 && e.DaemonSetUIDs[i-1] >= uid {
 			return fmt.Errorf("ordered unique Worker workload UIDs required")
+		}
+	}
+	if d := e.IndependentDeployment; d != nil {
+		if !offlineKubernetesUID.MatchString(d.UID) || d.UID == e.NodeUID || slices.Contains(e.DaemonSetUIDs, d.UID) ||
+			len(validation.IsDNS1123Subdomain(d.Name)) != 0 || len(d.EdgeImage) > 512 || len(d.CaddyImage) > 512 ||
+			!offlineWorkerImage.MatchString(d.EdgeImage) || !offlineWorkerImage.MatchString(d.CaddyImage) {
+			return fmt.Errorf("independent Worker requires exact Deployment ownership and digest-pinned images")
 		}
 	}
 	return nil

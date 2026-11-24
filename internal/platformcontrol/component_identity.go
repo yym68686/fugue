@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -51,18 +52,21 @@ type PlatformComponentIdentityKeyring struct {
 }
 
 type PlatformComponentIdentityClaims struct {
-	Version            string   `json:"v"`
-	CredentialID       string   `json:"credential_id"`
-	TokenID            string   `json:"token_id"`
-	Component          string   `json:"component"`
-	NodeID             string   `json:"node_id"`
-	AuthorityID        string   `json:"authority_id,omitempty"`
-	WorkerEnrollmentID string   `json:"worker_enrollment_id,omitempty"`
-	ScopeKey           string   `json:"scope_key"`
-	ArtifactKinds      []string `json:"artifact_kinds"`
-	IssuedAtUnix       int64    `json:"issued_at"`
-	ExpiresAtUnix      int64    `json:"expires_at"`
+	Version               string   `json:"v"`
+	CredentialID          string   `json:"credential_id"`
+	TokenID               string   `json:"token_id"`
+	Component             string   `json:"component"`
+	NodeID                string   `json:"node_id"`
+	AuthorityID           string   `json:"authority_id,omitempty"`
+	WorkerEnrollmentID    string   `json:"worker_enrollment_id,omitempty"`
+	WorkerFrontServiceUID string   `json:"worker_front_service_uid,omitempty"`
+	ScopeKey              string   `json:"scope_key"`
+	ArtifactKinds         []string `json:"artifact_kinds"`
+	IssuedAtUnix          int64    `json:"issued_at"`
+	ExpiresAtUnix         int64    `json:"expires_at"`
 }
+
+var workerFrontServiceUID = regexp.MustCompile(`^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$`)
 
 type PlatformConsumerHeartbeatEnvelope struct {
 	ConsumerID                string    `json:"consumer_id"`
@@ -608,6 +612,10 @@ func normalizePlatformComponentIdentityClaims(claims PlatformComponentIdentityCl
 	if claims.WorkerEnrollmentID != "" && (claims.Component != model.PlatformConsumerComponentEdgeWorker ||
 		len(claims.ArtifactKinds) != 2 || !containsExactString(claims.ArtifactKinds, model.PlatformArtifactKindEdgeRouteBundle) ||
 		!containsExactString(claims.ArtifactKinds, model.PlatformArtifactKindCaddyRouteConfig)) {
+		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
+	}
+	if claims.WorkerFrontServiceUID != "" && (claims.WorkerEnrollmentID == "" ||
+		!workerFrontServiceUID.MatchString(claims.WorkerFrontServiceUID)) {
 		return PlatformComponentIdentityClaims{}, ErrPlatformComponentIdentityInvalid
 	}
 	if claims.Component == model.PlatformConsumerComponentDNSServer && claims.AuthorityID != "" || claims.WorkerEnrollmentID != "" {

@@ -58,7 +58,7 @@ def holds(policy):
             e = hold['worker_enrollment']
             required = {'id', 'node_uid', 'service_account', 'daemonset_uids', 'pod_created_after'}
             uid = r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}'
-            if 'recovery' not in hold or not isinstance(e, dict) or set(e) != required or any(not isinstance(e[k], str) for k in required-{'daemonset_uids'}) or not re.fullmatch(r'[a-f0-9]{32}', e['id']) or not re.fullmatch(uid, e['node_uid']) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', e['service_account']) or e['id'] in enrollments:
+            if 'recovery' not in hold or not isinstance(e, dict) or not required <= set(e) or set(e) - required - {'independent_deployment'} or any(not isinstance(e[k], str) for k in required-{'daemonset_uids'}) or not re.fullmatch(r'[a-f0-9]{32}', e['id']) or not re.fullmatch(uid, e['node_uid']) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', e['service_account']) or e['id'] in enrollments:
                 raise ValueError('replacement Worker requires a unique enrollment and exact Node ownership')
             ds = e['daemonset_uids']
             if not isinstance(ds, list) or not 1 <= len(ds) <= 2 or any(not isinstance(v, str) or not re.fullmatch(uid, v) for v in ds) or ds != sorted(set(ds)):
@@ -66,6 +66,15 @@ def holds(policy):
             created_after = datetime.datetime.strptime(e['pod_created_after'], '%Y-%m-%dT%H:%M:%SZ')
             if created_after.isoformat(timespec='seconds') + 'Z' != e['pod_created_after'] or created_after == datetime.datetime.min:
                 raise ValueError('canonical Worker Pod cutoff required')
+            if 'independent_deployment' in e:
+                d = e['independent_deployment']
+                image = r'[a-z0-9][a-z0-9._:-]*(/[a-z0-9][a-z0-9._-]*)+@sha256:[a-f0-9]{64}'
+                if (not isinstance(d, dict) or set(d) != {'name', 'uid', 'edge_image', 'caddy_image'}
+                        or not all(isinstance(v, str) for v in d.values())
+                        or not re.fullmatch(uid, d['uid']) or d['uid'] in [e['node_uid'], *ds]
+                        or len(d['name']) > 253 or any(not re.fullmatch(r'[a-z0-9]([a-z0-9-]*[a-z0-9])?', label) for label in d['name'].split('.'))
+                        or any(not re.fullmatch(image, d[k]) or len(d[k]) > 512 for k in ('edge_image', 'caddy_image'))):
+                    raise ValueError('independent Worker requires exact Deployment ownership and digest-pinned images')
             enrollments.add(e['id'])
         previous = hold['edge_id']
     return result
@@ -159,7 +168,7 @@ def recovery_declaration_digest(hold):
     # The runtime binds the typed OfflineEdge JSON, whose field order differs
     # from artifact map canonicalization. Keep the wire digest identical to Go,
     # including encoding/json's HTML and JavaScript separator escaping.
-    # Keep the independent hosted Worker permission out of the DNS digest.
+    # Keep hosted execution and independent workload grants out of the DNS digest.
     value = {key: hold[key] for key in ('edge_id', 'edge_group_id', 'public_ipv4', 'reason')}
     if hold.get('expected_recovery_date'):
         value['expected_recovery_date'] = hold['expected_recovery_date']

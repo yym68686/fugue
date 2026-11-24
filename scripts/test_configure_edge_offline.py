@@ -85,6 +85,30 @@ class OfflineConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             offline.validate(config)
 
+    def test_independent_worker_grant_keeps_same_dns_recovery_identity(self):
+        config, _ = self.fixture()
+        hold = config['projection_policy']['offline_edges'][0]
+        hold.update(reason='quota_exhausted', recovery={'hostname': 'api.example.test', 'path': '/', 'probe_interval_seconds': 300, 'probe_timeout_seconds': 5, 'success_threshold': 3, 'failure_threshold': 1, 'freshness_seconds': 1800})
+        hold.pop('expected_recovery_date')
+        hold['worker_enrollment'] = dict(id='a'*32, node_uid='11111111-1111-1111-1111-111111111111',
+                                         service_account='worker-account', daemonset_uids=['22222222-2222-2222-2222-222222222222'],
+                                         pod_created_after='2030-01-01T00:00:00Z')
+        previous = copy.deepcopy(config['projection_policy'])
+        pin = offline.recovery_declaration_digest(hold)
+        self.assertEqual(pin, 'sha256:29db956b07289dc7761a3421444a3b9df04a2af3156a944f6b6590f541958f02')
+        grant = dict(name='local-worker', uid='33333333-3333-3333-3333-333333333333',
+                     edge_image='registry.example/system/edge@sha256:'+'a'*64,
+                     caddy_image='registry.example/system/caddy@sha256:'+'b'*64)
+        hold['worker_enrollment']['independent_deployment'] = grant
+        config['projection_policy']['generation'] += '-handoff'
+        offline.validate(config)
+        self.assertEqual(offline.check_delta(previous, config['projection_policy']), hold['edge_id'])
+        self.assertEqual(offline.recovery_declaration_digest(hold), pin)
+        for invalid in (dict(grant, uid=hold['worker_enrollment']['node_uid']), dict(grant, edge_image='registry.example/system/edge:latest'), dict(grant, unknown=True)):
+            hold['worker_enrollment']['independent_deployment'] = invalid
+            with self.assertRaises(ValueError):
+                offline.validate(config)
+
     def test_preview_rejects_held_candidate_and_unrelated_changes(self):
         config, _ = self.fixture()
         before = {'business_snapshot_revision': 'before', 'intent': {'dns': [{'hostname': 'app.example.test'}]}, 'policy': {'minimum_healthy_edges': 1}, 'issues': []}

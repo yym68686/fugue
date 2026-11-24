@@ -78,6 +78,13 @@ func OfflineRecoveryDigest(hold OfflineEdge) string {
 	// A separate hosted Worker registration is not new DNS recovery evidence
 	// and must not reset or advance the existing DNS recovery window.
 	hold.KeepHostedRouteTLS = false
+	// A grant to prepare a particular independent incarnation under the same
+	// enrollment is not a new DNS hold, eligibility decision or observation.
+	if enrollment := hold.WorkerEnrollment; enrollment != nil && enrollment.IndependentDeployment != nil {
+		copy := *enrollment
+		copy.IndependentDeployment = nil
+		hold.WorkerEnrollment = &copy
+	}
 	d, _ := platformconfig.Digest(hold)
 	return d
 }

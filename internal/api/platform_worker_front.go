@@ -26,8 +26,9 @@ import (
 // Pins survive a selector handoff on the same Service but not its replacement.
 type WorkerFrontBindings map[string]workerFrontPin
 type workerFrontPin struct {
-	uid   string
-	reads chan struct{}
+	uid    string
+	staged bool
+	reads  chan struct{}
 }
 
 var workerServiceUID = regexp.MustCompile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -38,10 +39,11 @@ func ParseWorkerFrontBindings(raw string) (WorkerFrontBindings, error) {
 	if raw == "" {
 		return nil, nil // no overlap enrollment in this release
 	}
-	bad := errors.New("invalid FUGUE_WORKER_FRONT_BINDINGS: expected unique node and public Service UID pairs")
+	bad := errors.New("invalid FUGUE_WORKER_FRONT_BINDINGS: expected unique node and public Service UID pairs with optional staged or active mode")
 	var list []struct {
-		Node       string `json:"node"`
-		ServiceUID string `json:"service_uid"`
+		Node       string          `json:"node"`
+		ServiceUID string          `json:"service_uid"`
+		Mode       json.RawMessage `json:"mode"`
 	}
 	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -53,8 +55,12 @@ func ParseWorkerFrontBindings(raw string) (WorkerFrontBindings, error) {
 		if len(validation.IsDNS1123Subdomain(pin.Node)) != 0 || !workerServiceUID.MatchString(pin.ServiceUID) || out[pin.Node].uid != "" || seen[pin.ServiceUID] {
 			return nil, bad
 		}
+		mode := "active" // existing pins omitted the mode
+		if pin.Mode != nil && (json.Unmarshal(pin.Mode, &mode) != nil || string(pin.Mode) == "null" || (mode != "active" && mode != "staged")) {
+			return nil, bad
+		}
 		seen[pin.ServiceUID] = true
-		out[pin.Node] = workerFrontPin{pin.ServiceUID, make(chan struct{}, 2)}
+		out[pin.Node] = workerFrontPin{uid: pin.ServiceUID, staged: mode == "staged", reads: make(chan struct{}, 2)}
 	}
 	return out, nil
 }
@@ -161,20 +167,26 @@ type selectedWorkerRuntimeBinding struct {
 
 func (s *Server) admitPhysicalWorker(w http.ResponseWriter, r *http.Request, who platformcontrol.PlatformComponentIdentityClaims, positive bool) (context.Context, bool) {
 	pin, enabled := s.workerFrontBindings[who.NodeID]
+	if who.WorkerFrontServiceUID != "" && (!enabled || pin.uid != who.WorkerFrontServiceUID) {
+		// A pre-cutover credential must never become an unfenced reporting
+		// credential if a later API release removes or replaces this binding.
+		writeWorkerTransportUnavailable(w)
+		return r.Context(), false
+	}
 	if !enabled || who.Component != model.PlatformConsumerComponentEdgeWorker || who.ScopeKey != "global" {
 		return r.Context(), true
 	}
+	if !pin.staged && !strings.HasPrefix(who.CredentialID, "kubernetes:") {
+		httpx.WriteError(w, http.StatusForbidden, "reporter is not the selected physical Worker")
+		return r.Context(), false
+	}
 	status := http.StatusServiceUnavailable
 	admissionCtx := r.Context()
-	if !strings.HasPrefix(who.CredentialID, "kubernetes:") {
-		status = http.StatusForbidden
-	} else {
-		select {
-		case pin.reads <- struct{}{}:
-			defer func() { <-pin.reads }()
-			status, admissionCtx = s.checkPhysicalWorker(r.Context(), who, pin.uid, positive)
-		default:
-		}
+	select {
+	case pin.reads <- struct{}{}:
+		defer func() { <-pin.reads }()
+		status, admissionCtx = s.checkPhysicalWorker(r.Context(), who, pin, positive)
+	default:
 	}
 	if status == http.StatusOK {
 		return admissionCtx, true
@@ -192,18 +204,30 @@ func writeWorkerTransportUnavailable(w http.ResponseWriter) {
 	httpx.WriteJSON(w, http.StatusServiceUnavailable, httpx.ErrorResponse{Error: "selected Worker transport could not be verified", Code: "worker_transport_unavailable", Category: "unavailable", Retryable: true})
 }
 
-func (s *Server) checkPhysicalWorker(request context.Context, who platformcontrol.PlatformComponentIdentityClaims, serviceUID string, positive bool) (int, context.Context) {
+func (s *Server) checkPhysicalWorker(request context.Context, who platformcontrol.PlatformComponentIdentityClaims, pin workerFrontPin, positive bool) (int, context.Context) {
 	ctx, cancel := context.WithTimeout(kubeauth.WithObservationSite(request, kubeauth.ObservePublicFront), 4*time.Second)
 	defer cancel()
-	node, _, err := s.store.GetEdgeNode(who.NodeID)
-	if err != nil || node.ID != who.NodeID {
-		return http.StatusServiceUnavailable, ctx
-	}
 	predecessor, err := s.store.ReadWorkerReporterPredecessor(ctx, who.NodeID)
 	if err != nil {
 		return http.StatusServiceUnavailable, ctx
 	}
-	_, binding, status := s.inspectPhysicalWorker(ctx, node, who, serviceUID, positive)
+	if pin.staged && !predecessor.Fenced() {
+		// This release can serve as rollback for activation, but may not
+		// establish the first fence. The store serializes legacy commits
+		// with that first write while both API revisions are serving.
+		if who.WorkerFrontServiceUID != "" {
+			return http.StatusServiceUnavailable, ctx
+		}
+		return http.StatusOK, request
+	}
+	if !strings.HasPrefix(who.CredentialID, "kubernetes:") {
+		return http.StatusForbidden, ctx
+	}
+	node, _, err := s.store.GetEdgeNode(who.NodeID)
+	if err != nil || node.ID != who.NodeID {
+		return http.StatusServiceUnavailable, ctx
+	}
+	_, binding, status := s.inspectPhysicalWorker(ctx, node, who, pin.uid, positive)
 	if status != http.StatusOK {
 		return status, ctx
 	}

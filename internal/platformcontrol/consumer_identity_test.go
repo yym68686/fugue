@@ -16,12 +16,13 @@ func TestWorkerReplacementEnrollmentUsesOnlyFreshExactIdentity(t *testing.T) {
 	legacy.ArtifactKinds = []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig}
 	replacement := legacy
 	replacement.WorkerEnrollmentID = strings.Repeat("a", 32)
+	replacement.WorkerFrontServiceUID = "11111111-1111-1111-1111-111111111111"
 	token, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), replacement, now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	replacement, err = ParsePlatformComponentIdentity(platformComponentTestKeyring(), token, now)
-	if err != nil || replacement.ConsumerID() == legacy.ConsumerID() {
+	if err != nil || replacement.ConsumerID() == legacy.ConsumerID() || replacement.WorkerFrontServiceUID != "11111111-1111-1111-1111-111111111111" {
 		t.Fatal("replacement acquired legacy identity", err)
 	}
 	for _, kind := range replacement.ArtifactKinds {
@@ -50,6 +51,8 @@ func TestWorkerReplacementEnrollmentUsesOnlyFreshExactIdentity(t *testing.T) {
 	for _, invalid := range []PlatformComponentIdentityClaims{
 		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", WorkerEnrollmentID: replacement.WorkerEnrollmentID, CredentialID: "unbound", ArtifactKinds: replacement.ArtifactKinds},
 		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", AuthorityID: "cell-a", WorkerEnrollmentID: replacement.WorkerEnrollmentID, CredentialID: replacement.CredentialID, ArtifactKinds: replacement.ArtifactKinds},
+		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", WorkerFrontServiceUID: replacement.WorkerFrontServiceUID, CredentialID: replacement.CredentialID, ArtifactKinds: replacement.ArtifactKinds},
+		{Component: replacement.Component, NodeID: replacement.NodeID, ScopeKey: "global", WorkerEnrollmentID: replacement.WorkerEnrollmentID, WorkerFrontServiceUID: "not-a-service-uid", CredentialID: replacement.CredentialID, ArtifactKinds: replacement.ArtifactKinds},
 	} {
 		if _, err := IssuePlatformComponentIdentity(platformComponentTestKeyring(), invalid, now, time.Minute); err == nil {
 			t.Fatal("replacement identity accepted a foreign scope or unbound credential")

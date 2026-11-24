@@ -106,11 +106,12 @@ func (s *Server) handleExchangePlatformConsumerIdentity(w http.ResponseWriter, r
 	}
 	if policy.Component == model.PlatformConsumerComponentEdgeWorker && policy.ScopeKey == "global" && policy.AuthorityID == "" &&
 		len(policy.ArtifactKinds) == 2 && slices.Contains(policy.ArtifactKinds, model.PlatformArtifactKindEdgeRouteBundle) && slices.Contains(policy.ArtifactKinds, model.PlatformArtifactKindCaddyRouteConfig) {
-		claims.WorkerEnrollmentID, err = s.bindGlobalWorkerEnrollment(ctx, client, pod)
-		if err != nil {
+		enrollment, enrollmentErr := s.bindGlobalWorkerEnrollment(ctx, client, pod)
+		if enrollmentErr != nil {
 			httpx.WriteError(w, http.StatusServiceUnavailable, "global Worker enrollment could not be verified")
 			return
 		}
+		claims.WorkerEnrollmentID, claims.WorkerFrontServiceUID = enrollment.id, enrollment.serviceUID
 	}
 	// Issuance and parsing also enforce the kernel's finite component/kind schema.
 	keyring := s.auth.PlatformComponentIdentityKeyring

@@ -2,6 +2,7 @@ package platformproducer
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +60,29 @@ func TestOfflineRecoveryDeclarationWireDigestMatchesConfigurationPublisher(t *te
 	bad.Recovery = nil
 	if ValidateOfflineEdges([]OfflineEdge{bad}) == nil {
 		t.Fatal("hold without recovery granted hosted execution")
+	}
+}
+
+func TestIndependentWorkerGrantDoesNotChangeDNSRecoveryIdentity(t *testing.T) {
+	h := recoveryHold()
+	h.WorkerEnrollment = &OfflineWorkerEnrollment{ID: strings.Repeat("a", 32), NodeUID: "11111111-1111-1111-1111-111111111111",
+		ServiceAccount: "worker-account", DaemonSetUIDs: []string{"22222222-2222-2222-2222-222222222222"}, PodCreatedAfter: "2030-01-01T00:00:00Z"}
+	const oldDigest = "sha256:29db956b07289dc7761a3421444a3b9df04a2af3156a944f6b6590f541958f02"
+	digest, key := OfflineRecoveryDigest(h), OfflineRecoveryKey(h)
+	if digest != oldDigest {
+		t.Fatalf("unexpected wire digest: %s", digest)
+	}
+	h.WorkerEnrollment.IndependentDeployment = &OfflineWorkerDeployment{Name: "local-worker", UID: "33333333-3333-3333-3333-333333333333",
+		EdgeImage: "registry.example/system/edge@sha256:" + strings.Repeat("a", 64), CaddyImage: "registry.example/system/caddy@sha256:" + strings.Repeat("b", 64)}
+	if err := ValidateOfflineEdges([]OfflineEdge{h}); err != nil {
+		t.Fatal(err)
+	}
+	if OfflineRecoveryDigest(h) != digest || OfflineRecoveryKey(h) != key || h.WorkerEnrollment.IndependentDeployment == nil {
+		t.Fatal("an additive deployment grant changed the DNS recovery identity or mutated the input")
+	}
+	h.WorkerEnrollment.IndependentDeployment.EdgeImage = "registry.example/system/edge:latest"
+	if ValidateOfflineEdges([]OfflineEdge{h}) == nil {
+		t.Fatal("a mutable Worker image was granted the enrollment")
 	}
 }
 

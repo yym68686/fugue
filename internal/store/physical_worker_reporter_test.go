@@ -57,6 +57,9 @@ func TestWorkerReporterPredecessorRejectsDelayedWriteAcrossRollback(t *testing.T
 		return nil
 	}
 	original := read()
+	if original.Fenced() {
+		t.Fatal("unregistered node already fenced")
+	}
 	if err = s.acceptHostedWorker(ctx, nil, claims, true); !errors.Is(err, ErrWorkerReporterChanged) {
 		t.Fatal("held hosted-only Worker could report without an exact selected Front", err)
 	}
@@ -71,13 +74,46 @@ func TestWorkerReporterPredecessorRejectsDelayedWriteAcrossRollback(t *testing.T
 	if err = unbound(); err != nil {
 		t.Fatal("unregistered node affected", err)
 	}
+	claims.WorkerFrontServiceUID = "fixture-service"
+	if err = unbound(); !errors.Is(err, ErrWorkerReporterChanged) {
+		t.Fatal("independent credential reported before the first fence", err)
+	}
+	claims.WorkerFrontServiceUID = ""
+	legacyInFlight, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyInFlight.Rollback()
+	if err = s.acceptPhysicalWorker(ctx, legacyInFlight, claims); err != nil {
+		t.Fatal("staged legacy writer could not start", err)
+	}
+	if err = write(original, digest(0), true); !errors.Is(err, ErrWorkerReporterChanged) || read().Fenced() {
+		t.Fatal("activation overtook a staged receipt already in flight", err)
+	}
+	if err = legacyInFlight.Commit(); err != nil {
+		t.Fatal(err)
+	}
 	if err = write(original, digest(0), false); err != nil || read().revision != 0 {
 		t.Fatal("aborted receipt advanced the node", err)
 	}
-	if err = write(original, digest(0), true); err != nil {
+	activeInFlight, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activeInFlight.Rollback()
+	if err = s.acceptPhysicalWorker(ctx, activeInFlight, claims, original.Bind(ctx, digest(0), claims.CredentialID)); err != nil {
+		t.Fatal("active writer could not establish first head", err)
+	}
+	if err = unbound(); !errors.Is(err, ErrWorkerReporterChanged) {
+		t.Fatal("staged writer raced past an uncommitted activation", err)
+	}
+	if err = activeInFlight.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	first := read()
+	if !first.Fenced() {
+		t.Fatal("first committed head invisible to staged API")
+	}
 	if err = unbound(); !errors.Is(err, ErrConflict) {
 		t.Fatal("missing pin reopened an enrolled node", err)
 	}
