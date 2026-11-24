@@ -30,13 +30,14 @@ import (
 func TestEdgeWorkloadRefusesDurableFrontRepairFence(t *testing.T) {
 	const group, namespace = "edge-group-fixture", "fixture-system"
 	for _, tc := range []struct {
-		name, kind, owner string
-		readError         bool
-		wantError         bool
+		name, kind, owner   string
+		readError, nodeMode bool
+		wantError           bool
 	}{
 		{name: "no fence"},
 		{name: "ordinary label without a valid prepared journal", kind: "transition-journal", owner: group, wantError: true},
 		{name: "durable repair", kind: releaseguardian.FrontRepairJournalKind, owner: group, wantError: true},
+		{name: "durable node mode", nodeMode: true, wantError: true},
 		{name: "mismatched owner", kind: "transition-journal", owner: "edge-group-other", wantError: true},
 		{name: "unexpected kind", kind: "unknown", owner: group, wantError: true},
 		{name: "cannot read", readError: true, wantError: true},
@@ -48,6 +49,13 @@ func TestEdgeWorkloadRefusesDurableFrontRepairFence(t *testing.T) {
 					"name": releaseguardian.FrontRepairFenceName(group), "namespace": namespace,
 					"labels": map[string]any{"fugue.pro/group": tc.owner, "fugue.pro/authority-kind": tc.kind},
 				}}})
+			}
+			if tc.nodeMode {
+				objects = append(objects, &unstructured.Unstructured{Object: map[string]any{
+					"apiVersion": "v1", "kind": "ConfigMap", "metadata": map[string]any{
+						"name": releaseguardian.NodeWorkerModeName(group), "namespace": namespace,
+					},
+				}})
 			}
 			client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), objects...)
 			if tc.readError {

@@ -1058,7 +1058,9 @@ func readAuthorityRuntimeJSON(ctx context.Context, endpoint string, destination 
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, nil)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, err := (&http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}).Do(request)
 	if err != nil {
 		return err
 	}

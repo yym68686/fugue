@@ -18,7 +18,10 @@ from scripts import stage_front_serving_transport as stage
 
 def validate(config):
     fields = {"schema", "service", "serviceUID", "address", "expectedGeneration", "generation", "rollbackGeneration", "verificationSeconds", "observation"}
-    if set(config) != fields or config["schema"] != "fugue.front-executor-replacement/v1":
+    mode = config.get("schema")
+    if mode == "fugue.front-executor-replacement/v2":
+        fields.update({"candidateAuthority", "candidateImageDigest"})
+    if set(config) != fields or mode not in {"fugue.front-executor-replacement/v1", "fugue.front-executor-replacement/v2"}:
         raise ValueError("explicit executor replacement declaration required")
     for key in ["service", "serviceUID"]:
         if not isinstance(config[key], str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", config[key]):
@@ -32,6 +35,13 @@ def validate(config):
     if not address.is_global or address.version != 4 or str(address) != config["address"]:
         raise ValueError("explicit public IPv4 required")
     front.validate(config["observation"])
+    if mode == "fugue.front-executor-replacement/v2":
+        profile = config["observation"]
+        if (config["candidateAuthority"] != "node-worker-v1"
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", config["candidateImageDigest"])
+                or profile["candidateSelector"].get("fugue.io/edge-node") != profile["node"]
+                or profile["activationPath"] != "/var/lib/fugue-edge-front/activation.json"):
+            raise ValueError("node Worker Front replacement needs the exact node selector and local state path")
     return config
 
 
@@ -98,11 +108,19 @@ def executors(config):
     # A node-local observation may find one Pod while the actual Service
     # selector matches additional Pods on other nodes. Reject before any CAS.
     old = front.pod(profile, profile["legacySelector"], False, singleton_selector=True)
-    candidate = front.pod(profile, profile["candidateSelector"], True, singleton_selector=True)
+    node_worker = config.get("candidateAuthority") == "node-worker-v1"
+    candidate = front.pod(profile, profile["candidateSelector"], True, singleton_selector=True, node_worker=node_worker)
     if old["metadata"]["uid"] == candidate["metadata"]["uid"]:
         raise ValueError("replacement must retain two independent executors")
     if any(port.get("hostPort") for container in old["spec"]["containers"] for port in container.get("ports", [])) or old["spec"].get("hostNetwork"):
         raise ValueError("selector replacement requires an existing Service-owned public Front")
+    if node_worker:
+        declared = next(c["image"] for c in candidate["spec"]["containers"] if c["name"] == "edge-front")
+        observed = next(c["imageID"] for c in candidate["status"]["containerStatuses"] if c["name"] == "edge-front")
+        digest_suffix = "@" + config["candidateImageDigest"]
+        if not declared.endswith(digest_suffix) or not observed.endswith(digest_suffix):
+            raise ValueError("node Worker Front declared and running image must match its exact independent release")
+        front.node_worker_recipient(profile, candidate)
     return old, candidate
 
 
@@ -115,7 +133,7 @@ def prepare(config):
     previous = baseline(config, current(config))
     old, candidate = executors(config)
     stage.selected_endpoint_witness(profile, {"name": config["service"]}, profile, old, previous)
-    observed = front.observe(profile)
+    observed = front.observe(profile, node_worker=config.get("candidateAuthority") == "node-worker-v1")
     for target in profile["probes"]:
         handoff.redirect(config["address"], target["host"])
         handoff.redirect(candidate["status"]["podIP"], target["host"])

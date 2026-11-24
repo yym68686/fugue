@@ -528,6 +528,10 @@ def main() -> int:
         non_go_tasks["dynamic-quality-configuration-tests"] = ["python3", "-m", "unittest", "scripts.test_configure_dynamic_quality", "scripts.test_configure_business_exploration", "scripts.test_dns_availability_recovery"]
     if any(name in {"scripts/replace_front_executor.py", "scripts/test_replace_front_executor.py", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/front-executor-replacement/") for name in paths):
         non_go_tasks["front-executor-replacement-tests"] = ["python3", "-m", "unittest", "scripts.test_replace_front_executor"]
+    if any(name in {".github/workflows/ci.yml", "scripts/node_worker_handoff.py", "scripts/run_node_worker_handoff.py",
+                    "scripts/test_node_worker_handoff.py", "scripts/test_run_node_worker_handoff.py"}
+           or name.startswith("deploy/environments/production/node-worker-handoff/") for name in paths):
+        non_go_tasks["node-worker-handoff-tests"] = ["python3", "-m", "unittest", "scripts.test_node_worker_handoff", "scripts.test_run_node_worker_handoff"]
     if packages:
         vet_task = ["go", "vet", *packages]
         if declarative_engine_changed:

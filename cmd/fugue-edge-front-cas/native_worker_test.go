@@ -113,3 +113,79 @@ func TestProjectedNativeCommandReportsLostWriteWithoutRepeatingCutover(t *testin
 		t.Fatal("replay changed durable receipt", e)
 	}
 }
+
+func TestNodeWorkerCommandBindsFixedProjectionAndRecipient(t *testing.T) {
+	dir := t.TempDir()
+	state, journal := filepath.Join(dir, "activation.json"), filepath.Join(dir, "journal.json")
+	now := time.Now().UTC()
+	const group = "edge-group-example"
+	digest := func(c string) string { return "sha256:" + strings.Repeat(c, 64) }
+	source := func(c string) string { return strings.Repeat(c, 40) }
+	uid := func(i int) string { return fmt.Sprintf("00000000-0000-0000-0000-%012d", i) }
+	previous, err := st.ApplyActivationCAS(state, st.ActivationCASRequest{
+		Operation: st.ActivationOperationInit, GroupID: group, ExpectedSlot: "b", TargetSlot: "b",
+		InitialGeneration: 912, BundleGeneration: "fixture.p10.r1", WorkerSourceCommit: source("b"),
+		WorkerImageDigest: digest("b"), Reason: "verified fixture predecessor",
+	}, now.Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := st.NativeRecipient{PodUID: uid(1), Node: "edge-pilot", Group: group, Incarnation: digest("f")}
+	j, err := (st.NodeWorkerJournal{
+		Schema: st.NodeWorkerJournalSchema, Recipient: id, NodeUID: uid(2), ServiceUID: uid(3),
+		PredecessorWorkerUID: uid(4), CandidateWorkerUID: uid(5), Expected: previous.Current,
+		PredecessorProcess: digest("a"), CandidateProcess: digest("c"), CandidateComponent: "test-candidate",
+		Candidate:     st.ActivationRepairRelease{Slot: "a", BundleGeneration: "fixture.p11.r1", WorkerSourceCommit: source("c"), WorkerImageDigest: digest("c")},
+		ReleaseDigest: digest("d"), CreatedAt: now,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := st.Config{NodeHost: "127.0.0.1", EdgeID: id.Node, EdgeGroupID: group, ActiveSlotFile: state, RequireActivationState: true,
+		Slots:           map[string]st.SlotTargets{"a": {HTTPAddress: "127.0.0.1:18080", HTTPSAddress: "127.0.0.1:18443"}, "b": {HTTPAddress: "127.0.0.1:28080", HTTPSAddress: "127.0.0.1:28443"}},
+		WorkerTransport: fmt.Sprintf(`{"schema":"fugue.worker-transport/v1","group":%q,"node":%q,"retained":[{"slot":"a","source":%q,"image":%q},{"slot":"b","source":%q,"image":%q}],"candidate":{"slot":"a","source":%q,"image":%q},"candidate_http_port":38080,"candidate_https_port":38443}`, group, id.Node, source("a"), digest("a"), source("b"), digest("b"), source("c"), digest("c")),
+	}
+	encode := func(v any) []byte {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	var out bytes.Buffer
+	w := st.NodeWorkerWrite{Schema: st.NodeWorkerWriteSchema, Recipient: id, JournalDigest: j.Digest, Operation: "prepare", ExpiresAt: now.Add(10 * time.Second)}
+	run := func(body []byte) error {
+		out.Reset()
+		return runNativeNodeWorker([]string{"--node-worker-advance", base64.RawURLEncoding.EncodeToString(body)}, &out, func() (st.NativeRecipient, error) { return id, nil }, cfg, journal)
+	}
+	if err := run(encode(w)); err == nil {
+		t.Fatal("CLI wrote without a projection")
+	}
+	if err := os.WriteFile(journal, encode(j), 0444); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(append(encode(w), ' ')); err == nil {
+		t.Fatal("CLI accepted a noncanonical envelope")
+	}
+	id.Incarnation = digest("e")
+	if err := run(encode(w)); err == nil {
+		t.Fatal("CLI accepted a different process incarnation")
+	}
+	id = j.Recipient
+	if err := run(encode(w)); err != nil {
+		t.Fatal(err)
+	}
+	var prep st.PublicationPreparation
+	if err := json.Unmarshal(out.Bytes(), &prep); err != nil || prep.WorkerImageDigest != digest("c") {
+		t.Fatalf("wrong preparation receipt: %+v err=%v", prep, err)
+	}
+	w.Operation = "commit"
+	if err := run(encode(w)); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := st.ReadActivationState(state)
+	if err != nil || j.Progress(current) != st.NodeWorkerActivated {
+		t.Fatalf("native write is not recoverable: %+v err=%v", current, err)
+	}
+}

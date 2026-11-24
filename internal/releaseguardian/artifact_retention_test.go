@@ -2,6 +2,7 @@ package releaseguardian
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -15,6 +16,31 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
 )
+
+func TestArtifactPrunerDefersDuringNodeWorkerHandoff(t *testing.T) {
+	const ns = "fugue-system"
+	j := nodeWorkerFenceFixture(t)
+	now := j.CreatedAt.Add(time.Minute)
+	raw, _ := json.Marshal(j)
+	claim := retentionConfigMap(FrontRepairFenceName(j.Recipient.Group), now, authorityLabels(j.Recipient.Group),
+		map[string]string{"fugue.pro/authority-kind": nodeWorkerJournalKind}, map[string]string{"journal.json": string(raw)}, true)
+	objects := []runtime.Object{claim}
+	for i := 0; i < 9; i++ {
+		route := sealedRouteRecord(t, j.Recipient.Group, int64(i+1))
+		record, _ := declarativerelease.CanonicalJSON(route)
+		objects = append(objects, retentionConfigMap(routeBundleRecordName(route.GroupID, route.RecordDigest), now.Add(-48*time.Hour),
+			authorityLabels(route.GroupID), map[string]string{"fugue.pro/authority-kind": "route-bundle"}, map[string]string{"record.json": string(record)}, true))
+	}
+	client := fake.NewSimpleClientset(objects...)
+	pruner, err := NewArtifactPruner(client, ns, ArtifactRetentionPolicy{MinimumAge: time.Hour, MinimumHistory: 8, MaximumDeletes: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pruner.Prune(context.Background(), now.UTC())
+	if err != nil || !result.Deferred || result.Candidates != 1 || result.Deleted != 0 {
+		t.Fatalf("active node Worker should defer artifact deletion: result=%+v err=%v", result, err)
+	}
+}
 
 func TestArtifactPrunerRetainsCurrentRouteAndBoundedHistory(t *testing.T) {
 	ctx := context.Background()

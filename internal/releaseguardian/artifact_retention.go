@@ -152,6 +152,15 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered invalid CandidateAuthority %s", name)
 			}
 			keep[routeBundleRecordName(candidate.GroupID, candidate.RecordDigest)] = true
+		case strings.HasPrefix(name, "fugue-authority-transition-prepared-") && object.Labels["fugue.pro/authority-kind"] == nodeWorkerJournalKind:
+			group := object.Labels["fugue.pro/group"]
+			if _, err := decodeNodeWorkerFence(object, group); err != nil {
+				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered invalid node Worker journal %s: %w", name, err)
+			}
+			// The transaction can still need the retained Worker and the
+			// independently monitored candidate. Resume normal bounded GC
+			// when Guardian has archived the result and removed the claim.
+			busy = true
 		case strings.HasPrefix(name, "fugue-authority-transition-prepared-") || strings.HasPrefix(name, "fugue-authority-transition-activated-"):
 			var journal AuthorityTransitionJournal
 			if decodeStrict([]byte(object.Data["journal.json"]), &journal) != nil || journal.Validate() != nil ||

@@ -329,6 +329,13 @@ func requestCandidateRoute(ctx context.Context, address, host, path string) (int
 		return 0, nil, nil, err
 	}
 	defer connection.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
+	}
+	if err := connection.SetDeadline(deadline); err != nil {
+		return 0, nil, nil, err
+	}
 	if _, err := io.WriteString(connection, proxyproto.HeaderV1(connection.LocalAddr(), connection.RemoteAddr())); err != nil {
 		return 0, nil, nil, err
 	}

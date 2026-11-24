@@ -20,6 +20,78 @@ def fixture():
 
 
 class ReplacementTests(unittest.TestCase):
+    def test_node_worker_front_is_explicit_and_has_one_writable_mount(self):
+        config, _, _ = fixture()
+        profile = config["observation"]
+        config.update(schema="fugue.front-executor-replacement/v2", candidateAuthority="node-worker-v1",
+                      candidateImageDigest="sha256:" + "b"*64)
+        with self.assertRaises(ValueError):
+            replacement.validate(config)
+        profile["candidateSelector"]["fugue.io/edge-node"] = profile["node"]
+        profile["activationPath"] = "/var/lib/fugue-edge-front/activation.json"
+        replacement.validate(config)
+
+        def node_front():
+            image = "example.test/front@" + config["candidateImageDigest"]
+            return {"metadata": {"uid": "new", "name": "candidate", "namespace": profile["namespace"],
+                                 "annotations": {"fugue.pro/source-commit": profile["candidateSource"]}},
+                    "spec": {
+                        "nodeName": profile["node"], "automountServiceAccountToken": False,
+                        "containers": [{"name": "edge-front", "image": image,
+                                        "env": [{"name": "FUGUE_EDGE_FRONT_EDGE_GROUP_ID", "value": profile["group"]},
+                                                {"name": "FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "value": profile["activationPath"]},
+                                                {"name": "FUGUE_EDGE_FRONT_REQUIRE_ACTIVATION_STATE", "value": "true"}],
+                                        "securityContext": {"readOnlyRootFilesystem": True, "allowPrivilegeEscalation": False,
+                                                            "capabilities": {"drop": ["ALL"]}},
+                                        "volumeMounts": [
+                                            {"name": "activation", "mountPath": "/var/lib/fugue-edge-front"},
+                                            {"name": "journal", "mountPath": "/var/run/fugue-worker-transaction", "readOnly": True}]}],
+                        "volumes": [{"name": "activation", "hostPath": {
+                            "path": "/var/lib/fugue/edge-owned/" + profile["group"] + "/front", "type": "Directory"}},
+                            {"name": "journal", "configMap": {"name": replacement.front.node_worker_projection_name(profile["group"], profile["node"]),
+                                                               "items": [{"key": "journal.json", "path": "journal.json"}], "optional": True}}]},
+                    "status": {"phase": "Running", "podIP": "10.0.0.2",
+                               "conditions": [{"type": "Ready", "status": "True"}],
+                               "containerStatuses": [{"name": "edge-front", "ready": True, "imageID": image, "restartCount": 0}]}}
+
+        candidate = node_front()
+        with patch.object(replacement.front, "read", return_value={"items": [candidate]}):
+            with self.assertRaisesRegex(ValueError, "read-only"):
+                replacement.front.pod(profile, profile["candidateSelector"], True)
+            self.assertIs(replacement.front.pod(profile, profile["candidateSelector"], True, node_worker=True), candidate)
+        for fault in ("other_mount", "other_node", "host_namespace", "extra_caps", "subpath", "required_cm"):
+            candidate = node_front()
+            spec = candidate["spec"]
+            container = spec["containers"][0]
+            if fault == "other_mount":
+                spec["volumes"][0]["hostPath"]["path"] = "/var/lib/wrong"
+            elif fault == "other_node":
+                spec["volumes"][1]["configMap"]["name"] = replacement.front.node_worker_projection_name(profile["group"], "other-node")
+            elif fault == "host_namespace":
+                spec["hostPID"] = True
+            elif fault == "extra_caps":
+                container["securityContext"]["capabilities"]["add"] = ["NET_ADMIN"]
+            elif fault == "subpath":
+                container["volumeMounts"][1]["subPath"] = "journal.json"
+            elif fault == "required_cm":
+                spec["volumes"][1]["configMap"]["optional"] = False
+            with self.subTest(fault=fault), patch.object(replacement.front, "read", return_value={"items": [candidate]}):
+                with self.assertRaises(ValueError):
+                    replacement.front.pod(profile, profile["candidateSelector"], True, node_worker=True)
+
+        candidate, old = node_front(), node_front()
+        old["metadata"]["uid"] = "old"
+        with patch.object(replacement.front, "pod", side_effect=[old, candidate]), patch.object(
+                replacement.front, "read", return_value={"pod_uid": "new", "node": profile["node"], "group": profile["group"],
+                                                        "incarnation": "sha256:" + "a"*64}):
+            self.assertEqual(replacement.executors(config), (old, candidate))
+        candidate["status"]["containerStatuses"][0]["imageID"] = "example.test/front@sha256:" + "c"*64
+        with patch.object(replacement.front, "pod", side_effect=[old, candidate]), patch.object(
+                replacement.front, "node_worker_recipient") as recipient:
+            with self.assertRaisesRegex(ValueError, "running image"):
+                replacement.executors(config)
+            recipient.assert_not_called()
+
     def test_declaration_and_baseline_are_exact(self):
         config, previous, _ = fixture()
         replacement.validate(config)

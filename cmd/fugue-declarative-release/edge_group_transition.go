@@ -237,20 +237,26 @@ func (cluster *kubectlCluster) applyEdgeGroupAB(ctx context.Context, release dec
 func requireEdgeWorkloadNoFrontRepair(ctx context.Context, client dynamic.Interface, namespace, group string) error {
 	resource := client.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}).Namespace(namespace)
 	object, err := resource.Get(ctx, releaseguardian.FrontRepairFenceName(group), metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("read group Front repair fence: %w", err)
+	}
+	if err == nil {
+		var fence corev1.ConfigMap
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &fence); err != nil {
+			return fmt.Errorf("decode group Front repair fence: %w", err)
+		}
+		if err := releaseguardian.RequireOrdinaryFrontJournal(&fence, group); err != nil {
+			return fmt.Errorf("edge Worker release cannot write: %w", err)
+		}
+	}
+	_, err = resource.Get(ctx, releaseguardian.NodeWorkerModeName(group), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read group Front repair fence: %w", err)
+		return fmt.Errorf("read durable node Worker authority fence: %w", err)
 	}
-	var fence corev1.ConfigMap
-	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(object.Object, &fence); err != nil {
-		return fmt.Errorf("decode group Front repair fence: %w", err)
-	}
-	if err := releaseguardian.RequireOrdinaryFrontJournal(&fence, group); err != nil {
-		return fmt.Errorf("edge Worker release cannot write: %w", err)
-	}
-	return nil
+	return releaseguardian.ErrNodeWorkerGroupMode
 }
 
 func requireEdgeGroupOnDelete(namespace string, transition declarativerelease.EdgeGroupABTransition, manifest []byte) error {

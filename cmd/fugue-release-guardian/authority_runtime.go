@@ -18,9 +18,12 @@ import (
 
 type authorityRuntime struct {
 	controller *releaseguardian.AuthorityController
+	store      *releaseguardian.AuthorityStore
+	fronts     map[string]*frontAuthorityActivator
 	groups     []string
 	queues     map[string]chan struct{}
 	once       sync.Once
+	nodeWrite  bool
 }
 
 func newAuthorityRuntime(store *releaseguardian.AuthorityStore, value string) (*authorityRuntime, error) {
@@ -103,7 +106,10 @@ func newAuthorityRuntimeWithActivators(store *releaseguardian.AuthorityStore, cl
 	if err := controller.SetHealthObservers(observers); err != nil {
 		return nil, err
 	}
-	runtime := &authorityRuntime{controller: controller, groups: groups, queues: map[string]chan struct{}{}}
+	runtime := &authorityRuntime{controller: controller, store: store, fronts: map[string]*frontAuthorityActivator{}, groups: groups, queues: map[string]chan struct{}{}}
+	for group, activator := range activators {
+		runtime.fronts[group] = activator.(*groupAuthorityActivator).front
+	}
 	for _, group := range groups {
 		runtime.queues[group] = make(chan struct{}, 1)
 	}
@@ -125,6 +131,9 @@ func (runtime *authorityRuntime) Start(ctx context.Context) {
 					case <-ctx.Done():
 						return
 					case <-ticker.C:
+						if runtime.reconcileNodeWorker(ctx, group) {
+							continue
+						}
 						receipt, changed, err := runtime.controller.ObserveAndRevert(ctx, group)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "authority health %s: %v\n", group, err)
@@ -132,6 +141,9 @@ func (runtime *authorityRuntime) Start(ctx context.Context) {
 							fmt.Fprintf(os.Stderr, "authority health %s: action=%s receipt=%s\n", group, receipt.Action, receipt.ReceiptDigest)
 						}
 					case <-runtime.queues[group]:
+						if runtime.nodeWorkerOwnsGroup(ctx, group) {
+							continue
+						}
 						receipt, changed, err := runtime.controller.Reconcile(ctx, group)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "authority reconcile %s: %v\n", group, err)
@@ -144,6 +156,42 @@ func (runtime *authorityRuntime) Start(ctx context.Context) {
 		}
 		runtime.EnqueueAll()
 	})
+}
+
+func (runtime *authorityRuntime) nodeWorkerOwnsGroup(ctx context.Context, group string) bool {
+	if !runtime.nodeWrite || runtime.fronts[group] == nil {
+		return false
+	}
+	// Lease acquisition and release themselves generate informer events.
+	// Only the bounded ticker may advance an armed node transaction; the
+	// event queue must not turn a persistent gate into a write retry loop.
+	_, found, err := runtime.store.LoadNodeWorker(ctx, group)
+	if found || err != nil {
+		return true
+	}
+	mode, err := runtime.store.NodeWorkerMode(ctx, group)
+	return mode || err != nil
+}
+
+func (runtime *authorityRuntime) reconcileNodeWorker(ctx context.Context, group string) bool {
+	front := runtime.fronts[group]
+	if !runtime.nodeWrite || front == nil {
+		return false
+	}
+	handled, change, err := front.reconcileNodeWorker(ctx, runtime.store)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "node Worker reconcile %s: %v\n", group, err)
+	} else if change != "" {
+		fmt.Fprintf(os.Stderr, "node Worker reconcile %s: %s\n", group, change)
+	}
+	if handled {
+		return true
+	}
+	mode, err := runtime.store.NodeWorkerMode(ctx, group)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "node Worker mode %s: %v\n", group, err)
+	}
+	return mode || err != nil
 }
 
 func (runtime *authorityRuntime) EnqueueAll() {

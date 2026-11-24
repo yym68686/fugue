@@ -18,6 +18,7 @@ import (
 
 var ErrCandidateCanaryUnavailable = errors.New("candidate canary result is unavailable")
 var ErrFrontRepairInProgress = errors.New("group Front authority repair is in progress")
+var ErrNodeWorkerInProgress = errors.New("node Worker advance owns the group Front mutation fence")
 
 const FrontRepairJournalKind = "front-repair-journal"
 
@@ -33,13 +34,18 @@ func RequireNoFrontRepair(ctx context.Context, client kubernetes.Interface, name
 		return errors.New("Front repair fence lookup is invalid")
 	}
 	object, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, FrontRepairFenceName(groupID), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
-	return RequireOrdinaryFrontJournal(object, groupID)
+	if err == nil {
+		if err := RequireOrdinaryFrontJournal(object, groupID); err != nil {
+			return err
+		}
+	}
+	// Check the durable mode after checking the transient journal. There is
+	// never a read interval in which both are absent during finalization.
+	store := AuthorityStore{client: client, namespace: namespace}
+	return store.requireLegacyWorkerMode(ctx, groupID)
 }
 
 // RequireOrdinaryFrontJournal validates a present fence obtained from the
@@ -50,6 +56,9 @@ func RequireOrdinaryFrontJournal(object *corev1.ConfigMap, groupID string) error
 	}
 	if object.Labels["fugue.pro/group"] == groupID && object.Labels["fugue.pro/authority-kind"] == FrontRepairJournalKind {
 		return ErrFrontRepairInProgress
+	}
+	if object.Labels["fugue.pro/group"] == groupID && object.Labels["fugue.pro/authority-kind"] == nodeWorkerJournalKind {
+		return ErrNodeWorkerInProgress
 	}
 	var journal AuthorityTransitionJournal
 	if object.DeletionTimestamp != nil || object.Immutable == nil || !*object.Immutable || len(object.Data) != 1 || len(object.BinaryData) != 0 ||
@@ -110,6 +119,9 @@ func (store *AuthorityStore) CreateTransitionJournal(ctx context.Context, journa
 	if journal.Validate() != nil || journal.Phase != AuthorityTransitionPrepared {
 		return errors.New("authority transition journal create is invalid")
 	}
+	if err := store.requireLegacyWorkerMode(ctx, journal.GroupID); err != nil {
+		return err
+	}
 	return store.createImmutable(ctx, transitionJournalName(journal.GroupID), journal.GroupID, "transition-journal", "journal.json", journal)
 }
 
@@ -130,6 +142,9 @@ func (store *AuthorityStore) LoadTransitionJournal(ctx context.Context, groupID 
 				return AuthorityTransitionJournal{}, false, err
 			}
 		}
+		if err := store.requireLegacyWorkerMode(ctx, groupID); err != nil {
+			return AuthorityTransitionJournal{}, false, err
+		}
 		var journal AuthorityTransitionJournal
 		if object.Immutable == nil || !*object.Immutable || object.Labels["fugue.pro/group"] != groupID ||
 			object.Labels["fugue.pro/authority-kind"] != "transition-journal" || len(object.Data) != 1 ||
@@ -138,7 +153,15 @@ func (store *AuthorityStore) LoadTransitionJournal(ctx context.Context, groupID 
 		}
 		return journal, true, nil
 	}
-	return AuthorityTransitionJournal{}, false, nil
+	return AuthorityTransitionJournal{}, false, store.requireLegacyWorkerMode(ctx, groupID)
+}
+
+func (store *AuthorityStore) requireLegacyWorkerMode(ctx context.Context, groupID string) error {
+	nodeMode, err := store.NodeWorkerMode(ctx, groupID)
+	if err == nil && nodeMode {
+		return ErrNodeWorkerGroupMode
+	}
+	return err
 }
 
 // RequireNoActivatedTransition is for repair's own claimed fence. Repair

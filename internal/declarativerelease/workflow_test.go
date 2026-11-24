@@ -305,9 +305,24 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release")
+	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
+	}
+	nodeWorker := yamlMappingValue(t, jobs, "node_worker_handoff")
+	nodeWorkerWhen := yamlMappingValue(t, nodeWorker, "if").Value
+	for _, required := range []string{"github.event_name == 'push' && github.ref == 'refs/heads/main'", "needs.prepush.result == 'success'", "needs.node_worker_handoff_plan.outputs.config != ''"} {
+		if !strings.Contains(nodeWorkerWhen, required) {
+			t.Fatalf("node Worker publication is missing its main, test or exact declaration gate: %s", required)
+		}
+	}
+	for _, name := range []string{"node_worker_handoff", "front_replacement", "front_replacement_recovery", "front_serving_handoff", "front_public_recovery"} {
+		queue := yamlMappingValue(t, yamlMappingValue(t, jobs, name), "concurrency")
+		if yamlMappingValue(t, queue, "group").Value != "fugue-production-front-executor-replacement" ||
+			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {
+			t.Fatalf("%s must share the non-canceling Front writer queue", name)
+		}
 	}
 	relayTrust := yamlMappingValue(t, jobs, "edge_origin_relay_trust")
 	relayWhen := yamlMappingValue(t, relayTrust, "if").Value

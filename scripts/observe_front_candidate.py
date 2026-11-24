@@ -73,7 +73,54 @@ def validate(config):
     return config
 
 
-def pod(config, selector, candidate, *, singleton_selector=False):
+def node_worker_projection_name(group, node):
+    return "fugue-node-worker-projection-" + hashlib.sha256((group + "\n" + node).encode()).hexdigest()[:32]
+
+
+def require_node_worker_mounts(config, p, c):
+    """Recognize exactly the local activation writer; don't admit writable observation mounts."""
+    spec = p["spec"]
+    security = c.get("securityContext", {})
+    if (any(spec.get(key) for key in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace",
+                                      "initContainers", "ephemeralContainers"))
+            or len(spec["containers"]) != 1 or config["activationPath"] != "/var/lib/fugue-edge-front/activation.json"):
+        raise ValueError("node Worker Front must use its own process namespace and the fixed activation path")
+    if (security.get("privileged") or security.get("allowPrivilegeEscalation") is not False
+            or security.get("readOnlyRootFilesystem") is not True or security.get("capabilities", {}).get("add")
+            or security.get("capabilities", {}).get("drop") != ["ALL"]):
+        raise ValueError("node Worker Front candidate cannot elevate beyond the fixed activation mount")
+    mounts, volumes = c.get("volumeMounts", []), spec.get("volumes", [])
+    if (len(mounts) != 2 or len(volumes) != 2
+            or any(m.get("subPath") or m.get("subPathExpr") or m.get("mountPropagation") not in (None, "None") for m in mounts)):
+        raise ValueError("node Worker Front must have exactly the activation and journal directory mounts")
+    by_path = {m["mountPath"]: m for m in mounts}
+    by_name = {v["name"]: v for v in volumes}
+    activation = by_path.get("/var/lib/fugue-edge-front", {})
+    journal = by_path.get("/var/run/fugue-worker-transaction", {})
+    local = by_name.get(activation.get("name"), {})
+    projection = by_name.get(journal.get("name"), {})
+    if (activation.get("readOnly", False) or journal.get("readOnly") is not True
+            or set(local) != {"name", "hostPath"} or local["hostPath"] != {
+                "path": "/var/lib/fugue/edge-owned/" + config["group"] + "/front", "type": "Directory"}
+            or set(projection) != {"name", "configMap"}):
+        raise ValueError("node Worker Front can write only its fixed node-local activation directory")
+    cm = projection["configMap"]
+    if (cm.get("name") != node_worker_projection_name(config["group"], config["node"]) or cm.get("optional") is not True
+            or cm.get("items") != [{"key": "journal.json", "path": "journal.json"}]):
+        raise ValueError("node Worker Front lacks its own optional read-only journal projection")
+
+
+def node_worker_recipient(config, candidate):
+    recipient = read("-n", config["namespace"], "exec", candidate["metadata"]["name"], "-c", "edge-front", "--",
+                     "/usr/local/bin/fugue-edge-front-cas", "--worker-recipient")
+    if (set(recipient) != {"pod_uid", "node", "group", "incarnation"}
+            or recipient["pod_uid"] != candidate["metadata"]["uid"] or recipient["node"] != config["node"]
+            or recipient["group"] != config["group"] or not re.fullmatch(r"sha256:[0-9a-f]{64}", recipient["incarnation"])):
+        raise ValueError("candidate executable did not prove its exact node Worker recipient")
+    return recipient
+
+
+def pod(config, selector, candidate, *, singleton_selector=False, node_worker=False):
     query = ",".join(k + "=" + v for k, v in sorted(selector.items()))
     response = read("get", "pods", "-n", config["namespace"], "-l", query, "-o", "json")
     if response.get("metadata", {}).get("continue"):
@@ -96,8 +143,12 @@ def pod(config, selector, candidate, *, singleton_selector=False):
     if not status.get("ready") or "@sha256:" not in status.get("imageID", "") or p["metadata"].get("namespace") != config["namespace"]:
         raise ValueError("Front image or runtime identity is invalid")
     if candidate:
-        if p["metadata"]["annotations"].get("fugue.pro/source-commit") != config["candidateSource"] or status.get("restartCount") != 0 or p["spec"].get("hostNetwork") or p["spec"].get("automountServiceAccountToken") is not False or any(x.get("hostPort") for x in c.get("ports", [])) or any(m.get("readOnly") is not True for m in c.get("volumeMounts", [])):
+        if p["metadata"]["annotations"].get("fugue.pro/source-commit") != config["candidateSource"] or status.get("restartCount") != 0 or p["spec"].get("hostNetwork") or p["spec"].get("automountServiceAccountToken") is not False or any(x.get("hostPort") for x in c.get("ports", [])):
             raise ValueError("candidate Front changed code, restart state or observation isolation")
+        if node_worker:
+            require_node_worker_mounts(config, p, c)
+        elif any(m.get("readOnly") is not True for m in c.get("volumeMounts", [])):
+            raise ValueError("ordinary Front observation requires read-only mounts")
     ipaddress.ip_address(p["status"]["podIP"])
     return p
 
@@ -173,11 +224,11 @@ def stable_proof_pair(address, probe_port, host, path, node, group):
     raise ValueError("public/probe publication did not stabilize within the bounded observation")
 
 
-def observe(config):
+def observe(config, *, node_worker=False):
     observations = []
     for index in range(config["samples"]):
         old = pod(config, config["legacySelector"], False)
-        candidate = pod(config, config["candidateSelector"], True)
+        candidate = pod(config, config["candidateSelector"], True, **({"node_worker": True} if node_worker else {}))
         if old["metadata"]["uid"] == candidate["metadata"]["uid"]:
             raise ValueError("candidate reused the public Front")
         before = state(config, old)
@@ -193,7 +244,7 @@ def observe(config):
         if state(config, old) != before or state(config, candidate) != before:
             raise ValueError("activation changed during observation")
         for observed, selector, is_candidate in [(old, config["legacySelector"], False), (candidate, config["candidateSelector"], True)]:
-            latest = pod(config, selector, is_candidate)
+            latest = pod(config, selector, is_candidate, **({"node_worker": True} if node_worker and is_candidate else {}))
             if latest["metadata"]["uid"] != observed["metadata"]["uid"] or latest["spec"] != observed["spec"]:
                 raise ValueError("Front identity changed during observation")
         observations.append({"at": now().isoformat(), "old_uid": old["metadata"]["uid"], "candidate_uid": candidate["metadata"]["uid"], "candidate_image": candidate["status"]["containerStatuses"][0]["imageID"], "activation": before, "proofs": proofs})

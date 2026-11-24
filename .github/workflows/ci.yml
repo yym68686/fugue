@@ -2636,6 +2636,69 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  node_worker_handoff_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {contents: read}
+    outputs:
+      config: ${{ steps.selected.outputs.config }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select one explicit node Worker handoff
+        id: selected
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$BASE_SHA^{commit}"
+          files="$(git diff --name-only "$BASE_SHA" HEAD -- deploy/environments/production/node-worker-handoff)"
+          if [[ -z "$files" ]]; then
+            exit 0
+          fi
+          [[ "$files" =~ ^deploy/environments/production/node-worker-handoff/[a-z0-9][a-z0-9-]*\.json$ ]]
+          test -f "$files" && test ! -L "$files"
+          git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/front-executor-replacement deploy/environments/production/front-transport-transition
+          python3 -m scripts.run_node_worker_handoff validate "$files"
+          echo "config=$files" >> "$GITHUB_OUTPUT"
+
+  node_worker_handoff:
+    needs: [prepush, node_worker_handoff_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.node_worker_handoff_plan.outputs.config != '' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
+    timeout-minutes: 16
+    permissions: {contents: read}
+    env:
+      CONFIG: ${{ needs.node_worker_handoff_plan.outputs.config }}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Require unchanged explicit declaration and handoff implementation
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py
+          python3 -m unittest scripts.test_run_node_worker_handoff scripts.test_node_worker_handoff scripts.test_front_connection_witness
+      - name: Hold public connections and require Guardian receipt and unchanged peers
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/node-worker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+          python3 -m scripts.run_node_worker_handoff run "$CONFIG" --evidence "$evidence"
+      - name: Retain exact node Worker transaction evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-node-worker-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/node-worker-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 30
+
   front_replacement_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
@@ -2675,7 +2738,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_replacement_plan.outputs.selected == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {contents: read}
     outputs:
@@ -2741,7 +2804,7 @@ jobs:
     if: ${{ always() && needs.front_replacement.outputs.prepared == 'true' && (needs.front_replacement.result != 'success' || needs.front_replacement_external.result != 'success') }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 5
     permissions: {contents: read, actions: read}
     env:
@@ -3051,7 +3114,7 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.front_probe_transport.result == 'success' && needs.front_external_observation.result == 'success' && needs.front_serving_stage.result == 'success' && needs.front_restricted_egress_observation.result == 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 10
     permissions: {actions: read, contents: read}
     steps:
@@ -3148,7 +3211,7 @@ jobs:
     if: ${{ always() && needs.front_serving_handoff.outputs.recoverable == 'true' && needs.front_public_verification.result != 'success' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
-    concurrency: {group: fugue-production-front-serving-handoff, cancel-in-progress: false}
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
     timeout-minutes: 5
     permissions: {actions: read, contents: read}
     steps:

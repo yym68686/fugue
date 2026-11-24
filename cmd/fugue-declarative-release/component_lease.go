@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/releaseguardian"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +23,7 @@ import (
 // The longest bounded executor is the 12-minute Edge A/B transition. Keep the
 // lease valid for that entire process lifetime without introducing a second
 // renewal state machine; a crashed runner becomes reclaimable after 15 minutes.
-const componentLeaseDurationSeconds int64 = 900
+const componentLeaseDurationSeconds = releaseguardian.ComponentLeaseDurationSeconds
 const componentLeaseFinalizationTimeout = 10 * time.Second
 
 func componentLeaseFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -225,56 +226,15 @@ func (coordinator *componentLeaseCoordinator) release(ctx context.Context, held 
 }
 
 func newComponentLease(release declarativerelease.PlanRelease, holder string, now time.Time) *coordinationv1.Lease {
-	value := &coordinationv1.Lease{
-		TypeMeta: metav1.TypeMeta{APIVersion: coordinationv1.SchemeGroupVersion.String(), Kind: "Lease"},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: release.Concurrency, Namespace: release.Workload.Namespace,
-			Labels: map[string]string{"app.kubernetes.io/managed-by": "fugue-declarative-release", "fugue.pro/component": release.ComponentID},
-		},
-	}
-	setComponentLeaseSpec(value, holder, now)
-	return value
+	return releaseguardian.NewComponentLease(release.Workload.Namespace, release.Concurrency, release.ComponentID, holder, now)
 }
 
 func setComponentLeaseSpec(value *coordinationv1.Lease, holder string, now time.Time) {
-	duration := int32(componentLeaseDurationSeconds)
-	renewTime := metav1.NewMicroTime(now.UTC().Truncate(time.Microsecond))
-	spec := coordinationv1.LeaseSpec{
-		HolderIdentity:       &holder,
-		LeaseDurationSeconds: &duration,
-		RenewTime:            &renewTime,
-	}
-	if holder != "" {
-		acquireTime := renewTime
-		spec.AcquireTime = &acquireTime
-	}
-	value.Spec = spec
+	releaseguardian.SetComponentLease(value, holder, now)
 }
 
 func parseComponentLease(value *coordinationv1.Lease) (string, int64, time.Time, error) {
-	if value == nil || value.GetUID() == "" || value.GetResourceVersion() == "" {
-		return "", 0, time.Time{}, errors.New("component lease metadata is invalid")
-	}
-	if value.Spec.LeaseDurationSeconds == nil {
-		return "", 0, time.Time{}, errors.New("component lease spec is invalid")
-	}
-	duration := int64(*value.Spec.LeaseDurationSeconds)
-	if duration != componentLeaseDurationSeconds {
-		return "", 0, time.Time{}, errors.New("component lease spec is invalid")
-	}
-	holder := ""
-	if value.Spec.HolderIdentity != nil {
-		holder = *value.Spec.HolderIdentity
-	}
-	// A released Lease has no holder and may have no timestamps.  The holder is
-	// the concurrency authority; timestamps are required only while it is held.
-	if holder == "" {
-		return "", duration, time.Time{}, nil
-	}
-	if value.Spec.RenewTime == nil {
-		return "", 0, time.Time{}, errors.New("component lease spec is invalid")
-	}
-	return holder, duration, value.Spec.RenewTime.Time, nil
+	return releaseguardian.ReadComponentLease(value)
 }
 
 func heldLeaseFromObject(value *coordinationv1.Lease, holder string) (heldComponentLease, error) {

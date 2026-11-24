@@ -44,6 +44,12 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "worker-front-preflight" {
 		return runWorkerFrontPreflight(os.Args[2:], os.Stdout)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "node-worker-claim" {
+		return runNodeWorkerClaim(os.Args[2:], os.Stdin, os.Stdout)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "node-worker-seal" {
+		return runNodeWorkerSeal(os.Args[2:], os.Stdin, os.Stdout)
+	}
 	role := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_ROLE"))
 	if role != "guardian" && role != "canary-prober" {
 		return errors.New("FUGUE_RELEASE_GUARDIAN_ROLE must be guardian or canary-prober")
@@ -144,6 +150,9 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 		os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"), os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS"))
 	if err != nil {
 		return err
+	}
+	if authority != nil {
+		authority.nodeWrite = mode == releaseguardian.ModeWrite
 	}
 	authority.Start(ctx)
 	namespace := targets[0].Namespace

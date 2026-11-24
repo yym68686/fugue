@@ -62,6 +62,34 @@ func runNativeWorker(args []string, out io.Writer, identify func() (st.NativeRec
 	return runNativeWorkerAt(args, out, identify, st.NativeJournalPath, st.NativeStatePath)
 }
 
+func runNativeNodeWorker(args []string, out io.Writer, identify func() (st.NativeRecipient, error), cfg st.Config, path string) error {
+	if len(args) != 2 || args[0] != "--node-worker-advance" || len(args[1]) > 16<<10 {
+		return errors.New("invalid node Worker command")
+	}
+	id, err := identify()
+	if err != nil {
+		return err
+	}
+	raw, err := base64.RawURLEncoding.Strict().DecodeString(args[1])
+	var w st.NodeWorkerWrite
+	if err != nil || json.Unmarshal(raw, &w) != nil {
+		return errors.New("invalid node Worker envelope")
+	}
+	wire, err := json.Marshal(w)
+	if err != nil || !bytes.Equal(wire, raw) || base64.RawURLEncoding.EncodeToString(raw) != args[1] || id != w.Recipient {
+		return errors.New("node Worker recipient or envelope mismatch")
+	}
+	journal, err := readNativeProjection(path)
+	if err != nil {
+		return err
+	}
+	receipt, err := st.ExecuteNodeWorkerWrite(cfg, id, journal, w)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(receipt)
+}
+
 // File bindings are fixed by the compiled entrypoint, never supplied in the
 // command or envelope. Isolated file-backed tests use their own directory.
 func runNativeWorkerAt(args []string, out io.Writer, identify func() (st.NativeRecipient, error), journalPath, statePath string) error {
