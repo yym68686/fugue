@@ -6,6 +6,8 @@
 - For this repository, every production component update must go through `git push` to `main` and the single declarative GitHub Actions entrypoint in `.github/workflows/ci.yml`.
 - Do not bypass the normal deployment path with manual reinstall or upgrade commands unless the user explicitly asks for that recovery path.
 - Treat the declarative GitHub Actions component lanes and their self-hosted runner as the only normal production release path.
+- Fugue is operated by one owner. Do not design an Edge/DNS release or recovery that requires a second human, a second account, or an independent environment reviewer. An unmerged proposal is not production policy. If such a proposal conflicts with the owner's operating model, replace the design; do not ask the owner to recruit a reviewer or change repository governance to satisfy it.
+- Owner authorization answers who may request a change, not whether it is safe to apply. The ordinary release lane must still verify the exact release and live predecessor, preserve existing connections and check the actual outcome. Report a missing technical capability or failed check by name; do not relabel it as missing human permission. Never synthesize an approval, signature, or runtime receipt.
 - Do not build images locally and then transfer them to control-plane or cluster nodes over `ssh`, `scp`, `rsync`, `ctr`, `docker save/load`, or similar direct image copy methods.
 - Do not patch live control-plane Deployments by hand with ad-hoc image tags when the intended change can be released through the normal workflow.
 - If an emergency investigation requires SSH access, keep it read-only by default; only perform manual remote recovery when the user explicitly asks for that exception.
