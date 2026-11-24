@@ -92,6 +92,7 @@ metadata:
   namespace: fugue-system
 spec:
   schedule: "*/5 * * * *"
+  timeZone: Etc/UTC
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 90
   successfulJobsHistoryLimit: 2

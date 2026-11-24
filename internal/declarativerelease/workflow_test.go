@@ -390,7 +390,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, gate := range []string{"git diff --exit-code HEAD origin/main", "--dry-run=server", "create pods --subresource=exec", "delete snapshots.longhorn.io", "authorizes_deletion == false"} {
+	for _, gate := range []string{"git diff --exit-code HEAD origin/main", "--dry-run=server", "create pods --subresource=exec", "delete snapshots.longhorn.io", "authorizes_deletion == false", "metadata.creationTimestamp > $published", "spec.timeZone", ".phase == \"blocked\""} {
 		if !strings.Contains(string(observerYAML), gate) {
 			t.Fatalf("snapshot observer release lacks the observation-only gate %s", gate)
 		}

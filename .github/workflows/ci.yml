@@ -200,7 +200,6 @@ jobs:
           git diff --exit-code HEAD origin/main -- "$path" .github/workflows/ci.yml
           python3 -m unittest scripts.test_observe_longhorn_cleanup
           kubectl apply --server-side --field-manager=fugue-longhorn-cleanup-observer --dry-run=server -k "$path"
-          kubectl apply --server-side --field-manager=fugue-longhorn-cleanup-observer -k "$path"
           ns="$(jq -er .namespace "$path/policy.json")"
           storage_ns="$(jq -er .longhornNamespace "$path/policy.json")"
           name=fugue-longhorn-cleanup-observer
@@ -208,27 +207,41 @@ jobs:
           deny() {
             local result
             result="$(kubectl auth can-i --as="$identity" --as-group=system:serviceaccounts --as-group="system:serviceaccounts:$ns" --as-group=system:authenticated "$@" || true)"
-            [[ "$result" == no ]]
+            if [[ "$result" != no ]]; then
+              echo "::error::Observer permission denial not proven: $*"
+              return 1
+            fi
           }
-          deny -n "$ns" create pods --subresource=exec
-          deny -n "$storage_ns" create pods --subresource=exec
-          deny -n "$ns" get pods --subresource=exec
-          deny -n "$storage_ns" get pods --subresource=exec
-          deny -n "$ns" get secrets
-          deny -n "$ns" update leases.coordination.k8s.io
-          deny -n "$storage_ns" delete snapshots.longhorn.io
+          verify_read_only() {
+            deny -n "$ns" create pods --subresource=exec
+            deny -n "$storage_ns" create pods --subresource=exec
+            deny -n "$ns" get pods --subresource=exec
+            deny -n "$storage_ns" get pods --subresource=exec
+            deny -n "$ns" get secrets
+            deny -n "$ns" update leases.coordination.k8s.io
+            deny -n "$storage_ns" delete snapshots.longhorn.io
+          }
+          # Do not start a workload if its identity inherited unexpected access.
+          verify_read_only
+          kubectl apply --server-side --field-manager=fugue-longhorn-cleanup-observer -k "$path"
+          published_after="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          verify_read_only
           expected="$(python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$path/policy.json")"
           cron="$(kubectl -n "$ns" get cronjob "$name" -o json)"
           uid="$(jq -er '.metadata.uid' <<< "$cron")"
           input="$(jq -er '.spec.jobTemplate.spec.template.spec.volumes[] | select(.name == "inputs").configMap.name' <<< "$cron")"
+          jq -e '.spec.schedule == "*/5 * * * *" and .spec.timeZone == "Etc/UTC" and .spec.suspend != true' <<< "$cron" >/dev/null
+          seen=''
           for ((i=0; i<36; i++)); do
             job="$(kubectl -n "$ns" get jobs -l "app.kubernetes.io/name=$name" -o json |
-              jq -r --arg uid "$uid" --arg input "$input" '[.items[] | select(any(.metadata.ownerReferences[]?; .uid == $uid) and any(.spec.template.spec.volumes[]?; .configMap.name == $input)) | select((.status.succeeded // 0) > 0)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
-            if [[ -n "$job" ]]; then
+              jq -r --arg uid "$uid" --arg input "$input" --arg published "$published_after" '[.items[] | select(.metadata.creationTimestamp > $published and any(.metadata.ownerReferences[]?; .uid == $uid and .kind == "CronJob" and .controller == true) and any(.spec.template.spec.volumes[]?; .name == "inputs" and .configMap.name == $input)) | select((.status.succeeded // 0) > 0)] | sort_by(.metadata.creationTimestamp) | last | .metadata.name // empty')"
+            if [[ -n "$job" && "$job" != "$seen" ]]; then
+              seen="$job"
               receipt="$(kubectl -n "$ns" logs "job/$job" -c inventory --limit-bytes=4096)"
               printf '%s\n' "$receipt"
-              jq -e --arg expected "$expected" '.schema == "fugue.longhorn-cleanup-observation/v1" and .mode == "metadata-only" and .authorizes_deletion == false and .policy_sha256 == $expected and .phase == "inventory_observed"' <<< "$receipt"
-              exit 0
+              jq -e --arg expected "$expected" '.schema == "fugue.longhorn-cleanup-observation/v1" and .mode == "metadata-only" and .authorizes_deletion == false and .policy_sha256 == $expected' <<< "$receipt"
+              if jq -e '.phase == "inventory_observed"' <<< "$receipt" >/dev/null; then exit 0; fi
+              jq -e '.phase == "blocked"' <<< "$receipt" >/dev/null
             fi
             sleep 12
           done
