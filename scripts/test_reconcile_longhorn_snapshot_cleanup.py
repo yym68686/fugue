@@ -72,6 +72,9 @@ class CleanupTests(unittest.TestCase):
         self.binding_patch = patch.object(gc, 'database_binding', return_value=self.binding)
         self.binding_patch.start()
         self.addCleanup(self.binding_patch.stop)
+        self.fs_patch = patch.object(gc, 'database_filesystem', return_value=({}, 1 << 30))
+        self.filesystem = self.fs_patch.start()
+        self.addCleanup(self.fs_patch.stop)
 
     def test_all_aliases_must_be_retired_before_any_native_request(self):
         for field, value in [('protected', True), ('status', 'active'), ('physical_deleted', False),
@@ -116,6 +119,58 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(failure['admission_stage'], 'preflight')
         self.assertIn('retry', failure['reason'])
         self.assertEqual(json.loads(self.path.read_text()), result)
+
+    def test_low_target_is_deferred_while_another_volume_completes(self):
+        original = self.kube.items
+        def items(path, **selectors):
+            values = original(path, **selectors)
+            if path.endswith('/snapshots'):
+                values.append(dict(metadata=dict(name='second-point', uid='second-snapshot',
+                    labels={'fugue.pro/backup-run': 'second_run'}), spec=dict(volume='second-volume')))
+            if path.endswith('/volumes'):
+                values[0]['metadata']['uid'] = self.binding['volumeUID']
+                values.append(dict(metadata=dict(name='second-volume', uid='second-volume-uid'), status={}))
+            return values
+        self.kube.items = items
+        self.kube.ledger += [{**row(), 'run': 'second_run', 'snapshot': 'second-point', 'id': 'second-artifact'}]
+        declare = gc.declaration
+        def binding(kube, policy, platform, snapshot, rows, pod):
+            if snapshot['metadata']['name'] == 'second-point':
+                platform = {**platform, 'volume': 'second-volume', 'volumeUID': 'second-volume-uid'}
+            return declare(kube, policy, platform, snapshot, rows, pod)
+        def observe(_, c):
+            return {**review(), 'budget': dict(fold_write_bytes=1 if c['snapshot'] == 'old-point' else 2)}
+        for stage in ('discovery', 'fenced'):
+            with self.subTest(stage=stage):
+                executed, deleted = [], []
+                def filesystem(_, c, **kwargs):
+                    if stage == 'discovery' and c['snapshot'] == 'old-point':
+                        raise gc.TargetBlockedPreDelete(1024, stage)
+                    return {}, 1 << 30
+                def run(r):
+                    executed.append(r.config['snapshot'])
+                    if r.config['snapshot'] == 'old-point':
+                        raise gc.TargetBlockedPreDelete(1024, stage)
+                    deleted.append(r.config['snapshot'])
+                    r.state['phase'] = 'completed'
+                self.filesystem.side_effect = filesystem
+                with patch.object(gc, 'observe', side_effect=observe), patch.object(gc, 'declaration', side_effect=binding), \
+                     patch.object(gc.Recovery, 'run', new=run):
+                    result = gc.drain(self.kube, {**fixed_policy(), 'maxOperationsPerPass': 1 if stage == 'discovery' else 2}, self.path, execute=True)
+                self.assertEqual(result['completed'], 1)
+                self.assertEqual(executed, ['second-point'] if stage == 'discovery' else ['old-point', 'second-point'])
+                self.assertEqual(deleted, ['second-point'])
+                self.assertEqual(result['deferred_volume_uids'], [self.binding['volumeUID']])
+                failure = result['passes'][0]['blocked'][0]
+                self.assertEqual(failure['kind'], 'target_blocked_pre_delete')
+                self.assertFalse(failure['deletion_attempted'])
+                self.assertEqual(failure['admission_stage'], stage)
+
+    def test_shared_observation_failure_cannot_turn_into_a_target_skip(self):
+        with patch.object(gc, 'observe', side_effect=gc.ClusterObservationError('shared observer unavailable')):
+            with self.assertRaisesRegex(gc.ClusterObservationError, 'shared observer unavailable'):
+                gc.drain(self.kube, fixed_policy(), self.path, execute=True)
+        self.assertEqual(json.loads(self.path.read_text())['phase'], 'failed')
 
     def test_unexpected_native_error_fails_and_preserves_partial_pass_evidence(self):
         def reconcile(kube, policy, path, **kwargs):

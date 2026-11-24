@@ -1,9 +1,7 @@
 # Local database snapshot review
 
 `python3 -m scripts.plan_longhorn_snapshot_recovery <declaration> --evidence <path>`
-is a read-only review, including when called by the snapshot review step in the
-existing `postgres_volume_recovery` job in the main CI workflow. It has no apply
-mode. It does not acquire a
+is a read-only review. It has no apply mode. It does not acquire a
 Lease, delete a Snapshot/Backup CR, initiate a purge, change retention or write SQL.
 
 An exact declaration binds the current database, primary Pod, PVC, volume,
@@ -43,6 +41,16 @@ defaults to a read-only preview. Apply requires the main production Actions
 environment, an explicit approval binding the exact declaration SHA256 and
 Snapshot UID, and all fresh planner gates. The existing serialized
 `postgres_volume_recovery` job is the only release path. No SQL write is used.
+
+Add `review.json` and `approval.json` together under
+`deploy/environments/production/local-snapshot-review/requests/<declaration-sha256>/`
+in a main push. The selector validates the files against each other and the
+directory name before the production runner starts. Request paths are
+append-only; do not edit, remove or reintroduce an admitted pair. The legacy
+top-level pair is historical evidence, and script-only pushes only run tests.
+Reruns of the same request use the same durable operation identity and cannot
+repeat a DELETE. A missing or changed request is not authority to launch an
+operation against the same target.
 
 Before DELETE, a durable operation ConfigMap records the exact target, fencing
 token and review. The existing backup/release Lease uses a `release/` owner:
@@ -91,3 +99,15 @@ actual bottom-disk free counters and PG filesystem available bytes. The free
 counter change includes concurrent business writes: it is not an exact causal
 reclaim measurement. Local snapshot cleanup does not itself enlarge PostgreSQL's
 filesystem. A separate expansion still needs its own current capacity gate.
+
+## Standing cleanup policy
+
+Routine cleanup runs on a separate Actions schedule, never on a main code push.
+The executor still enforces the 512 MiB PostgreSQL filesystem floor. If the
+identified target is already below it before DELETE, cleanup records
+`target_blocked_pre_delete`, defers that volume for the current run, and can
+re-observe other volumes within its bounds. A fenced denial only permits this
+after release of that operation's Lease and admission fences is verified.
+Unknown DELETE outcomes, observation errors and post-DELETE space or health
+failures do not become deferred-volume results. Operators should inspect
+scheduled cleanup receipts for deferred targets even when the job succeeds.

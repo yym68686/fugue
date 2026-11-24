@@ -124,6 +124,10 @@ def fold_budget(observation, minimal_percent, extra, reserve, max_write):
                 reclaimable_bytes_exact=None)
 
 
+class ClusterObservationError(ValueError):
+    """The observation command failed, rather than proving a target unsafe."""
+
+
 class ReadOnlyCluster:
     def __init__(self):
         self.kubectl = shlex.split(os.environ.get('KUBECTL', 'kubectl'))
@@ -136,7 +140,8 @@ class ReadOnlyCluster:
             command = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, shlex.join(command)]
         result = subprocess.run(command, input=stdin, text=True,
                                 capture_output=True, timeout=30)
-        require(result.returncode == 0 and len(result.stdout) <= limit, 'bounded read-only cluster observation failed')
+        if result.returncode != 0 or len(result.stdout) > limit:
+            raise ClusterObservationError('bounded read-only cluster observation failed')
         return result.stdout
 
     def get(self, resource, name, namespace=None):

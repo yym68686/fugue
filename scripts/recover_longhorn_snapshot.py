@@ -22,6 +22,7 @@ from scripts.plan_longhorn_snapshot_recovery import ReadOnlyCluster, engine_impl
 
 TOKEN = 'fugue.pro/coordination-token'
 OPERATION = 'fugue.pro/snapshot-recovery'
+MIN_DATABASE_AVAILABLE_BYTES = 512 << 20
 
 
 def canonical(value):
@@ -34,9 +35,41 @@ def timestamp():
 
 class CapacityBlocked(ValueError):
     """A fresh admission denial, only raised before any native DELETE intent."""
-    def __init__(self, budget, stage):
-        super().__init__('working-space gate failed; retry with a fresh observation; no deletion permitted')
+    def __init__(self, budget, stage, message='working-space gate failed; retry with a fresh observation; no deletion permitted'):
+        super().__init__(message)
         self.budget, self.stage = dict(budget), stage
+
+
+class TargetBlockedPreDelete(CapacityBlocked):
+    """The proven target's database filesystem was below its safety floor."""
+    def __init__(self, free, stage):
+        super().__init__(dict(database_available_bytes=free,
+                              minimum_database_available_bytes=MIN_DATABASE_AVAILABLE_BYTES), stage,
+                         'target database space is below the hard stop; no deletion permitted')
+
+
+def database_filesystem(kube, c, *, predelete_stage=None):
+    cluster = kube.get('clusters.postgresql.cnpg.io', c['cluster'], c['namespace'])
+    same(cluster, c['cluster'], c['clusterUID'])
+    require(cluster['status'].get('phase') == 'Cluster in healthy state' and cluster['status'].get('readyInstances') == 1 and
+            cluster['status'].get('currentPrimary') == cluster['status'].get('targetPrimary') == c['primary'], 'database health changed')
+    pod = kube.get('pod', c['primary'], c['namespace'])
+    same(pod, c['primary'], c['primaryUID'])
+    require(any(x.get('type') == 'Ready' and x.get('status') == 'True' for x in pod['status'].get('conditions', [])), 'database primary not Ready')
+    raw = kube.command(['-n', c['namespace'], 'exec', c['primary'], '-c', 'postgres', '--', 'df', '-Pk', '/var/lib/postgresql/data'])
+    lines = raw.strip().splitlines()
+    fields = lines[-1].split() if len(lines) == 2 else []
+    require(len(fields) == 6 and fields[3].isdigit(), 'database filesystem observation is invalid')
+    free = int(fields[3]) * 1024
+    if free < MIN_DATABASE_AVAILABLE_BYTES and predelete_stage is not None:
+        # Do not treat missing evidence, pod replacement or PVC rebinding as
+        # low space on an identified target. Observe() already checked the PV.
+        require(fields[-1] == '/var/lib/postgresql/data', 'database filesystem is not the target mount')
+        same(kube.get('pod', c['primary'], c['namespace']), c['primary'], c['primaryUID'])
+        same(kube.get('pvc', c['primary'], c['namespace']), c['primary'], c['pvcUID'])
+        raise TargetBlockedPreDelete(free, predelete_stage)
+    require(free >= MIN_DATABASE_AVAILABLE_BYTES, 'database space is below the hard stop')
+    return pod, free
 
 
 class Cluster(ReadOnlyCluster):
@@ -355,18 +388,9 @@ class Recovery:
             changed['spec'][key] = value
             self.denied_probe(['replace', '--dry-run=server', '-f', '-', '-o', 'json'], changed)
 
-    def health(self):
+    def health(self, *, predelete_stage=None):
         c = self.config
-        cluster = self.kube.get('clusters.postgresql.cnpg.io', c['cluster'], c['namespace'])
-        same(cluster, c['cluster'], c['clusterUID'])
-        require(cluster['status'].get('phase') == 'Cluster in healthy state' and cluster['status'].get('readyInstances') == 1 and
-                cluster['status'].get('currentPrimary') == cluster['status'].get('targetPrimary') == c['primary'], 'database health changed')
-        pod = self.kube.get('pod', c['primary'], c['namespace'])
-        same(pod, c['primary'], c['primaryUID'])
-        require(any(x.get('type') == 'Ready' and x.get('status') == 'True' for x in pod['status'].get('conditions', [])), 'database primary not Ready')
-        raw = self.kube.command(['-n', c['namespace'], 'exec', c['primary'], '-c', 'postgres', '--', 'df', '-Pk', '/var/lib/postgresql/data'])
-        free = int(raw.splitlines()[-1].split()[3]) * 1024
-        require(free >= 512 << 20, 'database space is below the hard stop')
+        pod, free = database_filesystem(self.kube, c, predelete_stage=predelete_stage)
         probes = {}
         if 'recoveryBudget' in c:
             started = time.monotonic()
@@ -481,6 +505,18 @@ class Recovery:
             require(not actual, 'unowned pre-delete admission fences require review')
         self.save('aborted-before-delete')
 
+    def verify_no_admission_fences(self):
+        for resource in ('validatingadmissionpolicies', 'validatingadmissionpolicybindings'):
+            require(not self.kube.items('/apis/admissionregistration.k8s.io/v1/' + resource, labelSelector=OPERATION + '=' + self.operation),
+                    'pre-delete admission fence release not verified')
+
+    def verify_lease_release(self):
+        lease = self.lease()
+        annotations = lease['metadata'].get('annotations', {})
+        require(lease['metadata']['uid'] == self.record['data']['lease_uid'] and
+                lease['spec'].get('holderIdentity') != self.holder and annotations.get(OPERATION) != self.operation and
+                annotations.get(TOKEN) != self.record['data']['token'], 'pre-delete coordination fence release not verified')
+
     def run(self):
         c = self.config
         existing = self.kube.maybe('configmaps', self.operation, c['namespace'])
@@ -528,7 +564,14 @@ class Recovery:
             review = observe(self.kube, c)
             if not review['ready_for_review']:
                 raise CapacityBlocked(review['budget'], 'preflight')
-            before = self.health()
+            try:
+                before = self.health(predelete_stage='preflight')
+            except TargetBlockedPreDelete:
+                if retry_aborted:
+                    self.verify_no_admission_fences()
+                    self.verify_lease_release()
+                    self.save('aborted-before-delete', target_defer_fences_released=True)
+                raise
             lease = self.lease()
             require(not lease['spec'].get('holderIdentity'), 'coordination Lease is occupied')
             token = secrets.token_hex(16)
@@ -558,7 +601,7 @@ class Recovery:
                 if not fresh['ready_for_review']:
                     raise CapacityBlocked(fresh['budget'], 'fenced')
                 require(stable_chain(fresh) == stable_chain(review), 'immutable ancestry changed')
-                self.health()
+                self.health(predelete_stage='fenced')
                 self.record['data']['review.json'] = canonical(fresh)
                 target = self.kube.get('snapshots.longhorn.io', c['snapshot'], c['longhornNamespace'])
                 same(target, c['snapshot'], c['snapshotUID'])
@@ -571,11 +614,16 @@ class Recovery:
                 # no finally block releases protection after this point.
                 self.kube.delete('/apis/longhorn.io/v1beta2/namespaces/' + c['longhornNamespace'] + '/snapshots/' + c['snapshot'], target)
                 review = fresh
-            except Exception:
+            except Exception as error:
                 if not self.state['deletion_attempted']:
                     self.remove_barriers()
+                    target_deferred = isinstance(error, TargetBlockedPreDelete)
+                    if target_deferred:
+                        self.verify_no_admission_fences()
                     self.release()
-                    self.save('aborted-before-delete')
+                    if target_deferred:
+                        self.verify_lease_release()
+                    self.save('aborted-before-delete', target_defer_fences_released=target_deferred)
                 raise
         after = self.wait_native(review)
         if after is None:

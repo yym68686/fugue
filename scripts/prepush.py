@@ -474,6 +474,11 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
+                    "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
+                    "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):
+        non_go_tasks["production-maintenance-selection-tests"] = ["python3", "-m", "unittest",
+            "scripts.test_select_production_maintenance", "scripts.test_select_dns_configuration"]
     if any(name.startswith("internal/pgimage/") or name in {"deploy/environments/production/cnpg-controller/release.json", "scripts/generate_postgres_image_catalog.py"} for name in paths):
         non_go_tasks["postgres-image-catalog-drift"] = [sys.executable, "scripts/generate_postgres_image_catalog.py", "--check"]
         non_go_tasks["postgres-image-catalog-tests"] = [sys.executable, "-m", "unittest", "scripts.test_generate_postgres_image_catalog"]

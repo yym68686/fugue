@@ -15,8 +15,10 @@ from pathlib import Path
 import re
 import time
 
-from scripts.plan_longhorn_snapshot_recovery import NAME, observe, require, terminal_ledger, validate, validate_recovery_budget
-from scripts.recover_longhorn_snapshot import CapacityBlocked, Cluster, Recovery, canonical, timestamp
+from scripts.plan_longhorn_snapshot_recovery import (NAME, ClusterObservationError, observe, require, terminal_ledger,
+                                                     validate, validate_recovery_budget)
+from scripts.recover_longhorn_snapshot import (CapacityBlocked, Cluster, Recovery, TargetBlockedPreDelete,
+                                                canonical, database_filesystem, timestamp)
 
 POLICY_LABEL = 'fugue.pro/snapshot-cleanup-policy'
 
@@ -133,19 +135,33 @@ def declaration(kube, policy, platform, snapshot, rows, pod):
     return c
 
 
-def reconcile(kube, policy, evidence_path, *, execute=False):
+def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uids=()):
     validate_policy(policy)
     digest = hashlib.sha256(canonical(policy).encode()).hexdigest()
     result = dict(schema=policy['schema'], observed_at=timestamp(), preview=not execute,
                   policy_sha256=digest, completed=0, candidates=0, blocked=[], retained=[], phase='disabled')
     path = Path(evidence_path)
+    deferred = set(deferred_volume_uids)
 
     def save():
         path.write_text(json.dumps(result, indent=2) + '\n')
 
+    def target_blocked(c, error):
+        deferred.add(c['volumeUID'])
+        result['blocked'].append(dict(
+            kind='target_blocked_pre_delete', snapshot=c['snapshot'], snapshot_uid=c['snapshotUID'],
+            volume=c['volume'], volume_uid=c['volumeUID'], namespace=c['namespace'], cluster=c['cluster'],
+            reason=str(error), admission_stage=error.stage, budget=error.budget,
+            observed_at=timestamp(), retry='next scheduled reconciliation', deletion_attempted=False))
+
     def execute_recovery(recovery):
         try:
             recovery.run()
+        except TargetBlockedPreDelete as error:
+            # A failure to prove fence release propagates as a regular error.
+            require(recovery.state['deletion_attempted'] is False, 'target denial after delete intent')
+            target_blocked(recovery.config, error)
+            result.update(phase='blocked', retry_discovery=True)
         except CapacityBlocked as error:
             # Only pre-DELETE capacity denials use this type. Native errors and
             # ambiguous outcomes must still fail with protection intact.
@@ -175,7 +191,10 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
     for record in operations:
         data = record.get('data', {})
         receipt = json.loads(data['receipt.json'])
-        if receipt['phase'] == 'completed':
+        if receipt['phase'] == 'completed' or (receipt['phase'] == 'aborted-before-delete' and
+                receipt.get('deletion_attempted') is False and receipt.get('target_defer_fences_released') is True):
+            # A durable abort was recorded only after cleanup. Retry it via
+            # discovery, where the executor verifies its old fences again.
             continue
         if data.get('cleanup_policy_sha256') != digest:
             require('cleanup_policy.json' in data, 'unfinished cleanup belongs to a different policy; review required')
@@ -222,6 +241,8 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
         if snapshot['metadata'].get('deletionTimestamp') or snapshot.get('status', {}).get('markRemoved'):
             continue
         name, volume_name = snapshot['metadata']['name'], snapshot['spec']['volume']
+        if volumes.get(volume_name, {}).get('metadata', {}).get('uid') in deferred:
+            continue
         if volume_name not in ledger_cache:
             require(len(ledger_cache) < 32, 'snapshot volume inventory exceeds observation budget')
             ledger_cache[volume_name] = kube.volume_ledger({**platform, 'volume': volume_name})
@@ -230,6 +251,8 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
                 failed = kube.failed_snapshot_run({**platform, 'run': snapshot['metadata']['labels']['fugue.pro/backup-run'], 'snapshot': name})
                 ledger_cache[volume_name].extend(failed)
             aliases = candidate_ledger(ledger_cache[volume_name], name, snapshot['metadata']['labels']['fugue.pro/backup-run'])
+        except ClusterObservationError:
+            raise
         except ValueError:
             refs = [r for r in ledger_cache[volume_name] if name in (r.get('snapshot'), r.get('alternate_snapshot'))]
             owned = refs and all(r['run'] == snapshot['metadata']['labels']['fugue.pro/backup-run'] for r in refs)
@@ -256,13 +279,24 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
                 result['blocked'].append(dict(snapshot=name, reason='working-space gate failed; no deletion permitted', budget=review['budget']))
                 save()
                 continue
+        except ClusterObservationError:
+            raise
         except ValueError as error:
             result['blocked'].append(dict(snapshot=name, reason=str(error)))
+            save()
+            continue
+        if c['volumeUID'] in deferred:
+            continue
+        try:
+            database_filesystem(kube, c, predelete_stage='discovery')
+        except TargetBlockedPreDelete as error:
+            target_blocked(c, error)
             save()
             continue
         ready.append((snapshot, c, review))
         if 'recoveryBudget' not in policy:
             break
+    ready = [item for item in ready if item[1]['volumeUID'] not in deferred]
     if ready:
         def cost(item):
             snapshot, _, review = item
@@ -282,7 +316,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False):
             result['operation'] = r.operation
             execute_recovery(r)
         return result
-    result['phase'] = 'blocked' if result['blocked'] else 'idle'
+    result['phase'] = 'blocked' if result['blocked'] or deferred else 'idle'
     save()
     return result
 
@@ -293,6 +327,7 @@ def drain(kube, policy, evidence_path, *, execute=False):
     if not execute or 'recoveryBudget' not in policy:
         return reconcile(kube, policy, evidence_path, execute=execute)
     started, passes = time.monotonic(), []
+    deferred = set()
     result = dict(schema=policy['schema'], observed_at=timestamp(), preview=False, phase='inspecting',
                   completed=0, candidates=0, passes=passes)
     path = Path(evidence_path)
@@ -306,7 +341,7 @@ def drain(kube, policy, evidence_path, *, execute=False):
         path.write_text(json.dumps(result, indent=2) + '\n')
         pass_path = Path(str(path) + '.pass-' + str(index) + '.json')
         try:
-            current = reconcile(kube, policy, str(pass_path), execute=True)
+            current = reconcile(kube, policy, str(pass_path), execute=True, deferred_volume_uids=deferred)
         except Exception as error:
             # Do not leave the aggregate falsely at "inspecting" when an
             # executor fails. Preserve the last partial pass and re-raise.
@@ -320,9 +355,13 @@ def drain(kube, policy, evidence_path, *, execute=False):
             path.write_text(json.dumps(result, indent=2) + '\n')
             raise
         passes.append(current)
+        target_blocks = [b for b in current.get('blocked', []) if b.get('kind') == 'target_blocked_pre_delete']
+        deferred.update(b['volume_uid'] for b in target_blocks)
         result.update(phase=current['phase'], completed=sum(p['completed'] for p in passes), candidates=current['candidates'])
+        if deferred:
+            result['deferred_volume_uids'] = sorted(deferred)
         path.write_text(json.dumps(result, indent=2) + '\n')
-        if current['phase'] != 'completed' or time.monotonic() - started >= policy['maxPassSeconds']:
+        if (current['phase'] != 'completed' and not current.get('retry_discovery')) or time.monotonic() - started >= policy['maxPassSeconds']:
             break
     return result
 

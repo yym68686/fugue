@@ -62,9 +62,35 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  production_maintenance_plan:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    outputs:
+      node_policy: ${{ steps.selected.outputs.node_policy }}
+      expansion: ${{ steps.selected.outputs.expansion }}
+      protection: ${{ steps.selected.outputs.protection }}
+      capacity_access: ${{ steps.selected.outputs.capacity_access }}
+      snapshot_request: ${{ steps.selected.outputs.snapshot_request }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0}
+      - name: Select only explicit production maintenance declarations
+        id: selected
+        env: {BASE_SHA: '${{ github.event.before }}'}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.select_production_maintenance "$BASE_SHA" "$GITHUB_SHA" > "$RUNNER_TEMP/maintenance-selection.json"
+          python3 - "$RUNNER_TEMP/maintenance-selection.json" <<'PYTHON'
+          import json, os, sys
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key, value in json.load(open(sys.argv[1])).items():
+                  output.write(key + '=' + (str(value).lower() if isinstance(value, bool) else value) + '\n')
+          PYTHON
+
   automatic_node_participation:
-    needs: prepush
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') }}
+    needs: production_maintenance_plan
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || needs.production_maintenance_plan.outputs.node_policy == 'true') }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-automatic-node-participation, cancel-in-progress: false, queue: max}
@@ -94,8 +120,8 @@ jobs:
           retention-days: 30
 
   longhorn_local_snapshot_cleanup:
-    needs: [prepush, deploy_api]
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
+    # Temporary schedule until the in-cluster executor has cross-writer fencing.
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
@@ -128,8 +154,7 @@ jobs:
           retention-days: 30
 
   edge_capacity_external_observation:
-    needs: [prepush, deploy_api]
-    if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success') && (needs.deploy_api.result == 'success' || needs.deploy_api.result == 'skipped') }}
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     environment: production
     concurrency: {group: fugue-edge-capacity-external-observation, cancel-in-progress: false, queue: max}
@@ -325,7 +350,8 @@ jobs:
 
   postgres_volume_recovery:
     # A full database must be recoverable without its API or a component build.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: production_maintenance_plan
+    if: ${{ needs.production_maintenance_plan.outputs.expansion == 'true' || needs.production_maintenance_plan.outputs.snapshot_request != '' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
@@ -337,58 +363,44 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
-      - name: Select the declared volume expansion
-        id: selected
-        env:
-          BASE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          paths=(deploy/environments/production/postgres-volume-expansion scripts/expand_postgres_volume.py scripts/test_expand_postgres_volume.py)
-          if ! git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then
-            git fetch origin main
-            git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
-            echo 'changed=true' >> "$GITHUB_OUTPUT"
-          fi
       - name: Test and preview the identity-fenced expansion
-        if: steps.selected.outputs.changed == 'true'
+        if: needs.production_maintenance_plan.outputs.expansion == 'true'
         run: |
           python3 -m unittest scripts.test_expand_postgres_volume
           python3 -m scripts.expand_postgres_volume deploy/environments/production/postgres-volume-expansion/recovery.json --evidence "$RUNNER_TEMP/postgres-volume-preview.json"
       - name: Expand the declared claim and preserve the desired size
-        if: steps.selected.outputs.changed == 'true'
+        if: needs.production_maintenance_plan.outputs.expansion == 'true'
         run: |
           git fetch origin main
           git diff --exit-code HEAD origin/main -- deploy/environments/production/postgres-volume-expansion scripts/expand_postgres_volume.py scripts/test_expand_postgres_volume.py .github/workflows/ci.yml
           python3 -m scripts.expand_postgres_volume deploy/environments/production/postgres-volume-expansion/recovery.json --apply --evidence "$RUNNER_TEMP/postgres-volume-result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always() && steps.selected.outputs.changed == 'true'
+        if: always() && needs.production_maintenance_plan.outputs.expansion == 'true'
         with:
           name: fugue-postgres-volume-recovery-${{ github.sha }}
           path: ${{ runner.temp }}/postgres-volume-*.json
           if-no-files-found: error
           retention-days: 30
       - name: Review the declared obsolete local snapshot without changing it
-        id: snapshot_review
-        env: {BASE_SHA: '${{ github.event.before }}'}
+        if: needs.production_maintenance_plan.outputs.snapshot_request != ''
+        env: {REQUEST: '${{ needs.production_maintenance_plan.outputs.snapshot_request }}'}
         run: |
           set -euo pipefail
-          paths=(deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/test_longhorn_snapshot_map.py scripts/test_plan_longhorn_snapshot_recovery.py scripts/test_recover_longhorn_snapshot.py)
-          if git diff --quiet "$BASE_SHA" HEAD -- "${paths[@]}"; then exit 0; fi
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- "${paths[@]}" .github/workflows/ci.yml
-          echo 'selected=true' >> "$GITHUB_OUTPUT"
+          git diff --exit-code HEAD origin/main -- "$REQUEST" scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/select_production_maintenance.py .github/workflows/ci.yml
           python3 -m unittest scripts.test_longhorn_snapshot_map scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot
           # Read-only preview also recognizes a durable previous operation.
-          python3 -m scripts.recover_longhorn_snapshot deploy/environments/production/local-snapshot-review/review.json deploy/environments/production/local-snapshot-review/approval.json --evidence "$RUNNER_TEMP/local-snapshot-review.json"
+          python3 -m scripts.recover_longhorn_snapshot "$REQUEST/review.json" "$REQUEST/approval.json" --evidence "$RUNNER_TEMP/local-snapshot-review.json"
       - name: Recover only the explicitly approved local snapshot through native Longhorn
-        if: steps.snapshot_review.outputs.selected == 'true'
+        if: needs.production_maintenance_plan.outputs.snapshot_request != ''
+        env: {REQUEST: '${{ needs.production_maintenance_plan.outputs.snapshot_request }}'}
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-review scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/test_recover_longhorn_snapshot.py .github/workflows/ci.yml
-          python3 -m scripts.recover_longhorn_snapshot deploy/environments/production/local-snapshot-review/review.json deploy/environments/production/local-snapshot-review/approval.json --apply --evidence "$RUNNER_TEMP/local-snapshot-result.json"
+          git diff --exit-code HEAD origin/main -- "$REQUEST" scripts/longhorn_snapshot_map.py scripts/plan_longhorn_snapshot_recovery.py scripts/recover_longhorn_snapshot.py scripts/select_production_maintenance.py .github/workflows/ci.yml
+          python3 -m scripts.recover_longhorn_snapshot "$REQUEST/review.json" "$REQUEST/approval.json" --apply --evidence "$RUNNER_TEMP/local-snapshot-result.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always() && steps.snapshot_review.outputs.selected == 'true'
+        if: always() && needs.production_maintenance_plan.outputs.snapshot_request != ''
         with:
           name: fugue-local-snapshot-review-${{ github.sha }}
           path: ${{ runner.temp }}/local-snapshot-*.json
@@ -3120,6 +3132,7 @@ jobs:
       transport: ${{ steps.selected.outputs.transport }}
       ports: ${{ steps.selected.outputs.ports }}
       slots: ${{ steps.selected.outputs.slots }}
+      public_observation: ${{ steps.selected.outputs.public_observation }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
@@ -3262,8 +3275,8 @@ jobs:
           retention-days: 30
 
   dns_observation_policy:
-    needs: [dns_transport, dns_port_retirement]
-    if: ${{ always() && (github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    needs: [dns_configuration_plan, dns_transport, dns_port_retirement, dns_slot_retirement]
+    if: ${{ !cancelled() && (github.event_name == 'schedule' && github.event.schedule == '23 18 * * *' || needs.dns_configuration_plan.outputs.public_observation == 'true' && !contains(needs.*.result, 'failure')) }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     timeout-minutes: 10
@@ -3489,7 +3502,8 @@ jobs:
 
   postgres_protection:
     # Database recovery must remain possible when an application build fails.
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: production_maintenance_plan
+    if: ${{ needs.production_maintenance_plan.outputs.protection == 'true' || needs.production_maintenance_plan.outputs.capacity_access == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     # Every member of this shared group must queue: a default single-slot
@@ -3503,53 +3517,31 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
-      - name: Detect database protection configuration changes
-        id: changed
-        env:
-          BASE_SHA: ${{ github.event.before }}
-        run: |
-          base="${BASE_SHA}"
-          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == 0000000000000000000000000000000000000000 ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
-          changed=false
-          script_changed=false
-          if ! git diff --quiet "${base}" HEAD -- scripts/reconcile_postgres_protection.py scripts/test_reconcile_postgres_protection.py; then
-            script_changed=true
-          fi
-          if ! git diff --quiet "${base}" HEAD -- deploy/environments/production/control-plane-postgres; then
-            changed=true
-          fi
-          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
-          echo "script_changed=${script_changed}" >> "${GITHUB_OUTPUT}"
       - name: Verify database protection writer safety
-        if: steps.changed.outputs.changed == 'true' || steps.changed.outputs.script_changed == 'true'
+        if: needs.production_maintenance_plan.outputs.protection == 'true'
         run: python3 -m unittest discover -s scripts -p test_reconcile_postgres_protection.py
       - name: Validate and reconcile durable database protection
-        if: steps.changed.outputs.changed == 'true'
-        run: |
-          # Reapply protection only on explicit configuration intent changes.
-          # A guard-only code update must not restore an unrelated quorum policy.
-          python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json
-          python3 scripts/reconcile_postgres_protection.py deploy/environments/production/control-plane-postgres/protection.json --apply
-
-      - name: Reconcile read-only storage capacity and attachment observation access
-        env:
-          BASE_SHA: ${{ github.event.before }}
+        if: needs.production_maintenance_plan.outputs.protection == 'true'
         run: |
           set -euo pipefail
-          base="${BASE_SHA}"
-          if [[ ! "${base}" =~ ^[0-9a-f]{40}$ || "${base}" == 0000000000000000000000000000000000000000 ]]; then
-            base="$(git rev-parse HEAD^)"
-          fi
+          config=deploy/environments/production/control-plane-postgres/protection.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$config" scripts/reconcile_postgres_protection.py .github/workflows/ci.yml
+          python3 scripts/reconcile_postgres_protection.py "$config"
+          python3 scripts/reconcile_postgres_protection.py "$config" --apply
+
+      - name: Reconcile read-only storage capacity and attachment observation access
+        if: needs.production_maintenance_plan.outputs.capacity_access == 'true'
+        run: |
+          set -euo pipefail
           config=deploy/environments/production/postgres-capacity-observation/rbac.json
-          if ! git diff --quiet "${base}" HEAD -- "${config}"; then
-            kubectl apply --server-side --dry-run=server --field-manager=fugue-postgres-capacity-observation -f "${config}"
-            kubectl apply --server-side --field-manager=fugue-postgres-capacity-observation -f "${config}"
-            for resource in csistoragecapacities csidrivers csinodes volumeattachments; do
-              kubectl auth can-i list "${resource}.storage.k8s.io" --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
-            done
-          fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$config" .github/workflows/ci.yml
+          kubectl apply --server-side --dry-run=server --field-manager=fugue-postgres-capacity-observation -f "$config"
+          kubectl apply --server-side --field-manager=fugue-postgres-capacity-observation -f "$config"
+          for resource in csistoragecapacities csidrivers csinodes volumeattachments; do
+            kubectl auth can-i list "${resource}.storage.k8s.io" --all-namespaces --as=system:serviceaccount:fugue-system:fugue-fugue-control-plane-sa
+          done
 
   drain_observation_access:
     # Observation access can be repaired without rebuilding or restarting code.

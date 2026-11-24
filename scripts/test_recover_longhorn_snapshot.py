@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from scripts.recover_longhorn_snapshot import CapacityBlocked, Cluster, Recovery, TOKEN, admission_probes, barrier_objects, canonical
+from scripts.recover_longhorn_snapshot import (CapacityBlocked, Cluster, Recovery, TargetBlockedPreDelete, TOKEN,
+                                               admission_probes, barrier_objects, canonical, database_filesystem)
 
 
 def config():
@@ -54,6 +55,9 @@ class FakeCluster:
             return copy.deepcopy(self.snapshot)
         raise AssertionError('unexpected read')
 
+    def items(self, path, **selectors):
+        return []
+
     def create(self, obj):
         obj = copy.deepcopy(obj)
         obj['metadata'].update(uid='operation-uid', resourceVersion='1')
@@ -89,7 +93,7 @@ class RecoveryTests(unittest.TestCase):
         self.r = Recovery(self.kube, self.c, approval(self.c), Path(self.tmp.name) / 'receipt.json')
         self.r.install_barriers = lambda _: None
         self.r.remove_barriers = lambda: None
-        self.r.health = lambda: dict(database_restarts=0, database_available_bytes=1 << 30, public_ready=True)
+        self.r.health = lambda **_: dict(database_restarts=0, database_available_bytes=1 << 30, public_ready=True)
         self.r.wait_native = lambda _: self.r.health()
         self.r.physical = lambda _: dict(free_bytes=54 << 30, available_bytes=45 << 30)
 
@@ -114,6 +118,44 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(self.kube.deletes, 0)
                 self.assertFalse(self.r.state['deletion_attempted'])
                 self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+
+    def test_low_database_space_is_target_blocked_only_with_exact_predelete_mount(self):
+        c = self.c
+        kube = Mock()
+        objects = {
+            'clusters.postgresql.cnpg.io': dict(metadata=dict(name=c['cluster'], uid=c['clusterUID']),
+                status=dict(phase='Cluster in healthy state', readyInstances=1, currentPrimary=c['primary'], targetPrimary=c['primary'])),
+            'pod': dict(metadata=dict(name=c['primary'], uid=c['primaryUID']),
+                        status=dict(conditions=[dict(type='Ready', status='True')])),
+            'pvc': dict(metadata=dict(name=c['primary'], uid=c['pvcUID'])),
+        }
+        kube.get.side_effect = lambda resource, *_: objects[resource]
+        kube.command.return_value = 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/longhorn/db 650000 649999 1 99% /var/lib/postgresql/data\n'
+        with self.assertRaises(TargetBlockedPreDelete) as caught:
+            database_filesystem(kube, c, predelete_stage='discovery')
+        self.assertEqual(caught.exception.budget['database_available_bytes'], 1024)
+        with self.assertRaises(ValueError) as after:
+            database_filesystem(kube, c)
+        self.assertNotIsInstance(after.exception, TargetBlockedPreDelete)
+        kube.command.return_value = kube.command.return_value.replace('/var/lib/postgresql/data', '/')
+        with self.assertRaisesRegex(ValueError, 'not the target mount'):
+            database_filesystem(kube, c, predelete_stage='discovery')
+
+    def test_fenced_low_database_space_cannot_continue_without_proven_release(self):
+        blocked = TargetBlockedPreDelete(1024, 'fenced')
+        with patch('scripts.recover_longhorn_snapshot.observe', return_value=review()):
+            self.r.health = Mock(side_effect=[{}, blocked])
+            with self.assertRaises(TargetBlockedPreDelete):
+                self.r.run()
+            self.assertEqual(self.r.state['phase'], 'aborted-before-delete')
+            self.assertEqual(self.kube.deletes, 0)
+            self.assertEqual(self.kube.lease['spec']['holderIdentity'], '')
+            self.kube.items = Mock(return_value=[{'metadata': {'name': 'leftover-fence'}}])
+            self.r.health = Mock(side_effect=[{}, blocked])
+            with self.assertRaisesRegex(ValueError, 'admission fence release not verified') as caught:
+                self.r.run()
+            self.assertNotIsInstance(caught.exception, TargetBlockedPreDelete)
+            self.assertEqual(self.kube.deletes, 0)
 
     def test_final_resource_version_race_remains_a_known_predelete_abort(self):
         self.kube.snapshot['metadata']['resourceVersion'] = '13'
@@ -190,7 +232,7 @@ class RecoveryTests(unittest.TestCase):
         self.kube.get = Mock(side_effect=[cluster, pod] * 3)
         for times, message in [([0, 6], 'database latency'), ([0, .1, 1, 5], 'API latency'),
                                ([0, .2, 1, 1.3], None)]:
-            self.kube.command = Mock(side_effect=['Filesystem blocks used available\n/dev/data 1 1 1048576', '1\n'])
+            self.kube.command = Mock(side_effect=['Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/data 1048577 1 1048576 1% /var/lib/postgresql/data', '1\n'])
             with patch('scripts.recover_longhorn_snapshot.time.monotonic', side_effect=times), \
                  patch('scripts.recover_longhorn_snapshot.urllib.request.urlopen') as opened:
                 opened.return_value.__enter__.return_value = io.BytesIO(b'{"status":"ok","checks":{"store":{"status":"ok"}}}')
