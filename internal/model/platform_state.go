@@ -235,6 +235,7 @@ type PlatformExpectedConsumer struct {
 	FailureDomain             string    `json:"failure_domain"`
 	Cohort                    string    `json:"cohort"`
 	Required                  bool      `json:"required"`
+	HostedRouteTLSOnly        bool      `json:"hosted_route_tls_only,omitempty"`
 	ExpectedProtocolVersion   string    `json:"expected_protocol_version"`
 	AcceptedProtocolVersions  []string  `json:"accepted_protocol_versions,omitempty"`
 	ExpectedSchemaVersion     string    `json:"expected_schema_version"`

@@ -28,7 +28,7 @@ def holds(policy):
     enrollments = set()
     for hold in result:
         required = {'edge_id', 'edge_group_id', 'public_ipv4', 'reason'}
-        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date', 'recovery', 'worker_enrollment'}:
+        if not isinstance(hold, dict) or not required <= set(hold) or set(hold) - required - {'expected_recovery_date', 'recovery', 'worker_enrollment', 'keep_hosted_route_tls'}:
             raise ValueError('complete offline endpoint identity required')
         if not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', hold['edge_id']) or hold['edge_id'] <= previous or not re.fullmatch(r'edge-group-[a-z0-9]+(?:-[a-z0-9]+)*', hold['edge_group_id']):
             raise ValueError('ordered unique offline endpoint identities required')
@@ -37,6 +37,8 @@ def holds(policy):
             raise ValueError('canonical public endpoint and typed reason required')
         if hold.get('expected_recovery_date'):
             datetime.date.fromisoformat(hold['expected_recovery_date'])
+        if 'keep_hosted_route_tls' in hold and (type(hold['keep_hosted_route_tls']) is not bool or hold['keep_hosted_route_tls'] and (hold['reason'] != 'quota_exhausted' or 'recovery' not in hold)):
+            raise ValueError('hosted route/TLS retention requires an explicit quota recovery hold')
         if 'recovery' in hold:
             p = hold['recovery']
             numeric = {'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds'}
@@ -157,6 +159,7 @@ def recovery_declaration_digest(hold):
     # The runtime binds the typed OfflineEdge JSON, whose field order differs
     # from artifact map canonicalization. Keep the wire digest identical to Go,
     # including encoding/json's HTML and JavaScript separator escaping.
+    # Keep the independent hosted Worker permission out of the DNS digest.
     value = {key: hold[key] for key in ('edge_id', 'edge_group_id', 'public_ipv4', 'reason')}
     if hold.get('expected_recovery_date'):
         value['expected_recovery_date'] = hold['expected_recovery_date']

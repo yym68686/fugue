@@ -21,6 +21,7 @@ type OfflineEdge struct {
 	ExpectedRecoveryDate string                     `json:"expected_recovery_date,omitempty"`
 	Recovery             *OfflineEdgeRecoveryPolicy `json:"recovery,omitempty"`
 	WorkerEnrollment     *OfflineWorkerEnrollment   `json:"worker_enrollment,omitempty"`
+	KeepHostedRouteTLS   bool                       `json:"keep_hosted_route_tls,omitempty"`
 }
 
 // OfflineWorkerEnrollment authorizes a fresh global consumer incarnation on
@@ -77,6 +78,9 @@ func ValidateOfflineEdges(holds []OfflineEdge) error {
 			if p := hold.Recovery.Capacity; p != nil && slices.Contains(p.ReferenceEdgeIDs, hold.EdgeID) {
 				return fmt.Errorf("capacity reference must be another physical Edge")
 			}
+		}
+		if hold.KeepHostedRouteTLS && (hold.Reason != "quota_exhausted" || hold.Recovery == nil) {
+			return fmt.Errorf("hosted route/TLS retention requires an explicit quota recovery hold")
 		}
 		if e := hold.WorkerEnrollment; e != nil {
 			if hold.Recovery == nil || e.Validate() != nil || enrollments[e.ID] {

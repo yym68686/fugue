@@ -1199,6 +1199,9 @@ func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsu
 		return s.pgCreatePlatformExpectedConsumerSet(set)
 	}
 	err = s.withLockedState(true, func(state *model.State) error {
+		if err := s.validateHostedRouteTLSExpectations(stateDNSRouteSourceReader(state), set); err != nil {
+			return err
+		}
 		for _, existing := range state.ExpectedConsumerSets {
 			if existing.ID == set.ID {
 				return ErrConflict
@@ -2323,6 +2326,9 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 		}
 		if consumer.ArtifactKind != in.ArtifactKind || consumer.ScopeKey != in.ScopeKey || consumer.ExpectedGeneration != in.ExpectedGeneration {
+			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
+		}
+		if consumer.HostedRouteTLSOnly && !platformcontrol.AllowsHostedRouteTLSOnly(consumer) {
 			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 		}
 		if _, exists := consumerIDs[consumer.ConsumerID]; exists {

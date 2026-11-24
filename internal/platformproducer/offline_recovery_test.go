@@ -38,8 +38,27 @@ func TestOfflineRecoveryDeclarationWireDigestMatchesConfigurationPublisher(t *te
 	h.ExpectedRecoveryDate = "2030-01-01"
 	h.Recovery.Path = "/a&b"
 	const wireDigest = "sha256:5f2a440655b056227813ab50cd3fe4ff772704af0fdc5b4f07c1c0e13ddb0dc0"
+	recoveryKey := OfflineRecoveryKey(h)
 	if got := OfflineRecoveryDigest(h); got != wireDigest {
 		t.Fatalf("typed declaration digest drifted from configuration publisher contract: %s", got)
+	}
+	h.KeepHostedRouteTLS = true
+	if got := OfflineRecoveryDigest(h); got != wireDigest || OfflineRecoveryKey(h) != recoveryKey {
+		t.Fatalf("route/TLS permission changed DNS recovery identity: %s", got)
+	}
+	nodes := []model.EdgeNode{{ID: h.EdgeID, EdgeGroupID: h.EdgeGroupID, PublicIPv4: h.PublicIPv4}, {ID: "edge-b", EdgeGroupID: h.EdgeGroupID, PublicIPv4: "9.9.9.9"}}
+	if selected, err := SelectDNSCandidateEndpoints(nodes, []OfflineEdge{h}); err != nil || len(selected) != 1 || selected[0].ID != "edge-b" {
+		t.Fatalf("permission changed DNS candidates: %+v, %v", selected, err)
+	}
+	bad := h
+	bad.Reason = "maintenance"
+	if ValidateOfflineEdges([]OfflineEdge{bad}) == nil {
+		t.Fatal("maintenance hold granted hosted execution")
+	}
+	bad = h
+	bad.Recovery = nil
+	if ValidateOfflineEdges([]OfflineEdge{bad}) == nil {
+		t.Fatal("hold without recovery granted hosted execution")
 	}
 }
 

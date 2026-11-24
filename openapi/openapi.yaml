@@ -28681,7 +28681,9 @@ components:
                 additionalProperties: false
                 required: [code]
                 properties:
-                  code: {type: string}
+                  code:
+                    type: string
+                    description: The blocking check. `member_not_expected` identifies a signed recipient absent from the current formal release's expected consumers, even when that recipient is registered as a DNS declaration.
                   node_id: {type: string}
                   artifact_kind: {type: string}
                   capability: {type: string}
@@ -38705,6 +38707,9 @@ components:
           type: string
         required:
           type: boolean
+        hosted_route_tls_only:
+          type: boolean
+          description: Optional in the global convergence quorum, but eligible to execute a separately signed hostname route or TLS part for its exact DNS-held physical member. This flag does not grant DNS answer eligibility or waive the hostname's required execution receipts.
         expected_protocol_version:
           type: string
         accepted_protocol_versions:

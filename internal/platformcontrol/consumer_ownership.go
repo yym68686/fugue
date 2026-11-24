@@ -15,7 +15,7 @@ func ProjectExpectedConsumerOwners(set model.PlatformExpectedConsumerSet) model.
 	for i := range out.Consumers {
 		c := &out.Consumers[i]
 		enrollment, err := ConsumerEnrollmentFromID(c.Component, c.NodeID, c.AuthorityID, c.ScopeKey, c.ConsumerID)
-		if err == nil && c.Component == model.PlatformConsumerComponentCaddyEdgeFront && c.NodeID != "" && c.ArtifactKind == set.ArtifactKind && c.ScopeKey == set.ScopeKey && (c.AuthorityID == "" || c.Cohort == c.AuthorityID) {
+		if err == nil && !c.HostedRouteTLSOnly && c.Component == model.PlatformConsumerComponentCaddyEdgeFront && c.NodeID != "" && c.ArtifactKind == set.ArtifactKind && c.ScopeKey == set.ScopeKey && (c.AuthorityID == "" || c.Cohort == c.AuthorityID) {
 			c.Component = model.PlatformConsumerComponentEdgeWorker
 			c.ConsumerID, _ = EnrolledPlatformConsumerID(c.Component, c.NodeID, c.AuthorityID, c.ScopeKey, enrollment)
 		}

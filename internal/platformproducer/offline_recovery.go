@@ -72,10 +72,15 @@ type OfflineRecoveryObservation struct {
 }
 
 func OfflineRecoveryKey(hold OfflineEdge) string {
-	d, _ := platformconfig.Digest(hold)
-	return "edge-offline-recovery/" + d
+	return "edge-offline-recovery/" + OfflineRecoveryDigest(hold)
 }
-func OfflineRecoveryDigest(hold OfflineEdge) string { d, _ := platformconfig.Digest(hold); return d }
+func OfflineRecoveryDigest(hold OfflineEdge) string {
+	// A separate hosted Worker registration is not new DNS recovery evidence
+	// and must not reset or advance the existing DNS recovery window.
+	hold.KeepHostedRouteTLS = false
+	d, _ := platformconfig.Digest(hold)
+	return d
+}
 
 func (o OfflineRecoveryObservation) Ready(hold OfflineEdge, at time.Time) bool {
 	p := hold.Recovery

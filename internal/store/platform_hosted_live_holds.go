@@ -18,25 +18,85 @@ import (
 // to compute this host's eligible addresses. A new observation is not
 // authority to invent a physical address or silently lift a recovery hold.
 func (s *Store) checkHostedLiveHolds(ctx context.Context, tx *sql.Tx, read dnsRouteSourceReader, p pc.HostedScopeProposal, full model.PlatformArtifact, at time.Time) error {
+	declared, err := s.readHostedOfflinePolicy(read, full)
+	if err != nil {
+		return err
+	}
+	return pgCheckHostedPhysical(ctx, tx, p, declared, at)
+}
+
+func (s *Store) readHostedOfflinePolicy(read dnsRouteSourceReader, full model.PlatformArtifact) ([]platformproducer.OfflineEdge, error) {
 	id, pin := full.Metadata[platformproducer.DNSPolicyIDMetadata], full.Metadata[platformproducer.DNSPolicyDigestMetadata]
 	if id == "" || !platformproducer.ValidDigest(pin) {
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	a, e := read.artifact(id)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	if a.ID != id || a.ContentHash != pin || a.Status != model.PlatformArtifactStatusValidated || a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot || !platformsafety.EvaluateArtifactIntegrity(a, s.platformArtifactSigningKeyring()).Pass {
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	var declared []platformproducer.OfflineEdge
 	if v, present := a.Content["offline_edges"]; present {
 		raw, e := json.Marshal(v)
 		if e != nil || v == nil || json.Unmarshal(raw, &declared) != nil || platformproducer.ValidateOfflineEdges(declared) != nil {
+			return nil, ErrConflict
+		}
+	}
+	return declared, nil
+}
+
+// Verify the special expectation against signed authority rather than relying
+// on a marker in the consumer JSON. Automatic promotion only rebinds the
+// prior immutable expectations to another release of this same parent.
+func (s *Store) validateHostedRouteTLSExpectations(read dnsRouteSourceReader, set model.PlatformExpectedConsumerSet) error {
+	var members []model.PlatformExpectedConsumer
+	for _, member := range set.Consumers {
+		if member.HostedRouteTLSOnly {
+			members = append(members, member)
+		}
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	parent, err := read.artifact(set.ReleaseSetID)
+	if err != nil {
+		return err
+	}
+	if parent.ID != set.ReleaseSetID || parent.ArtifactKind != model.PlatformArtifactKindReleaseSet || parent.Status != model.PlatformArtifactStatusValidated ||
+		parent.ScopeKey != pc.GlobalScopeKey || parent.CreatedByType != model.ActorTypeBootstrap || parent.CreatedByID != platformproducer.Actor ||
+		parent.Content["consumer_topology"] != nil || parent.Content["publication_role"] != nil ||
+		!platformsafety.EvaluateArtifactIntegrity(parent, s.platformArtifactSigningKeyring()).Pass {
+		return ErrConflict
+	}
+	declared, err := s.readHostedOfflinePolicy(read, parent)
+	if err != nil {
+		return err
+	}
+	effective, err := platformproducer.PublicationOfflineHolds(parent, declared)
+	if err != nil {
+		return ErrConflict
+	}
+	held := make(map[string]platformproducer.OfflineEdge, len(effective))
+	for _, h := range effective {
+		held[h.EdgeID] = h
+	}
+	for _, m := range members {
+		h := held[m.NodeID]
+		if !platformcontrol.AllowsHostedRouteTLSOnly(m) || !h.KeepHostedRouteTLS || m.Cohort != h.EdgeGroupID {
+			return ErrConflict
+		}
+		enrollment := ""
+		if h.WorkerEnrollment != nil {
+			enrollment = h.WorkerEnrollment.ID
+		}
+		want, err := platformcontrol.EnrolledPlatformConsumerID(m.Component, h.EdgeID, "", pc.GlobalScopeKey, enrollment)
+		if err != nil || m.ConsumerID != want {
 			return ErrConflict
 		}
 	}
-	return pgCheckHostedPhysical(ctx, tx, p, declared, at)
+	return nil
 }
 
 func pgCheckHostedPhysical(ctx context.Context, tx *sql.Tx, p pc.HostedScopeProposal, declared []platformproducer.OfflineEdge, at time.Time) error {

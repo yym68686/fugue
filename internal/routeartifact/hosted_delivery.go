@@ -31,6 +31,9 @@ type HostedDelivery struct {
 	Member, MembershipSet, MembershipRelease      string
 	MembershipRevision, MembershipFence           int64
 	Parts                                         []HostedDeliveryPart
+	// Server-only admission metadata, reconstructed from the current
+	// expected set. A Worker cannot supply it in its signed observation.
+	SelectedWorkerRequired bool `json:"-"`
 }
 
 // The slot is for one registered physical member/kind/zone of this host.
@@ -147,7 +150,7 @@ func (u *HostedPhaseResolver) ForMember(who platformcontrol.PlatformComponentIde
 		if v.Component != who.Component || v.NodeID != who.NodeID {
 			continue
 		}
-		if member != nil || !v.Required || v.ArtifactKind != set.ArtifactKind || v.ScopeKey != set.ScopeKey || v.ExpectedGeneration != set.ExpectedGeneration ||
+		if member != nil || !u.acceptsHostedMember(*v) || v.ArtifactKind != set.ArtifactKind || v.ScopeKey != set.ScopeKey || v.ExpectedGeneration != set.ExpectedGeneration ||
 			!platformcontrol.ExpectedConsumerIdentityMatches(*v, who) {
 			return empty, "", bad
 		}
@@ -158,7 +161,7 @@ func (u *HostedPhaseResolver) ForMember(who platformcontrol.PlatformComponentIde
 	}
 	out := HostedDelivery{Schema: "fugue.hosted-recipient-input/v1", Host: p.Host, DraftDigest: u.draft, ImageDigest: u.digest, Phase: u.phase,
 		Member: member.ConsumerID, MembershipSet: set.ID, MembershipRelease: serving.ArtifactReleaseID, MembershipRevision: set.Revision, MembershipFence: serving.FencingToken,
-		Parts: u.parts[hostedKindNode{member.Component, member.ArtifactKind, member.NodeID, member.Cohort}]}
+		Parts: u.parts[hostedKindNode{member.Component, member.ArtifactKind, member.NodeID, member.Cohort}], SelectedWorkerRequired: member.HostedRouteTLSOnly}
 	if len(out.Parts) == 0 {
 		return empty, "", bad
 	}
@@ -167,4 +170,30 @@ func (u *HostedPhaseResolver) ForMember(who platformcontrol.PlatformComponentIde
 		return empty, "", err
 	}
 	return out, pin, nil
+}
+
+func (u *HostedPhaseResolver) acceptsHostedMember(member model.PlatformExpectedConsumer) bool {
+	if !member.HostedRouteTLSOnly {
+		return member.Required
+	}
+	p := u.proposal
+	if !platformcontrol.AllowsHostedRouteTLSOnly(member) || p.ExternalPath == nil {
+		return false
+	}
+	for _, n := range p.Eligible {
+		if n.EdgeID == member.NodeID {
+			return false
+		}
+	}
+	matched := false
+	for _, n := range p.Physical {
+		if n.EdgeID != member.NodeID {
+			continue
+		}
+		if n.EdgeGroupID != member.Cohort || !slices.Contains(p.ExternalPath.Held, pc.HostedAddressHold{EdgeID: n.EdgeID, EdgeGroupID: n.EdgeGroupID, Address: n.Address}) {
+			return false
+		}
+		matched = true
+	}
+	return matched
 }

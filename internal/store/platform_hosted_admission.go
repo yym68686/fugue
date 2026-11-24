@@ -170,7 +170,7 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 	parts, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
 		code, _, err := pgHostedMemberBlocker(ctx, tx, p, member, a, time.Now().UTC(), true)
 		return code == "" && err == nil, err
-	}, nil)
+	}, nil, nil)
 	if err != nil || len(parts) == 0 {
 		return err
 	}
@@ -214,7 +214,7 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 // Reconstruct exact parts from the selected image and current physical registrations.
 // Only admission requires capability facts; status reads never issue member credentials
 // or turn a registration into an observation.
-func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error), visitPart func(string, routeartifact.HostedRecipient)) (map[string]string, []hostedMemberDirectoryEntry, error) {
+func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error), visitPart func(string, routeartifact.HostedRecipient), visitMissing func(node, kind string)) (map[string]string, []hostedMemberDirectoryEntry, error) {
 	type receiver struct{ node, kind, group, component string }
 	need := map[receiver]bool{}
 	slots := map[routeartifact.HostedRecipient]bool{}
@@ -227,13 +227,20 @@ func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.Platfor
 	}
 	parts := map[string]string{}
 	var directory []hostedMemberDirectoryEntry
+	missingSet := false
 	for _, spec := range []struct{ kind, id, hash string }{
 		{model.PlatformArtifactKindEdgeRouteBundle, p.Base.RouteArtifactID, p.Base.RouteArtifactDigest},
 		{model.PlatformArtifactKindCaddyRouteConfig, p.Base.TLSArtifactID, p.Base.TLSArtifactDigest},
 		{model.PlatformArtifactKindDNSAnswerBundle, p.Base.DNSArtifactID, p.Base.DNSArtifactDigest}} {
 		set, e := scanPlatformExpectedConsumerSet(tx.QueryRowContext(ctx, hostedCurrentSetSQL, full.ID, p.Base.ReleaseID, spec.kind, pc.GlobalScopeKey))
 		if errors.Is(e, sql.ErrNoRows) || errors.Is(e, ErrNotFound) {
-			return nil, nil, nil
+			if visitMissing == nil {
+				return nil, nil, nil
+			}
+			// Inspect the other sets for diagnostics only. This manifest
+			// is still incomplete, even if this set has no hosted parts.
+			missingSet = true
+			continue
 		}
 		if e != nil {
 			return nil, nil, e
@@ -277,7 +284,12 @@ func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.Platfor
 			directory = append(directory, hostedMemberDirectoryEntry{delivery.Member, spec.kind, set.ID, spec.id})
 		}
 	}
-	if len(need) != 0 || len(slots) != 0 {
+	if missingSet || len(need) != 0 || len(slots) != 0 {
+		if visitMissing != nil {
+			for key := range need {
+				visitMissing(key.node, key.kind)
+			}
+		}
 		return nil, nil, nil
 	}
 	return parts, directory, nil

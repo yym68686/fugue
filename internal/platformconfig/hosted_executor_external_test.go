@@ -10,8 +10,90 @@ import (
 
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
 )
+
+func TestExternalWithheldRouteTLSUsesExactWorkerAssignment(t *testing.T) {
+	s, p := pc.ExternalWithheldRosterFixtureForTest(t)
+	held := p.ExternalPath.Held[0]
+	draft, err := pc.Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := routeartifact.FreezeHostedProgram(s, p, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const enrollment = "0123456789abcdef0123456789abcdef"
+	build := func(kind string, topology platformcontrol.ExpectedConsumerTopology) model.PlatformExpectedConsumerSet {
+		t.Helper()
+		set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: p.Base.ReleaseSetID, ArtifactReleaseID: p.Base.ReleaseID, ArtifactKind: kind, ScopeKey: "global", Generation: "v1", Revision: 1, PreparedAt: time.Now(), Topology: topology})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return set
+	}
+	nodes := []model.EdgeNode{{ID: held.EdgeID, EdgeGroupID: held.EdgeGroupID, PublicIPv4: held.Address}}
+	topology := platformcontrol.ExpectedConsumerTopology{HostedRouteTLSOnly: nodes, WorkerEnrollments: map[string]string{held.EdgeID: enrollment}}
+	for _, spec := range []struct{ kind, child, hash string }{
+		{model.PlatformArtifactKindEdgeRouteBundle, p.Base.RouteArtifactID, p.Base.RouteArtifactDigest},
+		{model.PlatformArtifactKindCaddyRouteConfig, p.Base.TLSArtifactID, p.Base.TLSArtifactDigest},
+	} {
+		t.Run(spec.kind, func(t *testing.T) {
+			set := build(spec.kind, topology)
+			who := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentEdgeWorker, NodeID: held.EdgeID, ScopeKey: "global", ArtifactKinds: []string{spec.kind}, WorkerEnrollmentID: enrollment}
+			a := model.PlatformConsumerAssignment{ScopeKey: "global", ReleaseChannel: "full", ReleaseSetID: p.Base.ReleaseSetID, ArtifactReleaseID: p.Base.ReleaseID, ArtifactID: spec.child, ArtifactKind: spec.kind, ContentHash: spec.hash, FencingToken: p.Base.FencingToken, ExpectedConsumerSetID: set.ID, Revision: set.Revision, ExpectedGeneration: set.ExpectedGeneration}
+			for _, phase := range []string{"prepare", "forward", "withdraw"} {
+				d, pin, err := routeartifact.AddressHostedPreparation(p, draft, img.Digest, img.Wire, phase, who, a, set)
+				if err != nil || pin == "" || !d.SelectedWorkerRequired || len(d.Parts) != 1 || d.Parts[0].Recipient.Node != held.EdgeID || d.Parts[0].Content.DNS != nil {
+					t.Fatalf("%s lost a required route/TLS part or gave the held Worker DNS: %+v, %v", phase, d, err)
+				}
+				wire, err := json.Marshal(d)
+				var decoded routeartifact.HostedDelivery
+				if err != nil || json.Unmarshal(wire, &decoded) != nil || decoded.SelectedWorkerRequired {
+					t.Fatalf("%s let a client control the selected physical Worker check", phase)
+				}
+			}
+			for _, bad := range []string{"unmarked", "ordinary optional", "group", "enrollment", "fence", "hold_address", "eligible", "missing"} {
+				t.Run(bad, func(t *testing.T) {
+					current, assignment, identity, proposal := set, a, who, p
+					current.Consumers = slices.Clone(set.Consumers)
+					switch bad {
+					case "unmarked":
+						current.Consumers[0].HostedRouteTLSOnly = false
+					case "ordinary optional":
+						top := topology
+						top.EdgeNodes, top.HostedRouteTLSOnly = slices.Clone(nodes), nil
+						top.EdgeNodes[0].Draining = true
+						current = build(spec.kind, top)
+						assignment.ExpectedConsumerSetID = current.ID
+					case "group":
+						current.Consumers[0].Cohort = "edge-group-other"
+					case "enrollment":
+						identity.WorkerEnrollmentID = ""
+					case "fence":
+						assignment.FencingToken++
+					case "hold_address":
+						proposal.Physical = slices.Clone(p.Physical)
+						for i := range proposal.Physical {
+							if proposal.Physical[i].EdgeID == held.EdgeID {
+								proposal.Physical[i].Address = "1.1.1.1"
+							}
+						}
+					case "eligible":
+						proposal.Eligible = append(slices.Clone(p.Eligible), held)
+					case "missing":
+						current.Consumers = nil
+					}
+					if _, _, err := routeartifact.AddressHostedPreparation(proposal, draft, img.Digest, img.Wire, "prepare", identity, assignment, current); err == nil {
+						t.Fatal("accepted a non-authorized physical recipient")
+					}
+				})
+			}
+		})
+	}
+}
 
 func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
 	for _, tc := range []struct {

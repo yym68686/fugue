@@ -10,14 +10,15 @@ import (
 	pc "fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/routeartifact"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
 // Test the production admission boundary, not the compiler: use an isolated
-// schema with real Postgres fact/expectation columns, one untouched old
-// physical Edge, one eligible Edge, and one DNS. No live credentials or ACKs.
+// schema with real Postgres fact/expectation columns, two eligible Edges,
+// one DNS-held route/TLS-only Edge, and two DNS members. No live credentials.
 func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	t.Helper()
 	for _, ddl := range postgresSchemaStatements {
@@ -78,15 +79,24 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 		}
 	})
 	owner := model.EdgeTLSAllowlistEntry{Hostname: host, TenantID: "tenant", AppID: "app"}
-	eligible := pc.HostedAddressHold{EdgeID: "alpha", EdgeGroupID: "group", Address: "192.0.2.1"}
-	held := pc.HostedAddressHold{EdgeID: "bravo", EdgeGroupID: "group", Address: "192.0.2.2"}
-	record := pc.DNSIntent{Hostname: host, Type: "A", AppID: "app", TenantID: "tenant", TTL: 90, Values: []string{eligible.Address, held.Address}}
-	p := pc.HostedScopeProposal{Schema: pc.HostedProposalSchema, Host: host, Before: pc.HostedDispatchRows{Owner: owner}, Authority: pc.HostedProposalAuthority{ExpiresAt: until}, Base: base, Physical: []pc.HostedAddressHold{eligible, held}, Eligible: []pc.HostedAddressHold{eligible}, Records: []pc.DNSIntent{record}}
+	const group = "edge-group-us"
+	eligible := pc.HostedAddressHold{EdgeID: "alpha", EdgeGroupID: group, Address: "192.0.2.1"}
+	held := pc.HostedAddressHold{EdgeID: "bravo", EdgeGroupID: group, Address: "192.0.2.2"}
+	peer := pc.HostedAddressHold{EdgeID: "delta", EdgeGroupID: group, Address: "192.0.2.3"}
+	record := pc.DNSIntent{Hostname: host, Type: "A", AppID: "app", TenantID: "tenant", TTL: 60, Values: []string{eligible.Address, held.Address, peer.Address}}
+	p := pc.HostedScopeProposal{Schema: pc.HostedProposalSchema, Host: host, Before: pc.HostedDispatchRows{Owner: owner}, Authority: pc.HostedProposalAuthority{ExpiresAt: until}, Base: base,
+		Physical: []pc.HostedAddressHold{eligible, held, peer}, Eligible: []pc.HostedAddressHold{eligible, peer}, Records: []pc.DNSIntent{record},
+		ExternalPath: &pc.ExternalPathAnchor{Target: pc.ExternalPathTarget{Hostname: host, Target: host, TenantID: owner.TenantID, AppID: owner.AppID, Members: []string{host}}, Held: []pc.HostedAddressHold{held}, Shape: d, EffectiveShape: d}}
 	p.Prepared = pc.HostedDispatchRows{Owner: owner, Routes: []model.EdgeRouteIntent{{Hostname: host, PathPrefix: "/", AppID: "app"}}}
-	stage := routeartifact.HostedPhase{Groups: map[string]routeartifact.HostedGroupContent{"group": {Routes: []model.EdgeRouteBinding{{Hostname: host, TenantID: "tenant", AppID: "app", EdgeGroupID: "group", PathPrefix: "/"}}, TLSAllowlist: []model.EdgeTLSAllowlistEntry{owner}}}, DNS: pc.HostedDNSContent{
-		Views: []pc.DNSQueryView{{NodeID: "charlie", EdgeGroupID: "group", Zone: "example.test", Records: []model.EdgeDNSRecord{{Name: host, Type: "A", TenantID: "tenant", AppID: "app"}}}},
-		Rules: []pc.DNSAnswerRule{{NodeID: "charlie", Hostname: host, Type: "A"}},
-		Plan:  pc.DNSReadinessPlan{Records: []pc.DNSReadinessRecord{{Hostname: host, Targets: []pc.DNSReadinessTarget{{Family: "A", Address: eligible.Address, ProbeIDs: []string{"root"}}}}}, Probes: []pc.DNSReadinessProbe{{ID: "root", Hostname: host, Path: "/"}}}}}
+	stage := routeartifact.HostedPhase{Groups: map[string]routeartifact.HostedGroupContent{group: {Routes: []model.EdgeRouteBinding{{Hostname: host, TenantID: "tenant", AppID: "app", EdgeGroupID: group, PathPrefix: "/"}}, TLSAllowlist: []model.EdgeTLSAllowlistEntry{owner}}}, DNS: pc.HostedDNSContent{
+		Withheld: []pc.HostedAddressHold{held},
+		Plan: pc.DNSReadinessPlan{Records: []pc.DNSReadinessRecord{{Hostname: host, Targets: []pc.DNSReadinessTarget{
+			{Family: "A", Address: eligible.Address, ProbeIDs: []string{"root"}}, {Family: "A", Address: peer.Address, ProbeIDs: []string{"peer-root"}}}}},
+			Probes: []pc.DNSReadinessProbe{{ID: "root", Hostname: host, Path: "/"}, {ID: "peer-root", Hostname: host, Path: "/"}}}}}
+	for _, dns := range []string{"charlie", "echo"} {
+		stage.DNS.Views = append(stage.DNS.Views, pc.DNSQueryView{NodeID: dns, EdgeGroupID: group, Zone: "example.test", Records: []model.EdgeDNSRecord{{Name: host, Type: "A", TenantID: "tenant", AppID: "app"}}})
+		stage.DNS.Rules = append(stage.DNS.Rules, pc.DNSAnswerRule{NodeID: dns, Hostname: host, Type: "A"})
+	}
 	c := HostedSuccessorClaim{Scope: "host:qual", Host: host, Project: "project", Owner: d, Paths: d, Draft: "selected-qual", DraftDigest: d, Prepared: d, Forward: digest("fwd"), Phase: "prepare", Sequence: 1}
 	wire, e := json.Marshal(map[string]any{"schema": "fugue.hosted-program/v1", "host": host, "base": base, "records": p.Records, "prepared": stage, "forward": stage, "draft_digest": d})
 	if e != nil {
@@ -106,17 +116,20 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	kinds := []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindDNSAnswerBundle}
 	for i, kind := range kinds {
 		component := model.PlatformConsumerComponentEdgeWorker
-		nodes := []string{"alpha", "bravo"}
+		nodes := []string{"alpha", "bravo", "delta"}
 		if i == 2 {
 			component = model.PlatformConsumerComponentDNSServer
-			nodes = []string{"charlie"}
+			nodes = []string{"charlie", "echo"}
 		}
 		var members []model.PlatformExpectedConsumer
 		for _, node := range nodes {
 			id := component + ":" + node
-			m := model.PlatformExpectedConsumer{ConsumerID: id, NodeID: node, Component: component, ArtifactKind: kind, ScopeKey: "global", Cohort: "group", ExpectedGeneration: "gen", Required: true}
+			m := model.PlatformExpectedConsumer{ConsumerID: id, NodeID: node, Component: component, ArtifactKind: kind, ScopeKey: "global", Cohort: group, ExpectedGeneration: "gen", Required: node != held.EdgeID, HostedRouteTLSOnly: node == held.EdgeID}
 			members = append(members, m)
 			caps := []string{platformcontrol.TrafficReleaseCapabilityV1, hostedMemberProtocol}
+			if i == 2 {
+				caps = append(caps, routeartifact.HostedSharedTargetCapability, routeartifact.HostedSharedHoldCapability)
+			}
 			if node == "bravo" {
 				caps = caps[:1]
 			}
@@ -147,7 +160,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 		}
 	}
 	check(0, 0)
-	checkBlockers := func(want []string) {
+	checkBlockers := func(want ...model.ProjectHostPreparationBlocker) {
 		t.Helper()
 		tx, err := db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 		if err != nil {
@@ -159,37 +172,59 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(err)
 		}
 		blockers, err := pgHostedPreparationBlockers(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, unit, time.Now().UTC())
-		if err != nil || len(blockers) != len(want) {
+		if err != nil || !slices.Equal(blockers, want) {
 			t.Fatalf("incorrect read-only admission evidence: %+v %v; want %v", blockers, err, want)
 		}
-		for i, b := range blockers {
-			if b.Code != "member_capability_missing" || b.NodeID != "bravo" || b.ArtifactKind != want[i] || b.Capability != hostedMemberProtocol {
-				t.Fatalf("incorrect blocker: %+v", b)
-			}
-		}
 	}
-	checkBlockers(kinds[:2])
+	incapable := func(kind string) model.ProjectHostPreparationBlocker {
+		return model.ProjectHostPreparationBlocker{Code: "member_capability_missing", NodeID: held.EdgeID, ArtifactKind: kind, Capability: hostedMemberProtocol}
+	}
+	notExpected := func(node, kind string) model.ProjectHostPreparationBlocker {
+		return model.ProjectHostPreparationBlocker{Code: "member_not_expected", NodeID: node, ArtifactKind: kind}
+	}
+	checkBlockers(incapable(kinds[0]), incapable(kinds[1]))
+	var originalTLSSet string
+	if err := db.QueryRow(`SELECT consumers_json FROM fugue_platform_expected_consumer_sets WHERE id=$1`, "set-"+kinds[1]).Scan(&originalTLSSet); err != nil {
+		t.Fatal(err)
+	}
+	removeHeldTLSMember := func() {
+		exec(`UPDATE fugue_platform_expected_consumer_sets
+ SET consumers_json=(SELECT jsonb_agg(m) FROM jsonb_array_elements(consumers_json) m WHERE m->>'node_id' <> $2)
+ WHERE id=$1`, "set-"+kinds[1], held.EdgeID)
+	}
+	removeHeldTLSMember()
+	checkBlockers(incapable(kinds[0]), notExpected(held.EdgeID, kinds[1]))
+	check(0, 0)
+	exec(`UPDATE fugue_platform_expected_consumer_sets SET consumers_json=$1, artifact_release_id='other' WHERE id=$2`, originalTLSSet, "set-"+kinds[1])
+	checkBlockers(incapable(kinds[0]), notExpected(eligible.EdgeID, kinds[1]), notExpected(held.EdgeID, kinds[1]), notExpected(peer.EdgeID, kinds[1]))
+	check(0, 0)
+	exec(`UPDATE fugue_platform_expected_consumer_sets SET artifact_release_id='release' WHERE id=$1`, "set-"+kinds[1])
 	caps, _ := json.Marshal([]string{platformcontrol.TrafficReleaseCapabilityV1, hostedMemberProtocol})
 	exec("UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=$1 WHERE node_id='bravo' AND artifact_kind=$2", string(caps), kinds[1])
-	checkBlockers(kinds[:1])
+	checkBlockers(incapable(kinds[0]))
 	check(0, 0)
 	exec("UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=$1 WHERE node_id='bravo' AND artifact_kind=$2", string(caps), kinds[0])
-	checkBlockers(nil)
-	check(1, 5)
-	check(1, 5)
+	checkBlockers()
+	removeHeldTLSMember()
+	checkBlockers(notExpected(held.EdgeID, kinds[1]))
+	check(0, 0)
+	exec(`UPDATE fugue_platform_expected_consumer_sets SET consumers_json=$1 WHERE id=$2`, originalTLSSet, "set-"+kinds[1])
+	const required = 8
+	check(1, required)
+	check(1, required)
 	var facts int
 	if e = db.QueryRow("SELECT count(*) FROM fugue_hosted_selection_receipts WHERE hostname=$1", host).Scan(&facts); e != nil || facts != 0 {
 		t.Fatal("capability counted as application", e, facts)
 	}
-	// The real producer callback may advance only after the ledger has five
-	// separate fresh *test* observations, not merely five capable processes.
+	// The route/TLS-only Worker is optional for the global full but both of
+	// its hosted parts must have separate fresh receipts before forward.
 	var rawParts []byte
 	var decision string
 	if e = db.QueryRow("SELECT members,decision FROM fugue_hosted_selections WHERE hostname=$1", host).Scan(&rawParts, &decision); e != nil {
 		t.Fatal(e)
 	}
 	var members map[string]string
-	if e = json.Unmarshal(rawParts, &members); e != nil || len(members) != 5 {
+	if e = json.Unmarshal(rawParts, &members); e != nil || len(members) != required {
 		t.Fatal("incomplete member manifest", e)
 	}
 	verifyParts := func(phase string, count int, state string, drift bool) {
@@ -214,7 +249,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			}
 			return
 		}
-		if err != nil || out.State != state || out.HostSelection == nil || out.HostSelection.Passing != count || out.HostSelection.Required != 5 || out.HostSelection.Phase != phase {
+		if err != nil || out.State != state || out.HostSelection == nil || out.HostSelection.Passing != count || out.HostSelection.Required != required || out.HostSelection.Phase != phase {
 			t.Fatal("incorrect publication status", err, out)
 		}
 		seenPassing := 0
@@ -228,12 +263,30 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 				t.Fatalf("receipt lost physical identity: %+v", member)
 			}
 		}
-		if len(out.HostSelection.Members) != 5 || seenPassing != count {
+		if len(out.HostSelection.Members) != required || seenPassing != count {
 			t.Fatalf("receipt membership differs from aggregate: %+v", out.HostSelection)
 		}
 	}
 	verifyParts("prepare", 0, "pending", false)
-	for slot, content := range members {
+	unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, im.Digest, wire, "prepare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(t.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heldParts := make(map[string]bool)
+	_, _, err = pgHostedCurrentManifest(t.Context(), tx, model.PlatformArtifact{ID: base.ReleaseSetID, ScopeKey: "global"}, p, unit, nil, func(k string, r routeartifact.HostedRecipient) {
+		if r.Node == held.EdgeID {
+			heldParts[k] = true
+		}
+	}, nil)
+	if end := tx.Rollback(); err != nil || end != nil || len(heldParts) != 2 {
+		t.Fatal("held Worker does not own exactly two route/TLS parts", err, end, heldParts)
+	}
+	recordPart := func(slot, content string) {
+		t.Helper()
 		tx, e := db.BeginTx(t.Context(), nil)
 		if e != nil {
 			t.Fatal(e)
@@ -247,25 +300,35 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(e)
 		}
 	}
-	verifyParts("prepare", 5, "pending", false)
+	for slot, content := range members {
+		if !heldParts[slot] {
+			recordPart(slot, content)
+		}
+	}
+	verifyParts("prepare", required-2, "pending", false)
+	check(1, required)
+	for slot := range heldParts {
+		recordPart(slot, members[slot])
+	}
+	verifyParts("prepare", required, "pending", false)
 	// Stop claiming that the entire global DNS release was verified
 	// once the process owns individual records. It may only renew
 	// its own protocol capability, never substitute for host receipts.
 	kind := model.PlatformArtifactKindDNSAnswerBundle
-	exec("UPDATE fugue_platform_consumer_instances SET issued_at=now()-interval '5 min', last_heartbeat_at=now()-interval '5 min' WHERE artifact_kind=$1", kind)
-	check(1, 5)
+	exec("UPDATE fugue_platform_consumer_instances SET issued_at=now()-interval '5 min', last_heartbeat_at=now()-interval '5 min' WHERE artifact_kind=$1 AND node_id='charlie'", kind)
+	check(1, required)
 	seen := func(credential, child string) {
 		exec(hostedExecutorSeenSQL, model.PlatformConsumerComponentDNSServer+":charlie", kind, credential, base.ReleaseSetID, child, "set-"+kind, base.FencingToken, time.Now().UTC(), until)
 	}
 	seen("different-pod", base.DNSArtifactID)
-	check(1, 5)
+	check(1, required)
 	seen("cred", "retired-child")
-	check(1, 5)
+	check(1, required)
 	seen("cred", base.DNSArtifactID)
 	exec("UPDATE fugue_platform_consumer_instances SET probe_status='failed' WHERE artifact_kind=$1", kind)
-	check(1, 5)
+	check(1, required)
 	exec("UPDATE fugue_platform_consumer_instances SET probe_status='passed' WHERE artifact_kind=$1", kind)
-	check(0, 5)
+	check(0, required)
 	var fence int64
 	var phase string
 	if e = db.QueryRow("SELECT fence,phase FROM fugue_hosted_selections WHERE hostname=$1", host).Scan(&fence, &phase); e != nil || fence != 2 || phase != "forward" {
@@ -291,12 +354,12 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(err)
 		}
 	}
-	verifyParts("forward", 5, "published", false)
+	verifyParts("forward", required, "published", false)
 	exec("UPDATE fugue_hosted_member_directory SET child_id='wrong' WHERE hostname=$1 AND kind=$2", host, kind)
-	verifyParts("forward", 5, "pending", true)
+	verifyParts("forward", required, "pending", true)
 	exec("UPDATE fugue_hosted_member_directory SET child_id=$3 WHERE hostname=$1 AND kind=$2", host, kind, base.DNSArtifactID)
 	exec("UPDATE fugue_platform_expected_consumer_sets SET revision=revision+1 WHERE artifact_kind=$1", kind)
-	verifyParts("forward", 5, "pending", true)
+	verifyParts("forward", required, "pending", true)
 	// A simplistic fixture has no real tenant-owned draft. Its persisted
 	// head may never fall back to global diagnostics or disclose a prior
 	// tenant's decision, even for a request naming the same hostname.

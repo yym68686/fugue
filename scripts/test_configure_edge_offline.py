@@ -68,6 +68,23 @@ class OfflineConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 offline.check_delta(source, changed)
 
+    def test_hosted_worker_permission_does_not_restart_or_end_dns_recovery(self):
+        config, _ = self.fixture()
+        hold = config['projection_policy']['offline_edges'][0]
+        with self.assertRaises(ValueError):
+            offline.validate(config | {'projection_policy': config['projection_policy'] | {'offline_edges': [hold | {'keep_hosted_route_tls': True}]}})
+        hold.update(reason='quota_exhausted', recovery={'hostname': 'app.example.test', 'path': '/', 'probe_interval_seconds': 300, 'probe_timeout_seconds': 5, 'success_threshold': 3, 'failure_threshold': 1, 'freshness_seconds': 1800})
+        previous = copy.deepcopy(config['projection_policy'])
+        pin = offline.recovery_declaration_digest(hold)
+        hold['keep_hosted_route_tls'] = True
+        config['projection_policy']['generation'] += '-hosted'
+        offline.validate(config)
+        self.assertEqual(offline.check_delta(previous, config['projection_policy']), hold['edge_id'])
+        self.assertEqual(offline.recovery_declaration_digest(hold), pin)
+        hold['keep_hosted_route_tls'] = 'true'
+        with self.assertRaises(ValueError):
+            offline.validate(config)
+
     def test_preview_rejects_held_candidate_and_unrelated_changes(self):
         config, _ = self.fixture()
         before = {'business_snapshot_revision': 'before', 'intent': {'dns': [{'hostname': 'app.example.test'}]}, 'policy': {'minimum_healthy_edges': 1}, 'issues': []}

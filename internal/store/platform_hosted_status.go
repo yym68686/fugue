@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -116,6 +117,7 @@ func (s *Store) pgHostedPreparationStatus(ctx context.Context, tx *sql.Tx, proje
 
 func pgHostedPreparationBlockers(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, now time.Time) ([]model.ProjectHostPreparationBlocker, error) {
 	var blockers []model.ProjectHostPreparationBlocker
+	var missing []model.ProjectHostPreparationBlocker
 	parts, _, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(m model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
 		code, capability, err := pgHostedMemberBlocker(ctx, tx, p, m, a, now, false)
 		if code != "" {
@@ -124,11 +126,17 @@ func pgHostedPreparationBlockers(ctx context.Context, tx *sql.Tx, full model.Pla
 		// Continue through the remaining recipients to show all blockers.
 		// The parts constructed here are never used to select or serve.
 		return err == nil, err
-	}, nil)
+	}, nil, func(node, kind string) {
+		missing = append(missing, model.ProjectHostPreparationBlocker{Code: "member_not_expected", NodeID: node, ArtifactKind: kind})
+	})
 	if err != nil {
 		return nil, err
 	}
-	if len(parts) == 0 {
+	slices.SortFunc(missing, func(a, b model.ProjectHostPreparationBlocker) int {
+		return cmp.Or(cmp.Compare(a.NodeID, b.NodeID), cmp.Compare(a.ArtifactKind, b.ArtifactKind))
+	})
+	blockers = append(blockers, slices.Compact(missing)...)
+	if len(parts) == 0 && len(missing) == 0 {
 		blockers = append(blockers, model.ProjectHostPreparationBlocker{Code: "member_manifest_incomplete"})
 	}
 	return blockers, nil
@@ -180,7 +188,7 @@ func pgHostedPublishedParts(ctx context.Context, tx *sql.Tx, full model.Platform
 	recipients := map[string]routeartifact.HostedRecipient{}
 	current, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, nil, func(key string, r routeartifact.HostedRecipient) {
 		recipients[key] = r
-	})
+	}, nil)
 	if err != nil {
 		return empty, err
 	}

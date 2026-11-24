@@ -14,6 +14,10 @@ import (
 
 type ExpectedConsumerTopology struct {
 	EdgeNodes []model.EdgeNode
+	// HostedRouteTLSOnly contains exact DNS-held nodes explicitly retained by
+	// the signed global producer input. They are not ordinary required members
+	// or sources of DNS eligibility.
+	HostedRouteTLSOnly []model.EdgeNode
 	// WorkerEnrollments is reconstructed from the exact signed source of a
 	// global publication, never from the node's self-reported heartbeat.
 	WorkerEnrollments map[string]string
@@ -55,12 +59,23 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 		}
 	}
 	active := map[string]bool{}
+	activeNodes := make(map[string]bool, len(topology.EdgeNodes))
 	for _, node := range topology.EdgeNodes {
 		worker := expectedEdgeConsumer(model.PlatformConsumerComponentEdgeWorker, node, topology.WorkerEnrollments[node.ID], set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
 		active[worker.ConsumerID] = true
+		activeNodes[worker.NodeID] = true
 		if normalizeExpectedConsumerArtifactKind(set.ArtifactKind) != model.PlatformArtifactKindEdgeRouteBundle {
 			front := expectedEdgeConsumer(model.PlatformConsumerComponentCaddyEdgeFront, node, topology.WorkerEnrollments[node.ID], set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
 			active[front.ConsumerID] = true
+		}
+	}
+	hosted := map[string]model.PlatformExpectedConsumer{}
+	if globalHostedWorkerKind(model.PlatformConsumerComponentEdgeWorker, set.ArtifactKind, set.ScopeKey) {
+		for _, node := range topology.HostedRouteTLSOnly {
+			member, err := hostedRouteTLSOnlyConsumer(node, topology.WorkerEnrollments[node.ID], set.ArtifactKind, set.ScopeKey, set.ExpectedGeneration, time.Time{})
+			if err == nil && !activeNodes[member.NodeID] {
+				hosted[member.ConsumerID] = member
+			}
 		}
 	}
 	for _, node := range dnsNodes {
@@ -107,7 +122,12 @@ func ProjectExpectedConsumerSetToTopology(set model.PlatformExpectedConsumerSet,
 				consumer.ConsumerID, _ = PlatformConsumerID(model.PlatformConsumerComponentDNSServer, physical, consumer.AuthorityID)
 			}
 		}
-		if !active[consumer.ConsumerID] {
+		if consumer.HostedRouteTLSOnly {
+			current, ok := hosted[consumer.ConsumerID]
+			if !ok || !AllowsHostedRouteTLSOnly(consumer) || consumer.NodeID != current.NodeID || consumer.Cohort != current.Cohort {
+				continue
+			}
+		} else if !active[consumer.ConsumerID] {
 			continue
 		}
 		if legacyCaddy && consumer.Component == model.PlatformConsumerComponentCaddyEdgeFront {
@@ -167,6 +187,7 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 	for _, component := range components {
 		switch component {
 		case model.PlatformConsumerComponentEdgeWorker, model.PlatformConsumerComponentCaddyEdgeFront:
+			seen := make(map[string]bool)
 			for _, node := range req.Topology.EdgeNodes {
 				if strings.HasPrefix(node.EdgeGroupID, "cell-") && ConsumerAuthorityID(node.EdgeGroupID) == "" {
 					return model.PlatformExpectedConsumerSet{}, fmt.Errorf("neutral consumer authority is invalid")
@@ -179,6 +200,20 @@ func BuildExpectedConsumerSet(req ExpectedConsumerSetBuildRequest) (model.Platfo
 					return model.PlatformExpectedConsumerSet{}, ErrPlatformComponentIdentityInvalid
 				}
 				consumers = append(consumers, consumer)
+				seen[consumer.NodeID] = true
+			}
+			if globalHostedWorkerKind(component, kind, scopeKey) {
+				for _, node := range req.Topology.HostedRouteTLSOnly {
+					if seen[strings.TrimSpace(node.ID)] {
+						return model.PlatformExpectedConsumerSet{}, fmt.Errorf("duplicate ordinary or hosted-only Worker node")
+					}
+					consumer, err := hostedRouteTLSOnlyConsumer(node, req.Topology.WorkerEnrollments[node.ID], kind, scopeKey, generation, now)
+					if err != nil {
+						return model.PlatformExpectedConsumerSet{}, err
+					}
+					consumers = append(consumers, consumer)
+					seen[consumer.NodeID] = true
+				}
 			}
 		case model.PlatformConsumerComponentDNSServer:
 			dnsNodes, _, err := physicalDNSConsumerNodes(req.Topology.DNSNodes)
@@ -504,6 +539,30 @@ func expectedEdgeConsumer(component string, node model.EdgeNode, enrollment, art
 	return consumer
 }
 
+func globalHostedWorkerKind(component, kind, scope string) bool {
+	return scope == "global" && component == model.PlatformConsumerComponentEdgeWorker &&
+		(kind == model.PlatformArtifactKindEdgeRouteBundle || kind == model.PlatformArtifactKindCaddyRouteConfig)
+}
+
+// AllowsHostedRouteTLSOnly identifies the additional registration type. The
+// hosted recipient resolver must separately match the signed host's hold,
+// physical recipient and exact live assignment; this grants no DNS part.
+func AllowsHostedRouteTLSOnly(member model.PlatformExpectedConsumer) bool {
+	_, err := ConsumerEnrollmentFromID(member.Component, member.NodeID, member.AuthorityID, member.ScopeKey, member.ConsumerID)
+	return err == nil && member.HostedRouteTLSOnly && !member.Required &&
+		member.AuthorityID == "" && strings.HasPrefix(member.Cohort, "edge-group-") &&
+		globalHostedWorkerKind(member.Component, member.ArtifactKind, member.ScopeKey)
+}
+
+func hostedRouteTLSOnlyConsumer(node model.EdgeNode, enrollment, kind, scope, generation string, now time.Time) (model.PlatformExpectedConsumer, error) {
+	member := expectedEdgeConsumer(model.PlatformConsumerComponentEdgeWorker, node, enrollment, kind, scope, generation, now)
+	member.HostedRouteTLSOnly, member.Required = true, false
+	if !AllowsHostedRouteTLSOnly(member) || member.NodeID == "" || node.Draining {
+		return model.PlatformExpectedConsumer{}, ErrPlatformComponentIdentityInvalid
+	}
+	return member, nil
+}
+
 func expectedDNSConsumer(node model.DNSNode, artifactKind, scopeKey, generation string, now time.Time) model.PlatformExpectedConsumer {
 	nodeID := strings.TrimSpace(node.ID)
 	failureDomain := firstNonEmptyExpected("edge-group:"+strings.TrimSpace(node.EdgeGroupID), "node:"+firstNonEmptyExpected(strings.TrimSpace(node.PhysicalNodeID), nodeID))
@@ -579,6 +638,9 @@ func expectedConsumerTopologyRevision(kind, scopeKey string, consumers []model.P
 	for _, consumer := range consumers {
 		if consumer.AuthorityID != "" {
 			parts = append(parts, "authority:"+consumer.AuthorityID)
+		}
+		if consumer.HostedRouteTLSOnly {
+			parts = append(parts, "hosted-route-tls-only")
 		}
 		parts = append(parts, strings.Join([]string{
 			consumer.ConsumerID,

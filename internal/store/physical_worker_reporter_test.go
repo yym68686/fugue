@@ -57,6 +57,9 @@ func TestWorkerReporterPredecessorRejectsDelayedWriteAcrossRollback(t *testing.T
 		return nil
 	}
 	original := read()
+	if err = s.acceptHostedWorker(ctx, nil, claims, true); !errors.Is(err, ErrWorkerReporterChanged) {
+		t.Fatal("held hosted-only Worker could report without an exact selected Front", err)
+	}
 	unbound := func() error {
 		tx, e := db.BeginTx(ctx, nil)
 		if e != nil {

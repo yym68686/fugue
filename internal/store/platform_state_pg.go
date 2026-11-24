@@ -1775,6 +1775,9 @@ func (s *Store) pgCreatePlatformExpectedConsumerSet(set model.PlatformExpectedCo
 	err = s.consumePreparedCompilerInput(ctx, proof, pins, false, func(ctx context.Context, tx *sql.Tx) error {
 		return pgLockPromotionScope(ctx, tx, intentSet.ScopeKey, false)
 	}, func(ctx context.Context, tx *sql.Tx) error {
+		if err := s.validateHostedRouteTLSExpectations(pgDNSRouteSourceReader(ctx, tx), intentSet); err != nil {
+			return err
+		}
 		out, err = pgInsertPlatformExpectedConsumerSet(ctx, tx, intentSet)
 		return err
 	})

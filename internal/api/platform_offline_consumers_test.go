@@ -106,6 +106,81 @@ func TestGlobalOfflineMembershipUsesPinnedInputAndPreservesRequiredSurvivors(t *
 	if err != nil || !reflect.DeepEqual(selected, topology) {
 		t.Fatal("current hold changed a parent pinned to the previous input", err)
 	}
+	t.Run("retained held Worker never enters DNS or ordinary quorum", func(t *testing.T) {
+		at := time.Now().UTC()
+		hold := policy.OfflineEdges[0]
+		hold.Reason, hold.KeepHostedRouteTLS = "quota_exhausted", true
+		hold.Recovery = &platformproducer.OfflineEdgeRecoveryPolicy{Hostname: "app.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}
+		next, nextProducer := policy, producer
+		next.Generation, next.OfflineEdges = "retained-input", []platformproducer.OfflineEdge{hold}
+		source := create(model.PlatformArtifactKindPolicySnapshot, "global", next.Generation, next)
+		nextProducer.Generation, nextProducer.DNSPolicyArtifactID, nextProducer.DNSPolicyDigest = "retained-producer", source.ID, source.ContentHash
+		authority := create(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, nextProducer.Generation, nextProducer)
+		_, release, _, _, err := server.store.ReleasePlatformArtifact(authority.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, platformProducerPrincipal())
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidate := parent
+		candidate.Provenance.SignedAt = at
+		candidate.Metadata = map[string]string{platformproducer.DNSPolicyIDMetadata: source.ID, platformproducer.DNSPolicyDigestMetadata: source.ContentHash,
+			platformproducer.StaticIntentIDMetadata: intent.ID, platformproducer.StaticIntentDigestMetadata: intent.ContentHash, platformproducer.PolicyReleaseMetadata: release.ID}
+		inventory := topology
+		inventory.EdgeNodes = append(append([]model.EdgeNode(nil), topology.EdgeNodes...), model.EdgeNode{ID: "edge-c", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.4.4"})
+		unbound, err := server.applyGlobalOfflineConsumerIntent(candidate, inventory)
+		if err != nil || len(unbound.HostedRouteTLSOnly) != 0 || !reflect.DeepEqual(unbound.EdgeNodes, inventory.EdgeNodes[1:]) {
+			t.Fatalf("retained a credential-only Worker or added it to ordinary membership: %+v, %v", unbound, err)
+		}
+		prior := server.workerFrontBindings
+		t.Cleanup(func() { server.workerFrontBindings = prior })
+		server.workerFrontBindings, err = ParseWorkerFrontBindings(`[{"node":"edge-a","service_uid":"11111111-1111-1111-1111-111111111111"}]`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := server.applyGlobalOfflineConsumerIntent(candidate, inventory)
+		if err != nil || !reflect.DeepEqual(selected.EdgeNodes, inventory.EdgeNodes[1:]) || !reflect.DeepEqual(selected.HostedRouteTLSOnly, inventory.EdgeNodes[:1]) || !reflect.DeepEqual(selected.DNSNodes, inventory.DNSNodes) {
+			t.Fatalf("hosted-only registration changed DNS or ordinary Worker membership: %+v, %v", selected, err)
+		}
+		for _, kind := range []string{model.PlatformArtifactKindEdgeRouteBundle, model.PlatformArtifactKindCaddyRouteConfig, model.PlatformArtifactKindDNSAnswerBundle, model.PlatformArtifactKindEdgeRankingPolicy} {
+			set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: "parent", ArtifactReleaseID: "full", ArtifactKind: kind, ScopeKey: "global", Generation: "generation", Revision: 1, PreparedAt: at, Topology: selected})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var marked int
+			for _, member := range set.Consumers {
+				if member.HostedRouteTLSOnly {
+					marked++
+					if !platformcontrol.AllowsHostedRouteTLSOnly(member) || member.NodeID != hold.EdgeID {
+						t.Fatal(member)
+					}
+				}
+			}
+			if kind != model.PlatformArtifactKindEdgeRouteBundle && kind != model.PlatformArtifactKindCaddyRouteConfig {
+				if marked != 0 {
+					t.Fatalf("%s gained a hosted-only Worker", kind)
+				}
+				continue
+			}
+			if marked != 1 || set.RequiredCardinality != 2 || set.OptionalCardinality != 1 {
+				t.Fatalf("%s changed the required Worker quorum: %+v", kind, set)
+			}
+			if current := platformcontrol.ProjectExpectedConsumerSetToTopology(set, selected); !reflect.DeepEqual(current.Consumers, set.Consumers) {
+				t.Fatalf("%s projection lost the signed hosted-only role", kind)
+			}
+			wrong := selected
+			wrong.HostedRouteTLSOnly = append([]model.EdgeNode(nil), selected.HostedRouteTLSOnly...)
+			wrong.HostedRouteTLSOnly[0].EdgeGroupID = "edge-group-foreign"
+			if current := platformcontrol.ProjectExpectedConsumerSetToTopology(set, wrong); current.RequiredCardinality != 2 || current.OptionalCardinality != 0 {
+				t.Fatalf("%s projection let the hosted-only role move to a different group", kind)
+			}
+		}
+		bad := plan
+		bad.Probes = append(append([]platformconfig.DNSReadinessProbe(nil), plan.Probes...), platformconfig.DNSReadinessProbe{EdgeID: hold.EdgeID, Address: hold.PublicIPv4 + ":443"})
+		unsafeDNS := create(model.PlatformArtifactKindDNSAnswerBundle, "global", "retained-unsafe-dns", map[string]any{"readiness_plan": bad})
+		candidate.Content = map[string]any{"artifact_ids": []any{unsafeDNS.ID}, "artifact_kinds": []any{model.PlatformArtifactKindDNSAnswerBundle}}
+		if _, err := server.applyGlobalOfflineConsumerIntent(candidate, inventory); err == nil {
+			t.Fatal("route/TLS flag re-enabled a held DNS probe")
+		}
+	})
 	t.Run("replacement expectation comes from pinned recovered source", func(t *testing.T) {
 		at := time.Now().UTC()
 		hold := policy.OfflineEdges[0]

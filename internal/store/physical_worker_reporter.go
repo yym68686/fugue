@@ -45,6 +45,17 @@ func (p WorkerReporterPredecessor) Bind(ctx context.Context, digest, credential 
 	return context.WithValue(ctx, workerReporterKey{}, workerReporterAdmission{p, digest, credential})
 }
 
+// A held hosted-only recipient may never use legacy credential-only
+// reporting, even if it has not yet created a reporter head.
+func (s *Store) acceptHostedWorker(ctx context.Context, tx *sql.Tx, who platformcontrol.PlatformComponentIdentityClaims, selectedRequired bool) error {
+	if selectedRequired {
+		if _, ok := ctx.Value(workerReporterKey{}).(workerReporterAdmission); !ok {
+			return ErrWorkerReporterChanged
+		}
+	}
+	return s.acceptPhysicalWorker(ctx, tx, who, ctx)
+}
+
 // observation is the original request context; do not substitute its cancellation
 // for store-owned deadlines. The checkpoint and receipt always commit together.
 func (s *Store) acceptPhysicalWorker(ctx context.Context, tx *sql.Tx, who platformcontrol.PlatformComponentIdentityClaims, observation ...context.Context) error {

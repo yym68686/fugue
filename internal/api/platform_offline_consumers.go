@@ -98,6 +98,23 @@ func (s *Server) applyGlobalOfflineConsumerIntent(parent model.PlatformArtifact,
 	if err != nil {
 		return fail()
 	}
+	// Separate an explicit signed hosted-execution grant from DNS selection.
+	// An effective hold still excludes the address, including from the DNS
+	// child we just validated. The retained Worker cannot block a normal full.
+	hosted := make(map[string]bool)
+	for _, hold := range policy.OfflineEdges {
+		if hold.KeepHostedRouteTLS {
+			hosted[hold.EdgeID] = true
+		}
+	}
+	for _, node := range topology.EdgeNodes {
+		// A retained Worker may never satisfy hosted publication through
+		// credentials shared by both slots. Its actual serving Front must
+		// already be pinned in the API's independent release inputs.
+		if hosted[node.ID] && s.workerFrontBindings[node.ID].uid != "" {
+			topology.HostedRouteTLSOnly = append(topology.HostedRouteTLSOnly, node)
+		}
+	}
 	topology.EdgeNodes = selected
 	if len(enrollments) != 0 {
 		topology.WorkerEnrollments = enrollments
