@@ -123,7 +123,7 @@ func (s *Store) WithdrawHostedSelection(ctx context.Context, source pc.HostedAdd
 	}
 	scope, key := NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: host, TenantID: p.Before.Owner.TenantID, AppID: p.Before.Owner.AppID})
 	pin, err := hostedAuthorityDigest(p)
-	if err != nil || pin != cmd.Authority || c.Scope != key || draft.Scope != scope || draft.ScopeKey != key || p.Schema != pc.HostedProposalSchema || !cmd.ValidUntil.Equal(p.Authority.ExpiresAt.UTC().Truncate(time.Microsecond)) {
+	if err != nil || pin != cmd.Authority || c.Scope != key || draft.Scope != scope || draft.ScopeKey != key || !p.SupportedSchema() || !cmd.ValidUntil.Equal(p.Authority.ExpiresAt.UTC().Truncate(time.Microsecond)) {
 		return 0, ErrConflict
 	}
 	if _, err = s.hostedSelectedBase(read, p); err != nil {

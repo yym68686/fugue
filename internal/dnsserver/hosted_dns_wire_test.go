@@ -18,6 +18,12 @@ import (
 // Actual listeners & checkpoints, synthetic physical observations. DNS must
 // not decide a route/certificate passed just because an IP is unchanged.
 func TestHostedDNSWireIndependentForwardWithdrawalAndRestart(t *testing.T) {
+	testHostedWire(t, false)
+}
+func TestHostedDNSIndependentRebindAcrossTwoZonesAndWithdraw(t *testing.T) {
+	testHostedWire(t, true)
+}
+func testHostedWire(t *testing.T, carry bool) {
 	view, _, policy, _, at := queryExecutionFixture()
 	// Linux selection clocks can carry sub-microsecond precision. The
 	// signed artifact envelope has a PostgreSQL-compatible microsecond
@@ -128,6 +134,33 @@ func TestHostedDNSWireIndependentForwardWithdrawalAndRestart(t *testing.T) {
 			u.Plan = plan
 			p.Delivery.Parts = append(p.Delivery.Parts, routeartifact.HostedDeliveryPart{Recipient: r, Content: content, ContentDigest: digest([]any{"fugue.hosted-recipient-part/v1", f.cp.Host, r, content})})
 		}
+		if carry {
+			var err error
+			p.MemberBaseline, err = routeartifact.HostedDNSBaselinePin(p.Delivery, f.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if f.head.Fence > 0 && (f.head.Parent != p.Parent || f.head.Offer > 1) {
+				p.Draft, p.Offer, p.Delivery.DraftDigest, p.Delivery.ImageDigest, p.Authority = "new-"+f.cp.Host, 2, digest([]string{"new-draft", f.cp.Host}), digest([]string{"new-image", f.cp.Host}), digest("new-authority")
+				if phase == "withdraw" {
+					p.ExactWithdrawal, p.SkippedForwardFrom = true, ""
+				}
+				if f.head.Parent != p.Parent {
+					p.PriorParts = map[string]string{}
+					for i, v := range p.Delivery.Parts {
+						k, err := p.Delivery.PartKey(v)
+						if err != nil {
+							t.Fatal(err)
+						}
+						p.PriorParts[k] = f.head.Delivery.Parts[i].ContentDigest
+					}
+					p.MembershipRebind, err = routeartifact.BindHostedContinuation(f.head, p, f.head.MemberBaseline, p.MemberBaseline)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
 		sig, e := routeartifact.SignHostedPacket(p, s.platformDNSKeys(), at)
 		if e != nil {
 			t.Fatal(e)
@@ -185,6 +218,48 @@ func TestHostedDNSWireIndependentForwardWithdrawalAndRestart(t *testing.T) {
 	apply(fb, "prepare", false)
 	af, afacts := apply(fa, "forward", true)
 	bf, bfacts := apply(fb, "forward", true)
+	if carry {
+		a.ReleaseSetID, a.ExpectedConsumerSetID, a.ArtifactID, a.ArtifactReleaseID, a.ContentHash = "next-full", "next-set", "next-child", "next-release", digest("next-child")
+		a.FencingToken++
+		a.Revision++
+		fa.cp.Serving, fb.cp.Serving = a, a
+		n := *parent
+		parent = &n
+		parent.record.Parent.ID, parent.record.Parent.ContentHash = a.ReleaseSetID, digest("new-parent")
+		parent.record.Candidate.Assignment = a
+		parent.record.Candidate.Artifact.ID, parent.record.Candidate.Artifact.ContentHash = a.ArtifactID, a.ContentHash
+		parent.record.Candidate.Release.FencingToken = a.FencingToken
+		s = NewService(meta, nil)
+		if err := s.reserveHostedDNS(); err != nil {
+			t.Fatal(err)
+		}
+		read = start(s)
+		read(A, dns.RcodeServerFailure)
+		read(B, dns.RcodeServerFailure)
+		if err := s.installHostedDNS(fb.cp, bf, parent, fb.base, bfacts); err == nil {
+			t.Fatal("resurrected old membership")
+		}
+		apply(fb, "forward", true)
+		read(B, dns.RcodeSuccess)
+		read(A, dns.RcodeServerFailure)
+		bHead := fb.head.Decision
+		next, _, _ := command(fa, "forward", true)
+		if err := s.installHostedDNS(fa.cp, next, parent, fa.base, afacts); err == nil {
+			t.Fatal("old DNS proofs credited to rebound host")
+		}
+		read(B, dns.RcodeSuccess)
+		apply(fa, "forward", true)
+		read(A, dns.RcodeSuccess)
+		read("alpha.delegated.example.test", dns.RcodeSuccess)
+		apply(fa, "withdraw", false)
+		read(A, dns.RcodeSuccess)
+		read(B, dns.RcodeSuccess)
+		w := s.hostedDNS.Load().keys[hostedZoneKey{view.Zone, hostedRRKey{B, dns.TypeA}}]
+		if w.forHost(B).Decision != bHead {
+			t.Fatal("A withdrawal changed B")
+		}
+		return
+	}
 	// Prove the exact per-zone writes, not just interchangeable IPs.
 	witness := func(s *Service, p routeartifact.HostedSelectedPacket, network string) (hostedDNSWireEvidence, error) {
 		part := p.Delivery.Parts[0]

@@ -74,7 +74,7 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 
 func hostedProposalDraft(p pc.HostedScopeProposal, captured, now time.Time) (model.PlatformArtifact, error) {
 	owner, a := p.Before.Owner, p.Authority
-	if p.Schema != pc.HostedProposalSchema || p.Host == "" || owner.Hostname != p.Host || owner.AppID == "" || owner.TenantID == "" ||
+	if !p.SupportedSchema() || p.Host == "" || owner.Hostname != p.Host || owner.AppID == "" || owner.TenantID == "" ||
 		owner != p.Prepared.Owner || owner != p.After.Owner || len(p.Before.Routes) == 0 || len(p.After.Routes) == 0 || len(p.Changes) == 0 ||
 		a.Producer.ArtifactID == "" || a.Producer.ContentHash == "" || a.Producer.ReleaseID == "" || a.Producer.FencingToken <= 0 ||
 		a.LKGID == "" || a.EvidenceHash == "" || !a.ExpiresAt.After(now) || captured.IsZero() || captured.After(now) || p.Base.Validate() != nil {
@@ -84,6 +84,7 @@ func hostedProposalDraft(p pc.HostedScopeProposal, captured, now time.Time) (mod
 	// Capture time is the creation time of the *first* observation, never a
 	// renewal. An assignment must separately check current authority, tenant
 	// intent, runtime and point-in-time consumer observations.
+	p.Schema = pc.HostedMembershipProposalSchema
 	raw, err := json.Marshal(p)
 	if err != nil || len(raw) > 1<<20 {
 		return model.PlatformArtifact{}, ErrInvalidInput

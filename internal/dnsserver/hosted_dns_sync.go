@@ -37,10 +37,19 @@ func (s *Service) installHostedDNS(cp platformconsumer.HostedCheckpoint, command
 		return errors.New("DNS selection is not a complete projection of the loaded parent")
 	}
 	current := s.hostedDNS.Load()
+	if p.MemberBaseline != "" {
+		pin, err := routeartifact.HostedDNSBaselinePin(p.Delivery, base)
+		if err != nil || pin != p.MemberBaseline {
+			return errors.New("DNS host baseline differs from its signed command")
+		}
+	}
 	live := base
 	old, e := cp.Reserved()
 	if e == nil {
-		if old.Parent != p.Parent || old.ChildDigest != p.ChildDigest {
+		cross := old.Parent != p.Parent
+		repeat := old.Fence == p.Fence && old.Decision == p.Decision
+		if cross && !p.ContinuesHostedMembership(old, old.MemberBaseline, p.MemberBaseline) ||
+			!cross && (old.ChildDigest != p.ChildDigest || !repeat && p.MembershipRebind != nil) {
 			return errors.New("DNS selection requires explicit membership rebind")
 		}
 		live = dnsHostParts(old)

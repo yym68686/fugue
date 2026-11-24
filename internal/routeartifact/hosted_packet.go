@@ -24,6 +24,7 @@ const HostedPacketKind = "hosted_recipient_selection_v1"
 // A v1-only DNS process deliberately rejects such packets.
 const HostedSharedTargetCapability = "hosted_shared_dns_target_v1"
 const HostedSharedHoldCapability = "hosted_shared_dns_hold_v1"
+const HostedContinuationCapability = "hosted_exact_parent_continuation_v1"
 
 type HostedSelectedPacket struct {
 	Scope              string            `json:"host_scope"`
@@ -35,14 +36,20 @@ type HostedSelectedPacket struct {
 	Previous           string            `json:"previous_host_decision"`
 	PriorParts         map[string]string `json:"previous_member_parts"`
 	SkippedForwardFrom string            `json:"skipped_forward_from,omitempty"`
-	Authority          string            `json:"authority_digest"`
-	Business           string            `json:"business_digest"`
-	Parent             string            `json:"membership_parent"`
-	Child              string            `json:"membership_child"`
-	ChildDigest        string            `json:"membership_child_digest"`
-	SelectedAt         time.Time         `json:"selected_at"`
-	ValidUntil         time.Time         `json:"valid_until"`
-	Delivery           HostedDelivery    `json:"delivery"`
+	// There is no skippable prepare on this parent after a forward rebind.
+	ExactWithdrawal bool           `json:"exact_withdrawal,omitempty"`
+	Authority       string         `json:"authority_digest"`
+	Business        string         `json:"business_digest"`
+	Parent          string         `json:"membership_parent"`
+	Child           string         `json:"membership_child"`
+	ChildDigest     string         `json:"membership_child_digest"`
+	SelectedAt      time.Time      `json:"selected_at"`
+	ValidUntil      time.Time      `json:"valid_until"`
+	Delivery        HostedDelivery `json:"delivery"`
+	MemberBaseline  string         `json:"member_baseline,omitempty"`
+	// Only a same-phase continuation of a retained member command. An absent
+	// field keeps all original signed packets and checkpoints readable.
+	MembershipRebind *HostedMembershipRebind `json:"membership_rebind,omitempty"`
 }
 
 func (p HostedSelectedPacket) validate(now time.Time) error {
@@ -58,10 +65,17 @@ func (p HostedSelectedPacket) validate(now time.Time) error {
 		}
 	}
 	one := d.Parts[0].Recipient
+	if p.MemberBaseline != "" && !platformproducer.ValidDigest(p.MemberBaseline) {
+		return bad
+	}
+	if p.MembershipRebind != nil && (p.Fence < 2 || d.Phase == "withdraw" || p.MembershipRebind.Baseline != p.MemberBaseline || !platformproducer.ValidDigest(p.MembershipRebind.Predecessor) ||
+		!platformproducer.ValidDigest(p.MembershipRebind.Baseline)) {
+		return bad
+	}
 	if p.Fence == 1 && (p.Previous != "" || len(p.PriorParts) != 0 || d.Phase != "prepare") ||
 		p.Fence > 1 && (!platformproducer.ValidDigest(p.Previous) || len(p.PriorParts) != len(d.Parts)) ||
-		d.Phase == "withdraw" && (p.Fence < 3 || !platformproducer.ValidDigest(p.SkippedForwardFrom)) ||
-		d.Phase != "withdraw" && p.SkippedForwardFrom != "" {
+		d.Phase == "withdraw" && (p.Fence < 3 || p.ExactWithdrawal && p.SkippedForwardFrom != "" || !p.ExactWithdrawal && !platformproducer.ValidDigest(p.SkippedForwardFrom)) ||
+		d.Phase != "withdraw" && (p.SkippedForwardFrom != "" || p.ExactWithdrawal) {
 		return bad
 	}
 	if one.Node == "" || one.Group == "" {

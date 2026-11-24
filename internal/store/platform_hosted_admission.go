@@ -49,6 +49,9 @@ func pgHostedMemberBlocker(ctx context.Context, tx *sql.Tx, p pc.HostedScopeProp
 	if !slices.Contains(f.CompatibilityCapabilities, hostedMemberProtocol) {
 		return "member_capability_missing", hostedMemberProtocol, nil
 	}
+	if p.HasMemberBaselines() && !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedContinuationCapability) {
+		return "member_capability_missing", routeartifact.HostedContinuationCapability, nil
+	}
 	if p.ExternalPath != nil && a.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle {
 		if !slices.Contains(f.CompatibilityCapabilities, routeartifact.HostedSharedTargetCapability) {
 			return "member_capability_missing", routeartifact.HostedSharedTargetCapability, nil
@@ -131,11 +134,13 @@ func hostedHoldsCurrent(p pc.HostedScopeProposal, holds []pc.HostedAddressHold) 
 // Called by the real offer writer, under its producer/full/business locks.
 // A legacy process or missing set leaves the offer intact and performs no
 // selection. Never shrink the expected set, even for held physical routes.
-func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, in ProjectHostRouteInputs, c HostedSuccessorClaim, program routeartifact.CompiledHostedProgram, holds []pc.HostedAddressHold) error {
+func (s *Store) pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, in ProjectHostRouteInputs, c HostedSuccessorClaim, program routeartifact.CompiledHostedProgram, holds []pc.HostedAddressHold) error {
 	if !hostedHoldsCurrent(p, holds) {
 		return nil
 	}
 	var same bool
+	carry := false
+	currentHostObserved := false
 	var pred hostedSelectionHead
 	err := tx.QueryRowContext(ctx, `SELECT fence,decision,phase,(scope_key=$2 AND project_id=$3 AND offer_sequence=$4 AND draft_id=$5 AND draft_digest=$6 AND program_digest=$7)
  FROM fugue_hosted_selections WHERE hostname=$1`, p.Host, c.Scope, c.Project, c.Sequence, c.Draft, c.DraftDigest, program.Digest).Scan(&pred.Fence, &pred.Decision, &pred.Phase, &same)
@@ -143,6 +148,9 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 	case errors.Is(err, sql.ErrNoRows): // Only the very first prepare has no predecessor.
 	case err != nil:
 		return err
+	case !same && p.HasMemberBaselines() && (pred.Phase == "forward" || pred.Phase == "prepare"):
+		carry = true
+		c.Phase = pred.Phase
 	case pred.Phase == "forward" || !same && pred.Phase != "withdraw":
 		return nil
 	default:
@@ -155,22 +163,37 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 		}
 		if same {
 			c.Phase = "forward"
+			currentHostObserved = p.HasMemberBaselines()
 		}
 	}
-	// Old deployments require no image decode or scanning of global history.
-	// The indexed, authoritative per-member reads below independently recheck.
-	var anyCapable bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_platform_consumer_instances WHERE scope_key=$1 AND artifact_kind=$2 AND release_set_id=$3 AND identity_verified AND compatibility_capabilities_json::jsonb ? $4)`, pc.GlobalScopeKey, model.PlatformArtifactKindDNSAnswerBundle, full.ID, hostedMemberProtocol).Scan(&anyCapable); err != nil || !anyCapable {
-		return err
+	// First contact still requires a fresh global capability. A same-phase
+	// carry only issues a conditional command to the identical enrolled
+	// receivers of a proven predecessor; no observation crosses that boundary.
+	// Afterward only new authenticated receipts for *this exact host head*
+	// can advance it. Requiring a new global positive for either transition
+	// is a deadlock: a process serving scoped hosts cannot attest all hosts.
+	var capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error)
+	if !carry && !currentHostObserved {
+		var anyCapable bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_platform_consumer_instances WHERE scope_key=$1 AND artifact_kind=$2 AND release_set_id=$3 AND identity_verified AND compatibility_capabilities_json::jsonb ? $4)`, pc.GlobalScopeKey, model.PlatformArtifactKindDNSAnswerBundle, full.ID, hostedMemberProtocol).Scan(&anyCapable); err != nil || !anyCapable {
+			return err
+		}
+		capable = func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
+			code, _, err := pgHostedMemberBlocker(ctx, tx, p, member, a, time.Now().UTC(), true)
+			return code == "" && err == nil, err
+		}
 	}
 	unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, program.Digest, program.Wire, c.Phase)
 	if err != nil {
 		return err
 	}
-	parts, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, func(member model.PlatformExpectedConsumer, a model.PlatformConsumerAssignment) (bool, error) {
-		code, _, err := pgHostedMemberBlocker(ctx, tx, p, member, a, time.Now().UTC(), true)
-		return code == "" && err == nil, err
-	}, nil, nil)
+	var receivers hostedDeliverySet
+	var collect []hostedDeliveryVisitor
+	if carry {
+		receivers = hostedDeliverySet{}
+		collect = append(collect, receivers.add)
+	}
+	parts, directory, err := pgHostedCurrentManifest(ctx, tx, full, p, unit, capable, nil, nil, collect...)
 	if err != nil || len(parts) == 0 {
 		return err
 	}
@@ -196,7 +219,11 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 	if err != nil || baseline == c.Paths {
 		return ErrConflict
 	}
-	_, err = pgSelectHostedPhase(ctx, tx, hostedSelectionCommand{Claim: c, Program: program.Digest, Authority: auth, Parts: parts, ValidUntil: p.Authority.ExpiresAt, Previous: pred.Decision, Fence: pred.Fence, BaselinePaths: baseline})
+	cmd := hostedSelectionCommand{Claim: c, Program: program.Digest, Authority: auth, Parts: parts, ValidUntil: p.Authority.ExpiresAt, Previous: pred.Decision, Fence: pred.Fence, BaselinePaths: baseline}
+	if carry {
+		return s.pgContinueHostedOffer(ctx, tx, full, p, program, cmd, directory, receivers, unit)
+	}
+	_, err = pgSelectHostedPhase(ctx, tx, cmd)
 	if err != nil {
 		return err
 	}
@@ -214,7 +241,9 @@ func pgAdmitHostedOffer(ctx context.Context, tx *sql.Tx, full model.PlatformArti
 // Reconstruct exact parts from the selected image and current physical registrations.
 // Only admission requires capability facts; status reads never issue member credentials
 // or turn a registration into an observation.
-func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error), visitPart func(string, routeartifact.HostedRecipient), visitMissing func(node, kind string)) (map[string]string, []hostedMemberDirectoryEntry, error) {
+type hostedDeliveryVisitor func(model.PlatformConsumerAssignment, routeartifact.HostedDelivery) error
+
+func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.PlatformArtifact, p pc.HostedScopeProposal, unit *routeartifact.HostedPhaseResolver, capable func(model.PlatformExpectedConsumer, model.PlatformConsumerAssignment) (bool, error), visitPart func(string, routeartifact.HostedRecipient), visitMissing func(node, kind string), visitors ...hostedDeliveryVisitor) (map[string]string, []hostedMemberDirectoryEntry, error) {
 	type receiver struct{ node, kind, group, component string }
 	need := map[receiver]bool{}
 	slots := map[routeartifact.HostedRecipient]bool{}
@@ -268,6 +297,11 @@ func pgHostedCurrentManifest(ctx context.Context, tx *sql.Tx, full model.Platfor
 			delivery, _, e := unit.ForMember(who, a, set)
 			if e != nil {
 				return nil, nil, ErrConflict
+			}
+			for _, visit := range visitors {
+				if e = visit(a, delivery); e != nil {
+					return nil, nil, e
+				}
 			}
 			for _, part := range delivery.Parts {
 				k, e := delivery.PartKey(part)

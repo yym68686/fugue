@@ -70,8 +70,8 @@ func (s *Service) witnessHostedWorker(ctx context.Context, route, p routeartifac
 			return nil, bad
 		}
 		owner, e = pc.Digest(local)
-		if e != nil {
-			return nil, e
+		if e != nil || p.MemberBaseline != "" && p.MemberBaseline != owner {
+			return nil, bad
 		}
 		// A certificate served by a stale or other Worker can still verify
 		// SNI. Bind the handshake to a nonce reply from this exact host head.

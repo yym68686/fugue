@@ -476,7 +476,7 @@ func (s *Service) reportPlatformServingFact(ctx context.Context, client platform
 	h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, platformcontrol.DNSAvailabilityRedundantCapabilityV2, platformcontrol.StaticEdgePolicyCapabilityV1, platformcontrol.PhysicalLastValidCapabilityV8, platformcontrol.SharedCustomHostTLSCapabilityV1)
 	if positive {
 		if s.Config.HostedExecutorAdmission && assigned.ReleaseChannel == "full" && assigned.ScopeKey == "global" && s.Config.CachePath != "" && s.Config.CaddyEnabled && s.PlatformTokenFile != "" {
-			h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind)
+			h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind, routeartifact.HostedContinuationCapability)
 		}
 		// The caller has verified this exact signed member, the applied group
 		// projection, its durable cache and fresh route/TLS probes. Status LKG

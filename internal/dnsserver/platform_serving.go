@@ -1060,7 +1060,7 @@ func (s *Service) reportDNSAssignmentStateLocked(ctx context.Context, client pla
 	h.GenerationSequence, h.DesiredGeneration = a.GenerationSequence, a.ExpectedGeneration
 	h.CompatibilityCapabilities = dnsExecutionCapabilities()
 	if s.Config.HostedExecutorAdmission && h.ApplyStatus == "applied" && h.ProbeStatus == "passed" && a.ReleaseChannel == "full" && a.ScopeKey == "global" && s.Config.CachePath != "" && s.PlatformTokenFile != "" {
-		h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind, routeartifact.HostedSharedTargetCapability, routeartifact.HostedSharedHoldCapability)
+		h.CompatibilityCapabilities = append(h.CompatibilityCapabilities, routeartifact.HostedPacketKind, routeartifact.HostedSharedTargetCapability, routeartifact.HostedSharedHoldCapability, routeartifact.HostedContinuationCapability)
 	}
 	h.EvidenceHash, _ = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(h)
 	var receipt model.PlatformConsumerHeartbeatResponse

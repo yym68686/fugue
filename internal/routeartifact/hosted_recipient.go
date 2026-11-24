@@ -36,7 +36,7 @@ func HostedRecipientInputs(p pc.HostedScopeProposal, phase HostedPhase) (map[Hos
 	out := map[HostedRecipient]HostedRecipientInput{}
 	groups := map[string]bool{}
 	nodes := map[string]string{}
-	if p.Schema != pc.HostedProposalSchema || p.Host == "" || p.Before.Owner.Hostname != p.Host || len(phase.Groups) == 0 || len(p.Physical) > 4096 {
+	if !p.SupportedSchema() || p.Host == "" || p.Before.Owner.Hostname != p.Host || len(phase.Groups) == 0 || len(p.Physical) > 4096 {
 		return nil, bad
 	}
 	for _, n := range p.Physical {

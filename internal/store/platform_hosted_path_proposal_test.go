@@ -26,6 +26,9 @@ func TestHostedProposalPureDraftCannotBecomeAnAssignment(t *testing.T) {
 	if _, err = s.CreatePlatformArtifact(draft); err == nil {
 		t.Fatal("public create accepted")
 	}
+	if draft.Content["schema"] != pc.HostedMembershipProposalSchema || draft.Content["schema"] == pc.HostedProposalSchema {
+		t.Fatal("old API could decode membership draft as v1")
+	}
 	if _, _, err = s.EnsurePlatformArtifact(draft); err == nil {
 		t.Fatal("generic ensure accepted")
 	}

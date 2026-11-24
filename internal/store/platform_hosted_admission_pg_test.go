@@ -148,7 +148,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(e)
 		}
 		defer tx.Rollback()
-		if e = pgAdmitHostedOffer(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, in, c, im, []pc.HostedAddressHold{held}); e != nil {
+		if e = (&Store{db: db}).pgAdmitHostedOffer(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, in, c, im, []pc.HostedAddressHold{held}); e != nil {
 			t.Fatal(e)
 		}
 		if e = tx.Commit(); e != nil {

@@ -131,7 +131,7 @@ func (s *Server) readHostedProjectBinding(ctx context.Context, id string) (pc.Ho
 		return p, b, bad
 	}
 	raw, err := json.Marshal(a.Content)
-	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || p.Schema != pc.HostedProposalSchema || p.Base.Validate() != nil || !p.Authority.ExpiresAt.After(time.Now()) {
+	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || !p.SupportedSchema() || p.Base.Validate() != nil || !p.Authority.ExpiresAt.After(time.Now()) {
 		return p, b, bad
 	}
 	scope, key := store.NormalizePlatformArtifactScope(model.PlatformArtifactScope{ScopeType: "hosted-path", Hostname: p.Host, AppID: p.Before.Owner.AppID, TenantID: p.Before.Owner.TenantID})

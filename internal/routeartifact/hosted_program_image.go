@@ -21,6 +21,7 @@ type hostedProgramImage struct {
 	Records     []pc.DNSIntent                         `json:"records"`
 	Prepared    HostedPhase                            `json:"prepared"`
 	Forward     HostedPhase                            `json:"forward"`
+	Baselines   []hostedBaselinePin                    `json:"member_baselines,omitempty"`
 }
 
 const maxHostedProgramBytes = 4 << 20
@@ -35,7 +36,19 @@ type CompiledHostedProgram struct {
 // Consumers must authenticate the original draft and their selection before
 // using these bytes. In particular the body does not confer a fresh lease.
 func FreezeHostedProgram(s pc.HostedAddressSource, p pc.HostedScopeProposal, draftDigest string) (CompiledHostedProgram, error) {
+	return freezeHostedProgram(s, p, draftDigest, false)
+}
+
+// For new compiler-authored drafts only. The legacy encoding stays exact:
+// mixed writers must never replace an existing offer image in place.
+func FreezeHostedMembershipProgram(s pc.HostedAddressSource, p pc.HostedScopeProposal, draftDigest string) (CompiledHostedProgram, error) {
+	return freezeHostedProgram(s, p, draftDigest, true)
+}
+func freezeHostedProgram(s pc.HostedAddressSource, p pc.HostedScopeProposal, draftDigest string, bind bool) (CompiledHostedProgram, error) {
 	var zero CompiledHostedProgram
+	if !p.SupportedSchema() || bind != p.HasMemberBaselines() {
+		return zero, errors.New("host draft and compiler encoding differ")
+	}
 	if len(draftDigest) != 71 || draftDigest[:7] != "sha256:" {
 		return zero, errors.New("invalid host draft digest")
 	}
@@ -50,7 +63,14 @@ func FreezeHostedProgram(s pc.HostedAddressSource, p pc.HostedScopeProposal, dra
 	if e != nil {
 		return zero, e
 	}
-	body, e := json.Marshal(hostedProgramImage{"fugue.hosted-program/v1", p.Host, draftDigest, p.Base, p.Records, a, b})
+	image := hostedProgramImage{Schema: "fugue.hosted-program/v1", Host: p.Host, DraftDigest: draftDigest, Base: p.Base, Records: p.Records, Prepared: a, Forward: b}
+	if bind {
+		image.Baselines, e = hostedMemberBaselinePins(s, p, a)
+		if e != nil {
+			return zero, e
+		}
+	}
+	body, e := json.Marshal(image)
 	if e != nil {
 		return zero, e
 	}

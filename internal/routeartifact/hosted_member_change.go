@@ -45,7 +45,7 @@ func PlanHostedMemberChange(a model.PlatformArtifact, host string, who platformc
 	}
 	initial := p.Fence == 1 && cursor.Fence == 0
 	repeat := cursor == next
-	skipped := p.Delivery.Phase == "withdraw" && cursor.Fence == p.Fence-2 && cursor.Decision == p.SkippedForwardFrom
+	skipped := p.Delivery.Phase == "withdraw" && !p.ExactWithdrawal && cursor.Fence == p.Fence-2 && cursor.Decision == p.SkippedForwardFrom
 	if !initial && !repeat && !skipped && (cursor.Fence != p.Fence-1 || cursor.Decision != p.Previous) {
 		return zero, bad
 	}

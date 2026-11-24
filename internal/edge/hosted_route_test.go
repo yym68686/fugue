@@ -30,6 +30,12 @@ import (
 // the ordinary route cache. HTTP requests and explicit nonce proofs cross
 // a real TLS socket; the Caddy apply status below is a fixture, not Caddy.
 func TestHostedWorkerIndependentSelectionOnWireAndRestart(t *testing.T) {
+	testHostedWorkerOnWire(t, false)
+}
+func TestHostedWorkerFourPathsWithdrawAcrossParentWithIndependentPeer(t *testing.T) {
+	testHostedWorkerOnWire(t, true)
+}
+func testHostedWorkerOnWire(t *testing.T, carry bool) {
 	const a, b = "a.fixture.test", "b.fixture.test"
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	digest := func(v any) string {
@@ -90,6 +96,13 @@ func TestHostedWorkerIndependentSelectionOnWireAndRestart(t *testing.T) {
 			part := routeartifact.HostedDeliveryPart{Recipient: r, Content: in, ContentDigest: digest([]any{"fugue.hosted-recipient-part/v1", host, r, in})}
 			v := routeartifact.HostedDelivery{Schema: "fugue.hosted-recipient-input/v1", Host: host, DraftDigest: d, ImageDigest: d, Phase: phase, Member: who.ConsumerID(), MembershipSet: sel.ExpectedConsumerSetID, MembershipRelease: sel.ArtifactReleaseID, MembershipRevision: sel.Revision, MembershipFence: sel.FencingToken, Parts: []routeartifact.HostedDeliveryPart{part}}
 			p := routeartifact.HostedSelectedPacket{Scope: "host:" + host, Project: "fixture", Draft: "draft-" + host, Offer: 1, Fence: int64(i + 1), Decision: digest([]string{host, phase}), Previous: prev, Authority: d, Business: d, Parent: sel.ReleaseSetID, Child: sel.ArtifactID, ChildDigest: d, SelectedAt: now.Add(-time.Second), ValidUntil: now.Add(time.Minute), Delivery: v}
+			if carry {
+				input, owner, err := hostedRouteSource(*gr, host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.MemberBaseline = digest([]any{input, owner})
+			}
 			if i == 0 {
 				prepare = p.Decision
 			} else {
@@ -180,6 +193,99 @@ func TestHostedWorkerIndependentSelectionOnWireAndRestart(t *testing.T) {
 	check("old-a", "old-a", "shared-v2")
 	apply(a, phasesA[1])
 	check("new-a", "shared-v1", "shared-v2")
+	if carry {
+		// The fixture has committed A and B's forward packets on disk.
+		// The new ordinary binding has its own child, set, release and
+		// fence; it is not authority to replay either old packet.
+		prev := map[string]routeartifact.HostedSelectedPacket{a: s.hostedRoutes[a].packet, b: s.hostedRoutes[b].packet}
+		sel.ReleaseSetID, sel.ArtifactReleaseID, sel.ExpectedConsumerSetID, sel.ArtifactID = "parent-2", "full-2", "set-2", "routes-2"
+		sel.FencingToken++
+		sel.Revision++
+		sel.ContentHash = digest("current-child")
+		binding := *gr.TrafficRelease
+		binding.ReleaseSetID, binding.ReleaseID, binding.FencingToken = sel.ReleaseSetID, sel.ArtifactReleaseID, sel.FencingToken
+		binding.ReleaseSetDigest, binding.RouteArtifactID, binding.RouteArtifactDigest = digest("parent-2"), sel.ArtifactID, sel.ContentHash
+		gr.TrafficRelease = &binding
+		*gr = bundleauth.SignEdgeRouteBundle(*gr, testCacheKey, testCacheKeyID, time.Hour)
+		endpoint.Close()
+		s = start()
+		live = s.ProxyHandler()
+		listen()
+		if e := s.applyHostedRoute(phasesA[1], a, who, sel, *gr); e == nil {
+			t.Fatal("old signed decision was reused on a different parent")
+		}
+		sign := func(p routeartifact.HostedSelectedPacket) model.PlatformArtifact {
+			t.Helper()
+			cmd, e := routeartifact.SignHostedPacket(p, keys, time.Now())
+			if e != nil {
+				t.Fatal(e)
+			}
+			return cmd
+		}
+		for _, host := range []string{b, a} {
+			o := prev[host]
+			p := o
+			p.Draft, p.Offer, p.Previous, p.Decision, p.Fence = o.Draft+"-2", 2, o.Decision, digest([]string{host, "carry"}), o.Fence+1
+			p.Parent, p.Child, p.ChildDigest, p.Authority = sel.ReleaseSetID, sel.ArtifactID, sel.ContentHash, digest("current-authority")
+			p.SelectedAt = time.Now().UTC().Truncate(time.Microsecond)
+			v := &p.Delivery
+			v.DraftDigest, v.ImageDigest = digest(p.Draft), digest("recompiled-"+host)
+			v.MembershipSet, v.MembershipRelease, v.MembershipRevision, v.MembershipFence = sel.ExpectedConsumerSetID, sel.ArtifactReleaseID, sel.Revision, sel.FencingToken
+			part := v.Parts[0]
+			k, e := v.PartKey(part)
+			if e != nil {
+				t.Fatal(e)
+			}
+			p.PriorParts = map[string]string{k: part.ContentDigest}
+			p.MembershipRebind, e = routeartifact.BindHostedContinuation(o, p, o.MemberBaseline, p.MemberBaseline)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if host == a {
+				for _, mutate := range []func(*routeartifact.HostedSelectedPacket){
+					func(q *routeartifact.HostedSelectedPacket) { q.MembershipRebind = nil },
+					func(q *routeartifact.HostedSelectedPacket) {
+						r := *q.MembershipRebind
+						r.Predecessor = digest("wrong predecessor")
+						q.MembershipRebind = &r
+					},
+					func(q *routeartifact.HostedSelectedPacket) {
+						r := *q.MembershipRebind
+						r.Baseline = digest("different owner")
+						q.MemberBaseline = r.Baseline
+						q.MembershipRebind = &r
+					},
+					func(q *routeartifact.HostedSelectedPacket) { q.Business = digest("other saved intent") },
+				} {
+					q := p
+					mutate(&q)
+					if err := s.applyHostedRoute(sign(q), host, who, sel, *gr); err == nil {
+						t.Fatal("foreign or missing carry accepted")
+					}
+					get(b, "/", "shared-v2", 200)
+				}
+			}
+			apply(host, sign(p))
+			apply(host, sign(p)) // exact replay after the host CAS
+			prev[host] = p
+		}
+		check("new-a", "shared-v1", "shared-v2")
+		beforeB := s.hostedRoutes[b].packet.Decision
+		p := prev[a]
+		p.Previous, p.Decision, p.Fence, p.ExactWithdrawal, p.Delivery.Phase = p.Decision, digest("withdraw-current"), p.Fence+1, true, "withdraw"
+		p.MembershipRebind = nil
+		p.SelectedAt = time.Now().UTC().Truncate(time.Microsecond)
+		part := p.Delivery.Parts[0]
+		part.Content = routeartifact.HostedRecipientInput{Routes: []model.EdgeRouteBinding{firstA}}
+		part.ContentDigest = digest([]any{"fugue.hosted-recipient-part/v1", a, part.Recipient, part.Content})
+		p.Delivery.Parts = []routeartifact.HostedDeliveryPart{part}
+		apply(a, sign(p))
+		check("old-a", "old-a", "shared-v2")
+		if s.hostedRoutes[b].packet.Decision != beforeB || s.hostedRoutes[a].packet.Parent != sel.ReleaseSetID {
+			t.Fatal("wrong parent or peer replaced")
+		}
+		return
+	}
 	proof := func(host, decision string) *http.Response {
 		req, _ := http.NewRequest("HEAD", "https://"+host+"/one", nil)
 		req.Header.Set(routeproof.RequestHeader, "1")

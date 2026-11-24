@@ -199,6 +199,9 @@ func (s *Service) applyHostedRoute(a model.PlatformArtifact, host string, who pl
 	if e != nil {
 		return e
 	}
+	if p.MemberBaseline != "" && p.MemberBaseline != source {
+		return errHostedGroup
+	}
 	h := edgeHostedRoute{packet: p, source: source}
 	target, e := h.materialize(*s.bundle, i.publication, host, now)
 	if e != nil {
@@ -221,7 +224,10 @@ func (s *Service) applyHostedRoute(a model.PlatformArtifact, host string, who pl
 			}
 		}
 		if old.packet.Fence != 0 {
-			if old.source != source || old.packet.Delivery.Member != who.ConsumerID() || old.packet.Parent != p.Parent || len(old.packet.Delivery.Parts) != 1 {
+			repeat := old.packet.Fence == p.Fence && old.packet.Decision == p.Decision
+			cross := old.packet.Parent != p.Parent
+			if old.source != source || old.packet.Delivery.Member != who.ConsumerID() || len(old.packet.Delivery.Parts) != 1 ||
+				cross && !p.ContinuesHostedMembership(old.packet, old.source, source) || !cross && !repeat && p.MembershipRebind != nil {
 				return errHostedGroup
 			}
 			before = old.packet.Delivery.Parts[0].Content

@@ -34,7 +34,7 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 	}
 	var out, empty HostedDNSContent
 	bad := errors.New("hosted DNS phase does not match its selected predecessor")
-	if p.Schema != HostedProposalSchema || p.Base.Validate() != nil || p.Host != p.Before.Owner.Hostname || p.Before.Owner != p.After.Owner || p.Before.Owner != p.Prepared.Owner ||
+	if !p.SupportedSchema() || p.Base.Validate() != nil || p.Host != p.Before.Owner.Hostname || p.Before.Owner != p.After.Owner || p.Before.Owner != p.Prepared.Owner ||
 		base.Policy.Scope != GlobalScopeKey || base.Policy.DNSPlacementMode != DNSPlacementConsumerReadiness || base.ReadinessPlan == nil || len(p.Hold) == 0 || len(p.Changes) == 0 {
 		return empty, bad
 	}

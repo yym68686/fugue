@@ -124,30 +124,16 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 	if err != nil || set.ID != a.ExpectedConsumerSetID || set.Revision != a.Revision || platformcontrol.ValidateDeclaredTrafficConsumerSet(full, set) != nil {
 		return empty, ErrNotFound
 	}
-	view, _, err := routeartifact.AddressHostedPreparation(p, draftHash, program, body, phase, who, a, set)
+	unit, err := routeartifact.OpenHostedPhase(p, draftHash, program, body, phase)
+	if err != nil {
+		return empty, ErrConflict
+	}
+	view, _, err := unit.ForMember(who, a, set)
 	if err != nil {
 		return empty, ErrNotFound
 	}
 	if err = s.checkHostedLiveHolds(ctx, tx, read, p, full, time.Now().UTC()); err != nil {
 		return empty, err
-	}
-	members := map[string]string{}
-	prior := map[string]string{}
-	if err = json.Unmarshal(manifest, &members); err != nil || len(members) > 8192 || json.Unmarshal(priorManifest, &prior) != nil || len(prior) > 8192 {
-		return empty, ErrConflict
-	}
-	packet.PriorParts = map[string]string{}
-	for _, part := range view.Parts {
-		k, e := view.PartKey(part)
-		if e != nil || members[k] != part.ContentDigest {
-			return empty, ErrNotFound
-		}
-		if packet.Fence > 1 {
-			if !platformproducer.ValidDigest(prior[k]) {
-				return empty, ErrConflict
-			}
-			packet.PriorParts[k] = prior[k]
-		}
 	}
 	lock := ""
 	if lockBusiness {
@@ -166,6 +152,19 @@ func (s *Store) pgReadHostedMemberSelection(ctx context.Context, tx *sql.Tx, hos
 		return empty, ErrConflict
 	}
 	packet.Parent, packet.Child, packet.ChildDigest, packet.Delivery = a.ReleaseSetID, a.ArtifactID, a.ContentHash, view
+	packet.MemberBaseline = unit.MemberBaseline(view)
+	j, err := pgHostedRebindJournal(ctx, tx, host, p.HasMemberBaselines())
+	if err != nil {
+		return empty, err
+	}
+	members, prior, err := hostedSelectionManifests(manifest, priorManifest)
+	if err != nil {
+		return empty, err
+	}
+	packet, err = hostedWirePredecessor(packet, members, prior, j)
+	if err != nil {
+		return empty, err
+	}
 	if !packet.ValidUntil.After(time.Now()) || who.ExpiresAtUnix <= time.Now().Unix() {
 		return empty, ErrConflict
 	}
@@ -191,7 +190,7 @@ func (s *Store) hostedVerifiedDraft(read dnsRouteSourceReader, host, scopeKey, i
 		return p, err
 	}
 	raw, err := json.Marshal(draft.Content)
-	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || p.Schema != pc.HostedProposalSchema || p.Host != host || p.Before.Owner.Hostname != host || p.Base.Validate() != nil ||
+	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || !p.SupportedSchema() || p.Host != host || p.Before.Owner.Hostname != host || p.Base.Validate() != nil ||
 		draft.ID != id || draft.ContentHash != hash || draft.ScopeKey != scopeKey || draft.ArtifactKind != model.PlatformArtifactKindHostedPathProposal || draft.Status != model.PlatformArtifactStatusDraft || draft.CreatedByID != platformproducer.Actor || draft.CreatedByType != model.ActorTypeBootstrap || !platformsafety.EvaluateArtifactIntegrity(draft, s.platformArtifactSigningKeyring()).Pass {
 		return p, ErrConflict
 	}
