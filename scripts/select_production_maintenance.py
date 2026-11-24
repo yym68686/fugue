@@ -5,12 +5,14 @@ import re
 import subprocess
 import sys
 
+from scripts.install_longhorn_snapshot_cleanup import RELEASE_PATHS as CLEANUP_EXECUTOR_PATHS
 from scripts.recover_longhorn_snapshot import Recovery
 
 ROOT = 'deploy/environments/production'
 REVIEW = ROOT + '/local-snapshot-review'
 REQUESTS = REVIEW + '/requests/'
 OBSERVER = ROOT + '/local-snapshot-cleanup/'
+CLEANUP_EXECUTOR = OBSERVER + 'executor.json'
 CNPG_RETENTION_EXECUTOR = (
     ROOT + '/control-plane-backup-retention/install.json',
     'scripts/cnpg_backup_retention.py',
@@ -49,6 +51,12 @@ def select(before, after):
                 for name, path in DECLARATIONS.items()}
     selected['cleanup_observer'] = any(changes.get(OBSERVER + path) in {'A', 'M'}
                                       for path in ('kustomization.yaml', 'observe.py', 'observer.yaml', 'policy.json'))
+    if changes.get(CLEANUP_EXECUTOR) == 'D':
+        raise ValueError('switch the Longhorn executor to observe mode rather than removing its declaration')
+    selected['cleanup_executor'] = (
+        any(path in changes for path in CLEANUP_EXECUTOR_PATHS)
+        and bool(git('ls-tree', after, '--', CLEANUP_EXECUTOR).strip())
+    )
     selected['cnpg_retention'] = any(changes.get(path) in {'A', 'M'} for path in CNPG_RETENTION_EXECUTOR)
     selected['local_node_resources'] = any(changes.get(path) in {'A', 'M'} for path in LOCAL_NODE_RESOURCE_EXECUTOR)
     requests = {path: status for path, status in changes.items() if path.startswith(REQUESTS)}

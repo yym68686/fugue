@@ -73,6 +73,7 @@ jobs:
       capacity_access: ${{ steps.selected.outputs.capacity_access }}
       snapshot_request: ${{ steps.selected.outputs.snapshot_request }}
       cleanup_observer: ${{ steps.selected.outputs.cleanup_observer }}
+      cleanup_executor: ${{ steps.selected.outputs.cleanup_executor }}
       cnpg_retention: ${{ steps.selected.outputs.cnpg_retention }}
       local_node_resources: ${{ steps.selected.outputs.local_node_resources }}
     steps:
@@ -122,13 +123,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  longhorn_local_snapshot_cleanup:
-    # Temporary schedule until the in-cluster executor has cross-writer fencing.
-    if: ${{ github.event_name == 'schedule' }}
+  longhorn_cleanup_executor_release:
+    # CI publishes a host service. Reclamation and retries happen online.
+    needs: [prepush, production_maintenance_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.production_maintenance_plan.outputs.cleanup_executor == 'true' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-postgres-protection, cancel-in-progress: false, queue: max}
-    timeout-minutes: 15
+    timeout-minutes: 12
     permissions: {contents: read}
     steps:
       - name: Inspect generated metadata before checkout
@@ -138,22 +140,26 @@ jobs:
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with: {go-version-file: go.mod, cache: false}
-      - name: Validate current policy and reconcile bounded retired local snapshots
+      - name: Publish pinned executor and verify the live watch and ledger
         run: |
           set -euo pipefail
+          paths="$(python3 -m scripts.install_longhorn_snapshot_cleanup --paths)"
+          mapfile -t inputs <<< "$paths"
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/environments/production/local-snapshot-cleanup scripts/reconcile_longhorn_snapshot_cleanup.py scripts/recover_longhorn_snapshot.py scripts/plan_longhorn_snapshot_recovery.py scripts/longhorn_snapshot_map.py tests/snapshot-native-fold .github/workflows/ci.yml
-          python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_recover_longhorn_snapshot scripts.test_plan_longhorn_snapshot_recovery scripts.test_longhorn_snapshot_map
-          # The production runner's /tmp is tmpfs; exercise native ext4 I/O on
-          # its existing workspace filesystem, not on an in-memory substitute.
+          if ! git diff --quiet HEAD origin/main -- "${inputs[@]}"; then
+            echo "A newer executor release supersedes this run."
+            exit 0
+          fi
+          python3 -m unittest scripts.test_run_longhorn_snapshot_cleanup scripts.test_reconcile_longhorn_snapshot_cleanup
+          # Test real ext4 I/O on the existing runner workspace, not /tmp tmpfs.
           TMPDIR="$RUNNER_TEMP" go -C tests/snapshot-native-fold test -count=1 ./...
-          python3 -m scripts.reconcile_longhorn_snapshot_cleanup deploy/environments/production/local-snapshot-cleanup/policy.json --apply --evidence "$RUNNER_TEMP/local-snapshot-cleanup.json"
+          python3 -m scripts.install_longhorn_snapshot_cleanup "$GITHUB_SHA" | tee "$RUNNER_TEMP/longhorn-cleanup-executor.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: fugue-local-snapshot-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/local-snapshot-cleanup*.json
-          if-no-files-found: error
+          name: fugue-longhorn-cleanup-executor-${{ github.sha }}
+          path: ${{ runner.temp }}/longhorn-cleanup-executor.json
+          if-no-files-found: ignore
           retention-days: 30
 
   edge_capacity_external_observation:
@@ -423,7 +429,8 @@ jobs:
           retention-days: 90
 
   postgres_volume_recovery:
-    # A full database must be recoverable without its API or a component build.
+    # Explicit break-glass requests only, never automatic lifecycle cleanup.
+    # Snapshot requests still coordinate with the online writer via its Lease.
     needs: production_maintenance_plan
     if: ${{ needs.production_maintenance_plan.outputs.expansion == 'true' || needs.production_maintenance_plan.outputs.snapshot_request != '' }}
     runs-on: [self-hosted, linux, x64, fugue, control-plane]

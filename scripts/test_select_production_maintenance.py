@@ -12,7 +12,7 @@ from scripts.test_recover_longhorn_snapshot import approval, config
 
 
 class SelectionTests(unittest.TestCase):
-    outputs = [*plan.DECLARATIONS, 'cleanup_observer', 'cnpg_retention', 'local_node_resources']
+    outputs = [*plan.DECLARATIONS, 'cleanup_observer', 'cleanup_executor', 'cnpg_retention', 'local_node_resources']
 
     def setUp(self):
         self.repo = tempfile.TemporaryDirectory()
@@ -69,6 +69,17 @@ class SelectionTests(unittest.TestCase):
         self.write(plan.OBSERVER + 'observe.py', {'updated': True})
         self.assertEqual(plan.select(self.base, self.commit()),
                          {**dict.fromkeys(self.outputs, False), 'cleanup_observer': True})
+
+    def test_cleanup_executor_publishes_pinned_runtime_but_not_observer(self):
+        self.write(plan.CLEANUP_EXECUTOR, {'mode': 'observe'})
+        first = self.commit()
+        expected = {key: key == 'cleanup_executor' for key in self.outputs}
+        self.assertEqual(plan.select(self.base, first), expected)
+        self.write('scripts/run_longhorn_snapshot_cleanup.py', {'version': 2})
+        second = self.commit()
+        self.assertEqual(plan.select(first, second), expected)
+        self.write('.github/workflows/ci.yml', {'change': True})
+        self.assertEqual(plan.select(second, self.commit()), dict.fromkeys(self.outputs, False))
 
     def test_cnpg_retention_installs_only_when_its_inputs_change(self):
         before = self.base

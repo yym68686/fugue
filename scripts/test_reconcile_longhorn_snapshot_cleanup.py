@@ -58,6 +58,10 @@ class FakeCluster:
     def volume_ledger(self, _):
         return self.ledger
 
+    def maybe(self, kind, name, ns):
+        assert (kind, ns) == ('snapshots.longhorn.io', 'storage')
+        return next((s for s in self.items('/snapshots') if s['metadata']['name'] == name), None)
+
     def failed_snapshot_run(self, _):
         return []
 
@@ -84,6 +88,21 @@ class CleanupTests(unittest.TestCase):
                 result = gc.reconcile(self.kube, policy(), self.path, execute=True)
                 self.assertEqual(result['phase'], 'idle' if field in ('protected', 'status') else 'blocked')
                 observe.assert_not_called()
+
+    def test_event_admits_only_exact_volume_snapshot_run_and_never_bypasses_remote_proof(self):
+        for key in (('pvc-data', 'old-point', 'other'), ('other-pvc', 'old-point', 'run_example')):
+            with patch.object(gc, 'observe') as observe:
+                result = gc.reconcile(self.kube, policy(), self.path, execute=True, targets={key})
+                self.assertEqual(result['phase'], 'idle')
+                self.assertEqual(result['observed_targets'], [])
+                observe.assert_not_called()
+        self.kube.ledger[0]['physical_deleted'] = False
+        key = ('pvc-data', 'old-point', 'run_example')
+        with patch.object(gc.Recovery, 'run') as executor:
+            result = gc.reconcile(self.kube, policy(), self.path, execute=True, targets={key})
+            self.assertEqual(result['phase'], 'blocked')
+            self.assertEqual(result['observed_targets'], [list(key)])
+            executor.assert_not_called()
 
     def test_capacity_failure_is_visible_and_retried_without_deletion(self):
         with patch.object(gc, 'observe', return_value={**review(), 'ready_for_review': False}), patch.object(gc, 'Recovery') as executor:
@@ -343,7 +362,10 @@ class CleanupWorkflowTests(unittest.TestCase):
     def test_every_shared_protection_lane_queues_without_replacing_cleanup(self):
         workflow = (Path(__file__).resolve().parent.parent / '.github/workflows/ci.yml').read_text()
         blocks = re.split(r'(?m)(?=^  [a-zA-Z0-9_-]+:$)', workflow)
-        cleanup = next(block for block in blocks if block.startswith('  longhorn_local_snapshot_cleanup:'))
+        self.assertNotIn('  longhorn_local_snapshot_cleanup:', workflow)
+        cleanup = next(block for block in blocks if block.startswith('  longhorn_cleanup_executor_release:'))
+        self.assertIn("github.event_name == 'push'", cleanup)
+        self.assertNotIn('--apply', cleanup)
         group = re.search(r'concurrency: \{group: ([^,}]+)', cleanup).group(1)
         shared = [block for block in blocks if re.search(
             r'concurrency: \{group: ' + re.escape(group) + r'[,}]', block)]

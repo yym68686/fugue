@@ -1,4 +1,4 @@
-"""Bounded, restart-safe local snapshot GC through the production CI lane.
+"""Bounded, restart-safe local snapshot GC using the native Longhorn executor.
 
 The committed policy authorizes only remotely retired, unprotected ledger
 aliases. Reuse the native executor, including its durable intent, fences,
@@ -21,6 +21,11 @@ from scripts.recover_longhorn_snapshot import (CapacityBlocked, Cluster, Recover
                                                 canonical, database_filesystem, timestamp)
 
 POLICY_LABEL = 'fugue.pro/snapshot-cleanup-policy'
+
+
+def snapshot_key(snapshot):
+    return (snapshot['spec']['volume'], snapshot['metadata']['name'],
+            snapshot['metadata'].get('labels', {}).get('fugue.pro/backup-run', ''))
 
 
 class PreflightInventory:
@@ -135,7 +140,7 @@ def declaration(kube, policy, platform, snapshot, rows, pod):
     return c
 
 
-def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uids=(), deferred_snapshot_uids=()):
+def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uids=(), deferred_snapshot_uids=(), targets=None):
     validate_policy(policy)
     digest = hashlib.sha256(canonical(policy).encode()).hexdigest()
     result = dict(schema=policy['schema'], observed_at=timestamp(), preview=not execute,
@@ -224,7 +229,8 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
         r = Recovery(kube, c, a, str(path) + '.operation.json', cleanup_policy_sha256=record['data']['cleanup_policy_sha256'],
                      cleanup_policy=original if 'cleanup_policy.json' in record['data'] else None)
         require(record['metadata']['name'] == r.operation, 'durable cleanup operation identity differs')
-        result.update(phase='pending-native-operation', operation=r.operation)
+        result.update(phase='pending-native-operation', operation=r.operation, selected_snapshot=c['snapshot'],
+                      selected_target=[c['volume'], c['snapshot'], c['run']])
         save()
         if execute:
             execute_recovery(r)
@@ -234,7 +240,20 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
         result.update(phase='blocked', blocked=[dict(reason='backup/release coordination Lease is occupied')])
         save()
         return result
-    snapshots = kube.items(base + '/snapshots', labelSelector='fugue.pro/backup-run')
+    if targets is None:
+        snapshots = kube.items(base + '/snapshots', labelSelector='fugue.pro/backup-run')
+    else:
+        require(len(targets) <= 1, 'targeted cleanup may consider only one source')
+        snapshots = []
+        for key in targets:
+            snapshot = kube.maybe('snapshots.longhorn.io', key[1], policy['longhornNamespace'])
+            if snapshot and snapshot_key(snapshot) == key:
+                snapshots.append(snapshot)
+        result['observed_targets'] = [list(snapshot_key(snapshot)) for snapshot in snapshots]
+        if not snapshots:
+            result['phase'] = 'idle'
+            save()
+            return result
     volumes = {v['metadata']['name']: v for v in kube.items(base + '/volumes')}
     pods = kube.items('/api/v1/pods', labelSelector='cnpg.io/cluster')
     preflight = PreflightInventory(kube)
@@ -312,7 +331,7 @@ def reconcile(kube, policy, evidence_path, *, execute=False, deferred_volume_uid
             # layers, without putting a large, unsafe layer ahead of all work.
             return (written / (1 + age / (7 * 86400)), created, snapshot['metadata']['name'])
         snapshot, c, review = min(ready, key=cost)
-        result.update(phase='ready', selected_snapshot=snapshot['metadata']['name'], budget=review['budget'],
+        result.update(phase='ready', selected_snapshot=snapshot['metadata']['name'], selected_target=list(snapshot_key(snapshot)), budget=review['budget'],
                       executable_candidates=len(ready))
         save()
         if execute:

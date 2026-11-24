@@ -7,14 +7,21 @@ They reuse run-labelled sources (including pre-Backup snapshots), use stable
 names across ambiguous creates, and coordinate every Longhorn backup with the
 shared backup/release Lease, including managed tenant databases.
 
-The committed `local-snapshot-cleanup/policy.json` is standing authorization
-for the bounded reconciler in the single production `ci.yml` entrypoint. Deploy
-the coordinating API before enabling the policy. The existing schedule, not a
-normal push, re-discovers the labelled local inventory independently of
-worker memory, artifact list display windows, and previous job success. Native
-operations remain serialized with database recovery. V2 executes a bounded
-sequence, re-discovering and measuring after every single native completion.
-No extra capacity, replicas or paid resources are provisioned.
+The production `ci.yml` publishes the executor on the declared control-plane
+host as `fugue-longhorn-local-cleanup.service`. The service watches managed
+Longhorn Backup deletions, then enqueues the matching volume, snapshot and
+backup run. SQLite stores the work and watch position together. A 15-minute
+inventory scan backfills missed events and already-retired sources. A watch
+event is a wake-up signal. The ledger's physical retirement receipt and fresh
+reference checks determine eligibility. The host service uses the existing
+K3s administrator kubeconfig for native admission fencing.
+
+`executor.json` selects `observe` or `active`. Start with `observe` and check
+the exact release, live watch, queue and inventory receipt before enabling
+writes with `active`. The policy in `policy.json` defines native admission.
+The executor retries deferred targets with backoff, allowing other volumes
+to proceed after a target-level failure. One native operation at a time
+keeps the existing platform-wide coordination fence.
 
 ## In-cluster observation canary
 
@@ -25,12 +32,8 @@ does not access the backup ledger, inspect physical capacity, classify candidate
 or authorize deletions. Its service account has no exec, secret, Lease-write or
 snapshot-write permissions. It does not accept write-mode configuration.
 
-A successful observation proves that the cluster scheduler and bounded metadata
-reads work independently of Actions. It does not prove parity with the native
-executor. Keep the existing writer until the new execution identity can inspect
-the full cross-volume inventory and run narrowly authorized ledger/physical
-observations, and until all concurrent database writers honor the shared
-fences. Do not give this observer broad pod exec to skip those requirements.
+The resident executor has its own watch and ledger health receipt. The
+metadata observer keeps its separate read-only identity.
 
 Every alias of a source must be unprotected, terminal, remotely physically
 retired, free of active restores, and owned by a terminal run with no live lease.
@@ -58,7 +61,7 @@ also remain). A removed live-head parent can remain physically present until a
 later immutable child makes native reclamation possible.
 
 Durable native operation ConfigMaps include the exact declaration, approval,
-policy digest, delete intent, fencing token and progress receipt. Scheduled
+policy digest, delete intent, fencing token and progress receipt. Online
 reconciliation resumes an unfinished operation before discovering any new work,
 even if its Snapshot CR has already gone. Unknown DELETE outcomes never cause a
 second DELETE or automatic unlock. Known pre-delete crashes can retry only when
@@ -88,17 +91,14 @@ prune; unknown additional folds remain blocked.
 The shared platform Lease serializes all Fugue-managed Longhorn backups and
 cleanup across volumes, which is stricter than a per-disk cleanup mutex. External
 filesystem writers are covered by the growth reserve, not implicitly paused.
-All CI lanes sharing the database-protection concurrency group also use
-`queue: max` and never cancel in-progress work: leaving one member at the
-default single pending slot can displace a queued cleanup/resumption pass.
+The executor publishing lane queues alongside explicit database maintenance
+changes. Runtime reclamation uses the Kubernetes Lease and admission fences.
 There is no guarantee against arbitrary unbounded concurrent growth. Admission
 and native monitoring also enforce explicit database `SELECT 1` and public API
 readiness round-trip latency limits (including exec/network overhead).
 
-Feasible work is ranked by fold writes with an age weight. Byte caps authorize
-whole native operations; they are **not bandwidth limits**. Roll out one small
-canary, inspect actual duration/latency/space, then authorize larger folds. This
-also sets a conservative throughput assumption; each operation's estimated
+Due work is ordered by retry time and identity. The byte cap bounds whole
+native operations. Each operation's estimated
 duration must fit its foreground-growth window. This assumption is an admission
 estimate, not an engine throughput guarantee or cancellation deadline. This
 implementation does not modify the online engine or claim native throttling.
@@ -107,19 +107,16 @@ data view; it does not replace production health/space admission.
 
 An observation window ending records `native-running`, progress, stagnation and
 physical/health observations, and yields without unlocking or replaying DELETE.
-The next scheduled reconciliation resumes it first. This is periodic monitoring,
-not a continuously resident capacity controller. Errors and unknown outcomes
-retain protection. The durable completion floor uses the same available-space
-budget as admission, not the unrelated scheduling threshold. The pass deadline
-leaves headroom for discovery/native observation within CI's job timeout.
+The service resumes it first. Errors and unknown outcomes retain protection.
+The durable completion floor uses the same available-space budget as admission.
 
 `--evidence` reports `idle`, `blocked`, `ready` (preview), native progress or
 `completed`, including candidate blockers and the actual post-native filesystem
-counter change. A blocked pass is not reported as reclaimed space. CI uploads
-the summary and per-operation evidence even on failure; an incomplete native
-operation with an error fails the job; a healthy `native-running` operation is
-not falsely marked failed. Blocked candidates retry on later passes. Snapshot
-size sums are never reported as guaranteed reclaimable bytes.
+counter change. On the executor host, inspect
+`/var/lib/fugue-longhorn-local-cleanup/status.json` and the service journal.
+The journal records the latest decision and retry reason. Native receipts
+remain in Kubernetes. Snapshot size is an inventory metric. The native
+completion receipt measures actual filesystem reclaim.
 If the executor's fresh capacity sample denies admission after discovery, the
 pass records `blocked` with that exact budget and sampling stage, not the stale
 successful preflight. A fenced denial first unwinds only its known pre-delete
@@ -134,5 +131,5 @@ python3 -m scripts.reconcile_longhorn_snapshot_cleanup \
   --evidence /tmp/local-snapshot-cleanup.json
 ```
 
-`--apply` is restricted to the standard main CI lane. Never manually delete
-replica files, clear native finalizers or lower capacity gates to make a pass run.
+Production automatic writes belong to the online executor. Use the separately
+declared recovery process for an explicitly approved emergency operation.

@@ -11,7 +11,7 @@ test:
 	python3 -m unittest scripts.test_capture_dns_observation_policy
 	python3 -m unittest scripts.test_select_production_maintenance scripts.test_select_dns_configuration
 	python3 -m unittest scripts.test_configure_runtime_input
-	python3 -m unittest scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot scripts.test_longhorn_snapshot_map
+	python3 -m unittest scripts.test_run_longhorn_snapshot_cleanup scripts.test_reconcile_longhorn_snapshot_cleanup scripts.test_plan_longhorn_snapshot_recovery scripts.test_recover_longhorn_snapshot scripts.test_longhorn_snapshot_map
 	python3 -m unittest scripts.test_observe_longhorn_cleanup
 	go -C tests/snapshot-native-fold test -count=1 ./...
 	python3 -m unittest scripts.test_install_compiler_input_zero_temp

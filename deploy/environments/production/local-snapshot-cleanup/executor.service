@@ -1,0 +1,32 @@
+[Unit]
+Description=Fugue Longhorn local snapshot cleanup executor
+After=network-online.target k3s.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/local/lib/fugue/longhorn-local-cleanup/current
+EnvironmentFile=/usr/local/lib/fugue/longhorn-local-cleanup/current/release.env
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+Environment="KUBECTL=/usr/local/bin/kubectl --cache-dir=/var/lib/fugue-longhorn-local-cleanup/kubecache"
+ExecStart=/usr/bin/python3 -Bs -m scripts.run_longhorn_snapshot_cleanup policy.json --state /var/lib/fugue-longhorn-local-cleanup --revision ${FUGUE_EXECUTOR_REVISION} --mode ${FUGUE_EXECUTOR_MODE}
+DynamicUser=yes
+StateDirectory=fugue-longhorn-local-cleanup
+StateDirectoryMode=0700
+UMask=0077
+Restart=always
+RestartSec=15s
+TimeoutStopSec=30s
+MemoryMax=256M
+TasksMax=32
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
