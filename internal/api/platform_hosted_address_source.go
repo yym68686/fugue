@@ -19,26 +19,28 @@ type hostedCapturePlan struct {
 	phase    string
 	hosts    []string
 	external []string
+	managed  []string
 }
 
 type externalHostHint struct {
 	full, intent string
 	names        []string
+	managed      []string
 }
 
 // A cache hit is a discovery hint only. Selection reopens the verified full
 // and the current project intent in their respective transactions.
-func (s *Server) pendingExternalPaths(parent model.PlatformArtifact, intent platformconfig.PlatformIntent) ([]string, error) {
+func (s *Server) pendingHostedPaths(parent model.PlatformArtifact, intent platformconfig.PlatformIntent) (*externalHostHint, error) {
 	if !slices.ContainsFunc(intent.DNS, func(r platformconfig.DNSIntent) bool {
-		return r.Type == "FUGUE_ROUTE" && r.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget && r.Route != nil && !r.Route.ManagedHost
+		return r.Type == "FUGUE_ROUTE" && r.Route != nil && (r.RecordKind == model.EdgeDNSRecordKindCustomDomainTarget && !r.Route.ManagedHost || r.RecordKind == "hosted" && r.Route.ManagedHost)
 	}) {
-		return nil, nil
+		return &externalHostHint{}, nil
 	}
 	if parent.Metadata["intent_generation"] == intent.Generation && intent.Generation != "" {
-		return nil, nil
+		return &externalHostHint{}, nil
 	}
 	if q := s.hostedExternalHint.Load(); q != nil && q.full == parent.ContentHash && q.intent == intent.Generation && q.intent != "" {
-		return q.names, nil
+		return q, nil
 	}
 	var old platformconfig.PlatformIntent
 	a, err := s.store.GetPlatformArtifactByIdentity(model.PlatformArtifactKindPlatformIntent, platformconfig.GlobalScopeKey, parent.Metadata["intent_generation"])
@@ -60,8 +62,9 @@ func (s *Server) pendingExternalPaths(parent model.PlatformArtifact, intent plat
 		return nil, errors.New("selected external domain intent lineage differs")
 	}
 	names := platformconfig.ExternalChangedHosts(old, intent)
-	s.hostedExternalHint.Store(&externalHostHint{parent.ContentHash, intent.Generation, names})
-	return names, nil
+	hint := &externalHostHint{full: parent.ContentHash, intent: intent.Generation, names: names, managed: platformconfig.ManagedChangedHosts(old, intent)}
+	s.hostedExternalHint.Store(hint)
+	return hint, nil
 }
 
 // Discovery is cheap and does not authorize compilation. Don't read the full
@@ -77,12 +80,13 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 	if err != nil || !ok {
 		return plan, err
 	}
-	external, err := s.pendingExternalPaths(parent, p.Intent)
+	hint, err := s.pendingHostedPaths(parent, p.Intent)
 	if err != nil {
 		return plan, err
 	}
-	if len(external) > 0 {
-		plan = hostedCapturePlan{selected: full, phase: "external", external: external}
+	external := hint.names
+	if len(external)+len(hint.managed) > 0 {
+		plan = hostedCapturePlan{selected: full, phase: "external", external: external, managed: hint.managed}
 	}
 	if len(p.hostedAddressHolds) == 0 {
 		return plan, nil
@@ -99,7 +103,7 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 			// shadow instead of moving to paths or releasing deferred B.
 			phase = "after-scoped/" + full.ID
 		}
-		return hostedCapturePlan{selected: full, phase: phase, external: external}, nil
+		return hostedCapturePlan{selected: full, phase: phase, external: external, managed: hint.managed}, nil
 	}
 	if !slices.ContainsFunc(p.Intent.DNS, func(d platformconfig.DNSIntent) bool {
 		return d.Type == "FUGUE_ROUTE" && d.Route != nil && d.Route.ManagedHost
@@ -116,16 +120,21 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 	}
 	hosts := platformconfig.NewHostedPathReservationHosts(previous, p.Intent, p.hostedAddressHolds)
 	if len(hosts) > 0 {
-		return hostedCapturePlan{selected: full, phase: "initial", hosts: slices.Sorted(maps.Keys(hosts)), external: external}, nil
+		return hostedCapturePlan{selected: full, phase: "initial", hosts: slices.Sorted(maps.Keys(hosts)), external: external, managed: hint.managed}, nil
 	}
 	return plan, nil
 }
 
 func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
+	if len(p.managed) > 0 {
+		return platformconfig.Digest([]any{"scoped-managed-paths/v1", ordinary, p.phase, p.selected.ID, p.hosts, p.external, p.managed})
+	}
 	if len(p.external) > 0 {
 		contract := "scoped-external-target/v1"
 		if p.phase == "initial" {
 			contract += "/ordinary-baseline-refresh-v1"
+		} else if p.phase == "external" {
+			contract += "/independent-ordinary-baseline-v1"
 		}
 		return platformconfig.Digest([]any{contract, ordinary, p.phase, p.selected.ID, p.hosts, p.external})
 	}
@@ -144,6 +153,33 @@ func (p hostedCapturePlan) sourceDigest(ordinary string) (string, error) {
 		Source, Phase string
 		Hosts         []string
 	}{ordinary, p.phase, p.hosts})
+}
+
+// A domain program is bound to the exact selected full. An ordinary baseline
+// renewal is not a new business input solely because that full got a new ID.
+// Keep the scheduling key separate from the source/parent CAS and failed
+// candidate identity. Never reuse a historical reservation or scoped phase.
+const isolatedBaselineInput = "producer_isolated_baseline_input_v1"
+
+func (p hostedCapturePlan) ordinaryPathOffers() bool {
+	return p.phase == "external" && len(p.managed)+len(p.external) > 0
+}
+
+func isolatedBaselineDigest(req platformconfig.CompileRequest, authority, compiler string, holds []platformconfig.HostedAddressHold) (string, error) {
+	// Hash the isolation result, not the pending business paths. A second
+	// edit on A, or an offer rebound to another full, isn't a change to B.
+	p := platformIntentProjectionResponse{Intent: req.Intent, Policy: req.Policy, RuntimeSnapshot: req.RuntimeSnapshot}
+	input, err := platformProducerSourceDigest(p, authority)
+	if err != nil {
+		return "", err
+	}
+	return platformconfig.Digest([]any{isolatedBaselineInput, compiler, input, holds})
+}
+
+func sameHostedBaseline(p hostedCapturePlan, input string, current model.PlatformArtifact, owned bool, released, expires, now time.Time, interval, refresh time.Duration) bool {
+	return owned && input != "" && current.ID != "" && current.ID == p.selected.ArtifactID &&
+		current.Metadata[isolatedBaselineInput] == input && !released.After(now) && now.Before(released.Add(refresh)) &&
+		expires.After(now.Add(interval))
 }
 
 // This is a read, not a publication or an acknowledgement. Check the source

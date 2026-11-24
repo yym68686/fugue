@@ -38,6 +38,17 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 		base.Policy.Scope != GlobalScopeKey || base.Policy.DNSPlacementMode != DNSPlacementConsumerReadiness || base.ReadinessPlan == nil || len(p.Hold) == 0 || len(p.Changes) == 0 {
 		return empty, bad
 	}
+	stable := len(p.Physical) > 0 && slices.Equal(p.Physical, p.Eligible)
+	if stable {
+		if !reflect.DeepEqual(p.Before, p.Prepared) || !reflect.DeepEqual(p.BaseProbes, p.HoldProbes) || len(p.Fallbacks) != 0 {
+			return empty, bad
+		}
+		for _, a := range p.Hold {
+			if !reflect.DeepEqual(a.Before, a.After) {
+				return empty, bad
+			}
+		}
+	}
 	source, dest := p.HoldProbes, p.PathProbes
 	switch phase {
 	case "prepare":
@@ -184,8 +195,13 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 						if !reflect.DeepEqual(from, h.Before) {
 							return empty, bad
 						}
-						ts = append(ts, h.After.Targets...)
+						if !stable {
+							ts = append(ts, h.After.Targets...)
+						}
 						delete(unusedHolds, k)
+					}
+					if stable {
+						ts = append(ts, t)
 					}
 					continue
 				}
@@ -264,7 +280,7 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 			return empty, bad
 		}
 	}
-	if phase == "prepare" {
+	if phase == "prepare" && !stable {
 		for i := range out.Views {
 			for j := range out.Views[i].Records {
 				r := &out.Views[i].Records[j]
@@ -311,7 +327,7 @@ func ComposeHostedDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phase
 		staged := base
 		staged.Policy = projectedPolicy
 		staged.QueryViews, staged.ReadinessPlan = out.Views, &out.Plan
-		checked, e := SelectHostedHoldRequirements(p.Host, base, staged, excluded)
+		checked, e := selectHostedRequirements(p.Host, base, staged, excluded, stable)
 		if e != nil || !reflect.DeepEqual(checked, p.Hold) {
 			return empty, errors.Join(bad, e)
 		}

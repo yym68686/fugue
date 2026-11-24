@@ -67,6 +67,7 @@ func CompileHostedPathTransition(req CompileRequest, source HostedAddressSource)
 // routing Cell's authority for machines outside that Cell's enrollment.
 type HostedTransitionCapture struct {
 	Hosts         []string
+	StableHosts   []string // independent path programs; not global hold successors
 	ExternalHosts []string
 	Desired       CompileResult
 	baseline      *CompileRequest
@@ -79,8 +80,19 @@ func CompileHostedPathWithCapture(req CompileRequest, source HostedAddressSource
 		return baseline, nil, err
 	}
 	capture.ExternalHosts = ExternalChangedHosts(source.PriorIntent, req.Intent)
+	held := NewHostedPathReservationHosts(source.Prior, req.Intent, source.EffectiveHolds)
+	for _, v := range source.Inherited {
+		if v.Record.RecordKind == "hosted" {
+			held[v.Record.Hostname] = true
+		}
+	}
+	for _, h := range ManagedChangedHosts(source.PriorIntent, req.Intent) {
+		if !held[h] {
+			capture.StableHosts = append(capture.StableHosts, h)
+		}
+	}
 	if !staged {
-		if len(capture.ExternalHosts) == 0 {
+		if len(capture.ExternalHosts)+len(capture.StableHosts) == 0 {
 			return baseline, nil, nil
 		}
 		capture.Desired = baseline

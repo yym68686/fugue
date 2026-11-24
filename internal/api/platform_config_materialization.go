@@ -29,8 +29,9 @@ type platformCompilationSource struct {
 	DNSPolicyDigest    string
 	// Never decoded from runtime Facts or HTTP. Bound by the producer after
 	// its independent verified-full selection, then checked again on serving.
-	hostedSource platformconfig.PreviousTrafficPublicationReference
-	hostedClaim  string
+	hostedSource  platformconfig.PreviousTrafficPublicationReference
+	hostedClaim   string
+	isolatedInput string
 }
 
 func (err *platformConfigReferenceError) Error() string { return err.reason }
@@ -90,6 +91,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			bindingOnly := sources[0]
 			bindingOnly.hostedSource = platformconfig.PreviousTrafficPublicationReference{}
 			bindingOnly.hostedClaim = ""
+			bindingOnly.isolatedInput = ""
 			if bindingOnly != source {
 				return platformConfigCompileResponse{}, store.ErrConflict
 			}
@@ -209,6 +211,12 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			parent.Metadata[store.HostedSuccessorMetadata] = sources[0].hostedClaim
 		}
 		parent.Metadata[platformproducer.SourceDigestMetadata] = sources[0].SourceDigest
+		if key := sources[0].isolatedInput; key != "" {
+			if !platformproducer.ValidDigest(key) || sources[0].hostedClaim != "" {
+				return platformConfigCompileResponse{}, store.ErrInvalidInput
+			}
+			parent.Metadata[isolatedBaselineInput] = key
+		}
 		if sources[0].StaticIntentID != "" {
 			parent.Metadata[platformproducer.StaticIntentIDMetadata] = sources[0].StaticIntentID
 			parent.Metadata[platformproducer.StaticIntentDigestMetadata] = sources[0].StaticIntentDigest

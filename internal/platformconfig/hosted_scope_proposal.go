@@ -92,8 +92,8 @@ func BuildHostedScopeProposals(src HostedAddressSource, stage CompileResult, cap
 // A non-nil error can accompany independently derived, valid proposals.
 func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage CompileResult, capture *HostedTransitionCapture) ([]HostedScopeProposal, error) {
 	bad := errors.New("host-scoped change cannot be derived from the selected global source and its compiled edit")
-	if capture == nil || len(capture.Hosts)+len(capture.ExternalHosts) == 0 || len(capture.Hosts) > 64 || len(capture.ExternalHosts) > 64 ||
-		!slices.IsSorted(capture.Hosts) || !slices.IsSorted(capture.ExternalHosts) || src.Publication.Validate() != nil ||
+	if capture == nil || len(capture.Hosts)+len(capture.StableHosts)+len(capture.ExternalHosts) == 0 || len(capture.Hosts)+len(capture.StableHosts) > 64 || len(capture.ExternalHosts) > 64 ||
+		!slices.IsSorted(capture.Hosts) || !slices.IsSorted(capture.StableHosts) || !slices.IsSorted(capture.ExternalHosts) || src.Publication.Validate() != nil ||
 		src.PriorRoute == nil || src.PriorTLS == nil || src.PriorRoute.ID != src.Publication.RouteArtifactID || src.PriorRoute.ContentHash != src.Publication.RouteArtifactDigest ||
 		src.PriorTLS.ID != src.Publication.TLSArtifactID || src.PriorTLS.ContentHash != src.Publication.TLSArtifactDigest || src.PriorIntent.Scope != GlobalScopeKey || src.Prior.Policy.Scope != GlobalScopeKey {
 		return nil, bad
@@ -183,7 +183,7 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 		return v, nil
 	}
 	seen := map[string]bool{}
-	for _, hosts := range [][]string{capture.Hosts, capture.ExternalHosts} {
+	for _, hosts := range [][]string{capture.Hosts, capture.StableHosts, capture.ExternalHosts} {
 		for _, h := range hosts {
 			if !validDNSConsumerZone(h) || seen[h] {
 				return nil, bad
@@ -191,7 +191,15 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 			seen[h] = true
 		}
 	}
-	managed := func(h string) (*HostedScopeProposal, error) {
+	stableChanges := ManagedChangedHosts(src.PriorIntent, intent)
+	managed := func(h string, stable bool) (*HostedScopeProposal, error) {
+		y := y
+		if stable {
+			if !slices.Contains(stableChanges, h) {
+				return nil, bad
+			}
+			y = x
+		}
 		var e error
 		p := HostedScopeProposal{Schema: HostedProposalSchema, Base: src.Publication, Host: h, Authority: src.Authority}
 		owner, tenant := "", ""
@@ -240,7 +248,7 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 			return nil, bad
 		}
 		p.Prepared = mid
-		p.Hold, e = SelectHostedHoldRequirements(h, x.dns, y.dns, src.EffectiveHolds)
+		p.Hold, e = selectHostedRequirements(h, x.dns, y.dns, src.EffectiveHolds, stable)
 		if e != nil {
 			return nil, e
 		}
@@ -303,7 +311,7 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 			p.Physical = append(p.Physical, phys...)
 			p.Eligible = append(p.Eligible, l...)
 		}
-		if len(p.Physical) == 0 || len(p.Eligible) == 0 || len(p.Eligible) >= len(p.Physical) {
+		if len(p.Physical) == 0 || len(p.Eligible) == 0 || (!stable && len(p.Eligible) >= len(p.Physical)) {
 			return nil, bad
 		}
 		p.Physical, e = makeSet(p.Physical)
@@ -313,6 +321,9 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 		p.Eligible, e = makeSet(p.Eligible)
 		if e != nil {
 			return nil, e
+		}
+		if stable && (!slices.Equal(p.Physical, p.Eligible) || len(externalProposalHolds(p.Physical, src.EffectiveHolds)) != 0) {
+			return nil, bad
 		}
 		for _, v := range []struct {
 			s    side
@@ -397,7 +408,11 @@ func BuildIndependentHostedScopeProposals(src HostedAddressSource, stage Compile
 		out = append(out, *p)
 	}
 	for _, h := range capture.Hosts {
-		p, err := managed(h)
+		p, err := managed(h, false)
+		record(h, p, err)
+	}
+	for _, h := range capture.StableHosts {
+		p, err := managed(h, true)
 		record(h, p, err)
 	}
 	if len(capture.ExternalHosts) != 0 {

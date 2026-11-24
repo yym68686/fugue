@@ -24,14 +24,18 @@ func HostedTransitionFixtureForTest(t *testing.T, withAlias bool, check func(Hos
 }
 
 func testHostedPathTransition(t *testing.T, withAlias bool, checks ...func(HostedAddressSource, HostedScopeProposal)) {
-	runHostedPathFixture(t, withAlias, nil, checks...)
+	runHostedPathFixture(t, withAlias, nil, nil, checks...)
 }
 
 func HostedFourPathFixtureForTest(t *testing.T, check func(HostedAddressSource, HostedScopeProposal)) {
-	runHostedPathFixture(t, true, check)
+	runHostedPathFixture(t, true, check, nil)
 }
 
-func runHostedPathFixture(t *testing.T, withAlias bool, four func(HostedAddressSource, HostedScopeProposal), checks ...func(HostedAddressSource, HostedScopeProposal)) {
+func HostedStableFourPathFixtureForTest(t *testing.T, check func(*testing.T, HostedAddressSource, HostedScopeProposal)) {
+	runHostedPathFixture(t, true, nil, check)
+}
+
+func runHostedPathFixture(t *testing.T, withAlias bool, four func(HostedAddressSource, HostedScopeProposal), stable func(*testing.T, HostedAddressSource, HostedScopeProposal), checks ...func(HostedAddressSource, HostedScopeProposal)) {
 	r := consumerPlacementFixture()
 	r.Intent.Scope, r.Policy.Scope = GlobalScopeKey, GlobalScopeKey
 	r.Policy.MinimumHealthyEdges = 1
@@ -132,12 +136,16 @@ func runHostedPathFixture(t *testing.T, withAlias bool, four func(HostedAddressS
 	}
 	proposal := proposals[0]
 	if four != nil {
-		testHostSuccessorInterleaving(t, r, next, src, four)
+		testHostSuccessorInterleaving(t, r, next, src, nil, four)
+		return
+	}
+	if stable != nil {
+		testHostSuccessorInterleaving(t, r, next, src, stable)
 		return
 	}
 	if withAlias && len(checks) == 0 {
 		t.Run("compile four paths across another publication", func(t *testing.T) {
-			testHostSuccessorInterleaving(t, r, next, src)
+			testHostSuccessorInterleaving(t, r, next, src, nil)
 		})
 	}
 	testHostedSuccessorWire(t, pr, intermediate.RouteArtifact, capture.Desired.RouteArtifact, proposal)

@@ -23,8 +23,14 @@ type HostedHoldRequirements struct {
 }
 
 func SelectHostedHoldRequirements(host string, prior, staged DNSArtifactPayload, holds []HostedAddressHold) ([]HostedHoldRequirements, error) {
+	return selectHostedRequirements(host, prior, staged, holds, false)
+}
+
+// For an ordinary path edit the readiness anchors are exact identities, not
+// invented outages. Preparation uses the current selected phase verbatim.
+func selectHostedRequirements(host string, prior, staged DNSArtifactPayload, holds []HostedAddressHold, stable bool) ([]HostedHoldRequirements, error) {
 	bad := errors.New("hold stage is not an isolated same-owner prerequisite")
-	if !validDNSConsumerZone(host) || len(holds) == 0 || prior.ReadinessPlan == nil || staged.ReadinessPlan == nil ||
+	if !validDNSConsumerZone(host) || (!stable && len(holds) == 0) || prior.ReadinessPlan == nil || staged.ReadinessPlan == nil ||
 		!reflect.DeepEqual(prior.Policy.DNSReadiness, staged.Policy.DNSReadiness) || ValidateDNSReadinessPlan(prior.ReadinessPlan, prior.Policy.DNSReadiness) != nil || ValidateDNSReadinessPlan(staged.ReadinessPlan, staged.Policy.DNSReadiness) != nil {
 		return nil, errors.Join(bad, errors.New("missing hold or different/invalid readiness policy"))
 	}
@@ -59,7 +65,7 @@ func SelectHostedHoldRequirements(host string, prior, staged DNSArtifactPayload,
 					if (p.Hostname == host) != bound {
 						return side{}, errors.Join(bad, errors.New("reverse dependency is not the same owner's alias"))
 					}
-					if bound && (p.Path != "/" || p.State != "" || p.StaticEdge != nil || p.PreviousAuthority != nil || p.CellPublicationDigest != "") {
+					if bound && ((!stable && p.Path != "/") || p.State != "" || p.StaticEdge != nil || p.PreviousAuthority != nil || p.CellPublicationDigest != "") {
 						return side{}, errors.Join(bad, errors.New("baseline probe is not an ordinary root requirement"))
 					}
 				}
@@ -105,7 +111,13 @@ func SelectHostedHoldRequirements(host string, prior, staged DNSArtifactPayload,
 			if !reflect.DeepEqual(from, to) {
 				return nil, bad
 			}
+			if stable {
+				out = append(out, HostedHoldRequirements{k.host, k.family, from, to})
+			}
 			continue
+		}
+		if stable {
+			return nil, bad
 		}
 		effective := r
 		effective.Values = remaining

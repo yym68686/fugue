@@ -157,6 +157,42 @@ func TestCompileExternalPathProducesReversibleProposalWithoutAddressHold(t *test
 	if err != nil || captured == nil || !slices.Equal(captured.ExternalHosts, []string{h}) || len(captured.Hosts) != 0 {
 		t.Fatal("compiler failed to discover external path edit", err)
 	}
+	t.Run("retain only the changed hostname on a shared target", func(t *testing.T) {
+		const peer = "peer.example.org"
+		withPeer := func(in PlatformIntent, extra bool) PlatformIntent {
+			in.DNS = slices.Clone(in.DNS)
+			r := *in.DNS[0].Route
+			r.Hostnames = append(slices.Clone(r.Hostnames), peer)
+			r.Bindings = slices.Clone(r.Bindings)
+			in.DNS[0].Route = &r
+			base := in.Routes[0]
+			base.Hostname = peer
+			base.RecordOriginForTest(t, "/", base.RuntimeID)
+			in.Routes = append(slices.Clone(in.Routes), base)
+			if extra {
+				r.Bindings = append(r.Bindings, DNSRouteBinding{Hostname: peer, PathPrefix: "/", AppID: base.AppID})
+				base.RecordOriginForTest(t, "/peer", base.RuntimeID)
+				in.Routes = append(in.Routes, base)
+				r.Bindings = append(r.Bindings, DNSRouteBinding{Hostname: peer, PathPrefix: "/peer", AppID: base.AppID})
+			}
+			return in
+		}
+		fresh := edit
+		fresh.Intent = withPeer(fresh.Intent, true)
+		staged, e := stageBaselineExternalPaths(withPeer(src.PriorIntent, false), fresh, []string{h})
+		if e != nil {
+			t.Fatal(e)
+		}
+		got := staged.Intent.DNS[0].Route.Bindings
+		for _, b := range []DNSRouteBinding{{Hostname: h, PathPrefix: "/", AppID: d.AppID}, {Hostname: peer, PathPrefix: "/", AppID: d.AppID}, {Hostname: peer, PathPrefix: "/peer", AppID: d.AppID}} {
+			if !slices.Contains(got, b) {
+				t.Fatal("missing staged or current peer binding", b, got)
+			}
+		}
+		if len(got) != 3 {
+			t.Fatal("pending paths escaped", got)
+		}
+	})
 	t.Run("ordinary DNS refresh does not apply pending external paths", func(t *testing.T) {
 		fresh := edit
 		fresh.Intent.Routes = slices.Clone(fresh.Intent.Routes)

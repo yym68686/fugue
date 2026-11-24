@@ -65,6 +65,84 @@ func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
 	}
 }
 
+func TestStableFourPathProgramOnRefreshedRoster(t *testing.T) {
+	pc.HostedStableFourPathFixtureForTest(t, func(t *testing.T, s pc.HostedAddressSource, p pc.HostedScopeProposal) {
+		d, err := pc.Digest(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := routeartifact.FreezeHostedProgram(s, p, d)
+		if err != nil {
+			t.Fatal("freeze path-only program", err)
+		}
+		a, b, err := routeartifact.BuildHostedProgramUnits(s, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, phase := range []routeartifact.HostedPhase{a, b} {
+			parts, err := routeartifact.HostedRecipientInputs(p, phase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kinds := [3]int{}
+			for _, v := range parts {
+				switch {
+				case v.DNS != nil:
+					kinds[0]++
+					if !reflect.DeepEqual(v.Records, p.Records) || len(v.DNS.Withheld) != 0 {
+						t.Fatal("changed wire or eligible roster")
+					}
+				case len(v.TLS) > 0:
+					kinds[1]++
+					if !reflect.DeepEqual(v.TLS, []model.EdgeTLSAllowlistEntry{p.Before.Owner}) {
+						t.Fatal("changed certificate owner")
+					}
+				case len(v.Routes) > 0:
+					kinds[2]++
+					if len(v.Routes) != []int{1, 4}[i] {
+						t.Fatal("wrong route count", i)
+					}
+				}
+			}
+			if kinds[0] == 0 || kinds[1] != len(p.Physical) || kinds[2] != kinds[1] {
+				t.Fatal("incomplete delivery", kinds)
+			}
+		}
+		groups := map[string]model.EdgeRouteBundle{}
+		for _, n := range p.Physical {
+			g, e := routeartifact.MaterializeForGroup(*s.PriorRoute, n.EdgeGroupID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			groups[n.EdgeGroupID] = g
+		}
+		dns := s.Prior
+		for _, phase := range []string{"prepare", "forward", "withdraw"} {
+			v, e := routeartifact.ComposeHostedExecutorChange(groups, dns, p, phase, d, img.Digest, img.Wire)
+			if e != nil {
+				t.Fatal("execute", phase, e)
+			}
+			if !reflect.DeepEqual(v.DNS.Views, s.Prior.QueryViews) || !reflect.DeepEqual(v.DNS.Rules, s.Prior.Policy.DNSAnswerRules) {
+				t.Fatal("changed DNS", phase)
+			}
+			for k, g := range v.Groups {
+				prior := groups[k]
+				foreign := func(rows []model.EdgeRouteBinding) []model.EdgeRouteBinding {
+					return slices.DeleteFunc(slices.Clone(rows), func(row model.EdgeRouteBinding) bool { return row.Hostname == p.Host })
+				}
+				if len(foreign(prior.Routes)) == 0 || !reflect.DeepEqual(foreign(prior.Routes), foreign(g.Routes)) || !reflect.DeepEqual(prior.TLSAllowlist, g.TLSAllowlist) {
+					t.Fatal("lost independent route or certificate", phase)
+				}
+				groups[k] = model.EdgeRouteBundle{EdgeGroupID: k, Routes: g.Routes, TLSAllowlist: g.TLSAllowlist, CachePolicies: g.CachePolicies}
+			}
+			dns.ReadinessPlan, dns.QueryViews, dns.Policy.DNSAnswerRules = &v.DNS.Plan, v.DNS.Views, v.DNS.Rules
+		}
+		if !reflect.DeepEqual(dns.ReadinessPlan, s.Prior.ReadinessPlan) {
+			t.Fatal("withdraw did not restore selected readiness")
+		}
+	})
+}
+
 func TestCompilerToHostProgramIncludesEveryPhysicalIngressWithoutDNSReadmission(t *testing.T) {
 	pc.HostedTransitionFixtureForTest(t, true, func(s pc.HostedAddressSource, p pc.HostedScopeProposal) {
 		a, b, err := routeartifact.HostedProgramDigests(s, p)

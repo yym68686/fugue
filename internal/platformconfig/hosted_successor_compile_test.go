@@ -11,7 +11,7 @@ import (
 	"fugue/internal/model"
 )
 
-func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src HostedAddressSource, fixtures ...func(HostedAddressSource, HostedScopeProposal)) {
+func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src HostedAddressSource, stable func(*testing.T, HostedAddressSource, HostedScopeProposal), fixtures ...func(HostedAddressSource, HostedScopeProposal)) {
 	b := DNSIntent{Hostname: "independent.example.test", Type: "A", Values: []string{"192.0.2.10"}, TTL: 90}
 	old.Intent.DNS = append(slices.Clone(old.Intent.DNS), b)
 	// A separate route under B changes deployment while A is in flight.
@@ -201,8 +201,53 @@ func testHostSuccessorInterleaving(t *testing.T, old, edit CompileRequest, src H
 			}
 		}
 		got, pending, err := CompileHostedPathWithCapture(next, src)
-		if err != nil || pending != nil || len(got.InputSnapshot.HostedAddressReservations) != 0 {
+		if err != nil || pending == nil || len(pending.Hosts) != 0 || !slices.Equal(pending.StableHosts, []string{p.Host}) || len(got.InputSnapshot.HostedAddressReservations) != 0 {
 			t.Fatal("recapture on the refreshed baseline still coupled DNS and paths", err)
+		}
+		offers, err := BuildHostedScopeProposals(src, got, pending)
+		if err != nil || len(offers) != 1 {
+			t.Fatal("path-only edit unavailable after global baseline replacement", err)
+		}
+		q := offers[0]
+		if q.Base != src.Publication || q.Base == p.Base || len(q.After.Routes) != 4 || !slices.Equal(q.Eligible, q.Physical) || !reflect.DeepEqual(q.Before, q.Prepared) {
+			t.Fatal("stale parent, topology or routes")
+		}
+		if stable != nil {
+			stable(t, src, q)
+		}
+		// Reuse the compiled image, not an old complete parent. Every
+		// phase must keep the refreshed wire and the independent peer.
+		view := src.Prior
+		for _, phase := range []string{"prepare", "forward", "withdraw"} {
+			res, e := ComposeHostedDNSPhase(view, q, phase)
+			if e != nil || !reflect.DeepEqual(res.Views, src.Prior.QueryViews) || !reflect.DeepEqual(res.Rules, src.Prior.Policy.DNSAnswerRules) {
+				t.Fatal("ordinary path DNS drift", phase, e)
+			}
+			view.ReadinessPlan = &res.Plan
+		}
+		if !reflect.DeepEqual(view.ReadinessPlan, src.Prior.ReadinessPlan) {
+			t.Fatal("ordinary withdrawal changed readiness outside the new paths")
+		}
+		stable, err := IndependentManagedBaselineRequest(src, next, pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ordinary, err := CompileIndependentManagedBaseline(src, stable)
+		if err != nil {
+			t.Fatal("retain global baseline separately from A's program", err)
+		}
+		retained, err := ProjectRouteArtifact(ordinary.RouteArtifact)
+		if err != nil || slices.ContainsFunc(retained.Routes, func(r model.EdgeRouteIntent) bool {
+			return r.Hostname == q.Host && (r.PathPrefix != "/" || r.AppID != q.Before.Owner.AppID)
+		}) || !slices.ContainsFunc(retained.Routes, func(r model.EdgeRouteIntent) bool {
+			return r.Hostname == foreign.Hostname && r.DeploymentGeneration == newForeign.DeploymentGeneration
+		}) {
+			t.Fatal("ordinary baseline consumed A or lost B", err)
+		}
+		missing := next
+		missing.RuntimeSnapshot.Origins = nil
+		if _, e := IndependentManagedBaselineRequest(src, missing, pending); e == nil {
+			t.Fatal("retained route without real current origin")
 		}
 		dnsArtifact, err := globalProposalArtifact(got.DNSArtifact, model.PlatformArtifactKindDNSAnswerBundle)
 		if err != nil {

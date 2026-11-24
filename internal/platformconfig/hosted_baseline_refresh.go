@@ -32,6 +32,11 @@ func CompileHostedBaselineRefresh(staged CompileResult, source HostedAddressSour
 	if len(source.Inherited) == 0 {
 		return Compile(req)
 	}
+	return compileWithInheritedCustody(req, source)
+}
+
+func compileWithInheritedCustody(req CompileRequest, source HostedAddressSource) (CompileResult, error) {
+	bad := errors.New("cannot isolate an ordinary DNS baseline refresh")
 	// No newly proposed host gets a reservation on this ordinary release.
 	source.managedHosts = make(map[string]bool)
 	custody := make(map[hostedRecordKey]DNSIntent, len(source.Inherited))
@@ -113,7 +118,30 @@ func stageBaselineExternalPaths(prior PlatformIntent, req CompileRequest, hosts 
 		if !reflect.DeepEqual(old, d) {
 			return CompileRequest{}, fmt.Errorf("%w: changed target declaration for %s", bad, d.Hostname)
 		}
-		live.Bindings = targets[d.Hostname].Route.Bindings
+		// Retain only the pending domains. Other users of a shared target
+		// may have independently changed their bindings in this capture.
+		bindings := slices.DeleteFunc(slices.Clone(intent.DNS[i].Route.Bindings), func(b DNSRouteBinding) bool {
+			_, pending := wanted[b.Hostname]
+			return pending
+		})
+		for _, b := range targets[d.Hostname].Route.Bindings {
+			if _, pending := wanted[b.Hostname]; pending {
+				bindings = append(bindings, b)
+			}
+		}
+		// An empty list is the shorthand for every listed host's root.
+		// If one peer still needs explicit paths, spell out retained roots.
+		if len(bindings) > 0 {
+			for _, h := range live.Hostnames {
+				if _, ok := wanted[h]; !ok || slices.ContainsFunc(bindings, func(b DNSRouteBinding) bool { return b.Hostname == h }) {
+					continue
+				}
+				for path, app := range wanted[h].before {
+					bindings = append(bindings, DNSRouteBinding{Hostname: h, PathPrefix: path, AppID: app})
+				}
+			}
+		}
+		live.Bindings = bindings
 		intent.DNS[i].Route = &live
 		delete(targets, d.Hostname)
 	}

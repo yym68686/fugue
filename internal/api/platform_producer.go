@@ -332,17 +332,20 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	ordinaryOffers := hosted.ordinaryPathOffers()
 	sourceDigest, err = hosted.sourceDigest(sourceDigest)
 	if err != nil {
 		return interval, err
 	}
+	var failed bool
 	if policy.Mode == "serving" {
-		failed, err := s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, sourceDigest)
-		if err != nil || failed {
+		failed, err = s.producedSourcePreviouslyFailed(policy.TargetScope, authority.ID, sourceDigest)
+		if err != nil || (failed && !ordinaryOffers) {
 			return interval, err
 		}
 	}
-	if owned && current.Metadata[platformproducer.SourceDigestMetadata] == sourceDigest && time.Since(previous.ReleasedAt) < time.Duration(policy.RefreshSeconds)*time.Second {
+	unchanged := owned && current.Metadata[platformproducer.SourceDigestMetadata] == sourceDigest && time.Since(previous.ReleasedAt) < time.Duration(policy.RefreshSeconds)*time.Second
+	if unchanged && !ordinaryOffers {
 		decision = "unchanged_source"
 		if policy.Mode == "serving" {
 			// A rejected older candidate must not block capturing a corrected
@@ -430,13 +433,46 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 				done()
 			}
 		}
+		if failed {
+			// A failed ordinary shadow is not a failed hostname program.
+			// Offer each current host above, but never re-stage this shadow.
+			decision = "failed_global_source"
+			return interval, err
+		}
 		if globalGate != nil {
 			// Only the per-host offer/selection above can consume this read.
 			// A full successor, including a single-host global successor,
 			// still requires positive current convergence of the full cohort.
 			return interval, errors.Join(globalGate, err)
 		}
-		if err == nil {
+		isolate := scoped != nil && (len(scoped.StableHosts) > 0 || (len(scoped.ExternalHosts) > 0 && len(scoped.Hosts) == 0 && len(source.Inherited) == 0))
+		if err == nil && isolate {
+			baseline, e := platformconfig.IndependentManagedBaselineRequest(source, req, scoped)
+			if e != nil {
+				return interval, e
+			}
+			var ordinaryInput string
+			if ordinaryOffers && len(source.Inherited) == 0 {
+				ordinaryInput, e = isolatedBaselineDigest(baseline, authority.ID, compiler, source.EffectiveHolds)
+				if e != nil {
+					return interval, e
+				}
+			}
+			if sameHostedBaseline(hosted, ordinaryInput, current, owned, previous.ReleasedAt, source.Authority.ExpiresAt, time.Now(), interval, time.Duration(policy.RefreshSeconds)*time.Second) {
+				decision = "host_offers_on_current_baseline"
+				return interval, nil
+			}
+			if unchanged && ordinaryInput != "" && current.Metadata[isolatedBaselineInput] == ordinaryInput && current.ID != hosted.selected.ArtifactID {
+				// Same exact parent-bound shadow, not a replacement for a
+				// different parent: finish the outstanding ordinary rollout.
+				if _, err := s.preparePlatformReleaseSetConsumers(ctx, principal, current, previous); err != nil {
+					return interval, err
+				}
+				return interval, s.stageProducedTraffic(ctx, policy, authority, current)
+			}
+			compiled, err = platformconfig.CompileIndependentManagedBaseline(source, baseline)
+			provenance.isolatedInput = ordinaryInput
+		} else if err == nil {
 			advance("compile_scoped_host_successor")
 			successor, claim, selected, e := s.compileOfferedHostedSuccessor(ctx, req, source, scoped)
 			if e != nil {
