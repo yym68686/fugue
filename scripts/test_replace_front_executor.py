@@ -59,8 +59,36 @@ class ReplacementTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 replacement.validate_evidence(config, changed)
 
+    def test_prepare_rejects_multi_node_selector_before_any_write(self):
+        config, previous, _ = fixture()
+        profile = config["observation"]
+
+        def pod(uid, node, ip):
+            return {"metadata": {"name": uid, "namespace": profile["namespace"], "uid": uid,
+                                 "annotations": {"fugue.pro/source-commit": profile["candidateSource"]}},
+                    "spec": {"nodeName": node, "automountServiceAccountToken": False, "containers": [{
+                        "name": "edge-front", "env": [
+                            {"name": "FUGUE_EDGE_FRONT_EDGE_GROUP_ID", "value": profile["group"]},
+                            {"name": "FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE", "value": profile["activationPath"]},
+                            {"name": "FUGUE_EDGE_FRONT_REQUIRE_ACTIVATION_STATE", "value": "true"}]}]},
+                    "status": {"phase": "Running", "podIP": ip,
+                               "conditions": [{"type": "Ready", "status": "True"}], "containerStatuses": [
+                                   {"name": "edge-front", "ready": True, "imageID": "front@sha256:" + "b"*64, "restartCount": 0}]}}
+
+        old = pod("old", "node-a", "10.0.0.1")
+        local = pod("candidate-a", "node-a", "10.0.0.2")
+        remote = pod("candidate-b", "node-b", "10.0.0.3")
+        for extra in [remote, dict(remote, metadata=dict(remote["metadata"], deletionTimestamp="2026-01-01T00:00:00Z"))]:
+            with self.subTest(extra=extra["metadata"]), patch.object(replacement, "current", return_value=previous), \
+                 patch.object(replacement.front, "read", side_effect=[{"items": [old]}, {"items": [local, extra]}]), \
+                 patch.object(replacement, "write") as write, patch.object(replacement.stage, "selected_endpoint_witness") as verify:
+                with self.assertRaisesRegex(ValueError, "selector must select exactly one Pod"):
+                    replacement.prepare(config)
+                write.assert_not_called()
+                verify.assert_not_called()
+
     def test_handoff_preserves_connections_and_fences_recovery(self):
-        for failure in [None, "held_socket", "candidate_socket", "lost_write_response", "new_writer", "changed_before_write"]:
+        for failure in [None, "held_socket", "candidate_socket", "lost_write_response", "new_writer", "changed_before_write", "executor_changed_before_write"]:
             with self.subTest(failure=failure), ExitStack() as stack:
                 config, previous, evidence = fixture()
                 live = [copy.deepcopy(previous)]
@@ -104,17 +132,22 @@ class ReplacementTests(unittest.TestCase):
                 def sleep(duration):
                     clock[0] += duration
 
+                def executors(_):
+                    if failure == "executor_changed_before_write" and sockets:
+                        return old, dict(candidate, status={"podIP": "10.0.0.3"})
+                    return old, candidate
+
                 if failure == "changed_before_write":
                     live[0]["metadata"]["resourceVersion"] = "11"
-                for target, name, value in [(replacement, "current", lambda _: copy.deepcopy(live[0])), (replacement, "executors", lambda _: (old, candidate)), (replacement, "write", write),
-                                            (replacement.front, "state", lambda *_: {"generation": 10}), (replacement.front, "proof", lambda *_: proof), (replacement.front, "pod", lambda *_: old),
+                for target, name, value in [(replacement, "current", lambda _: copy.deepcopy(live[0])), (replacement, "executors", executors), (replacement, "write", write),
+                                            (replacement.front, "state", lambda *_: {"generation": 10}), (replacement.front, "proof", lambda *_: proof), (replacement.front, "pod", lambda *_, **__: old),
                                             (replacement.handoff, "redirect", lambda *_: None), (replacement.stage, "selected_endpoint_witness", lambda *_: {}),
                                             (replacement.connection, "HeldTLS", Socket), (replacement.connection, "fact", fact), (replacement.time, "monotonic", lambda: clock[0]), (replacement.time, "sleep", sleep)]:
                     stack.enter_context(patch.object(target, name, value))
                 if failure:
                     with self.assertRaises((ValueError, OSError)):
                         replacement.apply(config, evidence)
-                    expected = [] if failure == "changed_before_write" else ["3"] if failure == "new_writer" else ["3", "4"]
+                    expected = [] if failure in ["changed_before_write", "executor_changed_before_write"] else ["3"] if failure == "new_writer" else ["3", "4"]
                     self.assertEqual(writes, expected)
                     if len(writes) == 2:
                         self.assertEqual(live[0]["spec"], previous["spec"])

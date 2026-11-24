@@ -95,13 +95,19 @@ def exact_state(live, previous, spec, annotations):
 
 def executors(config):
     profile = config["observation"]
-    old = front.pod(profile, profile["legacySelector"], False)
-    candidate = front.pod(profile, profile["candidateSelector"], True)
+    # A node-local observation may find one Pod while the actual Service
+    # selector matches additional Pods on other nodes. Reject before any CAS.
+    old = front.pod(profile, profile["legacySelector"], False, singleton_selector=True)
+    candidate = front.pod(profile, profile["candidateSelector"], True, singleton_selector=True)
     if old["metadata"]["uid"] == candidate["metadata"]["uid"]:
         raise ValueError("replacement must retain two independent executors")
     if any(port.get("hostPort") for container in old["spec"]["containers"] for port in container.get("ports", [])) or old["spec"].get("hostNetwork"):
         raise ValueError("selector replacement requires an existing Service-owned public Front")
     return old, candidate
+
+
+def executor_identities(pods):
+    return [(pod["metadata"]["uid"], pod["status"]["podIP"]) for pod in pods]
 
 
 def prepare(config):
@@ -113,8 +119,8 @@ def prepare(config):
     for target in profile["probes"]:
         handoff.redirect(config["address"], target["host"])
         handoff.redirect(candidate["status"]["podIP"], target["host"])
-    if current(config) != previous:
-        raise ValueError("Service changed during replacement preparation")
+    if executor_identities(executors(config)) != executor_identities((old, candidate)) or current(config) != previous:
+        raise ValueError("executor or Service changed during replacement preparation")
     spec, annotations = selected(config, previous)
     write(config, previous, spec, annotations, dry_run=True)
     result = {"schema": "fugue.front-executor-replacement-evidence/v1", "declaration_digest": transport.digest(config), "at": front.now().isoformat(), "baseline": previous,
@@ -144,7 +150,7 @@ def recover(config, evidence):
     if not exact_state(live, previous, spec, annotations):
         raise ValueError("replacement recovery conflicts with a different live writer")
     profile = config["observation"]
-    old = front.pod(profile, profile["legacySelector"], False)
+    old = front.pod(profile, profile["legacySelector"], False, singleton_selector=True)
     if old["metadata"]["uid"] != evidence["old_uid"]:
         raise ValueError("previous Front was replaced before recovery")
     for target in profile["probes"]:
@@ -189,6 +195,8 @@ def apply(config, evidence):
         original = connection.fact(profile, old, held)
         if proof != front.proof(candidate["status"]["podIP"], target["host"], target["path"]):
             raise ValueError("candidate authority differs before replacement")
+        if executor_identities(executors(config)) != executor_identities((old, candidate)):
+            raise ValueError("executor changed during pre-switch connection proof")
         spec, annotations = selected(config, previous)
         attempted = True
         write(config, previous, spec, annotations)

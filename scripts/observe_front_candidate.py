@@ -73,10 +73,16 @@ def validate(config):
     return config
 
 
-def pod(config, selector, candidate):
+def pod(config, selector, candidate, *, singleton_selector=False):
     query = ",".join(k + "=" + v for k, v in sorted(selector.items()))
-    items = read("get", "pods", "-n", config["namespace"], "-l", query, "-o", "json")["items"]
-    items = [p for p in items if not p["metadata"].get("deletionTimestamp") and p["spec"].get("nodeName") == config["node"]]
+    response = read("get", "pods", "-n", config["namespace"], "-l", query, "-o", "json")
+    if response.get("metadata", {}).get("continue"):
+        raise ValueError("Front selector inventory is incomplete")
+    items = response["items"]
+    local = [p for p in items if not p["metadata"].get("deletionTimestamp") and p["spec"].get("nodeName") == config["node"]]
+    if singleton_selector and (len(items) != 1 or len(local) != 1):
+        raise ValueError("Front Service selector must select exactly one Pod on the declared node")
+    items = local
     if len(items) != 1:
         raise ValueError("Front ownership is ambiguous")
     p = items[0]
