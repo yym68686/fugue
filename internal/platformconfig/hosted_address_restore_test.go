@@ -44,8 +44,41 @@ func TestCompileHostedDeclarationRestoreBindsSeparateHistoryAndExcludesRoutes(t 
 	if len(c.InputSnapshot.HostedAddressReservations) != 1 || c.InputSnapshot.HostedAddressReservations[0].Source != source.Publication {
 		t.Fatal("restored custody mistakenly depends on historical serving authority")
 	}
-	if _, err = CompileHostedDeclarationRestore(edit, source, plan, historical.Prior); err == nil {
-		t.Fatal("restore smuggled the host path edit")
+	// The fresh capture can change ranking even if the declared DNS, eligible
+	// endpoints, configured policy and verified routing have not changed.
+	// The ordinary compile would update the query output, which is outside
+	// this recovery's authority.
+	newCapture := baseline
+	newCapture.RuntimeSnapshot.DNSSelections = slices.Clone(baseline.RuntimeSnapshot.DNSSelections)
+	newCapture.RuntimeSnapshot.DNSSelections[0].Reason = "new ranking"
+	newCapture.RuntimeSnapshot.DNSSelections[0].RankingVersion = "rank-v2"
+	unbound, err := Compile(newCapture)
+	if err != nil || reflect.DeepEqual(unbound.DNSArtifact.Content["query_views"], c.DNSArtifact.Content["query_views"]) {
+		t.Fatal("test did not reproduce query selector drift", err)
+	}
+	retained, err := CompileHostedDeclarationRestore(newCapture, source, plan, historical.Prior)
+	if err != nil || !reflect.DeepEqual(retained.DNSArtifact.Content, c.DNSArtifact.Content) ||
+		!reflect.DeepEqual(retained.InputSnapshot.DNSSelections, c.InputSnapshot.DNSSelections) ||
+		retained.InputSnapshot.DNSSelections[0].ObservedAt != source.PriorDNSSelections[0].ObservedAt {
+		t.Fatal("restoration changed the bound configuration or redated selector evidence", err)
+	}
+	edit.Policy.DNSAnswerRules = slices.Clone(edit.Policy.DNSAnswerRules)
+	edit.Policy.DNSAnswerRules[0].TTLSeconds++
+	isolated, err := CompileHostedDeclarationRestore(edit, source, plan, historical.Prior)
+	if err != nil || !reflect.DeepEqual(isolated.DNSArtifact.Content, c.DNSArtifact.Content) ||
+		!reflect.DeepEqual(isolated.RouteArtifact.Content, c.RouteArtifact.Content) || !reflect.DeepEqual(isolated.TLSArtifact.Content, c.TLSArtifact.Content) {
+		t.Fatal("restore incorporated independently pending route, policy or TLS changes", err)
+	}
+	changed := source
+	changed.PriorRuntime.DNSSelections = slices.Clone(source.PriorRuntime.DNSSelections)
+	changed.PriorRuntime.DNSSelections[0].Reason = "not the signed selector input"
+	if _, err = CompileHostedDeclarationRestore(edit, changed, plan, historical.Prior); err == nil {
+		t.Fatal("restore accepted a different selected compiler input")
+	}
+	changed = source
+	changed.EffectiveHolds = append(slices.Clone(source.EffectiveHolds), HostedAddressHold{"edge-extra", "edge-group-extra", "93.184.216.39"})
+	if _, err = CompileHostedDeclarationRestore(edit, changed, plan, historical.Prior); err == nil {
+		t.Fatal("restore accepted unrelated changes in current effective holds")
 	}
 }
 

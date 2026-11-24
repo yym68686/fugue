@@ -63,7 +63,9 @@ func externalFourRouteEditWithThirdEndpoint(t *testing.T, extra bool) (HostedAdd
 		RouteArtifactID: "routes", RouteArtifactDigest: hash, TLSArtifactID: "certs", TLSArtifactDigest: hash, DNSArtifactID: "dns", DNSArtifactDigest: hash}}
 	decode(prior.IntentArtifact, &src.PriorIntent)
 	decode(prior.DNSArtifact, &src.Prior)
+	src.PriorDNSSelections = slices.Clone(prior.InputSnapshot.DNSSelections)
 	src.PriorRoute, src.PriorTLS = &prior.RouteArtifact, &prior.TLSArtifact
+	src.PriorRuntime = prior.InputSnapshot
 	src.PriorRoute.ID, src.PriorRoute.ContentHash, src.PriorRoute.ScopeKey = src.Publication.RouteArtifactID, hash, GlobalScopeKey
 	src.PriorTLS.ID, src.PriorTLS.ContentHash, src.PriorTLS.ScopeKey = src.Publication.TLSArtifactID, hash, GlobalScopeKey
 	edit := r

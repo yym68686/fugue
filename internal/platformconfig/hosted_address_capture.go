@@ -15,6 +15,11 @@ type HostedAddressSource struct {
 	Authority   HostedProposalAuthority
 	PriorIntent PlatformIntent
 	Prior       DNSArtifactPayload
+	// PriorRuntime is the compact, lineage-checked runtime input of the
+	// selected full. Declaration-only recovery must compile this signed
+	// configuration, never a newer capture whose DNS ranking or policy may
+	// belong to an unrelated change.
+	PriorRuntime RuntimeSnapshot
 	// Fixed selector inputs that produced the selected signed DNS child, not
 	// consumer readiness/health receipts. Keep their original observation time.
 	PriorDNSSelections []DNSSelectionObservation

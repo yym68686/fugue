@@ -65,19 +65,6 @@ func (s *Server) compileHostedDeclarationRestore(ctx context.Context, policy pla
 	if err != nil {
 		return empty, noRef, err
 	}
-	_, pending, err := pc.CompileHostedPathWithCapture(req, source)
-	if err != nil {
-		return empty, noRef, err
-	}
-	if pending != nil {
-		// Leave pending A/B (and any separately staged managed paths) for
-		// their own releases. The restore must reproduce the selected root
-		// bindings and no new routes from the saved desired intent.
-		req, err = pc.IndependentManagedBaselineRequest(source, req, pending)
-		if err != nil {
-			return empty, noRef, err
-		}
-	}
 	result, err := pc.CompileHostedDeclarationRestore(req, source, plan, history)
 	return result, source.Publication, err
 }

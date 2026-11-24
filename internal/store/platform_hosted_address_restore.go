@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
@@ -65,6 +66,11 @@ func (s *Store) ReadHostedDeclarationHistory(ctx context.Context, plan pc.Hosted
 func validateHostedDeclarationRestore(state *model.State, previous, parent, dns, priorDNS model.PlatformArtifact,
 	ref pc.PreviousTrafficPublicationReference, plan pc.HostedDeclarationRestorePlan, keys bundleauth.Keyring) error {
 	bad := fmt.Errorf("%w: shared DNS restore lacks current signed scope or offline authority", ErrConflict)
+	for _, key := range []string{"intent_digest", "policy_digest"} {
+		if previous.Metadata[key] == "" || previous.Metadata[key] != parent.Metadata[key] {
+			return bad
+		}
+	}
 	reader := hostedDeclarationHistoryReader{
 		release: func(id string) (model.PlatformArtifactRelease, error) {
 			i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, id)
@@ -101,7 +107,7 @@ func validateHostedDeclarationRestore(state *model.State, previous, parent, dns,
 	afterHolds, e2 := platformproducer.PublicationOfflineHolds(parent, holds)
 	before, e3 := pc.DecodeDNSArtifact(priorDNS)
 	after, e4 := pc.DecodeDNSArtifact(dns)
-	if e1 != nil || e2 != nil || e3 != nil || e4 != nil {
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !reflect.DeepEqual(beforeHolds, afterHolds) {
 		return bad
 	}
 	physical := func(in []platformproducer.OfflineEdge) []pc.HostedAddressHold {

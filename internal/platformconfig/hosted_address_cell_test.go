@@ -92,6 +92,8 @@ func testCellInheritsReservedAddress(t *testing.T, shared bool) {
 		history.ReleaseID, history.ReleaseSetID = "historic-release", "historic-parent"
 		source.Publication.FencingToken++
 		source.Prior, source.PriorHolds = read(base), source.EffectiveHolds
+		source.PriorRuntime = base.InputSnapshot
+		source.PriorDNSSelections = base.InputSnapshot.DNSSelections
 		source.PriorRoute, source.PriorTLS = &base.RouteArtifact, &base.TLSArtifact
 		globalResult, e = pc.CompileHostedDeclarationRestore(global, source, pc.HostedDeclarationRestorePlan{History: history, Target: alias, Family: "A", Held: hold}, old)
 	} else {

@@ -87,8 +87,38 @@ func CompileHostedDeclarationRestore(req CompileRequest, source HostedAddressSou
 		plan.History.ReleaseSetID == source.Publication.ReleaseSetID || source.PriorRoute == nil || source.PriorTLS == nil {
 		return CompileResult{}, errors.New("restore needs separate current and historical full publications")
 	}
+	if source.PriorRuntime.CapturedAt == nil || source.PriorRuntime.CapturedAt.IsZero() ||
+		source.PriorRuntime.IntentGeneration != source.PriorIntent.Generation || source.PriorRuntime.PolicyGeneration != source.Prior.Policy.Generation ||
+		!sameDeclarationHolds(source.PriorHolds, source.EffectiveHolds) {
+		return CompileResult{}, errors.New("shared DNS restore needs the exact selected compiler input and unchanged effective holds")
+	}
+	if len(source.PriorRuntime.RetainedTrafficPartitions) != 0 {
+		return CompileResult{}, errors.New("shared DNS restore requires an ordinary baseline without retained traffic partitions")
+	}
+	priorInput, digest := source.PriorRuntime, source.Prior.Lineage.InputSnapshotDigest
+	if source.Prior.Lineage.RuntimeInputDigest != "" {
+		priorInput, digest = ConfigurationRuntimeInput(priorInput), source.Prior.Lineage.RuntimeInputDigest
+	}
+	if got, err := RuntimeSnapshotDigest(priorInput); err != nil || digest == "" || got != digest {
+		return CompileResult{}, errors.New("shared DNS restore compiler input differs from selected lineage")
+	}
 	source.restoring = &hostedDeclarationRestoreSource{history, plan}
-	got, err := CompileWithHostedAddressSource(req, source)
+	// The restore is deliberately compiled from the selected full's exact
+	// signed intent, policy and compact runtime input. The caller's fresh
+	// projection may contain an unrelated ranking/policy refresh; accepting it
+	// here would turn a declaration-only recovery into a whole DNS rewrite.
+	formal := CompileRequest{OmitOriginalInput: req.OmitOriginalInput, CreatedAt: req.CreatedAt,
+		Intent: source.PriorIntent, Policy: source.Prior.Policy, RuntimeSnapshot: priorInput}
+	formal.RuntimeSnapshot.HostedAddressReservations = nil
+	// These are producer-originated publication bindings, not runtime
+	// observations. Do not carry arbitrary Facts from either invocation.
+	formal.RuntimeSnapshot.Facts = map[string]any{}
+	for _, k := range []string{"configuration_producer", "offline_edge_recovery"} {
+		if v, ok := req.RuntimeSnapshot.Facts[k]; ok {
+			formal.RuntimeSnapshot.Facts[k] = v
+		}
+	}
+	got, err := CompileWithHostedAddressSource(formal, source)
 	if err != nil {
 		return CompileResult{}, err
 	}
@@ -113,6 +143,23 @@ func CompileHostedDeclarationRestore(req CompileRequest, source HostedAddressSou
 	return got, nil
 }
 
+func sameDeclarationHolds(a, b []HostedAddressHold) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[HostedAddressHold]bool, len(a))
+	for _, h := range a {
+		set[h] = true
+	}
+	for _, h := range b {
+		if !set[h] {
+			return false
+		}
+		delete(set, h)
+	}
+	return len(set) == 0
+}
+
 // ValidateHostedDeclarationRestoreDelta is also called in the locked serving
 // transaction against the exact current full, not merely the compile inputs.
 // No route, certificate, probe requirement, selector policy or unrelated
@@ -129,8 +176,21 @@ func ValidateHostedDeclarationRestoreDelta(previous, history, next DNSArtifactPa
 	if !reflect.DeepEqual(want.Records, next.Records) {
 		return errors.New("shared DNS restore changed another declaration or did not restore the pinned RR")
 	}
+	for _, field := range []struct {
+		name      string
+		want, got any
+	}{
+		{"DNS query selectors", want.QueryViews, next.QueryViews},
+		{"DNS readiness requirements", want.ReadinessPlan, next.ReadinessPlan},
+		{"DNS consumer views", want.ConsumerViews, next.ConsumerViews},
+		{"DNS policy", want.Policy, next.Policy},
+	} {
+		if !reflect.DeepEqual(field.want, field.got) {
+			return errors.New("shared DNS restore also changes " + field.name)
+		}
+	}
 	if !reflect.DeepEqual(want, next) {
-		return errors.New("shared DNS restore also changes DNS selectors, readiness, or consumer views")
+		return errors.New("shared DNS restore also changes the DNS artifact envelope")
 	}
 	if !sameDeclarationRestoreDispatch(priorRoute, nextRoute, model.PlatformArtifactKindEdgeRouteBundle) {
 		return errors.New("shared DNS restore also changes the serving route configuration")

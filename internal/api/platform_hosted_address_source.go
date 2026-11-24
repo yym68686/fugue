@@ -296,7 +296,7 @@ func (s *Server) readHostedAddressSourceWith(ctx context.Context, policy platfor
 	if err = s.store.ValidateDNSProducerSelection(ctx, model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, model.PlatformPublicationPrecondition{ArtifactID: old.parent.ID, ContentHash: old.parent.ContentHash, ReleaseID: old.release.ID, FencingToken: old.release.FencingToken}); err != nil {
 		return out, err
 	}
-	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, PriorRoute: &old.route, PriorTLS: &tls,
+	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, PriorRuntime: old.snapshot, PriorRoute: &old.route, PriorTLS: &tls,
 		Authority:          platformconfig.HostedProposalAuthority{Producer: model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, LKGID: old.lkg.ID, EvidenceHash: old.lkg.VerificationEvidenceHash, ExpiresAt: old.lkg.ExpiresAt},
 		PriorDNSSelections: old.snapshot.DNSSelections, Inherited: old.snapshot.HostedAddressReservations, PriorHolds: holds(previous), EffectiveHolds: effective}, nil
 }
