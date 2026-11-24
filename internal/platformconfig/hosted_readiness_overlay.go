@@ -14,7 +14,11 @@ import (
 // Callers must keep the original base authority and its expiry; an overlay
 // must be discarded if that authority is replaced, expired or withdrawn.
 func ComposeHostedReadinessRequirements(host string, base, desired *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (*DNSReadinessPlan, HostedReadinessDelta, error) {
-	d, err := PlanHostedReadinessDelta(host, base, desired, policy, beforePaths, afterPaths)
+	return composeHostedReadinessAt(host, host, base, desired, policy, beforePaths, afterPaths)
+}
+
+func composeHostedReadinessAt(host, anchor string, base, desired *DNSReadinessPlan, policy *DNSReadinessPolicy, beforePaths, afterPaths []string) (*DNSReadinessPlan, HostedReadinessDelta, error) {
+	d, err := planHostedReadinessDelta(host, anchor, base, desired, policy, beforePaths, afterPaths)
 	if err != nil {
 		return nil, HostedReadinessDelta{}, err
 	}

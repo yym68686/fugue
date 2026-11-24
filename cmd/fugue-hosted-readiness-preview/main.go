@@ -15,13 +15,15 @@ import (
 )
 
 type inputSide struct {
-	Plan   *platformconfig.DNSReadinessPlan
-	Policy *platformconfig.DNSReadinessPolicy
-	Paths  []string
+	Plan    *platformconfig.DNSReadinessPlan
+	Policy  *platformconfig.DNSReadinessPolicy
+	Paths   []string
+	Records []platformconfig.DNSIntent
 }
 type input struct {
-	Host          string
-	Base, Desired inputSide
+	Host           string
+	ExternalTarget *platformconfig.ExternalPathTarget
+	Base, Desired  inputSide
 }
 
 func preview(r io.Reader, w io.Writer) error {
@@ -36,11 +38,25 @@ func preview(r io.Reader, w io.Writer) error {
 	if d.Decode(&in) != nil || d.Decode(new(any)) != io.EOF || in.Base.Policy == nil || in.Desired.Policy == nil || *in.Base.Policy != *in.Desired.Policy {
 		return errors.New("invalid pair or changed readiness policy")
 	}
-	view, p, e := platformconfig.ComposeHostedReadinessRequirements(in.Host, in.Base.Plan, in.Desired.Plan, in.Base.Policy, in.Base.Paths, in.Desired.Paths)
+	compose := func(base, want inputSide) (*platformconfig.DNSReadinessPlan, platformconfig.HostedReadinessDelta, error) {
+		if target := in.ExternalTarget; target != nil {
+			if target.Hostname != in.Host {
+				return nil, platformconfig.HostedReadinessDelta{}, errors.New("external target belongs to another hostname")
+			}
+			return platformconfig.ComposeExternalPathRequirements(*target, base.Plan, want.Plan, base.Policy, base.Paths, want.Paths, base.Records, want.Records)
+		}
+		if len(base.Records)+len(want.Records) != 0 {
+			return nil, platformconfig.HostedReadinessDelta{}, errors.New("external target binding required for wire inputs")
+		}
+		return platformconfig.ComposeHostedReadinessRequirements(in.Host, base.Plan, want.Plan, base.Policy, base.Paths, want.Paths)
+	}
+	view, p, e := compose(in.Base, in.Desired)
 	if e != nil {
 		return e
 	}
-	restored, back, e := platformconfig.ComposeHostedReadinessRequirements(in.Host, view, in.Base.Plan, in.Base.Policy, in.Desired.Paths, in.Base.Paths)
+	served := in.Desired
+	served.Plan = view
+	restored, back, e := compose(served, in.Base)
 	if e != nil {
 		return e
 	}
