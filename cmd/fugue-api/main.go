@@ -48,6 +48,10 @@ func main() {
 		cfg.EdgeActivationPlanSigningKeyGeneration = keySnapshot.Generation
 	}
 	logger := log.Default()
+	workers, err := api.ParseWorkerFrontBindings(os.Getenv("FUGUE_WORKER_FRONT_BINDINGS"))
+	if err != nil {
+		logger.Fatal(err)
+	}
 	restore, err := platformconfig.ParseHostedDeclarationRestorePlan(os.Getenv("FUGUE_HOSTED_DNS_DECLARATION_RESTORE"))
 	if err != nil {
 		logger.Fatal(err)
@@ -65,6 +69,7 @@ func main() {
 	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
+		WorkerFrontBindings:             workers,
 		HostedDeclarationRestore:        restore,
 		BackupInventory:                 api.BackupInventoryConfigFromEnv(),
 		DatabaseURL:                     cfg.DatabaseURL,

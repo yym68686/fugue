@@ -262,6 +262,9 @@ func (s *Store) RecordHostedMemberObservation(ctx context.Context, host string, 
 	if e = pgLockPromotionScope(ctx, tx, "hosted-selection:"+host, true); e != nil {
 		return e
 	}
+	if e = s.acceptPhysicalWorker(ctx, tx, who, ctx); e != nil {
+		return e
+	}
 	for _, r := range rows {
 		if until.Before(r.ValidUntil) {
 			r.ValidUntil = until

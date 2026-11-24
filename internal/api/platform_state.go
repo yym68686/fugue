@@ -1286,7 +1286,11 @@ func (s *Server) handleVerifiedPlatformConsumerHeartbeat(w http.ResponseWriter, 
 		return
 	}
 	var consumer model.PlatformConsumerInstance
-	admissionCtx, admission := store.WithPlatformInputFailureObservation(r.Context())
+	physicalCtx, physicalOK := s.admitPhysicalWorker(w, r, claims, strings.EqualFold(strings.TrimSpace(heartbeat.ProbeStatus), model.PlatformConsumerProbeStatusPassed))
+	if !physicalOK {
+		return
+	}
+	admissionCtx, admission := store.WithPlatformInputFailureObservation(physicalCtx)
 	if shadow {
 		consumer, err = s.store.AcceptPlatformShadowConsumerHeartbeatObserved(admissionCtx, claims, heartbeat, time.Now().UTC(), s.heartbeatAuditKeyring)
 	} else {
@@ -1642,6 +1646,8 @@ func consumerAssignmentChild(releaseSet model.PlatformArtifact, kind string, rea
 func writeTrustedPlatformConsumerHeartbeatError(w http.ResponseWriter, err error, ctx context.Context) {
 	var databaseError interface{ SQLState() string }
 	switch {
+	case errors.Is(err, store.ErrWorkerReporterChanged):
+		writeWorkerTransportUnavailable(w)
 	case errors.Is(err, store.ErrInvalidInput):
 		httpx.WriteError(w, http.StatusBadRequest, "invalid trusted heartbeat request")
 	case errors.Is(err, store.ErrNotFound):

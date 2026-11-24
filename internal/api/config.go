@@ -20,6 +20,7 @@ func imageStoreMinimumReplicasFromEnv() int {
 }
 
 type ServerConfig struct {
+	WorkerFrontBindings                    WorkerFrontBindings
 	HostedDeclarationRestore               *platformconfig.HostedDeclarationRestorePlan
 	CompilerInputOmitOriginal              bool
 	BackupInventory                        BackupInventoryConfig

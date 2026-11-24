@@ -219,6 +219,9 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.P
 				acceptAt = at
 			}
 			var err error
+			if err = s.acceptPhysicalWorker(ctx, tx, claims, observation...); err != nil {
+				return err
+			}
 			out, err = s.pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx, tx, claims, h, acceptAt, audit)
 			return err
 		})

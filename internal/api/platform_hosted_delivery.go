@@ -111,7 +111,15 @@ func (s *Server) readPlatformConsumerHosted(w http.ResponseWriter, r *http.Reque
 			httpx.WriteError(w, status, "reporter is not the selected DNS backend")
 			return
 		}
-		if err = s.store.RecordHostedMemberObservation(ctx, host, who, selected.Assignment, observation, bind); err != nil {
+		physicalCtx, ok := s.admitPhysicalWorker(w, r, who, observation.Failure == "")
+		if !ok {
+			return
+		}
+		if err = s.store.RecordHostedMemberObservation(physicalCtx, host, who, selected.Assignment, observation, bind); err != nil {
+			if errors.Is(err, store.ErrWorkerReporterChanged) {
+				writeWorkerTransportUnavailable(w)
+				return
+			}
 			s.writeStoreError(w, err)
 			return
 		}

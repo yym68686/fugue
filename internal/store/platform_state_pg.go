@@ -2011,6 +2011,9 @@ func (s *Store) pgAcceptTrustedPlatformConsumerHeartbeat(
 				acceptAt = receivedAt
 			}
 			var err error
+			if err = s.acceptPhysicalWorker(ctx, tx, claims, observation...); err != nil {
+				return err
+			}
 			out, err = s.pgAcceptTrustedPlatformConsumerHeartbeatInTransaction(ctx, tx, claims, expectedSetID, heartbeat, acceptAt, policy, auditKeyring, rollbackScope)
 			return err
 		})

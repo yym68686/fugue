@@ -49,7 +49,7 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		t.Fatal(e)
 	}
 	defer db.Close()
-	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL, schemamigrate.HostedExecutorPresenceSQL} {
+	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL, schemamigrate.HostedExecutorPresenceSQL, schemamigrate.WorkerReporterHeadsSQL} {
 		if _, e = db.Exec(ddl); e != nil {
 			t.Fatal(e)
 		}

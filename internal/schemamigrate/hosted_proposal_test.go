@@ -69,6 +69,7 @@ func TestHostedProposalStorageRejectsLegacyPublish(t *testing.T) {
  AND indrelid=to_regclass('fugue_hosted_member_directory') AND indisready AND indisvalid
  AND pg_get_indexdef(indexrelid, 1, true)='hostname')
  AND NOT EXISTS (SELECT 1 FROM fugue_hosted_membership_rebinds)
+ AND NOT EXISTS (SELECT 1 FROM fugue_worker_reporter_heads)
  AND NOT EXISTS (SELECT 1 FROM fugue_hosted_selections)
  AND NOT EXISTS (SELECT 1 FROM fugue_hosted_selection_receipts)`).Scan(&ready); err != nil || !ready {
 		t.Fatalf("continuation migration: ready=%v err=%v", ready, err)

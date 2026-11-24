@@ -53,7 +53,7 @@ func hotInventoryTestDatabase(t *testing.T) (*sql.DB, string, string) {
 	t.Cleanup(func() { _ = db.Close() })
 	// Use the real schema and additive migrations, not a second hand-written
 	// model that could hide a misspelled production column or table.
-	for _, statement := range []string{postgresMetaSchemaStatement, postgresSchemaBatch(), schemamigrate.BoundedContentSQL, schemamigrate.CompilerInputArchiveSQL, schemamigrate.PlatformShadowConsumersSQL} {
+	for _, statement := range []string{postgresMetaSchemaStatement, postgresSchemaBatch(), schemamigrate.BoundedContentSQL, schemamigrate.CompilerInputArchiveSQL, schemamigrate.PlatformShadowConsumersSQL, schemamigrate.WorkerReporterHeadsSQL} {
 		if _, err = db.Exec(statement); err != nil {
 			t.Fatal("disposable hot-inventory schema", err)
 		}

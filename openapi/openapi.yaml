@@ -4526,7 +4526,11 @@ paths:
         release or expected consumer set receives code platform_assignment_changed.
         This check does not change artifacts, serving configuration or local
         readiness. Independently provisioned non-Kubernetes component identities
-        retain their existing authentication contract.
+        retain their existing authentication contract outside explicitly enrolled
+        Worker nodes. On an enrolled node, a global Worker report (including
+        a failure) requires a bound Pod credential for the Worker selected by
+        the node's public Front. A different reporter is rejected without a write;
+        unavailable or changing transport evidence is retryable.
         Enforced PostgreSQL history admission also requires the complete signed dependency closure
         of the selected expectation and every reported desired, actual, candidate
         and LKG generation to have current durable verified local input pins.
@@ -4577,6 +4581,8 @@ paths:
         the same component identity, signed ReleaseSet membership, exact
         expectation, fence, freshness, replay and capability checks as trusted
         heartbeats. DNS retains its live Pod and declared backend checks.
+        Enrolled global Worker nodes use the same physical reporter binding as
+        trusted heartbeats; shadow validation still cannot change serving state.
         Edge shadow reports must leave actual_generation and lkg_generation
         empty and must not claim serving_lkg or lkg_expired. A staged candidate
         does not establish an applied or recoverable generation. Only staged and
@@ -4918,7 +4924,7 @@ paths:
       x-fugue-handler: handleRecordPlatformConsumerHostedReceipt
       tags: [Edge]
       summary: Record an enrolled executor's observations for the current host decision
-      description: Acknowledges only this member's exact selected parts. DNS requires every signed query key over UDP and TCP from the serving backend; Worker route requires every path, and TLS requires the selected owner and a fresh verified SNI observation. A failed attempt invalidates this member's earlier success. Never publishes, renews the host lease, or credits global full. Maximum request body 2 MiB.
+      description: Acknowledges only this member's exact selected parts. DNS requires every signed query key over UDP and TCP from the serving backend; Worker route requires every path, and TLS requires the selected owner and a fresh verified SNI observation. For global Worker nodes enrolled in physical reporter validation, both success and failure must come from the bound Pod selected by the node's public Front. Unavailable or changing transport evidence is retryable and does not invalidate an earlier observation. A verified failed attempt invalidates this member's earlier success. Never publishes, renews the host lease, or credits global full. Maximum request body 2 MiB.
       security: [{PlatformComponentBearerAuth: []}]
       parameters:
         - {in: path, name: artifact_id, required: true, schema: {type: string}}

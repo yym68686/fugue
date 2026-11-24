@@ -36,6 +36,7 @@ import (
 )
 
 type Server struct {
+	workerFrontBindings                    WorkerFrontBindings
 	hostedDeclarationRestore               *platformconfig.HostedDeclarationRestorePlan
 	compilerInputOmitOriginal              bool
 	operationOnce                          sync.Once
@@ -243,6 +244,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
 	server := &Server{
+		workerFrontBindings:             cfg.WorkerFrontBindings,
 		hostedDeclarationRestore:        cfg.HostedDeclarationRestore,
 		compilerInputOmitOriginal:       true,
 		store:                           store,
