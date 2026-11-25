@@ -1,13 +1,19 @@
 package dnsserver
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"maps"
+	"os"
 	"reflect"
 	"slices"
 	"time"
 
+	"fugue/internal/lkgcache"
 	"fugue/internal/model"
+	pc "fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/routeartifact"
 	"github.com/miekg/dns"
@@ -20,10 +26,9 @@ type hostedDNSHandoffInput struct {
 	facts      map[routeartifact.HostedRecipient][]dnsReadinessFact
 }
 
-// Build, but do not publish, a closed successor from independent per-host
-// commands. In particular, never seed its rows or observations from prior.
-func prepareHostedDNSHandoff(prior *hostedDNSRoutes, next *dnsServingState, inputs map[string]hostedDNSHandoffInput, now time.Time) (*hostedDNSRoutes, error) {
-	if prior == nil || next == nil || !next.record.Positive || next.transition != nil || len(inputs) == 0 || len(inputs) > 8192 {
+// Include all owners of shared keys, even when they are not the last writer.
+func (prior *hostedDNSRoutes) heads() (map[string]*routeartifact.HostedSelectedPacket, error) {
+	if prior == nil || len(prior.keys) == 0 {
 		return nil, errHostedDNSPeerPending
 	}
 	heads := map[string]*routeartifact.HostedSelectedPacket{}
@@ -47,6 +52,19 @@ func prepareHostedDNSHandoff(prior *hostedDNSRoutes, next *dnsServingState, inpu
 			}
 		}
 	}
+	return heads, nil
+}
+
+// Build, but do not publish, a closed successor from independent per-host
+// commands. In particular, never seed its rows or observations from prior.
+func prepareHostedDNSHandoff(prior *hostedDNSRoutes, next *dnsServingState, inputs map[string]hostedDNSHandoffInput, now time.Time) (*hostedDNSRoutes, error) {
+	if next == nil || !next.record.Positive || next.transition != nil || len(inputs) == 0 || len(inputs) > 8192 {
+		return nil, errHostedDNSPeerPending
+	}
+	heads, e := prior.heads()
+	if e != nil {
+		return nil, e
+	}
 	if len(inputs) != len(heads) {
 		return nil, errHostedDNSPeerPending
 	}
@@ -63,7 +81,11 @@ func prepareHostedDNSHandoff(prior *hostedDNSRoutes, next *dnsServingState, inpu
 		}
 		pin, err := routeartifact.HostedDNSBaselinePin(p.Delivery, in.base)
 		before := heads[host]
-		if err != nil || !p.ContinuesHostedMembership(*before, before.MemberBaseline, pin) || !hostedDNSParentMatches(next, in.base, p) {
+		// A crash may already have persisted some of the exact target
+		// envelopes. Reopen those byte-equivalent heads, never a sibling's
+		// decision, a skipped fence, or their old readiness observations.
+		if err != nil || p.MemberBaseline == "" || p.MemberBaseline != pin ||
+			(!reflect.DeepEqual(p, *before) && !p.ContinuesHostedMembership(*before, before.MemberBaseline, pin)) || !hostedDNSParentMatches(next, in.base, p) {
 			return nil, errors.New("DNS successor does not continue its exact hostname predecessor")
 		}
 		idx, err = idx.withPacket(p, next, in.facts)
@@ -89,6 +111,169 @@ func prepareHostedDNSHandoff(prior *hostedDNSRoutes, next *dnsServingState, inpu
 		}
 	}
 	return idx, nil
+}
+
+type hostedDNSParentExchange struct {
+	prior  *hostedDNSRoutes
+	next   *hostedDNSRoutes
+	inputs map[string]hostedDNSHandoffInput
+	heads  map[string]*routeartifact.HostedSelectedPacket
+}
+
+func (s *Service) readHostedDNSExchange(ctx context.Context, c platformconsumer.Client, id platformconsumer.Identity, parent *dnsServingState, prior *hostedDNSRoutes) (*hostedDNSParentExchange, error) {
+	heads, err := prior.heads()
+	if err != nil || len(heads) > 8192 || parent.payload.Policy.DNSReadiness == nil {
+		return nil, errHostedDNSPeerPending
+	}
+	a := parent.record.Candidate.Assignment
+	v := parent.payload
+	view := pc.DNSArtifactPayload{ReadinessPlan: v.Plan, Records: v.Records, QueryViews: v.Queries, Policy: v.Policy}
+	oldPublication := s.platformServing.publication.Load()
+	current := func() bool {
+		return ctx.Err() == nil && s.platformServing.publication.Load() == oldPublication && s.hostedDNS.Load() == prior
+	}
+	x := &hostedDNSParentExchange{prior: prior, heads: heads, inputs: map[string]hostedDNSHandoffInput{}}
+	ordered := slices.Sorted(maps.Keys(heads))
+	for _, host := range ordered {
+		if !current() {
+			return nil, platformconsumer.ErrAssignmentChanged
+		}
+		before := heads[host]
+		cp, err := s.dnsHostCheckpoint(host)
+		if err != nil {
+			return nil, err
+		}
+		cp.Serving = a
+		if id.BoundConsumerID() != cp.Who.ConsumerID() {
+			return nil, platformconsumer.ErrAssignmentChanged
+		}
+		cmd, err := c.HostedCommand(ctx, id, a, host, before.Fence, before.Decision, cp.Keys)
+		if err != nil {
+			return nil, err
+		}
+		base, err := routeartifact.HostedDNSMemberBase(host, id.NodeID, s.Config.EdgeGroupID, view)
+		if err != nil {
+			return nil, err
+		}
+		if !hostedDNSParentMatches(parent, base, cmd.Packet) {
+			return nil, errors.New("candidate DNS rows differ from signed host ownership")
+		}
+		facts, err := s.probeScopedDNS(ctx, cmd.Packet, parent, v.Policy.DNSReadiness.MaxConcurrency, current)
+		if err != nil {
+			return nil, err
+		}
+		x.inputs[host] = hostedDNSHandoffInput{cp, cmd.Artifact, base, facts}
+	}
+	// A's decision can change while probing B. Do not persist a prefix
+	// of the read set, or convert a private candidate into a wire receipt.
+	for _, host := range ordered {
+		in := x.inputs[host]
+		cmd, err := c.HostedCommand(ctx, id, a, host, in.command.GenerationSequence, in.command.Generation, in.checkpoint.Keys)
+		if err != nil {
+			return nil, err
+		}
+		if !current() || cmd.Artifact.ID != in.command.ID {
+			return nil, platformconsumer.ErrAssignmentChanged
+		}
+		s.hostedDNSRecovery(cmd.Packet, v.Policy.DNSReadiness, in.facts, time.Now().UTC())
+	}
+	x.next, err = prepareHostedDNSHandoff(prior, parent, x.inputs, time.Now().UTC())
+	return x, err
+}
+
+// With the host writer excluded, check *every* durable predecessor before
+// advancing the first one. On an ambiguous persistence failure the caller
+// restores reservations from disk without treating them as observations.
+func (x *hostedDNSParentExchange) persist(now time.Time) error {
+	hosts := slices.Sorted(maps.Keys(x.inputs))
+	for _, host := range hosts {
+		in := x.inputs[host]
+		old, err := in.checkpoint.Reserved()
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(old, *x.heads[host]) {
+			return platformconsumer.ErrAssignmentChanged
+		}
+	}
+	for _, host := range hosts {
+		in := x.inputs[host]
+		if _, err := in.checkpoint.Commit(in.command, dnsHostParts(*x.heads[host]), in.base, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Entry holds platformConsumerMu and hostedDNSMu. Local leases are not
+// authority: recheck the selected release after filesystem preparation and
+// before exchanging. No whole-parent success is claimed for scoped replies.
+func (s *Service) applyHostedDNSExchange(st *dnsServingState, x *hostedDNSParentExchange, check func() error, wireProbe func(*dnsServingState) error) error {
+	if s.Config.CachePath == "" || x.prior == nil || x.next == nil || s.hostedDNS.Load() != x.prior {
+		return platformconsumer.ErrAssignmentChanged
+	}
+	raw, err := json.Marshal(st.record)
+	if err != nil {
+		return err
+	}
+	path := s.Config.CachePath + ".platform-serving.json"
+	if err := lkgcache.PreservePrevious(path, s.validPreviousDNSCheckpoint); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	checkFresh := func() error {
+		now := time.Now().UTC()
+		if !dnsServingReady(st, now) || checkDNSServingSnapshot(st, now, false) != nil {
+			return errors.New("DNS candidate expired before host exchange")
+		}
+		for k := range x.next.keys {
+			if err := x.next.checkHostedWire(st, k, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := checkFresh(); err != nil {
+		return err
+	}
+	// Queries only briefly wait for the disk commit, never for an API
+	// call, HTTPS readiness pass, or a UDP/TCP loopback self-probe.
+	s.hostedPairMu.Lock()
+	err = x.persist(time.Now().UTC())
+	if err == nil {
+		err = lkgcache.AtomicWriteFile(path, raw, 0600)
+	}
+	if err == nil {
+		err = checkFresh()
+	}
+	if err != nil {
+		// We may have renamed any prefix, including every file. Refuse
+		// scoped answers until the signed checkpoints are read again.
+		blocked := *x.prior
+		blocked.pending = map[string]bool{}
+		for host := range x.heads {
+			blocked.pending[host] = true
+		}
+		s.hostedDNS.Store(&blocked)
+		recoverErr := s.reserveHostedDNS()
+		s.hostedPairMu.Unlock()
+		return errors.Join(err, recoverErr)
+	}
+	s.platformCheckpoint.Store(&dnsPersistedCheckpoint{sha256.Sum256(raw), st.record})
+	s.hostedDNS.Store(x.next)
+	s.platformServing.publish(st, dnsServingWriterCandidate)
+	s.platformServingBound.Store(true)
+	s.hostedPairMu.Unlock()
+	// The old fences cannot be replayed after durable exchange. A failed
+	// listener check is an error, not permission to reinstall either old
+	// command. The ordinary host loop independently probes and reports.
+	if err := wireProbe(st); err != nil {
+		return err
+	}
+	s.servingDNSProbes.clearQueryBlockers(st.record.Candidate.Assignment)
+	return nil
 }
 
 // Exercise the actual selection and reply path without changing the listener

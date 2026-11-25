@@ -615,6 +615,26 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	if err = s.signDNSCheckpoint(&st.record); err != nil {
 		return err
 	}
+	if !same {
+		prior := s.hostedDNS.Load()
+		var exchange *hostedDNSParentExchange
+		if prior != nil {
+			exchange, err = s.readHostedDNSExchange(ctx, client, id, st, prior)
+			if err != nil {
+				return err
+			}
+		}
+		// Exclude a first enrollment racing the nil snapshot, as well as a
+		// B update racing A. Never hold the query snapshot lock on network IO.
+		s.hostedDNSMu.Lock()
+		defer s.hostedDNSMu.Unlock()
+		if s.hostedDNS.Load() != prior {
+			return platformconsumer.ErrAssignmentChanged
+		}
+		if exchange != nil {
+			return s.applyHostedDNSExchange(st, exchange, checkApplyAuthority, wireProbe)
+		}
+	}
 	s.platformServing.publish(st, dnsServingWriterCandidate)
 	s.platformServingBound.Store(true)
 	rollback := func() {

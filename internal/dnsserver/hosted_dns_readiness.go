@@ -28,8 +28,14 @@ type hostedDNSDecision struct {
 // The signed parent supplies the probe budget. An observation is private
 // to this attempt and does not publish DNS records or manufacture history.
 func (s *Service) observeHostedDNSMember(ctx context.Context, p routeartifact.HostedSelectedPacket, parent *dnsServingState, workers int) (map[routeartifact.HostedRecipient][]dnsReadinessFact, error) {
+	return s.probeScopedDNS(ctx, p, parent, workers, func() bool { return s.currentDNSServingState() == parent })
+}
+
+// A detached probe is usable only with a verified candidate, an unchanged
+// predecessor, and a post-probe re-read of the exact signed command.
+func (s *Service) probeScopedDNS(ctx context.Context, p routeartifact.HostedSelectedPacket, parent *dnsServingState, workers int, current func() bool) (map[routeartifact.HostedRecipient][]dnsReadinessFact, error) {
 	now := time.Now().UTC()
-	if parent == nil || s.currentDNSServingState() != parent || !parent.record.Positive || len(p.Delivery.Parts) == 0 || p.Delivery.Parts[0].Recipient.Node != s.Config.DNSNodeID || p.Delivery.Parts[0].Recipient.Kind != model.PlatformArtifactKindDNSAnswerBundle || parent.payload.Policy.DNSReadiness == nil {
+	if parent == nil || !current() || !parent.record.Positive || len(p.Delivery.Parts) == 0 || p.Delivery.Parts[0].Recipient.Node != s.Config.DNSNodeID || p.Delivery.Parts[0].Recipient.Kind != model.PlatformArtifactKindDNSAnswerBundle || parent.payload.Policy.DNSReadiness == nil {
 		return nil, errors.New("DNS host observation has no current physical parent")
 	}
 	h := packetDNSDecision(&p)
@@ -129,7 +135,7 @@ send:
 		}
 		out[part.Recipient] = rows
 	}
-	if !p.ValidUntil.After(time.Now()) || s.currentDNSServingState() != parent {
+	if !p.ValidUntil.After(time.Now()) || !current() {
 		return nil, errors.New("DNS host selection changed during observation")
 	}
 	return out, ctx.Err()
