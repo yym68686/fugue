@@ -168,7 +168,7 @@ func testSharedWireDecisions(t *testing.T, hold, carry bool) {
 		cp.Serving = assign
 		return s.installHostedDNS(cp, h.cmd, parent, signedBase, h.fs)
 	}
-	apply := func(host, phase string, v routeartifact.HostedRecipientInput) {
+	makeHead := func(host, phase string, v routeartifact.HostedRecipientInput) head {
 		t.Helper()
 		cp, _ := s.dnsHostCheckpoint(host)
 		old := heads[host].p
@@ -223,7 +223,12 @@ func testSharedWireDecisions(t *testing.T, hold, carry bool) {
 				h.fs[r] = append(h.fs[r], f)
 			}
 		}
-		err = install(host, h)
+		return h
+	}
+	apply := func(host, phase string, v routeartifact.HostedRecipientInput) {
+		t.Helper()
+		h := makeHead(host, phase, v)
+		err := install(host, h)
 		if awaitPeer {
 			if !errors.Is(err, errHostedDNSPeerPending) {
 				t.Fatal("first peer did not reserve the new membership", err)
@@ -263,6 +268,39 @@ func testSharedWireDecisions(t *testing.T, hold, carry bool) {
 		n.record.Candidate.Artifact = model.PlatformArtifact{ID: assign.ArtifactID, ContentHash: assign.ContentHash}
 		n.record.Candidate.Release.ID, n.record.Candidate.Release.FencingToken = assign.ArtifactReleaseID, assign.FencingToken
 		parent = &n
+		// Prepare against the new signed membership while the actual UDP
+		// and TCP listeners are still using their old, valid decisions.
+		prior := s.hostedDNS.Load()
+		nextHeads := map[string]head{a: makeHead(a, "forward", unit(four, root)), b: makeHead(b, "forward", withHold(unit(root, two)))}
+		inputs := map[string]hostedDNSHandoffInput{}
+		for _, host := range []string{a, b} {
+			h := nextHeads[host]
+			cp, err := s.dnsHostCheckpoint(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cp.Serving = assign
+			inputs[host] = hostedDNSHandoffInput{cp, h.cmd, signedBase, h.fs}
+			idx, err := prepareHostedDNSHandoff(prior, parent, inputs, time.Now().UTC())
+			if host == a {
+				if idx != nil || !errors.Is(err, errHostedDNSPeerPending) {
+					t.Fatal("partial successor escaped", err)
+				}
+			} else if err != nil || idx == nil {
+				t.Fatal("complete successor could not answer", err)
+			}
+			if s.hostedDNS.Load() != prior {
+				t.Fatal("preparation published to the listener")
+			}
+			query(dns.RcodeSuccess)
+		}
+		wrong := inputs[b]
+		wrong.facts = heads[b].fs
+		inputs[b] = wrong
+		if idx, err := prepareHostedDNSHandoff(prior, parent, inputs, time.Now().UTC()); err == nil || idx != nil {
+			t.Fatal("old peer proofs credited to the new membership")
+		}
+		query(dns.RcodeSuccess)
 		s.platformServing.Store(parent)
 		query(dns.RcodeServerFailure)
 		awaitPeer = true
