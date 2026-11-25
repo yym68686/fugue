@@ -212,6 +212,32 @@ func (s *Service) applyHostedDNSExchange(st *dnsServingState, x *hostedDNSParent
 	if s.Config.CachePath == "" || x.prior == nil || x.next == nil || s.hostedDNS.Load() != x.prior {
 		return platformconsumer.ErrAssignmentChanged
 	}
+	heads, err := x.next.heads()
+	if err != nil {
+		return err
+	}
+	if old := s.platformServing.Load(); old != nil && !old.record.coversHostedFloor(heads) {
+		return errors.New("DNS paired exchange would forget a durable hostname")
+	}
+	floor := make(map[string]dnsHostedFloor, len(heads))
+	for host, p := range heads {
+		floor[host] = dnsHostedFloor{p.Fence, p.Decision}
+		if x.next == x.prior {
+			cp, err := s.dnsHostCheckpoint(host)
+			if err != nil {
+				return err
+			}
+			cp.Serving = st.record.Candidate.Assignment
+			old, err := cp.Load(time.Now().UTC())
+			if err != nil || !reflect.DeepEqual(old, *p) {
+				return errors.New("DNS live reservation differs from durable host head")
+			}
+		}
+	}
+	st.record.Schema, st.record.HostedFloor = dnsPairedCheckpoint, floor
+	if err := s.signDNSCheckpoint(&st.record); err != nil {
+		return err
+	}
 	raw, err := json.Marshal(st.record)
 	if err != nil {
 		return err
@@ -224,16 +250,7 @@ func (s *Service) applyHostedDNSExchange(st *dnsServingState, x *hostedDNSParent
 		return err
 	}
 	checkFresh := func() error {
-		now := time.Now().UTC()
-		if !dnsServingReady(st, now) || checkDNSServingSnapshot(st, now, false) != nil {
-			return errors.New("DNS candidate expired before host exchange")
-		}
-		for k := range x.next.keys {
-			if err := x.next.checkHostedWire(st, k, now); err != nil {
-				return err
-			}
-		}
-		return nil
+		return x.next.checkPairedSnapshot(st, time.Now().UTC())
 	}
 	if err := checkFresh(); err != nil {
 		return err
@@ -253,7 +270,7 @@ func (s *Service) applyHostedDNSExchange(st *dnsServingState, x *hostedDNSParent
 		// scoped answers until the signed checkpoints are read again.
 		blocked := *x.prior
 		blocked.pending = map[string]bool{}
-		for host := range x.heads {
+		for host := range heads {
 			blocked.pending[host] = true
 		}
 		s.hostedDNS.Store(&blocked)
@@ -274,6 +291,57 @@ func (s *Service) applyHostedDNSExchange(st *dnsServingState, x *hostedDNSParent
 	}
 	s.servingDNSProbes.clearQueryBlockers(st.record.Candidate.Assignment)
 	return nil
+}
+
+// Partition record obligations, not probe IDs. A parent obligation disappears
+// only when every local occurrence and every required family have a signed
+// scoped wire row. The scoped materializer checks the effective quorum,
+// including still-global dependencies of a shared record. Requirements absent
+// from this listener's zone inventory are never silently dropped.
+func (idx *hostedDNSRoutes) checkPairedSnapshot(st *dnsServingState, now time.Time) error {
+	if st == nil || st.transition != nil || st.payload.Plan == nil || st.payload.Policy.DNSReadiness == nil ||
+		!st.record.Positive || !st.record.AppliedAt.Add(time.Duration(st.payload.Policy.MaxStaleSeconds)*time.Second).After(now) ||
+		idx == nil || len(idx.keys) == 0 || len(idx.pending) != 0 {
+		return errHostedDNSPeerPending
+	}
+	for k := range idx.keys {
+		if err := idx.checkHostedWire(st, k, now); err != nil {
+			return err
+		}
+	}
+	covered := map[string]map[string]bool{}
+	missing := map[string]bool{}
+	for zone, z := range st.zones {
+		for name, rows := range z.records {
+			for _, row := range rows {
+				kind := row.record.Type
+				if kind != "A" && kind != "AAAA" {
+					continue
+				}
+				if idx.keys[hostedZoneKey{zone, hostedRRKey{name, dns.StringToType[kind]}}] == nil {
+					missing[name] = true
+				} else {
+					if covered[name] == nil {
+						covered[name] = map[string]bool{}
+					}
+					covered[name][kind] = true
+				}
+			}
+		}
+	}
+	plan := *st.payload.Plan
+	plan.Records = nil
+	for _, rr := range st.payload.Plan.Records {
+		if missing[rr.Hostname] || len(covered[rr.Hostname]) == 0 || len(rr.Targets) == 0 ||
+			slices.ContainsFunc(rr.Targets, func(t pc.DNSReadinessTarget) bool { return !covered[rr.Hostname][t.Family] }) {
+			plan.Records = append(plan.Records, rr)
+		}
+	}
+	status := summarizeDNSReadiness(&plan, st.payload.Policy.DNSReadiness, st.facts, "", st.checkedAt, now)
+	if status.ReadyRecords != status.Records {
+		return errors.New("DNS uncovered parent readiness incomplete")
+	}
+	return checkDNSSelectedSnapshot(st, idx, now, false)
 }
 
 // Exercise the actual selection and reply path without changing the listener

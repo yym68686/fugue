@@ -22,22 +22,38 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformconsumer"
 	"fugue/internal/platformcontrol"
+	"fugue/internal/platformproducer"
 	"fugue/internal/routeartifact"
 	"fugue/internal/routeprobe"
+	"fugue/internal/tlsissuance"
 	"github.com/miekg/dns"
 )
 
 type dnsServingCheckpoint struct {
-	RouteSources *dnsroutesource.Context `json:"route_sources,omitempty"`
-	Schema       string                  `json:"schema"`
-	NodeID       string                  `json:"node_id"`
-	GroupID      string                  `json:"group_id"`
-	Parent       model.PlatformArtifact  `json:"parent"`
-	Candidate    dnsPlatformCandidate    `json:"candidate"`
-	AppliedAt    time.Time               `json:"applied_at"`
-	Positive     bool                    `json:"positive"`
-	KeyID        string                  `json:"key_id"`
-	Signature    string                  `json:"signature,omitempty"`
+	// A paired checkpoint is only a base for this set of durable hostname
+	// reservations. It is not a positive observation of the full release.
+	HostedFloor  map[string]dnsHostedFloor `json:"hosted_floor,omitempty"`
+	RouteSources *dnsroutesource.Context   `json:"route_sources,omitempty"`
+	Schema       string                    `json:"schema"`
+	NodeID       string                    `json:"node_id"`
+	GroupID      string                    `json:"group_id"`
+	Parent       model.PlatformArtifact    `json:"parent"`
+	Candidate    dnsPlatformCandidate      `json:"candidate"`
+	AppliedAt    time.Time                 `json:"applied_at"`
+	Positive     bool                      `json:"positive"`
+	KeyID        string                    `json:"key_id"`
+	Signature    string                    `json:"signature,omitempty"`
+}
+
+const dnsPairedCheckpoint = "fugue.dns.paired-checkpoint/v1"
+
+type dnsHostedFloor struct {
+	Fence    int64  `json:"fence"`
+	Decision string `json:"decision"`
+}
+
+func (c dnsServingCheckpoint) wholePositive() bool {
+	return c.Positive && c.Schema != dnsPairedCheckpoint && len(c.HostedFloor) == 0
 }
 
 // One already materialized checkpoint, bound to the actual persisted bytes.
@@ -105,8 +121,14 @@ func (s *Service) decodeDNSCheckpointPayload(raw []byte) (dnsServingCheckpoint, 
 }
 
 func (s *Service) verifyMaterializedDNSCheckpoint(c dnsServingCheckpoint) (dnsServingCheckpoint, dnsServingPayload, string, error) {
-	if c.Schema != "fugue.dns.positive-checkpoint/v1" || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
+	paired := c.Schema == dnsPairedCheckpoint && len(c.HostedFloor) > 0 && len(c.HostedFloor) <= 8192
+	if (!paired && (c.Schema != "fugue.dns.positive-checkpoint/v1" || c.HostedFloor != nil)) || !c.Positive || c.NodeID != s.Config.DNSNodeID || c.GroupID != s.Config.EdgeGroupID || c.AppliedAt.IsZero() || c.AppliedAt.After(time.Now().Add(time.Second)) {
 		return c, dnsServingPayload{}, "", errors.New("DNS positive checkpoint invalid")
+	}
+	for host, floor := range c.HostedFloor {
+		if !tlsissuance.ValidHostname(host) || floor.Fence < 1 || !platformproducer.ValidDigest(floor.Decision) {
+			return c, dnsServingPayload{}, "", errors.New("DNS paired checkpoint has invalid hostname floor")
+		}
 	}
 	k := s.platformDNSKeys()
 	if _, revoked := k.RevokedKeyIDs[strings.ToLower(c.KeyID)]; revoked {
@@ -130,14 +152,14 @@ func (s *Service) verifyMaterializedDNSCheckpoint(c dnsServingCheckpoint) (dnsSe
 
 func (s *Service) validPreviousDNSCheckpoint(raw []byte) bool {
 	if known := s.platformCheckpoint.Load(); known != nil && len(raw) <= 32<<20 && sha256.Sum256(raw) == known.digest {
-		if _, _, _, err := s.verifyMaterializedDNSCheckpoint(known.record); err == nil {
+		if _, _, _, err := s.verifyMaterializedDNSCheckpoint(known.record); err == nil && known.record.wholePositive() {
 			return true
 		}
 		// A changed in-memory graph must not stand in for the actual file.
 		// Recover from its bytes using the ordinary verification path.
 	}
-	_, err := s.decodeDNSCheckpoint(raw)
-	return err == nil
+	c, err := s.decodeDNSCheckpoint(raw)
+	return err == nil && c.wholePositive()
 }
 
 var errDNSCheckpointMissing = errors.New("DNS positive serving checkpoint missing")
@@ -227,14 +249,14 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	if previous := s.decisionPublication.Load(); previous != nil {
 		publicationObservation.LKG = previous.LKG
 	}
-	if old != nil && old.record.Positive {
+	if old != nil && old.record.wholePositive() {
 		lkg := dnsPublication(old.record)
 		publicationObservation.LKG = &lkg
 	}
 	defer func() {
 		publicationObservation.ObservedAt = time.Now().UTC()
 		loaded := s.platformServing.Load()
-		if loaded != nil && loaded.record.Positive {
+		if loaded != nil && loaded.record.wholePositive() {
 			lkg := dnsPublication(loaded.record)
 			publicationObservation.LKG = &lkg
 		}
@@ -398,13 +420,13 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	// Same-release observations use only volatile fresh proof cache. Persisted
 	// checkpoint readiness is never reused after restart.
 	same := old != nil && reflect.DeepEqual(old.record.Candidate.Assignment, a)
-	if same && old.record.RouteSources != nil && release.ReleaseChannel == model.PlatformArtifactReleaseChannelFull &&
+	if same && s.hostedDNS.Load() == nil && old.record.RouteSources != nil && release.ReleaseChannel == model.PlatformArtifactReleaseChannelFull &&
 		release.VerificationState == model.PlatformArtifactVerificationStateVerified && old.record.Parent.ContentHash == parent.ContentHash && old.routeID == routeID {
 		if attempted, err := s.reportFreshDNSRouteSourceHeartbeat(ctx, client, id, old, wireProbe); attempted {
 			return err
 		}
 	}
-	if same && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
+	if same && s.hostedDNS.Load() == nil && old.record.RouteSources == nil && len(p.dnsSourceApprovals()) == 0 &&
 		dnsServingCanSkipProbeSweep(old, time.Now().UTC()) {
 		if old.fallback != "" {
 			recovered := *old
@@ -499,6 +521,35 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 	st, err := buildDNSServingState(checkpoint, p, routeID, s.Config.DNSNodeID, s.Config.EdgeGroupID, facts, now)
 	if err != nil {
 		return err
+	}
+	checkApplyAuthority := func() error {
+		if p.routeSources == nil {
+			return checkAssignment()
+		}
+		return s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources)
+	}
+	// An existing reservation changes what actually answers the query. Never
+	// test the covered keys as plain global rows or let a failed paired
+	// reconciliation enter the unscoped transition/checkpoint path.
+	prior := s.hostedDNS.Load()
+	if prior != nil {
+		var exchange *hostedDNSParentExchange
+		if same {
+			// The independent host loop owns same-parent forwards, withdrawals
+			// and fresh path observations. Use one immutable snapshot of them.
+			exchange = &hostedDNSParentExchange{prior: prior, next: prior}
+		} else {
+			exchange, err = s.readHostedDNSExchange(ctx, client, id, st, prior)
+			if err != nil {
+				return err
+			}
+		}
+		s.hostedDNSMu.Lock()
+		defer s.hostedDNSMu.Unlock()
+		return s.applyHostedDNSExchange(st, exchange, checkApplyAuthority, wireProbe)
+	}
+	if old != nil && old.record.Schema == dnsPairedCheckpoint {
+		return errors.New("DNS paired checkpoint lost its hostname reservations")
 	}
 	ready := dnsServingReady(st, now)
 	var snapshotErr error
@@ -599,41 +650,17 @@ func (s *Service) syncPlatformDNSServingOnce(ctx context.Context, probe dnsReadi
 		}
 		return fmt.Errorf("DNS candidate required readiness is incomplete: %s", summary)
 	}
-	checkApplyAuthority := func() error {
-		if p.routeSources == nil {
-			return checkAssignment()
-		}
-		// The selected route-source endpoint checks exact serving ownership
-		// on both sides of its ledger read. The client also compares the
-		// entire assignment and the release, and we compare the source digest.
-		// A separate serving-list read adds work but not a later guard.
-		return s.checkDNSRouteSources(ctx, client, id, candidate, p.routeSources)
-	}
 	if err = checkApplyAuthority(); err != nil {
 		return err
 	}
 	if err = s.signDNSCheckpoint(&st.record); err != nil {
 		return err
 	}
-	if !same {
-		prior := s.hostedDNS.Load()
-		var exchange *hostedDNSParentExchange
-		if prior != nil {
-			exchange, err = s.readHostedDNSExchange(ctx, client, id, st, prior)
-			if err != nil {
-				return err
-			}
-		}
-		// Exclude a first enrollment racing the nil snapshot, as well as a
-		// B update racing A. Never hold the query snapshot lock on network IO.
-		s.hostedDNSMu.Lock()
-		defer s.hostedDNSMu.Unlock()
-		if s.hostedDNS.Load() != prior {
-			return platformconsumer.ErrAssignmentChanged
-		}
-		if exchange != nil {
-			return s.applyHostedDNSExchange(st, exchange, checkApplyAuthority, wireProbe)
-		}
+	// Exclude first enrollment throughout any unscoped positive publication.
+	s.hostedDNSMu.Lock()
+	defer s.hostedDNSMu.Unlock()
+	if s.hostedDNS.Load() != nil {
+		return platformconsumer.ErrAssignmentChanged
 	}
 	s.platformServing.publish(st, dnsServingWriterCandidate)
 	s.platformServingBound.Store(true)
@@ -888,6 +915,10 @@ func probeDNSServingSnapshot(st *dnsServingState) error {
 // The materialization-only check uses the caller's evaluation time and
 // bypasses wire encoding and diagnostic capture.
 func checkDNSServingSnapshot(st *dnsServingState, evaluatedAt time.Time, wire bool) error {
+	return checkDNSSelectedSnapshot(st, nil, evaluatedAt, wire)
+}
+
+func checkDNSSelectedSnapshot(st *dnsServingState, idx *hostedDNSRoutes, evaluatedAt time.Time, wire bool) error {
 	// A partial successor transition can answer individual live requests, but
 	// cannot prove this checkpoint is ready on its own.
 	if st.transition != nil {
@@ -906,7 +937,12 @@ func checkDNSServingSnapshot(st *dnsServingState, evaluatedAt time.Time, wire bo
 					now = time.Now().UTC()
 					capture = &dnsDecisionCapture{input: dnsDecisionReplay{Version: DNSDecisionSchema}, records: []DNSDecisionRecord{}}
 				}
-				response := st.answerObserved(req, "", now, capture)
+				key := hostedZoneKey{zone, hostedRRKey{name, req.Question[0].Qtype}}
+				source := idx.forQuery(st, req, now)
+				if idx != nil && source.hostedWire != idx.keys[key] {
+					return errors.New("DNS scoped record is shadowed by another zone")
+				}
+				response := source.answerObserved(req, "", now, capture)
 				if response.Rcode != dns.RcodeSuccess {
 					if !wire {
 						return errors.New("DNS snapshot cannot materialize a declared answer")
@@ -1019,7 +1055,7 @@ func (s *Service) reportDNSAssignmentStateGuarded(ctx context.Context, client pl
 func (s *Service) reportDNSAssignmentStateLocked(ctx context.Context, client platformconsumer.Client, id platformconsumer.Identity, a model.PlatformConsumerAssignment, loaded *dnsServingState, h platformcontrol.PlatformConsumerHeartbeatEnvelope, stillReady func() bool, sourceAfterWire *dnsServingState) (resultErr error) {
 	// A whole-parent positive receipt cannot attest the bytes & evidence
 	// privately selected for a host. Never credit scoped work to old full.
-	if h.ProbeStatus == "passed" && s.hostedDNS.Load() != nil {
+	if loaded != nil && loaded.record.Schema == dnsPairedCheckpoint || h.ProbeStatus == "passed" && s.hostedDNS.Load() != nil {
 		return errors.New("DNS whole-publication proof excludes independently selected records")
 	}
 	step := "serving_state"

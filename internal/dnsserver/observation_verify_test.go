@@ -8,6 +8,41 @@ import (
 	"fugue/internal/dnsfacts"
 )
 
+func TestPairedDNSCheckpointCannotAuthorizeWholeHandoff(t *testing.T) {
+	s, st, now := runtimeFactsFixture(t)
+	st.record.Schema = dnsPairedCheckpoint
+	st.record.HostedFloor = map[string]dnsHostedFloor{"reserved.example.test": {1, st.record.Parent.ContentHash}}
+	if err := s.signDNSCheckpoint(&st.record); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(st.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.decodeDNSCheckpoint(raw); err != nil {
+		t.Fatal("valid paired checkpoint cannot be recovered", err)
+	}
+	if s.validPreviousDNSCheckpoint(raw) {
+		t.Fatal("paired checkpoint would replace standalone LKG")
+	}
+	snapshot, err := dnsRuntimeFacts(st, now)
+	if err != nil || snapshot.Ready {
+		t.Fatal("global runtime exported a paired success", err)
+	}
+	snapshot.Ready = true
+	if err := VerifyServingObservation(s.Config, raw, snapshot, now); err == nil {
+		t.Fatal("scope-only checkpoint was accepted as whole listener evidence")
+	}
+	delete(st.record.HostedFloor, "reserved.example.test")
+	if err := s.signDNSCheckpoint(&st.record); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = json.Marshal(st.record)
+	if _, err := s.decodeDNSCheckpoint(raw); err == nil {
+		t.Fatal("paired checkpoint reopened without the reservation manifest")
+	}
+}
+
 func TestExpiredPredecessorCannotAuthorizeTraffic(t *testing.T) {
 	s, st, now := runtimeFactsFixture(t)
 	st.record.AppliedAt = now.Add(-time.Duration(st.payload.Policy.MaxStaleSeconds)*time.Second - time.Second)

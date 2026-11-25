@@ -207,7 +207,7 @@ func decisionPublicationState(state *dnsServingState, observed *DNSDecisionPubli
 	if state != nil {
 		loaded := dnsPublication(state.record)
 		out.Loaded = &loaded
-		if state.record.Positive {
+		if state.record.wholePositive() {
 			out.LKG = &loaded
 		}
 		out.FallbackReason = state.fallback

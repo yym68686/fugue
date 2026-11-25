@@ -60,7 +60,7 @@ const (
 func verifyDNSExecutorObservation(configuration config.DNSConfig, checkpoint []byte, snapshot dnsfacts.Snapshot, now time.Time, mode executorObservationMode) error {
 	service := &Service{Config: configuration}
 	record, payload, routeID, err := service.decodeDNSCheckpointPayload(checkpoint)
-	if err != nil {
+	if err != nil || !record.wholePositive() {
 		return errors.New("DNS observation checkpoint authentication failed")
 	}
 	planDigest, err := platformconfig.Digest(payload.Plan)

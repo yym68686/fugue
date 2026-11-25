@@ -1192,6 +1192,18 @@ func (s *Service) statusLocked() Status {
 		status.LastError = s.platformServingError
 		status.DegradedReason = st.fallback
 		status.PlatformServing = &DNSServingStatus{State: "serving", ReleaseSetID: c.Assignment.ReleaseSetID, ArtifactID: c.Artifact.ID, Digest: c.Artifact.ContentHash, ReleaseChannel: c.Release.ReleaseChannel, FencingToken: c.Release.FencingToken, Zones: len(st.zones), Readiness: &readiness, FallbackReason: st.fallback, LastError: s.platformServingError, ReportedAt: s.platformServingReported}
+		if st.record.Schema == dnsPairedCheckpoint {
+			// Readiness counters above remain global probe counters. The
+			// listener may be healthy with no global proof of a scoped path.
+			status.PlatformServing.State = "serving_scoped"
+			status.LKGGeneration, status.LastGoodGeneration = "", ""
+			status.Healthy = s.hostedDNS.Load().checkPairedSnapshot(st, time.Now().UTC()) == nil && !s.listenerFailed.Load()
+			status.StaleCache = st.fallback != "" || !status.Healthy
+			status.Status = "degraded"
+			if status.Healthy {
+				status.Status = "ok"
+			}
+		}
 		return status
 	}
 	for _, child := range s.childZoneServices() {

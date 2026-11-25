@@ -38,7 +38,7 @@ func dnsRuntimeFacts(st *dnsServingState, now time.Time) (dnsfacts.Snapshot, err
 	}
 	sort.Slice(out.Facts, func(i, j int) bool { return out.Facts[i].ProbeID < out.Facts[j].ProbeID })
 	status := summarizeDNSReadiness(st.payload.Plan, st.payload.Policy.DNSReadiness, filtered, digest, st.checkedAt, now)
-	out.Ready = now.Before(until) && status.ReadyRecords == status.Records
+	out.Ready = st.record.wholePositive() && now.Before(until) && status.ReadyRecords == status.Records
 	if out.Ready {
 		// A transport handoff needs an answer from this exact checkpoint, not
 		// just a fresh route quorum. A signed selector can exclude the only

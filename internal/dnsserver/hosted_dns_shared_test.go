@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -305,16 +306,14 @@ func testSharedWireDecisions(t *testing.T, hold, carry, exchange bool) {
 		query(dns.RcodeSuccess)
 		if exchange {
 			inputs[b] = savedB
-			// Distinct, still-valid facts for the underlying signed successor.
-			// Scoped replies never use these as their private route witnesses.
+			// Only the scoped routes really serve these paths. There is no
+			// global proof for the old root under this new parent.
 			parent.zones = map[string]dnsServingZone{}
 			parent.payload.Plan = &base.DNS.Plan
-			for _, pr := range base.DNS.Plan.Probes {
-				f := fact(pr)
-				f.Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseSetID: assign.ReleaseSetID, ReleaseSetDigest: parent.record.Parent.ContentHash, RouteArtifactID: parent.routeID, ReleaseID: assign.ArtifactReleaseID, ReleaseChannel: "full", FencingToken: assign.FencingToken, ScopeKey: "global"}
-				parent.facts = append(parent.facts, f)
+			setGlobal(nil)
+			if dnsServingReady(parent, at) || checkDNSServingSnapshot(parent, at, false) == nil {
+				t.Fatal("fixture unexpectedly qualifies as a whole-parent proof")
 			}
-			setGlobal(parent.facts)
 			idx, err := prepareHostedDNSHandoff(prior, parent, inputs, time.Now().UTC())
 			if err != nil {
 				t.Fatal(err)
@@ -324,6 +323,15 @@ func testSharedWireDecisions(t *testing.T, hold, carry, exchange bool) {
 				t.Fatal(err)
 			}
 			x := &hostedDNSParentExchange{prior, idx, inputs, before}
+			plan := base.DNS.Plan
+			other := plan.Records[0]
+			other.Hostname = "uncovered.example.test"
+			plan.Records = append(slices.Clone(plan.Records), other)
+			parent.payload.Plan = &plan
+			if err := s.applyHostedDNSExchange(parent, x, func() error { return nil }, s.probeDNSServingListener); err == nil {
+				t.Fatal("scoped facts credited to an uncovered parent obligation")
+			}
+			parent.payload.Plan = &base.DNS.Plan
 			stale := errors.New("assignment moved")
 			if err := s.applyHostedDNSExchange(parent, x, func() error { return stale }, s.probeDNSServingListener); !errors.Is(err, stale) {
 				t.Fatal("stale authority changed host files", err)
@@ -340,6 +348,17 @@ func testSharedWireDecisions(t *testing.T, hold, carry, exchange bool) {
 			}
 			heads = nextHeads
 			query(dns.RcodeSuccess)
+			if parent.record.wholePositive() || len(parent.record.HostedFloor) != 2 {
+				t.Fatal("paired parent treated as a full LKG")
+			}
+			if status := s.Status(); !status.Healthy || status.LKGGeneration != "" || status.LastGoodGeneration != "" || status.PlatformServing.State != "serving_scoped" {
+				t.Fatal("effective listener health confused with whole LKG", status)
+			}
+			repeat := *parent
+			if err := s.applyHostedDNSExchange(&repeat, &hostedDNSParentExchange{prior: idx, next: idx}, func() error { return nil }, s.probeDNSServingListener); err != nil {
+				t.Fatal("same-parent reentry needs nonexistent old-root proofs", err)
+			}
+			parent = &repeat
 			for name, in := range inputs {
 				p, err := in.checkpoint.Load(time.Now().UTC())
 				if err != nil || p.Decision != heads[name].p.Decision {
@@ -410,6 +429,20 @@ func testSharedWireDecisions(t *testing.T, hold, carry, exchange bool) {
 		}
 	}
 	s = NewService(config, nil)
+	if exchange {
+		s.platformServing.Store(parent)
+		path := filepath.Join(config.CachePath+".hosted-dns", b)
+		held := filepath.Join(t.TempDir(), "detached-host")
+		if err := os.Rename(path, held); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.reserveHostedDNS(); err == nil || s.hostedDNS.Load() != nil {
+			t.Fatal("paired checkpoint reopened after losing B's reservation")
+		}
+		if err := os.Rename(held, path); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if e := s.reserveHostedDNS(); e != nil {
 		t.Fatal(e)
 	}

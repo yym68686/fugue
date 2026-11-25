@@ -189,11 +189,34 @@ func (s *Service) reserveHostedDNS() error {
 			return e
 		}
 	}
+	// A paired parent is not an independently usable full LKG. If a
+	// reservation is missing or rolled back, do not even open the listeners.
+	// A legitimately newer decision (including a partial next exchange)
+	// remains reserved, but still needs fresh observations before serving.
+	if parent := s.platformServing.Load(); parent != nil && parent.record.Schema == dnsPairedCheckpoint {
+		heads, err := idx.heads()
+		if err != nil {
+			return err
+		}
+		if !parent.record.coversHostedFloor(heads) {
+			return errors.New("DNS paired checkpoint missing its durable hostname predecessor")
+		}
+	}
 	if idx != nil {
 		s.platformServingBound.Store(true)
 		s.hostedDNS.Store(idx)
 	}
 	return nil
+}
+
+func (c dnsServingCheckpoint) coversHostedFloor(heads map[string]*routeartifact.HostedSelectedPacket) bool {
+	for host, floor := range c.HostedFloor {
+		p := heads[host]
+		if p == nil || p.Fence < floor.Fence || p.Fence == floor.Fence && p.Decision != floor.Decision {
+			return false
+		}
+	}
+	return true
 }
 
 func hostedDNSParentMatches(parent *dnsServingState, base map[routeartifact.HostedRecipient]routeartifact.HostedRecipientInput, p routeartifact.HostedSelectedPacket) bool {
