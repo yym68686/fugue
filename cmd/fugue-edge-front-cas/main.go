@@ -30,6 +30,17 @@ func run(args []string, stdout io.Writer, now time.Time) error {
 	if len(args) > 0 && args[0] == "--node-worker-advance" {
 		return runNativeNodeWorker(args, stdout, localWorkerRecipient, edgegroupfront.ConfigFromEnv(), edgegroupfront.NativeJournalPath)
 	}
+	if len(args) == 1 && args[0] == "--worker-fixed-rotation" {
+		id, err := localWorkerRecipient()
+		if err != nil {
+			return err
+		}
+		state, err := edgegroupfront.ObserveFixedWorkerRotation(edgegroupfront.ConfigFromEnv(), id)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(state)
+	}
 	if len(args) > 0 && (args[0] == "--worker-recipient" || args[0] == "--worker-journal" || args[0] == "--worker-convergence") {
 		return runNativeWorker(args, stdout, localWorkerRecipient)
 	}

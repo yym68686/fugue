@@ -63,6 +63,23 @@ class NodeWorkerDriverTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 driver.validate(dict(config, **{key: value}))
 
+    def test_fixed_rotation_requires_exact_fixed_candidate_and_real_drain_witness(self):
+        config = pinned()
+        with self.assertRaisesRegex(ValueError, "fixed rotation"):
+            driver.validate(dict(config, fixedRotation=True))
+        config["candidate"]["daemonSet"] = config["candidate"].pop("deployment")
+        config["probeIngress"] = {"service": "probe-front", "uid": "00000000-0000-4000-8000-000000000004",
+                                  "generation": 1, "port": 15443}
+        with self.assertRaisesRegex(ValueError, "drain evidence"):
+            driver.validate(dict(config, fixedRotation=True))
+        config.update(verifyDrain=True, fixedRotation=True)
+        config["probe"]["bodyDigest"] = "sha256:" + "f"*64
+        self.assertEqual(driver.validate(config), config)
+        f = Fixture()
+        f.journal["fixed_rotation"] = True
+        f.activation["reason"] = "advance fixed Worker using journal " + f.journal["digest"]
+        self.assertEqual(driver.handoff.slot_phase(f.journal, f.activation), "activated")
+
     def test_immutable_input_readback_does_not_repeat_a_lost_write(self):
         adapter = driver.ClaimedHandoff(unittest.mock.Mock(), {}, {"recipient": {"group": "edge-group-fixture"},
                                                                   "digest": "sha256:" + "b"*64})

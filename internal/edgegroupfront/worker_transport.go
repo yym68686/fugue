@@ -41,6 +41,8 @@ func (cfg *Config) prepareWorkerTransport() error {
 }
 
 func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
+	cfg.workerTargets = nil
+	cfg.fixedWorkerRotation = false
 	if cfg.WorkerTransport == "" {
 		return nil
 	}
@@ -60,7 +62,7 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 			v.HTTP == v.HTTPS || !v.Candidate.valid() {
 			return fail
 		}
-	case "fugue.worker-transport-fixed/v1":
+	case "fugue.worker-transport-fixed/v1", fixedWorkerRotationSchema:
 		// Pin the two existing Workers without declaring phantom listeners.
 		if v.Candidate != (workerImagePin{}) || v.HTTP != 0 || v.HTTPS != 0 {
 			return fail
@@ -91,9 +93,16 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 			return fail
 		}
 		t := cfg.Slots[p.Slot]
-		for _, addr := range []string{t.HTTPAddress, t.HTTPSAddress} {
+		fixedPorts := [2]uint16{18080, 18443}
+		if p.Slot == "b" {
+			fixedPorts = [2]uint16{28080, 28443}
+		}
+		for i, addr := range []string{t.HTTPAddress, t.HTTPSAddress} {
 			ep, e := netip.ParseAddrPort(addr)
 			if e != nil || ep.Addr() != ip || ep.Port() < 1024 || taken[ep.Port()] {
+				return fail
+			}
+			if v.Schema == fixedWorkerRotationSchema && ep.Port() != fixedPorts[i] {
 				return fail
 			}
 			taken[ep.Port()] = true
@@ -105,6 +114,7 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 		lookup[v.Candidate] = SlotTargets{HTTPAddress: port(v.HTTP), HTTPSAddress: port(v.HTTPS)}
 	}
 	cfg.workerTargets = lookup
+	cfg.fixedWorkerRotation = v.Schema == fixedWorkerRotationSchema
 	return nil
 }
 
@@ -122,6 +132,6 @@ func (s *Service) selectedWorker(cfg Config) (string, *ActivationState, SlotTarg
 	if e != nil || !found || a.GroupID != cfg.EdgeGroupID {
 		return "", nil, SlotTargets{}, false
 	}
-	t, ok := cfg.workerTargets[workerImagePin{a.ActiveSlot, a.WorkerSourceCommit, a.WorkerImageDigest}]
+	t, _, ok := cfg.activationWorkerTargets(a)
 	return a.ActiveSlot, &a, t, ok
 }

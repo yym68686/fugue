@@ -42,7 +42,8 @@ def matches(pattern, value):
 def validate(config):
     fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe"
            + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else "")
-           + (" verifyDrain" if isinstance(config, dict) and "verifyDrain" in config else ""))
+           + (" verifyDrain" if isinstance(config, dict) and "verifyDrain" in config else "")
+           + (" fixedRotation" if isinstance(config, dict) and "fixedRotation" in config else ""))
     require("verifyDrain" not in config or (config["verifyDrain"] is True and "probeIngress" in config),
             "drain evidence requires an explicit independent probe ingress")
     require(config["schema"] == "fugue.node-worker-handoff/v1"
@@ -54,6 +55,8 @@ def validate(config):
     fixed = isinstance(candidate, dict) and "daemonSet" in candidate
     fields(candidate, ("daemonSet" if fixed else "deployment") + " component source imageDigest slot bundleGeneration releaseDigest")
     require(not fixed or "probeIngress" in config, "fixed Worker handoff requires the independent probe transport")
+    require("fixedRotation" not in config or (config["fixedRotation"] is True and fixed and config.get("verifyDrain") is True),
+            "fixed rotation requires a fixed Worker and retained-connection drain evidence")
     addr = ipaddress.ip_address(public["address"])
     require(addr.version == 4 and addr.is_global and public["address"] == str(addr)
             and matches(NAME, public["service"]) and matches(UID, public["uid"])
@@ -274,6 +277,9 @@ class ActiveCluster:
         recipient = front.node_worker_recipient(self.profile, selected)
         expected = front.state(self.profile, selected)
         require(expected == cfg["expected"], "in-service Front does not match declared predecessor activation")
+        if cfg.get("fixedRotation"):
+            require(self.native(selected, "--worker-fixed-rotation") == expected,
+                    "in-service Front cannot rotate its exact fixed Worker binding")
         local = self.pods(node=cfg["node"])
         prior = self.worker_at(local, 18443 if expected["active_slot"] == "a" else 28443)
         pin_image(prior, "edge", expected["worker_source_commit"], expected["worker_image_digest"])
@@ -301,6 +307,8 @@ class ActiveCluster:
             journal["probe_service_uid"] = cfg["probeIngress"]["uid"]
         if "daemonSet" in can:
             journal["fixed_transport"] = True
+        if cfg.get("fixedRotation"):
+            journal["fixed_rotation"] = True
         return selected, guardian, journal
 
     def peer_snapshot(self):

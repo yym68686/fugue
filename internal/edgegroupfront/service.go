@@ -57,6 +57,7 @@ type Config struct {
 	WorkerDrainGrantPath   string
 	WorkerDrainFrontUID    string
 	workerTargets          map[workerImagePin]SlotTargets
+	fixedWorkerRotation    bool
 	ProcNetSNMPPath        string
 	ProcNetNetstatPath     string
 }

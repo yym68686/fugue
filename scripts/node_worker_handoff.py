@@ -34,13 +34,14 @@ def slot_phase(journal, observed):
     state = dict(before)
     state.pop("rollback_of_generation", None)
     state["updated_at"] = observed["updated_at"]
+    reason_prefix = "fixed Worker" if journal.get("fixed_rotation") else "node Worker"
     promoted = dict(state, generation=before["generation"] + 1, previous_slot=before["active_slot"],
                     active_slot=candidate["Slot"], bundle_generation=candidate["BundleGeneration"],
                     worker_source_commit=candidate["WorkerSourceCommit"], worker_image_digest=candidate["WorkerImageDigest"],
-                    operation="promote", reason="advance node Worker using journal " + journal["digest"])
+                    operation="promote", reason="advance " + reason_prefix + " using journal " + journal["digest"])
     reverted = dict(state, generation=before["generation"] + 2, previous_slot=candidate["Slot"],
                     operation="rollback", rollback_of_generation=before["generation"] + 1,
-                    reason="restore node Worker using journal " + journal["digest"])
+                    reason="restore " + reason_prefix + " using journal " + journal["digest"])
     if observed == promoted:
         return "activated"
     if observed == reverted:

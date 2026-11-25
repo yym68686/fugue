@@ -31,6 +31,7 @@ type NodeWorkerJournal struct {
 	ServiceUID           string                  `json:"service_uid"`
 	ProbeServiceUID      string                  `json:"probe_service_uid,omitempty"`
 	FixedTransport       bool                    `json:"fixed_transport,omitempty"`
+	FixedRotation        bool                    `json:"fixed_rotation,omitempty"`
 	PredecessorWorkerUID string                  `json:"predecessor_worker_uid"`
 	CandidateWorkerUID   string                  `json:"candidate_worker_uid"`
 	PredecessorProcess   string                  `json:"predecessor_process"`
@@ -52,7 +53,7 @@ type NodeWorkerWrite struct {
 }
 
 func (j NodeWorkerJournal) sealedDigest() (string, error) {
-	if j.Schema != NodeWorkerJournalSchema || validateActivationState(j.Expected) != nil ||
+	if j.Schema != NodeWorkerJournalSchema || validateActivationState(j.Expected) != nil || j.FixedRotation && !j.FixedTransport ||
 		j.Recipient.Group != j.Expected.GroupID || j.Recipient.Node == "" ||
 		!activationDigestPattern.MatchString(j.Recipient.Incarnation) || !activationDigestPattern.MatchString(j.ReleaseDigest) ||
 		!activationDigestPattern.MatchString(j.PredecessorProcess) || !activationDigestPattern.MatchString(j.CandidateProcess) ||
@@ -161,11 +162,15 @@ func (j NodeWorkerJournal) Progress(state ActivationState) NodeWorkerProgress {
 
 func (j NodeWorkerJournal) target() ActivationState {
 	c := j.Candidate
+	reason := "advance node Worker using journal "
+	if j.FixedRotation {
+		reason = fixedWorkerAdvanceReason
+	}
 	return ActivationState{
 		Schema: ActivationStateSchemaV1, GroupID: j.Recipient.Group, Generation: j.Expected.Generation + 1,
 		ActiveSlot: c.Slot, PreviousSlot: j.Expected.ActiveSlot, BundleGeneration: c.BundleGeneration,
 		WorkerSourceCommit: c.WorkerSourceCommit, WorkerImageDigest: c.WorkerImageDigest,
-		Authority: ActivationAuthority, Operation: ActivationOperationPromote, Reason: "advance node Worker using journal " + j.Digest,
+		Authority: ActivationAuthority, Operation: ActivationOperationPromote, Reason: reason + j.Digest,
 	}
 }
 
@@ -175,7 +180,11 @@ func (j NodeWorkerJournal) rollbackTarget() ActivationState {
 	s.PreviousSlot = j.Candidate.Slot
 	s.Operation = ActivationOperationRollback
 	s.RollbackOfGeneration = s.Generation - 1
-	s.Reason = "restore node Worker using journal " + j.Digest
+	reason := "restore node Worker using journal "
+	if j.FixedRotation {
+		reason = fixedWorkerRestoreReason
+	}
+	s.Reason = reason + j.Digest
 	return s
 }
 
@@ -201,9 +210,9 @@ func executeNodeWorkerWrite(cfg Config, local NativeRecipient, raw []byte, w Nod
 	if err := cfg.prepareWorkerTransport(); err != nil {
 		return nil, err
 	}
-	// Verify the actual Front registered both exact releases in the declared
-	// mode. This intentionally cannot swap the pinned image of a retained
-	// listener or repurpose an overlap address for a fixed-slot handoff.
+	// v1 requires two static image pins. Fixed rotation still requires the
+	// exact authorized journal and the two registered ports, but records the
+	// image change under the activation lock instead of restarting Front.
 	var transport workerTransportDeclaration
 	if err := json.Unmarshal([]byte(cfg.WorkerTransport), &transport); err != nil {
 		return nil, err
@@ -215,7 +224,13 @@ func executeNodeWorkerWrite(cfg Config, local NativeRecipient, raw []byte, w Nod
 	endpoint, endpointErr := netip.ParseAddrPort(targets.HTTPSAddress)
 	modeMatches := !j.FixedTransport && transport.Schema == "fugue.worker-transport/v1" && transport.Candidate == candidate ||
 		j.FixedTransport && transport.Schema == "fugue.worker-transport-fixed/v1"
-	if !priorOK || !nextOK || prior == targets || !modeMatches || endpointErr != nil || endpoint.Port() != j.CandidateHTTPSPort() {
+	if cfg.fixedWorkerRotation {
+		prior, targets = cfg.Slots[previous.Slot], cfg.Slots[candidate.Slot]
+		endpoint, endpointErr = netip.ParseAddrPort(targets.HTTPSAddress)
+		priorOK, nextOK, modeMatches = true, true, j.FixedTransport
+	}
+	if j.FixedRotation != cfg.fixedWorkerRotation || !priorOK || !nextOK || prior == targets || !modeMatches ||
+		endpointErr != nil || endpoint.Port() != j.CandidateHTTPSPort() {
 		return nil, errors.New("node Worker journal is not bound to the Front's retained and candidate listeners")
 	}
 	if err := validateActivationPath(cfg.ActiveSlotFile); err != nil {
@@ -241,6 +256,18 @@ func executeNodeWorkerWrite(cfg Config, local NativeRecipient, raw []byte, w Nod
 	}
 	if err != nil || !found || j.Progress(current) != expected {
 		return nil, errors.Join(ErrActivationCASConflict, err)
+	}
+	var priorBinding NodeWorkerJournal
+	if cfg.fixedWorkerRotation {
+		selected, record, ok := cfg.activationWorkerTargets(current)
+		want := prior
+		if w.Operation == "rollback" {
+			want = targets
+		}
+		if !ok || selected != want || (w.Operation == "rollback" && record.Digest != j.Digest) {
+			return nil, errors.Join(ErrActivationCASConflict, errors.New("current Worker activation has no exact fixed listener binding"))
+		}
+		priorBinding = record
 	}
 	now := clock().UTC()
 	if now.Before(started) || now.Before(current.UpdatedAt) || !now.Before(w.ExpiresAt) {
@@ -276,6 +303,11 @@ func executeNodeWorkerWrite(cfg Config, local NativeRecipient, raw []byte, w Nod
 	}
 	if p.ExpiresAt.Before(deadline) {
 		deadline = p.ExpiresAt
+	}
+	if cfg.fixedWorkerRotation {
+		if err := cfg.stageFixedWorkerBinding(priorBinding, j, guard); err != nil {
+			return nil, err
+		}
 	}
 	next := j.target()
 	next.UpdatedAt = now

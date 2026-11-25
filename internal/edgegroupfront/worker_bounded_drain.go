@@ -199,8 +199,14 @@ func (s *Service) reconcileWorkerDrain(cfg Config, now time.Time) error {
 	if err != nil || !exists || current != g.Serving || now.Before(g.HealthyAt) {
 		return errors.New("bounded drain no longer matches the live activation")
 	}
+	next, binding, nextOK := cfg.activationWorkerTargets(current)
 	prior, priorOK := cfg.workerTargets[workerPin(g.Previous)]
-	next, nextOK := cfg.workerTargets[workerPin(g.Serving)]
+	if cfg.fixedWorkerRotation {
+		// The two endpoints must come from the same journal as the actual
+		// serving pointer, not from an old pin for a recycled fixed port.
+		prior, priorOK = cfg.Slots[g.Previous.ActiveSlot]
+		priorOK = priorOK && binding.Digest != "" && binding.Expected == g.Previous
+	}
 	if !priorOK || !nextOK || strings.TrimSpace(prior.HTTPSAddress) == "" || prior == next {
 		return errors.New("bounded drain targets are not distinct pinned transports")
 	}
