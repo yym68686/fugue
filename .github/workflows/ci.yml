@@ -1173,6 +1173,9 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Exercise detached shared DNS commands on real UDP and TCP listeners
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/host-dns-detached-qualification-20261125'
+        run: go test -count=1 -v ./internal/dnsserver -run '^TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart$'
       - name: Compile test binaries before the bounded test budget
         timeout-minutes: 10
         # Cold compilation is separately bounded. The prepush step below still
