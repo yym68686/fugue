@@ -77,6 +77,10 @@ def node_worker_projection_name(group, node):
     return "fugue-node-worker-projection-" + hashlib.sha256((group + "\n" + node).encode()).hexdigest()[:32]
 
 
+def node_worker_drain_name(group, node):
+    return "fugue-node-worker-drain-" + hashlib.sha256((group + "\n" + node).encode()).hexdigest()[:32]
+
+
 def require_node_worker_mounts(config, p, c):
     """Recognize exactly the local activation writer; don't admit writable observation mounts."""
     spec = p["spec"]
@@ -90,11 +94,13 @@ def require_node_worker_mounts(config, p, c):
             or security.get("capabilities", {}).get("drop") != ["ALL"]):
         raise ValueError("node Worker Front candidate cannot elevate beyond the fixed activation mount")
     mounts, volumes = c.get("volumeMounts", []), spec.get("volumes", [])
-    if (len(mounts) != 2 or len(volumes) != 2
+    if (len(mounts) not in (2, 3) or len(volumes) != len(mounts)
             or any(m.get("subPath") or m.get("subPathExpr") or m.get("mountPropagation") not in (None, "None") for m in mounts)):
-        raise ValueError("node Worker Front must have exactly the activation and journal directory mounts")
+        raise ValueError("node Worker Front mounts must be activation, journal and optionally the drain grant")
     by_path = {m["mountPath"]: m for m in mounts}
     by_name = {v["name"]: v for v in volumes}
+    if len(by_path) != len(mounts) or len(by_name) != len(volumes) or {m["name"] for m in mounts} != set(by_name):
+        raise ValueError("node Worker Front must use distinct volumes for its fixed mounts")
     activation = by_path.get("/var/lib/fugue-edge-front", {})
     journal = by_path.get("/var/run/fugue-worker-transaction", {})
     local = by_name.get(activation.get("name"), {})
@@ -108,6 +114,21 @@ def require_node_worker_mounts(config, p, c):
     if (cm.get("name") != node_worker_projection_name(config["group"], config["node"]) or cm.get("optional") is not True
             or cm.get("items") != [{"key": "journal.json", "path": "journal.json"}]):
         raise ValueError("node Worker Front lacks its own optional read-only journal projection")
+    env = {row["name"]: row for row in c["env"]}
+    drain_uid = "FUGUE_EDGE_FRONT_WORKER_DRAIN_FRONT_UID"
+    drain_path = "FUGUE_EDGE_FRONT_WORKER_DRAIN_GRANT_PATH"
+    if len(mounts) == 2 and not ({drain_uid, drain_path} & set(env)):
+        return
+    grant = by_path.get("/var/run/fugue-worker-drain", {})
+    volume = by_name.get(grant.get("name"), {})
+    cm = volume.get("configMap", {})
+    uid = env.get(drain_uid, {}).get("valueFrom", {}).get("fieldRef", {})
+    if (grant.get("readOnly") is not True or set(volume) != {"name", "configMap"}
+            or cm.get("name") != node_worker_drain_name(config["group"], config["node"])
+            or cm.get("optional") is not True or cm.get("items") != [{"key": "grant.json", "path": "grant.json"}]
+            or uid.get("fieldPath") != "metadata.uid" or uid.get("apiVersion", "v1") != "v1"
+            or env.get(drain_path, {}).get("value") != "/var/run/fugue-worker-drain/grant.json"):
+        raise ValueError("bounded drain Front lacks its own read-only grant projection and exact Pod UID")
 
 
 def node_worker_recipient(config, candidate):

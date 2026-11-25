@@ -86,6 +86,11 @@ def baseline(config, value):
                                    dict(profile, candidateSelector=profile["legacySelector"]))
         transport.validate_existing(value, target)
         allowed_annotations = {stage.GENERATION, stage.DIGEST}
+        # A previously migrated probe can follow the next executor, but only
+        # for the same serving Service. Its Pod and generation are fenced
+        # separately by serving_source.
+        if annotations.get(transport.FOLLOWS_SERVING) == config["servingSource"]["serviceUID"]:
+            allowed_annotations.add(transport.FOLLOWS_SERVING)
         prior_rollback = "transport.fugue.dev/rollback-of-generation"
         if annotations.get(prior_rollback) == str(config["expectedGeneration"] - 1):
             allowed_annotations.add(prior_rollback)

@@ -72,6 +72,48 @@ func TestDeclaredWorkerTransportRejectsAmbiguousOrOffNodeInputs(t *testing.T) {
 	}
 }
 
+func TestFixedWorkerTransportSelectsOnlyTheTwoDeclaredImages(t *testing.T) {
+	c, v := transportFixture()
+	c.ActiveSlotFile = filepath.Join(t.TempDir(), "activation.json")
+	v.Schema, v.Candidate, v.HTTP, v.HTTPS = "fugue.worker-transport-fixed/v1", workerImagePin{}, 0, 0
+	set := func() {
+		t.Helper()
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.WorkerTransport = string(raw)
+	}
+	set()
+	if err := c.prepareWorkerTransport(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.workerTargets) != 2 {
+		t.Fatalf("fixed transport bound %d endpoints, want two", len(c.workerTargets))
+	}
+	req := activationRequest(ActivationOperationInit, 0, "b", "b", "bundle-b", 0)
+	req.WorkerSourceCommit, req.WorkerImageDigest = v.Retained[1].Source, v.Retained[1].Image
+	if _, err := ApplyActivationCAS(c.ActiveSlotFile, req, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	s := NewService(c, nil)
+	if slot, _, targets, ok := s.selectedWorker(c); !ok || slot != "b" || targets != c.Slots["b"] {
+		t.Fatalf("active B not mapped to its declared transport: %q %+v %t", slot, targets, ok)
+	}
+	req = activationRequest(ActivationOperationPromote, 1, "b", "a", "unknown-a", 0)
+	if _, err := ApplyActivationCAS(c.ActiveSlotFile, req, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, ok := s.selectedWorker(c); ok {
+		t.Fatal("unlisted activation fell back to the reused slot")
+	}
+	v.Candidate = v.Retained[0]
+	set()
+	if err := c.prepareWorkerTransport(); err == nil {
+		t.Fatal("fixed transport admitted an overlap candidate")
+	}
+}
+
 func TestNodeOverlapReusesLogicalSlotWithoutDroppingEitherRetainedTLSStream(t *testing.T) {
 	c, v := transportFixture()
 	c.ActiveSlotFile = filepath.Join(t.TempDir(), "activation.json")

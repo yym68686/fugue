@@ -94,6 +94,25 @@ class ReplacementTests(unittest.TestCase):
         self.assertEqual(compensated[transport.GENERATION], "4")
         self.assertEqual(compensated[transport.DIGEST], probe["metadata"]["annotations"][transport.DIGEST])
 
+    def test_probe_can_follow_a_second_handoff_of_the_same_serving_service(self):
+        config, probe, _, _ = probe_fixture()
+        transport = replacement.transport
+        spec, annotations = replacement.selected(config, probe)
+        probe["spec"], probe["metadata"]["annotations"] = spec, annotations
+        previous, target = config["observation"]["candidateSelector"], config["observation"]["legacySelector"]
+        config["observation"].update(legacySelector=previous, candidateSelector=target)
+        config.update(expectedGeneration=3, generation=4, rollbackGeneration=5)
+        config["servingSource"].update(generation=8, podUID="next")
+        replacement.validate(config)
+        self.assertIs(replacement.baseline(config, probe), probe)
+        restored, compensated = replacement.selected(config, probe, rollback=True)
+        self.assertEqual(restored, probe["spec"])
+        self.assertEqual(compensated[transport.FOLLOWS_SERVING], config["servingSource"]["serviceUID"])
+        self.assertEqual(compensated[replacement.stage.GENERATION], "5")
+        changed_service = dict(config, servingSource=dict(config["servingSource"], serviceUID="another"))
+        with self.assertRaises(ValueError):
+            replacement.baseline(changed_service, probe)
+
     def test_probe_handoff_preserves_held_connection_and_never_writes_serving(self):
         for fault in [None, "source_before", "source_after", "worker_after", "candidate_is_not_serving"]:
             with self.subTest(fault=fault), ExitStack() as stack:
@@ -204,6 +223,39 @@ class ReplacementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "read-only"):
                 replacement.front.pod(profile, profile["candidateSelector"], True)
             self.assertIs(replacement.front.pod(profile, profile["candidateSelector"], True, node_worker=True), candidate)
+        for fault in (None, "wrong_map", "wrong_key", "wrong_uid", "writable", "subpath", "wrong_path", "missing_volume"):
+            candidate = node_front()
+            spec = candidate["spec"]
+            container = spec["containers"][0]
+            path = "/var/run/fugue-worker-drain"
+            grant_mount = {"name": "grant", "mountPath": path, "readOnly": True}
+            grant_cm = {"name": replacement.front.node_worker_drain_name(profile["group"], profile["node"]),
+                        "items": [{"key": "grant.json", "path": "grant.json"}], "optional": True}
+            grant_uid = {"name": "FUGUE_EDGE_FRONT_WORKER_DRAIN_FRONT_UID",
+                         "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}
+            grant_path = {"name": "FUGUE_EDGE_FRONT_WORKER_DRAIN_GRANT_PATH", "value": path + "/grant.json"}
+            container["env"].extend([grant_uid, grant_path])
+            if fault != "missing_volume":
+                container["volumeMounts"].append(grant_mount)
+                spec["volumes"].append({"name": "grant", "configMap": grant_cm})
+            if fault == "wrong_map":
+                grant_cm["name"] = replacement.front.node_worker_drain_name(profile["group"], "other-node")
+            if fault == "wrong_key":
+                grant_cm["items"][0]["key"] = "wrong.json"
+            if fault == "wrong_uid":
+                grant_uid["valueFrom"]["fieldRef"]["fieldPath"] = "metadata.name"
+            if fault == "writable":
+                grant_mount["readOnly"] = False
+            if fault == "subpath":
+                grant_mount["subPath"] = "grant.json"
+            if fault == "wrong_path":
+                grant_path["value"] = "/tmp/grant.json"
+            with self.subTest(drain_mount=fault), patch.object(replacement.front, "read", return_value={"items": [candidate]}):
+                if fault is None:
+                    self.assertIs(replacement.front.pod(profile, profile["candidateSelector"], True, node_worker=True), candidate)
+                else:
+                    with self.assertRaises(ValueError):
+                        replacement.front.pod(profile, profile["candidateSelector"], True, node_worker=True)
         for fault in ("other_mount", "other_node", "host_namespace", "extra_caps", "subpath", "required_cm"):
             candidate = node_front()
             spec = candidate["spec"]

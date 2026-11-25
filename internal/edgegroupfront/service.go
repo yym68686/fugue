@@ -54,25 +54,30 @@ type Config struct {
 	ProxyProtocol          bool
 	Slots                  map[string]SlotTargets
 	WorkerTransport        string
+	WorkerDrainGrantPath   string
+	WorkerDrainFrontUID    string
 	workerTargets          map[workerImagePin]SlotTargets
 	ProcNetSNMPPath        string
 	ProcNetNetstatPath     string
 }
 
 type Service struct {
-	Config          Config
-	Logger          *log.Logger
-	activationMu    sync.Mutex
-	lastActivation  *ActivationState
-	mu              sync.Mutex
-	active          map[string]edgeFrontActiveTCPConnection
-	connectionIndex map[connectionObservationKey]map[string]struct{}
-	metrics         edgeFrontMetrics
-	sequence        uint64
-	networkLast     time.Time
-	passiveMu       sync.Mutex
-	passive         [frontnetwork.PassiveBuckets]passiveNetworkBucket
-	passiveState    passiveNetworkState
+	Config                 Config
+	Logger                 *log.Logger
+	activationMu           sync.Mutex
+	lastActivation         *ActivationState
+	mu                     sync.Mutex
+	active                 map[string]edgeFrontActiveTCPConnection
+	connectionIndex        map[connectionObservationKey]map[string]struct{}
+	metrics                edgeFrontMetrics
+	sequence               uint64
+	networkLast            time.Time
+	passiveMu              sync.Mutex
+	passive                [frontnetwork.PassiveBuckets]passiveNetworkBucket
+	passiveState           passiveNetworkState
+	workerDrainMu          sync.Mutex
+	workerDrainConnections map[*workerDrainConnection]struct{}
+	workerDrainObservation workerDrainObservation
 }
 
 type tcpCopyResult = tcpproxy.CopyResult
@@ -131,6 +136,9 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	if err := cfg.prepareWorkerTransport(); err != nil {
+		return err
+	}
+	if err := cfg.validateWorkerDrain(); err != nil {
 		return err
 	}
 	if cfg.RequireActivationState {
@@ -193,6 +201,9 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	if cfg.WorkerDrainGrantPath != "" {
+		wg.Go(func() { s.runWorkerDrain(ctx, cfg) })
+	}
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
@@ -449,7 +460,23 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	startedAt := time.Now()
 	defer downstream.Close()
 
-	slot, _, targets, selected := s.selectedWorker(cfg)
+	var slot string
+	var targets SlotTargets
+	var selected bool
+	var tracked *workerDrainConnection
+	dialContext := context.Background()
+	if cfg.WorkerDrainGrantPath != "" {
+		targets, tracked, dialContext, selected = s.selectDrainTracked(cfg, downstream)
+		if selected {
+			slot = tracked.worker.Slot
+			defer func() {
+				_ = downstream.Close()
+				s.forgetDrainConnection(tracked)
+			}()
+		}
+	} else {
+		slot, _, targets, selected = s.selectedWorker(cfg)
+	}
 	if !selected {
 		return
 	}
@@ -470,7 +497,8 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 		return
 	}
 
-	upstream, err := net.DialTimeout("tcp", target, cfg.DialTimeout)
+	dialer := net.Dialer{Timeout: cfg.DialTimeout}
+	upstream, err := dialer.DialContext(dialContext, "tcp", target)
 	if err != nil {
 		if samplePublic {
 			s.recordPassiveForwarding(false, time.Now())
@@ -479,6 +507,9 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 		return
 	}
 	defer upstream.Close()
+	if tracked != nil && !s.attachDrainUpstream(tracked, upstream) {
+		return
+	}
 	if cfg.ProxyProtocol {
 		if _, err := io.WriteString(upstream, proxyproto.HeaderV1(downstream.RemoteAddr(), downstream.LocalAddr())); err != nil {
 			if samplePublic {
@@ -750,6 +781,9 @@ func (s *Service) handleMetrics(w http.ResponseWriter, r *http.Request, cfg Conf
 	fmt.Fprintln(w, "# HELP fugue_edge_front_info Static low-cardinality edge-front identity labels.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_info gauge")
 	fmt.Fprintf(w, "fugue_edge_front_info{%s} 1\n", labels)
+	if cfg.WorkerDrainGrantPath != "" {
+		s.writeWorkerDrainMetrics(w)
+	}
 	s.writePassiveNetworkMetrics(w, labels)
 	fmt.Fprintln(w, "# HELP fugue_edge_front_tcp_active_connections Active public TCP connections handled by edge-front.")
 	fmt.Fprintln(w, "# TYPE fugue_edge_front_tcp_active_connections gauge")

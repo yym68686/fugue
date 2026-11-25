@@ -66,6 +66,22 @@
                     }
                   },
                   {
+                    "name": "FUGUE_EDGE_FRONT_POD_UID",
+                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_WORKER_DRAIN_FRONT_UID",
+                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_WORKER_DRAIN_GRANT_PATH",
+                    "value": "/var/run/fugue-worker-drain/grant.json"
+                  },
+                  {
+                    "name": "FUGUE_EDGE_FRONT_WORKER_TRANSPORT",
+                    "value": "{\"schema\":\"fugue.worker-transport-fixed/v1\",\"group\":\"edge-group-country-us\",\"node\":\"vps-591f4447\",\"retained\":[{\"slot\":\"a\",\"source\":\"86460476e4a1ca2e0075164aead4f04dda7934c2\",\"image\":\"sha256:225fc110af84e64f71da4abbe170048342168ae25814b479b537ea99742c760f\"},{\"slot\":\"b\",\"source\":\"664f552db3470a8cf37016d2424e6b4dce3b1b8c\",\"image\":\"sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1\"}]}"
+                  },
+                  {
                     "name": "FUGUE_EDGE_FRONT_EDGE_GROUP_ID",
                     "value": "edge-group-country-us"
                   },
@@ -184,7 +200,16 @@
                 "volumeMounts": [
                   {
                     "mountPath": "/var/lib/fugue-edge-front",
-                    "name": "activation-state",
+                    "name": "activation-state"
+                  },
+                  {
+                    "mountPath": "/var/run/fugue-worker-transaction",
+                    "name": "node-worker-journal",
+                    "readOnly": true
+                  },
+                  {
+                    "mountPath": "/var/run/fugue-worker-drain",
+                    "name": "worker-drain-grant",
                     "readOnly": true
                   }
                 ]
@@ -212,6 +237,22 @@
                   "type": "Directory"
                 },
                 "name": "activation-state"
+              },
+              {
+                "name": "node-worker-journal",
+                "configMap": {
+                  "name": "fugue-node-worker-projection-629fecae1f494a5a48237abf6811d4eb",
+                  "optional": true,
+                  "items": [{"key": "journal.json", "path": "journal.json"}]
+                }
+              },
+              {
+                "name": "worker-drain-grant",
+                "configMap": {
+                  "name": "fugue-node-worker-drain-629fecae1f494a5a48237abf6811d4eb",
+                  "optional": true,
+                  "items": [{"key": "grant.json", "path": "grant.json"}]
+                }
               }
             ],
             "nodeSelector": {

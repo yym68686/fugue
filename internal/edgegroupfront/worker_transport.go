@@ -25,9 +25,9 @@ type workerTransportDeclaration struct {
 	Group     string           `json:"group"`
 	Node      string           `json:"node"`
 	Retained  []workerImagePin `json:"retained"`
-	Candidate workerImagePin   `json:"candidate"`
-	HTTP      uint16           `json:"candidate_http_port"`
-	HTTPS     uint16           `json:"candidate_https_port"`
+	Candidate workerImagePin   `json:"candidate,omitzero"`
+	HTTP      uint16           `json:"candidate_http_port,omitempty"`
+	HTTPS     uint16           `json:"candidate_https_port,omitempty"`
 }
 
 func (p workerImagePin) valid() bool {
@@ -50,7 +50,22 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 	}
 	var v workerTransportDeclaration
 	b := []byte(cfg.WorkerTransport)
-	if json.Unmarshal(b, &v) != nil || v.HTTP != httpPort || v.HTTPS != httpsPort {
+	if json.Unmarshal(b, &v) != nil {
+		return fail
+	}
+	overlap := v.Schema == "fugue.worker-transport/v1"
+	switch v.Schema {
+	case "fugue.worker-transport/v1":
+		if v.HTTP != httpPort || v.HTTPS != httpsPort || v.HTTP < 1024 || v.HTTPS < 1024 ||
+			v.HTTP == v.HTTPS || !v.Candidate.valid() {
+			return fail
+		}
+	case "fugue.worker-transport-fixed/v1":
+		// Pin the two existing Workers without declaring phantom listeners.
+		if v.Candidate != (workerImagePin{}) || v.HTTP != 0 || v.HTTPS != 0 {
+			return fail
+		}
+	default:
 		return fail
 	}
 	// The renderer emits this canonical layout. Reject duplicate/unknown
@@ -62,14 +77,17 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 	}
 	ip, err := netip.ParseAddr(cfg.NodeHost)
 	if err != nil || ip.Zone() != "" || ip.IsUnspecified() || ip.IsMulticast() || ip.Is4In6() || !activationGroupPattern.MatchString(cfg.EdgeGroupID) ||
-		v.Schema != "fugue.worker-transport/v1" || v.Group != cfg.EdgeGroupID || v.Node == "" || v.Node != cfg.EdgeID || len(v.Retained) != 2 ||
-		v.Retained[0].Slot != "a" || v.Retained[1].Slot != "b" || !v.Candidate.valid() || v.HTTP < 1024 || v.HTTPS < 1024 || v.HTTP == v.HTTPS {
+		v.Group != cfg.EdgeGroupID || v.Node == "" || v.Node != cfg.EdgeID || len(v.Retained) != 2 ||
+		v.Retained[0].Slot != "a" || v.Retained[1].Slot != "b" {
 		return fail
 	}
-	taken := map[uint16]bool{v.HTTP: true, v.HTTPS: true}
+	taken := map[uint16]bool{}
+	if overlap {
+		taken[v.HTTP], taken[v.HTTPS] = true, true
+	}
 	lookup := map[workerImagePin]SlotTargets{}
 	for _, p := range v.Retained {
-		if !p.valid() || p.Image == v.Candidate.Image {
+		if !p.valid() || (overlap && p.Image == v.Candidate.Image) {
 			return fail
 		}
 		t := cfg.Slots[p.Slot]
@@ -82,8 +100,10 @@ func (cfg *Config) bindWorkerTransport(httpPort, httpsPort uint16) error {
 		}
 		lookup[p] = t
 	}
-	port := func(n uint16) string { return net.JoinHostPort(ip.String(), strconv.Itoa(int(n))) }
-	lookup[v.Candidate] = SlotTargets{HTTPAddress: port(v.HTTP), HTTPSAddress: port(v.HTTPS)}
+	if overlap {
+		port := func(n uint16) string { return net.JoinHostPort(ip.String(), strconv.Itoa(int(n))) }
+		lookup[v.Candidate] = SlotTargets{HTTPAddress: port(v.HTTP), HTTPSAddress: port(v.HTTPS)}
+	}
 	cfg.workerTargets = lookup
 	return nil
 }
