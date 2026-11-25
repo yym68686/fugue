@@ -35,10 +35,10 @@ def slot_phase(journal, observed):
     state.pop("rollback_of_generation", None)
     state["updated_at"] = observed["updated_at"]
     promoted = dict(state, generation=before["generation"] + 1, previous_slot=before["active_slot"],
-                    active_slot=candidate["slot"], bundle_generation=candidate["bundle_generation"],
-                    worker_source_commit=candidate["worker_source_commit"], worker_image_digest=candidate["worker_image_digest"],
+                    active_slot=candidate["Slot"], bundle_generation=candidate["BundleGeneration"],
+                    worker_source_commit=candidate["WorkerSourceCommit"], worker_image_digest=candidate["WorkerImageDigest"],
                     operation="promote", reason="advance node Worker using journal " + journal["digest"])
-    reverted = dict(state, generation=before["generation"] + 2, previous_slot=candidate["slot"],
+    reverted = dict(state, generation=before["generation"] + 2, previous_slot=candidate["Slot"],
                     operation="rollback", rollback_of_generation=before["generation"] + 1,
                     reason="restore node Worker using journal " + journal["digest"])
     if observed == promoted:
@@ -136,7 +136,7 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
     """Adapter supplies disk readback and immutable arm/witness/result, not cutover."""
     if slot_phase(journal, adapter.selected_activation()) != "pending":
         raise ValueError("handoff must begin on the exact retained Worker")
-    before, target = journal["expected"]["active_slot"], journal["candidate"]["slot"]
+    before, target = journal["expected"]["active_slot"], journal["candidate"]["Slot"]
     retained_port = 18443 if before == "a" else 28443
     candidate_port = (18443 if target == "a" else 28443) if journal.get("fixed_transport") else 38443
     retained_addr, candidate_addr = socket_target(address, retained_port), socket_target(address, candidate_port)

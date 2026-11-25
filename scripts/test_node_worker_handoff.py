@@ -16,8 +16,8 @@ class Fixture:
                        "active_slot": "b", "bundle_generation": "bundle.p45.r1", "worker_source_commit": "b"*40,
                        "worker_image_digest": "sha256:" + "b"*64, "authority": "edge-control", "operation": "init",
                        "reason": "observed predecessor", "updated_at": "2026-11-24T23:58:00Z"}
-        self.journal = {"expected": self.before, "candidate": {"slot": "a", "bundle_generation": "bundle.p45.r1",
-                        "worker_source_commit": "a"*40, "worker_image_digest": "sha256:" + "a"*64},
+        self.journal = {"expected": self.before, "candidate": {"Slot": "a", "BundleGeneration": "bundle.p45.r1",
+                        "WorkerSourceCommit": "a"*40, "WorkerImageDigest": "sha256:" + "a"*64},
                         "digest": "sha256:" + "c"*64, "recipient": {"pod_uid": "front-uid"},
                         "created_at": "2026-11-25T00:00:00Z"}
         self.activation = dict(self.before, active_slot="a", previous_slot="b", generation=913,

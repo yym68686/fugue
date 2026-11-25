@@ -28,6 +28,13 @@ def pinned():
 
 
 class NodeWorkerDriverTests(unittest.TestCase):
+    def test_candidate_uses_guardian_repair_release_wire_fields(self):
+        candidate = pinned()["candidate"]
+        self.assertEqual(driver.candidate_wire(candidate), {
+            "Slot": "a", "BundleGeneration": "bundle.p45.r1",
+            "WorkerSourceCommit": "a"*40, "WorkerImageDigest": "sha256:" + "a"*64,
+        })
+
     def test_declaration_allows_no_generic_command_or_unpinned_candidate(self):
         config = pinned()
         self.assertEqual(driver.validate(config), config)

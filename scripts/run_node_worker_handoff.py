@@ -136,6 +136,13 @@ def worker_process(pod):
     return sha(("fugue-node-worker-process/v1\n" + edge["id"] + "\n" + caddy["id"]).encode())
 
 
+def candidate_wire(declared):
+    # ActivationRepairRelease uses Go's field names on the wire; the
+    # activation record itself uses explicit snake_case JSON tags.
+    return {"Slot": declared["slot"], "BundleGeneration": declared["bundleGeneration"],
+            "WorkerSourceCommit": declared["source"], "WorkerImageDigest": declared["imageDigest"]}
+
+
 def obj_uid(obj):
     return obj["metadata"]["uid"]
 
@@ -272,8 +279,7 @@ class ActiveCluster:
                    "predecessor_worker_uid": obj_uid(prior), "predecessor_process": worker_process(prior),
                    "candidate_worker_uid": obj_uid(candidate), "candidate_process": worker_process(candidate),
                    "candidate_component": can["component"], "release_digest": can["releaseDigest"],
-                   "candidate": {"slot": can["slot"], "bundle_generation": can["bundleGeneration"],
-                                 "worker_source_commit": can["source"], "worker_image_digest": can["imageDigest"]}}
+                   "candidate": candidate_wire(can)}
         if "probeIngress" in cfg:
             journal["probe_service_uid"] = cfg["probeIngress"]["uid"]
         if "daemonSet" in can:
