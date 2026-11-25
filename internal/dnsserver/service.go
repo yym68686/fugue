@@ -73,6 +73,7 @@ type Service struct {
 	platformServing               dnsServingPointer
 	hostedDNS                     atomic.Pointer[hostedDNSRoutes]
 	hostedDNSMu                   sync.Mutex
+	hostedPairMu                  sync.RWMutex // only across a paired parent/index load or exchange
 	hostedDNSAfter                string
 	hostedDNSHistory              dnsProbeHistoryStore
 	hostedDNSWitnesses            sync.Map // locally issued, short-lived UDP/TCP challenge only
@@ -901,7 +902,9 @@ func (s *Service) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 	if s.platformServingRequired() {
-		st := s.currentDNSServingState()
+		s.hostedPairMu.RLock()
+		st, hosted := s.currentDNSServingState(), s.hostedDNS.Load()
+		s.hostedPairMu.RUnlock()
 		if st == nil {
 			reply := new(miekgdns.Msg)
 			reply.SetRcode(r, miekgdns.RcodeServerFailure)
@@ -928,7 +931,7 @@ func (s *Service) ServeDNS(w miekgdns.ResponseWriter, r *miekgdns.Msg) {
 		}
 		observed := s.decisionPublication.Load()
 		queryAt := time.Now().UTC()
-		st = s.hostedDNS.Load().forQuery(st, r, queryAt)
+		st = hosted.forQuery(st, r, queryAt)
 		reply := st.answerObserved(r, remote, queryAt, capture, &dnsPassiveRuntime{view: s.passiveASNView.Load(), node: s.Config.DNSNodeID})
 		qtype := "unknown"
 		if len(r.Question) > 0 {

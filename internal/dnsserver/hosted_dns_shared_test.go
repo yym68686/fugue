@@ -26,11 +26,12 @@ func TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart(t *testing.T
 		if held {
 			name = "physical-hold"
 		}
-		t.Run(name, func(t *testing.T) { testSharedWireDecisions(t, held, false) })
-		t.Run(name+"/parent-handoff", func(t *testing.T) { testSharedWireDecisions(t, held, true) })
+		t.Run(name, func(t *testing.T) { testSharedWireDecisions(t, held, false, false) })
+		t.Run(name+"/parent-handoff", func(t *testing.T) { testSharedWireDecisions(t, held, true, false) })
+		t.Run(name+"/paired-exchange", func(t *testing.T) { testSharedWireDecisions(t, held, true, true) })
 	}
 }
-func testSharedWireDecisions(t *testing.T, hold, carry bool) {
+func testSharedWireDecisions(t *testing.T, hold, carry, exchange bool) {
 	const a, b, name = "first.example.org", "second.example.org", "target.example.test"
 	view, template, policy, _, at := queryExecutionFixture()
 	if hold {
@@ -294,33 +295,79 @@ func testSharedWireDecisions(t *testing.T, hold, carry bool) {
 			}
 			query(dns.RcodeSuccess)
 		}
-		wrong := inputs[b]
+		savedB := inputs[b]
+		wrong := savedB
 		wrong.facts = heads[b].fs
 		inputs[b] = wrong
 		if idx, err := prepareHostedDNSHandoff(prior, parent, inputs, time.Now().UTC()); err == nil || idx != nil {
 			t.Fatal("old peer proofs credited to the new membership")
 		}
 		query(dns.RcodeSuccess)
-		s.platformServing.Store(parent)
-		query(dns.RcodeServerFailure)
-		awaitPeer = true
-		apply(a, "forward", unit(four, root))
-		if got := s.hostedDNS.Load().keys[hostedZoneKey{view.Zone, hostedRRKey{name, dns.TypeA}}].forHost(b); got.Decision != heads[b].p.Decision {
-			t.Fatal("staging A replaced B")
+		if exchange {
+			inputs[b] = savedB
+			// Distinct, still-valid facts for the underlying signed successor.
+			// Scoped replies never use these as their private route witnesses.
+			parent.zones = map[string]dnsServingZone{}
+			parent.payload.Plan = &base.DNS.Plan
+			for _, pr := range base.DNS.Plan.Probes {
+				f := fact(pr)
+				f.Proof.TrafficRelease = &model.TrafficReleaseBinding{ReleaseSetID: assign.ReleaseSetID, ReleaseSetDigest: parent.record.Parent.ContentHash, RouteArtifactID: parent.routeID, ReleaseID: assign.ArtifactReleaseID, ReleaseChannel: "full", FencingToken: assign.FencingToken, ScopeKey: "global"}
+				parent.facts = append(parent.facts, f)
+			}
+			setGlobal(parent.facts)
+			idx, err := prepareHostedDNSHandoff(prior, parent, inputs, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := prior.heads()
+			if err != nil {
+				t.Fatal(err)
+			}
+			x := &hostedDNSParentExchange{prior, idx, inputs, before}
+			stale := errors.New("assignment moved")
+			if err := s.applyHostedDNSExchange(parent, x, func() error { return stale }, s.probeDNSServingListener); !errors.Is(err, stale) {
+				t.Fatal("stale authority changed host files", err)
+			}
+			for name, in := range inputs {
+				p, err := in.checkpoint.Reserved()
+				if err != nil || p.Decision != heads[name].p.Decision {
+					t.Fatal("aborted exchange touched a predecessor", name, err)
+				}
+			}
+			query(dns.RcodeSuccess)
+			if err := s.applyHostedDNSExchange(parent, x, func() error { return nil }, s.probeDNSServingListener); err != nil {
+				t.Fatal("paired exchange on real DNS listeners", err)
+			}
+			heads = nextHeads
+			query(dns.RcodeSuccess)
+			for name, in := range inputs {
+				p, err := in.checkpoint.Load(time.Now().UTC())
+				if err != nil || p.Decision != heads[name].p.Decision {
+					t.Fatal("new head not durable", name, err)
+				}
+			}
+		} else {
+			s.platformServing.Store(parent)
+			query(dns.RcodeServerFailure)
+			awaitPeer = true
+			apply(a, "forward", unit(four, root))
+			if got := s.hostedDNS.Load().keys[hostedZoneKey{view.Zone, hostedRRKey{name, dns.TypeA}}].forHost(b); got.Decision != heads[b].p.Decision {
+				t.Fatal("staging A replaced B")
+			}
+			// Crash after A's durable rename and before B's. Reserve both;
+			// never reconstruct an answer out of two parents or old facts.
+			s = NewService(config, nil)
+			if err := s.reserveHostedDNS(); err != nil {
+				t.Fatal("mixed checkpoint restart failed", err)
+			}
+			start()
+			query(dns.RcodeServerFailure)
+			if err := install(a, heads[a]); !errors.Is(err, errHostedDNSPeerPending) {
+				t.Fatal("mixed snapshot accepted a receipt", err)
+			}
+			awaitPeer = false
+			apply(b, "forward", withHold(unit(root, two)))
 		}
-		// Crash after A's durable rename and before B's. Reserve both;
-		// never reconstruct an answer out of two parents or old facts.
-		s = NewService(config, nil)
-		if err := s.reserveHostedDNS(); err != nil {
-			t.Fatal("mixed checkpoint restart failed", err)
-		}
-		start()
-		query(dns.RcodeServerFailure)
-		if err := install(a, heads[a]); !errors.Is(err, errHostedDNSPeerPending) {
-			t.Fatal("mixed snapshot accepted a receipt", err)
-		}
-		awaitPeer = false
-		apply(b, "forward", withHold(unit(root, two)))
 	}
 	oldA := heads[a]
 	apply(a, "withdraw", base)
