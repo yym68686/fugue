@@ -521,6 +521,11 @@ func (s *Service) handleTCPConnection(cfg Config, protocol string, downstream ne
 	}
 	connectionID := s.startTCPConnection(protocol, slot, target, downstream, upstream, startedAt, cfg.ProxyProtocol)
 	defer s.finishTCPConnection(connectionID)
+	if tracked != nil {
+		s.workerDrainMu.Lock()
+		tracked.connectionID = connectionID
+		s.workerDrainMu.Unlock()
+	}
 	var baseline model.EdgeClientNetworkSample
 	if samplePublic {
 		connection.ID = connectionID

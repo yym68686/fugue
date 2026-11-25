@@ -1,6 +1,7 @@
 """Run one declared node Worker handoff via the installed Release Guardian."""
 import argparse
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -40,7 +41,10 @@ def matches(pattern, value):
 
 def validate(config):
     fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe"
-           + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else ""))
+           + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else "")
+           + (" verifyDrain" if isinstance(config, dict) and "verifyDrain" in config else ""))
+    require("verifyDrain" not in config or (config["verifyDrain"] is True and "probeIngress" in config),
+            "drain evidence requires an explicit independent probe ingress")
     require(config["schema"] == "fugue.node-worker-handoff/v1"
             and all(matches(NAME, config[k]) for k in ("namespace", "group", "node"))
             and matches(UID, config["nodeUID"]), "exact named node Worker handoff required")
@@ -336,6 +340,56 @@ class ClaimedHandoff:
     def connection_fact(profile, selected_front, sock):
         return connection.fact(profile, selected_front, sock)
 
+    def drain_grant(self):
+        recipient = self.journal["recipient"]
+        name = front.node_worker_drain_name(recipient["group"], recipient["node"])
+        obj = self.cluster.get_config(name)
+        if obj is None:
+            return None
+        meta = obj["metadata"]
+        labels = meta.get("labels", {})
+        require(meta["name"] == name and meta["namespace"] == self.cluster.ns and meta.get("uid")
+                and meta.get("resourceVersion") and not meta.get("deletionTimestamp")
+                and labels.get("app.kubernetes.io/managed-by") == "fugue-release-guardian"
+                and labels.get("fugue.pro/authority-store") == "true"
+                and labels.get("fugue.pro/authority-kind") == "node-worker-drain"
+                and labels.get("fugue.pro/group") == recipient["group"]
+                and meta.get("annotations", {}).get("fugue.io/edge-node") == recipient["node"]
+                and not obj.get("binaryData") and set(obj.get("data", {})) == {"grant.json"},
+                "unexpected Guardian Worker drain projection metadata")
+        return json.loads(obj["data"]["grant.json"])
+
+    def drain_metrics(self):
+        client = http.client.HTTPConnection(self.selected["status"]["podIP"], 7831, timeout=5)
+        try:
+            client.request("GET", "/metrics")
+            response = client.getresponse()
+            raw = response.read((1 << 20) + 1)
+            require(response.status == 200 and len(raw) <= 1 << 20, "Front Worker drain metrics unavailable")
+        finally:
+            client.close()
+        values = {}
+        for key, value in re.findall(rb"^fugue_edge_front_worker_drain_([a-z_]+) ([0-9]+)$", raw, re.MULTILINE):
+            name = key.decode("ascii")
+            require(name not in values, "duplicate Front Worker drain metric")
+            values[name] = int(value)
+        return values
+
+    def forced_connection(self, conn_id, generation, deadline):
+        name = self.selected["metadata"]["name"]
+        pod = self.cluster.get("pod", name)
+        require(obj_uid(pod) == obj_uid(self.selected) and process(pod, "edge-front") == process(self.selected, "edge-front"),
+                "Front incarnation changed during drain observation")
+        since = handoff.wire_time(deadline.replace(microsecond=0))
+        logs = subprocess.run(["kubectl", "-n", self.cluster.ns, "logs", name, "-c", "edge-front",
+                               "--timestamps", "--since-time=" + since, "--limit-bytes=2097152"],
+                              capture_output=True, text=True, timeout=10)
+        require(logs.returncode == 0 and len(logs.stdout) <= 2 << 20, "exact Front drain receipt logs unavailable")
+        suffix = f"worker drain forced: generation={generation} connection={conn_id}"
+        events = [front.timestamp(line.split(maxsplit=1)[0]) for line in logs.stdout.splitlines() if line.endswith(" " + suffix)]
+        require(len(events) <= 1, "duplicate exact Front drain receipt")
+        return events[0] if events else None
+
     def name(self, phase):
         return "fugue-node-worker-" + phase + "-" + self.journal["digest"][7:39]
 
@@ -416,6 +470,13 @@ def run(config, evidence_path):
     def save():
         evidence_path.write_text(front.canonical(evidence) + "\n")
 
+    def record(**details):
+        evidence.update(details)
+        save()
+        for phase in ("drain_started", "drain_completed"):
+            if phase in details:
+                print(phase + ": " + front.canonical(details[phase]), flush=True)
+
     save()
     failure = None
     try:
@@ -430,7 +491,8 @@ def run(config, evidence_path):
         adapter.wait_projection(sealed)
         evidence["guardian_result"] = handoff.handoff(adapter, cluster.profile, selected, config["front"]["address"],
                                                        config["probe"], journal,
-                                                       probe_port=config.get("probeIngress", {}).get("port"))
+                                                       probe_port=config.get("probeIngress", {}).get("port"),
+                                                       drain_record=record if config.get("verifyDrain") else None)
     except (ValueError, OSError, subprocess.TimeoutExpired) as err:
         evidence["error"] = str(err)
         failure = err

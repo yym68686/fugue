@@ -108,7 +108,75 @@ def simulate(fixture):
                           now=fixture.now, pause=fixture.pause, open_tls=fixture.open)
 
 
+class DrainFixture(Fixture):
+    def __init__(self, failure=None):
+        super().__init__(failure)
+        self.journal.update(fixed_transport=True, probe_service_uid="probe-uid")
+        self.journal["recipient"]["node"] = PROFILE["node"]
+        self.evidence = {}
+
+    def result(self):
+        result = super().result()
+        if result is not None:
+            self.start = worker.front.timestamp(result["drain_start"])
+            self.deadline = self.start + datetime.timedelta(seconds=600)
+        return result
+
+    def record(self, **data):
+        self.evidence.update(data)
+
+    def drain_grant(self):
+        return {"schema": "edge-worker-bounded-drain/v1", "front_uid": "front-uid", "node": PROFILE["node"],
+                "previous": self.before, "serving": self.activation, "start": worker.wire_time(self.start),
+                "deadline": worker.wire_time(self.deadline), "healthy_at": worker.wire_time(self.now())}
+
+    def drain_metrics(self):
+        expired = self.now() >= self.deadline
+        return {"capability": 1, "last_generation": 913, "last_deadline_seconds": int(self.deadline.timestamp()),
+                "last_forced": int(expired), "last_remaining": int(not expired), "last_completed": int(expired)}
+
+    def forced_connection(self, conn_id, generation, deadline):
+        assert (conn_id, generation, deadline) == ("original", 913, self.deadline)
+        return None if self.failure == "unattributed" else self.deadline
+
+    def open(self, address, host, port=443):
+        sock = super().open(address, host, port)
+        proof = sock.proof
+
+        def observed(path):
+            if sock.number == 0 and hasattr(self, "deadline"):
+                deadline = self.deadline - datetime.timedelta(seconds=30 if self.failure == "early_close" else 0)
+                if self.now() >= deadline:
+                    assert not sock.closed, "must observe peer close before closing our side"
+                    raise ConnectionResetError("closed by remote Front")
+            return proof(path)
+
+        sock.proof = observed
+        return sock
+
+    def verify(self):
+        return worker.handoff(self, PROFILE, {"pod": "existing-front"}, ADDRESS, PROBE, self.journal, probe_port=15443,
+                              now=self.now, pause=self.pause, open_tls=self.open, drain_record=self.record)
+
+
 class NodeWorkerHandoffTests(unittest.TestCase):
+    def test_deadline_proof_holds_original_until_its_exact_front_receipt(self):
+        f = DrainFixture()
+        self.assertEqual(f.verify()["outcome"], "verified")
+        self.assertGreater(f.evidence["drain_started"]["remaining_seconds"], 580)
+        complete = f.evidence["drain_completed"]
+        self.assertLess(worker.front.timestamp(complete["last_alive_at"]), f.deadline)
+        self.assertGreaterEqual(worker.front.timestamp(complete["peer_closed_at"]), f.deadline)
+        self.assertEqual(worker.front.timestamp(complete["front_forced_at"]), f.deadline)
+        self.assertEqual(complete["metrics"]["last_forced"], 1)
+
+    def test_early_or_unattributed_disconnect_cannot_pass(self):
+        for case, error in (("early_close", "without a verified"), ("unattributed", "no witnessed")):
+            f = DrainFixture(case)
+            with self.subTest(case=case), self.assertRaisesRegex(ValueError, error):
+                f.verify()
+            self.assertNotIn("drain_completed", f.evidence)
+
     def test_fixed_transport_has_distinct_fresh_public_and_probe_connections(self):
         fixture = Fixture()
         fixture.journal.update(fixed_transport=True, probe_service_uid="probe-uid")

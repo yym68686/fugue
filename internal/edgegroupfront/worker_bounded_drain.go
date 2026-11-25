@@ -99,12 +99,13 @@ func workerPin(a ActivationState) workerImagePin {
 }
 
 type workerDrainConnection struct {
-	worker     workerImagePin
-	generation uint64
-	downstream net.Conn
-	upstream   net.Conn
-	cancel     context.CancelFunc
-	stopping   bool
+	connectionID string
+	worker       workerImagePin
+	generation   uint64
+	downstream   net.Conn
+	upstream     net.Conn
+	cancel       context.CancelFunc
+	stopping     bool
 }
 
 type workerDrainObservation struct {
@@ -171,6 +172,15 @@ func (s *Service) runWorkerDrain(ctx context.Context, cfg Config) {
 }
 
 func (s *Service) reconcileWorkerDrain(cfg Config, now time.Time) error {
+	var forcedIDs []string
+	var forcedGeneration uint64
+	defer func() {
+		// Emit opaque connection IDs only, after releasing the activation and
+		// connection locks. Do not expose client addresses via this receipt.
+		for _, id := range forcedIDs {
+			s.Logger.Printf("worker drain forced: generation=%d connection=%s", forcedGeneration, id)
+		}
+	}()
 	// This also fences rollback performed by the external activation helper.
 	// Do not wait on an occupied lock, especially during service shutdown.
 	lock, err := acquireActivationLockMode(cfg.ActiveSlotFile, syscall.LOCK_EX|syscall.LOCK_NB)
@@ -228,6 +238,10 @@ func (s *Service) reconcileWorkerDrain(cfg Config, now time.Time) error {
 				_ = c.upstream.Close()
 			}
 			o.Forced++
+			if c.connectionID != "" {
+				forcedGeneration = g.Serving.Generation
+				forcedIDs = append(forcedIDs, c.connectionID)
+			}
 		}
 	}
 	if o.Remaining != 0 {

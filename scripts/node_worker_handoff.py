@@ -1,6 +1,8 @@
 """Hold and verify an exact public TLS handoff for a claimed node Worker."""
 import datetime
+import http.client
 import ipaddress
+import ssl
 import time
 from contextlib import ExitStack, closing
 
@@ -73,8 +75,64 @@ def require_verified(result, journal, state, witnessed):
             raise ValueError("Guardian receipt did not retain both exact connection identities")
 
 
+def verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, record):
+    """Keep the same real connection until the exact Front reports forcing it."""
+    started = front.timestamp(result["drain_start"])
+    deadline = started + datetime.timedelta(seconds=600)
+    seen = None
+    last_alive = None
+    detached = None
+    while now() < deadline + datetime.timedelta(seconds=90):
+        if adapter.selected_activation() != state:
+            raise ValueError("activation changed during verification of the bounded drain")
+        if detached is None:
+            sample = now()
+            try:
+                check_old()
+                last_alive = sample
+            except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, ssl.SSLEOFError):
+                detached = now()
+                if detached < deadline or not seen or not last_alive or last_alive < deadline - datetime.timedelta(seconds=15):
+                    raise ValueError("the witnessed old connection was lost without a verified near-deadline drain")
+        check_new()
+        grant = adapter.drain_grant()
+        if grant is not None:
+            healthy = front.timestamp(grant["healthy_at"])
+            if (set(grant) != {"schema", "front_uid", "node", "previous", "serving", "start", "deadline", "healthy_at"}
+                    or grant["schema"] != "edge-worker-bounded-drain/v1" or grant["front_uid"] != old["front_uid"]
+                    or grant["node"] != journal["recipient"]["node"] or grant["previous"] != journal["expected"]
+                    or grant["serving"] != state or front.timestamp(grant["start"]) != started
+                    or front.timestamp(grant["deadline"]) != deadline or healthy < started
+                    or seen is not None and healthy < front.timestamp(seen["healthy_at"])):
+                raise ValueError("Guardian drain grant did not bind the immutable cutover and both Worker releases")
+            metrics = adapter.drain_metrics()
+            if metrics.get("capability") != 1:
+                raise ValueError("selected Front did not advertise bounded Worker drain capability")
+            if metrics.get("last_generation") == state["generation"]:
+                if metrics.get("last_deadline_seconds") != int(deadline.timestamp()):
+                    raise ValueError("Front reported a different Worker drain deadline")
+                if now() < deadline and metrics.get("last_forced") != 0:
+                    raise ValueError("Front reported a forced old-Worker closure before the deadline")
+                if seen is None and detached is None and metrics.get("last_remaining", 0) > 0 and now() < deadline:
+                    record(drain_started={"grant": grant, "metrics": metrics, "held": old,
+                                          "remaining_seconds": int((deadline - now()).total_seconds())})
+                    seen = grant
+                elif seen is not None:
+                    seen = grant
+                if detached and metrics.get("last_forced", 0) > 0 and metrics.get("last_remaining") == 0 and metrics.get("last_completed") == 1:
+                    event = adapter.forced_connection(old["id"], state["generation"], deadline)
+                    if event is not None:
+                        if not deadline <= event <= detached + datetime.timedelta(seconds=5):
+                            raise ValueError("Front's exact force-close receipt falls outside the observed window")
+                        record(drain_completed={"last_alive_at": wire_time(last_alive), "peer_closed_at": wire_time(detached),
+                                                "front_forced_at": wire_time(event), "metrics": metrics, "grant": grant})
+                        return
+        pause(2 if now() >= deadline - datetime.timedelta(seconds=15) else 5)
+    raise ValueError("no witnessed old socket force-close and exact Front evidence by the bounded drain deadline")
+
+
 def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_port=None,
-            now=front.now, pause=time.sleep, open_tls=connection.HeldTLS):
+            now=front.now, pause=time.sleep, open_tls=connection.HeldTLS, drain_record=None):
     """Adapter supplies disk readback and immutable arm/witness/result, not cutover."""
     if slot_phase(journal, adapter.selected_activation()) != "pending":
         raise ValueError("handoff must begin on the exact retained Worker")
@@ -147,6 +205,21 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                         if (adapter.selected_activation() != state or proof(retained) != reference or proof(fresh) != reference
                                 or fact(retained, before, retained_addr) != old or fact(fresh, target, candidate_addr) != newest):
                             raise ValueError("a witnessed connection or activation vanished during Guardian readback")
+                        if drain_record is not None:
+                            if probe_fresh is None:
+                                raise ValueError("drain verification requires both public and probe sockets")
+                            drain_record(guardian_result=result)
+
+                            def check_old():
+                                if proof(retained) != reference or fact(retained, before, retained_addr) != old:
+                                    raise ValueError("draining socket no longer reaches its exact old Worker")
+
+                            def check_new():
+                                for sock, ref in ((fresh, newest), (probe_fresh, probe_ref)):
+                                    if proof(sock) != reference or fact(sock, target, candidate_addr) != ref:
+                                        raise ValueError("new Worker socket changed during the old-Worker drain")
+
+                            verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, drain_record)
                         return result
                     if (adapter.selected_activation() != state or proof(retained) != reference or proof(fresh) != reference
                             or fact(retained, before, retained_addr) != old or fact(fresh, target, candidate_addr) != newest):

@@ -2669,7 +2669,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
     concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
-    timeout-minutes: 16
+    timeout-minutes: 22
     permissions: {contents: read}
     env:
       CONFIG: ${{ needs.node_worker_handoff_plan.outputs.config }}
