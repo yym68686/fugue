@@ -338,6 +338,14 @@ func (v *View) chooseAggregate(family int, candidates []edgequality.PassiveEndpo
 // if no challenger beats it or conflicting wins make the result ambiguous.
 // A complete non-winning comparison is a stop barrier, not an unknown pair.
 func (v *View) Choose(asn uint32, family int, candidates []edgequality.PassiveEndpoint, exploration uint64) Choice {
+	return v.choose(asn, family, candidates, exploration, true)
+}
+
+func (v *View) ChooseLocal(asn uint32, family int, candidates []edgequality.PassiveEndpoint, exploration uint64) Choice {
+	return v.choose(asn, family, candidates, exploration, false)
+}
+
+func (v *View) choose(asn uint32, family int, candidates []edgequality.PassiveEndpoint, exploration uint64, aggregate bool) Choice {
 	if len(candidates) == 0 {
 		return Choice{Reason: "no_eligible_edge"}
 	}
@@ -370,7 +378,7 @@ func (v *View) Choose(asn uint32, family int, candidates []edgequality.PassiveEn
 	}
 	// Don't let a fleet average override a local tie, loss, or an
 	// unresolved conflict between eligible members of this ASN.
-	if len(unknown) == len(candidates)-1 {
+	if aggregate && len(unknown) == len(candidates)-1 {
 		hasLocal := false
 		for i, a := range unknown {
 			for _, b := range unknown[i+1:] {

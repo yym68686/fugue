@@ -38,6 +38,8 @@ type dnsRuntimeBackend struct {
 }
 
 type platformDNSRuntimeFactsResponse struct {
+	readinessPlan       *platformconfig.DNSReadinessPlan
+	probeFreshness      time.Duration
 	captureSequence     uint64 `json:"-"`
 	preflightFailure    *dnsPreflightFactFailure
 	lkgGeneration       string
@@ -491,6 +493,8 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 	if err != nil {
 		return platformDNSRuntimeFactsResponse{}, errDNSRuntimeFacts
 	}
+	response.readinessPlan = current.payload.ReadinessPlan
+	response.probeFreshness = time.Duration(current.payload.Policy.DNSReadiness.FactFreshnessSeconds) * time.Second
 	return response, nil
 }
 

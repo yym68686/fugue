@@ -87,6 +87,37 @@ measured pairs. It gives opponents equal weight, one vote per ASN and pair,
 and accounts for ties. With neither source, tier zero means unranked.
 Offline nodes are excluded from quality tiers.
 
+## Platform default for single-address dynamic DNS
+
+The control plane can use the fleet tiers as a prior when a dynamic name has
+no stronger domain-specific evidence. It works independently for A and
+AAAA. `dynamic_quality.fleet_default` defaults to `shadow`: the runtime
+preview shows `runtime_snapshot.facts.fleet_default_shadow`, but the
+signed DNS order is unchanged. `active` promotes only the eligible winner
+to the front of that order, leaving the remaining fallback order intact.
+Use `fleet_default_hosts` to restrict the rollout to named hostnames; an
+omitted list means all eligible dynamic hostnames. Use the declarative
+dynamic-quality configuration lane to activate or roll back to shadow.
+
+An Edge must already be authorized in the exact name/family selection and
+have current matching route and TLS proofs from each relevant full-release
+authority. The fleet ranking does not grant admission or shorten probe
+recovery. Fixed, pinned, static, redundant and business-allocation records
+are unchanged. Incomplete or conflicting evidence does not rank more
+highly than the current verified default; ties keep that default. A live
+promotion needs the same winner in two non-overlapping 30-minute windows.
+A compatible bootstrap snapshot can be used for at most 24 hours from
+the original evidence, without extending its age on observation refresh.
+A failed primary uses the existing immediate readiness fallback.
+
+Active DNS decisions expose `ranking_version=passive-fleet-default-v1`,
+`ranking_scope=global` and the original evidence timestamp. On a healthy
+fleet-ranked default, only a direct comparison for a trusted client ASN
+can supersede it; the cross-ASN aggregate is not applied a second time.
+This is still a platform prior, not an assertion about an individual user.
+
+## Per-ASN DNS comparison
+
 For the existing signed `all_dynamic` policy, each authoritative process
 fetches a private HMAC-signed observation bound to its exact artifact, consumer
 set, release and fence. Older Worker readers do not need new policy fields.

@@ -39275,6 +39275,14 @@ components:
       description: 'Applies quality evaluation to every eligible owned dynamic query, including future domains. Static records and explicit pinned placement are preserved. Signed current order remains the safe learning baseline until independently bound evidence authorizes a change; learning failures are isolated per query. Refresh is bounded and rotates fairly, independently of user query volume.'
       properties:
         mode: {type: string, enum: [all_dynamic]}
+        fleet_default: {type: string, enum: [shadow, active], description: "Platform fleet ranking for the default answer when exact service evidence cannot rank the eligible nodes. Omission is shadow. Active mode may change only an automatic single-address order, not membership, readiness, or an explicit pin."}
+        fleet_default_hosts:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items: {type: string, minLength: 1, maxLength: 253}
+          description: Optional source-only scope for fleet default decisions. Omit to cover all eligible automatic hostnames.
         policy:
           allOf:
             - $ref: '#/components/schemas/PhysicalEdgeQualityPolicy'

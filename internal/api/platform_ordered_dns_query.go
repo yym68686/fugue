@@ -151,6 +151,11 @@ func projectOrderedDNSQueries(result *platformIntentProjectionResponse, strategy
 	strategy.OrderedProjection.Overrides = slices.DeleteFunc(strategy.OrderedProjection.Overrides, func(entry platformconfig.DNSOrderOverride) bool {
 		return entry.BootstrapOnly
 	})
+	if strategy.DynamicQuality != nil {
+		dynamic := *strategy.DynamicQuality
+		dynamic.FleetDefault, dynamic.FleetDefaultHosts = "", nil
+		strategy.DynamicQuality = &dynamic
+	}
 	policy.DNSQueryPolicy = &strategy
 	policy.DNSAnswerRules = rules
 	policy = platformconfig.NormalizePolicySnapshot(policy)

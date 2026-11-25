@@ -6,10 +6,23 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"time"
 )
 
 const DNSAvailabilityVersion = "dns-availability-v1"
 const DNSAvailabilityRedundantVersion = "dns-availability-redundant-v2"
+
+func DNSAvailabilityRecoveryReady(policy *DNSAvailabilityPolicy, history []time.Time, checkedAt, now time.Time, maxGap time.Duration) bool {
+	if ValidateDNSAvailabilityPolicy(policy) != nil || len(history) < policy.RecoverySuccesses || len(history) > 16 || !history[len(history)-1].Equal(checkedAt) {
+		return false
+	}
+	for index, at := range history {
+		if at.IsZero() || at.After(now) || index > 0 && (!at.After(history[index-1]) || at.Sub(history[index-1]) > maxGap) {
+			return false
+		}
+	}
+	return history[len(history)-1].Sub(history[0]) >= time.Duration(policy.RecoveryMinSeconds)*time.Second
+}
 
 // DNSAvailabilityPolicy is signed configuration, not a health or quality fact.
 // Membership cannot add an endpoint to a record's route/TLS authorization.

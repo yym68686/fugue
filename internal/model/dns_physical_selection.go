@@ -11,6 +11,9 @@ const DNSAnswerPolicyKindPhysicalQuality = "physical_quality"
 const DNSAnswerPolicyKindPhysicalOrder = "physical_order"
 const DNSPhysicalSelectionVersion = "physical-edge-network-v1"
 const DNSPhysicalBusinessSelectionVersion = "physical-edge-business-v1"
+const DNSFleetDefaultRankingVersion = "passive-fleet-default-v1"
+const DNSFleetDefaultLive = "fleet_default_live"
+const DNSFleetDefaultHistorical = "fleet_default_historical"
 
 type DNSPhysicalOrder struct {
 	QualityObservedAt *time.Time `json:"quality_observed_at,omitempty"`

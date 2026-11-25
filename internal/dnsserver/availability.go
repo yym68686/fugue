@@ -15,19 +15,10 @@ const dnsProbeHistoryLimit = 16
 // A history is observation only. It cannot make an expired/wrong publication
 // proof valid; materialization checks those independent gates first.
 func dnsAvailabilityRecovered(policy *model.DNSAvailabilityPolicy, fact dnsReadinessFact, maxGap time.Duration, now time.Time) bool {
-	if model.ValidateDNSAvailabilityPolicy(policy) != nil || !fact.Ready || !fact.Proof.ValidUntil.After(now) {
+	if !fact.Ready || !fact.Proof.ValidUntil.After(now) {
 		return false
 	}
-	history := fact.ProbeHistory
-	if len(history) < policy.RecoverySuccesses || len(history) > dnsProbeHistoryLimit || !history[len(history)-1].Equal(fact.Proof.CheckedAt) {
-		return false
-	}
-	for i, at := range history {
-		if at.IsZero() || at.After(now) || i > 0 && (!at.After(history[i-1]) || at.Sub(history[i-1]) > maxGap) {
-			return false
-		}
-	}
-	return history[len(history)-1].Sub(history[0]) >= time.Duration(policy.RecoveryMinSeconds)*time.Second
+	return model.DNSAvailabilityRecoveryReady(policy, fact.ProbeHistory, fact.Proof.CheckedAt, now, maxGap)
 }
 
 // The candidate, serving and retained-LKG schedulers share only observation

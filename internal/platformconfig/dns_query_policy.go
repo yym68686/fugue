@@ -30,16 +30,23 @@ type DynamicQualityPolicy struct {
 	Policy                 model.PhysicalEdgeQualityPolicy `json:"policy"`
 	RefreshQueriesPerCycle int                             `json:"refresh_queries_per_cycle"`
 	RefreshConcurrency     int                             `json:"refresh_concurrency"`
+	FleetDefault           string                          `json:"fleet_default,omitempty"`
+	FleetDefaultHosts      []string                        `json:"fleet_default_hosts,omitempty"`
 }
 
 func (value *DynamicQualityPolicy) UnmarshalJSON(raw []byte) error {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || len(fields) != 4 {
+	if json.Unmarshal(raw, &fields) != nil {
 		return fmt.Errorf("complete dynamic quality policy required")
 	}
 	for _, key := range []string{"mode", "policy", "refresh_queries_per_cycle", "refresh_concurrency"} {
 		if fields[key] == nil || bytes.Equal(bytes.TrimSpace(fields[key]), []byte("null")) {
 			return fmt.Errorf("dynamic quality requires %s", key)
+		}
+	}
+	for _, key := range []string{"fleet_default", "fleet_default_hosts"} {
+		if bytes.Equal(bytes.TrimSpace(fields[key]), []byte("null")) {
+			return fmt.Errorf("dynamic quality %s cannot be null", key)
 		}
 	}
 	if err := validateExplicitPhysicalPolicy(fields["policy"]); err != nil {
@@ -51,6 +58,9 @@ func (value *DynamicQualityPolicy) UnmarshalJSON(raw []byte) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&decoded); err != nil {
 		return err
+	}
+	if fields["fleet_default"] != nil && decoded.FleetDefault == "" || fields["fleet_default_hosts"] != nil && len(decoded.FleetDefaultHosts) == 0 {
+		return fmt.Errorf("fleet default declaration cannot be empty")
 	}
 	*value = DynamicQualityPolicy(decoded)
 	return nil
@@ -231,6 +241,16 @@ func ValidateDNSQueryPolicy(p *DNSQueryPolicy) error {
 		availabilityHosts[route.Hostname] = true
 	}
 	if dynamic := p.DynamicQuality; dynamic != nil {
+		if dynamic.FleetDefault != "" && dynamic.FleetDefault != "shadow" && dynamic.FleetDefault != "active" || len(dynamic.FleetDefaultHosts) > 64 {
+			return fmt.Errorf("invalid fleet default strategy")
+		}
+		seen := map[string]bool{}
+		for _, hostname := range dynamic.FleetDefaultHosts {
+			if !validDNSConsumerZone(hostname) || seen[hostname] {
+				return fmt.Errorf("invalid or duplicate fleet default hostname")
+			}
+			seen[hostname] = true
+		}
 		if dynamic.Mode != "all_dynamic" || p.RankingMode != "active" || p.OrderedProjection == nil || !model.IsDeliveryPhysicalNetworkPolicy(dynamic.Policy.Version) || model.ValidatePhysicalEdgeQualityPolicy(dynamic.Policy) != nil || dynamic.RefreshQueriesPerCycle < 1 || dynamic.RefreshQueriesPerCycle > 128 || dynamic.RefreshConcurrency < 1 || dynamic.RefreshConcurrency > 8 || dynamic.RefreshConcurrency > dynamic.RefreshQueriesPerCycle {
 			return fmt.Errorf("dynamic quality requires bounded explicit delivery policy and safe bootstrap order")
 		}

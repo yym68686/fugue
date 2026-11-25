@@ -68,8 +68,15 @@ def validate(config):
         raise ValueError("explicit global producer and policy identity required")
     query = policy.get("dns_query_policy", {})
     dynamic = query.get("dynamic_quality", {})
-    if query.get("ranking_mode") != "active" or not query.get("ordered_projection") or set(dynamic) != {"mode", "policy", "refresh_queries_per_cycle", "refresh_concurrency"} or dynamic["mode"] != "all_dynamic":
+    required_dynamic = {"mode", "policy", "refresh_queries_per_cycle", "refresh_concurrency"}
+    if query.get("ranking_mode") != "active" or not query.get("ordered_projection") or not isinstance(dynamic, dict) or not required_dynamic.issubset(dynamic) or set(dynamic) - required_dynamic - {"fleet_default", "fleet_default_hosts"} or dynamic["mode"] != "all_dynamic":
         raise ValueError("generic dynamic coverage and safe baseline required")
+    if dynamic.get("fleet_default", "shadow") not in ("shadow", "active"):
+        raise ValueError("invalid fleet default mode")
+    if "fleet_default_hosts" in dynamic:
+        hosts = dynamic["fleet_default_hosts"]
+        if not isinstance(hosts, list) or not 1 <= len(hosts) <= 64 or any(not isinstance(host, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host) for host in hosts) or len(set(hosts)) != len(hosts):
+            raise ValueError("invalid fleet default host scope")
     if type(dynamic["refresh_queries_per_cycle"]) is not int or not 1 <= dynamic["refresh_queries_per_cycle"] <= 128 or type(dynamic["refresh_concurrency"]) is not int or not 1 <= dynamic["refresh_concurrency"] <= min(8, dynamic["refresh_queries_per_cycle"]):
         raise ValueError("bounded capture concurrency required")
     network = dynamic["policy"]

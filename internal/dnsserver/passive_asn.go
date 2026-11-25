@@ -240,7 +240,8 @@ func passiveAvailabilityPrimary(policy model.DNSAnswerPolicy, selectionResult st
 	switch policy.PolicyKind {
 	case model.DNSAnswerPolicyKindPhysicalOrder:
 		return selectionResult == "physical_order_primary" &&
-			(policy.Reason == "availability_only_quality_unavailable" || policy.Reason == "retained_previous_verified_order_quality_unavailable")
+			(policy.Reason == "availability_only_quality_unavailable" || policy.Reason == "retained_previous_verified_order_quality_unavailable" ||
+				policy.RankingVersion == model.DNSFleetDefaultRankingVersion)
 	case model.DNSAnswerPolicyKindPhysicalQuality:
 		return selectionResult == "physical_selected_primary" || selectionResult == "physical_learning_primary"
 	}
@@ -258,6 +259,7 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	policy := record.AnswerPolicy
 	availabilityPrimary := passiveAvailabilityPrimary(policy, audit.SelectionResult)
 	primary := audit.SelectionResult == "physical_order_primary" || audit.SelectionResult == "physical_selected_primary" || audit.SelectionResult == "physical_learning_primary"
+	fleetDefault := policy.PolicyKind == model.DNSAnswerPolicyKindPhysicalOrder && policy.RankingVersion == model.DNSFleetDefaultRankingVersion
 	// Explicit service/placement constraints, effective fixed orders, and
 	// separate allocation rules retain their original semantics. Once the
 	// signed primary is unavailable, readiness failover owns the answer.
@@ -301,6 +303,10 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 		family = 4
 	}
 	result.Decision.ASN, result.Decision.Family = asn, family
+	if fleetDefault && asn == 0 {
+		result.Decision.Incumbent, result.Decision.ComparedChoice = audit.Answered[0].EdgeID, audit.Answered[0].EdgeID
+		return result
+	}
 	// Existing selector's signed eligible order is the upper bound, never a
 	// restatement of the producer's broader inventory.
 	ordered, _ := edgeDNSOrderedCandidatesWithDecision(record, dnsGeoHint{}, now, false)
@@ -315,7 +321,12 @@ func (st *dnsServingState) passiveASNSelection(rt *dnsPassiveRuntime, req *dns.M
 	if mode == "active" && view.CohortExploration && len(endpoints) > 1 && !noECS {
 		explore = passiveExploration(prefix, now)
 	}
-	choice := view.Choose(asn, family, endpoints, explore)
+	var choice passiveasn.Choice
+	if fleetDefault {
+		choice = view.ChooseLocal(asn, family, endpoints, 0)
+	} else {
+		choice = view.Choose(asn, family, endpoints, explore)
+	}
 	if asn != 0 || choice.Reason != "retained_no_comparison" {
 		result.Decision.Reason = choice.Reason
 	}

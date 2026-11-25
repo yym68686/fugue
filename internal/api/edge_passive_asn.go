@@ -36,6 +36,8 @@ type passiveASNCheckpoint struct {
 	ExplorationHolds  []edgequality.PassiveEndpoint               `json:"exploration_holds,omitempty"`
 	Estimates         map[string]edgequality.PassiveASNComparison `json:"fleet_estimates,omitempty"`
 	FleetSnapshots    map[int]passiveFleetSnapshot                `json:"fleet_snapshots,omitempty"`
+	FleetLive         map[int][2]passiveFleetSnapshot             `json:"fleet_live_windows,omitempty"`
+	FleetBootstrap    map[int]passiveFleetSnapshot                `json:"fleet_bootstrap,omitempty"`
 }
 
 type passiveASNDNSProof struct {
@@ -284,12 +286,13 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 	cancel()
 	window.cappedEdges = len(capped)
 	window.edges = len(identities)
-	comparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
+	currentComparisons, coverage := edgequality.ComparePassiveASN(samples, identities, resolver, now)
 	// Replay the preceding real window before raw storage prunes it. Never
 	// mix widely separated windows or promote its original timestamps.
 	historical, priorCoverage := edgequality.ComparePassiveASN(prior, identities, resolver, previousWindowEnd)
-	comparisons = append(historical, comparisons...)
-	estimates := append(priorCoverage.FleetEstimates, coverage.FleetEstimates...)
+	comparisons := append(slices.Clone(historical), currentComparisons...)
+	currentEstimates := coverage.FleetEstimates
+	estimates := append(slices.Clone(priorCoverage.FleetEstimates), currentEstimates...)
 	coverage.FleetEstimates = nil
 	window.coverage = coverage
 	var ranks []passiveFleetStatus
@@ -331,6 +334,8 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 				}
 			}
 			next.FleetSnapshots = make(map[int]passiveFleetSnapshot, 2)
+			next.FleetLive = make(map[int][2]passiveFleetSnapshot, 2)
+			next.FleetBootstrap = make(map[int]passiveFleetSnapshot, 2)
 			for _, family := range []int{4, 6} {
 				var endpoints []edgequality.PassiveEndpoint
 				for edge, id := range identities {
@@ -346,6 +351,18 @@ func (s *Server) observePassiveASN(ctx context.Context, now time.Time) error {
 					previousWindowEnd, historical, priorCoverage.FleetEstimates, last.FleetSnapshots[family], resolver)
 				if !snapshot.At.IsZero() {
 					next.FleetSnapshots[family] = snapshot
+				}
+				current := capturePassiveFleet(complete, passiveasn.RankFleet(family, endpoints, currentComparisons), currentComparisons)
+				previous := capturePassiveFleet(previousWindowEnd, passiveasn.RankFleet(family, endpoints, historical), historical)
+				next.FleetLive[family] = [2]passiveFleetSnapshot{current, previous}
+				// A single new live window must not bypass the two-window gate
+				// by becoming the observer's diagnostic historical fallback.
+				bootstrap := last.FleetBootstrap[family]
+				if last.FleetLive == nil {
+					bootstrap = last.FleetSnapshots[family]
+				}
+				if !fleetDefaultUsableSnapshot(bootstrap, family, now, fleetDefaultMaxHistory, resolver).At.IsZero() {
+					next.FleetBootstrap[family] = bootstrap
 				}
 				for i, rank := range effective {
 					ranks = append(ranks, passiveFleetStatus{rank: rank, live: live[i], historical: fallbackAt})

@@ -148,6 +148,9 @@ func TestPassiveASNCanSupersedeHealthyAvailabilityBaseline(t *testing.T) {
 	}{
 		{"healthy", "availability_only_quality_unavailable", "", "edge-b", "passive_asn_preferred", true, false},
 		{"retained baseline", "retained_previous_verified_order_quality_unavailable", "", "edge-b", "passive_asn_preferred", true, false},
+		{"fleet default with local challenger", model.DNSFleetDefaultLive, "", "edge-b", "passive_asn_preferred", true, false},
+		{"fleet default without local comparison", model.DNSFleetDefaultHistorical, "", "edge-a", "retained_no_comparison", false, false},
+		{"fleet default with unready primary", model.DNSFleetDefaultLive, "edge-a", "edge-b", "record_not_eligible", true, false},
 		{"no usable comparison", "availability_only_quality_unavailable", "", "edge-a", "retained_no_comparison", false, false},
 		{"challenger recovering", "availability_only_quality_unavailable", "edge-b", "edge-a", "retained_no_comparison", true, false},
 		{"primary not ready", "availability_only_quality_unavailable", "edge-a", "edge-b", "record_not_eligible", true, false},
@@ -161,6 +164,9 @@ func TestPassiveASNCanSupersedeHealthyAvailabilityBaseline(t *testing.T) {
 			record := &p.Queries[0].Records[0]
 			policy := &record.AnswerPolicy
 			policy.Reason = tc.inputReason
+			if tc.inputReason == model.DNSFleetDefaultLive || tc.inputReason == model.DNSFleetDefaultHistorical {
+				policy.RankingVersion = model.DNSFleetDefaultRankingVersion
+			}
 			policy.Availability = &model.DNSAvailabilityPolicy{Version: model.DNSAvailabilityVersion,
 				OrderedEdgeIDs: []string{"edge-a", "edge-b"}, RecoverySuccesses: 2, RecoveryMinSeconds: 10}
 			p.Plan.Records[0].MinimumHealthyEdges = 1

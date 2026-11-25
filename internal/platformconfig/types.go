@@ -743,6 +743,8 @@ func normalizePolicy(in PolicySnapshot) PolicySnapshot {
 		p := *in.DNSQueryPolicy
 		if p.DynamicQuality != nil {
 			dynamic := *p.DynamicQuality
+			dynamic.FleetDefaultHosts = append([]string(nil), dynamic.FleetDefaultHosts...)
+			sort.Strings(dynamic.FleetDefaultHosts)
 			p.DynamicQuality = &dynamic
 		}
 		p.OrderedProjection = CloneDNSOrderedProjection(in.DNSQueryPolicy.OrderedProjection)

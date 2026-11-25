@@ -23,6 +23,21 @@ def fixture():
 
 
 class DynamicQualityConfigurationTests(unittest.TestCase):
+    def test_fleet_rollout_changes_only_dynamic_quality(self):
+        config, _ = fixture()
+        previous = copy.deepcopy(config["projection_policy"])
+        previous["generation"] = "old-generation"
+        dynamic = config["projection_policy"]["dns_query_policy"]["dynamic_quality"]
+        dynamic.update(fleet_default="active", fleet_default_hosts=["app.example.test"])
+        quality.validate(config)
+        quality.check_delta(previous, config["projection_policy"])
+        for change in ({"fleet_default": "other"}, {"fleet_default_hosts": []},
+                       {"fleet_default_hosts": ["app.example.test", "app.example.test"]}):
+            invalid = copy.deepcopy(config)
+            invalid["projection_policy"]["dns_query_policy"]["dynamic_quality"].update(change)
+            with self.assertRaises(ValueError):
+                quality.validate(invalid)
+
     def test_bootstrap_migration_changes_only_explicit_classification(self):
         config, _ = fixture()
         previous = copy.deepcopy(config["projection_policy"])

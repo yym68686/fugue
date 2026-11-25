@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +65,13 @@ func dynamicQualityRoutes(projection platformIntentProjectionResponse, policy pl
 	explicit := map[string]bool{}
 	for _, route := range policy.PhysicalRoutes {
 		explicit[route.Hostname] = true
+	}
+	if policy.OrderedProjection != nil {
+		for _, override := range policy.OrderedProjection.Overrides {
+			if !override.BootstrapOnly && override.Type == "A" {
+				explicit[override.Hostname] = true
+			}
+		}
 	}
 	readRoutes := newPlacementRecordRouteReader(projection)
 	for _, record := range projection.Intent.DNS {
@@ -316,7 +322,7 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 			return err
 		}
 	}
-	if err := s.preservePublishedDynamicOrderContext(ctx, projection, jobs); err != nil {
+	if err := s.preservePublishedDynamicOrderWithFleet(ctx, projection, jobs, policy.DynamicQuality, states); err != nil {
 		return err
 	}
 	work := s.dynamicQuality.schedule(jobs, policy.DynamicQuality.RefreshQueriesPerCycle, time.Now().UTC())
@@ -364,6 +370,15 @@ func (s *Server) captureDynamicQuality(ctx context.Context, projection *platform
 			}
 		}
 	}
+	if fleetDefaultHasTargets(policy.DynamicQuality, states) {
+		fleet := s.loadFleetDefaultInput(ctx, policy, projection.RuntimeSnapshot.DNSConsumers, time.Now().UTC())
+		if err := applyFleetDefaults(projection, policy, states, fleet, time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	if projection.RuntimeSnapshot.Facts == nil {
 		projection.RuntimeSnapshot.Facts = map[string]any{}
 	}
@@ -408,7 +423,7 @@ func applyDynamicQualityHost(projection *platformIntentProjectionResponse, polic
 		return state, err
 	}
 	for _, fact := range projection.RuntimeSnapshot.DNSSelections {
-		if fact.Hostname == jobs[0].Route.Hostname && fact.Reason == "retained_previous_verified_order_quality_unavailable" {
+		if fact.Hostname == jobs[0].Route.Hostname && (fact.Reason == "retained_previous_verified_order_quality_unavailable" || fact.RankingVersion == model.DNSFleetDefaultRankingVersion) {
 			return "retained_previous_verified_order", nil
 		}
 	}
@@ -523,6 +538,10 @@ func (s *Server) preservePublishedDynamicOrder(projection *platformIntentProject
 }
 
 func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context, projection *platformIntentProjectionResponse, jobs []dynamicQualityJob) error {
+	return s.preservePublishedDynamicOrderWithFleet(parentCtx, projection, jobs, nil, nil)
+}
+
+func (s *Server) preservePublishedDynamicOrderWithFleet(parentCtx context.Context, projection *platformIntentProjectionResponse, jobs []dynamicQualityJob, dynamic *platformconfig.DynamicQualityPolicy, states map[string]string) error {
 	ctx, cancel := context.WithTimeout(parentCtx, time.Minute)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -579,10 +598,11 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 	orders := map[string][]string{}
 	epochs := map[string]*time.Time{}
 	qualityTimes := map[string]*time.Time{}
+	fleetPolicies := map[string]model.DNSAnswerPolicy{}
 	for _, view := range payload.Views {
 		for _, record := range view.Records {
-			key := view.NodeID + "\x00" + record.Name
-			if record.Type != "A" {
+			key := dynamicQualityFamilyKey(view.NodeID, record.Name, record.Type)
+			if record.Type != "A" && record.Type != "AAAA" {
 				continue
 			}
 			if record.AnswerPolicy.PhysicalSelection != nil {
@@ -600,6 +620,9 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 				orders[key] = record.AnswerPolicy.PhysicalOrder.OrderedEdgeIDs
 				epochs[key] = record.AnswerPolicy.PhysicalOrder.PrimarySince
 				qualityTimes[key] = record.AnswerPolicy.PhysicalOrder.QualityObservedAt
+				if record.AnswerPolicy.RankingVersion == model.DNSFleetDefaultRankingVersion {
+					fleetPolicies[key] = record.AnswerPolicy
+				}
 			}
 		}
 	}
@@ -607,6 +630,11 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 	for _, job := range jobs {
 		covered[job.Key] = true
 	}
+	factIndexes := make(map[string]int, len(projection.RuntimeSnapshot.DNSSelections))
+	for index, fact := range projection.RuntimeSnapshot.DNSSelections {
+		factIndexes[dynamicQualityFamilyKey(fact.NodeID, fact.Hostname, fact.Type)] = index
+	}
+	fixed := fleetDefaultFixedQueries(projection.Policy.DNSQueryPolicy)
 	if !s.qualityInputSourceUnchanged(ctx, inputSource) {
 		return fmt.Errorf("dynamic quality baseline input authority changed")
 	}
@@ -614,21 +642,32 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 		return err
 	}
 	for index, rule := range projection.Policy.DNSAnswerRules {
-		key := rule.NodeID + "\x00" + rule.Hostname
-		if !covered[key] || rule.Type != "A" || rule.PhysicalOrder == nil {
+		key := dynamicQualityFamilyKey(rule.NodeID, rule.Hostname, rule.Type)
+		if fixed[key] {
+			continue
+		}
+		fleet, wasFleet := fleetPolicies[key]
+		if wasFleet {
+			at := fleetDefaultEvidenceAt(fleet.ShadowReason)
+			now := time.Now().UTC()
+			if dynamic == nil || dynamic.FleetDefault != "active" || !fleetDefaultHostEnabled(dynamic, rule.Hostname) ||
+				!fleetDefaultStateEligible(states[rule.Hostname]) && !covered[rule.NodeID+"\x00"+rule.Hostname] ||
+				at.IsZero() || at.After(now) || now.Sub(at) > fleetDefaultMaxHistory {
+				continue
+			}
+		}
+		if (!covered[rule.NodeID+"\x00"+rule.Hostname] || rule.Type != "A") && !wasFleet || rule.PhysicalOrder == nil {
 			continue
 		}
 		if len(orders[key]) == 0 {
 			continue
 		}
-		var candidates []platformconfig.DNSSelectionCandidate
-		for _, fact := range projection.RuntimeSnapshot.DNSSelections {
-			if fact.NodeID == rule.NodeID && fact.Hostname == rule.Hostname && fact.Type == rule.Type {
-				candidates = fact.Candidates
-				break
-			}
+		factIndex, present := factIndexes[key]
+		if !present {
+			continue
 		}
-		order := preservedDynamicQualityOrder(orders[key], rule.PhysicalOrder.OrderedEdgeIDs, candidates)
+		fact := &projection.RuntimeSnapshot.DNSSelections[factIndex]
+		order := preservedDynamicQualityOrder(orders[key], rule.PhysicalOrder.OrderedEdgeIDs, fact.Candidates)
 		if len(order) == 0 {
 			return fmt.Errorf("dynamic quality baseline has no currently authorized endpoint")
 		}
@@ -646,18 +685,12 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 			at := *epochs[key]
 			projection.Policy.DNSAnswerRules[index].PhysicalOrder.PrimarySince = &at
 		}
-		for factIndex, fact := range projection.RuntimeSnapshot.DNSSelections {
-			if fact.NodeID != rule.NodeID || fact.Hostname != rule.Hostname || fact.Type != rule.Type {
-				continue
-			}
-			fact.Reason = "physical_quality_learning_preserved_verified_order"
-			fact.SourceDigest, fact.SourceGeneration = "", ""
-			digest, digestErr := platformconfig.Digest(fact)
-			if digestErr != nil {
-				return digestErr
-			}
-			fact.SourceDigest, fact.SourceGeneration = digest, "dns-observation_"+strings.TrimPrefix(digest, "sha256:")
-			projection.RuntimeSnapshot.DNSSelections[factIndex] = fact
+		fact.Reason = "physical_quality_learning_preserved_verified_order"
+		if wasFleet && order[0] == orders[key][0] {
+			fact.RankingVersion, fact.RankingScope, fact.Reason, fact.ShadowReason = fleet.RankingVersion, fleet.RankingScope, fleet.Reason, fleet.ShadowReason
+		}
+		if err := digestFleetDefaultFact(fact); err != nil {
+			return err
 		}
 	}
 	generation, err := platformconfig.PolicySnapshotGeneration(projection.Policy)
@@ -666,6 +699,10 @@ func (s *Server) preservePublishedDynamicOrderContext(parentCtx context.Context,
 	}
 	projection.Policy.Generation, projection.RuntimeSnapshot.PolicyGeneration = generation, generation
 	return nil
+}
+
+func dynamicQualityFamilyKey(node, hostname, family string) string {
+	return node + "\x00" + hostname + "\x00" + family
 }
 
 func preservedDynamicQualityOrder(previous, bootstrap []string, candidates []platformconfig.DNSSelectionCandidate) []string {

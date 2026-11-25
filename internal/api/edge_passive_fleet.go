@@ -12,8 +12,7 @@ import (
 
 const passiveFleetSnapshotMaxBindings = 4096
 
-// Fleet snapshots are diagnostic only. They cannot sign a comparison, affect
-// a live answer, or renew its evidence time. Retain one per address family.
+// Fleet snapshots alone grant no candidate or readiness authority.
 type passiveFleetSnapshot struct {
 	At       time.Time              `json:"at"`
 	Ranks    []passiveasn.FleetRank `json:"ranks"`

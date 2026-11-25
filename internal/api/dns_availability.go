@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,6 +72,24 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 		}
 		order := &model.DNSPhysicalOrder{Version: "physical-order-v1"}
 		retained := false
+		fleetRetained := false
+		if fact.RankingVersion == model.DNSFleetDefaultRankingVersion && policy.Version == model.DNSAvailabilityVersion {
+			for _, rule := range rules {
+				if rule.NodeID != fact.NodeID || rule.Hostname != fact.Hostname || rule.Type != fact.Type || rule.PhysicalOrder == nil {
+					continue
+				}
+				for _, id := range rule.PhysicalOrder.OrderedEdgeIDs {
+					if available[id] && slices.Contains(policy.OrderedEdgeIDs, id) {
+						order.OrderedEdgeIDs = append(order.OrderedEdgeIDs, id)
+						delete(available, id)
+					}
+				}
+				fleetRetained = len(order.OrderedEdgeIDs) > 0 && order.OrderedEdgeIDs[0] == rule.PhysicalOrder.OrderedEdgeIDs[0]
+				if fleetRetained {
+					order.PrimarySince = rule.PhysicalOrder.PrimarySince
+				}
+			}
+		}
 		if dynamic := projection.Policy.DNSQueryPolicy.DynamicQuality; dynamic != nil && model.IsContinuityPhysicalNetworkPolicy(dynamic.Policy.Version) {
 			for _, rule := range rules {
 				if rule.NodeID != fact.NodeID || rule.Hostname != fact.Hostname || rule.Type != fact.Type || rule.PhysicalOrder == nil || rule.PhysicalOrder.QualityObservedAt == nil {
@@ -127,10 +146,12 @@ func applyDNSAvailabilityBaseline(projection *platformIntentProjectionResponse, 
 		}
 		fact.RetainedPhysicalEvidence = retainedPhysicalHistory(fact, nil)
 		fact.PhysicalSelection, fact.PhysicalEvidence = nil, nil
-		fact.RankingVersion, fact.RankingScope = "", ""
-		fact.Reason = "availability_only_quality_unavailable"
-		if retained {
-			fact.Reason = "retained_previous_verified_order_quality_unavailable"
+		if !fleetRetained {
+			fact.RankingVersion, fact.RankingScope, fact.ShadowReason = "", "", ""
+			fact.Reason = "availability_only_quality_unavailable"
+			if retained {
+				fact.Reason = "retained_previous_verified_order_quality_unavailable"
+			}
 		}
 		fact.SourceDigest, fact.SourceGeneration = "", ""
 		digest, err := platformconfig.Digest(fact)
