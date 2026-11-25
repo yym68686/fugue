@@ -54,7 +54,7 @@ FROM fugue_dns_acme_challenges`
 	return challenges, nil
 }
 
-func (s *Store) pgUpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (model.DNSACMEChallenge, error) {
+func (s *Store) pgUpsertDNSACMEChallenge(challenge model.DNSACMEChallenge, actors []model.Principal) (model.DNSACMEChallenge, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -63,7 +63,12 @@ func (s *Store) pgUpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (mode
 		challenge.CreatedAt = now
 	}
 	challenge.UpdatedAt = now
-	row := s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.DNSACMEChallenge{}, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `
 INSERT INTO fugue_dns_acme_challenges (id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (id) DO UPDATE SET
@@ -75,28 +80,38 @@ ON CONFLICT (id) DO UPDATE SET
 	created_by = EXCLUDED.created_by,
 	expires_at = EXCLUDED.expires_at,
 	updated_at = EXCLUDED.updated_at
+WHERE $11 OR fugue_dns_acme_challenges.created_by=EXCLUDED.created_by
 RETURNING id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at
-`, challenge.ID, challenge.Zone, challenge.Name, challenge.Value, challenge.TTL, challenge.Owner, challenge.CreatedBy, challenge.ExpiresAt, challenge.CreatedAt, challenge.UpdatedAt)
+`, challenge.ID, challenge.Zone, challenge.Name, challenge.Value, challenge.TTL, challenge.Owner, challenge.CreatedBy, challenge.ExpiresAt, challenge.CreatedAt, challenge.UpdatedAt, len(actors) == 0 || actors[0].IsPlatformAdmin())
 	stored, err := scanDNSACMEChallenge(row)
 	if err != nil {
 		return model.DNSACMEChallenge{}, mapDBErr(err)
 	}
-	return stored, nil
+	return stored, s.commitMutation(ctx, tx, mutationEvent(actors, "dns_acme_challenge.upsert", "dns_acme_challenge", stored.ID, ""))
 }
 
-func (s *Store) pgDeleteDNSACMEChallenge(id string) (model.DNSACMEChallenge, error) {
+func (s *Store) pgDeleteDNSACMEChallenge(id string, domains []string, actors []model.Principal) (model.DNSACMEChallenge, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	challenge, err := scanDNSACMEChallenge(s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.DNSACMEChallenge{}, err
+	}
+	defer tx.Rollback()
+	creator := ""
+	if len(actors) > 0 {
+		creator = actors[0].ActorType + ":" + actors[0].ActorID
+	}
+	challenge, err := scanDNSACMEChallenge(tx.QueryRowContext(ctx, `
 DELETE FROM fugue_dns_acme_challenges
-WHERE id = $1
+WHERE id = $1 AND ($2 OR (zone=ANY($3::text[]) AND name='_acme-challenge.'||zone AND created_by=$4))
 RETURNING id, zone, name, value, ttl, owner, created_by, expires_at, created_at, updated_at
-`, id))
+`, id, len(actors) == 0 || actors[0].IsPlatformAdmin(), domains, creator))
 	if err != nil {
 		return model.DNSACMEChallenge{}, mapDBErr(err)
 	}
-	return challenge, nil
+	return challenge, s.commitMutation(ctx, tx, mutationEvent(actors, "dns_acme_challenge.delete", "dns_acme_challenge", challenge.ID, ""))
 }
 
 func scanDNSACMEChallenge(scanner sqlScanner) (model.DNSACMEChallenge, error) {

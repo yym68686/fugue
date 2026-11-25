@@ -16,7 +16,7 @@ func (s *Store) pgListHostedZones(tenantID string, platformAdmin bool) ([]model.
 
 	query := hostedZoneSelect() + ` WHERE status <> $1`
 	args := []any{model.HostedZoneStatusDeleted}
-	if !platformAdmin && strings.TrimSpace(tenantID) != "" {
+	if !platformAdmin {
 		args = append(args, strings.TrimSpace(tenantID))
 		query += fmt.Sprintf(" AND tenant_id = $%d", len(args))
 	}
@@ -53,7 +53,7 @@ WHERE lower(zone_name) = lower($1)
 	return zone, nil
 }
 
-func (s *Store) pgPutHostedZone(zone model.HostedZone) (model.HostedZone, error) {
+func (s *Store) pgPutHostedZone(zone model.HostedZone, actors []model.Principal) (model.HostedZone, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	parentNSJSON, err := marshalJSON(zone.ParentNameservers)
@@ -69,7 +69,12 @@ func (s *Store) pgPutHostedZone(zone model.HostedZone) (model.HostedZone, error)
 		zone.CreatedAt = now
 	}
 	zone.UpdatedAt = now
-	row := s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.HostedZone{}, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `
 INSERT INTO fugue_dns_zones (
 	id, tenant_id, project_id, zone_name, status, delegation_status,
 	parent_nameservers_json, expected_nameservers_json, created_by,
@@ -79,30 +84,52 @@ INSERT INTO fugue_dns_zones (
 	$7, $8, $9,
 	$10, $11, $12, $13
 )
-ON CONFLICT (id) DO UPDATE SET
-	tenant_id = EXCLUDED.tenant_id,
-	project_id = EXCLUDED.project_id,
-	zone_name = EXCLUDED.zone_name,
-	status = EXCLUDED.status,
-	delegation_status = EXCLUDED.delegation_status,
-	parent_nameservers_json = EXCLUDED.parent_nameservers_json,
-	expected_nameservers_json = EXCLUDED.expected_nameservers_json,
-	last_checked_at = EXCLUDED.last_checked_at,
-	last_message = EXCLUDED.last_message,
-	updated_at = EXCLUDED.updated_at
+ON CONFLICT (lower(zone_name)) WHERE status <> 'deleted' DO UPDATE SET zone_name = fugue_dns_zones.zone_name
+WHERE fugue_dns_zones.tenant_id = EXCLUDED.tenant_id AND fugue_dns_zones.project_id = EXCLUDED.project_id
 RETURNING id, tenant_id, project_id, zone_name, status, delegation_status,
 	parent_nameservers_json, expected_nameservers_json, created_by,
 	last_checked_at, last_message, created_at, updated_at
 `, zone.ID, zone.TenantID, zone.ProjectID, zone.ZoneName, zone.Status, zone.DelegationStatus,
 		parentNSJSON, expectedNSJSON, zone.CreatedBy, zone.LastCheckedAt, zone.LastMessage, zone.CreatedAt, zone.UpdatedAt)
 	stored, err := scanHostedZone(row)
+	if err == sql.ErrNoRows {
+		return model.HostedZone{}, ErrConflict
+	}
 	if err != nil {
 		return model.HostedZone{}, mapDBErr(err)
 	}
-	return stored, nil
+	var event *model.AuditEvent
+	if zone.ID == stored.ID {
+		event = mutationEvent(actors, "dns.zone.create", "dns_zone", stored.ID, stored.TenantID)
+	}
+	return stored, s.commitMutation(ctx, tx, event)
 }
 
-func (s *Store) pgDeleteHostedZone(zoneName string) (model.HostedZone, error) {
+func (s *Store) pgUpdateHostedZoneStatus(zone model.HostedZone) (model.HostedZone, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	parent, err := marshalJSON(zone.ParentNameservers)
+	if err != nil {
+		return model.HostedZone{}, err
+	}
+	expected, err := marshalJSON(zone.ExpectedNameservers)
+	if err != nil {
+		return model.HostedZone{}, err
+	}
+	stored, err := scanHostedZone(s.db.QueryRowContext(ctx, `
+UPDATE fugue_dns_zones SET status=$1, delegation_status=$2, parent_nameservers_json=$3,
+expected_nameservers_json=$4, last_message=$5, last_checked_at=$6, updated_at=clock_timestamp()
+WHERE id=$7 AND tenant_id=$8 AND project_id=$9 AND updated_at=$10 AND status <> 'deleted'
+RETURNING id, tenant_id, project_id, zone_name, status, delegation_status,
+ parent_nameservers_json, expected_nameservers_json, created_by, last_checked_at, last_message, created_at, updated_at`,
+		zone.Status, zone.DelegationStatus, parent, expected, zone.LastMessage, zone.LastCheckedAt, zone.ID, zone.TenantID, zone.ProjectID, zone.UpdatedAt))
+	if err == sql.ErrNoRows {
+		return model.HostedZone{}, ErrConflict
+	}
+	return stored, mapDBErr(err)
+}
+
+func (s *Store) pgDeleteHostedZone(expected model.HostedZone, actors []model.Principal) (model.HostedZone, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -111,17 +138,16 @@ func (s *Store) pgDeleteHostedZone(zoneName string) (model.HostedZone, error) {
 	}
 	defer tx.Rollback()
 	zone, err := scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+`
-WHERE lower(zone_name) = lower($1)
-  AND status <> $2
+WHERE id=$1 AND status <> $2 AND tenant_id=$3 AND project_id=$4
 FOR UPDATE
-`, zoneName, model.HostedZoneStatusDeleted))
+`, expected.ID, model.HostedZoneStatusDeleted, expected.TenantID, expected.ProjectID))
 	if err != nil {
 		return model.HostedZone{}, mapDBErr(err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE fugue_dns_zones SET status = $2, updated_at = $3 WHERE id = $1`, zone.ID, model.HostedZoneStatusDeleted, time.Now().UTC()); err != nil {
 		return model.HostedZone{}, fmt.Errorf("mark hosted dns zone deleted: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitMutation(ctx, tx, mutationEvent(actors, "dns.zone.delete", "dns_zone", zone.ID, zone.TenantID)); err != nil {
 		return model.HostedZone{}, fmt.Errorf("commit delete hosted dns zone transaction: %w", err)
 	}
 	return zone, nil
@@ -176,9 +202,9 @@ func (s *Store) pgPutDNSRecord(zone model.HostedZone, record model.DNSRecord, ov
 	defer tx.Rollback()
 	if _, err := scanHostedZone(tx.QueryRowContext(ctx, hostedZoneSelect()+`
 WHERE id = $1
-  AND status <> $2
+  AND status NOT IN ($2, 'pending_ownership') AND tenant_id=$3 AND project_id=$4
 FOR UPDATE
-`, zone.ID, model.HostedZoneStatusDeleted)); err != nil {
+`, zone.ID, model.HostedZoneStatusDeleted, zone.TenantID, zone.ProjectID)); err != nil {
 		return model.DNSRecord{}, mapDBErr(err)
 	}
 	existingRecords, err := pgListDNSRecordsTx(ctx, tx, zone.ID)

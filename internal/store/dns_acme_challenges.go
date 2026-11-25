@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -40,13 +41,13 @@ func (s *Store) ListDNSACMEChallenges(zone string, includeExpired bool) ([]model
 	return challenges, err
 }
 
-func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (model.DNSACMEChallenge, error) {
+func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge, actors ...model.Principal) (model.DNSACMEChallenge, error) {
 	challenge, err := normalizeDNSACMEChallengeForStore(challenge)
 	if err != nil {
 		return model.DNSACMEChallenge{}, err
 	}
 	if s.usingDatabase() {
-		return s.pgUpsertDNSACMEChallenge(challenge)
+		return s.pgUpsertDNSACMEChallenge(challenge, actors)
 	}
 
 	var out model.DNSACMEChallenge
@@ -55,6 +56,9 @@ func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (model.
 		index := findDNSACMEChallenge(state, challenge.ID)
 		if index >= 0 {
 			existing := state.DNSACMEChallenges[index]
+			if len(actors) > 0 && !actors[0].IsPlatformAdmin() && existing.CreatedBy != challenge.CreatedBy {
+				return ErrNotFound
+			}
 			if challenge.CreatedAt.IsZero() {
 				challenge.CreatedAt = existing.CreatedAt
 			}
@@ -68,6 +72,7 @@ func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (model.
 			state.DNSACMEChallenges = append(state.DNSACMEChallenges, challenge)
 		}
 		out = challenge
+		recordMutation(state, mutationEvent(actors, "dns_acme_challenge.upsert", "dns_acme_challenge", challenge.ID, ""))
 		return nil
 	})
 	if err != nil {
@@ -78,12 +83,20 @@ func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge) (model.
 }
 
 func (s *Store) DeleteDNSACMEChallenge(id string) (model.DNSACMEChallenge, error) {
+	return s.deleteDNSACMEChallenge(id, nil, nil)
+}
+
+func (s *Store) DeleteAuthorizedDNSACMEChallenge(id string, domains []string, actor model.Principal) (model.DNSACMEChallenge, error) {
+	return s.deleteDNSACMEChallenge(id, domains, []model.Principal{actor})
+}
+
+func (s *Store) deleteDNSACMEChallenge(id string, domains []string, actors []model.Principal) (model.DNSACMEChallenge, error) {
 	id = normalizeDNSACMEChallengeID(id)
 	if id == "" {
 		return model.DNSACMEChallenge{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgDeleteDNSACMEChallenge(id)
+		return s.pgDeleteDNSACMEChallenge(id, domains, actors)
 	}
 
 	var removed model.DNSACMEChallenge
@@ -93,6 +106,10 @@ func (s *Store) DeleteDNSACMEChallenge(id string) (model.DNSACMEChallenge, error
 			return ErrNotFound
 		}
 		removed = state.DNSACMEChallenges[index]
+		if len(actors) > 0 && !actors[0].IsPlatformAdmin() && (!slices.Contains(domains, removed.Zone) || removed.Name != "_acme-challenge."+removed.Zone || removed.CreatedBy != actors[0].ActorType+":"+actors[0].ActorID) {
+			return ErrNotFound
+		}
+		recordMutation(state, mutationEvent(actors, "dns_acme_challenge.delete", "dns_acme_challenge", removed.ID, ""))
 		state.DNSACMEChallenges = append(state.DNSACMEChallenges[:index], state.DNSACMEChallenges[index+1:]...)
 		return nil
 	})

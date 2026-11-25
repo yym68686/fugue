@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
+	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +63,9 @@ func (s *Server) handleListHostedDNSZones(w http.ResponseWriter, r *http.Request
 		s.writeStoreError(w, err)
 		return
 	}
+	if principal.ProjectID != "" && !principal.IsPlatformAdmin() {
+		zones = slices.DeleteFunc(zones, func(zone model.HostedZone) bool { return zone.ProjectID != principal.ProjectID })
+	}
 	s.appendAudit(principal, "dns.zones.read", "dns_zone", "", principal.TenantID, nil)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"zones": zones})
 }
@@ -89,6 +95,10 @@ func (s *Server) handleCreateHostedDNSZone(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	projectID := strings.TrimSpace(req.ProjectID)
+	if !principal.IsPlatformAdmin() && principal.ProjectID != "" && projectID != principal.ProjectID {
+		httpx.WriteError(w, http.StatusForbidden, "project is outside this credential scope")
+		return
+	}
 	if projectID != "" {
 		project, err := s.store.GetProject(projectID)
 		if err != nil {
@@ -112,6 +122,7 @@ func (s *Server) handleCreateHostedDNSZone(w http.ResponseWriter, r *http.Reques
 	}
 	now := time.Now().UTC()
 	zone := model.HostedZone{
+		ID:                  model.NewSecret("dnszone"),
 		TenantID:            tenantID,
 		ProjectID:           projectID,
 		ZoneName:            zoneName,
@@ -122,13 +133,23 @@ func (s *Server) handleCreateHostedDNSZone(w http.ResponseWriter, r *http.Reques
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
-	zone, err = s.store.PutHostedZone(zone)
+	if !principal.IsPlatformAdmin() {
+		zone.Status = model.HostedZoneStatusPendingOwnership
+		zone.LastMessage = "Publish TXT _fugue-ownership." + zoneName + " with value " + zone.ID + " at your current DNS provider, then run preflight before changing nameservers."
+	}
+	newID := zone.ID
+	zone, err = s.store.PutHostedZone(zone, principal)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	zone = s.refreshHostedDNSZonePreflight(r, principal, zone)
-	s.appendAudit(principal, "dns.zone.create", "dns_zone", zone.ID, zone.TenantID, map[string]string{"zone": zone.ZoneName})
+	if zone.ID == newID && zone.Status != model.HostedZoneStatusPendingOwnership {
+		zone, err = s.refreshHostedDNSZonePreflight(r, principal, zone)
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+	}
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{"zone": zone})
 }
 
@@ -155,12 +176,11 @@ func (s *Server) handleDeleteHostedDNSZone(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	deleted, err := s.store.DeleteHostedZone(zone.ZoneName)
+	deleted, err := s.store.DeleteHostedZone(zone, principal)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "dns.zone.delete", "dns_zone", deleted.ID, deleted.TenantID, map[string]string{"zone": deleted.ZoneName})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"deleted": true, "zone": deleted})
 }
 
@@ -175,11 +195,27 @@ func (s *Server) handleHostedDNSZonePreflight(w http.ResponseWriter, r *http.Req
 		return
 	}
 	response := s.buildDNSDelegationPreflight(r.Context(), principal, s.hostedDNSZonePreflightOptionsFromRequest(r, zone.ZoneName))
+	if zone.Status == model.HostedZoneStatusPendingOwnership {
+		ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+		lookup := s.dnsOwnershipTXTLookup
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupTXT
+		}
+		proof, err := lookup(ctx, "_fugue-ownership."+zone.ZoneName+".")
+		cancel()
+		if err != nil || !slices.Contains(proof, zone.ID) {
+			response.Pass = false
+			response.Checks = append(response.Checks, model.DNSDelegationPreflightCheck{Name: "tenant_domain_ownership", Pass: false, Message: "The ownership TXT record does not yet match this registration."})
+			httpx.WriteJSON(w, http.StatusOK, map[string]any{"zone": zone, "preflight": response})
+			return
+		}
+	}
 	zone = s.applyHostedDNSZonePreflight(zone, response)
-	if stored, err := s.store.PutHostedZone(zone); err == nil {
+	if stored, err := s.store.UpdateHostedZoneStatus(zone); err == nil {
 		zone = stored
-	} else if s.log != nil {
-		s.log.Printf("hosted DNS preflight status update failed; zone=%s err=%v", zone.ZoneName, err)
+	} else {
+		s.writeStoreError(w, err)
+		return
 	}
 	s.appendAudit(principal, "dns.zone.preflight", "dns_zone", zone.ID, zone.TenantID, map[string]string{"zone": zone.ZoneName, "pass": strconvFormatBool(response.Pass)})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"zone": zone, "preflight": response})
@@ -268,6 +304,17 @@ func (s *Server) handlePatchHostedDNSRecord(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req patchHostedDNSRecordRequest
+	if !principal.IsPlatformAdmin() {
+		current, err := s.store.GetDNSRecord(zone.ID, r.PathValue("record_id"))
+		if err != nil {
+			s.writeStoreError(w, err)
+			return
+		}
+		if current.Source != model.DNSRecordSourceUser {
+			httpx.WriteError(w, http.StatusForbidden, "only platform admin can edit non-user DNS records")
+			return
+		}
+	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
@@ -340,24 +387,17 @@ func (s *Server) loadAuthorizedHostedDNSZone(w http.ResponseWriter, r *http.Requ
 		s.writeStoreError(w, err)
 		return model.HostedZone{}, false
 	}
-	if !principal.IsPlatformAdmin() && strings.TrimSpace(zone.TenantID) != strings.TrimSpace(principal.TenantID) {
+	if !principal.IsPlatformAdmin() && (zone.TenantID != principal.TenantID || principal.ProjectID != "" && zone.ProjectID != principal.ProjectID) {
 		s.writeStoreError(w, store.ErrNotFound)
 		return model.HostedZone{}, false
 	}
 	return zone, true
 }
 
-func (s *Server) refreshHostedDNSZonePreflight(r *http.Request, principal model.Principal, zone model.HostedZone) model.HostedZone {
+func (s *Server) refreshHostedDNSZonePreflight(r *http.Request, principal model.Principal, zone model.HostedZone) (model.HostedZone, error) {
 	response := s.buildDNSDelegationPreflight(r.Context(), principal, s.hostedDNSZonePreflightOptionsFromRequest(r, zone.ZoneName))
 	zone = s.applyHostedDNSZonePreflight(zone, response)
-	stored, err := s.store.PutHostedZone(zone)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("hosted DNS zone preflight refresh failed; zone=%s err=%v", zone.ZoneName, err)
-		}
-		return zone
-	}
-	return stored
+	return s.store.UpdateHostedZoneStatus(zone)
 }
 
 func (s *Server) hostedDNSZonePreflightOptionsFromRequest(r *http.Request, zoneName string) dnsDelegationPreflightOptions {

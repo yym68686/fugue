@@ -13,7 +13,7 @@ for fugue-edge Caddy static loading.
 Options:
   --dns-provider <provider>     DNS hook provider: fugue or cloudflare. Default: fugue.
   --api-url <url>               Fugue API URL for --dns-provider fugue. Defaults to FUGUE_API_URL.
-  --api-key <token>             Fugue API key for --dns-provider fugue. Defaults to FUGUE_API_KEY/FUGUE_TOKEN/FUGUE_BOOTSTRAP_KEY.
+  --api-key <token>             Prefer a domain-scoped certificate identity in FUGUE_ACME_API_KEY; legacy admin environment variables are also supported.
   --cloudflare-env-file <path>  Legacy env file containing a Cloudflare token.
   --namespace <namespace>       Kubernetes namespace. Default: fugue-system.
   --secret-name <name>          Kubernetes TLS Secret name. Default: fugue-app-wildcard-tls.
@@ -93,7 +93,7 @@ domain="${FUGUE_APP_BASE_DOMAIN:-}"
 server="${ACME_SERVER:-letsencrypt}"
 dns_provider="${FUGUE_ACME_DNS_PROVIDER:-fugue}"
 api_url="${FUGUE_API_URL:-}"
-api_key="${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}"
+api_key="${FUGUE_ACME_API_KEY:-${FUGUE_API_KEY:-${FUGUE_TOKEN:-${FUGUE_BOOTSTRAP_KEY:-}}}}"
 cloudflare_env_file="${CLOUDFLARE_ENV_FILE:-}"
 acme_home="${ACME_HOME:-}"
 acme_cmd="${ACME_SH:-acme.sh}"
@@ -242,9 +242,8 @@ dns_fugue_add() {
   payload=$(printf '{"zone":"%s","name":"%s","value":"%s","ttl":%s,"owner":"%s","expires_in_seconds":%s}' "${FUGUE_ACME_ZONE}" "${fulldomain}" "${txtvalue}" "${FUGUE_ACME_CHALLENGE_TTL:-60}" "${FUGUE_ACME_OWNER:-wildcard-tls}" "${FUGUE_ACME_EXPIRES_IN_SECONDS:-3600}")
   response=$(_fugue_api_request POST "/v1/dns/acme-challenges" "${payload}") || return 1
   challenge_id=$(printf '%s' "${response}" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
-  if [ -n "${challenge_id}" ] && [ -n "${FUGUE_ACME_CHALLENGE_STATE_DIR}" ]; then
-    printf '%s' "${challenge_id}" >"${FUGUE_ACME_CHALLENGE_STATE_DIR}/$(_fugue_state_key "${fulldomain}" "${txtvalue}").id"
-  fi
+  [ -n "${challenge_id}" ] && [ -n "${FUGUE_ACME_CHALLENGE_STATE_DIR}" ] || return 1
+  printf '%s' "${challenge_id}" >"${FUGUE_ACME_CHALLENGE_STATE_DIR}/$(_fugue_state_key "${fulldomain}" "${txtvalue}").id"
 }
 
 dns_fugue_rm() {
@@ -252,13 +251,19 @@ dns_fugue_rm() {
   txtvalue="$2"
   state_file="${FUGUE_ACME_CHALLENGE_STATE_DIR}/$(_fugue_state_key "${fulldomain}" "${txtvalue}").id"
   if [ ! -r "${state_file}" ]; then
-    return 0
+    return 1
   fi
   challenge_id=$(cat "${state_file}")
   if [ -z "${challenge_id}" ]; then
-    return 0
+    return 1
   fi
-  _fugue_api_request DELETE "/v1/dns/acme-challenges/${challenge_id}" >/dev/null || return 0
+  status=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+    -H "Authorization: Bearer ${FUGUE_ACME_API_KEY}" \
+    "${FUGUE_ACME_API_URL%/}/v1/dns/acme-challenges/${challenge_id}") || return 1
+  case "${status}" in
+    2??|404) return 0 ;;
+    *) printf 'Fugue challenge cleanup failed (HTTP %s)\n' "${status}" >&2; return 1 ;;
+  esac
 }
 HOOK
   chmod 0755 "${dnsapi_dir}/dns_fugue.sh"

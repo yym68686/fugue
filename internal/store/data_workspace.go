@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -266,7 +267,7 @@ func (s *Store) GetDataBackendForUse(idOrName, tenantID string, platformAdmin bo
 	return backend, err
 }
 
-func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool) (model.DataBackend, error) {
+func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool, actors ...model.Principal) (model.DataBackend, error) {
 	idOrName = strings.TrimSpace(idOrName)
 	if idOrName == "" {
 		return model.DataBackend{}, ErrInvalidInput
@@ -275,20 +276,25 @@ func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool)
 		return model.DataBackend{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgDeleteDataBackend(idOrName, tenantID, platformAdmin)
+		return s.pgDeleteDataBackend(idOrName, tenantID, platformAdmin, actors)
 	}
 	var deleted model.DataBackend
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
+		index := findManagedBackend(state, idOrName, tenantID, platformAdmin)
 		if index < 0 {
 			return ErrNotFound
 		}
+		if state.DataBackends[index].ID == defaultDataBackendID {
+			return ErrInvalidInput
+		}
 		for _, workspace := range state.DataWorkspaces {
-			if workspace.StorageBackendID == state.DataBackends[index].ID {
+			b := state.DataBackends[index]
+			if workspace.StorageBackendID == b.ID || (dataTenantAllowed(b.TenantID, workspace.TenantID, false) && (strings.EqualFold(workspace.StorageBackendID, b.Name) || workspace.StorageBackendID == b.Slug)) {
 				return ErrConflict
 			}
 		}
 		deleted = state.DataBackends[index]
+		recordMutation(state, mutationEvent(actors, "data.backend.delete", "data_backend", deleted.ID, deleted.TenantID))
 		state.DataBackends = append(state.DataBackends[:index], state.DataBackends[index+1:]...)
 		return nil
 	})
@@ -298,17 +304,17 @@ func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool)
 	return model.RedactDataBackendCredentials(deleted), nil
 }
 
-func (s *Store) RotateDataBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials) (model.DataBackend, error) {
+func (s *Store) RotateDataBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials, actors ...model.Principal) (model.DataBackend, error) {
 	idOrName = strings.TrimSpace(idOrName)
 	if idOrName == "" || !dataBackendCredentialsPresent(credentials) {
 		return model.DataBackend{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgRotateDataBackendCredentials(idOrName, tenantID, platformAdmin, credentials)
+		return s.pgRotateDataBackendCredentials(idOrName, tenantID, platformAdmin, credentials, actors)
 	}
 	var rotated model.DataBackend
 	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
+		index := findManagedBackend(state, idOrName, tenantID, platformAdmin)
 		if index < 0 {
 			return ErrNotFound
 		}
@@ -339,6 +345,7 @@ func (s *Store) RotateDataBackendCredentials(idOrName, tenantID string, platform
 		backend.UpdatedAt = now
 		state.DataBackends[index] = backend
 		rotated = backend
+		recordMutation(state, mutationEvent(actors, "data.backend.credentials.rotate", "data_backend", backend.ID, backend.TenantID))
 		return nil
 	})
 	if err != nil {
@@ -460,7 +467,8 @@ func (s *Store) CreateDataWorkspace(workspace model.DataWorkspace) (model.DataWo
 		if workspace.StorageBackendID == "" {
 			workspace.StorageBackendID = defaultDataBackendID
 		}
-		if findDataBackend(state, workspace.StorageBackendID) < 0 {
+		backendIndex := findDataBackend(state, workspace.StorageBackendID)
+		if backendIndex < 0 || !dataTenantAllowed(state.DataBackends[backendIndex].TenantID, workspace.TenantID, false) {
 			return ErrNotFound
 		}
 		if workspace.ID == "" {
@@ -522,10 +530,11 @@ func (s *Store) updateDataWorkspace(idOrName, tenantID string, platformAdmin boo
 			if backendID == "" {
 				backendID = defaultDataBackendID
 			}
-			if findDataBackendByIDNameOrSlug(state, backendID, workspace.TenantID, platformAdmin) < 0 {
+			idx := findDataBackendByIDNameOrSlug(state, backendID, workspace.TenantID, false)
+			if idx < 0 {
 				return ErrNotFound
 			}
-			workspace.StorageBackendID = backendID
+			workspace.StorageBackendID = state.DataBackends[idx].ID
 		}
 		if update.Assets != nil {
 			workspace.Assets = normalizeDataAssets(*update.Assets)
@@ -1525,9 +1534,20 @@ func findDataBackendBySlug(state *model.State, tenantID, slug string) int {
 }
 
 func findDataBackendByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
+	return findMatchingBackend(state, value, tenantID, platformAdmin, false)
+}
+
+func findManagedBackend(state *model.State, value, tenantID string, admin bool) int {
+	return findMatchingBackend(state, value, tenantID, admin, true)
+}
+
+func findMatchingBackend(state *model.State, value, tenantID string, platformAdmin, managing bool) int {
 	value = strings.TrimSpace(value)
 	slug := model.Slugify(value)
 	for idx, backend := range state.DataBackends {
+		if !platformAdmin && managing && (tenantID == "" || backend.TenantID != tenantID) {
+			continue
+		}
 		if !dataTenantAllowed(backend.TenantID, tenantID, platformAdmin) {
 			continue
 		}
@@ -2112,31 +2132,12 @@ ON CONFLICT (backend_id) DO UPDATE SET
 	return tx.Commit()
 }
 
-func (s *Store) pgDeleteDataBackend(idOrName, tenantID string, platformAdmin bool) (model.DataBackend, error) {
-	backend, err := s.pgGetDataBackend(idOrName, tenantID, platformAdmin, false)
-	if err != nil {
-		return model.DataBackend{}, err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var inUse bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_data_workspaces WHERE storage_backend_id = $1)`, backend.ID).Scan(&inUse); err != nil {
-		return model.DataBackend{}, mapDBErr(err)
-	}
-	if inUse {
-		return model.DataBackend{}, ErrConflict
-	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM fugue_data_backends WHERE id = $1`, backend.ID); err != nil {
-		return model.DataBackend{}, mapDBErr(err)
-	}
-	return model.RedactDataBackendCredentials(backend), nil
+func lockManagedBackend(ctx context.Context, tx *sql.Tx, idOrName, tenantID string, admin bool) (model.DataBackend, error) {
+	backend, err := scanDataBackend(tx.QueryRowContext(ctx, `SELECT id, COALESCE(tenant_id, ''), name, slug, provider, bucket, region, endpoint, base_url, prefix, status, capabilities_json, credentials_json, created_at, updated_at FROM fugue_data_backends WHERE (id=$1 OR name=$1 OR slug=$2) AND ($3 OR tenant_id=NULLIF($4,'')) ORDER BY (id=$1) DESC,id LIMIT 1 FOR UPDATE`, idOrName, model.Slugify(idOrName), admin, tenantID))
+	return backend, mapDBErr(err)
 }
 
-func (s *Store) pgRotateDataBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials) (model.DataBackend, error) {
-	backend, err := s.pgGetDataBackend(idOrName, tenantID, platformAdmin, false)
-	if err != nil {
-		return model.DataBackend{}, err
-	}
+func (s *Store) pgDeleteDataBackend(idOrName, tenantID string, platformAdmin bool, actors []model.Principal) (model.DataBackend, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -2144,6 +2145,38 @@ func (s *Store) pgRotateDataBackendCredentials(idOrName, tenantID string, platfo
 		return model.DataBackend{}, err
 	}
 	defer tx.Rollback()
+	backend, err := lockManagedBackend(ctx, tx, idOrName, tenantID, platformAdmin)
+	if err != nil {
+		return model.DataBackend{}, err
+	}
+	if backend.ID == defaultDataBackendID {
+		return model.DataBackend{}, ErrInvalidInput
+	}
+	var inUse bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_data_workspaces WHERE storage_backend_id = $1 OR (($2='' OR tenant_id=$2) AND (lower(storage_backend_id)=lower($3) OR storage_backend_id=$4)))`, backend.ID, backend.TenantID, backend.Name, backend.Slug).Scan(&inUse); err != nil {
+		return model.DataBackend{}, mapDBErr(err)
+	}
+	if inUse {
+		return model.DataBackend{}, ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_data_backends WHERE id = $1`, backend.ID); err != nil {
+		return model.DataBackend{}, mapDBErr(err)
+	}
+	return model.RedactDataBackendCredentials(backend), s.commitMutation(ctx, tx, mutationEvent(actors, "data.backend.delete", "data_backend", backend.ID, backend.TenantID))
+}
+
+func (s *Store) pgRotateDataBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials, actors []model.Principal) (model.DataBackend, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.DataBackend{}, err
+	}
+	defer tx.Rollback()
+	backend, err := lockManagedBackend(ctx, tx, idOrName, tenantID, platformAdmin)
+	if err != nil {
+		return model.DataBackend{}, err
+	}
 	now := time.Now().UTC()
 	redacted := redactAccessKeyOnly(credentials)
 	credentialsJSON, err := marshalJSON(redacted)
@@ -2186,7 +2219,7 @@ ON CONFLICT (backend_id) DO UPDATE SET ciphertext = EXCLUDED.ciphertext, key_id 
 		return model.DataBackend{}, mapDBErr(err)
 	}
 	rotated.CredentialSecretID = secret.ID
-	if err := tx.Commit(); err != nil {
+	if err := s.commitMutation(ctx, tx, mutationEvent(actors, "data.backend.credentials.rotate", "data_backend", rotated.ID, rotated.TenantID)); err != nil {
 		return model.DataBackend{}, err
 	}
 	return model.RedactDataBackendCredentials(rotated), nil
@@ -2319,7 +2352,8 @@ func (s *Store) pgCreateDataWorkspace(workspace model.DataWorkspace) (model.Data
 	}
 	created, err := scanDataWorkspace(s.db.QueryRowContext(ctx, `
 INSERT INTO fugue_data_workspaces (id, tenant_id, project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, $12), $8, $9, $10, $11, $11)
+SELECT $1, $2, $3, $4, $5, $6, b.id, $8, $9, $10, $11, $11
+FROM (SELECT id FROM fugue_data_backends WHERE id=COALESCE($7::text,$12) AND (tenant_id IS NULL OR tenant_id=$2) FOR KEY SHARE) b
 RETURNING id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
 `, workspace.ID, nullIfEmpty(workspace.TenantID), workspace.ProjectID, workspace.Name, workspace.Slug, workspace.DefaultRegion, nullIfEmpty(workspace.StorageBackendID), workspace.QuotaBytes, workspace.UsedBytes, assetsJSON, workspace.CreatedAt, defaultDataBackendID))
 	if err != nil {
@@ -2362,12 +2396,14 @@ func (s *Store) pgUpdateDataWorkspace(idOrName, tenantID string, platformAdmin b
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return scanDataWorkspace(s.db.QueryRowContext(ctx, `
+	workspace, err := scanDataWorkspace(s.db.QueryRowContext(ctx, `
 UPDATE fugue_data_workspaces
-SET project_id = $2, name = $3, slug = $4, default_region = $5, storage_backend_id = $6, quota_bytes = $7, assets_json = $8, updated_at = $9
-WHERE id = $1
+SET project_id = $2, name = $3, slug = $4, default_region = $5, storage_backend_id = b.backend_id, quota_bytes = $7, assets_json = $8, updated_at = $9
+FROM (SELECT id AS backend_id FROM fugue_data_backends WHERE (id=$6 OR name=$6 OR slug=$11) AND (tenant_id IS NULL OR tenant_id=$10) ORDER BY (id=$6) DESC,id LIMIT 1 FOR KEY SHARE) b
+WHERE fugue_data_workspaces.id = $1
 RETURNING id, COALESCE(tenant_id, ''), project_id, name, slug, default_region, storage_backend_id, quota_bytes, used_bytes, assets_json, created_at, updated_at
-`, current.ID, current.ProjectID, current.Name, current.Slug, current.DefaultRegion, current.StorageBackendID, current.QuotaBytes, assetsJSON, current.UpdatedAt))
+`, current.ID, current.ProjectID, current.Name, current.Slug, current.DefaultRegion, current.StorageBackendID, current.QuotaBytes, assetsJSON, current.UpdatedAt, current.TenantID, model.Slugify(current.StorageBackendID)))
+	return workspace, mapDBErr(err)
 }
 
 func (s *Store) pgDeleteDataWorkspace(idOrName, tenantID string, platformAdmin bool) (model.DataWorkspace, error) {

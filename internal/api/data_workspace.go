@@ -324,12 +324,11 @@ func (s *Server) handleDeleteDataBackend(w http.ResponseWriter, r *http.Request)
 		httpx.WriteError(w, http.StatusForbidden, "missing data.admin scope")
 		return
 	}
-	backend, err := s.store.DeleteDataBackend(r.PathValue("backend_id"), principal.TenantID, principal.IsPlatformAdmin())
+	backend, err := s.store.DeleteDataBackend(r.PathValue("backend_id"), principal.TenantID, principal.IsPlatformAdmin(), principal)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "data.backend.delete", "data_backend", backend.ID, backend.TenantID, map[string]string{"name": backend.Name})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"backend": backend, "deleted": true})
 }
 
@@ -346,12 +345,11 @@ func (s *Server) handleRotateDataBackendCredentials(w http.ResponseWriter, r *ht
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	backend, err := s.store.RotateDataBackendCredentials(r.PathValue("backend_id"), principal.TenantID, principal.IsPlatformAdmin(), req.Credentials)
+	backend, err := s.store.RotateDataBackendCredentials(r.PathValue("backend_id"), principal.TenantID, principal.IsPlatformAdmin(), req.Credentials, principal)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	s.appendAudit(principal, "data.backend.credentials.rotate", "data_backend", backend.ID, backend.TenantID, map[string]string{"name": backend.Name})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"backend": backend, "rotated": true})
 }
 

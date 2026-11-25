@@ -6,6 +6,7 @@ import (
 )
 
 const (
+	HostedZoneStatusPendingOwnership  = "pending_ownership"
 	HostedZoneStatusPendingDelegation = "pending_delegation"
 	HostedZoneStatusActive            = "active"
 	HostedZoneStatusDegraded          = "degraded"
@@ -149,6 +150,8 @@ func NormalizeHostedZoneStatus(status string) string {
 	switch strings.TrimSpace(strings.ToLower(status)) {
 	case "", HostedZoneStatusPendingDelegation:
 		return HostedZoneStatusPendingDelegation
+	case HostedZoneStatusPendingOwnership:
+		return HostedZoneStatusPendingOwnership
 	case HostedZoneStatusActive:
 		return HostedZoneStatusActive
 	case HostedZoneStatusDegraded:

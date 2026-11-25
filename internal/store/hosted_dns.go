@@ -30,7 +30,7 @@ func (s *Store) ListHostedZones(tenantID string, platformAdmin bool) ([]model.Ho
 			if zone.Status == model.HostedZoneStatusDeleted {
 				continue
 			}
-			if !platformAdmin && tenantID != "" && zone.TenantID != tenantID {
+			if !platformAdmin && (tenantID == "" || zone.TenantID != tenantID) {
 				continue
 			}
 			zones = append(zones, zone)
@@ -64,59 +64,72 @@ func (s *Store) GetHostedZoneByName(zoneName string) (model.HostedZone, error) {
 	return zone, err
 }
 
-func (s *Store) PutHostedZone(zone model.HostedZone) (model.HostedZone, error) {
+// PutHostedZone registers a new zone. Repeated registration cannot update its owner or state.
+func (s *Store) PutHostedZone(zone model.HostedZone, actors ...model.Principal) (model.HostedZone, error) {
+	if zone.ID == "" {
+		zone.ID = model.NewSecret("dnszone")
+	}
 	zone, err := normalizeHostedZoneForStore(zone)
 	if err != nil {
 		return model.HostedZone{}, err
 	}
 	if s.usingDatabase() {
-		return s.pgPutHostedZone(zone)
+		return s.pgPutHostedZone(zone, actors)
 	}
-	var out model.HostedZone
 	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findHostedZoneByName(state, zone.ZoneName)
-		if index >= 0 {
-			existing := normalizeHostedZoneForRead(state.HostedZones[index])
-			if existing.ID != zone.ID && zone.ID != "" {
+		if i := findHostedZoneByName(state, zone.ZoneName); i >= 0 {
+			existing := state.HostedZones[i]
+			if existing.TenantID != zone.TenantID || existing.ProjectID != zone.ProjectID {
 				return ErrConflict
 			}
-			if zone.ID == "" {
-				zone.ID = existing.ID
-			}
-			if zone.CreatedAt.IsZero() {
-				zone.CreatedAt = existing.CreatedAt
-			}
-			if zone.CreatedBy == "" {
-				zone.CreatedBy = existing.CreatedBy
-			}
-		} else {
-			if zone.ID == "" {
-				zone.ID = model.NewID("dnszone")
-			}
-			if zone.CreatedAt.IsZero() {
-				zone.CreatedAt = now
-			}
+			zone = existing
+			return nil
 		}
-		zone.UpdatedAt = now
-		if index >= 0 {
-			state.HostedZones[index] = zone
-		} else {
-			state.HostedZones = append(state.HostedZones, zone)
+		if findHostedZoneByID(state, zone.ID) >= 0 {
+			return ErrConflict
 		}
-		out = normalizeHostedZoneForRead(zone)
+		zone.UpdatedAt = time.Now().UTC()
+		if zone.CreatedAt.IsZero() {
+			zone.CreatedAt = zone.UpdatedAt
+		}
+		state.HostedZones = append(state.HostedZones, zone)
+		recordMutation(state, mutationEvent(actors, "dns.zone.create", "dns_zone", zone.ID, zone.TenantID))
 		return nil
 	})
-	return out, err
+	return zone, err
 }
 
-func (s *Store) DeleteHostedZone(zoneName string) (model.HostedZone, error) {
-	zoneName = normalizeDNSZone(zoneName)
+// UpdateHostedZoneStatus only updates the live instance observed by the caller.
+func (s *Store) UpdateHostedZoneStatus(zone model.HostedZone) (model.HostedZone, error) {
+	if s.usingDatabase() {
+		return s.pgUpdateHostedZoneStatus(zone)
+	}
+	err := s.withLockedState(true, func(state *model.State) error {
+		i := findHostedZoneByName(state, zone.ZoneName)
+		if i < 0 {
+			return ErrNotFound
+		}
+		current := &state.HostedZones[i]
+		if current.ID != zone.ID || current.TenantID != zone.TenantID || current.ProjectID != zone.ProjectID || !current.UpdatedAt.Equal(zone.UpdatedAt) {
+			return ErrConflict
+		}
+		current.Status, current.DelegationStatus = zone.Status, zone.DelegationStatus
+		current.ParentNameservers, current.ExpectedNameservers = zone.ParentNameservers, zone.ExpectedNameservers
+		current.LastMessage, current.LastCheckedAt = zone.LastMessage, zone.LastCheckedAt
+		current.UpdatedAt = time.Now().UTC()
+		zone = *current
+		return nil
+	})
+	return zone, err
+}
+
+func (s *Store) DeleteHostedZone(zone model.HostedZone, actors ...model.Principal) (model.HostedZone, error) {
+	zoneName := normalizeDNSZone(zone.ZoneName)
 	if zoneName == "" {
 		return model.HostedZone{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {
-		return s.pgDeleteHostedZone(zoneName)
+		return s.pgDeleteHostedZone(zone, actors)
 	}
 	var removed model.HostedZone
 	err := s.withLockedState(true, func(state *model.State) error {
@@ -125,10 +138,11 @@ func (s *Store) DeleteHostedZone(zoneName string) (model.HostedZone, error) {
 			return ErrNotFound
 		}
 		removed = normalizeHostedZoneForRead(state.HostedZones[index])
-		if removed.Status == model.HostedZoneStatusDeleted {
+		if removed.ID != zone.ID || removed.TenantID != zone.TenantID || removed.ProjectID != zone.ProjectID || removed.Status == model.HostedZoneStatusDeleted {
 			return ErrNotFound
 		}
 		state.HostedZones[index].Status = model.HostedZoneStatusDeleted
+		recordMutation(state, mutationEvent(actors, "dns.zone.delete", "dns_zone", zone.ID, zone.TenantID))
 		state.HostedZones[index].UpdatedAt = time.Now().UTC()
 		return nil
 	})
@@ -220,7 +234,7 @@ func (s *Store) PutDNSRecord(zone model.HostedZone, record model.DNSRecord, over
 	var out model.DNSRecord
 	err = s.withLockedState(true, func(state *model.State) error {
 		zoneIndex := findHostedZoneByID(state, zone.ID)
-		if zoneIndex < 0 {
+		if zoneIndex < 0 || state.HostedZones[zoneIndex].Status == model.HostedZoneStatusDeleted || state.HostedZones[zoneIndex].Status == model.HostedZoneStatusPendingOwnership {
 			return ErrNotFound
 		}
 		existingRecords := make([]model.DNSRecord, 0, len(state.DNSRecords))
@@ -360,7 +374,7 @@ func normalizeHostedZoneForStore(zone model.HostedZone) (model.HostedZone, error
 		return model.HostedZone{}, ErrInvalidInput
 	}
 	if zone.ID == "" {
-		zone.ID = hostedZoneID(zone.ZoneName)
+		return model.HostedZone{}, ErrInvalidInput
 	}
 	return zone, nil
 }
@@ -676,7 +690,7 @@ func findHostedZoneByName(state *model.State, zoneName string) int {
 	}
 	zoneName = normalizeDNSZone(zoneName)
 	for index, zone := range state.HostedZones {
-		if normalizeDNSZone(zone.ZoneName) == zoneName {
+		if zone.Status != model.HostedZoneStatusDeleted && normalizeDNSZone(zone.ZoneName) == zoneName {
 			return index
 		}
 	}
@@ -708,10 +722,6 @@ func findDNSRecord(state *model.State, zoneID, recordID string) int {
 		}
 	}
 	return -1
-}
-
-func hostedZoneID(zoneName string) string {
-	return "dnszone_" + shortHostedDNSHash(normalizeDNSZone(zoneName))
 }
 
 func dnsRecordID(zoneID, fqdn, recordType, source, sourceRefType, sourceRefID string) string {

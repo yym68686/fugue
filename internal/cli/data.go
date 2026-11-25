@@ -611,9 +611,18 @@ func (c *CLI) renderAccountDataStatus(client *Client) error {
 		return nil
 	}
 	fmt.Fprintln(c.stdout, "Your data workspaces:")
+	backendNames := map[string]string{}
+	if backends, err := client.ListDataBackends(); err == nil {
+		for _, b := range backends {
+			backendNames[b.ID] = b.Name
+		}
+	}
 	rows := make([][]string, 0, len(workspaces))
 	for _, workspace := range workspaces {
 		backend := strings.TrimSpace(workspace.StorageBackendID)
+		if name := backendNames[backend]; name != "" {
+			backend = name
+		}
 		if backend == "" {
 			backend = "default"
 		}

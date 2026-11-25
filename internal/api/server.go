@@ -170,6 +170,7 @@ type Server struct {
 	mailDNSLookup                          func(context.Context, string, string) ([]string, error)
 	dnsDelegationProbe                     dnsDelegationProbeFunc
 	dnsParentNSLookup                      dnsParentNSLookupFunc
+	dnsOwnershipTXTLookup                  func(context.Context, string) ([]string, error)
 	logStreamTuning                        logStreamTuning
 	oomRightSizingMu                       sync.Mutex
 	oomRightSizingEvents                   map[string]time.Time

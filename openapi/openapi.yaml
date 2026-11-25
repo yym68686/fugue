@@ -5320,6 +5320,7 @@ paths:
     get:
       operationId: listDNSACMEChallenges
       summary: List DNS ACME Challenges
+      description: Platform administrators can list all records. A delegated certificate identity must select its exact authorized domain and sees only challenges for that certificate name.
       tags: [DNS]
       x-fugue-handler: handleListDNSACMEChallenges
       security:
@@ -5347,6 +5348,7 @@ paths:
     post:
       operationId: upsertDNSACMEChallenge
       summary: Upsert DNS ACME Challenge
+      description: Requires platform administration or an explicit dns.acme:<domain> grant for the exact certificate domain. General tenant DNS permissions cannot manage certificate challenges.
       tags: [DNS]
       x-fugue-handler: handleUpsertDNSACMEChallenge
       security:
@@ -5370,6 +5372,7 @@ paths:
     delete:
       operationId: deleteDNSACMEChallenge
       summary: Delete DNS ACME Challenge
+      description: Platform administrators may clean up any record. Delegated certificate identities may clean up records only for their exact authorized certificate names.
       tags: [DNS]
       x-fugue-handler: handleDeleteDNSACMEChallenge
       security:
@@ -5415,6 +5418,9 @@ paths:
         zone uses that release's explicit hosted-zone templates. Missing or
         invalid verified configuration returns 503 before creating a zone;
         environment nameservers cannot supply a fallback.
+        Registration is idempotent within the same tenant and project; another owner receives 409.
+        New tenant registrations must publish a TXT record at _fugue-ownership.<zone>
+        containing the returned zone ID at the existing DNS provider, then run preflight before delegation.
       tags: [DNS]
       x-fugue-handler: handleCreateHostedDNSZone
       security:
@@ -15444,6 +15450,7 @@ paths:
     delete:
       operationId: deleteDataBackend
       summary: Delete Data Backend
+      description: Requires management authority over the resolved backend. Shared backends require platform administration. Default and referenced backends are protected.
       tags: [Data Workspaces]
       x-fugue-handler: handleDeleteDataBackend
       security:
@@ -15468,6 +15475,7 @@ paths:
     post:
       operationId: rotateDataBackendCredentials
       summary: Rotate Data Backend Credentials
+      description: Requires management authority over the resolved backend. Only platform administrators may rotate shared backend credentials.
       tags: [Data Workspaces]
       x-fugue-handler: handleRotateDataBackendCredentials
       security:
@@ -23907,7 +23915,7 @@ components:
           type: string
         status:
           type: string
-          enum: [pending_delegation, active, degraded, suspended, deleted]
+          enum: [pending_ownership, pending_delegation, active, degraded, suspended, deleted]
         delegation_status:
           type: string
           enum: [pending, ready, error]

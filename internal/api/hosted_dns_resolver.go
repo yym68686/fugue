@@ -41,7 +41,7 @@ func (s *Server) reconcileHostedDNSFlattenRecords(ctx context.Context, now time.
 	cache := map[string]hostedDNSFlattenResult{}
 	updatedCount := 0
 	for _, zone := range zones {
-		if zone.Status == model.HostedZoneStatusDeleted || zone.Status == model.HostedZoneStatusSuspended {
+		if zone.Status == model.HostedZoneStatusDeleted || zone.Status == model.HostedZoneStatusSuspended || zone.Status == model.HostedZoneStatusPendingOwnership {
 			continue
 		}
 		records, err := s.store.ListDNSRecords(zone.ID)
