@@ -62,6 +62,32 @@ env:
         print('Observed root-owned generated entries: 0')
 
 jobs:
+  hosted_continuation_qualification:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/host-parent-qualification-20261125'
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {persist-credentials: false, fetch-depth: 0}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310
+        with: {version: v4.2.0}
+      - name: Verify A withdrawal with B retained in a disposable local database
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d "$RUNNER_TEMP/host-qualification.XXXXXXXX")"
+          pg="$(pg_config --bindir)"
+          port=25431
+          "$pg/initdb" -D "$tmp/data" --auth=trust --encoding=UTF8 --locale=C
+          "$pg/pg_ctl" -D "$tmp/data" -l "$tmp/pg.log" -o "-h 127.0.0.1 -p $port -k $tmp" -w start
+          trap '"$pg/pg_ctl" -D "$tmp/data" -m fast -w stop' EXIT
+          "$pg/createdb" -h 127.0.0.1 -p "$port" fugue_test_host_continuation
+          FUGUE_TEST_DATABASE_URL="postgresql://$(id -un)@127.0.0.1:$port/fugue_test_host_continuation?sslmode=disable" go test -count=1 -v -run '^TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward$' ./internal/store
+      - name: Verify repository, executor TLS and UDP/TCP wire
+        run: make test GOCACHE="$(go env GOCACHE)"
   production_maintenance_plan:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
