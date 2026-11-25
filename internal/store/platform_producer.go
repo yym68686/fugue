@@ -350,6 +350,11 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 		state.PlatformArtifacts = append(state.PlatformArtifacts, a)
 	}
+	if guard.Phase != "" && parent.Metadata[platformconfig.HostedFleetHandoffMetadata] != "" {
+		if err := pgLoadHostedFleetHandoff(ctx, tx, state, guard.BaselineArtifactID); err != nil {
+			return err
+		}
+	}
 	trace.advance(producerGuardReadMembers)
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	_, compositionErr := platformconfig.ValidateReleaseComposition(parent)

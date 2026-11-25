@@ -9,6 +9,71 @@ import (
 	"fugue/internal/model"
 )
 
+const HostedFleetHandoffMetadata = "hosted_fleet_handoff_inherited_digest_v1"
+
+// CompileHostedFleetHandoff may only carry existing custody into the first
+// ordinary baseline of a new fleet-default policy. The only reservation
+// field that can change is the source pin. Do not emit offers, scoped
+// successors, or historical declaration restorations from this input.
+func CompileHostedFleetHandoff(req CompileRequest, source HostedAddressSource) (CompileResult, error) {
+	bad := errors.New("fleet default handoff must carry exact existing hosted address reservations")
+	if len(source.Inherited) == 0 {
+		return CompileResult{}, bad
+	}
+	managed := ManagedChangedHosts(source.PriorIntent, req.Intent)
+	for host := range NewHostedPathReservationHosts(source.Prior, req.Intent, source.EffectiveHolds) {
+		if !slices.Contains(managed, host) {
+			return CompileResult{}, bad
+		}
+	}
+	stable, err := stageSelectedManagedPaths(source.PriorIntent, req, managed)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	stable, err = stageBaselineExternalPaths(source.PriorIntent, stable, ExternalChangedHosts(source.PriorIntent, req.Intent))
+	if err != nil {
+		return CompileResult{}, err
+	}
+	out, err := compileWithInheritedCustody(stable, source)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	if !sameHostedFleetCustody(source.Inherited, out.InputSnapshot.HostedAddressReservations, source.Publication) {
+		return CompileResult{}, bad
+	}
+	digest, err := Digest(source.Inherited)
+	if err != nil {
+		return CompileResult{}, err
+	}
+	out.DNSArtifact.Metadata[HostedFleetHandoffMetadata] = digest
+	out.ReleaseArtifact.Metadata[HostedFleetHandoffMetadata] = digest
+	return out, nil
+}
+
+func sameHostedFleetCustody(before, after []HostedAddressReservation, pin PreviousTrafficPublicationReference) bool {
+	if len(before) == 0 || len(before) != len(after) {
+		return false
+	}
+	custody := make(map[hostedRecordKey]HostedAddressReservation, len(before))
+	for _, reservation := range before {
+		key := hostedRecordKey{reservation.Record.Hostname, reservation.Record.Type}
+		if _, exists := custody[key]; exists || reservation.Source == pin {
+			return false
+		}
+		reservation.Source = pin
+		custody[key] = reservation
+	}
+	for _, reservation := range after {
+		key := hostedRecordKey{reservation.Record.Hostname, reservation.Record.Type}
+		previous, exists := custody[key]
+		if !exists || !reflect.DeepEqual(previous, reservation) {
+			return false
+		}
+		delete(custody, key)
+	}
+	return len(custody) == 0
+}
+
 // CompileHostedBaselineRefresh separates ordinary topology changes from the
 // creation of a new hosted reservation. Use the current capture and the
 // already proven intermediate route bindings, never the previous live facts.

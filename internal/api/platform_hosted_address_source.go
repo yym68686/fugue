@@ -16,6 +16,7 @@ import (
 
 type hostedCapturePlan struct {
 	selected model.PlatformArtifactRelease
+	producer string
 	phase    string
 	hosts    []string
 	external []string
@@ -100,7 +101,7 @@ func (s *Server) discoverHostedCapture(policy platformproducer.Policy, p platfor
 			// shadow instead of moving to paths or releasing deferred B.
 			phase = "after-scoped/" + full.ID
 		}
-		return hostedCapturePlan{selected: full, phase: phase, external: external, managed: hint.managed}, nil
+		return hostedCapturePlan{selected: full, producer: parent.Metadata[platformproducer.PolicyReleaseMetadata], phase: phase, external: external, managed: hint.managed}, nil
 	}
 	if len(p.hostedAddressHolds) == 0 {
 		return plan, nil
@@ -192,6 +193,10 @@ func (s *Server) readHostedAddressSource(ctx context.Context, policy platformpro
 }
 
 func (s *Server) readHostedAddressSourceWith(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, effective []platformconfig.HostedAddressHold, observe trafficSourceObservation) (platformconfig.HostedAddressSource, error) {
+	return s.readHostedAddressSourceFor(ctx, policy, authority, effective, observe, false)
+}
+
+func (s *Server) readHostedAddressSourceFor(ctx context.Context, policy platformproducer.Policy, authority model.PlatformArtifactRelease, effective []platformconfig.HostedAddressHold, observe trafficSourceObservation, handoff bool) (platformconfig.HostedAddressSource, error) {
 	var out platformconfig.HostedAddressSource
 	bad := errors.New("hosted DNS reservation requires current verified global producer, full and physical input")
 	if policy.TargetScope != platformconfig.GlobalScopeKey || policy.Mode != "serving" || policy.PublicationRole != "" || policy.InputSource != "business-static-intent" || authority.ID == "" || authority.FencingToken < 1 {
@@ -203,9 +208,12 @@ func (s *Server) readHostedAddressSourceWith(ctx context.Context, policy platfor
 	}
 	producer, active, ok, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, model.PlatformArtifactReleaseChannelShadow)
 	if err != nil || !ok || producer.ID != authority.ArtifactID || active.ID != authority.ID || active.FencingToken != authority.FencingToken ||
-		s.store.VerifyPlatformArtifactIntegrity(producer) != nil || old.parent.Metadata[platformproducer.PolicyReleaseMetadata] != active.ID ||
-		old.parent.Metadata[platformproducer.DNSPolicyIDMetadata] != policy.DNSPolicyArtifactID || old.parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != policy.DNSPolicyDigest ||
+		s.store.VerifyPlatformArtifactIntegrity(producer) != nil ||
 		old.parent.Metadata[platformproducer.StaticIntentIDMetadata] != policy.StaticIntentArtifactID || old.parent.Metadata[platformproducer.StaticIntentDigestMetadata] != policy.StaticIntentDigest {
+		return out, bad
+	}
+	if !handoff && (old.parent.Metadata[platformproducer.PolicyReleaseMetadata] != active.ID ||
+		old.parent.Metadata[platformproducer.DNSPolicyIDMetadata] != policy.DNSPolicyArtifactID || old.parent.Metadata[platformproducer.DNSPolicyDigestMetadata] != policy.DNSPolicyDigest) {
 		return out, bad
 	}
 	decoded, err := platformproducer.Decode(producer)
@@ -293,7 +301,11 @@ func (s *Server) readHostedAddressSourceWith(ctx context.Context, policy platfor
 	if !old.lkg.ExpiresAt.After(time.Now()) || ctx.Err() != nil {
 		return out, bad
 	}
-	if err = s.store.ValidateDNSProducerSelection(ctx, model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, model.PlatformPublicationPrecondition{ArtifactID: old.parent.ID, ContentHash: old.parent.ContentHash, ReleaseID: old.release.ID, FencingToken: old.release.FencingToken}); err != nil {
+	validate := s.store.ValidateDNSProducerSelection
+	if handoff {
+		validate = s.store.ValidateHostedFleetHandoffSelection
+	}
+	if err = validate(ctx, model.PlatformPublicationPrecondition{ArtifactID: producer.ID, ContentHash: producer.ContentHash, ReleaseID: active.ID, FencingToken: active.FencingToken}, model.PlatformPublicationPrecondition{ArtifactID: old.parent.ID, ContentHash: old.parent.ContentHash, ReleaseID: old.release.ID, FencingToken: old.release.FencingToken}); err != nil {
 		return out, err
 	}
 	return platformconfig.HostedAddressSource{Publication: pin, PriorIntent: old.intent, Prior: payload, PriorRuntime: old.snapshot, PriorRoute: &old.route, PriorTLS: &tls,

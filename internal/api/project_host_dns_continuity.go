@@ -106,6 +106,10 @@ func guardProducedHostedDNSPaths(ctx context.Context, full, next, before, after 
 			ref.DNSArtifactID != before.ID || ref.DNSArtifactDigest != before.ContentHash {
 			return errors.New("shared DNS restore does not bind the selected parent and DNS child")
 		}
+	} else if after.Metadata[platformconfig.HostedFleetHandoffMetadata] != "" {
+		if err := platformconfig.ValidateHostedFleetHandoffTransition(before, after); err != nil {
+			return err
+		}
 	} else if ref != nil {
 		if err := platformconfig.ValidateScopedHostedPublicationTransition(before, after); err != nil {
 			return err

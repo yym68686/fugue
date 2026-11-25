@@ -15,8 +15,20 @@ import (
 // use its normal publication authority. Enforce isolation specifically when
 // first separating a hold from paths, or when those paths actually change.
 func ValidateScopedHostedPublicationTransition(previous, next model.PlatformArtifact) error {
+	return validateScopedHostedPublicationTransition(previous, next, false)
+}
+
+// The policy handoff cannot also consume a pending hosted path edit.
+func ValidateHostedFleetHandoffTransition(previous, next model.PlatformArtifact) error {
+	return validateScopedHostedPublicationTransition(previous, next, true)
+}
+
+func validateScopedHostedPublicationTransition(previous, next model.PlatformArtifact, handoff bool) error {
 	ref, _, err := HostedAddressAuthority(next)
 	if err != nil || ref == nil {
+		if handoff && err == nil {
+			return errors.New("fleet default handoff has no successor reservations")
+		}
 		return err
 	}
 	old, _, err := HostedAddressAuthority(previous)
@@ -24,6 +36,9 @@ func ValidateScopedHostedPublicationTransition(previous, next model.PlatformArti
 		return err
 	}
 	if old == nil {
+		if handoff {
+			return errors.New("fleet default handoff has no inherited reservations")
+		}
 		return ValidateHostedPublicationIsolation(previous, next)
 	}
 	type owner struct{ host, family, app, tenant string }
@@ -97,6 +112,9 @@ func ValidateScopedHostedPublicationTransition(previous, next model.PlatformArti
 	after, e := read(next)
 	if e != nil {
 		return e
+	}
+	if handoff && !reflect.DeepEqual(before, after) {
+		return errors.New("fleet default handoff changes reserved records or their active paths")
 	}
 	for k, previous := range before {
 		if previous.shared && !reflect.DeepEqual(previous.record, after[k].record) {

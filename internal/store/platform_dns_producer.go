@@ -46,6 +46,16 @@ func validateDNSProducerPolicySelection(read dnsRouteSourceReader, pin model.Pla
 // Capture has one coherent read-only witness. Publication separately repeats the
 // policy selection under the already established DNS/source authority locks.
 func (s *Store) ValidateDNSProducerSelection(ctx context.Context, producer, full model.PlatformPublicationPrecondition) error {
+	return s.validateDNSProducerSelection(ctx, producer, full, false)
+}
+
+// The ordinary DNS producer and per-host programs must never call this
+// exception. It is only an input for the global producer's custody handoff.
+func (s *Store) ValidateHostedFleetHandoffSelection(ctx context.Context, producer, full model.PlatformPublicationPrecondition) error {
+	return s.validateDNSProducerSelection(ctx, producer, full, true)
+}
+
+func (s *Store) validateDNSProducerSelection(ctx context.Context, producer, full model.PlatformPublicationPrecondition, handoff bool) error {
 	keys := s.platformArtifactSigningKeyring()
 	check := func(read dnsRouteSourceReader) error {
 		if err := ctx.Err(); err != nil {
@@ -55,11 +65,17 @@ func (s *Store) ValidateDNSProducerSelection(ctx context.Context, producer, full
 			return err
 		}
 		a, r, err := dnsProducerSelection(read, model.PlatformArtifactKindReleaseSet, "global", "full", full, keys)
-		if err != nil || a.Metadata[platformproducer.PolicyReleaseMetadata] != producer.ReleaseID || r.VerificationState != model.PlatformArtifactVerificationStateVerified || r.VerifiedLKGGeneration != a.Generation {
+		if err != nil || r.VerificationState != model.PlatformArtifactVerificationStateVerified || r.VerifiedLKGGeneration != a.Generation {
 			return ErrConflict
 		}
 		lkg, err := read.lkg("global")
 		if err != nil || lkg == nil || lkg.VerifiedByReleaseID != r.ID || !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, a, keys, time.Now().UTC()).Pass {
+			return ErrConflict
+		}
+		if handoff {
+			return validateHostedFleetHandoff(read, producer.ReleaseID, a, r, *lkg, keys)
+		}
+		if a.Metadata[platformproducer.PolicyReleaseMetadata] != producer.ReleaseID {
 			return ErrConflict
 		}
 		return nil

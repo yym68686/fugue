@@ -16,6 +16,36 @@ func ValidateDynamicQualityUpdate(previous, next Policy, static, oldDNS, newDNS 
 	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "dynamic_quality")
 }
 
+// ValidateFleetDefaultOnlyUpdate is narrower than dynamic_quality admission:
+// it cannot change an eligibility, policy, topology or configured order.
+func ValidateFleetDefaultOnlyUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
+	if err := ValidateDynamicQualityUpdate(previous, next, static, oldDNS, newDNS); err != nil {
+		return err
+	}
+	intent, err := DecodeStaticIntent(static)
+	if err != nil {
+		return err
+	}
+	before, err := DecodeProjectionPolicy(oldDNS, intent.Consumers, previous.HostedZoneTemplates)
+	if err != nil {
+		return err
+	}
+	after, err := DecodeProjectionPolicy(newDNS, intent.Consumers, next.HostedZoneTemplates)
+	if err != nil {
+		return err
+	}
+	b, a := before.DNSQueryPolicy.DynamicQuality, after.DNSQueryPolicy.DynamicQuality
+	if b == nil || a == nil || b.FleetDefault == a.FleetDefault && reflect.DeepEqual(b.FleetDefaultHosts, a.FleetDefaultHosts) {
+		return fmt.Errorf("expected an explicit fleet default change")
+	}
+	a.FleetDefault, a.FleetDefaultHosts = b.FleetDefault, b.FleetDefaultHosts
+	after.Generation = before.Generation
+	if !reflect.DeepEqual(before, after) {
+		return fmt.Errorf("fleet default handoff cannot change any other DNS input")
+	}
+	return nil
+}
+
 func ValidateBusinessExplorationUpdate(previous, next Policy, static, oldDNS, newDNS model.PlatformArtifact) error {
 	return validatePhysicalDNSUpdate(previous, next, static, oldDNS, newDNS, "business_exploration")
 }

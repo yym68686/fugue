@@ -31,11 +31,16 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 	parentRef, parentDigest, parentErr := platformconfig.HostedAddressAuthority(parent)
 	restore, restoreErr := platformconfig.HostedDeclarationRestoreAuthority(dns)
 	parentRestore, parentRestoreErr := platformconfig.HostedDeclarationRestoreAuthority(parent)
+	handoff := parent.Metadata[platformconfig.HostedFleetHandoffMetadata]
 	if err != nil || parentErr != nil || digest != parentDigest || restoreErr != nil || parentRestoreErr != nil ||
-		(restore == nil) != (parentRestore == nil) || restore != nil && *restore != *parentRestore {
+		(restore == nil) != (parentRestore == nil) || restore != nil && *restore != *parentRestore ||
+		handoff != dns.Metadata[platformconfig.HostedFleetHandoffMetadata] {
 		return reject
 	}
 	if ref == nil {
+		if handoff != "" {
+			return reject
+		}
 		return nil
 	}
 	if parentRef == nil || *parentRef != *ref || !lkg.ExpiresAt.After(now) ||
@@ -57,8 +62,18 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 	if !valid {
 		return reject
 	}
-	for _, k := range []string{platformproducer.PolicyReleaseMetadata, platformproducer.DNSPolicyIDMetadata, platformproducer.DNSPolicyDigestMetadata, platformproducer.StaticIntentIDMetadata, platformproducer.StaticIntentDigestMetadata} {
-		if parent.Metadata[k] == "" || parent.Metadata[k] != src.Metadata[k] {
+	if handoff == "" {
+		for _, k := range []string{platformproducer.PolicyReleaseMetadata, platformproducer.DNSPolicyIDMetadata, platformproducer.DNSPolicyDigestMetadata, platformproducer.StaticIntentIDMetadata, platformproducer.StaticIntentDigestMetadata} {
+			if parent.Metadata[k] == "" || parent.Metadata[k] != src.Metadata[k] {
+				return reject
+			}
+		}
+	} else {
+		inherited, sourceDigest, err := platformconfig.HostedAddressAuthority(src)
+		if err != nil || inherited == nil || handoff != sourceDigest || restore != nil || parent.Metadata[HostedSuccessorMetadata] != "" ||
+			parent.CreatedByType != model.ActorTypeBootstrap || parent.CreatedByID != platformproducer.Actor ||
+			dns.CreatedByType != model.ActorTypeBootstrap || dns.CreatedByID != platformproducer.Actor ||
+			validateHostedFleetHandoff(stateDNSRouteSourceReader(state), parent.Metadata[platformproducer.PolicyReleaseMetadata], src, baseline, lkg, keys) != nil {
 			return reject
 		}
 	}
@@ -78,7 +93,12 @@ func validateHostedAddressBaseline(state *model.State, parent, dns model.Platfor
 			return reject
 		}
 		if id == ref.DNSArtifactID {
-			if restore != nil {
+			if handoff != "" {
+				_, inheritedDigest, err := platformconfig.HostedAddressAuthority(sourceChild)
+				if err != nil || inheritedDigest != handoff || platformconfig.ValidateHostedFleetHandoffTransition(sourceChild, dns) != nil {
+					return fmt.Errorf("%w: fleet default handoff includes a custody or hosted path change", ErrConflict)
+				}
+			} else if restore != nil {
 				if err := validateHostedDeclarationRestore(state, src, parent, dns, sourceChild, *ref, *restore, keys); err != nil {
 					return err
 				}

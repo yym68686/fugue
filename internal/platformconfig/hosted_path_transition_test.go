@@ -213,6 +213,42 @@ func runHostedPathFixture(t *testing.T, withAlias bool, four func(HostedAddressS
 		t.Fatal("global address borrowed another cell's route authority")
 	}
 	baseline := payload(intermediate)
+	t.Run("fleet_default_handoff", func(t *testing.T) {
+		// The root-only baseline is already verified, but the requested
+		// paths have not been published. A ranking-only successor must
+		// preserve custody (including the alias) without taking the paths.
+		handoff := src
+		handoff.Publication, handoff.Prior = pin("verified", 2), baseline
+		handoff.PriorIntent = capture.baseline.Intent
+		handoff.PriorHolds = hold
+		handoff.Inherited = intermediate.InputSnapshot.HostedAddressReservations
+		out, err := CompileHostedFleetHandoff(next, handoff)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old, new := intermediate.DNSArtifact, out.DNSArtifact
+		old.ScopeKey, new.ScopeKey = GlobalScopeKey, GlobalScopeKey
+		if err := ValidateHostedFleetHandoffTransition(old, new); err != nil {
+			t.Fatal(err)
+		}
+		pending := capture.Desired.DNSArtifact
+		pending.ScopeKey = GlobalScopeKey
+		if err := ValidateHostedFleetHandoffTransition(old, pending); err == nil {
+			t.Fatal("pending path change was accepted as custody-only")
+		}
+		_, digest, err := HostedAddressAuthority(old)
+		if err != nil || digest == "" || new.Metadata[HostedFleetHandoffMetadata] != digest || out.ReleaseArtifact.Metadata[HostedFleetHandoffMetadata] != digest {
+			t.Fatal("signed handoff does not identify original custody", err)
+		}
+		out.InputSnapshot.HostedAddressReservations[0].Physical.Targets[0].EdgeID = "another-edge"
+		if sameHostedFleetCustody(handoff.Inherited, out.InputSnapshot.HostedAddressReservations, handoff.Publication) {
+			t.Fatal("replacement physical identity accepted")
+		}
+		handoff.EffectiveHolds = nil
+		if _, err := CompileHostedFleetHandoff(next, handoff); err == nil {
+			t.Fatal("retained an address without its current hold")
+		}
+	})
 	needed := 1
 	if withAlias {
 		needed = 2

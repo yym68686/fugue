@@ -197,7 +197,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 	}
 	advance("parent_build")
 	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, compiled.ReleaseSet.ArtifactIDs, time.Now().UTC())
-	for _, k := range []string{platformconfig.HostedAddressReservationsDigestMetadata, platformconfig.HostedAddressSourceMetadata, platformconfig.HostedDeclarationRestoreMetadata} {
+	for _, k := range []string{platformconfig.HostedAddressReservationsDigestMetadata, platformconfig.HostedAddressSourceMetadata, platformconfig.HostedDeclarationRestoreMetadata, platformconfig.HostedFleetHandoffMetadata} {
 		if value, ok := compiled.ReleaseArtifact.Metadata[k]; ok {
 			parent.Metadata[k] = value
 		}

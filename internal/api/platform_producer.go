@@ -350,12 +350,21 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
-	restore, restoreBase, err := s.discoverHostedDeclarationRestore(ctx, policy)
-	if err != nil {
-		return interval, err
+	handoff := hosted.producer != "" && hosted.producer != authority.ID
+	var restore *platformconfig.HostedDeclarationRestorePlan
+	var restoreBase model.PlatformArtifactRelease
+	if !handoff {
+		restore, restoreBase, err = s.discoverHostedDeclarationRestore(ctx, policy)
+		if err != nil {
+			return interval, err
+		}
 	}
 	ordinaryOffers := hosted.ordinaryPathOffers()
 	sourceDigest, err = hosted.sourceDigest(sourceDigest)
+	if handoff && err == nil {
+		sourceDigest, err = platformconfig.Digest([]any{platformconfig.HostedFleetHandoffMetadata, sourceDigest, hosted.selected.ID})
+		ordinaryOffers = false
+	}
 	if err != nil {
 		return interval, err
 	}
@@ -415,7 +424,18 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	req := platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication}
 	var compiled platformconfig.CompileResult
 	provenance := platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest}
-	if restore != nil {
+	if handoff {
+		advance("compile_hosted_fleet_handoff")
+		source, e := s.readHostedAddressSourceFor(ctx, policy, authority, projection.hostedAddressHolds, s.observeRetainedTrafficSource, true)
+		if e != nil {
+			return interval, fmt.Errorf("hosted fleet handoff base unavailable: %w", e)
+		}
+		if source.Publication.ReleaseID != hosted.selected.ID || source.Publication.FencingToken != hosted.selected.FencingToken || source.Publication.ReleaseSetID != hosted.selected.ArtifactID {
+			return interval, fmt.Errorf("hosted fleet handoff base changed before compilation")
+		}
+		compiled, err = platformconfig.CompileHostedFleetHandoff(req, source)
+		provenance.hostedSource = source.Publication
+	} else if restore != nil {
 		advance("compile_hosted_declaration_restore")
 		compiled, provenance.hostedSource, err = s.compileHostedDeclarationRestore(ctx, policy, authority, restoreBase, projection.hostedAddressHolds, req, *restore)
 	} else if hosted.phase == "" {
