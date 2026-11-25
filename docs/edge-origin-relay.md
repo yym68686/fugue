@@ -132,6 +132,14 @@ grant authority to renew or mint a future lease.
 For non-off phases, the job requires the verified immutable Worker release
 currently served by both Fronts, exact Pod addresses and slot identities, and
 current nonce-based proofs of the applied route at each pinned public Front.
+For edges with independent public Services, use
+`fugue.edge.origin-relay-policy-release/v2` and set `serving_fronts` to a
+map from each pilot edge to its own `service`, `uid` and serving transport
+`generation`. The `front` and `front_uid` fields in this schema bind the
+immutable Worker release record. Live authority comes from each Service's
+full selector, single ready EndpointSlice target and selected Worker's
+activation. Moving a Service or changing its Front process invalidates an
+in-flight witness.
 It installs egress first; the ingress is not changed until the egress has
 acknowledged the exact policy in its retained fence. For withdrawal it tries
 the ingress first, independently of the peer and of public route health. A

@@ -1220,7 +1220,7 @@ jobs:
           config=deploy/environments/production/edge-origin-relay/policy.json
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
-          if ! git diff --quiet "$base" HEAD -- "$config" cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/test_release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py internal/edge/relayroute; then
+          if ! git diff --quiet "$base" HEAD -- "$config" cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/test_release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py scripts/stage_front_serving_transport.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py internal/edge/relayroute; then
             go test ./cmd/fugue-edge-relay-policy ./internal/edge/relayroute
             python3 -m unittest scripts.test_release_edge_origin_relay_policy
           fi
@@ -2561,7 +2561,7 @@ jobs:
           set -euo pipefail
           directory=deploy/environments/production/edge-origin-relay
           git fetch origin main
-          git diff --quiet HEAD origin/main -- "$directory" deploy/releases/edge-groups.json cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py scripts/verify_dns_configuration_revision.py internal/edge/relayroute
+          git diff --quiet HEAD origin/main -- "$directory" deploy/releases/edge-groups.json cmd/fugue-edge-relay-policy scripts/release_edge_origin_relay_policy.py scripts/stage_edge_origin_relay_trust.py scripts/stage_front_serving_transport.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/verify_dns_configuration_revision.py internal/edge/relayroute
           python3 - "$GITHUB_SHA" "$directory/trust.json" <<'PY'
           import json, subprocess, sys
           from scripts.verify_dns_configuration_revision import workflow_projection

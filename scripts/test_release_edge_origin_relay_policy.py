@@ -166,6 +166,72 @@ class RelayPolicyReleaseTest(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         release.route_proof(self.d, self.trust, "node-1", now)
 
+    def test_service_bound_front_requires_distinct_pins(self):
+        pins = {
+            "node-1": {"service": "front-one", "uid": uid(31), "generation": 4},
+            "node-2": {"service": "front-two", "uid": uid(32), "generation": 5},
+        }
+        plan = {**self.d, "schema": "fugue.edge.origin-relay-policy-release/v2", "serving_fronts": pins}
+        self.assertEqual(release.validate_declaration(plan, self.trust), plan)
+        for key in ("service", "uid"):
+            with self.subTest(repeated=key), self.assertRaises(ValueError):
+                repeated = {"node-1": pins["node-1"], "node-2": {**pins["node-2"], key: pins["node-1"][key]}}
+                release.validate_declaration({**plan, "serving_fronts": repeated}, self.trust)
+
+    def test_service_bound_front_proves_current_endpoint_and_worker(self):
+        ns, group = self.trust["namespace"], self.trust["group"]
+        edge = "node-1"
+        service_uid, pod_uid = uid(31), uid(41)
+        plan = {**self.d, "serving_fronts": {edge: {"service": "front-one", "uid": service_uid, "generation": 4}}}
+        selector = {"app": "front-one", "fugue.io/edge-node": edge}
+        ports = [{"name": "http", "port": 80, "protocol": "TCP", "targetPort": 80},
+                 {"name": "https", "port": 443, "protocol": "TCP", "targetPort": 443}]
+        spec = {"type": "ClusterIP", "selector": selector, "ports": ports,
+                "externalIPs": [plan["public_ips"][edge]], "externalTrafficPolicy": "Local",
+                "publishNotReadyAddresses": False}
+        svc = {"metadata": {"name": "front-one", "namespace": ns, "uid": service_uid, "resourceVersion": "51",
+                            "labels": {"app.kubernetes.io/managed-by": release.serving.MANAGER},
+                            "annotations": {"transport.fugue.dev/phase": "serving",
+                                            release.serving.GENERATION: "4",
+                                            release.serving.DIGEST: release.transport.digest(spec)}},
+               "spec": spec}
+        pod = {"metadata": {"name": "front-one-pod", "namespace": ns, "uid": pod_uid,
+                            "labels": {**selector, "fugue.io/edge-group-id": group}},
+               "spec": {"nodeName": edge},
+               "status": {"podIP": "10.0.0.11", "conditions": [{"type": "Ready", "status": "True"}],
+                          "containerStatuses": [{"name": "edge-front", "ready": True, "containerID": "containerd://front"}]}}
+        slices = {"metadata": {}, "items": [
+            {"metadata": {"ownerReferences": [{"kind": "Service", "uid": service_uid, "controller": True}]},
+             "ports": [{k: p[k] for k in ("name", "port", "protocol")} for p in ports],
+             "endpoints": [{"nodeName": edge, "addresses": [pod["status"]["podIP"]], "conditions": {"ready": True},
+                            "targetRef": {"kind": "Pod", "namespace": ns, "name": "front-one-pod", "uid": pod_uid}}]},
+        ]}
+        image_digest = "sha256:" + "d" * 64
+        health = {"status": "ok", "route_authority": "edge-control", "active_slot": "b", "activation_generation": 19,
+                  "worker_source_commit": plan["worker_config_sha"], "worker_image_digest": image_digest}
+        image = "ghcr.io/example/edge@" + image_digest
+
+        def read(actual_svc=svc, actual_pods=None, actual_slices=slices, actual_health=health):
+            if actual_pods is None:
+                actual_pods = [pod]
+            replies = [actual_svc, {"metadata": {}, "items": actual_pods}, actual_health]
+            with (patch.object(release.trust, "kubectl", side_effect=map(release.trust.canonical, replies)) as kubectl,
+                  patch.object(release.serving.front, "read", return_value=actual_slices)):
+                witness = release.front_witness(plan, self.trust, edge, image)
+                self.assertIn("app=front-one,fugue.io/edge-node=node-1", kubectl.call_args_list[1].args)
+                self.assertTrue(kubectl.call_args.args[-1].endswith("/front-one-pod:7831/proxy/readyz"))
+                return witness
+
+        self.assertEqual(read(), (pod_uid, "b", 19, service_uid, "51", "10.0.0.11", "containerd://front"))
+        wrong_service = deepcopy(svc)
+        wrong_service["metadata"]["annotations"][release.serving.GENERATION] = "5"
+        wrong_endpoint = deepcopy(slices)
+        wrong_endpoint["items"][0]["endpoints"][0]["targetRef"]["uid"] = uid(99)
+        for changed in ({"actual_svc": wrong_service}, {"actual_pods": [pod, pod]},
+                        {"actual_slices": wrong_endpoint}, {"actual_health": {**health, "worker_image_digest": "wrong"}}):
+            with self.subTest(changed=list(changed)), self.assertRaises(ValueError):
+                read(**changed)
+
 
 if __name__ == "__main__":
     unittest.main()

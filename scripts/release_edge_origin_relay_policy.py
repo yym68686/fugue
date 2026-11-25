@@ -18,7 +18,9 @@ import secrets
 import sys
 import time
 
+from scripts import reconcile_front_probe_transport as transport
 from scripts import stage_edge_origin_relay_trust as trust
+from scripts import stage_front_serving_transport as serving
 
 
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -31,7 +33,13 @@ PORT = 8443
 def validate_declaration(d, t):
     keys = {"schema", "worker_config_sha", "monitor", "front", "front_uid", "host", "path",
             "source", "peer", "public_ips", "mode", "generation", "ca_sha256"}
-    if not isinstance(d, dict) or set(d) not in (keys, keys | {"withdrawal_of"}) or d["schema"] != "fugue.edge.origin-relay-policy-release/v1":
+    if not isinstance(d, dict):
+        raise ValueError("invalid pilot declaration")
+    schema = d.get("schema")
+    service_bound = schema == "fugue.edge.origin-relay-policy-release/v2"
+    if service_bound:
+        keys = keys | {"serving_fronts"}
+    if schema not in ("fugue.edge.origin-relay-policy-release/v1", "fugue.edge.origin-relay-policy-release/v2") or set(d) not in (keys, keys | {"withdrawal_of"}):
         raise ValueError("invalid pilot declaration")
     if not (trust.matches(SHA, d["worker_config_sha"]) and trust.matches(trust.DNS_LABEL, d["monitor"])
             and trust.matches(trust.DNS_LABEL, d["front"]) and trust.matches(trust.UID, d["front_uid"])
@@ -47,6 +55,18 @@ def validate_declaration(d, t):
             or any(not isinstance(x, str) or not ipaddress.IPv4Address(x).is_global for x in d["public_ips"].values())
             or len(set(d["public_ips"].values())) != 2):
         raise ValueError("pilot must use exactly the two independently pinned front addresses")
+    if service_bound:
+        fronts = d["serving_fronts"]
+        if not isinstance(fronts, dict) or set(fronts) != edges:
+            raise ValueError("each pilot edge requires its own serving Front Service")
+        for pin in fronts.values():
+            if (not isinstance(pin, dict) or set(pin) != {"service", "uid", "generation"}
+                    or not trust.matches(trust.DNS_LABEL, pin["service"])
+                    or not trust.matches(trust.UID, pin["uid"])
+                    or type(pin["generation"]) is not int or pin["generation"] <= 0):
+                raise ValueError("invalid serving Front Service pin")
+        if any(len({pin[key] for pin in fronts.values()}) != 2 for key in ("service", "uid")):
+            raise ValueError("pilot edges must pin different serving Front Services")
     if "withdrawal_of" in d:
         prior = d["withdrawal_of"]
         if (d["mode"] != "off" or not isinstance(prior, dict) or set(prior) != {"generation", "payload_sha256", "slots"}
@@ -121,6 +141,54 @@ def release_image(d, t):
 
 def front_witness(d, t, edge, image):
     ns = t["namespace"]
+    if "serving_fronts" in d:
+        pin = d["serving_fronts"][edge]
+        svc = trust.strict_json(trust.kubectl("-n", ns, "get", "service", pin["service"], "-o", "json"))
+        meta, spec = svc["metadata"], svc["spec"]
+        ann = meta.get("annotations", {})
+        selector = spec.get("selector", {})
+        projection = {key: spec.get(key) for key in (
+            "type", "selector", "ports", "externalIPs", "externalTrafficPolicy", "publishNotReadyAddresses",
+        )}
+        projection["publishNotReadyAddresses"] = bool(projection["publishNotReadyAddresses"])
+        ports = spec.get("ports", [])
+        if ((meta.get("name"), meta.get("namespace"), meta.get("uid")) != (pin["service"], ns, pin["uid"])
+                or meta.get("deletionTimestamp")
+                or meta.get("labels", {}).get("app.kubernetes.io/managed-by") != serving.MANAGER
+                or ann.get("transport.fugue.dev/phase") != "serving"
+                or ann.get(serving.GENERATION) != str(pin["generation"])
+                or ann.get(serving.DIGEST) != transport.digest(projection)
+                or spec.get("type") != "ClusterIP" or spec.get("externalTrafficPolicy") != "Local"
+                or spec.get("externalIPs") != [d["public_ips"][edge]] or projection["publishNotReadyAddresses"]
+                or selector.get("fugue.io/edge-node") != edge
+                or len(ports) != 2
+                or {(p.get("port"), p.get("targetPort"), p.get("protocol", "TCP")) for p in ports}
+                    != {(80, 80, "TCP"), (443, 443, "TCP")}):
+            raise ValueError("serving Front Service differs from its exact pilot pin")
+        # Match the whole selector across the namespace before comparing it to
+        # the EndpointSlice. A local Pod alone does not establish public ingress.
+        query = ",".join(f"{k}={v}" for k, v in sorted(selector.items()))
+        result = trust.strict_json(trust.kubectl("-n", ns, "get", "pods", "-l", query, "-o", "json"))
+        pods = result["items"]
+        if result["metadata"].get("continue") or len(pods) != 1:
+            raise ValueError("serving Front Service must select one exact Pod")
+        pod = pods[0]
+        pm, ps = pod["metadata"], pod["spec"]
+        containers = [c for c in pod["status"].get("containerStatuses", []) if c["name"] == "edge-front"]
+        if (pm.get("namespace") != ns or pm.get("deletionTimestamp") or ps.get("nodeName") != edge
+                or pm.get("labels", {}).get("fugue.io/edge-group-id") != t["group"]
+                or any(pm.get("labels", {}).get(k) != v for k, v in selector.items())
+                or not trust.ready(pod) or len(containers) != 1 or containers[0].get("ready") is not True
+                or not containers[0].get("containerID")):
+            raise ValueError("serving Front Service selected a different or unready process")
+        endpoint = serving.selected_endpoint_witness({"namespace": ns}, {"name": pin["service"]}, {"node": edge}, pod, svc)
+        ip = private_ip(endpoint["address"])
+        path = f"/api/v1/namespaces/{ns}/pods/{pm['name']}:7831/proxy/readyz"
+        health = trust.strict_json(trust.kubectl("get", "--raw", path))
+        activation = witness_activation(d, image, health)
+        return (pm["uid"], *activation, endpoint["service_uid"], endpoint["service_version"],
+                str(ip), containers[0]["containerID"])
+
     workload = trust.strict_json(trust.kubectl("-n", ns, "get", "daemonset", d["front"], "-o", "json"))
     meta = workload["metadata"]
     if (meta.get("name"), meta.get("uid"), meta.get("namespace")) != (d["front"], d["front_uid"], ns) or meta.get("deletionTimestamp"):
@@ -133,13 +201,17 @@ def front_witness(d, t, edge, image):
     front_ip = private_ip(pod["status"]["podIP"])
     health = trust.strict_json(trust.run(["curl", "--noproxy", "*", "--fail", "--silent", "--show-error", "--max-time", "5",
                                           f"http://{host_literal(front_ip)}:7831/healthz"]))
+    return (pod["metadata"]["uid"], *witness_activation(d, image, health))
+
+
+def witness_activation(d, image, health):
     generation = health.get("activation_generation")
     if (health.get("status") != "ok" or health.get("route_authority") != "edge-control"
             or health.get("active_slot") not in ("a", "b") or type(generation) is not int or generation <= 0
             or health.get("worker_source_commit") != d["worker_config_sha"]
             or health.get("worker_image_digest") != image.split("@")[1]):
         raise ValueError("front is not actively serving the declared Worker release")
-    return pod["metadata"]["uid"], health["active_slot"], generation
+    return health["active_slot"], generation
 
 
 def private_ip(value):
