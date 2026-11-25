@@ -988,7 +988,6 @@ func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) e
 	return writeEdgeNodeQualityRouteTable(w, response.Routes)
 }
 
-
 func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityRoute) error {
 	sorted := append([]model.EdgeNodeQualityRoute(nil), routes...)
 	sort.Slice(sorted, func(i, j int) bool {
