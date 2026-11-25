@@ -132,8 +132,62 @@ def verify_drain(adapter, journal, result, state, old, check_old, check_new, now
     raise ValueError("no witnessed old socket force-close and exact Front evidence by the bounded drain deadline")
 
 
+def verify_retirement(adapter, journal, result, state, old, check_old, check_new, release_old, now, pause, record, declared):
+    """Require actual old and new TLS sockets and the Guardian's Pod/port absence receipt."""
+    start = front.timestamp(result["drain_start"])
+    deadline = start + datetime.timedelta(minutes=10)
+    state_seen, last_alive, peer_closed, released = None, None, None, None
+    expected = declared["witness"]
+    while now() < deadline + datetime.timedelta(seconds=120):
+        if adapter.selected_activation() != state:
+            raise ValueError("the new Worker ceased serving during old-slot retirement")
+        check_new()
+        if released is None and peer_closed is None:
+            try:
+                check_old()
+                last_alive = now()
+            except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, ssl.SSLEOFError):
+                peer_closed = now()
+                if state_seen is None or now() < deadline or expected != "deadline":
+                    raise ValueError("the old TLS connection closed before the declared retirement condition")
+        metrics = adapter.drain_metrics()
+        if (state_seen is None and now() < deadline and metrics.get("last_generation") == state["generation"]
+                and metrics.get("last_deadline_seconds") == int(deadline.timestamp())
+                and metrics.get("last_remaining", 0) > 0 and metrics.get("last_forced") == 0):
+            state_seen = now()
+            record(drain_started={"held": old, "metrics": metrics, "deadline": wire_time(deadline)})
+            if expected == "empty":
+                release_old()
+                released = now()
+        receipt = adapter.retired()
+        if receipt is not None:
+            plan = receipt.get("plan", {})
+            initiated = front.timestamp(receipt["initiated_at"])
+            observed = now()
+            if (plan.get("schema") != "edge-node-worker-retirement/v1" or plan.get("journal_digest") != journal["digest"]
+                    or plan.get("daemonset") != declared["daemonSet"] or plan.get("daemonset_uid") != declared["uid"]
+                    or plan.get("generation") != declared["generation"] or receipt.get("node") != journal["recipient"]["node"]
+                    or receipt.get("worker_uid") != journal["predecessor_worker_uid"] or front.timestamp(receipt["deadline"]) != deadline
+                    or receipt.get("outcome") != expected or state_seen is None or initiated < state_seen or initiated > observed):
+                raise ValueError("retirement receipt does not match the exact Worker, controller, deadline and witness")
+            if expected == "empty":
+                if released is None or not released <= initiated <= observed < deadline or receipt.get("old_sockets") != 0:
+                    raise ValueError("the old Worker did not exit early after the witnessed TLS connection went idle")
+            elif (last_alive is None or peer_closed is None or not deadline <= peer_closed
+                    or last_alive < deadline - datetime.timedelta(seconds=15)
+                    or not deadline <= initiated <= deadline + datetime.timedelta(seconds=45)):
+                raise ValueError("the old Worker was not retired with a live TLS connection held to the deadline")
+            record(retirement_completed={"receipt": receipt, "observed_at": wire_time(observed),
+                                         "last_alive_at": wire_time(last_alive),
+                                         "released_at": wire_time(released) if released else None,
+                                         "peer_closed_at": wire_time(peer_closed) if peer_closed else None})
+            return
+        pause(2 if now() >= deadline - datetime.timedelta(seconds=15) else 5)
+    raise ValueError("no exact old Worker Pod and port retirement evidence")
+
+
 def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_port=None,
-            now=front.now, pause=time.sleep, open_tls=connection.HeldTLS, drain_record=None):
+            now=front.now, pause=time.sleep, open_tls=connection.HeldTLS, drain_record=None, retirement=None):
     """Adapter supplies disk readback and immutable arm/witness/result, not cutover."""
     if slot_phase(journal, adapter.selected_activation()) != "pending":
         raise ValueError("handoff must begin on the exact retained Worker")
@@ -265,7 +319,11 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                                     if fact(sock, target, candidate_addr) != ref:
                                         raise ValueError("new Worker socket changed during the old-Worker drain")
 
-                            verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, drain_record)
+                            if retirement is None:
+                                verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, drain_record)
+                            else:
+                                verify_retirement(adapter, journal, result, state, old, check_old, check_new,
+                                                  retained.close, now, pause, drain_record, retirement)
                         return result
                     pause(3)
                 break

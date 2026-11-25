@@ -50,6 +50,10 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "node-worker-seal" {
 		return runNodeWorkerSeal(os.Args[2:], os.Stdin, os.Stdout)
 	}
+	if len(os.Args) == 2 && os.Args[1] == "node-worker-retirement-version" {
+		_, err := fmt.Fprintln(os.Stdout, workerRetirementSchema)
+		return err
+	}
 	role := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_ROLE"))
 	if role != "guardian" && role != "canary-prober" {
 		return errors.New("FUGUE_RELEASE_GUARDIAN_ROLE must be guardian or canary-prober")

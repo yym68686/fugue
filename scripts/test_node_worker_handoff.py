@@ -1,4 +1,12 @@
 import datetime
+import http.client
+from pathlib import Path
+import shutil
+import socket
+import ssl
+import subprocess
+from tempfile import TemporaryDirectory
+from threading import Thread
 import unittest
 
 from scripts import node_worker_handoff as worker
@@ -242,3 +250,96 @@ class NodeWorkerHandoffTests(unittest.TestCase):
         result["witness"] = dict(result["witness"], held=dict(result["witness"]["held"], id="reopened"))
         with self.assertRaisesRegex(ValueError, "exact connection identities"):
             worker.require_verified(result, f.journal, f.activation, f.witness_input)
+
+
+@unittest.skipUnless(shutil.which("openssl"), "OpenSSL is needed for the loopback TLS fixture")
+class RetirementLoopbackTLSTest(unittest.TestCase):
+    def pair(self, server_tls, client_tls):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            listener.settimeout(3)
+            server = []
+
+            def accept():
+                conn, _ = listener.accept()
+                conn.settimeout(3)
+                server.append(server_tls.wrap_socket(conn, server_side=True))
+
+            thread = Thread(target=accept, daemon=True)
+            thread.start()
+            raw = socket.create_connection(listener.getsockname(), timeout=3)
+            client = client_tls.wrap_socket(raw, server_hostname="worker-test")
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(len(server), 1)
+            self.addCleanup(client.close)
+            self.addCleanup(server[0].close)
+            return client, server[0]
+
+    @staticmethod
+    def roundtrip(client, server):
+        client.sendall(b"x")
+        if server.fileno() >= 0:
+            if server.recv(1) != b"x":
+                raise ValueError("TLS request disappeared")
+            server.sendall(b"y")
+        if client.recv(1) != b"y":
+            raise http.client.RemoteDisconnected("original TLS peer closed")
+
+    def test_early_idle_and_deadline_use_the_original_tls_socket(self):
+        with TemporaryDirectory() as root:
+            key, cert = (str(Path(root) / file) for file in ("key.pem", "cert.pem"))
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
+                            "-nodes", "-days", "1", "-subj", "/CN=worker-test", "-addext", "subjectAltName=DNS:worker-test",
+                            "-keyout", key, "-out", cert], check=True, capture_output=True)
+            server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_tls.load_cert_chain(cert, key)
+            client_tls = ssl.create_default_context(cafile=cert)
+            for target in ("empty", "deadline"):
+                with self.subTest(target=target):
+                    self.exercise(target, server_tls, client_tls)
+
+    def exercise(self, target, server_tls, client_tls):
+        original, legacy = self.pair(server_tls, client_tls)
+        fresh, active = self.pair(server_tls, client_tls)
+        start = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+        deadline = start + datetime.timedelta(minutes=10)
+        clock = start
+        initiated = None
+        events = {}
+        fixture = Fixture()
+        journal, state = fixture.journal, fixture.activation
+        journal["recipient"]["node"] = PROFILE["node"]
+        journal["predecessor_worker_uid"] = "pinned-old"
+        declared = {"daemonSet": "older", "uid": "controller", "generation": 7, "witness": target}
+
+        class Adapter:
+            def selected_activation(self):
+                return state
+
+            def drain_metrics(self):
+                return {"last_generation": state["generation"], "last_deadline_seconds": int(deadline.timestamp()),
+                        "last_remaining": int(legacy.fileno() >= 0), "last_forced": 0}
+
+            def retired(self):
+                if initiated is None:
+                    return None
+                return {"plan": {"schema": "edge-node-worker-retirement/v1", "journal_digest": journal["digest"],
+                                  "daemonset": "older", "daemonset_uid": "controller", "generation": 7},
+                        "node": PROFILE["node"], "worker_uid": "pinned-old", "outcome": target,
+                        "initiated_at": worker.wire_time(initiated), "deadline": worker.wire_time(deadline),
+                        "old_sockets": int(target == "deadline")}
+
+        def pause(seconds):
+            nonlocal clock, initiated
+            clock += datetime.timedelta(seconds=seconds)
+            if initiated is None and (target == "empty" or clock >= deadline):
+                if target == "empty":
+                    self.assertEqual(legacy.recv(1), b"", "client did not actually close its TLS connection")
+                legacy.close()
+                initiated = clock
+
+        worker.verify_retirement(Adapter(), journal, {"drain_start": worker.wire_time(start)}, state, {"id": "original"},
+                                 lambda: self.roundtrip(original, legacy), lambda: self.roundtrip(fresh, active),
+                                 original.close, lambda: clock, pause, lambda **kwargs: events.update(kwargs), declared)
+        self.assertEqual(events["retirement_completed"]["receipt"]["outcome"], target)
+        self.roundtrip(fresh, active)

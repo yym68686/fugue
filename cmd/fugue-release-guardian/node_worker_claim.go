@@ -144,6 +144,9 @@ func (a *frontAuthorityActivator) claimNodeWorker(ctx context.Context, store *re
 	if err != nil {
 		return fence, err
 	}
+	if err := a.requireWorkerRetirementPreflight(ctx, j, r); err != nil {
+		return fence, err
+	}
 	raw, execErr := a.executor.Exec(ctx, a.config.Namespace, r.front.Name, "edge-front", frontActivationCASBinary, "--worker-recipient")
 	var id edgegroupfront.NativeRecipient
 	if execErr != nil || decodeStrictJSON(raw, &id) != nil || id != j.Recipient {

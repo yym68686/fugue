@@ -63,7 +63,7 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 		return true, "", err
 	} else if exists {
 		if result.DrainStart != nil {
-			finished, err := a.refreshNodeWorkerDrain(ctx, store, fence, result.Activation)
+			finished, err := a.reconcileNodeWorkerDrain(ctx, store, fence, result)
 			if err != nil || !finished {
 				return true, "", err
 			}
@@ -147,6 +147,9 @@ func (a *frontAuthorityActivator) prepareOrActivateNodeWorker(ctx context.Contex
 	if err != nil {
 		return err
 	}
+	if err := a.requireWorkerRetirementPreflight(ctx, j, runtime); err != nil {
+		return err
+	}
 	if arm.Held.Target != runtime.prior.target || !a.nodeWorkerConnectionsLive(ctx, runtime, arm.Held) {
 		return errors.New("release job's original TLS connection is no longer present on the retained listener")
 	}
@@ -197,9 +200,10 @@ func (a *frontAuthorityActivator) checkNodeWorkerProjection(ctx context.Context,
 }
 
 func (a *frontAuthorityActivator) readNodeWorkerSelection(ctx context.Context, j edgegroupfront.NodeWorkerJournal, runtime nodeWorkerRuntime) (edgegroupfront.ActivationState, error) {
-	s, err := a.readActivation(ctx, runtime.prior.pod.Name)
-	if err != nil {
-		return s, err
+	raw, err := a.executor.Exec(ctx, a.config.Namespace, runtime.front.Name, "edge-front", "cat", edgegroupfront.NativeStatePath)
+	var s edgegroupfront.ActivationState
+	if err != nil || decodeStrictJSON(raw, &s) != nil || j.Progress(s) == edgegroupfront.NodeWorkerConflict {
+		return s, errors.Join(errors.New("node Worker Front activation is invalid"), err)
 	}
 	var live nodeWorkerFrontHealth
 	if err := readAuthorityRuntimeJSON(ctx, repairHealthEndpoint(runtime.front.Status.PodIP, frontHealthPort, "/healthz"), &live); err != nil ||

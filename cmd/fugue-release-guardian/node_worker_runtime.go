@@ -45,6 +45,10 @@ type nodeWorkerRuntime struct {
 }
 
 func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, j edgegroupfront.NodeWorkerJournal, requireCandidate, requirePublicReady bool) (nodeWorkerRuntime, error) {
+	return a.observeNodeWorkerRuntimeWithRetirement(ctx, j, requireCandidate, requirePublicReady, false)
+}
+
+func (a *frontAuthorityActivator) observeNodeWorkerRuntimeWithRetirement(ctx context.Context, j edgegroupfront.NodeWorkerJournal, requireCandidate, requirePublicReady, excluded bool) (nodeWorkerRuntime, error) {
 	var found nodeWorkerRuntime
 	ns, nodeName, group := a.config.Namespace, j.Recipient.Node, a.config.GroupID
 	if j.Recipient.Group != group {
@@ -144,11 +148,13 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, 
 	if prior.Slot == "b" {
 		port = 28443
 	}
-	if found.prior, err = observeNodeWorkerProcess(local.Items, front, j.PredecessorWorkerUID, prior, hostIP, port); err != nil {
-		return found, fmt.Errorf("retained Worker: %w", err)
-	}
-	if edgegroupfront.NodeWorkerProcessDigest(found.prior.edgeID, found.prior.caddyID) != j.PredecessorProcess {
-		return found, errors.New("retained Worker process changed after the journal was claimed")
+	if !excluded {
+		if found.prior, err = observeNodeWorkerProcess(local.Items, front, j.PredecessorWorkerUID, prior, hostIP, port); err != nil {
+			return found, fmt.Errorf("retained Worker: %w", err)
+		}
+		if edgegroupfront.NodeWorkerProcessDigest(found.prior.edgeID, found.prior.caddyID) != j.PredecessorProcess {
+			return found, errors.New("retained Worker process changed after the journal was claimed")
+		}
 	}
 	found.next, err = observeNodeWorkerProcess(local.Items, front, j.CandidateWorkerUID, j.Candidate, hostIP, j.CandidateHTTPSPort())
 	if err != nil && requireCandidate {

@@ -24,11 +24,23 @@ func (a *frontAuthorityActivator) refreshNodeWorkerDrain(ctx context.Context, st
 	if err != nil {
 		return false, err
 	}
+	if err := a.proveNodeWorkerDrainServing(ctx, j, state, r, false); err != nil {
+		return false, err
+	}
+	grant, err := store.ProjectNodeWorkerDrain(ctx, fence, a.now())
+	if err != nil {
+		return false, err
+	}
+	return nodeWorkerDrainComplete(ctx, repairHealthEndpoint(r.front.Status.PodIP, frontHealthPort, "/metrics"), grant)
+}
+
+func (a *frontAuthorityActivator) proveNodeWorkerDrainServing(ctx context.Context, j edgegroupfront.NodeWorkerJournal,
+	state edgegroupfront.ActivationState, r nodeWorkerRuntime, excluded bool) error {
 	if r.probe.UID == "" {
-		return false, errors.New("bounded Worker drain lost the pinned probe transport")
+		return errors.New("bounded Worker drain lost the pinned probe transport")
 	}
 	if err := a.verifyLocalWorkerServing(ctx, j, r.next, j.Candidate.BundleGeneration); err != nil {
-		return false, err
+		return err
 	}
 	// New TLS handshakes through both declared listeners. The same physical
 	// Front and exact selected Worker binding are verified independently.
@@ -39,20 +51,18 @@ func (a *frontAuthorityActivator) refreshNodeWorkerDrain(ctx context.Context, st
 		})
 		cancel()
 		if err != nil || status != http.StatusOK || shaDigest(payload) != a.config.RouteBodyDigest {
-			return false, errors.Join(fmt.Errorf("bounded Worker drain lost serving health on ingress port %d", port), err)
+			return errors.Join(fmt.Errorf("bounded Worker drain lost serving health on ingress port %d", port), err)
 		}
 	}
-	if err := a.requireSameNodeWorkerRuntime(ctx, j, state, r, true); err != nil {
-		return false, err
+	fresh, err := a.observeNodeWorkerRuntimeWithRetirement(ctx, j, true, true, excluded)
+	if err != nil || !r.sameBinding(fresh, true) {
+		return errors.Join(errors.New("bounded Worker drain physical binding changed"), err)
 	}
-	grant, err := store.ProjectNodeWorkerDrain(ctx, fence, a.now())
-	if err != nil {
-		return false, err
+	selected, err := a.readNodeWorkerSelection(ctx, j, fresh)
+	if err != nil || selected != state {
+		return errors.Join(errors.New("bounded Worker drain serving pointer changed"), err)
 	}
-	// A local completion report releases only the handoff fence. It is not
-	// enough to terminate or allocate any Worker: other Fronts and rollback
-	// retention have independent safety and capacity gates.
-	return nodeWorkerDrainComplete(ctx, repairHealthEndpoint(r.front.Status.PodIP, frontHealthPort, "/metrics"), grant)
+	return nil
 }
 
 func nodeWorkerDrainComplete(ctx context.Context, addr string, grant edgegroupfront.WorkerDrainGrant) (bool, error) {

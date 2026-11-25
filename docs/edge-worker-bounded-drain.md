@@ -48,7 +48,30 @@ sharing the activation must be resolved before issuing the grant. An
 unselected Front without an ingress may retain its established sockets; they
 are outside the grant and do not by themselves prevent switching new traffic.
 
-The local completion signal releases the handoff fence, not permission to
-reclaim a Worker. The release must still account for connections on any other
-Front and keep an exact rollback Worker until a separate retirement check
-passes. Do not replace a Front in place while it is selected or holds sessions.
+Without a retirement declaration, local completion releases the handoff fence
+but leaves the old Worker installed. It never implicitly authorizes reclaiming
+a Worker.
+
+For fixed slots, a main-branch node Worker handoff may include `retirement`:
+the exact old DaemonSet name, UID and generation and an `empty` or `deadline`
+TLS witness. The witness selects how the verifier uses its socket; it does not
+change the Guardian's retirement policy. Once the new Worker has verified
+public and probe ingress, Guardian continues renewing health at the original
+deadline. It retires as soon as both Front completion and the old Worker's
+IPv4/IPv6 listener sockets are quiet, or at the deadline with the new Worker
+still proven healthy. The old Worker's kernel inventory includes connections
+arriving through a different Front.
+
+Retirement changes only the journal node's eligibility for the exact old
+OnDelete DaemonSet. It does not roll the other nodes. The same update persists
+the retirement decision; Guardian can resume it after a lost update reply or
+a restart. A terminal retirement receipt requires the absent old Pod, observed
+controller generation, no replacement, and both former ports proven closed.
+An unhealthy new Worker or a competing ingress withholds retirement. Do not
+replace a Front in place while it is selected or holds sessions.
+
+The next handoff may explicitly rearm a parked candidate from that terminal
+receipt. This restores scheduling for the same node and pinned artifact
+without changing the active slot. Changing the candidate artifact is a
+separate release operation; rearm is not permission to install an unverified
+image or overlap a third Worker.

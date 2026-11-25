@@ -1,5 +1,7 @@
 """Run one declared node Worker handoff via the installed Release Guardian."""
 import argparse
+import copy
+from contextlib import ExitStack
 import hashlib
 import http.client
 import ipaddress
@@ -15,6 +17,7 @@ from scripts import node_worker_handoff as handoff
 from scripts import observe_front_candidate as front
 from scripts import reconcile_front_probe_transport as kube
 from scripts import replace_front_executor as replacement
+from scripts import retire_front_hostport as parking
 from scripts import stage_front_serving_transport as stage
 
 GUARDIAN = "/usr/local/bin/fugue-release-guardian"
@@ -43,7 +46,9 @@ def validate(config):
     fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe"
            + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else "")
            + (" verifyDrain" if isinstance(config, dict) and "verifyDrain" in config else "")
-           + (" fixedRotation" if isinstance(config, dict) and "fixedRotation" in config else ""))
+           + (" fixedRotation" if isinstance(config, dict) and "fixedRotation" in config else "")
+           + (" retirement" if isinstance(config, dict) and "retirement" in config else "")
+           + (" rearm" if isinstance(config, dict) and "rearm" in config else ""))
     require("verifyDrain" not in config or (config["verifyDrain"] is True and "probeIngress" in config),
             "drain evidence requires an explicit independent probe ingress")
     require(config["schema"] == "fugue.node-worker-handoff/v1"
@@ -57,6 +62,17 @@ def validate(config):
     require(not fixed or "probeIngress" in config, "fixed Worker handoff requires the independent probe transport")
     require("fixedRotation" not in config or (config["fixedRotation"] is True and fixed and config.get("verifyDrain") is True),
             "fixed rotation requires a fixed Worker and retained-connection drain evidence")
+    if "retirement" in config:
+        retirement = config["retirement"]
+        fields(retirement, "daemonSet uid generation witness")
+        require(fixed and config.get("verifyDrain") is True and matches(NAME, retirement["daemonSet"])
+                and retirement["daemonSet"] != candidate["daemonSet"] and matches(UID, retirement["uid"])
+                and type(retirement["generation"]) is int and retirement["generation"] > 0
+                and retirement["witness"] in ("empty", "deadline"), "retirement must pin the exact old Worker controller and witness")
+    if "rearm" in config:
+        fields(config["rearm"], "journalDigest")
+        require("retirement" in config and matches(DIGEST, config["rearm"]["journalDigest"]),
+                "candidate rearm must pin the prior retirement receipt and a new node-local handoff")
     addr = ipaddress.ip_address(public["address"])
     require(addr.version == 4 and addr.is_global and public["address"] == str(addr)
             and matches(NAME, public["service"]) and matches(UID, public["uid"])
@@ -171,6 +187,49 @@ def controller(obj):
     return one([r for r in obj["metadata"].get("ownerReferences", []) if r.get("controller") is True], "controller owner")
 
 
+def peer_template(owner, config, journal):
+    """Ignore only this journal's target exclusion, never peer placement or images."""
+    template = owner["spec"]["template"]
+    retire = config.get("retirement")
+    if not retire or not journal or obj_uid(owner) != retire["uid"]:
+        return template
+    node = config["node"]
+    key = "fugue.pro/worker-retired-" + hashlib.sha256(node.encode()).hexdigest()[:20]
+    wire = owner["metadata"].get("annotations", {}).get(key)
+    if wire is None:
+        return template
+    decision = json.loads(wire)
+    require(decision.get("node") == node and decision.get("worker_uid") == journal["predecessor_worker_uid"]
+            and decision.get("plan", {}).get("journal_digest") == journal["digest"]
+            and owner["metadata"]["generation"] == retire["generation"] + 1,
+            "unexpected mutation of the old Worker controller")
+    return remove_target_exclusion(template, node)
+
+
+def remove_target_exclusion(template, node):
+    template = copy.deepcopy(template)
+    spec = template["spec"]
+    affinity = spec["affinity"]
+    node_affinity = affinity["nodeAffinity"]
+    terms = node_affinity["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+    require(bool(terms), "old Worker controller lacks the exact node exclusion")
+    expected = {"key": "metadata.name", "operator": "NotIn", "values": [node]}
+    for t in terms:
+        require(t.get("matchFields", []).count(expected) == 1, "node exclusion changed peer placement")
+        t["matchFields"].remove(expected)
+        if not t["matchFields"]:
+            del t["matchFields"]
+    if terms == [{}]:
+        del node_affinity["requiredDuringSchedulingIgnoredDuringExecution"]
+    else:
+        require(all(terms), "node exclusion changed another choice")
+    if not node_affinity:
+        del affinity["nodeAffinity"]
+    if not affinity:
+        del spec["affinity"]
+    return template
+
+
 class ActiveCluster:
     def __init__(self, config):
         self.config, self.ns = config, config["namespace"]
@@ -259,6 +318,102 @@ class ActiveCluster:
         require(run.returncode == 0 and len(run.stdout) <= 16 << 10, "selected Front native observation failed")
         return json.loads(run.stdout)
 
+    def rearm_candidate(self, selected, guardian, expected):
+        """Re-enable one parked listener only after its previous retirement completed."""
+        c, can = self.config, self.config["candidate"]
+        digest = c["rearm"]["journalDigest"]
+        node = c["node"]
+        record_name = "fugue-node-worker-retired-" + digest[7:39]
+        record = self.get_config(record_name)
+        require(record is not None and record.get("immutable") is True and not record.get("binaryData")
+                and set(record.get("data", {})) == {"retired.json"}, "candidate has no immutable retirement receipt")
+        meta = record["metadata"]
+        require(meta.get("name") == record_name and meta.get("namespace") == self.ns and meta.get("uid")
+                and meta.get("resourceVersion") and not meta.get("deletionTimestamp")
+                and meta.get("labels", {}).get("app.kubernetes.io/managed-by") == "fugue-release-guardian"
+                and meta.get("labels", {}).get("fugue.pro/group") == c["group"]
+                and meta.get("labels", {}).get("fugue.pro/authority-kind") == "node-worker-retired",
+                "candidate retirement receipt is not owned by Guardian")
+        decision = json.loads(record["data"]["retired.json"])
+        plan = decision.get("plan", {})
+        require(decision.get("node") == node and plan.get("schema") == "edge-node-worker-retirement/v1"
+                and plan.get("journal_digest") == digest and plan.get("daemonset") == can["daemonSet"]
+                and matches(UID, plan.get("daemonset_uid")) and type(plan.get("generation")) is int,
+                "candidate retirement receipt is for a different node or controller")
+        require(self.exec_guardian(guardian, "node-worker-retirement-version", b"").strip() == b"edge-node-worker-retirement/v1",
+                "cannot rearm without the installed retirement-capable Guardian")
+        lease_helper = parking.Cluster(c)
+        suffix = hashlib.sha256(node.encode()).hexdigest()[:20]
+        parked_key, enabled_key = "fugue.pro/worker-retired-" + suffix, "fugue.pro/worker-rearmed-" + suffix
+        component, group = can["component"], c["group"]
+        with ExitStack() as stack:
+            locks = []
+            for name, labels, ttl in (
+                    ("fugue-production-" + component,
+                     {"app.kubernetes.io/managed-by": "fugue-declarative-release", "fugue.pro/component": component}, 900),
+                    ("fugue-authority-" + group,
+                     {"app.kubernetes.io/managed-by": "fugue-release-guardian", "fugue.pro/group": group}, 120)):
+                lock = lease_helper.lock(name, labels, ttl)
+                locks.append(lock)
+                stack.callback(lease_helper.unlock, lock)
+            lease_helper.no_worker_transaction()
+            public = self.read_service(dict(c["front"], node=node))
+            alive, _ = self.service_front(public, node)
+            require(obj_uid(alive) == obj_uid(selected) and front.state(self.profile, alive) == expected,
+                    "serving Front changed before candidate rearm")
+            self.require_probe_ingress(c["probeIngress"], public, alive)
+            ds = self.get("daemonset", can["daemonSet"])
+            m, spec = ds["metadata"], ds["spec"]
+            template = spec["template"]
+            edge = one([container for container in template["spec"]["containers"] if container["name"] == "edge"], "candidate Worker edge")
+            require(obj_uid(ds) == plan["daemonset_uid"] and not m.get("deletionTimestamp")
+                    and spec["updateStrategy"]["type"] == "OnDelete"
+                    and template["metadata"].get("labels", {}).get("fugue.io/edge-slot") == can["slot"]
+                    and template["metadata"].get("labels", {}).get("fugue.io/edge-group-id") == group
+                    and template["metadata"].get("annotations", {}).get("fugue.pro/source-commit") == can["source"]
+                    and edge["image"].endswith("@" + can["imageDigest"]), "rearm would schedule an unpinned candidate")
+            annotations = dict(m["annotations"])
+            if parked_key not in annotations:
+                require(m["generation"] == plan["generation"] + 2 and annotations.get(enabled_key) == digest,
+                        "candidate exclusion disappeared outside the exact rearm")
+            else:
+                require(m["generation"] == plan["generation"] + 1 and json.loads(annotations[parked_key]) == decision,
+                        "candidate retirement no longer matches the live exclusion")
+                ports = (18080, 18443) if can["slot"] == "a" else (28080, 28443)
+                require(not any(s.get("hostPort") in ports for pod in self.pods(node=node)
+                                if pod["status"]["phase"] not in ("Succeeded", "Failed")
+                                for container in pod["spec"]["containers"] for s in container.get("ports", [])),
+                        "candidate ports have a different owner")
+                del annotations[parked_key]
+                annotations[enabled_key] = digest
+                patched = remove_target_exclusion(template, node)
+                changes = [{"op": "test", "path": "/metadata/uid", "value": m["uid"]},
+                           {"op": "test", "path": "/metadata/resourceVersion", "value": m["resourceVersion"]},
+                           {"op": "replace", "path": "/metadata/annotations", "value": annotations},
+                           {"op": "replace", "path": "/spec/template", "value": patched}]
+                for lock in locks:
+                    lease_helper.held(lock, renew=True)
+                live = kube.kubectl("patch", "daemonset", can["daemonSet"], "-n", self.ns, "--type=json",
+                                    "--patch-file", "-", "-o", "json", body=front.canonical(changes))
+                require(obj_uid(live) == obj_uid(ds) and live["spec"]["template"] == patched
+                        and live["metadata"]["generation"] == plan["generation"] + 2
+                        and live["metadata"]["annotations"].get(enabled_key) == digest,
+                        "candidate scheduling did not converge to the exact rearm")
+        until = time.monotonic() + 115
+        while time.monotonic() < until:
+            local = [p for p in self.pods(node=node) if any(
+                s.get("hostPort") == (18443 if can["slot"] == "a" else 28443)
+                for ct in p["spec"]["containers"] for s in ct.get("ports", []))]
+            if local:
+                pod = one(local, "candidate HTTPS slot")
+                owner = controller(pod)
+                require(owner["kind"] == "DaemonSet" and owner["uid"] == plan["daemonset_uid"],
+                        "rearmed candidate has a foreign controller")
+                if any(r["type"] == "Ready" and r["status"] == "True" for r in pod["status"].get("conditions", ())):
+                    return
+            time.sleep(3)
+        raise ValueError("rearmed candidate did not become Ready; serving pointer was not changed")
+
     def exact_actors(self):
         cfg = self.config
         roster = list_items(front.read("get", "nodes", "-l", "fugue.io/edge-group-id=" + cfg["group"] + ",fugue.io/role.edge=true", "-o", "json"))
@@ -280,9 +435,19 @@ class ActiveCluster:
         if cfg.get("fixedRotation"):
             require(self.native(selected, "--worker-fixed-rotation") == expected,
                     "in-service Front cannot rotate its exact fixed Worker binding")
+        guardian = self.deployment_actor(cfg["guardian"], "release-guardian")
+        if "rearm" in cfg:
+            self.rearm_candidate(selected, guardian, expected)
         local = self.pods(node=cfg["node"])
         prior = self.worker_at(local, 18443 if expected["active_slot"] == "a" else 28443)
         pin_image(prior, "edge", expected["worker_source_commit"], expected["worker_image_digest"])
+        if "retirement" in cfg:
+            retire = cfg["retirement"]
+            ds = self.get("daemonset", retire["daemonSet"])
+            old_owner = controller(prior)
+            require(old_owner["kind"] == "DaemonSet" and old_owner["name"] == retire["daemonSet"]
+                    and old_owner["uid"] == obj_uid(ds) == retire["uid"] and ds["metadata"]["generation"] == retire["generation"]
+                    and ds["spec"]["updateStrategy"]["type"] == "OnDelete", "retirement does not match the live old Worker controller")
         can = cfg["candidate"]
         if "daemonSet" in can:
             candidate = self.worker_at(local, 18443 if can["slot"] == "a" else 28443)
@@ -296,7 +461,6 @@ class ActiveCluster:
             candidate = self.deployment_actor(can, "edge")
             require(candidate["spec"]["nodeName"] == cfg["node"] and obj_uid(self.worker_at(local, 38443)) == obj_uid(candidate),
                     "independently monitored Worker is not the node's registered overlap process")
-        guardian = self.deployment_actor(cfg["guardian"], "release-guardian")
         journal = {"schema": "edge-node-worker-advance/v1", "recipient": recipient, "expected": expected,
                    "node_uid": cfg["nodeUID"], "service_uid": bound["service_uid"],
                    "predecessor_worker_uid": obj_uid(prior), "predecessor_process": worker_process(prior),
@@ -330,7 +494,7 @@ class ActiveCluster:
                 require(r["kind"] in ("DaemonSet", "ReplicaSet"), "peer runtime lacks an exact declarative controller")
                 owner = self.get(r["kind"].lower(), r["name"])
                 require(obj_uid(owner) == r["uid"], "peer runtime controller UID changed")
-                templates = {obj_uid(owner): kube.digest(owner["spec"]["template"])}
+                templates = {obj_uid(owner): kube.digest(peer_template(owner, self.config, getattr(self, "retirement_journal", None)))}
                 if r["kind"] == "ReplicaSet":
                     ref = controller(owner)
                     require(ref["kind"] == "Deployment", "peer ReplicaSet lacks its parent Deployment")
@@ -344,7 +508,7 @@ class ActiveCluster:
         return snapshots
 
     def exec_guardian(self, pod, command, raw):
-        require(command in ("node-worker-seal", "node-worker-claim"), "unexpected Guardian command")
+        require(command in ("node-worker-seal", "node-worker-claim", "node-worker-retirement-version"), "unexpected Guardian command")
         name = pod["metadata"]["name"]
         current = self.get("pod", name)
         require(obj_uid(current) == obj_uid(pod) and process(current, "release-guardian") == process(pod, "release-guardian"),
@@ -461,6 +625,21 @@ class ClaimedHandoff:
             return None
         return json.loads(self.require_record(obj, name, "node-worker-result", "result.json"))
 
+    def retire(self, declared):
+        self.put_input("retirement", "node-worker-retirement", "retirement.json",
+                       {"schema": "edge-node-worker-retirement/v1", "journal_digest": self.journal["digest"],
+                        "daemonset": declared["daemonSet"], "daemonset_uid": declared["uid"],
+                        "generation": declared["generation"]})
+
+    def retired(self):
+        name = self.name("retired")
+        obj = self.cluster.get_config(name)
+        if obj is None:
+            return None
+        require(obj["metadata"].get("labels", {}).get("app.kubernetes.io/managed-by") == "fugue-release-guardian",
+                "retirement receipt does not belong to Guardian")
+        return json.loads(self.require_record(obj, name, "node-worker-retired", "retired.json"))
+
     def require_claim(self, sealed):
         name = "fugue-authority-transition-prepared-" + self.journal["recipient"]["group"]
         obj = self.cluster.get_config(name)
@@ -504,13 +683,18 @@ def run(config, evidence_path):
     def record(**details):
         evidence.update(details)
         save()
-        for phase in ("drain_started", "drain_completed"):
+        for phase in ("drain_started", "drain_completed", "retirement_completed"):
             if phase in details:
                 print(phase + ": " + front.canonical(details[phase]), flush=True)
 
     save()
     failure = None
     try:
+        if "retirement" in config:
+            require(cluster.exec_guardian(guardian, "node-worker-retirement-version", b"").strip() == b"edge-node-worker-retirement/v1",
+                    "the live Guardian does not support automatic old-slot retirement")
+            cluster.retirement_journal = journal
+            adapter.retire(config["retirement"])
         try:
             cluster.exec_guardian(guardian, "node-worker-claim", sealed)
         except (ValueError, subprocess.TimeoutExpired) as err:
@@ -523,7 +707,8 @@ def run(config, evidence_path):
         evidence["guardian_result"] = handoff.handoff(adapter, cluster.profile, selected, config["front"]["address"],
                                                        config["probe"], journal,
                                                        probe_port=config.get("probeIngress", {}).get("port"),
-                                                       drain_record=record if config.get("verifyDrain") else None)
+                                                       drain_record=record if config.get("verifyDrain") else None,
+                                                       retirement=config.get("retirement"))
     except (ValueError, OSError, subprocess.TimeoutExpired) as err:
         evidence["error"] = str(err)
         failure = err

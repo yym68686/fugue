@@ -2683,7 +2683,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py
+          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py scripts/retire_front_hostport.py
           python3 -m unittest scripts.test_run_node_worker_handoff scripts.test_node_worker_handoff scripts.test_front_connection_witness
       - name: Hold public connections and require Guardian receipt and unchanged peers
         run: |
