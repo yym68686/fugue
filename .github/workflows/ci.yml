@@ -1173,6 +1173,17 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Run full audit on the exact integrated source (qualification only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/host-parent-qualification-20261125'
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          revision=13ec99456edc4c3d82717a74109dfc2f3d625351
+          git merge-base --is-ancestor "$revision" "$GITHUB_SHA"
+          git diff --quiet "$revision" "$GITHUB_SHA" -- . ':!.github/workflows/ci.yml'
+          checkout="$RUNNER_TEMP/host-parent-source"
+          git worktree add --detach "$checkout" "$revision"
+          make -C "$checkout" test GOCACHE="$(go env GOCACHE)"
       - name: Compile test binaries before the bounded test budget
         timeout-minutes: 10
         # Cold compilation is separately bounded. The prepush step below still
