@@ -19,11 +19,13 @@ import (
 // readiness certificate or proof of application. Ordinary global consumers
 // never select this kind. Original selection time/expiry survive retries.
 const HostedPacketKind = "hosted_recipient_selection_v1"
+const HostedMembershipPacketKind = "hosted_recipient_selection_v2"
 
 // DNS execution can compose peer heads over one shared platform target.
 // A v1-only DNS process deliberately rejects such packets.
 const HostedSharedTargetCapability = "hosted_shared_dns_target_v1"
 const HostedSharedHoldCapability = "hosted_shared_dns_hold_v1"
+const HostedContinuationCapability = "hosted_exact_parent_continuation_v1"
 
 type HostedSelectedPacket struct {
 	Scope              string            `json:"host_scope"`
@@ -35,14 +37,27 @@ type HostedSelectedPacket struct {
 	Previous           string            `json:"previous_host_decision"`
 	PriorParts         map[string]string `json:"previous_member_parts"`
 	SkippedForwardFrom string            `json:"skipped_forward_from,omitempty"`
-	Authority          string            `json:"authority_digest"`
-	Business           string            `json:"business_digest"`
-	Parent             string            `json:"membership_parent"`
-	Child              string            `json:"membership_child"`
-	ChildDigest        string            `json:"membership_child_digest"`
-	SelectedAt         time.Time         `json:"selected_at"`
-	ValidUntil         time.Time         `json:"valid_until"`
-	Delivery           HostedDelivery    `json:"delivery"`
+	// There is no skippable prepare on this parent after a forward rebind.
+	ExactWithdrawal bool           `json:"exact_withdrawal,omitempty"`
+	Authority       string         `json:"authority_digest"`
+	Business        string         `json:"business_digest"`
+	Parent          string         `json:"membership_parent"`
+	Child           string         `json:"membership_child"`
+	ChildDigest     string         `json:"membership_child_digest"`
+	SelectedAt      time.Time      `json:"selected_at"`
+	ValidUntil      time.Time      `json:"valid_until"`
+	Delivery        HostedDelivery `json:"delivery"`
+	MemberBaseline  string         `json:"member_baseline,omitempty"`
+	// Only a same-phase continuation of a retained member command. An absent
+	// field keeps all original signed packets and checkpoints readable.
+	MembershipRebind *HostedMembershipRebind `json:"membership_rebind,omitempty"`
+}
+
+func (p HostedSelectedPacket) PacketKind() string {
+	if p.MemberBaseline != "" {
+		return HostedMembershipPacketKind
+	}
+	return HostedPacketKind
 }
 
 func (p HostedSelectedPacket) validate(now time.Time) error {
@@ -58,10 +73,17 @@ func (p HostedSelectedPacket) validate(now time.Time) error {
 		}
 	}
 	one := d.Parts[0].Recipient
+	if p.ExactWithdrawal && p.MemberBaseline == "" || p.MemberBaseline != "" && !platformproducer.ValidDigest(p.MemberBaseline) {
+		return bad
+	}
+	if p.MembershipRebind != nil && (p.Fence < 2 || d.Phase == "withdraw" || p.MembershipRebind.Baseline != p.MemberBaseline || !platformproducer.ValidDigest(p.MembershipRebind.Predecessor) ||
+		!platformproducer.ValidDigest(p.MembershipRebind.Baseline)) {
+		return bad
+	}
 	if p.Fence == 1 && (p.Previous != "" || len(p.PriorParts) != 0 || d.Phase != "prepare") ||
 		p.Fence > 1 && (!platformproducer.ValidDigest(p.Previous) || len(p.PriorParts) != len(d.Parts)) ||
-		d.Phase == "withdraw" && (p.Fence < 3 || !platformproducer.ValidDigest(p.SkippedForwardFrom)) ||
-		d.Phase != "withdraw" && p.SkippedForwardFrom != "" {
+		d.Phase == "withdraw" && (p.Fence < 3 || p.ExactWithdrawal && p.SkippedForwardFrom != "" || !p.ExactWithdrawal && !platformproducer.ValidDigest(p.SkippedForwardFrom)) ||
+		d.Phase != "withdraw" && (p.SkippedForwardFrom != "" || p.ExactWithdrawal) {
 		return bad
 	}
 	if one.Node == "" || one.Group == "" {
@@ -130,7 +152,7 @@ func SignHostedPacket(p HostedSelectedPacket, keys bundleauth.Keyring, now time.
 	if e != nil {
 		return a, e
 	}
-	return platformsafety.SignPlatformArtifact(model.PlatformArtifact{ID: "host-selection:" + digest, ArtifactKind: HostedPacketKind, SchemaVersion: model.PlatformArtifactSchemaVersionV1, Scope: model.PlatformArtifactScope{ScopeType: "hosted-recipient", Key: p.Scope, ProjectID: p.Project, Hostname: p.Delivery.Host}, ScopeKey: p.Scope, Generation: p.Decision, GenerationSequence: p.Fence, Status: model.PlatformArtifactStatusValidated, Content: body, ContentHash: digest, CreatedAt: p.SelectedAt, UpdatedAt: p.SelectedAt}, keys)
+	return platformsafety.SignPlatformArtifact(model.PlatformArtifact{ID: "host-selection:" + digest, ArtifactKind: p.PacketKind(), SchemaVersion: model.PlatformArtifactSchemaVersionV1, Scope: model.PlatformArtifactScope{ScopeType: "hosted-recipient", Key: p.Scope, ProjectID: p.Project, Hostname: p.Delivery.Host}, ScopeKey: p.Scope, Generation: p.Decision, GenerationSequence: p.Fence, Status: model.PlatformArtifactStatusValidated, Content: body, ContentHash: digest, CreatedAt: p.SelectedAt, UpdatedAt: p.SelectedAt}, keys)
 }
 
 // Verify with the receiver's current private assignment and enrollment even
@@ -139,11 +161,11 @@ func SignHostedPacket(p HostedSelectedPacket, keys bundleauth.Keyring, now time.
 func VerifyHostedPacket(a model.PlatformArtifact, host string, who platformcontrol.PlatformComponentIdentityClaims, serving model.PlatformConsumerAssignment, knownFence int64, knownDecision string, keys bundleauth.Keyring, now time.Time) (HostedSelectedPacket, error) {
 	var p HostedSelectedPacket
 	bad := errors.New("host selection is stale or addressed to another receiver")
-	if a.ArtifactKind != HostedPacketKind || a.ID != "host-selection:"+a.ContentHash || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
+	if (a.ArtifactKind != HostedPacketKind && a.ArtifactKind != HostedMembershipPacketKind) || a.ID != "host-selection:"+a.ContentHash || a.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(a, keys).Pass {
 		return p, bad
 	}
 	raw, e := json.Marshal(a.Content)
-	if e != nil || len(raw) > maxHostedProgramBytes || json.Unmarshal(raw, &p) != nil || p.validate(now) != nil {
+	if e != nil || len(raw) > maxHostedProgramBytes || json.Unmarshal(raw, &p) != nil || p.PacketKind() != a.ArtifactKind || p.validate(now) != nil {
 		return HostedSelectedPacket{}, bad
 	}
 	d := p.Delivery

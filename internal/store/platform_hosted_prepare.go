@@ -31,7 +31,7 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 	raw, err := json.Marshal(draft.Content)
 	if err != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || draft.ID != id || draft.ArtifactKind != model.PlatformArtifactKindHostedPathProposal ||
 		draft.Status != model.PlatformArtifactStatusDraft || draft.CreatedByType != model.ActorTypeBootstrap || draft.CreatedByID != platformproducer.Actor ||
-		s.VerifyPlatformArtifactIntegrity(draft) != nil || p.Schema != pc.HostedProposalSchema || p.Host == "" || p.Before.Owner.Hostname != p.Host ||
+		s.VerifyPlatformArtifactIntegrity(draft) != nil || !p.SupportedSchema() || p.Host == "" || p.Before.Owner.Hostname != p.Host ||
 		p.Base != source.Publication || !p.Authority.Same(source.Authority) || !p.Authority.ExpiresAt.After(time.Now()) {
 		return 0, ErrConflict
 	}
@@ -44,7 +44,11 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 		return 0, ErrConflict
 	}
 	project := app.ProjectID
-	program, err := routeartifact.FreezeHostedProgram(source, p, draft.ContentHash)
+	freeze := routeartifact.FreezeHostedProgram
+	if p.HasMemberBaselines() {
+		freeze = routeartifact.FreezeHostedMembershipProgram
+	}
+	program, err := freeze(source, p, draft.ContentHash)
 	if err != nil {
 		return 0, fmt.Errorf("materialize reversible host program: %w", err)
 	}
@@ -93,7 +97,7 @@ func (s *Store) OfferCompiledHostedPreparation(parent context.Context, source pc
 		return 0, err
 	}
 	claim := HostedSuccessorClaim{Scope: key, Project: project, Host: p.Host, Draft: id, DraftDigest: draft.ContentHash, Owner: owner, Paths: paths, Prepared: program.Prepared, Forward: program.Forward, Phase: "prepare", Sequence: epoch}
-	if err = pgAdmitHostedOffer(ctx, tx, full, p, in, claim, program, source.EffectiveHolds); err != nil {
+	if err = s.pgAdmitHostedOffer(ctx, tx, full, p, in, claim, program, source.EffectiveHolds); err != nil {
 		return 0, err
 	}
 	return epoch, tx.Commit()

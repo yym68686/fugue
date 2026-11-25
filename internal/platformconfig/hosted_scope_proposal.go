@@ -21,6 +21,17 @@ import (
 // a routing Cell's membership nor its serving evidence may fill either set.
 const HostedProposalSchema = "fugue.hosted-path-proposal/v1"
 
+// Old producers reject this schema before freezing an offer. A new optional
+// field on v1 would be silently ignored by Go's JSON decoder during rollout.
+const HostedMembershipProposalSchema = "fugue.hosted-path-proposal/v2"
+
+func (p HostedScopeProposal) HasMemberBaselines() bool {
+	return p.Schema == HostedMembershipProposalSchema
+}
+func (p HostedScopeProposal) SupportedSchema() bool {
+	return p.Schema == HostedProposalSchema || p.HasMemberBaselines()
+}
+
 type HostedProposalAuthority struct {
 	Producer     model.PlatformPublicationPrecondition `json:"producer"`
 	LKGID        string                                `json:"lkg_id"`

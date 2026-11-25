@@ -29,7 +29,7 @@ func ComposeHostedSuccessorRoutes(base, target model.PlatformArtifact, p HostedS
 	var empty HostedSuccessorRoutes
 	bad := errors.New("cannot compose host successor from independently bound route rows")
 	host, owner := p.Host, p.Before.Owner
-	if p.Schema != HostedProposalSchema || p.Base.Validate() != nil || host == "" || owner.Hostname != host || owner != p.After.Owner || owner != p.Prepared.Owner ||
+	if !p.SupportedSchema() || p.Base.Validate() != nil || host == "" || owner.Hostname != host || owner != p.After.Owner || owner != p.Prepared.Owner ||
 		base.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle || target.ArtifactKind != base.ArtifactKind ||
 		base.Scope.Key != GlobalScopeKey || target.Scope.Key != GlobalScopeKey ||
 		base.ScopeKey != "" && base.ScopeKey != GlobalScopeKey || target.ScopeKey != "" && target.ScopeKey != GlobalScopeKey {

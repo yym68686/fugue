@@ -80,7 +80,7 @@ func (s *Store) ReadHostedSuccessor(ctx context.Context, host, tenant, owner str
 	if e != nil || len(raw) > 1<<20 || json.Unmarshal(raw, &p) != nil || a.ID != c.Draft || a.ContentHash != c.DraftDigest ||
 		a.Scope != scope || a.ScopeKey != key || a.Status != model.PlatformArtifactStatusDraft || a.ArtifactKind != model.PlatformArtifactKindHostedPathProposal ||
 		a.CreatedByID != platformproducer.Actor || a.CreatedByType != model.ActorTypeBootstrap || s.VerifyPlatformArtifactIntegrity(a) != nil ||
-		p.Host != host || p.Before.Owner.AppID != owner || p.Before.Owner.TenantID != tenant || p.Schema != pc.HostedProposalSchema {
+		p.Host != host || p.Before.Owner.AppID != owner || p.Before.Owner.TenantID != tenant || !p.SupportedSchema() {
 		return c, p, "", true, ErrConflict
 	}
 	c.Host = host

@@ -148,7 +148,7 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 			t.Fatal(e)
 		}
 		defer tx.Rollback()
-		if e = pgAdmitHostedOffer(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, in, c, im, []pc.HostedAddressHold{held}); e != nil {
+		if e = (&Store{db: db}).pgAdmitHostedOffer(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, in, c, im, []pc.HostedAddressHold{held}); e != nil {
 			t.Fatal(e)
 		}
 		if e = tx.Commit(); e != nil {
@@ -209,8 +209,66 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	checkBlockers(notExpected(held.EdgeID, kinds[1]))
 	check(0, 0)
 	exec(`UPDATE fugue_platform_expected_consumer_sets SET consumers_json=$1 WHERE id=$2`, originalTLSSet, "set-"+kinds[1])
+	t.Run("new-domain-encoding-uses-every-physical-receiver", func(t *testing.T) {
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback() // test capabilities never affect the real admission fixture
+		unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, im.Digest, wire, "prepare")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := func(expected string) {
+			t.Helper()
+			got, e := pgHostedNewDraftEncoding(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, unit, time.Now().UTC())
+			if e != nil || got != expected {
+				t.Fatalf("draft: got %s, want %s: %v", got, expected, e)
+			}
+		}
+		want(pc.HostedProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=compatibility_capabilities_json::jsonb || jsonb_build_array($1::text) WHERE node_id<>$2`, routeartifact.HostedContinuationCapability, held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=compatibility_capabilities_json::jsonb || jsonb_build_array($1::text) WHERE node_id=$2`, routeartifact.HostedContinuationCapability, held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedMembershipProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE artifact_kind=$1 AND node_id=$2`, kinds[1], held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedProposalSchema)
+	})
 	const required = 8
 	check(1, required)
+	t.Run("transition is not a global positive and obeys known negative evidence", func(t *testing.T) {
+		kind := model.PlatformArtifactKindEdgeRouteBundle
+		m := model.PlatformExpectedConsumer{Component: model.PlatformConsumerComponentEdgeWorker, NodeID: "alpha", ConsumerID: model.PlatformConsumerComponentEdgeWorker + ":alpha"}
+		a := model.PlatformConsumerAssignment{ArtifactKind: kind, ExpectedConsumerSetID: "set-" + kind, ReleaseSetID: "parent", FencingToken: 1, ExpectedGeneration: "gen"}
+		expect := func(ok bool) {
+			t.Helper()
+			tx, e := db.BeginTx(t.Context(), nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer tx.Rollback()
+			v, e := pgHostedMemberWithoutVeto(t.Context(), tx, p, m, a)
+			if e != nil || v != ok {
+				t.Fatalf("veto-free=%v want %v, err=%v", v, ok, e)
+			}
+		}
+		expect(false) // same parent, known legacy executor
+		newCaps, _ := json.Marshal([]string{platformcontrol.TrafficReleaseCapabilityV1, hostedMemberProtocol, routeartifact.HostedContinuationCapability})
+		exec("UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=$3 WHERE consumer_id=$1 AND artifact_kind=$2", m.ConsumerID, kind, string(newCaps))
+		expect(true)
+		exec("UPDATE fugue_platform_consumer_instances SET probe_status='failed' WHERE consumer_id=$1 AND artifact_kind=$2", m.ConsumerID, kind)
+		expect(false)
+		exec("UPDATE fugue_platform_consumer_instances SET probe_status='passed',compatibility_capabilities_json=$3 WHERE consumer_id=$1 AND artifact_kind=$2", m.ConsumerID, kind, string(caps))
+		a.ReleaseSetID = "new"
+		a.FencingToken++
+		expect(true) // only a historical fact; no new receipt
+	})
 	check(1, required)
 	var facts int
 	if e = db.QueryRow("SELECT count(*) FROM fugue_hosted_selection_receipts WHERE hostname=$1", host).Scan(&facts); e != nil || facts != 0 {

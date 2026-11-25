@@ -66,13 +66,14 @@ type HostedPhaseResolver struct {
 	proposal             pc.HostedScopeProposal
 	draft, digest, phase string
 	parts                map[hostedKindNode][]HostedDeliveryPart
+	baselines            map[hostedKindNode]string
 }
 
 // Decode one bounded selected image once, independently of the number of
 // enrolled nodes. The rows are physical receiver inputs, never live facts.
 func OpenHostedPhase(p pc.HostedScopeProposal, draft, digest string, wire []byte, phase string) (*HostedPhaseResolver, error) {
 	bad := errors.New("invalid compiled hosted phase")
-	if len(wire) == 0 || len(wire) > maxHostedProgramBytes || p.Base.Validate() != nil || p.Schema != pc.HostedProposalSchema {
+	if len(wire) == 0 || len(wire) > maxHostedProgramBytes || p.Base.Validate() != nil || !p.SupportedSchema() {
 		return nil, bad
 	}
 	sum := sha256.Sum256(wire)
@@ -82,6 +83,9 @@ func OpenHostedPhase(p pc.HostedScopeProposal, draft, digest string, wire []byte
 		return nil, bad
 	}
 	stage := image.Prepared
+	if p.HasMemberBaselines() != (image.Baselines != nil) {
+		return nil, bad
+	}
 	switch phase {
 	case "prepare", "withdraw":
 	case "forward":
@@ -93,7 +97,7 @@ func OpenHostedPhase(p pc.HostedScopeProposal, draft, digest string, wire []byte
 	if err != nil {
 		return nil, err
 	}
-	unit := &HostedPhaseResolver{p, draft, digest, phase, map[hostedKindNode][]HostedDeliveryPart{}}
+	unit := &HostedPhaseResolver{proposal: p, draft: draft, digest: digest, phase: phase, parts: map[hostedKindNode][]HostedDeliveryPart{}}
 	for r, v := range parts {
 		pin, e := pc.Digest([]any{"fugue.hosted-recipient-part/v1", p.Host, r, v})
 		if e != nil {
@@ -105,7 +109,7 @@ func OpenHostedPhase(p pc.HostedScopeProposal, draft, digest string, wire []byte
 	for k := range unit.parts {
 		slices.SortFunc(unit.parts[k], func(a, b HostedDeliveryPart) int { return strings.Compare(a.Recipient.Zone, b.Recipient.Zone) })
 	}
-	return unit, nil
+	return unit, unit.bindBaselines(image.Baselines)
 }
 
 func (u *HostedPhaseResolver) Required() []HostedRecipient {

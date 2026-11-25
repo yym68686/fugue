@@ -73,7 +73,7 @@ func replayExternalDNSPhase(base DNSArtifactPayload, p HostedScopeProposal, phas
 	var empty HostedDNSContent
 	bad := errors.New("external path phase does not match its selected predecessor")
 	a, owner := p.ExternalPath, p.Before.Owner
-	if p.Schema != ExternalPathProposalSchema || a == nil || p.Base.Validate() != nil ||
+	if !p.SupportedSchema() || a == nil || p.Base.Validate() != nil ||
 		base.Policy.Scope != GlobalScopeKey || base.Policy.DNSPlacementMode != DNSPlacementConsumerReadiness ||
 		p.Host == "" || p.Host != a.Target.Hostname || p.Host != owner.Hostname || owner.Status != "verified" ||
 		owner.TenantID != a.Target.TenantID || owner.AppID != a.Target.AppID || owner != p.After.Owner ||

@@ -14,7 +14,7 @@ import (
 // strict view validator, not records owned by this host.
 func HostedDNSProgramSource(base DNSArtifactPayload, p HostedScopeProposal) (DNSArtifactPayload, error) {
 	bad := errors.New("host DNS program source is not a closed dependency set")
-	if p.Schema != HostedProposalSchema || p.Host == "" || p.Before.Owner.Hostname != p.Host || p.Base.Validate() != nil ||
+	if !p.SupportedSchema() || p.Host == "" || p.Before.Owner.Hostname != p.Host || p.Base.Validate() != nil ||
 		base.Policy.Scope != GlobalScopeKey || base.Policy.PublicationRole != "" || base.Policy.DNSPlacementMode != DNSPlacementConsumerReadiness ||
 		base.ReadinessPlan == nil || len(p.Records) == 0 || len(p.Records) > 4096 {
 		return DNSArtifactPayload{}, bad

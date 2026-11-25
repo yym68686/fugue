@@ -26,6 +26,15 @@ func TestHostedProposalPureDraftCannotBecomeAnAssignment(t *testing.T) {
 	if _, err = s.CreatePlatformArtifact(draft); err == nil {
 		t.Fatal("public create accepted")
 	}
+	if draft.Content["schema"] != pc.HostedProposalSchema {
+		t.Fatal("mixed rollout rewrote a legacy draft")
+	}
+	v2 := p
+	v2.Schema = pc.HostedMembershipProposalSchema
+	next, err := hostedProposalDraft(v2, now.Add(-time.Minute), now)
+	if err != nil || next.Content["schema"] != pc.HostedMembershipProposalSchema || next.Generation == draft.Generation {
+		t.Fatal("membership draft is not a distinct signed generation", err)
+	}
 	if _, _, err = s.EnsurePlatformArtifact(draft); err == nil {
 		t.Fatal("generic ensure accepted")
 	}

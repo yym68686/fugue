@@ -29,7 +29,7 @@ func ComposeHostedGroupEdit(base model.EdgeRouteBundle, proposal pc.HostedScopeP
 	var empty HostedGroupContent
 	group, host := base.EdgeGroupID, proposal.Host
 	owner := proposal.Before.Owner
-	if proposal.Schema != pc.HostedProposalSchema || proposal.Base.Validate() != nil || host == "" || owner.Hostname != host || owner.AppID == "" || owner.TenantID == "" ||
+	if !proposal.SupportedSchema() || proposal.Base.Validate() != nil || host == "" || owner.Hostname != host || owner.AppID == "" || owner.TenantID == "" ||
 		owner != proposal.Prepared.Owner || owner != proposal.After.Owner ||
 		!slices.ContainsFunc(proposal.Physical, func(n pc.HostedAddressHold) bool { return n.EdgeGroupID == group && n.Address != "" && n.EdgeID != "" }) {
 		return empty, fail

@@ -1,6 +1,7 @@
 package platformconfig_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"slices"
@@ -93,6 +94,85 @@ func TestExternalWithheldRouteTLSUsesExactWorkerAssignment(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Baselines come from the complete original source, not the forward command
+// and not an invented positive observation. Exercise regular/held/external
+// target projections using real compiler output and every physical recipient.
+func TestHostedMembershipBaselinesSurviveIndependentParentRenewal(t *testing.T) {
+	run := func(t *testing.T, s pc.HostedAddressSource, p pc.HostedScopeProposal) {
+		t.Helper()
+		bind := func(s pc.HostedAddressSource, p pc.HostedScopeProposal) (*routeartifact.HostedPhaseResolver, routeartifact.CompiledHostedProgram) {
+			t.Helper()
+			p.Schema = pc.HostedMembershipProposalSchema
+			d, e := pc.Digest(p)
+			if e != nil {
+				t.Fatal(e)
+			}
+			im, e := routeartifact.FreezeHostedMembershipProgram(s, p, d)
+			if e != nil {
+				t.Fatal(e)
+			}
+			same, e := routeartifact.FreezeHostedMembershipProgram(s, p, d)
+			if e != nil || !bytes.Equal(im.Wire, same.Wire) {
+				t.Fatal("nondeterministic member image", e)
+			}
+			u, e := routeartifact.OpenHostedPhase(p, d, im.Digest, im.Wire, "forward")
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e := routeartifact.FreezeHostedProgram(s, p, d); e == nil {
+				t.Fatal("legacy encoder accepted a v2 draft")
+			}
+			old := p
+			old.Schema = pc.HostedProposalSchema
+			legacy, e := routeartifact.FreezeHostedProgram(s, old, d)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if _, e = routeartifact.OpenHostedPhase(p, d, legacy.Digest, legacy.Wire, "forward"); e == nil {
+				t.Fatal("missing promised baselines accepted")
+			}
+			return u, im
+		}
+		one, im := bind(s, p)
+		s.Publication.ReleaseSetID += "-next"
+		s.Publication.ReleaseID += "-next"
+		s.Publication.FencingToken++
+		s.Authority.LKGID += "-next"
+		p.Base, p.Authority = s.Publication, s.Authority
+		two, next := bind(s, p)
+		if im.Digest == next.Digest {
+			t.Fatal("replayed old image digest on different parent")
+		}
+		counts := map[string]int{}
+		for _, r := range one.Required() {
+			d := routeartifact.HostedDelivery{Host: p.Host, Parts: []routeartifact.HostedDeliveryPart{{Recipient: r}}}
+			x, y := one.MemberBaseline(d), two.MemberBaseline(d)
+			if x == "" || x != y {
+				t.Fatal("parent changed host baseline", r)
+			}
+			counts[r.Kind]++
+			if r.Kind == model.PlatformArtifactKindCaddyRouteConfig {
+				want, e := pc.Digest(p.Before.Owner)
+				if e != nil || x != want {
+					t.Fatal("certificate owner pin differs")
+				}
+			}
+		}
+		if len(counts) != 3 {
+			t.Fatal("incomplete physical coverage", counts)
+		}
+	}
+	t.Run("managed-four-paths", func(t *testing.T) {
+		pc.HostedFourPathFixtureForTest(t, func(s pc.HostedAddressSource, p pc.HostedScopeProposal) { run(t, s, p) })
+	})
+	t.Run("stable-four-paths", func(t *testing.T) { pc.HostedStableFourPathFixtureForTest(t, run) })
+	t.Run("external-shared-held", func(t *testing.T) { s, p := pc.ExternalHeldFixtureForTest(t); run(t, s, p) })
+	t.Run("physical-worker-already-withheld-from-dns", func(t *testing.T) {
+		s, p := pc.ExternalWithheldRosterFixtureForTest(t)
+		run(t, s, p)
+	})
 }
 
 func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {

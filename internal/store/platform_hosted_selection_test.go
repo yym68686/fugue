@@ -17,6 +17,7 @@ import (
 	"fugue/internal/model"
 	pc "fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
+	"fugue/internal/routeartifact"
 	"fugue/internal/schemamigrate"
 )
 
@@ -49,7 +50,7 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		t.Fatal(e)
 	}
 	defer db.Close()
-	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL, schemamigrate.HostedExecutorPresenceSQL, schemamigrate.WorkerReporterHeadsSQL} {
+	for _, ddl := range []string{`CREATE TABLE fugue_platform_artifacts (id text,content_hash text,artifact_kind text,scope_key text,status text,updated_at timestamptz)`, schemamigrate.HostedPrepareOffersSQL, schemamigrate.HostedProgramImagesSQL, schemamigrate.HostedSelectionsSQL, schemamigrate.HostedSelectionReceiptsSQL, schemamigrate.HostedMemberDirectorySQL, schemamigrate.HostedExecutorPresenceSQL, schemamigrate.WorkerReporterHeadsSQL, schemamigrate.HostedMembershipRebindSQL, schemamigrate.HostedMemberDirectoryHostIndexSQL} {
 		if _, e = db.Exec(ddl); e != nil {
 			t.Fatal(e)
 		}
@@ -296,6 +297,125 @@ func TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Run("real producer admission with legacy and enrolled members", func(t *testing.T) { qualifyHostedProducerAdmission(t, db) })
+	t.Run("rebind changes only one host and its receipts and withdraws exactly", func(t *testing.T) {
+		c := init("carry.example.test")
+		h := mustSelect(c)
+		for key := range c.Parts {
+			mustRecord(receipt(c, h, key, true))
+		}
+		f := next(c, h, "forward")
+		f.Parts = maps.Clone(c.Parts)
+		f.Parts[d("edge-member")] = d("four paths")
+		fh := mustSelect(f)
+		oldDir := []hostedMemberDirectoryEntry{{"edge", "route", "old-r", "routes"}, {"dns", "dns", "old-d", "zones"}}
+		newDir := []hostedMemberDirectoryEntry{{"edge", "route", "new-r", "newroutes"}, {"dns", "dns", "new-d", "newzones"}}
+		dir, _ := json.Marshal(oldDir)
+		if _, e := db.Exec(hostedDirectoryInsertSQL, c.Claim.Host, string(dir)); e != nil {
+			t.Fatal(e)
+		}
+		n := next(f, fh, "forward")
+		n.Claim.Sequence++
+		n.Claim.Draft += ":new"
+		n.Claim.DraftDigest = d(n.Claim.Draft)
+		n.Program = d("second program")
+		n.Authority = d("new authority")
+		n.Parts = map[string]string{}
+		if e := txcall(func(tx *sql.Tx) error {
+			k := n.Claim
+			if _, e := tx.Exec("INSERT INTO fugue_platform_artifacts VALUES($1,$2,'hosted_path_proposal',$3,'draft',clock_timestamp())", k.Draft, k.DraftDigest, k.Scope); e != nil {
+				return e
+			}
+			var seq int64
+			if e := tx.QueryRow(hostedPrepareOfferCAS, k.Scope, k.Draft, k.DraftDigest, k.Project, k.Owner, k.Paths, k.Prepared, k.Forward, n.ValidUntil).Scan(&seq); e != nil {
+				return e
+			}
+			_, e := tx.Exec(putHostedProgramSQL, k.Scope, seq, k.Draft, k.DraftDigest, n.Program, []byte("second program"), k.Prepared, k.Forward)
+			return e
+		}); e != nil {
+			t.Fatal(e)
+		}
+		w := hostedRebindWrite{OldDraft: c.Claim.Draft, OldProgram: c.Program, OldAuthority: c.Authority, OldDirectory: oldDir, Directory: newDir}
+		v := routeartifact.HostedDelivery{Schema: "fugue.hosted-recipient-input/v1", Host: c.Claim.Host, Member: "edge", MembershipSet: "new-r", MembershipRevision: 1, MembershipRelease: "newrelease", MembershipFence: 7, Phase: "forward"}
+		part := routeartifact.HostedDeliveryPart{Recipient: routeartifact.HostedRecipient{Kind: "route", Node: "node", Group: "group"}, ContentDigest: f.Parts[d("edge-member")]}
+		v.Parts = []routeartifact.HostedDeliveryPart{part}
+		memberKey, e := v.PartKey(part)
+		if e != nil {
+			t.Fatal(e)
+		}
+		prepared := map[string]string{}
+		for key, value := range f.Parts {
+			k := d("new-key-" + key)
+			if key == d("edge-member") {
+				k = memberKey
+			}
+			n.Parts[k] = value
+			prepared[k] = c.Parts[key]
+			w.Slots = append(w.Slots, hostedRebindSlot{key, k, value, c.Parts[key], d("packet-" + key)})
+		}
+		w.Next = n
+		move := func(w hostedRebindWrite) (h hostedSelectionHead, e error) {
+			e = txcall(func(tx *sql.Tx) error { h, e = pgRebindHostedPhase(t.Context(), tx, w); return e })
+			return
+		}
+		// The producer may not race past a checkpoint that one member never saw.
+		if _, e := move(w); !errors.Is(e, ErrConflict) {
+			t.Fatal("missing predecessor receipt", e)
+		}
+		for key := range f.Parts {
+			mustRecord(receipt(f, fh, key, true))
+		}
+		bad := w
+		bad.OldDirectory = append([]hostedMemberDirectoryEntry(nil), oldDir...)
+		bad.OldDirectory[0].Set = "unknown-old-set"
+		if _, e := move(bad); !errors.Is(e, ErrConflict) {
+			t.Fatal("incorrect old membership", e)
+		}
+		status(f, fh, 3)
+		status(bf, bh, 3)
+		h2, e := move(w)
+		if e != nil {
+			t.Fatal(e)
+		}
+		status(n, h2, 0)
+		status(bf, bh, 3)
+		if _, e = move(w); !errors.Is(e, ErrConflict) {
+			t.Fatal("stale rebind", e)
+		}
+		var journal hostedRebindJournal
+		if e := txcall(func(tx *sql.Tx) error {
+			var e error
+			journal, e = pgHostedRebindJournal(t.Context(), tx, c.Claim.Host, true)
+			return e
+		}); e != nil {
+			t.Fatal(e)
+		}
+		p := routeartifact.HostedSelectedPacket{Fence: h2.Fence, Decision: h2.Decision, Previous: fh.Decision, MemberBaseline: d("base"), Delivery: v}
+		p, e = hostedWirePredecessor(p, n.Parts, prepared, journal)
+		if e != nil || p.MembershipRebind == nil || p.MembershipRebind.Predecessor != d("packet-"+d("edge-member")) || p.PriorParts[memberKey] != part.ContentDigest {
+			t.Fatal("did not encode exact forward predecessor", e)
+		}
+		if e := record(receipt(f, fh, d("edge-member"), true)); !errors.Is(e, ErrConflict) {
+			t.Fatal("old evidence accepted", e)
+		}
+		wc := next(n, h2, "withdraw")
+		wc.Parts = prepared
+		wc.Claim.Business = d("restore business")
+		wh := mustSelect(wc)
+		status(wc, wh, 0)
+		status(bf, bh, 3)
+		p.Delivery.Phase = "withdraw"
+		p.Delivery.Parts[0].ContentDigest = prepared[memberKey]
+		wpacket := routeartifact.HostedSelectedPacket{Fence: wh.Fence, Decision: wh.Decision, Previous: h2.Decision, MemberBaseline: p.MemberBaseline, SkippedForwardFrom: fh.Decision, Delivery: p.Delivery}
+		wpacket, e = hostedWirePredecessor(wpacket, prepared, n.Parts, journal)
+		if e != nil || !wpacket.ExactWithdrawal || wpacket.SkippedForwardFrom != "" || wpacket.MembershipRebind != nil || wpacket.PriorParts[memberKey] != part.ContentDigest {
+			t.Fatal("withdraw may skip across membership", e)
+		}
+		for key := range wc.Parts {
+			mustRecord(receipt(wc, wh, key, true))
+		}
+		status(wc, wh, 3)
+		status(bf, bh, 3)
+	})
 	t.Run("current physical holds", func(t *testing.T) {
 		exec := func(q string, args ...any) {
 			t.Helper()
