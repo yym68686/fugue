@@ -95,9 +95,11 @@ AAAA. `dynamic_quality.fleet_default` defaults to `shadow`: the runtime
 preview shows `runtime_snapshot.facts.fleet_default_shadow`, but the
 signed DNS order is unchanged. `active` promotes only the eligible winner
 to the front of that order, leaving the remaining fallback order intact.
-Use `fleet_default_hosts` to restrict the rollout to named hostnames; an
-omitted list means all eligible dynamic hostnames. Use the declarative
-dynamic-quality configuration lane to activate or roll back to shadow.
+For fleet-wide serving, leave `fleet_default_hosts` absent: every eligible
+dynamic hostname uses the same platform rank, including newly onboarded
+ones. The optional list only scopes a staged rollout; it is not part of
+ranking or candidate admission. Use the declarative dynamic-quality
+configuration lane to activate or roll back to shadow.
 
 An Edge must already be authorized in the exact name/family selection and
 have current matching route and TLS proofs from each relevant full-release

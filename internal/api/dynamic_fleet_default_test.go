@@ -125,6 +125,57 @@ func TestFleetDefaultProjectionRespectsSignedCandidatesAndEvidence(t *testing.T)
 	}
 }
 
+func TestGlobalFleetDefaultUsesSharedRankButRequiresEachHostsReadiness(t *testing.T) {
+	p, policy, states, input, now := fleetDefaultFixture(t)
+	policy.DynamicQuality.FleetDefaultHosts = nil
+	first := p.Policy.DNSAnswerRules[0].Hostname
+	second, limited := "other.example.test", "limited.example.test"
+	winner := input.ranks["A"].historical.Ranks[1].Edge
+	initial := p.Policy.DNSAnswerRules[0].PhysicalOrder.OrderedEdgeIDs[0]
+	for _, host := range []string{second, limited} {
+		states[host] = states[first]
+		for _, rule := range slices.Clone(p.Policy.DNSAnswerRules) {
+			if rule.Hostname == first {
+				rule.Hostname = host
+				p.Policy.DNSAnswerRules = append(p.Policy.DNSAnswerRules, rule)
+			}
+		}
+		for _, fact := range slices.Clone(p.RuntimeSnapshot.DNSSelections) {
+			if fact.Hostname == first {
+				fact.Hostname = host
+				p.RuntimeSnapshot.DNSSelections = append(p.RuntimeSnapshot.DNSSelections, fact)
+			}
+		}
+		for node, byQuery := range input.ready {
+			ready := map[edgequality.PassiveEndpoint]time.Time{}
+			for edge, until := range byQuery[fleetDefaultQuery{first, "A"}] {
+				if host != limited || node != "dns-b" || edge != winner {
+					ready[edge] = until
+				}
+			}
+			byQuery[fleetDefaultQuery{host, "A"}] = ready
+		}
+	}
+	if err := applyFleetDefaults(&p, policy, states, input, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range p.Policy.DNSAnswerRules {
+		want := winner.EdgeID
+		if rule.Hostname == limited {
+			want = initial
+		}
+		if got := rule.PhysicalOrder.OrderedEdgeIDs[0]; got != want {
+			t.Errorf("%s on %s: got %s, want %s", rule.Hostname, rule.NodeID, got, want)
+		}
+	}
+	for _, fact := range p.RuntimeSnapshot.DNSSelections {
+		if fact.RankingVersion != model.DNSFleetDefaultRankingVersion ||
+			!fleetDefaultEvidenceAt(fact.ShadowReason).Equal(input.ranks["A"].historical.At) {
+			t.Errorf("%s on %s did not use shared platform evidence", fact.Hostname, fact.NodeID)
+		}
+	}
+}
+
 func TestFleetDefaultNeedsTwoIndependentLiveWindowsAndKeepsTies(t *testing.T) {
 	p, _, _, input, now := fleetDefaultFixture(t)
 	query := fleetDefaultQuery{p.Policy.DNSAnswerRules[0].Hostname, "A"}

@@ -39,6 +39,22 @@ class DynamicQualityConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 quality.validate(invalid)
 
+    def test_expand_active_fleet_default_by_removing_hostname_scope(self):
+        config, _ = fixture()
+        successor = config["projection_policy"]
+        successor["dns_query_policy"]["dynamic_quality"]["fleet_default"] = "active"
+        previous = copy.deepcopy(successor)
+        previous["generation"] = "old-generation"
+        previous["dns_query_policy"]["dynamic_quality"]["fleet_default_hosts"] = ["pilot.example.test"]
+        self.assertTrue(quality.fleet_default_only_delta(previous, successor))
+        quality.validate(config)
+        quality.check_delta(previous, successor)
+        unrelated_change = copy.deepcopy(successor)
+        unrelated_change["dns_query_policy"]["minimum_ttl_seconds"] += 1
+        self.assertFalse(quality.fleet_default_only_delta(previous, unrelated_change))
+        with self.assertRaises(ValueError):
+            quality.check_delta(previous, unrelated_change)
+
     def test_bootstrap_migration_changes_only_explicit_classification(self):
         config, _ = fixture()
         previous = copy.deepcopy(config["projection_policy"])
