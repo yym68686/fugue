@@ -1109,7 +1109,10 @@ func platformReleaseOverrideExpiry(expiresAt *time.Time) string {
 }
 
 func (s *Server) handleGetPlatformStateArtifact(w http.ResponseWriter, r *http.Request) {
-	_ = mustPrincipal(r)
+	if !mustPrincipal(r).HasScope("artifact.read") {
+		httpx.WriteError(w, http.StatusForbidden, "artifact.read scope required")
+		return
+	}
 	kind := store.NormalizePlatformArtifactKind(r.PathValue("artifact_kind"))
 	if kind == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "unknown artifact kind")
