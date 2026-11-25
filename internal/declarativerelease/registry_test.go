@@ -365,18 +365,84 @@ func TestIndependentFrontBootstrapCannotAcquirePublicPortsOrWriteActivation(t *t
 					t.Fatal("shadow Front reserves an existing public listener")
 				}
 			}
-			for _, raw := range container["volumeMounts"].([]any) {
-				if raw.(map[string]any)["readOnly"] != true {
-					t.Fatal("Front can mutate the existing activation authority")
-				}
-			}
-			for _, raw := range pod["volumes"].([]any) {
-				host, _ := objectField(raw.(map[string]any), "hostPath")
-				if host["type"] != "Directory" {
-					t.Fatal("Front can manufacture an empty activation directory")
-				}
-			}
+			requireIndependentFrontMounts(t, pod, container, labels, selector)
 		})
+	}
+}
+
+func requireIndependentFrontMounts(t *testing.T, pod, container, labels, selector map[string]any) {
+	t.Helper()
+	const activation = "/var/lib/fugue-edge-front"
+	const drain = "/var/run/fugue-worker-drain"
+	const journal = "/var/run/fugue-worker-transaction"
+	env := map[string]map[string]any{}
+	for _, raw := range container["env"].([]any) {
+		entry := raw.(map[string]any)
+		env[entry["name"].(string)] = entry
+	}
+	bounded := env["FUGUE_EDGE_FRONT_WORKER_DRAIN_GRANT_PATH"]["value"] == drain+"/grant.json"
+	mounts := container["volumeMounts"].([]any)
+	volumes := pod["volumes"].([]any)
+	if !bounded {
+		for _, raw := range mounts {
+			if raw.(map[string]any)["readOnly"] != true {
+				t.Fatal("unqualified Front has a writable activation mount")
+			}
+		}
+		for _, raw := range volumes {
+			host, _ := objectField(raw.(map[string]any), "hostPath")
+			if host["type"] != "Directory" {
+				t.Fatal("Front can manufacture an empty activation directory")
+			}
+		}
+		return
+	}
+	node, _ := labels["fugue.io/edge-node"].(string)
+	group, _ := labels["fugue.io/edge-group-id"].(string)
+	sec, _ := objectField(container, "securityContext")
+	caps, _ := objectField(sec, "capabilities")
+	byUID, _ := objectField(env["FUGUE_EDGE_FRONT_WORKER_DRAIN_FRONT_UID"], "valueFrom")
+	field, _ := objectField(byUID, "fieldRef")
+	if node == "" || group == "" || selector["kubernetes.io/hostname"] != node || field["fieldPath"] != "metadata.uid" ||
+		env["FUGUE_EDGE_FRONT_REQUIRE_ACTIVATION_STATE"]["value"] != "true" ||
+		env["FUGUE_EDGE_FRONT_ACTIVE_SLOT_FILE"]["value"] != activation+"/activation.json" ||
+		sec["allowPrivilegeEscalation"] != false || sec["readOnlyRootFilesystem"] != true || sec["privileged"] == true ||
+		caps["add"] != nil || !reflect.DeepEqual(caps["drop"], []any{"ALL"}) || len(mounts) != 3 || len(volumes) != 3 {
+		t.Fatal("bounded Front is not a confined, single-node activation participant")
+	}
+	volumeByName := map[any]map[string]any{}
+	for _, raw := range volumes {
+		v := raw.(map[string]any)
+		volumeByName[v["name"]] = v
+	}
+	suffix := digestOf([]byte(group + "\n" + node))[7:39]
+	want := map[string][2]string{
+		journal: {"fugue-node-worker-projection-" + suffix, "journal.json"},
+		drain:   {"fugue-node-worker-drain-" + suffix, "grant.json"},
+	}
+	seen := map[string]bool{}
+	for _, raw := range mounts {
+		m := raw.(map[string]any)
+		path, _ := m["mountPath"].(string)
+		v := volumeByName[m["name"]]
+		if seen[path] || len(v) != 2 || m["subPath"] != nil || m["subPathExpr"] != nil || m["mountPropagation"] != nil {
+			t.Fatal("ambiguous bounded Front volume")
+		}
+		seen[path] = true
+		if path == activation {
+			host, _ := objectField(v, "hostPath")
+			if host["type"] != "Directory" || host["path"] != "/var/lib/fugue/edge-owned/"+group+"/front" || m["readOnly"] == true {
+				t.Fatal("bounded Front must access only its existing node activation directory")
+			}
+			continue
+		}
+		expected, ok := want[path]
+		cm, _ := objectField(v, "configMap")
+		items, _ := cm["items"].([]any)
+		if !ok || m["readOnly"] != true || cm["name"] != expected[0] || cm["optional"] != true ||
+			len(items) != 1 || !reflect.DeepEqual(items[0], map[string]any{"key": expected[1], "path": expected[1]}) {
+			t.Fatal("Front may only read the exact Guardian journal and grant ConfigMaps")
+		}
 	}
 }
 

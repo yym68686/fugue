@@ -532,6 +532,9 @@ def main() -> int:
                     "scripts/test_node_worker_handoff.py", "scripts/test_run_node_worker_handoff.py"}
            or name.startswith("deploy/environments/production/node-worker-handoff/") for name in paths):
         non_go_tasks["node-worker-handoff-tests"] = ["python3", "-m", "unittest", "scripts.test_node_worker_handoff", "scripts.test_run_node_worker_handoff"]
+    if any(name in {".github/workflows/ci.yml", "scripts/retire_front_hostport.py", "scripts/test_retire_front_hostport.py"}
+           or name.startswith("deploy/environments/production/front-hostport-retirement/") for name in paths):
+        non_go_tasks["front-hostport-retirement-tests"] = ["python3", "-m", "unittest", "scripts.test_retire_front_hostport"]
     if packages:
         vet_task = ["go", "vet", *packages]
         if declarative_engine_changed:

@@ -305,7 +305,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release")
-	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan")
+	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
@@ -317,7 +317,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatalf("node Worker publication is missing its main, test or exact declaration gate: %s", required)
 		}
 	}
-	for _, name := range []string{"node_worker_handoff", "front_replacement", "front_replacement_recovery", "front_serving_handoff", "front_public_recovery"} {
+	for _, name := range []string{"node_worker_handoff", "front_replacement", "front_replacement_recovery", "front_serving_handoff", "front_public_recovery", "front_hostport_retirement"} {
 		queue := yamlMappingValue(t, yamlMappingValue(t, jobs, name), "concurrency")
 		if yamlMappingValue(t, queue, "group").Value != "fugue-production-front-executor-replacement" ||
 			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {

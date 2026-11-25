@@ -2707,10 +2707,11 @@ jobs:
     outputs:
       selected: ${{ steps.plan.outputs.selected }}
       config: ${{ steps.plan.outputs.config }}
+      hostport_config: ${{ steps.plan.outputs.hostport_config }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with: {ref: '${{ github.sha }}', fetch-depth: 0}
-      - name: Select one independent Front executor replacement
+      - name: Select one independent Front executor replacement or hostPort retirement
         id: plan
         env:
           BASE_SHA: ${{ github.event.before }}
@@ -2721,9 +2722,18 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           mapfile -t declarations < <(git diff --name-only "$base" HEAD -- deploy/environments/production/front-executor-replacement)
-          if (( ${#declarations[@]} > 1 )); then
+          mapfile -t retirements < <(git diff --name-only "$base" HEAD -- deploy/environments/production/front-hostport-retirement)
+          if (( ${#declarations[@]} + ${#retirements[@]} > 1 )); then
             echo 'one physical Front replacement atom is required' >&2
             exit 1
+          fi
+          if (( ${#retirements[@]} == 1 )); then
+            config="${retirements[0]}"
+            [[ "$config" =~ ^deploy/environments/production/front-hostport-retirement/[a-z0-9][a-z0-9-]*\.json$ ]]
+            test -f "$config" && test ! -L "$config"
+            git diff --quiet "$base" HEAD -- deploy/releases deploy/environments/production/node-worker-handoff deploy/environments/production/front-serving-handoff deploy/environments/production/front-serving-stage deploy/environments/production/front-probe-transport deploy/environments/production/front-transport-transition internal/edge/component
+            python3 -m scripts.retire_front_hostport validate "$config"
+            echo "hostport_config=$config" >> "$GITHUB_OUTPUT"
           fi
           if (( ${#declarations[@]} == 1 )); then
             config="${declarations[0]}"
@@ -2732,6 +2742,39 @@ jobs:
             echo "config=$config" >> "$GITHUB_OUTPUT"
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
+
+  front_hostport_retirement:
+    needs: [prepush, front_replacement_plan]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.front_replacement_plan.outputs.hostport_config != '' }}
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-front-executor-replacement, cancel-in-progress: false, queue: max}
+    timeout-minutes: 8
+    permissions: {contents: read}
+    env:
+      CONFIG: ${{ needs.front_replacement_plan.outputs.hostport_config }}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Require unchanged scoped retirement and tests
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/retire_front_hostport.py scripts/test_retire_front_hostport.py scripts/observe_front_candidate.py scripts/front_connection_witness.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py
+          python3 -m unittest scripts.test_retire_front_hostport
+      - name: Isolate old host ports and prove uninterrupted current ingress
+        run: python3 -m scripts.retire_front_hostport run "$CONFIG" --evidence "$RUNNER_TEMP/front-hostport-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+      - name: Retain scoped retirement evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-front-hostport-retirement-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/front-hostport-${{ github.run_id }}-${{ github.run_attempt }}.json
+          if-no-files-found: warn
+          retention-days: 30
 
   front_replacement:
     needs: [prepush, front_replacement_plan]
