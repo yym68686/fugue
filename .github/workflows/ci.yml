@@ -1173,9 +1173,20 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
-      - name: Exercise detached shared DNS commands on real UDP and TCP listeners
+      - name: Verify mixed Worker encoding and independent withdrawals on disposable PostgreSQL
         if: github.event_name == 'push' && github.ref == 'refs/heads/codex/host-dns-detached-qualification-20261125'
-        run: go test -count=1 -v ./internal/dnsserver -run '^TestSharedTargetWireKeepsPeerDecisionThroughWithdrawAndRestart$'
+        run: |
+          set -euo pipefail
+          revision=10005a40fc30ba97e7125aeaa1c486544f40023e
+          git diff --exit-code "$revision" HEAD -- . ':!.github/workflows/ci.yml'
+          tmp="$(mktemp -d "$RUNNER_TEMP/host-encoding.XXXXXXXX")"
+          pg="$(pg_config --bindir)"
+          port=25431
+          "$pg/initdb" -D "$tmp/data" --auth=trust --encoding=UTF8 --locale=C
+          "$pg/pg_ctl" -D "$tmp/data" -l "$tmp/pg.log" -o "-h 127.0.0.1 -p $port -k $tmp" -w start
+          trap '"$pg/pg_ctl" -D "$tmp/data" -m fast -w stop' EXIT
+          "$pg/createdb" -h 127.0.0.1 -p "$port" fugue_test_host_encoding
+          FUGUE_TEST_DATABASE_URL="postgresql://$(id -un)@127.0.0.1:$port/fugue_test_host_encoding?sslmode=disable" go test -count=1 -v -run '^(TestHostedChoicesFenceOnlyOneHostAndCanWithdrawPartialForward|TestHostedProposalPureDraftCannotBecomeAnAssignment)$' ./internal/store
       - name: Compile test binaries before the bounded test budget
         timeout-minutes: 10
         # Cold compilation is separately bounded. The prepush step below still
