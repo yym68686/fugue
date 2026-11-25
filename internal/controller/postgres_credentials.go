@@ -47,8 +47,10 @@ func (s *Service) reconcileManagedPostgresCredentials(ctx context.Context, clien
 		if found && !postgresCredentialOwnerMatches(current, desired) {
 			return app, fmt.Errorf("resource_ownership_conflict: managed postgres Cluster %s/%s belongs to another backing service", namespace, clusterName)
 		}
-		if err := s.reconcilePostgresIngress(ctx, client, namespace, clusterName, service); err != nil {
-			return app, fmt.Errorf("reconcile managed database ingress: %w", err)
+		if !found {
+			if err := s.reconcilePostgresIngress(ctx, client, namespace, clusterName, service); err != nil {
+				return app, fmt.Errorf("reconcile managed database ingress: %w", err)
+			}
 		}
 		name := postgres.CredentialSecretName
 		if name == "" {

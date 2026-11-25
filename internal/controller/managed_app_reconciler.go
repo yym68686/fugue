@@ -137,7 +137,7 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 		return fmt.Errorf("list managed apps: %w", err)
 	}
 
-	var firstErr error
+	firstErr := s.reconcileLivePostgresIngress(ctx, client)
 	for _, managed := range managedApps {
 		if err := s.reconcileManagedAppObject(ctx, client, managed); err != nil {
 			if firstErr == nil {
