@@ -1612,10 +1612,6 @@ func runCommand(ctx context.Context, name string, args ...string) ([]byte, error
 	return runCommandWithEnvironmentAndInput(ctx, nil, nil, name, args...)
 }
 
-func runCommandWithInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
-	return runCommandWithEnvironmentAndInput(ctx, nil, input, name, args...)
-}
-
 func runCommandWithEnvironmentAndInput(ctx context.Context, environment []string, input []byte, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	if len(environment) > 0 {

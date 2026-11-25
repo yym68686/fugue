@@ -117,16 +117,6 @@ func ReserveHostedAddressProjection(next DNSArtifactPayload, source HostedAddres
 	return out, reservations, nil
 }
 
-// CaptureHostedAddressChanges is a dry compilation step; it never changes
-// either signed document. The caller authenticates the exact predecessor,
-// its stored runtime input and both publications' independent offline policy.
-// A reservation only explains subtraction of an existing, now-held address.
-// Other record changes are not explained by this result. The caller must
-// independently classify them; this function does not authorize their release.
-func CaptureHostedAddressChanges(source PreviousTrafficPublicationReference, prior DNSArtifactPayload, inherited []HostedAddressReservation, priorHolds []HostedAddressHold, next DNSArtifactPayload, nextHolds []HostedAddressHold) ([]HostedAddressReservation, error) {
-	return captureHostedAddressChanges(source, prior, inherited, priorHolds, next, nextHolds, nil, nil)
-}
-
 func captureHostedAddressChanges(source PreviousTrafficPublicationReference, prior DNSArtifactPayload, inherited []HostedAddressReservation, priorHolds []HostedAddressHold, next DNSArtifactPayload, nextHolds []HostedAddressHold, hosts map[string]bool, aliases map[string]string) ([]HostedAddressReservation, error) {
 	bad := errors.New("incomplete or ambiguous hosted address projection")
 	if source.Validate() != nil || len(inherited) > 4096 || len(prior.Records) > 20000 || len(next.Records) > 20000 ||

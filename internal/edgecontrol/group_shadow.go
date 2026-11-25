@@ -688,24 +688,6 @@ func normalizeIdentitySlice(values []string) []string {
 	return out
 }
 
-func normalizeGroupIDSlice(values []string) []string {
-	set := make(map[string]struct{}, len(values))
-	for _, value := range values {
-		if value = normalizeGroupID(value); value != "" {
-			set[value] = struct{}{}
-		}
-	}
-	out := make([]string, 0, len(set))
-	for value := range set {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func routeHasUpstream(binding model.EdgeRouteBinding) bool {
 	if strings.TrimSpace(binding.UpstreamURL) != "" {
 		return true

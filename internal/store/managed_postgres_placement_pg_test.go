@@ -35,16 +35,6 @@ func pgPlacementBoundServiceRowForSpec(
 	}
 }
 
-func pgPlacementBackingServiceRows(
-	now time.Time,
-	tenantID, projectID, serviceID, runtimeID, nodeName string,
-) *sqlmock.Rows {
-	return pgPlacementBackingServiceRowsForSpec(now, tenantID, projectID, serviceID, model.AppPostgresSpec{
-		Database: "demo", User: "demo", Password: "secret", ServiceName: "demo-postgres",
-		RuntimeID: runtimeID, PrimaryNodeName: nodeName, StorageSize: "1Gi", Instances: 1,
-	})
-}
-
 func pgPlacementBackingServiceRowsForSpec(
 	now time.Time,
 	tenantID, projectID, serviceID string,

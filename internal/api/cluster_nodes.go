@@ -1522,23 +1522,6 @@ func clusterNodeContainerRequests(containers []clusterNodeContainer) clusterNode
 	return total
 }
 
-func clusterNodeMaxContainerRequests(containers []clusterNodeContainer) clusterNodeResourceRequests {
-	var maxRequests clusterNodeResourceRequests
-	for _, container := range containers {
-		requests := container.Resources.Requests
-		if value, ok := parseCPUQuantityMilli(requests["cpu"]); ok && value > maxRequests.cpuMilliCores {
-			maxRequests.cpuMilliCores = value
-		}
-		if value, ok := parseBytesQuantity(requests["memory"]); ok && value > maxRequests.memoryBytes {
-			maxRequests.memoryBytes = value
-		}
-		if value, ok := parseBytesQuantity(requests["ephemeral-storage"]); ok && value > maxRequests.ephemeralStorageBytes {
-			maxRequests.ephemeralStorageBytes = value
-		}
-	}
-	return maxRequests
-}
-
 func clusterNodeHasRole(node model.ClusterNode, role string) bool {
 	role = strings.TrimSpace(role)
 	if role == "" {

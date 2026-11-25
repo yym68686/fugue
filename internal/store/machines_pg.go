@@ -150,10 +150,6 @@ func (s *Store) pgEnsurePlatformMachineForClusterNode(nodeName, endpoint string,
 	return machine, nil
 }
 
-func (s *Store) pgSetMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy) (model.Machine, error) {
-	return s.pgSetMachinePolicyWithEdgeGroup(name, policy, "")
-}
-
 func (s *Store) pgSetMachinePolicyWithEdgeGroup(name string, policy model.MachinePolicy, edgeGroupID string) (model.Machine, error) {
 	return s.pgSetMachinePolicyWithEdgeEnrollment(name, policy, edgeGroupID, nil)
 }

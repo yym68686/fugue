@@ -522,10 +522,6 @@ func normalizeEdgeInstanceToken(value string, maxLength int) string {
 	return value
 }
 
-func sameEdgeActiveEpochIdentity(left, right model.EdgeActiveEpoch) bool {
-	return left.EdgeGroupID == right.EdgeGroupID && left.Slot == right.Slot && left.ReleaseEpoch == right.ReleaseEpoch && left.FenceSequence == right.FenceSequence && left.MinHealthyInstances == right.MinHealthyInstances
-}
-
 func edgeInstanceMatchesActiveEpoch(instance model.EdgeNodeInstance, epoch model.EdgeActiveEpoch) bool {
 	return instance.EdgeGroupID == epoch.EdgeGroupID && instance.Slot == epoch.Slot && instance.ReleaseEpoch == epoch.ReleaseEpoch
 }

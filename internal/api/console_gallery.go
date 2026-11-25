@@ -498,18 +498,6 @@ func readConsoleOperationTimestamp(operation model.Operation) time.Time {
 	}
 }
 
-func isConsoleReleaseOperationCandidate(operation model.Operation) bool {
-	normalizedType := normalizeConsoleText(operation.Type)
-	normalizedStatus := normalizeConsoleText(operation.Status)
-	return normalizedType == model.OperationTypeImport ||
-		normalizedType == "build" ||
-		normalizedType == model.OperationTypeDeploy ||
-		strings.Contains(normalizedStatus, "import") ||
-		strings.Contains(normalizedStatus, "build") ||
-		strings.Contains(normalizedStatus, "deploy") ||
-		operation.DesiredSource != nil
-}
-
 func hasConsoleLiveRelease(app model.App) bool {
 	return app.ObservedStatus != nil && consoleObservedReadyForServing(app)
 }

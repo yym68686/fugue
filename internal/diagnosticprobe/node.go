@@ -73,10 +73,6 @@ type processFact struct {
 	Missing         []string `json:"missing"`
 }
 
-func processScheduling(req livediagnostics.ProbeRequest) (any, error) {
-	return processSchedulingAt(context.Background(), req, hostProc)
-}
-
 func processSchedulingAt(ctx context.Context, req livediagnostics.ProbeRequest, procRoot string) (any, error) {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {

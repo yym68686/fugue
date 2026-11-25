@@ -3433,10 +3433,6 @@ func maxInt64(value int64) int64 {
 	return value
 }
 
-func (c *imageCache) ensureLocalBlobFromSource(ctx context.Context, sourceBase, repo, digest string, expectedSize *int64) error {
-	return c.ensureLocalBlobFromSourceWithStats(ctx, sourceBase, repo, digest, expectedSize, nil)
-}
-
 func (c *imageCache) ensureLocalBlobFromSourceWithStats(ctx context.Context, sourceBase, repo, digest string, expectedSize *int64, stats *replicationTransferStats) error {
 	if c == nil || strings.TrimSpace(c.storeDir) == "" {
 		return errors.New("image cache blob store is unavailable")

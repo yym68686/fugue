@@ -2971,7 +2971,3 @@ WHERE workspace_id = $1
 	}
 	return role, role != "", nil
 }
-
-func IsDataNotFound(err error) bool {
-	return errors.Is(err, ErrNotFound)
-}

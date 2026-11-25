@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-func (s *Server) captureDirectDNSQueries(ctx context.Context, result *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy) error {
-	return s.captureDirectDNSQueriesWithNodes(ctx, result, policy, nil)
-}
-
 func (s *Server) captureDirectDNSQueriesWithNodes(ctx context.Context, result *platformIntentProjectionResponse, policy platformconfig.DNSQueryPolicy, declaredNodes []model.EdgeNode) error {
 	if err := platformconfig.ValidateDNSQueryPolicy(&policy); err != nil {
 		return err

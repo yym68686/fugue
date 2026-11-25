@@ -650,31 +650,6 @@ func movableRWOAppLabels(app model.App) map[string]string {
 	return labels
 }
 
-func buildMovableRWOTargetService(namespace, name string, labels map[string]string) map[string]any {
-	selector := clonePlacementStringMap(labels)
-	selector["fugue.pro/volume-migration-role"] = "target"
-	return map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Service",
-		"metadata": map[string]any{
-			"name":      name,
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"selector": selector,
-			"ports": []map[string]any{
-				{
-					"name":       "copy",
-					"port":       movableRWOCopyPort,
-					"targetPort": movableRWOCopyPort,
-					"protocol":   "TCP",
-				},
-			},
-		},
-	}
-}
-
 func buildMovableRWOTargetPod(namespace, name string, labels map[string]string, claimName, targetPath string, scheduling runtimepkg.SchedulingConstraints) map[string]any {
 	podLabels := clonePlacementStringMap(labels)
 	podLabels["fugue.pro/volume-migration-role"] = "target"

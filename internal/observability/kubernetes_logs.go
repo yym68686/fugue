@@ -561,42 +561,6 @@ func (c *kubernetesLogCollector) kubernetesLogLinesPerContainer(targetCount int)
 	return fairShare
 }
 
-func (c *kubernetesLogCollector) collectContainerLogs(ctx context.Context, pod corev1.Pod, container string, maxLines int) kubernetesLogIngestResult {
-	if maxLines <= 0 {
-		return kubernetesLogIngestResult{}
-	}
-	cfg := c.pipeline.cfg
-	sinceSeconds := int64((cfg.KubernetesLogPollInterval * 2).Seconds())
-	if sinceSeconds < 5 {
-		sinceSeconds = 5
-	}
-	tailLines := kubernetesLogTailLinesForRequest(cfg, maxLines)
-	options := &corev1.PodLogOptions{
-		Container:    container,
-		Timestamps:   true,
-		SinceSeconds: &sinceSeconds,
-		TailLines:    &tailLines,
-	}
-	request := c.client.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, options)
-	logCtx, cancel := context.WithTimeout(ctx, cfg.KubernetesLogPollInterval)
-	defer cancel()
-	stream, err := request.Stream(logCtx)
-	if err != nil {
-		if isBenignKubernetesLogReadError(err) {
-			return kubernetesLogIngestResult{}
-		}
-		if ctx.Err() != nil {
-			return kubernetesLogIngestResult{}
-		}
-		c.pipeline.kubernetesLogErrors.Add(1)
-		c.pipeline.recordError(fmt.Errorf("read Kubernetes logs for %s/%s/%s: %w", pod.Namespace, pod.Name, container, err))
-		return kubernetesLogIngestResult{}
-	}
-	defer stream.Close()
-
-	return c.ingestLogStreamResult(logCtx, stream, pod, container, maxLines)
-}
-
 func kubernetesLogTailLinesForRequest(cfg Config, maxLines int) int64 {
 	tailLines := cfg.KubernetesLogTailLines
 	if tailLines <= 0 {

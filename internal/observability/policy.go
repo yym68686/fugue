@@ -74,14 +74,6 @@ type SummaryPolicy struct {
 	MaxValueBytes int
 }
 
-func DefaultSummaryPolicy() SummaryPolicy {
-	return SummaryPolicy{
-		MaxFields:     DefaultSummaryMaxFields,
-		MaxKeyBytes:   DefaultSummaryMaxKeyBytes,
-		MaxValueBytes: DefaultSummaryMaxValueBytes,
-	}
-}
-
 func IsAllowedMetricLabel(key string) bool {
 	_, ok := metricLabelAllowlist[normalizeFieldKey(key)]
 	return ok

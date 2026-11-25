@@ -241,75 +241,6 @@ func (s *Service) observedManagedPostgresPrimaryPlacement(
 	}, "pod " + primaryPod + " on node " + nodeName + " at " + podIP, nil
 }
 
-func (s *Service) observedManagedPostgresPrimaryRuntimeID(ctx context.Context, app model.App, spec model.AppPostgresSpec) (string, string, error) {
-	if strings.TrimSpace(app.TenantID) == "" || strings.TrimSpace(spec.ServiceName) == "" {
-		return "", "", nil
-	}
-	clusterName := model.NormalizePostgresServiceName(spec.ServiceName, "")
-
-	client, err := s.kubeClient()
-	if err != nil {
-		return "", "", fmt.Errorf("initialize kubernetes client: %w", err)
-	}
-
-	namespace := runtimepkg.NamespaceForTenant(app.TenantID)
-	cluster, found, err := client.getCloudNativePGCluster(ctx, namespace, clusterName)
-	if err != nil {
-		return "", "", fmt.Errorf("read cloudnativepg cluster %s/%s: %w", namespace, clusterName, err)
-	}
-	if !found {
-		return "", "", nil
-	}
-
-	if primaryPod := strings.TrimSpace(cluster.Status.CurrentPrimary); primaryPod != "" {
-		runtimeID, detail, err := s.runtimeIDForManagedPostgresPod(ctx, client, namespace, primaryPod)
-		if err != nil {
-			return "", "", err
-		}
-		if runtimeID != "" {
-			return runtimeID, detail, nil
-		}
-	}
-
-	pvcSelector := "cnpg.io/cluster=" + clusterName + ",role=primary"
-	pvcNames, err := client.listPersistentVolumeClaimNamesByLabel(ctx, namespace, pvcSelector)
-	if err != nil {
-		return "", "", fmt.Errorf("list primary postgres pvcs for %s/%s: %w", namespace, clusterName, err)
-	}
-	for _, pvcName := range pvcNames {
-		runtimeID, detail, err := s.runtimeIDForPersistentVolumeClaim(ctx, client, namespace, pvcName)
-		if err != nil {
-			return "", "", err
-		}
-		if runtimeID != "" {
-			return runtimeID, detail, nil
-		}
-	}
-	return "", "", nil
-}
-
-func (s *Service) runtimeIDForManagedPostgresPod(ctx context.Context, client *kubeClient, namespace, podName string) (string, string, error) {
-	pod, found, err := client.getPod(ctx, namespace, podName)
-	if err != nil {
-		return "", "", fmt.Errorf("read postgres pod %s/%s: %w", namespace, podName, err)
-	}
-	if found {
-		if nodeName := strings.TrimSpace(pod.Spec.NodeName); nodeName != "" {
-			runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
-			if err != nil {
-				return "", "", err
-			}
-			if runtimeID != "" {
-				return runtimeID, "pod " + podName + " on node " + nodeName, nil
-			}
-		}
-		if pvcName := managedPostgresPVCNameForPod(pod); pvcName != "" {
-			return s.runtimeIDForPersistentVolumeClaim(ctx, client, namespace, pvcName)
-		}
-	}
-	return s.runtimeIDForPersistentVolumeClaim(ctx, client, namespace, podName)
-}
-
 func managedPostgresPVCNameForPod(pod kubePod) string {
 	for _, volume := range pod.Spec.Volumes {
 		if volume.PersistentVolumeClaim == nil {
@@ -328,53 +259,6 @@ func managedPostgresPVCNameForPod(pod kubePod) string {
 		}
 	}
 	return ""
-}
-
-func (s *Service) runtimeIDForPersistentVolumeClaim(ctx context.Context, client *kubeClient, namespace, pvcName string) (string, string, error) {
-	pvc, found, err := client.getPersistentVolumeClaim(ctx, namespace, pvcName)
-	if err != nil {
-		return "", "", fmt.Errorf("read postgres pvc %s/%s: %w", namespace, pvcName, err)
-	}
-	if !found {
-		return "", "", nil
-	}
-
-	if nodeName := strings.TrimSpace(pvc.Metadata.Annotations[pvcSelectedNodeAnnotation]); nodeName != "" {
-		runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
-		if err != nil {
-			return "", "", err
-		}
-		if runtimeID != "" {
-			return runtimeID, "pvc " + pvcName + " selected-node " + nodeName, nil
-		}
-	}
-
-	volumeName := strings.TrimSpace(pvc.Spec.VolumeName)
-	if volumeName == "" {
-		return "", "", nil
-	}
-
-	pv, found, err := client.getPersistentVolume(ctx, volumeName)
-	if err != nil {
-		if strings.Contains(err.Error(), "status=403") {
-			return "", "", nil
-		}
-		return "", "", fmt.Errorf("read persistent volume %s for pvc %s/%s: %w", volumeName, namespace, pvcName, err)
-	}
-	if !found {
-		return "", "", nil
-	}
-
-	if nodeName := persistentVolumeNodeName(pv); nodeName != "" {
-		runtimeID, err := s.runtimeIDForNode(ctx, client, nodeName)
-		if err != nil {
-			return "", "", err
-		}
-		if runtimeID != "" {
-			return runtimeID, "pv " + volumeName + " hostname " + nodeName, nil
-		}
-	}
-	return "", "", nil
 }
 
 func persistentVolumeNodeName(pv kubePersistentVolume) string {

@@ -4741,10 +4741,6 @@ func (s *Store) pgDispatchOperationToRuntime(id, runtimeID string) (model.Operat
 	return op, nil
 }
 
-func (s *Store) pgCompleteOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
-	return s.pgCompleteOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, nil)
-}
-
 func (s *Store) pgCompleteOperationGuarded(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource, guard *operationFinalizationGuard) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -4930,10 +4926,6 @@ func (s *Store) pgUpdateOperationProgress(id, message string) (model.Operation, 
 		return model.Operation{}, fmt.Errorf("commit operation progress transaction: %w", err)
 	}
 	return op, nil
-}
-
-func (s *Store) pgFailOperation(id, message string) (model.Operation, error) {
-	return s.pgFailOperationGuarded(id, message, nil)
 }
 
 func (s *Store) pgFailOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {

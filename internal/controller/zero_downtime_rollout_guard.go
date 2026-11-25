@@ -27,15 +27,6 @@ type zeroDowntimeRolloutGuardDecision struct {
 	AdministratorMigration   bool
 }
 
-func (s *Service) refuseNonZeroDowntimeRolloutIfNeeded(
-	ctx context.Context,
-	op model.Operation,
-	currentApp, desiredApp model.App,
-	scheduling runtime.SchedulingConstraints,
-) error {
-	return s.refuseNonZeroDowntimeRolloutWithScheduling(ctx, op, currentApp, desiredApp, scheduling, scheduling, "")
-}
-
 func (s *Service) refuseNonZeroDowntimeRolloutWithScheduling(
 	ctx context.Context,
 	op model.Operation,

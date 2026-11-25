@@ -22,6 +22,7 @@ import (
 	"fugue/internal/pgimage"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sshidentity"
+
 	k8svalidation "k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -6437,19 +6438,6 @@ func defaultBackingServiceRuntimeForProject(spec model.BackingServiceSpec, proje
 	out := cloneBackingServiceSpec(spec)
 	out.Postgres.RuntimeID = defaultRuntimeID
 	return out
-}
-
-func findManagedOwnedRuntimeByNodeKeyAndName(state *model.State, nodeKeyID, runtimeName string) int {
-	for idx := range state.Runtimes {
-		runtime := state.Runtimes[idx]
-		if runtime.Type != model.RuntimeTypeManagedOwned {
-			continue
-		}
-		if runtime.NodeKeyID == nodeKeyID && strings.EqualFold(runtime.Name, strings.TrimSpace(runtimeName)) {
-			return idx
-		}
-	}
-	return -1
 }
 
 func nextAvailableRuntimeName(state *model.State, tenantID, requested string) string {

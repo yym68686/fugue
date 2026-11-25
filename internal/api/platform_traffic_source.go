@@ -80,14 +80,6 @@ func (s *Server) trafficRouteSourceWithInputCapture(ctx context.Context, group, 
 	}
 }
 
-func (s *Server) observeTrafficRouteSource(group, scope string, readArtifact func(string) (model.PlatformArtifact, error)) (model.EdgeRouteIntentSnapshot, bool, error) {
-	return s.observeTrafficRouteSourceWithBindingReader(group, scope, readArtifact, nil)
-}
-
-func (s *Server) observeTrafficRouteSourceWithBindingReader(group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader) (model.EdgeRouteIntentSnapshot, bool, error) {
-	return s.observeTrafficRouteSourceWithInputCapture(context.Background(), group, scope, readArtifact, readBinding, nil)
-}
-
 func (s *Server) observeTrafficRouteSourceWithInputCapture(ctx context.Context, group, scope string, readArtifact func(string) (model.PlatformArtifact, error), readBinding routeartifact.BindingReader, capture func([]store.PlatformInputReadSelection)) (model.EdgeRouteIntentSnapshot, bool, error) {
 	defer s.observeOperation("traffic-source")()
 	parent, release, found, err := s.selectTrafficRouteReleaseInScopeContext(ctx, group, scope)

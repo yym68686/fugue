@@ -2147,10 +2147,6 @@ func backupPolicyTargetsApp(policy model.BackupPolicy, app model.App) bool {
 	return policy.AppID != "" || policy.Target.AppID != ""
 }
 
-func (s *Server) backupBackendIDForPrincipal(w http.ResponseWriter, principal model.Principal, idOrName string) (string, bool) {
-	return s.backupBackendIDForScope(w, principal, principal.TenantID, idOrName)
-}
-
 func (s *Server) backupBackendIDForScope(w http.ResponseWriter, principal model.Principal, tenantID, idOrName string) (string, bool) {
 	tenantID = strings.TrimSpace(tenantID)
 	idOrName = strings.TrimSpace(idOrName)

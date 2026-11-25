@@ -1393,22 +1393,6 @@ func dnsQueryMsg(t *testing.T, service *Service, req *miekgdns.Msg) *miekgdns.Ms
 	return writer.msg
 }
 
-func ecsSubnetOption(msg *miekgdns.Msg) *miekgdns.EDNS0_SUBNET {
-	if msg == nil {
-		return nil
-	}
-	opt := msg.IsEdns0()
-	if opt == nil {
-		return nil
-	}
-	for _, extra := range opt.Option {
-		if subnet, ok := extra.(*miekgdns.EDNS0_SUBNET); ok {
-			return subnet
-		}
-	}
-	return nil
-}
-
 type captureDNSResponseWriter struct {
 	msg *miekgdns.Msg
 }

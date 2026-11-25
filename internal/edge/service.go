@@ -922,12 +922,6 @@ func (s *Service) SyncOnce(ctx context.Context) (err error) {
 	}
 }
 
-func (s *Service) hasGroupRoutePublication() bool {
-	publication, bundle := s.currentRoutePublicationAndBundle()
-	return publication.Source == edgeControlRouteSourceV1 && publication.PublicationSequence > 0 && bundle != nil &&
-		!bundle.ValidUntil.IsZero() && time.Now().UTC().Before(bundle.ValidUntil.UTC())
-}
-
 func (s *Service) retryCurrentCaddyConfig(ctx context.Context, reason string) {
 	if !s.Config.CaddyEnabled || !s.hasBundle() {
 		return
@@ -1195,10 +1189,6 @@ func weightedReleaseStickinessKey(r *http.Request, host string, route model.Edge
 	}
 	parts = append(parts, identity)
 	return strings.Join(parts, "\x00")
-}
-
-func weightedReleaseBucket(key string, total int) int {
-	return weightedselector.Bucket(key, total)
 }
 
 func (s *Service) hasBundle() bool {
@@ -2302,10 +2292,6 @@ func newEdgeRequestBodyBufferManager(cfg config.EdgeConfig) *edgeRequestBodyBuff
 	m := &edgeRequestBodyBufferManager{path: path, budget: cfg.RequestBodyBufferTotalMaxBytes, dynamic: cfg.RequestBodyBufferTotalMaxBytes <= 0, reserveBytes: cfg.RequestBodyBufferReserveBytes, diskRatio: cfg.RequestBodyBufferDiskRatio}
 	m.refreshBudgetLocked()
 	return m
-}
-
-func dynamicEdgeRequestBodyBufferBudget(path string, reserveBytes int64, ratio float64) int64 {
-	return sampleEdgeBodyBudget(path, reserveBytes, ratio).Budget
 }
 
 func filesystemAvailableBytes(path string) (int64, error) {
@@ -4128,10 +4114,6 @@ func (s *Service) preservePreviousCache(path string) {
 	if err != nil && !os.IsNotExist(err) && s.Logger != nil {
 		s.Logger.Printf("preserve previous edge route cache failed: %v", err)
 	}
-}
-
-func previousCachePath(path string) string {
-	return lkgcache.PreviousPath(path)
 }
 
 func (s *Service) verifyBundle(bundle model.EdgeRouteBundle, now time.Time) error {

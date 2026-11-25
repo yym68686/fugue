@@ -18,6 +18,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+
 	"golang.org/x/sync/errgroup"
 )
 
@@ -1659,10 +1660,6 @@ func (s *Server) queryAppObservabilityRuleDiagnosis(ctx context.Context, appID s
 	}
 
 	return appObservabilityRuleDiagnosisFromRowsWithPeers(requestRows, spanRows, peerTTFBRows, eventRows), nil
-}
-
-func buildAppObservabilityRequestsQuery(appID string, window appObservabilityWindow, query url.Values) (string, error) {
-	return buildAppObservabilityRequestsQueryWithOptions(appID, window, query, appObservabilityRequestQueryOptions{})
 }
 
 func buildAppObservabilityRequestsQueryWithOptions(appID string, window appObservabilityWindow, query url.Values, options appObservabilityRequestQueryOptions) (string, error) {

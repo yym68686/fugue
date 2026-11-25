@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	cliconsole "fugue/internal/cli/console"
@@ -78,15 +77,6 @@ JSON and plain output retain their existing script contracts.
 	cmd.Flags().BoolVar(&opts.AltScreen, "alt-screen", false, "Use alternate screen for the preview frame")
 	cmd.Flags().IntVar(&opts.LogLines, "log-lines", opts.LogLines, "Runtime log lines to load for the selected app")
 	return cmd
-}
-
-func (c *CLI) consoleRenderer() cliconsole.Renderer {
-	mode, err := cliterminal.ParseMode(c.root.Color)
-	if err != nil {
-		mode = cliterminal.ModeAuto
-	}
-	level := cliterminal.DetectColorLevel(mode, c.shouldUseInteractiveMonitor(false), os.LookupEnv)
-	return cliconsole.NewRenderer(envIntDefault("COLUMNS", 100), cliterminal.Palette{Level: level})
 }
 
 func (c *CLI) loadConsoleView(client *Client, projectRef string, includeAdmin bool, mouse bool, logLines int) (cliconsole.View, error) {

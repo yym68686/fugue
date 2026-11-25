@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fugue/internal/model"
 	"strings"
 	"sync"
 	"time"
@@ -112,13 +111,4 @@ func (c *CLI) loadAppOverviewWithin(client *Client, ref string, budget time.Dura
 		snapshot.Diagnosis = selectPrimaryOverviewDiagnosis(diagnosis, runtimeDiagnosis)
 	}
 	return snapshot, nil
-}
-
-// Preserve read compatibility while allowing stateful callers to reject fuzzy
-// project resolution. IDs always remain an exact targeting escape hatch.
-func validateAppSelection(app model.App, tenant, project string) error {
-	if (tenant != "" && app.TenantID != tenant) || (project != "" && app.ProjectID != project) {
-		return withExitCode(errAppOutsideSelection, ExitCodeNotFound)
-	}
-	return nil
 }

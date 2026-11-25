@@ -538,23 +538,6 @@ func podContainerNames(pod kubePodInfo, includeInit bool) []string {
 	return names
 }
 
-func podStatusContainerNames(pod kubePodInfo, includeInit bool) []string {
-	names := make([]string, 0, len(pod.Status.ContainerStatuses)+len(pod.Status.InitContainerStatuses))
-	if includeInit {
-		for _, status := range pod.Status.InitContainerStatuses {
-			if name := strings.TrimSpace(status.Name); name != "" {
-				names = append(names, name)
-			}
-		}
-	}
-	for _, status := range pod.Status.ContainerStatuses {
-		if name := strings.TrimSpace(status.Name); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 func readJobLogs(ctx context.Context, client appLogsClient, namespace, jobName string, tailLines int) (string, error) {
 	pods, err := client.listPodsBySelector(ctx, namespace, "job-name="+jobName)
 	if err != nil {
@@ -683,15 +666,6 @@ func latestBuilderJobName(ctx context.Context, client appLogsClient, namespace, 
 		return jobs[i].Metadata.CreationTimestamp.Before(jobs[j].Metadata.CreationTimestamp)
 	})
 	return jobs[len(jobs)-1].Metadata.Name, nil
-}
-
-func kubeJobCompleted(status kubeJobStatus) bool {
-	for _, condition := range status.Conditions {
-		if strings.EqualFold(strings.TrimSpace(condition.Type), "Complete") && strings.EqualFold(strings.TrimSpace(condition.Status), "True") {
-			return true
-		}
-	}
-	return status.Succeeded > 0
 }
 
 func kubeJobFailed(status kubeJobStatus) bool {

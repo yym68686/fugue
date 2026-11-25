@@ -147,47 +147,6 @@ func (scope edgeQualityRankScope) key() string {
 	}
 }
 
-func normalizeEdgeRequestSizeClass(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "all":
-		return ""
-	case "no_body", "body_le_64k", "body_64k_1m", "body_1m_16m", "body_gt_16m":
-		return value
-	case "none":
-		return "no_body"
-	case "small", "small_body":
-		return "body_le_64k"
-	case "medium", "medium_body":
-		return "body_64k_1m"
-	case "large", "large_body":
-		return "body_1m_16m"
-	case "huge", "huge_body":
-		return "body_gt_16m"
-	default:
-		return ""
-	}
-}
-
-func edgeQualityRequestSizeClass(sample model.EdgePerformanceSample) string {
-	size := sample.RequestBodyBytes
-	if sample.RequestBodyReadBytes > size {
-		size = sample.RequestBodyReadBytes
-	}
-	switch {
-	case size <= 0:
-		return "no_body"
-	case size <= 64*1024:
-		return "body_le_64k"
-	case size <= 1024*1024:
-		return "body_64k_1m"
-	case size <= 16*1024*1024:
-		return "body_1m_16m"
-	default:
-		return "body_gt_16m"
-	}
-}
-
 func edgeQualityPathPrefixBucket(pathPrefix string) string {
 	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
 	switch {

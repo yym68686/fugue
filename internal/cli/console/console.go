@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"fugue/internal/cli/monitor"
 	"fugue/internal/cli/terminal"
 	"fugue/internal/cli/ui"
 )
@@ -171,18 +170,6 @@ func (r Renderer) Render(model Model) string {
 		body = append(body, "", commandPalette(view))
 	}
 	return renderer.Panel("Fugue console", strings.Join(body, "\n"))
-}
-
-func SnapshotFromView(view View) monitor.Snapshot {
-	sections := make([]monitor.Section, 0, len(view.Tables))
-	for _, table := range view.Tables {
-		rows := make([][]string, 0, len(table.Rows))
-		for _, row := range table.Rows {
-			rows = append(rows, row.Cells)
-		}
-		sections = append(sections, monitor.Section{Title: table.Title, Headers: table.Headers, Rows: rows})
-	}
-	return monitor.Snapshot{Title: "Fugue console", Summary: view.Summary, Sections: sections}
 }
 
 func renderTabs(pages []Page, active Page, lowWidth bool) string {

@@ -62,18 +62,3 @@ func compilerInputExternalRoots(ctx context.Context, tx *sql.Tx, limit int, obse
 	}
 	return roots, revision, rows.Err()
 }
-
-// Final enforcement takes SHARE on both tables BEFORE re-reading the census.
-// This also catches a root appended after preparation that happens to point to
-// already-retained native inputs. A record's identity must not disappear just
-// because its input set overlaps another root.
-func lockCompilerInputExternalRootRegistry(ctx context.Context, tx *sql.Tx) error {
-	var installed bool
-	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('fugue_platform_input_external_roots') IS NOT NULL OR to_regclass('fugue_platform_input_external_root_refs') IS NOT NULL`).Scan(&installed); err != nil || !installed {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `LOCK TABLE fugue_platform_input_external_roots,fugue_platform_input_external_root_refs IN SHARE MODE`); err != nil {
-		return err
-	}
-	return schemamigrate.VerifyCompilerInputExternalRoots(ctx, tx)
-}

@@ -1156,14 +1156,6 @@ func defaultPostgresBindingEnv(spec model.AppPostgresSpec) map[string]string {
 	}
 }
 
-func serviceNamespaceForTenant(tenantID string) string {
-	tenantID = model.Slugify(strings.ReplaceAll(tenantID, "_", "-"))
-	if len(tenantID) > 32 {
-		tenantID = tenantID[:32]
-	}
-	return "fg-" + tenantID
-}
-
 func serviceResourceName(name string) string {
 	name = model.Slugify(name)
 	if len(name) > 50 {
@@ -1208,15 +1200,6 @@ func sortServiceBindings(bindings []model.ServiceBinding) {
 	})
 }
 
-func hasBackingServiceType(services []model.BackingService, serviceType string) bool {
-	for _, service := range services {
-		if strings.EqualFold(service.Type, serviceType) {
-			return true
-		}
-	}
-	return false
-}
-
 func backingServiceNameExists(state *model.State, tenantID, projectID, name, exceptID string) bool {
 	for _, service := range state.BackingServices {
 		if service.ID == exceptID || isDeletedBackingService(service) {
@@ -1244,15 +1227,6 @@ func nextAvailableBackingServiceName(state *model.State, tenantID, projectID, ba
 func hasServiceBindings(state *model.State, serviceID string) bool {
 	for _, binding := range state.ServiceBindings {
 		if binding.ServiceID == serviceID {
-			return true
-		}
-	}
-	return false
-}
-
-func hasAppOwnedPostgresService(state *model.State, appID string) bool {
-	for _, service := range state.BackingServices {
-		if service.OwnerAppID == appID && service.Type == model.BackingServiceTypePostgres && !isDeletedBackingService(service) {
 			return true
 		}
 	}

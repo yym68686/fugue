@@ -304,16 +304,6 @@ func scanEdgeActiveEpoch(scanner sqlScanner) (model.EdgeActiveEpoch, error) {
 	return normalizeEdgeActiveEpoch(epoch)
 }
 
-func verifyEdgeInstanceMaterial(instances []model.EdgeNodeInstance, epochs []model.EdgeActiveEpoch, controls []model.EdgeNode) error {
-	state := model.State{
-		EdgeInstanceFencingSchema: model.EdgeInstanceFencingSchemaV1,
-		EdgeNodeInstances:         instances,
-		EdgeActiveEpochs:          epochs,
-		EdgeNodes:                 controls,
-	}
-	return verifyEdgeInstanceState(&state)
-}
-
 func pgReadEdgeControlNodes(ctx context.Context, db sqlQueryer) ([]model.EdgeNode, error) {
 	rows, err := db.QueryContext(ctx, `SELECT edge_id, edge_group_id
 FROM fugue_edge_node_instances

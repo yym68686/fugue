@@ -352,10 +352,3 @@ func (s *Service) currentTime() time.Time {
 	}
 	return time.Now()
 }
-
-func imageTrackingRetryReady(tracking model.AppImageTracking, now time.Time) bool {
-	if tracking.LastTriggeredAt == nil {
-		return true
-	}
-	return !tracking.LastTriggeredAt.Add(5 * time.Minute).After(now)
-}

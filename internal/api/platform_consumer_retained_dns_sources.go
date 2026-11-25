@@ -98,13 +98,6 @@ func observeRetainedDNSRouteSources(ctx context.Context, lookup func() (consumer
 	return model.PlatformConsumerRetainedDNSRouteSourcesResponse{PlatformConsumerDNSRouteSourcesResponse: model.PlatformConsumerDNSRouteSourcesResponse{Assignment: before.Assignment, Release: before.Release, Snapshot: snapshot}, RetainedLKG: lkg}, nil
 }
 
-// The positive LKG is a separate read authority. A pending gray/full assignment
-// cannot lend its policy to an old DNS artifact or revoke its read just by being
-// selected. Conversely, arbitrary historical full releases grant no access.
-func (s *Server) retainedDNSRouteSourceOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string) (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
-	return s.retainedDNSRouteSourceOwnerWithReader(claims, artifactID, setID, s.store.GetPlatformArtifact)
-}
-
 func (s *Server) retainedDNSRouteSourceOwnerWithReader(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string, loadArtifact func(string) (model.PlatformArtifact, error)) (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
 	fail := func() (consumerArtifactLookup, model.PlatformLKGSnapshot, error) {
 		return consumerArtifactLookup{}, model.PlatformLKGSnapshot{}, store.ErrNotFound

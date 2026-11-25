@@ -2,13 +2,10 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
@@ -260,19 +257,4 @@ func (s *Store) BeginCompilerInputReadLease(ctx context.Context) (*sql.Tx, func(
 		})
 	}
 	return tx, finish, nil
-}
-
-func verifyArchiveReader(r *inputarchive.Reader, expected string, expectedBytes int64) error {
-	if r == nil {
-		return ErrConflict
-	}
-	h := sha256.New()
-	n, err := io.Copy(h, r)
-	if err != nil {
-		return err
-	}
-	if !r.Verified() || n != expectedBytes || "sha256:"+hex.EncodeToString(h.Sum(nil)) != expected {
-		return fmt.Errorf("compiler input archive readback differs: %w", ErrConflict)
-	}
-	return nil
 }

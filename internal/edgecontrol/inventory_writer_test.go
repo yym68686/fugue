@@ -506,27 +506,6 @@ func writeInventoryWriterKeyringFixture(t *testing.T, now time.Time, revoked boo
 	return filepath.Join(root, "version", "keyring.json"), secret
 }
 
-func writeInventoryWriterGroupKeyringFixture(t *testing.T, now time.Time, groupID string) (string, []byte) {
-	t.Helper()
-	root := t.TempDir()
-	secret := []byte("0123456789abcdef0123456789abcdef")
-	value := inventoryWriterKeyring{
-		Schema: InventoryWriterKeyringSchemaV1, Generation: 1, GroupID: groupID,
-		Keys: []inventoryWriterKey{{
-			KeyID: "writer-current", Secret: base64.RawURLEncoding.EncodeToString(secret),
-			NotBeforeUnix: now.Add(-time.Minute).Unix(), NotAfterUnix: now.Add(time.Hour).Unix(),
-		}},
-	}
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, groupID+".json"), raw, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return root, secret
-}
-
 func writeInventoryPlatformIdentityGroupFixture(t *testing.T, now time.Time, groupID, nodeID string) (string, string) {
 	t.Helper()
 	root := t.TempDir()

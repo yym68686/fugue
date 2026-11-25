@@ -38,20 +38,8 @@ func mergedAppEnv(app model.App) map[string]string {
 	return mergedAppEnvWithSpec(app, app.Spec)
 }
 
-func mergedAppEnvWithBindings(spec model.AppSpec, bindings []model.ServiceBinding) map[string]string {
-	app := model.App{
-		Bindings: bindings,
-		Spec:     spec,
-	}
-	return mergedAppEnvWithSpec(app, spec)
-}
-
 func mergedAppEnvWithSpec(app model.App, spec model.AppSpec) map[string]string {
 	return mergedAppEnvDetails(app, spec).Env
-}
-
-func mergedAppEnvEntries(app model.App, spec model.AppSpec) []model.AppEnvEntry {
-	return mergedAppEnvDetails(app, spec).Entries
 }
 
 type appEnvDetails struct {
@@ -180,18 +168,6 @@ func appendUniqueString(values []string, value string) []string {
 		}
 	}
 	return append(values, value)
-}
-
-func hasManagedStatefulBinding(app model.App) bool {
-	for _, bound := range appBoundServices(app) {
-		if !strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) {
-			continue
-		}
-		if isManagedBackingService(bound.Service) {
-			return true
-		}
-	}
-	return false
 }
 
 func firstManagedPostgresBinding(app model.App) (appBoundService, bool) {

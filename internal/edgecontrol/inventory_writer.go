@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -365,15 +364,4 @@ func writeInventoryHeartbeatError(w http.ResponseWriter, status int, code string
 		Schema string `json:"schema"`
 		Error  string `json:"error"`
 	}{Schema: "edge-control-error/v1", Error: code})
-}
-
-// sortedInventoryGroups is shared with status/readback construction so every
-// externally visible group list has one deterministic canonical order.
-func sortedInventoryGroups(values map[string]struct{}) []string {
-	out := make([]string, 0, len(values))
-	for value := range values {
-		out = append(out, value)
-	}
-	sort.Strings(out)
-	return out
 }

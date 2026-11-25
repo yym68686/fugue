@@ -181,10 +181,6 @@ func DecisionTime(decision model.ImageRetentionDecision) time.Time {
 	return time.Time{}
 }
 
-func KeySetFromRefs(refs map[string]struct{}) map[string]struct{} {
-	return keySetFromRefs(refs)
-}
-
 func keySetFromRefs(refs map[string]struct{}) map[string]struct{} {
 	out := map[string]struct{}{}
 	for ref := range refs {

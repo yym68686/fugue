@@ -21,6 +21,7 @@ import (
 	"fugue/internal/releaseflow"
 	"fugue/internal/releaseproof"
 	"fugue/internal/runtime"
+
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
@@ -835,36 +836,8 @@ type kubeObjectMetadataView struct {
 	namespace string
 }
 
-func kubeObjectMetadata(raw map[string]any) kubeObjectMetadataView {
-	metadata, _ := raw["metadata"].(map[string]any)
-	name, _ := metadata["name"].(string)
-	namespace, _ := metadata["namespace"].(string)
-	return kubeObjectMetadataView{name: strings.TrimSpace(name), namespace: strings.TrimSpace(namespace)}
-}
-
-func kubeObjectNamespaceOrName(raw map[string]any, fallback string) string {
-	metadata := kubeObjectMetadata(raw)
-	if metadata.name != "" {
-		return metadata.name
-	}
-	return strings.TrimSpace(fallback)
-}
-
-func kubeObjectNamespacedKey(raw map[string]any) string {
-	metadata := kubeObjectMetadata(raw)
-	return kubeNamespacedKey(metadata.namespace, metadata.name)
-}
-
 func kubeNamespacedKey(namespace, name string) string {
 	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
-}
-
-func kubeAddressCount(value any) int {
-	items, ok := value.([]any)
-	if !ok {
-		return 0
-	}
-	return len(items)
 }
 
 func (c *managedAppStatusClient) doJSON(ctx context.Context, apiPath string, out any) error {

@@ -602,10 +602,6 @@ func (s *Service) computeControllerImageCachePrunePlan(ctx context.Context, node
 	return plan, nil
 }
 
-func protectControllerImageCacheSharedDigestAliases(candidates []model.ImageCachePruneCandidate) []model.ImageCachePruneCandidate {
-	return imagecachepolicy.ProtectSharedDigestAliases(candidates)
-}
-
 type controllerImageCacheProtectedSet struct {
 	orphanPolicy          model.ImageOrphanPolicy
 	orphanDecisions       map[string]model.ImageOrphanDecision
@@ -1181,10 +1177,6 @@ func controllerImageReferenceKeys(imageRef, digest string) []string {
 
 func controllerManifestReferenceKeys(repo, target, digest, imageRef string) []string {
 	return imagecachekeys.ExactManifestReferenceKeys(repo, target, digest, imageRef)
-}
-
-func normalizeControllerImageCacheDigest(digest string) string {
-	return imagecachekeys.NormalizeDigest(digest)
 }
 
 func addControllerImageKeys(set map[string]struct{}, keys ...string) {

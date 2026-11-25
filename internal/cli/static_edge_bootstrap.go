@@ -1002,5 +1002,3 @@ func loadStaticEdgeManagerBinary(ctx context.Context, localPath string) ([]byte,
 	}
 	return nil, errors.New("manager release archive lacks executable")
 }
-
-func tlsKeyPair(cert, key []byte) (any, error) { return tls.X509KeyPair(cert, key) }

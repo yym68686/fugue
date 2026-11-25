@@ -723,10 +723,6 @@ func preservedDynamicQualityOrder(previous, bootstrap []string, candidates []pla
 	return order
 }
 
-func (s *Server) restorePublishedQualityEvidence(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact) {
-	s.restorePublishedQualityEvidenceAt(projection, jobs, parent, time.Now)
-}
-
 func (s *Server) restorePublishedQualityEvidenceAt(projection platformIntentProjectionResponse, jobs []dynamicQualityJob, parent model.PlatformArtifact, now func() time.Time) {
 	s.restorePublishedQualityEvidenceContext(context.Background(), projection, jobs, parent, now)
 }

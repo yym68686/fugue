@@ -11,10 +11,6 @@ import (
 	"fugue/internal/runtime"
 )
 
-func InspectBuilderPlacement(ctx context.Context, namespace string, policy BuilderPodPolicy, buildStrategy string, stateful bool, requiredNodeLabels map[string]string) (model.BuilderPlacementInspection, error) {
-	return InspectBuilderPlacementForProfile(ctx, namespace, policy, "", buildStrategy, stateful, requiredNodeLabels)
-}
-
 func InspectBuilderPlacementForProfile(ctx context.Context, namespace string, policy BuilderPodPolicy, profile, buildStrategy string, stateful bool, requiredNodeLabels map[string]string) (model.BuilderPlacementInspection, error) {
 	resolvedProfile := normalizeBuilderInspectionProfile(profile, buildStrategy, stateful)
 	scheduler, err := newBuilderScheduler(namespace, policy, resolvedProfile, requiredNodeLabels)

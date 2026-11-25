@@ -2,7 +2,6 @@ package store
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -198,8 +197,4 @@ func validEdgeRemediationFailure(value string) bool {
 	default:
 		return false
 	}
-}
-
-func sortedRemediationTargets(items []model.EdgeRemediationTarget) {
-	sort.Slice(items, func(i, j int) bool { return items[i].DaemonSetName < items[j].DaemonSetName })
 }

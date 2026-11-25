@@ -568,13 +568,6 @@ func (s *Server) captureAgentEdgeGrant(ctx context.Context, audience, preferred 
 	return result, p, diagnostics, nil
 }
 
-func captureAgentEdgeObservation(ctx context.Context, client *clusterNodeClient, p agentedge.AuthorityPolicy, edge edgetopology.Edge, node model.EdgeNode, source agentCellSource, probe agentEdgeProbeFunc) (struct {
-	candidate agentedge.Candidate
-	fact      edgetopology.RouteFact
-}, string) {
-	return captureAgentEdgeObservationWithObserver(ctx, client, p, edge, node, source, probe, nil)
-}
-
 func captureAgentEdgeObservationWithObserver(ctx context.Context, client *clusterNodeClient, p agentedge.AuthorityPolicy, edge edgetopology.Edge, node model.EdgeNode, source agentCellSource, probe agentEdgeProbeFunc, observe func(string)) (struct {
 	candidate agentedge.Candidate
 	fact      edgetopology.RouteFact

@@ -273,10 +273,6 @@ func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map
 	return machine, nil
 }
 
-func buildPlatformMachine(key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, existing *model.Machine, now time.Time) (model.Machine, error) {
-	return buildPlatformMachineRecord(key.ID, nodeName, endpoint, labels, machineName, machineFingerprint, existing, now)
-}
-
 func findMachine(state *model.State, id string) int {
 	id = strings.TrimSpace(id)
 	if id == "" {

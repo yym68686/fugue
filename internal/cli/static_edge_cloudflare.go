@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	c "fugue/internal/staticedgecontract"
+
 	"github.com/spf13/cobra"
 )
 
@@ -696,31 +696,6 @@ func parseStaticEdgeCheck(spec string) (string, string, int, error) {
 		return "", "", 0, errors.New("invalid expected status or check path")
 	}
 	return host, path, status, nil
-}
-func probeStaticEdgeEndpoint(ctx context.Context, ip, hostname string, port int, path string, timeout time.Duration) error {
-	return probeStaticEdgeEndpointStatus(ctx, ip, hostname, port, path, timeout, 200)
-}
-func probeStaticEdgeEndpointStatus(ctx context.Context, ip, hostname string, port int, path string, timeout time.Duration, expected int) error {
-	tr := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, net.JoinHostPort(ip, fmt.Sprint(port)))
-	}, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: hostname}, TLSHandshakeTimeout: timeout}
-	defer tr.CloseIdleConnections()
-	client := &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, e := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+net.JoinHostPort(hostname, fmt.Sprint(port))+path, nil)
-	if e != nil {
-		return e
-	}
-	req.Host = hostname
-	resp, e := client.Do(req)
-	if e != nil {
-		return fmt.Errorf("direct TLS probe %s via %s: %w", hostname, ip, e)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != expected {
-		return fmt.Errorf("direct probe %s%s via %s: HTTP %d (expected %d)", hostname, path, ip, resp.StatusCode, expected)
-	}
-	_, e = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	return e
 }
 func (cli *CLI) staticEdgeExistingCutover(ctx context.Context, o staticEdgeCutoverOptions, op string) error {
 	return cli.staticEdgeExistingCutoverWithChecks(ctx, o, op, probeStaticEdgeBothWithCoverage, waitStaticEdgeAuthoritative)

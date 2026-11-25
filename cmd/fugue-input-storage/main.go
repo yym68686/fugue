@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
@@ -25,6 +24,7 @@ import (
 	"fugue/internal/inputarchive"
 	"fugue/internal/inputhistory"
 	"fugue/internal/store"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -735,37 +735,6 @@ func maintenanceErrorCategory(err error) string {
 		return "invalid-input"
 	}
 	return "unclassified"
-}
-
-func observeStorage(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", "/tmp/fugue-observation.sock")
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://runtime/v1/snapshots/storage", nil)
-	if err != nil {
-		return err
-	}
-	response, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("storage observation HTTP status")
-	}
-	raw, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
-	if err != nil {
-		return err
-	}
-	if len(raw) > 1<<20 || !json.Valid(raw) {
-		return fmt.Errorf("storage observation exceeds budget or is invalid")
-	}
-	_, err = os.Stdout.Write(append(raw, '\n'))
-	return err
 }
 
 func validCompilerInputStorageMode(mode string) bool {

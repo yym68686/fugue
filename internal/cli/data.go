@@ -3979,14 +3979,6 @@ func validatePullBlobs(blobs map[string]dataBlobPlan, entries []model.DataManife
 	return nil
 }
 
-func verifyPulledManifest(root string, cfg dataConfig, manifest model.DataManifest) error {
-	return verifyPulledManifestWithProgress(root, cfg, manifest, nil)
-}
-
-func verifyPulledManifestWithProgress(root string, cfg dataConfig, manifest model.DataManifest, progress dataTransferProgress) error {
-	return verifyPulledManifestWithConcurrency(root, cfg, manifest, progress, defaultDataHashWorkerCount())
-}
-
 func verifyPulledManifestWithConcurrency(root string, cfg dataConfig, manifest model.DataManifest, progress dataTransferProgress, hashConcurrency int) error {
 	type verifyHashJob struct {
 		Entry  model.DataManifestEntry
@@ -6376,15 +6368,6 @@ func (c *Client) RevokeDataWorkspaceAccess(workspaceID, subjectType, subjectID s
 		return false, err
 	}
 	return resp.Removed, nil
-}
-
-func dataURLJoin(rawBase, rawPath string) string {
-	u, err := url.Parse(rawBase)
-	if err != nil {
-		return rawBase
-	}
-	u.Path = path.Join(u.Path, rawPath)
-	return u.String()
 }
 
 var errDataNoop = errors.New("data noop")

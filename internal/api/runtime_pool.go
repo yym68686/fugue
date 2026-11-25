@@ -129,10 +129,6 @@ func (s *Server) reconcileRuntimeClusterNodeWithMachinePolicy(ctx context.Contex
 	return client.reconcileRuntimeNodeWithMachinePolicy(ctx, runtimeObj, machine)
 }
 
-func (c *clusterNodeClient) reconcileRuntimeNode(ctx context.Context, runtimeObj model.Runtime) (bool, error) {
-	return c.reconcileRuntimeNodeWithMachinePolicy(ctx, runtimeObj, nil)
-}
-
 func (c *clusterNodeClient) reconcileRuntimeNodeWithMachinePolicy(ctx context.Context, runtimeObj model.Runtime, machine *model.Machine) (bool, error) {
 	nodeName := strings.TrimSpace(runtimeObj.ClusterNodeName)
 	if nodeName == "" {
@@ -197,10 +193,6 @@ func (c *clusterNodeClient) patchNode(ctx context.Context, nodeName string, patc
 	return nil
 }
 
-func buildRuntimeNodeMergePatch(node kubeNode, runtimeObj model.Runtime) (map[string]any, bool) {
-	return buildRuntimeNodeMergePatchWithMachinePolicy(node, runtimeObj, nil)
-}
-
 func buildRuntimeNodeMergePatchWithMachinePolicy(node kubeNode, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
 	healthy := nodeSchedulingHealthy(node)
 	retainPlacement := retainDataPlanePlacementWhileNotReady(node) &&
@@ -219,14 +211,6 @@ func buildRuntimeNodeMergePatchWithMachinePolicy(node kubeNode, runtimeObj model
 		patch["spec"] = map[string]any{"taints": taints}
 	}
 	return patch, true
-}
-
-func buildRuntimeNodeLabelsPatch(current map[string]string, runtimeObj model.Runtime) (map[string]any, bool) {
-	return buildRuntimeNodeLabelsPatchForHealth(current, true, runtimeObj)
-}
-
-func buildRuntimeNodeLabelsPatchForHealth(current map[string]string, healthy bool, runtimeObj model.Runtime) (map[string]any, bool) {
-	return buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current, healthy, runtimeObj, nil)
 }
 
 func buildRuntimeNodeLabelsPatchForHealthWithMachinePolicy(current map[string]string, healthy bool, runtimeObj model.Runtime, machine *model.Machine) (map[string]any, bool) {
@@ -269,10 +253,6 @@ func desiredRuntimeNodeAppRole(runtimeObj model.Runtime, machine *model.Machine)
 		return machine.Policy.AllowAppRuntime || machine.Policy.AllowSharedPool
 	}
 	return true
-}
-
-func buildRuntimeNodeTaints(current []kubeNodeTaint, runtimeObj model.Runtime) ([]kubeNodeTaint, bool) {
-	return buildRuntimeNodeTaintsForHealth(current, true, runtimeObj)
 }
 
 func buildRuntimeNodeTaintsForHealth(current []kubeNodeTaint, healthy bool, runtimeObj model.Runtime) ([]kubeNodeTaint, bool) {

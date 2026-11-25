@@ -908,15 +908,6 @@ func filterAppDiagnosisEvents(events []corev1.Event, pods []kubePodInfo) []model
 	return out
 }
 
-func newestFailedSchedulingEvent(events []coreEventOrZero) *coreEventOrZero {
-	for index := range events {
-		if strings.EqualFold(strings.TrimSpace(events[index].Event.Reason), "FailedScheduling") {
-			return &events[index]
-		}
-	}
-	return nil
-}
-
 func newestFailedSchedulingEventForPods(events []coreEventOrZero, pods []kubePodInfo) *coreEventOrZero {
 	if len(events) == 0 || len(pods) == 0 {
 		return nil

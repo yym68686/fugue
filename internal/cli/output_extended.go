@@ -92,10 +92,6 @@ func formatCurrencyMicroCents(value int64, currency string) string {
 	return fmt.Sprintf("%s %.2f", currency, float64(value)/1_000_000)
 }
 
-func writeProjectTable(w io.Writer, projects []model.Project) error {
-	return writeProjectTableWithContext(w, projects, nil, false)
-}
-
 func writeProjectTableWithContext(w io.Writer, projects []model.Project, tenantNames map[string]string, showIDs bool) error {
 	sorted := append([]model.Project(nil), projects...)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -438,10 +434,6 @@ func shortImageTrackingDigest(value string) string {
 	return value
 }
 
-func writeProjectUsageTable(w io.Writer, projects []projectImageUsageSummary) error {
-	return writeProjectUsageTableWithContext(w, projects, nil, false)
-}
-
 func writeProjectUsageTableWithContext(w io.Writer, projects []projectImageUsageSummary, projectNames map[string]string, showIDs bool) error {
 	sorted := append([]projectImageUsageSummary(nil), projects...)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -491,32 +483,6 @@ func writeProjectUsageAppsTable(w io.Writer, apps []projectImageUsageAppSummary)
 			app.CurrentVersionCount,
 			app.StaleVersionCount,
 			formatBytes(app.ReclaimableSizeBytes),
-		); err != nil {
-			return err
-		}
-	}
-	return tw.Flush()
-}
-
-func writeOperationTable(w io.Writer, operations []model.Operation) error {
-	sorted := append([]model.Operation(nil), operations...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
-	})
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "OPERATION\tSTATUS\tTYPE\tAPP\tTARGET\tUPDATED"); err != nil {
-		return err
-	}
-	for _, op := range sorted {
-		if _, err := fmt.Fprintf(
-			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
-			op.ID,
-			op.Status,
-			op.Type,
-			op.AppID,
-			firstNonEmpty(op.TargetRuntimeID, op.AssignedRuntimeID),
-			formatTime(op.UpdatedAt),
 		); err != nil {
 			return err
 		}
@@ -625,23 +591,6 @@ func writeRuntimeTableWithContext(w io.Writer, runtimes []model.Runtime, tenantN
 			formatDisplayName(tenantName, runtime.TenantID, showIDs),
 			runtime.Endpoint,
 		); err != nil {
-			return err
-		}
-	}
-	return tw.Flush()
-}
-
-func writeRuntimeGrantTable(w io.Writer, grants []model.RuntimeAccessGrant) error {
-	sorted := append([]model.RuntimeAccessGrant(nil), grants...)
-	sort.Slice(sorted, func(i, j int) bool {
-		return strings.Compare(sorted[i].TenantID, sorted[j].TenantID) < 0
-	})
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "TENANT\tCREATED\tUPDATED"); err != nil {
-		return err
-	}
-	for _, grant := range sorted {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\n", grant.TenantID, formatTime(grant.CreatedAt), formatTime(grant.UpdatedAt)); err != nil {
 			return err
 		}
 	}

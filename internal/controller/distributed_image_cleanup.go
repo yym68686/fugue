@@ -138,34 +138,6 @@ func (s *Service) sweepExpiredDistributedImagePins(ctx context.Context, gates ma
 	return nil
 }
 
-func (s *Service) scheduleDistributedImagePruneForApp(ctx context.Context, app model.App) error {
-	if s == nil || s.Store == nil || !s.imageStoreDistributedMode() {
-		return nil
-	}
-	if blocked, reason, err := s.Store.MigrationArtifactsRetirementBlocked(app.ID); err != nil {
-		return err
-	} else if blocked {
-		_ = s.Store.RecordMigrationArtifactRetirementBlocked(app.ID, "distributed image prune blocked: "+reason)
-		return nil
-	}
-	images, err := s.Store.ListImages(model.ImageFilter{
-		TenantID: strings.TrimSpace(app.TenantID),
-		AppID:    strings.TrimSpace(app.ID),
-	})
-	if err != nil {
-		return err
-	}
-	for _, image := range images {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := s.scheduleDistributedImagePrune(ctx, image); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Service) scheduleDistributedImagePrune(ctx context.Context, image model.Image) error {
 	if s == nil || s.Store == nil || strings.TrimSpace(image.ID) == "" {
 		return nil

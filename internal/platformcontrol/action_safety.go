@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -502,20 +501,4 @@ func maxInt(left, right int) int {
 		return left
 	}
 	return right
-}
-
-func FormatActionSafetyCountMap(values map[string]int) string {
-	if len(values) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		parts = append(parts, key+"="+strconv.Itoa(values[key]))
-	}
-	return strings.Join(parts, ",")
 }

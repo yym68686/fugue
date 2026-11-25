@@ -1449,13 +1449,6 @@ func (c *kubeClient) deleteDeployment(ctx context.Context, namespace, name strin
 	return normalizeDeleteNotFound(err)
 }
 
-// deleteDeploymentWithUID makes stale-name cleanup fail closed. A release
-// target can be replaced while a controller is waiting for drain; Kubernetes
-// must reject deletion when the observed UID no longer exists at that name.
-func (c *kubeClient) deleteDeploymentWithUID(ctx context.Context, namespace, name, uid string) error {
-	return c.deleteObjectWithUID(ctx, deploymentAPIPath(c.effectiveNamespace(namespace), name), uid)
-}
-
 func (c *kubeClient) scaleDeployment(ctx context.Context, namespace, name string, replicas int) error {
 	body := map[string]any{
 		"spec": map[string]any{
@@ -1536,10 +1529,6 @@ func (c *kubeClient) deleteService(ctx context.Context, namespace, name string) 
 	return normalizeDeleteNotFound(err)
 }
 
-func (c *kubeClient) deleteServiceWithUID(ctx context.Context, namespace, name, uid string) error {
-	return c.deleteObjectWithUID(ctx, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/services/"+url.PathEscape(name), uid)
-}
-
 func (c *kubeClient) deleteObjectWithUID(ctx context.Context, apiPath, uid string, versions ...string) error {
 	uid = strings.TrimSpace(uid)
 	if uid == "" {
@@ -1599,18 +1588,6 @@ func (c *kubeClient) deleteSecret(ctx context.Context, namespace, name string) e
 		return c.deletePostgresCredentialSecret(ctx, namespace, name, current)
 	}
 	_, err = c.doRequest(ctx, http.MethodDelete, "/api/v1/namespaces/"+c.effectiveNamespace(namespace)+"/secrets/"+url.PathEscape(name), "", nil, nil)
-	return normalizeDeleteNotFound(err)
-}
-
-func (c *kubeClient) forceDeletePod(ctx context.Context, namespace, name string) error {
-	apiPath := "/api/v1/namespaces/" + c.effectiveNamespace(namespace) + "/pods/" + url.PathEscape(strings.TrimSpace(name))
-	query := url.Values{}
-	query.Set("gracePeriodSeconds", "0")
-	query.Set("propagationPolicy", "Background")
-	if encoded := query.Encode(); encoded != "" {
-		apiPath += "?" + encoded
-	}
-	_, err := c.doRequest(ctx, http.MethodDelete, apiPath, "", nil, nil)
 	return normalizeDeleteNotFound(err)
 }
 

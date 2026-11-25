@@ -3651,12 +3651,6 @@ func (b *testControlPlaneBackupCoordinationBackend) setBlocked(blocked bool) {
 	b.blocked = blocked
 }
 
-func (b *testControlPlaneBackupCoordinationBackend) setDenyRenew(deny bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.denyRenew = deny
-}
-
 type testControlPlaneBackupCoordinationLease struct {
 	backend  *testControlPlaneBackupCoordinationBackend
 	token    string

@@ -529,30 +529,6 @@ func (c *CLI) resolveOpsAppID(client *Client, appRef string) (string, error) {
 	return app.ID, nil
 }
 
-func (c *CLI) loadOperationAppInventory(client *Client, operations []model.Operation) []model.App {
-	if len(operations) == 0 {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	apps := make([]model.App, 0)
-	for _, op := range operations {
-		appID := strings.TrimSpace(op.AppID)
-		if appID == "" {
-			continue
-		}
-		if _, ok := seen[appID]; ok {
-			continue
-		}
-		seen[appID] = struct{}{}
-		app, err := client.GetApp(appID)
-		if err != nil {
-			continue
-		}
-		apps = append(apps, app)
-	}
-	return apps
-}
-
 func latestOperation(operations []model.Operation) (model.Operation, error) {
 	if len(operations) == 0 {
 		return model.Operation{}, fmt.Errorf("no operations found")
@@ -573,10 +549,6 @@ func redactOperationsForOutput(operations []model.Operation) []model.Operation {
 		out = append(out, redactOperationForOutput(operation))
 	}
 	return out
-}
-
-func renderOperation(w io.Writer, op model.Operation) error {
-	return renderOperationWithDiagnosis(w, op, nil)
 }
 
 func writeOperationEvidenceTable(w io.Writer, evidence []model.OperationEvidence) error {
@@ -789,79 +761,6 @@ func resolveOperationListLimit(requested int, showAll bool, jsonOutput bool) int
 		return 0
 	}
 	return 20
-}
-
-func filterOperationsByAppIDs(operations []model.Operation, appIDs map[string]struct{}) []model.Operation {
-	if len(appIDs) == 0 {
-		return nil
-	}
-	filtered := make([]model.Operation, 0, len(operations))
-	for _, operation := range operations {
-		if _, ok := appIDs[strings.TrimSpace(operation.AppID)]; !ok {
-			continue
-		}
-		filtered = append(filtered, operation)
-	}
-	return filtered
-}
-
-func filterOperationsByTenantID(operations []model.Operation, tenantID string) []model.Operation {
-	tenantID = strings.TrimSpace(tenantID)
-	if tenantID == "" {
-		return operations
-	}
-	filtered := make([]model.Operation, 0, len(operations))
-	for _, operation := range operations {
-		if strings.TrimSpace(operation.TenantID) != tenantID {
-			continue
-		}
-		filtered = append(filtered, operation)
-	}
-	return filtered
-}
-
-func filterOperationsByKinds(operations []model.Operation, requested []string) []model.Operation {
-	allowed := normalizedFilterSet(requested)
-	if len(allowed) == 0 {
-		return operations
-	}
-	filtered := make([]model.Operation, 0, len(operations))
-	for _, operation := range operations {
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(operation.Type))]; !ok {
-			continue
-		}
-		filtered = append(filtered, operation)
-	}
-	return filtered
-}
-
-func filterOperationsByStatuses(operations []model.Operation, requested []string) []model.Operation {
-	allowed := normalizedFilterSet(requested)
-	if len(allowed) == 0 {
-		return operations
-	}
-	filtered := make([]model.Operation, 0, len(operations))
-	for _, operation := range operations {
-		if _, ok := allowed[strings.ToLower(strings.TrimSpace(operation.Status))]; !ok {
-			continue
-		}
-		filtered = append(filtered, operation)
-	}
-	return filtered
-}
-
-func normalizedFilterSet(values []string) map[string]struct{} {
-	normalized := make(map[string]struct{}, len(values))
-	for _, raw := range values {
-		for _, value := range strings.Split(raw, ",") {
-			value = strings.ToLower(strings.TrimSpace(value))
-			if value == "" {
-				continue
-			}
-			normalized[value] = struct{}{}
-		}
-	}
-	return normalized
 }
 
 func sortOperationsNewestFirst(operations []model.Operation) {

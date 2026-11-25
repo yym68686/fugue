@@ -3,7 +3,6 @@ package tcpdiag
 import (
 	"bufio"
 	"fmt"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -176,19 +175,4 @@ func readProcNetMetrics(path string, allowed map[string]struct{}) ([]ProcMetric,
 		return out, err
 	}
 	return out, nil
-}
-
-func ConnAddresses(conn net.Conn) (string, string) {
-	if conn == nil {
-		return "", ""
-	}
-	local := ""
-	remote := ""
-	if conn.LocalAddr() != nil {
-		local = conn.LocalAddr().String()
-	}
-	if conn.RemoteAddr() != nil {
-		remote = conn.RemoteAddr().String()
-	}
-	return local, remote
 }

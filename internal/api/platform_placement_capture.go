@@ -184,10 +184,6 @@ func captureDNSPlacementFacts(ctx context.Context, result *platformIntentProject
 	})
 }
 
-func captureDNSPlacementRecord(ctx context.Context, snapshot platformIntentProjectionResponse, record platformconfig.DNSIntent, nodes []model.EdgeNode, probe placementRouteProbe, budget *atomic.Int64) (platformconfig.DNSPlacementObservation, bool, error) {
-	return captureDNSPlacementRecordWithDiagnostics(ctx, snapshot, record, nodes, probe, budget, nil)
-}
-
 func captureDNSPlacementRecordWithDiagnostics(ctx context.Context, snapshot platformIntentProjectionResponse, record platformconfig.DNSIntent, nodes []model.EdgeNode, probe placementRouteProbe, budget *atomic.Int64, failures map[string]int) (platformconfig.DNSPlacementObservation, bool, error) {
 	compiled, projected, err := placementRecordRoutes(snapshot, record)
 	if err != nil {

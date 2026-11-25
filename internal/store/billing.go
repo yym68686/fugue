@@ -864,10 +864,6 @@ func publicRuntimeOfferHourlyRateMicroCents(offer model.RuntimePublicOffer, reso
 		resources.StorageGibibytes*priceBook.StorageMicroCentsPerGiBHour
 }
 
-func publicRuntimeChargeComponentForResources(state *model.State, consumerTenantID, runtimeID string, resources model.BillingResourceSpec) (publicRuntimeChargeComponent, bool) {
-	return publicRuntimeChargeComponentForResourcesWithIndex(newBillingStateIndex(state), consumerTenantID, runtimeID, resources)
-}
-
 func mergePublicRuntimeChargeComponent(components map[string]publicRuntimeChargeComponent, component publicRuntimeChargeComponent) {
 	if components == nil || component.HourlyRateMicroCents <= 0 {
 		return
@@ -879,14 +875,6 @@ func mergePublicRuntimeChargeComponent(components map[string]publicRuntimeCharge
 		return
 	}
 	components[key] = component
-}
-
-func tenantPublicRuntimeChargeComponents(state *model.State, tenantID string) []publicRuntimeChargeComponent {
-	return tenantPublicRuntimeChargeComponentsWithIndex(state, newBillingStateIndex(state), tenantID)
-}
-
-func tenantPublicRuntimeOutgoingHourlyRateMicroCents(state *model.State, tenantID string) int64 {
-	return tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state, newBillingStateIndex(state), tenantID)
 }
 
 func hasBillableManagedEnvelope(spec model.BillingResourceSpec) bool {
@@ -927,65 +915,7 @@ func activatedManagedHourlyRateMicroCents(
 	return billingHourlyRateMicroCents(record)
 }
 
-func activatedOutgoingHourlyRateMicroCents(
-	state *model.State,
-	record model.TenantBilling,
-	committed model.BillingResourceSpec,
-) int64 {
-	return activatedManagedHourlyRateMicroCents(record, committed) +
-		tenantPublicRuntimeOutgoingHourlyRateMicroCents(state, record.TenantID)
-}
-
-func activatedOutgoingMonthlyEstimateMicroCents(
-	state *model.State,
-	record model.TenantBilling,
-	committed model.BillingResourceSpec,
-) int64 {
-	priceBook := normalizeBillingPriceBook(record.PriceBook)
-	return activatedOutgoingHourlyRateMicroCents(state, record, committed) * priceBook.HoursPerMonth
-}
-
-func billingBalanceRestricted(record model.TenantBilling) bool {
-	return billingBalanceRestrictedWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
-}
-
-func billingRunwayHours(record model.TenantBilling) *float64 {
-	return billingRunwayHoursWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
-}
-
-func billingBalanceRestrictedWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) bool {
-	return billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes) > 0 &&
-		record.BalanceMicroCents <= 0
-}
-
-func billingRunwayHoursWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) *float64 {
-	hourlyRate := billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes)
-	return billingRunwayHoursForHourlyRate(record, hourlyRate)
-}
-
 func billingRunwayHoursForHourlyRate(record model.TenantBilling, hourlyRate int64) *float64 {
-	if hourlyRate <= 0 || record.BalanceMicroCents <= 0 {
-		return nil
-	}
-	hours := float64(record.BalanceMicroCents) / float64(hourlyRate)
-	return &hours
-}
-
-func activatedOutgoingBalanceRestricted(
-	state *model.State,
-	record model.TenantBilling,
-	committed model.BillingResourceSpec,
-) bool {
-	return activatedOutgoingHourlyRateMicroCents(state, record, committed) > 0 &&
-		record.BalanceMicroCents <= 0
-}
-
-func activatedOutgoingRunwayHours(
-	state *model.State,
-	record model.TenantBilling,
-	committed model.BillingResourceSpec,
-) *float64 {
-	hourlyRate := activatedOutgoingHourlyRateMicroCents(state, record, committed)
 	if hourlyRate <= 0 || record.BalanceMicroCents <= 0 {
 		return nil
 	}
@@ -1086,10 +1016,6 @@ func recentTenantBillingEvents(state *model.State, tenantID string) []model.Tena
 	return events
 }
 
-func tenantManagedCommittedResources(state *model.State, tenantID string) model.BillingResourceSpec {
-	return tenantManagedCommittedResourcesWithIndex(state, newBillingStateIndex(state), tenantID)
-}
-
 func tenantManagedCommittedResourcesForBilling(state *model.State, record model.TenantBilling) model.BillingResourceSpec {
 	return tenantManagedCommittedResourcesForBillingWithIndex(state, newBillingStateIndex(state), record)
 }
@@ -1097,14 +1023,6 @@ func tenantManagedCommittedResourcesForBilling(state *model.State, record model.
 func addManagedImageStorageCommitment(spec model.BillingResourceSpec, imageStorageGibibytes int64) model.BillingResourceSpec {
 	spec.StorageGibibytes += maxInt64(0, imageStorageGibibytes)
 	return spec
-}
-
-func appManagedBundleCommitment(state *model.State, app model.App, runtimeID string, replicas int) model.BillingResourceSpec {
-	return appManagedBundleCommitmentWithIndex(newBillingStateIndex(state), app, runtimeID, replicas)
-}
-
-func boundManagedServicesForApp(state *model.State, appID string) []model.BackingService {
-	return newBillingStateIndex(state).managedServicesForApp(appID)
 }
 
 func isBillableManagedBackingService(service model.BackingService) bool {
@@ -1157,10 +1075,6 @@ func postgresEffectiveResources(spec model.AppPostgresSpec) model.BillingResourc
 		MemoryMebibytes:  compute.MemoryMebibytes,
 		StorageGibibytes: postgresStorageGibibytes(&spec),
 	}
-}
-
-func runtimeTypeForState(state *model.State, runtimeID string) string {
-	return newBillingStateIndex(state).runtimeType(runtimeID)
 }
 
 func isBillableManagedRuntimeType(runtimeType string) bool {
@@ -1285,14 +1199,6 @@ func addResourceSpec(left, right model.BillingResourceSpec) model.BillingResourc
 		CPUMilliCores:    left.CPUMilliCores + right.CPUMilliCores,
 		MemoryMebibytes:  left.MemoryMebibytes + right.MemoryMebibytes,
 		StorageGibibytes: left.StorageGibibytes + right.StorageGibibytes,
-	}
-}
-
-func maxResourceSpec(left, right model.BillingResourceSpec) model.BillingResourceSpec {
-	return model.BillingResourceSpec{
-		CPUMilliCores:    maxInt64(left.CPUMilliCores, right.CPUMilliCores),
-		MemoryMebibytes:  maxInt64(left.MemoryMebibytes, right.MemoryMebibytes),
-		StorageGibibytes: maxInt64(left.StorageGibibytes, right.StorageGibibytes),
 	}
 }
 
@@ -1453,23 +1359,6 @@ func describeBillingCapExceeded(record model.TenantBilling, nextTotal model.Bill
 		record.ManagedCap.MemoryMebibytes,
 		nextTotal.StorageGibibytes,
 		record.ManagedCap.StorageGibibytes,
-	)
-}
-
-func describeBillingBalanceDepleted(record model.TenantBilling) error {
-	return describeBillingBalanceDepletedWithCommittedStorage(record, record.ManagedCap.StorageGibibytes)
-}
-
-func describeBillingBalanceDepletedWithCommittedStorage(record model.TenantBilling, committedStorageGibibytes int64) error {
-	hourlyRateMicroCents := billingHourlyRateMicroCentsWithCommittedStorage(record, committedStorageGibibytes)
-	if hourlyRateMicroCents <= 0 {
-		return ErrBillingBalanceDepleted
-	}
-	return fmt.Errorf(
-		"%w: balance=%d hourly_rate=%d microcents",
-		ErrBillingBalanceDepleted,
-		record.BalanceMicroCents,
-		hourlyRateMicroCents,
 	)
 }
 
