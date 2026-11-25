@@ -1021,6 +1021,11 @@ func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
 	return key, err
 }
 
+func nodeKeyUnavailable(state *model.State, key model.NodeKey) bool {
+	return key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked ||
+		(key.Scope == model.NodeKeyScopePlatformNode && key.TenantID != "") || tenantAccessHeld(state, key.TenantID)
+}
+
 func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
@@ -1045,7 +1050,7 @@ func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
 		if keyIndex < 0 {
 			return ErrNotFound
 		}
-		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
 			return ErrConflict
 		}
 
@@ -1071,7 +1076,7 @@ func (s *Store) CreateScopedNodeKey(tenantID, label, scope string) (model.NodeKe
 		return model.NodeKey{}, "", ErrInvalidInput
 	}
 	tenantID = strings.TrimSpace(tenantID)
-	if tenantID == "" && scope != model.NodeKeyScopePlatformNode {
+	if (scope == model.NodeKeyScopePlatformNode) != (tenantID == "") {
 		return model.NodeKey{}, "", ErrInvalidInput
 	}
 	if s.usingDatabase() {
@@ -1157,7 +1162,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 		if keyIndex < 0 {
 			return ErrNotFound
 		}
-		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
 			return ErrConflict
 		}
 
@@ -1178,6 +1183,11 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 		transferByFingerprint := false
 		if explicitFingerprint {
 			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
+			for _, index := range matchingIndexes {
+				if state.Runtimes[index].TenantID != key.TenantID {
+					return ErrConflict
+				}
+			}
 			keepFingerprintIndex := sameTenantFingerprintIndex
 			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
 				transferByFingerprint = true
@@ -1274,7 +1284,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		if keyIndex < 0 {
 			return ErrNotFound
 		}
-		if state.NodeKeys[keyIndex].RevokedAt != nil || state.NodeKeys[keyIndex].Status == model.NodeKeyStatusRevoked {
+		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
 			return ErrConflict
 		}
 
@@ -1295,6 +1305,11 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		transferByFingerprint := false
 		if explicitFingerprint {
 			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
+			for _, index := range matchingIndexes {
+				if state.Runtimes[index].TenantID != key.TenantID {
+					return ErrConflict
+				}
+			}
 			keepFingerprintIndex := sameTenantFingerprintIndex
 			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
 				transferByFingerprint = true
@@ -1442,7 +1457,7 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 			return ErrNotFound
 		}
 		token := &state.EnrollmentTokens[tokenIndex]
-		if token.UsedAt != nil || token.ExpiresAt.Before(now) {
+		if tenantAccessHeld(state, token.TenantID) || token.UsedAt != nil || token.ExpiresAt.Before(now) {
 			return ErrConflict
 		}
 		token.UsedAt = &now
@@ -3961,7 +3976,7 @@ func (s *Store) TryClaimPendingOperation(id string) (model.Operation, bool, erro
 		if index < 0 {
 			return nil
 		}
-		if state.Operations[index].Status != model.OperationStatusPending {
+		if state.Operations[index].Status != model.OperationStatusPending || tenantAccessHeld(state, state.Operations[index].TenantID) {
 			return nil
 		}
 		claimedOp, err := claimPendingOperationLocked(state, index)
@@ -4002,7 +4017,7 @@ func (s *Store) claimNextPendingOperationMatching(match func(model.Operation) bo
 	err := s.withLockedState(true, func(state *model.State) error {
 		pending := make([]int, 0)
 		for idx := range state.Operations {
-			if state.Operations[idx].Status != model.OperationStatusPending {
+			if state.Operations[idx].Status != model.OperationStatusPending || tenantAccessHeld(state, state.Operations[idx].TenantID) {
 				continue
 			}
 			if match != nil && !match(state.Operations[idx]) {

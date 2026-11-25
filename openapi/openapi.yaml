@@ -5837,6 +5837,41 @@ paths:
                 $ref: "#/components/schemas/TenantResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/tenants/{id}/access-hold:
+    put:
+      operationId: setTenantAccessHold
+      summary: Set or release an incident access hold for one workspace (platform administrator)
+      tags: [Tenants]
+      x-fugue-handler: handleSetTenantAccessHold
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdPathParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [held]
+              properties:
+                held:
+                  type: boolean
+      responses:
+        '200':
+          description: Effective control-plane access hold
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [held, tenant_id]
+                properties:
+                  held:
+                    type: boolean
+                  tenant_id:
+                    type: string
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/tenants/{id}:
     delete:
       operationId: deleteTenant
@@ -6496,7 +6531,7 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
     patch:
       operationId: updateBilling
-      summary: Update Billing
+      summary: Update managed capacity limits (platform administrator)
       tags: [Billing]
       x-fugue-handler: handleUpdateBilling
       security:
@@ -6542,7 +6577,7 @@ paths:
   /v1/billing/top-ups:
     post:
       operationId: topUpBilling
-      summary: Top Up Billing
+      summary: Credit a verified payment or administrative adjustment (platform administrator)
       tags: [Billing]
       x-fugue-handler: handleTopUpBilling
       security:
@@ -6784,7 +6819,7 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
     post:
       operationId: createNodeKey
-      summary: Create Node Key
+      summary: Create a tenant runtime key or a platform administrator's unscoped platform-node key
       tags: [Node Keys]
       x-fugue-handler: handleCreateNodeKey
       security:
@@ -11284,7 +11319,7 @@ paths:
   /v1/apps/{id}/database/query:
     post:
       operationId: queryAppDatabase
-      summary: Query App Database
+      summary: Query the managed database authorized by the application's recorded binding
       tags: [Apps]
       x-fugue-handler: handleQueryAppDatabase
       security:
@@ -11504,6 +11539,7 @@ paths:
   /v1/apps/{id}/database/access/{grant_id}/tunnel:
     get:
       operationId: connectAppDatabaseAccessTunnel
+      description: Only the managed database currently authorized by the app's service binding is reachable.
       summary: Connect App Database Access Tunnel
       tags: [Apps]
       x-fugue-handler: handleAppDatabaseAccessTunnel
@@ -30155,6 +30191,10 @@ components:
       additionalProperties: false
       required: [amount_cents]
       properties:
+        payment_reference:
+          type: string
+          maxLength: 256
+          description: Stable payment identity for idempotent settlement across callback retries.
         tenant_id:
           type: string
         amount_cents:

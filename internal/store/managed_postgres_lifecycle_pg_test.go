@@ -32,6 +32,7 @@ func TestPGLifecycleClaimsAlwaysUseManagedController(t *testing.T) {
 FROM fugue_operations
 WHERE id = \$1
   AND status = \$2
+  AND NOT EXISTS .*access-held.*
 FOR UPDATE SKIP LOCKED`,
 			firstArgs:  []driver.Value{"op_lifecycle", model.OperationStatusPending},
 			fullUpdate: true,
@@ -55,6 +56,7 @@ FOR UPDATE SKIP LOCKED`,
 FROM fugue_operations
 WHERE id = \$1
   AND status = \$2
+  AND NOT EXISTS .*access-held.*
 FOR UPDATE SKIP LOCKED`,
 			firstArgs:  []driver.Value{"op_lifecycle", model.OperationStatusPending},
 			fullUpdate: true,

@@ -162,6 +162,18 @@ func authenticatePlatformComponentRequest(r *http.Request, keyring platformcontr
 }
 
 func (a *Authenticator) authenticateRequest(r *http.Request) (model.Principal, error) {
+	principal, err := a.authenticateCredential(r)
+	if err != nil || principal.TenantID == "" {
+		return principal, err
+	}
+	tenant, err := a.Store.GetTenant(principal.TenantID)
+	if err != nil || tenant.Status == model.TenantStatusAccessHeld {
+		return model.Principal{}, errors.New("tenant access unavailable")
+	}
+	return principal, nil
+}
+
+func (a *Authenticator) authenticateCredential(r *http.Request) (model.Principal, error) {
 	if observe, ok := r.Context().Value(requestTimingObserverKey{}).(func(time.Duration)); ok {
 		started := time.Now()
 		defer func() { observe(time.Since(started)) }()

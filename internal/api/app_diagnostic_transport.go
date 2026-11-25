@@ -10,5 +10,5 @@ import "net/http"
 func newAppDiagnosticHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DisableKeepAlives = true
-	return &http.Client{Transport: transport}
+	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }

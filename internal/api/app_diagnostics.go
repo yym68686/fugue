@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -36,11 +37,12 @@ const (
 )
 
 type appDatabaseConnection struct {
-	DSN      string
-	Host     string
-	Port     string
-	Database string
-	User     string
+	ServiceID string
+	DSN       string
+	Host      string
+	Port      string
+	Database  string
+	User      string
 }
 
 type appDatabaseQueryColumn struct {
@@ -118,29 +120,29 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 		timeout = time.Duration(req.TimeoutMS) * time.Millisecond
 	}
 
-	spec := cloneAppSpec(app.Spec)
-	if appDeployBaselineNeedsRecovery(spec, app.Source) {
-		recoveredSpec, _, err := s.recoverAppDeployBaseline(app)
-		if err != nil {
-			s.writeStoreError(w, err)
-			return
-		}
-		spec = recoveredSpec
-	}
-	envDetails := mergedAppEnvDetails(app, spec)
-	connection, err := resolveAppDatabaseConnection(app, spec, envDetails.Env)
+	requestID := model.NewID("dbquery")
+	w.Header().Set("X-Request-ID", requestID)
+	audit := map[string]string{"request_id": requestID, "source_app_id": app.ID, "source_tenant_id": app.TenantID}
+	connection, err := authorizedDatabaseConnection(app)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		audit["reason"] = "no_authorized_database_binding"
+		s.appendAudit(principal, "app.database.query.denied", "app", app.ID, app.TenantID, audit)
+		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
 
+	audit["target_service_id"] = connection.ServiceID
+	audit["target_tenant_id"] = app.TenantID
+	audit["authorization"] = "managed_service_binding"
 	dbOpener := s.openAppDatabase
 	if dbOpener == nil {
 		dbOpener = openAppDiagnosticDatabase
 	}
 	db, err := dbOpener(appDatabaseQueryDefaultDriver, connection.DSN)
 	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, fmt.Sprintf("open app database: %v", err))
+		audit["reason"] = "open_failed"
+		s.appendAudit(principal, "app.database.query.failed", "app", app.ID, app.TenantID, audit)
+		httpx.WriteError(w, http.StatusServiceUnavailable, "managed database unavailable")
 		return
 	}
 	defer db.Close()
@@ -153,16 +155,17 @@ func (s *Server) handleQueryAppDatabase(w http.ResponseWriter, r *http.Request) 
 	startedAt := time.Now()
 	response, err := queryAppDatabase(ctx, db, connection, req.SQL, req.MaxRows)
 	if err != nil {
+		audit["reason"] = "query_failed"
+		s.appendAudit(principal, "app.database.query.failed", "app", app.ID, app.TenantID, audit)
 		httpx.WriteError(w, appDatabaseQueryErrorStatus(err), err.Error())
 		return
 	}
 	response.DurationMS = time.Since(startedAt).Milliseconds()
 
-	s.appendAudit(principal, "app.database.query", "app", app.ID, app.TenantID, map[string]string{
-		"database": connection.Database,
-		"host":     connection.Host,
-		"max_rows": strconv.Itoa(req.MaxRows),
-	})
+	audit["database"] = connection.Database
+	audit["host"] = connection.Host
+	audit["max_rows"] = strconv.Itoa(req.MaxRows)
+	s.appendAudit(principal, "app.database.query", "app", app.ID, app.TenantID, audit)
 	httpx.WriteJSON(w, http.StatusOK, response)
 }
 
@@ -368,147 +371,25 @@ func queryAppDatabase(ctx context.Context, db *sql.DB, connection appDatabaseCon
 	}, nil
 }
 
-func resolveAppDatabaseConnection(app model.App, spec model.AppSpec, env map[string]string) (appDatabaseConnection, error) {
-	if normalizedURL, ok := normalizePostgresDatabaseURL(firstNonEmptyString(
-		env["DATABASE_URL"],
-		env["DB_URL"],
-		env["POSTGRES_URL"],
-		env["POSTGRESQL_URL"],
-	)); ok {
-		parsed, err := url.Parse(normalizedURL)
-		if err != nil {
-			return appDatabaseConnection{}, fmt.Errorf("parse database URL: %w", err)
-		}
-		host := parsed.Hostname()
-		port := defaultString(parsed.Port(), "5432")
-		qualifiedHost := qualifyAppDatabaseHostForAPI(host, app, spec)
-		connectionURL := *parsed
-		if qualifiedHost != host {
-			connectionURL.Host = net.JoinHostPort(qualifiedHost, port)
-		}
-		return appDatabaseConnection{
-			DSN:      connectionURL.String(),
-			Host:     qualifiedHost,
-			Port:     port,
-			Database: strings.TrimPrefix(parsed.Path, "/"),
-			User:     parsed.User.Username(),
-		}, nil
-	}
+var postgresServiceLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
-	host := firstNonEmptyString(env["DB_HOST"], env["PGHOST"])
-	port := firstNonEmptyString(env["DB_PORT"], env["PGPORT"], "5432")
-	user := firstNonEmptyString(env["DB_USER"], env["PGUSER"], env["POSTGRES_USER"])
-	password := firstNonEmptyString(env["DB_PASSWORD"], env["PGPASSWORD"], env["POSTGRES_PASSWORD"])
-	database := firstNonEmptyString(env["DB_NAME"], env["DB_DATABASE"], env["PGDATABASE"], env["POSTGRES_DB"])
-	if host == "" && spec.Postgres != nil {
-		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)
-		host = firstNonEmptyString(host, defaults["DB_HOST"])
-		user = firstNonEmptyString(user, defaults["DB_USER"])
-		password = firstNonEmptyString(password, defaults["DB_PASSWORD"])
-		database = firstNonEmptyString(database, defaults["DB_NAME"])
+// Resolve only from the platform's recorded binding. App and binding environment
+// overrides are for the workload and must never configure a control-plane connection.
+func authorizedDatabaseConnection(app model.App) (appDatabaseConnection, error) {
+	bound, ok := firstManagedPostgresBinding(app)
+	service := bound.Service
+	if !ok || app.TenantID == "" || service.TenantID != app.TenantID || bound.Binding.TenantID != app.TenantID ||
+		bound.Binding.AppID != app.ID || bound.Binding.ServiceID != service.ID || service.ID == "" || service.Spec.Postgres == nil {
+		return appDatabaseConnection{}, errors.New("an authorized managed database binding is required")
 	}
-	if parsedHost, parsedPort, err := net.SplitHostPort(host); err == nil {
-		host = parsedHost
-		if strings.TrimSpace(parsedPort) != "" {
-			port = parsedPort
-		}
+	pg := *service.Spec.Postgres
+	name := model.PostgresEndpointName(pg)
+	if !postgresServiceLabel.MatchString(name) || pg.Database == "" || pg.User == "" || pg.Password == "" || pg.Suspended {
+		return appDatabaseConnection{}, errors.New("managed database connection unavailable")
 	}
-	host = qualifyAppDatabaseHostForAPI(host, app, spec)
-	if host == "" || user == "" || database == "" {
-		return appDatabaseConnection{}, fmt.Errorf("app does not expose a queryable postgres connection via DATABASE_URL or DB_* env")
-	}
-
-	query := url.Values{}
-	sslMode := firstNonEmptyString(env["DB_SSLMODE"], env["PGSSLMODE"])
-	if sslMode == "" {
-		sslMode = "disable"
-	}
-	query.Set("sslmode", sslMode)
-	connURL := &url.URL{
-		Scheme: "postgresql",
-		User:   url.UserPassword(user, password),
-		Host:   net.JoinHostPort(host, port),
-		Path:   "/" + database,
-	}
-	connURL.RawQuery = query.Encode()
-	return appDatabaseConnection{
-		DSN:      connURL.String(),
-		Host:     host,
-		Port:     port,
-		Database: database,
-		User:     user,
-	}, nil
-}
-
-func qualifyAppDatabaseHostForAPI(host string, app model.App, spec model.AppSpec) string {
-	host = strings.TrimSpace(host)
-	namespace := strings.TrimSpace(runtime.NamespaceForTenant(app.TenantID))
-	if host == "" || namespace == "" {
-		return host
-	}
-	for _, candidate := range managedPostgresQueryHostCandidates(app, spec) {
-		if strings.EqualFold(host, candidate) {
-			return host + "." + namespace + ".svc.cluster.local"
-		}
-	}
-	return host
-}
-
-func managedPostgresQueryHostCandidates(app model.App, spec model.AppSpec) []string {
-	candidates := make([]string, 0, 2)
-	appendCandidate := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-		for _, existing := range candidates {
-			if strings.EqualFold(existing, value) {
-				return
-			}
-		}
-		candidates = append(candidates, value)
-	}
-
-	for _, bound := range appBoundServices(app) {
-		if !strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) {
-			continue
-		}
-		if !isManagedBackingService(bound.Service) || bound.Service.Spec.Postgres == nil {
-			continue
-		}
-		appendCandidate(bound.Service.Spec.Postgres.ServiceName)
-		appendCandidate(model.PostgresRWServiceName(bound.Service.Spec.Postgres.ServiceName))
-		appendCandidate(model.PostgresEndpointName(*bound.Service.Spec.Postgres))
-		appendCandidate(model.PostgresRWServiceName(model.PostgresEndpointName(*bound.Service.Spec.Postgres)))
-	}
-	if len(candidates) == 0 && spec.Postgres != nil {
-		defaults := defaultAppManagedPostgresEnv(app.Name, *spec.Postgres)
-		appendCandidate(defaults["DB_HOST"])
-		appendCandidate(model.PostgresRWServiceName(defaults["DB_HOST"]))
-	}
-	return candidates
-}
-
-func normalizePostgresDatabaseURL(raw string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", false
-	}
-	if separator := strings.Index(raw, "://"); separator > 0 {
-		scheme := strings.ToLower(strings.TrimSpace(raw[:separator]))
-		rest := raw[separator:]
-		switch {
-		case scheme == "postgres", scheme == "postgresql":
-			return raw, true
-		case strings.HasPrefix(scheme, "postgresql+"):
-			return "postgresql" + rest, true
-		case strings.HasPrefix(scheme, "postgres+"):
-			return "postgres" + rest, true
-		default:
-			return "", false
-		}
-	}
-	return "", false
+	host := name + "." + runtime.NamespaceForTenant(service.TenantID) + ".svc.cluster.local"
+	u := url.URL{Scheme: "postgresql", Host: net.JoinHostPort(host, "5432"), Path: "/" + pg.Database, User: url.UserPassword(pg.User, pg.Password)}
+	return appDatabaseConnection{ServiceID: service.ID, DSN: u.String(), Host: host, Port: "5432", Database: pg.Database, User: pg.User}, nil
 }
 
 func normalizeDatabaseValue(value any) any {

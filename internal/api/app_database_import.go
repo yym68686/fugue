@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -380,16 +382,19 @@ func (s *Server) handleAppDatabaseAccessTunnel(w http.ResponseWriter, r *http.Re
 		httpx.WriteError(w, http.StatusForbidden, "database tunnel grant is not read-write")
 		return
 	}
+	tenant, err := s.store.GetTenant(grant.TenantID)
+	if err != nil || tenant.Status == model.TenantStatusAccessHeld {
+		httpx.WriteError(w, http.StatusForbidden, "database access unavailable")
+		return
+	}
 	app, err := s.store.GetApp(appID)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
-	spec := cloneAppSpec(app.Spec)
-	envDetails := mergedAppEnvDetails(app, spec)
-	connection, err := resolveAppDatabaseConnection(app, spec, envDetails.Env)
+	connection, err := authorizedDatabaseConnection(app)
 	if err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, err.Error())
+		httpx.WriteError(w, http.StatusForbidden, err.Error())
 		return
 	}
 	s.appendAudit(model.Principal{
@@ -425,7 +430,24 @@ func (s *Server) handleAppDatabaseAccessTunnel(w http.ResponseWriter, r *http.Re
 	errCh := make(chan error, 2)
 	go relayTCPToWebSocket(ws, dbConn, errCh)
 	go relayWebSocketToTCP(ws, dbConn, errCh)
-	<-errCh
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-errCh:
+			return
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			current, err := s.store.GetTenant(grant.TenantID)
+			if err != nil || current.Status == model.TenantStatusAccessHeld {
+				return
+			}
+			if _, err := s.store.AuthenticateAppDatabaseAccessGrant(appID, grantID, secret); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) StartBackgroundAppDatabaseImports(ctx context.Context) {
@@ -454,6 +476,10 @@ func (s *Server) processPendingAppDatabaseImportJobs(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
+		}
+		tenant, err := s.store.GetTenant(pending.TenantID)
+		if err != nil || tenant.Status == model.TenantStatusAccessHeld {
+			continue
 		}
 		job, err := s.store.ClaimAppDatabaseImportJob(pending.ID)
 		if err != nil {
@@ -502,9 +528,7 @@ func (s *Server) runAppDatabaseImportJob(ctx context.Context, job model.AppDatab
 	if store.OwnedManagedPostgresSpec(app) == nil {
 		return "", fmt.Errorf("managed postgres is not configured for this app")
 	}
-	spec := cloneAppSpec(app.Spec)
-	envDetails := mergedAppEnvDetails(app, spec)
-	connection, err := resolveAppDatabaseConnection(app, spec, envDetails.Env)
+	connection, err := authorizedDatabaseConnection(app)
 	if err != nil {
 		return "", err
 	}
@@ -804,6 +828,9 @@ func runPostgresImportCommand(ctx context.Context, connection appDatabaseConnect
 	}
 	tempPath := tempFile.Name()
 	defer os.Remove(tempPath)
+	if format == model.AppDatabaseImportFormatSQL {
+		data = unwrapPostgresDumpRestrictions(data)
+	}
 	if _, err := tempFile.Write(data); err != nil {
 		tempFile.Close()
 		return "", fmt.Errorf("write temporary database import file: %w", err)
@@ -824,7 +851,10 @@ func runPostgresImportCommand(ctx context.Context, connection appDatabaseConnect
 		args = append(args, tempPath)
 	case model.AppDatabaseImportFormatSQL:
 		name = "psql"
-		args = append([]string{"--set", "ON_ERROR_STOP=on"}, commonArgs...)
+		args = append([]string{"--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=on"}, commonArgs...)
+		// Restrict client commands for the entire input using a fresh key
+		// independent of the archive. Older clients fail before reading it.
+		args = append(args, "--command", "\\restrict "+rand.Text())
 		if clean {
 			args = append(args, "--command", sqlCleanPublicSchema(connection.User))
 		}
@@ -834,7 +864,7 @@ func runPostgresImportCommand(ctx context.Context, connection appDatabaseConnect
 	}
 
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = append(os.Environ(), pgEnv...)
+	cmd.Env = pgEnv
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
@@ -842,6 +872,23 @@ func runPostgresImportCommand(ctx context.Context, connection appDatabaseConnect
 		return output.String(), fmt.Errorf("%s failed: %w: %s", name, err, trimCommandOutput(output.String()))
 	}
 	return output.String(), nil
+}
+
+var dumpRestrictionStart = regexp.MustCompile(`(?m)^(?:--[^\r\n]*\r?\n|[ \t]*\r?\n)*\\restrict ([A-Za-z0-9]+)[ \t]*\r?$\n`)
+var dumpRestrictionEnd = regexp.MustCompile(`(?m)^\\unrestrict ([A-Za-z0-9]+)[ \t]*\r?(?:\n[ \t\r\n]*)?\z`)
+
+// Standard pg_dump plain archives have their own outer guard. Remove only a
+// matching pair surrounding the complete dump; psql supplies our guard instead.
+func unwrapPostgresDumpRestrictions(data []byte) []byte {
+	start := dumpRestrictionStart.FindSubmatchIndex(data)
+	if start == nil || start[0] != 0 {
+		return data
+	}
+	end := dumpRestrictionEnd.FindSubmatchIndex(data[start[1]:])
+	if end == nil || !bytes.Equal(data[start[2]:start[3]], data[start[1]+end[2]:start[1]+end[3]]) {
+		return data
+	}
+	return data[start[1] : start[1]+end[0]]
 }
 
 func postgresCommandEnvAndArgs(connection appDatabaseConnection) ([]string, []string, error) {
@@ -871,7 +918,7 @@ func postgresCommandEnvAndArgs(connection appDatabaseConnection) ([]string, []st
 		"--host", host,
 		"--port", port,
 		"--username", user,
-		"--dbname", database,
+		"--dbname", (&url.URL{Scheme: "postgresql", Host: net.JoinHostPort(host, port), Path: "/" + database, User: url.User(user)}).String(),
 	}
 	return env, args, nil
 }

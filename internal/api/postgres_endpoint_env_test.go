@@ -48,7 +48,7 @@ func TestQueryAppDatabaseUsesRestoredStableEndpoint(t *testing.T) {
 	defer db.Close()
 	host := "original-db." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
 	server.openAppDatabase = func(driver, dsn string) (*sql.DB, error) {
-		if driver != "pgx" || dsn != "postgresql://owner:fixture@"+host+":5432/demo?application_name=a" {
+		if driver != "pgx" || dsn != "postgresql://owner:fixture@"+host+":5432/demo" {
 			t.Fatal("diagnostic connection did not follow the stable endpoint")
 		}
 		return db, nil

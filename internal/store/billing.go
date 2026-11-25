@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -98,13 +99,22 @@ func (s *Store) UpdateTenantBilling(tenantID string, managedCap model.BillingRes
 }
 
 func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note string) (model.TenantBillingSummary, error) {
+	return s.SettleTenantBilling(tenantID, amountCents, note, "")
+}
+
+func (s *Store) SettleTenantBilling(tenantID string, amountCents int64, note, reference string) (model.TenantBillingSummary, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	note = strings.TrimSpace(note)
-	if tenantID == "" || amountCents <= 0 {
+	reference = strings.TrimSpace(reference)
+	if tenantID == "" || amountCents <= 0 || amountCents > math.MaxInt64/microCentsPerCent || len(reference) > 256 {
 		return model.TenantBillingSummary{}, ErrInvalidInput
 	}
+	eventID := model.NewID("billingevt")
+	if reference != "" {
+		eventID = fmt.Sprintf("payment_%x", sha256.Sum256([]byte(reference)))
+	}
 	if s.usingDatabase() {
-		return s.pgTopUpTenantBilling(tenantID, amountCents, note)
+		return s.pgTopUpTenantBilling(tenantID, amountCents, note, eventID, reference)
 	}
 
 	var summary model.TenantBillingSummary
@@ -118,6 +128,20 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 		if billing == nil {
 			return ErrNotFound
 		}
+		if reference != "" {
+			for _, event := range state.BillingEvents {
+				if event.ID == eventID {
+					if event.TenantID != tenantID || event.AmountMicroCents != amountCents*microCentsPerCent {
+						return ErrConflict
+					}
+					summary = buildTenantBillingSummaryWithIndex(state, index, *billing)
+					return nil
+				}
+			}
+		}
+		if billing.BalanceMicroCents > math.MaxInt64-amountCents*microCentsPerCent {
+			return ErrInvalidInput
+		}
 		billing.BalanceMicroCents += amountCents * microCentsPerCent
 		billing.UpdatedAt = now
 
@@ -126,7 +150,7 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 			metadata["note"] = note
 		}
 		appendTenantBillingEvent(state, model.TenantBillingEvent{
-			ID:                     model.NewID("billingevt"),
+			ID:                     eventID,
 			TenantID:               tenantID,
 			Type:                   model.BillingEventTypeTopUp,
 			AmountMicroCents:       amountCents * microCentsPerCent,
@@ -142,7 +166,7 @@ func (s *Store) TopUpTenantBilling(tenantID string, amountCents int64, note stri
 
 func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, metadata map[string]string) (model.TenantBillingSummary, error) {
 	tenantID = strings.TrimSpace(tenantID)
-	if tenantID == "" || balanceCents < 0 {
+	if tenantID == "" || balanceCents < 0 || balanceCents > math.MaxInt64/microCentsPerCent {
 		return model.TenantBillingSummary{}, ErrInvalidInput
 	}
 	if s.usingDatabase() {

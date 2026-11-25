@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -208,6 +209,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 		}
 		return patchManagedAppErrorStatus(ctx, client, namespace, managed, app, fmt.Errorf("read app from store: %w", err))
 	} else {
+		tenant, err := s.Store.GetTenant(storedApp.TenantID)
+		if err != nil {
+			return err
+		}
+		if tenant.Status == model.TenantStatusAccessHeld {
+			return s.pauseHeldAppDeployments(ctx, client, namespace, storedApp)
+		}
 		if handled, err := s.reconcileAppRecovery(ctx, client, managed, storedApp); handled || err != nil {
 			return err
 		}
@@ -3551,6 +3559,40 @@ func (s *Service) managedAppOwnedResourceNames(ctx context.Context, client *kube
 		sorted[kind] = setToSortedNames(names)
 	}
 	return sorted, nil
+}
+
+// Pause every release of a held app without altering its desired replicas or storage.
+func (s *Service) pauseHeldAppDeployments(ctx context.Context, client *kubeClient, namespace string, app model.App) error {
+	if app.ID == "" || namespace != runtime.NamespaceForTenant(app.TenantID) {
+		return errors.New("invalid held app identity")
+	}
+	names, err := client.listDeploymentNamesByLabel(ctx, namespace, runtime.FugueLabelAppID+"="+app.ID)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		live, found, err := client.getRawDeployment(ctx, namespace, name)
+		if err != nil {
+			return err
+		}
+		if !found || objectLabels(live)[runtime.FugueLabelAppID] != app.ID {
+			continue
+		}
+		spec := objectMapField(live, "spec")
+		if replicas, ok := spec["replicas"].(float64); ok && replicas == 0 {
+			continue
+		}
+		meta := objectMapField(live, "metadata")
+		patch := []map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": meta["uid"]},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": meta["resourceVersion"]},
+			{"op": "add", "path": "/spec/replicas", "value": 0},
+		}
+		if _, err := client.doRequest(ctx, http.MethodPatch, deploymentAPIPath(namespace, name), "application/json-patch+json", patch, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) listOwnedDeploymentNames(ctx context.Context, client *kubeClient, namespace, appID string) ([]string, error) {

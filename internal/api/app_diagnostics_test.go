@@ -69,6 +69,21 @@ func (fn diagnosticRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, 
 	return fn(req)
 }
 
+func TestQueryAppDatabaseRequiresBindingBeforeOpen(t *testing.T) {
+	_, server, key, app := setupAppConfigTestServer(t, model.AppSpec{
+		Image: "ghcr.io/example/demo:latest", Replicas: 1, RuntimeID: "runtime_managed_shared",
+		Env: map[string]string{"DATABASE_URL": "postgresql://unused.invalid/demo"},
+	})
+	server.openAppDatabase = func(string, string) (*sql.DB, error) {
+		t.Fatal("database opened without a managed binding")
+		return nil, nil
+	}
+	response := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/database/query", key, map[string]any{"sql": "select 1"})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("unexpected status %d", response.Code)
+	}
+}
+
 func TestQueryAppDatabaseUsesEffectiveConnection(t *testing.T) {
 	t.Parallel()
 
@@ -77,9 +92,8 @@ func TestQueryAppDatabaseUsesEffectiveConnection(t *testing.T) {
 		Ports:     []int{8080},
 		Replicas:  1,
 		RuntimeID: "runtime_managed_shared",
-		Env: map[string]string{
-			"DATABASE_URL": "postgresql://demo:secret@db.internal:5432/demo",
-		},
+		Postgres:  &model.AppPostgresSpec{ServiceName: "demo-db", Database: "demo", User: "demo", Password: "secret"},
+		Env:       map[string]string{"DATABASE_URL": "postgresql://demo:secret@db.internal:5432/demo"},
 	})
 
 	db, mock, err := sqlmock.New()
@@ -92,7 +106,7 @@ func TestQueryAppDatabaseUsesEffectiveConnection(t *testing.T) {
 		if driverName != "pgx" {
 			t.Fatalf("expected pgx driver, got %q", driverName)
 		}
-		if dsn != "postgresql://demo:secret@db.internal:5432/demo" {
+		if dsn != "postgresql://demo:secret@demo-db."+runtime.NamespaceForTenant(app.TenantID)+".svc.cluster.local:5432/demo" {
 			t.Fatalf("unexpected dsn %q", dsn)
 		}
 		return db, nil
@@ -123,7 +137,7 @@ func TestQueryAppDatabaseUsesEffectiveConnection(t *testing.T) {
 		ReadOnly bool                     `json:"read_only"`
 	}
 	mustDecodeJSON(t, recorder, &response)
-	if response.Database != "demo" || response.Host != "db.internal" || response.User != "demo" {
+	if response.Database != "demo" || response.Host != "demo-db."+runtime.NamespaceForTenant(app.TenantID)+".svc.cluster.local" || response.User != "demo" {
 		t.Fatalf("unexpected query target %+v", response)
 	}
 	if !response.ReadOnly {
@@ -168,7 +182,7 @@ func TestQueryAppDatabaseMapsExecutionErrors(t *testing.T) {
 				Ports:     []int{8080},
 				Replicas:  1,
 				RuntimeID: "runtime_managed_shared",
-				Env:       map[string]string{"DATABASE_URL": "postgresql://demo:secret@db.internal:5432/demo"},
+				Postgres:  &model.AppPostgresSpec{ServiceName: "demo-db", Database: "demo", User: "demo", Password: "secret"},
 			})
 			db, mock, err := sqlmock.New()
 			if err != nil {
@@ -230,7 +244,7 @@ func TestQueryAppDatabaseQualifiesManagedPostgresHost(t *testing.T) {
 		t.Fatalf("expected managed postgres binding, got app=%+v", storedApp)
 	}
 	expectedHost := bound.Service.Spec.Postgres.ServiceName + "." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
-	expectedDSN := "postgresql://demo:secret@" + expectedHost + ":5432/demo?sslmode=disable"
+	expectedDSN := "postgresql://demo:secret@" + expectedHost + ":5432/demo"
 	server.openAppDatabase = func(driverName, dsn string) (*sql.DB, error) {
 		if driverName != "pgx" {
 			t.Fatalf("expected pgx driver, got %q", driverName)
@@ -289,7 +303,7 @@ func TestQueryAppDatabaseQualifiesManagedPostgresDatabaseURL(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectedHost := "demo-postgres-rw." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
+	expectedHost := "demo-postgres." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local"
 	expectedDSN := "postgresql://demo:secret@" + expectedHost + ":5432/demo"
 	server.openAppDatabase = func(driverName, dsn string) (*sql.DB, error) {
 		if driverName != "pgx" {

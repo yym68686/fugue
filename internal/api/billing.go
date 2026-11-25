@@ -61,8 +61,8 @@ func (s *Server) handleGetBilling(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	if !principal.IsPlatformAdmin() && !principal.HasScope("billing.write") {
-		httpx.WriteError(w, http.StatusForbidden, "missing billing.write scope")
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform administrator required")
 		return
 	}
 
@@ -104,15 +104,16 @@ func (s *Server) handleUpdateBilling(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	if !principal.IsPlatformAdmin() && !principal.HasScope("billing.write") {
-		httpx.WriteError(w, http.StatusForbidden, "missing billing.write scope")
+	if !principal.IsPlatformAdmin() {
+		httpx.WriteError(w, http.StatusForbidden, "platform administrator required")
 		return
 	}
 
 	var req struct {
-		TenantID    string `json:"tenant_id"`
-		AmountCents int64  `json:"amount_cents"`
-		Note        string `json:"note"`
+		TenantID         string `json:"tenant_id"`
+		AmountCents      int64  `json:"amount_cents"`
+		PaymentReference string `json:"payment_reference"`
+		Note             string `json:"note"`
 	}
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
@@ -130,15 +131,16 @@ func (s *Server) handleTopUpBilling(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.scheduleTenantBillingImageStorageRefresh(tenantID)
-	summary, err := s.store.TopUpTenantBilling(tenantID, req.AmountCents, req.Note)
+	summary, err := s.store.SettleTenantBilling(tenantID, req.AmountCents, req.Note, req.PaymentReference)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
 	summary.CurrentUsage = s.currentTenantManagedUsage(r.Context(), tenantID, principal.IsPlatformAdmin())
 	s.appendAudit(principal, "billing.top_up", "tenant", tenantID, tenantID, map[string]string{
-		"amount_cents": httpxValue(req.AmountCents),
-		"note":         strings.TrimSpace(req.Note),
+		"amount_cents":      httpxValue(req.AmountCents),
+		"note":              strings.TrimSpace(req.Note),
+		"payment_reference": strings.TrimSpace(req.PaymentReference),
 	})
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"billing": summary,

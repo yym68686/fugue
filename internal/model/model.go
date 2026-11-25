@@ -570,6 +570,8 @@ func AppExposesPublicService(spec AppSpec) bool {
 	return AppPublicServicePort(spec) > 0
 }
 
+const TenantStatusAccessHeld = "access-held"
+
 type Tenant struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`

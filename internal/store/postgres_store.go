@@ -947,6 +947,8 @@ func (s *Store) pgAuthenticateNodeKey(secret string) (model.NodeKey, error) {
 SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
+AND (scope <> 'platform-node' OR COALESCE(tenant_id, '') = '')
+AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_node_keys.tenant_id AND t.status='access-held')
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
@@ -1080,6 +1082,8 @@ func (s *Store) pgBootstrapNode(secret, runtimeName, endpoint string, labels map
 SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
+AND (scope <> 'platform-node' OR COALESCE(tenant_id, '') = '')
+AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_node_keys.tenant_id AND t.status='access-held')
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
@@ -1130,6 +1134,9 @@ WHERE id = $1
 			keepRuntimeID = runtime.ID
 		}
 		for _, conflict := range matchingRuntimes {
+			if conflict.TenantID != key.TenantID {
+				return model.NodeKey{}, model.Runtime{}, "", ErrConflict
+			}
 			if conflict.ID == keepRuntimeID {
 				continue
 			}
@@ -1222,6 +1229,8 @@ func (s *Store) pgBootstrapClusterNode(secret, runtimeName, endpoint string, lab
 SELECT id, tenant_id, label, prefix, hash, scope, status, created_at, updated_at, last_used_at, revoked_at
 FROM fugue_node_keys
 WHERE hash = $1
+AND (scope <> 'platform-node' OR COALESCE(tenant_id, '') = '')
+AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_node_keys.tenant_id AND t.status='access-held')
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
@@ -1272,6 +1281,9 @@ WHERE id = $1
 			keepRuntimeID = runtime.ID
 		}
 		for _, conflict := range matchingRuntimes {
+			if conflict.TenantID != key.TenantID {
+				return model.NodeKey{}, model.Runtime{}, ErrConflict
+			}
 			if conflict.ID == keepRuntimeID {
 				continue
 			}
@@ -1413,6 +1425,7 @@ func (s *Store) pgConsumeEnrollmentToken(secret, runtimeName, endpoint string, l
 SELECT id, tenant_id, label, prefix, hash, expires_at, used_at, created_at, last_used_at
 FROM fugue_enrollment_tokens
 WHERE hash = $1
+AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_enrollment_tokens.tenant_id AND t.status='access-held')
 FOR UPDATE
 `, model.HashSecret(secret)))
 	if err != nil {
@@ -4527,6 +4540,7 @@ SELECT id, tenant_id, type, status, execution_mode, requested_by_type, requested
 FROM fugue_operations
 WHERE id = $1
   AND status = $2
+  AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_operations.tenant_id AND t.status='access-held')
 FOR UPDATE SKIP LOCKED
 `, id, model.OperationStatusPending))
 	if err != nil {
@@ -4615,6 +4629,7 @@ WITH next_op AS (
 	SELECT id
 	FROM fugue_operations
 	WHERE status = $1
+	  AND NOT EXISTS (SELECT 1 FROM fugue_tenants t WHERE t.id=fugue_operations.tenant_id AND t.status='access-held')
 ` + extraWhere + `
 	ORDER BY created_at ASC
 	FOR UPDATE SKIP LOCKED

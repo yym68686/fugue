@@ -405,6 +405,20 @@ func (s *Server) handleCreateAppBinding(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	service, err := s.store.GetBackingService(req.ServiceID)
+	if err != nil {
+		s.writeStoreError(w, err)
+		return
+	}
+	if app.TenantID != service.TenantID || (!principal.IsPlatformAdmin() && !principal.AllowsProject(service.ProjectID)) {
+		fields := map[string]string{"source_app_id": app.ID, "source_tenant_id": app.TenantID, "target_service_id": service.ID, "target_tenant_id": service.TenantID}
+		s.appendAudit(principal, "service_binding.denied", "app", app.ID, app.TenantID, fields)
+		if service.TenantID != app.TenantID {
+			s.appendAudit(principal, "service_binding.denied", "backing_service", service.ID, service.TenantID, fields)
+		}
+		httpx.WriteError(w, http.StatusForbidden, "backing service is not available to this app")
+		return
+	}
 	binding, err := s.store.BindBackingService(app.TenantID, app.ID, req.ServiceID, req.Alias, req.Env)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -415,11 +429,6 @@ func (s *Server) handleCreateAppBinding(w http.ResponseWriter, r *http.Request) 
 		if _, rollbackErr := s.store.UnbindBackingService(binding.ID); rollbackErr != nil {
 			s.log.Printf("rollback binding create failed for app=%s binding=%s: %v", app.ID, binding.ID, rollbackErr)
 		}
-		s.writeStoreError(w, err)
-		return
-	}
-	service, err := s.store.GetBackingService(binding.ServiceID)
-	if err != nil {
 		s.writeStoreError(w, err)
 		return
 	}

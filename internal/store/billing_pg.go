@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (s *Store) pgUpdateTenantBilling(tenantID string, managedCap model.BillingR
 	return summary, nil
 }
 
-func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note string) (model.TenantBillingSummary, error) {
+func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note, eventID, reference string) (model.TenantBillingSummary, error) {
 	if amountCents <= 0 {
 		return model.TenantBillingSummary{}, ErrInvalidInput
 	}
@@ -124,6 +125,23 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 	if err != nil {
 		return model.TenantBillingSummary{}, err
 	}
+	if reference != "" {
+		var owner string
+		var amount int64
+		err := tx.QueryRowContext(ctx, "SELECT tenant_id, amount_microcents FROM fugue_billing_events WHERE id=$1", eventID).Scan(&owner, &amount)
+		if err == nil {
+			if owner != tenantID || amount != amountCents*microCentsPerCent {
+				return model.TenantBillingSummary{}, ErrConflict
+			}
+			return buildTenantBillingSummaryWithIndex(&state, index, record), tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return model.TenantBillingSummary{}, err
+		}
+	}
+	if record.BalanceMicroCents > math.MaxInt64-amountCents*microCentsPerCent {
+		return model.TenantBillingSummary{}, ErrInvalidInput
+	}
 	record.BalanceMicroCents += amountCents * microCentsPerCent
 	record.UpdatedAt = now
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
@@ -135,7 +153,7 @@ func (s *Store) pgTopUpTenantBilling(tenantID string, amountCents int64, note st
 		metadata["note"] = note
 	}
 	if err := s.pgInsertTenantBillingEventTx(ctx, tx, model.TenantBillingEvent{
-		ID:                     model.NewID("billingevt"),
+		ID:                     eventID,
 		TenantID:               tenantID,
 		Type:                   model.BillingEventTypeTopUp,
 		AmountMicroCents:       amountCents * microCentsPerCent,

@@ -560,4 +560,5 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleListTenants)))
 	mux.Handle("POST /v1/tenants", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateTenant)))
 	mux.Handle("DELETE /v1/tenants/{id}", s.auth.RequireAPI(http.HandlerFunc(s.handleDeleteTenant)))
+	mux.Handle("PUT /v1/tenants/{id}/access-hold", s.auth.RequireAPI(http.HandlerFunc(s.handleSetTenantAccessHold)))
 }

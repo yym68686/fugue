@@ -943,6 +943,10 @@ func (s *Server) handleCreateNodeKey(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusForbidden, "cannot create node key for another tenant")
 		return
 	}
+	if scope == model.NodeKeyScopePlatformNode && (!principal.IsPlatformAdmin() || tenantID != "") {
+		httpx.WriteError(w, http.StatusForbidden, "platform-node keys require a platform administrator and cannot belong to a tenant")
+		return
+	}
 	if scope != model.NodeKeyScopePlatformNode && tenantID == "" {
 		httpx.WriteError(w, http.StatusBadRequest, "tenant_id is required for tenant runtime node keys")
 		return
