@@ -10,6 +10,22 @@ from scripts import run_node_worker_handoff as driver
 from scripts.test_node_worker_handoff import Fixture
 
 
+class PeerServingIdentityTest(unittest.TestCase):
+    def test_snapshots_legacy_peer_readyz_without_streaming_exec(self):
+        pod = {"metadata": {"name": "peer-front"}}
+        health = {"status": "ok", "route_authority": "edge-control", "active_slot": "a",
+                  "activation_generation": 913, "bundle_generation": "bundle.p1.r2",
+                  "worker_source_commit": "e" * 40, "worker_image_digest": "sha256:" + "a" * 64}
+        with patch.object(driver.front, "read", return_value=health) as read:
+            self.assertEqual(driver.peer_serving_identity("fugue-system", pod),
+                             {k: v for k, v in health.items() if k != "status"})
+            read.assert_called_once_with("get", "--raw", "/api/v1/namespaces/fugue-system/pods/peer-front:7831/proxy/readyz")
+        for key, invalid in [("status", "degraded"), ("activation_generation", True), ("worker_image_digest", "unknown")]:
+            with self.subTest(key=key), patch.object(driver.front, "read", return_value=dict(health, **{key: invalid})):
+                with self.assertRaisesRegex(ValueError, "peer-front"):
+                    driver.peer_serving_identity("fugue-system", pod)
+
+
 def pinned():
     f = Fixture()
     f.before["schema"] = "edge-front-group-activation/v1"

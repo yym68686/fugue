@@ -47,8 +47,16 @@
     "updated_at": "2026-11-20T22:21:36.553520885Z"
   },
   "peers": [
-    {"node": "bwg", "service": "fugue-front-serving-public-b-secondary", "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c"},
-    {"node": "86eabf26-42a9-4f9d-998a-754115f8b829", "service": "fugue-front-serving-us-managed", "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0"}
+    {
+      "node": "bwg",
+      "service": "fugue-front-serving-public-b-secondary",
+      "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c"
+    },
+    {
+      "node": "86eabf26-42a9-4f9d-998a-754115f8b829",
+      "service": "fugue-front-serving-us-managed",
+      "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0"
+    }
   ],
   "probe": {
     "host": "api.fugue.pro",

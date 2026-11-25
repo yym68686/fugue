@@ -112,6 +112,21 @@ def list_items(response):
     return response["items"]
 
 
+def peer_serving_identity(namespace, pod):
+    # The peer is not a CAS participant. Read the live serving identity
+    # without a kubelet exec (which uses a distinct streaming transport).
+    name = pod["metadata"]["name"]
+    health = front.read("get", "--raw", f"/api/v1/namespaces/{namespace}/pods/{name}:7831/proxy/readyz")
+    require(health.get("status") == "ok" and health.get("route_authority") == "edge-control"
+            and health.get("active_slot") in ("a", "b")
+            and type(health.get("activation_generation")) is int and health["activation_generation"] > 0
+            and matches(re.compile(r"[a-zA-Z0-9_.:-]{1,253}"), health.get("bundle_generation"))
+            and matches(SHA, health.get("worker_source_commit")) and matches(DIGEST, health.get("worker_image_digest")),
+            f"peer Front {name} did not report a valid serving Worker identity")
+    return {k: health[k] for k in ("active_slot", "activation_generation", "bundle_generation", "worker_source_commit",
+                                    "worker_image_digest", "route_authority")}
+
+
 def process(pod, name):
     spec = one([c for c in pod["spec"]["containers"] if c["name"] == name], name + " spec")
     runtime = one([c for c in pod["status"]["containerStatuses"] if c["name"] == name], name + " runtime")
@@ -315,7 +330,7 @@ class ActiveCluster:
                 snapshot[obj_uid(pod)] = {"pod": pod["metadata"]["name"], "templates": templates,
                                           "processes": {c["name"]: process(pod, c["name"]) for c in pod["spec"]["containers"]}}
             snapshots[node] = {"service": svc["spec"], "endpoint": endpoint,
-                               "activation": front.state(dict(self.profile, node=node), selected), "runtimes": snapshot}
+                               "serving_identity": peer_serving_identity(self.ns, selected), "runtimes": snapshot}
         return snapshots
 
     def exec_guardian(self, pod, command, raw):
