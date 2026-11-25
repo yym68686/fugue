@@ -1,0 +1,55 @@
+{
+  "schema": "fugue.node-worker-handoff/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "vps-591f4447",
+  "nodeUID": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+  "front": {
+    "service": "fugue-front-serving-public-b-primary",
+    "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+    "generation": 9,
+    "address": "15.204.94.71",
+    "source": "a5b582368682800caacf25f38e359cfd563f93c0",
+    "imageDigest": "sha256:accf36db4579bc3fe698b39f99b334fff18950f16c68eaa9ca90e3dfe6171633"
+  },
+  "probeIngress": {
+    "service": "fugue-front-probe-public-b-primary",
+    "uid": "ed787ee0-e869-4adb-8c11-b7be1cabbabb",
+    "generation": 5,
+    "port": 15443
+  },
+  "guardian": {
+    "deployment": "fugue-release-guardian",
+    "source": "09990f956b4a9a7e146c9508708de874005bc138",
+    "imageDigest": "sha256:8ca0b1bd90817720ee424d2e00220445091d7fd5e06f88f33b6266cc9c39f2b1"
+  },
+  "candidate": {
+    "daemonSet": "fugue-fugue-edge-worker-a",
+    "component": "edge-worker-us",
+    "source": "86460476e4a1ca2e0075164aead4f04dda7934c2",
+    "imageDigest": "sha256:225fc110af84e64f71da4abbe170048342168ae25814b479b537ea99742c760f",
+    "slot": "a",
+    "bundleGeneration": "edgegroupbundle_8682fceb651a8718c9f21c6dd9a82df7999e206d61262d0a192eb3ac6129733f.p66625.r185",
+    "releaseDigest": "sha256:e54cd138d6f9de01df3fe2856c84b27763103940e3fb18d12f9932fa8200840a"
+  },
+  "expected": {
+    "schema": "edge-front-group-activation/v1",
+    "edge_group_id": "edge-group-country-us",
+    "generation": 912,
+    "active_slot": "b",
+    "previous_slot": "a",
+    "bundle_generation": "edgegroupbundle_8682fceb651a8718c9f21c6dd9a82df7999e206d61262d0a192eb3ac6129733f.p66625.r185",
+    "worker_source_commit": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
+    "worker_image_digest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
+    "authority": "edge-control",
+    "operation": "promote",
+    "reason": "promote Guardian verified candidate authority",
+    "updated_at": "2026-11-20T22:21:36.553520885Z"
+  },
+  "peers": [
+    {"node": "bwg", "service": "fugue-front-serving-public-b-secondary", "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c"},
+    {"node": "86eabf26-42a9-4f9d-998a-754115f8b829", "service": "fugue-front-serving-us-managed", "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0"}
+  ],
+  "probe": {"host": "api.fugue.pro", "path": "/"},
+  "verifyDrain": true
+}

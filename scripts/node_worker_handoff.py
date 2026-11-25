@@ -211,12 +211,17 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                             drain_record(guardian_result=result)
 
                             def check_old():
-                                if proof(retained) != reference or fact(retained, before, retained_addr) != old:
+                                # A routine signed route refresh can change the
+                                # proof version. The socket and Worker identity
+                                # must remain exact throughout the drain.
+                                proof(retained)
+                                if fact(retained, before, retained_addr) != old:
                                     raise ValueError("draining socket no longer reaches its exact old Worker")
 
                             def check_new():
                                 for sock, ref in ((fresh, newest), (probe_fresh, probe_ref)):
-                                    if proof(sock) != reference or fact(sock, target, candidate_addr) != ref:
+                                    proof(sock)
+                                    if fact(sock, target, candidate_addr) != ref:
                                         raise ValueError("new Worker socket changed during the old-Worker drain")
 
                             verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, drain_record)
