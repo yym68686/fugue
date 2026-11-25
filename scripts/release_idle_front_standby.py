@@ -16,8 +16,9 @@ CONFIG_ROOT = Path("deploy/environments/production/front-hostport-retirement")
 
 
 def validate(config):
-    require(isinstance(config, dict) and set(config) == {"schema", "retirement", "daemonSetUID", "specDigest", "podUID"}
+    require(isinstance(config, dict) and set(config) == {"schema", "retirement", "daemonSetUID", "specDigest", "podUID", "idleSeconds"}
             and config["schema"] == "fugue.idle-front-standby-release/v1"
+            and type(config["idleSeconds"]) is int and 3 <= config["idleSeconds"] <= 15
             and re.fullmatch(r"[a-z0-9][a-z0-9-]*\.json", config["retirement"])
             and all(retirement.UID.fullmatch(config[k]) for k in ("daemonSetUID", "podUID"))
             and re.fullmatch(r"sha256:[a-f0-9]{64}", config["specDigest"]), "exact idle Front standby declaration required")
@@ -104,7 +105,7 @@ def run(config, origin, evidence):
         if patch:
             require(not workload(config, origin, write(patch, dry=True)), "standby exclusion server dry run diverged")
             cluster.idle(pod)
-            time.sleep(3)
+            time.sleep(config["idleSeconds"])
             _, patch, pod, current, current_transport = inspect()
             require(patch and current_transport == transport and front.state(cluster.profile, current) == activation,
                     "serving state or standby changed before releasing capacity")

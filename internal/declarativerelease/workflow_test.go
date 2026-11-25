@@ -305,7 +305,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release")
-	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement")
+	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
