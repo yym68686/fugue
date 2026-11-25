@@ -161,10 +161,6 @@ func DefaultBuilderHeavyEphemeralLimitBytes() int64 {
 	return parseBuilderBytes(defaultBuilderPodPolicy().Heavy.Resources.Limits["ephemeral-storage"])
 }
 
-func MaxBuilderHeavyEphemeralLimitBytes() int64 {
-	return parseBuilderBytes(defaultBuilderHeavyEphemeralCeiling)
-}
-
 func builderPodPolicyWithMemoryCeiling(policy BuilderPodPolicy, ceilingBytes int64) BuilderPodPolicy {
 	policy = normalizeBuilderPodPolicy(policy)
 	if ceilingBytes <= 0 {

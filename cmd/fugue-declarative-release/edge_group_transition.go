@@ -25,6 +25,7 @@ import (
 	"fugue/internal/edgecontrol"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
+
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -2660,10 +2661,6 @@ func exactFrontConnectionCount(value map[string]any) (int, bool) {
 	return count, true
 }
 
-func (cluster *kubectlCluster) rollEdgeDaemonSet(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity) (map[string]edgeGroupPod, error) {
-	return cluster.rollEdgeDaemonSetTarget(ctx, client, release, transition, name, target, true, false, nil)
-}
-
 func (cluster *kubectlCluster) rollEdgeDaemonSetTarget(ctx context.Context, client dynamic.Interface, release declarativerelease.PlanRelease, transition declarativerelease.EdgeGroupABTransition, name string, target declarativerelease.TargetIdentity, requireGroupAuthority, replaceUnready bool, progress func(context.Context) error) (map[string]edgeGroupPod, error) {
 	container := transition.WorkerContainer
 	// Inactive workers may be pre-authority during adoption, but their
@@ -2997,15 +2994,6 @@ func sortedEdgeNodes(pods map[string]edgeGroupPod) []string {
 	}
 	sort.Strings(nodes)
 	return nodes
-}
-
-func allFrontActivationPresent(values map[string]edgeFrontHealth) bool {
-	for _, value := range values {
-		if !value.ActivationPresent {
-			return false
-		}
-	}
-	return len(values) > 0
 }
 
 func immutableDigestFromRef(ref string) (string, error) {

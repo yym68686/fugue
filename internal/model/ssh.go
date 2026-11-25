@@ -164,30 +164,6 @@ func AppSSHTargetPort(spec AppSpec) int {
 	return ssh.TargetPort
 }
 
-func AppSSHUser(spec AppSpec) string {
-	ssh := NormalizeAppSSHSpec(spec.SSH)
-	if ssh == nil {
-		return ""
-	}
-	return ssh.User
-}
-
-func AppSSHAuthorizedKeysPath(spec AppSpec) string {
-	ssh := NormalizeAppSSHSpec(spec.SSH)
-	if ssh == nil {
-		return ""
-	}
-	return ssh.AuthorizedKeysPath
-}
-
-func AppSSHHostKeysPath(spec AppSpec) string {
-	ssh := NormalizeAppSSHSpec(spec.SSH)
-	if ssh == nil {
-		return ""
-	}
-	return ssh.HostKeysPath
-}
-
 func NormalizeAppSSHEndpointStatus(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case AppSSHEndpointStatusPending:

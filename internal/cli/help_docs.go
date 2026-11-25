@@ -1641,17 +1641,6 @@ func sampleSpecificFlagsForCommand(cmd *cobra.Command) string {
 	return strings.TrimSpace(strings.Join(flags, " "))
 }
 
-func documentedCommandPaths(root *cobra.Command) []string {
-	paths := make([]string, 0, 64)
-	walkHelpCommands(root, func(cmd *cobra.Command) {
-		if shouldSkipHelpDoc(cmd) {
-			return
-		}
-		paths = append(paths, cmd.CommandPath())
-	})
-	return paths
-}
-
 func undocumentedCommandsReport(root *cobra.Command) []string {
 	missing := make([]string, 0)
 	walkHelpCommands(root, func(cmd *cobra.Command) {

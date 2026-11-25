@@ -60,14 +60,6 @@ func buildOperationDiagnosisEvidenceView(diagnosis model.OperationDiagnosis) vie
 	return viewmodel.NewOperationDiagnosisEvidence(diagnosis)
 }
 
-func buildProjectWorkbenchView(project model.Project, apps []model.App, services []model.BackingService, operations []model.Operation) viewmodel.ProjectWorkbenchView {
-	return viewmodel.NewProjectWorkbench(project, apps, services, operations)
-}
-
-func buildRuntimeCapacityView(runtime model.Runtime) viewmodel.RuntimeCapacityView {
-	return viewmodel.NewRuntimeCapacity(runtime)
-}
-
 func buildActionPlanView(action, target, scope, apiCall, operationType string, destructive bool) viewmodel.ActionPlanView {
 	return viewmodel.NewActionPlan(action, target, scope, apiCall, operationType, destructive)
 }

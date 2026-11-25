@@ -2091,10 +2091,6 @@ func (s *Service) dnsCacheEnvelopeExpiresAt(cached cacheFile, createdAt time.Tim
 	return createdAt.Add(ttl).UTC()
 }
 
-func previousCachePath(path string) string {
-	return lkgcache.PreviousPath(path)
-}
-
 func (s *Service) verifyBundle(bundle model.EdgeDNSBundle, now time.Time) error {
 	keyring := bundleauth.NewKeyring(
 		s.Config.BundleSigningKey,
@@ -2489,10 +2485,6 @@ func edgeHealthKey(hostname, ip string) string {
 		return ""
 	}
 	return hostname + "|" + parsed.String()
-}
-
-func (s *Service) probeEdgeTarget(ctx context.Context, hostname, ip string) bool {
-	return s.probeEdgeTargetObservation(ctx, hostname, ip).Healthy
 }
 
 func (s *Service) probeEdgeTargetObservation(ctx context.Context, hostname, ip string) edgeHealthObservation {
@@ -2920,21 +2912,6 @@ func (s *Service) geoHintForOverride(ip net.IP, source string) (dnsGeoHint, bool
 		}, true
 	}
 	return dnsGeoHint{}, false
-}
-
-func edgeGroupCountry(edgeGroupID string) string {
-	edgeGroupID = strings.ToLower(strings.TrimSpace(edgeGroupID))
-	switch {
-	case strings.Contains(edgeGroupID, "-country-"):
-		return edgeGroupID[strings.Index(edgeGroupID, "-country-")+len("-country-"):]
-	default:
-		return ""
-	}
-}
-
-func rrForEdgeDNSRecordWithGeo(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) []miekgdns.RR {
-	rrs, _, _ := rrForEdgeDNSRecordWithGeoAudit(record, ownerName, qtype, hint, liveHealth, nil)
-	return rrs
 }
 
 func rrForEdgeDNSRecordWithGeoAudit(record model.EdgeDNSRecord, ownerName string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc) ([]miekgdns.RR, edgeDNSAnswerAudit, bool) {

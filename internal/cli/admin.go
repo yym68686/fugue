@@ -587,49 +587,6 @@ func (c *CLI) newAdminRuntimeShowCommand() *cobra.Command {
 	}
 }
 
-func (c *CLI) newAdminRuntimeAccessCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:     "access <runtime>",
-		Aliases: []string{"sharing"},
-		Short:   "Show who can access a runtime",
-		Args:    cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			runtimeObj, err := c.resolveNamedRuntime(client, args[0])
-			if err != nil {
-				return err
-			}
-			response, err := client.GetRuntimeSharing(runtimeObj.ID)
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(response)
-			}
-			if err := renderRuntime(c.stdout, response.Runtime); err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintf(c.stdout, "grants=%d\n", len(response.Grants)); err != nil {
-				return err
-			}
-			if len(response.Grants) == 0 {
-				return nil
-			}
-			tenantNames, err := c.visibleTenantNamesByID(client)
-			if err != nil {
-				c.progressf("warning=tenant inventory unavailable: %v", err)
-			}
-			if _, err := fmt.Fprintln(c.stdout); err != nil {
-				return err
-			}
-			return writeRuntimeAccessGrantTable(c.stdout, response.Grants, tenantNames)
-		},
-	}
-}
-
 func (c *CLI) newAdminRuntimeCreateCommand() *cobra.Command {
 	opts := struct {
 		Type     string

@@ -58,15 +58,6 @@ func AppRWOStorageClassSupportsSameNodeOnlineMount(storageClassName string) bool
 	}
 }
 
-func AppRWOStorageClassDisallowsSameNodeOnlineMount(storageClassName string) bool {
-	switch normalizeAppStorageClassName(storageClassName) {
-	case AppStorageClassFugueWorkspaceRWO:
-		return true
-	default:
-		return false
-	}
-}
-
 func AppWorkspaceSpecSupportsSameNodeOnlineRollout(spec *AppWorkspaceSpec) bool {
 	if spec == nil {
 		return false
@@ -173,10 +164,6 @@ func NormalizeAppPersistentStorageMountPath(kind, raw string) (string, error) {
 		return "", fmt.Errorf("persistent storage file mount path must point to a file")
 	}
 	return cleaned, nil
-}
-
-func AppPersistentStorageInternalPath(rootPath string) string {
-	return path.Join(strings.TrimSpace(rootPath), AppPersistentStorageInternalDirName)
 }
 
 func AppPersistentStorageMountRootPath(rootPath string) string {

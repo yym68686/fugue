@@ -123,12 +123,6 @@ func DefaultAppCPURequestMilliCores(workloadClass string) int64 {
 	}
 }
 
-func DefaultManagedAppBillingResources() BillingResourceSpec {
-	spec := BillingResourceSpecFromResourceSpec(DefaultManagedAppResources())
-	spec.StorageGibibytes = DefaultManagedAppStorageGibibytes
-	return spec
-}
-
 func DefaultManagedPostgresResources() ResourceSpec {
 	return ResourceSpec{
 		CPUMilliCores:        DefaultManagedPostgresCPUMilliCores,

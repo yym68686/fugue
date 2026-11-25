@@ -367,33 +367,6 @@ func PrepareAgentOperationApp(op model.Operation, current model.App) (model.App,
 	return prepareAgentOperationAppWithRenderer(op, current, Renderer{})
 }
 
-func prepareAgentOperationAppWithObservedRelease(op model.Operation, current model.App, renderer Renderer, observedReleaseKey string) (model.App, error) {
-	desired := current
-	switch op.Type {
-	case model.OperationTypeDeploy:
-		if op.DesiredSpec == nil {
-			return model.App{}, fmt.Errorf("deploy task missing desired spec")
-		}
-		desired.Spec = *op.DesiredSpec
-	case model.OperationTypeScale:
-		if op.DesiredReplicas == nil {
-			return model.App{}, fmt.Errorf("scale task missing desired replicas")
-		}
-		desired.Spec.Replicas = *op.DesiredReplicas
-	case model.OperationTypeMigrate:
-		if op.DesiredSpec != nil {
-			desired.Spec = *op.DesiredSpec
-		} else if strings.TrimSpace(op.TargetRuntimeID) != "" {
-			desired.Spec.RuntimeID = op.TargetRuntimeID
-		} else {
-			return model.App{}, fmt.Errorf("migrate task missing target runtime")
-		}
-	default:
-		return desired, nil
-	}
-	return agentZeroDowntimeRolloutWithRendererAndObserved(op.Type, current, desired, renderer, observedReleaseKey)
-}
-
 func prepareAgentOperationAppWithRenderer(op model.Operation, current model.App, renderer Renderer) (model.App, error) {
 	desired := current
 	switch op.Type {

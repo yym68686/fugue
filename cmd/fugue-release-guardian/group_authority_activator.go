@@ -521,11 +521,6 @@ func (activator *groupAuthorityActivator) recoverControlReceipt(ctx context.Cont
 	return receipt, nil
 }
 
-func (activator *groupAuthorityActivator) reconcileRecovery(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) error {
-	_, err := activator.reconcileRecoveryReceipt(ctx, promotion, targetGeneration)
-	return err
-}
-
 func (activator *groupAuthorityActivator) reconcileRecoveryReceipt(ctx context.Context, promotion edgecontrol.GroupPromotionReceipt, targetGeneration string) (edgecontrol.GroupRecoveryReceipt, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(activator.config.Endpoint, "/")+
 		edgecontrol.AuthorityGroupReadyPrefixV1+url.PathEscape(promotion.GroupID)+"/readyz", nil)

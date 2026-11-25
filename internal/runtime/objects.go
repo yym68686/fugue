@@ -73,10 +73,6 @@ func buildAppObjectsWithPlacementsAndOptions(app model.App, scheduling Schedulin
 	return buildAppObjectsWithOwnerAndOptions(app, scheduling, postgresPlacements, nil, options)
 }
 
-func buildAppObjectsWithOwner(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference) []map[string]any {
-	return buildAppObjectsWithOwnerAndOptions(app, scheduling, postgresPlacements, ownerRef, defaultRenderOptions())
-}
-
 func buildAppObjectsWithOwnerAndOptions(app model.App, scheduling SchedulingConstraints, postgresPlacements map[string][]SchedulingConstraints, ownerRef *OwnerReference, options RenderOptions) []map[string]any {
 	options = normalizeRenderOptions(options)
 	namespace := NamespaceForTenant(app.TenantID)
@@ -787,75 +783,6 @@ func buildAppFileVolumeMounts(files []model.AppFile) []map[string]any {
 		}
 	}
 	return mounts
-}
-
-func buildAppFilesInitContainer(files []model.AppFile) map[string]any {
-	return map[string]any{
-		"name":  "init-app-files",
-		"image": defaultWaitImage,
-		"command": []string{
-			"sh",
-			"-lc",
-			appFilesInitScript(),
-			"sh",
-			appFilesSourceMountPath,
-			buildAppFilesPlan(files),
-		},
-		"securityContext": map[string]any{
-			"runAsUser": 0,
-		},
-		"resources": runtimeHelperResourceRequirements(),
-		"volumeMounts": []map[string]any{
-			{
-				"name":      appFilesVolumeName,
-				"mountPath": appFilesSourceMountPath,
-				"readOnly":  true,
-			},
-		},
-	}
-}
-
-func appFilesInitScript() string {
-	return `set -eu
-
-src_root="$1"
-plan="$2"
-plan_file="$(mktemp)"
-trap 'rm -f "${plan_file}"' EXIT
-printf '%s\n' "${plan}" > "${plan_file}"
-tab="$(printf '\t')"
-
-while IFS="${tab}" read -r key mode target; do
-  if [ -z "${key}" ]; then
-    continue
-  fi
-  src="${src_root}/${key}"
-  if [ ! -f "${src}" ]; then
-    echo "missing app file payload: ${key}" >&2
-    exit 1
-  fi
-  parent="$(dirname "${target}")"
-  mkdir -p "${parent}"
-  if [ -d "${target}" ]; then
-    echo "app file target is a directory: ${target}" >&2
-    exit 1
-  fi
-  rm -f "${target}"
-  cat "${src}" > "${target}"
-  chmod "${mode}" "${target}"
-done < "${plan_file}"`
-}
-
-func buildAppFilesPlan(files []model.AppFile) string {
-	lines := make([]string, 0, len(files))
-	for index, file := range files {
-		lines = append(lines, strings.Join([]string{
-			fileKey(index),
-			strconv.FormatInt(int64(appFileMode(file)), 8),
-			strings.TrimSpace(file.Path),
-		}, "\t"))
-	}
-	return strings.Join(lines, "\n")
 }
 
 func appFileMode(file model.AppFile) int32 {
@@ -1653,10 +1580,6 @@ func mergedRuntimeEnv(app model.App) map[string]string {
 	return merged
 }
 
-func buildAppServiceObject(namespace string, app model.App, labels map[string]string) map[string]any {
-	return buildAppServiceObjectWithOptions(namespace, app, labels, defaultRenderOptions())
-}
-
 func buildAppServiceObjectWithOptions(namespace string, app model.App, labels map[string]string, options RenderOptions) map[string]any {
 	options = normalizeRenderOptions(options)
 	if !model.AppHasClusterService(app.Spec) && !model.AppSSHEnabled(app.Spec) {
@@ -2286,10 +2209,6 @@ func rollingUpdateDeploymentStrategy() map[string]any {
 	}
 }
 
-func appUsesOnlineRestartStrategy(app model.App) bool {
-	return appUsesOnlineDurableRolloutStrategy(app)
-}
-
 func appUsesOnlineDurableRolloutStrategy(app model.App) bool {
 	if (!appRolloutIntentIsOnlineDurable(app.Spec.RolloutIntent) && !model.AppZeroDowntimeEnabled(app.Spec) && app.Spec.StorageUnmountOperationID == "") ||
 		!model.AppHasClusterService(app.Spec) ||
@@ -2891,10 +2810,6 @@ func AppVolumeReplicationEnabled(app model.App) bool {
 	return model.AppSpecVolumeReplicationEnabled(app.Spec)
 }
 
-func AppUsesWorkspaceReplication(app model.App) bool {
-	return AppVolumeReplicationEnabled(app)
-}
-
 func workspaceStorageBaseName(app model.App) string {
 	if app.Spec.WorkloadGeneration != "" {
 		base := app
@@ -3297,10 +3212,6 @@ func postgresResourceName(appName string) string {
 	return appName + "-postgres"
 }
 
-func postgresSecretName(appName string) string {
-	return appName + "-pgsec"
-}
-
 // ManagedPostgresCredentialSecretName uses stable service identity, never a
 // display name. Existing services acquire an explicit persisted reference
 // after the controller validates the live legacy reference.
@@ -3380,26 +3291,6 @@ func postgresWaitCommand(serviceName string) string {
 
 func postgresServiceHostEnvVar(serviceName string) string {
 	return strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(serviceName), "-", "_")) + "_SERVICE_HOST"
-}
-
-func postgresRWServiceName(clusterName string) string {
-	return model.PostgresRWServiceName(clusterName)
-}
-
-func serviceFQDN(namespace, serviceName string) string {
-	namespace = strings.TrimSpace(namespace)
-	serviceName = strings.TrimSpace(serviceName)
-	if serviceName == "" {
-		return ""
-	}
-	if namespace == "" {
-		return serviceName
-	}
-	return serviceName + "." + namespace + ".svc.cluster.local"
-}
-
-func postgresRWServiceFQDN(namespace, clusterName string) string {
-	return serviceFQDN(namespace, postgresRWServiceName(clusterName))
 }
 
 func isManagedRuntimeBackingService(service model.BackingService) bool {

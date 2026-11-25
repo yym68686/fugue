@@ -35,10 +35,6 @@ func (s *Server) liveManagedImageReferences(ctx context.Context, apps []model.Ap
 	return s.liveManagedImageReferenceScan(ctx, apps, apps).References
 }
 
-func (s *Server) liveManagedImageReferencesWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) []liveManagedImageReference {
-	return s.liveManagedImageReferenceScan(ctx, desiredApps, lookupApps).References
-}
-
 func (s *Server) liveManagedImageReferenceScan(ctx context.Context, desiredApps, lookupApps []model.App) liveManagedImageReferenceScan {
 	if s == nil || strings.TrimSpace(s.registryPushBase) == "" {
 		return liveManagedImageReferenceScan{Complete: true}

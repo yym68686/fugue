@@ -182,10 +182,6 @@ func writeMultiAppSummary(w io.Writer, apps []model.App) error {
 	return writeAppTable(w, sorted)
 }
 
-func writeAppStatus(w io.Writer, app model.App) error {
-	return writeAppStatusWithContext(w, app, nil, nil, nil, false)
-}
-
 func writeAppStatusWithContext(w io.Writer, app model.App, tenantNames, projectNames, runtimeNames map[string]string, showIDs bool) error {
 	url := ""
 	if app.Route != nil {

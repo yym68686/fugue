@@ -2,67 +2,18 @@ package runtime
 
 import (
 	"bytes"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-
-	"fugue/internal/model"
 )
 
 const (
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
-
-func ApplyManagedApp(app model.App, constraints ...SchedulingConstraints) error {
-	host := os.Getenv("KUBERNETES_SERVICE_HOST")
-	port := os.Getenv("KUBERNETES_SERVICE_PORT")
-	if host == "" || port == "" {
-		return fmt.Errorf("kubernetes service host/port is not available in the environment")
-	}
-	token, err := os.ReadFile(serviceAccountTokenPath)
-	if err != nil {
-		return fmt.Errorf("read service account token: %w", err)
-	}
-	caData, err := os.ReadFile(serviceAccountCAPath)
-	if err != nil {
-		return fmt.Errorf("read service account CA: %w", err)
-	}
-
-	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(caData) {
-		return fmt.Errorf("load service account CA")
-	}
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: rootCAs},
-		},
-	}
-	baseURL := "https://" + host + ":" + port
-
-	var scheduling SchedulingConstraints
-	if len(constraints) > 0 {
-		scheduling = constraints[0]
-	}
-
-	for _, obj := range buildAppObjects(app, scheduling) {
-		apiPath, err := ObjectAPIPath(NamespaceForTenant(app.TenantID), obj)
-		if err != nil {
-			return err
-		}
-		if err := applyObject(client, baseURL, string(token), apiPath, obj); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func applyObject(client *http.Client, baseURL, bearerToken, apiPath string, obj map[string]any) error {
 	payload, err := json.Marshal(obj)
@@ -140,8 +91,4 @@ func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) 
 	default:
 		return "", fmt.Errorf("unsupported object %s %s", apiVersion, kind)
 	}
-}
-
-func objectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
-	return ObjectAPIPath(defaultNamespace, obj)
 }

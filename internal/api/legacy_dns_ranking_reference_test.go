@@ -150,14 +150,6 @@ type edgeDNSLatencyScope struct {
 	ASN     string
 }
 
-func (s *Server) edgeDNSLatencyProfiles(_ edgeDNSBundleOptions) (edgeDNSLatencyProfileCatalog, error) {
-	return s.edgeDNSLatencyProfilesAt(time.Now().UTC())
-}
-
-func (s *Server) edgeDNSLatencyProfilesAt(now time.Time) (edgeDNSLatencyProfileCatalog, error) {
-	return s.edgeDNSLatencyProfilesWithContext(context.Background(), now)
-}
-
 func (s *Server) edgeDNSLatencyProfilesWithContext(ctx context.Context, now time.Time) (edgeDNSLatencyProfileCatalog, error) {
 	if s.store == nil || s.edgeQualityRankingDisabled() {
 		return edgeDNSLatencyProfileCatalog{}, nil
@@ -260,14 +252,6 @@ func (builder *edgeDNSLatencyProfileBuilder) add(sample model.EdgePerformanceSam
 		}
 		edgeDNSLatencyAccumulate(builder.byHostnameScope[hostname][scopeKey], edgeGroupID, sample)
 	}
-}
-
-func edgeDNSLatencyProfilesByHostname(samples []model.EdgePerformanceSample, decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {
-	builder := newEdgeDNSLatencyProfileBuilder()
-	for _, sample := range samples {
-		builder.add(sample)
-	}
-	return builder.finish(decisions, now)
 }
 
 func (builder *edgeDNSLatencyProfileBuilder) finish(decisions []model.EdgeDNSRoutingDecision, now time.Time) (edgeDNSLatencyProfileCatalog, []model.EdgeDNSRoutingDecision) {

@@ -132,19 +132,11 @@ func VerifyEdgeRouteBundleWithKeyring(bundle model.EdgeRouteBundle, keyring Keyr
 	return verifyBundleSignature(bundle, keyring, now, bundle.ValidUntil, bundle.KeyID, bundle.Signature, bundle.Signatures)
 }
 
-func VerifyEdgeSSHRouteBundle(bundle model.EdgeSSHRouteBundle, key, keyID string, now time.Time) error {
-	return VerifyEdgeSSHRouteBundleWithKeyring(bundle, NewKeyring(key, keyID, "", "", nil), now)
-}
-
 func VerifyEdgeSSHRouteBundleWithKeyring(bundle model.EdgeSSHRouteBundle, keyring Keyring, now time.Time) error {
 	if err := validateBundleSchemaVersion(bundle.SchemaVersion); err != nil {
 		return err
 	}
 	return verifyBundleSignature(bundle, keyring, now, bundle.ValidUntil, bundle.KeyID, bundle.Signature, bundle.Signatures)
-}
-
-func VerifyEdgeDNSBundle(bundle model.EdgeDNSBundle, key, keyID string, now time.Time) error {
-	return VerifyEdgeDNSBundleWithKeyring(bundle, NewKeyring(key, keyID, "", "", nil), now)
 }
 
 func VerifyEdgeDNSBundleWithKeyring(bundle model.EdgeDNSBundle, keyring Keyring, now time.Time) error {

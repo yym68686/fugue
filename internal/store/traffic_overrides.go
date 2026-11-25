@@ -246,15 +246,6 @@ func validTrafficOverrideDigest(value string) bool {
 	return err == nil
 }
 
-func stringSliceContainsStore(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
-
 func cloneTrafficOverride(override model.TrafficOverride) model.TrafficOverride {
 	out := override
 	out.Answers = append([]string{}, override.Answers...)

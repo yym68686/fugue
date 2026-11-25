@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -26,113 +25,6 @@ type edgeQualityRankFilter struct {
 	RequestSizeClass string
 	Method           string
 	PathPrefixBucket string
-}
-
-func (s *Server) buildEdgeQualityRankResponse(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, samples []model.EdgePerformanceSample) model.EdgeQualityRankResponse {
-	filters := edgeQualityRankFallbackFilters(query)
-	scopes := edgeQualityRankFallbackScopes(query.RequestedScope)
-	selectedScope := edgeQualityRankScope{Kind: "global", Value: "global"}
-	selectedFilter := edgeQualityRankFilter{}
-	selectedSamples := []model.EdgePerformanceSample{}
-	fallbackLevel := 0
-	fallbackReason := ""
-	for filterIndex, filter := range filters {
-		for scopeIndex, scope := range scopes {
-			matched := edgeQualityFilterSamples(samples, filter, scope)
-			if len(matched) == 0 {
-				continue
-			}
-			selectedScope = scope
-			selectedFilter = filter
-			selectedSamples = matched
-			fallbackLevel = filterIndex*len(scopes) + scopeIndex
-			if fallbackLevel > 0 {
-				fallbackReason = "insufficient samples for more specific filter or scope"
-			}
-			break
-		}
-		if len(selectedSamples) > 0 {
-			break
-		}
-	}
-
-	groups := make(map[string]*edgeDNSLatencyGroupAccumulator)
-	for _, sample := range selectedSamples {
-		edgeDNSLatencyAccumulate(groups, strings.TrimSpace(sample.EdgeGroupID), sample)
-	}
-	groupCandidates := make(map[string]edgeDNSLatencyCandidateProfile, len(groups))
-	nodeCandidates := make(map[string]edgeDNSLatencyCandidateProfile)
-	for edgeGroupID, accumulator := range groups {
-		if accumulator == nil {
-			continue
-		}
-		groupCandidate := edgeDNSLatencyCandidateFromAccumulator(accumulator)
-		groupCandidates[edgeGroupID] = groupCandidate
-		for edgeID, nodeAccumulator := range accumulator.NodeAccumulators {
-			if nodeAccumulator == nil {
-				continue
-			}
-			nodeCandidates[edgeID] = edgeDNSLatencyCandidateFromAccumulator(nodeAccumulator)
-		}
-	}
-
-	candidates := make([]model.EdgeQualityRankCandidate, 0, len(nodes))
-	hardGated := make([]model.EdgeQualityRankCandidate, 0)
-	quarantineByNode := s.activeNodeQuarantineByName()
-	for _, node := range nodes {
-		candidate := edgeQualityRankCandidateForNode(node, policy, query.GeneratedAt, quarantineByNode)
-		if edgeQualityRankCandidateHardGated(candidate) {
-			candidate.Reason = firstNonEmpty(candidate.ExclusionReason, candidate.Reason, edgeQualityRankGateReason(candidate))
-			hardGated = append(hardGated, candidate)
-			continue
-		}
-		profile, ok := nodeCandidates[strings.TrimSpace(node.ID)]
-		if !ok {
-			profile, ok = groupCandidates[strings.TrimSpace(node.EdgeGroupID)]
-		}
-		if ok {
-			edgeQualityApplyProfile(&candidate, profile)
-		} else {
-			candidate.Score = 999999
-			candidate.ConfidencePenalty = 250
-			candidate.ScoreBreakdown = map[string]float64{"confidence": 250}
-			candidate.Reason = "no matching samples for selected scope"
-		}
-		candidates = append(candidates, candidate)
-	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].Score != candidates[j].Score {
-			return candidates[i].Score < candidates[j].Score
-		}
-		if candidates[i].Confidence != candidates[j].Confidence {
-			return candidates[i].Confidence > candidates[j].Confidence
-		}
-		if candidates[i].EdgeGroupID != candidates[j].EdgeGroupID {
-			return candidates[i].EdgeGroupID < candidates[j].EdgeGroupID
-		}
-		return candidates[i].EdgeID < candidates[j].EdgeID
-	})
-	for index := range candidates {
-		candidates[index].Rank = index + 1
-	}
-
-	return model.EdgeQualityRankResponse{
-		Hostname:         query.Hostname,
-		TrafficClass:     selectedFilter.TrafficClass,
-		RequestSizeClass: selectedFilter.RequestSizeClass,
-		Method:           selectedFilter.Method,
-		PathPrefixBucket: selectedFilter.PathPrefixBucket,
-		RequestedScope:   query.RequestedScope.key(),
-		SelectedScope:    selectedScope.key(),
-		FallbackLevel:    fallbackLevel,
-		FallbackReason:   fallbackReason,
-		Window:           query.Window,
-		Since:            query.Since,
-		GeneratedAt:      query.GeneratedAt,
-		Candidates:       candidates,
-		HardGated:        hardGated,
-		ShadowComparison: edgeQualityShadowComparison(policy, candidates),
-	}
 }
 
 func (s *Server) buildEdgeQualityRankResponseFromRollups(query edgeQualityRankQuery, nodes []model.EdgeNode, policy model.EdgeRoutePolicy, rollups []model.EdgeQualityRollup) model.EdgeQualityRankResponse {
@@ -311,28 +203,6 @@ func edgeQualityRankRollupResponseFreshEnough(response model.EdgeQualityRankResp
 	return !latest.Before(now.UTC().Add(-2 * edgeQualityRollupBuilderInterval))
 }
 
-func edgeQualityApplyProfile(candidate *model.EdgeQualityRankCandidate, profile edgeDNSLatencyCandidateProfile) {
-	if candidate == nil {
-		return
-	}
-	candidate.Score = profile.Score
-	candidate.ScoreBreakdown = cloneFloat64Map(profile.ScoreBreakdown)
-	candidate.Confidence = profile.Confidence
-	candidate.ConfidencePenalty = profile.ConfidencePenalty
-	candidate.SampleRecordCount = profile.SampleCount
-	candidate.RequestCount = profile.SampleCount
-	candidate.ErrorRate = profile.ErrorRate
-	candidate.CacheHitRate = profile.HitRatio
-	candidate.AvgTTFBMS = profile.TTFBMS
-	candidate.AvgTotalMS = profile.TotalMS
-	candidate.AvgUploadBPS = profile.UploadBPS
-	candidate.AvgResponseEgressBPS = profile.ResponseEgressBPS
-	candidate.ClientTCPRetransRate = profile.ClientTCPRetransRate
-	candidate.ClientTCPBytesRetransRate = profile.ClientTCPBytesRetransRate
-	candidate.ClientTCPRTORate = profile.ClientTCPRTORate
-	candidate.Reason = edgeDNSLatencyReason("scoped_quality", profile)
-}
-
 func edgeQualityApplyRollup(candidate *model.EdgeQualityRankCandidate, rollup model.EdgeQualityRollup) {
 	if candidate == nil {
 		return
@@ -423,29 +293,6 @@ func edgeQualityRankFallbackScopes(scope edgeQualityRankScope) []edgeQualityRank
 	}
 }
 
-func edgeQualityFilterSamples(samples []model.EdgePerformanceSample, filter edgeQualityRankFilter, scope edgeQualityRankScope) []model.EdgePerformanceSample {
-	out := make([]model.EdgePerformanceSample, 0, len(samples))
-	for _, sample := range samples {
-		if filter.TrafficClass != "" && !strings.EqualFold(strings.TrimSpace(sample.TrafficClass), filter.TrafficClass) {
-			continue
-		}
-		if filter.RequestSizeClass != "" && edgeQualityRequestSizeClass(sample) != filter.RequestSizeClass {
-			continue
-		}
-		if filter.Method != "" && !strings.EqualFold(strings.TrimSpace(sample.Method), filter.Method) {
-			continue
-		}
-		if filter.PathPrefixBucket != "" && edgeQualityPathPrefixBucket(sample.PathPrefix) != filter.PathPrefixBucket {
-			continue
-		}
-		if !edgeQualitySampleMatchesScope(sample, scope) {
-			continue
-		}
-		out = append(out, sample)
-	}
-	return out
-}
-
 func edgeQualityFilterRollups(rollups []model.EdgeQualityRollup, hostname string, filter edgeQualityRankFilter, scope edgeQualityRankScope) []model.EdgeQualityRollup {
 	out := make([]model.EdgeQualityRollup, 0, len(rollups))
 	hostname = normalizeExternalAppDomain(hostname)
@@ -501,35 +348,6 @@ func edgeQualityRollupMatchesScope(rollup model.EdgeQualityRollup, scope edgeQua
 		return kind == "country" && value == strings.ToLower(strings.TrimSpace(scope.Country))
 	default:
 		return kind == "global" || kind == ""
-	}
-}
-
-func parseEdgeQualityRankWindow(rawWindow, rawSince string, now time.Time) (string, time.Time, error) {
-	if strings.TrimSpace(rawSince) != "" {
-		since, err := parseEdgeNodeQualitySince(rawSince, now)
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		return strings.TrimSpace(rawSince), since, nil
-	}
-	rawWindow = strings.TrimSpace(rawWindow)
-	if rawWindow == "" {
-		rawWindow = "30m"
-	}
-	duration, err := time.ParseDuration(rawWindow)
-	if err != nil || duration <= 0 {
-		return "", time.Time{}, errors.New("window must be a positive duration such as 30m, 6h, or 24h")
-	}
-	return rawWindow, now.Add(-duration), nil
-}
-
-func normalizedEdgeQualityRankWindow(window string) string {
-	window = strings.ToLower(strings.TrimSpace(window))
-	switch window {
-	case "5m", "30m", "6h", "24h":
-		return window
-	default:
-		return ""
 	}
 }
 

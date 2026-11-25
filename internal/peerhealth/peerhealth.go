@@ -149,13 +149,6 @@ func Decide(signals []model.PeerHealthSignal, now time.Time) model.PeerHealthDec
 	return decision
 }
 
-func PublicTLSProbeStatus(err error) string {
-	if err == nil {
-		return model.PeerSignalStatusPass
-	}
-	return model.PeerSignalStatusSuspect
-}
-
 func canonicalSignal(signal model.PeerHealthSignal) ([]byte, error) {
 	if signal.EvidenceHash == "" {
 		signal.EvidenceHash = localwal.EvidenceHash(signal.Evidence)

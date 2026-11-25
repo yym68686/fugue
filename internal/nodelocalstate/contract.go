@@ -214,10 +214,6 @@ func Validate(document Document) error {
 	return nil
 }
 
-func ValidStableID(value string) bool {
-	return value == strings.TrimSpace(value) && stableIDPattern.MatchString(value)
-}
-
 func IsBootstrapNoop(document Document) bool {
 	return document.Transition.Type == TransitionNoop && document.Enforcement.Mode == EnforcementReportOnly && document.BaseGeneration == document.Generation && document.PreviousGeneration == document.Generation && document.RollbackGeneration == document.Generation
 }

@@ -3191,14 +3191,6 @@ func isHexDigestPrefix(value string) bool {
 	return true
 }
 
-func SetOperationSourceState(op *Operation, build, origin *AppSource) {
-	if op == nil {
-		return
-	}
-	op.DesiredSource = CloneAppSource(build)
-	op.DesiredOriginSource = CloneAppSource(origin)
-}
-
 func NormalizeOperationSourceState(op *Operation) {
 	if op == nil {
 		return

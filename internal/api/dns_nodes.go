@@ -466,18 +466,6 @@ func edgeTLSReadyForPreflight(node model.EdgeNode) bool {
 	}
 }
 
-func (s *Server) dnsNodePolicyStatusByName(ctx context.Context, principal model.Principal) (map[string]model.ClusterNodePolicyStatus, error) {
-	statuses, err := s.loadClusterNodePolicyStatuses(ctx, principal)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]model.ClusterNodePolicyStatus, len(statuses))
-	for _, status := range statuses {
-		out[strings.TrimSpace(strings.ToLower(status.NodeName))] = status
-	}
-	return out, nil
-}
-
 func (s *Server) buildDNSDelegationNodeCheck(ctx context.Context, node model.DNSNode, opts dnsDelegationPreflightOptions, policyByNode map[string]model.ClusterNodePolicyStatus, policyErr error) model.DNSDelegationNodeCheck {
 	publicIP := dnsNodePublicIPv4(node)
 	probe := s.probeDNSDelegationNode(ctx, node, opts.Zone, opts.ProbeName)
@@ -668,23 +656,6 @@ func defaultDNSParentNSLookup(ctx context.Context, zone string) ([]string, error
 	}
 	sort.Strings(out)
 	return out, nil
-}
-
-func dnsNodesForZone(nodes []model.DNSNode, zone string) []model.DNSNode {
-	zone = normalizeExternalAppDomain(zone)
-	out := make([]model.DNSNode, 0, len(nodes))
-	for _, node := range nodes {
-		if normalizeExternalAppDomain(node.Zone) == zone {
-			out = append(out, node)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].EdgeGroupID != out[j].EdgeGroupID {
-			return out[i].EdgeGroupID < out[j].EdgeGroupID
-		}
-		return out[i].ID < out[j].ID
-	})
-	return out
 }
 
 func dnsNodePolicyLookupID(node model.DNSNode) string {

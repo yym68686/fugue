@@ -362,14 +362,6 @@ type dnsAnswerCheckHostProbe struct {
 	Message       string `json:"message,omitempty"`
 }
 
-func (c *CLI) checkDNSAnswers(client *Client, hostname string) (dnsAnswerCheckReport, error) {
-	return c.checkDNSAnswersWithClientIP(client, hostname, "")
-}
-
-func (c *CLI) checkDNSAnswersWithClientIP(client *Client, hostname, clientIP string) (dnsAnswerCheckReport, error) {
-	return c.checkDNSAnswersWithQueryName(client, hostname, "", clientIP)
-}
-
 func (c *CLI) checkDNSAnswersWithQueryName(client *Client, hostname, explicitQueryName, clientIP string) (dnsAnswerCheckReport, error) {
 	explain, err := client.ExplainRoute(hostname)
 	if err != nil {
@@ -770,10 +762,6 @@ func summarizeAuthoritativeAnswerSets(nodes []dnsAnswerCheckNode) (bool, []dnsAu
 	}
 	consistent := len(nodes) >= 2 && queriedNodes == len(nodes) && len(sets) == 1
 	return consistent, sets, reasons
-}
-
-func probeDNSAnswerHosts(hostname string, nodes []dnsAnswerCheckNode) []dnsAnswerCheckHostProbe {
-	return probeDNSAnswerHostsUsing(hostname, nodes, probeDNSAnswerHost)
 }
 
 func probeDNSAnswerHostsUsing(hostname string, nodes []dnsAnswerCheckNode, probeHost func(context.Context, string, string) dnsAnswerCheckHostProbe) []dnsAnswerCheckHostProbe {

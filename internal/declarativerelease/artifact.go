@@ -2,7 +2,6 @@ package declarativerelease
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -209,9 +208,4 @@ func DecodeArtifactReceipt(reader io.Reader) (ArtifactReceipt, error) {
 		return ArtifactReceipt{}, errors.New("artifact receipt digest is invalid")
 	}
 	return receipt, nil
-}
-
-// MarshalRegistryVerification is only used by tests and fixture generators.
-func MarshalRegistryVerification(value RegistryVerification) ([]byte, error) {
-	return json.Marshal(value)
 }

@@ -1,14 +1,10 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -397,14 +393,6 @@ func (s *Server) ensureAppStableTrafficPolicy(ctx context.Context, principal mod
 	return s.appReleaseService().EnsureStableTrafficPolicy(ctx, principal, app)
 }
 
-func (s *Server) ensureAppStableRelease(ctx context.Context, app model.App) (model.AppRelease, error) {
-	return s.appReleaseService().EnsureStableRelease(ctx, app)
-}
-
-func (s *Server) validateAppTrafficPolicyReferences(principal model.Principal, app model.App, policy model.AppTrafficPolicy) error {
-	return s.appReleaseService().ValidateTrafficPolicyReferences(principal, app, policy)
-}
-
 func (s *Server) evaluateAppReleaseGate(ctx context.Context, app model.App, release model.AppRelease, policy model.AppReleaseGatePolicy) model.AppReleaseGateResult {
 	return s.appReleaseGateEvaluator().Evaluate(ctx, app, release, policy)
 }
@@ -462,169 +450,10 @@ func appReleaseGateMetricReleaseCondition(releaseID, releaseRole string) string 
 	return "JSONExtractString(summary_json, 'release_role') = " + quoteClickHouseString(strings.TrimSpace(releaseRole))
 }
 
-func appReleaseGateMetricEvidence(metrics map[string]any) []string {
-	if len(metrics) == 0 {
-		return nil
-	}
-	return []string{fmt.Sprintf("release requests=%0.f 5xx_rate=%.4f upstream_error_rate=%.4f p95_ttfb_ms=%.0f p99_duration_ms=%.0f",
-		floatMetric(metrics, "request_count"),
-		floatMetric(metrics, "error_5xx_rate"),
-		floatMetric(metrics, "edge_upstream_error_rate"),
-		floatMetric(metrics, "p95_ttfb_ms"),
-		floatMetric(metrics, "p99_duration_ms"),
-	)}
-}
-
-func appReleaseGateMetricFailures(metrics map[string]any, policy model.AppReleaseGatePolicy) []string {
-	failures := []string{}
-	if policy.MinCandidateRequests > 0 && floatMetric(metrics, "request_count") < float64(policy.MinCandidateRequests) {
-		failures = append(failures, fmt.Sprintf("release request count %.0f is below minimum %d", floatMetric(metrics, "request_count"), policy.MinCandidateRequests))
-	}
-	if policy.Max5xxRate > 0 && floatMetric(metrics, "error_5xx_rate") > policy.Max5xxRate {
-		failures = append(failures, fmt.Sprintf("5xx rate %.4f exceeds %.4f", floatMetric(metrics, "error_5xx_rate"), policy.Max5xxRate))
-	}
-	if policy.MaxEdgeUpstreamErrorRate > 0 && floatMetric(metrics, "edge_upstream_error_rate") > policy.MaxEdgeUpstreamErrorRate {
-		failures = append(failures, fmt.Sprintf("edge upstream error rate %.4f exceeds %.4f", floatMetric(metrics, "edge_upstream_error_rate"), policy.MaxEdgeUpstreamErrorRate))
-	}
-	if policy.MaxP95TTFBMilliseconds > 0 && floatMetric(metrics, "p95_ttfb_ms") > float64(policy.MaxP95TTFBMilliseconds) {
-		failures = append(failures, fmt.Sprintf("p95 ttfb %.0fms exceeds %dms", floatMetric(metrics, "p95_ttfb_ms"), policy.MaxP95TTFBMilliseconds))
-	}
-	if policy.MaxP99DurationMilliseconds > 0 && floatMetric(metrics, "p99_duration_ms") > float64(policy.MaxP99DurationMilliseconds) {
-		failures = append(failures, fmt.Sprintf("p99 duration %.0fms exceeds %dms", floatMetric(metrics, "p99_duration_ms"), policy.MaxP99DurationMilliseconds))
-	}
-	return failures
-}
-
-func (s *Server) runAppReleaseProbes(ctx context.Context, release model.AppRelease, probes []model.AppReleaseProbe) []model.AppReleaseProbeResult {
-	return s.appReleaseGateEvaluator().RunProbes(ctx, release, probes)
-}
-
-func runAppReleaseProbe(ctx context.Context, release model.AppRelease, probe model.AppReleaseProbe) model.AppReleaseProbeResult {
-	result := model.AppReleaseProbeResult{Name: probe.Name, Path: probe.Path, Status: model.AppReleaseGateStatusFail}
-	base := strings.TrimRight(strings.TrimSpace(release.UpstreamURL), "/")
-	if base == "" {
-		result.Error = "release upstream_url is empty"
-		return result
-	}
-	timeout := time.Duration(probe.TimeoutMilliseconds) * time.Millisecond
-	if timeout <= 0 {
-		timeout = defaultAppReleaseProbeTimeout
-	}
-	method := strings.TrimSpace(probe.Method)
-	if method == "" {
-		method = http.MethodGet
-	}
-	body := io.Reader(nil)
-	if probe.Body != "" {
-		body = bytes.NewBufferString(probe.Body)
-	}
-	reqCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, method, base+"/"+strings.TrimLeft(probe.Path, "/"), body)
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	for key, value := range probe.Headers {
-		if strings.TrimSpace(key) != "" {
-			req.Header.Set(strings.TrimSpace(key), value)
-		}
-	}
-	if probe.Body != "" && req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	started := time.Now()
-	var firstByteAt time.Time
-	trace := &httptrace.ClientTrace{
-		GotFirstResponseByte: func() {
-			firstByteAt = time.Now()
-		},
-	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		result.DurationMillis = time.Since(started).Milliseconds()
-		result.Error = err.Error()
-		return result
-	}
-	defer resp.Body.Close()
-	result.StatusCode = resp.StatusCode
-	expected := probe.ExpectedStatus
-	if expected == 0 {
-		expected = http.StatusOK
-	}
-	limit := int64(4096)
-	if strings.EqualFold(probe.Kind, model.AppReleaseProbeKindHTTPStream) || probe.ExpectStreamEventBeforeMillis > 0 {
-		limit = 1
-	}
-	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, limit))
-	result.DurationMillis = time.Since(started).Milliseconds()
-	if !firstByteAt.IsZero() {
-		result.TTFBMillis = firstByteAt.Sub(started).Milliseconds()
-	}
-	if readErr != nil {
-		result.Error = readErr.Error()
-		return result
-	}
-	if resp.StatusCode != expected {
-		result.Error = fmt.Sprintf("expected status %d, got %d", expected, resp.StatusCode)
-		return result
-	}
-	if probe.ExpectedContentType != "" && !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), strings.ToLower(probe.ExpectedContentType)) {
-		result.Error = "response content-type did not match"
-		return result
-	}
-	if probe.ExpectedBodyContains != "" && !strings.Contains(string(payload), probe.ExpectedBodyContains) {
-		result.Error = "response body did not contain expected text"
-		return result
-	}
-	if probe.MaxTTFBMilliseconds > 0 && result.TTFBMillis > int64(probe.MaxTTFBMilliseconds) {
-		result.Error = fmt.Sprintf("ttfb %dms exceeded %dms", result.TTFBMillis, probe.MaxTTFBMilliseconds)
-		return result
-	}
-	if probe.MaxDurationMilliseconds > 0 && result.DurationMillis > int64(probe.MaxDurationMilliseconds) {
-		result.Error = fmt.Sprintf("duration %dms exceeded %dms", result.DurationMillis, probe.MaxDurationMilliseconds)
-		return result
-	}
-	if probe.ExpectStreamEventBeforeMillis > 0 && result.TTFBMillis > int64(probe.ExpectStreamEventBeforeMillis) {
-		result.Error = fmt.Sprintf("stream first byte %dms exceeded %dms", result.TTFBMillis, probe.ExpectStreamEventBeforeMillis)
-		return result
-	}
-	result.Status = model.AppReleaseGateStatusPass
-	result.Evidence = fmt.Sprintf("status=%d ttfb_ms=%d duration_ms=%d", result.StatusCode, result.TTFBMillis, result.DurationMillis)
-	return result
-}
-
 func normalizeAppReleaseGatePolicy(raw *model.AppReleaseGatePolicy) model.AppReleaseGatePolicy {
 	return releaseflow.ReleaseGateEvaluator{}.NormalizePolicy(raw)
 }
 
 func defaultAppReleaseProbes() []model.AppReleaseProbe {
 	return releaseflow.DefaultReleaseProbes()
-}
-
-func appReleaseSourceRef(app model.App) string {
-	return releaseflow.AppReleaseSourceRef(app)
-}
-
-func appReleaseFirstNonNilTime(values ...*time.Time) *time.Time {
-	return releaseflow.FirstNonNilTime(values...)
-}
-
-func floatMetric(metrics map[string]any, key string) float64 {
-	switch value := metrics[key].(type) {
-	case float64:
-		return value
-	case float32:
-		return float64(value)
-	case int:
-		return float64(value)
-	case int64:
-		return float64(value)
-	case json.Number:
-		out, _ := value.Float64()
-		return out
-	default:
-		return 0
-	}
 }

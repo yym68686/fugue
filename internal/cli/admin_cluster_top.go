@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os/signal"
 	"syscall"
@@ -83,37 +82,6 @@ func (c *CLI) newAdminClusterTopCommand() *cobra.Command {
 	bindTUIAppearanceFlags(cmd, &tuiOpts)
 	cmd.Flags().StringVar(&scope, "scope", "all", "Cluster scope: all, nodes, runtimes or control-plane")
 	return cmd
-}
-
-func (c *CLI) watchClusterTopMonitor(ctx context.Context, client *Client, opts monitorOptions) error {
-	if opts.Interval <= 0 {
-		opts.Interval = 3 * time.Second
-	}
-	session := climonitor.Session{Controls: monitorControls(opts)}
-	for {
-		payload, err := c.loadClusterTopPayload(client)
-		if err != nil {
-			if session.HaveLast {
-				if renderErr := c.renderMonitorSnapshot(session.SnapshotWithError(err, time.Now().UTC())); renderErr != nil {
-					return renderErr
-				}
-				if waitErr := waitMonitorInterval(ctx, opts.Interval); waitErr != nil {
-					return c.printMonitorSummary(session.Last)
-				}
-				continue
-			}
-			return err
-		}
-		snapshot := clusterTopPayloadSnapshot(payload, opts)
-		if session.Accept(snapshot) {
-			if err := c.renderMonitorSnapshot(snapshot); err != nil {
-				return err
-			}
-		}
-		if err := waitMonitorInterval(ctx, opts.Interval); err != nil {
-			return c.printMonitorSummary(snapshot)
-		}
-	}
 }
 
 func (c *CLI) loadClusterTopPayload(client *Client) (clusterTopPayload, error) {

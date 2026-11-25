@@ -607,13 +607,3 @@ func (b *dataObjectBackend) deleteObjectBatch(ctx context.Context, batch []strin
 	}
 	return nil
 }
-
-func directObjectHTTPMethod(blob model.DataTransferPlanBlob) string {
-	if blob.UploadMode == model.DataBlobUploadModeMultipart {
-		return http.MethodPut
-	}
-	if blob.UploadURL != "" {
-		return http.MethodPut
-	}
-	return http.MethodGet
-}

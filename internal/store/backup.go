@@ -5216,14 +5216,6 @@ func (s *Store) pgRecordBackupArtifactPhysicalCleanupFailure(id string, attempte
 	return nil
 }
 
-func (s *Store) pgApplyBackupRetention(policyID string) error {
-	policy, err := s.pgGetBackupPolicy(policyID, "", true)
-	if err != nil {
-		return err
-	}
-	return s.pgReconcileRetentionCandidates(policy, false)
-}
-
 func (s *Store) pgCreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
 	plan.ArtifactID = strings.TrimSpace(plan.ArtifactID)
 	if plan.ArtifactID == "" {

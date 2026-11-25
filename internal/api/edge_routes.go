@@ -132,24 +132,6 @@ func (cfg applicationDomainConfig) projectRouteEdgePolicy(hostname string, domai
 	return model.EdgeRouteKindCustomDomain, model.EdgeRouteTLSPolicyCustomDomain, &domain, true
 }
 
-func dedupeEdgeRouteBindings(routes []model.EdgeRouteBinding) []model.EdgeRouteBinding {
-	if len(routes) < 2 {
-		return routes
-	}
-	indexByKey := make(map[string]int, len(routes))
-	out := make([]model.EdgeRouteBinding, 0, len(routes))
-	for _, route := range routes {
-		key := normalizeExternalAppDomain(route.Hostname) + "\x00" + model.NormalizeAppRoutePathPrefix(route.PathPrefix) + "\x00" + strings.TrimSpace(route.EdgeGroupID)
-		if index, exists := indexByKey[key]; exists {
-			out[index] = route
-			continue
-		}
-		indexByKey[key] = len(out)
-		out = append(out, route)
-	}
-	return out
-}
-
 func (s *Server) edgeRouteRuntimeNodeLabels(ctx context.Context) map[string]map[string]string {
 	snapshots, err := s.loadClusterNodeInventory(ctx)
 	if err != nil {
@@ -383,10 +365,6 @@ func applyAppReleaseTraffic(binding model.EdgeRouteBinding, policies map[string]
 	return releaseflow.ApplyAppReleaseTraffic(binding, policies, releases)
 }
 
-func appReleaseCanReceiveEdgeTraffic(release model.AppRelease) bool {
-	return releaseflow.AppReleaseCanReceiveEdgeTraffic(release)
-}
-
 func applyEdgeRoutePolicy(binding model.EdgeRouteBinding, policies map[string]model.EdgeRoutePolicy, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string, now time.Time) model.EdgeRouteBinding {
 	runtimeEdgeGroupID := strings.TrimSpace(firstNonEmpty(binding.RuntimeEdgeGroupID, binding.EdgeGroupID))
 	policy, ok := policies[normalizeExternalAppDomain(binding.Hostname)]
@@ -520,10 +498,6 @@ func edgeRoutePolicyMatchesBinding(policy model.EdgeRoutePolicy, binding model.E
 
 func expandDefaultPlatformEdgeBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool, healthyEdgeNodeIDsByGroup map[string][]string) []model.EdgeRouteBinding {
 	return expandDefaultPlatformBindingsForGroups(binding, sortedHealthyEdgeGroups(edgeRouteHealthyGroupsForBinding(healthyEdgeGroups, healthyEdgeNodeIDsByGroup, binding)))
-}
-
-func expandDefaultPlatformRouteBindings(binding model.EdgeRouteBinding, healthyEdgeGroups map[string]bool) []model.EdgeRouteBinding {
-	return expandDefaultPlatformBindingsForGroups(binding, sortedHealthyEdgeGroups(healthyEdgeGroups))
 }
 
 func expandDefaultPlatformBindingsForGroups(binding model.EdgeRouteBinding, groups []string) []model.EdgeRouteBinding {
@@ -871,23 +845,6 @@ func sortedHealthyEdgeGroups(healthyEdgeGroups map[string]bool) []string {
 	return candidates
 }
 
-func edgeRoutePublicationGroups(healthyEdgeGroups, expectedNonEmptyEdgeGroups map[string]bool) map[string]bool {
-	groups := make(map[string]bool, len(healthyEdgeGroups)+len(expectedNonEmptyEdgeGroups))
-	for edgeGroupID, healthy := range healthyEdgeGroups {
-		edgeGroupID = strings.TrimSpace(edgeGroupID)
-		if edgeGroupID != "" && healthy {
-			groups[edgeGroupID] = true
-		}
-	}
-	for edgeGroupID, previouslyServing := range expectedNonEmptyEdgeGroups {
-		edgeGroupID = strings.TrimSpace(edgeGroupID)
-		if edgeGroupID != "" && previouslyServing {
-			groups[edgeGroupID] = true
-		}
-	}
-	return groups
-}
-
 func (s *Server) edgeRouteHealthyEdgeGroups(ctx context.Context) (map[string]bool, error) {
 	healthy, _, _, _, err := s.edgeRouteGroupInventory(ctx)
 	return healthy, err
@@ -977,10 +934,6 @@ func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, 
 	}
 	s.recordEdgeRouteInventoryFallback(fallbackReason)
 	return s.store.ListEdgeNodes(edgeGroupID)
-}
-
-func edgeRouteInventoryAllowsLegacyFallback(inventoryErr error, activeNodes []model.EdgeNode, activation model.EdgeActivationState, activationErr error) bool {
-	return edgeRouteInventoryFallbackReason(inventoryErr, activeNodes, activation, activationErr) != ""
 }
 
 func edgeRouteInventoryFallbackReason(inventoryErr error, activeNodes []model.EdgeNode, activation model.EdgeActivationState, activationErr error) string {

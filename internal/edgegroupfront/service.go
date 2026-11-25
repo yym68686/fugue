@@ -1069,43 +1069,6 @@ func connAddr(addr net.Addr) string {
 	return logSafeTCPValue(addr.String())
 }
 
-func sortedEdgeFrontMetricKeys[T any](values map[edgeFrontMetricKey]T) []edgeFrontMetricKey {
-	keys := make([]edgeFrontMetricKey, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Protocol != keys[j].Protocol {
-			return keys[i].Protocol < keys[j].Protocol
-		}
-		if keys[i].Slot != keys[j].Slot {
-			return keys[i].Slot < keys[j].Slot
-		}
-		if keys[i].FirstCompleted != keys[j].FirstCompleted {
-			return keys[i].FirstCompleted < keys[j].FirstCompleted
-		}
-		return !keys[i].ProxyProtocol && keys[j].ProxyProtocol
-	})
-	return keys
-}
-
-func sortedEdgeFrontActiveKeys(values map[edgeFrontActiveMetricKey]int) []edgeFrontActiveMetricKey {
-	keys := make([]edgeFrontActiveMetricKey, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Protocol != keys[j].Protocol {
-			return keys[i].Protocol < keys[j].Protocol
-		}
-		if keys[i].Slot != keys[j].Slot {
-			return keys[i].Slot < keys[j].Slot
-		}
-		return !keys[i].ProxyProtocol && keys[j].ProxyProtocol
-	})
-	return keys
-}
-
 func prometheusTCPLabelValue(value string) string {
 	value = strings.TrimSpace(value)
 	value = strings.ReplaceAll(value, "\\", "\\\\")

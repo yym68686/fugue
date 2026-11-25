@@ -94,10 +94,6 @@ func observeAssignedDNSRouteSources(ctx context.Context, lookup func() (consumer
 	return model.PlatformConsumerDNSRouteSourcesResponse{Assignment: before.Assignment, Release: before.Release, Snapshot: snapshot}, nil
 }
 
-func (s *Server) assignedDNSRouteSourceOwner(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string) (consumerArtifactLookup, error) {
-	return s.assignedDNSRouteSourceOwnerWithReader(claims, artifactID, setID, s.store.GetPlatformArtifact)
-}
-
 func (s *Server) assignedDNSRouteSourceOwnerWithReader(claims platformcontrol.PlatformComponentIdentityClaims, artifactID, setID string, loadArtifact func(string) (model.PlatformArtifact, error)) (consumerArtifactLookup, error) {
 	return s.assignedDNSRouteSourceOwnerContext(context.Background(), claims, artifactID, setID, loadArtifact)
 }

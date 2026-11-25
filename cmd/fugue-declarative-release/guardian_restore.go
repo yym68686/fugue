@@ -14,12 +14,9 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/releaseguardian"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func runRestoreMonitor(args []string, output io.Writer) error {
-	return runRestoreMonitorContext(context.Background(), args, output)
-}
 
 func runRepairMonitorContext(parent context.Context, args []string, output io.Writer) error {
 	if len(args) != 3 {

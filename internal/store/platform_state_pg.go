@@ -262,10 +262,6 @@ WHERE content_hash = $1`, contentHash))
 	return content, nil
 }
 
-func (s *Store) pgListPlatformArtifacts(filter model.PlatformArtifactFilter) ([]model.PlatformArtifact, error) {
-	return s.pgListPlatformArtifactsView(filter, true)
-}
-
 func (s *Store) pgListPlatformArtifactsView(filter model.PlatformArtifactFilter, includeContent bool) ([]model.PlatformArtifact, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

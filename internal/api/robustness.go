@@ -385,18 +385,6 @@ func (s *Server) robustnessGeneratedArtifactChecks(r *http.Request, dnsOpts dnsD
 	return checks, nil
 }
 
-func robustnessChecksWithGuardian(checks []model.RobustnessCheck, guardian string) []model.RobustnessCheck {
-	out := make([]model.RobustnessCheck, 0, len(checks))
-	for _, check := range checks {
-		if check.Evidence == nil {
-			check.Evidence = map[string]string{}
-		}
-		check.Evidence["guardian"] = strings.TrimSpace(guardian)
-		out = append(out, check)
-	}
-	return out
-}
-
 func (s *Server) robustnessNodeStateChecks(r *http.Request, principal model.Principal) ([]model.RobustnessCheck, error) {
 	now := time.Now().UTC()
 	checks := []model.RobustnessCheck{}

@@ -160,10 +160,6 @@ func (s *CellStore) HasPendingCompletion(operationID string) (bool, error) {
 	return false, nil
 }
 
-func (s *CellStore) EnqueueCompletion(operationID, manifestPath, message string) error {
-	return s.EnqueueCompletionWithMigrationLedger(operationID, manifestPath, message, nil)
-}
-
 func (s *CellStore) EnqueueCompletionWithMigrationLedger(operationID, manifestPath, message string, ledger *model.AppMigrationLedger) error {
 	if s == nil {
 		return nil

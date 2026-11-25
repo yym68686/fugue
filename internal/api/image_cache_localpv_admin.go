@@ -709,10 +709,6 @@ type imageCacheProtectedSetOptions struct {
 	skipNodeUpdateTaskID string
 }
 
-func (s *Server) populateImageCacheProtectedSet(r *http.Request, protected *imageCacheProtectedSet) error {
-	return s.populateImageCacheProtectedSetWithOptions(r, protected, imageCacheProtectedSetOptions{})
-}
-
 func (s *Server) populateImageCacheProtectedSetWithOptions(r *http.Request, protected *imageCacheProtectedSet, options imageCacheProtectedSetOptions) error {
 	protected.availableRefs = map[string]struct{}{}
 	protected.lostRefs = map[string]struct{}{}

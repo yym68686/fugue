@@ -4,8 +4,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	xterm "golang.org/x/term"
 )
 
 type StreamInfo struct {
@@ -32,17 +30,6 @@ type Detector struct {
 	LookupEnv    func(string) (string, bool)
 	IsTerminal   func(fd int) bool
 	TerminalSize func(fd int) (int, int, error)
-}
-
-func NewDetector() Detector {
-	return Detector{
-		Stdout:       os.Stdout,
-		Stderr:       os.Stderr,
-		Stdin:        os.Stdin,
-		LookupEnv:    os.LookupEnv,
-		IsTerminal:   xterm.IsTerminal,
-		TerminalSize: xterm.GetSize,
-	}
 }
 
 func (d Detector) Detect(colorMode, interactiveMode Mode) Environment {

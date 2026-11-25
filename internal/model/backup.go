@@ -449,30 +449,6 @@ func BackupBackendAsDataBackend(backend BackupBackend) DataBackend {
 	}
 }
 
-func BackupBackendFromDataBackend(backend DataBackend) BackupBackend {
-	backend = RedactDataBackendCredentials(backend)
-	return NormalizeBackupBackend(BackupBackend{
-		ID:                 strings.Replace(backend.ID, "data_backend_", "backup_backend_", 1),
-		TenantID:           backend.TenantID,
-		Name:               backend.Name,
-		Slug:               backend.Slug,
-		Provider:           backend.Provider,
-		Bucket:             backend.Bucket,
-		Region:             backend.Region,
-		Endpoint:           backend.Endpoint,
-		BaseURL:            backend.BaseURL,
-		Prefix:             backend.Prefix,
-		Status:             backend.Status,
-		Capabilities:       backend.Capabilities,
-		Credentials:        backend.Credentials,
-		CredentialSecretID: backend.CredentialSecretID,
-		FugueManaged:       strings.TrimSpace(backend.TenantID) == "",
-		Billable:           strings.TrimSpace(backend.TenantID) == "" && NormalizeDataBackendProvider(backend.Provider) == DataBackendProviderCloudflareR2,
-		CreatedAt:          backend.CreatedAt,
-		UpdatedAt:          backend.UpdatedAt,
-	})
-}
-
 func NormalizeBackupPolicy(policy BackupPolicy) BackupPolicy {
 	policy.TenantID = strings.TrimSpace(policy.TenantID)
 	policy.ProjectID = strings.TrimSpace(policy.ProjectID)

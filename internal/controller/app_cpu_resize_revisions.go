@@ -17,13 +17,6 @@ type appRequestResizeDeferredPod struct {
 	Reason string `json:"reason"`
 }
 
-// Discover actual workloads, not candidate name prefixes or mutable release roles.
-// A Pod must prove the complete Pod -> ReplicaSet -> Deployment UID chain, and
-// its Deployment template must independently identify the same managed app.
-func additionalAppCPUResizeBaselines(ctx context.Context, c *kubeClient, app model.App, serving string, cpu int64) ([]appRequestResizePodBaseline, []appRequestResizeDeferredPod, error) {
-	return additionalAppRequestResizeBaselines(ctx, c, app, serving, appRequestResizeTarget{"cpu", cpu})
-}
-
 func additionalAppRequestResizeBaselines(ctx context.Context, c *kubeClient, app model.App, serving string, target appRequestResizeTarget) ([]appRequestResizePodBaseline, []appRequestResizeDeferredPod, error) {
 	ns := runtime.NamespaceForTenant(app.TenantID)
 	query := url.Values{"labelSelector": {runtime.FugueLabelAppID + "=" + app.ID}}
@@ -163,12 +156,4 @@ func appRequestResizeBaselinePod(ctx context.Context, c *kubeClient, app model.A
 		return pod, false, err
 	}
 	return pod, true, nil
-}
-
-func assessAppCPUResizeBaseline(ob managedPostgresResizeObservation, cpu int64, baseline appRequestResizePodBaseline) error {
-	return assessAppRequestResizeBaseline(ob, appRequestResizeTarget{"cpu", cpu}, baseline)
-}
-
-func appCPUResizeBaselineConverged(ob managedPostgresResizeObservation, baseline appRequestResizePodBaseline, cpu int64) bool {
-	return appRequestResizeBaselineConverged(ob, baseline, appRequestResizeTarget{"cpu", cpu})
 }

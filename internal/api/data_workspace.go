@@ -2682,10 +2682,6 @@ func (s *Server) authorizeDataBlobTransfer(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (s *Server) loadAuthorizedDataWorkspace(w http.ResponseWriter, r *http.Request, principal model.Principal) (model.DataWorkspace, bool) {
-	return s.loadAuthorizedDataWorkspaceForRole(w, r, principal, model.DataWorkspaceAccessRoleReader)
-}
-
 func (s *Server) loadAuthorizedDataWorkspaceForRole(w http.ResponseWriter, r *http.Request, principal model.Principal, requiredRole string) (model.DataWorkspace, bool) {
 	return s.loadAuthorizedDataWorkspaceForRoleValue(w, principal, r.PathValue("workspace_id"), requiredRole)
 }
@@ -2824,18 +2820,6 @@ func filterDataManifestAssets(manifest model.DataManifest, assets []string) mode
 		}
 	}
 	return model.NormalizeDataManifest(filtered)
-}
-
-func readInt64Query(r *http.Request, name string, fallback int64) (int64, error) {
-	raw := strings.TrimSpace(r.URL.Query().Get(name))
-	if raw == "" {
-		return fallback, nil
-	}
-	value, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer", name)
-	}
-	return value, nil
 }
 
 func (s *Server) handleDeleteDataPrewarmCache(w http.ResponseWriter, r *http.Request) {

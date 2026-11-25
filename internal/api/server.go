@@ -496,10 +496,6 @@ func (s *Server) edgeQualityRankingActive() bool {
 	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "active")
 }
 
-func (s *Server) edgeQualityRankingShadow() bool {
-	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "shadow")
-}
-
 func (s *Server) edgeQualityRankingDisabled() bool {
 	return strings.EqualFold(strings.TrimSpace(s.edgeQualityRankingMode), "legacy")
 }

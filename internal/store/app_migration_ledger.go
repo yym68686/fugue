@@ -662,20 +662,6 @@ func (s *Store) recordMigrationFailureLedger(op model.Operation, message, source
 	return err
 }
 
-func (s *Store) requireMigrationCutover(operationID string) error {
-	ledger, found, err := s.LatestAppMigrationLedger(operationID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return errMigrationCutoverEvidenceMissing
-	}
-	if ledger.CutoverStatus != model.AppMigrationCutoverVerified && ledger.CutoverStatus != model.AppMigrationCutoverCompleted {
-		return fmt.Errorf("%w: cutover status=%s", errMigrationCutoverEvidenceMissing, ledger.CutoverStatus)
-	}
-	return ValidateAppMigrationCutover(ledger)
-}
-
 func validateMigrationCutoverInState(state *model.State, op model.Operation) error {
 	if state == nil {
 		return errMigrationCutoverEvidenceMissing

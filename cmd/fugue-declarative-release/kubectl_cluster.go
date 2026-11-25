@@ -24,6 +24,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/model/edgecohort"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -2183,19 +2184,6 @@ func stringSubset(values, allowed []string) bool {
 	return true
 }
 
-func stringsOverlap(left, right []string) bool {
-	set := make(map[string]bool, len(right))
-	for _, value := range right {
-		set[value] = true
-	}
-	for _, value := range left {
-		if set[value] {
-			return true
-		}
-	}
-	return false
-}
-
 func escapeJSONPointerToken(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, "~", "~0"), "/", "~1")
 }
@@ -3798,33 +3786,6 @@ func parseReadyPods(raw []byte, release declarativerelease.PlanRelease, desired 
 	}
 	sort.Strings(evidence)
 	return imageID, digestBytesLocal([]byte(strings.Join(evidence, "\n"))), nil
-}
-
-func readyPodNamesFromJSON(raw []byte) ([]string, error) {
-	value, err := decodeJSONObject(raw)
-	if err != nil {
-		return nil, err
-	}
-	items, ok := value["items"].([]any)
-	if !ok {
-		return nil, errors.New("pod list is invalid")
-	}
-	names := make([]string, 0, len(items))
-	for _, rawItem := range items {
-		pod, ok := rawItem.(map[string]any)
-		if !ok {
-			continue
-		}
-		metadata := mapField(pod, "metadata")
-		if metadata["deletionTimestamp"] == nil && podReady(mapField(pod, "status")) {
-			names = append(names, stringValue(metadata["name"]))
-		}
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return nil, errors.New("no ready workload pods")
-	}
-	return names, nil
 }
 
 func podReady(status map[string]any) bool {

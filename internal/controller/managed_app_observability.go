@@ -433,15 +433,3 @@ func endpointTerminating(endpoint kubeEndpoint) bool {
 func (s *Service) controllerObservabilityEndpointConfigured() bool {
 	return strings.TrimSpace(s.Config.AppObservabilityEndpoint) != ""
 }
-
-func managedAppRolloutDecisionSummary(decision managedAppRolloutDecision) string {
-	return fmt.Sprintf(
-		"strategy=%s downtime_class=%s reason=%s rollout_intent=%s source=%s operation_id=%s",
-		decision.Strategy,
-		decision.DowntimeClass,
-		decision.Reason,
-		decision.RolloutIntent,
-		decision.Source,
-		decision.OperationID,
-	)
-}

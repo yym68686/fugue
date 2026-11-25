@@ -2,7 +2,10 @@ package schemamigrate
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -25,13 +28,67 @@ func exactPlatformStateRows() *sqlmock.Rows {
 func TestPlatformStateMigrationLive(t *testing.T) {
 	databaseURL := os.Getenv("FUGUE_SCHEMA_TEST_DATABASE_URL")
 	if databaseURL == "" {
-		t.Skip("set FUGUE_SCHEMA_TEST_DATABASE_URL to run the live schema migration test")
+		databaseURL = os.Getenv("FUGUE_TEST_DATABASE_URL")
 	}
-	if err := MigratePlatformState(context.Background(), databaseURL); err != nil {
+	if databaseURL == "" {
+		t.Skip("requires disposable local PostgreSQL")
+	}
+	u, err := url.Parse(strings.TrimSpace(databaseURL))
+	if err != nil || u.Hostname() != "127.0.0.1" || !strings.HasPrefix(u.Path, "/fugue_test") ||
+		(u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Query().Has("host") {
+		t.Fatal("disposable loopback PostgreSQL database required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	root, err := sql.Open("pgx", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	schema := fmt.Sprintf("platform_state_migration_%d", time.Now().UnixNano())
+	if _, err := root.ExecContext(ctx, "CREATE SCHEMA "+schema); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelCleanup()
+		if _, err := root.ExecContext(cleanupCtx, "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("remove test schema: %v", err)
+		}
+	}()
+
+	q := u.Query()
+	q.Set("search_path", schema)
+	u.RawQuery = q.Encode()
+	scoped := u.String()
+	db, err := sql.Open("pgx", scoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, query := range []string{
+		"CREATE TABLE fugue_platform_consumer_instances (consumer_id text PRIMARY KEY)",
+		"INSERT INTO fugue_platform_consumer_instances (consumer_id) VALUES ('legacy-consumer')",
+	} {
+		if _, err := db.ExecContext(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := MigratePlatformState(ctx, "  "+scoped+"  "); err != nil {
 		t.Fatalf("first schema migration: %v", err)
 	}
-	if err := MigratePlatformState(context.Background(), databaseURL); err != nil {
+	if err := MigratePlatformState(ctx, scoped); err != nil {
 		t.Fatalf("idempotent schema migration: %v", err)
+	}
+	var defaultsOK bool
+	if err := db.QueryRowContext(ctx, `
+SELECT candidate_generation = '' AND observation_evidence_hash = ''
+   AND observation_window_started_at IS NULL AND observation_window_heartbeat_count = 0
+FROM fugue_platform_consumer_instances WHERE consumer_id = 'legacy-consumer'`).Scan(&defaultsOK); err != nil {
+		t.Fatalf("read migrated consumer: %v", err)
+	}
+	if !defaultsOK {
+		t.Fatal("existing consumer did not receive the migration defaults")
 	}
 }
 

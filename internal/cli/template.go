@@ -165,10 +165,6 @@ func looksLikeGitHubInspectTarget(target string) bool {
 	return true
 }
 
-func renderTemplateInspection(w io.Writer, view templateInspectionView) error {
-	return renderTemplateView(w, view, "inspect")
-}
-
 func renderTemplatePlan(w io.Writer, view templateInspectionView) error {
 	return renderTemplateView(w, view, "plan")
 }

@@ -614,11 +614,6 @@ func (p *tuiProvider) Execute(ctx context.Context, plan tui.Plan) (receipt tui.R
 	return tui.Receipt{Operation: tui.Target{Kind: "operation", ID: op.ID, Name: op.Type}, Message: "Operation submitted: " + op.ID}, nil
 }
 
-func (p *tuiProvider) readJSON(client *Client, path string, out any) error {
-	return client.doJSON(http.MethodGet, path, nil, out)
-}
-func tuiResourcePath(kind, id string) string { return "/v1/" + kind + "/" + url.PathEscape(id) }
-
 func (p *tuiProvider) loadTUIAppResources(client *Client, request tui.Request, id, section string) (tui.Snapshot, error) {
 	s := tui.Snapshot{Target: request.Target, ObservedAt: time.Now()}
 	if section == "pods" {

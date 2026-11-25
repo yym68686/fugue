@@ -1365,30 +1365,6 @@ func (s *Service) cleanupOrphanManagedApp(ctx context.Context, client *kubeClien
 	return nil
 }
 
-func (s *Service) markOrphanManagedAppObservedOnly(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
-	managedName := strings.TrimSpace(managed.Metadata.Name)
-	if managedName == "" {
-		managedName = runtime.ManagedAppResourceName(app)
-	}
-	if managedName == "" {
-		return nil
-	}
-	reason = strings.TrimSpace(reason)
-	if managedAppObservedOnlyStatusCurrent(managed.Status, reason) {
-		return nil
-	}
-	status := managedAppBaseStatus(managed, app)
-	status.Phase = runtime.ManagedAppPhaseError
-	status.Message = reason
-	if err := client.patchManagedAppStatus(ctx, namespace, managedName, status); err != nil && !isKubernetesResourceNotFound(err) {
-		return fmt.Errorf("patch observed-only managed app status %s/%s: %w", namespace, managedName, err)
-	}
-	if s.Logger != nil {
-		s.Logger.Printf("observed-only managed app %s/%s: %s", namespace, managedName, reason)
-	}
-	return nil
-}
-
 func (s *Service) disableMissingStoreManagedApp(ctx context.Context, client *kubeClient, namespace string, managed runtime.ManagedAppObject, app model.App, reason string) error {
 	managedName := strings.TrimSpace(managed.Metadata.Name)
 	if managedName == "" {
@@ -1698,11 +1674,6 @@ func managedAppOrphanWorkloadZeroVerified(status runtime.ManagedAppStatus) bool 
 		}
 	}
 	return false
-}
-
-func managedAppObservedOnlyStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {
-	return strings.EqualFold(strings.TrimSpace(status.Phase), runtime.ManagedAppPhaseError) &&
-		strings.TrimSpace(status.Message) == strings.TrimSpace(reason)
 }
 
 func managedAppDisabledOrphanStatusCurrent(status runtime.ManagedAppStatus, reason string) bool {

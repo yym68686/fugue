@@ -364,10 +364,6 @@ func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, pr
 	}
 }
 
-func hasSampledResourceUsage(usage model.ResourceUsage) bool {
-	return usage.CPUMilliCores != nil || usage.MemoryBytes != nil || usage.EphemeralStorageBytes != nil
-}
-
 func hasRightSizingResourceUsage(usage model.ResourceUsage) bool {
 	return usage.CPUMilliCores != nil || usage.MemoryBytes != nil
 }

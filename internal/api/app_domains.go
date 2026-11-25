@@ -1254,14 +1254,6 @@ func shouldRefreshAppDomainOnRead(domain model.AppDomain, now time.Time) bool {
 	return now.Sub(lastChecked.UTC()) >= appDomainReadVerifyMinInterval
 }
 
-func (s *Server) customDomainVerificationResult(ctx context.Context, app model.App, domain model.AppDomain, legacyTarget string) (bool, string, error) {
-	observation, err := s.inspectCustomDomainDNS(ctx, domain.Hostname, s.customDomainTargets(app, legacyTarget))
-	if err != nil {
-		return false, "", err
-	}
-	return observation.Verified, observation.Message, nil
-}
-
 func (s *Server) inspectCustomDomainDNS(ctx context.Context, hostname string, targets []string) (appDomainDNSObservation, error) {
 	hostname = normalizeExternalAppDomain(hostname)
 	targets = uniqueNormalizedAppDomainHosts(targets...)
@@ -1318,14 +1310,6 @@ func (s *Server) inspectCustomDomainDNS(ctx context.Context, hostname string, ta
 	}
 	observation.Message = "create a CNAME record for " + hostname + " pointing to " + targets[0]
 	return observation, nil
-}
-
-func (s *Server) customDomainRoutesToAnyTarget(ctx context.Context, hostname string, targets []string) bool {
-	observation, err := s.inspectCustomDomainDNS(ctx, hostname, targets)
-	if err != nil {
-		return false
-	}
-	return observation.Verified
 }
 
 func (s *Server) validateEdgeTLSCertificateBundle(hostname string, domain model.AppDomain, authContext edgeAuthContext, req edgeTLSCertificateBundleRequest) (model.EdgeTLSCertificate, error) {
@@ -1486,13 +1470,6 @@ func appDomainCheckStatus(ok bool) string {
 		return "pass"
 	}
 	return "fail"
-}
-
-func missingMessage(present bool, message string) string {
-	if present {
-		return ""
-	}
-	return message
 }
 
 func (s *Server) customDomainTargets(app model.App, legacyTargets ...string) []string {

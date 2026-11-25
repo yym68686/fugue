@@ -8,19 +8,6 @@ import (
 	"fugue/internal/model"
 )
 
-func filterProjects(projects []model.Project, tenantID string) []model.Project {
-	if strings.TrimSpace(tenantID) == "" {
-		return append([]model.Project(nil), projects...)
-	}
-	out := make([]model.Project, 0, len(projects))
-	for _, project := range projects {
-		if project.TenantID == tenantID {
-			out = append(out, project)
-		}
-	}
-	return out
-}
-
 func filterServices(services []model.BackingService, tenantID, projectID string) []model.BackingService {
 	out := make([]model.BackingService, 0, len(services))
 	for _, service := range services {

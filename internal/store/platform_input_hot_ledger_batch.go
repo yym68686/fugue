@@ -6,13 +6,6 @@ import (
 	"fugue/internal/inputarchive"
 )
 
-// Identity-only lookups share the same builders as individual resolution. A
-// generation retains its exact kind and scope; no native generation is guessed.
-// The caller caps the combined batch at 32 and owns the read-only RR snapshot.
-func resolveCompilerInputHotLedgerBatch(ctx context.Context, db inputQueryer, generations, releases []inputarchive.HotReference, out map[inputarchive.HotReference]inputarchive.HotNode) error {
-	return resolveCompilerInputHotLedgerBatchObserved(ctx, db, generations, releases, out, nil)
-}
-
 func resolveCompilerInputHotLedgerBatchObserved(ctx context.Context, db inputQueryer, generations, releases []inputarchive.HotReference, out map[inputarchive.HotReference]inputarchive.HotNode, cost *CompilerInputHotReadCost) error {
 	if len(generations) > 0 {
 		ids, kinds, scopes := []string{}, []string{}, []string{}
