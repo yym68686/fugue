@@ -20,8 +20,8 @@
   },
   "guardian": {
     "deployment": "fugue-release-guardian",
-    "source": "09990f956b4a9a7e146c9508708de874005bc138",
-    "imageDigest": "sha256:8ca0b1bd90817720ee424d2e00220445091d7fd5e06f88f33b6266cc9c39f2b1"
+    "source": "837efc2a10463d2b1e2b431954c529143dbb54ed",
+    "imageDigest": "sha256:eefbde3f54db32f24d5e90fb31c9dbeb3e200841f222b99786b76da78f18c393"
   },
   "candidate": {
     "daemonSet": "fugue-fugue-edge-worker-a",
