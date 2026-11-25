@@ -1,0 +1,7 @@
+{
+  "schema": "fugue.idle-front-standby-release/v1",
+  "retirement": "us-primary.json",
+  "daemonSetUID": "50641c64-b951-4619-aceb-a03295f21691",
+  "specDigest": "sha256:53683e4de9edeba9e2ef6f03e3d2126c97f22134c6c2537ad5d50e7977dd2a96",
+  "podUID": "d8acd090-3d51-4133-bf29-eeb88f49068e"
+}
