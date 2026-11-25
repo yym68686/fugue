@@ -1,5 +1,6 @@
 """Publish a fenced dynamic-domain quality policy through the configuration lane."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 import os
@@ -186,6 +187,24 @@ def bootstrap_only_delta(old, new):
     return changed and old == restored
 
 
+def fleet_default_only_delta(previous, successor):
+    restored = copy.deepcopy(successor)
+    before = previous.get("dns_query_policy", {}).get("dynamic_quality", {})
+    after = restored.get("dns_query_policy", {}).get("dynamic_quality", {})
+    if not before or not after:
+        return False
+    keys = ("fleet_default", "fleet_default_hosts")
+    if all(before.get(key) == after.get(key) for key in keys):
+        return False
+    for key in keys:
+        if key in before:
+            after[key] = before[key]
+        else:
+            after.pop(key, None)
+    restored["generation"] = previous["generation"]
+    return restored == previous
+
+
 def validate_preview(previous, current):
     if not previous.get("business_snapshot_revision") or not current.get("business_snapshot_revision") or not previous.get("intent") or not current.get("intent"):
         raise ValueError("quality preview changed frozen business or static intent")
@@ -258,6 +277,8 @@ def publish_once(config, api, save):
         check_business_delta(source["content"], config["projection_policy"])
     else:
         check_delta(source["content"], config["projection_policy"])
+    paired_preview = precondition["operation"] == "dynamic_quality" and fleet_default_only_delta(
+        source["content"], config["projection_policy"])
     current = selected(api, SCOPE, "shadow")
     if authority_identity(current) != precondition["previous_policy"] and current.get("artifact", {}).get("generation") != config["producer_generation"]:
         raise ValueError("producer changed")
@@ -268,13 +289,28 @@ def publish_once(config, api, save):
     if authority_identity(current) != precondition["previous_policy"] and not exact(current.get("artifact", {}), "policy_snapshot", SCOPE, successor):
         raise ValueError("successor differs")
     artifact = ensure_input(api, "policy_snapshot", SCOPE, successor)
+    preview_path = "/v1/admin/platform-config/routes/project?producer_policy_artifact_id="
     prior_view = "configuration" if recovery else "runtime_summary"
-    checkpoint("capture_predecessor", artifact_id=artifact["id"])
-    before = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + old["id"] + "&view=" + prior_view)
-    if not recovery:
-        evidence["predecessor_runtime_summary"] = validate_runtime_summary(before)
-    checkpoint("capture_successor")
-    preview = api("GET", "/v1/admin/platform-config/routes/project?producer_policy_artifact_id=" + artifact["id"] + "&view=runtime_summary")
+    predecessor_preview_path = preview_path + old["id"] + "&view=" + prior_view
+    successor_preview_path = preview_path + artifact["id"] + "&view=runtime_summary"
+    if paired_preview:
+        # Each capture freezes business intent at the beginning of a slow
+        # runtime read. Start the two complete reads together, but still
+        # reject different intent, new issues or an invalid baseline below.
+        checkpoint("capture_preview_pair", artifact_id=artifact["id"], preview_capture_mode="paired_read_only")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            old_read = pool.submit(api, "GET", predecessor_preview_path)
+            new_read = pool.submit(api, "GET", successor_preview_path)
+            before = old_read.result()
+            evidence["predecessor_runtime_summary"] = validate_runtime_summary(before)
+            preview = new_read.result()
+    else:
+        checkpoint("capture_predecessor", artifact_id=artifact["id"])
+        before = api("GET", predecessor_preview_path)
+        if not recovery:
+            evidence["predecessor_runtime_summary"] = validate_runtime_summary(before)
+        checkpoint("capture_successor")
+        preview = api("GET", successor_preview_path)
     evidence["successor_runtime_summary"] = validate_runtime_summary(preview)
     checkpoint("validate_preview", preview_comparison=dns_availability_recovery.preview_evidence(before, preview, preview))
     recovery_preview = None

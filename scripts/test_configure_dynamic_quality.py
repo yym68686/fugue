@@ -1,4 +1,5 @@
 import copy
+from threading import Barrier
 import unittest
 from unittest.mock import patch
 
@@ -147,19 +148,71 @@ class DynamicQualityConfigurationTests(unittest.TestCase):
             self.assertEqual(request.call_count, 2)
             wait.assert_called_once_with(2)
 
-    def publication_fixture(self):
+    def publication_fixture(self, *, fleet=False):
         from scripts.test_reconfigure_physical_dns import Ledger, fixture as baseline_fixture
         config, source = fixture()
         _, old, _ = baseline_fixture()
         route = {"hostname": "app.example.test", "traffic_class": "streaming", "policy": copy.deepcopy(config["projection_policy"]["dns_query_policy"]["dynamic_quality"]["policy"])}
         source["dns_query_policy"]["physical_routes"] = [copy.deepcopy(route)]
         config["projection_policy"]["dns_query_policy"]["physical_routes"] = [route]
+        if fleet:
+            dynamic = config["projection_policy"]["dns_query_policy"]["dynamic_quality"]
+            source["dns_query_policy"]["dynamic_quality"] = copy.deepcopy(dynamic)
+            dynamic.update(fleet_default="active", fleet_default_hosts=["app.example.test"])
         old["dns_policy_digest"] = quality.digest(source)
         config["precondition"]["previous_policy"]["content_hash"] = quality.digest(old)
         ledger = Ledger(dict(config, hostname="app.example.test"), old, source)
         ledger.preview.update(intent={"generation": "unchanged"}, business_snapshot_revision="fixed")
         ledger.preview["runtime_snapshot"]["facts"] = {"dynamic_quality_coverage": {"mode": "all_dynamic", "query_count": 1, "hostnames": {"app.example.test": "learning_current_ready_primary"}}}
         return config, ledger
+
+    def test_fleet_only_preview_reads_start_together_without_relaxing_release_checks(self):
+        for scenario in ("matching", "changed_intent", "new_issue", "incomplete_summary", "changed_authority"):
+            config, ledger = self.publication_fixture(fleet=True)
+            previous = ledger.artifacts["dns-source"]["content"]
+            successor = config["projection_policy"]
+            self.assertTrue(quality.fleet_default_only_delta(previous, successor))
+            mixed = copy.deepcopy(successor)
+            mixed["dns_query_policy"]["dynamic_quality"]["refresh_concurrency"] = 2
+            self.assertFalse(quality.fleet_default_only_delta(previous, mixed))
+            self.assertFalse(quality.fleet_default_only_delta(successor, successor))
+            checkpoint, captures = [], []
+            overlap = Barrier(2, timeout=3)
+            predecessor = quality.urllib.parse.urlencode({"producer_policy_artifact_id": config["precondition"]["previous_policy"]["artifact_id"]})
+
+            def api(method, path, body=None):
+                if "/routes/project?" not in path:
+                    return ledger(method, path, body)
+                self.assertEqual((method, body), ("GET", None))
+                self.assertTrue(path.endswith("&view=runtime_summary"))
+                is_successor = predecessor + "&" not in path
+                captures.append(is_successor)
+                overlap.wait()
+                self.assertEqual(ledger.release_bodies, [])
+                preview = ledger(method, path, body)
+                if is_successor:
+                    if scenario == "changed_intent":
+                        preview["intent"]["generation"] = "different"
+                    elif scenario == "new_issue":
+                        preview["issues"].append({"code": "new_issue"})
+                    elif scenario == "incomplete_summary":
+                        preview.pop("runtime_summary")
+                    elif scenario == "changed_authority":
+                        full = ledger.authorities[("release_set", "global", "full")]
+                        full["artifact"]["metadata"]["producer_policy_release_id"] = "other-producer"
+                return preview
+
+            with self.subTest(scenario=scenario):
+                if scenario == "matching":
+                    result = quality.publish_once(config, api, checkpoint.append)
+                    self.assertTrue(result["producer_activated"])
+                    self.assertEqual(len(ledger.release_bodies), 1)
+                else:
+                    with self.assertRaises(ValueError):
+                        quality.publish_once(config, api, checkpoint.append)
+                    self.assertEqual(ledger.release_bodies, [])
+                self.assertCountEqual(captures, [False, True])
+                self.assertEqual(checkpoint[-1]["preview_capture_mode"], "paired_read_only")
 
     def test_quality_publication_uses_strict_summaries_and_retains_stage_evidence(self):
         config, ledger = self.publication_fixture()

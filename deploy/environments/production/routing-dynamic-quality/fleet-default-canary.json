@@ -1,6 +1,6 @@
 {
   "baseline_mode": "latest_verified_same_policy",
-  "generation": 1,
+  "generation": 2,
   "origin": "https://api.fugue.pro",
   "precondition": {"operation":"dynamic_quality","previous_policy":{"artifact_id":"artifact_1795109634_8d6c9cffc1bf","content_hash":"sha256:9a892894d1b67b385373dffc0798c74628e2ed3241aa129e8d9110ceaf476a1d","fencing_token":59,"release_id":"artifactrel_1795109799_0992dccc677c"},"serving_full":{"artifact_id":"artifact_1795628914_5c222a7f5bea","content_hash":"sha256:225f2fc45ff908a7493323d54b93bde10b0c6e4eba4bdc7fa4e7c8be1d7e81d4","fencing_token":9212,"release_id":"artifactrel_1795629113_b3ef14345337"},"verification_evidence_hash":"sha256:2aebf91f4e55eee5d0136ed14f1cbc6fb6ba0c0811ba1421eaf91da5fd7b71e0"},
   "producer_generation": "fleet-default-canary-producer-20261126-v1",
