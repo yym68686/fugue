@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // VerifyNodeWorkerArtifact binds the independent candidate to the ordinary
@@ -135,24 +136,16 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		}
 	}
 	if rendered.Name == "" || rendered.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
-		return reject
+		return errors.Join(reject, errors.New("no matching immutable OnDelete Worker release record"))
 	}
 	apps := store.client.AppsV1()
 	ds, err := apps.DaemonSets(store.namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil || ds.UID != owner.UID || ds.DeletionTimestamp != nil || ds.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
 		return errors.Join(reject, err)
 	}
-	hash := pod.Labels[appsv1.ControllerRevisionHashLabelKey]
-	if !componentPattern.MatchString(hash) {
-		return reject
-	}
-	revision, err := apps.ControllerRevisions(store.namespace).Get(ctx, owner.Name+"-"+hash, metav1.GetOptions{})
-	if err != nil || revision.UID == "" || revision.ResourceVersion == "" || revision.DeletionTimestamp != nil {
+	revision, err := store.readFixedNodeWorkerRevision(ctx, pod.Labels[appsv1.ControllerRevisionHashLabelKey], owner)
+	if err != nil {
 		return errors.Join(reject, err)
-	}
-	revisionOwner := metav1.GetControllerOf(revision)
-	if revisionOwner == nil || revisionOwner.Kind != owner.Kind || revisionOwner.Name != owner.Name || revisionOwner.UID != owner.UID {
-		return reject
 	}
 	var rev struct {
 		Spec struct {
@@ -161,13 +154,30 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 	}
 	if json.Unmarshal(revision.Data.Raw, &rev) != nil || rev.Spec.Template.Labels["fugue.io/edge-slot"] != j.Candidate.Slot ||
 		rev.Spec.Template.Annotations["fugue.pro/production-config-sha"] != configSHA {
-		return reject
+		return errors.Join(reject, errors.New("ControllerRevision slot or production config differs from the Worker"))
 	}
 	for _, c := range rendered.Spec.Template.Spec.Containers {
 		if containerImageMatches(rev.Spec.Template.Spec.Containers, c.Name, c.Image) != nil ||
 			containerImageMatches(pod.Spec.Containers, c.Name, c.Image) != nil {
-			return reject
+			return errors.Join(reject, errors.New("ControllerRevision or live container image differs from the release record"))
 		}
 	}
 	return nil
+}
+
+func (store *AuthorityStore) readFixedNodeWorkerRevision(ctx context.Context, hash string, owner *metav1.OwnerReference) (*appsv1.ControllerRevision, error) {
+	// DaemonSet revision hashes can begin with a digit. Validate the hash as
+	// a DNS label before using it as a suffix in the exact object lookup.
+	if len(validation.IsDNS1123Label(hash)) != 0 {
+		return nil, errors.New("Worker ControllerRevision hash label is invalid")
+	}
+	revision, err := store.client.AppsV1().ControllerRevisions(store.namespace).Get(ctx, owner.Name+"-"+hash, metav1.GetOptions{})
+	if err != nil || revision.UID == "" || revision.ResourceVersion == "" || revision.DeletionTimestamp != nil {
+		return nil, errors.Join(errors.New("exact live Worker ControllerRevision is unavailable"), err)
+	}
+	revisionOwner := metav1.GetControllerOf(revision)
+	if revisionOwner == nil || revisionOwner.Kind != owner.Kind || revisionOwner.Name != owner.Name || revisionOwner.UID != owner.UID {
+		return nil, errors.New("Worker ControllerRevision does not belong to the exact DaemonSet")
+	}
+	return revision, nil
 }
