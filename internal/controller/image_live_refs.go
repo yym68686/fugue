@@ -15,10 +15,6 @@ type liveManagedImageReferenceScan struct {
 	Complete bool
 }
 
-func (s *Service) liveManagedImageRefSet(ctx context.Context, apps []model.App) map[string]struct{} {
-	return s.liveManagedImageRefScanWithLookup(ctx, apps, apps).Refs
-}
-
 func (s *Service) liveManagedImageRefSetWithLookup(ctx context.Context, desiredApps, lookupApps []model.App) map[string]struct{} {
 	return s.liveManagedImageRefScanWithLookup(ctx, desiredApps, lookupApps).Refs
 }

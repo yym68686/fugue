@@ -177,7 +177,7 @@ func validateManagedPostgresPlacementIdentity(
 		isDeletedBackingService(*target.Service) {
 		return ErrNotFound
 	}
-	if !appHasBindingToServiceID(app, witness.ServiceID) || bindingCount != 1 {
+	if !app.HasServiceBinding(witness.ServiceID) || bindingCount != 1 {
 		return ErrConflict
 	}
 	bindingFound := false

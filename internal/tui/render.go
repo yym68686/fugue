@@ -383,13 +383,6 @@ func first(values ...string) string {
 	}
 	return ""
 }
-func sum(values []int) int {
-	n := 0
-	for _, v := range values {
-		n += v
-	}
-	return n
-}
 
 func scrollPosition(offset, total, visible, width int) string {
 	if total <= visible {

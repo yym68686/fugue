@@ -20,7 +20,6 @@ const (
 	boxBottomRight = "┘"
 	boxLeftJoin    = "├"
 	boxRightJoin   = "┤"
-	boxTopJoin     = "┬"
 	boxBottomJoin  = "┴"
 	boxCross       = "┼"
 )

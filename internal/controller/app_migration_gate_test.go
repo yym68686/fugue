@@ -249,10 +249,10 @@ func TestMigrationTargetImageReplicationUsesAppliedSchedulingNode(t *testing.T) 
 
 func TestMigrationReplicaCountExcludesPreviousRevision(t *testing.T) {
 	t.Parallel()
-	if got := minMigrationReplicaCount(0, 1, 1); got != 0 {
+	if got := model.MinObservedReplicaCount(0, 1, 1); got != 0 {
 		t.Fatalf("ready replicas from a previous revision counted as current: %d", got)
 	}
-	if got := minMigrationReplicaCount(2, 2, 2); got != 2 {
+	if got := model.MinObservedReplicaCount(2, 2, 2); got != 2 {
 		t.Fatalf("current updated/ready/available replicas = %d, want 2", got)
 	}
 }

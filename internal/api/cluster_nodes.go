@@ -39,7 +39,6 @@ const (
 	clusterNodeConditionReady           = "Ready"
 	clusterNodeConditionMemory          = "MemoryPressure"
 	clusterNodeConditionDisk            = "DiskPressure"
-	clusterNodeConditionPID             = "PIDPressure"
 	clusterNodeLabelRegion              = "topology.kubernetes.io/region"
 	clusterNodeLabelLegacyRegion        = "failure-domain.beta.kubernetes.io/region"
 	clusterNodeLabelZone                = "topology.kubernetes.io/zone"

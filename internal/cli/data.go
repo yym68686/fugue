@@ -191,7 +191,6 @@ type dataTransferProgress func(delta int64)
 type dataTableAlign string
 
 const (
-	dataTableAlignLeft  dataTableAlign = "left"
 	dataTableAlignRight dataTableAlign = "right"
 )
 
@@ -6379,5 +6378,4 @@ func (c *Client) RevokeDataWorkspaceAccess(workspaceID, subjectType, subjectID s
 	return resp.Removed, nil
 }
 
-var errDataNoop = errors.New("data noop")
 var errDataAuthorizationExpired = errors.New("data object authorization expired")

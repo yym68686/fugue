@@ -111,7 +111,7 @@ func (s *Service) verifyOrphanPostgresHasNoStoreConsumers(app model.App, deploym
 	}
 	for _, deployment := range deployments {
 		for _, consumer := range apps {
-			if controllerAppHasServiceBinding(consumer, deployment.ServiceID) {
+			if consumer.HasServiceBinding(deployment.ServiceID) {
 				return fmt.Errorf("orphan PostgreSQL service %s still has consumer %s", deployment.ServiceID, consumer.ID)
 			}
 		}

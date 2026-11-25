@@ -64,11 +64,6 @@ type ProjectMovePlan struct {
 	Blockers        []string               `json:"blockers,omitempty"`
 }
 
-type projectMoveAppTarget struct {
-	AppID           string
-	TargetProjectID string
-}
-
 type projectMoveServiceTarget struct {
 	ServiceID         string
 	TargetProjectID   string

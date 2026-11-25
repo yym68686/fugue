@@ -1,55 +1,13 @@
 package runtime
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"strings"
 )
 
 const (
 	serviceAccountTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	serviceAccountCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
-
-func applyObject(client *http.Client, baseURL, bearerToken, apiPath string, obj map[string]any) error {
-	payload, err := json.Marshal(obj)
-	if err != nil {
-		return fmt.Errorf("marshal object: %w", err)
-	}
-
-	u, err := url.Parse(baseURL + apiPath)
-	if err != nil {
-		return fmt.Errorf("parse apply url: %w", err)
-	}
-	query := u.Query()
-	query.Set("fieldManager", "fugue")
-	query.Set("force", "true")
-	u.RawQuery = query.Encode()
-
-	req, err := http.NewRequest(http.MethodPatch, u.String(), bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("create patch request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(bearerToken))
-	req.Header.Set("Content-Type", "application/apply-patch+yaml")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("patch object: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return nil
-}
 
 func ObjectAPIPath(defaultNamespace string, obj map[string]any) (string, error) {
 	apiVersion, _ := obj["apiVersion"].(string)

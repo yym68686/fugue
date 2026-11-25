@@ -194,10 +194,3 @@ func sortActiveOperations(ops []model.Operation) {
 		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
 	})
 }
-
-func operationCreatedBefore(left, right model.Operation) bool {
-	if left.CreatedAt.Equal(right.CreatedAt) {
-		return left.ID < right.ID
-	}
-	return left.CreatedAt.Before(right.CreatedAt)
-}

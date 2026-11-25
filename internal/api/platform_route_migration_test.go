@@ -1,7 +1,6 @@
 package api
 
 import (
-	"net/http"
 	"reflect"
 	"testing"
 	"time"
@@ -189,70 +188,5 @@ func TestRouteMigrationEmptyExclusionLifecycleEquivalence(t *testing.T) {
 		if !found {
 			t.Fatalf("missing exclusion field diagnostic %s: %+v", field, result)
 		}
-	}
-}
-
-func TestPlatformRouteMigrationAPIIsReadOnlyAndRequiresTrustedArtifact(t *testing.T) {
-	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
-	response := performLegacyComparisonRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, platformConfigCompileRequest{
-		Intent: platformconfig.PlatformIntent{Generation: "migration-compare-test", Routes: []platformconfig.RouteIntent{
-			{Hostname: "candidate.example.test", UpstreamURL: "http://candidate:8080", Enabled: true},
-		}},
-		Policy: platformconfig.PolicySnapshot{Generation: "migration-policy-test"},
-	})
-	if response.Code != http.StatusCreated {
-		t.Fatal(response.Body.String())
-	}
-	var compiled platformConfigCompileResponse
-	mustDecodeJSON(t, response, &compiled)
-	// A serving artifact must not cause the diagnostic to compare itself.
-	seedVerifiedPlatformArtifactAPI(t, server, admin, compiled.RouteArtifact.ID)
-	before, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	lkgBefore, err := state.GetPlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := "/v1/admin/platform-config/routes/compare?artifact_id="
-	for _, test := range []struct {
-		name, token, id string
-		status          int
-	}{
-		{"anonymous", "", compiled.RouteArtifact.ID, http.StatusUnauthorized},
-		{"tenant", tenant, compiled.RouteArtifact.ID, http.StatusForbidden},
-		{"missing id", admin, "", http.StatusBadRequest},
-		{"unknown", admin, "unknown", http.StatusNotFound},
-		{"generation alias", admin, compiled.RouteArtifact.Generation, http.StatusConflict},
-		{"wrong kind", admin, compiled.PolicyArtifact.ID, http.StatusConflict},
-		{"valid", admin, compiled.RouteArtifact.ID, http.StatusOK},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			r := performLegacyComparisonRequest(t, server, http.MethodGet, path+test.id, test.token, nil)
-			if r.Code != test.status {
-				t.Fatalf("%d: %s", r.Code, r.Body.String())
-			}
-			if r.Code == http.StatusOK {
-				var result platformRouteMigrationComparison
-				mustDecodeJSON(t, r, &result)
-				if result.Equivalent || result.SourceRouteCount == 0 || result.ArtifactRouteCount != 1 || result.ArtifactDigest != compiled.RouteArtifact.ContentHash || result.SourceGeneration == compiled.RouteArtifact.Generation || r.Header().Get("Cache-Control") != "no-store" {
-					t.Fatalf("incorrect migration evidence: %+v", result)
-				}
-			}
-		})
-	}
-	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.RouteArtifact.Provenance.KeyID)
-	rejected := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.RouteArtifact.ID, admin, nil)
-	if rejected.Code != http.StatusConflict {
-		t.Fatalf("revoked artifact accepted: %d %s", rejected.Code, rejected.Body.String())
-	}
-	after, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatal("read-only comparison changed artifacts", err)
-	}
-	lkgAfter, err := state.GetPlatformLKG(model.PlatformArtifactKindEdgeRouteBundle, "global")
-	if err != nil || !reflect.DeepEqual(lkgBefore, lkgAfter) {
-		t.Fatal("read-only comparison changed LKG", err)
 	}
 }

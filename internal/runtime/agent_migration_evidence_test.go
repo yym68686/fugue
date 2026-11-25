@@ -30,10 +30,10 @@ func TestAgentMigrationImageEvidenceRejectsTemplateMismatchAfterPull(t *testing.
 
 func TestAgentMigrationReplicaCountExcludesPreviousRevision(t *testing.T) {
 	t.Parallel()
-	if got := minAgentMigrationReplicaCount(0, 1, 1); got != 0 {
+	if got := model.MinObservedReplicaCount(0, 1, 1); got != 0 {
 		t.Fatalf("ready replicas from a previous revision counted as current: %d", got)
 	}
-	if got := minAgentMigrationReplicaCount(1, 1, 1); got != 1 {
+	if got := model.MinObservedReplicaCount(1, 1, 1); got != 1 {
 		t.Fatalf("current updated/ready/available replicas = %d, want 1", got)
 	}
 }

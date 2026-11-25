@@ -1505,10 +1505,6 @@ func (cfg applicationDomainConfig) primaryCustomDomainTarget(app model.App) stri
 	return targets[0]
 }
 
-func (s *Server) dedicatedCustomDomainTarget(app model.App) string {
-	return s.legacyApplicationDomains().dedicatedCustomDomainTarget(app)
-}
-
 func (cfg applicationDomainConfig) dedicatedCustomDomainTarget(app model.App) string {
 	base := normalizeExternalAppDomain(cfg.CustomDomainBaseDomain)
 	if base == "" {

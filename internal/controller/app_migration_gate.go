@@ -179,7 +179,7 @@ func (s *Service) verifyManagedAppMigrationCutover(ctx context.Context, op model
 	desiredReplicas := app.Spec.Replicas
 	// Cutover requires ReadyReplicas specifically. AvailableReplicas can lag
 	// readiness during termination and must not be used as a green substitute.
-	physicalReplicas := minMigrationReplicaCount(
+	physicalReplicas := model.MinObservedReplicaCount(
 		deployment.Status.UpdatedReplicas,
 		deployment.Status.ReadyReplicas,
 		deployment.Status.AvailableReplicas,
@@ -361,22 +361,6 @@ func (s *Service) verifyManagedAppMigrationCutover(ctx context.Context, op model
 		return ledger, fmt.Errorf("record migration cutover ledger: %w", err)
 	}
 	return ledger, nil
-}
-
-func minMigrationReplicaCount(values ...int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	minimum := values[0]
-	for _, value := range values[1:] {
-		if value < minimum {
-			minimum = value
-		}
-	}
-	if minimum < 0 {
-		return 0
-	}
-	return minimum
 }
 
 // verifyMigrationTargetImageReplication separates image identity from image

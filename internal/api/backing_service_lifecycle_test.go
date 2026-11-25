@@ -129,7 +129,7 @@ func TestSuspendBackingServiceRejectsRunningOwnerWithoutBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get app after unbind: %v", err)
 	}
-	if appHasServiceBinding(app, service.ID) {
+	if app.HasServiceBinding(service.ID) {
 		t.Fatal("test setup still has a service binding")
 	}
 

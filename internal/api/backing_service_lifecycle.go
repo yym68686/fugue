@@ -231,7 +231,7 @@ func (s *Server) backingServiceConsumerApps(service model.BackingService, owner 
 		if strings.TrimSpace(app.ID) == strings.TrimSpace(owner.ID) {
 			continue
 		}
-		if !appHasServiceBinding(app, service.ID) {
+		if !app.HasServiceBinding(service.ID) {
 			continue
 		}
 		appsUsingService = append(appsUsingService, app)

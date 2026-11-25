@@ -1213,13 +1213,6 @@ func deploymentRolloutReady(deployment kubeDeployment, found bool, desiredReplic
 	return true, fmt.Sprintf("deployment %s ready", deploymentName), nil
 }
 
-func expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingConstraints) string {
-	if strings.TrimSpace(app.Spec.Image) == "" {
-		return ""
-	}
-	return strings.TrimSpace(runtime.ManagedAppReleaseKey(app, scheduling))
-}
-
 func (s *Service) expectedManagedAppReleaseKey(app model.App, scheduling runtime.SchedulingConstraints) string {
 	if strings.TrimSpace(app.Spec.Image) == "" {
 		return ""

@@ -2,121 +2,31 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 	"strings"
 	"time"
 
-	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/platformsafety"
-	"fugue/internal/store"
 )
 
 type platformDNSMigrationComparison struct {
-	ArtifactID                 string                           `json:"artifact_id"`
-	ArtifactDigest             string                           `json:"artifact_digest"`
-	ArtifactGeneration         string                           `json:"artifact_generation"`
-	NodeID                     string                           `json:"node_id"`
-	EdgeGroupID                string                           `json:"edge_group_id"`
-	Zone                       string                           `json:"zone"`
-	SourceGeneration           string                           `json:"source_generation"`
-	SourceDigest               string                           `json:"source_digest"`
-	SourceScopeKey             string                           `json:"source_scope_key"`
-	CapturedAt                 time.Time                        `json:"captured_at"`
-	SourceRecordCount          int                              `json:"source_record_count"`
-	ArtifactRecordCount        int                              `json:"artifact_record_count"`
-	MatchingRecordCount        int                              `json:"matching_record_count"`
-	ExpiredCandidateValueCount int                              `json:"expired_candidate_value_count"`
-	Equivalent                 bool                             `json:"equivalent"`
-	Differences                []platformDNSMigrationDifference `json:"differences"`
+	CapturedAt                 time.Time
+	SourceRecordCount          int
+	ArtifactRecordCount        int
+	MatchingRecordCount        int
+	ExpiredCandidateValueCount int
+	Equivalent                 bool
+	Differences                []platformDNSMigrationDifference
 }
 
 type platformDNSMigrationDifference struct {
-	Hostname string   `json:"hostname"`
-	Type     string   `json:"type"`
-	Kind     string   `json:"kind"`
-	Fields   []string `json:"fields"`
-}
-
-func (s *Server) handleComparePlatformDNSMigrationForTest(w http.ResponseWriter, r *http.Request) {
-	if !mustPrincipal(r).IsPlatformAdmin() {
-		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
-		return
-	}
-	id, nodeID, zone := strings.TrimSpace(r.URL.Query().Get("artifact_id")), strings.TrimSpace(r.URL.Query().Get("node_id")), r.URL.Query().Get("zone")
-	if id == "" || len(id) > 256 || nodeID == "" || len(nodeID) > 256 || zone == "" || len(zone) > 253 || zone != normalizeExternalAppDomain(zone) {
-		httpx.WriteError(w, http.StatusBadRequest, "artifact_id, physical node_id and canonical zone are required")
-		return
-	}
-	artifact, err := s.store.GetPlatformArtifact(id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			httpx.WriteError(w, http.StatusNotFound, "artifact not found")
-		} else {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "artifact storage unavailable")
-		}
-		return
-	}
-	if artifact.ID != id || artifact.ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || artifact.ScopeKey != "global" || artifact.Status != model.PlatformArtifactStatusValidated || !platformsafety.EvaluateArtifactIntegrity(artifact, s.bundleKeyring()).Pass {
-		httpx.WriteError(w, http.StatusConflict, "comparison requires an exact trusted validated global DNS artifact")
-		return
-	}
-	records, group, err := platformDNSArtifactView(artifact, nodeID, zone)
-	if err != nil {
-		httpx.WriteError(w, http.StatusConflict, "DNS artifact has no compatible exact consumer view")
-		return
-	}
-	nodes, err := s.store.ListDNSNodes(group)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS inventory unavailable")
-		return
-	}
-	var reference *model.DNSNode
-	for i := range nodes {
-		node := &nodes[i]
-		if firstNonEmpty(node.PhysicalNodeID, node.ID) == nodeID && node.EdgeGroupID == group && node.Zone == zone {
-			if reference != nil {
-				httpx.WriteError(w, http.StatusServiceUnavailable, "DNS zone alias ownership is ambiguous")
-				return
-			}
-			reference = node
-		}
-	}
-	if reference == nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS reference zone identity is unavailable")
-		return
-	}
-	options, ok := s.edgeDNSBundleOptionsForDNSNode(*reference)
-	if !ok {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS reference endpoint is unavailable")
-		return
-	}
-	now := time.Now().UTC()
-	source, found, err := s.edgeDNSBundleArtifactForOptions(options, now)
-	if err != nil || !found {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "trusted published DNS reference is unavailable")
-		return
-	}
-	comparison, err := comparePlatformDNSRecords(source.Records, records, now)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS records cannot be compared unambiguously")
-		return
-	}
-	comparison.ArtifactID, comparison.ArtifactDigest, comparison.ArtifactGeneration = artifact.ID, artifact.ContentHash, artifact.Generation
-	comparison.NodeID, comparison.EdgeGroupID, comparison.Zone = nodeID, group, zone
-	comparison.SourceGeneration, comparison.SourceScopeKey = source.Generation, edgeDNSBundleArtifactScopeKey(options)
-	comparison.SourceDigest, err = platformconfig.Digest(source)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "DNS reference digest unavailable")
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(w, http.StatusOK, comparison)
+	Hostname string
+	Type     string
+	Kind     string
+	Fields   []string
 }
 
 func comparePlatformDNSRecords(source, candidate []model.EdgeDNSRecord, now time.Time) (platformDNSMigrationComparison, error) {

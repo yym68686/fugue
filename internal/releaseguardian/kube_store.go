@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -23,8 +24,7 @@ import (
 )
 
 const (
-	maxRecordBytes   = 900 << 10
-	defaultFreshness = 45 * time.Second
+	maxRecordBytes = 900 << 10
 )
 
 type TargetConfig struct {

@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -18,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/smithy-go"
 )
 
 // S3Config is intentionally separate from the backup/data backend config. A
@@ -229,14 +227,3 @@ type archiveObjectBody struct {
 }
 
 func (b *archiveObjectBody) Close() error { defer b.cancel(); return b.ReadCloser.Close() }
-
-func IsAlreadyExists(err error) bool {
-	var api smithy.APIError
-	if errors.As(err, &api) {
-		switch api.ErrorCode() {
-		case "PreconditionFailed", "EntityAlreadyExists", "ConditionalRequestConflict":
-			return true
-		}
-	}
-	return false
-}

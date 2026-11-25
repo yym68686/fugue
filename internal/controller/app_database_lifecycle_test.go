@@ -126,7 +126,7 @@ func TestManagedPostgresLifecycleDesiredAppSupportsStandaloneBoundService(t *tes
 	if !next.BackingServices[0].Spec.Postgres.Suspended {
 		t.Fatal("expected exclusively bound standalone service to receive lifecycle intent")
 	}
-	if !controllerAppHasServiceBinding(next, target.ServiceID) {
+	if !next.HasServiceBinding(target.ServiceID) {
 		t.Fatal("expected standalone service binding to be preserved")
 	}
 

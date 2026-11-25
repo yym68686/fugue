@@ -15,11 +15,9 @@ import (
 )
 
 type kubeOwnerReferenceEvidence = releaseproof.OwnerReference
-type kubeReleaseAnnotations = releaseproof.ReleaseAnnotations
 type kubeReleaseEndpointEvidence = releaseproof.Endpoint
 type kubeReleaseReplicaSetEvidence = releaseproof.ReplicaSet
 type kubeReleasePodEvidence = releaseproof.Pod
-type releaseEndpointPodIdentity = releaseproof.EndpointPodIdentity
 
 func (c *managedAppStatusClient) captureReleaseEndpointOwners(ctx context.Context, snapshot *managedAppKubeSnapshot) error {
 	pods, err := listTypedKubeResources[kubeReleasePodEvidence](ctx, c, "/api/v1/pods")

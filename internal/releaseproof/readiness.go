@@ -238,7 +238,7 @@ func Observe(app model.App, release model.AppRelease, stable bool, snapshot Snap
 	if deployment.Spec.Replicas != nil {
 		proof.DesiredReplicas = *deployment.Spec.Replicas
 	}
-	proof.ReadyReplicas = minObservedReplicaCount(deployment.Status.UpdatedReplicas, deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+	proof.ReadyReplicas = model.MinObservedReplicaCount(deployment.Status.UpdatedReplicas, deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 	if proof.DeploymentUID == "" || deployment.Metadata.DeletionTimestamp != "" || !owner(deployment.Metadata.Labels) || !owner(deployment.Spec.Template.Metadata.Labels) {
 		return fail("release deployment ownership differs")
 	}
@@ -489,22 +489,6 @@ func DeploymentCurrentCohortComplete(deployment Deployment) bool {
 		deployment.Status.UpdatedReplicas == desired &&
 		deployment.Status.ReadyReplicas >= desired &&
 		deployment.Status.AvailableReplicas >= desired
-}
-
-func minObservedReplicaCount(values ...int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	minimum := values[0]
-	for _, value := range values[1:] {
-		if value < minimum {
-			minimum = value
-		}
-	}
-	if minimum < 0 {
-		return 0
-	}
-	return minimum
 }
 
 func firstDeploymentContainerImage(deployment Deployment) string {

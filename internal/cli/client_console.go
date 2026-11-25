@@ -48,10 +48,6 @@ type consoleProjectDetailResponse struct {
 	ProjectName  string              `json:"project_name"`
 }
 
-type consoleGalleryStreamEvent struct {
-	Hash string `json:"hash"`
-}
-
 type appPatchResponse struct {
 	App            model.App        `json:"app"`
 	AlreadyCurrent bool             `json:"already_current,omitempty"`

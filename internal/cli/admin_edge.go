@@ -22,7 +22,6 @@ func (c *CLI) newAdminEdgeCommand() *cobra.Command {
 	cmd.AddCommand(c.newAdminEdgeRoutePolicyCommand())
 	cmd.AddCommand(c.newAdminEdgeRouteCheckCommand())
 	cmd.AddCommand(c.newAdminEdgeCacheCheckCommand())
-	cmd.AddCommand(c.newAdminEdgeQualityRankCommand())
 	cmd.AddCommand(c.newAdminEdgeQualityShadowCommand())
 	cmd.AddCommand(c.newAdminEdgeBusinessExplorationCommand())
 	cmd.AddCommand(c.newAdminEdgeQualityProbeCommand())
@@ -55,49 +54,6 @@ func (c *CLI) newAdminEdgeReleaseEvidenceCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.Window, "window", opts.Window, "Bounded request evidence window from 1m through 30m")
-	return cmd
-}
-
-func (c *CLI) newAdminEdgeQualityRankCommand() *cobra.Command {
-	opts := struct {
-		TrafficClass     string
-		RequestSizeClass string
-		Method           string
-		PathPrefix       string
-		Scope            string
-		Window           string
-		Since            string
-	}{
-		Scope:  "global",
-		Window: "30m",
-	}
-	cmd := &cobra.Command{
-		Use:        "quality-rank <hostname>",
-		Short:      "Retired composite scorer; use quality-shadow and DNS decisions",
-		Deprecated: "use quality-shadow capture and admin dns decisions explain; the legacy scorer is retired",
-		Args:       cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := c.newClient()
-			if err != nil {
-				return err
-			}
-			response, err := client.GetEdgeQualityRank(args[0], opts.TrafficClass, opts.RequestSizeClass, opts.Method, opts.PathPrefix, opts.Scope, opts.Window, opts.Since)
-			if err != nil {
-				return err
-			}
-			if c.wantsJSON() {
-				return c.writeJSON(response)
-			}
-			return writeEdgeQualityRank(c.stdout, response)
-		},
-	}
-	cmd.Flags().StringVar(&opts.TrafficClass, "traffic-class", "", "Traffic class such as dynamic_api, large_body_api, static_cacheable, streaming, sse, or websocket")
-	cmd.Flags().StringVar(&opts.RequestSizeClass, "request-size-class", "", "Request body size class: no_body, body_le_64k, body_64k_1m, body_1m_16m, or body_gt_16m")
-	cmd.Flags().StringVar(&opts.Method, "method", "", "HTTP method such as GET or POST")
-	cmd.Flags().StringVar(&opts.PathPrefix, "path-prefix", "", "Path prefix to bucket before ranking")
-	cmd.Flags().StringVar(&opts.Scope, "scope", opts.Scope, "Client scope: global, country:<country>, region:<country>:<region>, or asn:<asn>")
-	cmd.Flags().StringVar(&opts.Window, "window", opts.Window, "Quality window such as 30m, 6h, or 24h")
-	cmd.Flags().StringVar(&opts.Since, "since", "", "Explicit lower bound as a duration or RFC3339 timestamp; overrides --window")
 	return cmd
 }
 
@@ -1032,105 +988,6 @@ func writeEdgeNodeQuality(w io.Writer, response model.EdgeNodeQualityResponse) e
 	return writeEdgeNodeQualityRouteTable(w, response.Routes)
 }
 
-func writeEdgeQualityRank(w io.Writer, response model.EdgeQualityRankResponse) error {
-	if err := writeKeyValues(w,
-		kvPair{Key: "hostname", Value: strings.TrimSpace(response.Hostname)},
-		kvPair{Key: "traffic_class", Value: strings.TrimSpace(response.TrafficClass)},
-		kvPair{Key: "request_size_class", Value: strings.TrimSpace(response.RequestSizeClass)},
-		kvPair{Key: "method", Value: strings.TrimSpace(response.Method)},
-		kvPair{Key: "path_bucket", Value: strings.TrimSpace(response.PathPrefixBucket)},
-		kvPair{Key: "requested_scope", Value: strings.TrimSpace(response.RequestedScope)},
-		kvPair{Key: "selected_scope", Value: strings.TrimSpace(response.SelectedScope)},
-		kvPair{Key: "fallback_level", Value: fmt.Sprintf("%d", response.FallbackLevel)},
-		kvPair{Key: "fallback_reason", Value: strings.TrimSpace(response.FallbackReason)},
-		kvPair{Key: "window", Value: strings.TrimSpace(response.Window)},
-		kvPair{Key: "since", Value: formatTime(response.Since)},
-		kvPair{Key: "generated_at", Value: formatTime(response.GeneratedAt)},
-	); err != nil {
-		return err
-	}
-	if response.ShadowComparison != nil {
-		if err := writeKeyValues(w,
-			kvPair{Key: "legacy_edge_group", Value: strings.TrimSpace(response.ShadowComparison.LegacySelectedEdgeGroupID)},
-			kvPair{Key: "quality_edge_group", Value: strings.TrimSpace(response.ShadowComparison.QualitySelectedEdgeGroupID)},
-			kvPair{Key: "shadow_changed", Value: fmt.Sprintf("%t", response.ShadowComparison.Changed)},
-			kvPair{Key: "shadow_reason", Value: strings.TrimSpace(response.ShadowComparison.Reason)},
-		); err != nil {
-			return err
-		}
-	}
-	if len(response.Candidates) > 0 {
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
-		if err := writeEdgeQualityRankCandidateTable(w, response.Candidates); err != nil {
-			return err
-		}
-	}
-	if len(response.HardGated) == 0 {
-		return nil
-	}
-	if _, err := fmt.Fprintln(w, "\nHard-gated candidates:"); err != nil {
-		return err
-	}
-	return writeEdgeQualityRankCandidateTable(w, response.HardGated)
-}
-
-func writeEdgeQualityRankCandidateTable(w io.Writer, candidates []model.EdgeQualityRankCandidate) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "RANK\tEDGE\tGROUP\tSCORE\tCONF\tREQUESTS\tERROR\tTTFB_MS\tUPLOAD_BPS\tTCP_RETRANS\tTCP_RTO\tBREAKDOWN\tREASON"); err != nil {
-		return err
-	}
-	for _, candidate := range candidates {
-		rank := "-"
-		if candidate.Rank > 0 {
-			rank = fmt.Sprintf("%d", candidate.Rank)
-		}
-		if _, err := fmt.Fprintf(
-			tw,
-			"%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			rank,
-			strings.TrimSpace(candidate.EdgeID),
-			strings.TrimSpace(candidate.EdgeGroupID),
-			formatEdgeNodeQualityMetric(candidate.Score),
-			formatEdgeNodeQualityRate(candidate.Confidence),
-			candidate.RequestCount,
-			formatEdgeNodeQualityRate(candidate.ErrorRate),
-			formatEdgeNodeQualityMetric(candidate.AvgTTFBMS),
-			formatEdgeNodeQualityMetric(candidate.AvgUploadBPS),
-			formatEdgeNodeQualityRate(candidate.ClientTCPRetransRate),
-			formatEdgeNodeQualityRate(candidate.ClientTCPRTORate),
-			formatEdgeQualityScoreBreakdown(candidate.ScoreBreakdown),
-			strings.TrimSpace(candidate.Reason),
-		); err != nil {
-			return err
-		}
-	}
-	return tw.Flush()
-}
-
-func formatEdgeQualityScoreBreakdown(values map[string]float64) string {
-	if len(values) == 0 {
-		return "-"
-	}
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	parts := make([]string, 0, len(keys))
-	for _, key := range keys {
-		value := values[key]
-		if value == 0 {
-			continue
-		}
-		parts = append(parts, key+"="+formatEdgeNodeQualityMetric(value))
-	}
-	if len(parts) == 0 {
-		return "-"
-	}
-	return strings.Join(parts, ",")
-}
 
 func writeEdgeNodeQualityRouteTable(w io.Writer, routes []model.EdgeNodeQualityRoute) error {
 	sorted := append([]model.EdgeNodeQualityRoute(nil), routes...)

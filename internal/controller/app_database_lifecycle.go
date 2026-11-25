@@ -331,7 +331,7 @@ func (s *Service) managedPostgresSuspendConsumerApps(anchorApp model.App, servic
 	}
 	consumers := make([]model.App, 0, 1)
 	for _, app := range apps {
-		if !controllerAppHasServiceBinding(app, serviceID) {
+		if !app.HasServiceBinding(serviceID) {
 			continue
 		}
 		if app.Spec.Replicas > 0 {
@@ -627,7 +627,7 @@ func managedPostgresLifecycleDesiredApp(
 		if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
 			return model.App{}, fmt.Errorf("managed postgres service %s is not owned by app %s", serviceID, app.ID)
 		}
-		if ownerAppID == "" && !controllerAppHasServiceBinding(next, serviceID) {
+		if ownerAppID == "" && !next.HasServiceBinding(serviceID) {
 			return model.App{}, fmt.Errorf("standalone managed postgres service %s is not bound to app %s", serviceID, app.ID)
 		}
 		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
@@ -641,19 +641,6 @@ func managedPostgresLifecycleDesiredApp(
 		return next, nil
 	}
 	return model.App{}, fmt.Errorf("managed postgres service %s is missing from app %s", serviceID, app.ID)
-}
-
-func controllerAppHasServiceBinding(app model.App, serviceID string) bool {
-	serviceID = strings.TrimSpace(serviceID)
-	if serviceID == "" {
-		return false
-	}
-	for _, binding := range app.Bindings {
-		if strings.TrimSpace(binding.ServiceID) == serviceID {
-			return true
-		}
-	}
-	return false
 }
 
 func managedPostgresLifecycleTargetLabel(app model.App, target store.ManagedPostgresOperationTarget) string {

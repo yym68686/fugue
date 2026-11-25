@@ -29,7 +29,6 @@ const (
 	diagnosticManagedByLabel                  = livediagnostics.ManagedByLabel
 	diagnosticManagedByValue                  = livediagnostics.ManagedByValue
 	diagnosticAppIDLabel                      = livediagnostics.AppIDLabel
-	diagnosticSessionIDLabel                  = livediagnostics.SessionIDLabel
 	diagnosticKindLabel                       = livediagnostics.KindLabel
 	diagnosticTargetPodAnnotation             = livediagnostics.TargetPodAnnotation
 	diagnosticTargetContainerAnnotation       = livediagnostics.TargetContainerAnnotation

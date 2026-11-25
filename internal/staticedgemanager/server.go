@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -167,14 +166,4 @@ func ReadConfig(path string, value any) error {
 		return fmt.Errorf("invalid manager configuration: %w", e)
 	}
 	return nil
-}
-func RedactedError(err error) string {
-	if err == nil {
-		return ""
-	}
-	s := err.Error()
-	if strings.Contains(s, "PRIVATE KEY") {
-		return "credential operation failed"
-	}
-	return s
 }

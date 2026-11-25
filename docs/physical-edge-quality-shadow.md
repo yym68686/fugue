@@ -9,7 +9,8 @@ scorer exists only in test reference files. The independent historical DNS
 replayer can execute the captured old format only during offline receipt replay;
 it cannot authorize a serving bundle or activate a policy.
 
-The legacy `quality-rank` API returns 410 without computing a score. Request
+The legacy `quality-rank` API returns 410 without computing a score. The CLI
+exits locally with migration guidance instead of contacting that endpoint. Request
 rollups retain separate business and socket observations but do not calculate
 the retired composite score. `admin dns answer-check --explain` reads retained
 actual receipts; these are not guaranteed to be the receipts of that command's

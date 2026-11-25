@@ -3,17 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
 
-	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/platformsafety"
-	"fugue/internal/store"
 )
 
 type platformRouteMigrationComparison struct {
@@ -35,60 +30,6 @@ type platformRouteMigrationDifference struct {
 	PathPrefix string   `json:"path_prefix"`
 	Kind       string   `json:"kind"`
 	Fields     []string `json:"fields"`
-}
-
-// This endpoint deliberately bypasses the serving-source selector: migration
-// must compare the captured legacy source even if a route LKG already exists.
-// It neither persists this observation as intent nor authorizes promotion.
-func (s *Server) handleComparePlatformRouteMigrationForTest(w http.ResponseWriter, r *http.Request) {
-	if !mustPrincipal(r).IsPlatformAdmin() {
-		httpx.WriteError(w, http.StatusForbidden, "platform admin required")
-		return
-	}
-	id := strings.TrimSpace(r.URL.Query().Get("artifact_id"))
-	if id == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "artifact_id is required")
-		return
-	}
-	artifact, err := s.store.GetPlatformArtifact(id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			httpx.WriteError(w, http.StatusNotFound, "artifact not found")
-		} else {
-			httpx.WriteError(w, http.StatusServiceUnavailable, "artifact storage unavailable")
-		}
-		return
-	}
-	if artifact.ID != id || artifact.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle ||
-		artifact.ScopeKey != "global" || artifact.Status != model.PlatformArtifactStatusValidated ||
-		!platformsafety.EvaluateArtifactIntegrity(artifact, s.bundleKeyring()).Pass {
-		httpx.WriteError(w, http.StatusConflict, "comparison requires an exact trusted validated global route artifact")
-		return
-	}
-	projected, err := projectPlatformRouteArtifact(artifact)
-	if err != nil {
-		httpx.WriteError(w, http.StatusConflict, "route artifact projection is incompatible")
-		return
-	}
-	source, err := s.deriveEdgeRouteIntentSnapshot(r, s.store)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection unavailable")
-		return
-	}
-	if err := validateEdgeRouteIntentSnapshotForDiagnostics(source); err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "business route projection is invalid")
-		return
-	}
-	comparison, err := comparePlatformRouteSnapshots(source, projected)
-	if err != nil {
-		httpx.WriteError(w, http.StatusServiceUnavailable, "route projections cannot be compared unambiguously")
-		return
-	}
-	comparison.ArtifactID = artifact.ID
-	comparison.ArtifactDigest = artifact.ContentHash
-	comparison.ArtifactGeneration = artifact.Generation
-	w.Header().Set("Cache-Control", "no-store")
-	httpx.WriteJSON(w, http.StatusOK, comparison)
 }
 
 // Compare all route fields except generation and record timestamps. Those

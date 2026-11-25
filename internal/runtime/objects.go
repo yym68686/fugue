@@ -34,7 +34,6 @@ const (
 	appSSHSessionEnvVolumeName     = "app-ssh-session-env"
 	appSSHSessionEnvConfigKey      = "sshd_config"
 	AppSSHSessionEnvConfigPath     = "/run/fugue/ssh-session-env/sshd_config"
-	appFilesSourceMountPath        = "/fugue-app-files"
 	AppWorkspaceContainerName      = "fugue-workspace"
 	workspaceVolumeName            = "app-workspace"
 	workspaceSidecarName           = AppWorkspaceContainerName
@@ -2885,15 +2884,19 @@ func buildAppWorkspacePVCObject(namespace string, app model.App, labels map[stri
 }
 
 func buildWorkspaceReplicationDestinationObject(namespace string, app model.App, labels map[string]string, spec model.AppWorkspaceSpec) map[string]any {
+	return buildReplicationDestinationObject(namespace, app, labels, spec.StorageSize, spec.StorageClassName)
+}
+
+func buildReplicationDestinationObject(namespace string, app model.App, labels map[string]string, storageSize, storageClassName string) map[string]any {
 	rsyncTLS := map[string]any{
 		"copyMethod": "Direct",
-		"capacity":   spec.StorageSize,
+		"capacity":   storageSize,
 		"accessModes": []string{
 			"ReadWriteOnce",
 		},
 	}
-	if strings.TrimSpace(spec.StorageClassName) != "" {
-		rsyncTLS["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
+	if strings.TrimSpace(storageClassName) != "" {
+		rsyncTLS["storageClassName"] = strings.TrimSpace(storageClassName)
 	}
 	return map[string]any{
 		"apiVersion": VolSyncAPIVersion,
@@ -3050,31 +3053,7 @@ func buildPersistentStoragePVCObject(namespace, name string, labels map[string]s
 }
 
 func buildPersistentStorageReplicationDestinationObject(namespace string, app model.App, labels map[string]string, spec model.AppPersistentStorageSpec) map[string]any {
-	rsyncTLS := map[string]any{
-		"copyMethod": "Direct",
-		"capacity":   spec.StorageSize,
-		"accessModes": []string{
-			"ReadWriteOnce",
-		},
-	}
-	if strings.TrimSpace(spec.StorageClassName) != "" {
-		rsyncTLS["storageClassName"] = strings.TrimSpace(spec.StorageClassName)
-	}
-	return map[string]any{
-		"apiVersion": VolSyncAPIVersion,
-		"kind":       VolSyncReplicationDestinationKind,
-		"metadata": map[string]any{
-			"name":      WorkspaceReplicationDestinationName(app),
-			"namespace": namespace,
-			"labels":    labels,
-		},
-		"spec": map[string]any{
-			"trigger": map[string]any{
-				"manual": "bootstrap",
-			},
-			"rsyncTLS": rsyncTLS,
-		},
-	}
+	return buildReplicationDestinationObject(namespace, app, labels, spec.StorageSize, spec.StorageClassName)
 }
 
 func buildAppPersistentStorageSidecar(spec model.AppPersistentStorageSpec) map[string]any {

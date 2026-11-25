@@ -11,14 +11,6 @@ import (
 
 var errInvalidComposeImport = errors.New("invalid compose import")
 
-type composeAppPlan struct {
-	Service sourceimport.ComposeService
-	AppName string
-	Route   *model.AppRoute
-	Source  model.AppSource
-	Spec    model.AppSpec
-}
-
 func invalidComposeImportf(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", errInvalidComposeImport, fmt.Sprintf(format, args...))
 }

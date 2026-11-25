@@ -16,6 +16,7 @@ type commandMigration struct {
 	Path        string `json:"path"`
 	Replacement string `json:"replacement"`
 	Notes       string `json:"notes"`
+	RemovedIn   string `json:"removed_in,omitempty"`
 }
 
 var parsedCommandMigrations = func() []commandMigration {
@@ -63,7 +64,11 @@ func removedCommandError(root *cobra.Command, args []string) error {
 	joined := strings.Join(words, " ")
 	for _, item := range commandMigrations() {
 		if joined == item.Path || strings.HasPrefix(joined, item.Path+" ") {
-			return withExitCode(fmt.Errorf("fugue %s was removed in v0.2.0; use %s. %s", item.Path, item.Replacement, item.Notes), ExitCodeUserInput)
+			version := item.RemovedIn
+			if version == "" {
+				version = "v0.2.0"
+			}
+			return withExitCode(fmt.Errorf("fugue %s was removed in %s; use %s. %s", item.Path, version, item.Replacement, item.Notes), ExitCodeUserInput)
 		}
 	}
 	for _, arg := range args {

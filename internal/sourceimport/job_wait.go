@@ -176,11 +176,6 @@ func listBuilderPods(ctx context.Context, namespace, jobName string) ([]builderP
 	return podList.Items, nil
 }
 
-func summarizeBuilderJobFailure(ctx context.Context, namespace, jobName string) (string, error) {
-	summary, _, err := summarizeBuilderJobFailureDetails(ctx, namespace, jobName)
-	return summary, err
-}
-
 func summarizeBuilderJobFailureDetails(ctx context.Context, namespace, jobName string) (string, bool, error) {
 	job, err := getBuilderJob(ctx, namespace, jobName)
 	if err != nil {

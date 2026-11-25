@@ -116,7 +116,7 @@ func (s *AgentService) collectAgentMigrationLedger(ctx context.Context, op model
 	updatedReplicas := agentNestedInt(deployment, "status", "updatedReplicas")
 	readyReplicas := agentNestedInt(deployment, "status", "readyReplicas")
 	availableReplicas := agentNestedInt(deployment, "status", "availableReplicas")
-	physical := minAgentMigrationReplicaCount(updatedReplicas, readyReplicas, availableReplicas)
+	physical := model.MinObservedReplicaCount(updatedReplicas, readyReplicas, availableReplicas)
 	deploymentGeneration := int64(agentNestedInt(deployment, "metadata", "generation"))
 	deploymentObservedGeneration := int64(agentNestedInt(deployment, "status", "observedGeneration"))
 	managedGeneration := int64(agentNestedInt(managed, "metadata", "generation"))
@@ -230,22 +230,6 @@ func (s *AgentService) collectAgentMigrationLedger(ctx context.Context, op model
 		return ledger, fmt.Errorf("migration target invariants failed: %s", strings.Join(invariants, ", "))
 	}
 	return ledger, nil
-}
-
-func minAgentMigrationReplicaCount(values ...int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	minimum := values[0]
-	for _, value := range values[1:] {
-		if value < minimum {
-			minimum = value
-		}
-	}
-	if minimum < 0 {
-		return 0
-	}
-	return minimum
 }
 
 func agentMigrationGenerationEvidence(

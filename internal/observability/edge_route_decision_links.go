@@ -10,7 +10,6 @@ import (
 
 const (
 	edgeRouteDecisionLinkCheckInterval = 30 * time.Second
-	edgeRouteDecisionLinkGrace         = 2 * time.Minute
 	EdgeRouteDecisionRetention         = 30 * 24 * time.Hour
 	edgeRouteDecisionLinkLimit         = 100
 )

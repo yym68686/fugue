@@ -19,8 +19,6 @@ import (
 	runtimepkg "fugue/internal/runtime"
 )
 
-const serviceAccountNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-
 var (
 	errKubeNotFound = errors.New("kubernetes resource not found")
 	errKubeConflict = errors.New("kubernetes resource conflict")

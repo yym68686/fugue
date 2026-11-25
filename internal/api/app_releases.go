@@ -15,8 +15,6 @@ import (
 )
 
 const (
-	defaultAppReleaseProbeTimeout    = 10 * time.Second
-	defaultAppReleaseGateWindow      = 10 * time.Minute
 	defaultAppReleaseGateMinRequests = 1
 )
 
@@ -391,10 +389,6 @@ func (s *Server) loadAuthorizedAppRelease(w http.ResponseWriter, r *http.Request
 
 func (s *Server) ensureAppStableTrafficPolicy(ctx context.Context, principal model.Principal, app model.App) (model.AppTrafficPolicy, error) {
 	return s.appReleaseService().EnsureStableTrafficPolicy(ctx, principal, app)
-}
-
-func (s *Server) evaluateAppReleaseGate(ctx context.Context, app model.App, release model.AppRelease, policy model.AppReleaseGatePolicy) model.AppReleaseGateResult {
-	return s.appReleaseGateEvaluator().Evaluate(ctx, app, release, policy)
 }
 
 func (s *Server) queryAppReleaseGateMetrics(ctx context.Context, appID, releaseID, releaseRole string, window appObservabilityWindow) (map[string]any, error) {

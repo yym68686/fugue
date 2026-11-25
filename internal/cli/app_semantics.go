@@ -11,10 +11,6 @@ func renamedCommand(cmd *cobra.Command, use string) *cobra.Command {
 	cmd.Hidden = false
 	cmd.Deprecated = ""
 	cmd.Aliases = nil
-	if cmd.Annotations != nil {
-		delete(cmd.Annotations, "fugue.deprecation")
-		delete(cmd.Annotations, "fugue.replacement")
-	}
 	return cmd
 }
 func (c *CLI) newAppImageCommand() *cobra.Command {

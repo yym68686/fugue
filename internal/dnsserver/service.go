@@ -2574,11 +2574,6 @@ func parseEdgeHealthProbePaths(raw string, logger *log.Logger) map[string]string
 	return paths
 }
 
-func edgeDNSRecordsForQuestion(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc) ([]miekgdns.RR, bool) {
-	answers, nameExists, _ := edgeDNSRecordsForQuestionWithAudit(bundle, name, qtype, hint, liveHealth, nil, nil)
-	return answers, nameExists
-}
-
 func edgeDNSRecordsForQuestionWithAudit(bundle *model.EdgeDNSBundle, name string, qtype uint16, hint dnsGeoHint, liveHealth edgeDNSLiveHealthFunc, peerHealth edgeDNSPeerHealthFunc, index *dnsRecordIndex) ([]miekgdns.RR, bool, []edgeDNSAnswerAudit) {
 	if bundle == nil {
 		return nil, false, nil

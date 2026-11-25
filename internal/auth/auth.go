@@ -149,10 +149,6 @@ func PlatformComponentIdentityFromContext(ctx context.Context) (platformcontrol.
 	return claims, ok
 }
 
-func (a *Authenticator) authenticatePlatformComponentRequest(r *http.Request, now time.Time) (platformcontrol.PlatformComponentIdentityClaims, error) {
-	return authenticatePlatformComponentRequest(r, a.PlatformComponentIdentityKeyring, now)
-}
-
 func authenticatePlatformComponentRequest(r *http.Request, keyring platformcontrol.PlatformComponentIdentityKeyring, now time.Time) (platformcontrol.PlatformComponentIdentityClaims, error) {
 	secret, err := bearerTokenFromRequest(r)
 	if err != nil {

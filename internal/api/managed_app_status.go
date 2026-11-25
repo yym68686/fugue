@@ -831,11 +831,6 @@ func decodeKubeObject(raw map[string]any, out any) error {
 	return json.Unmarshal(data, out)
 }
 
-type kubeObjectMetadataView struct {
-	name      string
-	namespace string
-}
-
 func kubeNamespacedKey(namespace, name string) string {
 	return strings.TrimSpace(namespace) + "/" + strings.TrimSpace(name)
 }
@@ -1396,7 +1391,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 		physicalReady := 0
 		servingReady := 0
 		if deploymentExists {
-			servingReady = minObservedReplicaCount(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
+			servingReady = model.MinObservedReplicaCount(deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas)
 			evidence.deploymentGeneration = deployment.Metadata.Generation
 			evidence.deploymentObservedGeneration = deployment.Status.ObservedGeneration
 			evidence.deploymentImageDigest = edgeObservationDigest(firstDeploymentContainerImage(deployment))
@@ -1411,7 +1406,7 @@ func (s *Server) buildManagedAppRuntimeEvidenceWithStoreSnapshot(
 			// ReplicaSet after the template/generation changed. Only replicas
 			// that are simultaneously updated, ready, and available are current
 			// physical proof for this generation.
-			physicalReady = minObservedReplicaCount(
+			physicalReady = model.MinObservedReplicaCount(
 				deployment.Status.UpdatedReplicas,
 				deployment.Status.ReadyReplicas,
 				deployment.Status.AvailableReplicas,
@@ -1551,22 +1546,6 @@ func boolPointerTrue(value *bool) bool {
 
 func deploymentCurrentCohortComplete(deployment kubeDeploymentRuntimeEvidence) bool {
 	return releaseproof.DeploymentCurrentCohortComplete(deployment)
-}
-
-func minObservedReplicaCount(values ...int) int {
-	if len(values) == 0 {
-		return 0
-	}
-	minimum := values[0]
-	for _, value := range values[1:] {
-		if value < minimum {
-			minimum = value
-		}
-	}
-	if minimum < 0 {
-		return 0
-	}
-	return minimum
 }
 
 func (s *Server) observedRuntimeImageRefsEquivalent(app model.App, expected, actual string) bool {

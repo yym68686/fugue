@@ -42,7 +42,7 @@ func commandCatalog(root *cobra.Command, includeHidden bool) []commandInfo {
 		if hidden && !includeHidden {
 			return
 		}
-		entry := commandInfo{Path: cmd.CommandPath(), Use: cmd.Use, Effect: commandEffect(cmd), Scope: "server_authorized_target", OutputContract: "existing-command-json; errors=cli-error-v1", Details: cmd.Long, Summary: cmd.Short, Aliases: cmd.Aliases, Runnable: cmd.Runnable(), Hidden: hidden, Deprecated: firstNonEmpty(cmd.Deprecated, cmd.Annotations["fugue.deprecation"]), Replacement: cmd.Annotations["fugue.replacement"], Example: cmd.Example, Flags: []commandFlagInfo{}}
+		entry := commandInfo{Path: cmd.CommandPath(), Use: cmd.Use, Effect: commandEffect(cmd), Scope: "server_authorized_target", OutputContract: "existing-command-json; errors=cli-error-v1", Details: cmd.Long, Summary: cmd.Short, Aliases: cmd.Aliases, Runnable: cmd.Runnable(), Hidden: hidden, Deprecated: cmd.Deprecated, Example: cmd.Example, Flags: []commandFlagInfo{}}
 		flags := pflag.NewFlagSet(cmd.Name(), pflag.ContinueOnError)
 		flags.AddFlagSet(cmd.InheritedFlags())
 		flags.AddFlagSet(cmd.Flags())

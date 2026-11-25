@@ -648,7 +648,7 @@ func ownedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
 			continue
 		}
-		if !appHasDatabaseServiceBinding(app, service.ID) {
+		if !app.HasServiceBinding(service.ID) {
 			continue
 		}
 		if !isManagedPostgresBackingService(service) || service.Spec.Postgres == nil {
@@ -659,19 +659,6 @@ func ownedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 	}
 
 	return nil
-}
-
-func appHasDatabaseServiceBinding(app model.App, serviceID string) bool {
-	serviceID = strings.TrimSpace(serviceID)
-	if serviceID == "" {
-		return false
-	}
-	for _, binding := range app.Bindings {
-		if strings.TrimSpace(binding.ServiceID) == serviceID {
-			return true
-		}
-	}
-	return false
 }
 
 func formatAppDatabaseResourceValue(resources *model.ResourceSpec, selectValue func(*model.ResourceSpec) int64) string {

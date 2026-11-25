@@ -525,7 +525,7 @@ func (s *Server) backingServiceSwitchoverApp(service model.BackingService) (mode
 	}
 	var found *model.App
 	for _, app := range apps {
-		if !appHasServiceBinding(app, service.ID) {
+		if !app.HasServiceBinding(service.ID) {
 			continue
 		}
 		appCopy := app
@@ -538,19 +538,6 @@ func (s *Server) backingServiceSwitchoverApp(service model.BackingService) (mode
 		return model.App{}, store.ErrInvalidInput
 	}
 	return *found, nil
-}
-
-func appHasServiceBinding(app model.App, serviceID string) bool {
-	serviceID = strings.TrimSpace(serviceID)
-	if serviceID == "" {
-		return false
-	}
-	for _, binding := range app.Bindings {
-		if strings.TrimSpace(binding.ServiceID) == serviceID {
-			return true
-		}
-	}
-	return false
 }
 
 func isMigratableBackingService(service model.BackingService) bool {

@@ -261,9 +261,6 @@ Environment variables:
 			if cmd.CommandPath() == "fugue app db query" {
 				c.rawAppOutput = true
 			}
-			if notice := cmd.Annotations["fugue.deprecation"]; notice != "" {
-				fmt.Fprintln(c.stderr, "Deprecated:", notice)
-			}
 			if flag := cmd.Flags().Lookup("show-secrets"); flag != nil {
 				c.rawAppOutput, _ = cmd.Flags().GetBool("show-secrets")
 			}

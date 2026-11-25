@@ -1176,15 +1176,19 @@ func formatTolerations(tolerations []corev1.Toleration) []string {
 	return out
 }
 
+func workloadCondition(kind, status, reason, message string) model.ClusterWorkloadCondition {
+	return model.ClusterWorkloadCondition{
+		Type:    kind,
+		Status:  status,
+		Reason:  strings.TrimSpace(reason),
+		Message: strings.TrimSpace(message),
+	}
+}
+
 func deploymentConditions(conditions []appsv1.DeploymentCondition) []model.ClusterWorkloadCondition {
 	out := make([]model.ClusterWorkloadCondition, 0, len(conditions))
 	for _, condition := range conditions {
-		out = append(out, model.ClusterWorkloadCondition{
-			Type:    string(condition.Type),
-			Status:  string(condition.Status),
-			Reason:  strings.TrimSpace(condition.Reason),
-			Message: strings.TrimSpace(condition.Message),
-		})
+		out = append(out, workloadCondition(string(condition.Type), string(condition.Status), condition.Reason, condition.Message))
 	}
 	return out
 }
@@ -1192,12 +1196,7 @@ func deploymentConditions(conditions []appsv1.DeploymentCondition) []model.Clust
 func daemonSetConditions(conditions []appsv1.DaemonSetCondition) []model.ClusterWorkloadCondition {
 	out := make([]model.ClusterWorkloadCondition, 0, len(conditions))
 	for _, condition := range conditions {
-		out = append(out, model.ClusterWorkloadCondition{
-			Type:    string(condition.Type),
-			Status:  string(condition.Status),
-			Reason:  strings.TrimSpace(condition.Reason),
-			Message: strings.TrimSpace(condition.Message),
-		})
+		out = append(out, workloadCondition(string(condition.Type), string(condition.Status), condition.Reason, condition.Message))
 	}
 	return out
 }
@@ -1205,12 +1204,7 @@ func daemonSetConditions(conditions []appsv1.DaemonSetCondition) []model.Cluster
 func statefulSetConditions(conditions []appsv1.StatefulSetCondition) []model.ClusterWorkloadCondition {
 	out := make([]model.ClusterWorkloadCondition, 0, len(conditions))
 	for _, condition := range conditions {
-		out = append(out, model.ClusterWorkloadCondition{
-			Type:    string(condition.Type),
-			Status:  string(condition.Status),
-			Reason:  strings.TrimSpace(condition.Reason),
-			Message: strings.TrimSpace(condition.Message),
-		})
+		out = append(out, workloadCondition(string(condition.Type), string(condition.Status), condition.Reason, condition.Message))
 	}
 	return out
 }
@@ -1218,12 +1212,7 @@ func statefulSetConditions(conditions []appsv1.StatefulSetCondition) []model.Clu
 func podConditions(conditions []corev1.PodCondition) []model.ClusterWorkloadCondition {
 	out := make([]model.ClusterWorkloadCondition, 0, len(conditions))
 	for _, condition := range conditions {
-		out = append(out, model.ClusterWorkloadCondition{
-			Type:    string(condition.Type),
-			Status:  string(condition.Status),
-			Reason:  strings.TrimSpace(condition.Reason),
-			Message: strings.TrimSpace(condition.Message),
-		})
+		out = append(out, workloadCondition(string(condition.Type), string(condition.Status), condition.Reason, condition.Message))
 	}
 	return out
 }

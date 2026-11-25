@@ -838,7 +838,7 @@ func OwnedManagedPostgresSpec(app model.App) *model.AppPostgresSpec {
 		if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
 			continue
 		}
-		if !appHasBindingToServiceID(app, service.ID) {
+		if !app.HasServiceBinding(service.ID) {
 			continue
 		}
 		if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
@@ -1033,7 +1033,7 @@ func ManagedPostgresOperationTargetForApp(app model.App, serviceID string) (*Man
 			if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
 				continue
 			}
-			if !appHasBindingToServiceID(app, service.ID) {
+			if !app.HasServiceBinding(service.ID) {
 				continue
 			}
 			if !isManagedPostgresService(service) || service.Spec.Postgres == nil {
@@ -1060,7 +1060,7 @@ func ManagedPostgresOperationTargetForApp(app model.App, serviceID string) (*Man
 			return nil, ErrInvalidInput
 		}
 		appOwned := strings.TrimSpace(service.OwnerAppID) == strings.TrimSpace(app.ID)
-		if !appOwned && !appHasBindingToServiceID(app, serviceID) {
+		if !appOwned && !app.HasServiceBinding(serviceID) {
 			return nil, ErrInvalidInput
 		}
 		serviceCopy := cloneBackingService(service)
@@ -1082,19 +1082,6 @@ func ManagedPostgresSpecForOperation(app model.App, serviceID string) *model.App
 		return nil
 	}
 	return model.CloneAppPostgresSpec(&target.Postgres)
-}
-
-func appHasBindingToServiceID(app model.App, serviceID string) bool {
-	serviceID = strings.TrimSpace(serviceID)
-	if serviceID == "" {
-		return false
-	}
-	for _, binding := range app.Bindings {
-		if strings.TrimSpace(binding.ServiceID) == serviceID {
-			return true
-		}
-	}
-	return false
 }
 
 func ensureBoundPostgresViewBinding(app *model.App, service model.BackingService, spec model.AppPostgresSpec) {

@@ -1,5 +1,11 @@
 [
   {
+    "path": "admin edge quality-rank",
+    "replacement": "fugue admin dns decisions explain",
+    "notes": "The composite scorer is retired. For network-only measurements, use fugue admin edge quality-shadow capture.",
+    "removed_in": "v0.8.72"
+  },
+  {
     "path": "app image policy set",
     "replacement": "fugue app image retention set",
     "notes": "Positional arguments, flags and defaults are unchanged; the original success JSON object remains available through the replacement."

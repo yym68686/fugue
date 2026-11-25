@@ -2,13 +2,10 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"time"
 )
-
-var errAppOutsideSelection = errors.New("app not found in the selected tenant/project")
 
 type overviewRead struct {
 	name  string

@@ -21,12 +21,11 @@ import (
 )
 
 const (
-	workflowSchemaVersion     = "fugue.workflow-run.v1"
-	workflowBodyPreviewLimit  = 4096
-	workflowDefaultTimeout    = 30 * time.Second
-	workflowResultStatusOK    = "success"
-	workflowResultStatusFail  = "failed"
-	workflowStepStatusSkipped = "skipped"
+	workflowSchemaVersion    = "fugue.workflow-run.v1"
+	workflowBodyPreviewLimit = 4096
+	workflowDefaultTimeout   = 30 * time.Second
+	workflowResultStatusOK   = "success"
+	workflowResultStatusFail = "failed"
 )
 
 type workflowSpec struct {

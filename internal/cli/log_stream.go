@@ -52,20 +52,6 @@ type logStreamSourceSpec struct {
 	Phase     string `json:"phase,omitempty"`
 }
 
-type buildLogStreamStatusEvent struct {
-	Cursor          string   `json:"cursor"`
-	OperationID     string   `json:"operation_id"`
-	OperationStatus string   `json:"operation_status"`
-	JobName         string   `json:"job_name,omitempty"`
-	Pods            []string `json:"pods,omitempty"`
-	BuildStrategy   string   `json:"build_strategy,omitempty"`
-	ErrorMessage    string   `json:"error_message,omitempty"`
-	ResultMessage   string   `json:"result_message,omitempty"`
-	LastUpdatedAt   string   `json:"last_updated_at,omitempty"`
-	CompletedAt     string   `json:"completed_at,omitempty"`
-	StartedAt       string   `json:"started_at,omitempty"`
-}
-
 type runtimeLogStreamReadyEvent struct {
 	Cursor    string `json:"cursor"`
 	Stream    string `json:"stream"`

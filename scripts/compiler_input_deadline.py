@@ -6,9 +6,7 @@ confirm cleanup. Outside a preparation scope, existing callers are unchanged.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
-import math
 import subprocess
-import sys
 import time
 
 
@@ -99,30 +97,3 @@ def pause(seconds):
     budget = _current.get()
     time.sleep(min(seconds, budget.check()) if budget else seconds)
     check()
-
-
-def worker_seconds(maximum, ticket_remaining):
-    # Keep the existing 30s ticket margin and reserve a bounded patch call plus
-    # confirmation time within the SAME work deadline. Neither is a guarantee
-    # that remote scheduling, confirmation or cleanup will succeed.
-    budget = _current.get()
-    if not budget or budget.phase != 'work':
-        raise ValueError('worker requires the preparation work allowance')
-    seconds = math.floor(min(maximum, budget.check()-60, ticket_remaining-60))
-    if seconds < 1:
-        raise Exhausted('input preparation setup exhausted worker allowance; outcome unconfirmed')
-    return seconds
-
-
-def public_read(url):
-    # A socket timeout is reset by a trickling response and does not bound DNS.
-    # Contain that read in a local child, charged to the same elapsed allowance.
-    # The public URL carries no credentials; stdout is capped at 16KiB + 1.
-    code = ('import sys,urllib.request\n'
-            'with urllib.request.urlopen(sys.argv[1],timeout=10) as r:\n'
-            ' if r.status != 200: sys.exit(1)\n'
-            ' sys.stdout.buffer.write(r.read(16385))\n')
-    result = run([sys.executable, '-c', code, url], timeout=10, capture_output=True)
-    if result.returncode:
-        raise ValueError('public readiness failed')
-    return result.stdout

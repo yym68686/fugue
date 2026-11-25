@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"fmt"
 	"strings"
 )
 
@@ -136,14 +135,4 @@ func normalizeRenderOptions(options RenderOptions) RenderOptions {
 	options.StrictDrain = options.StrictDrain.Normalize()
 	options.Revision = NormalizeAppRevisionRenderOptions(options.Revision)
 	return options
-}
-
-func (cfg StrictDrainConfig) validate() error {
-	normalized := cfg.Normalize()
-	switch strings.TrimSpace(normalized.Mode) {
-	case StrictDrainModeFixedSleep, StrictDrainModeConnectionAware:
-	default:
-		return fmt.Errorf("unknown strict drain mode %q", normalized.Mode)
-	}
-	return nil
 }

@@ -2,14 +2,11 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/platformconfig"
 )
 
 func TestDNSMigrationComparisonPreservesSelectionSemantics(t *testing.T) {
@@ -93,108 +90,5 @@ func TestDNSMigrationComparisonLeasesNamesAndTXTBytes(t *testing.T) {
 	leased.Candidates = []model.EdgeDNSAnswerCandidate{{IP: "192.0.2.1"}}
 	if _, err = comparePlatformDNSRecords([]model.EdgeDNSRecord{leased}, nil, now); err == nil {
 		t.Fatal("unsupported leased dynamic candidate accepted")
-	}
-}
-
-func TestDNSMigrationComparisonAPIRequiresExactTrustedPublicationAndIsReadOnly(t *testing.T) {
-	state, server, tenant, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	node, err := state.UpdateDNSHeartbeat(model.DNSNode{ID: "dns-a", PhysicalNodeID: "dns-a", EdgeGroupID: "group-a", Zone: "example.test", PublicIPv4: "8.8.8.8", Status: "healthy", Healthy: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := platformConfigCompileRequest{
-		Intent:          platformconfig.PlatformIntent{Generation: "dns-compare-1", Scope: "global", DNS: []platformconfig.DNSIntent{{Hostname: "app.example.test", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, Status: "active"}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "group-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}},
-		Policy:          platformconfig.PolicySnapshot{Generation: "policy-1", Scope: "global"},
-		RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "group-a", ObservedAt: now, A: []string{"8.8.8.8"}}}},
-	}
-	response := performLegacyComparisonRequest(t, server, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
-	if response.Code != http.StatusCreated {
-		t.Fatal(response.Body.String())
-	}
-	var compiled platformConfigCompileResponse
-	mustDecodeJSON(t, response, &compiled)
-	path := "/v1/admin/platform-config/dns/compare?node_id=dns-a&zone=example.test&artifact_id="
-	for _, tc := range []struct {
-		name, token, id string
-		status          int
-	}{
-		{"anonymous", "", compiled.DNSArtifact.ID, 401}, {"tenant", tenant, compiled.DNSArtifact.ID, 403}, {"missing", admin, "", 400}, {"unknown", admin, "unknown", 404}, {"generation alias", admin, compiled.DNSArtifact.Generation, 409}, {"wrong kind", admin, compiled.RouteArtifact.ID, 409}, {"missing reference", admin, compiled.DNSArtifact.ID, 503},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := performLegacyComparisonRequest(t, server, http.MethodGet, path+tc.id, tc.token, nil)
-			if r.Code != tc.status {
-				t.Fatalf("%d: %s", r.Code, r.Body.String())
-			}
-		})
-	}
-	options, ok := server.edgeDNSBundleOptionsForDNSNode(node)
-	if !ok {
-		t.Fatal("missing test DNS options")
-	}
-	bundle := signEdgeDNSBundle(model.EdgeDNSBundle{Version: "dns-source-1", Generation: "dns-source-1", GeneratedAt: now, DNSNodeID: node.ID, EdgeGroupID: node.EdgeGroupID, Zone: node.Zone, Records: []model.EdgeDNSRecord{
-		{Name: "app.example.test", Type: "A", Values: []string{"192.0.2.1"}, TTL: 60, Status: "active"},
-		{Name: "probe.example.test", Type: "A", Values: []string{"8.8.8.8"}, TTL: 60, Status: "active", RecordKind: "probe", EdgeGroupID: "group-a"},
-	}}, server.bundleKeyring(), 10*time.Minute)
-	publishFullEdgeDNSArtifactForTest(t, state, server, newEdgeDNSBundleArtifact(options, bundle, now))
-	before, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	referenceBefore, releaseBefore, found, err := state.GetActivePlatformArtifact(model.PlatformArtifactKindDNSAnswerBundle, edgeDNSBundleArtifactScopeKey(options), "full")
-	if err != nil || !found {
-		t.Fatal("missing published fixture", err)
-	}
-	good := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
-	if good.Code != 200 {
-		t.Fatal(good.Body.String())
-	}
-	var comparison platformDNSMigrationComparison
-	mustDecodeJSON(t, good, &comparison)
-	if !comparison.Equivalent || comparison.MatchingRecordCount != 2 || comparison.NodeID != node.ID || comparison.SourceGeneration != bundle.Generation || comparison.ArtifactDigest != compiled.DNSArtifact.ContentHash || comparison.SourceDigest == "" || good.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("incorrect scoped comparison: %+v", comparison)
-	}
-	for _, query := range []string{"?artifact_id=" + compiled.DNSArtifact.ID + "&node_id=foreign&zone=example.test", "?artifact_id=" + compiled.DNSArtifact.ID + "&node_id=dns-a&zone=other.test"} {
-		r := performLegacyComparisonRequest(t, server, http.MethodGet, "/v1/admin/platform-config/dns/compare"+query, admin, nil)
-		if r.Code != 409 {
-			t.Fatal("unsigned consumer view accepted", r.Code)
-		}
-	}
-	after, err := state.ListPlatformArtifacts(model.PlatformArtifactFilter{})
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatal("comparison changed artifacts", err)
-	}
-	referenceAfter, releaseAfter, found, err := state.GetActivePlatformArtifact(model.PlatformArtifactKindDNSAnswerBundle, edgeDNSBundleArtifactScopeKey(options), "full")
-	if err != nil || !found || !reflect.DeepEqual(referenceBefore, referenceAfter) || !reflect.DeepEqual(releaseBefore, releaseAfter) {
-		t.Fatal("comparison changed serving publication", err)
-	}
-	invalid := compiled.DNSArtifact
-	invalid.Metadata = map[string]string{}
-	if _, _, err := platformDNSArtifactView(invalid, "dns-a", "example.test"); err == nil {
-		t.Fatal("unbound policy lineage accepted")
-	}
-	bad := bundle
-	bad.Version, bad.Generation = "dns-source-bad", "dns-source-bad"
-	bad = signEdgeDNSBundle(bad, server.bundleKeyring(), 10*time.Minute)
-	bad.Records = append([]model.EdgeDNSRecord(nil), bad.Records...)
-	bad.Records[0].Values = []string{"192.0.2.99"}
-	publishFullEdgeDNSArtifactForTest(t, state, server, newEdgeDNSBundleArtifact(options, bad, now))
-	badSource := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
-	if badSource.Code != 503 {
-		t.Fatal("untrusted reference reported a comparison", badSource.Code)
-	}
-	alias := node
-	alias.ID = "dns-zone-alias"
-	if _, err := state.UpdateDNSHeartbeat(alias); err != nil {
-		t.Fatal(err)
-	}
-	ambiguous := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
-	if ambiguous.Code != 503 {
-		t.Fatal("ambiguous physical zone reference accepted", ambiguous.Code)
-	}
-	server.bundleRevokedKeyIDs = append(server.bundleRevokedKeyIDs, compiled.DNSArtifact.Provenance.KeyID)
-	rejected := performLegacyComparisonRequest(t, server, http.MethodGet, path+compiled.DNSArtifact.ID, admin, nil)
-	if rejected.Code != 409 {
-		t.Fatal("revoked candidate accepted", rejected.Code)
 	}
 }

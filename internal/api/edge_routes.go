@@ -110,10 +110,6 @@ func (s *Server) edgeRouteBindingInputWithCapture(ctx context.Context, app model
 	return input
 }
 
-func (s *Server) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
-	return s.legacyApplicationDomains().projectRouteEdgePolicy(hostname, domainByHostname)
-}
-
 func (cfg applicationDomainConfig) projectRouteEdgePolicy(hostname string, domainByHostname map[string]model.AppDomain) (string, string, *model.AppDomain, bool) {
 	hostname = normalizeExternalAppDomain(hostname)
 	if hostname == "" {
@@ -157,10 +153,6 @@ type edgeRouteUpstream struct {
 	URL          string
 	Status       string
 	StatusReason string
-}
-
-func (s *Server) edgeRouteUpstream(ctx context.Context, app model.App, runtimeObj model.Runtime, runtimeFound bool) edgeRouteUpstream {
-	return s.edgeRouteUpstreamWithCapture(ctx, app, runtimeObj, runtimeFound, true)
 }
 
 func (s *Server) edgeRouteUpstreamWithCapture(ctx context.Context, app model.App, runtimeObj model.Runtime, runtimeFound bool, collectRuntime bool) edgeRouteUpstream {

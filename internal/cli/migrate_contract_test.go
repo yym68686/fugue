@@ -38,7 +38,7 @@ func TestRemovedCommandsAndFlagsDoNotMakeHTTPRequests(t *testing.T) {
 		t.Errorf("removed command made %s %s", r.Method, r.URL.Path)
 	}))
 	defer server.Close()
-	for _, path := range []string{"env ls demo", "apps routes set demo", "project rename project old", "runtime access grant node tenant", "app release ls demo", "admin artifact release artifact --force-publish", "app failover policy set demo --zero-downtime safe"} {
+	for _, path := range []string{"env ls demo", "apps routes set demo", "project rename project old", "runtime access grant node tenant", "app release ls demo", "admin artifact release artifact --force-publish", "app failover policy set demo --zero-downtime safe", "admin edge quality-rank example.test --scope global"} {
 		var out, stderr bytes.Buffer
 		args := append([]string{"--base-url", server.URL, "--token", "synthetic-secret", "--json"}, strings.Fields(path)...)
 		err := runWithStreams(args, &out, &stderr)

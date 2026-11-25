@@ -51,12 +51,6 @@ type longhornBackupStatus struct {
 	BackupTargetName string `json:"backupTargetName"`
 }
 
-type longhornSnapshotStatus struct {
-	ReadyToUse bool   `json:"readyToUse"`
-	Error      string `json:"error"`
-	Size       int64  `json:"size"`
-}
-
 // runControlPlaneLonghornBackup reuses the same provider-neutral volume
 // snapshot engine as app databases. The target is resolved from the
 // configured control-plane CNPG cluster; no SQL connection or dump is used.
