@@ -1,5 +1,6 @@
 import base64
 import datetime
+import hashlib
 import http.server
 import json
 from pathlib import Path
@@ -40,6 +41,13 @@ class HeldFrontConnectionTests(unittest.TestCase):
             class Handler(http.server.BaseHTTPRequestHandler):
                 protocol_version = "HTTP/1.1"
                 def log_message(self, *_): pass
+                def do_GET(self):
+                    seen.append(self.client_address)
+                    body = b"fixture canary body"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
                 def do_HEAD(self):
                     seen.append(self.client_address)
                     self.send_response(204)
@@ -52,7 +60,7 @@ class HeldFrontConnectionTests(unittest.TestCase):
                     self.send_header("X-Fugue-Route-Edge-Group", "cell-a")
                     binding = {"release_id": "release-one", "fencing_token": 2, "release_channel": "full"}
                     self.send_header("X-Fugue-Traffic-Release", base64.urlsafe_b64encode(json.dumps(binding).encode()).decode().rstrip("="))
-                    if len(seen) == 3: self.send_header("Connection", "close")
+                    if len(seen) == 5: self.send_header("Connection", "close")
                     self.end_headers()
             server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -70,9 +78,12 @@ class HeldFrontConnectionTests(unittest.TestCase):
                     self.assertEqual(first, second)
                     self.assertEqual(seen[0], seen[1])
                     self.assertEqual(held.requests, 2)
+                    held.serving("/", "sha256:" + hashlib.sha256(b"fixture canary body").hexdigest())
+                    with self.assertRaisesRegex(ValueError, "exact canary response"):
+                        held.serving("/", "sha256:" + "0" * 64)
                     with self.assertRaises(ValueError): held.proof("/")
                     with self.assertRaises((OSError, http.client.HTTPException, ValueError)): held.proof("/")
-                    self.assertEqual(len(seen), 3)
+                    self.assertEqual(len(seen), 5)
                     self.assertEqual(len(set(seen)), 1)
                 finally:
                     held.close()

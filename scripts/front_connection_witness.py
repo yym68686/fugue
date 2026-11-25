@@ -1,5 +1,6 @@
 """A held, non-reconnecting TLS connection and its exact Front runtime fact."""
 import datetime
+import hashlib
 import http.client
 import ipaddress
 import secrets
@@ -41,24 +42,44 @@ class HeldTLS:
         self.requests = 0
         self.closed = False
 
-    def proof(self, path):
+    def _request(self, method, path, headers, read_response):
         if self.closed or self.socket.fileno() != self.fd or self.fd < 0 or not path.startswith("/") or any(c in path for c in "\r\n"):
             raise ValueError("held Front connection is unavailable")
-        nonce = secrets.token_hex(16)
-        request = "HEAD " + path + " HTTP/1.1\r\nHost: " + self.host + "\r\nX-Fugue-Route-Probe: 1\r\nX-Fugue-Route-Probe-Nonce: " + nonce + "\r\nConnection: keep-alive\r\n\r\n"
+        request = method + " " + path + " HTTP/1.1\r\nHost: " + self.host + "\r\n" + headers + "Connection: keep-alive\r\n\r\n"
         self.socket.sendall(request.encode("ascii"))
-        response = http.client.HTTPResponse(self.socket)
-        response.begin()
+        response = http.client.HTTPResponse(self.socket, method=method)
         try:
-            proof = front.parse_proof(response, nonce, self.certificate_until)
-            if response.will_close or response.read(1):
-                raise ValueError("held Front connection was closed or returned a nonempty proof body")
+            response.begin()
+            if response.will_close:
+                raise ValueError("held Front connection did not keep the TLS session open")
+            value = read_response(response)
             if self.socket.fileno() != self.fd:
                 raise ValueError("held Front connection was replaced")
             self.requests += 1
-            return proof
+            return value
         finally:
             response.close()
+
+    def proof(self, path):
+        nonce = secrets.token_hex(16)
+
+        def read(response):
+            proof = front.parse_proof(response, nonce, self.certificate_until)
+            if response.read(1):
+                raise ValueError("held Front returned a nonempty proof body")
+            return proof
+
+        return self._request("HEAD", path, "X-Fugue-Route-Probe: 1\r\nX-Fugue-Route-Probe-Nonce: " + nonce + "\r\n", read)
+
+    def serving(self, path, expected_digest):
+        """Check the normal response on this socket without claiming route authority."""
+        def read(response):
+            body = response.read(65537)
+            if (response.status != 200 or not body or len(body) > 65536
+                    or "sha256:" + hashlib.sha256(body).hexdigest() != expected_digest):
+                raise ValueError("held Front did not serve the exact canary response")
+
+        return self._request("GET", path, "Accept-Encoding: identity\r\n", read)
 
     def close(self):
         self.closed = True

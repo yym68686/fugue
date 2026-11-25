@@ -143,6 +143,7 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
     if bool(journal.get("probe_service_uid")) != (probe_port is not None):
         raise ValueError("handoff must use the probe transport named in the journal")
     host, path = probe["host"], probe["path"]
+    canary_digest = probe.get("bodyDigest")
 
     def proof(sock):
         value = sock.proof(path)
@@ -153,8 +154,39 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
     def fact(sock, slot, target_addr):
         return require_fact(connection_ref(adapter.connection_fact(profile, selected_front, sock)), journal, slot, target_addr)
 
+    def retained_serves(sock):
+        # An inactive Worker may keep serving existing sessions but cannot
+        # emit positive signed routing authority for new sessions.
+        if canary_digest:
+            sock.serving(path, canary_digest)
+        else:
+            proof(sock)
+
+    def common_route(reference, retained, fresh, probe_fresh, deadline):
+        # Compare concurrent new public/probe signed publications, and bind
+        # their stable route digest to the predecessor's pre-cutover proof.
+        samples = {}
+        for _ in range(4):
+            if now() >= deadline:
+                break
+            samples = {"public": proof(fresh)}
+            if not canary_digest:
+                samples["held"] = proof(retained)
+            if probe_fresh is not None:
+                samples["probe"] = proof(probe_fresh)
+            samples["public_after"] = proof(fresh)
+            if (samples["public"].get("digest") == reference.get("digest")
+                    and all(sample == samples["public"] for sample in samples.values())):
+                return
+            pause(2)
+        summary = {endpoint: {"version": sample.get("version"), "digest": sample.get("digest"),
+                              "release_id": sample.get("traffic", {}).get("release_id")}
+                   for endpoint, sample in samples.items()}
+        raise ValueError("same-socket public and probe route evidence did not converge: " + front.canonical(summary))
+
     with closing(open_tls(address, host)) as retained:
         reference = proof(retained)
+        retained_serves(retained)
         old = fact(retained, before, retained_addr)
         opened = now()
         deadline = opened + datetime.timedelta(seconds=150)
@@ -165,7 +197,8 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
             phase = slot_phase(journal, state)
             if phase == "reverted":
                 raise ValueError("Guardian reverted the node Worker; no handoff verified")
-            if proof(retained) != reference or fact(retained, before, retained_addr) != old:
+            retained_serves(retained)
+            if fact(retained, before, retained_addr) != old:
                 raise ValueError("original TLS connection changed during node Worker handoff")
             if phase == "pending":
                 pause(3)
@@ -175,7 +208,6 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
             with ExitStack() as sockets:
                 try:
                     fresh = sockets.enter_context(closing(open_tls(address, host)))
-                    new_proof = proof(fresh)
                     newest = fact(fresh, target, candidate_addr)
                     probe_fresh = sockets.enter_context(closing(open_tls(address, host, probe_port))) if probe_port else None
                     probe_ref = fact(probe_fresh, target, candidate_addr) if probe_fresh is not None else None
@@ -183,12 +215,16 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                     pause(2)
                     continue
                 if (newest["id"] == old["id"] or front.timestamp(newest["started_at"]) < front.timestamp(state["updated_at"])
-                        or new_proof != reference or proof(retained) != reference or fact(retained, before, retained_addr) != old):
-                    raise ValueError("public TLS handoff did not demonstrate unchanged route and two distinct Worker processes")
+                        or fact(retained, before, retained_addr) != old):
+                    raise ValueError("public TLS handoff did not prove two distinct Worker connections after activation")
                 if probe_ref is not None and (probe_ref["id"] in (old["id"], newest["id"])
-                        or front.timestamp(probe_ref["started_at"]) < front.timestamp(state["updated_at"])
-                        or proof(probe_fresh) != reference):
-                    raise ValueError("probe TLS did not independently reach the newly selected Worker with the same route")
+                        or front.timestamp(probe_ref["started_at"]) < front.timestamp(state["updated_at"])):
+                    raise ValueError("probe TLS did not independently reach the newly selected Worker after activation")
+                common_route(reference, retained, fresh, probe_fresh, deadline)
+                if canary_digest:
+                    fresh.serving(path, canary_digest)
+                    if probe_fresh is not None:
+                        probe_fresh.serving(path, canary_digest)
                 witness = {"schema": "edge-node-worker-connection-witness/v1", "journal_digest": journal["digest"],
                            "held": old, "fresh": newest, "observed_at": wire_time(now())}
                 if probe_ref is not None:
@@ -198,13 +234,17 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                 adapter.witness(witness)
                 while now() < deadline + datetime.timedelta(seconds=15):
                     result = adapter.result()
-                    if probe_ref is not None and (proof(probe_fresh) != reference or fact(probe_fresh, target, candidate_addr) != probe_ref):
-                        raise ValueError("fresh probe connection changed before Guardian acknowledgement")
+                    if probe_ref is not None:
+                        proof(probe_fresh)
+                        if fact(probe_fresh, target, candidate_addr) != probe_ref:
+                            raise ValueError("fresh probe connection changed before Guardian acknowledgement")
+                    retained_serves(retained)
+                    proof(fresh)
+                    if (adapter.selected_activation() != state or fact(retained, before, retained_addr) != old
+                            or fact(fresh, target, candidate_addr) != newest):
+                        raise ValueError("a witnessed connection or activation changed before Guardian receipt")
                     if result is not None:
                         require_verified(result, journal, state, witness)
-                        if (adapter.selected_activation() != state or proof(retained) != reference or proof(fresh) != reference
-                                or fact(retained, before, retained_addr) != old or fact(fresh, target, candidate_addr) != newest):
-                            raise ValueError("a witnessed connection or activation vanished during Guardian readback")
                         if drain_record is not None:
                             if probe_fresh is None:
                                 raise ValueError("drain verification requires both public and probe sockets")
@@ -214,7 +254,7 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                                 # A routine signed route refresh can change the
                                 # proof version. The socket and Worker identity
                                 # must remain exact throughout the drain.
-                                proof(retained)
+                                retained_serves(retained)
                                 if fact(retained, before, retained_addr) != old:
                                     raise ValueError("draining socket no longer reaches its exact old Worker")
 
@@ -226,9 +266,6 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
 
                             verify_drain(adapter, journal, result, state, old, check_old, check_new, now, pause, drain_record)
                         return result
-                    if (adapter.selected_activation() != state or proof(retained) != reference or proof(fresh) != reference
-                            or fact(retained, before, retained_addr) != old or fact(fresh, target, candidate_addr) != newest):
-                        raise ValueError("a witnessed connection or activation changed before Guardian receipt")
                     pause(3)
                 break
         # No direct write. Loss of witness/expiry makes the Guardian retain or

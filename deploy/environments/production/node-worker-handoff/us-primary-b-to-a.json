@@ -35,16 +35,17 @@
   "expected": {
     "schema": "edge-front-group-activation/v1",
     "edge_group_id": "edge-group-country-us",
-    "generation": 912,
+    "generation": 914,
     "active_slot": "b",
     "previous_slot": "a",
     "bundle_generation": "edgegroupbundle_8682fceb651a8718c9f21c6dd9a82df7999e206d61262d0a192eb3ac6129733f.p66625.r185",
     "worker_source_commit": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
     "worker_image_digest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
     "authority": "edge-control",
-    "operation": "promote",
-    "reason": "promote Guardian verified candidate authority",
-    "updated_at": "2026-11-20T22:21:36.553520885Z"
+    "operation": "rollback",
+    "rollback_of_generation": 913,
+    "reason": "restore node Worker using journal sha256:1fb22e97001d0493f4b81d5cf00adf50a8323066c753f2bf2fffabadde50d323",
+    "updated_at": "2026-11-25T17:17:24.739136937Z"
   },
   "peers": [
     {
@@ -59,8 +60,9 @@
     }
   ],
   "probe": {
-    "host": "api.fugue.pro",
-    "path": "/"
+    "host": "edge-observe-canary-0731-1333.fugue.pro",
+    "path": "/",
+    "bodyDigest": "sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de"
   },
   "verifyDrain": true
 }

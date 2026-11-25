@@ -84,9 +84,11 @@ def validate(config):
             "declaration must pin the exact predecessor state, not a group-level version")
     front.timestamp(before["updated_at"])
     probe = config["probe"]
-    fields(probe, "host path")
+    fields(probe, "host path" + (" bodyDigest" if "bodyDigest" in probe else ""))
     require(matches(re.compile(r"[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]"), probe["host"])
-            and matches(re.compile(r"/[^\s?#]{0,510}"), probe["path"]), "invalid TLS canary")
+            and matches(re.compile(r"/[^\s?#]{0,510}"), probe["path"])
+            and ("bodyDigest" not in probe or matches(DIGEST, probe["bodyDigest"]))
+            and (not config.get("verifyDrain") or "bodyDigest" in probe), "invalid TLS canary")
     require(isinstance(config["peers"], list) and len(config["peers"]) <= 12, "explicit peer roster required")
     nodes, services = {config["node"]}, {public["service"]}
     for peer in config["peers"]:

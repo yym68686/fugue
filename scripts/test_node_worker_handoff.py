@@ -92,11 +92,22 @@ class Socket:
 
     def proof(self, path):
         assert not self.closed and path == PROBE["path"]
+        if self.fixture.failure == "inactive_probe_denied" and self.number == 0 and len(self.fixture.sockets) > 1:
+            raise ValueError("inactive Worker no longer emits signature evidence")
         self.requests += 1
         version = "expected"
         if self.fixture.failure == "different_route" and self.number != 0:
             version = "unexpected"
+        if self.fixture.failure == "publication_refresh" and len(self.fixture.sockets) == 3:
+            version = "refreshed" if self.number == 2 or self.fixture.refresh_seen else "expected"
+            if self.number == 2:
+                self.fixture.refresh_seen = True
         return {"edge": PROFILE["node"], "group": PROFILE["group"], "version": version}
+
+    def serving(self, path, digest):
+        assert not self.closed and path == PROBE["path"] and digest == "sha256:" + "e" * 64
+        if self.number == 0 and hasattr(self.fixture, "deadline") and self.fixture.now() >= self.fixture.deadline:
+            raise ConnectionResetError("closed by remote Front")
 
     def close(self):
         self.closed = True
@@ -170,6 +181,14 @@ class NodeWorkerHandoffTests(unittest.TestCase):
         self.assertEqual(worker.front.timestamp(complete["front_forced_at"]), f.deadline)
         self.assertEqual(complete["metrics"]["last_forced"], 1)
 
+    def test_drain_continuity_uses_real_canary_when_old_worker_no_longer_signs(self):
+        f = DrainFixture("inactive_probe_denied")
+        result = worker.handoff(f, PROFILE, {"pod": "existing-front"}, ADDRESS, dict(PROBE, bodyDigest="sha256:" + "e" * 64),
+                                f.journal, probe_port=15443, now=f.now, pause=f.pause, open_tls=f.open, drain_record=f.record)
+        self.assertEqual(result["outcome"], "verified")
+        self.assertEqual(f.sockets[0].requests, 1)
+        self.assertIn("drain_completed", f.evidence)
+
     def test_early_or_unattributed_disconnect_cannot_pass(self):
         for case, error in (("early_close", "without a verified"), ("unattributed", "no witnessed")):
             f = DrainFixture(case)
@@ -186,6 +205,14 @@ class NodeWorkerHandoffTests(unittest.TestCase):
         self.assertEqual(witness["probe_fresh"]["target"], witness["fresh"]["target"])
         self.assertEqual(len({witness[k]["id"] for k in ("held", "fresh", "probe_fresh")}), 3)
         self.assertTrue(all(s.closed for s in fixture.sockets))
+
+    def test_publication_refresh_requires_resampling_the_same_three_sockets(self):
+        fixture = Fixture("publication_refresh")
+        fixture.refresh_seen = False
+        fixture.journal.update(fixed_transport=True, probe_service_uid="probe-uid")
+        self.assertEqual(simulate(fixture)["outcome"], "verified")
+        self.assertEqual(len(fixture.sockets), 3)
+        self.assertGreaterEqual(fixture.sockets[2].requests, 3)
 
     def test_one_original_socket_and_one_fresh_socket_survive_to_guardian_readback(self):
         f = Fixture()
