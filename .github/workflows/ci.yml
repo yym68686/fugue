@@ -1173,6 +1173,22 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Qualify the exact API-only release candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/codex/api1198-exact-source-qualification'
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          revision=36ed0e1af7c616c5c3fbb888712ea566afb61706
+          base=1699f9b9d611c993e15aa1415c29369310b42cca
+          test "$(git rev-parse "$revision^")" = "$base"
+          git diff --exit-code "$revision" HEAD -- . ':!.github/workflows/ci.yml'
+          checkout="$RUNNER_TEMP/exact-api"
+          git worktree add --detach "$checkout" "$revision"
+          cd "$checkout"
+          git diff --name-only "$base" "$revision" > "$RUNNER_TEMP/api-paths"
+          go run ./cmd/fugue-declarative-release plan deploy/releases/components.json "$base" "$revision" "$RUNNER_TEMP/api-paths" > "$RUNNER_TEMP/api-plan.json"
+          jq -e '[.releases[].component] == ["api"]' "$RUNNER_TEMP/api-plan.json"
+          make test GOCACHE="$(go env GOCACHE)"
       - name: Compile test binaries before the bounded test budget
         timeout-minutes: 10
         # Cold compilation is separately bounded. The prepush step below still
