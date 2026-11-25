@@ -489,11 +489,14 @@ func TestNodeUpdaterEdgeCredentialFailsClosedWhenIdentityIsMissing(t *testing.T)
 	}
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
 	req := httptest.NewRequest(http.MethodGet, "https://api.fugue.pro/v1/node-updater/desired-state", nil)
-	credential, warnings, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{ClusterNodeName: "missing-edge", Labels: map[string]string{
-		"fugue.io/public-ip": "15.204.94.71", "fugue.io/role.edge": "true",
-	}}, &model.ClusterNodePolicyStatus{Policy: &model.ClusterNodePolicy{AllowEdge: true}, Labels: map[string]string{
-		"fugue.io/public-ip": "15.204.94.71", "fugue.io/role.edge": "true",
-	}})
+	// Location is known here: only the edge identity should be missing.
+	labels := map[string]string{
+		"fugue.io/location-country-code": "us",
+		"fugue.io/public-ip":             "15.204.94.71",
+		"fugue.io/role.edge":             "true",
+	}
+	credential, warnings, err := server.nodeUpdaterEdgeCredential(req, model.NodeUpdater{ClusterNodeName: "missing-edge", Labels: labels},
+		&model.ClusterNodePolicyStatus{Policy: &model.ClusterNodePolicy{AllowEdge: true}, Labels: labels})
 	if err != nil {
 		t.Fatalf("issue edge credential: %v", err)
 	}

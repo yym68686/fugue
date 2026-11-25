@@ -1647,6 +1647,7 @@ func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *
 	}
 
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{})
+	server.dnsResolver = fakeServiceResolver{} // These synthetic apps have no cluster DNS.
 	return s, server, apiKey, app
 }
 

@@ -23,6 +23,12 @@ MAX_CONFIGURED_TIMEOUT_SECONDS = 360.0
 MAX_CONFIGURED_ELAPSED_SECONDS = 360.0
 GO_TASK_CONCURRENCY = 2
 SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
+# Start the measured slow full suites before short jobs can fill the Go slots.
+FULL_TEST_PACKAGE_PRIORITY = {
+    "./internal/api": 0,
+    "./internal/controller": 1,
+    "./internal/store": 2,
+}
 LOCALPV_BOOT_SOURCES = {
     "internal/api/localpv_unit.py",
     "internal/api/localpv_unit.go",
@@ -256,6 +262,12 @@ def warm_affected_tests_before_compile(commands: list[list[str]]) -> bool:
     )
 
 
+def test_command_priority(command: list[str]) -> int:
+    if len(command) == 3 and command[:2] == ["go", "test"]:
+        return FULL_TEST_PACKAGE_PRIORITY.get(command[2], len(FULL_TEST_PACKAGE_PRIORITY))
+    return len(FULL_TEST_PACKAGE_PRIORITY)
+
+
 def run_test_commands(
     commands: list[list[str]],
     deadline: float,
@@ -278,7 +290,9 @@ def run_test_commands(
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(len(commands), GO_TASK_CONCURRENCY)
     ) as executor:
-        futures = [executor.submit(execute, index, command) for index, command in enumerate(commands)]
+        # Prioritize execution, but keep the original order for failure reporting.
+        indexed_commands = sorted(enumerate(commands), key=lambda pair: test_command_priority(pair[1]))
+        futures = [executor.submit(execute, index, command) for index, command in indexed_commands]
         for future in concurrent.futures.as_completed(futures):
             index, status, output = future.result()
             results[index] = (status, output)

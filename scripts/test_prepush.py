@@ -456,6 +456,40 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertIn("$ go test ./internal/a\na failed", output)
         self.assertIn("$ go test ./internal/b\nb failed", output)
 
+    def test_full_heavy_packages_start_first_but_failures_keep_input_order(self) -> None:
+        small = ["go", "test", "./internal/a"]
+        focused = ["go", "test", "./internal/api", "-run", "^TestOne$"]
+        api = ["go", "test", "./internal/api"]
+        controller = ["go", "test", "./internal/controller"]
+        store = ["go", "test", "./internal/store"]
+        commands = [small, focused, store, controller, api]
+        self.assertEqual(
+            sorted(commands, key=prepush.test_command_priority),
+            [api, controller, store, small, focused],
+        )
+        started = []
+        lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def fake_run(command, _timeout):
+            with lock:
+                started.append(command)
+                first_pair = len(started) <= 2
+            if first_pair:
+                barrier.wait(timeout=2)
+            if command == small:
+                return 7, "small failed"
+            if command == api:
+                return 9, "api failed"
+            return 0, ""
+
+        with mock.patch.object(prepush, "run", side_effect=fake_run):
+            status, output = prepush.run_test_commands(commands, time.monotonic() + 5)
+        self.assertCountEqual(started[:2], [api, controller])
+        self.assertCountEqual(started, commands)
+        self.assertEqual(status, 7)
+        self.assertEqual(output, "$ go test ./internal/a\nsmall failed\n$ go test ./internal/api\napi failed")
+
     def test_bounded_failure_output_keeps_failure_context_and_ends(self) -> None:
         output = (
             "head sentinel\n"

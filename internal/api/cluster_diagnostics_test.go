@@ -650,6 +650,9 @@ func TestProbeClusterWebSocketDistinguishesService101FromPublic502(t *testing.T)
 	}
 
 	server := NewServer(stateStore, auth.New(stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	server.dnsResolver = fakeServiceResolver{
+		ips: map[string][]net.IPAddr{serviceHost: {{IP: net.IPv4(127, 0, 0, 1)}}},
+	}
 	server.appRequestHTTPClient = &http.Client{Transport: transport}
 
 	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/cluster/net/websocket", "bootstrap-secret", map[string]any{

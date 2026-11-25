@@ -1472,6 +1472,8 @@ func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, mode
 		RegistryPushBase:            pushBase,
 		RegistryPullBase:            pullBase,
 	})
+	// Image and release tests have no Kubernetes DNS; keep synthetic services on the default hostname.
+	server.dnsResolver = fakeServiceResolver{}
 	server.requestRegistryGC = func(context.Context, string) error { return nil }
 	fakeRegistry := &fakeAppImageRegistry{
 		images: map[string]appImageRegistryInspectResult{

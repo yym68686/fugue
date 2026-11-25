@@ -450,6 +450,7 @@ func testCaptureReleaseRuntimeReadiness(t *testing.T, draining bool) {
 					t.Fatal(err)
 				}
 				fullServer := NewServer(state, auth.New(state, ""), nil, ServerConfig{AppBaseDomain: "example.test"})
+				fullServer.dnsResolver = fakeServiceResolver{}
 				fullServer.newManagedAppStatusClient = server.newManagedAppStatusClient
 				observed := fullServer.overlayManagedAppStatuses(context.Background(), []model.App{desired})
 				if observed[0].ObservedStatus == nil || observed[0].ObservedStatus.ServingReleaseID != "" {
