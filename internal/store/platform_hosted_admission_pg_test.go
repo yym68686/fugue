@@ -209,6 +209,37 @@ func qualifyHostedProducerAdmission(t *testing.T, db *sql.DB) {
 	checkBlockers(notExpected(held.EdgeID, kinds[1]))
 	check(0, 0)
 	exec(`UPDATE fugue_platform_expected_consumer_sets SET consumers_json=$1 WHERE id=$2`, originalTLSSet, "set-"+kinds[1])
+	t.Run("new-domain-encoding-uses-every-physical-receiver", func(t *testing.T) {
+		tx, err := db.BeginTx(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback() // test capabilities never affect the real admission fixture
+		unit, err := routeartifact.OpenHostedPhase(p, c.DraftDigest, im.Digest, wire, "prepare")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := func(expected string) {
+			t.Helper()
+			got, e := pgHostedNewDraftEncoding(t.Context(), tx, model.PlatformArtifact{ID: "parent", ScopeKey: "global"}, p, unit, time.Now().UTC())
+			if e != nil || got != expected {
+				t.Fatalf("draft: got %s, want %s: %v", got, expected, e)
+			}
+		}
+		want(pc.HostedProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=compatibility_capabilities_json::jsonb || jsonb_build_array($1::text) WHERE node_id<>$2`, routeartifact.HostedContinuationCapability, held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET compatibility_capabilities_json=compatibility_capabilities_json::jsonb || jsonb_build_array($1::text) WHERE node_id=$2`, routeartifact.HostedContinuationCapability, held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedMembershipProposalSchema)
+		if _, err := tx.Exec(`UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE artifact_kind=$1 AND node_id=$2`, kinds[1], held.EdgeID); err != nil {
+			t.Fatal(err)
+		}
+		want(pc.HostedProposalSchema)
+	})
 	const required = 8
 	check(1, required)
 	t.Run("transition is not a global positive and obeys known negative evidence", func(t *testing.T) {
