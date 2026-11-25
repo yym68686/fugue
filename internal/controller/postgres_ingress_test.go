@@ -16,7 +16,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
-func TestLivePostgresIngressIncludesRetainedGenerations(t *testing.T) {
+func livePostgresFixture(t *testing.T) (*store.Store, model.App) {
+	t.Helper()
 	state := store.New(filepath.Join(t.TempDir(), "state.json"))
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
@@ -41,9 +42,14 @@ func TestLivePostgresIngressIncludesRetainedGenerations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return state, app
+}
+
+func TestLivePostgresIngressIncludesRetainedGenerations(t *testing.T) {
+	state, app := livePostgresFixture(t)
 	db := app.BackingServices[0]
-	ns := runtime.NamespaceForTenant(tenant.ID)
-	labels := map[string]string{runtime.FugueLabelTenantID: tenant.ID, runtime.FugueLabelOwnerAppID: db.OwnerAppID, runtime.FugueLabelProjectID: project.ID, runtime.FugueLabelBackingServiceID: db.ID}
+	ns := runtime.NamespaceForTenant(app.TenantID)
+	labels := map[string]string{runtime.FugueLabelTenantID: app.TenantID, runtime.FugueLabelOwnerAppID: db.OwnerAppID, runtime.FugueLabelProjectID: app.ProjectID, runtime.FugueLabelBackingServiceID: db.ID}
 	names := []string{db.Spec.Postgres.ServiceName, "retained", "incident"}
 	policies := map[string]bool{}
 	handler := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +82,7 @@ func TestLivePostgresIngressIncludesRetainedGenerations(t *testing.T) {
 	}))
 	defer handler.Close()
 	s := &Service{Store: state, Config: config.ControllerConfig{ControlPlaneNamespace: "fugue-system"}}
-	if err := s.reconcileLivePostgresIngress(context.Background(), &kubeClient{client: handler.Client(), baseURL: handler.URL}); err != nil {
+	if err := s.reconcileLivePostgres(context.Background(), &kubeClient{client: handler.Client(), baseURL: handler.URL}); err != nil {
 		t.Fatal(err)
 	}
 	retained, created := policies["retained"]

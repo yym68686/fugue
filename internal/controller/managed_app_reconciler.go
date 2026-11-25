@@ -85,6 +85,14 @@ func (s *Service) applyManagedAppDesiredStateResult(ctx context.Context, app mod
 	if err := s.validateAppStoragePlacement(ctx, client, app, scheduling, s.Renderer.BuildManagedAppChildObjects(app, scheduling, nil)); err != nil {
 		return model.App{}, err
 	}
+	// A deploy may have been claimed before an administrator held the tenant.
+	tenant, err := s.Store.GetTenant(app.TenantID)
+	if err != nil {
+		return model.App{}, err
+	}
+	if tenant.Status == model.TenantStatusAccessHeld {
+		return model.App{}, errors.New("tenant access is held")
+	}
 	objects := runtime.BuildManagedAppStateObjects(app, scheduling)
 	if err := client.applyObjects(ctx, objects); err != nil {
 		return model.App{}, fmt.Errorf("apply managed app state objects: %w", err)
@@ -137,7 +145,7 @@ func (s *Service) reconcileManagedApps(ctx context.Context) error {
 		return fmt.Errorf("list managed apps: %w", err)
 	}
 
-	firstErr := s.reconcileLivePostgresIngress(ctx, client)
+	firstErr := s.reconcileLivePostgres(ctx, client)
 	for _, managed := range managedApps {
 		if err := s.reconcileManagedAppObject(ctx, client, managed); err != nil {
 			if firstErr == nil {

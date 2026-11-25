@@ -16,18 +16,18 @@ import (
 
 // Reconcile actual CNPG clusters independently of the parent app. Standalone,
 // restored and quarantined databases can all outlive an executable release.
-func (s *Service) reconcileLivePostgresIngress(ctx context.Context, client *kubeClient) error {
-	if s.Config.ControlPlaneNamespace == "" {
-		return nil
-	}
+func (s *Service) reconcileLivePostgres(ctx context.Context, client *kubeClient) error {
 	var clusters struct {
 		Items []struct {
 			Metadata metav1.ObjectMeta `json:"metadata"`
+			Status   struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
 		} `json:"items"`
 	}
 	path := "/apis/postgresql.cnpg.io/v1/clusters?labelSelector=" + url.QueryEscape(runtime.FugueLabelManagedBy+"="+runtime.FugueLabelManagedByValue+","+runtime.FugueLabelBackingServiceID)
 	if _, err := client.doJSON(ctx, http.MethodGet, path, nil, &clusters); err != nil {
-		return fmt.Errorf("list managed postgres ingress targets: %w", err)
+		return fmt.Errorf("list live managed postgres clusters: %w", err)
 	}
 	services, err := s.Store.ListBackingServices("", true)
 	if err != nil {
@@ -40,6 +40,14 @@ func (s *Service) reconcileLivePostgresIngress(ctx context.Context, client *kube
 		}
 	}
 	var failures []error
+	tenants, err := s.Store.ListTenants()
+	if err != nil {
+		failures = append(failures, fmt.Errorf("list postgres tenant holds: %w", err))
+	}
+	tenantStatus := make(map[string]string, len(tenants))
+	for _, tenant := range tenants {
+		tenantStatus[tenant.ID] = tenant.Status
+	}
 	for _, item := range clusters.Items {
 		meta := item.Metadata
 		tenant := meta.Labels[runtime.FugueLabelTenantID]
@@ -51,6 +59,11 @@ func (s *Service) reconcileLivePostgresIngress(ctx context.Context, client *kube
 		if !found || db.TenantID != tenant || db.ProjectID != meta.Labels[runtime.FugueLabelProjectID] ||
 			db.OwnerAppID != meta.Labels[runtime.FugueLabelOwnerAppID] {
 			continue
+		}
+		if status := tenantStatus[tenant]; status == model.TenantStatusAccessHeld || status == "active" && meta.Annotations[postgresTenantHold] != "" {
+			if err := s.reconcilePostgresTenantHold(ctx, client, meta, item.Status.Phase, db); err != nil {
+				failures = append(failures, fmt.Errorf("managed postgres tenant hold %s/%s: %w", meta.Namespace, meta.Name, err))
+			}
 		}
 		if err := s.reconcilePostgresIngress(ctx, client, meta.Namespace, meta.Name, db); err != nil {
 			failures = append(failures, fmt.Errorf("managed postgres ingress %s/%s: %w", meta.Namespace, meta.Name, err))
