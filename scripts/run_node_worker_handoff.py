@@ -39,21 +39,33 @@ def matches(pattern, value):
 
 
 def validate(config):
-    fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe")
+    fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe"
+           + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else ""))
     require(config["schema"] == "fugue.node-worker-handoff/v1"
             and all(matches(NAME, config[k]) for k in ("namespace", "group", "node"))
             and matches(UID, config["nodeUID"]), "exact named node Worker handoff required")
     public, guardian, candidate = (config[k] for k in ("front", "guardian", "candidate"))
     fields(public, "service uid generation address source imageDigest")
     fields(guardian, "deployment source imageDigest")
-    fields(candidate, "deployment component source imageDigest slot bundleGeneration releaseDigest")
+    fixed = isinstance(candidate, dict) and "daemonSet" in candidate
+    fields(candidate, ("daemonSet" if fixed else "deployment") + " component source imageDigest slot bundleGeneration releaseDigest")
+    require(not fixed or "probeIngress" in config, "fixed Worker handoff requires the independent probe transport")
     addr = ipaddress.ip_address(public["address"])
     require(addr.version == 4 and addr.is_global and public["address"] == str(addr)
             and matches(NAME, public["service"]) and matches(UID, public["uid"])
             and type(public["generation"]) is int and public["generation"] > 0, "exact serving Front Service is required")
     for actor in (public, guardian, candidate):
         require(matches(SHA, actor["source"]) and matches(DIGEST, actor["imageDigest"]), "actor must pin immutable source and image")
-    require(all(matches(NAME, actor["deployment"]) for actor in (guardian, candidate)) and matches(NAME, candidate["component"])
+    if "probeIngress" in config:
+        ingress = config["probeIngress"]
+        fields(ingress, "service uid generation port")
+        require(matches(NAME, ingress["service"]) and matches(UID, ingress["uid"])
+                and ingress["service"] != public["service"] and ingress["uid"] != public["uid"]
+                and type(ingress["generation"]) is int and ingress["generation"] > 0
+                and type(ingress["port"]) is int and ingress["port"] == 15443,
+                "exact independently selected Front probe transport required")
+    require(matches(NAME, guardian["deployment"]) and matches(NAME, candidate["daemonSet" if fixed else "deployment"])
+            and matches(NAME, candidate["component"])
             and matches(DIGEST, candidate["releaseDigest"]) and candidate["slot"] in ("a", "b")
             and matches(re.compile(r"[a-zA-Z0-9_.:-]{1,253}"), candidate["bundleGeneration"]),
             "independently monitored candidate is required")
@@ -160,12 +172,28 @@ class ActiveCluster:
                     "target Front Service is not on the declared serving generation and node")
         return svc
 
-    def service_front(self, svc, node):
+    def service_front(self, svc, node, *, probe=False):
         name = svc["metadata"]["name"]
         selected = one(self.pods(svc["spec"]["selector"]), "complete Service selector")
         require(selected["spec"]["nodeName"] == node, "Service selected a different node")
-        address = stage.selected_endpoint_witness(self.profile, {"name": name}, {"node": node}, selected, svc)
+        address = stage.selected_endpoint_witness(self.profile, {"name": name}, {"node": node}, selected, svc, probe=probe)
         return selected, address
+
+    def require_probe_ingress(self, expected, public, selected):
+        svc = self.get("service", expected["service"])
+        meta, spec = svc["metadata"], svc["spec"]
+        ann = meta.get("annotations", {})
+        projected = replacement.projection(spec, probe=True)
+        require(obj_uid(svc) == expected["uid"] and not meta.get("deletionTimestamp")
+                and meta.get("labels", {}).get("app.kubernetes.io/managed-by") == kube.MANAGER
+                and ann.get(kube.FOLLOWS_SERVING) == obj_uid(public)
+                and ann.get(kube.GENERATION) == str(expected["generation"])
+                and ann.get(kube.DIGEST) == kube.digest(projected)
+                and spec.get("selector") == public["spec"]["selector"] and spec.get("externalIPs") == public["spec"]["externalIPs"]
+                and projected.get("ports") == [{"name": "https-probe", "protocol": "TCP", "port": expected["port"], "targetPort": 443}],
+                "probe transport no longer follows the selected public Front")
+        same, _ = self.service_front(svc, self.config["node"], probe=True)
+        require(obj_uid(same) == obj_uid(selected), "probe transport picked a different Front process")
 
     def deployment_actor(self, declared, container):
         deployment = self.get("deployment", declared["deployment"])
@@ -210,6 +238,8 @@ class ActiveCluster:
         public = cfg["front"]
         svc = self.read_service(dict(public, node=cfg["node"]))
         selected, bound = self.service_front(svc, cfg["node"])
+        if "probeIngress" in cfg:
+            self.require_probe_ingress(cfg["probeIngress"], svc, selected)
         pin_image(selected, "edge-front", public["source"], public["imageDigest"])
         container = one([c for c in selected["spec"]["containers"] if c["name"] == "edge-front"], "Front container")
         front.require_node_worker_mounts(self.profile, selected, container)
@@ -220,9 +250,18 @@ class ActiveCluster:
         prior = self.worker_at(local, 18443 if expected["active_slot"] == "a" else 28443)
         pin_image(prior, "edge", expected["worker_source_commit"], expected["worker_image_digest"])
         can = cfg["candidate"]
-        candidate = self.deployment_actor(can, "edge")
-        require(candidate["spec"]["nodeName"] == cfg["node"] and obj_uid(self.worker_at(local, 38443)) == obj_uid(candidate),
-                "independently monitored Worker is not the node's registered overlap process")
+        if "daemonSet" in can:
+            candidate = self.worker_at(local, 18443 if can["slot"] == "a" else 28443)
+            pin_image(candidate, "edge", can["source"], can["imageDigest"])
+            owner = controller(candidate)
+            ds = self.get("daemonset", can["daemonSet"])
+            require(owner["kind"] == "DaemonSet" and owner["name"] == can["daemonSet"] and owner["uid"] == obj_uid(ds)
+                    and ds["spec"]["updateStrategy"]["type"] == "OnDelete",
+                    "fixed Worker was not created by its declared OnDelete DaemonSet")
+        else:
+            candidate = self.deployment_actor(can, "edge")
+            require(candidate["spec"]["nodeName"] == cfg["node"] and obj_uid(self.worker_at(local, 38443)) == obj_uid(candidate),
+                    "independently monitored Worker is not the node's registered overlap process")
         guardian = self.deployment_actor(cfg["guardian"], "release-guardian")
         journal = {"schema": "edge-node-worker-advance/v1", "recipient": recipient, "expected": expected,
                    "node_uid": cfg["nodeUID"], "service_uid": bound["service_uid"],
@@ -231,6 +270,10 @@ class ActiveCluster:
                    "candidate_component": can["component"], "release_digest": can["releaseDigest"],
                    "candidate": {"slot": can["slot"], "bundle_generation": can["bundleGeneration"],
                                  "worker_source_commit": can["source"], "worker_image_digest": can["imageDigest"]}}
+        if "probeIngress" in cfg:
+            journal["probe_service_uid"] = cfg["probeIngress"]["uid"]
+        if "daemonSet" in can:
+            journal["fixed_transport"] = True
         return selected, guardian, journal
 
     def peer_snapshot(self):
@@ -386,7 +429,8 @@ def run(config, evidence_path):
         adapter.require_claim(sealed)
         adapter.wait_projection(sealed)
         evidence["guardian_result"] = handoff.handoff(adapter, cluster.profile, selected, config["front"]["address"],
-                                                       config["probe"], journal)
+                                                       config["probe"], journal,
+                                                       probe_port=config.get("probeIngress", {}).get("port"))
     except (ValueError, OSError, subprocess.TimeoutExpired) as err:
         evidence["error"] = str(err)
         failure = err

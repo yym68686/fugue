@@ -47,9 +47,12 @@ class Fixture:
         self.reads += 1
         if self.reads <= 2:
             return None
-        return {"schema": "edge-node-worker-result/v1", "journal_digest": self.journal["digest"],
+        result = {"schema": "edge-node-worker-result/v1", "journal_digest": self.journal["digest"],
                 "outcome": "verified", "activation": dict(self.activation),
                 "witness": dict(self.witness_input, observed_at=self.witness_input["observed_at"].replace("Z", "+00:00"))}
+        if self.journal.get("probe_service_uid"):
+            result["drain_start"] = worker.wire_time(self.now())
+        return result
 
     def selected_activation(self):
         if not self.arm_input or self.clock.second < 4 and self.clock.minute == 0 or self.failure == "never_moves":
@@ -62,8 +65,9 @@ class Fixture:
                         reason="restore node Worker using journal " + self.journal["digest"])
         return self.activation
 
-    def open(self, address, host):
+    def open(self, address, host, port=443):
         assert (address, host) == (ADDRESS, PROBE["host"])
+        assert port in (443, 15443)
         socket = Socket(self, len(self.sockets), worker.wire_time(self.now()))
         self.sockets.append(socket)
         return socket
@@ -75,7 +79,8 @@ class Fixture:
         connection = "original" if old else f"new-{sock.number}"
         if self.failure == "replaced_old" and old and self.selected_activation() != self.before:
             connection = "different-original"
-        target = ADDRESS + (":28443" if old or self.failure == "wrong_new_listener" else ":38443")
+        target = ADDRESS + (":28443" if old or self.failure == "wrong_new_listener" else
+                            (":18443" if self.journal.get("fixed_transport") else ":38443"))
         return {"pod_uid": "front-uid", "connection_id": connection, "started_at": sock.started_at,
                 "slot": "b" if old else "a", "target": target, "source_evidence": "socket"}
 
@@ -99,10 +104,21 @@ class Socket:
 
 def simulate(fixture):
     return worker.handoff(fixture, PROFILE, {"pod": "existing-front"}, ADDRESS, PROBE, fixture.journal,
+                          probe_port=15443 if fixture.journal.get("probe_service_uid") else None,
                           now=fixture.now, pause=fixture.pause, open_tls=fixture.open)
 
 
 class NodeWorkerHandoffTests(unittest.TestCase):
+    def test_fixed_transport_has_distinct_fresh_public_and_probe_connections(self):
+        fixture = Fixture()
+        fixture.journal.update(fixed_transport=True, probe_service_uid="probe-uid")
+        result = simulate(fixture)
+        witness = result["witness"]
+        self.assertEqual(witness["fresh"]["target"], ADDRESS + ":18443")
+        self.assertEqual(witness["probe_fresh"]["target"], witness["fresh"]["target"])
+        self.assertEqual(len({witness[k]["id"] for k in ("held", "fresh", "probe_fresh")}), 3)
+        self.assertTrue(all(s.closed for s in fixture.sockets))
+
     def test_one_original_socket_and_one_fresh_socket_survive_to_guardian_readback(self):
         f = Fixture()
         result = simulate(f)

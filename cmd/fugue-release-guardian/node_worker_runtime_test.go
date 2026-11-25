@@ -115,6 +115,41 @@ func nodeWorkerRuntimeFixture(t *testing.T) (*frontAuthorityActivator, *fake.Cli
 	return &frontAuthorityActivator{client: client, config: frontAuthorityConfig{Namespace: namespace, GroupID: group}}, client, journal
 }
 
+func TestBoundedDrainRejectsAnotherIngressButNotAnUnselectedFront(t *testing.T) {
+	_, client, j := nodeWorkerRuntimeFixture(t)
+	ctx := context.Background()
+	core := client.CoreV1()
+	front, err := core.Pods("fugue-system").Get(ctx, "selected-front", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := core.Services("fugue-system").Get(ctx, "node-public", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := public.DeepCopy()
+	probe.Name, probe.UID = "node-probe", "another-service"
+	r := nodeWorkerRuntime{front: *front, service: *public, probe: *probe}
+	legacy := front.DeepCopy()
+	legacy.Name, legacy.UID, legacy.Labels["app"] = "legacy-front", "legacy", "old-front"
+	legacy.Spec.Containers[0].Ports = []corev1.ContainerPort{{Name: "https", ContainerPort: 443}}
+	services := []corev1.Service{*public, *probe}
+	if err := requireExclusiveNodeWorkerIngress(services, []corev1.Pod{*front, *legacy}, r); err != nil {
+		t.Fatalf("unselected old Front with no ingress blocked cutover of %s: %v", j.Recipient.Node, err)
+	}
+	legacy.Spec.Containers[0].Ports[0].HostPort = 443
+	if err := requireExclusiveNodeWorkerIngress(services, []corev1.Pod{*front, *legacy}, r); err == nil {
+		t.Fatal("accepted the legacy hostPort as an unowned path")
+	}
+	legacy.Spec.Containers[0].Ports[0].HostPort = 0
+	extra := public.DeepCopy()
+	extra.Name, extra.UID, extra.Spec.Selector = "other-ingress", "other-service", map[string]string{"app": "old-front"}
+	extra.Spec.Ports = []corev1.ServicePort{{Name: "https-alt", Port: 16443, TargetPort: intstr.FromString("https")}}
+	if err := requireExclusiveNodeWorkerIngress(append(services, *extra), []corev1.Pod{*front, *legacy}, r); err == nil {
+		t.Fatal("accepted another Service exposing the old Front")
+	}
+}
+
 func localPointer[T any](in T) *T { return &in }
 
 func TestIndependentRuntimeRejectsDriftInFullPublicSelectorAndPhysicalOwner(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"fugue/internal/edgegroupfront"
@@ -58,9 +59,15 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 	if err := store.RequireNoActivatedTransition(ctx, group); err != nil {
 		return true, "", err
 	}
-	if _, exists, err := store.ReadNodeWorkerResult(ctx, j); err != nil {
+	if result, exists, err := store.ReadNodeWorkerResult(ctx, j); err != nil {
 		return true, "", err
 	} else if exists {
+		if result.DrainStart != nil {
+			finished, err := a.refreshNodeWorkerDrain(ctx, store, fence, result.Activation)
+			if err != nil || !finished {
+				return true, "", err
+			}
+		}
 		if err := store.FinalizeNodeWorker(ctx, fence); err != nil {
 			return true, "", err
 		}
@@ -98,6 +105,9 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 		if witnessErr == nil && available {
 			witnessErr = a.verifyNodeWorkerWitness(ctx, store, j, arm, witness, state)
 			if witnessErr == nil {
+				if j.ProbeServiceUID != "" {
+					return true, "verified_drain_start", store.RecordNodeWorkerDrainStart(ctx, fence, state, witness, a.now())
+				}
 				return true, "verified", store.RecordNodeWorkerResult(ctx, fence, state, "verified", &witness)
 			}
 		}
@@ -200,7 +210,7 @@ func (a *frontAuthorityActivator) readNodeWorkerSelection(ctx context.Context, j
 	if j.Progress(s) == edgegroupfront.NodeWorkerActivated {
 		// Derive from the exact Front host even if its selected Worker
 		// replica is gone. Never dial an address from the health response.
-		target = net.JoinHostPort(runtime.front.Status.HostIP, "38443")
+		target = net.JoinHostPort(runtime.front.Status.HostIP, strconv.Itoa(int(j.CandidateHTTPSPort())))
 	}
 	if live.Target != target {
 		return s, errors.New("public Front did not select the journal's exact physical listener")
@@ -246,9 +256,13 @@ func (a *frontAuthorityActivator) verifyNodeWorkerWitness(ctx context.Context, s
 	if err != nil {
 		return err
 	}
+	refs := []releaseguardian.NodeWorkerConnection{witness.Held, witness.Fresh}
+	if witness.ProbeFresh != nil {
+		refs = append(refs, *witness.ProbeFresh)
+	}
 	if witness.Held.Target != r.prior.target || witness.Fresh.Target != r.next.target ||
-		!a.nodeWorkerConnectionsLive(ctx, r, witness.Held, witness.Fresh) {
-		return errors.New("both TLS connections were not observed on their expected physical Workers")
+		!a.nodeWorkerConnectionsLive(ctx, r, refs...) {
+		return errors.New("required live TLS connections were not observed on their expected physical Workers")
 	}
 	if err := store.VerifyNodeWorkerArtifact(ctx, j, r.next.pod); err != nil {
 		return err
@@ -343,10 +357,15 @@ func nodeWorkerConnectionInventoryMatches(raw []byte, uid string, refs []release
 			Target    string    `json:"target"`
 		} `json:"active"`
 	}
-	if len(refs) == 0 || len(refs) > 2 || json.Unmarshal(raw, &view) != nil || view.Count != len(view.Active) || view.Count > 16_384 {
+	if len(refs) == 0 || len(refs) > 3 || json.Unmarshal(raw, &view) != nil || view.Count != len(view.Active) || view.Count > 16_384 {
 		return false
 	}
+	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
+		if seen[ref.ID] {
+			return false
+		}
+		seen[ref.ID] = true
 		matches := 0
 		for _, c := range view.Active {
 			fact := releaseguardian.NodeWorkerConnection{FrontUID: uid, ID: c.ID, StartedAt: c.StartedAt, Slot: c.Slot, Target: c.Target}

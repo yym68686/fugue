@@ -112,6 +112,9 @@ func readClaimStdin(in io.Reader) ([]byte, error) {
 
 func (a *frontAuthorityActivator) claimNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore,
 	component releaseguardian.NodeWorkerComponent, podUID string, j edgegroupfront.NodeWorkerJournal) (fence releaseguardian.NodeWorkerFence, resultErr error) {
+	if j.FixedTransport && j.CandidateComponent != component.Component {
+		return fence, errors.New("fixed Worker must belong to the fenced release component")
+	}
 	now := a.now().UTC()
 	if j.CreatedAt.After(now) || !j.CreatedAt.Add(2*time.Minute).After(now) {
 		return fence, errors.New("new node Worker journal was not made from recent observations")

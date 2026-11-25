@@ -40,11 +40,12 @@ type NodeWorkerArm struct {
 }
 
 type NodeWorkerWitness struct {
-	Schema        string               `json:"schema"`
-	JournalDigest string               `json:"journal_digest"`
-	Held          NodeWorkerConnection `json:"held"`
-	Fresh         NodeWorkerConnection `json:"fresh"`
-	ObservedAt    time.Time            `json:"observed_at"`
+	Schema        string                `json:"schema"`
+	JournalDigest string                `json:"journal_digest"`
+	Held          NodeWorkerConnection  `json:"held"`
+	Fresh         NodeWorkerConnection  `json:"fresh"`
+	ProbeFresh    *NodeWorkerConnection `json:"probe_fresh,omitempty"`
+	ObservedAt    time.Time             `json:"observed_at"`
 }
 
 const (
@@ -70,7 +71,19 @@ func (w NodeWorkerWitness) Validate(j edgegroupfront.NodeWorkerJournal, arm Node
 		!w.ObservedAt.Before(arm.Deadline) || j.Progress(on) != edgegroupfront.NodeWorkerActivated {
 		return errors.New("node Worker witness does not prove both a retained and a new connection")
 	}
+	if !w.matchesProbe(j, on) {
+		return errors.New("node Worker witness does not prove a distinct fresh connection from the pinned probe")
+	}
 	return nil
+}
+
+func (w NodeWorkerWitness) matchesProbe(j edgegroupfront.NodeWorkerJournal, on edgegroupfront.ActivationState) bool {
+	p := w.ProbeFresh
+	if j.ProbeServiceUID == "" {
+		return p == nil
+	}
+	return p != nil && p.Valid(j, w.ObservedAt) && !p.StartedAt.Before(on.UpdatedAt) &&
+		p.ID != w.Held.ID && p.ID != w.Fresh.ID && p.Slot == w.Fresh.Slot && p.Target == w.Fresh.Target
 }
 
 func NodeWorkerArmName(digest string) string     { return nodeWorkerInputName("armed", digest) }
@@ -125,13 +138,28 @@ type NodeWorkerResult struct {
 	Outcome       string                         `json:"outcome"`
 	Activation    edgegroupfront.ActivationState `json:"activation"`
 	Witness       *NodeWorkerWitness             `json:"witness,omitempty"`
+	DrainStart    *time.Time                     `json:"drain_start,omitempty"`
 }
 
 const nodeWorkerResultSchema = "edge-node-worker-result/v1"
 
 func (store *AuthorityStore) RecordNodeWorkerResult(ctx context.Context, fence NodeWorkerFence, state edgegroupfront.ActivationState, outcome string, w *NodeWorkerWitness) error {
+	return store.recordNodeWorkerResult(ctx, fence, state, outcome, w, nil)
+}
+
+// RecordNodeWorkerDrainStart is only called once the Guardian has actually
+// verified live cutover on both ingress listeners. Storing the start and
+// witness in the same immutable result closes the restart/lost-reply gap.
+func (store *AuthorityStore) RecordNodeWorkerDrainStart(ctx context.Context, fence NodeWorkerFence, state edgegroupfront.ActivationState, w NodeWorkerWitness, observedAt time.Time) error {
+	start := observedAt.UTC()
+	return store.recordNodeWorkerResult(ctx, fence, state, "verified", &w, &start)
+}
+
+func (store *AuthorityStore) recordNodeWorkerResult(ctx context.Context, fence NodeWorkerFence, state edgegroupfront.ActivationState, outcome string, w *NodeWorkerWitness, start *time.Time) error {
 	j := fence.Journal
-	result := NodeWorkerResult{nodeWorkerResultSchema, j.Digest, outcome, state, w}
+	result := NodeWorkerResult{
+		Schema: nodeWorkerResultSchema, JournalDigest: j.Digest, Outcome: outcome, Activation: state, Witness: w, DrainStart: start,
+	}
 	if !result.matches(j) {
 		return errors.New("node Worker result does not follow from its durable state")
 	}
@@ -150,11 +178,14 @@ func (r NodeWorkerResult) matches(j edgegroupfront.NodeWorkerJournal) bool {
 	switch r.Outcome {
 	case "verified":
 		return progress == edgegroupfront.NodeWorkerActivated && r.Witness != nil &&
-			r.Witness.Schema == NodeWorkerWitnessSchema && r.Witness.JournalDigest == j.Digest
+			r.Witness.Schema == NodeWorkerWitnessSchema && r.Witness.JournalDigest == j.Digest &&
+			r.Witness.matchesProbe(j, r.Activation) &&
+			(r.DrainStart == nil || j.ProbeServiceUID != "" && !r.DrainStart.Before(r.Witness.ObservedAt) &&
+				!r.DrainStart.Before(r.Activation.UpdatedAt))
 	case "reverted":
-		return progress == edgegroupfront.NodeWorkerReverted && r.Witness == nil
+		return progress == edgegroupfront.NodeWorkerReverted && r.Witness == nil && r.DrainStart == nil
 	case "expired_without_cutover":
-		return progress == edgegroupfront.NodeWorkerPending && r.Witness == nil
+		return progress == edgegroupfront.NodeWorkerPending && r.Witness == nil && r.DrainStart == nil
 	}
 	return false
 }

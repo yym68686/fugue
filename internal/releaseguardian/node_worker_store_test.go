@@ -127,7 +127,7 @@ func TestNodeWorkerResultRequiresARealHandoffAndSurvivesRestart(t *testing.T) {
 	held := NodeWorkerConnection{FrontUID: j.Recipient.PodUID, ID: "old-connection", Slot: j.Expected.ActiveSlot, Target: "192.0.2.7:28443", StartedAt: j.Expected.UpdatedAt}
 	fresh := NodeWorkerConnection{FrontUID: j.Recipient.PodUID, ID: "new-connection", Slot: j.Candidate.Slot, Target: "192.0.2.7:38443", StartedAt: clock.Add(time.Second)}
 	arm := NodeWorkerArm{NodeWorkerArmSchema, j.Digest, held, j.CreatedAt, j.CreatedAt.Add(time.Minute)}
-	w := NodeWorkerWitness{NodeWorkerWitnessSchema, j.Digest, held, fresh, clock.Add(2 * time.Second)}
+	w := NodeWorkerWitness{Schema: NodeWorkerWitnessSchema, JournalDigest: j.Digest, Held: held, Fresh: fresh, ObservedAt: clock.Add(2 * time.Second)}
 	now := clock.Add(3 * time.Second)
 	if err := arm.Validate(j, now); err != nil {
 		t.Fatal(err)

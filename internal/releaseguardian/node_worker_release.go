@@ -1,12 +1,17 @@
 package releaseguardian
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // VerifyNodeWorkerArtifact binds the independent candidate to the ordinary
@@ -18,8 +23,13 @@ func (store *AuthorityStore) VerifyNodeWorkerArtifact(ctx context.Context, j edg
 	reject := errors.New("candidate Worker is not the independently released, monitored replica")
 	if !componentPattern.MatchString(j.CandidateComponent) || pod.Namespace != store.namespace ||
 		pod.Spec.NodeName != j.Recipient.Node || string(pod.UID) != j.CandidateWorkerUID ||
-		pod.Annotations["fugue.pro/source-commit"] != j.Candidate.WorkerSourceCommit ||
-		pod.Labels["fugue.io/edge-node"] != j.Recipient.Node {
+		pod.Annotations["fugue.pro/source-commit"] != j.Candidate.WorkerSourceCommit {
+		return reject
+	}
+	if j.FixedTransport {
+		return store.verifyFixedNodeWorkerArtifact(ctx, j, pod)
+	}
+	if pod.Labels["fugue.io/edge-node"] != j.Recipient.Node {
 		return reject
 	}
 	read := &KubeStore{client: store.client}
@@ -65,6 +75,99 @@ func (store *AuthorityStore) VerifyNodeWorkerArtifact(ctx context.Context, j edg
 	fresh, err := read.loadStableMonitorMap(ctx, target)
 	if err != nil || fresh.Name != record.Name || fresh.UID != record.UID || fresh.ResourceVersion != record.ResourceVersion || fresh.DeletionTimestamp != nil {
 		return errors.Join(errors.New("candidate Worker stable monitor changed during verification"), err)
+	}
+	return nil
+}
+
+func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod) error {
+	reject := errors.New("fixed Worker is not the exact retained declarative workload revision")
+	owner := metav1.GetControllerOf(&pod)
+	if owner == nil || owner.Kind != "DaemonSet" || owner.UID == "" || pod.Labels["fugue.io/edge-slot"] != j.Candidate.Slot {
+		return reject
+	}
+	configSHA := pod.Annotations["fugue.pro/production-config-sha"]
+	if !shaPattern.MatchString(configSHA) {
+		return reject
+	}
+	matches, err := store.client.CoreV1().ConfigMaps(store.namespace).List(ctx, metav1.ListOptions{
+		Limit: 16, LabelSelector: labels.Set{
+			"app.kubernetes.io/managed-by": "fugue-declarative-release",
+			"fugue.pro/component":          j.CandidateComponent, "fugue.pro/config-sha": configSHA,
+		}.String(),
+	})
+	if err != nil || matches.Continue != "" || len(matches.Items) > 16 {
+		return errors.Join(reject, err)
+	}
+	var rendered appsv1.DaemonSet
+	for _, object := range matches.Items {
+		if object.Immutable == nil || !*object.Immutable || object.UID == "" || object.ResourceVersion == "" || object.DeletionTimestamp != nil ||
+			totalConfigMapBytes(object.Data) > maxRecordBytes {
+			continue
+		}
+		plan, artifact, prepared, monitor, forward, _, err := decodeStableRecord(object.Data)
+		release, found := releaseForComponent(plan, j.CandidateComponent)
+		if err != nil || !found || release.Transition == nil || release.Transition.Type != "edge-group-ab" ||
+			release.Transition.EdgeGroupAB == nil || release.Transition.EdgeGroupAB.GroupID != j.Recipient.Group ||
+			monitor.Component != j.CandidateComponent || artifact.Component != j.CandidateComponent ||
+			object.Name != monitorRecordNameFromDigest(j.CandidateComponent, monitor.RecordDigest) ||
+			prepared.Forward.ConfigSHA != configSHA || artifact.ReceiptDigest != j.ReleaseDigest ||
+			artifact.OCIRevision != j.Candidate.WorkerSourceCommit || artifact.TopDigest != j.Candidate.WorkerImageDigest ||
+			artifact.ImmutableRef != prepared.Forward.ImageRef {
+			continue
+		}
+		resources, err := declarativerelease.DecodeResourceSet(bytes.NewReader(forward))
+		if err != nil {
+			return errors.Join(reject, err)
+		}
+		for _, object := range resources.Items {
+			meta, _ := object["metadata"].(map[string]any)
+			if object["kind"] != "DaemonSet" || meta["name"] != owner.Name || meta["namespace"] != pod.Namespace {
+				continue
+			}
+			raw, err := json.Marshal(object)
+			if err != nil || rendered.Name != "" || json.Unmarshal(raw, &rendered) != nil ||
+				rendered.Spec.Template.Labels["fugue.io/edge-slot"] != j.Candidate.Slot ||
+				rendered.Spec.Template.Labels["fugue.io/edge-group-id"] != j.Recipient.Group ||
+				rendered.Spec.Template.Annotations["fugue.pro/oci-revision"] != j.Candidate.WorkerSourceCommit ||
+				containerImageMatches(rendered.Spec.Template.Spec.Containers, "edge", artifact.ImmutableRef) != nil {
+				return reject
+			}
+		}
+	}
+	if rendered.Name == "" || rendered.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
+		return reject
+	}
+	apps := store.client.AppsV1()
+	ds, err := apps.DaemonSets(store.namespace).Get(ctx, owner.Name, metav1.GetOptions{})
+	if err != nil || ds.UID != owner.UID || ds.DeletionTimestamp != nil || ds.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
+		return errors.Join(reject, err)
+	}
+	hash := pod.Labels[appsv1.ControllerRevisionHashLabelKey]
+	if !componentPattern.MatchString(hash) {
+		return reject
+	}
+	revision, err := apps.ControllerRevisions(store.namespace).Get(ctx, owner.Name+"-"+hash, metav1.GetOptions{})
+	if err != nil || revision.UID == "" || revision.ResourceVersion == "" || revision.DeletionTimestamp != nil {
+		return errors.Join(reject, err)
+	}
+	revisionOwner := metav1.GetControllerOf(revision)
+	if revisionOwner == nil || revisionOwner.Kind != owner.Kind || revisionOwner.Name != owner.Name || revisionOwner.UID != owner.UID {
+		return reject
+	}
+	var rev struct {
+		Spec struct {
+			Template corev1.PodTemplateSpec `json:"template"`
+		} `json:"spec"`
+	}
+	if json.Unmarshal(revision.Data.Raw, &rev) != nil || rev.Spec.Template.Labels["fugue.io/edge-slot"] != j.Candidate.Slot ||
+		rev.Spec.Template.Annotations["fugue.pro/production-config-sha"] != configSHA {
+		return reject
+	}
+	for _, c := range rendered.Spec.Template.Spec.Containers {
+		if containerImageMatches(rev.Spec.Template.Spec.Containers, c.Name, c.Image) != nil ||
+			containerImageMatches(pod.Spec.Containers, c.Name, c.Image) != nil {
+			return reject
+		}
 	}
 	return nil
 }

@@ -40,9 +40,15 @@ in-flight dials. Logs and the `worker_drain_last_*` metrics describe the last
 local observation; they are not a reusable-slot or live health witness. These
 metrics do not include a session held by a legacy or different Front.
 
-The production integration must separately wire the release authority's
-persisted grant and fresh witness, inventory all old and new ingress owners,
-and enforce the retirement/rollback contract. A previous version still needed
-for immediate rollback may remain running after all its sessions have ended.
-A Front which does not support this contract cannot close old sessions via it.
-Do not replace such a Front in place while it is selected or holds sessions.
+For an opted-in node Worker journal, the Guardian records an immutable cutover
+receipt only after observing connections on both the public and the
+independent probe listener. It projects the same deadline across restarts and
+refreshes only serving health. Other reachable Front host ports or Services
+sharing the activation must be resolved before issuing the grant. An
+unselected Front without an ingress may retain its established sockets; they
+are outside the grant and do not by themselves prevent switching new traffic.
+
+The local completion signal releases the handoff fence, not permission to
+reclaim a Worker. The release must still account for connections on any other
+Front and keep an exact rollback Worker until a separate retirement check
+passes. Do not replace a Front in place while it is selected or holds sessions.

@@ -2,7 +2,7 @@
 import datetime
 import ipaddress
 import time
-from contextlib import closing
+from contextlib import ExitStack, closing
 
 from scripts import front_connection_witness as connection
 from scripts import observe_front_candidate as front
@@ -63,20 +63,27 @@ def require_verified(result, journal, state, witnessed):
         raise ValueError("Guardian receipt did not bind the offered connection witness")
     if front.timestamp(w["observed_at"]) != front.timestamp(witnessed["observed_at"]):
         raise ValueError("Guardian receipt did not bind the exact witness observation")
-    for k in ("held", "fresh"):
+    if "probe_fresh" in witnessed:
+        if ("drain_start" not in result or front.timestamp(result["drain_start"]) < front.timestamp(witnessed["observed_at"])):
+            raise ValueError("Guardian did not durably establish this verified drain")
+    for k in ("held", "fresh", *(("probe_fresh",) if "probe_fresh" in witnessed else ())):
         actual, expected = w[k], witnessed[k]
         if (set(actual) != set(expected) or any(actual[field] != expected[field] for field in expected if field != "started_at")
                 or front.timestamp(actual["started_at"]) != front.timestamp(expected["started_at"])):
             raise ValueError("Guardian receipt did not retain both exact connection identities")
 
 
-def handoff(adapter, profile, selected_front, address, probe, journal, *, now=front.now, pause=time.sleep, open_tls=connection.HeldTLS):
+def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_port=None,
+            now=front.now, pause=time.sleep, open_tls=connection.HeldTLS):
     """Adapter supplies disk readback and immutable arm/witness/result, not cutover."""
     if slot_phase(journal, adapter.selected_activation()) != "pending":
         raise ValueError("handoff must begin on the exact retained Worker")
     before, target = journal["expected"]["active_slot"], journal["candidate"]["slot"]
     retained_port = 18443 if before == "a" else 28443
-    retained_addr, candidate_addr = socket_target(address, retained_port), socket_target(address, 38443)
+    candidate_port = (18443 if target == "a" else 28443) if journal.get("fixed_transport") else 38443
+    retained_addr, candidate_addr = socket_target(address, retained_port), socket_target(address, candidate_port)
+    if bool(journal.get("probe_service_uid")) != (probe_port is not None):
+        raise ValueError("handoff must use the probe transport named in the journal")
     host, path = probe["host"], probe["path"]
 
     def proof(sock):
@@ -107,27 +114,34 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, now=fr
                 continue
             # Connection attempts are allowed to converge while the original
             # socket remains open. Never retry or reconnect the original.
-            fresh = None
-            try:
-                fresh = open_tls(address, host)
-                new_proof = proof(fresh)
-                newest = fact(fresh, target, candidate_addr)
-            except (OSError, ValueError):
-                if fresh is not None:
-                    fresh.close()
-                pause(2)
-                continue
-            with closing(fresh):
+            with ExitStack() as sockets:
+                try:
+                    fresh = sockets.enter_context(closing(open_tls(address, host)))
+                    new_proof = proof(fresh)
+                    newest = fact(fresh, target, candidate_addr)
+                    probe_fresh = sockets.enter_context(closing(open_tls(address, host, probe_port))) if probe_port else None
+                    probe_ref = fact(probe_fresh, target, candidate_addr) if probe_fresh is not None else None
+                except (OSError, ValueError):
+                    pause(2)
+                    continue
                 if (newest["id"] == old["id"] or front.timestamp(newest["started_at"]) < front.timestamp(state["updated_at"])
                         or new_proof != reference or proof(retained) != reference or fact(retained, before, retained_addr) != old):
                     raise ValueError("public TLS handoff did not demonstrate unchanged route and two distinct Worker processes")
+                if probe_ref is not None and (probe_ref["id"] in (old["id"], newest["id"])
+                        or front.timestamp(probe_ref["started_at"]) < front.timestamp(state["updated_at"])
+                        or proof(probe_fresh) != reference):
+                    raise ValueError("probe TLS did not independently reach the newly selected Worker with the same route")
                 witness = {"schema": "edge-node-worker-connection-witness/v1", "journal_digest": journal["digest"],
                            "held": old, "fresh": newest, "observed_at": wire_time(now())}
+                if probe_ref is not None:
+                    witness["probe_fresh"] = probe_ref
                 if now() >= deadline:
                     break
                 adapter.witness(witness)
                 while now() < deadline + datetime.timedelta(seconds=15):
                     result = adapter.result()
+                    if probe_ref is not None and (proof(probe_fresh) != reference or fact(probe_fresh, target, candidate_addr) != probe_ref):
+                        raise ValueError("fresh probe connection changed before Guardian acknowledgement")
                     if result is not None:
                         require_verified(result, journal, state, witness)
                         if (adapter.selected_activation() != state or proof(retained) != reference or proof(fresh) != reference

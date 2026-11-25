@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/netip"
 	"regexp"
 	"syscall"
 	"time"
@@ -28,6 +29,8 @@ type NodeWorkerJournal struct {
 	Recipient            NativeRecipient         `json:"recipient"`
 	NodeUID              string                  `json:"node_uid"`
 	ServiceUID           string                  `json:"service_uid"`
+	ProbeServiceUID      string                  `json:"probe_service_uid,omitempty"`
+	FixedTransport       bool                    `json:"fixed_transport,omitempty"`
 	PredecessorWorkerUID string                  `json:"predecessor_worker_uid"`
 	CandidateWorkerUID   string                  `json:"candidate_worker_uid"`
 	PredecessorProcess   string                  `json:"predecessor_process"`
@@ -63,7 +66,13 @@ func (j NodeWorkerJournal) sealedDigest() (string, error) {
 		return "", errors.New("node Worker journal has an invalid predecessor, candidate or recipient")
 	}
 	seen := map[string]bool{}
-	for _, id := range []string{j.Recipient.PodUID, j.NodeUID, j.ServiceUID, j.PredecessorWorkerUID, j.CandidateWorkerUID} {
+	ids := []string{j.Recipient.PodUID, j.NodeUID, j.ServiceUID, j.PredecessorWorkerUID, j.CandidateWorkerUID}
+	if j.ProbeServiceUID != "" {
+		ids = append(ids, j.ProbeServiceUID)
+	} else if j.FixedTransport {
+		return "", errors.New("fixed Worker handoff requires the independent probe ingress")
+	}
+	for _, id := range ids {
 		if !nodeWorkerUID.MatchString(id) || seen[id] {
 			return "", errors.New("node Worker journal lacks distinct physical identities")
 		}
@@ -75,6 +84,18 @@ func (j NodeWorkerJournal) sealedDigest() (string, error) {
 		return "", err
 	}
 	return nativeDigest(raw), nil
+}
+
+// CandidateHTTPSPort is derived from the physical transport contract; no
+// release declaration or connection witness may supply an arbitrary port.
+func (j NodeWorkerJournal) CandidateHTTPSPort() uint16 {
+	if !j.FixedTransport {
+		return 38443
+	}
+	if j.Candidate.Slot == "a" {
+		return 18443
+	}
+	return 28443
 }
 
 // NodeWorkerProcessDigest pins the Edge and Caddy container incarnations,
@@ -180,15 +201,21 @@ func executeNodeWorkerWrite(cfg Config, local NativeRecipient, raw []byte, w Nod
 	if err := cfg.prepareWorkerTransport(); err != nil {
 		return nil, err
 	}
-	// Validate the actual Front's overlap registration, including that the
-	// target really uses the registered candidate ports, not a retained pin.
+	// Verify the actual Front registered both exact releases in the declared
+	// mode. This intentionally cannot swap the pinned image of a retained
+	// listener or repurpose an overlap address for a fixed-slot handoff.
 	var transport workerTransportDeclaration
 	if err := json.Unmarshal([]byte(cfg.WorkerTransport), &transport); err != nil {
 		return nil, err
 	}
 	candidate := workerImagePin{j.Candidate.Slot, j.Candidate.WorkerSourceCommit, j.Candidate.WorkerImageDigest}
 	previous := workerImagePin{j.Expected.ActiveSlot, j.Expected.WorkerSourceCommit, j.Expected.WorkerImageDigest}
-	if _, registered := cfg.workerTargets[previous]; !registered || transport.Candidate != candidate || transport.Candidate == previous {
+	prior, priorOK := cfg.workerTargets[previous]
+	targets, nextOK := cfg.workerTargets[candidate]
+	endpoint, endpointErr := netip.ParseAddrPort(targets.HTTPSAddress)
+	modeMatches := !j.FixedTransport && transport.Schema == "fugue.worker-transport/v1" && transport.Candidate == candidate ||
+		j.FixedTransport && transport.Schema == "fugue.worker-transport-fixed/v1"
+	if !priorOK || !nextOK || prior == targets || !modeMatches || endpointErr != nil || endpoint.Port() != j.CandidateHTTPSPort() {
 		return nil, errors.New("node Worker journal is not bound to the Front's retained and candidate listeners")
 	}
 	if err := validateActivationPath(cfg.ActiveSlotFile); err != nil {

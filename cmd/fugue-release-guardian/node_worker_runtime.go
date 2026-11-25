@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"fugue/internal/edgegroupfront"
@@ -35,6 +38,8 @@ type nodeWorkerRuntime struct {
 	node, nodeRV string
 	service      corev1.Service
 	slices       []discoveryv1.EndpointSlice
+	probe        corev1.Service
+	probeSlices  []discoveryv1.EndpointSlice
 	front        corev1.Pod
 	prior, next  nodeWorkerProcess
 }
@@ -82,6 +87,9 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, 
 		front.Labels["fugue.io/edge-node"] != nodeName || front.ResourceVersion == "" || !frontMountsNodeWorkerFence(front, group) {
 		return found, errors.New("public Service selected a different Front or its journal projection is absent")
 	}
+	if j.ProbeServiceUID != "" && !frontMountsNodeWorkerDrain(front, group) {
+		return found, errors.New("pinned Front does not have the exact read-only Worker drain projection")
+	}
 	if requirePublicReady {
 		if _, err := repairPodProcess(front, ns, "edge-front"); err != nil {
 			return found, err
@@ -103,12 +111,30 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, 
 		return found, errors.Join(errors.New("public Service EndpointSlices do not exclusively select the pinned Front"), err)
 	}
 	found.front, found.slices = front, slices.Items
+	probe, err := selectNodeWorkerProbe(services.Items, service, publicIP, j.ProbeServiceUID)
+	if err != nil {
+		return found, err
+	}
+	if probe.UID != "" {
+		slices, err := a.client.DiscoveryV1().EndpointSlices(ns).List(ctx, metav1.ListOptions{
+			LabelSelector: discoveryv1.LabelServiceName + "=" + probe.Name, Limit: nodeWorkerListLimit,
+		})
+		if err != nil || slices.Continue != "" || len(slices.Items) > nodeWorkerListLimit || !nodeWorkerEndpointsMatch(probe, front, slices.Items, requirePublicReady) {
+			return found, errors.Join(errors.New("probe EndpointSlices do not exclusively select the pinned Front"), err)
+		}
+		found.probe, found.probeSlices = probe, slices.Items
+	}
 
 	local, err := pods.List(ctx, metav1.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.nodeName", nodeName).String(), Limit: nodeWorkerListLimit,
 	})
 	if err != nil || local.Continue != "" || len(local.Items) > nodeWorkerListLimit {
 		return found, errors.Join(errors.New("node Worker local Pod inventory is incomplete"), err)
+	}
+	if j.ProbeServiceUID != "" && requireCandidate {
+		if err := requireExclusiveNodeWorkerIngress(services.Items, local.Items, found); err != nil {
+			return found, err
+		}
 	}
 	prior := edgegroupfront.ActivationRepairRelease{
 		Slot: j.Expected.ActiveSlot, BundleGeneration: j.Expected.BundleGeneration,
@@ -124,7 +150,7 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, 
 	if edgegroupfront.NodeWorkerProcessDigest(found.prior.edgeID, found.prior.caddyID) != j.PredecessorProcess {
 		return found, errors.New("retained Worker process changed after the journal was claimed")
 	}
-	found.next, err = observeNodeWorkerProcess(local.Items, front, j.CandidateWorkerUID, j.Candidate, hostIP, 38443)
+	found.next, err = observeNodeWorkerProcess(local.Items, front, j.CandidateWorkerUID, j.Candidate, hostIP, j.CandidateHTTPSPort())
 	if err != nil && requireCandidate {
 		return found, fmt.Errorf("candidate Worker: %w", err)
 	}
@@ -215,6 +241,109 @@ func selectNodeWorkerService(services []corev1.Service, j edgegroupfront.NodeWor
 	return service, ip, nil
 }
 
+func selectNodeWorkerProbe(services []corev1.Service, public corev1.Service, ip netip.Addr, uid string) (corev1.Service, error) {
+	var probe corev1.Service
+	for _, svc := range services {
+		external := append([]string{}, svc.Spec.ExternalIPs...)
+		external = append(external, svc.Spec.LoadBalancerIP)
+		for _, ingress := range svc.Status.LoadBalancer.Ingress {
+			external = append(external, ingress.IP)
+		}
+		claimsIP := false
+		for _, addr := range external {
+			parsed, err := netip.ParseAddr(addr)
+			claimsIP = claimsIP || err == nil && parsed.Unmap() == ip.Unmap()
+		}
+		if svc.UID == public.UID {
+			continue
+		}
+		isProbe := svc.Labels["app.kubernetes.io/managed-by"] == "fugue-front-probe-transport"
+		if string(svc.UID) != uid {
+			for _, p := range svc.Spec.Ports {
+				if claimsIP && (p.Protocol == "" || p.Protocol == corev1.ProtocolTCP) &&
+					(isProbe || p.TargetPort.IntVal == 443 || p.Port == 15443) {
+					return probe, errors.New("unbound Service can send new connections to a Front HTTPS listener")
+				}
+			}
+			continue
+		}
+		spec := svc.Spec
+		generation, genErr := strconv.ParseUint(svc.Annotations["transport.fugue.dev/generation"], 10, 64)
+		if uid == "" || probe.UID != "" || !claimsIP || !isProbe || svc.Namespace != public.Namespace ||
+			svc.Name == "" || svc.ResourceVersion == "" || svc.DeletionTimestamp != nil || genErr != nil || generation == 0 ||
+			svc.Annotations["transport.fugue.dev/follows-serving-uid"] != string(public.UID) ||
+			spec.Type != corev1.ServiceTypeClusterIP || spec.ExternalTrafficPolicy != corev1.ServiceExternalTrafficPolicyLocal ||
+			spec.InternalTrafficPolicy == nil || *spec.InternalTrafficPolicy != corev1.ServiceInternalTrafficPolicyLocal ||
+			spec.PublishNotReadyAddresses || len(spec.ExternalIPs) != 1 || spec.ExternalIPs[0] != ip.String() ||
+			!reflect.DeepEqual(spec.Selector, public.Spec.Selector) || len(spec.Ports) != 1 {
+			return probe, errors.New("pinned node Worker probe does not follow the exact serving Front")
+		}
+		p := spec.Ports[0]
+		if p.Name != "https-probe" || p.Port != 15443 || p.Protocol != corev1.ProtocolTCP ||
+			p.NodePort != 0 || p.AppProtocol != nil || p.TargetPort.IntVal != 443 || p.TargetPort.StrVal != "" {
+			return probe, errors.New("node Worker probe listener has unexpected ports")
+		}
+		wire, err := json.Marshal(map[string]any{
+			"type": spec.Type, "externalIPs": spec.ExternalIPs, "externalTrafficPolicy": spec.ExternalTrafficPolicy,
+			"internalTrafficPolicy": spec.InternalTrafficPolicy, "publishNotReadyAddresses": spec.PublishNotReadyAddresses,
+			"selector": spec.Selector,
+			"ports":    []map[string]any{{"name": p.Name, "protocol": p.Protocol, "port": p.Port, "targetPort": p.TargetPort.IntVal}},
+		})
+		if err != nil || fmt.Sprintf("sha256:%x", sha256.Sum256(wire)) != svc.Annotations["transport.fugue.dev/digest"] {
+			return probe, errors.New("node Worker probe differs from its transport declaration")
+		}
+		probe = svc
+	}
+	if uid != "" && probe.UID == "" {
+		return probe, errors.New("pinned node Worker probe Service is missing")
+	}
+	return probe, nil
+}
+
+// An unselected Front may keep its established sockets. But a second
+// reachable ingress bound to the same activation cannot silently be left
+// outside this grant's proof and Front UID scope.
+func requireExclusiveNodeWorkerIngress(services []corev1.Service, pods []corev1.Pod, r nodeWorkerRuntime) error {
+	mount := repairHostActivationMount(r.front, "edge-front", true)
+	if mount == "" {
+		return errors.New("expected Front activation mount is absent")
+	}
+	for _, pod := range pods {
+		if pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded ||
+			repairHostActivationMount(pod, "edge-front", false) != mount {
+			continue
+		}
+		portNames := map[string]bool{}
+		for _, c := range pod.Spec.Containers {
+			for _, p := range c.Ports {
+				if p.Protocol != "" && p.Protocol != corev1.ProtocolTCP {
+					continue
+				}
+				if p.HostPort == 80 || p.HostPort == 443 || pod.Spec.HostNetwork && (p.ContainerPort == 80 || p.ContainerPort == 443) {
+					return fmt.Errorf("Front %s has a separate host ingress outside the Worker drain witness", pod.Name)
+				}
+				if p.ContainerPort == 80 || p.ContainerPort == 443 {
+					portNames[p.Name] = true
+				}
+			}
+		}
+		for _, svc := range services {
+			if svc.UID == r.service.UID || svc.UID == r.probe.UID || len(svc.Spec.Selector) == 0 ||
+				!labels.SelectorFromSet(labels.Set(svc.Spec.Selector)).Matches(labels.Set(pod.Labels)) {
+				continue
+			}
+			for _, p := range svc.Spec.Ports {
+				if (p.Protocol == "" || p.Protocol == corev1.ProtocolTCP) &&
+					(p.TargetPort.IntVal == 80 || p.TargetPort.IntVal == 443 || p.TargetPort.StrVal != "" && portNames[p.TargetPort.StrVal] ||
+						p.TargetPort.IntVal == 0 && p.TargetPort.StrVal == "" && (p.Port == 80 || p.Port == 443)) {
+					return fmt.Errorf("Service %s has a Front ingress outside the Worker drain witness", svc.Name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func frontMountsNodeWorkerFence(front corev1.Pod, group string) bool {
 	if front.Spec.HostNetwork || front.Spec.ShareProcessNamespace != nil && *front.Spec.ShareProcessNamespace ||
 		repairHostActivationMount(front, "edge-front", true) != "/var/lib/fugue/edge-owned/"+group+"/front" {
@@ -241,6 +370,37 @@ func frontMountsNodeWorkerFence(front corev1.Pod, group string) bool {
 	return false
 }
 
+func frontMountsNodeWorkerDrain(front corev1.Pod, group string) bool {
+	const path = "/var/run/fugue-worker-drain"
+	for _, c := range front.Spec.Containers {
+		if c.Name != "edge-front" {
+			continue
+		}
+		var uid, file bool
+		for _, e := range c.Env {
+			switch e.Name {
+			case "FUGUE_EDGE_FRONT_WORKER_DRAIN_FRONT_UID":
+				uid = e.Value == "" && e.ValueFrom != nil && e.ValueFrom.FieldRef != nil && e.ValueFrom.FieldRef.FieldPath == "metadata.uid"
+			case "FUGUE_EDGE_FRONT_WORKER_DRAIN_GRANT_PATH":
+				file = e.ValueFrom == nil && e.Value == path+"/grant.json"
+			}
+		}
+		for _, m := range c.VolumeMounts {
+			if m.MountPath != path || !m.ReadOnly || m.SubPath != "" || m.SubPathExpr != "" || m.MountPropagation != nil {
+				continue
+			}
+			for _, v := range front.Spec.Volumes {
+				cm := v.ConfigMap
+				if v.Name == m.Name && cm != nil && cm.Name == releaseguardian.NodeWorkerDrainName(group, front.Spec.NodeName) &&
+					cm.Optional != nil && *cm.Optional && len(cm.Items) == 1 && cm.Items[0].Key == "grant.json" && cm.Items[0].Path == "grant.json" {
+					return uid && file
+				}
+			}
+		}
+	}
+	return false
+}
+
 func nodeWorkerEndpointsMatch(s corev1.Service, front corev1.Pod, slices []discoveryv1.EndpointSlice, requireReady bool) bool {
 	podIP, err := netip.ParseAddr(front.Status.PodIP)
 	if err != nil || podIP.Zone() != "" {
@@ -249,7 +409,7 @@ func nodeWorkerEndpointsMatch(s corev1.Service, front corev1.Pod, slices []disco
 	total := 0
 	for _, slice := range slices {
 		if slice.Namespace != s.Namespace || slice.DeletionTimestamp != nil || slice.ResourceVersion == "" ||
-			slice.Labels[discoveryv1.LabelServiceName] != s.Name || len(slice.Ports) != 2 {
+			slice.Labels[discoveryv1.LabelServiceName] != s.Name || len(slice.Ports) != len(s.Spec.Ports) || len(slice.Ports) == 0 {
 			return false
 		}
 		owner := metav1.GetControllerOf(&slice)
@@ -263,8 +423,10 @@ func nodeWorkerEndpointsMatch(s corev1.Service, front corev1.Pod, slices []disco
 			}
 			ports[*p.Name] = *p.Port
 		}
-		if ports["http"] != 80 || ports["https"] != 443 {
-			return false
+		for _, p := range s.Spec.Ports {
+			if p.TargetPort.IntVal == 0 || ports[p.Name] != p.TargetPort.IntVal {
+				return false
+			}
 		}
 		for _, e := range slice.Endpoints {
 			total++
@@ -337,6 +499,7 @@ func observeNodeWorkerProcess(pods []corev1.Pod, front corev1.Pod, wantedUID str
 
 func (r nodeWorkerRuntime) sameBinding(other nodeWorkerRuntime, needCandidate bool) bool {
 	return r.node == other.node && r.nodeRV == other.nodeRV && reflect.DeepEqual(r.service, other.service) && reflect.DeepEqual(r.slices, other.slices) &&
+		reflect.DeepEqual(r.probe, other.probe) && reflect.DeepEqual(r.probeSlices, other.probeSlices) &&
 		r.front.UID == other.front.UID && r.front.ResourceVersion == other.front.ResourceVersion &&
 		r.prior.pod.UID == other.prior.pod.UID && r.prior.pod.ResourceVersion == other.prior.pod.ResourceVersion && r.prior.edgeID == other.prior.edgeID && r.prior.caddyID == other.prior.caddyID &&
 		(!needCandidate || r.next.pod.UID == other.next.pod.UID && r.next.pod.ResourceVersion == other.next.pod.ResourceVersion && r.next.edgeID == other.next.edgeID && r.next.caddyID == other.next.caddyID)

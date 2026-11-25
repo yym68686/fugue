@@ -40,10 +40,16 @@ type WorkerDrainGrant struct {
 }
 
 func (g WorkerDrainGrant) validate(cfg Config) error {
-	if g.Schema != WorkerDrainSchema || !nodeWorkerUID.MatchString(g.FrontUID) || g.FrontUID != cfg.WorkerDrainFrontUID ||
-		g.Node == "" || g.Node != cfg.EdgeID ||
+	return g.ValidateFor(cfg.WorkerDrainFrontUID, cfg.EdgeID, cfg.EdgeGroupID)
+}
+
+// ValidateFor is shared by the authority writer and the Front projection
+// consumer so they cannot disagree about the activation or deadline.
+func (g WorkerDrainGrant) ValidateFor(frontUID, node, group string) error {
+	if g.Schema != WorkerDrainSchema || !nodeWorkerUID.MatchString(g.FrontUID) || g.FrontUID != frontUID ||
+		g.Node == "" || g.Node != node ||
 		validateActivationState(g.Previous) != nil || validateActivationState(g.Serving) != nil ||
-		g.Previous.GroupID != cfg.EdgeGroupID || g.Serving.GroupID != cfg.EdgeGroupID ||
+		g.Previous.GroupID != group || g.Serving.GroupID != group ||
 		g.Previous.Generation == ^uint64(0) || g.Previous.Generation+1 != g.Serving.Generation ||
 		g.Serving.Operation != ActivationOperationPromote || g.Serving.PreviousSlot != g.Previous.ActiveSlot ||
 		g.Serving.ActiveSlot == g.Previous.ActiveSlot || g.Serving.WorkerImageDigest == g.Previous.WorkerImageDigest ||

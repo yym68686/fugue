@@ -124,6 +124,48 @@ func TestNodeWorkerAdvancesOnlyObservedMemberAndRecoversLostResponse(t *testing.
 	}
 }
 
+func TestNodeWorkerFixedTransportPromotesAndRevertsExactRetainedWorker(t *testing.T) {
+	for _, slot := range []string{"a", "b"} {
+		t.Run(slot, func(t *testing.T) {
+			cfg, j := nodeWorkerFixture(t, slot, 912)
+			var transport workerTransportDeclaration
+			if err := json.Unmarshal([]byte(cfg.WorkerTransport), &transport); err != nil {
+				t.Fatal(err)
+			}
+			next := 0
+			if slot == "a" {
+				next = 1
+			}
+			pin := transport.Retained[next]
+			j.FixedTransport, j.ProbeServiceUID = true, "00000000-0000-4000-8000-000000000006"
+			j.Candidate.Slot, j.Candidate.WorkerSourceCommit, j.Candidate.WorkerImageDigest = pin.Slot, pin.Source, pin.Image
+			j, err := j.Seal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := testNodeWorkerWrite(t, cfg, j, "prepare", j.CreatedAt); err == nil {
+				t.Fatal("accepted an overlap transport for a fixed-port journal")
+			}
+			transport.Schema, transport.Candidate, transport.HTTP, transport.HTTPS = "fugue.worker-transport-fixed/v1", workerImagePin{}, 0, 0
+			raw, err := json.Marshal(transport)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.WorkerTransport = string(raw)
+			for i, op := range []string{"prepare", "commit", "rollback"} {
+				if _, err := testNodeWorkerWrite(t, cfg, j, op, j.CreatedAt.Add(time.Duration(i)*time.Second)); err != nil {
+					t.Fatalf("%s: %v", op, err)
+				}
+				got, _, err := ReadActivationState(cfg.ActiveSlotFile)
+				want := []NodeWorkerProgress{NodeWorkerPending, NodeWorkerActivated, NodeWorkerReverted}[i]
+				if err != nil || j.Progress(got) != want {
+					t.Fatalf("%s: got %+v, want %s (err %v)", op, got, want, err)
+				}
+			}
+		})
+	}
+}
+
 func TestNodeWorkerRejectsWrongJournalRecipientDeadlineOrPin(t *testing.T) {
 	cfg, plan := nodeWorkerFixture(t, "b", 912)
 	now := plan.CreatedAt
