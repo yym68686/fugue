@@ -618,8 +618,10 @@ class TransportTests(unittest.TestCase):
         def save():
             pass
         def run(remaining, fail_port=None, fail_address=None, changed_diagnostic=False,
-                write_failure=None, restore_failure=False, predecessor_failure=False, changed_predecessor=None):
+                write_failure=None, restore_failure=False, predecessor_failure=False, changed_predecessor=None,
+                advance_publication=False):
             evidence, history = {"applied": []}, []
+            advanced = dict(witness, assignment={"fencing_token": 2}, parent_digest="parent2", plan_digest="plan2")
             def verify(_, stage, binding, port):
                 history.append((stage["address"], port, binding))
                 if port == fail_port and (fail_address is None or stage["address"] == fail_address) and binding == witness:
@@ -627,7 +629,9 @@ class TransportTests(unittest.TestCase):
                 if binding == predecessor_binding and predecessor_failure:
                     raise transport.PublicDNSVerificationFailed([{"hostname": "app.example.test",
                                                                   "transport": "udp", "response_code": 2}])
-                if binding == predecessor_binding:
+                if advance_publication and evidence.get("publication_refreshes"):
+                    result = dict(advanced, candidate_uid=witness["old_uid"]) if binding == predecessor_binding else advanced
+                elif binding == predecessor_binding:
                     result = dict(witness, candidate_uid=witness["old_uid"])
                     if changed_predecessor:
                         result.update(changed_predecessor)
@@ -645,10 +649,15 @@ class TransportTests(unittest.TestCase):
                 else:
                     self.assertTrue(acknowledged)
                 return config
-            with patch.object(transport, "revalidate_handoff_witness", return_value=witness), \
+            def revalidate(_, listener, *_args):
+                return advanced if advance_publication and listener["port"] == 53 else witness
+            with patch.object(transport, "revalidate_handoff_witness", side_effect=revalidate), \
                  patch.object(transport, "kubectl", side_effect=write), \
                  patch.object(transport, "restore_staged_listener", side_effect=restore):
-                if changed_diagnostic:
+                if changed_predecessor and "candidate_uid" in changed_predecessor:
+                    with self.assertRaisesRegex(ValueError, "predecessor verification .*backend identity"):
+                        transport.apply_transport_steps(config, remaining, evidence, save, verify)
+                elif changed_diagnostic:
                     with self.assertRaisesRegex(ValueError, "assignment changed after diagnostic"):
                         transport.apply_transport_steps(config, remaining, evidence, save, verify)
                 elif changed_predecessor:
@@ -691,18 +700,38 @@ class TransportTests(unittest.TestCase):
         self.assertEqual([x["result"] for x in evidence["compensations"]], ["unverified", "restored"])
         evidence, history = run(operations, changed_diagnostic=True)
         self.assertEqual(evidence["applied"], ["diagnostic-one"])
-        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
+        diagnostic_binding = {"candidate_uid": "candidate", "node_uid": "node"}
+        self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding),
+                                   (one["address"], 15353, diagnostic_binding), (one["address"], 53, predecessor_binding)])
+        self.assertEqual(evidence["publication_refreshes"], [{"address": one["address"], "port": 53}])
         for drift in ({"assignment": {"fencing_token": 2}}, {"parent_digest": "other"},
                       {"plan_digest": "other"}, {"candidate_uid": "replacement"}):
             with self.subTest(predecessor=drift):
                 evidence, history = run(operations, changed_predecessor=drift)
                 self.assertEqual(evidence["applied"], ["diagnostic-one"])
                 self.assertEqual(evidence["compensations"], [{"listener": "diagnostic-one", "result": "retained_diagnostic_stage"}])
-                self.assertEqual(history, [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)])
+                expected = [(one["address"], 15353, witness), (one["address"], 53, predecessor_binding)]
+                if "candidate_uid" not in drift:
+                    expected += [(one["address"], 15353, diagnostic_binding), (one["address"], 53, predecessor_binding)]
+                else:
+                    self.assertNotIn("publication_refreshes", evidence)
+                self.assertEqual(history, expected)
+        evidence, history = run(operations, changed_diagnostic=True, changed_predecessor={"candidate_uid": "replacement"})
+        self.assertEqual(evidence["applied"], ["diagnostic-one"])
+        self.assertNotIn("publication_refreshes", evidence)
         evidence, history = run([op(one)])
         self.assertEqual(evidence["applied"], ["public-one"])
         self.assertEqual(history[:3], [(one["address"], 15353, None), (one["address"], 53, predecessor_binding),
                                       (one["address"], 53, witness)])
+        evidence, history = run([op(one)], advance_publication=True)
+        self.assertEqual(evidence["applied"], ["public-one"])
+        self.assertEqual(evidence["publication_refreshes"], [{"address": one["address"], "port": 53}])
+        self.assertEqual(history[:4], [(one["address"], 15353, None), (one["address"], 53, predecessor_binding),
+                                      (one["address"], 15353, diagnostic_binding), (one["address"], 53, predecessor_binding)])
+        self.assertEqual(history[4][:2], (one["address"], 53))
+        self.assertEqual(history[4][2]["assignment"], {"fencing_token": 2})
+        self.assertEqual([r["result"]["verified_backend"]["assignment"]["fencing_token"]
+                          for r in evidence["predecessor_verifications"]], [1, 2])
         evidence, history = run([op(two), op(diagnose_two)])
         self.assertEqual(evidence["applied"], ["diagnostic-two", "public-two"])
         self.assertEqual(history, [(one["address"], 15353, None), (one["address"], 53, None),

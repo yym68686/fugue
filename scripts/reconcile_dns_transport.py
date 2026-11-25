@@ -34,6 +34,10 @@ class ObservationUnavailable(RuntimeError):
     """A read-only Kubernetes observation is temporarily unavailable."""
 
 
+class HandoffPublicationChanged(ValueError):
+    """Signed policy changed after socket verification with the same backends."""
+
+
 class PublicDNSVerificationFailed(RuntimeError):
     """An actual authoritative UDP/TCP sample failed after a switch."""
 
@@ -879,10 +883,12 @@ def restore_staged_listener(config, operation, witness, write_acknowledged, *, r
     return rollback_config
 
 
-def validate_witness_policy(policy, witness, uid_key):
-    if witness is None or policy["candidate_uid"] != witness[uid_key] or any(
-            policy[k] != witness[k] for k in ("assignment", "parent_digest", "plan_digest")):
-        raise ValueError("DNS handoff assignment changed after " + uid_key + " verification")
+def validate_witness_policy(policy, witness, uid_key, *, role=None, refreshable=False):
+    message = "DNS handoff assignment changed after " + (role or uid_key) + " verification"
+    if not witness or policy["candidate_uid"] != witness[uid_key]:
+        raise ValueError(message + " (backend identity)")
+    if any(policy[k] != witness[k] for k in ("assignment", "parent_digest", "plan_digest")):
+        raise (HandoffPublicationChanged if refreshable else ValueError)(message)
 
 
 def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage, verify_fallback=None, verify_failure=None):
@@ -890,7 +896,7 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
     used_challenges = set()
 
     def apply_one(operation, *, diagnostic_policy=None, predecessor_policy=None, fallback_policy=None,
-                  failure_observation=None, stage=None, attempted=None):
+                  failure_observation=None, stage=None, attempted=None, refreshable=False):
         command, body, listener, current, witness = operation
         refused = stage is not None and "refused_listener" in stage.get("failed_predecessor", {})
         if refused:
@@ -916,14 +922,18 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                 break
         elif witness is not None:
             witness = revalidate_handoff_witness(config, listener, current, witness)
+        publication_change = None
         for role, policy, uid_key in (("diagnostic", diagnostic_policy, "candidate_uid"),
                                       ("predecessor", predecessor_policy, "old_uid"),
                                       ("recovery fallback", fallback_policy, "fallback_uid")):
             if policy is not None:
                 try:
-                    validate_witness_policy(policy, witness, uid_key)
-                except ValueError as error:
-                    raise ValueError("DNS handoff assignment changed after " + role + " verification") from error
+                    validate_witness_policy(policy, witness, uid_key, role=role, refreshable=refreshable)
+                except HandoffPublicationChanged as error:
+                    # Complete the other identity check before offering a refresh.
+                    publication_change = publication_change or error
+        if publication_change:
+            raise publication_change
         if failure_observation is not None:
             validate_failure_observation(failure_observation, stage, current, witness)
         if attempted is not None:
@@ -935,6 +945,15 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
         save_evidence()
         print("reconciled Service/" + listener["name"], flush=True)
         return witness
+
+    def observe_predecessor(stage, operation):
+        _, _, listener, previous, witness = operation
+        # A signed expected answer does not prove that the predecessor can
+        # still serve it on the public socket.
+        old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
+        old_stage, old_binding = predecessor_stage_identity(stage, witness)
+        return observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
+                                    "predecessor_verifications", save_evidence)["verified_backend"]
 
     if "handoffs" not in config:
         for operation in planned:
@@ -971,16 +990,28 @@ def apply_transport_steps(config, planned, evidence, save_evidence, verify_stage
                                 evidence["predecessor_verifications"].append(failure_observation)
                                 save_evidence()
                         else:
-                            # A signed expected answer does not prove the
-                            # predecessor can serve it on the public socket.
-                            old_config, _ = predecessor_listener_config(config, listener, previous, config["generation"])
-                            old_stage, old_binding = predecessor_stage_identity(stage, witness)
-                            verified = observe_stage_result(verify_stage, old_config, old_stage, old_binding, 53, evidence,
-                                                            "predecessor_verifications", save_evidence)
-                            predecessor_policy = verified["verified_backend"]
-                witness = apply_one(operation, diagnostic_policy=diagnostic_policy,
-                                    predecessor_policy=predecessor_policy, fallback_policy=fallback_policy,
-                                    failure_observation=failure_observation, stage=stage, attempted=attempted) if operation else None
+                            predecessor_policy = observe_predecessor(stage, operation)
+                witness = None
+                if operation:
+                    try:
+                        witness = apply_one(operation, diagnostic_policy=diagnostic_policy,
+                                            predecessor_policy=predecessor_policy, fallback_policy=fallback_policy,
+                                            failure_observation=failure_observation, stage=stage, attempted=attempted,
+                                            refreshable=port == 53 and not use_recovery and not recover_failure)
+                    except HandoffPublicationChanged:
+                        # No public write has been attempted. Discard both proofs
+                        # and take one fresh pair, pinned to the same Pod/node
+                        # identities. The original Service CAS remains in force.
+                        planned_witness = operation[-1]
+                        binding = {k: planned_witness[k] for k in ("candidate_uid", "node_uid")}
+                        evidence.setdefault("publication_refreshes", []).append({"address": stage["address"], "port": port})
+                        save_evidence()
+                        latest = observe_stage_result(verify_stage, config, stage, binding, diagnostic["port"],
+                                                      evidence, "diagnostic_verifications", save_evidence)
+                        diagnostic_policy = latest["verified_backend"]
+                        predecessor_policy = observe_predecessor(stage, operation)
+                        witness = apply_one(operation, diagnostic_policy=diagnostic_policy,
+                                            predecessor_policy=predecessor_policy, stage=stage, attempted=attempted)
                 # Re-observe even if the socket was switched by a previous run.
                 observed = observe_stage_result(verify_stage, config, stage, witness, port, evidence, report, save_evidence)
                 if recover_failure and witness is not None:
