@@ -169,6 +169,10 @@ func TestHostedMembershipBaselinesSurviveIndependentParentRenewal(t *testing.T) 
 	})
 	t.Run("stable-four-paths", func(t *testing.T) { pc.HostedStableFourPathFixtureForTest(t, run) })
 	t.Run("external-shared-held", func(t *testing.T) { s, p := pc.ExternalHeldFixtureForTest(t); run(t, s, p) })
+	t.Run("physical-worker-already-withheld-from-dns", func(t *testing.T) {
+		s, p := pc.ExternalWithheldRosterFixtureForTest(t)
+		run(t, s, p)
+	})
 }
 
 func TestExternalHeldCompilerProgramReachesEveryRecipient(t *testing.T) {
