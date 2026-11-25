@@ -75,7 +75,8 @@ def run(config, origin, evidence):
         selected, transport = cluster.ingress(obj["spec"]["template"]["metadata"]["labels"], pod)
         if pod:
             require(not any((endpoint.get("targetRef") or {}).get("uid") == config["podUID"]
-                            for item in cluster.list("endpointslices", "-A") for endpoint in item.get("endpoints", [])),
+                            or pod["status"]["podIP"] in (endpoint.get("addresses") or [])
+                            for item in cluster.list("endpointslices", "-A") for endpoint in (item.get("endpoints") or [])),
                     "an EndpointSlice still references the isolated standby Pod")
         return obj, patch, pod, selected, transport
 
