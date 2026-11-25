@@ -549,6 +549,9 @@ def main() -> int:
     if any(name in {".github/workflows/ci.yml", "scripts/retire_front_hostport.py", "scripts/test_retire_front_hostport.py"}
            or name.startswith("deploy/environments/production/front-hostport-retirement/") for name in paths):
         non_go_tasks["front-hostport-retirement-tests"] = ["python3", "-m", "unittest", "scripts.test_retire_front_hostport"]
+    if any(name in {".github/actions/deploy-declarative-component/action.yml", "scripts/check_unselected_front_roll.py",
+                    "scripts/test_check_unselected_front_roll.py"} or name.endswith("/unselected-front.json") for name in paths):
+        non_go_tasks["unselected-front-roll-tests"] = ["python3", "-m", "unittest", "scripts.test_check_unselected_front_roll"]
     if any(name in {".github/workflows/ci.yml", "scripts/release_idle_front_standby.py", "scripts/test_release_idle_front_standby.py"}
            or name.startswith("deploy/environments/production/idle-front-standby-release/") for name in paths):
         non_go_tasks["idle-front-standby-release-tests"] = ["python3", "-m", "unittest", "scripts.test_release_idle_front_standby"]

@@ -79,7 +79,7 @@
                   },
                   {
                     "name": "FUGUE_EDGE_FRONT_WORKER_TRANSPORT",
-                    "value": "{\"schema\":\"fugue.worker-transport-fixed/v1\",\"group\":\"edge-group-country-us\",\"node\":\"vps-591f4447\",\"retained\":[{\"slot\":\"a\",\"source\":\"86460476e4a1ca2e0075164aead4f04dda7934c2\",\"image\":\"sha256:225fc110af84e64f71da4abbe170048342168ae25814b479b537ea99742c760f\"},{\"slot\":\"b\",\"source\":\"664f552db3470a8cf37016d2424e6b4dce3b1b8c\",\"image\":\"sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1\"}]}"
+                    "value": "{\"schema\":\"fugue.worker-transport-fixed/v2\",\"group\":\"edge-group-country-us\",\"node\":\"vps-591f4447\",\"retained\":[{\"slot\":\"a\",\"source\":\"86460476e4a1ca2e0075164aead4f04dda7934c2\",\"image\":\"sha256:225fc110af84e64f71da4abbe170048342168ae25814b479b537ea99742c760f\"},{\"slot\":\"b\",\"source\":\"664f552db3470a8cf37016d2424e6b4dce3b1b8c\",\"image\":\"sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1\"}]}"
                   },
                   {
                     "name": "FUGUE_EDGE_FRONT_EDGE_GROUP_ID",

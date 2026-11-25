@@ -106,6 +106,20 @@ runs:
           *) echo "unsupported production writer" >&2; exit 1 ;;
         esac
         printf 'writer=%s\n' "${writer}" >>"${GITHUB_OUTPUT}"
+    - name: Verify the optional unselected Front rollout boundary
+      if: steps.delivery.outputs.writer == 'direct'
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+      run: |
+        set -euo pipefail
+        guard="deploy/releases/${COMPONENT}/unselected-front.json"
+        if [[ -e "$guard" || -L "$guard" ]]; then
+          test -f "$guard" && test ! -L "$guard"
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "deploy/releases/${COMPONENT}" .github/actions/deploy-declarative-component/action.yml scripts/check_unselected_front_roll.py scripts/retire_front_hostport.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py
+          python3 -m scripts.check_unselected_front_roll "$guard"
+        fi
     - name: Execute one direct declarative component atom
       if: steps.delivery.outputs.writer == 'direct'
       id: execute_direct
