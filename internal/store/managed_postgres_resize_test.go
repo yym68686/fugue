@@ -123,6 +123,36 @@ func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
 	}
 }
 
+func TestManagedPostgresCPULimitAutoResizeRequiresSystemActorAndOwner(t *testing.T) {
+	f := newManagedPostgresResizeFixture(t)
+	target := f.bootstrap
+	target.CPULimitMilliCores = 400
+	request := managedPostgresResizeOperation(f, target)
+	request.RequestedByID = ManagedPostgresAutoCPULimitActorPrefix + "/identity-hash/200"
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("non-system actor resized the CPU limit: %v", err)
+	}
+	request.RequestedByType = model.ActorTypeSystem
+	op, result, err := f.store.CreateOperationWithResult(request)
+	if err != nil || !result.Created {
+		t.Fatalf("authorized enrolled system operation was rejected: result=%+v err=%v", result, err)
+	}
+	if _, err := f.store.CompleteManagedOperation(op.ID, "", "verified in-place CPU limit resize"); err != nil {
+		t.Fatal(err)
+	}
+	service, err := f.store.GetBackingService(f.service.ID)
+	if err != nil || service.OwnerAppID != f.app.ID || *service.Spec.Postgres.RuntimeResources != target || *service.Spec.Postgres.Resources != f.bootstrap {
+		t.Fatalf("limit resize changed ownership/bootstrap or lost runtime target: service=%+v err=%v", service, err)
+	}
+	mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
+	})
+	request.DesiredSpec.Postgres.RuntimeResources = &target
+	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
+		t.Fatalf("CPU limit automation accepted a non-owner database: %v", err)
+	}
+}
+
 func managedPostgresResizeOperation(f managedPostgresResizeFixture, target model.ResourceSpec) model.Operation {
 	replicas := 99
 	return model.Operation{

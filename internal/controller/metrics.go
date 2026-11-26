@@ -88,6 +88,7 @@ func (s *Service) collectMetrics(parent context.Context, w io.Writer) error {
 	observability.WriteGaugeMetric(w, "fugue_controller_host_journald_policy_reconcile_interval_seconds", "Configured minimum interval between successful host journald policy reconciliations on a node.", nil, s.Config.HostJournaldPolicyReconcileInterval.Seconds())
 	resizeConfig := s.Config.ManagedPostgresInPlaceResize
 	observability.WriteGaugeMetric(w, "fugue_managed_postgres_in_place_resize_enabled", "Whether the global managed PostgreSQL in-place resize kill switch is enabled.", nil, boolGauge(resizeConfig.Enabled))
+	observability.WriteGaugeMetric(w, "fugue_managed_postgres_auto_cpu_limit_upscale_enrolled", "Number of databases enrolled for bounded PostgreSQL CPU limit upscale.", nil, float64(len(resizeConfig.AutoCPULimitUpscaleTargets)))
 	observability.WriteMetricHeader(w, "fugue_managed_postgres_in_place_resize_capability_enabled", "Whether each managed PostgreSQL in-place resize capability is enabled by configuration.", "gauge")
 	for _, capability := range []struct {
 		name    string

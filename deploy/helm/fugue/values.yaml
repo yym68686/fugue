@@ -326,6 +326,8 @@ controller:
     # Exact service/Cluster UID/system ID enrollment enables automatic request
     # downscale for these databases without opening the global direction gate.
     autoCPURequestDownscaleTargets: []
+    # Explicit per-database identity and max_limit_millicores budget.
+    autoCPULimitUpscaleTargets: []
     # Independent database policy: request-only /resize; never changes limits,
     # CNPG templates, storage, or the application's right-sizing policy.
     autoMemoryRequestResizeEnabled: true

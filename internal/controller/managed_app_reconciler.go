@@ -250,6 +250,13 @@ func (s *Service) reconcileManagedAppObject(ctx context.Context, client *kubeCli
 				if restoring {
 					return nil
 				}
+				if queued, err := s.reconcileManagedPostgresAutoCPULimit(ctx, client, autoApp); err != nil {
+					if s.Logger != nil {
+						s.Logger.Printf("automatic PostgreSQL CPU limit reconciliation deferred app=%s: %v", storedApp.ID, err)
+					}
+				} else if queued {
+					return nil
+				}
 				if queued, err := s.reconcileManagedPostgresAutoMemoryRequest(ctx, client, autoApp); err != nil {
 					if s.Logger != nil {
 						s.Logger.Printf("automatic PostgreSQL memory request reconciliation deferred app=%s: %v", storedApp.ID, err)

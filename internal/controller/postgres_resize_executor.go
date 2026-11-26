@@ -141,6 +141,12 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	gates := s.Config.ManagedPostgresInPlaceResize
 	enrollment := managedPostgresCPUEnrollment(gates, target.ServiceID, namespace, clusterName)
 	automaticCPU := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPUActor+"/")
+	automaticCPULimit := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPULimitActor+"/")
+	limitEnrollment := managedPostgresCPULimitEnrollment(gates, target.ServiceID, namespace, clusterName)
+	if automaticCPULimit && (op.RequestedByType != model.ActorTypeSystem || !target.AppOwned || !gates.CPULimitUpscaleEnabled ||
+		limitEnrollment == nil || !managedPostgresCPULimitAutoAllowed(app)) {
+		return s.blockManagedPostgresResizeOperation(op, app, "automatic_cpu_limit_policy_disabled", "automatic PostgreSQL CPU limit upscale requires the system actor, owner enrollment and enabled policy")
+	}
 	automaticMemory := strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/")
 	if automaticMemory && (op.RequestedByType != model.ActorTypeSystem || !gates.AutoMemoryRequestResizeEnabled) {
 		return s.blockManagedPostgresResizeOperation(op, app, "automatic_memory_policy_disabled", "automatic PostgreSQL memory request resize requires the enabled database policy and a system actor")
@@ -204,6 +210,9 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			if err == nil && automaticCPU {
 				err = validateManagedPostgresAutomaticCPUTarget(snapshot.Observation.DesiredResources, targetResources)
 			}
+			if err == nil && automaticCPULimit {
+				err = validateManagedPostgresAutoCPULimit(op.RequestedByID, *limitEnrollment, snapshot, targetResources)
+			}
 			if err == nil && automaticMemory {
 				err = validateManagedPostgresAutomaticMemoryTarget(op.RequestedByID, snapshot, targetResources)
 				if err == nil {
@@ -256,6 +265,9 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			return observeManagedPostgresResize(pod, managedPostgresMainContainerName)
 		},
 		Probe: func(callCtx context.Context, snapshot managedPostgresResizeSnapshot) error {
+			if automaticCPULimit {
+				return probeManagedPostgresAutoCPULimit(callCtx, client, snapshot)
+			}
 			return probeManagedPostgresResizeDatabase(callCtx, client, namespace, target.Postgres, snapshot)
 		},
 		EnsureOwned: func() error {
@@ -265,6 +277,25 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 			return s.reportManagedPostgresResizeExecutionEvent(op, app, namespace, clusterName, event)
 		},
 		Wait: waitManagedPostgresResizePollInterval,
+	}
+	if automaticCPULimit {
+		hooks.BeforePatch = func(callCtx context.Context, snapshot managedPostgresResizeSnapshot, resources kubeResourceRequirements) error {
+			if !managedPostgresResizeResourcesEqual(resources, targetResources) || op.CreatedAt.Before(time.Now().UTC().Add(-10*time.Minute)) {
+				return fmt.Errorf("automatic PostgreSQL CPU limit resize requires a fresh, single-stage target")
+			}
+			current, err := managedPostgresLiveResourceSpec(snapshot.Observation.DesiredResources)
+			if err != nil {
+				return err
+			}
+			pressured, err := confirmManagedPostgresCPULimitPressure(callCtx, client, snapshot.Observation, current.CPULimitMilliCores)
+			if err != nil {
+				return err
+			}
+			if !pressured {
+				return fmt.Errorf("automatic PostgreSQL CPU limit upscale no longer has live throttling evidence")
+			}
+			return nil
+		}
 	}
 	if restoring {
 		hooks.BeforePatch = func(callCtx context.Context, snapshot managedPostgresResizeSnapshot, resources kubeResourceRequirements) error {

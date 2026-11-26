@@ -216,6 +216,9 @@ func TestManagedPostgresInPlaceResizeGatesMatchReviewedDefaultsAndCanClose(t *te
 			t.Fatalf("helm template failed: %v\n%s", err, output)
 		}
 		controller := manifestDocumentForKindAndName(string(output), "Deployment", "fugue-fugue-controller")
+		if !strings.Contains(controller, "            - name: FUGUE_MANAGED_POSTGRES_AUTO_CPU_LIMIT_UPSCALE_TARGETS_JSON\n              value: \"[]\"") {
+			t.Errorf("CPU limit automatic enrollment must default closed (closeAll=%t)", closeAll)
+		}
 		for _, gate := range gates {
 			want := strconv.FormatBool(gate.enabled && !closeAll)
 			needle := "            - name: " + gate.name + "\n              value: \"" + want + "\""

@@ -8,6 +8,7 @@ import (
 )
 
 const ManagedPostgresAutoCPURequestActorPrefix = "fugue-controller/postgres-cpu-request-downscale"
+const ManagedPostgresAutoCPULimitActorPrefix = "fugue-controller/postgres-cpu-limit-upscale"
 const ManagedPostgresAutoMemoryRequestActorPrefix = "fugue-controller/postgres-memory-request"
 const ManagedPostgresRestoreRuntimeActorPrefix = "fugue-controller/postgres-restore-runtime-resources"
 
@@ -52,6 +53,10 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 	restore := strings.HasPrefix(op.RequestedByID, ManagedPostgresRestoreRuntimeActorPrefix+"/")
 	if restore && (op.RequestedByType != model.ActorTypeSystem || target.Postgres.RuntimeResources == nil ||
 		*target.Postgres.RuntimeResources != *targetResources) {
+		return ErrConflict
+	}
+	if strings.HasPrefix(op.RequestedByID, ManagedPostgresAutoCPULimitActorPrefix+"/") &&
+		(op.RequestedByType != model.ActorTypeSystem || !target.AppOwned) {
 		return ErrConflict
 	}
 	if !target.AppOwned && (op.RequestedByType != model.ActorTypeSystem ||

@@ -114,6 +114,7 @@ type ManagedPostgresInPlaceResizeConfig struct {
 	MemoryLimitDownscaleEnabled    bool
 	RecoveryEnabled                bool
 	AutoCPURequestDownscaleTargets []ManagedPostgresCPURequestTarget
+	AutoCPULimitUpscaleTargets     []ManagedPostgresCPULimitTarget
 	AutoMemoryRequestResizeEnabled bool
 }
 
@@ -124,6 +125,32 @@ type ManagedPostgresCPURequestTarget struct {
 	Cluster    string `json:"cluster"`
 	ClusterUID string `json:"cluster_uid"`
 	SystemID   string `json:"system_id"`
+}
+
+type ManagedPostgresCPULimitTarget struct {
+	ManagedPostgresCPURequestTarget
+	MaxLimitMilliCores int64 `json:"max_limit_millicores"`
+}
+
+func parseManagedPostgresCPULimitTargets(raw string) []ManagedPostgresCPULimitTarget {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var targets []ManagedPostgresCPULimitTarget
+	if err := json.Unmarshal([]byte(raw), &targets); err != nil {
+		log.Printf("invalid PostgreSQL automatic CPU limit enrollment; automatic upscale disabled")
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, t := range targets {
+		if t.ServiceID == "" || t.Namespace == "" || t.Cluster == "" || t.ClusterUID == "" || t.SystemID == "" ||
+			t.MaxLimitMilliCores <= 0 || t.MaxLimitMilliCores > 64000 || seen[t.ServiceID] {
+			log.Printf("incomplete, duplicate, or unbounded PostgreSQL automatic CPU limit enrollment; automatic upscale disabled")
+			return nil
+		}
+		seen[t.ServiceID] = true
+	}
+	return targets
 }
 
 func parseManagedPostgresCPURequestTargets(raw string) []ManagedPostgresCPURequestTarget {
@@ -637,6 +664,7 @@ func ControllerFromEnv() ControllerConfig {
 			MemoryLimitDownscaleEnabled:    getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_MEMORY_LIMIT_DOWNSCALE_ENABLED", false),
 			RecoveryEnabled:                getenvBool("FUGUE_MANAGED_POSTGRES_IN_PLACE_RECOVERY_ENABLED", false),
 			AutoCPURequestDownscaleTargets: parseManagedPostgresCPURequestTargets(os.Getenv("FUGUE_MANAGED_POSTGRES_AUTO_CPU_REQUEST_DOWNSCALE_TARGETS_JSON")),
+			AutoCPULimitUpscaleTargets:     parseManagedPostgresCPULimitTargets(os.Getenv("FUGUE_MANAGED_POSTGRES_AUTO_CPU_LIMIT_UPSCALE_TARGETS_JSON")),
 			AutoMemoryRequestResizeEnabled: getenvBool("FUGUE_MANAGED_POSTGRES_AUTO_MEMORY_REQUEST_RESIZE_ENABLED", true),
 		},
 	}
