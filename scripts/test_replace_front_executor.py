@@ -46,6 +46,30 @@ def probe_fixture():
 
 
 class ReplacementTests(unittest.TestCase):
+    def test_passive_front_is_only_allowed_for_probe_follow_and_remains_image_fenced(self):
+        config, _, _, _ = probe_fixture()
+        config["candidateAuthority"] = replacement.SERVING_READ_ONLY
+        replacement.validate(config)
+        public = {k: v for k, v in config.items() if k not in {"probePort", "servingSource"}}
+        public["schema"] = "fugue.front-executor-replacement/v2"
+        with self.assertRaisesRegex(ValueError, "allowed authority"):
+            replacement.validate(public)
+        image = "example.test/front@" + config["candidateImageDigest"]
+        old = {"metadata": {"uid": "old"}, "spec": {"containers": []}}
+        candidate = {
+            "metadata": {"uid": "new"},
+            "spec": {"containers": [{"name": "edge-front", "image": image}]},
+            "status": {"containerStatuses": [{"name": "edge-front", "imageID": image}]},
+        }
+        with patch.object(replacement.front, "pod", side_effect=[old, candidate, old, candidate]) as pod, \
+             patch.object(replacement.front, "node_worker_recipient") as recipient:
+            self.assertEqual(replacement.executors(config), (old, candidate))
+            self.assertFalse(pod.call_args.kwargs["node_worker"])
+            recipient.assert_not_called()
+            candidate["status"]["containerStatuses"][0]["imageID"] = "example.test/front@sha256:" + "1"*64
+            with self.assertRaisesRegex(ValueError, "running image"):
+                replacement.executors(config)
+
     def test_probe_replacement_accepts_only_an_owned_separate_listener_with_exact_baseline(self):
         config, probe, source, evidence = probe_fixture()
         transport = replacement.transport

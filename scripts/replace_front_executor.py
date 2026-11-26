@@ -17,6 +17,7 @@ from scripts import stage_front_serving_transport as stage
 
 
 PROBE_FOLLOW = "fugue.front-executor-probe-replacement/v1"
+SERVING_READ_ONLY = "serving-read-only-v1"
 
 
 def validate(config):
@@ -42,11 +43,12 @@ def validate(config):
     front.validate(config["observation"])
     if mode in {"fugue.front-executor-replacement/v2", PROBE_FOLLOW}:
         profile = config["observation"]
-        if (config["candidateAuthority"] != "node-worker-v1"
+        allowed_authority = {"node-worker-v1", SERVING_READ_ONLY} if mode == PROBE_FOLLOW else {"node-worker-v1"}
+        if (config["candidateAuthority"] not in allowed_authority
                 or not re.fullmatch(r"sha256:[0-9a-f]{64}", config["candidateImageDigest"])
                 or profile["candidateSelector"].get("fugue.io/edge-node") != profile["node"]
                 or profile["activationPath"] != "/var/lib/fugue-edge-front/activation.json"):
-            raise ValueError("node Worker Front replacement needs the exact node selector and local state path")
+            raise ValueError("Front replacement needs an allowed authority, exact node selector and local state path")
     if mode == PROBE_FOLLOW:
         source = config["servingSource"]
         if (not isinstance(source, dict) or set(source) != {"service", "serviceUID", "generation", "podUID"}
@@ -157,12 +159,13 @@ def executors(config):
         raise ValueError("replacement must retain two independent executors")
     if any(port.get("hostPort") for container in old["spec"]["containers"] for port in container.get("ports", [])) or old["spec"].get("hostNetwork"):
         raise ValueError("selector replacement requires an existing Service-owned public Front")
-    if node_worker:
+    if "candidateImageDigest" in config:
         declared = next(c["image"] for c in candidate["spec"]["containers"] if c["name"] == "edge-front")
         observed = next(c["imageID"] for c in candidate["status"]["containerStatuses"] if c["name"] == "edge-front")
         digest_suffix = "@" + config["candidateImageDigest"]
         if not declared.endswith(digest_suffix) or not observed.endswith(digest_suffix):
-            raise ValueError("node Worker Front declared and running image must match its exact independent release")
+            raise ValueError("Front declared and running image must match the exact release")
+    if node_worker:
         front.node_worker_recipient(profile, candidate)
     return old, candidate
 
