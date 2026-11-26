@@ -13,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+var errHeldEdgeCoverageUnproven = errors.New("held Edge health does not cover every required member")
+
 // A held node still belongs to its DaemonSet and retains its running process.
 // Aggregate DaemonSet counters therefore cannot describe the explicitly smaller
 // release cohort. When holds exist, verify every required physical Pod instead.
@@ -58,8 +60,8 @@ func (store *KubeStore) heldEdgeWorkloadHealth(ctx context.Context, release decl
 		return evidence, true, errors.New("held Edge health Pod inventory is incomplete")
 	}
 	active, retired, err := store.workloadHealthPods(ctx, cohort.FilterPods(pods.Items), workload)
-	if err != nil || len(active) != cohort.Expected {
-		return evidence, true, errors.New("held Edge health does not cover every required member")
+	if err != nil {
+		return evidence, true, err
 	}
 	known := map[string]string{}
 	for _, n := range nodes.Items {
@@ -88,6 +90,16 @@ func (store *KubeStore) heldEdgeWorkloadHealth(ctx context.Context, release decl
 				return evidence, true, errors.New("required Edge process differs from immutable code target")
 			}
 		}
+	}
+	// Verify every observed member first. A missing Pod is not proof of code
+	// drift: a required node can already be served by a node-local Worker
+	// instead of this historical group workload. Extra or invalid Pods remain
+	// negative evidence.
+	if len(active) < cohort.Expected {
+		return evidence, true, errHeldEdgeCoverageUnproven
+	}
+	if len(active) > cohort.Expected {
+		return evidence, true, errors.New("held Edge health exceeds the required membership")
 	}
 	count := int32(cohort.Expected)
 	evidence = workloadHealthEvidence{Kind: "DaemonSet", Name: workload.Name, Desired: count, Updated: count, Ready: count, Available: count, Generation: workload.Generation, RetiredPods: retired, RequiredNodeUIDs: requiredUIDs, ReleaseHoldNodeUIDs: heldUIDs}

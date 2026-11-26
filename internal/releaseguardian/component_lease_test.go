@@ -2,6 +2,7 @@ package releaseguardian
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -33,8 +34,8 @@ func TestNodeWorkerComponentLeaseExcludesAnAlreadyRunningGroupWriter(t *testing.
 		}
 		return false, nil, nil
 	})
-	if _, err := AcquireNodeWorkerComponent(ctx, client, component, "pilot-pod", j.Digest, now.Add(time.Minute)); err == nil {
-		t.Fatal("node writer took an ordinary release's live Lease")
+	if _, err := AcquireNodeWorkerComponent(ctx, client, component, "pilot-pod", j.Digest, now.Add(time.Minute)); !errors.Is(err, ErrNodeWorkerComponentBusy) {
+		t.Fatalf("held Lease was not classified as prewrite contention: %v", err)
 	}
 	if got := len(client.Actions()); got != 1 || client.Actions()[0].GetVerb() != "get" {
 		t.Fatalf("busy node writer should not touch the Lease: %+v", client.Actions())

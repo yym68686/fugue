@@ -365,6 +365,13 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 	degraded := func(reason string) LayerHealth {
 		return LayerHealth{State: HealthDegraded, Reason: reason, EvidenceDigest: digest([]byte(reason)), ObservedAt: now.Format(time.RFC3339Nano)}
 	}
+	workloadFailure := func(err error) LayerHealth {
+		layer := degraded(err.Error())
+		if errors.Is(err, errHeldEdgeCoverageUnproven) {
+			layer.State = HealthUnknown
+		}
+		return layer
+	}
 	var selector labels.Selector
 	var daemonSet *appsv1.DaemonSet
 	var deployment *appsv1.Deployment
@@ -397,11 +404,11 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 		}
 		if evidence, handled, err := store.heldEdgeWorkloadHealth(ctx, release, target, workload); handled {
 			if err != nil {
-				return degraded(err.Error())
+				return workloadFailure(err)
 			}
 			members, err := store.componentWorkloadHealth(ctx, release, target, manifest)
 			if err != nil {
-				return degraded(err.Error())
+				return workloadFailure(err)
 			}
 			return healthy(map[string]any{"requiredWorkload": evidence, "componentWorkloads": members, "membership": "explicit-release-hold"})
 		}
@@ -444,7 +451,7 @@ func (store *KubeStore) localHealth(ctx context.Context, release declarativerele
 	}
 	componentWorkloads, err := store.componentWorkloadHealth(ctx, release, target, manifest)
 	if err != nil {
-		return degraded(err.Error())
+		return workloadFailure(err)
 	}
 	return healthy(map[string]any{
 		"desired": desired, "updated": updated, "ready": ready, "available": available,

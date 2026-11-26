@@ -3,7 +3,9 @@ package releaseguardian
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/model/edgecohort"
@@ -15,7 +17,7 @@ import (
 )
 
 func TestHeldEdgeHealthChecksRequiredPodsInsteadOfWholeDaemonSetCounters(t *testing.T) {
-	for _, scenario := range []string{"held", "no-hold", "missing-pod", "duplicate-node", "wrong-image", "wrong-runtime-image", "unready", "foreign-owner", "old-revision", "node-replaced", "controller-stale", "held-terminating"} {
+	for _, scenario := range []string{"held", "no-hold", "missing-pod", "missing-and-wrong-image", "duplicate-node", "wrong-image", "wrong-runtime-image", "unready", "foreign-owner", "old-revision", "node-replaced", "controller-stale", "held-terminating"} {
 		t.Run(scenario, func(t *testing.T) {
 			group, image := "edge-pool-a", "ghcr.io/example/worker@"+testDigest
 			target := declarativerelease.TargetIdentity{ConfigSHA: testSHA, ManifestSHA: testSHA, OCIRevision: testSHA, ImageRef: image}
@@ -46,6 +48,12 @@ func TestHeldEdgeHealthChecksRequiredPodsInsteadOfWholeDaemonSetCounters(t *test
 				objects = append(objects, duplicate)
 			case "wrong-image":
 				pod.Spec.Containers[0].Image = "old"
+			case "missing-and-wrong-image":
+				pod.Spec.Containers[0].Image = "old"
+				other := n.DeepCopy()
+				other.Name, other.UID = "node-local", "node-local-uid"
+				release.Transition.EdgeGroupAB.ExpectedNodes++
+				objects = append(objects, other)
 			case "wrong-runtime-image":
 				pod.Status.ContainerStatuses[0].ImageID = "old"
 			case "unready":
@@ -78,6 +86,19 @@ func TestHeldEdgeHealthChecksRequiredPodsInsteadOfWholeDaemonSetCounters(t *test
 				}
 			} else if err == nil {
 				t.Fatal("unproven member health accepted")
+			}
+			if errors.Is(err, errHeldEdgeCoverageUnproven) != (scenario == "missing-pod") {
+				t.Fatalf("only a valid but incomplete inventory is unproven coverage: %v", err)
+			}
+			if scenario == "missing-pod" {
+				layer := store.localHealth(context.Background(), release, target, nil, time.Now().UTC())
+				if layer.State != HealthUnknown || layer.Reason != errHeldEdgeCoverageUnproven.Error() {
+					t.Fatalf("coverage is not proof of drift: %+v", layer)
+				}
+				health := HealthSnapshot{Local: layer, Dependency: LayerHealth{State: HealthHealthy}, Route: LayerHealth{State: HealthHealthy}}
+				if decision := Classify(testDigest, testDigest, health); decision.RollbackEligible || decision.State == StateStable {
+					t.Fatalf("incomplete coverage must neither trigger rollback nor report stable: %+v", decision)
+				}
 			}
 			for _, action := range client.Actions() {
 				if action.GetVerb() != "get" && action.GetVerb() != "list" {

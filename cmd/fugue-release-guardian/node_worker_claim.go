@@ -110,16 +110,45 @@ func readClaimStdin(in io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
+func waitNodeWorkerComponent(ctx context.Context, recent func() bool, wait, interval time.Duration,
+	acquire func() (releaseguardian.NodeWorkerComponentHold, error)) (releaseguardian.NodeWorkerComponentHold, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		if err := ctx.Err(); err != nil {
+			return releaseguardian.NodeWorkerComponentHold{}, err
+		}
+		if !recent() {
+			return releaseguardian.NodeWorkerComponentHold{}, errors.New("new node Worker journal was not made from recent observations")
+		}
+		hold, err := acquire()
+		if !errors.Is(err, releaseguardian.ErrNodeWorkerComponentBusy) {
+			return hold, err
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return hold, err
+		}
+		timer := time.NewTimer(min(interval, left))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return hold, errors.Join(err, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
 func (a *frontAuthorityActivator) claimNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore,
 	component releaseguardian.NodeWorkerComponent, podUID string, j edgegroupfront.NodeWorkerJournal) (fence releaseguardian.NodeWorkerFence, resultErr error) {
-	now := a.now().UTC()
-	if j.CreatedAt.After(now) || !j.CreatedAt.Add(2*time.Minute).After(now) {
-		return fence, errors.New("new node Worker journal was not made from recent observations")
-	}
 	// Ordinary slot-template writes hold this component Lease, then take the
 	// group Lease for Front activation. Keep the same order. After the
 	// immutable journal is claimed, ordinary writers see it under their lock.
-	componentHold, err := releaseguardian.AcquireNodeWorkerComponent(ctx, a.client, component, podUID, j.Digest, now)
+	componentHold, err := waitNodeWorkerComponent(ctx, func() bool {
+		now := a.now().UTC()
+		return !j.CreatedAt.After(now) && j.CreatedAt.Add(2*time.Minute).After(now)
+	}, 10*time.Second, time.Second, func() (releaseguardian.NodeWorkerComponentHold, error) {
+		return releaseguardian.AcquireNodeWorkerComponent(ctx, a.client, component, podUID, j.Digest, a.now().UTC())
+	})
 	if err != nil {
 		return fence, err
 	}

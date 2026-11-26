@@ -18,6 +18,10 @@ import (
 // 12-minute whole-group Edge A/B transition) and is shared by both writers.
 const ComponentLeaseDurationSeconds = 900
 
+// ErrNodeWorkerComponentBusy means acquisition stopped at a validated GET
+// before any Lease write. Uncertain create/update responses are not contention.
+var ErrNodeWorkerComponentBusy = errors.New("whole-group Worker component Lease is already held")
+
 func NewComponentLease(namespace, name, component, holder string, now time.Time) *coordinationv1.Lease {
 	value := &coordinationv1.Lease{
 		TypeMeta: metav1.TypeMeta{APIVersion: coordinationv1.SchemeGroupVersion.String(), Kind: "Lease"},
@@ -128,7 +132,7 @@ func AcquireNodeWorkerComponent(ctx context.Context, client kubernetes.Interface
 			return NodeWorkerComponentHold{}, readErr
 		}
 		if current != "" && now.Before(renewed.Add(time.Duration(duration)*time.Second)) {
-			return NodeWorkerComponentHold{}, errors.New("whole-group Worker component Lease is already held")
+			return NodeWorkerComponentHold{}, ErrNodeWorkerComponentBusy
 		}
 		object = object.DeepCopy()
 		SetComponentLease(object, holder, now)
