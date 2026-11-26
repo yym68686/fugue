@@ -15,7 +15,12 @@ import (
 	"fugue/internal/store"
 )
 
-const managedPostgresAutoCPULimitActor = store.ManagedPostgresAutoCPULimitActorPrefix
+const (
+	managedPostgresAutoCPULimitActor = store.ManagedPostgresAutoCPULimitActorPrefix
+	// Kubernetes exec must close the stream even after the command returns.
+	// Allow for transport delays and scheduling under a saturated CPU quota.
+	managedPostgresAutoCPULimitExecTimeout = 30 * time.Second
+)
 
 func managedPostgresCPULimitEnrollment(cfg config.ManagedPostgresInPlaceResizeConfig, serviceID, namespace, cluster string) *config.ManagedPostgresCPULimitTarget {
 	for _, entry := range cfg.AutoCPULimitUpscaleTargets {
@@ -103,17 +108,23 @@ func managedPostgresCPURecentlySaturated(samples []model.ResourceUsageSample, no
 }
 
 const managedPostgresReadCPUWindow = `
-read quota period < /sys/fs/cgroup/cpu.max
+read -r quota period < /sys/fs/cgroup/cpu.max
 printf '%s %s ' "$quota" "$period"
 sample() {
-  awk '$1 == "nr_periods" {p=$2} $1 == "nr_throttled" {t=$2} END {
-    if (p == "" || t == "") exit 1
-    print p, t
-  }' /sys/fs/cgroup/cpu.stat
+  periods=
+  throttled=
+  while read -r key value; do
+    case "$key" in
+      nr_periods) periods=$value ;;
+      nr_throttled) throttled=$value ;;
+    esac
+  done < /sys/fs/cgroup/cpu.stat
+  test -n "$periods" && test -n "$throttled" || return 1
+  printf '%s %s\n' "$periods" "$throttled"
 }
 sample
 sleep 3
-read quota2 period2 < /sys/fs/cgroup/cpu.max
+read -r quota2 period2 < /sys/fs/cgroup/cpu.max
 test "$quota:$period" = "$quota2:$period2"
 sample
 `
@@ -142,7 +153,7 @@ func managedPostgresCPUWindowThrottled(raw string, limit int64) bool {
 }
 
 func confirmManagedPostgresCPULimitPressure(ctx context.Context, client *kubeClient, o managedPostgresResizeObservation, limit int64) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, managedPostgresAutoCPULimitExecTimeout)
 	defer cancel()
 	var out bytes.Buffer
 	if err := coldExec(ctx, client, o.Namespace, o.PodName, o.ContainerName, []string{"sh", "-ec", managedPostgresReadCPUWindow}, &out); err != nil {
@@ -161,7 +172,7 @@ INSERT INTO fugue_cpu_limit_probe VALUES (1);
 SELECT pg_is_in_recovery(), current_setting('transaction_read_only'), system_identifier, value
 FROM pg_control_system(), fugue_cpu_limit_probe;
 ROLLBACK;`
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, managedPostgresAutoCPULimitExecTimeout)
 	defer cancel()
 	o := snapshot.Observation
 	var out bytes.Buffer
