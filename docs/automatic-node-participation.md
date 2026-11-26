@@ -63,10 +63,16 @@ handoff and rollback use the same per-transaction peer witness.
 Global hosted publication normally requires fresh predecessor receipts from
 its full cohort. A newly effective hold already authorized by the same signed
 producer may instead stage a contraction after verifying surviving consumers.
+An online DNS consumer whose old receipt failed only its aggregate probe may
+prove this predecessor check with per-route facts from its currently selected
+Pod. Every retained route must still have a current proof and satisfy the
+original quorum. The withdrawn Edge does not need to respond.
 The signed predecessor, its immutable expectations and LKG are not rewritten.
 The new release preserves route/TLS behavior and cannot add DNS addresses or
-combine unrelated DNS edits with the contraction. The candidate still needs
-its own ordinary green receipts and serving proof.
+combine unrelated DNS edits with the contraction. Affected DNS orders keep
+surviving members in order. If the entire order is withdrawn, only a surviving
+fallback already authorized by the signed DNS policy can be used. The candidate
+still needs its own ordinary green receipts and serving proof.
 
 The API's capacity recovery verifier resolves a returned node's actual public
 Front and Worker against the latest completed node-local Guardian journal

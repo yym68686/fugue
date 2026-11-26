@@ -193,12 +193,26 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 	if input == nil || len(input.OfflineEdges) == 0 {
 		return projectDNSReadinessWithPolicy(result, nodes, at, input)
 	}
-	if err := platformproducer.ValidateOfflineEdges(input.OfflineEdges); err != nil {
+	effective, observations, err := s.effectiveOfflineEdgeHolds(ctx, nodes, at, input.OfflineEdges, lookup)
+	if err != nil {
 		return err
+	}
+	copy := *input
+	copy.OfflineEdges = effective
+	if err := projectDNSReadinessWithPolicy(result, nodes, at, &copy); err != nil {
+		return err
+	}
+	result.hostedAddressHolds = offlineHostedAddressHolds(effective)
+	return setOfflineRecoveryFact(&result.RuntimeSnapshot, observations, at)
+}
+
+func (s *Server) effectiveOfflineEdgeHolds(ctx context.Context, nodes []model.EdgeNode, at time.Time, holds []platformproducer.OfflineEdge, lookup func(context.Context, []store.PlatformConsumerRetirementTarget) (map[store.PlatformConsumerRetirementTarget]bool, error)) ([]platformproducer.OfflineEdge, []platformproducer.OfflineRecoveryObservation, error) {
+	if err := platformproducer.ValidateOfflineEdges(holds); err != nil {
+		return nil, nil, err
 	}
 	observations := []platformproducer.OfflineRecoveryObservation{}
 	var targets []store.PlatformConsumerRetirementTarget
-	for _, hold := range input.OfflineEdges {
+	for _, hold := range holds {
 		if hold.Recovery != nil {
 			o, err := s.readOfflineRecovery(ctx, hold)
 			if err != nil {
@@ -212,7 +226,7 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 			if o.Ready(hold, at) {
 				enrollments, err := offlineEdgeRouteEnrollments(hold)
 				if err != nil {
-					return err
+					return nil, nil, err
 				}
 				targets = append(targets, enrollments[:]...)
 				observations = append(observations, o)
@@ -222,7 +236,7 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 	if len(targets) > 0 {
 		retired, err := lookup(ctx, targets)
 		if err != nil {
-			return fmt.Errorf("check permanent consumer retirement before offline recovery: %w", err)
+			return nil, nil, fmt.Errorf("check permanent consumer retirement before offline recovery: %w", err)
 		}
 		// A fresh probe establishes readiness, not enrollment authority.
 		// Omit ineligible evidence before signing so replay retains the
@@ -245,22 +259,22 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 		}
 		observations = eligible
 	}
-	effective, err := platformproducer.EffectiveOfflineHolds(nodes, input.OfflineEdges, observations, at)
-	if err != nil {
-		return err
+	effective, err := platformproducer.EffectiveOfflineHolds(nodes, holds, observations, at)
+	return effective, observations, err
+}
+
+func offlineHostedAddressHolds(holds []platformproducer.OfflineEdge) []platformconfig.HostedAddressHold {
+	var out []platformconfig.HostedAddressHold
+	for _, h := range holds {
+		out = append(out, platformconfig.HostedAddressHold{EdgeID: h.EdgeID, EdgeGroupID: h.EdgeGroupID, Address: h.PublicIPv4})
 	}
-	copy := *input
-	copy.OfflineEdges = effective
-	if err := projectDNSReadinessWithPolicy(result, nodes, at, &copy); err != nil {
-		return err
-	}
-	result.hostedAddressHolds = nil
-	for _, h := range effective {
-		result.hostedAddressHolds = append(result.hostedAddressHolds, platformconfig.HostedAddressHold{EdgeID: h.EdgeID, EdgeGroupID: h.EdgeGroupID, Address: h.PublicIPv4})
-	}
+	return out
+}
+
+func setOfflineRecoveryFact(snapshot *platformconfig.RuntimeSnapshot, observations []platformproducer.OfflineRecoveryObservation, at time.Time) error {
 	if len(observations) > 0 {
-		if result.RuntimeSnapshot.Facts == nil {
-			result.RuntimeSnapshot.Facts = map[string]any{}
+		if snapshot.Facts == nil {
+			snapshot.Facts = map[string]any{}
 		}
 		// JSON storage form is also the compiler form; this prevents replay drift.
 		raw, _ := json.Marshal(map[string]any{"captured_at": at, "observations": observations})
@@ -268,7 +282,7 @@ func (s *Server) projectDNSReadinessWithRecoveryChecked(ctx context.Context, res
 		if err := json.Unmarshal(raw, &fact); err != nil {
 			return err
 		}
-		result.RuntimeSnapshot.Facts[platformproducer.OfflineRecoveryFact] = fact
+		snapshot.Facts[platformproducer.OfflineRecoveryFact] = fact
 	}
 	return nil
 }

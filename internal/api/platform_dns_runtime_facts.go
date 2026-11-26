@@ -39,6 +39,7 @@ type dnsRuntimeBackend struct {
 
 type platformDNSRuntimeFactsResponse struct {
 	readinessPlan       *platformconfig.DNSReadinessPlan
+	transportReady      bool
 	probeFreshness      time.Duration
 	captureSequence     uint64 `json:"-"`
 	preflightFailure    *dnsPreflightFactFailure
@@ -485,6 +486,7 @@ func (s *Server) readPlatformDNSRuntimeFacts(ctx context.Context, node string) (
 		observeCapture(ctx, event)
 	})
 	response.Ready = response.Ready && transportReady
+	response.transportReady = transportReady
 	response.lkgGeneration = current.consumer.LKGGeneration
 	response.heartbeatValidUntil = current.heartbeatValidUntil
 	if err := ctx.Err(); err != nil {

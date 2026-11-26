@@ -294,6 +294,17 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			resultErr = errors.Join(resultErr, finish(exitCtx))
 		}()
 	}
+	// A business capture can itself require the old full to have converged.
+	// Do the independent, membership-only attempt before that dependency.
+	advance("discover_offline_consumer_contraction")
+	contraction, provenance, err := s.prepareOfflineContraction(ctx, policy, authority)
+	if err != nil {
+		return interval, err
+	}
+	if contraction != nil {
+		decision = "offline_consumer_contraction"
+		return interval, s.persistProducedCompilation(ctx, policy, authority, previous, principal, *contraction, provenance, "", advance)
+	}
 	// Runtime capture includes several independently bounded network probes.
 	// Neither a new phase nor a new deadline renews evidence timestamps or
 	// relaxes policy, integrity, convergence or LKG checks.
@@ -423,7 +434,7 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	advance("compile")
 	req := platformconfig.CompileRequest{OmitOriginalInput: s.compilerInputOmitOriginal, Intent: projection.Intent, Policy: projection.Policy, RuntimeSnapshot: projection.RuntimeSnapshot, PreviousTrafficPublication: dnsRequest.PreviousTrafficPublication}
 	var compiled platformconfig.CompileResult
-	provenance := platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest}
+	provenance = platformCompilationSource{PolicyReleaseID: authority.ID, SourceDigest: sourceDigest, StaticIntentID: policy.StaticIntentArtifactID, StaticIntentDigest: policy.StaticIntentDigest, DNSPolicyID: policy.DNSPolicyArtifactID, DNSPolicyDigest: policy.DNSPolicyDigest}
 	if handoff {
 		advance("compile_hosted_fleet_handoff")
 		source, e := s.readHostedAddressSourceFor(ctx, policy, authority, projection.hostedAddressHolds, s.observeRetainedTrafficSource, true)
@@ -472,11 +483,11 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 		}
 		isolate := scoped != nil && (len(scoped.StableHosts) > 0 || (len(scoped.ExternalHosts) > 0 && len(scoped.Hosts) == 0 && !managedCustody))
 		if globalGate != nil {
-			if err != nil || !errors.Is(globalGate, errFullConsumerNotConverged) {
-				return interval, errors.Join(globalGate, err)
+			if !errors.Is(globalGate, errFullConsumerNotConverged) {
+				return interval, globalGate
 			}
 			advance("compile_offline_consumer_contraction")
-			compiled, err = s.compileHostedOfflineContraction(ctx, req, source, scoped)
+			compiled, err = s.compileHostedOfflineContraction(ctx, req, source)
 			if err != nil {
 				return interval, errors.Join(globalGate, err)
 			}
@@ -540,8 +551,12 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	if err != nil {
 		return interval, err
 	}
+	return interval, s.persistProducedCompilation(ctx, policy, authority, previous, principal, compiled, provenance, projection.BusinessSnapshotRevision, advance)
+}
+
+func (s *Server) persistProducedCompilation(ctx context.Context, policy platformproducer.Policy, authority, previous model.PlatformArtifactRelease, principal model.Principal, compiled platformconfig.CompileResult, provenance platformCompilationSource, businessRevision string, advance func(string)) error {
 	if err := ctx.Err(); err != nil {
-		return interval, err
+		return err
 	}
 	// The verified compiler-input write has its own two-minute ceiling. Start
 	// the outer deadline only now, so digesting and compilation cannot consume
@@ -551,42 +566,42 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 	advance("persist_inputs")
 	inputs, err := s.ensurePlatformProducerInputs(persistCtx, compiled, principal)
 	if err != nil {
-		return interval, err
+		return err
 	}
 	advance("persist_artifacts")
 	result, err := s.materializePlatformCompilation(persistCtx, compiled, principal, &inputs, provenance)
 	if err != nil {
-		return interval, err
+		return err
 	}
 	if err = persistCtx.Err(); err != nil {
-		return interval, err
+		return err
 	}
 	cancelPersist()
 	advance("publish_shadow")
 	s.warmDNSProducerPublication(ctx, policy, result.ReleaseArtifact)
 	if err := ctx.Err(); err != nil {
-		return interval, err
+		return err
 	}
 	_, release, _, _, err := s.store.ReleaseProducedPlatformArtifact(result.ReleaseArtifact.ID, authority.ID, previous.ID, principal)
 	if err != nil {
-		return interval, err
+		return err
 	}
 	advance("prepare_consumers")
 	prepareCtx, cancelPrepare := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancelPrepare()
 	if _, err = s.preparePlatformReleaseSetConsumers(prepareCtx, principal, result.ReleaseArtifact, release); err != nil {
-		return interval, err
+		return err
 	}
 	cancelPrepare()
-	s.appendAudit(principal, "platform_config.shadow_produced", "platform_release_set", result.ReleaseArtifact.ID, "", map[string]string{"policy_release_id": authority.ID, "source_digest": sourceDigest, "business_snapshot_revision": projection.BusinessSnapshotRevision, "release_id": release.ID})
+	s.appendAudit(principal, "platform_config.shadow_produced", "platform_release_set", result.ReleaseArtifact.ID, "", map[string]string{"policy_release_id": authority.ID, "source_digest": provenance.SourceDigest, "business_snapshot_revision": businessRevision, "release_id": release.ID})
 	if s.log != nil {
-		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, sourceDigest, projection.BusinessSnapshotRevision)
+		s.log.Printf("platform configuration producer published policy_release=%s release=%s artifact=%s source_digest=%s business_revision=%s", authority.ID, release.ID, result.ReleaseArtifact.ID, provenance.SourceDigest, businessRevision)
 	}
 	if policy.Mode == "serving" {
 		advance("stage_traffic")
-		return interval, s.stageProducedTraffic(ctx, policy, authority, result.ReleaseArtifact)
+		return s.stageProducedTraffic(ctx, policy, authority, result.ReleaseArtifact)
 	}
-	return interval, nil
+	return nil
 }
 
 // Compare the route behavior resolved from fixed runtime facts as well as
