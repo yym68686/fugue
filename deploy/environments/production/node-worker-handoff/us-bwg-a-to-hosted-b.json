@@ -1,0 +1,74 @@
+{
+  "schema": "fugue.node-worker-handoff/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "bwg",
+  "nodeUID": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+  "front": {
+    "service": "fugue-front-serving-public-b-secondary",
+    "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c",
+    "generation": 8,
+    "address": "95.169.10.156",
+    "source": "35ac386a1adf5e1087ecf4a86e809b76f678a4a9",
+    "imageDigest": "sha256:0c1c724d29320cfc16ab793f307ff08af1178d6cc060fd206ee3e34add618ccf"
+  },
+  "probeIngress": {
+    "service": "fugue-front-probe-public-b-secondary",
+    "uid": "9cbf3f2e-5102-4ce2-ad9f-fd97a0efe62d",
+    "generation": 4,
+    "port": 15443
+  },
+  "guardian": {
+    "deployment": "fugue-release-guardian",
+    "source": "1e1f46543d41a32b5870d76b88dfac723450812f",
+    "imageDigest": "sha256:e3f5dd2c4e9378ef88c07657b4acee5af0a9fe71d1883ff59b8275d3d0356f07"
+  },
+  "candidate": {
+    "daemonSet": "fugue-edge-worker-us-bwg-b-hosted",
+    "component": "edge-worker-us-bwg-b-hosted",
+    "source": "5982a59366859caefba54b8de5f24c335c3a6c37",
+    "imageDigest": "sha256:8cfca13820022d89cd6c99f8430f1829e0a1f7a8bce49d8af12aa8b1048f2ef3",
+    "slot": "b",
+    "bundleGeneration": "edgegroupbundle_85fdcc5e9abbc9f2023655720f270e54653b45a6a09d319634072532693f5ba1.p67318.r185",
+    "releaseDigest": "sha256:9e083d1d8e51ab08f0b2f8b4e1cb36aa3cdd34bb97945e29078c254f22a0fb35"
+  },
+  "expected": {
+    "active_slot": "a",
+    "authority": "edge-control",
+    "bundle_generation": "edgegroupbundle_dc381b4a2f3f0bd02f3031fd9a4b550f812218b34cbaeefbb1743b02a2e1bdfc.p67316.r185",
+    "edge_group_id": "edge-group-country-us",
+    "generation": 913,
+    "operation": "promote",
+    "previous_slot": "b",
+    "reason": "advance fixed Worker using journal sha256:6c7df4d4f3173310321eac18b97328c818bb0e55eea7983a819f2faa9736d321",
+    "schema": "edge-front-group-activation/v1",
+    "updated_at": "2026-11-26T03:58:05.42258417Z",
+    "worker_image_digest": "sha256:225fc110af84e64f71da4abbe170048342168ae25814b479b537ea99742c760f",
+    "worker_source_commit": "86460476e4a1ca2e0075164aead4f04dda7934c2"
+  },
+  "peers": [
+    {
+      "node": "vps-591f4447",
+      "service": "fugue-front-serving-public-b-primary",
+      "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f"
+    },
+    {
+      "node": "86eabf26-42a9-4f9d-998a-754115f8b829",
+      "service": "fugue-front-serving-us-managed",
+      "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0"
+    }
+  ],
+  "probe": {
+    "host": "edge-observe-canary-0731-1333.fugue.pro",
+    "path": "/",
+    "bodyDigest": "sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de"
+  },
+  "verifyDrain": true,
+  "fixedRotation": true,
+  "retirement": {
+    "daemonSet": "fugue-fugue-edge-worker-a",
+    "uid": "5332a5de-7721-4d6d-9d3a-2540375a2bf3",
+    "generation": 718,
+    "witness": "background"
+  }
+}
