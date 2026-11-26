@@ -60,6 +60,10 @@ producer's planned suspension. A missing peer, timeout, conflicting hold,
 unverified DNS candidate or changed node identity does not count. Forward
 handoff and rollback use the same per-transaction peer witness.
 
+An ongoing producer rollout can retain a previous exclusion only when its
+signed candidate and pinned, verified rollback both exclude the node. This
+is not sufficient evidence for a new exclusion.
+
 Global hosted publication normally requires fresh predecessor receipts from
 its full cohort. A newly effective hold already authorized by the same signed
 producer may instead stage a contraction after verifying surviving consumers.
@@ -78,7 +82,11 @@ The API's capacity recovery verifier resolves a returned node's actual public
 Front and Worker against the latest completed node-local Guardian journal
 when one exists, rather than comparing it to the older group slot. A
 node-local Worker already at the committed target can be readmitted without
-recreating legacy workloads. If the node-local code differs from the committed
+recreating legacy workloads. Guardian indexes completed results by physical
+Node UID before releasing a handoff fence and backfills existing groups under
+the same mutation lease. The API reads only the named index and the exact
+immutable archive and receipt; it does not list namespace ConfigMaps.
+If the node-local code differs from the committed
 target, the hold remains; the legacy recovery primitive cannot write that
 activation. The installed API's reconciliation uses its loopback observation
 endpoint and existing Kubernetes release leases. Where configured, the external

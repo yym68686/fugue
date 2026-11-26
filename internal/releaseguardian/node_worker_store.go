@@ -205,13 +205,20 @@ func (store *AuthorityStore) FinalizeNodeWorker(ctx context.Context, fence NodeW
 			return err
 		}
 	}
-	archive := nodeWorkerInputName("archive", j.Digest)
+	archive := NodeWorkerArchiveName(j.Digest)
 	if err := store.createImmutable(ctx, archive, group, "node-worker-archive", "journal.json", j); err != nil {
 		return err
 	}
 	var archived edgegroupfront.NodeWorkerJournal
 	if found, err := store.readNodeWorkerInput(ctx, j, archive, "node-worker-archive", "journal.json", &archived); err != nil || !found || archived != j {
 		return errors.Join(errors.New("archived node Worker journal readback is not exact"), err)
+	}
+	if result.Outcome != "expired_without_cutover" {
+		// Commit the lookup before releasing the fence. Recovery cannot see
+		// a settled group while its exact committed head is still missing.
+		if err := store.advanceNodeWorkerIndex(ctx, j, result); err != nil {
+			return err
+		}
 	}
 	configs := store.client.CoreV1().ConfigMaps(store.namespace)
 	name := NodeWorkerProjectionName(group, node)

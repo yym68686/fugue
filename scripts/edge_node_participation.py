@@ -104,7 +104,8 @@ def isolation(policy, member, node, svc):
     o = observed.get("observation", {})
     intent = o.get("dns_admission_intent", {})
     if (o.get("heartbeat_fresh") is not False or o.get("reason") != "heartbeat_stale" or
-            intent.get("state") != "suspended" or intent.get("serving_evidence") != "excluded_from_verified_full" or
+            intent.get("state") != "suspended" or
+            intent.get("serving_evidence") not in ("excluded_from_verified_full", "excluded_across_full_transition") or
             svc["spec"]["externalIPs"] != [observed.get("public_ipv4")]):
         return None
     slices = require_isolated_service(policy["namespace"], svc, member["node"])

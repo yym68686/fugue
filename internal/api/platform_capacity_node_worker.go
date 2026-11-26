@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/url"
 
-	"fugue/internal/edgegroupfront"
 	"fugue/internal/model"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
@@ -32,53 +31,56 @@ func (s *Server) capacityNodeWorkerTarget(ctx context.Context, client *clusterNo
 	if json.Unmarshal([]byte(marker.Data["mode.json"]), &mode) != nil || len(mode) != 2 || mode["schema"] != "edge-node-worker-mode/v1" || mode["group"] != group {
 		return target, "", errors.New("Guardian node-mode identity differs")
 	}
-	var archives corev1.ConfigMapList
-	q := url.Values{"labelSelector": {"fugue.pro/group=" + group + ",fugue.pro/authority-kind=node-worker-archive"}, "limit": {"128"}}
-	if err := readCapacityMetadata(ctx, client, base+"/configmaps?"+q.Encode(), &archives); err != nil || archives.Continue != "" || len(archives.Items) > 128 {
-		return target, "", errors.New("Guardian node Worker history unavailable or incomplete")
+	read := func(name string, into *corev1.ConfigMap) error {
+		return readCapacityMetadata(ctx, client, base+"/configmaps/"+url.PathEscape(name), into)
 	}
-	var digest string
-	var journal edgegroupfront.NodeWorkerJournal
-	seen := map[uint64]bool{}
-	for _, a := range archives.Items {
-		j, err := edgegroupfront.ReadNodeWorkerJournal([]byte(a.Data["journal.json"]))
-		if err != nil || !capacityGuardianRecord(a, group, "node-worker-archive", "journal.json") ||
-			j.Recipient.Group != group || a.Name != "fugue-node-worker-archive-"+j.Digest[7:39] {
-			return target, "", errors.New("invalid Guardian node Worker archive")
-		}
-		if j.Recipient.Node != node.Name {
-			continue
-		}
-		if j.NodeUID != string(node.UID) {
-			continue // old physical incarnation cannot grant recovery authority
-		}
-		name := releaseguardian.NodeWorkerResultName(j.Digest)
-		var result corev1.ConfigMap
-		if err := readCapacityMetadata(ctx, client, base+"/configmaps/"+url.PathEscape(name), &result); err != nil {
-			return target, "", err
-		}
-		var receipt releaseguardian.NodeWorkerResult
-		if !capacityGuardianRecord(result, group, "node-worker-result", "result.json") || result.Name != name ||
-			json.Unmarshal([]byte(result.Data["result.json"]), &receipt) != nil || !receipt.MatchesJournal(j) {
-			return target, "", errors.New("invalid Guardian node Worker result")
-		}
-		state := receipt.Activation
-		if receipt.Outcome == "expired_without_cutover" {
-			continue
-		}
-		if seen[state.Generation] {
-			return target, "", errors.New("ambiguous Guardian node Worker result")
-		}
-		seen[state.Generation] = true
-		if state.Generation > target.FrontGeneration {
-			digest, journal = j.Digest, j
-			target = model.EdgeCodeRecoveryTarget{Slot: state.ActiveSlot, FrontGeneration: state.Generation, BundleGeneration: state.BundleGeneration, WorkerSourceSHA: state.WorkerSourceCommit, WorkerImageDigest: state.WorkerImageDigest}
-		}
+	var headObject corev1.ConfigMap
+	indexName := releaseguardian.NodeWorkerIndexName(group)
+	if err := read(indexName, &headObject); err != nil {
+		return target, "", errors.New("Guardian node Worker index unavailable")
 	}
-	if digest != "" && journal.ServiceUID != string(service.UID) {
-		return target, "", errors.New("completed Guardian handoff refers to a different public Front Service")
+	index, err := releaseguardian.ReadNodeWorkerIndex(&headObject, group)
+	if err != nil {
+		return target, "", err
 	}
-	return target, digest, nil
+	head, local := index.Nodes[string(node.UID)]
+	checkCurrent := func() error {
+		var latest corev1.ConfigMap
+		if err := read(indexName, &latest); err != nil || latest.UID != headObject.UID || latest.ResourceVersion != headObject.ResourceVersion {
+			return errors.New("Guardian node Worker head changed during observation")
+		}
+		return nil
+	}
+	if !local {
+		return target, "", checkCurrent()
+	}
+	var archive, result corev1.ConfigMap
+	archiveName := releaseguardian.NodeWorkerArchiveName(head.JournalDigest)
+	if err := read(archiveName, &archive); err != nil {
+		return target, "", err
+	}
+	j, err := releaseguardian.ReadArchivedNodeWorkerJournal([]byte(archive.Data["journal.json"]))
+	if err != nil || !capacityGuardianRecord(archive, group, "node-worker-archive", "journal.json") ||
+		archive.Name != archiveName || j.Digest != head.JournalDigest || j.Recipient.Group != group ||
+		j.Recipient.Node != node.Name || j.NodeUID != string(node.UID) || j.ServiceUID != string(service.UID) {
+		return target, "", errors.New("Guardian node Worker archive does not bind this node and public Front Service")
+	}
+	resultName := releaseguardian.NodeWorkerResultName(j.Digest)
+	if err := read(resultName, &result); err != nil {
+		return target, "", err
+	}
+	var receipt releaseguardian.NodeWorkerResult
+	if !capacityGuardianRecord(result, group, "node-worker-result", "result.json") || result.Name != resultName ||
+		json.Unmarshal([]byte(result.Data["result.json"]), &receipt) != nil || !receipt.MatchesJournal(j) ||
+		receipt.Outcome == "expired_without_cutover" || receipt.Activation.Generation != head.Generation {
+		return target, "", errors.New("invalid Guardian node Worker result")
+	}
+	if err := checkCurrent(); err != nil {
+		return target, "", err
+	}
+	state := receipt.Activation
+	return model.EdgeCodeRecoveryTarget{Slot: state.ActiveSlot, FrontGeneration: state.Generation, BundleGeneration: state.BundleGeneration,
+		WorkerSourceSHA: state.WorkerSourceCommit, WorkerImageDigest: state.WorkerImageDigest}, j.Digest, nil
 }
 
 func capacityGuardianRecord(a corev1.ConfigMap, group, kind, key string) bool {

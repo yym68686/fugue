@@ -197,11 +197,19 @@ func TestNodeWorkerResultRequiresARealHandoffAndSurvivesRestart(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	if err := restarted.FinalizeNodeWorker(ctx, f); err == nil {
-		t.Fatal("retirement failure was reported as settled")
+	if err := restarted.FinalizeNodeWorker(ctx, f); err == nil || !strings.Contains(err.Error(), "fixture simulates a dropped delete request") {
+		t.Fatalf("retirement did not reach the expected fenced deletion: %v", err)
 	}
 	if mode, err := restarted.NodeWorkerMode(ctx, j.Recipient.Group); err != nil || !mode {
 		t.Fatalf("legacy writers were not fenced before retirement: %t %v", mode, err)
+	}
+	indexObject, err := configs.Get(ctx, NodeWorkerIndexName(j.Recipient.Group), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("committed head must precede fence deletion: %v", err)
+	}
+	index, err := ReadNodeWorkerIndex(indexObject, j.Recipient.Group)
+	if want := (NodeWorkerIndexHead{JournalDigest: j.Digest, Generation: activation.Generation}); err != nil || index.Nodes[j.NodeUID] != want {
+		t.Fatalf("committed head does not bind the outcome: %+v %v", index, err)
 	}
 	if err := restarted.FinalizeNodeWorker(ctx, f); err != nil {
 		t.Fatalf("retirement could not resume: %v", err)

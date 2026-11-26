@@ -134,14 +134,14 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if err != nil {
 		return fail("code_observation_unavailable", "recovery_history")
 	}
+	pending, err = edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID)
+	if err != nil {
+		return fail("code_observation_unavailable", "transition_journal")
+	}
+	if pending {
+		return fail("code_transition_in_progress", "transition_journal")
+	}
 	if journal != "" {
-		pending, err := edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID)
-		if err != nil {
-			return fail("code_observation_unavailable", "transition_journal")
-		}
-		if pending {
-			return fail("code_transition_in_progress", "transition_journal")
-		}
 		if observed != local {
 			return fail("code_not_current", "code_binding")
 		}

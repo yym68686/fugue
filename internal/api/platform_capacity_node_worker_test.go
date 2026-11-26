@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
@@ -41,7 +42,7 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 		t.Fatal("synthetic rollback must be a real Guardian outcome")
 	}
 	record := func(name, kind, key string, data any) corev1.ConfigMap {
-		raw, err := json.Marshal(data)
+		raw, err := declarativerelease.CanonicalJSON(data)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -53,10 +54,22 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 	const base = "/api/v1/namespaces/system"
 	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: j.Recipient.Node, UID: "00000000-0000-4000-8000-000000000002"}}
 	service := corev1.Service{ObjectMeta: metav1.ObjectMeta{UID: "00000000-0000-4000-8000-000000000003"}}
-	for _, scenario := range []string{"verified", "partial history", "tampered rollback", "replaced ingress", "foreign node UID"} {
+	for _, scenario := range []string{"verified", "missing index", "changed index", "wrong generation", "tampered rollback", "replaced ingress", "foreign node UID"} {
 		t.Run(scenario, func(t *testing.T) {
-			a := record("fugue-node-worker-archive-"+j.Digest[7:39], "node-worker-archive", "journal.json", j)
+			a := record(releaseguardian.NodeWorkerArchiveName(j.Digest), "node-worker-archive", "journal.json", j)
 			name := releaseguardian.NodeWorkerResultName(j.Digest)
+			indexName := releaseguardian.NodeWorkerIndexName(group)
+			generation := uint64(13)
+			if scenario == "wrong generation" {
+				generation++
+			}
+			index := record(indexName, "node-worker-index", "index.json", releaseguardian.NodeWorkerIndex{
+				Schema: "edge-node-worker-index/v1", Group: group, Nodes: map[string]releaseguardian.NodeWorkerIndexHead{
+					j.NodeUID: {JournalDigest: j.Digest, Generation: generation},
+				},
+			})
+			index.Immutable = nil
+			indexReads := 0
 			r := receipt
 			if scenario == "tampered rollback" {
 				r.Activation.WorkerImageDigest = digest("0")
@@ -66,12 +79,18 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 				switch req.URL.Path {
 				case base + "/configmaps/" + releaseguardian.NodeWorkerModeName(group):
 					reply = record(releaseguardian.NodeWorkerModeName(group), "node-worker-mode", "mode.json", map[string]string{"schema": "edge-node-worker-mode/v1", "group": group})
-				case base + "/configmaps":
-					list := corev1.ConfigMapList{Items: []corev1.ConfigMap{a}}
-					if scenario == "partial history" {
-						list.Continue = "more"
+				case base + "/configmaps/" + indexName:
+					if scenario == "missing index" {
+						http.NotFound(w, req)
+						return
 					}
-					reply = list
+					indexReads++
+					if scenario == "changed index" && indexReads > 1 {
+						index.ResourceVersion = "2"
+					}
+					reply = index
+				case base + "/configmaps/" + a.Name:
+					reply = a
 				case base + "/configmaps/" + name:
 					reply = record(name, "node-worker-result", "result.json", r)
 				default:

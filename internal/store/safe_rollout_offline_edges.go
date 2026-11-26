@@ -90,6 +90,134 @@ func (s *Store) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.E
 		}
 		return fail("lkg_integrity/" + strings.Join(checks, ","))
 	}
+	selected, err := s.safeRolloutSignedDNSMembership(nodes, parent, source)
+	if err != nil {
+		return nil, err
+	}
+	// Do not return evidence assembled across a concurrent publication switch.
+	_, current, found, err := s.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", model.PlatformArtifactReleaseChannelFull)
+	if err != nil {
+		return nil, err
+	}
+	if !found || current.ID != release.ID || current.FencingToken != release.FencingToken || current.Status != release.Status || current.VerificationState != release.VerificationState {
+		return nil, fmt.Errorf("%w: active publication changed while verifying membership", ErrSafeRolloutServingPublicationPending)
+	}
+	return selected, nil
+}
+
+// SelectContinuouslyExcludedRolloutEdges is limited to an ordinary producer
+// full rollout that pins the still-valid verified rollback. The same new
+// artifact must be active in gray. No node is excluded unless *both* possible
+// configurations independently continue to exclude it.
+func (s *Store) SelectContinuouslyExcludedRolloutEdges(nodes []model.EdgeNode) ([]model.EdgeNode, error) {
+	const scope = "global"
+	const kind = model.PlatformArtifactKindReleaseSet
+	pending := ErrSafeRolloutServingPublicationPending
+	parent, full, found, err := s.GetActivePlatformArtifact(kind, scope, model.PlatformArtifactReleaseChannelFull)
+	if err != nil {
+		return nil, err
+	}
+	if !found || !producerOwnsPublication(full) || full.ArtifactID != parent.ID || full.Generation != parent.Generation ||
+		full.Status != model.PlatformArtifactReleaseStatusActive || full.FencingToken <= 0 ||
+		full.VerificationState != model.PlatformArtifactVerificationStateServingUnverified {
+		return nil, pending
+	}
+	_, gray, found, err := s.GetActivePlatformArtifact(kind, scope, model.PlatformArtifactReleaseChannelGray)
+	if err != nil {
+		return nil, err
+	}
+	if !found || !producerOwnsPublication(gray) || gray.Status != model.PlatformArtifactReleaseStatusActive ||
+		gray.ArtifactID != parent.ID || gray.Generation != parent.Generation || gray.FencingToken <= 0 ||
+		!gray.ReleasedAt.Before(full.ReleasedAt) {
+		return nil, pending
+	}
+	lkg, err := s.GetPlatformLKG(kind, scope)
+	if err != nil {
+		return nil, err
+	}
+	if lkg == nil || lkg.ArtifactID == parent.ID || full.PinnedRollbackGeneration != lkg.Generation ||
+		full.RollbackTargetGeneration != lkg.Generation || gray.PinnedRollbackGeneration != lkg.Generation {
+		return nil, pending
+	}
+	verified, err := s.GetPlatformArtifactRelease(lkg.VerifiedByReleaseID)
+	if err != nil {
+		return nil, err
+	}
+	if !producerOwnsPublication(verified) || verified.ArtifactKind != kind || verified.ScopeKey != scope ||
+		verified.Status != model.PlatformArtifactReleaseStatusSuperseded || verified.ReleaseChannel != model.PlatformArtifactReleaseChannelFull ||
+		verified.ArtifactID != lkg.ArtifactID || verified.Generation != lkg.Generation || verified.FencingToken <= 0 ||
+		verified.FencingToken >= full.FencingToken || verified.VerificationState != model.PlatformArtifactVerificationStateVerified ||
+		verified.VerifiedLKGGeneration != lkg.Generation || verified.VerifiedAt == nil {
+		return nil, pending
+	}
+	baseline, err := s.GetPlatformArtifact(lkg.ArtifactID)
+	if err != nil {
+		return nil, err
+	}
+	if !platformsafety.EvaluatePlatformLKGSnapshot(*lkg, baseline, s.platformArtifactSigningKeyring(), time.Now().UTC()).Pass {
+		return nil, pending
+	}
+	readMembers := func(a model.PlatformArtifact) ([]model.EdgeNode, error) {
+		if a.Status != model.PlatformArtifactStatusValidated || a.ArtifactKind != kind || a.ScopeKey != scope ||
+			a.CreatedByType != model.ActorTypeBootstrap || a.CreatedByID != platformproducer.Actor ||
+			a.Content["consumer_topology"] != nil || a.Content["publication_role"] != nil || s.VerifyPlatformArtifactIntegrity(a) != nil {
+			return nil, pending
+		}
+		source, err := s.GetPlatformArtifact(a.Metadata[platformproducer.DNSPolicyIDMetadata])
+		if err != nil {
+			return nil, err
+		}
+		if source.Status != model.PlatformArtifactStatusValidated || source.ContentHash != a.Metadata[platformproducer.DNSPolicyDigestMetadata] || s.VerifyPlatformArtifactIntegrity(source) != nil {
+			return nil, pending
+		}
+		return s.safeRolloutSignedDNSMembership(nodes, a, source)
+	}
+	oldMembers, err := readMembers(baseline)
+	if err != nil {
+		return nil, err
+	}
+	newMembers, err := readMembers(parent)
+	if err != nil {
+		return nil, err
+	}
+	// The union retains every node still used by either serving configuration.
+	members := make(map[string]bool, len(nodes))
+	for _, list := range [][]model.EdgeNode{oldMembers, newMembers} {
+		for _, n := range list {
+			members[n.ID] = true
+		}
+	}
+	out := make([]model.EdgeNode, 0, len(members))
+	for _, n := range nodes {
+		if members[n.ID] {
+			out = append(out, n)
+		}
+	}
+	for _, snapshot := range []model.PlatformArtifactRelease{full, gray} {
+		_, actual, found, err := s.GetActivePlatformArtifact(kind, scope, snapshot.ReleaseChannel)
+		if err != nil {
+			return nil, err
+		}
+		if !found || actual.ID != snapshot.ID || actual.FencingToken != snapshot.FencingToken ||
+			actual.VerificationState != snapshot.VerificationState {
+			return nil, pending
+		}
+	}
+	if current, err := s.GetPlatformLKG(kind, scope); err != nil {
+		return nil, err
+	} else if current == nil || current.VerifiedByReleaseID != lkg.VerifiedByReleaseID || current.ArtifactID != lkg.ArtifactID {
+		return nil, pending
+	}
+	return out, nil
+}
+
+func (s *Store) safeRolloutSignedDNSMembership(nodes []model.EdgeNode, parent, source model.PlatformArtifact) ([]model.EdgeNode, error) {
+	fail := func(check string) ([]model.EdgeNode, error) {
+		return nil, &SafeRolloutServingMembershipError{Check: check}
+	}
+	trusted := func(a model.PlatformArtifact) bool {
+		return a.Status == model.PlatformArtifactStatusValidated && s.VerifyPlatformArtifactIntegrity(a) == nil
+	}
 	authorityRelease, err := s.GetPlatformArtifactRelease(parent.Metadata[platformproducer.PolicyReleaseMetadata])
 	if err != nil {
 		return fail("producer_policy_release_unavailable")
@@ -150,19 +278,7 @@ func (s *Store) SelectSafeRolloutServingEdges(nodes []model.EdgeNode) ([]model.E
 	if !dnsFound {
 		return fail("dns_bundle_missing")
 	}
-	selected, err := platformproducer.SelectDNSCandidateEndpoints(nodes, policy.OfflineEdges)
-	if err != nil {
-		return nil, err
-	}
-	// Do not return evidence assembled across a concurrent publication switch.
-	_, current, found, err := s.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", model.PlatformArtifactReleaseChannelFull)
-	if err != nil {
-		return nil, err
-	}
-	if !found || current.ID != release.ID || current.FencingToken != release.FencingToken || current.Status != release.Status || current.VerificationState != release.VerificationState {
-		return nil, fmt.Errorf("%w: active publication changed while verifying membership", ErrSafeRolloutServingPublicationPending)
-	}
-	return selected, nil
+	return platformproducer.SelectDNSCandidateEndpoints(nodes, policy.OfflineEdges)
 }
 
 func safeRolloutDNSOfflineExclusionCheck(artifact model.PlatformArtifact, holds []platformproducer.OfflineEdge) string {

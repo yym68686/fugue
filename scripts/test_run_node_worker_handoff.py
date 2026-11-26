@@ -92,6 +92,8 @@ class NodeWorkerDriverTests(unittest.TestCase):
                 patch.object(driver.front, "read", return_value=endpoints), \
                 patch.object(cluster, "service_front", side_effect=ValueError("live Front proof required")) as live:
             self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
+            edge["observation"]["dns_admission_intent"]["serving_evidence"] = "excluded_across_full_transition"
+            self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
             live.assert_not_called()
             for mutation in ("unknown_dns_selection", "missing_owner_policy", "serving_endpoint", "recovered"):
                 original, state = copy.deepcopy(edge), copy.deepcopy(physical)

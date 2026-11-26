@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"fugue/internal/model"
@@ -104,8 +105,8 @@ func (s *Server) observeEdgeNode(node model.EdgeNode, now time.Time) *model.Edge
 	return observation
 }
 
-// The policy's intent is not serving evidence. Only the verified full, its
-// signed DNS child and its current fence can establish a traffic exclusion.
+// A policy hold alone is not serving evidence. Use the exact verified full
+// or prove the exclusion on both sides of a fenced release transition.
 func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *model.EdgeNodeInventoryObservation) {
 	intent := observation.DNSAdmissionIntent
 	if intent == nil || intent.State != "suspended" || observation.Reason != "heartbeat_stale" {
@@ -128,6 +129,11 @@ func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *m
 		return
 	}
 	selected, err := s.store.SelectSafeRolloutServingEdges(nodes)
+	evidence := "excluded_from_verified_full"
+	if errors.Is(err, store.ErrSafeRolloutServingPublicationPending) {
+		selected, err = s.store.SelectContinuouslyExcludedRolloutEdges(nodes)
+		evidence = "excluded_across_full_transition"
+	}
 	if err != nil {
 		return
 	}
@@ -136,7 +142,7 @@ func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *m
 			return
 		}
 	}
-	intent.ServingEvidence = "excluded_from_verified_full"
+	intent.ServingEvidence = evidence
 }
 
 func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeDNSAdmissionIntent, holds []platformproducer.OfflineEdge, now time.Time) {

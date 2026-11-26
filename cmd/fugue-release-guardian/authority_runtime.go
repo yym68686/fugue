@@ -190,6 +190,10 @@ func (runtime *authorityRuntime) reconcileNodeWorker(ctx context.Context, group 
 	mode, err := runtime.store.NodeWorkerMode(ctx, group)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "node Worker mode %s: %v\n", group, err)
+	} else if mode {
+		if err := front.ensureNodeWorkerIndex(ctx, runtime.store); err != nil {
+			fmt.Fprintf(os.Stderr, "node Worker index %s: %v\n", group, err)
+		}
 	}
 	return mode || err != nil
 }

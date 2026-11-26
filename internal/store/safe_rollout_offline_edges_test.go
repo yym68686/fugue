@@ -14,7 +14,8 @@ import (
 )
 
 func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testing.T) {
-	for _, scenario := range []string{"verified", "recovered", "invalid_recovery", "historical_hold", "unverified_full", "missing_lkg", "previous_lkg", "failed_verification", "expired_lkg", "tampered_source", "wrong_identity", "still_in_dns", "missing_dns_plan", "cell_publication", "producer_mismatch"} {
+	for _, scenario := range []string{"verified", "recovered", "invalid_recovery", "historical_hold", "unverified_full", "missing_lkg", "previous_lkg", "failed_verification", "expired_lkg", "tampered_source", "wrong_identity", "still_in_dns", "missing_dns_plan", "cell_publication", "producer_mismatch",
+		"transition_excluded", "transition_bad_pin", "transition_bad_gray", "transition_retains_member"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newServingFixture(t, "")
 			source, err := f.s.GetPlatformArtifact(f.policy.DNSPolicyArtifactID)
@@ -73,6 +74,39 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 			}
 			now := time.Now().UTC()
 			full := model.PlatformArtifactRelease{ID: "offline-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1, VerificationState: model.PlatformArtifactVerificationStateVerified, ReleasedAt: now}
+			transition := strings.HasPrefix(scenario, "transition_")
+			var candidateFull, candidateGray model.PlatformArtifactRelease
+			if transition {
+				full.Status, full.VerifiedLKGGeneration, full.VerifiedAt = model.PlatformArtifactReleaseStatusSuperseded, full.Generation, &now
+				full.ReleasedByType, full.ReleasedByID = model.ActorTypeBootstrap, platformproducer.Actor
+				candidate := parent
+				candidate.ID, candidate.Generation = "", "offline-successor"
+				if scenario == "transition_retains_member" {
+					plan.Probes = append(plan.Probes, platformconfig.DNSReadinessProbe{EdgeID: "edge-a", Address: "8.8.8.8:443"})
+					child := savePhysicalDNSTestArtifact(t, f.s, dns.ArtifactKind, dns.ScopeKey, "new-dns", map[string]any{"readiness_plan": plan})
+					candidate.Content = map[string]any{"artifact_ids": []any{child.ID}, "artifact_kinds": []any{child.ArtifactKind}}
+				}
+				candidate, err = f.s.CreatePlatformArtifact(candidate)
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidate, err = f.s.ValidatePlatformArtifact(candidate.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidateFull = full
+				candidateFull.ID, candidateFull.ArtifactID, candidateFull.Generation = "candidate-full", candidate.ID, candidate.Generation
+				candidateFull.Status, candidateFull.VerificationState, candidateFull.FencingToken = model.PlatformArtifactReleaseStatusActive, model.PlatformArtifactVerificationStateServingUnverified, 3
+				candidateFull.PinnedRollbackGeneration, candidateFull.RollbackTargetGeneration, candidateFull.ReleasedAt = full.Generation, full.Generation, now.Add(time.Second)
+				candidateGray = candidateFull
+				candidateGray.ID, candidateGray.ReleaseChannel, candidateGray.FencingToken, candidateGray.ReleasedAt = "candidate-gray", "gray", 2, now
+				if scenario == "transition_bad_pin" {
+					candidateFull.PinnedRollbackGeneration = "another-generation"
+				}
+				if scenario == "transition_bad_gray" {
+					candidateGray.ArtifactID, candidateGray.Generation = parent.ID, parent.Generation
+				}
+			}
 			if scenario == "unverified_full" {
 				full.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
 			}
@@ -89,6 +123,9 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 			}
 			if err := f.s.withLockedState(true, func(state *model.State) error {
 				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, ownerRelease, full)
+				if transition {
+					state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, candidateGray, candidateFull)
+				}
 				if scenario == "previous_lkg" {
 					lkg.VerifiedByReleaseID = "previous-full"
 				}
@@ -107,6 +144,20 @@ func TestSafeRolloutServingMembershipRequiresVerifiedOfflinePublication(t *testi
 				nodes[0].PublicIPv4 = "1.1.1.1"
 			}
 			selected, err := f.s.SelectSafeRolloutServingEdges(nodes)
+			if transition {
+				if !errors.Is(err, ErrSafeRolloutServingPublicationPending) {
+					t.Fatalf("candidate must not acquire verified status from continuity: %v", err)
+				}
+				selected, err = f.s.SelectContinuouslyExcludedRolloutEdges(nodes)
+				if scenario == "transition_excluded" {
+					if err != nil || len(selected) != 1 || selected[0].ID != "edge-b" {
+						t.Fatalf("lost continuous exclusion: %v %v", selected, err)
+					}
+				} else if err == nil || len(selected) != 0 {
+					t.Fatalf("unsafe continuous exclusion: %v %v", selected, err)
+				}
+				return
+			}
 			if scenario == "verified" || scenario == "historical_hold" || scenario == "recovered" {
 				wantCount, firstID := 1, "edge-b"
 				if scenario == "recovered" {

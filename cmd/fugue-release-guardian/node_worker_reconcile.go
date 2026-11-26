@@ -19,6 +19,33 @@ import (
 
 var errNodeWorkerWriteUnknown = errors.New("node Worker native write result is unknown; retain the lease until expiry")
 
+// An existing installation may have durable node-local outcomes predating
+// the named index. Populate it under the same lease as normal finalization.
+func (a *frontAuthorityActivator) ensureNodeWorkerIndex(parent context.Context, store *releaseguardian.AuthorityStore) (resultErr error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	group := a.config.GroupID
+	if found, err := store.HasNodeWorkerIndex(ctx, group); found || err != nil {
+		return err
+	}
+	lease, err := a.acquireLease(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cleanup, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer stop()
+		resultErr = errors.Join(resultErr, lease.release(cleanup))
+	}()
+	if err := store.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
+	}
+	if _, active, err := store.LoadNodeWorker(ctx, group); err != nil || active {
+		return err // an active journal indexes its terminal result before release
+	}
+	return store.EnsureNodeWorkerIndex(ctx, group)
+}
+
 // Reconcile only a journal that the release lane has already authorized. A
 // Kubernetes event alone cannot create a journal or arm a public cutover.
 func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore) (handled bool, change string, resultErr error) {
