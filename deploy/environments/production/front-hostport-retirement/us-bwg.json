@@ -1,0 +1,20 @@
+{
+  "schema": "fugue.front-hostport-exclusion/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "bwg",
+  "nodeUID": "275836a4-5739-4cf7-a051-4b9be9bce79f",
+  "address": "95.169.10.156",
+  "legacy": "fugue-fugue-edge-front",
+  "legacyUID": "fdf4b313-6679-4498-aebd-8709782a129b",
+  "legacyGeneration": 244,
+  "legacyTemplateDigest": "sha256:f3d9af8fc85f6a2260899383a14da84bbaaf30b0abe020e1cbb2c0931d048458",
+  "oldUID": "f6b25671-8626-438a-bffe-ba40f68fd8b8",
+  "frontUID": "479a68d9-784f-4c56-81a7-b06ae863f1bd",
+  "workerComponent": "edge-worker-us",
+  "serving": {"name": "fugue-front-serving-public-b-secondary", "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c", "generation": 8},
+  "probe": {"name": "fugue-front-probe-public-b-secondary", "uid": "9cbf3f2e-5102-4ce2-ad9f-fd97a0efe62d", "generation": 4},
+  "peers": {"86eabf26-42a9-4f9d-998a-754115f8b829": "67624f00-8fd8-426c-a8bc-ba8d608d4c84"},
+  "priorExclusions": ["vps-591f4447"],
+  "hosts": ["api.fugue.pro", "fugue.pro"]
+}

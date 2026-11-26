@@ -2,6 +2,7 @@
 import argparse
 import copy
 import datetime
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -19,6 +20,7 @@ from scripts import replace_front_executor as replacement
 from scripts import stage_front_serving_transport as stage
 
 GEN = "transport.fugue.dev/front-hostport-retirement"
+EXCLUDE = "fugue.front-hostport-exclusion/v1"
 ISOLATED = "transport.fugue.dev/hostport-isolated"
 MANAGER = "fugue-front-hostport-retirement"
 NAME = re.compile(r"[a-z0-9][a-z0-9.-]{0,62}")
@@ -32,13 +34,15 @@ def require(ok, reason):
 
 
 def validate(c):
-    require(isinstance(c, dict) and set(c) == set("schema namespace group node nodeUID address legacy legacyUID legacyGeneration legacyTemplateDigest oldUID isolated frontUID workerComponent serving probe peers hosts".split())
-            and c["schema"] == "fugue.front-hostport-retirement/v1", "exact node Front retirement declaration required")
-    for key in ("namespace", "group", "node", "legacy", "isolated", "workerComponent"):
+    common = set("schema namespace group node nodeUID address legacy legacyUID legacyGeneration legacyTemplateDigest oldUID frontUID workerComponent serving probe peers hosts".split())
+    excluded = isinstance(c, dict) and c.get("schema") == EXCLUDE
+    require(isinstance(c, dict) and set(c) == common | ({"priorExclusions"} if excluded else {"isolated"})
+            and (excluded or c["schema"] == "fugue.front-hostport-retirement/v1"), "exact node Front retirement declaration required")
+    for key in ("namespace", "group", "node", "legacy", "workerComponent") + (() if excluded else ("isolated",)):
         require(isinstance(c[key], str) and NAME.fullmatch(c[key]), "invalid Front retirement name")
     for key in ("nodeUID", "legacyUID", "oldUID", "frontUID"):
         require(isinstance(c[key], str) and UID.fullmatch(c[key]), "exact Kubernetes UID required")
-    require(c["legacy"] != c["isolated"] and c["oldUID"] != c["frontUID"] and type(c["legacyGeneration"]) is int
+    require(c["legacy"] != c.get("isolated") and c["oldUID"] != c["frontUID"] and type(c["legacyGeneration"]) is int
             and c["legacyGeneration"] > 0 and re.fullmatch(r"sha256:[a-f0-9]{64}", c["legacyTemplateDigest"]),
             "invalid exact legacy workload predecessor")
     address = ipaddress.ip_address(c["address"])
@@ -52,6 +56,11 @@ def validate(c):
     require(isinstance(peers, dict) and 1 <= len(peers) <= 16 and c["node"] not in peers
             and all(NAME.fullmatch(n) and UID.fullmatch(u) for n, u in peers.items()) and len(set(peers.values())) == len(peers),
             "exact non-target Pod roster required")
+    if excluded:
+        prior = c["priorExclusions"]
+        require(isinstance(prior, list) and 1 <= len(prior) <= 16
+                and all(isinstance(n, str) and NAME.fullmatch(n) and n != c["node"] and n not in peers for n in prior)
+                and prior == sorted(set(prior)), "exact, disjoint prior node exclusions required")
     require(isinstance(hosts, list) and 2 <= len(hosts) <= 8 and len(set(hosts)) == len(hosts)
             and all(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,252}", h) for h in hosts), "explicit TLS route proof targets required")
     return c
@@ -68,7 +77,49 @@ def node_affinity(node, operator):
     ]}}}
 
 
+def exclusion_affinity(nodes):
+    affinity = node_affinity(nodes[0], "NotIn")
+    affinity["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]["matchFields"] = [
+        {"key": "metadata.name", "operator": "NotIn", "values": [node]} for node in nodes
+    ]
+    return affinity
+
+
+def derive_exclusion(c, ds):
+    meta, spec = ds["metadata"], ds["spec"]
+    template = copy.deepcopy(spec["template"])
+    pod = template["spec"]
+    annotations = meta.get("annotations", {})
+    key = GEN + "-" + hashlib.sha256(c["node"].encode()).hexdigest()[:20]
+    recorded = key in annotations
+    prior = c["priorExclusions"]
+    final = exclusion_affinity(sorted([*prior, c["node"]]))
+    require(meta["uid"] == c["legacyUID"] and not meta.get("deletionTimestamp")
+            and spec["updateStrategy"] == {"type": "OnDelete"} and annotations.get(GEN)
+            and meta["generation"] == c["legacyGeneration"] + recorded
+            and pod["affinity"] == (final if recorded else exclusion_affinity(prior))
+            and not pod.get("hostNetwork") and
+            (not recorded or annotations[key] == kube.digest(c)),
+            "legacy Front is not the exact OnDelete predecessor and exclusions")
+    pod["affinity"] = exclusion_affinity(prior)
+    require(kube.digest(template) == c["legacyTemplateDigest"], "legacy Front template changed")
+    containers = pod["containers"]
+    require(len(containers) == 1 and containers[0]["name"] == "edge-front" and not pod.get("initContainers")
+            and sorted((p["hostPort"], p["containerPort"], p.get("protocol", "TCP"))
+                       for p in containers[0].get("ports", []) if p.get("hostPort")) == [(80, 80, "TCP"), (443, 443, "TCP")],
+            "legacy Front transport is not exactly TCP 80/443")
+    return ([] if recorded else [
+        {"op": "test", "path": "/metadata/uid", "value": meta["uid"]},
+        {"op": "test", "path": "/metadata/resourceVersion", "value": meta["resourceVersion"]},
+        {"op": "test", "path": "/spec", "value": spec},
+        {"op": "replace", "path": "/metadata/annotations", "value": dict(annotations, **{key: kube.digest(c)})},
+        {"op": "replace", "path": "/spec/template/spec/affinity", "value": final},
+    ]), None
+
+
 def derive(c, ds):
+    if c["schema"] == EXCLUDE:
+        return derive_exclusion(c, ds)
     meta, spec = ds["metadata"], ds["spec"]
     require(meta["uid"] == c["legacyUID"] and not meta.get("deletionTimestamp") and spec["updateStrategy"] == {"type": "OnDelete"},
             "legacy Front must be the exact OnDelete DaemonSet")
@@ -215,7 +266,7 @@ class Cluster:
                 require(not any(p.get("protocol") == "TCP" and p["port"] in (80, 443, 15443) for p in spec.get("ports", [])),
                         "another Service overlaps a current public listener")
             if meta["namespace"] == self.ns and selector:
-                require(not all(isolated_labels.get(k) == v for k, v in selector.items()),
+                require(isolated_labels is None or not all(isolated_labels.get(k) == v for k, v in selector.items()),
                         "a Service selector could admit the isolated Front")
                 if old is not None:
                     require(not all(old["metadata"]["labels"].get(k) == v for k, v in selector.items()),
@@ -233,6 +284,11 @@ class Cluster:
         result = subprocess.run(["kubectl", "-n", self.ns, "exec", name, "-c", "edge-front", "--", "cat", "/proc/net/tcp", "/proc/net/tcp6"],
                                 capture_output=True, text=True, timeout=12)
         require(result.returncode == 0 and bool(result.stdout) and len(result.stdout) < 2 << 20, "old Front kernel TCP inventory unavailable")
+        if self.c["schema"] == EXCLUDE:
+            rows = [line.split() for line in result.stdout.splitlines() if line.strip()]
+            require(sum(row[:2] == ["sl", "local_address"] for row in rows) == 2
+                    and all(any(len(row) >= 4 and row[1].endswith(port) and row[3] == "0A" for row in rows)
+                            for port in (":0050", ":01BB")), "complete kernel inventories and both listeners required")
         require(retirable_tcp(result.stdout) == 0, "old Front still holds active or in-flight TCP connections")
 
     def write_exclusion(self, patch, dry=False):
@@ -343,7 +399,7 @@ def run(cluster, evidence):
             locks[index] = lock
         cluster.no_worker_transaction()
         ds, patch, clone, old, peers = cluster.workloads()
-        isolated_labels = clone["spec"]["template"]["metadata"]["labels"]
+        isolated_labels = clone["spec"]["template"]["metadata"]["labels"] if clone is not None else None
         selected, transport = cluster.ingress(isolated_labels, old[0] if old else None)
         activation = front.state(cluster.profile, selected)
         with closing(connection.HeldTLS(c["address"], c["hosts"][0])) as sock:
@@ -351,10 +407,10 @@ def run(cluster, evidence):
             held = connection.fact(cluster.profile, selected, sock)
             require(held["pod_uid"] == c["frontUID"], "public TLS did not reach the pinned Front")
             http_before = route_proofs()
-            isolated = cluster.get("daemonset", c["isolated"], optional=True)
+            isolated = cluster.get("daemonset", c["isolated"], optional=True) if clone is not None else None
             require(not patch or isolated is None, "an unexpected isolated workload already exists")
             clone_expected = clone
-            if isolated is None:
+            if clone is not None and isolated is None:
                 dry_clone = cluster.create_isolated(clone, dry=True)
                 require(all(dry_clone["spec"].get(k) == v for k, v in clone["spec"].items())
                         and not has_host_ports(dry_clone["spec"]["template"]["spec"]),
@@ -385,28 +441,33 @@ def run(cluster, evidence):
                 require(not pending, "the node exclusion disappeared")
                 if not old and live["status"].get("observedGeneration") == live["metadata"]["generation"] and live["status"]["desiredNumberScheduled"] == len(peers):
                     break
-                require(time.monotonic() < end, "the DaemonSet controller did not retire the old primary Front")
+                require(time.monotonic() < end, "the DaemonSet controller did not retire the target legacy Front")
                 time.sleep(3)
             save(result="old_released", old_uid_absent=True)
             for lock in locks:
                 cluster.held(lock, renew=True)
-            if isolated is None:
-                try:
-                    isolated = cluster.create_isolated(clone)
-                except ValueError:
-                    isolated = cluster.get("daemonset", c["isolated"], optional=True)
-                    if isolated is None:
-                        raise
-            end = time.monotonic() + 80
-            while True:
-                live = cluster.get("daemonset", c["isolated"])
-                require(live["metadata"]["uid"] == isolated["metadata"]["uid"], "isolated workload was replaced during verification")
-                pod = cluster.check_clone(clone_expected, live)
-                if pod:
-                    break
-                require(time.monotonic() < end, "the no-hostPort Front did not become Ready")
-                time.sleep(3)
-            save(result="isolated_ready", isolated_uid=pod["metadata"]["uid"], host_ports=[])
+            details = {}
+            if clone is not None:
+                if isolated is None:
+                    try:
+                        isolated = cluster.create_isolated(clone)
+                    except ValueError:
+                        isolated = cluster.get("daemonset", c["isolated"], optional=True)
+                        if isolated is None:
+                            raise
+                end = time.monotonic() + 80
+                while True:
+                    live = cluster.get("daemonset", c["isolated"])
+                    require(live["metadata"]["uid"] == isolated["metadata"]["uid"], "isolated workload was replaced during verification")
+                    pod = cluster.check_clone(clone_expected, live)
+                    if pod:
+                        break
+                    require(time.monotonic() < end, "the no-hostPort Front did not become Ready")
+                    time.sleep(3)
+                save(result="isolated_ready", isolated_uid=pod["metadata"]["uid"], host_ports=[])
+                details["replacement_image"] = pod["spec"]["containers"][0]["image"]
+            else:
+                details["replacement_created"] = False
             peers_match()
             current, observed = cluster.ingress(isolated_labels)
             require(observed == transport and front.state(cluster.profile, current) == activation, "public ingress or Worker changed")
@@ -417,7 +478,7 @@ def run(cluster, evidence):
                     and after_held == held, "the same public TLS connection did not survive retirement")
             save(result="verified", peers_unchanged=True, ingress_unchanged=True, public_connection_preserved=True,
                  public_http_redirects=http_before, public_connection_before=held, public_connection_after=after_held,
-                 replacement_image=pod["spec"]["containers"][0]["image"])
+                 **details)
 
 
 def main():

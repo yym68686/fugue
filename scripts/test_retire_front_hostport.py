@@ -87,6 +87,41 @@ class FrontHostPortRetirementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "generation or affinity changed"):
             retirement.derive(c, ds)
 
+    def test_exclude_only_preserves_previous_exclusion_and_does_not_clone(self):
+        c, ds = self.fixture()
+        c.pop("isolated")
+        c.update(schema=retirement.EXCLUDE, priorExclusions=["edge-already-retired"])
+        template = ds["spec"]["template"]
+        template["spec"]["affinity"] = retirement.node_affinity("edge-already-retired", "NotIn")
+        ds["metadata"]["annotations"][retirement.GEN] = "prior-release"
+        c["legacyTemplateDigest"] = kube.digest(template)
+        retirement.validate(c)
+        patch, clone = retirement.derive(c, ds)
+        self.assertIsNone(clone)
+        self.assertEqual(patch[2], {"op": "test", "path": "/spec", "value": ds["spec"]})
+        self.assertEqual(patch[-1]["value"], retirement.exclusion_affinity(["edge-already-retired", "edge-primary"]))
+        term, = patch[-1]["value"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+        self.assertEqual(term["matchFields"], [
+            {"key": "metadata.name", "operator": "NotIn", "values": ["edge-already-retired"]},
+            {"key": "metadata.name", "operator": "NotIn", "values": ["edge-primary"]},
+        ])
+        live = copy.deepcopy(ds)
+        live["metadata"]["annotations"] = patch[-2]["value"]
+        live["metadata"]["generation"] += 1
+        live["spec"]["template"]["spec"]["affinity"] = patch[-1]["value"]
+        self.assertEqual(live["metadata"]["annotations"][retirement.GEN], "prior-release")
+        self.assertEqual(retirement.derive(c, live), ([], None))
+        live["spec"]["template"]["spec"]["affinity"] = retirement.node_affinity(c["node"], "NotIn")
+        with self.assertRaisesRegex(ValueError, "predecessor and exclusions"):
+            retirement.derive(c, live)
+
+    def test_exclude_only_rejects_target_or_peer_as_prior_exclusion(self):
+        c = declaration()
+        c.pop("isolated")
+        for prior in ([], [c["node"]], list(c["peers"]), ["edge-z", "edge-a"]):
+            with self.subTest(prior=prior), self.assertRaisesRegex(ValueError, "prior node exclusions"):
+                retirement.validate(dict(c, schema=retirement.EXCLUDE, priorExclusions=prior))
+
     def test_rejects_scope_expansion_and_invalid_listener_identity(self):
         c = retirement.validate(declaration())
         for mutate in (
