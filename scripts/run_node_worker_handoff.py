@@ -1,7 +1,7 @@
 """Run one declared node Worker handoff via the installed Release Guardian."""
 import argparse
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import hashlib
 import http.client
 import ipaddress
@@ -41,6 +41,34 @@ def fields(obj, names):
 
 def matches(pattern, value):
     return isinstance(value, str) and pattern.fullmatch(value) is not None
+
+
+@contextmanager
+def rearm_leases(helper, component, group, *, wait_seconds=240):
+    """Retry only contention, dropping partial ownership between attempts."""
+    deadline = time.monotonic() + wait_seconds
+    declarations = (
+        ("fugue-production-" + component,
+         {"app.kubernetes.io/managed-by": "fugue-declarative-release", "fugue.pro/component": component}, 900),
+        ("fugue-authority-" + group,
+         {"app.kubernetes.io/managed-by": "fugue-release-guardian", "fugue.pro/group": group}, 120),
+    )
+    while True:
+        with ExitStack() as stack:
+            locks = []
+            try:
+                for name, labels, ttl in declarations:
+                    lock = helper.lock(name, labels, ttl)
+                    locks.append(lock)
+                    stack.callback(helper.unlock, lock)
+            except parking.LeaseBusy as err:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise ValueError(f"candidate rearm timed out waiting for {err}") from err
+            else:
+                yield locks
+                return
+        time.sleep(min(left, 3))
 
 
 def validate(config):
@@ -430,17 +458,7 @@ class ActiveCluster:
         require(self.exec_guardian(guardian, "node-worker-retirement-version", b"").strip() == b"edge-node-worker-retirement/v1",
                 "cannot rearm without the installed retirement-capable Guardian")
         lease_helper = parking.Cluster(c)
-        component = can["component"]
-        with ExitStack() as stack:
-            locks = []
-            for name, labels, ttl in (
-                    ("fugue-production-" + component,
-                     {"app.kubernetes.io/managed-by": "fugue-declarative-release", "fugue.pro/component": component}, 900),
-                    ("fugue-authority-" + group,
-                     {"app.kubernetes.io/managed-by": "fugue-release-guardian", "fugue.pro/group": group}, 120)):
-                lock = lease_helper.lock(name, labels, ttl)
-                locks.append(lock)
-                stack.callback(lease_helper.unlock, lock)
+        with rearm_leases(lease_helper, can["component"], group) as locks:
             lease_helper.no_worker_transaction()
             public = self.read_service(dict(c["front"], node=node))
             alive, _ = self.service_front(public, node)

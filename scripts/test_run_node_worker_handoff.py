@@ -64,6 +64,58 @@ def pinned():
 
 
 class NodeWorkerDriverTests(unittest.TestCase):
+    def test_rearm_lease_classifies_only_a_bound_holder_as_contention(self):
+        cfg = pinned()
+        helper = driver.parking.Cluster(cfg)
+        name, labels = "fugue-production-worker", {"component": "worker"}
+        lease = {"metadata": {"name": name, "namespace": cfg["namespace"], "uid": "lease-uid",
+                              "resourceVersion": "10", "labels": labels},
+                 "spec": {"holderIdentity": "writer", "leaseDurationSeconds": 900}}
+        with patch.object(helper, "get", return_value=lease), patch.object(helper, "lease_patch") as write:
+            with self.assertRaisesRegex(driver.parking.LeaseBusy, "in use"):
+                helper.lock(name, labels, 900)
+            with self.assertRaisesRegex(ValueError, "different binding") as rejected:
+                helper.lock(name, labels, 120)
+            self.assertNotIsInstance(rejected.exception, driver.parking.LeaseBusy)
+            write.assert_not_called()
+
+    def test_rearm_waits_for_contention_without_holding_partial_leases(self):
+        calls = []
+        class Helper:
+            def lock(self, name, labels, ttl):
+                calls.append(("lock", name))
+                if len(calls) == 2:
+                    raise driver.parking.LeaseBusy(name)
+                return name
+
+            def unlock(self, name):
+                calls.append(("release", name))
+
+        component, group = "fugue-production-worker", "fugue-authority-pool"
+        with patch.object(driver.time, "sleep", side_effect=lambda delay: calls.append(("wait", delay))):
+            with driver.rearm_leases(Helper(), "worker", "pool") as held:
+                self.assertEqual(held, [component, group])
+        self.assertEqual(calls, [("lock", component), ("lock", group), ("release", component),
+                                 ("wait", 3), ("lock", component), ("lock", group),
+                                 ("release", group), ("release", component)])
+
+    def test_rearm_wait_is_bounded_and_binding_errors_fail_closed(self):
+        class Helper:
+            def __init__(self, error):
+                self.error = error
+
+            def lock(self, *_):
+                raise self.error
+
+        with patch.object(driver.time, "sleep") as delay:
+            with self.assertRaisesRegex(ValueError, "timed out waiting"):
+                with driver.rearm_leases(Helper(driver.parking.LeaseBusy("busy")), "worker", "pool", wait_seconds=0):
+                    self.fail("contended lease acquired")
+            with self.assertRaisesRegex(ValueError, "different binding"):
+                with driver.rearm_leases(Helper(ValueError("different binding")), "worker", "pool"):
+                    self.fail("foreign lease acquired")
+        delay.assert_not_called()
+
     def test_rearm_accepts_peer_retirement_without_mutating_peer_placement(self):
         cfg = pinned()
         node = cfg["node"]

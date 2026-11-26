@@ -33,6 +33,10 @@ def require(ok, reason):
         raise ValueError(reason)
 
 
+class LeaseBusy(ValueError):
+    """A correctly bound Lease is temporarily owned by another writer."""
+
+
 def validate(c):
     common = set("schema namespace group node nodeUID address legacy legacyUID legacyGeneration legacyTemplateDigest oldUID frontUID workerComponent serving probe peers hosts".split())
     excluded = isinstance(c, dict) and c.get("schema") == EXCLUDE
@@ -302,8 +306,13 @@ class Cluster:
 
     def lock(self, name, labels, duration):
         current = self.get("lease", name)
-        require(current["metadata"]["labels"] == labels and not current["spec"].get("holderIdentity")
-                and current["spec"]["leaseDurationSeconds"] == duration, "an authority Lease was replaced or is in use")
+        metadata = current["metadata"]
+        require(metadata.get("name") == name and metadata.get("namespace") == self.ns
+                and metadata.get("uid") and metadata.get("resourceVersion") and not metadata.get("deletionTimestamp")
+                and metadata.get("labels") == labels and current["spec"].get("leaseDurationSeconds") == duration,
+                f"authority Lease {name} has a different binding")
+        if current["spec"].get("holderIdentity"):
+            raise LeaseBusy(f"authority Lease {name} is in use")
         holder = f"{MANAGER}:{os.environ['GITHUB_RUN_ID']}:{os.environ['GITHUB_RUN_ATTEMPT']}"
         now = front.now().isoformat(timespec="microseconds").replace("+00:00", "Z")
         spec = dict(current["spec"], holderIdentity=holder, acquireTime=now, renewTime=now)
