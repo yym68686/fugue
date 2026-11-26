@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -58,7 +59,11 @@ func TestReplacementWorkerBindsPhysicalNodeAndFreshWorkload(t *testing.T) {
 func TestReplacementWorkerRequiresFreshRecoveryForDNSCandidate(t *testing.T) {
 	s, _, legacy, input := offlineRecoveryFixture(t)
 	at := time.Now().UTC()
-	nodes := []model.EdgeNode{{ID: legacy.EdgeID, EdgeGroupID: legacy.EdgeGroupID, PublicIPv4: legacy.PublicIPv4}, {ID: "edge-b", EdgeGroupID: legacy.EdgeGroupID, PublicIPv4: "9.9.9.9"}}
+	node, _, err := s.store.GetEdgeNode(legacy.EdgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := []model.EdgeNode{node, {ID: "edge-b", EdgeGroupID: legacy.EdgeGroupID, PublicIPv4: "9.9.9.9"}}
 	replacement := legacy
 	replacement.WorkerEnrollment = testWorkerEnrollment(at.Add(-time.Hour))
 	input.OfflineEdges = []platformproducer.OfflineEdge{replacement}
@@ -69,8 +74,21 @@ func TestReplacementWorkerRequiresFreshRecoveryForDNSCandidate(t *testing.T) {
 			t.Fatal("replacement reused retirement slot or changed scope", old, newTargets)
 		}
 	}
-	for _, edge := range []platformproducer.OfflineEdge{legacy, replacement} {
+	code := testCapacityCode()
+	code.NodeUID = replacement.WorkerEnrollment.NodeUID
+	s.offlineCapacityCode = func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+		return code, nil
+	}
+	for _, tc := range []struct {
+		edge    platformproducer.OfflineEdge
+		hasCode bool
+		want    int
+	}{{legacy, false, 1}, {replacement, false, 1}, {replacement, true, 2}} {
+		edge := tc.edge
 		o := platformproducer.OfflineRecoveryObservation{EdgeID: edge.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(edge), LastAttempt: at, LastSuccess: at, ProofValidUntil: at.Add(time.Hour), Successes: 3, Admitted: true}
+		if tc.hasCode {
+			o.RouteCode, o.LastResult = &code, "route_code_verified"
+		}
 		if _, err := s.store.UpdateObservationCheckpoint(t.Context(), platformproducer.OfflineRecoveryKey(edge), func([]byte) ([]byte, error) { return json.Marshal(o) }); err != nil {
 			t.Fatal(err)
 		}
@@ -78,11 +96,7 @@ func TestReplacementWorkerRequiresFreshRecoveryForDNSCandidate(t *testing.T) {
 		if err := s.projectDNSReadinessWithRecovery(t.Context(), &projection, nodes, at, &input); err != nil {
 			t.Fatal(err)
 		}
-		want := 1
-		if edge.WorkerEnrollment != nil {
-			want = 2
-		}
-		if len(projection.RuntimeSnapshot.DNSEdgeEndpoints) != want {
+		if len(projection.RuntimeSnapshot.DNSEdgeEndpoints) != tc.want {
 			t.Fatal("candidate membership did not require the exact fresh enrollment proof", edge, projection.RuntimeSnapshot.DNSEdgeEndpoints)
 		}
 	}

@@ -186,13 +186,18 @@ func (s *Server) observeOfflineRecoveryChecked(node model.EdgeNode, intent *mode
 			intent.RecoveryCapacityElapsedMilliseconds = o.Capacity.ElapsedMilliseconds
 			intent.RecoveryCapacityEvidenceDigest = o.Capacity.ReportDigest
 		}
-		if o.Ready(hold, now) {
+		codeCtx, cancelCode := context.WithTimeout(context.Background(), 3*time.Second)
+		ready := s.offlineRecoveryReady(codeCtx, hold, o, node, now)
+		cancelCode()
+		if ready {
 			targets, err := offlineEdgeRouteEnrollments(hold)
 			if err != nil {
 				intent.RecoveryState = "unavailable"
 				return
 			}
-			retired, err := lookup(ctx, targets[:])
+			lookupCtx, cancelLookup := context.WithTimeout(context.Background(), time.Second)
+			retired, err := lookup(lookupCtx, targets[:])
+			cancelLookup()
 			if err != nil {
 				intent.RecoveryState = "unavailable"
 				return

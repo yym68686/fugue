@@ -96,6 +96,47 @@ func TestOfflineRecoveryProbeBudgetAndConcurrentReplicas(t *testing.T) {
 	}
 }
 
+func TestEnrolledRouteRecoveryRequiresCurrentExactCode(t *testing.T) {
+	s, _, h, _ := offlineRecoveryFixture(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	node, _, err := s.store.GetEdgeNode(h.EdgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := testCapacityCode()
+	h.WorkerEnrollment = &platformproducer.OfflineWorkerEnrollment{NodeUID: code.NodeUID}
+	o := platformproducer.OfflineRecoveryObservation{
+		EdgeID: h.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(h), Admitted: true,
+		LastAttempt: now, LastSuccess: now, ProofValidUntil: now.Add(time.Minute), Successes: h.Recovery.SuccessThreshold,
+	}
+	reads := 0
+	live := code
+	s.offlineCapacityCode = func(_ context.Context, seen model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+		if seen.ID != h.EdgeID {
+			t.Fatal("verified a different node")
+		}
+		reads++
+		return live, nil
+	}
+	if !o.Ready(h, now) || s.offlineRecoveryReady(ctx, h, o, node, now) || reads != 0 {
+		t.Fatal("a legacy route-only sample readmitted the enrolled Worker")
+	}
+	o.RouteCode, o.LastResult = &code, "route_code_verified"
+	if !s.offlineRecoveryReady(ctx, h, o, node, now) || reads != 1 {
+		t.Fatal("matching fresh executable and route evidence did not allow recovery", reads)
+	}
+	live.WorkerPodUID = "new-worker"
+	if s.offlineRecoveryReady(ctx, h, o, node, now) {
+		t.Fatal("a replaced Worker inherited a previous Pod's route evidence")
+	}
+	live = code
+	live.NodeUID = "different-node"
+	if s.offlineRecoveryReady(ctx, h, o, node, now) {
+		t.Fatal("a replacement Node inherited the enrolled Node's route evidence")
+	}
+}
+
 func TestOfflineRecoveryRestoresCandidatesAndRetractsOnFailedProof(t *testing.T) {
 	s, policy, hold, input := offlineRecoveryFixture(t)
 	ctx := context.Background()

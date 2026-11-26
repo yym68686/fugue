@@ -26,7 +26,12 @@ UID/resourceVersion tests fence writes. Manual maintenance holds are preserved;
 managing an existing network/quota hold requires explicit `adopt_hold` intent.
 
 The state is `offline`, `recovering` or `active`. Repeated offline observations
-perform no additional write. Recovery waits for the configured stable interval
+perform no additional write. A Ready Node is not necessarily reachable for
+Edge traffic. An authorized member with a UID-bound serving transport can
+enter the recovery flow even if its kubelet never became NotReady, when the
+online API proves it is suspended and excluded by the signed serving release.
+With no fresh Edge heartbeat, this path does not contact its Front or Worker.
+Recovery waits for the configured stable interval
 and uses the existing member recovery primitive to prove current authority,
 Worker executable, Front activation, fresh TLS and paired physical route proofs.
 Only an inactive OnDelete Worker can be recreated. Same-slot stale code may
@@ -102,3 +107,11 @@ capacity sampler still depends on its separately deployed observation path; a
 missing external sample cannot be replaced with in-cluster proof.
 Node-local handoffs do not need a CI tick to install a redundant hold when
 all independent isolation checks already pass.
+
+A Worker's re-enrollment is not a code or serving receipt. When an offline
+policy has a separate Worker enrollment but uses HTTPS route checks rather
+than capacity rounds, recovery binds those checks to its enrolled physical
+Node and exact running Front, Worker and Guardian authority. A changed
+activation or replaced process starts a new series of successful checks.
+The live projection rechecks this binding before dropping the DNS hold;
+historical signed releases still replay their own pinned evidence.

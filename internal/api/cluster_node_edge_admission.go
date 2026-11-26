@@ -83,7 +83,7 @@ func acquireEdgeEnrollmentLease(ctx context.Context, c *clusterNodeClient, names
 	}
 	// Check after claiming the same lease as Guardian. Membership remains
 	// frozen when a repair process exits and leaves the durable fence behind.
-	pending, err := edgeAuthorityTransitionPending(ctx, c, namespace, group)
+	pending, err := edgeAuthorityTransitionPending(ctx, c, namespace, group, nil)
 	if err != nil || pending {
 		return nil, errors.Join(errors.New("group authority has an unfinished or unverified transition; retry after release completes"), err, release())
 	}

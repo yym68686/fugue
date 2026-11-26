@@ -64,7 +64,7 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if authority.UID == "" || authority.DeletionTimestamp != nil || authority.Labels["fugue.pro/authority-store"] != "true" {
 		return fail("code_identity_conflict", "authority_metadata")
 	}
-	pending, err := edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID)
+	pending, err := edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID, &node)
 	if err != nil {
 		return fail("code_observation_unavailable", "transition_journal")
 	}
@@ -134,7 +134,7 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if err != nil {
 		return fail("code_observation_unavailable", "recovery_history")
 	}
-	pending, err = edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID)
+	pending, err = edgeAuthorityTransitionPending(ctx, client, s.controlPlaneNamespace, edge.EdgeGroupID, &node)
 	if err != nil {
 		return fail("code_observation_unavailable", "transition_journal")
 	}
@@ -236,13 +236,27 @@ var errCapacityMetadataNotFound = errors.New("capacity metadata object not found
 
 // Either journal name implies an unsettled cohort, including the prepared
 // name claimed by Front repair. Only an authenticated not-found proves absence.
-func edgeAuthorityTransitionPending(ctx context.Context, client *clusterNodeClient, namespace, group string) (bool, error) {
+func edgeAuthorityTransitionPending(ctx context.Context, client *clusterNodeClient, namespace, group string, node *corev1.Node) (bool, error) {
 	base := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/configmaps/"
 	for _, phase := range []string{"prepared", "activated"} {
 		var journal corev1.ConfigMap
 		err := readCapacityMetadata(ctx, client, base+url.PathEscape("fugue-authority-transition-"+phase+"-"+group), &journal)
-		if !errors.Is(err, errCapacityMetadataNotFound) {
-			return err == nil, err
+		if errors.Is(err, errCapacityMetadataNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		// An exact immutable node-local handoff cannot change another
+		// physical member's selected Worker. Keep whole-group writes and
+		// anything unrecognized fenced, including same-name UID conflicts.
+		if node == nil || phase != "prepared" || journal.Name != "fugue-authority-transition-prepared-"+group ||
+			!capacityGuardianRecord(journal, group, "node-worker-journal", "journal.json") {
+			return true, nil
+		}
+		j, err := edgegroupfront.ReadNodeWorkerJournal([]byte(journal.Data["journal.json"]))
+		if err != nil || j.Recipient.Group != group || j.NodeUID == string(node.UID) || j.Recipient.Node == node.Name {
+			return true, nil
 		}
 	}
 	return false, nil

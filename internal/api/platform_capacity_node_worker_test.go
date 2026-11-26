@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -54,6 +55,35 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 	const base = "/api/v1/namespaces/system"
 	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: j.Recipient.Node, UID: "00000000-0000-4000-8000-000000000002"}}
 	service := corev1.Service{ObjectMeta: metav1.ObjectMeta{UID: "00000000-0000-4000-8000-000000000003"}}
+	t.Run("independent Worker journal does not block recovery of another node", func(t *testing.T) {
+		name := releaseguardian.FrontRepairFenceName(group)
+		cm := record(name, "node-worker-journal", "journal.json", j)
+		journal, err := json.Marshal(j)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cm.Data["journal.json"] = string(journal)
+		kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path != base+"/configmaps/"+name {
+				http.NotFound(w, req)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(cm)
+		}))
+		defer kube.Close()
+		client := &clusterNodeClient{baseURL: kube.URL, client: kube.Client()}
+		other := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "edge-peer", UID: "peer-uid"}}
+		replacement := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: node.Name, UID: "replacement-uid"}}
+		for _, tc := range []struct {
+			node    *corev1.Node
+			pending bool
+		}{{&other, false}, {&node, true}, {&replacement, true}, {nil, true}} {
+			got, err := edgeAuthorityTransitionPending(context.Background(), client, "system", group, tc.node)
+			if err != nil || got != tc.pending {
+				t.Fatalf("node %v: pending=%t, want %t: %v", tc.node, got, tc.pending, err)
+			}
+		}
+	})
 	for _, scenario := range []string{"verified", "missing index", "changed index", "wrong generation", "tampered rollback", "replaced ingress", "foreign node UID"} {
 		t.Run(scenario, func(t *testing.T) {
 			a := record(releaseguardian.NodeWorkerArchiveName(j.Digest), "node-worker-archive", "journal.json", j)

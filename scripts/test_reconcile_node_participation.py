@@ -128,8 +128,10 @@ class ParticipationTests(unittest.TestCase):
     def test_node_local_recovery_readmits_without_legacy_workloads(self):
         member = Participant()
         first = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
-        public, snap = object(), {'activation': {'updated_at': first.isoformat()}, 'address': '9.9.9.9'}
+        public = (object(), {'spec': {'externalIPs': ['9.9.9.9']}})
+        snap = {'activation': {'updated_at': first.isoformat()}, 'address': '9.9.9.9'}
         with patch.object(member, 'public_service', return_value=public), \
+                patch.object(p, 'read_edge_node', return_value={'observation': {'heartbeat_fresh': True}}), \
                 patch.object(member, 'node_local_snapshot', return_value=snap), \
                 patch.object(member, 'approved_network_recovery', return_value=True), \
                 patch.object(member, 'require_settled_group'), \
@@ -149,7 +151,7 @@ class ParticipationTests(unittest.TestCase):
         member = Participant()
         first = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
         checked = first + dt.timedelta(seconds=306)
-        origin = object()
+        origin = (object(), {'spec': {'externalIPs': ['9.9.9.9']}})
         snap = {'activation': {'updated_at': (first-dt.timedelta(days=1)).isoformat()}, 'address': '9.9.9.9'}
         intent = {'state': 'allowed', 'recovery_last_success_at': (first-dt.timedelta(seconds=2)).isoformat()}
         obs = {'observation': {'heartbeat_fresh': True, 'admission_allows_dns': True, 'eligible': True,
@@ -172,6 +174,47 @@ class ParticipationTests(unittest.TestCase):
                 self.assertEqual(member.run(True)['state'], 'active')
             self.assertNotIn(p.ANNOTATION, member.value['metadata']['annotations'])
             self.assertEqual(probe.call_count, 2)
+
+    def test_ready_node_enters_recovery_from_signed_exclusion_without_contacting_offline_front(self):
+        member = Participant()
+        member.value['status']['conditions'][0]['status'] = 'True'
+        public = (object(), {'spec': {'externalIPs': ['9.9.9.9']}})
+        intent = {'state': 'suspended', 'reason': 'network_unavailable', 'serving_evidence': 'not_evaluated'}
+        observed = {'public_ipv4': '9.9.9.9', 'observation': {'heartbeat_fresh': False, 'dns_admission_intent': intent}}
+        with patch.object(member, 'public_service', return_value=public), \
+                patch.object(p, 'read_edge_node', return_value=observed), \
+                patch.object(member, 'activation') as activation, \
+                patch.object(member, 'recovery_config') as legacy:
+            self.assertEqual(member.run(True)['state'], 'active')
+            self.assertEqual(member.writes, 0)
+            intent['serving_evidence'] = 'excluded_from_verified_full'
+            intent['reason'] = 'maintenance'
+            self.assertEqual(member.run(True)['state'], 'active')
+            intent['reason'] = 'network_unavailable'
+            observed['public_ipv4'] = '8.8.8.8'
+            self.assertEqual(member.run(True)['state'], 'active')
+            observed['public_ipv4'] = '9.9.9.9'
+            self.assertEqual(member.run(True)['state'], 'offline')
+            self.assertEqual(member.run(True)['state'], 'offline')
+            self.assertEqual(member.writes, 1)
+            observed['observation']['heartbeat_fresh'] = True
+            self.assertEqual(member.run(True)['state'], 'recovering')
+            self.assertEqual(member.run(True)['state'], 'recovering')
+            self.assertIn(p.ANNOTATION, member.value['metadata']['annotations'])
+            activation.assert_not_called()
+            legacy.assert_not_called()
+
+    def test_exclusion_lost_inside_release_leases_does_not_install_a_hold(self):
+        member = Participant()
+        member.value['status']['conditions'][0]['status'] = 'True'
+        public = (object(), {'spec': {'externalIPs': ['9.9.9.9']}})
+        excluded = {'public_ipv4': '9.9.9.9', 'observation': {'heartbeat_fresh': True, 'dns_admission_intent': {
+            'state': 'suspended', 'reason': 'network_unavailable', 'serving_evidence': 'excluded_across_full_transition'}}}
+        with patch.object(member, 'public_service', return_value=public), \
+                patch.object(p, 'read_edge_node', side_effect=[excluded, {}]):
+            with self.assertRaisesRegex(ValueError, 'phase changed'):
+                member.run(True)
+        self.assertEqual(member.writes, 0)
 
 
 if __name__=='__main__':unittest.main()

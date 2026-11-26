@@ -70,6 +70,7 @@ type OfflineRecoveryObservation struct {
 	FirstSuccess      time.Time                   `json:"first_success,omitzero"`
 	LastResult        string                      `json:"last_result,omitempty"`
 	Capacity          *CapacityRecoveryEvidence   `json:"capacity,omitempty"`
+	RouteCode         *CapacityCodeIdentity       `json:"route_code,omitempty"`
 }
 
 func OfflineRecoveryKey(hold OfflineEdge) string {

@@ -13,7 +13,7 @@ import subprocess
 import urllib.parse
 
 from scripts.configure_edge_release_hold import ANNOTATION, hold, validate_node, validate_reader, validate_retained_workload
-from scripts.edge_node_participation import STATE, STATE_SCHEMA, node_ready, node_service, participation_owner, read_edge_node, serving_services
+from scripts.edge_node_participation import STATE, STATE_SCHEMA, node_ready, node_service, participation_owner, read_edge_node, serving_services, verified_dns_exclusion
 from scripts.reconcile_edge_member import Recovery, canonical, now, timestamp, reconcile, without_time
 from scripts import run_node_worker_handoff as worker_driver
 
@@ -134,6 +134,26 @@ class Participant(Recovery):
                                         address=address[0]))
         return cluster, svc
 
+    def recovery_phase(self, node, public, existing):
+        if not node_ready(node):
+            # The Kubernetes control plane is sufficient to establish this
+            # release hold. Do not contact a disconnected Front or Worker.
+            return 'offline'
+        if public is None:
+            return 'recovering' if existing is not None else 'active'
+        _, svc = public
+        value = read_edge_node(self.policy, self.member)
+        observation = value.get('observation', {})
+        intent = observation.get('dns_admission_intent', {})
+        excluded = verified_dns_exclusion(value, svc) and intent.get('reason') == self.member['reason']
+        if existing is None and not excluded:
+            return 'active'
+        # A kubelet can remain Ready even when the Edge data plane cannot
+        # operate. Do not attempt Pod exec while the online API has not
+        # observed a fresh Edge heartbeat for this registered transport.
+        fresh = observation.get('heartbeat_fresh') is True
+        return 'recovering' if fresh else 'offline'
+
     def node_local_snapshot(self, public):
         if public is None:
             return None
@@ -238,26 +258,30 @@ class Participant(Recovery):
         expected = hold(self.config)
         if existing is not None and (json.loads(existing) != expected or state is None and not self.member['adopt_hold']):
             raise ValueError('Manual release hold retained; automatic policy cannot replace it')
-        ready = node_ready(node)
-        if ready and existing is None:
+        public = self.public_service()
+        phase = self.recovery_phase(node, public, existing)
+        if phase == 'active':
             return {'node': self.member['node'], 'state': 'active', 'changed': False}
         baseline = self.readers()
-        public = self.public_service()
         if public is None:
             for workload in [self.member['front'], *self.member['workers'].values()]:
                 validate_retained_workload(self.get('daemonset', workload), self.member['group'])
         inventory = json.loads(self.kube('get', 'nodes', '-l', 'fugue.io/edge-group-id='+self.member['group'], '-o', 'json'))
         validate_node(self.config, node, inventory, baseline)
         since = state.get('since') if state else None
-        phase = 'recovering' if ready else 'offline'
         if state is None or state.get('phase') != phase:
             if apply:
                 with self.leases():
                     current = self.node()
                     if current['metadata']['resourceVersion'] != node['metadata']['resourceVersion']: raise ValueError('Node changed before participation transition')
+                    current_public = self.public_service()
+                    if ((public is None) != (current_public is None) or
+                            (public and public[1] != current_public[1]) or
+                            self.recovery_phase(current, current_public, existing) != phase):
+                        raise ValueError('Public transport or recovery phase changed before participation transition')
                     self.transition_node(current, phase)
             return {'node': self.member['node'], 'state': phase, 'changed': apply}
-        if not ready:
+        if phase == 'offline':
             return {'node': self.member['node'], 'state': phase, 'changed': False}
         since = recovery_since(node, since)
         if now()-since < dt.timedelta(seconds=self.member['stable_seconds']):

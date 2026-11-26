@@ -28,6 +28,41 @@ func (s *Server) readOfflineRecovery(ctx context.Context, hold platformproducer.
 	return o, nil
 }
 
+// A separately re-enrolled Worker must prove its exact activation before a
+// route-only check can admit it. A successful HTTPS response alone can come
+// from the returning node's old executable. Capacity rounds already bind code.
+func requiresOfflineRouteCode(hold platformproducer.OfflineEdge) bool {
+	return hold.WorkerEnrollment != nil && hold.Recovery != nil && hold.Recovery.Capacity == nil
+}
+
+func (s *Server) readOfflineRouteCode(ctx context.Context, hold platformproducer.OfflineEdge, node model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+	read := s.offlineCapacityCode
+	if read == nil {
+		read = s.readCapacityCode
+	}
+	code, err := read(ctx, node)
+	if err == nil && (!code.Valid() || code.NodeUID != hold.WorkerEnrollment.NodeUID) {
+		err = codeObservationError("code_identity_conflict", "node_metadata")
+	}
+	return code, err
+}
+
+func (s *Server) offlineRecoveryReady(ctx context.Context, hold platformproducer.OfflineEdge, o platformproducer.OfflineRecoveryObservation, node model.EdgeNode, at time.Time) bool {
+	if !o.Ready(hold, at) {
+		return false
+	}
+	if !requiresOfflineRouteCode(hold) {
+		return true
+	}
+	if o.RouteCode == nil || !o.RouteCode.Valid() || o.LastResult != "route_code_verified" || node.ID != hold.EdgeID ||
+		node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || node.Draining ||
+		!edgeNodeRouteServingCapable(node, time.Now().UTC()) {
+		return false
+	}
+	code, err := s.readOfflineRouteCode(ctx, hold, node)
+	return err == nil && code == *o.RouteCode
+}
+
 // Only the independent recovery worker schedules probes. Preview/inventory requests only
 // read checkpoints. Claiming before I/O bounds retries across process restarts.
 func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platformproducer.Policy) error {
@@ -126,6 +161,7 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 		passed := false
 		var validUntil time.Time
 		var capacity *platformproducer.CapacityRecoveryEvidence
+		var routeCode *platformproducer.CapacityCodeIdentity
 		result, codeDetail := "", ""
 		var codePlan *model.EdgeCodeRecoveryPlan
 		observedAt := time.Time{}
@@ -138,10 +174,32 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 				observedAt = capacity.CheckedAt
 			}
 		} else if nodeErr == nil && node.EdgeGroupID == hold.EdgeGroupID && node.PublicIPv4 == hold.PublicIPv4 && edgeNodeRouteServingCapable(node, now) && !node.Draining {
-			proof, probeErr := probe(ctx, hold.Recovery.Hostname, hold.Recovery.Path, hold.PublicIPv4, "", time.Duration(hold.Recovery.ProbeTimeoutSeconds)*time.Second)
-			checked := time.Now().UTC()
-			passed = probeErr == nil && proof.EdgeID == hold.EdgeID && proof.GroupID == hold.EdgeGroupID && proof.State == "" && !proof.CheckedAt.Before(now) && !proof.CheckedAt.After(checked) && proof.ValidUntil.After(checked)
-			validUntil = proof.ValidUntil
+			var before platformproducer.CapacityCodeIdentity
+			var codeErr error
+			if requiresOfflineRouteCode(hold) {
+				before, codeErr = s.readOfflineRouteCode(ctx, hold, node)
+			}
+			if codeErr == nil {
+				proof, probeErr := probe(ctx, hold.Recovery.Hostname, hold.Recovery.Path, hold.PublicIPv4, "", time.Duration(hold.Recovery.ProbeTimeoutSeconds)*time.Second)
+				checked := time.Now().UTC()
+				passed = probeErr == nil && proof.EdgeID == hold.EdgeID && proof.GroupID == hold.EdgeGroupID && proof.State == "" && !proof.CheckedAt.Before(now) && !proof.CheckedAt.After(checked) && proof.ValidUntil.After(checked)
+				validUntil = proof.ValidUntil
+				if passed && requiresOfflineRouteCode(hold) {
+					var after platformproducer.CapacityCodeIdentity
+					after, codeErr = s.readOfflineRouteCode(ctx, hold, node)
+					if codeErr == nil && before != after {
+						codeErr = codeObservationError("code_identity_conflict", "observation_changed")
+					}
+					if codeErr == nil {
+						routeCode, result = &after, "route_code_verified"
+					}
+				}
+			}
+			if codeErr != nil {
+				passed = false
+				failure := capacityCodeFailureResult(codeErr)
+				result, codeDetail, codePlan = failure.reason, failure.codeDetail, failure.codePlan
+			}
 		}
 		completionCtx, finish := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 		_, err = s.store.UpdateObservationCheckpoint(completionCtx, platformproducer.OfflineRecoveryKey(hold), func(raw []byte) ([]byte, error) {
@@ -152,8 +210,14 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 			if observedAt.IsZero() {
 				observedAt = time.Now().UTC()
 			}
+			if requiresOfflineRouteCode(hold) && (previous.RouteCode == nil || routeCode == nil || *previous.RouteCode != *routeCode) {
+				// Do not count successes from a different activation, or a
+				// pre-upgrade route-only checkpoint without code evidence.
+				previous = platformproducer.OfflineRecoveryObservation{}
+			}
 			observed := previous.RecordCapacity(hold, observedAt, passed, validUntil, capacity, result)
 			observed.CodeDetail, observed.CodePlan = codeDetail, codePlan
+			observed.RouteCode = routeCode
 			return json.Marshal(observed)
 		})
 		finish()
@@ -212,6 +276,7 @@ func (s *Server) effectiveOfflineEdgeHolds(ctx context.Context, nodes []model.Ed
 	}
 	observations := []platformproducer.OfflineRecoveryObservation{}
 	var targets []store.PlatformConsumerRetirementTarget
+	var inventory map[string]model.EdgeNode
 	for _, hold := range holds {
 		if hold.Recovery != nil {
 			o, err := s.readOfflineRecovery(ctx, hold)
@@ -223,7 +288,13 @@ func (s *Server) effectiveOfflineEdgeHolds(ctx context.Context, nodes []model.Ed
 				}
 				continue
 			}
-			if o.Ready(hold, at) {
+			if requiresOfflineRouteCode(hold) && inventory == nil {
+				inventory = make(map[string]model.EdgeNode, len(nodes))
+				for _, node := range nodes {
+					inventory[node.ID] = node
+				}
+			}
+			if s.offlineRecoveryReady(ctx, hold, o, inventory[hold.EdgeID], at) {
 				enrollments, err := offlineEdgeRouteEnrollments(hold)
 				if err != nil {
 					return nil, nil, err

@@ -97,6 +97,14 @@ def require_isolated_service(namespace, svc, node, *, allow_serving=False):
     return None if serving else sorted(uids)
 
 
+def verified_dns_exclusion(value, svc):
+    """An intent or an old heartbeat alone is not signed serving evidence."""
+    intent = value.get("observation", {}).get("dns_admission_intent", {})
+    return (intent.get("state") == "suspended" and
+            intent.get("serving_evidence") in ("excluded_from_verified_full", "excluded_across_full_transition") and
+            bool(value.get("public_ipv4")) and svc["spec"]["externalIPs"] == [value["public_ipv4"]])
+
+
 def isolation(policy, member, node, svc):
     """Require policy authorization, exact live hold, and verified DNS exclusion."""
     if member is None:
@@ -117,12 +125,9 @@ def isolation(policy, member, node, svc):
         return None
     observed = read_edge_node(policy, member)
     o = observed.get("observation", {})
-    intent = o.get("dns_admission_intent", {})
     stale = o.get("heartbeat_fresh") is False and o.get("reason") == "heartbeat_stale"
     if (not (stale or recovering and o.get("heartbeat_fresh") is True) or
-            intent.get("state") != "suspended" or
-            intent.get("serving_evidence") not in ("excluded_from_verified_full", "excluded_across_full_transition") or
-            svc["spec"]["externalIPs"] != [observed.get("public_ipv4")]):
+            not verified_dns_exclusion(observed, svc)):
         return None
     # An already-recovering member may have a usable direct Front before DNS
     # admission. In that case observe it like a live peer, not as absent.
