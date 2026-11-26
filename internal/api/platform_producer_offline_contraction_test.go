@@ -6,32 +6,89 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/platformcontrol"
 )
 
 func TestOfflineContractionDoesNotChangeUnrelatedConsumers(t *testing.T) {
 	offline := map[string]string{"offline": "edge-group-fixture"}
 	assessment := model.PlatformConsumerEvidenceAssessment{Required: true, State: model.InvariantEvidenceStateUnknown,
-		Expected: model.PlatformExpectedConsumer{NodeID: "offline", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, Component: model.PlatformConsumerComponentEdgeWorker, AuthorityID: platformcontrol.ConsumerAuthorityID("edge-group-fixture")}}
+		Expected: model.PlatformExpectedConsumer{NodeID: "offline", ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, Component: model.PlatformConsumerComponentEdgeWorker, Cohort: "edge-group-fixture"}}
 	survivor := model.PlatformConsumerEvidenceAssessment{Required: true, State: model.InvariantEvidenceStatePass,
 		Expected: model.PlatformExpectedConsumer{NodeID: "healthy", Component: model.PlatformConsumerComponentEdgeWorker}}
 	st := model.PlatformConsumerConvergenceStatus{RequiredExpected: 2, Assessments: []model.PlatformConsumerEvidenceAssessment{assessment, survivor}}
-	if !offlineContractionSurvivorsPass(st, offline) {
+	if !offlineContractionSurvivorsPass(st, offline, nil) {
 		t.Fatal("stale receipts from the withdrawn Worker blocked its own withdrawal")
 	}
 	st.Assessments[0].Expected.Component = model.PlatformConsumerComponentDNSServer
-	if offlineContractionSurvivorsPass(st, offline) {
+	if offlineContractionSurvivorsPass(st, offline, nil) {
 		t.Fatal("removed a DNS dependency at the same node")
 	}
 	st.Assessments[0] = assessment
+	st.Assessments[0].Expected.Cohort = "edge-group-another"
+	if offlineContractionSurvivorsPass(st, offline, nil) {
+		t.Fatal("omitted a Worker whose cohort did not match the hold")
+	}
+	st.Assessments[0] = assessment
 	st.Assessments[1].State = model.InvariantEvidenceStateUnknown
-	if offlineContractionSurvivorsPass(st, offline) {
+	if offlineContractionSurvivorsPass(st, offline, nil) {
 		t.Fatal("admitted a stale surviving Worker")
 	}
 	st.Assessments = st.Assessments[:1]
 	st.RequiredExpected = 1
-	if offlineContractionSurvivorsPass(st, offline) {
+	if offlineContractionSurvivorsPass(st, offline, nil) {
 		t.Fatal("removed the last required member")
+	}
+}
+
+func TestOfflineContractionAllowsOneExactRetainedDNSProbeFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		mutate        func(*model.PlatformConsumerConvergenceStatus)
+		backend, want bool
+	}{
+		{name: "selected live backend with a passing peer", backend: true, want: true},
+		{name: "backend replaced"},
+		{name: "no passing peer", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.Assessments[1] = s.Assessments[0]
+		}},
+		{name: "missing heartbeat", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.Assessments[0].Observed = nil
+		}},
+		{name: "expired heartbeat or wrong fence", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.Assessments[0].Reasons = append(s.Assessments[0].Reasons, "receipt is stale or belongs to another release")
+		}},
+		{name: "failed successor", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.Assessments[0].Observed.CandidateGeneration = "successor"
+		}},
+		{name: "unrelated probe", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.Assessments[0].Observed.LastError = "another probe failed"
+		}},
+		{name: "outside global scope", backend: true, mutate: func(s *model.PlatformConsumerConvergenceStatus) {
+			s.ScopeKey = "authority-cell:cell-fixture"
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dns := model.PlatformExpectedConsumer{Component: model.PlatformConsumerComponentDNSServer,
+				ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle, ScopeKey: "global", ExpectedGeneration: "verified"}
+			failed := model.PlatformConsumerEvidenceAssessment{Expected: dns, Required: true, State: model.InvariantEvidenceStateFail,
+				Reasons: []string{probeNotPassedReason},
+				Observed: &model.PlatformConsumerInstance{IdentityVerified: true, CredentialID: "kubernetes:fixture:dns:pod", ProbeStatus: "failed",
+					LastError: retainedDNSProbeError, ServingLKG: true, LKGGeneration: "verified"}}
+			healthy := model.PlatformConsumerEvidenceAssessment{Expected: dns, Required: true, State: model.InvariantEvidenceStatePass}
+			status := model.PlatformConsumerConvergenceStatus{ArtifactKind: dns.ArtifactKind, ScopeKey: dns.ScopeKey,
+				RequiredExpected: 2, Assessments: []model.PlatformConsumerEvidenceAssessment{failed, healthy}}
+			if tt.mutate != nil {
+				tt.mutate(&status)
+			}
+			held := map[string]string{"offline": "edge-group-fixture"}
+			if got := offlineContractionSurvivorsPass(status, held, func(model.PlatformConsumerEvidenceAssessment) bool {
+				return tt.backend
+			}); got != tt.want {
+				t.Fatalf("predecessor gate = %t, want %t", got, tt.want)
+			}
+			if offlineContractionSurvivorsPass(status, held, nil) {
+				t.Fatal("ordinary live convergence accepted a failed DNS receipt")
+			}
+		})
 	}
 }
 

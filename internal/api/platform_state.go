@@ -519,8 +519,11 @@ func (s *Server) checkReleaseConsumerSetsExcept(ctx context.Context, artifact mo
 		if consumerErr != nil {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
 		}
-		status := s.evaluateLiveConsumerConvergence(ctx, set, consumers, s.platformConvergenceBinding(set))
-		if len(offline) > 0 && set.RequiresConsumers && offlineContractionSurvivorsPass(status, offline) {
+		binding := s.platformConvergenceBinding(set)
+		status := s.evaluateLiveConsumerConvergence(ctx, set, consumers, binding)
+		if len(offline) > 0 && set.RequiresConsumers && offlineContractionSurvivorsPass(status, offline, func(assessment model.PlatformConsumerEvidenceAssessment) bool {
+			return s.checkOfflineContractionRetainedDNS(ctx, set, binding, assessment)
+		}) {
 			continue
 		}
 		if set.RequiresConsumers && !status.Pass {

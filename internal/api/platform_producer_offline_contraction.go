@@ -2,9 +2,10 @@ package api
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"maps"
 	"net"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -16,11 +17,12 @@ import (
 	"fugue/internal/platformproducer"
 )
 
-func offlineContractionSurvivorsPass(status model.PlatformConsumerConvergenceStatus, offline map[string]string) bool {
+func offlineContractionSurvivorsPass(status model.PlatformConsumerConvergenceStatus, offline map[string]string, checkRetainedDNS func(model.PlatformConsumerEvidenceAssessment) bool) bool {
 	if len(status.UnexpectedConsumers) != 0 {
 		return false
 	}
 	seen, retained := 0, 0
+	var degradedDNS *model.PlatformConsumerEvidenceAssessment
 	for _, a := range status.Assessments {
 		if !a.Required {
 			continue
@@ -30,15 +32,60 @@ func offlineContractionSurvivorsPass(status model.PlatformConsumerConvergenceSta
 		if group := offline[c.NodeID]; group != "" &&
 			c.Component == model.PlatformConsumerComponentEdgeWorker && !c.HostedRouteTLSOnly &&
 			(c.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || c.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig) &&
-			c.AuthorityID == platformcontrol.ConsumerAuthorityID(group) {
+			c.Cohort == group && c.AuthorityID == platformcontrol.ConsumerAuthorityID(group) {
 			continue
 		}
-		retained++
-		if a.State != model.InvariantEvidenceStatePass {
+		if a.State == model.InvariantEvidenceStatePass {
+			retained++
+			continue
+		}
+		if checkRetainedDNS == nil || degradedDNS != nil || !offlineContractionRetainedDNS(status, a) {
 			return false
 		}
+		degradedDNS = &a
 	}
-	return retained > 0 && seen == status.RequiredExpected
+	// An exact DNS predecessor can lose a readiness probe because it still
+	// routes through the withdrawn Edge. Keep every DNS member in the candidate
+	// and require ordinary current-fence convergence there. At least one DNS
+	// peer and all surviving Workers must already pass on the predecessor.
+	return retained > 0 && seen == status.RequiredExpected && (degradedDNS == nil || checkRetainedDNS(*degradedDNS))
+}
+
+// Match the existing DNS heartbeat and convergence diagnostics. New or
+// combined failure reasons require the ordinary recovery path.
+const (
+	retainedDNSProbeError = "DNS serving readiness or listener probe failed"
+	probeNotPassedReason  = "probe status is not passed"
+)
+
+func offlineContractionRetainedDNS(status model.PlatformConsumerConvergenceStatus, a model.PlatformConsumerEvidenceAssessment) bool {
+	c, f := a.Expected, a.Observed
+	// The normal evaluator must have accepted the identity, freshness,
+	// exact predecessor fence, and all other receipt checks.
+	return status.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && status.ScopeKey == platformconfig.GlobalScopeKey &&
+		c.Component == model.PlatformConsumerComponentDNSServer && c.ArtifactKind == status.ArtifactKind && c.ScopeKey == status.ScopeKey &&
+		a.State == model.InvariantEvidenceStateFail && len(a.Reasons) == 1 && a.Reasons[0] == probeNotPassedReason &&
+		f != nil && f.IdentityVerified && strings.HasPrefix(f.CredentialID, "kubernetes:") &&
+		f.ProbeStatus == "failed" && f.LastError == retainedDNSProbeError && f.ServingLKG && !f.LKGExpired &&
+		f.CandidateGeneration == "" && f.LKGGeneration == c.ExpectedGeneration
+}
+
+func (s *Server) checkOfflineContractionRetainedDNS(ctx context.Context, set model.PlatformExpectedConsumerSet, binding *platformcontrol.ConsumerReleaseBinding, a model.PlatformConsumerEvidenceAssessment) bool {
+	if binding == nil || binding.ReleaseChannel != model.PlatformArtifactReleaseChannelFull {
+		return false
+	}
+	f := a.Observed
+	claims := platformcontrol.PlatformComponentIdentityClaims{
+		CredentialID: f.CredentialID, Component: f.Component, NodeID: f.NodeID,
+		AuthorityID: a.Expected.AuthorityID, ScopeKey: f.ScopeKey, ArtifactKinds: f.SupportedKinds,
+	}
+	hb := platformcontrol.PlatformConsumerHeartbeatEnvelope{
+		ApplyStatus: f.ApplyStatus, ProbeStatus: f.ProbeStatus, ReleaseSetID: f.ReleaseSetID,
+		ExpectedConsumerSetID: f.ExpectedConsumerSetID, FencingToken: f.FencingToken, GenerationSequence: f.GenerationSequence,
+	}
+	return platformcontrol.ExpectedConsumerIdentityMatches(a.Expected, claims) &&
+		s.validateDNSHeartbeatBackend(ctx, claims, hb, set) == http.StatusOK &&
+		a.FreshUntil != nil && a.FreshUntil.After(time.Now()) && ctx.Err() == nil
 }
 
 func newlyHeldEdges(before, after []platformconfig.HostedAddressHold) []platformconfig.HostedAddressHold {
@@ -286,10 +333,10 @@ func offlineDNSQueryViewsContract(before, after []platformconfig.DNSQueryView, h
 // an ordinary release to consume new business input. Readmission and unrelated
 // stale receipts must still go through the ordinary convergence gate.
 func (s *Server) compileHostedOfflineContraction(ctx context.Context, req platformconfig.CompileRequest, source platformconfig.HostedAddressSource, capture *platformconfig.HostedTransitionCapture) (platformconfig.CompileResult, error) {
-	bad := errors.New("offline contraction lacks exact authorized withdrawal and surviving consumer evidence")
+	bad := func(check string) error { return fmt.Errorf("offline contraction blocked: %s", check) }
 	held := newlyHeldEdges(source.PriorHolds, source.EffectiveHolds)
 	if len(held) == 0 {
-		return platformconfig.CompileResult{}, bad
+		return platformconfig.CompileResult{}, bad("effective holds do not strictly extend the predecessor")
 	}
 	now := time.Now().UTC()
 	omitted := make(map[string]string, len(held))
@@ -299,7 +346,7 @@ func (s *Server) compileHostedOfflineContraction(ctx context.Context, req platfo
 	for _, h := range held {
 		n, _, err := s.store.GetEdgeNode(h.EdgeID)
 		if err != nil || n.EdgeGroupID != h.EdgeGroupID || n.PublicIPv4 != h.Address || observeEdgeNodeInventory(n, now).Reason != "heartbeat_stale" {
-			return platformconfig.CompileResult{}, bad
+			return platformconfig.CompileResult{}, bad("new hold does not match an unreachable Edge")
 		}
 		omitted[h.EdgeID] = h.EdgeGroupID
 		omittedIDs[h.EdgeID] = true
@@ -311,9 +358,11 @@ func (s *Server) compileHostedOfflineContraction(ctx context.Context, req platfo
 	})
 	parent, current, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, platformconfig.GlobalScopeKey, "full")
 	if err != nil || !found || parent.ID != source.Publication.ReleaseSetID || parent.ContentHash != source.Publication.ReleaseSetDigest ||
-		current.ID != source.Publication.ReleaseID || current.FencingToken != source.Publication.FencingToken ||
-		!s.checkReleaseConsumerSetsExcept(ctx, parent, true, omitted).Pass {
-		return platformconfig.CompileResult{}, bad
+		current.ID != source.Publication.ReleaseID || current.FencingToken != source.Publication.FencingToken {
+		return platformconfig.CompileResult{}, bad("verified predecessor changed")
+	}
+	if check := s.checkReleaseConsumerSetsExcept(ctx, parent, true, omitted); !check.Pass {
+		return platformconfig.CompileResult{}, bad(check.Message)
 	}
 	if capture != nil {
 		req, err = platformconfig.IndependentManagedBaselineRequest(source, req, capture)
@@ -332,13 +381,21 @@ func (s *Server) compileHostedOfflineContraction(ctx context.Context, req platfo
 	nextDNS, err := platformconfig.DecodeDNSArtifact(candidate)
 	priorPolicy := source.Prior.Policy
 	priorPolicy.Generation = nextDNS.Policy.Generation
-	if err != nil || !onlyOfflineDNSRecordsChanged(source.Prior, nextDNS, omittedIDs) ||
-		!reflect.DeepEqual(priorPolicy, nextDNS.Policy) || !reflect.DeepEqual(source.Prior.ConsumerViews, nextDNS.ConsumerViews) ||
-		!offlineDNSPlanContracts(source.Prior.ReadinessPlan, nextDNS.ReadinessPlan, heldByID) ||
-		!offlineDNSQueryViewsContract(source.Prior.QueryViews, nextDNS.QueryViews, heldByID) ||
-		validateOfflineDNSCandidate(out.DNSArtifact, exclusions) != nil ||
-		!sameTrafficProgram(source.PriorRoute, out.RouteArtifact) || !sameTrafficProgram(source.PriorTLS, out.TLSArtifact) {
-		return platformconfig.CompileResult{}, bad
+	switch {
+	case err != nil:
+		return platformconfig.CompileResult{}, bad("candidate DNS cannot be decoded")
+	case !onlyOfflineDNSRecordsChanged(source.Prior, nextDNS, omittedIDs):
+		return platformconfig.CompileResult{}, bad("candidate changes DNS declarations beyond the withdrawal")
+	case !reflect.DeepEqual(priorPolicy, nextDNS.Policy) || !reflect.DeepEqual(source.Prior.ConsumerViews, nextDNS.ConsumerViews):
+		return platformconfig.CompileResult{}, bad("candidate changes DNS policy or consumer ownership")
+	case !offlineDNSPlanContracts(source.Prior.ReadinessPlan, nextDNS.ReadinessPlan, heldByID):
+		return platformconfig.CompileResult{}, bad("candidate must preserve surviving readiness targets and quorum")
+	case !offlineDNSQueryViewsContract(source.Prior.QueryViews, nextDNS.QueryViews, heldByID):
+		return platformconfig.CompileResult{}, bad("candidate changes DNS query views beyond the withdrawal")
+	case validateOfflineDNSCandidate(out.DNSArtifact, exclusions) != nil:
+		return platformconfig.CompileResult{}, bad("candidate still includes withdrawn Edge evidence")
+	case !sameTrafficProgram(source.PriorRoute, out.RouteArtifact) || !sameTrafficProgram(source.PriorTLS, out.TLSArtifact):
+		return platformconfig.CompileResult{}, bad("candidate changes the route or TLS program")
 	}
 	return out, nil
 }
