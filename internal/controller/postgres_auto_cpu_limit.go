@@ -205,7 +205,7 @@ func managedPostgresCPULimitCoolingDown(ops []model.Operation, serviceID string,
 
 func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, client *kubeClient, app model.App) (bool, error) {
 	cfg := s.Config.ManagedPostgresInPlaceResize
-	if !s.Config.KubectlApply || !cfg.Enabled || !cfg.CPULimitUpscaleEnabled || len(cfg.AutoCPULimitUpscaleTargets) == 0 || !managedPostgresCPULimitAutoAllowed(app) {
+	if !s.Config.KubectlApply || !cfg.Enabled || !cfg.CPULimitUpscaleEnabled || len(cfg.AutoCPULimitUpscaleTargets) == 0 {
 		return false, nil
 	}
 	now := time.Now().UTC()
@@ -219,6 +219,15 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 		if enrollment == nil {
 			continue
 		}
+		logSkip := func(reason string) {
+			if s.Logger != nil {
+				s.Logger.Printf("automatic PostgreSQL CPU limit upscale skipped service=%s reason=%s", service.ID, reason)
+			}
+		}
+		if !managedPostgresCPULimitAutoAllowed(app) {
+			logSkip("app_right_sizing_disabled")
+			continue
+		}
 		ops, err := s.Store.ListOperationSummariesFiltered(app.TenantID, false, store.OperationListFilter{
 			AppID: app.ID, ServiceID: service.ID, Types: []string{model.OperationTypeDatabaseResize},
 		})
@@ -226,6 +235,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			return false, err
 		}
 		if managedPostgresCPULimitCoolingDown(ops, service.ID, now) {
+			logSkip("cooldown")
 			continue
 		}
 		snapshot, err := observeManagedPostgresResizeSnapshot(ctx, client, namespace, enrollment.Cluster)
@@ -240,6 +250,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			return false, err
 		}
 		if o.ActualResources == nil || !managedPostgresResizeResourcesEqual(*o.ActualResources, o.DesiredResources) || o.ContainerStartedAt == "" || !o.PodReady || !o.ContainerReady {
+			logSkip("pod_resources_not_converged")
 			continue
 		}
 		target, err := managedPostgresLiveResourceSpec(o.DesiredResources)
@@ -248,6 +259,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 		}
 		current := target.CPULimitMilliCores
 		if target.CPULimitMilliCores = managedPostgresNextCPULimit(current, enrollment.MaxLimitMilliCores); target.CPULimitMilliCores == 0 {
+			logSkip("no_bounded_increase")
 			continue
 		}
 		samples, err := s.Store.ListResourceUsageSamples(app.TenantID, managedPostgresCPUUsageSampleKind, service.ID, now.Add(-15*time.Minute))
@@ -255,6 +267,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			return false, err
 		}
 		if !managedPostgresCPURecentlySaturated(samples, now, current) {
+			logSkip("no_sustained_cpu_saturation")
 			continue
 		}
 		resources, err := managedPostgresKubeResources(*target)
@@ -262,6 +275,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			return false, err
 		}
 		if result := assessManagedPostgresResize(o, resources, managedPostgresResizeSafetyOptions{AllowLimitChanges: true}); result.State != managedPostgresResizeStateReady {
+			logSkip(result.Reason)
 			continue
 		}
 		pressured, err := confirmManagedPostgresCPULimitPressure(ctx, client, o, current)
@@ -269,6 +283,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			return false, err
 		}
 		if !pressured {
+			logSkip("container_throttling_not_confirmed")
 			continue
 		}
 		op, result, err := s.Store.CreateOperationWithResult(model.Operation{
@@ -277,6 +292,7 @@ func (s *Service) reconcileManagedPostgresAutoCPULimit(ctx context.Context, clie
 			DesiredSpec: &model.AppSpec{Postgres: &model.AppPostgresSpec{RuntimeResources: target}},
 		})
 		if errors.Is(err, store.ErrConflict) {
+			logSkip("operation_admission_conflict")
 			return false, nil
 		}
 		if err == nil && result.Created && s.Logger != nil {
