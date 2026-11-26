@@ -1357,6 +1357,7 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 				return rolloutErr
 			}
 			if safeRollout != nil && safeRollout.StableAlignmentAllowed {
+				s.retireHistoricalRevisionsDuringHandoff(ctx, op, safeRollout)
 				alignedApp, err := s.applyManagedAppDesiredStateResult(applyCtx, app, scheduling)
 				if errors.Is(err, errSafeCanonicalHandoffPending) {
 					return s.waitForSafeRolloutCanonicalHandoff(ctx, op, app, safeRollout.Candidate.ID, err)

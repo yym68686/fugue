@@ -12,6 +12,66 @@ import (
 	"fugue/internal/runtime"
 )
 
+// A resumed promotion can hold an operation open while canonical connections
+// drain. Its rollback and handoff releases are still in use by that operation.
+// Older, independent revisions can use the normal retirement proofs under the
+// same operation, without waiting for the canonical Deployment to change.
+func (s *Service) retireHistoricalRevisionsDuringHandoff(ctx context.Context, op model.Operation, state *safeRolloutState) {
+	if !s.Config.KubectlApply || !state.Resumed || !state.AlreadyPromoted || !state.ServingVerified ||
+		state.Candidate.RevisionWorkload == nil || state.Candidate.RevisionWorkload.OperationID != op.ID ||
+		state.StableRelease.ID == "" || state.StableRelease.CreatedAt.IsZero() {
+		return
+	}
+	app := state.CandidateApp
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if held, err := s.Store.AppRecoveryHeld(app.ID); err != nil || held {
+		return
+	}
+	client, err := s.kubeClient()
+	if err != nil {
+		return
+	}
+	namespace := runtime.NamespaceForTenant(app.TenantID)
+	deploymentName := runtime.RuntimeAppResourceName(app)
+	serviceName := runtime.RuntimeAppServiceName(app)
+	canonical, found, err := client.getRawObject(ctx, deploymentAPIPath(namespace, deploymentName))
+	if err != nil || !found {
+		return
+	}
+	metadata := objectMapField(canonical, "metadata")
+	var handoff safeCanonicalHandoff
+	if json.Unmarshal([]byte(objectStringMapValue(metadata["annotations"])[safeCanonicalHandoffAnnotation]), &handoff) != nil ||
+		handoff.ReleaseID != state.Candidate.ID || handoff.SourceReleaseID == "" ||
+		handoff.ReleaseKey == "" || handoff.Image == "" ||
+		handoff.DeploymentUID == "" || handoff.DeploymentUID != objectStringField(metadata, "uid") ||
+		!appWorkloadOwnerMatches(metadata, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) ||
+		objectStringField(metadata, "deletionTimestamp") != "" {
+		return
+	}
+	if err := s.ensureOperationStillActiveContext(ctx, op.ID); err != nil {
+		return
+	}
+	err = s.scanDrainingAppReleaseRetirements(ctx, app, func(previous, stable model.AppRelease) bool {
+		return historicalHandoffRetirementEligible(previous, stable, state, handoff, deploymentName, serviceName, time.Now().UTC())
+	})
+	if err != nil && ctx.Err() == nil && s.Logger != nil {
+		s.Logger.Printf("retire historical releases during canonical handoff app=%s: %v", app.ID, err)
+	}
+}
+
+func historicalHandoffRetirementEligible(previous, stable model.AppRelease, state *safeRolloutState, handoff safeCanonicalHandoff, canonicalDeployment, canonicalService string, now time.Time) bool {
+	binding := previous.RevisionWorkload
+	return stable.ID == state.Candidate.ID &&
+		previous.Role == model.AppReleaseRolePrevious && previous.Status == model.AppReleaseStatusDraining &&
+		previous.ID != state.StableRelease.ID && previous.ID != stable.RollbackTargetID &&
+		previous.ID != handoff.SourceReleaseID && previous.ID != handoff.PreviousTargetReleaseID &&
+		!previous.CreatedAt.IsZero() && previous.CreatedAt.Before(state.StableRelease.CreatedAt) &&
+		previous.RetentionUntil != nil && !now.Before(*previous.RetentionUntil) &&
+		binding != nil && binding.DeploymentName != "" && binding.DeploymentName != canonicalDeployment &&
+		binding.ServiceName != "" && binding.ServiceName != canonicalService
+}
+
 // A canonical replica is a later convergence step. Once the promoted immutable
 // revision serves every published endpoint, lack of capacity for that redundant
 // replica must not invalidate the already applied code release. This read-only

@@ -540,6 +540,10 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	if err != nil || active {
 		return err
 	}
+	return s.scanDrainingAppReleaseRetirements(ctx, app, nil)
+}
+
+func (s *Service) scanDrainingAppReleaseRetirements(ctx context.Context, app model.App, eligible func(model.AppRelease, model.AppRelease) bool) error {
 	positions, finish, acquired := s.retirementScans.beginPrioritized(app)
 	if !acquired {
 		return nil
@@ -573,6 +577,9 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 	intent := retirementIntentVersion(app, stable, policy)
 	ready := make([]model.AppRelease, 0, len(releases))
 	for _, release := range releases {
+		if eligible != nil && !eligible(release, stable) {
+			continue
+		}
 		if !store.AppReleaseAwaitingDrain(release) && !store.AppReleaseHasAlignedRevision(release) && !(release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil) {
 			continue
 		}

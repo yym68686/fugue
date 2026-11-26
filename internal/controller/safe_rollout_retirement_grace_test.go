@@ -2,11 +2,105 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/runtime"
 )
+
+func TestResumedCanonicalHandoffRetiresOnlyExpiredIndependentRevision(t *testing.T) {
+	for _, scenario := range []string{"unrelated", "source", "rollback", "previous_target", "invalid_marker", "retention", "unconfirmed_traffic"} {
+		t.Run(scenario, func(t *testing.T) {
+			t.Parallel()
+			s, app, old, fixture := newDrainWorkloadFixture(t)
+			s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
+			expired := time.Now().Add(-time.Minute)
+			old.RetentionUntil = &expired
+			if scenario == "retention" {
+				future := time.Now().Add(time.Minute)
+				old.RetentionUntil = &future
+			}
+			old, err := s.Store.UpdateAppRelease(old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current, err := s.Store.GetAppRelease(app.TenantID, true, policy.StableReleaseID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, err := s.Store.CreateOperation(model.Operation{AppID: app.ID, TenantID: app.TenantID, Type: model.OperationTypeDeploy,
+				DesiredSpec: &app.Spec, ExecutionMode: model.ExecutionModeManaged})
+			if err != nil {
+				t.Fatal(err)
+			}
+			op, claimed, err := s.Store.TryClaimPendingOperation(op.ID)
+			if err != nil || !claimed {
+				t.Fatal("claim", err)
+			}
+			current.RevisionWorkload = &model.AppReleaseWorkload{OperationID: op.ID}
+			rollback := model.AppRelease{ID: "rollback", CreatedAt: old.CreatedAt.Add(time.Minute)}
+			marker := safeCanonicalHandoff{ReleaseID: current.ID, SourceReleaseID: "source",
+				DeploymentUID: "canonical-uid", ReleaseKey: "source-key", Image: "example/source:v1"}
+			switch scenario {
+			case "source":
+				marker.SourceReleaseID = old.ID
+			case "rollback":
+				rollback.ID = old.ID
+			case "previous_target":
+				marker.PreviousTargetReleaseID = old.ID
+			case "invalid_marker":
+				marker.DeploymentUID = "other-uid"
+			case "unconfirmed_traffic":
+				s.safeRolloutEdgeBundleObserver = staticSafeRolloutEdgeObserver{}
+			}
+			payload, err := json.Marshal(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.extra = func(w http.ResponseWriter, r *http.Request) bool {
+				if r.Method != http.MethodGet || !strings.HasSuffix(r.URL.Path, "/deployments/"+runtime.RuntimeAppResourceName(app)) {
+					return false
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{
+					"uid": "canonical-uid",
+					"labels": map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID,
+						runtime.FugueLabelManagedBy: runtime.FugueLabelManagedByValue},
+					"annotations": map[string]string{safeCanonicalHandoffAnnotation: string(payload)},
+				}})
+				return true
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+			defer cancel()
+			s.retireHistoricalRevisionsDuringHandoff(ctx, op, &safeRolloutState{
+				Enabled: true, Resumed: true, AlreadyPromoted: true, ServingVerified: true,
+				CandidateApp: app, Candidate: current, StableRelease: rollback,
+			})
+			got, err := s.Store.GetAppRelease(app.TenantID, true, old.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "unrelated" {
+				if got.Status != model.AppReleaseStatusRetired || fixture.deleteCalls != 2 || fixture.proxyCalls < 4 {
+					t.Fatalf("historical retirement stalled: status=%s deletes=%d observations=%d", got.Status, fixture.deleteCalls, fixture.proxyCalls)
+				}
+			} else if got.Status != model.AppReleaseStatusDraining || fixture.deleteCalls != 0 {
+				t.Fatalf("retirement ignored %s: status=%s deletes=%d", scenario, got.Status, fixture.deleteCalls)
+			}
+			after, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
+			if err != nil || after != policy {
+				t.Fatal("retirement changed serving intent", err)
+			}
+		})
+	}
+}
 
 func TestStableTrafficRetriesDoNotStarveRetirement(t *testing.T) {
 	s, app, previous, fixture := newDrainWorkloadFixture(t)
