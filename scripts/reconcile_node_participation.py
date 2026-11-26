@@ -52,6 +52,11 @@ def owned_pod(pods, workload, node):
     return found[0]
 
 
+def recovery_since(node, since):
+    ready = next(c for c in node['status']['conditions'] if c['type'] == 'Ready')
+    return max(timestamp(since), timestamp(ready.get('lastTransitionTime', since)))
+
+
 class Participant(Recovery):
     def __init__(self, policy, member):
         self.policy, self.member = policy, member
@@ -160,10 +165,10 @@ class Participant(Recovery):
         return dict(activation=state, front=worker_driver.process(selected, 'edge-front'), worker_uid=uid,
                     worker=worker_driver.worker_process(worker), endpoint=endpoint, address=svc['spec']['externalIPs'][0])
 
-    def readmit_node_local(self, snapshot, annotations, existing, apply):
+    def readmit_node_local(self, snapshot, annotations, existing, apply, since):
         node = self.member['node']
         result = {'node': node, 'state': 'recovering', 'changed': False}
-        stamp = timestamp(snapshot['activation']['updated_at'])
+        stamp = max(since, timestamp(snapshot['activation']['updated_at']))
         if not apply or not self.approved_network_recovery(stamp):
             return result
         with self.leases():
@@ -177,7 +182,8 @@ class Participant(Recovery):
                 raise ValueError('Node-local recovery evidence or serving process changed')
             current = self.node()
             a = current['metadata'].get('annotations', {})
-            if not node_ready(current) or a.get(STATE) != annotations.get(STATE) or a.get(ANNOTATION) != existing:
+            if (not node_ready(current) or a.get(STATE) != annotations.get(STATE) or a.get(ANNOTATION) != existing or
+                    recovery_since(current, json.loads(a[STATE])['since']) != since):
                 raise ValueError('Participation ownership changed before readmission')
             self.transition_node(current, 'active', remove_hold=True)
         return {'node': node, 'state': 'active', 'changed': True, 'code': {'verified': True, 'mode': 'node-local'}}
@@ -253,21 +259,21 @@ class Participant(Recovery):
                     if current['metadata']['resourceVersion'] != node['metadata']['resourceVersion']: raise ValueError('Node changed before participation transition')
                     self.transition_node(current, phase)
             return {'node': self.member['node'], 'state': phase, 'changed': apply}
-        if not ready or now()-timestamp(since) < dt.timedelta(seconds=self.member['stable_seconds']):
+        if not ready:
             return {'node': self.member['node'], 'state': phase, 'changed': False}
-        condition = next(c for c in node['status']['conditions'] if c['type']=='Ready')
-        if 'lastTransitionTime' in condition and now()-timestamp(condition['lastTransitionTime']) < dt.timedelta(seconds=self.member['stable_seconds']):
+        since = recovery_since(node, since)
+        if now()-since < dt.timedelta(seconds=self.member['stable_seconds']):
             return {'node': self.member['node'], 'state':'recovering', 'changed':False}
         local = self.node_local_snapshot(public)
         if local is not None:
-            return self.readmit_node_local(local, annotations, existing, apply)
+            return self.readmit_node_local(local, annotations, existing, apply, since)
         config = self.recovery_config()
         evidence = reconcile(config, apply)
         if apply and config.get('retainedPrevious') and evidence.get('verified'):
             config = self.recovery_config()
             if config.get('retainedPrevious'): raise ValueError('Retained recovery did not advance to the current authority')
             evidence = reconcile(config, apply)
-        if not apply or not evidence.get('verified') or not self.approved_network_recovery():
+        if not apply or not evidence.get('verified') or not self.approved_network_recovery(since):
             return {'node': self.member['node'], 'state': 'recovering', 'code': evidence, 'changed': False}
         # Recheck exact authority, running code, physical Node and readers under
         # the same release/authority leases before removing our own hold.
@@ -278,10 +284,12 @@ class Participant(Recovery):
             owner, target, previous, raw, worker, reference = Recovery(final).snapshot()
             if without_time(previous) != without_time(target): raise ValueError('Code catch-up not complete')
             self.readers()
-            if not self.approved_network_recovery(): raise ValueError('Network recovery proof expired')
+            if not self.approved_network_recovery(max(since, timestamp(previous['updated_at']))):
+                raise ValueError('Network recovery proof predates the current activation or expired')
             current = self.node()
             a = current['metadata'].get('annotations', {})
-            if not node_ready(current) or a.get(STATE) != annotations.get(STATE) or a.get(ANNOTATION) != existing:
+            if (not node_ready(current) or a.get(STATE) != annotations.get(STATE) or a.get(ANNOTATION) != existing or
+                    recovery_since(current, json.loads(a[STATE])['since']) != since):
                 raise ValueError('Participation ownership changed before readmission')
             self.transition_node(current, 'active', remove_hold=True)
         return {'node': self.member['node'], 'state': 'active', 'changed': True, 'code': evidence}

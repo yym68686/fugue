@@ -35,8 +35,10 @@ authority; absent or conflicting history preserves the hold with a bounded
 reason. Neither a new global authority nor a new serving bundle is invented.
 
 Readmission additionally requires fresh heartbeat and a recent successful
-recovery observation admitted by the existing signed DNS policy. The controller
-rechecks physical identity, current code, authority and reader health under both
+recovery observation admitted by the existing signed DNS policy. The local
+release hold is not removed using an observation from before the current
+Ready/recovery interval or before the Worker activation being readmitted. The
+controller rechecks physical identity, current code, authority and reader health under both
 leases before removing its own hold. It never changes DNS, placement labels,
 replicas, billing, volumes or manually maintained pauses. Each run uploads a
 bounded evidence artifact; expected outages remain waiting states rather than

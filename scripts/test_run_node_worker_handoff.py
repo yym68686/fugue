@@ -64,6 +64,21 @@ def pinned():
 
 
 class NodeWorkerDriverTests(unittest.TestCase):
+    def test_rearm_write_accepts_only_exact_kubernetes_generation_annotation(self):
+        generation = "deprecated.daemonset.template.generation"
+        before = {"metadata": {"uid": "controller", "generation": 32}}
+        expected = {generation: "32", "rearmed": "receipt", "peer-retired": "retained"}
+        after = {"metadata": {"uid": "controller", "generation": 33,
+                              "annotations": dict(expected, **{generation: "33"})},
+                 "spec": {"template": {"placement": "unchanged-peer"}}}
+        template = copy.deepcopy(after["spec"]["template"])
+        driver.verify_rearm_write(before, after, template, expected)
+        for key, value in [(generation, "34"), ("peer-retired", "changed"), ("rearmed", "different")]:
+            modified = copy.deepcopy(after)
+            modified["metadata"]["annotations"][key] = value
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "exact rearm"):
+                driver.verify_rearm_write(before, modified, template, expected)
+
     def test_rearm_lease_classifies_only_a_bound_holder_as_contention(self):
         cfg = pinned()
         helper = driver.parking.Cluster(cfg)

@@ -51,7 +51,7 @@ class Participant(p.Participant):
 
     def readers(self): return 2
     def public_service(self): return None
-    def approved_network_recovery(self): return self.allowed
+    def approved_network_recovery(self, not_before=None): return self.allowed
     def recovery_config(self): return {'authorityRecord':self.final_record, 'authorityUID':'authority-uid'}
 
     @contextlib.contextmanager
@@ -63,7 +63,7 @@ class Participant(p.Participant):
 
 class FinalRecovery:
     def __init__(self,c): self.c=c
-    def snapshot(self): return ({}, {'code':'current'}, {'code':'current'}, '', {}, {})
+    def snapshot(self): return ({}, {'code':'current'}, {'code':'current','updated_at':'2025-12-31T00:00:00Z'}, '', {}, {})
 
 
 class ParticipationTests(unittest.TestCase):
@@ -144,6 +144,34 @@ class ParticipationTests(unittest.TestCase):
             self.assertNotIn(p.ANNOTATION, member.value['metadata']['annotations'])
             self.assertEqual(probe.call_count, 2)
             legacy.assert_not_called()
+
+    def test_pre_outage_network_sample_does_not_readmit_current_worker(self):
+        member = Participant()
+        first = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        checked = first + dt.timedelta(seconds=306)
+        origin = object()
+        snap = {'activation': {'updated_at': (first-dt.timedelta(days=1)).isoformat()}, 'address': '9.9.9.9'}
+        intent = {'state': 'allowed', 'recovery_last_success_at': (first-dt.timedelta(seconds=2)).isoformat()}
+        obs = {'observation': {'heartbeat_fresh': True, 'admission_allows_dns': True, 'eligible': True,
+                               'fresh_until': (checked+dt.timedelta(seconds=60)).isoformat(), 'dns_admission_intent': intent}}
+        with patch.object(member, 'public_service', return_value=origin), \
+                patch.object(member, 'node_local_snapshot', return_value=snap), \
+                patch.object(member, 'approved_network_recovery', p.Participant.approved_network_recovery.__get__(member)), \
+                patch.object(p, 'read_edge_node', return_value=obs), \
+                patch.object(member, 'require_settled_group'), \
+                patch.object(p.worker_driver.front, 'proof', return_value={'edge': 'intermittent', 'group': 'pool-a'}) as probe:
+            with patch.object(p, 'now', return_value=first):
+                self.assertEqual(member.run(True)['state'], 'offline')
+                member.value['status']['conditions'][0].update(status='True', lastTransitionTime=first.isoformat())
+                self.assertEqual(member.run(True)['state'], 'recovering')
+            with patch.object(p, 'now', return_value=checked):
+                self.assertEqual(member.run(True)['state'], 'recovering')
+                self.assertIn(p.ANNOTATION, member.value['metadata']['annotations'])
+                probe.assert_not_called()
+                intent['recovery_last_success_at'] = (first+dt.timedelta(seconds=1)).isoformat()
+                self.assertEqual(member.run(True)['state'], 'active')
+            self.assertNotIn(p.ANNOTATION, member.value['metadata']['annotations'])
+            self.assertEqual(probe.call_count, 2)
 
 
 if __name__=='__main__':unittest.main()

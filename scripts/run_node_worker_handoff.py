@@ -317,6 +317,20 @@ def remove_target_exclusion(template, node):
     return template
 
 
+def verify_rearm_write(before, after, template, annotations):
+    generation = before["metadata"]["generation"] + 1
+    actual = dict(after["metadata"]["annotations"])
+    expected = dict(annotations)
+    # Kubernetes' DaemonSet update strategy rewrites this annotation.
+    key = "deprecated.daemonset.template.generation"
+    if actual.get(key) == str(generation):
+        actual.pop(key)
+        expected.pop(key, None)
+    require(obj_uid(after) == obj_uid(before) and after["spec"]["template"] == template
+            and after["metadata"]["generation"] == generation and actual == expected,
+            "candidate scheduling did not converge to the exact rearm")
+
+
 class ActiveCluster:
     def __init__(self, config):
         self.config, self.ns = config, config["namespace"]
@@ -482,10 +496,7 @@ class ActiveCluster:
                     lease_helper.held(lock, renew=True)
                 live = kube.kubectl("patch", "daemonset", can["daemonSet"], "-n", self.ns, "--type=json",
                                     "--patch-file", "-", "-o", "json", body=front.canonical(changes))
-                require(obj_uid(live) == obj_uid(ds) and live["spec"]["template"] == patched
-                        and live["metadata"]["generation"] == m["generation"] + 1
-                        and live["metadata"]["annotations"] == annotations,
-                        "candidate scheduling did not converge to the exact rearm")
+                verify_rearm_write(ds, live, patched, annotations)
         until = time.monotonic() + 115
         while time.monotonic() < until:
             local = [p for p in self.pods(node=node) if any(
