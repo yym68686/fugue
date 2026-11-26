@@ -20,8 +20,8 @@
   },
   "guardian": {
     "deployment": "fugue-release-guardian",
-    "source": "192771490935b0e07bcd008800e0f327ce7f78c3",
-    "imageDigest": "sha256:c31a4571c13fa31743a6b0f39c624a8cf429e425592885a5e0383126fe23b860"
+    "source": "e86ac9e9bcea04e41c20760d4ab86761a1c67377",
+    "imageDigest": "sha256:6a70254356351b64765e45f3e4e3efe6b99c3171a29a7f5b87b82f5126bbdcdd"
   },
   "candidate": {
     "daemonSet": "fugue-fugue-edge-worker-b",
@@ -29,7 +29,7 @@
     "source": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
     "imageDigest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
     "slot": "b",
-    "bundleGeneration": "edgegroupbundle_1efaca176bd413ac9f19ea3aacf8d704a454df52312b81662c8508324f3e542e.p67371.r185",
+    "bundleGeneration": "edgegroupbundle_23fccb89eb377b8892be438e6fc74a4f647e898859c408471cb206b65d0dc803.p67381.r185",
     "releaseDigest": "sha256:1b5fffbd5b1c95c262c872a0d600753866134c69898ad12935576526799b9675"
   },
   "expected": {
