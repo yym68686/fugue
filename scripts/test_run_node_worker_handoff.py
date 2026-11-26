@@ -11,6 +11,24 @@ from scripts.test_node_worker_handoff import Fixture
 
 
 class PeerServingIdentityTest(unittest.TestCase):
+    def test_peer_can_have_only_its_exact_serving_slot(self):
+        cluster = driver.ActiveCluster({"namespace": "sample", "node": "pilot", "group": "group"})
+        image = "sample.test/worker@sha256:" + "a" * 64
+        identity = {"active_slot": "a", "worker_source_commit": "b" * 40, "worker_image_digest": image.split("@")[1]}
+        pod = {"metadata": {"uid": "active", "name": "worker", "labels": {"fugue.io/edge-slot": "a"},
+                            "annotations": {"fugue.pro/source-commit": identity["worker_source_commit"]}},
+               "spec": {"containers": [{"name": "edge", "image": image},
+                                       {"name": "caddy", "image": image, "ports": [{"hostPort": 18443}]}]},
+               "status": {"phase": "Running", "containerStatuses": [
+                   {"name": name, "imageID": image, "containerID": name, "ready": True, "restartCount": 0,
+                    "state": {"running": {"startedAt": "2026-11-01T00:00:00Z"}}}
+                   for name in ["edge", "caddy"]]}}
+        self.assertEqual(driver.peer_selected_worker(cluster, [pod], identity), "active")
+        with self.assertRaisesRegex(ValueError, "host port"):
+            driver.peer_selected_worker(cluster, [], identity)
+        with self.assertRaisesRegex(ValueError, "pinned ready release"):
+            driver.peer_selected_worker(cluster, [pod], dict(identity, worker_source_commit="c" * 40))
+
     def test_snapshots_legacy_peer_readyz_without_streaming_exec(self):
         pod = {"metadata": {"name": "peer-front"}}
         health = {"status": "ok", "route_authority": "edge-control", "active_slot": "a",

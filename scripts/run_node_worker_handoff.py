@@ -173,6 +173,20 @@ def worker_process(pod):
     return sha(("fugue-node-worker-process/v1\n" + edge["id"] + "\n" + caddy["id"]).encode())
 
 
+def peer_selected_worker(cluster, workers, serving):
+    # A peer may already have retired its inactive slot. Require the exact
+    # serving listener, and let the full peer snapshot fence all other Pods
+    # that actually exist instead of requiring a standby to be installed.
+    slot = serving["active_slot"]
+    pod = cluster.worker_at(workers, 18443 if slot == "a" else 28443)
+    require(pod["metadata"].get("labels", {}).get("fugue.io/edge-slot") == slot,
+            "peer serving listener does not own the reported slot")
+    pin_image(pod, "edge", serving["worker_source_commit"], serving["worker_image_digest"])
+    caddy = process(pod, "caddy")
+    require(caddy["ready"] is True, "peer serving listener is not ready")
+    return obj_uid(pod)
+
+
 def candidate_wire(declared):
     # ActivationRepairRelease uses Go's field names on the wire; the
     # activation record itself uses explicit snake_case JSON tags.
@@ -487,8 +501,8 @@ class ActiveCluster:
                             or "edge-front" in {c["name"] for c in p["spec"]["containers"]})]
             require(obj_uid(selected) in {obj_uid(p) for p in related}, "peer Front was absent from the group runtime")
             workers = [p for p in related if {"edge", "caddy"} <= {c["name"] for c in p["spec"]["containers"]}]
-            require({"a", "b"} <= {p["metadata"].get("labels", {}).get("fugue.io/edge-slot") for p in workers},
-                    "peer runtime is missing a Worker slot")
+            serving = peer_serving_identity(self.ns, selected)
+            selected_worker = peer_selected_worker(self, workers, serving)
             snapshot = {}
             for pod in related:
                 r = controller(pod)
@@ -505,7 +519,7 @@ class ActiveCluster:
                 snapshot[obj_uid(pod)] = {"pod": pod["metadata"]["name"], "templates": templates,
                                           "processes": {c["name"]: process(pod, c["name"]) for c in pod["spec"]["containers"]}}
             snapshots[node] = {"service": svc["spec"], "endpoint": endpoint,
-                               "serving_identity": peer_serving_identity(self.ns, selected), "runtimes": snapshot}
+                               "serving_identity": serving, "serving_worker_uid": selected_worker, "runtimes": snapshot}
         return snapshots
 
     def exec_guardian(self, pod, command, raw):

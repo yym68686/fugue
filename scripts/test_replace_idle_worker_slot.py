@@ -104,3 +104,25 @@ class IdleWorkerSlotTest(unittest.TestCase):
         term["matchFields"].pop()
         with self.assertRaisesRegex(ValueError, "exclusion changed"):
             replacement.require_retired(config, ds, receipt)
+
+        # The same proof may release a different fixed slot on one node
+        # without requiring its shared former controller to have no peers.
+        peer = next(iter(config["peers"]))
+        config["slot"] = "b"
+        config["retirement"]["controllerPeers"] = {peer: config["peers"][peer]}
+        replacement.validate(config)
+        template["metadata"]["labels"]["fugue.io/edge-slot"] = "b"
+        spec = template["spec"]
+        spec.pop("nodeSelector")
+        spec["affinity"] = replacement.parking.node_affinity(node, "NotIn")
+        for container in spec["containers"]:
+            for port in container.get("ports", []):
+                if port.get("hostPort") in replacement.PORTS[0]:
+                    index = replacement.PORTS[0].index(port["hostPort"])
+                    port["hostPort"] = replacement.PORTS[1][index]
+        old["templateDigest"] = replacement.kube.digest(template)
+        ds["status"].update(desiredNumberScheduled=1, currentNumberScheduled=1, numberReady=1)
+        replacement.require_retired(config, ds, receipt)
+        config["retirement"]["controllerPeers"] = {}
+        with self.assertRaisesRegex(ValueError, "exact single-node exclusion"):
+            replacement.require_retired(config, ds, receipt)

@@ -23,7 +23,7 @@ require = handoff.require
 def validate(c):
     retired = isinstance(c, dict) and "retirement" in c
     handoff.fields(c, "schema namespace group node nodeUID old peers active front probeIngress next host"
-                   + (" retirement" if retired else ""))
+                   + (" retirement" if retired else "") + (" slot" if isinstance(c, dict) and "slot" in c else ""))
     handoff.fields(c["old"], "controller controllerUID generation templateDigest podUID")
     handoff.fields(c["active"], "podUID source imageDigest generation")
     handoff.fields(c["front"], "service uid generation address source imageDigest podUID")
@@ -36,15 +36,27 @@ def validate(c):
             c["next"]["controller"] == "fugue-" + c["next"]["component"] and c["next"]["controller"] != c["old"]["controller"],
             "exact, distinct fixed Worker controllers required")
     if retired:
-        handoff.fields(c["retirement"], "journalDigest receiptUID")
+        handoff.fields(c["retirement"], "journalDigest receiptUID" +
+                       (" controllerPeers" if "controllerPeers" in c["retirement"] else ""))
         require(handoff.matches(handoff.DIGEST, c["retirement"]["journalDigest"]) and
                 handoff.matches(handoff.UID, c["retirement"]["receiptUID"]), "exact Guardian retirement receipt required")
-    require(c["probeIngress"]["port"] == 15443 and len(c["peers"]) == 2 and c["node"] not in c["peers"],
+        controller_peers = c["retirement"].get("controllerPeers", {})
+        require(isinstance(controller_peers, dict) and set(controller_peers) <= set(c["peers"]) and
+                all(handoff.matches(handoff.UID, uid) for uid in controller_peers.values()),
+                "shared retired controller must pin every retained peer")
+    require(c.get("slot", "a") in ("a", "b") and ("slot" not in c or retired),
+            "an explicit slot requires a Guardian retirement receipt")
+    require(c["probeIngress"]["port"] == 15443 and isinstance(c["peers"], dict)
+            and len(c["peers"]) == 2 and c["node"] not in c["peers"],
             "independent probe and exact peer roster required")
     for uid in (c["nodeUID"], c["old"]["controllerUID"], c["old"]["podUID"], c["active"]["podUID"],
                 c["front"]["uid"], c["front"]["podUID"], c["probeIngress"]["uid"], *c["peers"].values()):
         require(handoff.matches(handoff.UID, uid), "exact object UID required")
     return c
+
+
+def slot_ports(slot):
+    return PORTS[0 if slot == "a" else 1]
 
 
 def require_retired(c, ds, receipt):
@@ -72,15 +84,21 @@ def require_retired(c, ds, receipt):
             "retirement receipt does not bind the old controller, worker and node")
     template = spec["template"]
     original = handoff.remove_target_exclusion(template, node)
+    shared = "controllerPeers" in retirement
+    survivors = len(retirement.get("controllerPeers", {}))
+    slot = c.get("slot", "a")
+    original_spec = original["spec"]
+    scope = (not original_spec.get("nodeSelector", {}).get("kubernetes.io/hostname") if shared else
+             original_spec.get("nodeSelector", {}).get("kubernetes.io/hostname") == node and
+             original_spec.get("affinity") == parking.node_affinity(node, "In"))
     require(meta.get("uid") == old["controllerUID"] and meta.get("name") == old["controller"] and
             meta.get("namespace") == c["namespace"] and not meta.get("deletionTimestamp") and
             meta.get("generation") == status.get("observedGeneration") == old["generation"] and
-            all(status.get(k, 0) == 0 for k in ("desiredNumberScheduled", "currentNumberScheduled", "numberReady", "numberMisscheduled")) and
+            all(status.get(k, 0) == survivors for k in ("desiredNumberScheduled", "currentNumberScheduled", "numberReady")) and
+            status.get("numberMisscheduled", 0) == 0 and scope and
             spec["updateStrategy"] == {"type": "OnDelete"} and kube.digest(template) == old["templateDigest"] and
-            original["spec"].get("nodeSelector", {}).get("kubernetes.io/hostname") == node and
-            original["spec"].get("affinity") == parking.node_affinity(node, "In") and
-            not template["spec"].get("hostNetwork") and hostports(template["spec"]) == PORTS[0] and
-            template["metadata"]["labels"].get("fugue.io/edge-slot") == "a" and
+            not template["spec"].get("hostNetwork") and hostports(template["spec"]) == slot_ports(slot) and
+            template["metadata"]["labels"].get("fugue.io/edge-slot") == slot and
             template["metadata"]["labels"].get("fugue.io/edge-group-id") == c["group"],
             "retired controller no longer matches its exact single-node exclusion")
 
@@ -142,24 +160,27 @@ def ready_scope(c, forward):
     template = spec["template"]
     labels = template["metadata"]["labels"]
     pod = template["spec"]
+    slot = c.get("slot", "a")
     require(ds["kind"] == "DaemonSet" and meta["name"] == c["next"]["controller"] and meta["namespace"] == c["namespace"] and
-            spec["updateStrategy"] == {"type": "OnDelete"} and not pod.get("hostNetwork") and hostports(pod) == PORTS[0] and
+            spec["updateStrategy"] == {"type": "OnDelete"} and not pod.get("hostNetwork") and hostports(pod) == slot_ports(slot) and
             not pod.get("nodeName") and pod["nodeSelector"]["kubernetes.io/hostname"] == c["node"] and
             pod.get("affinity") == parking.node_affinity(c["node"], "In") and
             labels["fugue.io/edge-node"] == c["node"] and labels["fugue.io/edge-group-id"] == c["group"] and
-            labels["fugue.io/edge-slot"] == "a" and spec["selector"]["matchLabels"]["fugue.io/edge-node"] == c["node"],
-            "verified release would not stay in the freed single-node A slot")
+            labels["fugue.io/edge-slot"] == slot and spec["selector"]["matchLabels"]["fugue.io/edge-node"] == c["node"],
+            f"verified release would not stay in the freed single-node {slot.upper()} slot")
     return labels
 
 
 def release(c, execution, run, record):
     labels = ready_scope(c, json.loads((execution / "forward.json").read_text()))
     old = c["old"]
+    slot = c.get("slot", "a")
+    active_slot = "b" if slot == "a" else "a"
+    retired = c.get("retirement")
     k = parking.Cluster(dict(c, legacy=old["controller"]))
     live = handoff.ActiveCluster(c)
 
     def inventory():
-        retired = c.get("retirement")
         ds = k.get("daemonset", old["controller"])
         if retired:
             name = "fugue-node-worker-retired-" + retired["journalDigest"][7:39]
@@ -175,7 +196,8 @@ def release(c, execution, run, record):
                 all(p["metadata"]["uid"] == old["podUID"] for p in target), "old A pod changed")
         peers = {p["spec"]["nodeName"]: (p["metadata"]["uid"], handoff.worker_process(p))
                  for p in pods if p["spec"]["nodeName"] != c["node"]}
-        require({n: p[0] for n, p in peers.items()} == ({} if retired else c["peers"]), "old A peer roster changed")
+        expected = retired.get("controllerPeers", {}) if retired else c["peers"]
+        require({n: p[0] for n, p in peers.items()} == expected, "old Worker peer roster changed")
         return ds, patch, target, peers
 
     def retired_peers():
@@ -196,14 +218,14 @@ def release(c, execution, run, record):
         handoff.pin_image(selected, "edge-front", c["front"]["source"], c["front"]["imageDigest"])
         state = front.state(live.profile, selected)
         active = c["active"]
-        require(state["active_slot"] == "b" and state["generation"] == active["generation"] and
+        require(state["active_slot"] == active_slot and state["generation"] == active["generation"] and
                 state["worker_source_commit"] == active["source"] and state["worker_image_digest"] == active["imageDigest"],
-                "slot A is not the declared inactive slot")
+                "the replacement slot is not the declared inactive slot")
         local = live.pods(node=c["node"])
-        b = live.worker_at(local, PORTS[1][1])
-        require(b["metadata"]["uid"] == active["podUID"], "active B Pod changed")
-        handoff.pin_image(b, "edge", active["source"], active["imageDigest"])
-        return selected, state, handoff.worker_process(b)
+        worker = live.worker_at(local, slot_ports(active_slot)[1])
+        require(worker["metadata"]["uid"] == active["podUID"], "serving Worker Pod changed")
+        handoff.pin_image(worker, "edge", active["source"], active["imageDigest"])
+        return selected, state, handoff.worker_process(worker)
 
     def no_direct_ingress(pod):
         identities = [labels, pod["metadata"]["labels"]] if pod else [labels]
@@ -224,7 +246,7 @@ def release(c, execution, run, record):
 
     def unchanged(previous):
         selected, state, process = check_ingress()
-        require((state, process) == previous, "live B activation or process changed during A replacement")
+        require((state, process) == previous, "serving Worker activation or process changed during replacement")
         return selected
 
     def same_authority(held, path):
@@ -252,12 +274,13 @@ def release(c, execution, run, record):
         with closing(connection.HeldTLS(address, c["host"])) as held:
             same_authority(held, path)
             fact = connection.fact(live.profile, selected, held)
-            require(fact["slot"] == "b" and fact["target"] == f"{address}:{PORTS[1][1]}",
-                    "public connection does not reach the pinned B Worker")
+            require(fact["slot"] == active_slot and fact["target"] == f"{address}:{slot_ports(active_slot)[1]}",
+                    "public connection does not reach the pinned serving Worker")
             front.stable_proof_pair(address, c["probeIngress"]["port"], c["host"], path, c["node"], group)
             _, patch, target, peers = inventory()
-            if "retirement" in c:
+            if retired:
                 require(not target, "retired controller still owns a Pod")
+                controller_peers = peers
                 peers = retired_peers()
             no_direct_ingress(target[0] if target else None)
             if patch:
@@ -278,19 +301,19 @@ def release(c, execution, run, record):
             end = time.monotonic() + 80
             while True:
                 ds, pending, local, peer_now = inventory()
-                retired = "retirement" in c
-                require(not pending and (retired_peers() if retired else peer_now) == peers,
+                require(not pending and (retired_peers() if retired else peer_now) == peers
+                        and (not retired or peer_now == controller_peers),
                         "peer process or target exclusion changed")
-                if not local and ds["status"].get("observedGeneration") == ds["metadata"]["generation"] and ds["status"]["desiredNumberScheduled"] == (0 if retired else len(peers)):
+                if not local and ds["status"].get("observedGeneration") == ds["metadata"]["generation"] and ds["status"]["desiredNumberScheduled"] == len(peer_now):
                     break
                 require(time.monotonic() < end, "idle A did not stop on the declared node")
                 time.sleep(3)
-            record("old-a-parked")
+            record(f"old-{slot}-parked")
             current_front = unchanged((state, process))
-            if "retirement" in c:
+            if retired:
                 port_holders = [p for p in live.pods(node=c["node"])
                                 if p["status"]["phase"] not in ("Succeeded", "Failed") and
-                                set(hostports(p["spec"])).intersection(PORTS[0])]
+                                set(hostports(p["spec"])).intersection(slot_ports(slot))]
                 require(not port_holders and not endpoint_targets_worker(k.list("endpointslices", "-A"), old["podUID"], None),
                         "retired Worker still owns an endpoint or the fixed slot ports")
                 require(connection.fact(live.profile, current_front, held) == fact, "serving connection changed before release")
@@ -303,17 +326,18 @@ def release(c, execution, run, record):
                 same_authority(held, path)
 
             rc = run(renew)
-            require(rc == 0, "declarative A release did not verify; B remains selected and old A parked")
+            require(rc == 0, "declarative release did not verify; serving Worker remains selected and old slot parked")
             end_pod = unchanged((state, process))
             same_authority(held, path)
             observed_peers = inventory()[3]
             require(connection.fact(live.profile, end_pod, held) == fact and
-                    (retired_peers() if "retirement" in c else observed_peers) == peers,
-                    "B connection or peer process changed during new A release")
-            installed = live.worker_at(live.pods(node=c["node"]), PORTS[0][1])
+                    (retired_peers() if retired else observed_peers) == peers
+                    and (not retired or observed_peers == controller_peers),
+                    "serving connection or peer process changed during Worker release")
+            installed = live.worker_at(live.pods(node=c["node"]), slot_ports(slot)[1])
             controller = k.get("daemonset", c["next"]["controller"])
             require(parking.owner(installed, c["next"]["controller"], handoff.obj_uid(controller)) and
-                    controller["status"]["desiredNumberScheduled"] == 1, "new A is not the one declared replacement")
+                    controller["status"]["desiredNumberScheduled"] == 1, "new Worker is not the one declared replacement")
             record("verified", new_uid=handoff.obj_uid(installed))
 
 
