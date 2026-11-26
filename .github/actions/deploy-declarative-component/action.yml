@@ -133,7 +133,21 @@ runs:
         RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
       run: |
         set -euo pipefail
-        "${RELEASE_TOOL}" execute "${EXECUTION}" >"${RESULT}"
+        if [[ "${{ inputs.component }}" == 'edge-worker-us-primary-a' ]]; then
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/edge-worker-us-primary-a .github/actions/deploy-declarative-component/action.yml scripts/replace_idle_worker_slot.py scripts/run_node_worker_handoff.py scripts/retire_front_hostport.py
+          python3 -m scripts.replace_idle_worker_slot deploy/releases/edge-worker-us-primary-a/idle-slot.json "${EXECUTION}" "${RELEASE_TOOL}" "${RESULT}" "${RUNNER_TEMP}/fugue-worker-idle-replacement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+        else
+          "${RELEASE_TOOL}" execute "${EXECUTION}" >"${RESULT}"
+        fi
+    - name: Retain single-node Worker preparation evidence
+      if: always() && inputs.component == 'edge-worker-us-primary-a' && steps.execute_direct.outcome != 'skipped'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fugue-us-primary-worker-a-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/fugue-worker-idle-replacement-${{ github.run_id }}-${{ github.run_attempt }}.json
+        if-no-files-found: warn
+        retention-days: 30
     - name: Publish one immutable target to the in-cluster Guardian
       if: steps.delivery.outputs.writer == 'guardian'
       id: execute_guardian

@@ -1,0 +1,56 @@
+import copy
+import json
+import unittest
+from pathlib import Path
+
+from scripts import replace_idle_worker_slot as replacement
+
+
+class IdleWorkerSlotTest(unittest.TestCase):
+    def setUp(self):
+        directory = Path(__file__).resolve().parents[1] / "deploy/releases/edge-worker-us-primary-a"
+        self.config = replacement.validate(json.loads((directory / "idle-slot.json").read_text()))
+        self.resources = json.loads((directory / "resources.json").read_text())
+        self.predecessor = copy.deepcopy(self.resources["items"][0])
+        old = self.config["old"]
+        self.predecessor["metadata"].update(name=old["controller"], uid=old["controllerUID"], generation=old["generation"],
+                                            resourceVersion="42")
+        template = self.predecessor["spec"]["template"]
+        template["spec"].pop("affinity")
+        old["templateDigest"] = replacement.kube.digest(template)
+
+    def test_node_exclusion_only_changes_the_declared_node(self):
+        patch = replacement.parked_patch(self.config, self.predecessor)
+        self.assertEqual([p["op"] for p in patch], ["test", "test", "test", "add", "add"])
+        self.assertEqual(patch[-1]["value"], replacement.parking.node_affinity(self.config["node"], "NotIn"))
+        parked = copy.deepcopy(self.predecessor)
+        parked["metadata"]["annotations"] = patch[-2]["value"]
+        parked["metadata"]["generation"] += 1
+        parked["spec"]["template"]["spec"]["affinity"] = patch[-1]["value"]
+        original = copy.deepcopy(parked)
+        self.assertEqual(replacement.parked_patch(self.config, parked), [])
+        self.assertEqual(original, parked)
+        parked["spec"]["template"]["spec"]["containers"][0]["image"] = "other"
+        with self.assertRaisesRegex(ValueError, "template changed"):
+            replacement.parked_patch(self.config, parked)
+
+    def test_candidate_cannot_add_a_workload_or_use_a_third_slot(self):
+        replacement.ready_scope(self.config, self.resources)
+        other = copy.deepcopy(self.resources)
+        other["items"].append(copy.deepcopy(other["items"][0]))
+        with self.assertRaisesRegex(ValueError, "expected one object"):
+            replacement.ready_scope(self.config, other)
+        other = copy.deepcopy(self.resources)
+        other["items"][0]["spec"]["template"]["spec"]["containers"][1]["ports"][1]["hostPort"] = 38443
+        with self.assertRaisesRegex(ValueError, "freed single-node A slot"):
+            replacement.ready_scope(self.config, other)
+
+    def test_socket_inventory_counts_in_flight_and_draining_connections(self):
+        header = "sl local_address rem_address st\n"
+        for state in ("01", "02", "05", "08"):
+            with self.assertRaisesRegex(ValueError, "established or in-flight"):
+                replacement.require_empty_tcp(header + f"1: 00000000:480B 00000000:0000 {state}\n" + header)
+        replacement.require_empty_tcp(header + "1: 00000000:480B 00000000:0000 0A\n"
+                                      + header + "1: 00000000:480B 00000000:0000 06\n")
+        with self.assertRaisesRegex(ValueError, "IPv4 and IPv6"):
+            replacement.require_empty_tcp(header)

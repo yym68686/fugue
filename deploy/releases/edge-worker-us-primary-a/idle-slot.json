@@ -1,0 +1,44 @@
+{
+  "schema": "fugue.idle-fixed-worker-replacement/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "vps-591f4447",
+  "nodeUID": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+  "old": {
+    "controller": "fugue-fugue-edge-worker-a",
+    "controllerUID": "5332a5de-7721-4d6d-9d3a-2540375a2bf3",
+    "generation": 717,
+    "templateDigest": "sha256:55f42025b1ffb2a62526128c3e5b42a7c6c1a67a4aebe77c79fddf51b8a964a4",
+    "podUID": "5c470dcc-b814-4504-ac40-cb40b4689e05"
+  },
+  "peers": {
+    "86eabf26-42a9-4f9d-998a-754115f8b829": "82b690f4-c78e-47b0-aba9-a52b14c2f677",
+    "bwg": "f11f29b1-b096-4dc7-b48d-ba96fec6cbb3"
+  },
+  "active": {
+    "podUID": "f8b9010d-7868-4076-8a4d-ceb80826e8cc",
+    "source": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
+    "imageDigest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
+    "generation": 916
+  },
+  "front": {
+    "service": "fugue-front-serving-public-b-primary",
+    "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+    "generation": 10,
+    "address": "15.204.94.71",
+    "source": "86488c546a5ef0ec58091e70ad470e442cc49e1f",
+    "imageDigest": "sha256:34bc0c473418cfbbeb371e475f02a05da72ac864ea32d7b6aaa61b7dc32b50e8",
+    "podUID": "18025305-d2ae-40f1-a231-6cb6c84f1a1f"
+  },
+  "probeIngress": {
+    "service": "fugue-front-probe-public-b-primary",
+    "uid": "ed787ee0-e869-4adb-8c11-b7be1cabbabb",
+    "generation": 6,
+    "port": 15443
+  },
+  "next": {
+    "component": "edge-worker-us-primary-a",
+    "controller": "fugue-edge-worker-us-primary-a"
+  },
+  "host": "fugue.pro"
+}

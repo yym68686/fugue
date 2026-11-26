@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/edgegroupfront"
@@ -100,6 +101,7 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		return errors.Join(reject, err)
 	}
 	var rendered appsv1.DaemonSet
+	var isolated bool
 	for _, object := range matches.Items {
 		if object.Immutable == nil || !*object.Immutable || object.UID == "" || object.ResourceVersion == "" || object.DeletionTimestamp != nil ||
 			totalConfigMapBytes(object.Data) > maxRecordBytes {
@@ -107,8 +109,8 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		}
 		plan, artifact, prepared, monitor, forward, _, err := decodeStableRecord(object.Data)
 		release, found := releaseForComponent(plan, j.CandidateComponent)
-		if err != nil || !found || release.Transition == nil || release.Transition.Type != "edge-group-ab" ||
-			release.Transition.EdgeGroupAB == nil || release.Transition.EdgeGroupAB.GroupID != j.Recipient.Group ||
+		if err != nil || !found ||
+			!fixedWorkerReleaseScope(release, j, owner.Name, pod.Namespace) ||
 			monitor.Component != j.CandidateComponent || artifact.Component != j.CandidateComponent ||
 			object.Name != monitorRecordNameFromDigest(j.CandidateComponent, monitor.RecordDigest) ||
 			prepared.Forward.ConfigSHA != configSHA || artifact.ReceiptDigest != j.ReleaseDigest ||
@@ -119,6 +121,10 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		resources, err := declarativerelease.DecodeResourceSet(bytes.NewReader(forward))
 		if err != nil {
 			return errors.Join(reject, err)
+		}
+		nodeOnly := release.Transition == nil
+		if nodeOnly && len(resources.Items) != 1 {
+			return reject
 		}
 		for _, object := range resources.Items {
 			meta, _ := object["metadata"].(map[string]any)
@@ -133,6 +139,10 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 				containerImageMatches(rendered.Spec.Template.Spec.Containers, "edge", artifact.ImmutableRef) != nil {
 				return reject
 			}
+			if nodeOnly && !fixedWorkerNodeTemplate(rendered.Spec.Template, j) {
+				return reject
+			}
+			isolated = nodeOnly
 		}
 	}
 	if rendered.Name == "" || rendered.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
@@ -142,6 +152,9 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 	ds, err := apps.DaemonSets(store.namespace).Get(ctx, owner.Name, metav1.GetOptions{})
 	if err != nil || ds.UID != owner.UID || ds.DeletionTimestamp != nil || ds.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType {
 		return errors.Join(reject, err)
+	}
+	if isolated && (!fixedWorkerNodeTemplate(ds.Spec.Template, j) || pod.Labels["fugue.io/edge-node"] != j.Recipient.Node) {
+		return reject
 	}
 	revision, err := store.readFixedNodeWorkerRevision(ctx, pod.Labels[appsv1.ControllerRevisionHashLabelKey], owner)
 	if err != nil {
@@ -156,13 +169,52 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		rev.Spec.Template.Annotations["fugue.pro/production-config-sha"] != configSHA {
 		return errors.Join(reject, errors.New("ControllerRevision slot or production config differs from the Worker"))
 	}
+	if isolated && !fixedWorkerNodeTemplate(rev.Spec.Template, j) {
+		return reject
+	}
 	for _, c := range rendered.Spec.Template.Spec.Containers {
 		if containerImageMatches(rev.Spec.Template.Spec.Containers, c.Name, c.Image) != nil ||
 			containerImageMatches(pod.Spec.Containers, c.Name, c.Image) != nil {
 			return errors.Join(reject, errors.New("ControllerRevision or live container image differs from the release record"))
 		}
 	}
+	if isolated {
+		for _, c := range rendered.Spec.Template.Spec.InitContainers {
+			if containerImageMatches(rev.Spec.Template.Spec.InitContainers, c.Name, c.Image) != nil ||
+				containerImageMatches(pod.Spec.InitContainers, c.Name, c.Image) != nil {
+				return reject
+			}
+		}
+	}
 	return nil
+}
+
+// A fixed slot can be individually released after its shared template has
+// been excluded from this node. The immutable ordinary release must itself
+// name the replacement controller; a cloned live workload is not a receipt.
+func fixedWorkerReleaseScope(r declarativerelease.PlanRelease, j edgegroupfront.NodeWorkerJournal, owner, namespace string) bool {
+	if t := r.Transition; t != nil {
+		return t.Type == "edge-group-ab" && t.EdgeGroupAB != nil && t.EdgeGroupAB.GroupID == j.Recipient.Group
+	}
+	w := r.Workload
+	return j.FixedRotation && strings.HasPrefix(r.ComponentID, "edge-worker-") &&
+		w.APIVersion == "apps/v1" && w.Kind == "DaemonSet" && w.Name == owner && w.Namespace == namespace &&
+		w.Container == "edge" && w.RolloutMode == "on-delete"
+}
+
+func fixedWorkerNodeTemplate(t corev1.PodTemplateSpec, j edgegroupfront.NodeWorkerJournal) bool {
+	if t.Spec.HostNetwork || t.Spec.NodeName != "" || t.Spec.NodeSelector["kubernetes.io/hostname"] != j.Recipient.Node ||
+		t.Labels["fugue.io/edge-node"] != j.Recipient.Node || t.Labels["fugue.io/edge-group-id"] != j.Recipient.Group ||
+		t.Labels["fugue.io/edge-slot"] != j.Candidate.Slot || t.Spec.Affinity == nil || t.Spec.Affinity.NodeAffinity == nil ||
+		t.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return false
+	}
+	terms := t.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchFields) != 1 {
+		return false
+	}
+	f := terms[0].MatchFields[0]
+	return f.Key == "metadata.name" && f.Operator == corev1.NodeSelectorOpIn && len(f.Values) == 1 && f.Values[0] == j.Recipient.Node
 }
 
 func (store *AuthorityStore) readFixedNodeWorkerRevision(ctx context.Context, hash string, owner *metav1.OwnerReference) (*appsv1.ControllerRevision, error) {

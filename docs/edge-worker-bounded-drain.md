@@ -75,3 +75,12 @@ receipt. This restores scheduling for the same node and pinned artifact
 without changing the active slot. Changing the candidate artifact is a
 separate release operation; rearm is not permission to install an unverified
 image or overlap a third Worker.
+
+A new, unselected fixed-slot Worker can be installed on the original two host
+ports after the old inactive Pod is proven idle and excluded from that node.
+The single-node DaemonSet uses process readiness while parked: the candidate
+bundle endpoint can legitimately be empty between releases. Process readiness
+and the immutable ordinary release receipt are not permission to serve. Before
+the Front can point to this Worker, the Guardian must prepare and independently
+verify a fresh signed publication, the Caddy configuration and the exact TLS
+canary on the candidate listener.
