@@ -1,4 +1,5 @@
 """Read-only observations shared by node-local release and participation recovery."""
+import hashlib
 import json
 import os
 import urllib.parse
@@ -11,6 +12,12 @@ from scripts import replace_front_executor as replacement
 from scripts import stage_front_serving_transport as stage
 
 STATE = "fugue.io/automatic-edge-participation"
+STATE_SCHEMA = "fugue.automatic-edge-participation/v1"
+
+
+def participation_owner(member):
+    identity = {k: member[k] for k in ("node", "node_uid", "group", "component")}
+    return "sha256:" + hashlib.sha256(front.canonical(identity).encode()).hexdigest()
 
 
 def items(value, limit=256):
@@ -63,7 +70,7 @@ def node_service(services, node):
     return selected[0] if selected else None
 
 
-def require_isolated_service(namespace, svc, node):
+def require_isolated_service(namespace, svc, node, *, allow_serving=False):
     """An Unknown Node or one failed HTTP probe alone is not a traffic fence."""
     meta, spec = svc["metadata"], svc["spec"]
     if (spec["selector"].get("fugue.io/edge-node") != node or
@@ -71,7 +78,7 @@ def require_isolated_service(namespace, svc, node):
         raise ValueError("Cannot isolate a peer without its exact node-local public transport")
     slices = items(front.read("get", "endpointslices", "-n", namespace,
                               "-l", "kubernetes.io/service-name=" + meta["name"], "-o", "json"))
-    uids = []
+    uids, serving = [], False
     for item in slices:
         m = item["metadata"]
         if (not m.get("uid") or m.get("deletionTimestamp") or
@@ -82,16 +89,19 @@ def require_isolated_service(namespace, svc, node):
         for endpoint in item.get("endpoints", []):
             conditions = endpoint.get("conditions", {})
             # An omitted ready flag means ready per the Kubernetes contract.
-            if (endpoint.get("nodeName") != node or conditions.get("ready") is not False or
-                    conditions.get("serving") is True):
+            if endpoint.get("nodeName") != node:
                 raise ValueError("Offline peer still has a serving or unproven Front endpoint")
-    return sorted(uids)
+            serving |= conditions.get("ready") is not False or conditions.get("serving") is True
+    if serving and not allow_serving:
+        raise ValueError("Offline peer still has a serving or unproven Front endpoint")
+    return None if serving else sorted(uids)
 
 
 def isolation(policy, member, node, svc):
     """Require policy authorization, exact live hold, and verified DNS exclusion."""
-    if member is None or node_ready(node):
+    if member is None:
         return None
+    ready = node_ready(node)
     meta = node["metadata"]
     ann = meta.get("annotations", {})
     owned = json.loads(ann.get(ANNOTATION, "null"))
@@ -100,14 +110,24 @@ def isolation(policy, member, node, svc):
     # A conflicting/manual hold, however, still belongs to its own owner.
     if meta["uid"] != member["node_uid"] or ANNOTATION in ann and owned != hold(member):
         return None
+    state = json.loads(ann.get(STATE, "null"))
+    recovering = (owned == hold(member) and isinstance(state, dict) and state.get("schema") == STATE_SCHEMA
+                  and state.get("owner") == participation_owner(member) and state.get("phase") in ("offline", "recovering"))
+    if ready and not recovering:
+        return None
     observed = read_edge_node(policy, member)
     o = observed.get("observation", {})
     intent = o.get("dns_admission_intent", {})
-    if (o.get("heartbeat_fresh") is not False or o.get("reason") != "heartbeat_stale" or
+    stale = o.get("heartbeat_fresh") is False and o.get("reason") == "heartbeat_stale"
+    if (not (stale or recovering and o.get("heartbeat_fresh") is True) or
             intent.get("state") != "suspended" or
             intent.get("serving_evidence") not in ("excluded_from_verified_full", "excluded_across_full_transition") or
             svc["spec"]["externalIPs"] != [observed.get("public_ipv4")]):
         return None
-    slices = require_isolated_service(policy["namespace"], svc, member["node"])
+    # An already-recovering member may have a usable direct Front before DNS
+    # admission. In that case observe it like a live peer, not as absent.
+    slices = require_isolated_service(policy["namespace"], svc, member["node"], allow_serving=recovering and (ready or not stale))
+    if slices is None:
+        return None
     return {"state": "isolated", "node_uid": meta["uid"], "authorization": hold(member), "service_uid": svc["metadata"]["uid"],
             "service": svc["spec"], "endpoint_slices": slices}

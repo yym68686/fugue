@@ -109,7 +109,7 @@ func (s *Server) observeEdgeNode(node model.EdgeNode, now time.Time) *model.Edge
 // or prove the exclusion on both sides of a fenced release transition.
 func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *model.EdgeNodeInventoryObservation) {
 	intent := observation.DNSAdmissionIntent
-	if intent == nil || intent.State != "suspended" || observation.Reason != "heartbeat_stale" {
+	if intent == nil || intent.State != "suspended" {
 		return
 	}
 	nodes, _, err := s.store.ListEdgeNodes("")
@@ -119,7 +119,7 @@ func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *m
 	found := false
 	for _, n := range nodes {
 		if n.ID == node.ID {
-			if n.EdgeGroupID != node.EdgeGroupID || n.PublicIPv4 != node.PublicIPv4 || observeEdgeNodeInventory(n, time.Now().UTC()).Reason != "heartbeat_stale" {
+			if n.EdgeGroupID != node.EdgeGroupID || n.PublicIPv4 != node.PublicIPv4 {
 				return
 			}
 			found = true

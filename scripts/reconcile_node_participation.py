@@ -6,7 +6,6 @@ Only an inactive Worker may be recreated by the existing recovery primitive.
 import argparse
 import copy
 import datetime as dt
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -14,7 +13,7 @@ import subprocess
 import urllib.parse
 
 from scripts.configure_edge_release_hold import ANNOTATION, hold, validate_node, validate_reader, validate_retained_workload
-from scripts.edge_node_participation import STATE, node_ready, node_service, read_edge_node, serving_services
+from scripts.edge_node_participation import STATE, STATE_SCHEMA, node_ready, node_service, participation_owner, read_edge_node, serving_services
 from scripts.reconcile_edge_member import Recovery, canonical, now, timestamp, reconcile, without_time
 from scripts import run_node_worker_handoff as worker_driver
 
@@ -61,8 +60,7 @@ class Participant(Recovery):
     def __init__(self, policy, member):
         self.policy, self.member = policy, member
         super().__init__(dict(member, namespace=policy['namespace'], activationPath='/var/lib/fugue-edge-front/activation.json'))
-        identity = {k: member[k] for k in ('node', 'node_uid', 'group', 'component')}
-        self.owner = 'sha256:' + hashlib.sha256(canonical(identity).encode()).hexdigest()
+        self.owner = participation_owner(member)
 
     def node(self):
         value = self.get('node', self.member['node'])
@@ -94,7 +92,7 @@ class Participant(Recovery):
 
     def transition_node(self, node, phase, since=None, remove_hold=False):
         annotations = copy.deepcopy(node['metadata'].get('annotations', {}))
-        desired = canonical(dict(schema='fugue.automatic-edge-participation/v1', owner=self.owner, phase=phase, since=since or now().isoformat()))
+        desired = canonical(dict(schema=STATE_SCHEMA, owner=self.owner, phase=phase, since=since or now().isoformat()))
         if annotations.get(STATE) == desired and not remove_hold:
             return node
         annotations[STATE] = desired
@@ -235,7 +233,7 @@ class Participant(Recovery):
         annotations = node['metadata'].get('annotations', {})
         existing = annotations.get(ANNOTATION)
         state = json.loads(annotations[STATE]) if STATE in annotations else None
-        if state is not None and (state.get('schema') != 'fugue.automatic-edge-participation/v1' or state.get('owner') != self.owner):
+        if state is not None and (state.get('schema') != STATE_SCHEMA or state.get('owner') != self.owner):
             raise ValueError('Another controller owns automatic member participation')
         expected = hold(self.config)
         if existing is not None and (json.loads(existing) != expected or state is None and not self.member['adopt_hold']):

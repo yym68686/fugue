@@ -21482,7 +21482,7 @@ components:
         recovery_capacity_evidence_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
         serving_evidence:
           type: string
-          description: On a single-node read, excluded_from_verified_full means the signed, verified global full and its DNS plan exclude this endpoint. excluded_across_full_transition means both the signed in-flight gray/full candidate and its pinned verified rollback exclude this endpoint. Neither value replaces Node identity, endpoint isolation, or heartbeat checks.
+          description: On a single-node read, excluded_from_verified_full means the signed, verified global full and its DNS plan exclude this suspended endpoint. excluded_across_full_transition means both the signed in-flight gray/full candidate and its pinned verified rollback exclude it. These publication facts are independent of heartbeat freshness; callers must check Node identity, endpoint isolation, and recovery state separately.
           enum: [not_evaluated, excluded_from_verified_full, excluded_across_full_transition]
         reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
         expected_recovery_date: {type: string, format: date}

@@ -62,6 +62,12 @@ producer's planned suspension. A missing peer, timeout, conflicting hold,
 unverified DNS candidate or changed node identity does not count. Forward
 handoff and rollback use the same per-transaction peer witness.
 
+A returning heartbeat (or Kubernetes Ready) is not readmission. An exact,
+controller-owned offline/recovering hold can continue to exclude a member
+while its signed DNS exclusion and non-serving EndpointSlices both still
+hold. If its direct Front is ready to serve, the Worker lane observes that
+Front and its Worker as a live peer, even before DNS puts it back in rotation.
+
 An ongoing producer rollout can retain a previous exclusion only when its
 signed candidate and pinned, verified rollback both exclude the node. This
 is not sufficient evidence for a new exclusion.

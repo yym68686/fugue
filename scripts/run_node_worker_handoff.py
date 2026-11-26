@@ -815,7 +815,12 @@ def run(config, evidence_path, participation_policy=None):
         except (ValueError, subprocess.TimeoutExpired) as err:
             # If the claim reached Kubernetes, the Guardian owns it. A lost
             # claim reply is safe to observe, never grounds for a fresh claim.
-            adapter.require_claim(sealed)
+            evidence["claim_command_error"] = str(err)
+            try:
+                adapter.require_claim(sealed)
+            except (ValueError, OSError, subprocess.TimeoutExpired) as observe_err:
+                evidence["claim_readback_error"] = str(observe_err)
+                raise err from observe_err
             raise ValueError("an exact claim exists but Guardian completion was unproven; leave it unarmed") from err
         adapter.require_claim(sealed)
         adapter.wait_projection(sealed)

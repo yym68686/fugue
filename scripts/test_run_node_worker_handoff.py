@@ -177,7 +177,7 @@ class NodeWorkerDriverTests(unittest.TestCase):
         cluster = driver.ActiveCluster(config)
         physical = {"metadata": {"name": "peer-node", "uid": "peer-uid"},
                     "status": {"conditions": [{"type": "Ready", "status": "Unknown"}]}}
-        member = {"node": "peer-node", "node_uid": "peer-uid", "group": config["group"], "reason": "network_unavailable"}
+        member = {"node": "peer-node", "node_uid": "peer-uid", "group": config["group"], "component": "edge-worker-fixture", "reason": "network_unavailable"}
         policy = {"namespace": config["namespace"], "members": [member]}
         cluster.participation_policy = policy
         selector = {"fugue.io/edge-node": "peer-node"}
@@ -220,6 +220,24 @@ class NodeWorkerDriverTests(unittest.TestCase):
                     physical.update(state)
                     endpoints["items"][0]["endpoints"][0]["conditions"]["serving"] = False
                     cluster.participation_policy = policy
+            physical["status"]["conditions"][0]["status"] = "True"
+            edge["observation"].update(reason="inventory_checks_passed", heartbeat_fresh=True)
+            annotations = physical["metadata"]["annotations"] = {
+                participation.ANNOTATION: json.dumps(participation.hold(member)),
+                participation.STATE: json.dumps({"schema": participation.STATE_SCHEMA,
+                    "owner": participation.participation_owner(member), "phase": "recovering"}),
+            }
+            live.reset_mock()
+            self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
+            live.assert_not_called()
+            state = annotations[participation.STATE]
+            annotations[participation.STATE] = state.replace('"recovering"', '"active"')
+            with self.assertRaisesRegex(ValueError, "live Front proof"):
+                cluster.peer_snapshot()
+            annotations[participation.STATE] = state
+            endpoints["items"][0]["endpoints"][0]["conditions"]["ready"] = True
+            with self.assertRaisesRegex(ValueError, "live Front proof"):
+                cluster.peer_snapshot()
 
     def test_candidate_uses_guardian_repair_release_wire_fields(self):
         candidate = pinned()["candidate"]
@@ -280,7 +298,7 @@ class NodeWorkerDriverTests(unittest.TestCase):
             kubectl.assert_called_once()
 
     def test_lost_claim_is_left_unarmed_and_peer_change_fails_real_receipt(self):
-        for result in ("lost_claim", "peer_moved", "ok"):
+        for result in ("lost_claim", "rejected_claim", "peer_moved", "ok"):
             with self.subTest(result=result), TemporaryDirectory() as td:
                 config, f = pinned(), Fixture()
                 evidence = Path(td) / "receipt.json"
@@ -300,9 +318,13 @@ class NodeWorkerDriverTests(unittest.TestCase):
                             return json.dumps(payload).encode()
                         if result == "lost_claim":
                             raise TimeoutExpired("fixture", 1)
+                        if result == "rejected_claim":
+                            raise ValueError("Guardian component Lease was busy")
                         return b"{}"
 
                     cluster.exec_guardian.side_effect = execute
+                    if result == "rejected_claim":
+                        adapter_class.return_value.require_claim.side_effect = ValueError("missing journal")
                     exercise.return_value = {"outcome": "verified"}
                     if result == "ok":
                         driver.run(config, evidence)
@@ -311,10 +333,14 @@ class NodeWorkerDriverTests(unittest.TestCase):
                             driver.run(config, evidence)
                     actual = json.loads(evidence.read_text())
                     self.assertEqual(actual["peers_unchanged"], result != "peer_moved")
-                    if result == "lost_claim":
+                    if result in ("lost_claim", "rejected_claim"):
                         exercise.assert_not_called()
                         adapter_class.return_value.require_claim.assert_called_once()
                         self.assertNotIn("guardian_result", actual)
+                        self.assertIn("claim_command_error", actual)
+                        if result == "rejected_claim":
+                            self.assertEqual(actual["error"], "Guardian component Lease was busy")
+                            self.assertEqual(actual["claim_readback_error"], "missing journal")
                     else:
                         exercise.assert_called_once()
 
