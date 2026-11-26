@@ -72,6 +72,11 @@ def hostports(spec):
                         for p in x.get("ports", []) if p.get("hostPort")))
 
 
+def endpoint_targets_worker(endpoint_slices, uid, address):
+    return any((ep.get("targetRef") or {}).get("uid") == uid or address in (ep.get("addresses") or [])
+               for s in endpoint_slices for ep in (s.get("endpoints") or []))
+
+
 def require_empty_tcp(raw):
     require(raw.count("local_address") == 2, "IPv4 and IPv6 socket tables are required")
     for line in raw.splitlines():
@@ -145,10 +150,8 @@ def release(c, execution, run, record):
                 require(not any(all(identity.get(key) == val for key, val in selector.items()) for identity in identities),
                         "a Service directly selects an A Worker")
         if pod:
-            for s in k.list("endpointslices", "-A"):
-                require(not any((ep.get("targetRef") or {}).get("uid") == old["podUID"] or
-                                pod["status"]["podIP"] in ep.get("addresses", []) for ep in s.get("endpoints", [])),
-                        "an EndpointSlice directly selects the old A Worker")
+            require(not endpoint_targets_worker(k.list("endpointslices", "-A"), old["podUID"], pod["status"]["podIP"]),
+                    "an EndpointSlice directly selects the old A Worker")
 
     def idle(pod):
         raw = subprocess.run(["kubectl", "-n", c["namespace"], "exec", pod["metadata"]["name"], "-c", "caddy",

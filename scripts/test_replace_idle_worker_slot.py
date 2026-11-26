@@ -54,3 +54,9 @@ class IdleWorkerSlotTest(unittest.TestCase):
                                       + header + "1: 00000000:480B 00000000:0000 06\n")
         with self.assertRaisesRegex(ValueError, "IPv4 and IPv6"):
             replacement.require_empty_tcp(header)
+
+    def test_empty_endpoint_slice_does_not_hide_other_slices(self):
+        empty = [{}, {"endpoints": None}, {"endpoints": []}]
+        self.assertFalse(replacement.endpoint_targets_worker(empty, "worker-uid", "10.0.0.1"))
+        for endpoint in ({"targetRef": {"uid": "worker-uid"}, "addresses": None}, {"addresses": ["10.0.0.1"]}):
+            self.assertTrue(replacement.endpoint_targets_worker(empty + [{"endpoints": [endpoint]}], "worker-uid", "10.0.0.1"))
