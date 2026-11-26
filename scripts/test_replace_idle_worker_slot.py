@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 import unittest
 from pathlib import Path
@@ -60,3 +61,46 @@ class IdleWorkerSlotTest(unittest.TestCase):
         self.assertFalse(replacement.endpoint_targets_worker(empty, "worker-uid", "10.0.0.1"))
         for endpoint in ({"targetRef": {"uid": "worker-uid"}, "addresses": None}, {"addresses": ["10.0.0.1"]}):
             self.assertTrue(replacement.endpoint_targets_worker(empty + [{"endpoints": [endpoint]}], "worker-uid", "10.0.0.1"))
+
+    def test_existing_retired_controller_requires_receipt_exclusion_and_zero_schedule(self):
+        config = self.config
+        node = config["node"]
+        config["retirement"] = {"journalDigest": "sha256:" + "a" * 64,
+                                "receiptUID": "00000000-0000-0000-0000-000000000042"}
+        replacement.validate(config)
+        old = config["old"]
+        ds = copy.deepcopy(self.predecessor)
+        ds["metadata"]["namespace"] = config["namespace"]
+        template = ds["spec"]["template"]
+        template["spec"]["affinity"] = replacement.parking.node_affinity(node, "In")
+        term = template["spec"]["affinity"]["nodeAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"][0]
+        term["matchFields"].append({"key": "metadata.name", "operator": "NotIn", "values": [node]})
+        old["templateDigest"] = replacement.kube.digest(template)
+        ds["status"] = {"observedGeneration": old["generation"], "desiredNumberScheduled": 0, "currentNumberScheduled": 0}
+        decision = {"plan": {"schema": "edge-node-worker-retirement/v1", "journal_digest": config["retirement"]["journalDigest"],
+                             "daemonset": old["controller"], "daemonset_uid": old["controllerUID"],
+                             "generation": old["generation"] - 1},
+                    "node": node, "worker_uid": old["podUID"], "outcome": "deadline"}
+        raw = replacement.front.canonical(decision)
+        key = "fugue.pro/worker-retired-" + hashlib.sha256(node.encode()).hexdigest()[:20]
+        ds["metadata"]["annotations"][key] = raw
+        receipt = {"metadata": {"name": "fugue-node-worker-retired-" + "a" * 32,
+                                 "namespace": config["namespace"], "uid": config["retirement"]["receiptUID"],
+                                 "resourceVersion": "42", "labels": {"app.kubernetes.io/managed-by": "fugue-release-guardian",
+                                     "fugue.pro/authority-kind": "node-worker-retired", "fugue.pro/group": config["group"]}},
+                   "immutable": True, "data": {"retired.json": raw}}
+        replacement.require_retired(config, ds, receipt)
+        for field, value in (("observedGeneration", old["generation"] - 1), ("desiredNumberScheduled", 1), ("currentNumberScheduled", 1)):
+            changed = copy.deepcopy(ds)
+            changed["status"][field] = value
+            with self.assertRaisesRegex(ValueError, "exact single-node exclusion"):
+                replacement.require_retired(config, changed, receipt)
+        changed = copy.deepcopy(ds)
+        changed["metadata"]["annotations"][key] = "{}"
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            replacement.require_retired(config, changed, receipt)
+        with self.assertRaisesRegex(ValueError, "immutable Guardian receipt"):
+            replacement.require_retired(config, ds, dict(receipt, immutable=False))
+        term["matchFields"].pop()
+        with self.assertRaisesRegex(ValueError, "exclusion changed"):
+            replacement.require_retired(config, ds, receipt)
