@@ -304,6 +304,14 @@ def handoff(adapter, profile, selected_front, address, probe, journal, *, probe_
                             if probe_fresh is None:
                                 raise ValueError("drain verification requires both public and probe sockets")
                             drain_record(guardian_result=result)
+                            # The real cutover and the immutable drain start are
+                            # established above. Let Guardian retire the old
+                            # slot without keeping synthetic connections alive.
+                            if retirement and retirement["witness"] == "background":
+                                start = front.timestamp(result["drain_start"])
+                                drain_record(retirement_pending={"journal_digest": journal["digest"],
+                                                                 "deadline": wire_time(start + datetime.timedelta(minutes=10))})
+                                return result
 
                             def check_old():
                                 # A routine signed route refresh can change the

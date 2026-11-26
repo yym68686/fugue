@@ -1,0 +1,74 @@
+{
+  "schema": "fugue.node-worker-handoff/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "vps-591f4447",
+  "nodeUID": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+  "front": {
+    "service": "fugue-front-serving-public-b-primary",
+    "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+    "generation": 10,
+    "address": "15.204.94.71",
+    "source": "86488c546a5ef0ec58091e70ad470e442cc49e1f",
+    "imageDigest": "sha256:34bc0c473418cfbbeb371e475f02a05da72ac864ea32d7b6aaa61b7dc32b50e8"
+  },
+  "probeIngress": {
+    "service": "fugue-front-probe-public-b-primary",
+    "uid": "ed787ee0-e869-4adb-8c11-b7be1cabbabb",
+    "generation": 6,
+    "port": 15443
+  },
+  "guardian": {
+    "deployment": "fugue-release-guardian",
+    "source": "1e1f46543d41a32b5870d76b88dfac723450812f",
+    "imageDigest": "sha256:e3f5dd2c4e9378ef88c07657b4acee5af0a9fe71d1883ff59b8275d3d0356f07"
+  },
+  "candidate": {
+    "daemonSet": "fugue-edge-worker-us-primary-a-hosted",
+    "component": "edge-worker-us-primary-a-hosted",
+    "source": "1baedc8a448ece9c8a52232c0055750e0c661a0e",
+    "imageDigest": "sha256:aef8e23537de2e3ea2245fa5c91728b541476d15684f674fd9d9fa4a7afa1265",
+    "slot": "a",
+    "bundleGeneration": "edgegroupbundle_727ef8b671f27b54ac69cea8073bd2049524d0af7121e2064b273c07b9366602.p67303.r185",
+    "releaseDigest": "sha256:ecfef7c492fbdb29c251e7932c8fc720ab2d046cef8b661aaf6eea0cb35d1121"
+  },
+  "expected": {
+    "schema": "edge-front-group-activation/v1",
+    "edge_group_id": "edge-group-country-us",
+    "generation": 918,
+    "active_slot": "b",
+    "previous_slot": "a",
+    "bundle_generation": "edgegroupbundle_e0cbf634631265c13767ff763680dca98c8310389dd4b954176b6610c6911287.p67292.r185",
+    "worker_source_commit": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
+    "worker_image_digest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
+    "authority": "edge-control",
+    "operation": "promote",
+    "reason": "advance fixed Worker using journal sha256:60c0a9cbf0432f95f8e9f1ad2943ae62f86b6311c3131a262396abb3d410d79b",
+    "updated_at": "2026-11-26T01:30:27.760957841Z"
+  },
+  "peers": [
+    {
+      "node": "bwg",
+      "service": "fugue-front-serving-public-b-secondary",
+      "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c"
+    },
+    {
+      "node": "86eabf26-42a9-4f9d-998a-754115f8b829",
+      "service": "fugue-front-serving-us-managed",
+      "uid": "33a28c0e-3dd2-4d49-84d9-c22b5531bfd0"
+    }
+  ],
+  "probe": {
+    "host": "edge-observe-canary-0731-1333.fugue.pro",
+    "path": "/",
+    "bodyDigest": "sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de"
+  },
+  "verifyDrain": true,
+  "fixedRotation": true,
+  "retirement": {
+    "daemonSet": "fugue-fugue-edge-worker-b",
+    "uid": "08ca7fcc-bf05-40bd-ab13-415d1474a62a",
+    "generation": 630,
+    "witness": "background"
+  }
+}

@@ -68,7 +68,8 @@ def validate(config):
         require(fixed and config.get("verifyDrain") is True and matches(NAME, retirement["daemonSet"])
                 and retirement["daemonSet"] != candidate["daemonSet"] and matches(UID, retirement["uid"])
                 and type(retirement["generation"]) is int and retirement["generation"] > 0
-                and retirement["witness"] in ("empty", "deadline"), "retirement must pin the exact old Worker controller and witness")
+                and retirement["witness"] in ("empty", "deadline", "background"),
+                "retirement must pin the exact old Worker controller and witness")
     if "rearm" in config:
         fields(config["rearm"], "journalDigest")
         require("retirement" in config and matches(DIGEST, config["rearm"]["journalDigest"]),

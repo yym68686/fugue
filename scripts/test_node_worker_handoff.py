@@ -197,6 +197,20 @@ class NodeWorkerHandoffTests(unittest.TestCase):
         self.assertEqual(f.sockets[0].requests, 1)
         self.assertIn("drain_completed", f.evidence)
 
+    def test_background_retirement_closes_test_sockets_after_verified_handoff(self):
+        f = DrainFixture("inactive_probe_denied")
+        result = worker.handoff(f, PROFILE, {"pod": "existing-front"}, ADDRESS, dict(PROBE, bodyDigest="sha256:" + "e" * 64),
+                                f.journal, probe_port=15443, now=f.now, pause=f.pause, open_tls=f.open,
+                                drain_record=f.record, retirement={"witness": "background"})
+        self.assertEqual(result["outcome"], "verified")
+        self.assertEqual(f.evidence["guardian_result"], result)
+        self.assertEqual(f.evidence["retirement_pending"]["journal_digest"], f.journal["digest"])
+        self.assertEqual(worker.front.timestamp(f.evidence["retirement_pending"]["deadline"]), f.deadline)
+        self.assertLess(f.now(), f.deadline)
+        self.assertEqual(len(f.sockets), 3)
+        self.assertTrue(all(s.closed for s in f.sockets))
+        self.assertNotIn("retirement_completed", f.evidence)
+
     def test_early_or_unattributed_disconnect_cannot_pass(self):
         for case, error in (("early_close", "without a verified"), ("unattributed", "no witnessed")):
             f = DrainFixture(case)
