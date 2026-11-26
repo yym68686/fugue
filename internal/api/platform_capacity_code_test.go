@@ -109,6 +109,9 @@ func TestCapacityCodeUsesSelectedPublicFrontAndItsExactCurrentWorker(t *testing.
 				}
 				var response any
 				switch r.URL.Path {
+				case "/api/v1/namespaces/system/configmaps/fugue-authority-node-mode-group-a":
+					http.NotFound(w, r)
+					return
 				case "/api/v1/nodes/edge-a":
 					response = kubeNode
 				case "/api/v1/namespaces/system/configmaps/fugue-current-authority-group-a":

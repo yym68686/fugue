@@ -165,6 +165,7 @@ func main() {
 	go server.StartBackgroundPassiveASN(ctx)
 	go server.StartBackgroundDNSObservations(ctx)
 	go server.StartBackgroundPlatformConfiguration(ctx)
+	go server.StartBackgroundNodeParticipation(ctx, os.Getenv("FUGUE_AUTOMATIC_NODE_PARTICIPATION_POLICY"), cfg.BindAddr, cfg.BootstrapAdminKey)
 	go server.StartBackgroundTLSIssuance(ctx)
 	go server.StartBackgroundAppDatabaseImports(ctx)
 	go server.StartBackgroundBackups(ctx)

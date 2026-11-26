@@ -67,6 +67,9 @@ func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtif
 
 func validateProducerReleaseGuardWithTrace(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard, trace *platformProducerGuardTrace) error {
 	if guard == nil {
+		if _, marked := parent.Metadata[platformproducer.OfflinePredecessorMetadata]; marked && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+			return ErrConflict
+		}
 		return rejectUnboundHostedPublication(parent, req.ReleaseChannel)
 	}
 	trace.advance(producerGuardParent)
@@ -257,6 +260,9 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 		}
 	}
 	if guard == nil {
+		if _, marked := parent.Metadata[platformproducer.OfflinePredecessorMetadata]; marked && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
+			return ErrConflict
+		}
 		return rejectUnboundHostedPublication(parent, req.ReleaseChannel)
 	}
 	trace := beginPlatformProducerGuardTrace(ctx)

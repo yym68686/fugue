@@ -104,6 +104,41 @@ func (s *Server) observeEdgeNode(node model.EdgeNode, now time.Time) *model.Edge
 	return observation
 }
 
+// The policy's intent is not serving evidence. Only the verified full, its
+// signed DNS child and its current fence can establish a traffic exclusion.
+func (s *Server) observeVerifiedDNSExclusion(node model.EdgeNode, observation *model.EdgeNodeInventoryObservation) {
+	intent := observation.DNSAdmissionIntent
+	if intent == nil || intent.State != "suspended" || observation.Reason != "heartbeat_stale" {
+		return
+	}
+	nodes, _, err := s.store.ListEdgeNodes("")
+	if err != nil {
+		return
+	}
+	found := false
+	for _, n := range nodes {
+		if n.ID == node.ID {
+			if n.EdgeGroupID != node.EdgeGroupID || n.PublicIPv4 != node.PublicIPv4 || observeEdgeNodeInventory(n, time.Now().UTC()).Reason != "heartbeat_stale" {
+				return
+			}
+			found = true
+		}
+	}
+	if !found {
+		return
+	}
+	selected, err := s.store.SelectSafeRolloutServingEdges(nodes)
+	if err != nil {
+		return
+	}
+	for _, retained := range selected {
+		if retained.ID == node.ID {
+			return
+		}
+	}
+	intent.ServingEvidence = "excluded_from_verified_full"
+}
+
 func (s *Server) observeOfflineRecovery(node model.EdgeNode, intent *model.EdgeDNSAdmissionIntent, holds []platformproducer.OfflineEdge, now time.Time) {
 	s.observeOfflineRecoveryChecked(node, intent, holds, now, s.store.RetiredPlatformConsumerTargets)
 }

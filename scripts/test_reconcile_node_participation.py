@@ -50,6 +50,7 @@ class Participant(p.Participant):
         assert self.lease_entries > 0
 
     def readers(self): return 2
+    def public_service(self): return None
     def approved_network_recovery(self): return self.allowed
     def recovery_config(self): return {'authorityRecord':self.final_record, 'authorityUID':'authority-uid'}
 
@@ -123,6 +124,26 @@ class ParticipationTests(unittest.TestCase):
             with patch.object(FinalRecovery,'snapshot',return_value=({}, {'code':'current'}, {'code':'old'},'',{},{})):
                 with self.assertRaisesRegex(ValueError,'catch-up'):member.run(True)
             self.assertIn(p.ANNOTATION,member.value['metadata']['annotations'])
+
+    def test_node_local_recovery_readmits_without_legacy_workloads(self):
+        member = Participant()
+        first = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+        public, snap = object(), {'activation': {'updated_at': first.isoformat()}, 'address': '9.9.9.9'}
+        with patch.object(member, 'public_service', return_value=public), \
+                patch.object(member, 'node_local_snapshot', return_value=snap), \
+                patch.object(member, 'approved_network_recovery', return_value=True), \
+                patch.object(member, 'require_settled_group'), \
+                patch.object(p.worker_driver.front, 'proof', return_value={'edge': 'intermittent', 'group': 'pool-a'}) as probe, \
+                patch.object(p, 'validate_retained_workload') as legacy:
+            with patch.object(p, 'now', return_value=first):
+                self.assertEqual(member.run(True)['state'], 'offline')
+                member.value['status']['conditions'][0]['status'] = 'True'
+                self.assertEqual(member.run(True)['state'], 'recovering')
+            with patch.object(p, 'now', return_value=first + dt.timedelta(seconds=301)):
+                self.assertEqual(member.run(True)['code']['mode'], 'node-local')
+            self.assertNotIn(p.ANNOTATION, member.value['metadata']['annotations'])
+            self.assertEqual(probe.call_count, 2)
+            legacy.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

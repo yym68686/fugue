@@ -13,6 +13,7 @@ import subprocess
 import time
 
 from scripts import front_connection_witness as connection
+from scripts import edge_node_participation as participation
 from scripts import node_worker_handoff as handoff
 from scripts import observe_front_candidate as front
 from scripts import reconcile_front_probe_transport as kube
@@ -43,7 +44,8 @@ def matches(pattern, value):
 
 
 def validate(config):
-    fields(config, "schema namespace group node nodeUID front guardian candidate expected peers probe"
+    fields(config, "schema namespace group node nodeUID front guardian candidate expected probe"
+           + (" peers" if isinstance(config, dict) and "peers" in config else "")
            + (" probeIngress" if isinstance(config, dict) and "probeIngress" in config else "")
            + (" verifyDrain" if isinstance(config, dict) and "verifyDrain" in config else "")
            + (" fixedRotation" if isinstance(config, dict) and "fixedRotation" in config else "")
@@ -109,9 +111,9 @@ def validate(config):
             and matches(re.compile(r"/[^\s?#]{0,510}"), probe["path"])
             and ("bodyDigest" not in probe or matches(DIGEST, probe["bodyDigest"]))
             and (not config.get("verifyDrain") or "bodyDigest" in probe), "invalid TLS canary")
-    require(isinstance(config["peers"], list) and len(config["peers"]) <= 12, "explicit peer roster required")
+    require(isinstance(config.get("peers", []), list) and len(config.get("peers", [])) <= 12, "invalid legacy peer pins")
     nodes, services = {config["node"]}, {public["service"]}
-    for peer in config["peers"]:
+    for peer in config.get("peers", []):
         fields(peer, "node service uid")
         require(matches(NAME, peer["node"]) and matches(NAME, peer["service"]) and matches(UID, peer["uid"])
                 and peer["node"] not in nodes and peer["service"] not in services, "peer roster is not exact and unique")
@@ -145,8 +147,9 @@ def peer_serving_identity(namespace, pod):
             and matches(re.compile(r"[a-zA-Z0-9_.:-]{1,253}"), health.get("bundle_generation"))
             and matches(SHA, health.get("worker_source_commit")) and matches(DIGEST, health.get("worker_image_digest")),
             f"peer Front {name} did not report a valid serving Worker identity")
-    return {k: health[k] for k in ("active_slot", "activation_generation", "bundle_generation", "worker_source_commit",
-                                    "worker_image_digest", "route_authority")}
+    keys = ("active_slot", "activation_generation", "bundle_generation", "worker_source_commit",
+            "worker_image_digest", "route_authority")
+    return {k: health[k] for k in (*keys, "https_target") if k in health}
 
 
 def process(pod, name):
@@ -178,7 +181,13 @@ def peer_selected_worker(cluster, workers, serving):
     # serving listener, and let the full peer snapshot fence all other Pods
     # that actually exist instead of requiring a standby to be installed.
     slot = serving["active_slot"]
-    pod = cluster.worker_at(workers, 18443 if slot == "a" else 28443)
+    fixed_port = 18443 if slot == "a" else 28443
+    host, _, port = serving.get("https_target", "").rpartition(":")
+    require(not port or port in (str(fixed_port), "38443"), "peer Front selects an unknown Worker listener")
+    pod = cluster.worker_at(workers, int(port) if port else fixed_port)
+    if port == "38443":
+        require(host.strip("[]") in (pod["status"].get("hostIP"), pod["status"].get("podIP")),
+                "peer Front selects a foreign overlap listener")
     require(pod["metadata"].get("labels", {}).get("fugue.io/edge-slot") == slot,
             "peer serving listener does not own the reported slot")
     pin_image(pod, "edge", serving["worker_source_commit"], serving["worker_image_digest"])
@@ -250,6 +259,24 @@ class ActiveCluster:
         self.config, self.ns = config, config["namespace"]
         self.profile = {k: config[k] for k in ("namespace", "node", "group")}
         self.profile["activationPath"] = STATE
+        self.participation_policy = None
+
+    def roster(self):
+        cfg = self.config
+        roster = participation.items(front.read("get", "nodes", "-l", "fugue.io/edge-group-id=" + cfg["group"] + ",fugue.io/role.edge=true", "-o", "json"), 64)
+        members = {}
+        for node in roster:
+            m = node["metadata"]
+            labels = m.get("labels", {})
+            require(m.get("name") and m["name"] not in members and obj_uid(node) and not m.get("deletionTimestamp")
+                    and labels.get("fugue.io/edge-group-id") == cfg["group"] and labels.get("fugue.io/role.edge") == "true",
+                    "ambiguous physical Edge membership")
+            members[m["name"]] = node
+        require(cfg["node"] in members and obj_uid(members[cfg["node"]]) == cfg["nodeUID"],
+                "pilot Node UID changed")
+        require({p["node"] for p in cfg.get("peers", [])} <= set(members),
+                "a declared legacy peer no longer belongs to the physical group")
+        return members
 
     def get(self, kind, name):
         return front.read("get", kind, name, "-n", self.ns, "-o", "json")
@@ -431,11 +458,8 @@ class ActiveCluster:
 
     def exact_actors(self):
         cfg = self.config
-        roster = list_items(front.read("get", "nodes", "-l", "fugue.io/edge-group-id=" + cfg["group"] + ",fugue.io/role.edge=true", "-o", "json"))
-        require({n["metadata"]["name"] for n in roster} == {cfg["node"], *(p["node"] for p in cfg["peers"])},
-                "declared peers do not cover every physical member of the group")
-        pilot = one([n for n in roster if n["metadata"]["name"] == cfg["node"]], "pilot Node")
-        require(obj_uid(pilot) == cfg["nodeUID"], "pilot Node UID changed")
+        pilot = self.roster()[cfg["node"]]
+        require(participation.node_ready(pilot), "target Node is unavailable")
         public = cfg["front"]
         svc = self.read_service(dict(public, node=cfg["node"]))
         selected, bound = self.service_front(svc, cfg["node"])
@@ -492,9 +516,26 @@ class ActiveCluster:
 
     def peer_snapshot(self):
         snapshots = {}
-        for peer in self.config["peers"]:
-            node = peer["node"]
+        roster = self.roster()
+        pins = {peer["node"]: peer for peer in self.config.get("peers", [])}
+        policy = self.participation_policy
+        authorized = {m["node"]: m for m in policy["members"] if m["group"] == self.config["group"]} if policy else {}
+        services = participation.serving_services(self.ns) if set(roster) - {self.config["node"]} else []
+        for node, physical in sorted(roster.items()):
+            if node == self.config["node"]:
+                continue
+            service = participation.node_service(services, node)
+            peer = pins.get(node) if service is None else {
+                "node": node, "service": service["metadata"]["name"], "uid": obj_uid(service),
+                "generation": int(service["metadata"]["annotations"][stage.GENERATION]),
+                "address": one(service["spec"]["externalIPs"], "peer public address"),
+            }
+            require(peer is not None, "peer has no unambiguous registered serving Front Service")
             svc = self.read_service(peer)
+            excluded = participation.isolation(policy, authorized.get(node), physical, svc)
+            if excluded is not None:
+                snapshots[node] = excluded
+                continue
             selected, endpoint = self.service_front(svc, node)
             related = [p for p in self.pods(node=node) if p["metadata"].get("labels", {}).get("fugue.io/edge-group-id") == self.config["group"]
                        and ({"edge", "caddy"} <= {c["name"] for c in p["spec"]["containers"]}
@@ -518,7 +559,7 @@ class ActiveCluster:
                     templates[obj_uid(deployment)] = kube.digest(deployment["spec"]["template"])
                 snapshot[obj_uid(pod)] = {"pod": pod["metadata"]["name"], "templates": templates,
                                           "processes": {c["name"]: process(pod, c["name"]) for c in pod["spec"]["containers"]}}
-            snapshots[node] = {"service": svc["spec"], "endpoint": endpoint,
+            snapshots[node] = {"node_uid": obj_uid(physical), "service": svc["spec"], "endpoint": endpoint,
                                "serving_identity": serving, "serving_worker_uid": selected_worker, "runtimes": snapshot}
         return snapshots
 
@@ -675,10 +716,11 @@ class ClaimedHandoff:
         raise ValueError("the selected Front did not mount the exact Guardian journal")
 
 
-def run(config, evidence_path):
+def run(config, evidence_path, participation_policy=None):
     cluster = ActiveCluster(config)
-    selected, guardian, unsigned = cluster.exact_actors()
+    cluster.participation_policy = participation_policy
     peers = cluster.peer_snapshot()
+    selected, guardian, unsigned = cluster.exact_actors()
     require(cluster.peer_snapshot() == peers, "peer state changed across baseline observations")
     unsigned["created_at"] = handoff.wire_time(front.now())
     sealed = cluster.exec_guardian(guardian, "node-worker-seal", front.canonical(unsigned).encode())
@@ -748,6 +790,7 @@ def main():
     parser.add_argument("operation", choices=("validate", "run"))
     parser.add_argument("config", type=Path)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--participation-policy", type=Path)
     args = parser.parse_args()
     cfg = validate(json.loads(args.config.read_text()))
     if args.operation == "run":
@@ -755,7 +798,12 @@ def main():
                 and os.environ.get("GITHUB_REF") == "refs/heads/main" and matches(SHA, os.environ.get("GITHUB_SHA")),
                 "node Worker handoff only runs in the ordinary main GitHub Actions deployment")
         require(args.evidence is not None and not args.evidence.exists(), "new evidence file required")
-        run(cfg, args.evidence)
+        policy = None
+        if args.participation_policy:
+            from scripts.reconcile_node_participation import validate as validate_policy
+            policy = validate_policy(json.loads(args.participation_policy.read_text()))
+            require(policy["namespace"] == cfg["namespace"], "participation policy belongs to another namespace")
+        run(cfg, args.evidence, policy)
 
 
 if __name__ == "__main__":

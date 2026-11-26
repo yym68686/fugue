@@ -30,6 +30,7 @@ test:
 	python3 -m unittest scripts.test_configure_edge_offline_recovery
 	python3 -m unittest scripts.test_capacity_observer scripts.test_reconcile_edge_member
 	python3 -m unittest scripts.test_reconcile_node_participation scripts.test_configure_edge_release_hold
+	python3 -m unittest scripts.test_run_node_worker_handoff scripts.test_node_worker_handoff scripts.test_front_connection_witness
 	python3 -m unittest scripts.test_observe_dns_failure_timeline
 	python3 -m unittest scripts.test_observe_managed_ssh_front
 	python3 -m unittest scripts.test_select_managed_ssh_transport

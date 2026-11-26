@@ -190,6 +190,12 @@ func (r NodeWorkerResult) matches(j edgegroupfront.NodeWorkerJournal) bool {
 	return false
 }
 
+// MatchesJournal validates an immutable terminal receipt against its sealed
+// journal. Readers still need to prove the ownership and identity of both.
+func (r NodeWorkerResult) MatchesJournal(j edgegroupfront.NodeWorkerJournal) bool {
+	return r.matches(j)
+}
+
 func (store *AuthorityStore) ReadNodeWorkerResult(ctx context.Context, j edgegroupfront.NodeWorkerJournal) (NodeWorkerResult, bool, error) {
 	var r NodeWorkerResult
 	found, err := store.readNodeWorkerInput(ctx, j, NodeWorkerResultName(j.Digest), "node-worker-result", "result.json", &r)

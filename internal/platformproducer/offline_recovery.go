@@ -15,6 +15,7 @@ const MaxOfflineRecoveryEvidenceBytes = 64 * 4096
 
 const OfflineRecoveryFact = "offline_edge_recovery"
 const OfflineRecoveryMetadata = "producer_offline_recovery"
+const OfflinePredecessorMetadata = "producer_offline_predecessor"
 
 type OfflineEdgeRecoveryPolicy struct {
 	Hostname             string                  `json:"hostname"`

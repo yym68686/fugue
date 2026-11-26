@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts import run_node_worker_handoff as driver
+from scripts import edge_node_participation as participation
 from scripts.test_node_worker_handoff import Fixture
 
 
@@ -62,6 +63,55 @@ def pinned():
 
 
 class NodeWorkerDriverTests(unittest.TestCase):
+    def test_discovered_peer_must_prove_exclusion_before_omitting_live_checks(self):
+        config = pinned()
+        config.pop("peers")
+        driver.validate(config)
+        cluster = driver.ActiveCluster(config)
+        physical = {"metadata": {"name": "peer-node", "uid": "peer-uid"},
+                    "status": {"conditions": [{"type": "Ready", "status": "Unknown"}]}}
+        member = {"node": "peer-node", "node_uid": "peer-uid", "group": config["group"], "reason": "network_unavailable"}
+        policy = {"namespace": config["namespace"], "members": [member]}
+        cluster.participation_policy = policy
+        selector = {"fugue.io/edge-node": "peer-node"}
+        spec = {"type": "ClusterIP", "selector": selector, "externalIPs": ["9.9.9.9"], "externalTrafficPolicy": "Local",
+                "ports": [{"name": "http", "port": 80, "targetPort": 80, "protocol": "TCP"},
+                          {"name": "https", "port": 443, "targetPort": 443, "protocol": "TCP"}]}
+        svc = {"metadata": {"name": "peer-service", "uid": "service-peer", "annotations": {
+            "transport.fugue.dev/phase": "serving", driver.stage.GENERATION: "1",
+            driver.stage.DIGEST: driver.kube.digest(driver.replacement.projection(spec))}},
+               "spec": spec}
+        edge = {"public_ipv4": "9.9.9.9", "observation": {"reason": "heartbeat_stale", "heartbeat_fresh": False,
+                "dns_admission_intent": {"state": "suspended", "serving_evidence": "excluded_from_verified_full"}}}
+        endpoints = {"items": [{"metadata": {"uid": "slice", "ownerReferences": [
+            {"kind": "Service", "uid": "service-peer", "controller": True}]},
+            "endpoints": [{"nodeName": "peer-node", "conditions": {"ready": False, "serving": False}}]}]}
+        roster = {config["node"]: {}, "peer-node": physical}
+        with patch.object(cluster, "roster", return_value=roster), patch.object(participation, "serving_services", return_value=[svc]), \
+                patch.object(cluster, "read_service", return_value=svc), patch.object(participation, "read_edge_node", return_value=edge), \
+                patch.object(driver.front, "read", return_value=endpoints), \
+                patch.object(cluster, "service_front", side_effect=ValueError("live Front proof required")) as live:
+            self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
+            live.assert_not_called()
+            for mutation in ("unknown_dns_selection", "missing_owner_policy", "serving_endpoint", "recovered"):
+                original, state = copy.deepcopy(edge), copy.deepcopy(physical)
+                try:
+                    if mutation == "unknown_dns_selection":
+                        edge["observation"]["dns_admission_intent"]["serving_evidence"] = "not_evaluated"
+                    elif mutation == "missing_owner_policy":
+                        cluster.participation_policy = None
+                    elif mutation == "serving_endpoint":
+                        endpoints["items"][0]["endpoints"][0]["conditions"]["serving"] = True
+                    else:
+                        physical["status"]["conditions"][0]["status"] = "True"
+                    with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "live Front proof|serving or unproven"):
+                        cluster.peer_snapshot()
+                finally:
+                    edge.update(original)
+                    physical.update(state)
+                    endpoints["items"][0]["endpoints"][0]["conditions"]["serving"] = False
+                    cluster.participation_policy = policy
+
     def test_candidate_uses_guardian_repair_release_wire_fields(self):
         candidate = pinned()["candidate"]
         self.assertEqual(driver.candidate_wire(candidate), {

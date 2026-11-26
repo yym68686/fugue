@@ -112,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/environments/production/node-participation scripts/reconcile_node_participation.py scripts/reconcile_edge_member.py scripts/configure_edge_release_hold.py .github/workflows/ci.yml
+          git diff --exit-code HEAD origin/main -- deploy/environments/production/node-participation scripts/edge_node_participation.py scripts/reconcile_node_participation.py scripts/reconcile_edge_member.py scripts/configure_edge_release_hold.py scripts/run_node_worker_handoff.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py scripts/reconcile_front_probe_transport.py scripts/observe_front_candidate.py .github/workflows/ci.yml
           python3 -m unittest scripts.test_reconcile_node_participation scripts.test_reconcile_edge_member scripts.test_configure_edge_release_hold
           python3 -m scripts.reconcile_node_participation deploy/environments/production/node-participation/policy.json --apply --evidence "$RUNNER_TEMP/node-participation.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -2683,13 +2683,15 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py scripts/retire_front_hostport.py
+          git diff --exit-code HEAD origin/main -- "$CONFIG" .github/workflows/ci.yml deploy/environments/production/node-participation scripts/edge_node_participation.py scripts/reconcile_node_participation.py scripts/configure_edge_release_hold.py scripts/reconcile_edge_member.py scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/read_front_conntrack.py scripts/observe_front_node_conntrack.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/stage_front_serving_transport.py scripts/retire_front_hostport.py
           python3 -m unittest scripts.test_run_node_worker_handoff scripts.test_node_worker_handoff scripts.test_front_connection_witness
       - name: Hold public connections and require Guardian receipt and unchanged peers
+        env:
+          FUGUE_API_KEY: ${{ secrets.FUGUE_API_KEY }}
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/node-worker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-          python3 -m scripts.run_node_worker_handoff run "$CONFIG" --evidence "$evidence"
+          python3 -m scripts.run_node_worker_handoff run "$CONFIG" --evidence "$evidence" --participation-policy deploy/environments/production/node-participation/policy.json
       - name: Retain exact node Worker transaction evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

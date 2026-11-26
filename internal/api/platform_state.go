@@ -480,6 +480,13 @@ func (s *Server) validateReleaseSetConvergence(ctx context.Context, artifact mod
 // A scoped draft uses the same topology, but its delivery transaction checks
 // the actual receivers of this host. Never use topology alone for a full release.
 func (s *Server) checkReleaseConsumerSets(ctx context.Context, artifact model.PlatformArtifact, requireLiveConvergence bool) model.PlatformArtifactValidationResult {
+	return s.checkReleaseConsumerSetsExcept(ctx, artifact, requireLiveConvergence, nil)
+}
+
+// Only the producer's offline contraction path may omit an Edge from the
+// predecessor's live check. Neither the declared topology check nor the
+// candidate's own convergence can use this exception.
+func (s *Server) checkReleaseConsumerSetsExcept(ctx context.Context, artifact model.PlatformArtifact, requireLiveConvergence bool, offline map[string]string) model.PlatformArtifactValidationResult {
 	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ReleaseSetID: artifact.ID, Limit: 200})
 	if err != nil {
 		return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
@@ -513,6 +520,9 @@ func (s *Server) checkReleaseConsumerSets(ctx context.Context, artifact model.Pl
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "release set consumer convergence could not be evaluated"}
 		}
 		status := s.evaluateLiveConsumerConvergence(ctx, set, consumers, s.platformConvergenceBinding(set))
+		if len(offline) > 0 && set.RequiresConsumers && offlineContractionSurvivorsPass(status, offline) {
+			continue
+		}
 		if set.RequiresConsumers && !status.Pass {
 			return model.PlatformArtifactValidationResult{Name: "release_set.convergence", Pass: false, Severity: model.RobustnessSeverityBlockPublish, Message: "required release set consumers have not converged", Evidence: map[string]string{"expected_consumer_set_id": set.ID, "state": status.State, "required_passing": fmt.Sprintf("%d", status.RequiredPassing), "required_expected": fmt.Sprintf("%d", status.RequiredExpected)}}
 		}

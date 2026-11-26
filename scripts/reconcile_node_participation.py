@@ -8,17 +8,15 @@ import copy
 import datetime as dt
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
-import urllib.request
 import urllib.parse
 
 from scripts.configure_edge_release_hold import ANNOTATION, hold, validate_node, validate_reader, validate_retained_workload
+from scripts.edge_node_participation import STATE, node_ready, node_service, read_edge_node, serving_services
 from scripts.reconcile_edge_member import Recovery, canonical, now, timestamp, reconcile, without_time
-
-STATE = 'fugue.io/automatic-edge-participation'
+from scripts import run_node_worker_handoff as worker_driver
 
 
 def validate(policy):
@@ -47,23 +45,11 @@ def validate(policy):
     return policy
 
 
-def node_ready(node):
-    values = [c for c in node.get('status', {}).get('conditions', []) if c['type'] == 'Ready']
-    if len(values) != 1:
-        raise ValueError('Node readiness observation is missing or ambiguous')
-    return values[0]['status'] == 'True'
-
-
 def owned_pod(pods, workload, node):
     found = [p for p in pods if p['spec'].get('nodeName') == node and not p['metadata'].get('deletionTimestamp') and any(r.get('controller') and r.get('kind') == 'DaemonSet' and r.get('uid') == workload['metadata']['uid'] for r in p['metadata'].get('ownerReferences', []))]
     if len(found) != 1:
         raise ValueError('Physical workload Pod is missing or ambiguous')
     return found[0]
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
 
 
 class Participant(Recovery):
@@ -116,15 +102,9 @@ class Participant(Recovery):
                  {'op': 'add', 'path': '/metadata/annotations', 'value': annotations}]
         return json.loads(self.kube('patch', 'node', self.member['node'], '--type=json', '-p', canonical(patch), '-o', 'json'))
 
-    def approved_network_recovery(self):
-        key = os.environ.get('FUGUE_API_KEY', '')
-        if not key: raise ValueError('Recovery observation credential unavailable')
-        req = urllib.request.Request(self.policy['origin']+'/v1/edge/nodes/'+urllib.parse.quote(self.member['node'], safe=''), headers={'Authorization': 'Bearer '+key})
-        with urllib.request.build_opener(NoRedirect()).open(req, timeout=15) as response:
-            raw = response.read(131073)
-        if len(raw) > 131072: raise ValueError('Recovery observation exceeds bound')
-        node = json.loads(raw)['node']
-        if node['id'] != self.member['node'] or node['edge_group_id'] != self.member['group'] or node.get('draining'):
+    def approved_network_recovery(self, not_before=None):
+        node = read_edge_node(self.policy, self.member)
+        if node.get('draining'):
             return False
         o = node.get('observation', {})
         intent = o.get('dns_admission_intent', {})
@@ -133,7 +113,74 @@ class Participant(Recovery):
         return (o.get('heartbeat_fresh') is True and o.get('admission_allows_dns') is True and o.get('eligible') is True and
                 intent.get('state') == 'allowed' and timestamp(o['fresh_until']) > now() and
                 intent.get('recovery_last_success_at') is not None and
-                dt.timedelta(0) <= now()-timestamp(intent['recovery_last_success_at']) <= dt.timedelta(minutes=10))
+                dt.timedelta(0) <= now()-timestamp(intent['recovery_last_success_at']) <= dt.timedelta(minutes=10) and
+                (not_before is None or timestamp(intent['recovery_last_success_at']) >= not_before))
+
+    def public_service(self):
+        node = self.member['node']
+        found = node_service(serving_services(self.policy['namespace']), node)
+        if found is None:
+            return None
+        name, group = found['metadata']['name'], self.member['group']
+        cluster = worker_driver.ActiveCluster(dict(namespace=self.policy['namespace'], node=node, group=group))
+        address = found['spec']['externalIPs']
+        if len(address) != 1:
+            raise ValueError('Returned node has ambiguous public ingress')
+        svc = cluster.read_service(dict(service=name, node=node, uid=found['metadata']['uid'],
+                                        generation=int(found['metadata']['annotations']['transport.fugue.dev/generation']),
+                                        address=address[0]))
+        return cluster, svc
+
+    def node_local_snapshot(self, public):
+        if public is None:
+            return None
+        cluster, svc = public
+        group, node = self.member['group'], self.member['node']
+        selected, endpoint = cluster.service_front(svc, node)
+        state, _ = self.activation(selected['metadata']['name'])
+        # Group-mode recovery can still use the existing mutable-inactive-slot
+        # path. A node-local binding must never be reset to a group slot.
+        reason = state.get('reason', '')
+        if not reason.startswith(('advance node Worker using journal ', 'advance fixed Worker using journal ',
+                                  'restore node Worker using journal ', 'restore fixed Worker using journal ')):
+            return None
+        identity = worker_driver.peer_serving_identity(cluster.ns, selected)
+        expected = {
+            'active_slot': state['active_slot'], 'activation_generation': state['generation'],
+            'bundle_generation': state['bundle_generation'], 'worker_source_commit': state['worker_source_commit'],
+            'worker_image_digest': state['worker_image_digest'], 'route_authority': state['authority'],
+        }
+        if state.get('edge_group_id') != group or any(identity[k] != v for k, v in expected.items()):
+            raise ValueError('Returned Front disagrees with the live activation')
+        workers = [p for p in cluster.pods(node=node) if
+                   p['metadata'].get('labels', {}).get('fugue.io/edge-group-id') == group and
+                   {'edge', 'caddy'} <= {c['name'] for c in p['spec']['containers']}]
+        uid = worker_driver.peer_selected_worker(cluster, workers, identity)
+        worker = next(p for p in workers if p['metadata']['uid'] == uid)
+        return dict(activation=state, front=worker_driver.process(selected, 'edge-front'), worker_uid=uid,
+                    worker=worker_driver.worker_process(worker), endpoint=endpoint, address=svc['spec']['externalIPs'][0])
+
+    def readmit_node_local(self, snapshot, annotations, existing, apply):
+        node = self.member['node']
+        result = {'node': node, 'state': 'recovering', 'changed': False}
+        stamp = timestamp(snapshot['activation']['updated_at'])
+        if not apply or not self.approved_network_recovery(stamp):
+            return result
+        with self.leases():
+            self.require_settled_group()
+            self.readers()
+            for p in self.member['probes']:
+                proof = worker_driver.front.proof(snapshot['address'], p['host'], p['path'])
+                if proof['edge'] != node or proof['group'] != self.member['group']:
+                    raise ValueError('Returned public Front did not prove the physical member')
+            if self.node_local_snapshot(self.public_service()) != snapshot or not self.approved_network_recovery(stamp):
+                raise ValueError('Node-local recovery evidence or serving process changed')
+            current = self.node()
+            a = current['metadata'].get('annotations', {})
+            if not node_ready(current) or a.get(STATE) != annotations.get(STATE) or a.get(ANNOTATION) != existing:
+                raise ValueError('Participation ownership changed before readmission')
+            self.transition_node(current, 'active', remove_hold=True)
+        return {'node': node, 'state': 'active', 'changed': True, 'code': {'verified': True, 'mode': 'node-local'}}
 
     def recovery_config(self):
         m = self.member
@@ -191,8 +238,10 @@ class Participant(Recovery):
         if ready and existing is None:
             return {'node': self.member['node'], 'state': 'active', 'changed': False}
         baseline = self.readers()
-        for workload in [self.member['front'], *self.member['workers'].values()]:
-            validate_retained_workload(self.get('daemonset', workload), self.member['group'])
+        public = self.public_service()
+        if public is None:
+            for workload in [self.member['front'], *self.member['workers'].values()]:
+                validate_retained_workload(self.get('daemonset', workload), self.member['group'])
         inventory = json.loads(self.kube('get', 'nodes', '-l', 'fugue.io/edge-group-id='+self.member['group'], '-o', 'json'))
         validate_node(self.config, node, inventory, baseline)
         since = state.get('since') if state else None
@@ -209,6 +258,9 @@ class Participant(Recovery):
         condition = next(c for c in node['status']['conditions'] if c['type']=='Ready')
         if 'lastTransitionTime' in condition and now()-timestamp(condition['lastTransitionTime']) < dt.timedelta(seconds=self.member['stable_seconds']):
             return {'node': self.member['node'], 'state':'recovering', 'changed':False}
+        local = self.node_local_snapshot(public)
+        if local is not None:
+            return self.readmit_node_local(local, annotations, existing, apply)
         config = self.recovery_config()
         evidence = reconcile(config, apply)
         if apply and config.get('retainedPrevious') and evidence.get('verified'):
@@ -239,18 +291,33 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('policy')
     parser.add_argument('--apply', action='store_true')
-    parser.add_argument('--evidence', required=True)
+    parser.add_argument('--evidence')
+    parser.add_argument('--member-index', type=int)
+    parser.add_argument('--local-origin')
     args = parser.parse_args()
     policy = validate(json.loads(Path(args.policy).read_text()))
+    members = policy['members']
+    if args.member_index is not None:
+        if not 0 <= args.member_index < len(members):
+            parser.error('invalid participation policy member index')
+        members = [members[args.member_index]]
+    if args.local_origin:
+        local = urllib.parse.urlsplit(args.local_origin)
+        if not re.fullmatch(r'http://(?:127\.0\.0\.1|\[::1\]):[0-9]{1,5}', args.local_origin) or not 0 < local.port <= 65535:
+            parser.error('online observation origin must be literal loopback')
+        policy = dict(policy, _local_origin=args.local_origin)
+    elif args.evidence is None:
+        parser.error('scheduled reconciliation requires an evidence destination')
     results = []
-    for member in policy['members']:
+    for member in members:
         try:
             results.append(Participant(policy, member).run(args.apply))
         except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
             # Preserve one bounded actionable reason; the scheduled controller
             # retries later without restarting workloads or spamming alerts.
             results.append({'node': member['node'], 'state': 'waiting', 'reason': str(exc)[:512]})
-    Path(args.evidence).write_text(json.dumps({'schema': policy['schema'], 'observed_at': now().isoformat(), 'members': results}, indent=2)+'\n')
+    if args.evidence:
+        Path(args.evidence).write_text(json.dumps({'schema': policy['schema'], 'observed_at': now().isoformat(), 'members': results}, indent=2)+'\n')
     print(canonical({'members': [{k:v for k,v in r.items() if k != 'code'} for r in results]}))
 
 

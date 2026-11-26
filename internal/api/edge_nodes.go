@@ -136,6 +136,7 @@ func (s *Server) handleGetEdgeNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	node.Observation = s.observeEdgeNode(node, time.Now().UTC())
+	s.observeVerifiedDNSExclusion(node, node.Observation)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"node":  node,
 		"group": group,

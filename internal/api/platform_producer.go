@@ -466,18 +466,25 @@ func (s *Server) reconcilePlatformConfigurationScope(ctx context.Context, scope 
 			decision = "failed_global_source"
 			return interval, err
 		}
-		if globalGate != nil {
-			// Only the per-host offer/selection above can consume this read.
-			// A full successor, including a single-host global successor,
-			// still requires positive current convergence of the full cohort.
-			return interval, errors.Join(globalGate, err)
-		}
 		managedCustody := false
 		for _, r := range source.Inherited {
 			managedCustody = managedCustody || r.Record.RecordKind == "hosted"
 		}
 		isolate := scoped != nil && (len(scoped.StableHosts) > 0 || (len(scoped.ExternalHosts) > 0 && len(scoped.Hosts) == 0 && !managedCustody))
-		if err == nil && isolate {
+		if globalGate != nil {
+			if err != nil || !errors.Is(globalGate, errFullConsumerNotConverged) {
+				return interval, errors.Join(globalGate, err)
+			}
+			advance("compile_offline_consumer_contraction")
+			compiled, err = s.compileHostedOfflineContraction(ctx, req, source, scoped)
+			if err != nil {
+				return interval, errors.Join(globalGate, err)
+			}
+			provenance.offlinePredecessor = model.PlatformPublicationPrecondition{
+				ArtifactID: source.Publication.ReleaseSetID, ContentHash: source.Publication.ReleaseSetDigest,
+				ReleaseID: source.Publication.ReleaseID, FencingToken: source.Publication.FencingToken,
+			}
+		} else if err == nil && isolate {
 			baseline, e := platformconfig.IndependentManagedBaselineRequest(source, req, scoped)
 			if e != nil {
 				return interval, e

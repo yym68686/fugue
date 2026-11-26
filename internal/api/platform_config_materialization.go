@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -29,9 +30,10 @@ type platformCompilationSource struct {
 	DNSPolicyDigest    string
 	// Never decoded from runtime Facts or HTTP. Bound by the producer after
 	// its independent verified-full selection, then checked again on serving.
-	hostedSource  platformconfig.PreviousTrafficPublicationReference
-	hostedClaim   string
-	isolatedInput string
+	hostedSource       platformconfig.PreviousTrafficPublicationReference
+	hostedClaim        string
+	isolatedInput      string
+	offlinePredecessor model.PlatformPublicationPrecondition
 }
 
 func (err *platformConfigReferenceError) Error() string { return err.reason }
@@ -92,6 +94,7 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			bindingOnly.hostedSource = platformconfig.PreviousTrafficPublicationReference{}
 			bindingOnly.hostedClaim = ""
 			bindingOnly.isolatedInput = ""
+			bindingOnly.offlinePredecessor = model.PlatformPublicationPrecondition{}
 			if bindingOnly != source {
 				return platformConfigCompileResponse{}, store.ErrConflict
 			}
@@ -211,6 +214,13 @@ func (s *Server) materializePlatformCompilation(ctx context.Context, compiled pl
 			parent.Metadata[store.HostedSuccessorMetadata] = sources[0].hostedClaim
 		}
 		parent.Metadata[platformproducer.SourceDigestMetadata] = sources[0].SourceDigest
+		if pin := sources[0].offlinePredecessor; pin != (model.PlatformPublicationPrecondition{}) {
+			raw, err := json.Marshal(pin)
+			if err != nil {
+				return platformConfigCompileResponse{}, err
+			}
+			parent.Metadata[platformproducer.OfflinePredecessorMetadata] = string(raw)
+		}
 		if key := sources[0].isolatedInput; key != "" {
 			if !platformproducer.ValidDigest(key) || sources[0].hostedClaim != "" {
 				return platformConfigCompileResponse{}, store.ErrInvalidInput

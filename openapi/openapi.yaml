@@ -21480,7 +21480,10 @@ components:
         recovery_capacity_bytes_per_second: {type: number, minimum: 0}
         recovery_capacity_elapsed_milliseconds: {type: number, minimum: 0}
         recovery_capacity_evidence_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
-        serving_evidence: {type: string, enum: [not_evaluated]}
+        serving_evidence:
+          type: string
+          description: On a single-node read, excluded_from_verified_full means the signed, currently selected global full and its DNS readiness plan both exclude this endpoint. Other values do not authorize excluding a release participant.
+          enum: [not_evaluated, excluded_from_verified_full]
         reason: {type: string, enum: [quota_exhausted, maintenance, network_unavailable]}
         expected_recovery_date: {type: string, format: date}
         producer_policy_id: {type: string}

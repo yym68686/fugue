@@ -16,8 +16,10 @@ nodes retain the shared desired template and Kubernetes catches them up after
 reconnection. A later operation requires recovered nodes to prove current code.
 
 `deploy/environments/production/node-participation/policy.json` independently
-authorizes automatic Edge release participation for exact Node UIDs. The normal
-CI entrypoint reconciles it every five minutes and after a successful push gate.
+authorizes automatic Edge release participation for exact Node UIDs. The deployed
+API runs the same policy reconciliation independently of GitHub's cadence.
+Main → Actions installs the policy and controller; the scheduled CI entrypoint
+also remains available as a fallback and uses the same leases.
 Both compatible code-release readers and complete baseline membership are
 required before changing a release hold. Release and authority leases plus Node
 UID/resourceVersion tests fence writes. Manual maintenance holds are preserved;
@@ -39,8 +41,42 @@ leases before removing its own hold. It never changes DNS, placement labels,
 replicas, billing, volumes or manually maintained pauses. Each run uploads a
 bounded evidence artifact; expected outages remain waiting states rather than
 failed production releases. Recovery failures preserve the hold and retry on the
-next scheduled run.
+next bounded reconciliation.
 
 The historical one-shot hold and member recovery lanes now run only when their
 declarations change. Updating shared executor code must not replay old Pod UIDs
 or reinstall a superseded manual hold over the automatic controller.
+
+## Node-local Worker and global DNS handoffs
+
+The node-local Worker lane discovers physical peers by group and public Front
+Services by selector. Legacy peer pins are accepted for transports without a
+node selector. A permanently enrolled peer can be omitted from live checks
+only under the current UID-bound participation policy, after Kubernetes and
+Edge heartbeats show it unavailable, its public EndpointSlices offer no
+serving backend, and the active verified full and signed DNS plan exclude it.
+The latter proof comes from the single-node API observation, not from the
+producer's planned suspension. A missing peer, timeout, conflicting hold,
+unverified DNS candidate or changed node identity does not count. Forward
+handoff and rollback use the same per-transaction peer witness.
+
+Global hosted publication normally requires fresh predecessor receipts from
+its full cohort. A newly effective hold already authorized by the same signed
+producer may instead stage a contraction after verifying surviving consumers.
+The signed predecessor, its immutable expectations and LKG are not rewritten.
+The new release preserves route/TLS behavior and cannot add DNS addresses or
+combine unrelated DNS edits with the contraction. The candidate still needs
+its own ordinary green receipts and serving proof.
+
+The API's capacity recovery verifier resolves a returned node's actual public
+Front and Worker against the latest completed node-local Guardian journal
+when one exists, rather than comparing it to the older group slot. A
+node-local Worker already at the committed target can be readmitted without
+recreating legacy workloads. If the node-local code differs from the committed
+target, the hold remains; the legacy recovery primitive cannot write that
+activation. The installed API's reconciliation uses its loopback observation
+endpoint and existing Kubernetes release leases. Where configured, the external
+capacity sampler still depends on its separately deployed observation path; a
+missing external sample cannot be replaced with in-cluster proof.
+Node-local handoffs do not need a CI tick to install a redundant hold when
+all independent isolation checks already pass.

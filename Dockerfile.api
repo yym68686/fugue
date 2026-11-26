@@ -15,8 +15,10 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/fugue-input-storage ./cmd/fugue-input-storage
 
 FROM --platform=$TARGETPLATFORM golang:1.25-alpine
-RUN apk add --no-cache bash ca-certificates git kubectl perf postgresql-client
+RUN apk add --no-cache bash ca-certificates git kubectl perf postgresql-client python3
 WORKDIR /app
+COPY scripts/edge_node_participation.py scripts/reconcile_node_participation.py scripts/reconcile_edge_member.py scripts/configure_edge_release_hold.py scripts/run_node_worker_handoff.py scripts/node_worker_handoff.py scripts/front_connection_witness.py scripts/observe_front_candidate.py scripts/observe_worker_standby.py scripts/reconcile_front_probe_transport.py scripts/replace_front_executor.py scripts/retire_front_hostport.py scripts/stage_front_serving_transport.py scripts/handoff_front_serving_transport.py scripts/observe_front_node_conntrack.py scripts/read_front_conntrack.py ./scripts/
+COPY deploy/environments/production/node-participation/policy.json ./release/node-participation.json
 COPY --from=build /out/fugue-api /usr/local/bin/fugue-api
 COPY --from=build /out/fugue-diagnostic-agent /usr/local/bin/fugue-diagnostic-agent
 COPY --from=build /out/fugue-pprof /usr/local/bin/fugue-pprof

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -75,6 +76,10 @@ func validateProducerServingPhase(state *model.State, parent model.PlatformArtif
 		return fail("initial full verified baseline required")
 	}
 	if !producerRecoveryPhase(guard) {
+		if raw, marked := parent.Metadata[platformproducer.OfflinePredecessorMetadata]; marked &&
+			!offlineProducerPredecessorMatches(raw, parent.ScopeKey, *lkg, baseline) {
+			return fail("offline membership predecessor changed")
+		}
 		if err := validateRetainedTrafficBaseline(state, parent, baseline, *lkg, now, keys); err != nil {
 			return err
 		}
@@ -144,4 +149,11 @@ func validateProducerServingPhase(state *model.State, parent model.PlatformArtif
 		return fail("unknown automatic action")
 	}
 	return nil
+}
+
+func offlineProducerPredecessorMatches(raw, scope string, lkg model.PlatformLKGSnapshot, baseline model.PlatformArtifactRelease) bool {
+	var pin model.PlatformPublicationPrecondition
+	return scope == platformconfig.GlobalScopeKey && len(raw) <= 1024 && json.Unmarshal([]byte(raw), &pin) == nil &&
+		pin.ArtifactID == lkg.ArtifactID && pin.ContentHash == lkg.ContentHash && pin.ReleaseID == lkg.VerifiedByReleaseID &&
+		pin.ReleaseID == baseline.ID && pin.FencingToken > 0 && pin.FencingToken == baseline.FencingToken
 }

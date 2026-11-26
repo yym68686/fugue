@@ -1,0 +1,110 @@
+package api
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"fugue/internal/edgegroupfront"
+	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
+	const group = "edge-group-fixture"
+	digest := func(value string) string { return "sha256:" + strings.Repeat(value, 64) }
+	uid := func(value string) string { return "00000000-0000-4000-8000-00000000000" + value }
+	start := time.Now().UTC()
+	previous := edgegroupfront.ActivationState{Schema: edgegroupfront.ActivationStateSchemaV1, GroupID: group, Generation: 11,
+		ActiveSlot: "a", BundleGeneration: "test.p1.r1", WorkerSourceCommit: strings.Repeat("a", 40),
+		WorkerImageDigest: digest("a"), Authority: edgegroupfront.ActivationAuthority,
+		Operation: edgegroupfront.ActivationOperationInit, Reason: "verified predecessor", UpdatedAt: start}
+	j, err := (edgegroupfront.NodeWorkerJournal{
+		Schema: edgegroupfront.NodeWorkerJournalSchema, Recipient: edgegroupfront.NativeRecipient{Node: "edge-fixture", Group: group, PodUID: uid("1"), Incarnation: digest("b")},
+		NodeUID: uid("2"), ServiceUID: uid("3"), PredecessorWorkerUID: uid("4"), CandidateWorkerUID: uid("5"),
+		PredecessorProcess: digest("c"), CandidateProcess: digest("d"), CandidateComponent: "worker-fixture", ReleaseDigest: digest("e"),
+		Expected: previous, Candidate: edgegroupfront.ActivationRepairRelease{Slot: "b", BundleGeneration: "test.p2.r1", WorkerSourceCommit: strings.Repeat("f", 40), WorkerImageDigest: digest("f")},
+		CreatedAt: start.Add(time.Second),
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := previous
+	state.Generation, state.PreviousSlot, state.Operation, state.RollbackOfGeneration = 13, "b", edgegroupfront.ActivationOperationRollback, 12
+	state.Reason, state.UpdatedAt = "restore node Worker using journal "+j.Digest, start.Add(2*time.Second)
+	receipt := releaseguardian.NodeWorkerResult{Schema: "edge-node-worker-result/v1", JournalDigest: j.Digest, Outcome: "reverted", Activation: state}
+	if !receipt.MatchesJournal(j) {
+		t.Fatal("synthetic rollback must be a real Guardian outcome")
+	}
+	record := func(name, kind, key string, data any) corev1.ConfigMap {
+		raw, err := json.Marshal(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		immutable := true
+		return corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name, UID: "fixture-uid", ResourceVersion: "1", Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "fugue-release-guardian", "fugue.pro/authority-store": "true", "fugue.pro/group": group,
+			"fugue.pro/authority-kind": kind}}, Immutable: &immutable, Data: map[string]string{key: string(raw)}}
+	}
+	const base = "/api/v1/namespaces/system"
+	node := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: j.Recipient.Node, UID: "00000000-0000-4000-8000-000000000002"}}
+	service := corev1.Service{ObjectMeta: metav1.ObjectMeta{UID: "00000000-0000-4000-8000-000000000003"}}
+	for _, scenario := range []string{"verified", "partial history", "tampered rollback", "replaced ingress", "foreign node UID"} {
+		t.Run(scenario, func(t *testing.T) {
+			a := record("fugue-node-worker-archive-"+j.Digest[7:39], "node-worker-archive", "journal.json", j)
+			name := releaseguardian.NodeWorkerResultName(j.Digest)
+			r := receipt
+			if scenario == "tampered rollback" {
+				r.Activation.WorkerImageDigest = digest("0")
+			}
+			kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				var reply any
+				switch req.URL.Path {
+				case base + "/configmaps/" + releaseguardian.NodeWorkerModeName(group):
+					reply = record(releaseguardian.NodeWorkerModeName(group), "node-worker-mode", "mode.json", map[string]string{"schema": "edge-node-worker-mode/v1", "group": group})
+				case base + "/configmaps":
+					list := corev1.ConfigMapList{Items: []corev1.ConfigMap{a}}
+					if scenario == "partial history" {
+						list.Continue = "more"
+					}
+					reply = list
+				case base + "/configmaps/" + name:
+					reply = record(name, "node-worker-result", "result.json", r)
+				default:
+					t.Errorf("unexpected read: %s", req.URL)
+					http.NotFound(w, req)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(reply)
+			}))
+			defer kube.Close()
+			n, svc := node, service
+			if scenario == "replaced ingress" {
+				svc.UID = "replacement-ingress"
+			}
+			if scenario == "foreign node UID" {
+				n.UID = "replacement-node"
+			}
+			client := &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader"}
+			got, fence, err := (&Server{}).capacityNodeWorkerTarget(t.Context(), client, base, n, svc, group)
+			switch scenario {
+			case "verified":
+				if err != nil || fence != j.Digest || got.FrontGeneration != 13 || got.Slot != "a" {
+					t.Fatal("did not recover the committed rollback", got, fence, err)
+				}
+			case "foreign node UID":
+				if err != nil || fence != "" {
+					t.Fatal("old physical node must not grant authority", fence, err)
+				}
+			default:
+				if err == nil {
+					t.Fatal("unproven recovery history admitted")
+				}
+			}
+		})
+	}
+}
