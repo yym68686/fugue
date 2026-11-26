@@ -34,6 +34,10 @@ type capacityFrontState struct {
 // The caller captures it on both sides of a signed public transfer. Missing,
 // changing, or ambiguous physical ownership keeps the member quarantined.
 func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+	return s.readCapacityCodeIdentity(parent, edge, false)
+}
+
+func (s *Server) readCapacityCodeIdentity(parent context.Context, edge model.EdgeNode, requireRelease bool) (platformproducer.CapacityCodeIdentity, error) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 	var result platformproducer.CapacityCodeIdentity
@@ -130,7 +134,7 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 		return fail("code_identity_conflict", "authority_changed")
 	}
 	observed := model.EdgeCodeRecoveryTarget{Slot: health.Slot, FrontGeneration: health.Fence, BundleGeneration: health.Bundle, WorkerSourceSHA: health.Source, WorkerImageDigest: health.Image}
-	local, journal, err := s.capacityNodeWorkerTarget(ctx, client, base, node, *service, edge.EdgeGroupID)
+	local, err := s.capacityNodeWorkerTarget(ctx, client, base, node, *service, edge.EdgeGroupID)
 	if err != nil {
 		return fail("code_observation_unavailable", "recovery_history")
 	}
@@ -141,12 +145,18 @@ func (s *Server) readCapacityCode(parent context.Context, edge model.EdgeNode) (
 	if pending {
 		return fail("code_transition_in_progress", "transition_journal")
 	}
-	if journal != "" {
-		if observed != local {
+	if local.journalDigest != "" {
+		if observed != local.target {
 			return fail("code_not_current", "code_binding")
 		}
-		result.AuthorityRecordDigest = journal
+		result.AuthorityRecordDigest = local.journalDigest
+		if requireRelease {
+			result.WorkerReleaseDigest = local.releaseDigest
+		}
 		return result, nil
+	}
+	if requireRelease {
+		return fail("code_not_current", "recovery_history")
 	}
 	target := model.EdgeCodeRecoveryTarget{Slot: current.Slot, FrontGeneration: current.Fence, BundleGeneration: current.Bundle, WorkerSourceSHA: current.Source, WorkerImageDigest: current.Image}
 	var previous *model.EdgeCodeRecoveryTarget

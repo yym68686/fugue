@@ -26,6 +26,30 @@ type OfflineEdgeRecoveryPolicy struct {
 	FailureThreshold     int                     `json:"failure_threshold"`
 	FreshnessSeconds     int                     `json:"freshness_seconds"`
 	Capacity             *CapacityRecoveryPolicy `json:"capacity,omitempty"`
+	WorkerTarget         *OfflineWorkerTarget    `json:"worker_target,omitempty"`
+}
+
+// OfflineWorkerTarget is a durable desired release, not an observation of the
+// running Worker. Its artifact receipt is scoped to this physical ingress by
+// the Guardian's completed local handoff. It does not authorize a cutover.
+type OfflineWorkerTarget struct {
+	NodeUID         string `json:"node_uid"`
+	ServiceUID      string `json:"service_uid"`
+	ReleaseDigest   string `json:"release_digest"`
+	WorkerSourceSHA string `json:"worker_source_sha"`
+	WorkerImage     string `json:"worker_image_digest"`
+}
+
+func (t OfflineWorkerTarget) valid() bool {
+	return offlineKubernetesUID.MatchString(t.NodeUID) && offlineKubernetesUID.MatchString(t.ServiceUID) &&
+		t.NodeUID != t.ServiceUID && ValidDigest(t.ReleaseDigest) && ValidDigest(t.WorkerImage) &&
+		len(t.WorkerSourceSHA) == 40 && strings.Trim(t.WorkerSourceSHA, "0123456789abcdef") == ""
+}
+
+func (t OfflineWorkerTarget) Matches(c CapacityCodeIdentity) bool {
+	return t.valid() && c.Valid() && c.NodeUID == t.NodeUID && c.ServiceUID == t.ServiceUID &&
+		c.WorkerReleaseDigest == t.ReleaseDigest && c.WorkerSourceSHA == t.WorkerSourceSHA &&
+		c.WorkerImageDigest == t.WorkerImage
 }
 
 func (p OfflineEdgeRecoveryPolicy) Validate() error {
@@ -50,6 +74,9 @@ func (p OfflineEdgeRecoveryPolicy) Validate() error {
 	}
 	if p.Capacity != nil && p.Capacity.Version == CapacityContinuityVersion && p.Capacity.RetainAdmissionSeconds < p.FreshnessSeconds {
 		return fmt.Errorf("capacity retention cannot be shorter than freshness")
+	}
+	if p.WorkerTarget != nil && !p.WorkerTarget.valid() {
+		return fmt.Errorf("offline Worker target requires exact physical ingress and immutable release identity")
 	}
 	return nil
 }
@@ -93,6 +120,15 @@ func OfflineRecoveryDigest(hold OfflineEdge) string {
 
 func (o OfflineRecoveryObservation) Ready(hold OfflineEdge, at time.Time) bool {
 	p := hold.Recovery
+	if p != nil && p.WorkerTarget != nil {
+		if p.Capacity != nil {
+			if o.Capacity == nil || !p.WorkerTarget.Matches(o.Capacity.Code) {
+				return false
+			}
+		} else if o.RouteCode == nil || o.LastResult != "route_code_verified" || !p.WorkerTarget.Matches(*o.RouteCode) {
+			return false
+		}
+	}
 	if p != nil && p.Capacity != nil && p.Capacity.Version == CapacitySingleVersion {
 		return o.singleReady(hold, at)
 	}

@@ -19,6 +19,33 @@ from scripts.reconcile_agent_edge_trust import strict_json
 from scripts.reconfigure_cell_producer import DIGEST, IDENTITY, validate_ref
 from scripts.reconfigure_physical_dns import SCOPE, baseline, bounded_json, validate_runtime_summary
 
+UID = r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+WORKER_TARGET_FIELDS = ('node_uid', 'service_uid', 'release_digest', 'worker_source_sha', 'worker_image_digest')
+
+
+def valid_worker_target(value):
+    return (isinstance(value, dict) and set(value) == set(WORKER_TARGET_FIELDS)
+            and all(isinstance(v, str) for v in value.values())
+            and all(re.fullmatch(UID, value[k]) for k in ('node_uid', 'service_uid'))
+            and value['node_uid'] != value['service_uid']
+            and all(DIGEST.fullmatch(value[k]) for k in ('release_digest', 'worker_image_digest'))
+            and re.fullmatch(r'[a-f0-9]{40}', value['worker_source_sha']) is not None)
+
+
+def worker_target_observed(recovery, observation):
+    target = recovery.get('worker_target')
+    if target is None:
+        return True
+    if 'capacity' in recovery:
+        capacity = observation.get('capacity')
+        code = capacity.get('code') if isinstance(capacity, dict) else None
+    else:
+        if observation.get('last_result') != 'route_code_verified':
+            return False
+        code = observation.get('route_code')
+    return isinstance(code, dict) and all(code.get('worker_release_digest' if key == 'release_digest' else key) == target[key]
+                                          for key in WORKER_TARGET_FIELDS)
+
 
 def holds(policy):
     result = policy.get('offline_edges', [])
@@ -42,7 +69,7 @@ def holds(policy):
         if 'recovery' in hold:
             p = hold['recovery']
             numeric = {'probe_interval_seconds', 'probe_timeout_seconds', 'success_threshold', 'failure_threshold', 'freshness_seconds'}
-            if not isinstance(p, dict) or not numeric | {'hostname', 'path'} <= set(p) or set(p) - numeric - {'hostname', 'path', 'capacity'} or any(type(p[k]) is not int for k in numeric):
+            if not isinstance(p, dict) or not numeric | {'hostname', 'path'} <= set(p) or set(p) - numeric - {'hostname', 'path', 'capacity', 'worker_target'} or any(type(p[k]) is not int for k in numeric):
                 raise ValueError('complete bounded recovery probe policy required')
             if not isinstance(p['hostname'], str) or len(p['hostname']) > 253 or '.' not in p['hostname'] or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label) for label in p['hostname'].split('.')):
                 raise ValueError('canonical recovery probe hostname required')
@@ -54,13 +81,18 @@ def holds(policy):
                 raise ValueError('recovery probe bounds invalid')
             if 'capacity' in p:
                 validate_capacity_policy(p['capacity'], hold['edge_id'], p['freshness_seconds'])
+            if 'worker_target' in p and not valid_worker_target(p['worker_target']):
+                raise ValueError('offline Worker target requires exact physical ingress and immutable release identity')
         if 'worker_enrollment' in hold:
             e = hold['worker_enrollment']
             required = {'id', 'node_uid', 'service_account', 'daemonset_uids', 'pod_created_after'}
-            uid = r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}'
+            uid = UID
             if 'recovery' not in hold or not isinstance(e, dict) or not required <= set(e) or set(e) - required - {'independent_deployment'} or any(not isinstance(e[k], str) for k in required-{'daemonset_uids'}) or not re.fullmatch(r'[a-f0-9]{32}', e['id']) or not re.fullmatch(uid, e['node_uid']) or not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,127}', e['service_account']) or e['id'] in enrollments:
                 raise ValueError('replacement Worker requires a unique enrollment and exact Node ownership')
             ds = e['daemonset_uids']
+            target = hold['recovery'].get('worker_target')
+            if target is not None and target['node_uid'] != e['node_uid']:
+                raise ValueError('offline Worker target belongs to a different physical Node than its enrollment')
             if not isinstance(ds, list) or not 1 <= len(ds) <= 2 or any(not isinstance(v, str) or not re.fullmatch(uid, v) for v in ds) or ds != sorted(set(ds)):
                 raise ValueError('ordered unique Worker workload UIDs required')
             created_after = datetime.datetime.strptime(e['pod_created_after'], '%Y-%m-%dT%H:%M:%SZ')
@@ -178,6 +210,8 @@ def recovery_declaration_digest(hold):
             value['recovery']['capacity'] = {key: hold['recovery']['capacity'][key] for key in ('version', 'traffic_class', 'reference_edge_ids', 'minimum_bytes_per_second', 'max_elapsed_milliseconds', 'minimum_stable_seconds')}
             if hold['recovery']['capacity'].get('retain_admission_seconds'):
                 value['recovery']['capacity']['retain_admission_seconds'] = hold['recovery']['capacity']['retain_admission_seconds']
+        if 'worker_target' in hold['recovery']:
+            value['recovery']['worker_target'] = {key: hold['recovery']['worker_target'][key] for key in WORKER_TARGET_FIELDS}
     if 'worker_enrollment' in hold:
         value['worker_enrollment'] = {key: hold['worker_enrollment'][key] for key in ('id', 'node_uid', 'service_account', 'daemonset_uids', 'pod_created_after')}
     raw = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
@@ -208,7 +242,7 @@ def validate_preview(previous, current, policy):
         if not p:
             continue
         for o in recovered:
-            if o.get('edge_id') != hold['edge_id'] or o.get('declaration_digest') != recovery_declaration_digest(hold) or o.get('admitted') is not True:
+            if o.get('edge_id') != hold['edge_id'] or o.get('declaration_digest') != recovery_declaration_digest(hold) or o.get('admitted') is not True or not worker_target_observed(p, o):
                 continue
             at = datetime.datetime.fromisoformat(fact['captured_at'].replace('Z', '+00:00'))
             attempt = datetime.datetime.fromisoformat(o['last_attempt'].replace('Z', '+00:00'))

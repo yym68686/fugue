@@ -42,6 +42,18 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 	if !receipt.MatchesJournal(j) {
 		t.Fatal("synthetic rollback must be a real Guardian outcome")
 	}
+	promoted := previous
+	promoted.Generation, promoted.ActiveSlot, promoted.PreviousSlot = 12, "b", "a"
+	promoted.Operation, promoted.Reason, promoted.UpdatedAt = edgegroupfront.ActivationOperationPromote, "advance node Worker using journal "+j.Digest, start.Add(2*time.Second)
+	promoted.BundleGeneration, promoted.WorkerSourceCommit, promoted.WorkerImageDigest = j.Candidate.BundleGeneration, j.Candidate.WorkerSourceCommit, j.Candidate.WorkerImageDigest
+	promotion := releaseguardian.NodeWorkerResult{Schema: receipt.Schema, JournalDigest: j.Digest, Outcome: "verified", Activation: promoted,
+		Witness: &releaseguardian.NodeWorkerWitness{Schema: releaseguardian.NodeWorkerWitnessSchema, JournalDigest: j.Digest, ObservedAt: promoted.UpdatedAt.Add(time.Second),
+			Held:  releaseguardian.NodeWorkerConnection{FrontUID: j.Recipient.PodUID, ID: "retained", StartedAt: j.CreatedAt, Slot: "a", Target: "192.0.2.1:18443"},
+			Fresh: releaseguardian.NodeWorkerConnection{FrontUID: j.Recipient.PodUID, ID: "fresh", StartedAt: promoted.UpdatedAt, Slot: "b", Target: "192.0.2.1:38443"},
+		}}
+	if !promotion.MatchesJournal(j) {
+		t.Fatal("synthetic cutover must be a real Guardian outcome")
+	}
 	record := func(name, kind, key string, data any) corev1.ConfigMap {
 		raw, err := declarativerelease.CanonicalJSON(data)
 		if err != nil {
@@ -84,12 +96,16 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 			}
 		}
 	})
-	for _, scenario := range []string{"verified", "missing index", "changed index", "wrong generation", "tampered rollback", "replaced ingress", "foreign node UID"} {
+	for _, scenario := range []string{"verified", "reverted", "missing index", "changed index", "wrong generation", "tampered rollback", "replaced ingress", "foreign node UID"} {
 		t.Run(scenario, func(t *testing.T) {
 			a := record(releaseguardian.NodeWorkerArchiveName(j.Digest), "node-worker-archive", "journal.json", j)
 			name := releaseguardian.NodeWorkerResultName(j.Digest)
 			indexName := releaseguardian.NodeWorkerIndexName(group)
-			generation := uint64(13)
+			r := receipt
+			if scenario == "verified" {
+				r = promotion
+			}
+			generation := r.Activation.Generation
 			if scenario == "wrong generation" {
 				generation++
 			}
@@ -100,7 +116,6 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 			})
 			index.Immutable = nil
 			indexReads := 0
-			r := receipt
 			if scenario == "tampered rollback" {
 				r.Activation.WorkerImageDigest = digest("0")
 			}
@@ -139,15 +154,19 @@ func TestNodeLocalCapacityRecoveryUsesExactCompletedRollback(t *testing.T) {
 				n.UID = "replacement-node"
 			}
 			client := &clusterNodeClient{client: kube.Client(), baseURL: kube.URL, bearerToken: "metadata-reader"}
-			got, fence, err := (&Server{}).capacityNodeWorkerTarget(t.Context(), client, base, n, svc, group)
+			got, err := (&Server{}).capacityNodeWorkerTarget(t.Context(), client, base, n, svc, group)
 			switch scenario {
 			case "verified":
-				if err != nil || fence != j.Digest || got.FrontGeneration != 13 || got.Slot != "a" {
-					t.Fatal("did not recover the committed rollback", got, fence, err)
+				if err != nil || got.journalDigest != j.Digest || got.releaseDigest != j.ReleaseDigest || got.target.FrontGeneration != 12 || got.target.Slot != "b" {
+					t.Fatal("did not recover the committed release", got, err)
+				}
+			case "reverted":
+				if err != nil || got.journalDigest != j.Digest || got.releaseDigest != "" || got.target.FrontGeneration != 13 || got.target.Slot != "a" {
+					t.Fatal("rollback did not restore the predecessor or incorrectly attested the candidate", got, err)
 				}
 			case "foreign node UID":
-				if err != nil || fence != "" {
-					t.Fatal("old physical node must not grant authority", fence, err)
+				if err != nil || got != (nodeWorkerRecoveryAuthority{}) {
+					t.Fatal("old physical node must not grant authority", got, err)
 				}
 			default:
 				if err == nil {

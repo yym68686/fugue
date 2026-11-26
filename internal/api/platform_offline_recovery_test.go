@@ -137,6 +137,43 @@ func TestEnrolledRouteRecoveryRequiresCurrentExactCode(t *testing.T) {
 	}
 }
 
+func TestPinnedWorkerRecoveryRejectsOldCodeAndDoesNotObserveOfflineNode(t *testing.T) {
+	s, _, h, _ := offlineRecoveryFixture(t)
+	now := time.Now().UTC()
+	node, _, err := s.store.GetEdgeNode(h.EdgeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := testCapacityCode()
+	code.NodeUID = "11111111-1111-1111-1111-111111111111"
+	code.ServiceUID = "22222222-2222-2222-2222-222222222222"
+	code.WorkerReleaseDigest = "sha256:" + strings.Repeat("a", 64)
+	h.Recovery.WorkerTarget = &platformproducer.OfflineWorkerTarget{NodeUID: code.NodeUID, ServiceUID: code.ServiceUID,
+		ReleaseDigest: code.WorkerReleaseDigest, WorkerSourceSHA: code.WorkerSourceSHA, WorkerImage: code.WorkerImageDigest}
+	o := platformproducer.OfflineRecoveryObservation{EdgeID: h.EdgeID, DeclarationDigest: platformproducer.OfflineRecoveryDigest(h),
+		Admitted: true, LastAttempt: now, LastSuccess: now, ProofValidUntil: now.Add(time.Minute), Successes: h.Recovery.SuccessThreshold,
+		LastResult: "route_code_verified", RouteCode: &code}
+	live, reads := code, 0
+	s.offlineCapacityCode = func(context.Context, model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+		reads++
+		return live, nil
+	}
+	stale := node
+	old := now.Add(-time.Hour)
+	stale.LastSeenAt, stale.LastHeartbeatAt = &old, &old
+	if s.offlineRecoveryReady(t.Context(), h, o, stale, now) || reads != 0 {
+		t.Fatal("offline node was probed or admitted")
+	}
+	live.WorkerReleaseDigest = "sha256:" + strings.Repeat("b", 64)
+	if s.offlineRecoveryReady(t.Context(), h, o, node, now) || reads != 1 {
+		t.Fatal("historical executable receipt admitted the node")
+	}
+	live = code
+	if !s.offlineRecoveryReady(t.Context(), h, o, node, now) || reads != 2 {
+		t.Fatal("exact current Worker and prior verification did not authorize readiness")
+	}
+}
+
 func TestOfflineRecoveryRestoresCandidatesAndRetractsOnFailedProof(t *testing.T) {
 	s, policy, hold, input := offlineRecoveryFixture(t)
 	ctx := context.Background()

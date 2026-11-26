@@ -189,7 +189,7 @@ class NodeWorkerDriverTests(unittest.TestCase):
             driver.stage.DIGEST: driver.kube.digest(driver.replacement.projection(spec))}},
                "spec": spec}
         edge = {"public_ipv4": "9.9.9.9", "observation": {"reason": "heartbeat_stale", "heartbeat_fresh": False,
-                "dns_admission_intent": {"state": "suspended", "serving_evidence": "excluded_from_verified_full"}}}
+                "dns_admission_intent": {"state": "suspended", "reason": "network_unavailable", "serving_evidence": "excluded_from_verified_full"}}}
         endpoints = {"items": [{"metadata": {"uid": "slice", "ownerReferences": [
             {"kind": "Service", "uid": "service-peer", "controller": True}]},
             "endpoints": [{"nodeName": "peer-node", "conditions": {"ready": False, "serving": False}}]}]}
@@ -202,7 +202,11 @@ class NodeWorkerDriverTests(unittest.TestCase):
             edge["observation"]["dns_admission_intent"]["serving_evidence"] = "excluded_across_full_transition"
             self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
             live.assert_not_called()
-            for mutation in ("unknown_dns_selection", "missing_owner_policy", "serving_endpoint", "recovered"):
+            physical["status"]["conditions"][0]["status"] = "True"
+            self.assertEqual(cluster.peer_snapshot()["peer-node"]["state"], "isolated")
+            physical["status"]["conditions"][0]["status"] = "Unknown"
+            live.assert_not_called()
+            for mutation in ("unknown_dns_selection", "missing_owner_policy", "serving_endpoint", "ready_with_serving_endpoint", "wrong_reason", "recovered"):
                 original, state = copy.deepcopy(edge), copy.deepcopy(physical)
                 try:
                     if mutation == "unknown_dns_selection":
@@ -211,14 +215,20 @@ class NodeWorkerDriverTests(unittest.TestCase):
                         cluster.participation_policy = None
                     elif mutation == "serving_endpoint":
                         endpoints["items"][0]["endpoints"][0]["conditions"]["serving"] = True
+                    elif mutation == "ready_with_serving_endpoint":
+                        physical["status"]["conditions"][0]["status"] = "True"
+                        endpoints["items"][0]["endpoints"][0]["conditions"]["ready"] = True
+                    elif mutation == "wrong_reason":
+                        edge["observation"]["dns_admission_intent"]["reason"] = "maintenance"
                     else:
                         physical["status"]["conditions"][0]["status"] = "True"
+                        edge["observation"].update(reason="inventory_checks_passed", heartbeat_fresh=True)
                     with self.subTest(mutation=mutation), self.assertRaisesRegex(ValueError, "live Front proof|serving or unproven"):
                         cluster.peer_snapshot()
                 finally:
                     edge.update(original)
                     physical.update(state)
-                    endpoints["items"][0]["endpoints"][0]["conditions"]["serving"] = False
+                    endpoints["items"][0]["endpoints"][0]["conditions"].update(serving=False, ready=False)
                     cluster.participation_policy = policy
             physical["status"]["conditions"][0]["status"] = "True"
             edge["observation"].update(reason="inventory_checks_passed", heartbeat_fresh=True)

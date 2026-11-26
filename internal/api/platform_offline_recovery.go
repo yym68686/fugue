@@ -28,39 +28,54 @@ func (s *Server) readOfflineRecovery(ctx context.Context, hold platformproducer.
 	return o, nil
 }
 
-// A separately re-enrolled Worker must prove its exact activation before a
-// route-only check can admit it. A successful HTTPS response alone can come
-// from the returning node's old executable. Capacity rounds already bind code.
+// A re-enrolled Worker or a pinned release must prove its exact activation
+// before a route-only check can admit it. Capacity rounds already bind code.
 func requiresOfflineRouteCode(hold platformproducer.OfflineEdge) bool {
-	return hold.WorkerEnrollment != nil && hold.Recovery != nil && hold.Recovery.Capacity == nil
+	return hold.Recovery != nil && hold.Recovery.Capacity == nil && (hold.WorkerEnrollment != nil || hold.Recovery.WorkerTarget != nil)
 }
 
-func (s *Server) readOfflineRouteCode(ctx context.Context, hold platformproducer.OfflineEdge, node model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+func (s *Server) readOfflineCode(ctx context.Context, hold platformproducer.OfflineEdge, node model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+	target := hold.Recovery.WorkerTarget
 	read := s.offlineCapacityCode
 	if read == nil {
 		read = s.readCapacityCode
+		if target != nil {
+			read = func(ctx context.Context, node model.EdgeNode) (platformproducer.CapacityCodeIdentity, error) {
+				return s.readCapacityCodeIdentity(ctx, node, true)
+			}
+		}
 	}
 	code, err := read(ctx, node)
-	if err == nil && (!code.Valid() || code.NodeUID != hold.WorkerEnrollment.NodeUID) {
-		err = codeObservationError("code_identity_conflict", "node_metadata")
+	if err != nil {
+		return code, err
 	}
-	return code, err
+	if !code.Valid() || hold.WorkerEnrollment != nil && code.NodeUID != hold.WorkerEnrollment.NodeUID {
+		return code, codeObservationError("code_identity_conflict", "node_metadata")
+	}
+	if target != nil && !target.Matches(code) {
+		return code, codeObservationError("code_not_current", "code_binding")
+	}
+	return code, nil
 }
 
 func (s *Server) offlineRecoveryReady(ctx context.Context, hold platformproducer.OfflineEdge, o platformproducer.OfflineRecoveryObservation, node model.EdgeNode, at time.Time) bool {
 	if !o.Ready(hold, at) {
 		return false
 	}
-	if !requiresOfflineRouteCode(hold) {
+	if !requiresOfflineRouteCode(hold) && hold.Recovery.WorkerTarget == nil {
 		return true
 	}
-	if o.RouteCode == nil || !o.RouteCode.Valid() || o.LastResult != "route_code_verified" || node.ID != hold.EdgeID ||
+	expected := o.RouteCode
+	if hold.Recovery.Capacity != nil && o.Capacity != nil {
+		expected = &o.Capacity.Code
+	}
+	if expected == nil || !expected.Valid() || hold.Recovery.Capacity == nil && o.LastResult != "route_code_verified" || node.ID != hold.EdgeID ||
 		node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || node.Draining ||
 		!edgeNodeRouteServingCapable(node, time.Now().UTC()) {
 		return false
 	}
-	code, err := s.readOfflineRouteCode(ctx, hold, node)
-	return err == nil && code == *o.RouteCode
+	code, err := s.readOfflineCode(ctx, hold, node)
+	return err == nil && code == *expected
 }
 
 // Only the independent recovery worker schedules probes. Preview/inventory requests only
@@ -177,7 +192,7 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 			var before platformproducer.CapacityCodeIdentity
 			var codeErr error
 			if requiresOfflineRouteCode(hold) {
-				before, codeErr = s.readOfflineRouteCode(ctx, hold, node)
+				before, codeErr = s.readOfflineCode(ctx, hold, node)
 			}
 			if codeErr == nil {
 				proof, probeErr := probe(ctx, hold.Recovery.Hostname, hold.Recovery.Path, hold.PublicIPv4, "", time.Duration(hold.Recovery.ProbeTimeoutSeconds)*time.Second)
@@ -186,7 +201,7 @@ func (s *Server) reconcileOfflineEdgeRecovery(ctx context.Context, policy platfo
 				validUntil = proof.ValidUntil
 				if passed && requiresOfflineRouteCode(hold) {
 					var after platformproducer.CapacityCodeIdentity
-					after, codeErr = s.readOfflineRouteCode(ctx, hold, node)
+					after, codeErr = s.readOfflineCode(ctx, hold, node)
 					if codeErr == nil && before != after {
 						codeErr = codeObservationError("code_identity_conflict", "observation_changed")
 					}
@@ -288,7 +303,7 @@ func (s *Server) effectiveOfflineEdgeHolds(ctx context.Context, nodes []model.Ed
 				}
 				continue
 			}
-			if requiresOfflineRouteCode(hold) && inventory == nil {
+			if (requiresOfflineRouteCode(hold) || hold.Recovery.WorkerTarget != nil) && inventory == nil {
 				inventory = make(map[string]model.EdgeNode, len(nodes))
 				for _, node := range nodes {
 					inventory[node.ID] = node

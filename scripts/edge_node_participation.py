@@ -121,17 +121,25 @@ def isolation(policy, member, node, svc):
     state = json.loads(ann.get(STATE, "null"))
     recovering = (owned == hold(member) and isinstance(state, dict) and state.get("schema") == STATE_SCHEMA
                   and state.get("owner") == participation_owner(member) and state.get("phase") in ("offline", "recovering"))
+    # Ready describes the kubelet, not the Edge data plane. After the
+    # transport lost all serving endpoints, a stalled controller tick must
+    # not leave a permitted node in the live verification set.
+    slices = None
     if ready and not recovering:
-        return None
+        slices = require_isolated_service(policy["namespace"], svc, member["node"], allow_serving=True)
+        if slices is None:
+            return None
     observed = read_edge_node(policy, member)
     o = observed.get("observation", {})
     stale = o.get("heartbeat_fresh") is False and o.get("reason") == "heartbeat_stale"
     if (not (stale or recovering and o.get("heartbeat_fresh") is True) or
-            not verified_dns_exclusion(observed, svc)):
+            not verified_dns_exclusion(observed, svc) or
+            o.get("dns_admission_intent", {}).get("reason") != member["reason"]):
         return None
     # An already-recovering member may have a usable direct Front before DNS
     # admission. In that case observe it like a live peer, not as absent.
-    slices = require_isolated_service(policy["namespace"], svc, member["node"], allow_serving=recovering and (ready or not stale))
+    if slices is None:
+        slices = require_isolated_service(policy["namespace"], svc, member["node"], allow_serving=recovering and (ready or not stale))
     if slices is None:
         return None
     return {"state": "isolated", "node_uid": meta["uid"], "authorization": hold(member), "service_uid": svc["metadata"]["uid"],

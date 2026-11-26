@@ -109,6 +109,31 @@ class OfflineConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 offline.validate(config)
 
+    def test_worker_target_requires_an_exact_release_and_changes_recovery_digest(self):
+        config, _ = self.fixture()
+        hold = config['projection_policy']['offline_edges'][0]
+        hold.pop('expected_recovery_date')
+        hold.update(reason='quota_exhausted', recovery={'hostname': 'api.example.test', 'path': '/',
+            'probe_interval_seconds': 300, 'probe_timeout_seconds': 5, 'success_threshold': 3,
+            'failure_threshold': 1, 'freshness_seconds': 1800})
+        old = offline.recovery_declaration_digest(hold)
+        target = dict(node_uid='11111111-1111-1111-1111-111111111111', service_uid='22222222-2222-2222-2222-222222222222',
+                      release_digest='sha256:'+'c'*64, worker_source_sha='d'*40, worker_image_digest='sha256:'+'e'*64)
+        hold['recovery']['worker_target'] = target
+        offline.validate(config)
+        self.assertNotEqual(offline.recovery_declaration_digest(hold), old)
+        self.assertEqual(offline.recovery_declaration_digest(hold), 'sha256:db2945a0fd087a6d0c841ac29a710dac9d840f721ccc59fe0a96b82b4ccb3453')
+        for invalid in (dict(target, service_uid=target['node_uid']), dict(target, release_digest='latest'), dict(target, fake='yes')):
+            hold['recovery']['worker_target'] = invalid
+            with self.assertRaises(ValueError):
+                offline.validate(config)
+        hold['recovery']['worker_target'] = target
+        code = dict(target)
+        code['worker_release_digest'] = code.pop('release_digest')
+        self.assertTrue(offline.worker_target_observed(hold['recovery'], {'last_result': 'route_code_verified', 'route_code': code}))
+        self.assertFalse(offline.worker_target_observed(hold['recovery'], {'last_result': 'route_code_verified', 'route_code': dict(code, worker_release_digest=None)}))
+        self.assertTrue(offline.worker_target_observed(dict(hold['recovery'], capacity={}), {'capacity': {'code': code}}))
+
     def test_preview_rejects_held_candidate_and_unrelated_changes(self):
         config, _ = self.fixture()
         before = {'business_snapshot_revision': 'before', 'intent': {'dns': [{'hostname': 'app.example.test'}]}, 'policy': {'minimum_healthy_edges': 1}, 'issues': []}

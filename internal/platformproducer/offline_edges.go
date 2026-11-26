@@ -106,6 +106,9 @@ func ValidateOfflineEdges(holds []OfflineEdge) error {
 			if hold.Recovery == nil || e.Validate() != nil || enrollments[e.ID] {
 				return fmt.Errorf("unique replacement Worker enrollment requires a recovery policy")
 			}
+			if target := hold.Recovery.WorkerTarget; target != nil && target.NodeUID != e.NodeUID {
+				return fmt.Errorf("offline Worker target belongs to a different physical Node than its enrollment")
+			}
 			enrollments[e.ID] = true
 		}
 	}

@@ -34,6 +34,63 @@ func recoveryHold() OfflineEdge {
 	return OfflineEdge{EdgeID: "edge-a", EdgeGroupID: "edge-group-a", PublicIPv4: "8.8.8.8", Reason: "quota_exhausted", Recovery: &OfflineEdgeRecoveryPolicy{Hostname: "api.example.test", Path: "/", ProbeIntervalSeconds: 300, ProbeTimeoutSeconds: 5, SuccessThreshold: 3, FailureThreshold: 1, FreshnessSeconds: 1800}}
 }
 
+func TestOfflineWorkerTargetIsBoundToCurrentProofAndSignedReplay(t *testing.T) {
+	h := recoveryHold()
+	old := OfflineRecoveryDigest(h)
+	target := OfflineWorkerTarget{NodeUID: "11111111-1111-1111-1111-111111111111", ServiceUID: "22222222-2222-2222-2222-222222222222",
+		ReleaseDigest: "sha256:" + strings.Repeat("c", 64), WorkerSourceSHA: strings.Repeat("d", 40), WorkerImage: "sha256:" + strings.Repeat("e", 64)}
+	h.Recovery.WorkerTarget = &target
+	if err := ValidateOfflineEdges([]OfflineEdge{h}); err != nil {
+		t.Fatal(err)
+	}
+	digest := OfflineRecoveryDigest(h)
+	if digest == old || digest != "sha256:db2945a0fd087a6d0c841ac29a710dac9d840f721ccc59fe0a96b82b4ccb3453" {
+		t.Fatal("Worker target must participate in the cross-language evidence binding", digest)
+	}
+	at := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	code := capacityEvidence(at).Code
+	code.NodeUID, code.ServiceUID = target.NodeUID, target.ServiceUID
+	code.WorkerSourceSHA, code.WorkerImageDigest = target.WorkerSourceSHA, target.WorkerImage
+	o := OfflineRecoveryObservation{EdgeID: h.EdgeID, DeclarationDigest: digest, LastAttempt: at, LastSuccess: at,
+		ProofValidUntil: at.Add(time.Hour), Successes: h.Recovery.SuccessThreshold, Admitted: true, LastResult: "route_code_verified", RouteCode: &code}
+	if o.Ready(h, at) {
+		t.Fatal("a running image alone is not a receipt for the selected release")
+	}
+	code.WorkerReleaseDigest = target.ReleaseDigest
+	if !o.Ready(h, at) {
+		t.Fatal("fresh evidence for the exact Worker target did not admit it")
+	}
+	raw, err := json.Marshal(map[string]any{"captured_at": at, "observations": []OfflineRecoveryObservation{o}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := model.PlatformArtifact{Metadata: map[string]string{OfflineRecoveryMetadata: string(raw)}, Provenance: model.PlatformArtifactProvenance{SignedAt: at}}
+	if holds, err := PublicationOfflineHolds(parent, []OfflineEdge{h}); err != nil || len(holds) != 0 {
+		t.Fatalf("replay did not honor its own signed target: %v, %v", holds, err)
+	}
+	newTarget := target
+	newTarget.ReleaseDigest = "sha256:" + strings.Repeat("f", 64)
+	h.Recovery.WorkerTarget = &newTarget
+	if o.Ready(h, at) {
+		t.Fatal("new signed target reused an older checkpoint")
+	}
+	if _, err := PublicationOfflineHolds(parent, []OfflineEdge{h}); err == nil {
+		t.Fatal("signed evidence was accepted with a different declaration")
+	}
+
+	h, o, at = singleRecoveryFixture(t)
+	h.Recovery.WorkerTarget = &target
+	o.DeclarationDigest = OfflineRecoveryDigest(h)
+	o.Capacity.Code = code
+	if !o.Ready(h, at) {
+		t.Fatal("capacity observation did not recognize the exact Worker target")
+	}
+	o.Capacity.Code.ServiceUID = "wrong-service"
+	if o.Ready(h, at) {
+		t.Fatal("capacity observation bypassed the exact ingress binding")
+	}
+}
+
 func TestOfflineRecoveryDeclarationWireDigestMatchesConfigurationPublisher(t *testing.T) {
 	h := recoveryHold()
 	h.ExpectedRecoveryDate = "2030-01-01"

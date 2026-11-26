@@ -40,16 +40,9 @@ func (s *Server) prepareCapacityRecovery(ctx context.Context, hold platformprodu
 	if err != nil || node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || !edgeNodeRouteServingCapable(node, now) || node.Draining {
 		return fail("route_unavailable")
 	}
-	readCode := s.offlineCapacityCode
-	if readCode == nil {
-		readCode = s.readCapacityCode
-	}
-	before, err := readCode(ctx, node)
+	before, err := s.readOfflineCode(ctx, hold, node)
 	if err != nil {
 		return nil, capacityCodeFailureResult(err)
-	}
-	if !before.Valid() {
-		return nil, capacityCodeFailureResult(codeObservationError("code_identity_conflict", "code_binding"))
 	}
 	probe := s.offlineEdgeRecoveryProbe
 	if probe == nil {
@@ -141,11 +134,7 @@ func (s *Server) finishCapacityRecovery(ctx context.Context, hold platformproduc
 	if err != nil || node.EdgeGroupID != hold.EdgeGroupID || node.PublicIPv4 != hold.PublicIPv4 || !edgeNodeRouteServingCapable(node, time.Now().UTC()) || node.Draining || !reflect.DeepEqual(round.Plan, report.Plan) {
 		return fail("route_unavailable")
 	}
-	readCode := s.offlineCapacityCode
-	if readCode == nil {
-		readCode = s.readCapacityCode
-	}
-	after, err := readCode(ctx, node)
+	after, err := s.readOfflineCode(ctx, hold, node)
 	if err != nil {
 		return capacityCodeFailureResult(err)
 	}

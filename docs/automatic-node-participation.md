@@ -59,9 +59,10 @@ or reinstall a superseded manual hold over the automatic controller.
 The node-local Worker lane discovers physical peers by group and public Front
 Services by selector. Legacy peer pins are accepted for transports without a
 node selector. A permanently enrolled peer can be omitted from live checks
-only under the current UID-bound participation policy, after Kubernetes and
-Edge heartbeats show it unavailable, its public EndpointSlices offer no
-serving backend, and the active verified full and signed DNS plan exclude it.
+only under the current UID-bound participation policy, when its Edge
+heartbeat is stale, its public EndpointSlices offer no serving backend,
+and the active verified full and signed DNS plan exclude it for the same
+policy reason. A Ready kubelet alone does not override those three checks.
 The latter proof comes from the single-node API observation, not from the
 producer's planned suspension. A missing peer, timeout, conflicting hold,
 unverified DNS candidate or changed node identity does not count. Forward
@@ -115,3 +116,15 @@ Node and exact running Front, Worker and Guardian authority. A changed
 activation or replaced process starts a new series of successful checks.
 The live projection rechecks this binding before dropping the DNS hold;
 historical signed releases still replay their own pinned evidence.
+
+An offline recovery policy may additionally pin `recovery.worker_target`
+in the signed DNS policy. It names the physical `node_uid`, public
+`service_uid`, immutable Worker `release_digest`, `worker_source_sha`,
+and `worker_image_digest`. The release digest is the ordinary monitored
+artifact receipt digest, not a branch SHA, journal digest, or image tag.
+With this pin, route and capacity recovery require a verified terminal
+Guardian result on that Node/Service for the exact release, and the live
+Front and Worker must still match it at candidate compilation. A reverted
+handoff does not attest its candidate, and a later desired release needs
+new recovery evidence. The pin is a readmission condition; it does not
+stage a Worker's inactive slot or grant an isolated activation.

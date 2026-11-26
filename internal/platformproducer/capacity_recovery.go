@@ -83,6 +83,7 @@ type CapacityCodeIdentity struct {
 	ServiceUID            string `json:"service_uid"`
 	AuthorityUID          string `json:"authority_uid"`
 	AuthorityRecordDigest string `json:"authority_record_digest"`
+	WorkerReleaseDigest   string `json:"worker_release_digest,omitempty"`
 	WorkerSourceSHA       string `json:"worker_source_sha"`
 	WorkerImageDigest     string `json:"worker_image_digest"`
 	FrontImageDigest      string `json:"front_image_digest"`
