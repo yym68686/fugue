@@ -1,0 +1,65 @@
+{
+  "schema": "fugue.node-worker-handoff/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "vps-591f4447",
+  "nodeUID": "ecc25989-8514-4e16-9a76-ae74608b1c0e",
+  "front": {
+    "service": "fugue-front-serving-public-b-primary",
+    "uid": "50247fef-fbe9-43db-b5c4-5cf6f09e146f",
+    "generation": 10,
+    "address": "15.204.94.71",
+    "source": "86488c546a5ef0ec58091e70ad470e442cc49e1f",
+    "imageDigest": "sha256:34bc0c473418cfbbeb371e475f02a05da72ac864ea32d7b6aaa61b7dc32b50e8"
+  },
+  "probeIngress": {
+    "service": "fugue-front-probe-public-b-primary",
+    "uid": "ed787ee0-e869-4adb-8c11-b7be1cabbabb",
+    "generation": 6,
+    "port": 15443
+  },
+  "guardian": {
+    "deployment": "fugue-release-guardian",
+    "source": "192771490935b0e07bcd008800e0f327ce7f78c3",
+    "imageDigest": "sha256:c31a4571c13fa31743a6b0f39c624a8cf429e425592885a5e0383126fe23b860"
+  },
+  "candidate": {
+    "daemonSet": "fugue-fugue-edge-worker-b",
+    "component": "edge-worker-us",
+    "source": "664f552db3470a8cf37016d2424e6b4dce3b1b8c",
+    "imageDigest": "sha256:194360677aaed0db67a3b72e812e9d590b511bdac1e2f636fa078b467be88ea1",
+    "slot": "b",
+    "bundleGeneration": "edgegroupbundle_e0cbf634631265c13767ff763680dca98c8310389dd4b954176b6610c6911287.p67292.r185",
+    "releaseDigest": "sha256:1b5fffbd5b1c95c262c872a0d600753866134c69898ad12935576526799b9675"
+  },
+  "expected": {
+    "schema": "edge-front-group-activation/v1",
+    "edge_group_id": "edge-group-country-us",
+    "generation": 919,
+    "active_slot": "a",
+    "previous_slot": "b",
+    "bundle_generation": "edgegroupbundle_727ef8b671f27b54ac69cea8073bd2049524d0af7121e2064b273c07b9366602.p67303.r185",
+    "worker_source_commit": "1baedc8a448ece9c8a52232c0055750e0c661a0e",
+    "worker_image_digest": "sha256:aef8e23537de2e3ea2245fa5c91728b541476d15684f674fd9d9fa4a7afa1265",
+    "authority": "edge-control",
+    "operation": "promote",
+    "reason": "advance fixed Worker using journal sha256:4e5dee7eb9f407206d8f4a51899fec062ce3415c9fa01ce5f8fdb6bcdc6a84e8",
+    "updated_at": "2026-11-26T02:32:35.490282155Z"
+  },
+  "probe": {
+    "host": "edge-observe-canary-0731-1333.fugue.pro",
+    "path": "/",
+    "bodyDigest": "sha256:fb47468a2cd3953c7131431991afcc6a2703f14640520102eea0a685a7e8d6de"
+  },
+  "verifyDrain": true,
+  "fixedRotation": true,
+  "retirement": {
+    "daemonSet": "fugue-edge-worker-us-primary-a-hosted",
+    "uid": "9a080a49-796c-4815-96fe-18540a94b67e",
+    "generation": 1,
+    "witness": "background"
+  },
+  "rearm": {
+    "journalDigest": "sha256:4e5dee7eb9f407206d8f4a51899fec062ce3415c9fa01ce5f8fdb6bcdc6a84e8"
+  }
+}
