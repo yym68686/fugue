@@ -1,0 +1,45 @@
+{
+  "address": "95.169.10.156",
+  "candidateAuthority": "node-worker-v1",
+  "candidateImageDigest": "sha256:0c1c724d29320cfc16ab793f307ff08af1178d6cc060fd206ee3e34add618ccf",
+  "expectedGeneration": 3,
+  "generation": 4,
+  "observation": {
+    "activationPath": "/var/lib/fugue-edge-front/activation.json",
+    "candidateSelector": {
+      "app.kubernetes.io/component": "edge-client-front-public-b-secondary",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue",
+      "fugue.io/edge-node": "bwg"
+    },
+    "candidateSource": "35ac386a1adf5e1087ecf4a86e809b76f678a4a9",
+    "group": "edge-group-country-us",
+    "intervalSeconds": 10,
+    "legacySelector": {
+      "app.kubernetes.io/component": "edge-client-front-public-b-secondary-quality",
+      "app.kubernetes.io/instance": "fugue",
+      "app.kubernetes.io/name": "fugue",
+      "fugue.io/edge-node": "bwg"
+    },
+    "namespace": "fugue-system",
+    "node": "bwg",
+    "probes": [
+      {"host": "api.fugue.pro", "path": "/"},
+      {"host": "fugue.pro", "path": "/"}
+    ],
+    "samples": 3,
+    "schema": "fugue.front-observation/v1"
+  },
+  "probePort": 15443,
+  "rollbackGeneration": 5,
+  "schema": "fugue.front-executor-probe-replacement/v1",
+  "service": "fugue-front-probe-public-b-secondary",
+  "serviceUID": "9cbf3f2e-5102-4ce2-ad9f-fd97a0efe62d",
+  "servingSource": {
+    "generation": 8,
+    "podUID": "479a68d9-784f-4c56-81a7-b06ae863f1bd",
+    "service": "fugue-front-serving-public-b-secondary",
+    "serviceUID": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c"
+  },
+  "verificationSeconds": 60
+}
