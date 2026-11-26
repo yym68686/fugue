@@ -39,6 +39,9 @@ func TestManagedPostgresCPULimitUsageFreshAndSustained(t *testing.T) {
 		ok      bool
 	}{
 		{[]model.ResourceUsageSample{at(1, 91), at(11, 98), at(6, 90)}, true},
+		{[]model.ResourceUsageSample{at(1, 96), at(2, 95), at(6, 97), at(7, 98)}, true},
+		{[]model.ResourceUsageSample{at(1, 96), at(2, 10), at(6, 97), at(7, 98)}, false},
+		{[]model.ResourceUsageSample{at(1, 96), at(2, 96), at(6, 97), at(7, 10)}, true},
 		{[]model.ResourceUsageSample{at(9, 100), at(14, 100)}, false},
 		{[]model.ResourceUsageSample{at(1, 100), at(2, 100)}, false},
 		{[]model.ResourceUsageSample{at(1, 100), at(1, 100)}, false},

@@ -24,8 +24,10 @@ declarative controller release. Both the global in-place resize switch and the
 CPU limit upscale gate must be on. An empty enrollment disables automation;
 removing an entry does not undo a resize that already completed.
 
-The newest two adjacent five-minute samples (3–8 minutes apart, newest no
-more than 8 minutes old) must reach at least 90% of the current finite limit.
+Usage samples spanning 3–8 minutes, with the newest no more than 8 minutes
+old, must all reach at least 90% of the current finite limit. Samples may be
+interleaved by multiple API replicas; a low or unknown reading within the
+selected window vetoes it.
 The exact PostgreSQL container must still show at least 50% throttled CFS
 periods over a fresh cgroup v2 window. The controller repeats the throttling
 check immediately before applying the resize. Missing telemetry, a quota

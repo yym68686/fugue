@@ -67,25 +67,39 @@ func validateManagedPostgresAutoCPULimit(actor string, enrollment config.Managed
 	return nil
 }
 
-// Two adjacent five-minute usage samples near the same ceiling are necessary
-// but not sufficient: only exact container cgroup throttling confirms pressure.
+// Multiple API replicas can interleave samples. Require a contiguous span
+// of elevated readings, not a particular gap between the newest two rows.
+// Exact container cgroup throttling must independently confirm pressure.
 func managedPostgresCPURecentlySaturated(samples []model.ResourceUsageSample, now time.Time, currentLimit int64) bool {
-	var latest, previous model.ResourceUsageSample
+	if currentLimit <= 0 {
+		return false
+	}
+	var latest time.Time
 	for _, sample := range samples {
-		if sample.ObservedAt.After(now) || sample.ObservedAt.Before(now.Add(-15*time.Minute)) {
-			continue
-		}
-		switch {
-		case sample.ObservedAt.After(latest.ObservedAt):
-			previous, latest = latest, sample
-		case sample.ObservedAt.Before(latest.ObservedAt) && sample.ObservedAt.After(previous.ObservedAt):
-			previous = sample
+		if !sample.ObservedAt.After(now) && sample.ObservedAt.After(latest) {
+			latest = sample.ObservedAt
 		}
 	}
-	gap := latest.ObservedAt.Sub(previous.ObservedAt)
-	return currentLimit > 0 && latest.CPUMilliCores != nil && previous.CPUMilliCores != nil &&
-		!latest.ObservedAt.Before(now.Add(-8*time.Minute)) && gap >= 3*time.Minute && gap <= 8*time.Minute &&
-		*latest.CPUMilliCores >= currentLimit-currentLimit/10 && *previous.CPUMilliCores >= currentLimit-currentLimit/10
+	if latest.Before(now.Add(-8 * time.Minute)) {
+		return false
+	}
+	var lastLow, earlierHigh time.Time
+	for _, sample := range samples {
+		gap := latest.Sub(sample.ObservedAt)
+		if gap < 0 || gap > 8*time.Minute {
+			continue
+		}
+		if sample.CPUMilliCores == nil || *sample.CPUMilliCores < currentLimit-currentLimit/10 {
+			if sample.ObservedAt.After(lastLow) {
+				lastLow = sample.ObservedAt
+			}
+		} else if gap >= 3*time.Minute && sample.ObservedAt.After(earlierHigh) {
+			// Choose the most recent qualifying older observation, so a low
+			// reading preceding it does not hide a newer sustained window.
+			earlierHigh = sample.ObservedAt
+		}
+	}
+	return earlierHigh.After(lastLow)
 }
 
 const managedPostgresReadCPUWindow = `

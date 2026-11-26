@@ -64,10 +64,11 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	var acceptedBaseline *managedPostgresResizeInvariantBaseline
 	var restoreIntent *managedPostgresResizeInvariantBaseline
 	restoring := strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/")
+	automaticCPULimit := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPULimitActor+"/")
 	var restoreIntentEvidence model.OperationEvidence
 	// An accepted automatic mutation remains owned across process/leader loss.
 	// A transient preflight/read failure on replay cannot prove it was undone.
-	if restoring || strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
+	if restoring || automaticCPULimit || strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") {
 		accepted, err := s.Store.ListOperationEvidence(model.OperationEvidenceFilter{TenantID: op.TenantID, OperationID: op.ID, Types: []string{model.OperationEvidenceTypePostgresResizeAccepted}, Limit: 1})
 		if err != nil {
 			return fmt.Errorf("%w: read accepted automatic resize evidence: %v", errManagedPostgresResizeUnsettled, err)
@@ -141,7 +142,6 @@ func (s *Service) executeManagedDatabaseResizeOperation(
 	gates := s.Config.ManagedPostgresInPlaceResize
 	enrollment := managedPostgresCPUEnrollment(gates, target.ServiceID, namespace, clusterName)
 	automaticCPU := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPUActor+"/")
-	automaticCPULimit := strings.HasPrefix(op.RequestedByID, managedPostgresAutoCPULimitActor+"/")
 	limitEnrollment := managedPostgresCPULimitEnrollment(gates, target.ServiceID, namespace, clusterName)
 	if automaticCPULimit && (op.RequestedByType != model.ActorTypeSystem || !target.AppOwned || !gates.CPULimitUpscaleEnabled ||
 		limitEnrollment == nil || !managedPostgresCPULimitAutoAllowed(app)) {
