@@ -294,6 +294,27 @@ def recover(config, evidence):
                 restored.close()
 
 
+def same_publication(profile, first, second, repeat):
+    """Require exact proofs, distinguishing a witnessed refresh from skew."""
+    def pinned(proof):
+        return proof.get("edge") == profile["node"] and proof.get("group") == profile["group"]
+
+    if not pinned(first) or not pinned(second):
+        raise ValueError("route proof lost the pinned Edge or authority")
+    if first == second:
+        return True
+    after = repeat()
+    if (not pinned(after) or not first.get("version") or not after.get("version")
+            or first["version"] == after["version"] or second != after):
+        differences = sorted(key for key in set(first) | set(second) | set(after)
+                             if first.get(key) != second.get(key) or after.get(key) != second.get(key))
+        versions = [proof.get("version") for proof in (first, second, after)]
+        raise ValueError(f"route proofs differ outside a witnessed publication refresh: versions={versions} fields={differences}")
+    # A signed publication advanced across the comparison on the same
+    # endpoint. Do not count this sample; require later full equality.
+    return False
+
+
 def apply(config, evidence):
     validate_evidence(config, evidence)
     previous, profile = evidence["baseline"], config["observation"]
@@ -323,7 +344,7 @@ def apply(config, evidence):
         attempted = True
         write(config, previous, spec, annotations)
         deadline = time.monotonic() + config["verificationSeconds"]
-        observations = []
+        observations, publication_retries = [], 0
         while time.monotonic() < deadline:
             old_proof = held.proof(target["path"])
             if connection.fact(profile, old, held) != original:
@@ -338,14 +359,19 @@ def apply(config, evidence):
                 fresh = None
                 time.sleep(2)
                 continue
-            if old_proof != new_proof or new_proof["edge"] != profile["node"] or new_proof["group"] != profile["group"]:
-                raise ValueError("new public connection differs from preserved authority")
             if source is not None and any(new_fact[key] != original[key] for key in ["slot", "target"]):
                 raise ValueError("probe replacement changed the selected Worker")
+            if not same_publication(profile, old_proof, new_proof, lambda: held.proof(target["path"])):
+                publication_retries += 1
+                continue
             for route in profile["probes"]:
-                if listener_proof(config, route) != front.proof(candidate["status"]["podIP"], route["host"], route["path"]):
-                    raise ValueError("public route differs after executor replacement")
-            observations.append({"at": front.now().isoformat(), "old_connection": original, "new_connection": new_fact})
+                if not same_publication(profile, listener_proof(config, route),
+                                        front.proof(candidate["status"]["podIP"], route["host"], route["path"]),
+                                        lambda: listener_proof(config, route)):
+                    publication_retries += 1
+                    break
+            else:
+                observations.append({"at": front.now().isoformat(), "old_connection": original, "new_connection": new_fact})
             time.sleep(5)
         if len(observations) < 3:
             raise ValueError("replacement did not converge in the bounded window")
@@ -355,7 +381,7 @@ def apply(config, evidence):
             raise ValueError("executor identity or Service changed during verification")
         endpoint(config, latest_candidate, live)
         require_source(config, latest_candidate, source)
-        result = {"schema": "fugue.front-executor-replacement-result/v1", "result": "verified", "declaration_digest": transport.digest(config), "generation": config["generation"], "both_executors_retained": True, "observations": observations}
+        result = {"schema": "fugue.front-executor-replacement-result/v1", "result": "verified", "declaration_digest": transport.digest(config), "generation": config["generation"], "both_executors_retained": True, "observations": observations, "publication_retries": publication_retries}
         if source is not None:
             if front.state(profile, latest_old) != activation or front.state(profile, latest_candidate) != activation:
                 raise ValueError("Worker activation changed during probe replacement")

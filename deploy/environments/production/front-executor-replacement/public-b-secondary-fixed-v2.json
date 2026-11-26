@@ -2,8 +2,8 @@
   "address": "95.169.10.156",
   "candidateAuthority": "node-worker-v1",
   "candidateImageDigest": "sha256:0c1c724d29320cfc16ab793f307ff08af1178d6cc060fd206ee3e34add618ccf",
-  "expectedGeneration": 5,
-  "generation": 6,
+  "expectedGeneration": 7,
+  "generation": 8,
   "observation": {
     "activationPath": "/var/lib/fugue-edge-front/activation.json",
     "candidateSelector": {
@@ -30,7 +30,7 @@
     "samples": 3,
     "schema": "fugue.front-observation/v1"
   },
-  "rollbackGeneration": 7,
+  "rollbackGeneration": 9,
   "schema": "fugue.front-executor-replacement/v2",
   "service": "fugue-front-serving-public-b-secondary",
   "serviceUID": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c",

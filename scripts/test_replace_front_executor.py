@@ -46,6 +46,20 @@ def probe_fixture():
 
 
 class ReplacementTests(unittest.TestCase):
+    def test_signed_publication_refresh_needs_the_same_endpoint_and_does_not_count(self):
+        profile = {"node": "node-a", "group": "group-a"}
+        old = {"edge": "node-a", "group": "group-a", "version": "v1", "digest": "old"}
+        new = dict(old, version="v2", digest="new")
+        self.assertTrue(replacement.same_publication(profile, old, old, lambda: self.fail("unneeded replay")))
+        self.assertFalse(replacement.same_publication(profile, old, new, lambda: new))
+        for first, second, repeat in [
+            (old, new, old), (new, old, new), (old, dict(new, digest="wrong"), new),
+            (old, dict(old, digest="wrong"), dict(old, digest="wrong")),
+            (old, dict(new, edge="wrong-edge"), new),
+        ]:
+            with self.subTest(first=first, second=second, repeat=repeat), self.assertRaises(ValueError):
+                replacement.same_publication(profile, first, second, lambda: repeat)
+
     def test_passive_front_is_only_allowed_for_probe_follow_and_remains_image_fenced(self):
         config, _, _, _ = probe_fixture()
         config["candidateAuthority"] = replacement.SERVING_READ_ONLY
