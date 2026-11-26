@@ -16,12 +16,23 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// VerifyNodeWorkerArtifact binds the independent candidate to the ordinary
-// release monitor, not a mutable image tag or a caller's assertion that a
-// specified build was used. Only the one live replica in that verified
-// Deployment can obtain this positive check. This does not authorize
-// allocating the replica; the independent release must already own it.
+// VerifyNodeWorkerClaimArtifact checks the artifact while the group component
+// Lease and the group authority Lease are held. A different fixed component
+// must prove a single-node release, whose writer uses those same leases.
+func (store *AuthorityStore) VerifyNodeWorkerClaimArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod, group NodeWorkerComponent) error {
+	nodeOnly := j.FixedTransport && j.CandidateComponent != group.Component
+	if nodeOnly && !j.FixedRotation {
+		return errors.New("legacy fixed Worker must belong to the fenced release component")
+	}
+	return store.verifyNodeWorkerArtifact(ctx, j, pod, nodeOnly)
+}
+
+// VerifyNodeWorkerArtifact binds the live candidate to its monitored release.
 func (store *AuthorityStore) VerifyNodeWorkerArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod) error {
+	return store.verifyNodeWorkerArtifact(ctx, j, pod, false)
+}
+
+func (store *AuthorityStore) verifyNodeWorkerArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod, requireNodeOnly bool) error {
 	reject := errors.New("candidate Worker is not the independently released, monitored replica")
 	if !componentPattern.MatchString(j.CandidateComponent) || pod.Namespace != store.namespace ||
 		pod.Spec.NodeName != j.Recipient.Node || string(pod.UID) != j.CandidateWorkerUID ||
@@ -29,7 +40,7 @@ func (store *AuthorityStore) VerifyNodeWorkerArtifact(ctx context.Context, j edg
 		return reject
 	}
 	if j.FixedTransport {
-		return store.verifyFixedNodeWorkerArtifact(ctx, j, pod)
+		return store.verifyFixedNodeWorkerArtifact(ctx, j, pod, requireNodeOnly)
 	}
 	if pod.Labels["fugue.io/edge-node"] != j.Recipient.Node {
 		return reject
@@ -81,7 +92,7 @@ func (store *AuthorityStore) VerifyNodeWorkerArtifact(ctx context.Context, j edg
 	return nil
 }
 
-func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod) error {
+func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, j edgegroupfront.NodeWorkerJournal, pod corev1.Pod, requireNodeOnly bool) error {
 	reject := errors.New("fixed Worker is not the exact retained declarative workload revision")
 	owner := metav1.GetControllerOf(&pod)
 	if owner == nil || owner.Kind != "DaemonSet" || owner.UID == "" || pod.Labels["fugue.io/edge-slot"] != j.Candidate.Slot {
@@ -110,7 +121,7 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 		plan, artifact, prepared, monitor, forward, _, err := decodeStableRecord(object.Data)
 		release, found := releaseForComponent(plan, j.CandidateComponent)
 		if err != nil || !found ||
-			!fixedWorkerReleaseScope(release, j, owner.Name, pod.Namespace) ||
+			!fixedWorkerReleaseScope(release, j, owner.Name, pod.Namespace, requireNodeOnly) ||
 			monitor.Component != j.CandidateComponent || artifact.Component != j.CandidateComponent ||
 			object.Name != monitorRecordNameFromDigest(j.CandidateComponent, monitor.RecordDigest) ||
 			prepared.Forward.ConfigSHA != configSHA || artifact.ReceiptDigest != j.ReleaseDigest ||
@@ -192,9 +203,9 @@ func (store *AuthorityStore) verifyFixedNodeWorkerArtifact(ctx context.Context, 
 // A fixed slot can be individually released after its shared template has
 // been excluded from this node. The immutable ordinary release must itself
 // name the replacement controller; a cloned live workload is not a receipt.
-func fixedWorkerReleaseScope(r declarativerelease.PlanRelease, j edgegroupfront.NodeWorkerJournal, owner, namespace string) bool {
+func fixedWorkerReleaseScope(r declarativerelease.PlanRelease, j edgegroupfront.NodeWorkerJournal, owner, namespace string, requireNodeOnly bool) bool {
 	if t := r.Transition; t != nil {
-		return t.Type == "edge-group-ab" && t.EdgeGroupAB != nil && t.EdgeGroupAB.GroupID == j.Recipient.Group
+		return !requireNodeOnly && t.Type == "edge-group-ab" && t.EdgeGroupAB != nil && t.EdgeGroupAB.GroupID == j.Recipient.Group
 	}
 	w := r.Workload
 	return j.FixedRotation && strings.HasPrefix(r.ComponentID, "edge-worker-") &&

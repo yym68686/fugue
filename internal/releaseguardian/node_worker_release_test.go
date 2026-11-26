@@ -21,14 +21,21 @@ func TestFixedNodeWorkerIsolatedDaemonSetScope(t *testing.T) {
 	r := declarativerelease.PlanRelease{ComponentID: "edge-worker-fixture",
 		Workload: declarativerelease.Workload{APIVersion: "apps/v1", Kind: "DaemonSet", Name: "worker-a",
 			Namespace: "test", Container: "edge", RolloutMode: "on-delete"}}
-	if !fixedWorkerReleaseScope(r, j, "worker-a", "test") || fixedWorkerReleaseScope(r, j, "different-worker", "test") ||
-		fixedWorkerReleaseScope(r, j, "worker-a", "foreign") {
+	if !fixedWorkerReleaseScope(r, j, "worker-a", "test", true) || fixedWorkerReleaseScope(r, j, "different-worker", "test", true) ||
+		fixedWorkerReleaseScope(r, j, "worker-a", "foreign", true) {
 		t.Fatal("isolated release was not bound to its exact controller")
 	}
 	legacy := j
 	legacy.FixedRotation = false
-	if fixedWorkerReleaseScope(r, legacy, "worker-a", "test") {
+	if fixedWorkerReleaseScope(r, legacy, "worker-a", "test", true) {
 		t.Fatal("legacy fixed Front accepted an independently rotated release")
+	}
+	group := r
+	group.Transition = &declarativerelease.Transition{Type: "edge-group-ab",
+		EdgeGroupAB: &declarativerelease.EdgeGroupABTransition{GroupID: j.Recipient.Group}}
+	if !fixedWorkerReleaseScope(group, j, "worker-a", "test", false) ||
+		fixedWorkerReleaseScope(group, j, "worker-a", "test", true) {
+		t.Fatal("a different component must not use a group receipt to claim a fixed Worker")
 	}
 	template := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"fugue.io/edge-node": j.Recipient.Node,
