@@ -134,7 +134,7 @@ runs:
         RELEASE_TOOL: ${{ runner.temp }}/fugue-declarative-release
       run: |
         set -euo pipefail
-        if [[ "$COMPONENT" == 'edge-worker-us-primary-a' || "$COMPONENT" == 'edge-worker-us-primary-a-hosted' ]]; then
+        if [[ "$COMPONENT" == 'edge-worker-us-primary-a' || "$COMPONENT" == 'edge-worker-us-primary-a-hosted' || "$COMPONENT" == 'edge-worker-us-bwg-b-hosted' ]]; then
           git fetch origin main
           git diff --exit-code HEAD origin/main -- "deploy/releases/$COMPONENT" deploy/releases/components.json .github/actions/deploy-declarative-component/action.yml scripts/replace_idle_worker_slot.py scripts/run_node_worker_handoff.py scripts/retire_front_hostport.py scripts/front_connection_witness.py scripts/observe_front_candidate.py scripts/reconcile_front_probe_transport.py
           python3 -m scripts.replace_idle_worker_slot "deploy/releases/$COMPONENT/idle-slot.json" "${EXECUTION}" "${RELEASE_TOOL}" "${RESULT}" "${RUNNER_TEMP}/fugue-worker-idle-replacement-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
@@ -142,10 +142,10 @@ runs:
           "${RELEASE_TOOL}" execute "${EXECUTION}" >"${RESULT}"
         fi
     - name: Retain single-node Worker preparation evidence
-      if: always() && (inputs.component == 'edge-worker-us-primary-a' || inputs.component == 'edge-worker-us-primary-a-hosted') && steps.execute_direct.outcome != 'skipped'
+      if: always() && (inputs.component == 'edge-worker-us-primary-a' || inputs.component == 'edge-worker-us-primary-a-hosted' || inputs.component == 'edge-worker-us-bwg-b-hosted') && steps.execute_direct.outcome != 'skipped'
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: fugue-us-primary-worker-a-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+        name: fugue-fixed-worker-preparation-${{ inputs.component }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/fugue-worker-idle-replacement-${{ github.run_id }}-${{ github.run_attempt }}.json
         if-no-files-found: warn
         retention-days: 30
