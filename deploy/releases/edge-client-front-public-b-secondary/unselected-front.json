@@ -1,0 +1,15 @@
+{
+  "schema": "fugue.unselected-front-roll/v1",
+  "namespace": "fugue-system",
+  "group": "edge-group-country-us",
+  "node": "bwg",
+  "address": "95.169.10.156",
+  "daemonSet": "fugue-edge-front-public-b-secondary",
+  "daemonSetUID": "ff25cda0-9bf1-4410-8b0e-be1d2e1d9597",
+  "daemonSetGeneration": 2,
+  "oldUID": "62eedb50-d298-4f53-803a-ea66c779b640",
+  "frontUID": "8d4f0d98-51d9-4f02-a38b-b109c1a0d5d6",
+  "maxSessions": 0,
+  "serving": {"name": "fugue-front-serving-public-b-secondary", "uid": "bdbde54a-a9a3-48ea-bdeb-bdc5f04d5e6c", "generation": 5},
+  "probe": {"name": "fugue-front-probe-public-b-secondary", "uid": "9cbf3f2e-5102-4ce2-ad9f-fd97a0efe62d", "generation": 3}
+}
