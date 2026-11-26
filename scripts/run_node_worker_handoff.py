@@ -211,9 +211,11 @@ def controller(obj):
     return one([r for r in obj["metadata"].get("ownerReferences", []) if r.get("controller") is True], "controller owner")
 
 
-def peer_template(owner, config, journal):
+def peer_template(owner, config, journal, rearm_decision=None):
     """Ignore only this journal's target exclusion, never peer placement or images."""
     template = owner["spec"]["template"]
+    if rearm_decision is not None and obj_uid(owner) == rearm_decision["plan"]["daemonset_uid"]:
+        _, template = candidate_rearm_template(owner, config, rearm_decision)
     retire = config.get("retirement")
     if not retire or not journal or obj_uid(owner) != retire["uid"]:
         return template
@@ -228,6 +230,39 @@ def peer_template(owner, config, journal):
             and owner["metadata"]["generation"] == retire["generation"] + 1,
             "unexpected mutation of the old Worker controller")
     return remove_target_exclusion(template, node)
+
+
+def candidate_rearm_template(owner, config, decision):
+    """Verify the same physical exclusion before/after one target-only rearm."""
+    node, can = config["node"], config["candidate"]
+    digest, plan = config["rearm"]["journalDigest"], decision["plan"]
+    suffix = hashlib.sha256(node.encode()).hexdigest()[:20]
+    parked_key, enabled_key = "fugue.pro/worker-retired-" + suffix, "fugue.pro/worker-rearmed-" + suffix
+    m, spec = owner["metadata"], owner["spec"]
+    template = spec["template"]
+    edge = one([c for c in template["spec"]["containers"] if c["name"] == "edge"], "candidate Worker edge")
+    require(m.get("name") == can["daemonSet"] and obj_uid(owner) == plan["daemonset_uid"] and not m.get("deletionTimestamp")
+            and spec["updateStrategy"]["type"] == "OnDelete"
+            and template["metadata"].get("labels", {}).get("fugue.io/edge-slot") == can["slot"]
+            and template["metadata"].get("labels", {}).get("fugue.io/edge-group-id") == config["group"]
+            and template["metadata"].get("annotations", {}).get("fugue.pro/source-commit") == can["source"]
+            and edge["image"].endswith("@" + can["imageDigest"]), "rearm would schedule an unpinned candidate")
+    annotations = dict(m["annotations"])
+    if parked_key not in annotations:
+        terms = template["spec"].get("affinity", {}).get("nodeAffinity", {}).get("requiredDuringSchedulingIgnoredDuringExecution", {}).get("nodeSelectorTerms", [])
+        require(m["generation"] >= plan["generation"] + 2 and annotations.get(enabled_key) == digest
+                and not any(f.get("key") == "metadata.name" and f.get("operator") == "NotIn" and node in f.get("values", [])
+                            for t in terms for f in t.get("matchFields", [])),
+                "candidate exclusion disappeared outside the exact rearm")
+        return None, template
+    # A different physical node can have retired from this same DaemonSet
+    # since our receipt. Ownership is the exact target decision and predicate,
+    # not a DaemonSet generation that includes every peer's scheduling state.
+    require(m["generation"] >= plan["generation"] + 1 and json.loads(annotations[parked_key]) == decision,
+            "candidate retirement no longer matches the live exclusion")
+    del annotations[parked_key]
+    annotations[enabled_key] = digest
+    return annotations, remove_target_exclusion(template, node)
 
 
 def remove_target_exclusion(template, node):
@@ -260,6 +295,7 @@ class ActiveCluster:
         self.profile = {k: config[k] for k in ("namespace", "node", "group")}
         self.profile["activationPath"] = STATE
         self.participation_policy = None
+        self.rearm_decision = None
 
     def roster(self):
         cfg = self.config
@@ -360,8 +396,8 @@ class ActiveCluster:
         require(run.returncode == 0 and len(run.stdout) <= 16 << 10, "selected Front native observation failed")
         return json.loads(run.stdout)
 
-    def rearm_candidate(self, selected, guardian, expected):
-        """Re-enable one parked listener only after its previous retirement completed."""
+    def candidate_retirement(self):
+        """Read the immutable terminal evidence for this exact retired candidate."""
         c, can = self.config, self.config["candidate"]
         digest = c["rearm"]["journalDigest"]
         node = c["node"]
@@ -380,14 +416,21 @@ class ActiveCluster:
         plan = decision.get("plan", {})
         require(decision.get("node") == node and plan.get("schema") == "edge-node-worker-retirement/v1"
                 and plan.get("journal_digest") == digest and plan.get("daemonset") == can["daemonSet"]
-                and matches(UID, plan.get("daemonset_uid")) and type(plan.get("generation")) is int,
+                and matches(UID, plan.get("daemonset_uid")) and type(plan.get("generation")) is int and plan["generation"] > 0,
                 "candidate retirement receipt is for a different node or controller")
+        return decision
+
+    def rearm_candidate(self, selected, guardian, expected):
+        """Re-enable one parked listener only after its previous retirement completed."""
+        c, can = self.config, self.config["candidate"]
+        node, group = c["node"], c["group"]
+        decision = self.candidate_retirement()
+        require(decision == self.rearm_decision, "candidate retirement receipt changed since peer verification")
+        plan = decision["plan"]
         require(self.exec_guardian(guardian, "node-worker-retirement-version", b"").strip() == b"edge-node-worker-retirement/v1",
                 "cannot rearm without the installed retirement-capable Guardian")
         lease_helper = parking.Cluster(c)
-        suffix = hashlib.sha256(node.encode()).hexdigest()[:20]
-        parked_key, enabled_key = "fugue.pro/worker-retired-" + suffix, "fugue.pro/worker-rearmed-" + suffix
-        component, group = can["component"], c["group"]
+        component = can["component"]
         with ExitStack() as stack:
             locks = []
             for name, labels, ttl in (
@@ -405,30 +448,14 @@ class ActiveCluster:
                     "serving Front changed before candidate rearm")
             self.require_probe_ingress(c["probeIngress"], public, alive)
             ds = self.get("daemonset", can["daemonSet"])
-            m, spec = ds["metadata"], ds["spec"]
-            template = spec["template"]
-            edge = one([container for container in template["spec"]["containers"] if container["name"] == "edge"], "candidate Worker edge")
-            require(obj_uid(ds) == plan["daemonset_uid"] and not m.get("deletionTimestamp")
-                    and spec["updateStrategy"]["type"] == "OnDelete"
-                    and template["metadata"].get("labels", {}).get("fugue.io/edge-slot") == can["slot"]
-                    and template["metadata"].get("labels", {}).get("fugue.io/edge-group-id") == group
-                    and template["metadata"].get("annotations", {}).get("fugue.pro/source-commit") == can["source"]
-                    and edge["image"].endswith("@" + can["imageDigest"]), "rearm would schedule an unpinned candidate")
-            annotations = dict(m["annotations"])
-            if parked_key not in annotations:
-                require(m["generation"] == plan["generation"] + 2 and annotations.get(enabled_key) == digest,
-                        "candidate exclusion disappeared outside the exact rearm")
-            else:
-                require(m["generation"] == plan["generation"] + 1 and json.loads(annotations[parked_key]) == decision,
-                        "candidate retirement no longer matches the live exclusion")
+            m = ds["metadata"]
+            annotations, patched = candidate_rearm_template(ds, c, decision)
+            if annotations is not None:
                 ports = (18080, 18443) if can["slot"] == "a" else (28080, 28443)
                 require(not any(s.get("hostPort") in ports for pod in self.pods(node=node)
                                 if pod["status"]["phase"] not in ("Succeeded", "Failed")
                                 for container in pod["spec"]["containers"] for s in container.get("ports", [])),
                         "candidate ports have a different owner")
-                del annotations[parked_key]
-                annotations[enabled_key] = digest
-                patched = remove_target_exclusion(template, node)
                 changes = [{"op": "test", "path": "/metadata/uid", "value": m["uid"]},
                            {"op": "test", "path": "/metadata/resourceVersion", "value": m["resourceVersion"]},
                            {"op": "replace", "path": "/metadata/annotations", "value": annotations},
@@ -438,8 +465,8 @@ class ActiveCluster:
                 live = kube.kubectl("patch", "daemonset", can["daemonSet"], "-n", self.ns, "--type=json",
                                     "--patch-file", "-", "-o", "json", body=front.canonical(changes))
                 require(obj_uid(live) == obj_uid(ds) and live["spec"]["template"] == patched
-                        and live["metadata"]["generation"] == plan["generation"] + 2
-                        and live["metadata"]["annotations"].get(enabled_key) == digest,
+                        and live["metadata"]["generation"] == m["generation"] + 1
+                        and live["metadata"]["annotations"] == annotations,
                         "candidate scheduling did not converge to the exact rearm")
         until = time.monotonic() + 115
         while time.monotonic() < until:
@@ -550,7 +577,7 @@ class ActiveCluster:
                 require(r["kind"] in ("DaemonSet", "ReplicaSet"), "peer runtime lacks an exact declarative controller")
                 owner = self.get(r["kind"].lower(), r["name"])
                 require(obj_uid(owner) == r["uid"], "peer runtime controller UID changed")
-                templates = {obj_uid(owner): kube.digest(peer_template(owner, self.config, getattr(self, "retirement_journal", None)))}
+                templates = {obj_uid(owner): kube.digest(peer_template(owner, self.config, getattr(self, "retirement_journal", None), self.rearm_decision))}
                 if r["kind"] == "ReplicaSet":
                     ref = controller(owner)
                     require(ref["kind"] == "Deployment", "peer ReplicaSet lacks its parent Deployment")
@@ -719,6 +746,8 @@ class ClaimedHandoff:
 def run(config, evidence_path, participation_policy=None):
     cluster = ActiveCluster(config)
     cluster.participation_policy = participation_policy
+    if "rearm" in config:
+        cluster.rearm_decision = cluster.candidate_retirement()
     peers = cluster.peer_snapshot()
     selected, guardian, unsigned = cluster.exact_actors()
     require(cluster.peer_snapshot() == peers, "peer state changed across baseline observations")

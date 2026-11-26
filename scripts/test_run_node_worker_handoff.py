@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 from subprocess import TimeoutExpired
@@ -63,6 +64,45 @@ def pinned():
 
 
 class NodeWorkerDriverTests(unittest.TestCase):
+    def test_rearm_accepts_peer_retirement_without_mutating_peer_placement(self):
+        cfg = pinned()
+        node = cfg["node"]
+        candidate = cfg["candidate"]
+        candidate["daemonSet"] = "worker-fixture"
+        digest = "sha256:" + "a" * 64
+        cfg["rearm"] = {"journalDigest": digest}
+        decision = {"node": node, "plan": {"daemonset_uid": "worker-controller", "generation": 30}}
+        labels = {"fugue.io/edge-slot": candidate["slot"], "fugue.io/edge-group-id": cfg["group"]}
+        suffix = hashlib.sha256(node.encode()).hexdigest()[:20]
+        parked, enabled = "fugue.pro/worker-retired-" + suffix, "fugue.pro/worker-rearmed-" + suffix
+        own = {"key": "metadata.name", "operator": "NotIn", "values": [node]}
+        peer = {"key": "metadata.name", "operator": "NotIn", "values": ["node-other"]}
+        def terms(owner):
+            affinity = owner["spec"]["template"]["spec"]["affinity"]["nodeAffinity"]
+            return affinity["requiredDuringSchedulingIgnoredDuringExecution"]["nodeSelectorTerms"]
+        initial = {"metadata": {"uid": "worker-controller", "name": candidate["daemonSet"], "generation": 32,
+                                "annotations": {parked: json.dumps(decision), "other-receipt": "retained"}},
+                   "spec": {"updateStrategy": {"type": "OnDelete"},
+                            "template": {"metadata": {"labels": labels, "annotations": {"fugue.pro/source-commit": candidate["source"]}},
+                                         "spec": {"containers": [{"name": "edge", "image": "registry.example/worker@" + candidate["imageDigest"]}],
+                                                  "affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {
+                                                      "nodeSelectorTerms": [{"matchFields": [own, peer]}]}}}}}}}
+        annotations, template = driver.candidate_rearm_template(initial, cfg, decision)
+        self.assertEqual(annotations, {enabled: digest, "other-receipt": "retained"})
+        rearmed = copy.deepcopy(initial)
+        rearmed["metadata"].update(annotations=annotations, generation=33)
+        rearmed["spec"]["template"] = template
+        self.assertEqual(terms(rearmed), [{"matchFields": [peer]}])
+        self.assertEqual(driver.peer_template(initial, cfg, None, decision),
+                         driver.peer_template(rearmed, cfg, None, decision))
+        self.assertEqual(driver.candidate_rearm_template(rearmed, cfg, decision), (None, template))
+        terms(rearmed)[0]["matchFields"].append(own)
+        with self.assertRaisesRegex(ValueError, "outside the exact rearm"):
+            driver.candidate_rearm_template(rearmed, cfg, decision)
+        initial["metadata"]["annotations"][parked] = json.dumps(dict(decision, node="another-node"))
+        with self.assertRaisesRegex(ValueError, "does not match|no longer matches"):
+            driver.candidate_rearm_template(initial, cfg, decision)
+
     def test_discovered_peer_must_prove_exclusion_before_omitting_live_checks(self):
         config = pinned()
         config.pop("peers")
