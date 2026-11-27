@@ -38,12 +38,14 @@ func safeRolloutPolicyUpdateCanComplete(op model.Operation, current model.App, a
 }
 
 type safeCanonicalHandoff struct {
-	ReleaseID               string `json:"release_id"`
-	SourceReleaseID         string `json:"source_release_id,omitempty"`
-	PreviousTargetReleaseID string `json:"previous_target_release_id,omitempty"`
-	DeploymentUID           string `json:"deployment_uid"`
-	ReleaseKey              string `json:"release_key"`
-	Image                   string `json:"image"`
+	ReleaseID               string     `json:"release_id"`
+	SourceReleaseID         string     `json:"source_release_id,omitempty"`
+	PreviousTargetReleaseID string     `json:"previous_target_release_id,omitempty"`
+	DeploymentUID           string     `json:"deployment_uid"`
+	ReleaseKey              string     `json:"release_key"`
+	Image                   string     `json:"image"`
+	DrainDeadline           *time.Time `json:"drain_deadline,omitempty"`
+	Stopping                bool       `json:"stopping,omitempty"`
 }
 
 // A retained canonical workload can outlive several promoted revisions. Follow
@@ -170,6 +172,9 @@ func (s *Service) verifiedCanonicalHandoffSource(app model.App, handoff safeCano
 	if s.Renderer.ManagedAppReleaseKey(s.Renderer.PrepareApp(source), scheduling) != liveKey || !s.migrationImageRefsEquivalent(source, source.Spec.Image, image) {
 		return handoff, fmt.Errorf("canonical handoff replacement is not the prior promoted executable")
 	}
+	// A different live executable is a new canonical Pod cohort. Otherwise,
+	// subsequent promoted targets must not reset the existing drain budget.
+	handoff.DrainDeadline, handoff.Stopping = nil, false
 	handoff.SourceReleaseID, handoff.ReleaseKey, handoff.Image = previous.ID, liveKey, image
 	return handoff, nil
 }
@@ -206,7 +211,7 @@ func (s *Service) recoverSafeCanonicalHandoffSource(deployment kubeDeployment, c
 	if promoted.RevisionWorkload == nil || promoted.DeploymentName == deployment.Metadata.Name ||
 		promoted.Role != model.AppReleaseRoleStable || promoted.Status != model.AppReleaseStatusServing ||
 		(!s.safeRolloutBoundReleaseMatchesApp(desired, promoted) &&
-			!(promoted.ID == handoff.ReleaseID && s.safeRolloutBoundReleaseMatchesApp(current, promoted))) {
+			!(!handoff.Stopping && promoted.ID == handoff.ReleaseID && s.safeRolloutBoundReleaseMatchesApp(current, promoted))) {
 		return current, scheduling, false, fmt.Errorf("canonical handoff promoted executable differs")
 	}
 	scheduling = runtime.SchedulingConstraints{
@@ -314,8 +319,8 @@ func (s *Service) canonicalServicesReferenceRelease(ctx context.Context, client 
 
 // A Service can have consumers outside managed Edge (including autonomous
 // origins). Withdraw new connections from the canonical workload while it is
-// still running, then positively observe every original Pod before changing its
-// template. A bounded observation timeout retains both running workloads.
+// still running, then let Kubernetes drain those Pods within one durable
+// budget before changing the canonical template.
 func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeClient, app model.App, objects []map[string]any) (result []map[string]any, resultErr error) {
 	if client == nil || s.Store == nil || !s.Config.KubectlApply || !model.AppSafeZeroDowntimeRolloutEnabled(app.Spec) {
 		return objects, nil
@@ -467,7 +472,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		if err := s.restoreSafeCanonicalServices(ctx, client, app, objects, live, selector); err != nil {
 			return nil, err
 		}
-		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: nil}}}); err != nil {
+		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{
+			"annotations": map[string]any{safeCanonicalHandoffAnnotation: nil}, "labels": map[string]any{canonicalDrainLabel: nil},
+		}}); err != nil {
 			return nil, err
 		}
 		return objects, nil
@@ -481,7 +488,7 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		return nil, err
 	}
 	sourceScheduling := runtime.SchedulingConstraints{NodeSelector: deployment.Spec.Template.Spec.NodeSelector, Tolerations: deployment.Spec.Template.Spec.Tolerations}
-	_, verifiedSourceID, err := s.canonicalHandoffSourceSnapshot(app, sourceID, verified, sourceScheduling)
+	source, verifiedSourceID, err := s.canonicalHandoffSourceSnapshot(app, sourceID, verified, sourceScheduling)
 	if err != nil {
 		return nil, err
 	}
@@ -490,23 +497,30 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	if liveKey != handoff.ReleaseKey {
 		return nil, fmt.Errorf("%w: replacement readiness", errSafeCanonicalHandoffPending)
 	}
-	original := model.AppRelease{AppID: app.ID, TenantID: app.TenantID, DeploymentName: name, ResolvedImageRef: handoff.Image, RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: name, DeploymentUID: handoff.DeploymentUID, ReleaseKey: handoff.ReleaseKey, DeploymentGeneration: deployment.Metadata.Generation}}
-	before, err := s.captureDrainWorkload(ctx, client, app, original, false, true)
-	if err != nil {
-		return nil, fmt.Errorf("capture original canonical workload: %w", err)
+	if handoff.Stopping && handoff.DrainDeadline == nil {
+		return nil, fmt.Errorf("canonical handoff stop has no withdrawal deadline")
 	}
+	original := model.AppRelease{AppID: app.ID, TenantID: app.TenantID, DeploymentName: name, ResolvedImageRef: handoff.Image, RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: name, DeploymentUID: handoff.DeploymentUID, ReleaseKey: handoff.ReleaseKey, DeploymentGeneration: deployment.Metadata.Generation}}
 	if marker == "" || advanceTarget || sourceChanged {
+		requireReady := !handoff.Stopping && handoff.DrainDeadline == nil
+		if requireReady {
+			if _, err := s.captureDrainWorkload(ctx, client, app, original, false, true); err != nil {
+				return nil, fmt.Errorf("capture original canonical workload: %w", err)
+			}
+		}
 		encoded, _ := json.Marshal(handoff)
 		marker = string(encoded)
 		if err := client.patchAppWorkloadObject(ctx, deploymentAPIPath(namespace, name), live, map[string]any{"metadata": map[string]any{"annotations": map[string]any{safeCanonicalHandoffAnnotation: marker}}}); err != nil {
 			return nil, err
 		}
-		before, err = s.captureCanonicalAfterMarker(ctx, client, app, original)
-		if err != nil {
-			return nil, err
+		if requireReady {
+			if _, err := s.captureCanonicalAfterMarker(ctx, client, app, original); err != nil {
+				return nil, err
+			}
 		}
 	}
 	services := []string{}
+	serviceUIDs := map[string]string{}
 	for _, object := range objects {
 		if object["kind"] != "Service" {
 			continue
@@ -537,6 +551,18 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			!canonicalServiceSelectsSource(app, existing, deployment.Spec.Template.Metadata.Labels) {
 			return nil, fmt.Errorf("canonical handoff Service has an unexpected selector")
 		}
+		if handoff.DrainDeadline != nil && canonicalServiceSelectsSource(app, existing, deployment.Spec.Template.Metadata.Labels) {
+			if handoff.Stopping {
+				return nil, fmt.Errorf("canonical source regained traffic during termination")
+			}
+			// A source that received new connections gets a fresh deadline only
+			// after its traffic is withdrawn again.
+			handoff.DrainDeadline = nil
+			marker, err = s.writeCanonicalDrainState(ctx, client, app, handoff, marker, false)
+			if err != nil {
+				return nil, err
+			}
+		}
 		if !reflect.DeepEqual(existing, selector) {
 			// JSON patch replaces the selector as a whole; merge-patch would retain
 			// obsolete selector keys and can silently produce an empty endpoint set.
@@ -547,78 +573,96 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		}
 		objectMapField(object, "spec")["selector"] = selector
 		services = append(services, serviceName)
+		serviceUIDs[serviceName] = objectStringField(cm, "uid")
 	}
 	if len(services) == 0 {
 		return nil, fmt.Errorf("canonical handoff has no managed Service")
 	}
-	// Existing connections stay on original Pods; all newly published endpoints
-	// must belong to the immutable candidate before zero can be meaningful.
+	// The first positive withdrawal proof anchors the deadline. Let existing
+	// connections finish naturally, keeping a small reserve for kubelet shutdown.
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	waitStarted := time.Now()
-	lastActive, endpointsReady := -1, false
 	pending := func() error {
-		return fmt.Errorf("%w: stage=canonical_drain_wait last_observed_active_connections=%d pod_count=%d endpoints_ready=%t elapsed_ms=%d context=%s",
-			errSafeCanonicalHandoffPending, lastActive, len(before.Pods), endpointsReady, time.Since(waitStarted).Milliseconds(), drainObservationContext(waitCtx))
+		return fmt.Errorf("%w: stage=canonical_drain_wait drain_deadline=%v context=%s", errSafeCanonicalHandoffPending, handoff.DrainDeadline, drainObservationContext(waitCtx))
 	}
-	var quietSince time.Time
-	quiet := 2 * time.Second
-	for _, p := range before.Pods {
-		if q := time.Duration(p.QuietMS) * time.Millisecond; q > quiet {
-			quiet = q
-		}
-	}
-	for {
-		if err := waitCtx.Err(); err != nil {
-			return nil, pending()
-		}
-		ready := true
-		for _, serviceName := range services {
-			if err := safeCanonicalEndpoints(waitCtx, client, namespace, serviceName, candidateWorkload.Pods); err != nil {
-				ready = false
-				break
+	quietDrain := false
+	if !handoff.Stopping {
+		var sourceWorkload releaseDrainWorkload
+		var quietSince time.Time
+		quiet := 2 * time.Second
+		for {
+			if waitCtx.Err() != nil {
+				return nil, pending()
 			}
-		}
-		active := 0
-		if ready {
-			for _, p := range before.Pods {
-				receipt, e := client.observeReleasePodDrain(waitCtx, namespace, p)
-				if e != nil {
-					return nil, e
+			ready := true
+			for _, serviceName := range services {
+				if err := safeCanonicalEndpoints(waitCtx, client, namespace, serviceName, candidateWorkload.Pods); err != nil {
+					ready = false
+					break
 				}
-				active += *receipt.ActiveConnections
 			}
-			lastActive = active
-		}
-		endpointsReady = ready
-		if ready && active == 0 {
-			if quietSince.IsZero() {
-				quietSince = time.Now()
+			if ready {
+				if handoff.DrainDeadline == nil {
+					deadline := time.Now().UTC().Add(canonicalDrainBudget)
+					handoff.DrainDeadline = &deadline
+					marker, err = s.writeCanonicalDrainState(waitCtx, client, app, handoff, marker, false)
+					if err != nil {
+						return nil, err
+					}
+				}
+				if canonicalDrainDue(handoff, time.Now()) {
+					break
+				}
+				if sourceWorkload.DeploymentUID == "" {
+					sourceWorkload, err = s.captureCanonicalAfterMarker(waitCtx, client, app, original)
+					if err != nil {
+						return nil, err
+					}
+					for _, pod := range sourceWorkload.Pods {
+						if q := time.Duration(pod.QuietMS) * time.Millisecond; q > quiet {
+							quiet = q
+						}
+					}
+				}
+				idle := true
+				for _, pod := range sourceWorkload.Pods {
+					receipt, observeErr := client.observeReleasePodDrain(waitCtx, namespace, pod)
+					if observeErr != nil || *receipt.ActiveConnections != 0 {
+						idle = false
+					}
+				}
+				if !idle {
+					quietSince = time.Time{}
+				} else if quietSince.IsZero() {
+					quietSince = time.Now()
+				} else if time.Since(quietSince) >= quiet {
+					latest, err := s.captureDrainWorkload(waitCtx, client, app, original, false, true)
+					if err != nil || !reflect.DeepEqual(sourceWorkload, latest) {
+						return nil, fmt.Errorf("canonical workload changed during quiet drain proof")
+					}
+					quietDrain = true
+					break
+				}
+			} else {
+				quietSince = time.Time{}
 			}
-			if time.Since(quietSince) >= quiet {
-				break
+			select {
+			case <-waitCtx.Done():
+				return nil, pending()
+			case <-time.After(200 * time.Millisecond):
 			}
-		} else {
-			quietSince = time.Time{}
-		}
-		select {
-		case <-waitCtx.Done():
-			return nil, pending()
-		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	after, err := s.captureDrainWorkload(ctx, client, app, original, false, true)
-	if err != nil || !reflect.DeepEqual(before, after) {
-		return nil, fmt.Errorf("canonical workload changed during drain observation")
-	}
-
 	latestCandidate, err := s.captureReleaseDrainWorkload(ctx, client, app, candidate)
 	if err != nil || !reflect.DeepEqual(candidateWorkload, latestCandidate) {
 		return nil, fmt.Errorf("promoted workload changed during canonical handoff")
 	}
 	for _, serviceName := range services {
 		service, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/services/"+url.PathEscape(serviceName))
-		if err != nil || !found || !reflect.DeepEqual(selector, objectStringMapValue(nestedObjectValue(service, "spec", "selector"))) {
+		meta := objectMapField(service, "metadata")
+		if err != nil || !found || objectStringField(meta, "uid") != serviceUIDs[serviceName] || objectStringField(meta, "deletionTimestamp") != "" ||
+			!appWorkloadOwnerMatches(meta, map[string]string{runtime.FugueLabelAppID: app.ID, runtime.FugueLabelTenantID: app.TenantID}) ||
+			!reflect.DeepEqual(selector, objectStringMapValue(nestedObjectValue(service, "spec", "selector"))) {
 			return nil, fmt.Errorf("canonical handoff selector changed during observation")
 		}
 		if err := safeCanonicalEndpoints(ctx, client, namespace, serviceName, candidateWorkload.Pods); err != nil {
@@ -633,8 +677,16 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	if err != nil || !sameReleaseDrainTarget(release, currentRelease) {
 		return nil, fmt.Errorf("promoted release changed during canonical handoff")
 	}
+	for _, spec := range []model.AppSpec{source.Spec, app.Spec} {
+		if spec.Workspace != nil || (spec.PersistentStorage != nil && !model.AppPersistentStorageSpecUsesSharedProjectRWX(spec.PersistentStorage)) {
+			return nil, fmt.Errorf("canonical handoff bounded stop does not support single-writer storage")
+		}
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	if err := s.stopWithdrawnCanonicalPods(ctx, client, app, handoff, marker, quietDrain); err != nil {
+		return nil, err
 	}
 	return objects, nil
 }

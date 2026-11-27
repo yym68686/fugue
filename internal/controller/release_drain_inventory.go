@@ -98,12 +98,20 @@ func readReleaseDrainInventory(ctx context.Context, client *kubeClient, ns strin
 			return discovered, nil
 		}
 	}
+	inv, err := fetchReleaseDrainInventory(ctx, client, ns, initial != nil)
+	if err == nil && initial != nil {
+		initial.byNamespace[ns] = inv
+	}
+	return inv, err
+}
+
+func fetchReleaseDrainInventory(ctx context.Context, client *kubeClient, ns string, fullPods bool) (*releaseDrainInventory, error) {
 	var replicas, pods kubeObjectList
 	if _, err := client.doMetadataList(ctx, "/apis/apps/v1/namespaces/"+url.PathEscape(ns)+"/replicasets", &replicas); err != nil {
 		return nil, err
 	}
 	podPath := "/api/v1/namespaces/" + url.PathEscape(ns) + "/pods"
-	if initial != nil {
+	if fullPods {
 		if _, err := client.doJSON(ctx, http.MethodGet, podPath, nil, &pods); err != nil {
 			return nil, err
 		}
@@ -118,11 +126,7 @@ func readReleaseDrainInventory(ctx context.Context, client *kubeClient, ns strin
 	if replicas.Metadata.Continue != "" || pods.Metadata.Continue != "" {
 		return nil, fmt.Errorf("release ownership inventory is incomplete (continued list)")
 	}
-	inv := indexReleaseDrainInventory(replicas.Items, pods.Items)
-	if initial != nil {
-		initial.byNamespace[ns] = inv
-	}
-	return inv, nil
+	return indexReleaseDrainInventory(replicas.Items, pods.Items), nil
 }
 
 func hydrateReleaseDrainPod(ctx context.Context, client *kubeClient, ns string, pod map[string]any) (map[string]any, error) {

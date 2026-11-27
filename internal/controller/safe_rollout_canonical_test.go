@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -16,7 +17,7 @@ import (
 )
 
 func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *testing.T) {
-	for _, scenario := range []string{"valid", "next_desired", "wrong_uid", "wrong_image", "wrong_key", "changed_desired", "missing_source"} {
+	for _, scenario := range []string{"valid", "next_desired", "wrong_uid", "wrong_image", "wrong_key", "changed_desired", "missing_source", "stopping", "stopping_changed_desired"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			st, source, desired, op := newSafeRolloutTestState(t)
@@ -56,6 +57,12 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 			live.Metadata.UID = "canonical-uid"
 			marker := safeCanonicalHandoff{ReleaseID: promoted.ID, DeploymentUID: live.Metadata.UID,
 				ReleaseKey: live.Metadata.Annotations[runtime.FugueAnnotationReleaseKey], Image: source.Spec.Image}
+			if strings.HasPrefix(scenario, "stopping") {
+				zero := 0
+				live.Spec.Replicas = &zero
+				deadline := time.Now().UTC().Add(time.Minute)
+				marker.DrainDeadline, marker.Stopping = &deadline, true
+			}
 			switch scenario {
 			case "wrong_uid":
 				marker.DeploymentUID = "recreated-uid"
@@ -72,7 +79,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 			// remains alive until the separate canonical drain guard permits apply.
 			managed := managedAppLiveGuardObject(t, desired, runtime.SchedulingConstraints{})
 			managed.Status.CurrentReleaseKey = marker.ReleaseKey
-			if scenario == "next_desired" {
+			if scenario == "next_desired" || scenario == "stopping_changed_desired" {
 				desired.Spec = *cloneControllerAppSpec(&desired.Spec)
 				desired.Spec.Image = "ghcr.io/example/api:v3"
 			}
@@ -80,7 +87,7 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 			client := managedAppLiveGuardClient(t, managed, live, true, true, &writes)
 			got, err := svc.prepareManagedAppReconcileRolloutWithEvidence(context.Background(), client, managed.Metadata.Namespace,
 				managed, desired, "", runtime.SchedulingConstraints{})
-			if (err == nil) != (scenario == "valid" || scenario == "next_desired") {
+			if (err == nil) != (scenario == "valid" || scenario == "next_desired" || scenario == "stopping") {
 				t.Fatalf("scenario %s: %v", scenario, err)
 			}
 			if err == nil && (got.Spec.Image != desired.Spec.Image || got.Spec.RolloutIntent != model.AppRolloutIntentOnlineImageUpdate) {
@@ -93,8 +100,9 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 	}
 }
 
-func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
-	for _, scenario := range []string{"idle", "legacy_source_selector", "legacy_source_selector_busy", "legacy_source_selector_mismatch", "legacy_source_selector_broad", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector"} {
+func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
+	for _, scenario := range []string{"idle", "legacy_source_selector", "legacy_source_selector_busy", "legacy_source_selector_mismatch", "legacy_source_selector_broad", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector",
+		"deadline", "deadline_terminating", "deadline_stale_endpoints", "deadline_unhealthy", "deadline_wrong_pod", "advance_deadline", "deadline_source_rerouted", "missing_hook"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
@@ -190,7 +198,16 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 				m["name"], m["uid"], m["labels"] = fmt.Sprintf("original-%d", i), fmt.Sprintf("original-uid-%d", i), cLabels
 				objectMapField(m, "annotations")[runtime.FugueAnnotationReleaseKey] = oldKey
 				m["ownerReferences"] = []map[string]any{{"kind": "ReplicaSet", "name": "original-rs", "uid": "original-rs-uid", "controller": true}}
-				mapSlice(nestedObjectValue(old, "spec", "containers"))[0]["image"] = oldImage
+				container := mapSlice(nestedObjectValue(old, "spec", "containers"))[0]
+				container["image"] = oldImage
+				if scenario != "missing_hook" {
+					container["lifecycle"] = map[string]any{"preStop": map[string]any{"httpGet": map[string]any{"path": "/drain/prestop", "port": float64(19090)}}}
+				}
+				for _, init := range mapSlice(nestedObjectValue(old, "spec", "initContainers")) {
+					if init["name"] == "fugue-drain-agent" {
+						init["restartPolicy"] = "Always"
+					}
+				}
 				sourcePods = append(sourcePods, old)
 			}
 			sourceReplica := cloneKubeMap(f.replicas[0])
@@ -246,9 +263,14 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					pm["uid"] = "recreated-service"
 				}
 			}
-			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_") || advancing
+			hasDeadline := strings.HasPrefix(scenario, "deadline") || scenario == "advance_deadline" || scenario == "missing_hook"
+			expires := time.Now().UTC().Add(20 * time.Second)
+			marked := scenario == "resume" || strings.HasPrefix(scenario, "restore_") || advancing || hasDeadline
 			if marked {
 				handoff := safeCanonicalHandoff{ReleaseID: candidate.ID, DeploymentUID: "canonical-uid", ReleaseKey: oldKey, Image: oldImage}
+				if hasDeadline {
+					handoff.DrainDeadline = &expires
+				}
 				if advancing {
 					handoff.ReleaseID = predecessor.ID
 					if strings.HasPrefix(scenario, "advance_interrupted_") {
@@ -297,12 +319,27 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			if scenario == "wrong_selector" || scenario == "restore_wrong_selector" || scenario == "advance_wrong_selector" {
 				objectMapField(canonicalService, "spec")["selector"] = map[string]string{"unexpected": "workload"}
 			}
-			if scenario == "candidate_unhealthy" {
+			if scenario == "candidate_unhealthy" || scenario == "deadline_unhealthy" {
 				objectMapField(f.deployment, "status")["readyReplicas"] = 0
 			}
-			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
+			if scenario == "deadline_source_rerouted" {
+				objectMapField(canonicalService, "spec")["selector"] = cLabels
+			}
+			if scenario == "deadline_terminating" {
+				for _, pod := range sourcePods {
+					objectMapField(pod, "metadata")["deletionTimestamp"] = expires.Add(10 * time.Minute).Format(time.RFC3339)
+				}
+			}
+			if scenario == "deadline_wrong_pod" {
+				objectMapField(objectMapField(sourcePods[0], "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = "unexpected-executable"
+			}
+			normalStop := scenario == "idle" || scenario == "legacy_source_selector" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume"
+			expiredStop := scenario == "deadline" || scenario == "advance_deadline" || scenario == "deadline_terminating"
+			waitForBusy := scenario == "busy" || strings.HasSuffix(scenario, "_busy") || scenario == "deadline_source_rerouted" || scenario == "observer_failure"
 			busyObservation := make(chan struct{})
-			waitForBusyObservation := scenario == "busy" || strings.HasSuffix(scenario, "_busy")
+			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
+			scales, podStops := 0, 0
+			podsGone := false
 			markerReads := 0
 			markerPatched := false
 			f.extra = func(w http.ResponseWriter, r *http.Request) bool {
@@ -324,9 +361,6 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 								objectMapField(canonical, "status")["observedGeneration"] = cm["generation"]
 							}
 						}
-						if scenario == "changed_original" && sourceProbes > 0 {
-							cm["uid"] = "replaced-uid"
-						}
 						_ = json.NewEncoder(w).Encode(canonical)
 						return true
 					}
@@ -337,9 +371,17 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					var patch map[string]any
 					_ = json.NewDecoder(r.Body).Decode(&patch)
 					if patch["spec"] != nil {
-						templateWrites++
-						http.Error(w, "template mutation forbidden before drain", 500)
-						return true
+						if spec := objectMapField(patch, "spec"); len(spec) == 1 && spec["replicas"] == float64(0) && (normalStop || expiredStop) {
+							scales++
+							if patchMeta := objectMapField(patch, "metadata"); patchMeta["uid"] != cm["uid"] || patchMeta["resourceVersion"] != cm["resourceVersion"] {
+								t.Error("stop scale omitted source UID/resourceVersion")
+							}
+							objectMapField(canonical, "spec")["replicas"] = float64(0)
+						} else {
+							templateWrites++
+							http.Error(w, "unexpected canonical Deployment mutation", 500)
+							return true
+						}
 					}
 					for k, v := range objectMapField(objectMapField(patch, "metadata"), "annotations") {
 						if v == nil {
@@ -376,14 +418,33 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]any{"items": append(append([]map[string]any{}, f.replicas...), sourceReplica)})
 					return true
 				case strings.HasSuffix(r.URL.Path, "/pods"):
+					if podsGone {
+						_ = json.NewEncoder(w).Encode(map[string]any{"items": f.pods})
+						return true
+					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"items": append(append([]map[string]any{}, f.pods...), sourcePods...)})
 					return true
+				case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/pods/original-"):
+					podStops++
+					var options struct {
+						Grace         int64                `json:"gracePeriodSeconds"`
+						Preconditions struct{ UID string } `json:"preconditions"`
+					}
+					_ = json.NewDecoder(r.Body).Decode(&options)
+					if scales != 1 || options.Grace < 1 || options.Grace >= 600 || expiredStop && options.Grace > 20 || options.Preconditions.UID != fmt.Sprintf("original-uid-%d", podStops-1) {
+						t.Errorf("unbounded or unfenced Pod termination: %+v, scale=%d", options, scales)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"kind": "Status", "status": "Success"})
+					return true
 				case strings.HasSuffix(r.URL.Path, "/endpointslices"):
+					if scenario == "changed_original" {
+						cm["uid"] = "replaced-uid"
+					}
 					addresses := []string{"10.0.0.10", "10.0.0.11"}
 					if strings.HasPrefix(scenario, "restore_") && scenario != "restore_stale_endpoints" && objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector"))[runtime.FugueLabelAppWorkload] == name {
 						addresses = []string{"10.0.1.10", "10.0.1.11"}
 					}
-					if scenario == "stale_endpoints" {
+					if scenario == "stale_endpoints" || scenario == "deadline_stale_endpoints" {
 						addresses = append(addresses, "10.0.0.99")
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"endpoints": []any{map[string]any{"addresses": addresses, "conditions": map[string]bool{"ready": true}}}}}})
@@ -392,15 +453,16 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					sourceProbes++
 					if scenario == "observer_failure" {
 						http.Error(w, "unavailable", 503)
-						return true
+					} else {
+						pod := strings.Split(strings.Split(r.URL.Path, "/pods/")[1], ":")[0]
+						active := 0
+						if waitForBusy {
+							active = 1
+						}
+						_ = json.NewEncoder(w).Encode(drainprotocol.Snapshot{APIVersion: drainprotocol.Version, Nonce: r.URL.Query().Get("nonce"), Pod: pod,
+							Namespace: runtime.NamespaceForTenant(app.TenantID), AppPorts: []int{8080}, ActiveConnections: &active})
 					}
-					pod := strings.Split(strings.Split(r.URL.Path, "/pods/")[1], ":")[0]
-					active := 0
-					if scenario == "busy" || strings.HasSuffix(scenario, "_busy") {
-						active = 1
-					}
-					_ = json.NewEncoder(w).Encode(drainprotocol.Snapshot{APIVersion: drainprotocol.Version, Nonce: r.URL.Query().Get("nonce"), Pod: pod, Namespace: runtime.NamespaceForTenant(app.TenantID), AppPorts: []int{8080}, ActiveConnections: &active})
-					if waitForBusyObservation && sourceProbes == len(sourcePods) {
+					if waitForBusy && sourceProbes == len(sourcePods) {
 						w.(http.Flusher).Flush()
 						close(busyObservation)
 					}
@@ -411,10 +473,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			client, _ := s.kubeClient()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if waitForBusyObservation {
-				// Cancel only after the guarded handoff has observed every busy
-				// source Pod. A 150ms wall budget could expire before those checks
-				// under concurrent package load, never exercising drain retention.
+			if waitForBusy {
 				go func() {
 					select {
 					case <-busyObservation:
@@ -422,25 +481,55 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 					case <-ctx.Done():
 					}
 				}()
-			} else if scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" || advancing {
+			} else if scenario == "stale_endpoints" || scenario == "restore_stale_endpoints" || scenario == "deadline_stale_endpoints" || scenario == "advance_generation_stuck" {
 				ctx, cancel = context.WithTimeout(context.Background(), 150*time.Millisecond)
 				defer cancel()
 			}
-			got, err := s.prepareSafeCanonicalHandoff(ctx, client, app, []map[string]any{desired, desiredService})
-			success := scenario == "idle" || scenario == "legacy_source_selector" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume" || scenario == "restore_ready"
+			call := func(ctx context.Context) ([]map[string]any, error) {
+				return s.prepareSafeCanonicalHandoff(ctx, client, app, []map[string]any{cloneKubeMap(desired), cloneKubeMap(desiredService)})
+			}
+			got, err := call(ctx)
+			if normalStop || expiredStop {
+				if !errors.Is(err, errSafeCanonicalHandoffPending) || !strings.Contains(err.Error(), "canonical_drain_terminating") || scales != 1 || podStops != len(sourcePods) {
+					t.Fatalf("expected the old cohort to enter bounded termination: err=%v scales=%d stops=%d", err, scales, podStops)
+				}
+				var saved safeCanonicalHandoff
+				_ = json.Unmarshal([]byte(objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation]), &saved)
+				if !saved.Stopping || saved.DrainDeadline == nil || (expiredStop && !saved.DrainDeadline.Equal(expires)) {
+					t.Fatalf("stop did not retain its original deadline: %+v", saved)
+				}
+				for _, pod := range sourcePods {
+					objectMapField(pod, "metadata")["deletionTimestamp"] = saved.DrainDeadline.Add(-canonicalDrainKubeletBuffer).Format(time.RFC3339)
+				}
+				if _, retryErr := call(ctx); !errors.Is(retryErr, errSafeCanonicalHandoffPending) || podStops != len(sourcePods) || scales != 1 {
+					t.Fatalf("retry replaced source early or reset termination: %v, stops=%d", retryErr, podStops)
+				}
+				podsGone = true
+				objectMapField(canonical, "status")["replicas"] = float64(0)
+				got, err = call(ctx)
+			}
+			success := normalStop || expiredStop || scenario == "restore_ready"
 			if success != (err == nil) {
 				t.Fatalf("expected success=%v got %v (reads=%d probes=%d)", success, err, sourceReads, sourceProbes)
 			}
 			if templateWrites != 0 || f.deleteCalls != 0 {
 				t.Fatal("handoff changed or deleted the original workload")
 			}
-			if waitForBusyObservation && sourceProbes < len(sourcePods) {
-				t.Fatal("handoff stopped before observing the busy source cohort")
+			if !normalStop && !expiredStop && (scales != 0 || podStops != 0) {
+				t.Fatal("handoff stopped Pods without sufficient proof")
+			}
+			if expiredStop && sourceProbes != 0 {
+				t.Fatal("handoff near deadline still depended on the old socket observer")
+			}
+			if waitForBusy {
+				var saved safeCanonicalHandoff
+				_ = json.Unmarshal([]byte(objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation]), &saved)
+				if sourceProbes < len(sourcePods) || saved.DrainDeadline == nil || saved.Stopping ||
+					(scenario == "deadline_source_rerouted" && !saved.DrainDeadline.After(expires)) {
+					t.Fatalf("busy/unknown drain terminated early or lost its deadline: %+v probes=%d", saved, sourceProbes)
+				}
 			}
 			if success && scenario != "restore_ready" {
-				if sourceProbes < 4 {
-					t.Fatal("positive quiet interval was not observed")
-				}
 				if !reflect.DeepEqual(objectStringMapValue(nestedObjectValue(got[1], "spec", "selector")), targetSelector) {
 					t.Fatal("apply would redirect traffic to old canonical Pods")
 				}
@@ -471,7 +560,7 @@ func TestSafeCanonicalHandoffRetainsOldPodsUntilPositiveDrain(t *testing.T) {
 			if advancing && strings.HasSuffix(scenario, "_busy") {
 				var checkpoint safeCanonicalHandoff
 				_ = json.Unmarshal([]byte(objectStringMapValue(cm["annotations"])[safeCanonicalHandoffAnnotation]), &checkpoint)
-				if servicePatches != 1 || sourceProbes == 0 || !reflect.DeepEqual(objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector")), targetSelector) ||
+				if servicePatches != 1 || !reflect.DeepEqual(objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector")), targetSelector) ||
 					checkpoint.ReleaseID != candidate.ID || checkpoint.SourceReleaseID != expectedSourceID || checkpoint.DeploymentUID != "canonical-uid" || checkpoint.ReleaseKey != expectedSourceKey || checkpoint.Image != expectedSourceImage {
 					t.Fatal("successor did not retain original drain cohort while moving new connections", checkpoint, servicePatches, sourceProbes)
 				}

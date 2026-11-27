@@ -322,6 +322,10 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer stopOperationRecovery()
 	stopRetirement := s.startAppReleaseRetirementWorker(ctx)
 	defer stopRetirement()
+	if s.Config.KubectlApply {
+		stopCanonicalDrain := s.startPeriodicReconcile(ctx, 10*time.Second, "canonical drain deadline", s.reconcileCanonicalDrainDeadlines)
+		defer stopCanonicalDrain()
+	}
 	foregroundImports, stopForegroundImports := s.startPendingOperationWorkers(ctx, operationLaneForegroundImport, s.Config.ForegroundImportWorkers)
 	defer stopForegroundImports()
 	foregroundActivations, stopForegroundActivations := s.startPendingOperationWorkers(ctx, operationLaneForegroundActivate, s.Config.ForegroundActivateWorkers)

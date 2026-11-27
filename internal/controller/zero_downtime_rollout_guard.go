@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -456,6 +457,26 @@ func (s *Service) prepareManagedAppRolloutFromLiveState(
 	liveReplicas := 1
 	if deployment.Spec.Replicas != nil {
 		liveReplicas = *deployment.Spec.Replicas
+	}
+	// A bounded handoff deliberately stops only the withdrawn canonical
+	// Deployment while the independently promoted revision serves. Re-enter
+	// the handoff instead of waiting for the old Deployment to become ready.
+	// Canonical reconciliation still revalidates traffic and observes the old
+	// Pods disappear before it applies the new workload.
+	if liveReplicas == 0 && desired.Spec.Replicas > 0 && (operationType == "" || operationType == model.OperationTypeDeploy) {
+		var handoff safeCanonicalHandoff
+		if json.Unmarshal([]byte(deployment.Metadata.Annotations[safeCanonicalHandoffAnnotation]), &handoff) == nil &&
+			handoff.Stopping && handoff.DrainDeadline != nil && handoff.ReleaseKey == deployment.Metadata.Annotations[runtime.FugueAnnotationReleaseKey] {
+			if source, scheduling, recovered, err := s.recoverSafeCanonicalHandoffSource(deployment, current, desired); err != nil {
+				return model.App{}, err
+			} else if recovered {
+				desired.Spec.RolloutIntent = s.managedRolloutIntentForDesiredState(source, desired, scheduling, desiredScheduling)
+				if model.AppHasClusterService(desired.Spec) && !zeroDowntimeDeploymentStrategyIsSafe(s.zeroDowntimeManagedAppDeployment(desired, desiredScheduling)) {
+					return model.App{}, fmt.Errorf("rendered canonical replacement is not an explicit safe RollingUpdate")
+				}
+				return desired, nil
+			}
+		}
 	}
 	// A fully observed stop can retain historical serving timestamps. Only
 	// live proof of no remaining Pods or endpoints makes a subsequent start
