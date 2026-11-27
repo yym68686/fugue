@@ -64,6 +64,15 @@ rollback, or old writer revocation.
   local, dependency, and route health. It never advances the PostgreSQL
   last-verified version: that additionally needs proof this claim cannot
   issue a delayed write. Unknown state is not proof of no write.
+- `NewWitnessedExecutionJournal` authenticates content-addressed baseline
+  and terminal attestations from a separately configured, resource-scoped
+  provider observer, never from the owner approval key or publication input.
+  An attestation binds two independently retained records: the positive
+  readback and the proof of old-writer drainage or terminal write closure.
+  Terminal attestations also bind the exact intent, approval, fence, and
+  outcome. An unavailable, stale, or mismatched witness cannot advance the
+  head. This verifier does not collect either record, provision signer keys,
+  or establish that production drainage has occurred.
 - Guardian status reports the serving record separately from the durable
   last-verified record. A healthy provider pointer with an unresolved journal
   claim remains `verifying`; a missing journal does not advance status.

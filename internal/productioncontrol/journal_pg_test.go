@@ -175,4 +175,5 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		AND l.recorded_at=a.recorded_at AND l.actor=a.actor`).Scan(&launches); err != nil || launches != 1 {
 		t.Fatalf("historical launch was not backfilled exactly: count=%d error=%v", launches, err)
 	}
+	t.Run("independent-witness-gate", func(t *testing.T) { testPostgresWitnessGate(t, ctx, runtimeDB) })
 }
