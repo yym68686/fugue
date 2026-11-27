@@ -305,6 +305,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff", "quality_evidence_retention_handoff")
+	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
@@ -325,6 +326,23 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {
 			t.Fatalf("%s must share the non-canceling observation release queue", name)
 		}
+	}
+	storageAudit := yamlMappingValue(t, jobs, "deploy_storage_audit_worker")
+	storageAuditWhen := yamlMappingValue(t, storageAudit, "if").Value
+	for _, gate := range []string{
+		"github.event_name == 'push' && github.ref == 'refs/heads/main'",
+		"needs.prepush.result == 'success'", "needs.prepush.outputs.storage_audit_worker_rehearsed == 'true'",
+		"needs.component-build.result == 'success'", "needs.observability_configuration.result == 'success'",
+		"needs.storage_policy.result == 'success'", "'storage-audit-worker')",
+	} {
+		if !strings.Contains(storageAuditWhen, gate) {
+			t.Fatalf("storage audit release is missing its admission gate: %s", gate)
+		}
+	}
+	storageQueue := yamlMappingValue(t, storageAudit, "concurrency")
+	if yamlMappingValue(t, storageQueue, "group").Value != "fugue-production-storage-audit-worker" ||
+		yamlMappingValue(t, storageQueue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, storageQueue, "queue").Value != "max" {
+		t.Fatal("storage audit releases must use their own non-canceling queue")
 	}
 	nodeWorker := yamlMappingValue(t, jobs, "node_worker_handoff")
 	nodeWorkerWhen := yamlMappingValue(t, nodeWorker, "if").Value

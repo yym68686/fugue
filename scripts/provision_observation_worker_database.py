@@ -58,8 +58,12 @@ def scram_verifier(password):
 
 
 class Provision:
+    validate_config = staticmethod(parse_config)
+    binding_annotation = BINDING
+    success_message = "observation database credential provisioned; writer ownership unchanged"
+
     def __init__(self, config, kubectl="kubectl"):
-        self.config = parse_config(config)
+        self.config = self.validate_config(config)
         self.kubectl = kubectl
         self.service = config["cluster"] + "-rw"
         self.server = f'{self.service}.{config["namespace"]}.svc'
@@ -125,7 +129,7 @@ class Provision:
         return {
             "apiVersion": "v1", "kind": "Secret", "type": "Opaque", "immutable": True,
             "metadata": {"namespace": self.config["namespace"], "name": self.config["secret"],
-                         "annotations": {BINDING: self.binding}},
+                         "annotations": {self.binding_annotation: self.binding}},
             "data": {"database-url": base64.b64encode(dsn.encode("ascii")).decode("ascii")},
         }
 
@@ -134,7 +138,7 @@ class Provision:
         uid = meta.get("uid", "")
         if (secret.get("immutable") is not True or secret.get("type") != "Opaque"
                 or meta.get("deletionTimestamp") or not re.fullmatch(UID, uid)
-                or meta.get("annotations", {}).get(BINDING) != self.binding
+                or meta.get("annotations", {}).get(self.binding_annotation) != self.binding
                 or set(secret.get("data", {})) != {"database-url"}):
             raise ProvisionError("existing Secret was not created by this provisioner")
         encoded = secret["data"]["database-url"]
@@ -206,7 +210,7 @@ COMMIT;
         self.sql(primary[0], self.role_sql(uid, scram_verifier(password)))
         # The first worker readiness check validates the actual role and grants
         # over the declared write Service. Production ownership stays with API.
-        print("observation database credential provisioned; writer ownership unchanged")
+        print(self.success_message)
 
 
 def main():
