@@ -101,7 +101,7 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 		return NativePublication{}, err
 	}
 	key := payload.ProposedRecord.Key()
-	publication, err := p.store.planDesiredPublication(ctx, key, payload.Files)
+	publication, err := p.store.planDesiredPublicationFor(ctx, key, payload.Files, true)
 	if err != nil {
 		return NativePublication{}, err
 	}

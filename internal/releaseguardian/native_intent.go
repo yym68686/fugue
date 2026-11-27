@@ -30,16 +30,11 @@ type nativeReleasePayload struct {
 // settled predecessor and no shared/delegated writes. Repair and takeover of
 // an in-flight legacy operation require separate proofs.
 func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, clusterID, requestID string, files map[string][]byte) (NativeReleaseDraft, error) {
-	publication, err := store.planDesiredPublication(ctx, key, files)
+	publication, err := store.planDesiredPublicationFor(ctx, key, files, true)
 	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
 	preview := publication.preview
-	if preview.CurrentRecordDigest != preview.CurrentDesired.RecordDigest ||
-		preview.CurrentRecordDigest != preview.Record.LKGRecordDigest ||
-		preview.Health.Local.State != HealthHealthy || preview.Health.Dependency.State != HealthHealthy || preview.Health.Route.State != HealthHealthy {
-		return NativeReleaseDraft{}, errors.New("native release draft requires a healthy settled Guardian predecessor")
-	}
 	workload := preview.PrewriteWorkload
 	if workload.Namespace != preview.Namespace || workload.Kind == "" || workload.Name == "" {
 		return NativeReleaseDraft{}, errors.New("native release draft does not identify a workload in the configured namespace")

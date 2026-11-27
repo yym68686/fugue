@@ -45,6 +45,10 @@ func (store *KubeStore) PreviewDesired(ctx context.Context, key Key, files map[s
 }
 
 func (store *KubeStore) planDesiredPublication(ctx context.Context, key Key, files map[string][]byte) (desiredPublication, error) {
+	return store.planDesiredPublicationFor(ctx, key, files, false)
+}
+
+func (store *KubeStore) planDesiredPublicationFor(ctx context.Context, key Key, files map[string][]byte, native bool) (desiredPublication, error) {
 	if store == nil || store.client == nil {
 		return desiredPublication{}, errors.New("release Guardian store is unavailable")
 	}
@@ -96,7 +100,14 @@ func (store *KubeStore) planDesiredPublication(ctx context.Context, key Key, fil
 		!lkgMatchesStable {
 		return desiredPublication{}, errors.New("Guardian candidate LKG is not the exact current stable release")
 	}
-	record, err := bundle.ReleaseRecord(key, stableRecord.RecordDigest)
+	predecessorDigest := stableRecord.RecordDigest
+	if native {
+		predecessorDigest, err = nativePublicationPredecessor(snapshot, stableRecord)
+		if err != nil {
+			return desiredPublication{}, err
+		}
+	}
+	record, err := bundle.ReleaseRecord(key, predecessorDigest)
 	if err != nil {
 		return desiredPublication{}, err
 	}
@@ -156,6 +167,19 @@ func (store *KubeStore) planDesiredPublication(ctx context.Context, key Key, fil
 		},
 		record: recordMap, execution: executionMap, desired: desiredMap, bundle: bundle,
 	}, nil
+}
+
+func nativePublicationPredecessor(snapshot Snapshot, canonical ReleaseRecord) (string, error) {
+	if snapshot.DesiredRecordMissing || snapshot.CurrentRecordDigest != snapshot.Desired.RecordDigest ||
+		snapshot.Record.RecordDigest != snapshot.CurrentRecordDigest ||
+		!allLayersHealthy(snapshot.Health) || !SameCommittedReleaseTarget(snapshot.Record, canonical) {
+		return "", errors.New("native release requires an independently verified, healthy and settled Guardian predecessor")
+	}
+	// After a rollout the stable monitor derives a canonical record with a
+	// different envelope digest from the retained DesiredRelease. Keep the
+	// ledger's actual verified release identity, but only when it names the
+	// exact same serving image, manifest and health contract as that monitor.
+	return snapshot.CurrentRecordDigest, nil
 }
 
 // PublishDesired persists one immutable target and advances only its
