@@ -31,6 +31,7 @@ func TestMigratedDomainReleaseSourceOwnership(t *testing.T) {
 		path string
 		want []string
 	}{
+		{"internal/appimages/remote_registry.go", []string{"api", "controller"}},
 		{"internal/operationqueue/selection.go", []string{"controller"}},
 		{"internal/operationview/repository.go", []string{"api"}},
 		{"internal/operationview/contract/contract.go", []string{"api", "controller", "observation-worker", "ssh-control"}},
@@ -70,6 +71,7 @@ func TestMigratedDomainBuildGraphMatchesSourceOwnership(t *testing.T) {
 	// These domains have been extracted from larger release roots. Check that
 	// the path classifier selects exactly their actual artifact consumers.
 	sources := map[string]string{
+		"internal/appimages":                  "remote_registry.go",
 		"internal/backupusage":                "reconcile.go",
 		"internal/imagebilling":               "scheduler.go",
 		"internal/imagebilling/contract":      "repository.go",
