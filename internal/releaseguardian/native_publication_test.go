@@ -93,7 +93,8 @@ func TestNativePublicationIsBoundAndNeverRedispatched(t *testing.T) {
 				}
 				return nil
 			})
-			p := &NativePublisher{store: f.store, journal: journal, clusterID: draft.Intent.ClusterID, admission: admission}
+			p := &NativePublisher{store: f.store, journal: journal, clusterID: draft.Intent.ClusterID, admission: admission,
+				writer: f.client.CoreV1().ConfigMaps(draft.Preview.Namespace)}
 			switch mode {
 			case "artifact not in independent registry":
 				registry, err := NewIndependentRegistry("registry.fixture.invalid", nil, registryRoundTrip(func(*http.Request) (*http.Response, error) {
