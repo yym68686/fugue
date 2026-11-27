@@ -43,7 +43,10 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   Run these consumers uncached: child-process inputs may not invalidate the
   test result cache. A missing declared consumer or an unowned fixture still
   selects uncached full Go tests. This is not an inventory of every implicit
-  dependency.
+  dependency. In narrower scopes, the tracked-source business-coupling
+  and retired release mode audits also run uncached for both runtime and
+  test-only edits. They scan the tracked tree regardless of which packages
+  import the changed source.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,

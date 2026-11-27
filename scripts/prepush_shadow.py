@@ -45,6 +45,9 @@ COMMAND_TEST_CONSUMERS = {
 TEST_BINARY_CONSUMERS = {
     "./internal/sshexecutor": "./internal/sshkube",
 }
+# These contracts read every tracked file, including Go tests and sources
+# with no import path to the checker. They do not affect runtime builds.
+REPOSITORY_TEST_CONSUMERS = {"./internal/declarativerelease", "./internal/platformsafety"}
 
 
 def packages_from_stream(stream):
@@ -99,7 +102,7 @@ def full(reason):
     }
 
 
-def select(paths, packages, root):
+def select(paths, packages, root, *, repository_tests=()):
     if not paths:
         return full("no diff to classify")
     if not packages or any(p.get("Incomplete") or p.get("Error") or p.get("DepsErrors") for p in packages):
@@ -147,7 +150,8 @@ def select(paths, packages, root):
     for name in compiled:
         tests.update(reverse_test[name])
     available_labels = set(labels.values())
-    implicit_tests = {SOURCE_READERS[path] for path in paths if path in SOURCE_READERS}
+    implicit_tests = set(repository_tests)
+    implicit_tests.update(SOURCE_READERS[path] for path in paths if path in SOURCE_READERS)
     implicit_tests.update(
         COMMAND_TEST_CONSUMERS[labels[name]]
         for name in compiled if labels[name] in COMMAND_TEST_CONSUMERS
@@ -196,7 +200,10 @@ def report(base, *, target=None):
             goos, goarch = target.split("/")
             command = ["env", f"GOOS={goos}", f"GOARCH={goarch}", "CGO_ENABLED=0", *command]
         status, output = prepush.run(command, 12)
-        plan = select(paths, packages_from_stream(output) if not status else [], prepush.ROOT)
+        plan = select(
+            paths, packages_from_stream(output) if not status else [], prepush.ROOT,
+            repository_tests=REPOSITORY_TEST_CONSUMERS,
+        )
     except (OSError, TypeError, ValueError, KeyError):
         plan = full("Go package graph could not be read")
     planned = {pkg for cmd in plan["goTests"] for pkg in cmd[2:] if not pkg.startswith("-")}
