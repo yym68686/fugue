@@ -68,14 +68,15 @@ type CLI struct {
 func Run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runWithContext(ctx, args, os.Stdout, os.Stderr)
+	return RunWithContext(ctx, args, os.Stdout, os.Stderr)
 }
 
 func runWithStreams(args []string, stdout, stderr io.Writer) error {
-	return runWithContext(context.Background(), args, stdout, stderr)
+	return RunWithContext(context.Background(), args, stdout, stderr)
 }
 
-func runWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+// RunWithContext executes a command using the caller's context and output streams.
+func RunWithContext(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	payload := &payloadWriter{Writer: stdout}
 	cli := newCLI(payload, stderr)
 	cmd := cli.newRootCommand()
