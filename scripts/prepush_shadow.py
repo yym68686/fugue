@@ -47,7 +47,8 @@ TEST_BINARY_CONSUMERS = {
 }
 # These contracts read every tracked file, including Go tests and sources
 # with no import path to the checker. They do not affect runtime builds.
-REPOSITORY_TEST_CONSUMERS = {"./internal/declarativerelease", "./internal/platformsafety"}
+REPOSITORY_TEST_CONSUMERS = {"./internal/platformsafety", "./internal/releasesourceaudit"}
+EDGE_GROUP_SOURCE_PREFIXES = ("internal/edge/", "internal/edgecontrol/", "internal/edgegroupfront/")
 # These composition guards scan non-test Go files under both source trees.
 APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking", "./internal/releaseretirement"}
 
@@ -158,6 +159,9 @@ def select(paths, packages, root, *, repository_tests=(), application_source_tes
            for path in paths):
         implicit_tests.update(application_source_tests)
     implicit_tests.update(SOURCE_READERS[path] for path in paths if path in SOURCE_READERS)
+    if any(path.startswith(EDGE_GROUP_SOURCE_PREFIXES) and path.endswith(".go") and not path.endswith("_test.go")
+           for path in paths):
+        implicit_tests.add("./internal/declarativerelease")
     implicit_tests.update(
         COMMAND_TEST_CONSUMERS[labels[name]]
         for name in compiled if labels[name] in COMMAND_TEST_CONSUMERS

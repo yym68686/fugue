@@ -174,7 +174,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(plan["scope"], scope)
                 self.assertEqual(plan["goTests"], [
                     ["go", "test", "./domain"],
-                    ["go", "test", "-count=1", "./internal/declarativerelease", "./internal/platformsafety"],
+                    ["go", "test", "-count=1", "./internal/platformsafety", "./internal/releasesourceaudit"],
                 ])
                 self.assertEqual(plan["goBuilds"], builds)
                 self.assertEqual(shadow.select([path], [owner, *audits[1:]], ROOT, **kwargs)["scope"], "full")
@@ -192,10 +192,21 @@ class SelectionTest(unittest.TestCase):
             plan = shadow.report("HEAD")
         self.assertEqual(plan["scope"], "test-only")
         self.assertIn(
-            ["go", "test", "-count=1", "./internal/declarativerelease", "./internal/platformsafety"],
+            ["go", "test", "-count=1", "./internal/platformsafety", "./internal/releasesourceaudit"],
             plan["goTests"],
         )
         self.assertEqual(plan["goBuilds"], [])
+
+    def test_edge_source_changes_keep_the_configured_group_audit(self):
+        group_audit = pkg("internal/declarativerelease")
+        for prefix in shadow.EDGE_GROUP_SOURCE_PREFIXES:
+            path = prefix.rstrip("/") + "/component"
+            with self.subTest(path=path):
+                owner = pkg(path)
+                plan = shadow.select([path + "/impl.go"], [owner, group_audit], ROOT)
+                self.assertEqual(plan["goTests"][-1], ["go", "test", "-count=1", "./internal/declarativerelease"])
+                self.assertEqual(shadow.select([path + "/impl.go"], [owner], ROOT)["scope"], "full")
+                self.assertEqual(shadow.select([path + "/impl_test.go"], [owner], ROOT)["scope"], "test-only")
 
     def test_domain_guards_are_runtime_source_edges_without_build_edges(self):
         audits = [pkg("internal/imagetracking"), pkg("internal/releaseretirement")]
