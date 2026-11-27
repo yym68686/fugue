@@ -27,7 +27,17 @@ func TestRetiredAppReleaseCannotChangeServingTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := s.store.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired, UpstreamURL: "http://retired.example.test"})
+	rejected := performJSONRequest(t, s, http.MethodPost, "/v1/apps/"+app.ID+"/releases", key, appReleaseCreateRequest{
+		Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired, UpstreamURL: "http://retired.example.test",
+	})
+	if rejected.Code != http.StatusConflict {
+		t.Fatalf("cannot create a retirement tombstone through HTTP: %d %s", rejected.Code, rejected.Body.String())
+	}
+	historical, err := s.store.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRolePrevious, Status: model.AppReleaseStatusDraining, UpstreamURL: "http://retired.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := s.store.AppReleaseRetirement(app.TenantID, app.ID).RetireDrained(t.Context(), historical, stable, policy)
 	if err != nil {
 		t.Fatal(err)
 	}

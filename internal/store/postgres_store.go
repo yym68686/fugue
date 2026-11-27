@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/operationcancel"
 	"fugue/internal/pgimage"
 	runtimepkg "fugue/internal/runtime"
 )
@@ -4988,7 +4989,9 @@ func (s *Store) pgFailOperationGuarded(id, message string, guard *operationFinal
 	return op, nil
 }
 
-func (s *Store) pgCancelOperation(id, message string) (model.Operation, error) {
+// The internal queue may cancel only a deploy. API calls always supply the
+// authenticated actor, whose scope is verified in this same transaction.
+func (s *Store) pgCancelOperation(id, message string, actor *model.Principal) (model.Operation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -5000,20 +5003,22 @@ func (s *Store) pgCancelOperation(id, message string) (model.Operation, error) {
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
 	}
-	if op.Status != model.OperationStatusPending && !(op.Status == model.OperationStatusRunning && op.Type == model.OperationTypeDeploy) {
+	if actor == nil && op.Type != model.OperationTypeDeploy {
 		return model.Operation{}, ErrConflict
 	}
-	now := time.Now().UTC()
-	op.Status = model.OperationStatusCanceled
-	op.UpdatedAt = now
-	op.CompletedAt = &now
-	op.ResultMessage = strings.TrimSpace(message)
-	if op.ResultMessage == "" {
-		op.ResultMessage = "operation canceled before execution"
+	if actor != nil && !operationcancel.AllowsTenant(*actor, op) {
+		return model.Operation{}, operationcancel.ErrNotVisible
 	}
 	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
 	if err != nil {
 		return model.Operation{}, mapDBErr(err)
+	}
+	if actor != nil && !operationcancel.AllowsApp(*actor, app) {
+		return model.Operation{}, operationcancel.ErrNotVisible
+	}
+	op, allowed := operationcancel.Transition(op, message, time.Now().UTC())
+	if !allowed {
+		return model.Operation{}, ErrConflict
 	}
 	applyCanceledOperationToAppModel(&app, &op)
 	if err := s.pgUpdateOperationTx(ctx, tx, op); err != nil {

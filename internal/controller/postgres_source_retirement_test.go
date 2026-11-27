@@ -202,7 +202,7 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 					if !errors.Is(err, errPostgresSourceRetirementUnsettled) {
 						t.Fatalf("unknown mutation lost interlock: %v", err)
 					}
-					for _, action := range []func() error{func() error { _, e := st.CancelOperation(op.ID, "cancel"); return e }, func() error { _, e := st.RequeueManagedOperationGuarded(op, "requeue"); return e }, func() error { _, e := st.UnbindBackingService(app.Bindings[0].ID); return e }} {
+					for _, action := range []func() error{func() error { _, e := cancelFixtureOperation(st, op, "cancel"); return e }, func() error { _, e := st.RequeueManagedOperationGuarded(op, "requeue"); return e }, func() error { _, e := st.UnbindBackingService(app.Bindings[0].ID); return e }} {
 						if !errors.Is(action(), store.ErrConflict) {
 							t.Fatal("retirement lease bypassed")
 						}
