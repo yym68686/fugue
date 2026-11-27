@@ -158,15 +158,17 @@ func checkGlobalProducerRollback(ctx context.Context, tx *sql.Tx, intent Intent,
 // CheckGlobalProducerFreeze verifies the closed, pre-activation provider
 // boundary from the same database that will store the enrolled baseline.
 // It does not prove that external credentials have been revoked or drained.
-func (j *Journal) CheckGlobalProducerFreeze(ctx context.Context, release string, version Version, authorityDigest string) error {
-	if j == nil || release == "" || !version.valid() || !digestPattern.MatchString(authorityDigest) {
+func (j *Journal) CheckGlobalProducerFreeze(ctx context.Context, scope Scope, release string, version Version, freezeIntent string, observedAt int64) error {
+	if j == nil || !scope.valid() || scope.ResourceID != GlobalProducerPolicyResource || release == "" ||
+		!version.valid() || !digestPattern.MatchString(freezeIntent) || observedAt <= 0 {
 		return errors.New("global producer baseline lacks exact freeze evidence")
 	}
 	var frozen bool
 	if err := j.db.QueryRowContext(ctx, `SELECT EXISTS(
   SELECT 1 FROM fugue_native_global_producer_gate g WHERE g.singleton AND g.frozen AND g.baseline_release_id=$1
-    AND g.baseline_fence=$2 AND g.baseline_digest=$3 AND g.evidence_digest=$4
-    AND NOT EXISTS(SELECT 1 FROM fugue_native_global_producer_authority))`, release, version.Generation, version.Digest, authorityDigest).Scan(&frozen); err != nil {
+    AND g.baseline_fence=$2 AND g.baseline_digest=$3 AND g.evidence_digest=$4 AND g.frozen_at <= to_timestamp($6)
+    AND EXISTS(SELECT 1 FROM fugue_control.dns_cutovers c WHERE c.cluster_id=$5 AND c.phase='freeze' AND c.intent_digest=$4)
+    AND NOT EXISTS(SELECT 1 FROM fugue_native_global_producer_authority))`, release, version.Generation, version.Digest, freezeIntent, scope.ClusterID, observedAt).Scan(&frozen); err != nil {
 		return err
 	}
 	if !frozen {

@@ -153,6 +153,14 @@ func (e *ExecutionJournal) Resource(ctx context.Context, scope Scope) (ResourceS
 	return e.journal.ReadResource(ctx, scope)
 }
 
+// VerifyBaselineEvidence repeats independent baseline verification without recording a transition.
+func (e *ExecutionJournal) VerifyBaselineEvidence(ctx context.Context, baseline Baseline) error {
+	if e == nil || !baseline.Scope.valid() || !baseline.Verified.valid() || !digestPattern.MatchString(baseline.EvidenceDigest) {
+		return errors.New("invalid production resource baseline")
+	}
+	return e.evidence.VerifyBaseline(ctx, baseline)
+}
+
 // ReadResource does not require mutation or settlement privileges. A serving
 // observer must use the durable head, not infer it from provider health.
 func (j *Journal) ReadResource(ctx context.Context, scope Scope) (ResourceState, error) {
@@ -278,8 +286,8 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if err != nil {
 			return false, err
 		}
-		if intent.Operation == ParticipationTopology {
-			return false, errors.New("topology revisions do not authorize provider execution")
+		if intent.Operation == ParticipationTopology || intent.Operation == DNSCutover || intent.ResourceID == GlobalProducerCutoverResource {
+			return false, errors.New("topology and cutover intents do not authorize ordinary execution")
 		}
 		nodeScope := strings.HasPrefix(intent.ResourceID, ParticipationNodeResourcePrefix)
 		if nodeScope != (intent.Operation == NodeParticipation) {

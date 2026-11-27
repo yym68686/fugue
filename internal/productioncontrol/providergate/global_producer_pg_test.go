@@ -131,6 +131,68 @@ baseline_fence=$2,baseline_digest=$3,evidence_digest=$4 WHERE singleton`
 	}
 	_, err = admin.ExecContext(ctx, freeze, "r1", 1, baseDigest, evidence)
 	expectCode(err, "40001") // actual selection changed while waiting
+	var existing bool
+	if err := admin.QueryRowContext(ctx, `SELECT to_regnamespace('fugue_control') IS NOT NULL`).Scan(&existing); err != nil || existing {
+		t.Fatalf("requires a disposable database without a journal: %v", err)
+	}
+	if err := productioncontrol.ApplySchema(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	createdJournal = true
+	public, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RuntimeParams["search_path"] = "fugue_gate_fixture"
+	journalDB := stdlib.OpenDB(*cfg)
+	defer journalDB.Close()
+	j, err := productioncontrol.NewJournal(journalDB, productioncontrol.Approvers{"owner": {ClusterID: "fixture", PublicKey: public}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordCutover := func(request string, plan productioncontrol.DNSCutoverPlan) (string, string) {
+		t.Helper()
+		sub, err := productioncontrol.DraftDNSCutover("fixture", request, plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		i, err := j.RecordIntent(ctx, "owner", sub.Intent, sub.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		approval, err := productioncontrol.SignApproval(sub.Intent, "owner", private, time.Now(), time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := j.RecordApproval(ctx, approval)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return i.Digest, a.Digest
+	}
+	version := productioncontrol.Version{Generation: 2, Digest: newDigest}
+	freezePlan := productioncontrol.DNSCutoverPlan{Phase: productioncontrol.DNSFreeze, Origin: "https://api.example.test",
+		ReleaseID: "r2", Version: version, CheckpointDigest: evidence, ShadowPayload: json.RawMessage(`{"fixture":true}`)}
+	freezeIntent, freezeApproval := recordCutover("freeze-dns", freezePlan)
+	check := func(context.Context, productioncontrol.DNSCutoverPlan) (time.Time, error) {
+		return time.Now().Add(time.Minute), nil
+	}
+	failCheck := func(context.Context, productioncontrol.DNSCutoverPlan) (time.Time, error) {
+		return time.Time{}, errors.New("observation rejected")
+	}
+	expiredCheck := func(context.Context, productioncontrol.DNSCutoverPlan) (time.Time, error) {
+		return time.Now().Add(-time.Minute), nil
+	}
+	if _, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", freezeIntent, evidence, productioncontrol.DNSFreeze, check); err == nil {
+		t.Fatal("freeze spent a mismatched approval")
+	}
+	if _, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", freezeIntent, freezeApproval, productioncontrol.DNSFreeze, failCheck); err == nil {
+		t.Fatal("freeze ignored failed observation")
+	}
 	// Old repeatable-read snapshot must also fail closed after the freeze,
 	// not resume with the legacy mode observed before the transition.
 	stale, err := writer.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
@@ -142,7 +204,12 @@ baseline_fence=$2,baseline_digest=$3,evidence_digest=$4 WHERE singleton`
 	if err := stale.QueryRowContext(ctx, `SELECT fencing_token FROM fugue_platform_release_lanes WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`).Scan(&fence); err != nil || fence != 2 {
 		t.Fatalf("unexpected fixture fence %d: %v", fence, err)
 	}
-	exec(admin, freeze, "r2", 2, newDigest, evidence)
+	if row, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", freezeIntent, freezeApproval, productioncontrol.DNSFreeze, check); err != nil || !row.Created {
+		t.Fatalf("approved freeze: %+v %v", row, err)
+	}
+	if row, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", freezeIntent, freezeApproval, productioncontrol.DNSFreeze, failCheck); err != nil || row.Created {
+		t.Fatalf("freeze replay: %+v %v", row, err)
+	}
 	_, err = stale.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET fencing_token=3 WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`)
 	expectCode(err, "40001")
 	if err := stale.Rollback(); err != nil {
@@ -184,35 +251,12 @@ baseline_fence=$2,baseline_digest=$3,evidence_digest=$4 WHERE singleton`
 	}
 	// Enroll a disposable journal and prove the provider validates the
 	// separate login, claim and exact selected predecessor in the same DB.
-	var existing bool
-	if err := admin.QueryRowContext(ctx, `SELECT to_regnamespace('fugue_control') IS NOT NULL`).Scan(&existing); err != nil || existing {
-		t.Fatalf("requires a disposable database without a journal: %v", err)
-	}
-	if err := productioncontrol.ApplySchema(ctx, db); err != nil {
-		t.Fatal(err)
-	}
-	createdJournal = true
 	exec(admin, `CREATE ROLE fugue_gate_fixture_native LOGIN NOINHERIT`)
 	createdNativeRole = true
 	exec(admin, `GRANT USAGE ON SCHEMA fugue_gate_fixture TO fugue_gate_fixture_native;
 GRANT SELECT,INSERT,UPDATE ON fugue_platform_release_lanes,fugue_platform_artifact_releases TO fugue_gate_fixture_native;
 GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixture_native;
 GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixture_writer`)
-	public, private, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := pgx.ParseConfig(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.RuntimeParams["search_path"] = "fugue_gate_fixture"
-	journalDB := stdlib.OpenDB(*cfg)
-	defer journalDB.Close()
-	j, err := productioncontrol.NewJournal(journalDB, productioncontrol.Approvers{"owner": {ClusterID: "fixture", PublicKey: public}})
-	if err != nil {
-		t.Fatal(err)
-	}
 	w, err := productioncontrol.NewExecutionJournal(j, fixtureGateEvidence{})
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +268,23 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	if err != nil || !boundary.Frozen || boundary.SelectedReleaseID != "r2" || boundary.WriterEnrolled ||
 		boundary.Journal != nil || boundary.FrozenVersion == nil || *boundary.FrozenVersion != boundary.Selected {
 		t.Fatalf("frozen predecessor readback: %+v %v", boundary, err)
+	}
+	if err := j.CheckGlobalProducerFreeze(ctx, scope, "r2", version, freezeIntent, time.Now().Unix()+1); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.CheckGlobalProducerFreeze(ctx, scope, "r2", version, freezeIntent, time.Now().Add(-time.Minute).Unix()); err == nil {
+		t.Fatal("revocation attestation predating the freeze was accepted")
+	}
+	var writerOID uint32
+	if err := admin.QueryRowContext(ctx, `SELECT oid FROM pg_roles WHERE rolname='fugue_gate_fixture_native'`).Scan(&writerOID); err != nil {
+		t.Fatal(err)
+	}
+	activatePlan := productioncontrol.DNSCutoverPlan{Phase: productioncontrol.DNSActivate, Origin: freezePlan.Origin,
+		ReleaseID: "r2", Version: version, CheckpointDigest: evidence, FreezeIntent: freezeIntent, BaselineEvidence: baselineEvidence,
+		ActivationWitness: activationEvidence, Writer: "fugue_gate_fixture_native", WriterOID: writerOID}
+	activationIntent, activationApproval := recordCutover("activate-dns", activatePlan)
+	if _, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", activationIntent, activationApproval, productioncontrol.DNSActivate, check); err == nil {
+		t.Fatal("activation without an enrolled baseline")
 	}
 	if _, err := w.AnchorResource(ctx, "observer", productioncontrol.Baseline{Scope: scope, Verified: productioncontrol.Version{Generation: 2, Digest: newDigest}, EvidenceDigest: baselineEvidence}); err != nil {
 		t.Fatal(err)
@@ -237,9 +298,20 @@ GRANT fugue_gate_fixture_writer TO fugue_gate_fixture_native`)
 	expectCode(err, "40001") // even NOINHERIT can acquire privileges through SET ROLE
 	exec(admin, `REVOKE fugue_gate_fixture_writer FROM fugue_gate_fixture_native;
 REVOKE INSERT (envelope) ON fugue_control.approvals FROM fugue_gate_fixture_writer`)
-	exec(admin, activate, "fugue_gate_fixture_native", baselineEvidence, activationEvidence)
+	if _, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", activationIntent, activationApproval, productioncontrol.DNSActivate, failCheck); err == nil {
+		t.Fatal("activation ignored failed evidence verification")
+	}
+	if _, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", activationIntent, activationApproval, productioncontrol.DNSActivate, expiredCheck); err == nil {
+		t.Fatal("activation accepted expired evidence")
+	}
+	if row, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", activationIntent, activationApproval, productioncontrol.DNSActivate, check); err != nil || !row.Created {
+		t.Fatalf("approved activation: %+v %v", row, err)
+	}
+	if row, err := j.ApplyDNSCutover(ctx, "fixture", "coordinator", activationIntent, activationApproval, productioncontrol.DNSActivate, failCheck); err != nil || row.Created {
+		t.Fatalf("activation replay: %+v %v", row, err)
+	}
 	boundary, err = j.ReadGlobalProducerBoundary(ctx, scope)
-	if err != nil || !boundary.WriterEnrolled || !boundary.WriterStillIsolated || boundary.ActivationEvidenceDigest != activationEvidence ||
+	if err != nil || !boundary.WriterEnrolled || !boundary.WriterStillIsolated || boundary.ActivationEvidenceDigest != activationIntent ||
 		boundary.Journal == nil || boundary.Journal.LastVerified != boundary.Selected {
 		t.Fatalf("native enrollment readback: %+v %v", boundary, err)
 	}

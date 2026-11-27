@@ -123,23 +123,47 @@ collected application DNS answer report. The witness also names separate
 under their content digests. Settlement repeats the listener sweep and requires
 an exact match. The signer verifies the affected application answers before
 signing. The verifier checks the separate application report's SHA-256 binding.
-A baseline witness must
-also match the exact provider freeze before native activation. An `applied`
+A baseline witness must also match the exact provider freeze before native
+activation. An `applied`
 result needs its matching committed provider receipt; `not_applied` requires
 the exact unchanged verified predecessor and no receipt. The result check
 and insert hold the same journal resource lock as publication, and once the
 terminal record commits, no late native write under that claim can commit.
 
-There is intentionally no production freeze/activation command yet. Do not
-manually edit the gate or native authority. The rollback draft above covers
-only a settled, serving `applied` change; recovery from an ambiguous or
-non-converging selected policy still needs an independently approved recovery
-coordinator and must not bypass the claim fence. Complete the independently
-approved cutover coordinator and actual DNS answer collection before freezing
-the legacy lane or declaring it migrated. The
-database principal for schema migration and authority activation must be
-isolated from the old clients, and the dedicated runtime role must not have
-authority-table, DDL, approval, or terminal-journal mutation privileges.
+Use `draft-dns-cutover CLUSTER REQUEST PLAN` to create an intent for each
+phase. Review the plan, then sign and record it with the standard owner flow.
+
+1. The `freeze` plan binds `origin`, `releaseId`, `version` and
+   `checkpointDigest` from `dns-checkpoint`, and `shadowPayload` from the
+   `change` object in `shadow-dns-policy`. Run `dns-freeze INTENT_DIGEST
+   APPROVAL_DIGEST` using a dedicated bootstrap profile. It rechecks the
+   shadow, exact checkpoint and authoritative listeners. The provider fence
+   waits for older SQL writers and refuses a changed predecessor.
+2. Revoke the old writer credentials at their providers and verify drainage
+   outside the runner. A baseline witness names a canonical authority record
+   with `freezeIntent`, `credentialRevocationDigest`, and
+   `requestDrainageDigest` in that order. Mount both underlying provider
+   records by digest. The independent observer signs after the provider
+   freeze and runs `dns-anchor` with this witness.
+3. The `activate` plan binds a freshly observed checkpoint for the frozen predecessor, the
+   `freezeIntent`, the enrolled `baselineEvidence` witness digest, a fresh
+   `activationWitness` baseline witness digest for the same closed
+   boundary, and the dedicated PostgreSQL `writer` login and `writerOid`.
+   Run `dns-activate INTENT_DIGEST APPROVAL_DIGEST` using its own profile.
+   Activation requires the exact journal baseline, frozen provider and
+   still-isolated writer login. PostgreSQL commits each provider transition
+   with its intent and approval in `fugue_control.dns_cutovers`.
+
+Provision freeze and activation credentials separately from the runtime
+writer, observer, approver and legacy clients. Both coordinator profiles
+need read access to the relevant provider and journal tables and append
+access to `dns_cutovers`. The freeze profile needs the scoped gate UPDATE,
+and activation needs the scoped authority INSERT. Keep the actual revocation
+and drainage procedure with the relevant provider operators. The
+bootstrap validates the trusted observer's signature, freeze time and
+content bindings. The observer verifies the provider records before signing.
+Recovery from an ambiguous or non-converging selected policy still requires
+an independently approved recovery path under the existing claim fence.
 The database checks role memberships and forbidden grants at enrollment and
 again when the writer inserts a receipt. On PostgreSQL installations where
 `PUBLIC` can create objects in the provider schema, use a dedicated provider
