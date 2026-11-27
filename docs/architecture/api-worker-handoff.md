@@ -130,7 +130,11 @@ Keep the handoff declaration absent until both running images **and both
 actual rollback artifacts** contain the compatibility boundary. The handoff
 compares the pinned running workloads with the immutable production release
 records and fails before changing PostgreSQL if an older rollback target
-would remove admission or scheduling support. After commit, verification
+would remove admission or scheduling support. If an intervening refactor
+changes the API sources, the declaration must name separately tested source
+floors for the running API and its actual rollback artifact. The worker
+must retain its scheduler and bounded database capability in both artifacts.
+After commit, verification
 requires a durable worker pass newer than the recorded transfer timestamp;
 a timeout must not grant ownership back to the API.
 

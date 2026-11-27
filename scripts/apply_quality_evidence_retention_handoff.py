@@ -24,7 +24,7 @@ COLLECTOR_EXPRESSION = (
     '(fugue_quality_evidence_retention_storage_available{job="fugue-quality-evidence-retention"} == 1) and on(pod) '
     '(time() - timestamp(fugue_quality_evidence_retention_storage_available{job="fugue-quality-evidence-retention"}) < 90)'
 )
-API_PATHS = ("internal/store/platform_quality_evidence.go",)
+API_PATHS = ("internal/store/platform_quality_evidence.go", "cmd/fugue-api/main.go")
 WORKER_PATHS = (
     "cmd/fugue-observation-worker/main.go", "cmd/fugue-observation-worker/evidence_retention.go",
     "internal/store/platform_quality_evidence_retention_worker.go", "deploy/releases/observation-worker/resources.json",
@@ -32,12 +32,13 @@ WORKER_PATHS = (
 
 
 def parse_release(value):
-    if (not isinstance(value, dict) or value.keys() != {"schema", "api", "worker", "apiFloor", "workerFloor"}
+    floors = ("apiForwardFloor", "apiRollbackFloor", "workerFloor")
+    if (not isinstance(value, dict) or value.keys() != {"schema", "api", "worker", *floors}
             or value["schema"] != SCHEMA
-            or not all(matches(value[x], COMMIT) for x in ("apiFloor", "workerFloor"))):
+            or not all(matches(value[x], COMMIT) for x in floors)):
         raise ProvisionError("invalid quality evidence handoff declaration")
     return {**load_release({"schema": RELEASE_SCHEMA, "api": value["api"], "worker": value["worker"]}),
-            "apiFloor": value["apiFloor"], "workerFloor": value["workerFloor"]}
+            **{field: value[field] for field in floors}}
 
 
 def check_source(floor, source, paths):
@@ -47,11 +48,11 @@ def check_source(floor, source, paths):
             raise ProvisionError("forward or rollback artifact does not retain the tested timer boundary")
 
 
-def check_workload(provision, component, workload, floor, paths):
+def check_workload(provision, component, workload, forward_floor, rollback_floor, paths):
     target = verify_workload(provision, workload)
     rollback = checked_rollback(provision, component, workload)
-    for source in (workload["revision"], rollback[0]):
-        check_source(floor, source, paths)
+    check_source(forward_floor, workload["revision"], paths)
+    check_source(rollback_floor, rollback[0], paths)
     return target, rollback
 
 
@@ -93,8 +94,12 @@ COMMIT;
 
 
 def apply(provision, release, scrape, body, wait_seconds=240):
-    api = check_workload(provision, "api", release["api"], release["apiFloor"], API_PATHS)
-    worker = check_workload(provision, "observation-worker", release["worker"], release["workerFloor"], WORKER_PATHS)
+    # A source reorganization can make the two separately tested API
+    # snapshots differ. Neither snapshot attests the other binary.
+    api_args = (provision, "api", release["api"], release["apiForwardFloor"], release["apiRollbackFloor"], API_PATHS)
+    worker_args = (provision, "observation-worker", release["worker"], release["workerFloor"], release["workerFloor"], WORKER_PATHS)
+    api = check_workload(*api_args)
+    worker = check_workload(*worker_args)
     pods = [pod for pod, _ in worker[0][2]]
     verify_collector(provision, scrape, pods, COLLECTOR_EXPRESSION)
     primary = provision.find_primary()
@@ -103,8 +108,8 @@ def apply(provision, release, scrape, body, wait_seconds=240):
     if not (before["owner"] == "api" and not before["fence"] and before["completedPasses"] == 0) and not (
             before["owner"] == "worker" and before["fence"] and before["transferAt"]):
         raise ProvisionError("quality evidence writer is outside the supported forward-only transition")
-    if (check_workload(provision, "api", release["api"], release["apiFloor"], API_PATHS) != api
-            or check_workload(provision, "observation-worker", release["worker"], release["workerFloor"], WORKER_PATHS) != worker
+    if (check_workload(*api_args) != api
+            or check_workload(*worker_args) != worker
             or provision.find_primary() != primary):
         raise ProvisionError("workloads, primary or expected rollback changed during admission")
     provision.sql(primary[0], activation_sql(provision, secret_uid, body))

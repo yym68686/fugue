@@ -1,0 +1,20 @@
+{
+  "schema": "fugue.quality-evidence-retention-handoff/v1",
+  "apiForwardFloor": "6fd3896285628780c5344853ed20599f6c781c61",
+  "apiRollbackFloor": "83aa9d2fdae9eb47ab250638011a0fe74d6e2a3a",
+  "workerFloor": "e3183023e1e353a22393ea1c780ce1a13af6c7f1",
+  "api": {
+    "deployment": "fugue-fugue-api",
+    "container": "api",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:efa09e40bd915d92fd5212c40a6870a7ec0df2037516edf20e7f1d7f1a62dbe5",
+    "revision": "6fd3896285628780c5344853ed20599f6c781c61",
+    "replicas": 2
+  },
+  "worker": {
+    "deployment": "fugue-observation-worker",
+    "container": "observation-worker",
+    "image": "ghcr.io/yym68686/fugue-observation-worker@sha256:ad17e6e86efbb74f9ffdbec541a0530191f74c70fe6c0351bde0f4bf395719fe",
+    "revision": "6fd3896285628780c5344853ed20599f6c781c61",
+    "replicas": 1
+  }
+}

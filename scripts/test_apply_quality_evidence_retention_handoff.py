@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from scripts import apply_quality_evidence_retention_handoff as handoff
 from scripts.provision_observation_worker_database import Provision, ProvisionError
@@ -15,11 +15,24 @@ class QualityEvidenceHandoffTest(unittest.TestCase):
         release = {
             "api": {"revision": "a" * 40},
             "worker": {"revision": "b" * 40},
-            "apiFloor": "a" * 40,
+            "apiForwardFloor": "a" * 40,
+            "apiRollbackFloor": "c" * 40,
             "workerFloor": "b" * 40,
         }
         target = ((UID, 1, [("synthetic-pod", UID)]), ("f" * 40, "synthetic-image"))
         return provision, release, target
+
+    def test_attests_exact_forward_and_rollback_source_against_separate_proofs(self):
+        provision, release, target = self.fixture()
+        with (patch.object(handoff, "verify_workload", return_value=target[0]),
+              patch.object(handoff, "checked_rollback", return_value=target[1]),
+              patch.object(handoff, "check_source") as check):
+            self.assertEqual(handoff.check_workload(provision, "api", release["api"], release["apiForwardFloor"],
+                                                    release["apiRollbackFloor"], handoff.API_PATHS), target)
+        self.assertEqual(check.call_args_list, [
+            call(release["apiForwardFloor"], release["api"]["revision"], handoff.API_PATHS),
+            call(release["apiRollbackFloor"], target[1][0], handoff.API_PATHS),
+        ])
 
     def test_unsafe_rollback_refuses_before_write(self):
         provision, release, _ = self.fixture()
