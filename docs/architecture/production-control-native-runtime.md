@@ -11,6 +11,23 @@ resourceVersion, and requires matching predecessor, candidate, health, and
 rollback bindings. The report is not an approval or proof of a live rollout,
 rollback, or old writer revocation.
 
+`guardian-native-draft` accepts the same arguments and emits a portable
+intent and its exact payload. The draft still uses the GET-only transport
+and does not record an intent or submit a release. Use the standalone
+`fugue-production-control` command to keep review and approval out of GitHub:
+
+- `inspect SUBMISSION` prints the bound intent and its digest. Review the
+  draft's bound plan and predecessor, not just a source revision.
+- `sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL` works without
+  a network connection. It requires the reviewed digest and an owner-only
+  Ed25519 PKCS#8 PEM key. The private signing key stays off the journal,
+  provider, and CI hosts.
+- `record-intent JOURNAL_CONFIG ACTOR SUBMISSION` and
+  `record-approval JOURNAL_CONFIG APPROVAL` only append to PostgreSQL. Give
+  the intake principal SELECT/INSERT on intents and approvals and INSERT
+  on audit, not execution, Kubernetes, DNS or artifact write permissions.
+  The caller label is an audit annotation, not an authorization credential.
+
 - On an approved, marked DesiredRelease, Guardian compares the live pointer,
   candidate, and rollback monitor with the signed journal payload. It reserves
   an append-only launch entry under the pending resource fence and passes the
