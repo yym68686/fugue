@@ -73,10 +73,31 @@ class ReplayTest(unittest.TestCase):
             "packagesWithExecutedTests": 1, "timedOut": True,
         })
 
+    def test_incremental_readiness_rejects_target_disagreement_even_within_budget(self):
+        passed = {"status": "pass", "elapsedMs": 12_000}
+        pairs = [{"candidate": passed, "legacy": passed}] * 20
+        selection = {"scope": "test-only", "omittedLegacyPackagesBeforeFallback": []}
+        oracle = {"status": "pass"}
+        for disposition, expected in (
+            ("same-selection-across-requested-profiles", True),
+            ("full-verification-required", False),
+        ):
+            with self.subTest(disposition=disposition):
+                summary = prepush_replay.summarize_incremental(pairs, selection, oracle, {
+                    "disposition": disposition,
+                })
+                self.assertEqual(summary["incrementalReplayCriteriaMet"], expected)
+                self.assertEqual(summary["candidateP95Ms"], 12_000)
+                self.assertEqual(summary["activationReadiness"], "not-evaluated")
+
     def test_incremental_replay_isolates_both_caches_and_restores_fixture(self):
         selection = {
             "scope": "test-only", "paths": ["suite_test.go"], "goTests": [],
             "goBuilds": [], "omittedLegacyPackagesBeforeFallback": [],
+        }
+        target_comparison = {
+            "gate": "report-only", "disposition": "same-selection-across-requested-profiles",
+            "native": {"selection": selection},
         }
         with tempfile.TemporaryDirectory() as location:
             path = Path(location) / "suite_test.go"
@@ -93,7 +114,7 @@ class ReplayTest(unittest.TestCase):
                 mock.patch.object(prepush, "git_output", return_value=b"head\n"),
                 mock.patch.object(prepush_replay.prepush_shadow, "git_paths", return_value=[]),
                 mock.patch.object(prepush_replay.prepush_shadow, "snapshot", side_effect=lambda _base: path.read_text()),
-                mock.patch.object(prepush_replay.prepush_shadow, "compare_targets", return_value={"gate": "report-only"}) as compare,
+                mock.patch.object(prepush_replay.prepush_shadow, "compare_targets", return_value=target_comparison) as compare,
                 mock.patch.dict(prepush_replay.prepush_shadow_fixture.CASES, {"sample": (("suite_test.go", "", ""),)}),
                 mock.patch.object(prepush_replay.prepush_shadow_fixture, "prepare",
                                   side_effect=lambda _case: path.write_bytes(original + b"const identifier = \"fugue_shadow_sample_001\"\n")),
@@ -112,7 +133,7 @@ class ReplayTest(unittest.TestCase):
             self.assertNotEqual(report["samples"][0]["sourceSnapshot"], report["samples"][1]["sourceSnapshot"])
             self.assertFalse(report["productionAuthorization"])
             compare.assert_called_once_with("HEAD", ("linux/amd64", "linux/arm64"))
-            self.assertEqual(report["targetComparison"], {"gate": "report-only"})
+            self.assertEqual(report["targetComparison"], target_comparison)
 
 
 if __name__ == "__main__":
