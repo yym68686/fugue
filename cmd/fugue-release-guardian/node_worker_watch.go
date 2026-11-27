@@ -151,6 +151,11 @@ func (a *frontAuthorityActivator) watchNodeWorker(ctx context.Context, store *re
 	}
 	watchCtx, cancel := context.WithDeadline(ctx, arm.Deadline)
 	defer cancel()
+	if a.nodeWorkerAuthorization != nil {
+		if err := a.nodeWorkerAuthorization.arm(watchCtx, a, store, arm); err != nil {
+			return nodeWorkerWatchReport{}, err
+		}
+	}
 	if err := events.Encode(nodeWorkerWatchReady{
 		Phase: "observing", JournalDigest: j.Digest, Held: arm.Held, Deadline: arm.Deadline, RouteDigest: previous.Digest,
 	}); err != nil {
@@ -191,6 +196,11 @@ func (a *frontAuthorityActivator) watchNodeWorker(ctx context.Context, store *re
 			}
 			if _, found, err := store.ReadNodeWorkerResult(watchCtx, j); err != nil || found {
 				return nodeWorkerWatchReport{}, errors.Join(errors.New("Guardian ended the watched handoff before advancing"), err)
+			}
+			if a.nodeWorkerAuthorization != nil {
+				if _, _, err := a.reconcileNodeWorker(watchCtx, store); err != nil {
+					return nodeWorkerWatchReport{}, err
+				}
 			}
 		default:
 			return nodeWorkerWatchReport{}, errors.New("Front rolled back or departed from the watched journal")
@@ -299,6 +309,11 @@ func (a *frontAuthorityActivator) watchActivatedNodeWorker(ctx context.Context, 
 	if err := w.Validate(j, arm, state, a.now().UTC()); err != nil {
 		return nodeWorkerWatchReport{}, err
 	}
+	if a.nodeWorkerAuthorization != nil {
+		if err := a.nodeWorkerAuthorization.witness(ctx, a, store, arm, w, state); err != nil {
+			return nodeWorkerWatchReport{}, err
+		}
+	}
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for {
@@ -344,9 +359,19 @@ func (a *frontAuthorityActivator) watchActivatedNodeWorker(ctx context.Context, 
 			if err := matchWatchedNodeWorkerReceipt(j, state, w, resultArm, result, a.now().UTC()); err != nil {
 				return nodeWorkerWatchReport{}, err
 			}
+			if a.nodeWorkerAuthorization != nil && (!result.MatchesExecution(a.nodeWorkerAuthorization.claim) ||
+				!result.Witness.Held.Same(w.Held) || !result.Witness.Fresh.Same(w.Fresh) ||
+				(w.ProbeFresh != nil && !w.ProbeFresh.Same(*result.Witness.ProbeFresh))) {
+				return nodeWorkerWatchReport{}, errors.New("native Guardian verified different TLS connections from this execution")
+			}
 			return nodeWorkerWatchReport{
 				Phase: "verified", JournalDigest: j.Digest, Activation: state, RouteDigest: current.Digest, Connections: w, Receipt: result,
 			}, nil
+		}
+		if a.nodeWorkerAuthorization != nil {
+			if _, _, err := a.reconcileNodeWorker(ctx, store); err != nil {
+				return nodeWorkerWatchReport{}, err
+			}
 		}
 		select {
 		case <-ctx.Done():

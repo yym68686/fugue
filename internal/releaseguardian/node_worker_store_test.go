@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/productioncontrol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,72 @@ func nodeWorkerFenceFixture(t *testing.T) edgegroupfront.NodeWorkerJournal {
 		t.Fatal(err)
 	}
 	return j
+}
+
+func TestNativeNodeWorkerFenceBindsDurableClaimAndInputs(t *testing.T) {
+	ctx := t.Context()
+	const namespace = "fugue-system"
+	j := nodeWorkerFenceFixture(t)
+	start := j.CreatedAt.Add(time.Hour)
+	claim := productioncontrol.Claim{
+		Scope: productioncontrol.Scope{ClusterID: "production_1", ResourceID: productioncontrol.FrontWorkerResource(namespace, j.Recipient.Group)},
+		Fence: 3, IntentDigest: digest([]byte("intent")), ApprovalDigest: digest([]byte("approval")),
+	}
+	client := fake.NewSimpleClientset()
+	client.PrependReactor("create", "configmaps", func(action ktesting.Action) (bool, runtime.Object, error) {
+		object := action.(ktesting.CreateAction).GetObject().(*corev1.ConfigMap)
+		object.UID, object.ResourceVersion, object.CreationTimestamp = types.UID(object.Name), "23", metav1.NewTime(start)
+		return false, nil, nil
+	})
+	store, err := NewAuthorityStore(client, namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence, err := store.ClaimNativeNodeWorker(ctx, j, claim)
+	if err != nil || fence.Claim != claim || !fence.ClaimedAt.Equal(start) {
+		t.Fatalf("wrong native fence: %+v %v", fence, err)
+	}
+	restart, _ := NewAuthorityStore(client, namespace)
+	restored, found, err := restart.LoadNodeWorker(ctx, j.Recipient.Group)
+	if err != nil || !found || restored != fence {
+		t.Fatalf("lost the native claim across restart: %+v %v", restored, err)
+	}
+	if _, err := restart.ClaimNodeWorker(ctx, j); err == nil {
+		t.Fatal("legacy claim adopted an already native transaction")
+	}
+	wrong := claim
+	wrong.Fence++
+	if _, err := restart.ClaimNativeNodeWorker(ctx, j, wrong); err == nil {
+		t.Fatal("a different PostgreSQL claim adopted the same Kubernetes fence")
+	}
+	arm := NodeWorkerArm{
+		Schema: NodeWorkerArmSchema, JournalDigest: j.Digest, OpenedAt: start, Deadline: start.Add(2 * time.Minute),
+		Held: NodeWorkerConnection{FrontUID: j.Recipient.PodUID, ID: "retained", StartedAt: start, Slot: j.Expected.ActiveSlot, Target: "192.0.2.7:28443"},
+	}
+	otherFence := fence
+	otherFence.Claim = wrong
+	if err := restart.RecordNativeNodeWorkerArm(ctx, otherFence, arm, start); err == nil {
+		t.Fatal("a mismatched claim armed the Front")
+	}
+	if err := restart.RecordNativeNodeWorkerArm(ctx, fence, arm, start); err != nil {
+		t.Fatal(err)
+	}
+	if saved, ok, err := restart.ReadNodeWorkerArm(ctx, j, start); err != nil || !ok || !saved.Held.Same(arm.Held) {
+		t.Fatalf("missing native arm: %+v %v", saved, err)
+	}
+	if _, err := restart.ClaimNativeNodeWorker(ctx, j, claim); err == nil {
+		t.Fatal("a second dispatch adopted an already armed journal")
+	}
+	if err := restart.RecordNodeWorkerResult(ctx, fence, j.Expected, "expired_without_cutover", nil); err != nil {
+		t.Fatal(err)
+	}
+	result, found, err := restart.ReadNodeWorkerResult(ctx, j)
+	if err != nil || !found || !result.MatchesExecution(claim) || result.MatchesExecution(wrong) {
+		t.Fatalf("terminal result did not keep the exact production claim: %+v, %v", result, err)
+	}
+	if err := restart.FinalizeNodeWorker(ctx, fence); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestNodeWorkerFenceRetainsItsOnlyOwnerAcrossGuardianRestart(t *testing.T) {

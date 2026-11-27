@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
+	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/productioncontrol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +20,11 @@ import (
 
 const nodeWorkerJournalKind = "node-worker-journal"
 const nodeWorkerProjectionKind = "node-worker-projection"
+const nativeWorkerClusterAnnotation = "fugue.pro/native-cluster"
+const nativeWorkerApprovalAnnotation = "fugue.pro/native-approval-digest"
+const nativeWorkerClusterExpression = "^[a-z0-9][a-z0-9_-]{0,95}$"
+
+var nativeWorkerClusterPattern = regexp.MustCompile(nativeWorkerClusterExpression)
 
 var ErrNodeWorkerGroupMode = errors.New("group has node-local Worker state; legacy whole-group writes are disabled")
 
@@ -44,9 +53,11 @@ func (store *AuthorityStore) NodeWorkerMode(ctx context.Context, group string) (
 // the same ConfigMap name as ordinary promotion and Front repair, so those
 // paths cannot claim a second mutation even if the Guardian restarts.
 type NodeWorkerFence struct {
-	Journal edgegroupfront.NodeWorkerJournal
-	UID     types.UID
-	RV      string
+	Journal   edgegroupfront.NodeWorkerJournal
+	UID       types.UID
+	RV        string
+	Claim     productioncontrol.Claim
+	ClaimedAt time.Time
 }
 
 // CheckNodeWorkerShadowFence observes whether a new handoff can claim the
@@ -65,6 +76,25 @@ func (store *AuthorityStore) CheckNodeWorkerShadowFence(ctx context.Context, gro
 // ClaimNodeWorker must be invoked by the Guardian under the group mutation
 // Lease, after proving the independent release and physical node bindings.
 func (store *AuthorityStore) ClaimNodeWorker(ctx context.Context, j edgegroupfront.NodeWorkerJournal) (NodeWorkerFence, error) {
+	return store.claimNodeWorker(ctx, j, productioncontrol.Claim{})
+}
+
+// ClaimNativeNodeWorker binds the existing provider fence to a durable
+// execution. The caller revalidates the pending claim under the group Lease.
+func (store *AuthorityStore) ClaimNativeNodeWorker(ctx context.Context, j edgegroupfront.NodeWorkerJournal, claim productioncontrol.Claim) (NodeWorkerFence, error) {
+	if !validNativeWorkerClaim(store.namespace, j.Recipient.Group, claim) {
+		return NodeWorkerFence{}, errors.New("native node Worker fence requires the exact PostgreSQL claim")
+	}
+	return store.claimNodeWorker(ctx, j, claim)
+}
+
+func validNativeWorkerClaim(namespace, group string, claim productioncontrol.Claim) bool {
+	return claim.ResourceID != "" && claim.ResourceID == productioncontrol.FrontWorkerResource(namespace, group) &&
+		nativeWorkerClusterPattern.MatchString(claim.ClusterID) && claim.Fence > 0 &&
+		digestPattern.MatchString(claim.IntentDigest) && digestPattern.MatchString(claim.ApprovalDigest)
+}
+
+func (store *AuthorityStore) claimNodeWorker(ctx context.Context, j edgegroupfront.NodeWorkerJournal, claim productioncontrol.Claim) (NodeWorkerFence, error) {
 	group := j.Recipient.Group
 	raw, err := json.Marshal(j)
 	if err != nil || !groupPattern.MatchString(group) {
@@ -79,12 +109,27 @@ func (store *AuthorityStore) ClaimNodeWorker(ctx context.Context, j edgegroupfro
 	if _, retired, err := store.ReadNodeWorkerResult(ctx, j); err != nil || retired {
 		return NodeWorkerFence{}, errors.Join(errors.New("terminal node Worker journal cannot be claimed again"), err)
 	}
+	if claim.Fence > 0 {
+		configs := store.client.CoreV1().ConfigMaps(store.namespace)
+		for _, name := range []string{NodeWorkerArmName(j.Digest), NodeWorkerWitnessName(j.Digest)} {
+			if _, err := configs.Get(ctx, name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+				if err != nil {
+					return NodeWorkerFence{}, err
+				}
+				return NodeWorkerFence{}, errors.New("native node Worker journal already has a provider input")
+			}
+		}
+	}
 	immutable := true
 	object := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Name: FrontRepairFenceName(group), Namespace: store.namespace,
 		Labels: map[string]string{"fugue.pro/group": group, "fugue.pro/authority-kind": nodeWorkerJournalKind,
 			"fugue.pro/authority-store": "true", "app.kubernetes.io/managed-by": "fugue-release-guardian"},
 	}, Immutable: &immutable, Data: map[string]string{"journal.json": string(raw)}}
+	if claim != (productioncontrol.Claim{}) {
+		object.Annotations = map[string]string{nativeWorkerClusterAnnotation: claim.ClusterID, nativeIntentAnnotation: claim.IntentDigest,
+			nativeWorkerApprovalAnnotation: claim.ApprovalDigest, nativeFenceAnnotation: strconv.FormatInt(claim.Fence, 10)}
+	}
 	configs := store.client.CoreV1().ConfigMaps(store.namespace)
 	out, err := configs.Create(ctx, object, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
@@ -96,7 +141,7 @@ func (store *AuthorityStore) ClaimNodeWorker(ctx context.Context, j edgegroupfro
 		return NodeWorkerFence{}, err
 	}
 	fence, err := decodeNodeWorkerFence(out, group)
-	if err != nil || fence.Journal.Digest != j.Digest {
+	if err != nil || fence.Journal.Digest != j.Digest || fence.Claim != claim {
 		return NodeWorkerFence{}, errors.Join(errors.New("node Worker mutation fence already has another owner"), err)
 	}
 	return fence, nil
@@ -131,7 +176,28 @@ func decodeNodeWorkerFence(object *corev1.ConfigMap, group string) (NodeWorkerFe
 	if err != nil || j.Recipient.Group != group {
 		return NodeWorkerFence{}, errors.Join(errors.New("node Worker mutation fence has invalid journal scope"), err)
 	}
-	return NodeWorkerFence{Journal: j, UID: object.UID, RV: object.ResourceVersion}, nil
+	var claim productioncontrol.Claim
+	for _, name := range []string{nativeWorkerClusterAnnotation, nativeIntentAnnotation, nativeWorkerApprovalAnnotation, nativeFenceAnnotation} {
+		if _, exists := object.Annotations[name]; !exists {
+			continue
+		}
+		n := object.Annotations
+		sequence, err := strconv.ParseInt(n[nativeFenceAnnotation], 10, 64)
+		claim = productioncontrol.Claim{
+			Scope: productioncontrol.Scope{ClusterID: n[nativeWorkerClusterAnnotation], ResourceID: productioncontrol.FrontWorkerResource(object.Namespace, group)},
+			Fence: sequence, IntentDigest: n[nativeIntentAnnotation], ApprovalDigest: n[nativeWorkerApprovalAnnotation],
+		}
+		if err != nil || n[nativeFenceAnnotation] != strconv.FormatInt(sequence, 10) || !validNativeWorkerClaim(object.Namespace, group, claim) {
+			return NodeWorkerFence{}, errors.New("native node Worker journal has an incomplete execution claim")
+		}
+		break
+	}
+	if claim != (productioncontrol.Claim{}) && object.CreationTimestamp.IsZero() {
+		return NodeWorkerFence{}, errors.New("native node Worker fence has no Kubernetes creation timestamp")
+	}
+	return NodeWorkerFence{
+		Journal: j, UID: object.UID, RV: object.ResourceVersion, Claim: claim, ClaimedAt: object.CreationTimestamp.Time.UTC(),
+	}, nil
 }
 
 // EnsureNodeWorkerProjection publishes the exact immutable claim to the
@@ -208,7 +274,7 @@ func (store *AuthorityStore) FinalizeNodeWorker(ctx context.Context, fence NodeW
 	}
 	j := fence.Journal
 	result, found, err := store.ReadNodeWorkerResult(ctx, j)
-	if err != nil || !found {
+	if err != nil || !found || !result.MatchesExecution(fence.Claim) {
 		return errors.Join(errors.New("node Worker cannot retire without its immutable result"), err)
 	}
 	group, node := j.Recipient.Group, j.Recipient.Node

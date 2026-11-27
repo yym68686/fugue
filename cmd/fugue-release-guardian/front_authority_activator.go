@@ -83,12 +83,13 @@ type podCommandExecutor interface {
 }
 
 type frontAuthorityActivator struct {
-	cohort   *edgecohort.Snapshot
-	client   kubernetes.Interface
-	executor podCommandExecutor
-	config   frontAuthorityConfig
-	holder   string
-	now      func() time.Time
+	cohort                  *edgecohort.Snapshot
+	client                  kubernetes.Interface
+	executor                podCommandExecutor
+	config                  frontAuthorityConfig
+	holder                  string
+	now                     func() time.Time
+	nodeWorkerAuthorization *nativeNodeWorkerAuthorization
 }
 
 type heldAuthorityLease struct {

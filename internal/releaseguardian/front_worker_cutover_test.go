@@ -178,6 +178,11 @@ func TestFrontWorkerCutoverDeniedAndNativeAdmissionsAtProvider(t *testing.T) {
 		return err
 	}
 	fence := record(FrontRepairFenceName(config.Group), config.Group, nodeWorkerJournalKind)
+	legacyFence := fence.DeepCopy()
+	fence.Annotations = map[string]string{
+		nativeWorkerClusterAnnotation: "production-1", nativeIntentAnnotation: "sha256:" + strings.Repeat("1", 64),
+		nativeWorkerApprovalAnnotation: "sha256:" + strings.Repeat("2", 64), nativeFenceAnnotation: "1",
+	}
 	arm := record(names("armed"), config.Group, "node-worker-arm")
 	retirement := record(names("retirement"), config.Group, "node-worker-retirement")
 	witness := record(names("connected"), config.Group, "node-worker-witness")
@@ -250,6 +255,10 @@ func TestFrontWorkerCutoverDeniedAndNativeAdmissionsAtProvider(t *testing.T) {
 		requireAllowed(mapCreate(native, object))
 	}
 	requireCutoverDenial(t, mapCreate(native, record(fence.Name, config.Group, "ordinary-transition")))
+	requireCutoverDenial(t, mapCreate(native, legacyFence))
+	partialFence := fence.DeepCopy()
+	delete(partialFence.Annotations, nativeWorkerApprovalAnnotation)
+	requireCutoverDenial(t, mapCreate(native, partialFence))
 	requireCutoverDenial(t, mapCreate(native, record(transitionActivatedJournalName(config.Group), config.Group, "ordinary-transition")))
 	nonImmutable := arm.DeepCopy()
 	nonImmutable.Immutable = ptr.To(false)

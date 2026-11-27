@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/productioncontrol"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -90,6 +91,40 @@ func NodeWorkerArmName(digest string) string     { return nodeWorkerInputName("a
 func NodeWorkerWitnessName(digest string) string { return nodeWorkerInputName("connected", digest) }
 func NodeWorkerResultName(digest string) string  { return nodeWorkerInputName("result", digest) }
 
+func (store *AuthorityStore) RecordNativeNodeWorkerArm(ctx context.Context, fence NodeWorkerFence, arm NodeWorkerArm, now time.Time) error {
+	j := fence.Journal
+	if !validNativeWorkerClaim(store.namespace, j.Recipient.Group, fence.Claim) || !now.Before(arm.Deadline) {
+		return errors.New("recording an arm requires a valid native claim and open observation window")
+	}
+	if err := arm.Validate(j, now); err != nil {
+		return err
+	}
+	if err := store.requireNodeWorkerFence(ctx, fence); err != nil {
+		return err
+	}
+	return store.createImmutable(ctx, NodeWorkerArmName(j.Digest), j.Recipient.Group, "node-worker-arm", "arm.json", arm)
+}
+
+func (store *AuthorityStore) RecordNativeNodeWorkerWitness(ctx context.Context, fence NodeWorkerFence, arm NodeWorkerArm,
+	witness NodeWorkerWitness, state edgegroupfront.ActivationState, now time.Time) error {
+	j := fence.Journal
+	if !validNativeWorkerClaim(store.namespace, j.Recipient.Group, fence.Claim) {
+		return errors.New("recording a live witness requires a valid native claim")
+	}
+	if err := store.requireNodeWorkerFence(ctx, fence); err != nil {
+		return err
+	}
+	existing, found, err := store.ReadNodeWorkerArm(ctx, j, now)
+	if err != nil || !found || !existing.Held.Same(arm.Held) ||
+		!existing.OpenedAt.Equal(arm.OpenedAt) || !existing.Deadline.Equal(arm.Deadline) {
+		return errors.Join(errors.New("live witness has no matching native arm"), err)
+	}
+	if err := witness.Validate(j, existing, state, now); err != nil {
+		return err
+	}
+	return store.createImmutable(ctx, NodeWorkerWitnessName(j.Digest), j.Recipient.Group, "node-worker-witness", "witness.json", witness)
+}
+
 func nodeWorkerInputName(phase, digest string) string {
 	if !digestPattern.MatchString(digest) {
 		return ""
@@ -139,6 +174,7 @@ type NodeWorkerResult struct {
 	Activation    edgegroupfront.ActivationState `json:"activation"`
 	Witness       *NodeWorkerWitness             `json:"witness,omitempty"`
 	DrainStart    *time.Time                     `json:"drain_start,omitempty"`
+	NativeClaim   *productioncontrol.Claim       `json:"native_claim,omitempty"`
 }
 
 const nodeWorkerResultSchema = "edge-node-worker-result/v1"
@@ -159,6 +195,9 @@ func (store *AuthorityStore) recordNodeWorkerResult(ctx context.Context, fence N
 	j := fence.Journal
 	result := NodeWorkerResult{
 		Schema: nodeWorkerResultSchema, JournalDigest: j.Digest, Outcome: outcome, Activation: state, Witness: w, DrainStart: start,
+	}
+	if fence.Claim.Fence > 0 {
+		result.NativeClaim = &fence.Claim
 	}
 	if !result.matches(j) {
 		return errors.New("node Worker result does not follow from its durable state")
@@ -196,10 +235,19 @@ func (r NodeWorkerResult) MatchesJournal(j edgegroupfront.NodeWorkerJournal) boo
 	return r.matches(j)
 }
 
+// MatchesExecution validates the exact provider claim. Legacy results have
+// no native execution identity and cannot settle a native journal entry.
+func (r NodeWorkerResult) MatchesExecution(claim productioncontrol.Claim) bool {
+	if claim.Fence == 0 {
+		return r.NativeClaim == nil
+	}
+	return r.NativeClaim != nil && *r.NativeClaim == claim
+}
+
 func (store *AuthorityStore) ReadNodeWorkerResult(ctx context.Context, j edgegroupfront.NodeWorkerJournal) (NodeWorkerResult, bool, error) {
 	var r NodeWorkerResult
 	found, err := store.readNodeWorkerInput(ctx, j, NodeWorkerResultName(j.Digest), "node-worker-result", "result.json", &r)
-	if found && !r.matches(j) {
+	if found && (!r.matches(j) || (r.NativeClaim != nil && !validNativeWorkerClaim(store.namespace, j.Recipient.Group, *r.NativeClaim))) {
 		return r, false, errors.New("node Worker result binds another transaction")
 	}
 	return r, found, err
