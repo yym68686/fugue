@@ -124,7 +124,18 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 	if err != nil || handle != claim || result != nil || claim.Fence != 1 {
 		t.Fatalf("restart did not read the pending claim: %+v result=%+v err=%v", handle, result, err)
 	}
+	if err := w2.VerifyOpenClaim(ctx, claim); err != nil {
+		t.Fatalf("current approved pending claim was rejected: %v", err)
+	}
+	stale := claim
+	stale.Fence++
+	if err := w2.VerifyOpenClaim(ctx, stale); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("an unrelated fence was accepted for a provider write: %v", err)
+	}
 	j2.now = func() time.Time { return now.Add(48 * time.Hour) }
+	if err := w2.VerifyOpenClaim(ctx, claim); err == nil {
+		t.Fatal("expired pending claim was accepted for a new provider write")
+	}
 	replay, created, err := w2.ReserveExecution(ctx, "worker-b", claim.IntentDigest, claim.ApprovalDigest)
 	if err != nil || created || replay != claim {
 		t.Fatalf("restart reissued or lost authority: %+v created=%v err=%v", replay, created, err)
@@ -142,13 +153,14 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 		t.Fatalf("unknown result changed current state: %+v err=%v", pending, err)
 	}
 	evidence.fenced = true
-	stale := claim
-	stale.Fence++
 	if _, err := w2.CompleteExecution(ctx, "worker-b", stale, completed); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("stale fence should be rejected, got %v", err)
 	}
 	if inserted, err := w2.CompleteExecution(ctx, "worker-b", claim, completed); err != nil || !inserted {
 		t.Fatalf("verified application not persisted: inserted=%v err=%v", inserted, err)
+	}
+	if err := w2.VerifyOpenClaim(ctx, claim); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("terminal claim was accepted for another provider write: %v", err)
 	}
 	if inserted, err := w1.CompleteExecution(ctx, "worker-a", claim, completed); err != nil || inserted {
 		t.Fatalf("same terminal result was reinserted: inserted=%v err=%v", inserted, err)
