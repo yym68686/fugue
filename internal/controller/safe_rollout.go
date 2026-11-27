@@ -1011,7 +1011,7 @@ func (s *Service) retireWithdrawnSafeRolloutRelease(ctx context.Context, op mode
 	if err := ctx.Err(); err != nil {
 		return
 	}
-	retired, err := s.Store.RetireDrainedAppRelease(ctx, previous, state.Candidate, policy)
+	retired, err := s.Store.AppReleaseRetirement(state.CandidateApp.TenantID, state.CandidateApp.ID).RetireDrained(ctx, previous, state.Candidate, policy)
 	if err != nil {
 		s.recordSafeRolloutReleaseStep(op, state.CandidateApp, "previous_retire", model.ReleaseStepStatusSkipped, "previous retire paused: release record update failed", state.Candidate.ID, map[string]any{"error": err.Error(), "drain_metrics": metrics.Summary})
 		return

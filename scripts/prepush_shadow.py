@@ -48,8 +48,8 @@ TEST_BINARY_CONSUMERS = {
 # These contracts read every tracked file, including Go tests and sources
 # with no import path to the checker. They do not affect runtime builds.
 REPOSITORY_TEST_CONSUMERS = {"./internal/declarativerelease", "./internal/platformsafety"}
-# The composition guard scans non-test Go files under both source trees.
-APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking"}
+# These composition guards scan non-test Go files under both source trees.
+APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking", "./internal/releaseretirement"}
 
 
 def packages_from_stream(stream):

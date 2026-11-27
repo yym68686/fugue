@@ -56,6 +56,7 @@ test:
 	python3 -m scripts.test_prepush
 	python3 -m scripts.test_prepush_shadow
 	python3 -m scripts.test_prepush_replay
+	python3 -m scripts.test_prepush_shadow_contract
 	python3 -m unittest scripts.test_verify_k3s_transport
 	python3 ./scripts/test_verify_registry_image.py
 	env GOCACHE=$(GOCACHE) go test ./internal/declarativerelease ./cmd/fugue-declarative-release

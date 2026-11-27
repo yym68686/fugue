@@ -1,12 +1,10 @@
 package controller
 
 import (
-	"context"
 	"database/sql"
 	"io"
 	"net"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,9 +12,11 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/routeproof"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+	"fugue/internal/testpostgres"
 )
 
 type postgresResponseCounter struct {
@@ -34,10 +34,7 @@ func (w postgresResponseCounter) Write(p []byte) (int, error) {
 // independently of which store method or SQL projection the caller chooses.
 func controllerProjectionPostgres(t *testing.T) (*store.Store, *sql.DB, *atomic.Int64) {
 	t.Helper()
-	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("requires disposable loopback PostgreSQL")
-	}
+	address := testpostgres.Database(t, "")
 	u, err := url.Parse(address)
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires a disposable loopback fugue_test database")
@@ -98,6 +95,7 @@ func controllerProjectionPostgres(t *testing.T) (*store.Store, *sql.DB, *atomic.
 	})
 	u.Host = listener.Addr().String()
 	state := store.New(u.String())
+	t.Cleanup(func() { _ = state.Close() })
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -197,14 +195,14 @@ func TestControllerReleaseMetadataPathsBoundPostgresTransfer(t *testing.T) {
 	})
 	t.Run("retirement reads only drain configurations", func(t *testing.T) {
 		before := received.Load()
-		got, err := state.ListAppReleaseRetirementState(context.Background(), model.AppReleaseFilter{TenantID: tenant.ID, AppID: app.ID, IncludeRetired: true})
+		got, err := state.AppReleaseRetirement(tenant.ID, app.ID).List(t.Context())
 		bytes := received.Load() - before
 		if err != nil || len(got) != len(releases) {
 			t.Fatal("incomplete retirement state", len(got), err)
 		}
 		configs := 0
 		for _, release := range got {
-			if store.AppReleaseAwaitingDrain(release) {
+			if retirement.AwaitingDrain(release) {
 				if release.SpecSnapshot == nil || release.SpecSnapshot.Env["LARGE_CONFIG"] != large {
 					t.Fatal("lost executable drain configuration")
 				}

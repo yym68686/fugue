@@ -87,8 +87,8 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 	if err != nil || !reflect.DeepEqual(got, policy) {
 		t.Fatal("rejected reference changed serving policy", err)
 	}
-	// Both callers use the normal Store APIs, exercising its JSON file lock
-	// or the database triggers rather than a manually sequenced simulation.
+	// Both callers use normal Store APIs, exercising the database triggers
+	// rather than a manually sequenced simulation.
 	for i := 0; i < 8; i++ {
 		r := create(model.AppReleaseRolePrevious, model.AppReleaseStatusDraining)
 		var wg sync.WaitGroup
@@ -127,7 +127,7 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 		}
 	}
 	for _, failed := range []bool{false, true} {
-		for _, change := range []string{"none", "same_policy", "previous", "stable", "policy", "retention", "canceled"} {
+		for _, change := range []string{"none", "same_policy", "wrong_app_port", "wrong_tenant_port", "previous", "stable", "policy", "retention", "canceled"} {
 			t.Run(fmt.Sprintf("cas_failed_%t_%s", failed, change), func(t *testing.T) {
 				role, status := model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
 				if failed {
@@ -179,7 +179,14 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 				case "canceled":
 					cancel()
 				}
-				result, err := s.RetireDrainedAppRelease(ctx, r, stableNow, p)
+				tenantID, appID := r.TenantID, r.AppID
+				switch change {
+				case "wrong_app_port":
+					appID += "-other"
+				case "wrong_tenant_port":
+					tenantID += "-other"
+				}
+				result, err := s.AppReleaseRetirement(tenantID, appID).RetireDrained(ctx, r, stableNow, p)
 				if change == "none" || change == "same_policy" {
 					if err != nil || !AppReleaseIsRetired(result) {
 						t.Fatal("verified retirement failed", err)
