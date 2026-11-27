@@ -102,6 +102,23 @@ The subsequent cleanup removes the API rollup executor and its process-local
 writer metrics. API ingestion, quality reads and retired-ranking status remain
 unchanged; use the `fugue-observation-worker` scrape job for writer metrics.
 
+## Periodic quality-evidence retention: API compatibility
+
+The API's evidence-admission transaction still enforces the existing expiry
+and FIFO capacity rules when accepting a new object. Only the periodic expiry
+timer may move. The compatibility build reads the owner while holding the
+same transaction lock as evidence admission; an absent checkpoint leaves the
+API timer active. Foreground admission identifies its own transaction for a
+later database fence. This release does not create a checkpoint, enable an
+independent timer, or transfer deletion authority.
+
+Before transfer, verify the compatible API and rollback floor, then establish
+the worker's standby capability and durable progress reporting. The cutover
+must install a fence and switch the timer owner in one transaction. After
+cutover, a pre-compatibility API binary is not a supported rollback: it did
+not identify evidence-admission transactions, so the database will reject
+its old delete path. A worker rollback may not re-enable the API timer.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance

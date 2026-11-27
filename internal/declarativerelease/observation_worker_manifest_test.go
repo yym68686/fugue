@@ -24,12 +24,16 @@ func TestObservationWorkerManifestUsesOnlyItsDatabaseCredential(t *testing.T) {
 	}
 	container := apiTLSNamedObject(t, apiTLSArray(t, pod, "containers"), "name", "observation-worker")
 	env := apiTLSArray(t, container, "env")
-	if len(env) != 2 || container["envFrom"] != nil {
+	if len(env) != 3 || container["envFrom"] != nil {
 		t.Fatalf("unexpected extra worker environment: %#v", env)
 	}
 	memory := apiTLSNamedObject(t, env, "name", "GOMEMLIMIT")
 	if len(memory) != 2 || stringField(memory, "value") != "384MiB" {
 		t.Fatalf("unexpected worker memory setting: %#v", memory)
+	}
+	retention := apiTLSNamedObject(t, env, "name", "FUGUE_OBSERVATION_QUALITY_EVIDENCE_RETENTION")
+	if len(retention) != 2 || stringField(retention, "value") != "enabled" {
+		t.Fatalf("worker retention setting must be a literal, not a secret reference: %#v", retention)
 	}
 	dsn := apiTLSNamedObject(t, env, "name", "FUGUE_OBSERVATION_DATABASE_URL")
 	key := apiTLSObject(t, apiTLSObject(t, dsn, "valueFrom"), "secretKeyRef")

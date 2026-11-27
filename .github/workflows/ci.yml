@@ -4595,6 +4595,24 @@ jobs:
           git diff --exit-code HEAD origin/main -- "$declaration" scripts/provision_observation_worker_database.py scripts/test_provision_observation_worker_database.py deploy/releases/components.json deploy/releases/observation-worker/resources.json deploy/releases/observation-worker/intent.json .github/workflows/ci.yml
           python3 -m unittest scripts.test_provision_observation_worker_database
           python3 -m scripts.provision_observation_worker_database "$declaration"
+      - name: Rehearse and provision the quality evidence retention capability
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          installer=internal/schemamigrate/platform_quality_evidence_retention.sql
+          activation=internal/schemamigrate/platform_quality_evidence_retention_activate.sql
+          resource=deploy/releases/observation-worker/resources.json
+          git cat-file -e "${BASE_SHA}^{commit}"
+          if git diff --quiet "$BASE_SHA" HEAD -- "$installer" "$activation" "$resource" scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py; then
+            exit 0
+          fi
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/observation-worker deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py scripts/rehearse_observation_writer_fence.sh scripts/provision_observation_worker_database.py "$installer" "$activation" .github/workflows/ci.yml
+          pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+          docker run --rm --network none --user 26:26 --entrypoint bash \
+            -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+          python3 -m scripts.provision_quality_evidence_retention deploy/releases/observation-worker/database.json --apply
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
