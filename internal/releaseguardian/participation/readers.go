@@ -44,6 +44,7 @@ type KubernetesObserver struct {
 	admission    admissionclient.AdmissionregistrationV1Interface
 	namespace    string
 	namespaceUID string
+	binding      productioncontrol.ParticipationKubernetesBinding
 }
 
 func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {

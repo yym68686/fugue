@@ -67,6 +67,7 @@ func NewBoundKubernetesObserver(config *rest.Config, policy productioncontrol.Pa
 	}
 	o.namespace = policy.Namespace
 	o.namespaceUID = policy.Kubernetes.NamespaceUID
+	o.binding = *policy.Kubernetes
 	return o, nil
 }
 

@@ -7,8 +7,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -82,13 +84,15 @@ func Start(t *testing.T, identities ...string) (*rest.Config, map[string]*rest.C
 		t.Fatal(err)
 	}
 	const dnsName = "127.0.0.1"
+	ca, tlsCert, tlsKey := servingTLS(t, data, net.ParseIP(dnsName))
 	apiDone := startTestBinary(t, data, assets, "kube-apiserver",
-		"--bind-address="+dnsName, "--advertise-address="+dnsName, "--secure-port="+apiPort, "--cert-dir="+data,
+		"--bind-address="+dnsName, "--advertise-address="+dnsName, "--secure-port="+apiPort,
+		"--tls-cert-file="+tlsCert, "--tls-private-key-file="+tlsKey,
 		"--etcd-servers="+etcdAddress, "--service-cluster-ip-range=198.19.0.0/16", "--disable-admission-plugins=ServiceAccount",
 		"--authorization-mode=AlwaysAllow", "--anonymous-auth=false", "--token-auth-file="+tokenFile,
 		"--service-account-issuer=https://identity.invalid", "--service-account-key-file="+saPub, "--service-account-signing-key-file="+saKey)
 	cfg := &rest.Config{Host: "https://" + apiAddress, BearerToken: token, Timeout: 3 * time.Second,
-		QPS: 100, Burst: 200, TLSClientConfig: rest.TLSClientConfig{Insecure: true}}
+		QPS: 100, Burst: 200, TLSClientConfig: rest.TLSClientConfig{CAData: ca}}
 	client, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -106,12 +110,6 @@ func Start(t *testing.T, identities ...string) (*rest.Config, map[string]*rest.C
 	}); err != nil {
 		t.Fatalf("isolated Kubernetes API server did not start: %v", err)
 	}
-	servingCert, err := os.ReadFile(filepath.Join(data, "apiserver.crt"))
-	if err != nil {
-		t.Fatalf("read isolated Kubernetes serving certificate: %v", err)
-	}
-	cfg.Insecure = false
-	cfg.CAData = servingCert
 	clients := make(map[string]*rest.Config, len(tokens))
 	for identity, credential := range tokens {
 		client := rest.CopyConfig(cfg)
@@ -119,6 +117,49 @@ func Start(t *testing.T, identities ...string) (*rest.Config, map[string]*rest.C
 		clients[identity] = client
 	}
 	return cfg, clients
+}
+
+func servingTLS(t *testing.T, dir string, ip net.IP) ([]byte, string, string) {
+	t.Helper()
+	key := func() *ecdsa.PrivateKey {
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	caKey, serverKey := key(), key()
+	now := time.Now()
+	ca := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "isolated Kubernetes CA"},
+		NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	server := &x509.Certificate{
+		SerialNumber: big.NewInt(2), IPAddresses: []net.IP{ip}, NotBefore: ca.NotBefore, NotAfter: ca.NotAfter,
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, ca, ca, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDER, err := x509.CreateCertificate(rand.Reader, server, ca, &serverKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawKey, err := x509.MarshalPKCS8PrivateKey(serverKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, kind string, der []byte) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: kind, Bytes: der}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+		write("apiserver.crt", "CERTIFICATE", serverDER), write("apiserver.key", "PRIVATE KEY", rawKey)
 }
 
 func startTestBinary(t *testing.T, data, assets, name string, args ...string) <-chan struct{} {

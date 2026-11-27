@@ -25,7 +25,8 @@ import (
 func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	const node, group, ns = "node-a", "cell-a", "fixture"
 	const writer = "system:serviceaccount:fixture:hold-writer"
-	cfg, identities := kubeadmission.Start(t, writer)
+	const reader = "system:serviceaccount:fixture:hold-reader"
+	cfg, identities := kubeadmission.Start(t, writer, reader)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	admin, err := kubernetes.NewForConfig(cfg)
@@ -33,6 +34,14 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodes := admin.CoreV1().Nodes()
+	namespace, err := admin.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ca, _ := pem.Decode(cfg.CAData)
+	if ca == nil {
+		t.Fatal("isolated Kubernetes certificate is not PEM")
+	}
 	n, err := nodes.Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
 		Name: node, Annotations: map[string]string{"fixture.example/preserve": "original"},
 		Labels: map[string]string{participationRole: "true", participationGroup: group},
@@ -50,7 +59,7 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	topology := productioncontrol.VerifiedParticipationTopology{
 		Policy: productioncontrol.ParticipationPolicy{Schema: productioncontrol.BoundParticipationPolicySchema,
 			Generation: 1, Namespace: ns, Kubernetes: &productioncontrol.ParticipationKubernetesBinding{
-				Endpoint: cfg.Host, CADigest: digest([]byte("fixture-ca")), NamespaceUID: "fixture-ns",
+				Endpoint: cfg.Host, CADigest: digest(ca.Bytes), NamespaceUID: string(namespace.UID),
 			}, Members: []productioncontrol.ParticipationMember{{
 				Node: node, NodeUID: string(n.UID), Group: group, Component: "fixture-a", AdoptHold: &adopt, Reason: "network_unavailable",
 			}}},
@@ -76,6 +85,14 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	observer, err := NewBoundKubernetesObserver(identities[reader], topology.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := observer.ObserveOfflineHoldReadback(ctx, topology, submission)
+	if err != nil || before.State != OfflineHoldPredecessorVisible {
+		t.Fatalf("independent predecessor readback failed: %+v, %v", before, err)
 	}
 	policy, binding, err := RenderOfflineHoldGuard(submission, writer)
 	if err != nil {
@@ -110,6 +127,11 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	stored, err := nodes.Get(ctx, node, metav1.GetOptions{})
 	if err != nil || stored.ResourceVersion != got.ResourceVersion || !reflect.DeepEqual(stored.Annotations, got.Annotations) {
 		t.Fatalf("readback changed after a denied replay: %v", err)
+	}
+	after, err := observer.ObserveOfflineHoldReadback(ctx, topology, submission)
+	if err != nil || after.State != OfflineHoldTargetVisible || after.Node.ResourceVersion != stored.ResourceVersion ||
+		after.ObservedDigest != submission.Intent.TargetDigest {
+		t.Fatalf("independent target readback failed: %+v, %v", after, err)
 	}
 }
 
