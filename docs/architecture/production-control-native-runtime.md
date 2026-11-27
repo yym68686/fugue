@@ -47,14 +47,56 @@ unrelated lanes are not frozen by this selection gate. Tests use disposable
 PostgreSQL, including an unprivileged writer and the actual Store release and
 rollback paths.
 
-There is intentionally no production freeze command yet. This is not an
-admission mechanism for the native writer and does not prove credential
-revocation, draft/input immutability, externally drained work, or DNS consumer
-convergence. Do not activate the freeze manually. Complete the independently
-approved cutover coordinator, exact native dispatch, independent serving
-readback and inverse rollback before freezing the legacy lane or declaring
-it migrated. Database migration/DDL identities also require isolation from
-old clients. There is no production DNS cutover evidence yet.
+The native provider authority is an append-only record, separate from the
+freeze. Its creation requires the frozen predecessor to match the enrolled
+journal baseline, no existing claim, and an independently provisioned SQL
+login, not a group role or the schema owner. For this resource the journal and
+provider tables must be in the **same PostgreSQL database**. Do not use two
+separate connections to two databases to simulate a transactional fence.
+
+`fugue-release-guardian dns-policy-dispatch CONFIG INTENT_DIGEST APPROVAL_DIGEST`
+is the native executor. Its independently mounted configuration contains
+`journalFile`, `apiOrigin`, `readTokenFile`, and `artifactKeyFile`. The journal
+file contains the hostname-verified TLS DSN for the dedicated writer login,
+cluster, and owner public keys. The API token is GET-only. The artifact key
+file contains `primaryKey`, `primaryKeyId`, optional `previousKey` and
+`previousKeyId`, and optional `revokedKeyIds`; the HMAC verifier keys must
+not be issued by GitHub or confused with the independent owner key. All
+credential files must be private. The process does not start the general API
+or legacy Guardian loops and does not have a generic publication route.
+
+The executor repeats the paired DNS shadow against the exact approved change,
+prepares the existing compiler admission proof, reserves its single durable
+claim, and enters the existing Store publication transaction. In that one
+transaction it holds the journal resource lock through commit, verifies
+the original Ed25519 approval and pending fence again, resolves the exact
+producer/Full/LKG and all signed source references (including the LKG ID),
+and inserts a transaction-bound provider receipt. PostgreSQL independently
+checks the enrolled writer login and claim and permits only the exact
+predecessor supersession, incremented fence, and target selection. A deferred
+constraint aborts a receipt without the matching selection. No receipt or
+mutation from a different session can be replayed. Legacy generic releases
+and rollbacks remain fenced after native authority is active. The Store
+still runs all of its ordinary signed reconfiguration and retention checks.
+
+A dispatch reports **policy selection**, not actual DNS serving. An
+ambiguous commit or repeated request returns the existing claim and cannot
+start another dispatch; the last verified journal head remains unchanged
+until an independent observer proves the terminal result. The approved and
+fresh shadow digests are recorded in the same provider receipt as the write.
+Tests cover actual PostgreSQL triggers and a real signed Store producer
+reconfiguration while preserving Full/LKG; their shadow and enrollment
+evidence is synthetic. They do not prove production credential revocation,
+input immutability, external request drainage or DNS consumer convergence.
+
+There is intentionally no production freeze/activation command yet. Do not
+manually edit the gate or native authority. Complete the independently
+approved cutover coordinator, independent serving readback and inverse
+rollback before freezing the legacy lane or declaring it migrated. The
+database principal for schema migration and authority activation must be
+isolated from the old clients, and the dedicated runtime role must not have
+authority-table, DDL, approval, or terminal-journal mutation privileges.
+There is no production DNS cutover evidence yet.
 
 ## Node participation topology
 
