@@ -53,13 +53,8 @@ func (s *Server) refreshDistributedProjectImageUsageSnapshots(ctx context.Contex
 		tenantID := inventory.App.TenantID
 		byTenant[tenantID] = append(byTenant[tenantID], inventory)
 		observed := observedByTenant[tenantID]
-		if evidence.manifestObservedAt.After(observed) {
-			observed = evidence.manifestObservedAt
-		}
-		for _, location := range evidence.locationsByAppID[inventory.App.ID] {
-			if locationObserved := distributedImageLocationObservedAt(location); locationObserved.After(observed) {
-				observed = locationObserved
-			}
+		if at := evidence.ObservedAtForApp(inventory.App.ID); at.After(observed) {
+			observed = at
 		}
 		observedByTenant[tenantID] = observed
 	}
@@ -68,7 +63,7 @@ func (s *Server) refreshDistributedProjectImageUsageSnapshots(ctx context.Contex
 		key := projectImageUsageCacheKey(model.Principal{TenantID: tenantID})
 		responses[key] = aggregateProjectImageUsageInventories(newDistributedProjectImageUsageResponse(observedByTenant[tenantID]), tenantInventories)
 	}
-	responses[projectImageUsageCacheKey(principal)] = aggregateProjectImageUsageInventories(newDistributedProjectImageUsageResponse(evidence.observedAt), inventories)
+	responses[projectImageUsageCacheKey(principal)] = aggregateProjectImageUsageInventories(newDistributedProjectImageUsageResponse(evidence.ObservedAt()), inventories)
 	if err := ctx.Err(); err != nil {
 		return err
 	}

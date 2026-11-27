@@ -32,6 +32,8 @@ func TestMigratedDomainReleaseSourceOwnership(t *testing.T) {
 		want []string
 	}{
 		{"internal/appimages/remote_registry.go", []string{"api", "controller"}},
+		{"internal/imagecacheevidence/evidence.go", []string{"api", "controller", "image-cache", "observation-worker", "ssh-control"}},
+		{"internal/imagecachekeys/keys.go", []string{"api", "controller", "observation-worker", "ssh-control"}},
 		{"internal/operationqueue/selection.go", []string{"controller"}},
 		{"internal/operationview/repository.go", []string{"api"}},
 		{"internal/operationview/contract/contract.go", []string{"api", "controller", "observation-worker", "ssh-control"}},
@@ -75,6 +77,8 @@ func TestMigratedDomainBuildGraphMatchesSourceOwnership(t *testing.T) {
 		"internal/backupusage":                "reconcile.go",
 		"internal/imagebilling":               "scheduler.go",
 		"internal/imagebilling/contract":      "repository.go",
+		"internal/imagecacheevidence":         "evidence.go",
+		"internal/imagecachekeys":             "keys.go",
 		"internal/imagetracking":              "poller.go",
 		"internal/nodehostpolicy":             "host_journald_policy.go",
 		"internal/operationcancel":            "cancel.go",

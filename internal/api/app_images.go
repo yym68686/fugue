@@ -23,20 +23,20 @@ const (
 	appImageStatusMissing                          = "missing"
 	projectImageUsageModeRegistry                  = "registry"
 	projectImageUsageModeDistributed               = "distributed"
-	projectImageUsageMeasurementComplete           = "complete"
-	projectImageUsageMeasurementPartial            = "partial"
-	projectImageUsageMeasurementUnavailable        = "unavailable"
-	projectImageUsageReasonDigestConflict          = "digest_conflict"
-	projectImageUsageReasonSizeConflict            = "size_conflict"
-	projectImageUsageReasonStaleInventory          = "stale_inventory"
-	projectImageUsageReasonMissingManifestEvidence = "missing_manifest_evidence"
-	projectImageUsageReasonMissingSizeEvidence     = "missing_size_evidence"
-	projectImageUsageReasonMissingManifestSize     = "missing_manifest_size_evidence"
-	projectImageUsageReasonMissingBlobSize         = "missing_blob_size_evidence"
-	projectImageUsageReasonMissingChildManifest    = "missing_child_manifest"
-	projectImageUsageReasonMissingBlob             = "missing_blob"
-	projectImageUsageReasonNoStorageEvidence       = "no_storage_evidence"
-	projectImageUsageReasonRegistryNotConfigured   = "registry_not_configured"
+	projectImageUsageMeasurementComplete           = appimages.ProjectImageUsageMeasurementComplete
+	projectImageUsageMeasurementPartial            = appimages.ProjectImageUsageMeasurementPartial
+	projectImageUsageMeasurementUnavailable        = appimages.ProjectImageUsageMeasurementUnavailable
+	projectImageUsageReasonDigestConflict          = appimages.ProjectImageUsageReasonDigestConflict
+	projectImageUsageReasonSizeConflict            = appimages.ProjectImageUsageReasonSizeConflict
+	projectImageUsageReasonStaleInventory          = appimages.ProjectImageUsageReasonStaleInventory
+	projectImageUsageReasonMissingManifestEvidence = appimages.ProjectImageUsageReasonMissingManifestEvidence
+	projectImageUsageReasonMissingSizeEvidence     = appimages.ProjectImageUsageReasonMissingSizeEvidence
+	projectImageUsageReasonMissingManifestSize     = appimages.ProjectImageUsageReasonMissingManifestSize
+	projectImageUsageReasonMissingBlobSize         = appimages.ProjectImageUsageReasonMissingBlobSize
+	projectImageUsageReasonMissingChildManifest    = appimages.ProjectImageUsageReasonMissingChildManifest
+	projectImageUsageReasonMissingBlob             = appimages.ProjectImageUsageReasonMissingBlob
+	projectImageUsageReasonNoStorageEvidence       = appimages.ProjectImageUsageReasonNoStorageEvidence
+	projectImageUsageReasonRegistryNotConfigured   = appimages.ProjectImageUsageReasonRegistryNotConfigured
 	projectImageUsageAppBuildLimit                 = 8
 	projectImageUsageSoftWait                      = appimages.UsageSnapshotSoftWait
 )
@@ -102,13 +102,7 @@ type projectImageUsageAppSummary = appimages.ProjectUsageAppSummary
 type projectImageUsageSummary = appimages.ProjectUsageSummary
 type projectImageUsageResponse = appimages.ProjectUsageResponse
 
-type appImageCandidate struct {
-	ImageRef        string
-	RuntimeImageRef string
-	Source          model.AppSource
-	Current         bool
-	LastDeployedAt  *time.Time
-}
+type appImageCandidate = appimages.Candidate
 
 type builtAppImageVersion struct {
 	Candidate appImageCandidate
@@ -665,7 +659,7 @@ func (s *Server) buildAppImageInventory(
 			if locationEvidence.SizeBytes > 0 {
 				version.SizeMeasurementStatus = projectImageUsageMeasurementPartial
 			} else {
-				version.SizeMeasurementReasons = mergeProjectImageMeasurementReasons(
+				version.SizeMeasurementReasons = appimages.MergeMeasurementReasons(
 					version.SizeMeasurementReasons,
 					[]string{projectImageUsageReasonMissingSizeEvidence},
 				)
@@ -1023,21 +1017,7 @@ func (s *Server) managedImageDigestInUse(ctx context.Context, candidate string, 
 }
 
 func managedImageDigest(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	index := strings.LastIndex(value, "sha256:")
-	if index < 0 {
-		return ""
-	}
-	digest := value[index:]
-	if len(digest) != len("sha256:")+64 {
-		return ""
-	}
-	for _, r := range digest[len("sha256:"):] {
-		if r < '0' || r > '9' && r < 'a' || r > 'f' {
-			return ""
-		}
-	}
-	return digest
+	return appimages.ManagedImageDigest(value)
 }
 
 func appImageDeleteAuditState(result appImageRegistryDeleteResult) string {
