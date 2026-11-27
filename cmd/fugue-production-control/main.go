@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const usage = `usage: fugue-production-control inspect SUBMISSION
@@ -31,6 +33,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
        fugue-production-control preview-participation JOURNAL_CONFIG NODE SNAPSHOT
+       fugue-production-control observe-participation-readers JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -123,6 +126,41 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				return err
 			}
 			return emit(report)
+		})
+	case "observe-participation-readers":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		if !filepath.IsAbs(args[2]) || args[3] == "" {
+			return errors.New("participation observation requires an absolute kubeconfig path and explicit context")
+		}
+		loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: args[2]}
+		overrides := &clientcmd.ConfigOverrides{CurrentContext: args[3]}
+		kubeConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides).ClientConfig()
+		if err != nil {
+			return errors.New("could not load the requested read-only Kubernetes context")
+		}
+		observer, err := participation.NewKubernetesObserver(kubeConfig)
+		if err != nil {
+			return err
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			topology, err := j.ReadParticipationTopology(ctx, cluster)
+			if err != nil {
+				return err
+			}
+			readers, err := observer.ObserveReaderRollouts(ctx, topology.Policy, args[4])
+			if err != nil {
+				return err
+			}
+			return emit(struct {
+				Kind              string                          `json:"kind"`
+				ExecutionEvidence bool                            `json:"executionEvidence"`
+				JournalCluster    string                          `json:"journalCluster"`
+				KubeContext       string                          `json:"kubeContext"`
+				Topology          productioncontrol.Version       `json:"topology"`
+				Readers           participation.ReaderObservation `json:"readers"`
+			}{"participation_reader_observation", false, cluster, args[3], topology.Version, readers})
 		})
 	case "migrate-journal":
 		if len(args) != 2 {

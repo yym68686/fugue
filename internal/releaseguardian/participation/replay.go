@@ -17,11 +17,16 @@ const (
 // Binding it to an authenticated topology does not authenticate the snapshot,
 // its reader baseline, DNS results, clock, or claimed absence of a transport.
 type ReplayInput struct {
-	Schema       string                    `json:"schema"`
-	Cluster      string                    `json:"cluster"`
-	Topology     productioncontrol.Version `json:"topology"`
-	ObservedAt   time.Time                 `json:"observedAt"`
-	Observations *ParticipationSnapshot    `json:"observations"`
+	Schema       string                 `json:"schema"`
+	Cluster      string                 `json:"cluster"`
+	Topology     ReplayVersion          `json:"topology"`
+	ObservedAt   time.Time              `json:"observedAt"`
+	Observations *ParticipationSnapshot `json:"observations"`
+}
+
+type ReplayVersion struct {
+	Generation int64  `json:"generation"`
+	Digest     string `json:"digest"`
 }
 
 type ReplayReport struct {
@@ -48,7 +53,8 @@ func ReplayParticipation(cluster, node string, head productioncontrol.VerifiedPa
 		return ReplayReport{}, errors.New("invalid participation replay envelope")
 	}
 	if cluster == "" || in.Cluster != cluster || head.Version.Generation != head.Policy.Generation ||
-		head.Version.Generation < 1 || head.Version.Digest == "" || in.Topology != head.Version ||
+		head.Version.Generation < 1 || head.Version.Digest == "" ||
+		in.Topology != (ReplayVersion{Generation: head.Version.Generation, Digest: head.Version.Digest}) ||
 		head.IntentDigest == "" || head.ApprovalDigest == "" || head.RecordedAt.IsZero() {
 		return ReplayReport{}, errors.New("participation replay does not bind the current authenticated topology")
 	}
