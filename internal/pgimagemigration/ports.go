@@ -1,6 +1,6 @@
-// Package migration owns the execution and settlement policy of the managed
+// Package pgimagemigration owns execution and settlement policy for managed
 // PostgreSQL image migration. Its ports are scoped to a single operation.
-package migration
+package pgimagemigration
 
 import (
 	"context"
