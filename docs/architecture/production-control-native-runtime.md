@@ -4,6 +4,40 @@ This is an implementation boundary, not proof of a production cutover. The
 legacy workflow and runtime are still needed for resources that have not passed
 the independent cutover checks.
 
+## Global DNS offline policy
+
+The shared journal resource for changes to the global producer is
+`producer/global-policy`, not a resource per edge. The producer selection
+fence and content digest are distinct from the serving Full release and its
+verified LKG. All three must match the observed predecessor.
+
+- `prepare-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE HOLD_CHANGE`
+  accepts an exact edge ID, before hold (or null) and after hold (or null).
+  It derives and validates the immutable DNS and producer policy artifacts
+  with Go's existing typed single-hold validator. It may create or validate
+  those drafts; it cannot select or release them. The draft account needs
+  only artifact creation/validation, never publication authority. Retrying
+  preparation reuses the same immutable generation for the same predecessor
+  and change. An unknown or mismatched generation cannot be substituted.
+- `shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID`
+  is GET-only. It compares the two runtime summaries against the same
+  business revision, active producer, verified Full and unexpired LKG, checks
+  the intended membership and existing offline recovery conditions, and
+  returns a content-addressed comparison. It does not prove DNS withdrawal,
+  consumer convergence, or rollback.
+- `draft-dns-policy JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID REQUEST`
+  repeats the comparison and additionally requires a settled journal head
+  matching the previous producer fence and digest. The owner can inspect and
+  sign the resulting exact intent. The shadow output itself is not approval
+  or terminal evidence.
+
+These commands use dedicated credentials and an explicit HTTPS origin, do
+not follow redirects, and never use a publication endpoint. A signed intent
+is not permission to call the existing generic artifact release API. The
+shared provider writer gate, native dispatch, independent serving readback,
+and exact inverse rollback must be verified before freezing the legacy lane
+or declaring it migrated. There is no production DNS cutover evidence yet.
+
 ## Node participation topology
 
 An owner can migrate the existing participation policy without authorizing a
