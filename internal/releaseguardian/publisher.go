@@ -35,6 +35,7 @@ type desiredPublication struct {
 	preview                    PublicationPreview
 	record, execution, desired *corev1.ConfigMap
 	bundle                     ExecutionBundle
+	monitorComponent           string
 }
 
 // PreviewDesired evaluates the same candidate and predecessor rules as
@@ -165,7 +166,7 @@ func (store *KubeStore) planDesiredPublicationFor(ctx context.Context, key Key, 
 			PrewriteWorkload: bundle.Prepared.Prewrite.Primary, PrewriteResourceVersion: bundle.Prepared.Prewrite.ResourceVersion,
 			Health: snapshot.Health,
 		},
-		record: recordMap, execution: executionMap, desired: desiredMap, bundle: bundle,
+		record: recordMap, execution: executionMap, desired: desiredMap, bundle: bundle, monitorComponent: target.MonitorComponent,
 	}, nil
 }
 

@@ -160,7 +160,52 @@ A second release keeps the already verified DesiredRelease digest as its
 predecessor and rollback identity when it is a serving-equivalent alias of the
 canonical monitor record. The rollback bytes must still match that monitor;
 changing the alias does not relax manifest, image, or health-contract checks.
-There is no production entrypoint or admission implementation configured
-for the native adapter yet. None of these behaviors establish that legacy
-identities have actually lost permission, that Guardian applied a release,
-or that any production resource has been cut over.
+### Kubernetes admission barrier for an existing Deployment
+
+The offline renderer produces three Kubernetes v1
+ValidatingAdmissionPolicy/Binding pairs for the Deployment, release ConfigMaps
+and component Lease. It takes no kubeconfig or production credentials:
+
+```sh
+go run ./cmd/fugue-declarative-release render-native-cutover-policy /path/to/cutover-spec.json
+```
+
+The off-repository input names the exact `key` (`component`, `group`),
+`namespace`, `deployment`, `monitorComponent`, `componentLease`, `phase`,
+and the authenticated `publisher`, `guardian`, `canaryProber`, and
+`deploymentStatusWriter` usernames. The three Fugue writers must use
+distinct, newly enrolled service accounts. Do not reuse identities available
+to Actions, self-hosted runners, or legacy Guardian processes.
+
+- `frozen` denies protected writes other than Deployment health/status
+  writes from the exact configured Kubernetes controller identity.
+- `native` keeps legacy writers denied and separates publication, execution,
+  and canary evidence. The publisher can stage immutable records and advance
+  the pointer's recorded fence; a Guardian pointer update retains the current
+  claim binding. Scale changes and deletion of the protected existing
+  Deployment are still denied. This is not a policy for targets with an
+  autoscaler, delegated writes, or a separate actuator.
+
+Neither phase grants RBAC. No production entrypoint automatically applies the
+renderer output. The adapter re-reads the exact enforcing specs and checks its
+actual Kubernetes identity using SelfSubjectReview; it still refuses to
+publish without independent deployment cutover evidence. A matching object in
+storage is not proof that admission is active on every API-server endpoint.
+Verify enforcement per endpoint, remove legacy rights (including policy/RBAC
+administration, impersonation, access to the new service account and indirect
+host/node/provider write paths), and account for every old request **already
+past admission** before granting native writes. Pause in the frozen phase
+if any old action or artifact availability is unresolved.
+
+An optional test starts a disposable loopback Kubernetes API server and etcd;
+it uses no external cluster:
+
+```sh
+FUGUE_TEST_ENVTEST_ASSETS=/path/to/envtest go test ./internal/releaseguardian -run '^TestDeploymentCutover'
+```
+
+The isolated test demonstrates legacy writes denied before and after switching
+the fence to native, including an old request prepared before freeze but sent
+after it, and checks the exact provider-side identity and binding readback.
+It is not evidence of a production runner revocation, that Guardian rolled out
+a release, or that DNS, node participation, or maintenance has been migrated.

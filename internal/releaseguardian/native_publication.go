@@ -29,6 +29,8 @@ func hasNativePublicationMarker(annotations map[string]string) bool {
 type NativePublicationBoundary struct {
 	Scope                        productioncontrol.Scope
 	Namespace                    string
+	MonitorComponent             string
+	ComponentLease               string
 	DesiredObject                string
 	RecordObject                 string
 	ExecutionObject              string
@@ -194,6 +196,7 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 	}
 	return NativePublicationBoundary{
 		Scope: productioncontrol.Scope{ClusterID: intent.ClusterID, ResourceID: intent.ResourceID}, Namespace: preview.Namespace,
+		ComponentLease: bundle.Release.Concurrency, MonitorComponent: publication.monitorComponent,
 		DesiredObject: publication.desired.Name, RecordObject: publication.record.Name, ExecutionObject: publication.execution.Name,
 		Predecessor: preview.CurrentDesired, Candidate: preview.ProposedDesired, DesiredResourceVersion: preview.DesiredResourceVersion,
 		Workload: workload, WorkloadUID: prewrite.UID, WorkloadVersion: prewrite.ResourceVersion,
