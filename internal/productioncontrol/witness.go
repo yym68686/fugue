@@ -122,10 +122,8 @@ func NewWitnessedExecutionJournal(journal *Journal, source WitnessReader, truste
 		if !tokenPattern.MatchString(id) || !key.Scope.valid() || len(key.PublicKey) != ed25519.PublicKeySize {
 			return nil, errors.New("invalid production execution witness trust")
 		}
-		for _, approver := range journal.trusted {
-			if bytes.Equal(key.PublicKey, approver.PublicKey) {
-				return nil, errors.New("execution witness key must not also authorize production intent")
-			}
+		if err := journal.VerifyIndependentObserverKey(key.PublicKey); err != nil {
+			return nil, err
 		}
 		key.PublicKey = bytes.Clone(key.PublicKey)
 		keys[id] = key

@@ -41,6 +41,11 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "participation-offline-dispatch" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runOfflineHoldDispatch(ctx, os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "worker-front-preflight" {
 		return runWorkerFrontPreflight(os.Args[2:], os.Stdout)
 	}

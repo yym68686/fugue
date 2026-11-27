@@ -145,25 +145,29 @@ func (e *ExecutionJournal) ReadIntent(ctx context.Context, intentDigest string) 
 // journal fence immediately before provider writes. It is not a reservation:
 // a rehydrated claim must never use it to initiate a second dispatch.
 func (e *ExecutionJournal) VerifyOpenClaim(ctx context.Context, claim Claim) error {
-	stored, result, err := e.Execution(ctx, claim.Scope, claim.IntentDigest)
+	return e.journal.VerifyOpenClaim(ctx, claim)
+}
+
+func (j *Journal) VerifyOpenClaim(ctx context.Context, claim Claim) error {
+	stored, result, err := j.ReadExecution(ctx, claim.Scope, claim.IntentDigest)
 	if err != nil {
 		return err
 	}
 	if stored != claim || result != nil {
 		return ErrStaleFence
 	}
-	intent, _, err := e.ReadIntent(ctx, claim.IntentDigest)
+	intent, _, err := j.ReadIntent(ctx, claim.IntentDigest)
 	if err != nil {
 		return err
 	}
-	state, err := e.Resource(ctx, claim.Scope)
+	state, err := j.ReadResource(ctx, claim.Scope)
 	if err != nil {
 		return err
 	}
 	if state.LastFence != claim.Fence || state.Pending != claim.IntentDigest {
 		return ErrStaleFence
 	}
-	return verifyRecordedApproval(ctx, e.journal.db, e.journal, intent, claim.IntentDigest, claim.ApprovalDigest)
+	return verifyRecordedApproval(ctx, j.db, j, intent, claim.IntentDigest, claim.ApprovalDigest)
 }
 
 // Execution reads the persistent handle for recovery, whether or not a result
@@ -199,11 +203,15 @@ func (j *Journal) ReadExecution(ctx context.Context, scope Scope, intentDigest s
 // permits attempting provider dispatch, after rechecking authority and CAS
 // at the provider boundary. A commit error, repeated call, or restart never
 // grants another dispatch. Pending claims have no time-based expiry.
-func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string) (claim Claim, created bool, err error) {
+func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string) (Claim, bool, error) {
+	return e.journal.ReserveExecution(ctx, actor, intentDigest, approvalDigest)
+}
+
+func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string) (claim Claim, created bool, err error) {
 	if !tokenPattern.MatchString(actor) || !digestPattern.MatchString(intentDigest) || !digestPattern.MatchString(approvalDigest) {
 		return Claim{}, false, errors.New("invalid production execution request")
 	}
-	record, err := e.journal.record(ctx, intentDigest, func(tx *sql.Tx) (bool, error) {
+	record, err := j.record(ctx, intentDigest, func(tx *sql.Tx) (bool, error) {
 		intent, payload, err := readIntent(ctx, tx, intentDigest)
 		if err != nil {
 			return false, err
@@ -252,7 +260,7 @@ func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDi
 		if state.LastVerified != predecessor || intent.RollbackDigest != predecessor.Digest {
 			return false, ErrResourceDrift
 		}
-		if err := verifyRecordedApproval(ctx, tx, e.journal, intent, intentDigest, approvalDigest); err != nil {
+		if err := verifyRecordedApproval(ctx, tx, j, intent, intentDigest, approvalDigest); err != nil {
 			return false, err
 		}
 		if state.LastFence == math.MaxInt64 {

@@ -114,14 +114,28 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("admission did not fence the wrong identity: %v", err)
 	}
-	if got, err := writeOfflineHoldOnce(ctx, cfg, submission, n); got != nil || !apierrors.IsForbidden(err) {
+	wrongClient, err := offlineHoldClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := writeOfflineHoldOnce(ctx, wrongClient, submission, n); got != nil || !apierrors.IsForbidden(err) {
 		t.Fatalf("write from wrong identity was not fenced: %v", err)
 	}
-	got, err := writeOfflineHoldOnce(ctx, identities[writer], submission, n)
+	writerClient, err := offlineHoldClient(identities[writer])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOfflineWriterIdentity(ctx, writerClient, writer); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOfflineWriterIdentity(ctx, wrongClient, writer); err == nil {
+		t.Fatal("accepted the wrong Kubernetes writer")
+	}
+	got, err := writeOfflineHoldOnce(ctx, writerClient, submission, n)
 	if err != nil || got == nil || got.ResourceVersion == n.ResourceVersion || !reflect.DeepEqual(got.Annotations, preview.HoldPlan.After) {
 		t.Fatalf("designated writer failed to apply the exact approved delta: %v", err)
 	}
-	if replay, err := writeOfflineHoldOnce(ctx, identities[writer], submission, n); err == nil || replay != nil {
+	if replay, err := writeOfflineHoldOnce(ctx, writerClient, submission, n); err == nil || replay != nil {
 		t.Fatal("provider accepted stale request replay")
 	}
 	stored, err := nodes.Get(ctx, node, metav1.GetOptions{})
@@ -237,7 +251,11 @@ func TestOfflineHoldWriteSendsOnlyOneExactPatch(t *testing.T) {
 					cfg.CAData = nil
 					wantRequests = 0
 				}
-				got, err := writeOfflineHoldOnce(context.Background(), cfg, submission, live)
+				client, err := offlineHoldClient(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := writeOfflineHoldOnce(context.Background(), client, submission, live)
 				if requests.Load() != wantRequests || (err == nil) != (mode == "ok") ||
 					(mode == "ok" && (got == nil || got.ResourceVersion != "11")) || (err != nil && got != nil) {
 					t.Fatalf("result version, error or attempt count incorrect: requests=%d err=%v", requests.Load(), err)
