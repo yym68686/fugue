@@ -16,6 +16,10 @@ on:
           - contract-tracking-scope
           - contract-generator-consumer
         default: none
+      shadow_incremental:
+        description: 'Use distinct edits and independent baseline caches for a timing case'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +45,7 @@ jobs:
       GOFLAGS: -p=2
       PYTHONDONTWRITEBYTECODE: '1'
       SHADOW_CASE: ${{ inputs.shadow_case }}
+      SHADOW_INCREMENTAL: ${{ inputs.shadow_incremental }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -58,13 +63,13 @@ jobs:
           git rev-parse HEAD > "$evidence/source-sha.txt"
           go mod download 2> "$evidence/download.stderr"
           git status --porcelain > "$evidence/checkout-status.txt"
-          if [[ "$SHADOW_CASE" != contract-* ]]; then
+          if [[ "$SHADOW_CASE" != contract-* && "$SHADOW_INCREMENTAL" != true ]]; then
             python3 -m scripts.prepush_shadow_fixture --case "$SHADOW_CASE" 2> "$evidence/fixture.stderr"
             git diff --check
             git diff --binary > "$evidence/representative.patch"
           fi
       - name: Compare real native and artifact dependency graphs
-        if: ${{ !startsWith(inputs.shadow_case, 'contract-') }}
+        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && !inputs.shadow_incremental }}
         shell: bash
         run: |
           set -euo pipefail
@@ -79,7 +84,7 @@ jobs:
           git diff --check
           git diff --binary > "$evidence/representative.patch"
       - name: Run paired shadow experiment without a production receipt
-        if: ${{ !startsWith(inputs.shadow_case, 'contract-') }}
+        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && !inputs.shadow_incremental }}
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/fugue-shadow-go-cache
@@ -87,6 +92,13 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/fugue-shadow-evidence"
           python3 -m scripts.prepush_replay --case "$SHADOW_CASE" --base HEAD --samples 20 --full-oracle --oracle-timeout 1200 > "$evidence/replay.json" 2> "$evidence/replay.stderr"
+      - name: Run paired incremental experiment without a production receipt
+        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && inputs.shadow_incremental }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/fugue-shadow-evidence"
+          python3 -m scripts.prepush_replay --incremental --case "$SHADOW_CASE" --base HEAD --samples 20 --oracle-timeout 1200 > "$evidence/incremental-replay.json" 2> "$evidence/incremental-replay.stderr"
       - name: Preserve experiment or diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

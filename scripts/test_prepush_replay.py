@@ -1,5 +1,7 @@
 import io
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -66,8 +68,48 @@ class ReplayTest(unittest.TestCase):
             result = prepush_replay.go_oracle(3)
         self.assertEqual(result, {
             "status": "fail", "failedPackages": ["sample/contract"],
+            "failedTests": [{"package": "sample/contract", "test": "TestProjection"}],
+            "failedTestCount": 1,
             "packagesWithExecutedTests": 1, "timedOut": True,
         })
+
+    def test_incremental_replay_isolates_both_caches_and_restores_fixture(self):
+        selection = {
+            "scope": "test-only", "paths": ["suite_test.go"], "goTests": [],
+            "goBuilds": [], "omittedLegacyPackagesBeforeFallback": [],
+        }
+        with tempfile.TemporaryDirectory() as location:
+            path = Path(location) / "suite_test.go"
+            path.write_text("package demo\n", encoding="ascii")
+            original = path.read_bytes()
+            seen = {"legacy": [], "candidate": []}
+
+            def sample(name):
+                seen[name].append((os.environ["GOCACHE"], path.read_bytes()))
+                return {"status": "pass", "elapsedMs": 12, "selection": dict(selection)}
+
+            with (
+                mock.patch.object(prepush, "ROOT", path.parent),
+                mock.patch.object(prepush, "git_output", return_value=b"head\n"),
+                mock.patch.object(prepush_replay.prepush_shadow, "git_paths", return_value=[]),
+                mock.patch.object(prepush_replay.prepush_shadow, "snapshot", side_effect=lambda _base: path.read_text()),
+                mock.patch.dict(prepush_replay.prepush_shadow_fixture.CASES, {"sample": (("suite_test.go", "", ""),)}),
+                mock.patch.object(prepush_replay.prepush_shadow_fixture, "prepare",
+                                  side_effect=lambda _case: path.write_bytes(original + b"// edited\n")),
+                mock.patch.object(prepush_replay.subprocess, "check_output", return_value="{}"),
+                mock.patch.object(prepush, "run", return_value=(0, "")),
+                mock.patch.object(prepush_replay, "legacy_sample", side_effect=lambda: sample("legacy")),
+                mock.patch.object(prepush_replay, "candidate_sample", side_effect=lambda: sample("candidate")),
+                mock.patch.object(prepush_replay, "go_oracle", return_value={"status": "pass"}),
+            ):
+                report = prepush_replay.replay_incremental("sample", "HEAD", 2, 60)
+            self.assertEqual(path.read_bytes(), original)
+            legacy_cache, candidate_cache = [values[0][0] for values in seen.values()]
+            self.assertNotEqual(legacy_cache, candidate_cache)
+            self.assertEqual([data for _, data in seen["legacy"]], [data for _, data in seen["candidate"]])
+            self.assertNotEqual(seen["legacy"][0][1], seen["legacy"][1][1])
+            self.assertNotEqual(report["samples"][0]["sourceSnapshot"], report["samples"][1]["sourceSnapshot"])
+            self.assertFalse(report["productionAuthorization"])
 
 
 if __name__ == "__main__":

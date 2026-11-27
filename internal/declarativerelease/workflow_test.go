@@ -1150,6 +1150,11 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	if !reflect.DeepEqual(gotCases, wantCases) {
 		t.Fatalf("daily audit shadow cases: %v", gotCases)
 	}
+	incremental := yamlMappingValue(t, choices, "shadow_incremental")
+	if yamlMappingValue(t, incremental, "type").Value != "boolean" ||
+		yamlMappingValue(t, incremental, "default").Value != "false" {
+		t.Fatal("incremental replay must require explicit manual selection")
+	}
 	schedule := yamlMappingValue(t, on, "schedule").Content
 	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {
 		t.Fatal("daily audit cadence changed")

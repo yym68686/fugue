@@ -88,6 +88,12 @@ host; `activationReadiness` remains `not-evaluated`. Target comparisons,
 mutations that fail the intended contracts, and independent cache profiles
 remain separate activation evidence.
 
+For incremental timing, use `--incremental --case queue-test --base HEAD`
+in a clean disposable checkout. It prepares a separate baseline cache for
+each policy and applies the same distinct source input to both policies in
+each pair. The report records every input hash and the uncached Go oracle.
+The manual daily audit exposes this profile through `shadow_incremental`.
+
 For a source-owned writer capability or generator with an implicit downstream
 consumer, use the manual `contract-tracking-scope` or
 `contract-generator-consumer` shadow case. The witness first requires the
