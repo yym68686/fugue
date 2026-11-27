@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,6 +47,42 @@ func TestParticipationTopologyBindsApprovedPhysicalIdentity(t *testing.T) {
 	raw, _ := json.Marshal(next)
 	if _, err := DecodeParticipationPolicy(raw); err == nil {
 		t.Fatal("accepted a missing explicit hold policy")
+	}
+}
+
+func TestParticipationTopologyBindsKubernetesInVersionTwo(t *testing.T) {
+	legacy, err := DraftParticipationTopology("cluster-a", "import", Version{}, []byte(participationFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := validateParticipationIntent(legacy.Intent, legacy.Payload)
+	if err != nil || policy.Kubernetes != nil || strings.Contains(string(legacy.Payload), `"kubernetes"`) {
+		t.Fatalf("legacy payload changed: %v", err)
+	}
+	policy.Generation++
+	policy.Schema = BoundParticipationPolicySchema
+	policy.Kubernetes = &ParticipationKubernetesBinding{
+		Endpoint: "https://kube.fixture.invalid:6443", CADigest: digest([]byte("CA")), NamespaceUID: "namespace-a",
+	}
+	raw, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := DraftParticipationTopology("cluster-a", "bind-kubernetes", Version{policy.Generation - 1, legacy.Intent.TargetDigest}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := validateParticipationIntent(next.Intent, next.Payload)
+	if err != nil || got.Kubernetes == nil || *got.Kubernetes != *policy.Kubernetes {
+		t.Fatalf("approved policy did not bind Kubernetes: %+v %v", got.Kubernetes, err)
+	}
+	altered := strings.Replace(string(next.Payload), "namespace-a", "namespace-b", 1)
+	if _, err := validateParticipationIntent(next.Intent, []byte(altered)); err == nil {
+		t.Fatal("an unsigned namespace replacement survived topology validation")
+	}
+	duplicate := strings.Replace(string(raw), `"namespace_uid":"namespace-a"`, `"namespace_uid":"namespace-b","namespace_uid":"namespace-a"`, 1)
+	if _, err := DecodeParticipationPolicy([]byte(duplicate)); err == nil {
+		t.Fatal("duplicate namespace UID accepted")
 	}
 }
 

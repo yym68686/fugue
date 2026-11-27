@@ -26,6 +26,20 @@ never changes the head. Do not put policy files or owner signing material back
 in the program image. The legacy policy remains in use until shadow parity
 and provider-side writer cutover have been demonstrated.
 
+Live Kubernetes diagnostics require a separately approved
+`fugue.automatic-node-participation/v2` revision. In the draft, add
+`kubernetes.endpoint` (the exact HTTPS API origin), `kubernetes.ca_digest`
+(SHA-256 of the DER bytes of the one trusted CA certificate, with a
+`sha256:` prefix), and `kubernetes.namespace_uid` (the enrolled namespace
+UID). Obtain these values from a trusted cluster inventory, not from the
+context being checked. The client must present that origin and CA,
+without a hostname override or proxy, and return the enrolled namespace's
+UID before and after observation. Both PostgreSQL and Kubernetes must be
+read-only to the observer; add only Namespace GET for the enrolled name
+to the permissions below. Changing the approved cluster binding requires
+a new owner-approved topology revision. Legacy v1 remains readable and
+replayable, but cannot drive live diagnostics.
+
 `preview-participation JOURNAL_CONFIG NODE SNAPSHOT` uses the journal's
 read-only connection to load the current approved topology. The input JSON
 uses schema `fugue.participation-snapshot-replay/v1` with `cluster`, `topology`
@@ -49,8 +63,8 @@ checks rollout convergence, capability annotations, exact runtime image
 digests and the Guardian's declared group baseline, then repeats the read and
 rejects changes to those object versions. Use a Kubernetes principal with
 Deployment and ReplicaSet GET and Pod LIST in the topology namespace only.
-The operator-selected context is not a cryptographic cluster binding; this
-report alone is not independent cutover evidence and cannot authorize a write.
+The context is verified against the approved cluster binding. This report
+alone is not independent cutover evidence and cannot authorize a write.
 
 `observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE` verifies
 physical Node identity and a bounded group inventory. It checks the exact
@@ -69,8 +83,7 @@ If a Ready Node has a serving Service, it reports that DNS and heartbeat
 evidence is required, with no proposed action. If stabilization has elapsed,
 it still requires Front, Worker and network recovery checks before any
 readmission can be considered. It is not a comparison against the legacy
-runtime on production, does not bind the selected Kubernetes context to the
-journal, and emits no executable intent or cutover evidence.
+runtime on production and emits no executable intent or cutover evidence.
 
 ## Single-Deployment release draft
 
