@@ -1640,12 +1640,17 @@ func TestRetryRetiredAppReleaseCleanupUsesUIDPreconditions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retired.Role, retired.Status, retired.PromotedAt = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired, &now
-	retired, err = st.UpdateAppRelease(retired)
+	stable, err := st.CreateAppRelease(model.AppRelease{ID: "stable-bound", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-v2", ResolvedImageRef: "ghcr.io/example/api:v2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	stable, err := st.CreateAppRelease(model.AppRelease{ID: "stable-bound", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, RuntimeID: "runtime-v2", ResolvedImageRef: "ghcr.io/example/api:v2"})
+	if _, err := st.UpsertAppTrafficPolicy(model.AppTrafficPolicy{
+		TenantID: app.TenantID, AppID: app.ID, Mode: model.AppTrafficModeSingle, StableReleaseID: stable.ID, StableWeight: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retired.PromotedAt = &now
+	retired, err = retireFixtureRelease(t.Context(), st, retired)
 	if err != nil {
 		t.Fatal(err)
 	}

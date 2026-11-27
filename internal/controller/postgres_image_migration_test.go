@@ -640,7 +640,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 				if active.Status != model.OperationStatusRunning || current.Spec.Postgres.Image != "" {
 					t.Fatal("unverified mutation marked terminal or persisted early")
 				}
-				if _, err = state.CancelOperation(op.ID, "cancel"); !errors.Is(err, store.ErrConflict) {
+				if _, err = cancelFixtureOperation(state, op, "cancel"); !errors.Is(err, store.ErrConflict) {
 					t.Fatal("accepted mutation became cancellable")
 				}
 				if _, err = state.RequeueManagedOperationGuarded(op, "requeue"); !errors.Is(err, store.ErrConflict) {
