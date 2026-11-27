@@ -4,6 +4,13 @@ This is an implementation boundary, not proof of a production cutover. The
 legacy workflow and runtime are still needed for resources that have not passed
 the independent cutover checks.
 
+Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
+compares legacy and native publication planning against the same candidate.
+It reads Kubernetes without publishing, checks the live Deployment UID and
+resourceVersion, and requires matching predecessor, candidate, health, and
+rollback bindings. The report is not an approval or proof of a live rollout,
+rollback, or old writer revocation.
+
 - On an approved, marked DesiredRelease, Guardian compares the live pointer,
   candidate, and rollback monitor with the signed journal payload. It reserves
   an append-only launch entry under the pending resource fence and passes the

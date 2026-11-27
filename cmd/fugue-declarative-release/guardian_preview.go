@@ -40,8 +40,9 @@ func guardianSubmissionTarget(files map[string][]byte) (releaseguardian.TargetCo
 }
 
 func runGuardianPreview(parent context.Context, args []string, output io.Writer) error {
-	if len(args) != 4 || strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[2]) == "" {
-		return errors.New("usage: fugue-declarative-release guardian-preview KUBECONFIG CONTEXT PLAN_DIR")
+	compare := len(args) > 0 && args[0] == "guardian-native-shadow"
+	if (!compare && len(args) != 4) || (compare && len(args) != 6) || strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[2]) == "" {
+		return errors.New("usage: guardian-preview KUBECONFIG CONTEXT PLAN_DIR; guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID")
 	}
 	files, err := readPlanDirectory(args[3])
 	if err != nil {
@@ -70,6 +71,18 @@ func runGuardianPreview(parent context.Context, args []string, output io.Writer)
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	if compare {
+		observation, err := store.CompareNativeReleaseShadow(ctx, target.Key, args[4], args[5], files)
+		if err != nil {
+			return err
+		}
+		raw, err := declarativerelease.CanonicalJSON(observation)
+		if err != nil {
+			return err
+		}
+		_, err = output.Write(append(raw, '\n'))
+		return err
+	}
 	preview, err := store.PreviewDesired(ctx, target.Key, files)
 	if err != nil {
 		return err
