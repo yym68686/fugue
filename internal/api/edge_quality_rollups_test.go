@@ -12,6 +12,14 @@ import (
 const edgeQualityPlatformRollupHostname = qualityrollup.PlatformHostname
 const edgeQualityRollupBuilderInterval = qualityrollup.Interval
 
+func TestEdgeQualityTrafficClassNormalizationMatchesWorker(t *testing.T) {
+	for _, input := range []string{" LARGE_BODY_API ", "small_api", "dynamic_api", "static_cacheable", "streaming", "sse", "websocket", "html_dynamic", "unknown", ""} {
+		if got, want := normalizeEdgeTrafficClass(input), qualityrollup.NormalizeTrafficClass(input); got != want {
+			t.Errorf("API normalize %q = %q, worker = %q", input, got, want)
+		}
+	}
+}
+
 func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, window string, startedAt, endedAt, now time.Time) []model.EdgeQualityRollup {
 	builder := qualityrollup.NewWindowAccumulator(window, startedAt, endedAt)
 	builder.AddSamples(samples)

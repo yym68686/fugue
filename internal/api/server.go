@@ -30,7 +30,6 @@ import (
 	"fugue/internal/operationview"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
-	"fugue/internal/qualityrollup"
 	"fugue/internal/runtime"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/sourceimport"
@@ -176,7 +175,6 @@ type Server struct {
 	logStreamTuning                        logStreamTuning
 	oomRightSizingMu                       sync.Mutex
 	oomRightSizingEvents                   map[string]time.Time
-	qualityRollups                         *qualityrollup.Builder
 	passiveASN                             passiveASNState
 	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
@@ -246,7 +244,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		store:                           store,
 		auth:                            authn,
 		log:                             logger,
-		qualityRollups:                  qualityrollup.New(store, logger),
 		metricsStartedAt:                time.Now().UTC(),
 		producerCaptureRuntime:          newProducerCaptureRuntime(),
 		backupInventoryConfig:           cfg.BackupInventory.normalized(),
@@ -453,7 +450,7 @@ func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
 	}
 	s.writeRobustnessMetrics(ctx, w)
 	s.writeAutomationShadowLoopMetrics(w)
-	s.writeEdgeQualityRollupMetrics(w)
+	writeRetiredEdgeQualityRankingMetrics(w)
 	s.writeDNSObservationMetrics(w)
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)

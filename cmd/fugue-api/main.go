@@ -161,7 +161,6 @@ func main() {
 		logger.Printf("runtime observations unavailable: %v", err)
 	}
 	warmersDone := server.StartBackgroundWarmers(ctx)
-	go server.StartBackgroundEdgeQualityRollups(ctx)
 	go server.StartBackgroundPassiveASN(ctx)
 	go server.StartBackgroundDNSObservations(ctx)
 	go server.StartBackgroundPlatformConfiguration(ctx)

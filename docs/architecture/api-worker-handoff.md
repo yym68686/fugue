@@ -95,6 +95,13 @@ transaction's baseline plus a new worker success sample is the completion
 proof. A failed check after commit requires recovery on the worker side, not
 resetting the owner to the API.
 
+The 2026-11-27 production handoff (`55cfb6371`) switched the writer to the
+independent observation worker. The `a1dc7cd9b` API rollout replaced both API
+Pods while the same observation Pod stayed up and committed a new watermark.
+The subsequent cleanup removes the API rollup executor and its process-local
+writer metrics. API ingestion, quality reads and retired-ranking status remain
+unchanged; use the `fugue-observation-worker` scrape job for writer metrics.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance
