@@ -5,18 +5,42 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict, deque
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
 from scripts import prepush
 
 
-SOURCE = ("GoFiles", "CgoFiles", "EmbedFiles")
+# In addition to Go and embed inputs, cmd/go owns these inputs through the
+# active build constraints. An input absent from a profile is not assumed safe.
+SOURCE = (
+    "GoFiles", "CgoFiles", "EmbedFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
+    "FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles",
+)
 TEST = ("TestGoFiles", "XTestGoFiles", "TestEmbedFiles", "XTestEmbedFiles")
-FIELDS = ("Dir", "ImportPath", "Incomplete", "Imports", "TestImports", "XTestImports", *SOURCE, *TEST)
+FIELDS = (
+    "Dir", "ImportPath", "Incomplete", "Error", "DepsErrors",
+    "Imports", "TestImports", "XTestImports", *SOURCE, *TEST,
+)
+ENV_FIELDS = ("GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS")
+
+# Go's import graph does not see tests reading another package's source or
+# executing a command. Keep those contracts as test edges, never build edges.
+# An input not owned by Go (e.g. a runtime testdata read) still falls back.
+SOURCE_READERS = {
+    "cmd/fugue-declarative-release/main.go": "./internal/declarativerelease",
+    "internal/edge/service.go": "./internal/platformsafety",
+    "internal/edgegroupfront/service.go": "./internal/platformsafety",
+    "internal/observability/pipeline.go": "./internal/platformsafety",
+}
+COMMAND_TEST_CONSUMERS = {
+    "./cmd/fugue-openapi-gen": "./internal/apispec",
+}
 
 
 def packages_from_stream(stream):
@@ -41,6 +65,22 @@ def git_paths(base):
     return sorted(paths)
 
 
+def snapshot(base):
+    """Fingerprint the exact diff, including untracked input contents and links."""
+    digest = hashlib.sha256()
+    for command in (["rev-parse", base, "HEAD"], ["diff", "--binary", "HEAD", "--"]):
+        digest.update(prepush.git_output(command))
+        digest.update(b"\0")
+    untracked = prepush.nul_paths(["ls-files", "--others", "--exclude-standard", "-z", "--"])
+    for path in sorted(untracked):
+        file = prepush.ROOT / path
+        content = os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).digest())
+    return digest.hexdigest()
+
+
 def commands_for(kind, packages):
     if not packages:
         return []
@@ -51,14 +91,14 @@ def commands_for(kind, packages):
 def full(reason):
     return {
         "scope": "full", "reason": reason,
-        "goTests": [["go", "test", "./..."]], "goBuilds": [["go", "build", "./..."]],
+        "goTests": [["go", "test", "-count=1", "./..."]], "goBuilds": [["go", "build", "./..."]],
     }
 
 
 def select(paths, packages, root):
     if not paths:
         return full("no diff to classify")
-    if not packages or any(p.get("Incomplete") for p in packages):
+    if not packages or any(p.get("Incomplete") or p.get("Error") or p.get("DepsErrors") for p in packages):
         return full("Go package graph is unavailable or incomplete")
 
     owners = defaultdict(set)
@@ -102,15 +142,32 @@ def select(paths, packages, root):
     tests = compiled | test_edits
     for name in compiled:
         tests.update(reverse_test[name])
+    available_labels = set(labels.values())
+    implicit_tests = {SOURCE_READERS[path] for path in paths if path in SOURCE_READERS}
+    implicit_tests.update(
+        COMMAND_TEST_CONSUMERS[labels[name]]
+        for name in compiled if labels[name] in COMMAND_TEST_CONSUMERS
+    )
+    if implicit_tests - available_labels:
+        return full("declared implicit test consumer is missing from the Go graph")
+    test_commands = commands_for("test", {labels[name] for name in tests} - implicit_tests)
+    if implicit_tests:
+        # In particular, inputs read by a child process are not a reliable
+        # cache key for the Go test that invokes it.
+        test_commands.append(["go", "test", "-count=1", *sorted(implicit_tests)])
     return {
         "scope": "dependency-closure" if runtime_edits else "test-only",
-        "reason": "one package owner; Go production and test imports resolved",
-        "goTests": commands_for("test", {labels[name] for name in tests}),
+        "reason": "one package owner; Go imports and declared test inputs resolved",
+        "goTests": test_commands,
         "goBuilds": commands_for("build", {labels[name] for name in compiled}),
     }
 
 
-def report(base):
+def graph_command():
+    return ["go", "list", "-json=" + ",".join(FIELDS), "./..."]
+
+
+def report(base, *, target=None):
     started = time.monotonic()
     paths = git_paths(base)
     legacy_paths = prepush.changed_files(base)
@@ -122,11 +179,17 @@ def report(base):
     if declarative:
         legacy.append(declarative)
     try:
-        status, output = prepush.run(["go", "list", "-json=" + ",".join(FIELDS), "./..."], 12)
+        command = graph_command()
+        if target:
+            # These profiles mirror the CGO-disabled component container
+            # builds. Do not mutate the environment of the release gate.
+            goos, goarch = target.split("/")
+            command = ["env", f"GOOS={goos}", f"GOARCH={goarch}", "CGO_ENABLED=0", *command]
+        status, output = prepush.run(command, 12)
         plan = select(paths, packages_from_stream(output) if not status else [], prepush.ROOT)
     except (OSError, TypeError, ValueError, KeyError):
         plan = full("Go package graph could not be read")
-    planned = {pkg for cmd in plan["goTests"] for pkg in cmd[2:]}
+    planned = {pkg for cmd in plan["goTests"] for pkg in cmd[2:] if not pkg.startswith("-")}
     baseline = {pkg for cmd in legacy for pkg in cmd[2:cmd.index("-run") if "-run" in cmd else len(cmd)]}
     missing = sorted(baseline - planned) if plan["scope"] != "full" else []
     if missing:
@@ -141,13 +204,69 @@ def report(base):
     }
 
 
+def compare_targets(base, targets):
+    """Compare plans; no target commands are executed and none can authorize a push."""
+    base = prepush.git_output(["rev-parse", "--verify", f"{base}^{{commit}}"]).decode("ascii").strip()
+    initial = snapshot(base)
+    status, output = prepush.run(["go", "env", "-json", *ENV_FIELDS], 12)
+    if status != 0:
+        raise RuntimeError("native Go build profile is unavailable")
+    native_env = json.loads(output)
+    if not isinstance(native_env, dict) or not all(key in native_env for key in ENV_FIELDS):
+        raise RuntimeError("native Go build profile is incomplete")
+    native = report(base)
+    comparisons = []
+    for target in dict.fromkeys(targets):
+        goos, goarch = target.split("/")
+        candidate = report(base, target=target)
+        if any(candidate[key] != native[key] for key in ("baseCommit", "sourceCommit", "paths")):
+            raise RuntimeError("source or changed paths drifted during target comparison")
+        differences = [key for key in (
+            "scope", "goTests", "goBuilds", "omittedLegacyPackagesBeforeFallback",
+        ) if candidate[key] != native[key]]
+        comparisons.append({
+            "profile": {**native_env, "GOOS": goos, "GOARCH": goarch, "CGO_ENABLED": "0"},
+            "selection": candidate,
+            "differencesFromNative": differences,
+        })
+    if snapshot(base) != initial:
+        raise RuntimeError("source changed during target comparison; discard the plans")
+    if native["scope"] == "full" or any(
+        row["selection"]["scope"] == "full" or row["differencesFromNative"] for row in comparisons
+    ):
+        disposition = "full-verification-required"
+    else:
+        disposition = "same-selection-across-requested-profiles"
+    return {
+        "apiVersion": "prepush.fugue.dev/target-comparison-v1",
+        "kind": "GoVerificationTargetComparison",
+        "gate": "report-only",
+        "productionAuthorization": False,
+        "sourceSnapshot": initial,
+        "native": {"profile": native_env, "selection": native},
+        "comparisons": comparisons,
+        "disposition": disposition,
+    }
+
+
+def parse_target(value):
+    if not re.fullmatch(r"[a-z0-9]+/[a-z0-9]+", value):
+        raise argparse.ArgumentTypeError("target must be a GOOS/GOARCH pair, e.g. linux/amd64")
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", help="exact base ref (defaults to PREPUSH_BASE_REF or HEAD)")
+    parser.add_argument(
+        "--compare-target", action="append", default=[], type=parse_target,
+        help="compare the native plan with a CGO-disabled GOOS/GOARCH graph; repeat to add targets",
+    )
     options = parser.parse_args()
     try:
-        result = report(options.base or prepush.resolve_base())
-    except (OSError, UnicodeError, subprocess.CalledProcessError, RuntimeError) as err:
+        base = options.base or prepush.resolve_base()
+        result = compare_targets(base, options.compare_target) if options.compare_target else report(base)
+    except (OSError, ValueError, subprocess.CalledProcessError, RuntimeError) as err:
         parser.exit(2, f"shadow report unavailable: {err}\n")
     print(json.dumps(result, sort_keys=True))
 

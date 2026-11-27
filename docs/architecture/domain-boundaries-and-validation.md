@@ -36,6 +36,13 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   not rebuild downstream packages.
 - Unknown inputs, missing graph data, deleted/renamed paths whose old owner
   cannot be proven, and multi-package changes select whole-module Go checks.
+- Some Go tests read another package's source or execute a repository command
+  without importing it. Declare those consumers as test-only edges (for
+  example, the Prometheus source audit and OpenAPI generator contract).
+  Run these consumers uncached: child-process inputs may not invalidate the
+  test result cache. A missing declared consumer or an unowned fixture still
+  selects uncached full Go tests. This is not an inventory of every implicit
+  dependency.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,
@@ -48,6 +55,14 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   missed checks plus P95 ≤ 60 seconds for the agreed local edit classes before
   removing scheduling workarounds. CI continues to run the production gate.
 
+Run `python3 -m scripts.prepush_shadow --base <base> --compare-target linux/amd64`
+to compare the native graph with a CGO-disabled component build profile. Repeat
+`--compare-target` for each required target, and run separate comparisons with
+the actual build tags when they differ. The comparison binds the exact diff,
+reports differences in selected packages and falls back to full verification
+when profiles disagree or an input cannot be owned in one profile. It does not
+execute a cross-platform test or supply release authorization.
+
 On a disposable worktree, apply one representative edit and run
 `python3 -m scripts.prepush_replay --case <edit-class> --base HEAD --full-oracle`.
 The replay alternates execution order, records 20 measured pairs by default
@@ -59,6 +74,10 @@ for domain source, test-only, transitive contracts and broad fallback; retain
 failures and retain the separate warm-up times. Warm repeated-diff P95 does not
 prove cold or real incremental performance, and an all-green oracle does not
 prove that a failing cross-domain contract would be selected.
+The report's `warmReplayCriteriaMet` covers only this run on its recorded
+host; `activationReadiness` remains `not-evaluated`. Target comparisons,
+mutations that fail the intended contracts, and independent cache profiles
+remain separate activation evidence.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing

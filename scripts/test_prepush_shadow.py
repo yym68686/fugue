@@ -14,7 +14,8 @@ ROOT = Path("/checkout")
 def pkg(path, **fields):
     return {
         "Dir": str(ROOT / path), "ImportPath": "demo/" + path,
-        "GoFiles": ["impl.go"], "TestGoFiles": ["impl_test.go"], **fields,
+        "GoFiles": ["impl.go"], "TestGoFiles": ["impl_test.go"],
+        **fields,
     }
 
 
@@ -46,6 +47,18 @@ class SelectionTest(unittest.TestCase):
         result = shadow.select(["files/template.txt"], [pkg("files", EmbedFiles=["template.txt"])], ROOT)
         self.assertEqual(result["goTests"], [["go", "test", "./files"]])
         self.assertEqual(result["goBuilds"], [["go", "build", "-o", os.devnull, "./files"]])
+
+    def test_compile_inputs_are_runtime_inputs_and_dependency_errors_fail_wide(self):
+        for field in ("CXXFiles", "HFiles", "SFiles", "SysoFiles"):
+            graph = [pkg("domain", **{field: ["native"]}), pkg("cmd", Imports=["demo/domain"])]
+            with self.subTest(field=field):
+                self.assertEqual(shadow.select(["domain/native"], graph, ROOT)["goBuilds"], [
+                    ["go", "build", "./cmd", "./domain"],
+                ])
+        for field in ("Error", "DepsErrors"):
+            with self.subTest(field=field):
+                graph = [pkg("domain", **{field: {"Err": "missing input"}})]
+                self.assertEqual(shadow.select(["domain/impl.go"], graph, ROOT)["scope"], "full")
 
     def test_unknown_deleted_cross_package_or_incomplete_graph_fail_wide(self):
         for paths in (["go.mod"], ["domain/deleted.go"], ["assets/fixture.json"],
@@ -126,6 +139,84 @@ class SelectionTest(unittest.TestCase):
             for result in (witness, oracle):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("projection drift", result.stdout)
+
+    def test_literal_source_reader_is_selected_but_is_not_a_build_target(self):
+        path = "internal/observability/pipeline.go"
+        owner = pkg("internal/observability")
+        owner["GoFiles"] = ["pipeline.go"]
+        reader = pkg("internal/platformsafety")
+        # There is deliberately no import in either direction.
+        plan = shadow.select([path], [owner, reader], ROOT)
+        self.assertEqual(plan["goTests"], [
+            ["go", "test", "./internal/observability"],
+            ["go", "test", "-count=1", "./internal/platformsafety"],
+        ])
+        self.assertEqual(plan["goBuilds"], [["go", "build", "-o", os.devnull, "./internal/observability"]])
+        self.assertEqual(shadow.select([path], [owner], ROOT)["scope"], "full")
+        unrelated = shadow.select(["internal/observability/impl_test.go"], [owner, reader], ROOT)
+        self.assertEqual(unrelated["goTests"], [["go", "test", "./internal/observability"]])
+
+    def test_tool_dependency_reaches_the_command_contract_without_an_import(self):
+        dep = pkg("render")
+        tool = pkg("cmd/fugue-openapi-gen", Imports=["demo/render"])
+        contract = pkg("internal/apispec")
+        plan = shadow.select(["render/impl.go"], [dep, tool, contract], ROOT)
+        self.assertEqual(plan["goTests"], [
+            ["go", "test", "./cmd/fugue-openapi-gen", "./render"],
+            ["go", "test", "-count=1", "./internal/apispec"],
+        ])
+        self.assertEqual(plan["goBuilds"], [["go", "build", "./cmd/fugue-openapi-gen", "./render"]])
+        self.assertEqual(shadow.select(["render/impl.go"], [dep, tool], ROOT)["scope"], "full")
+
+    def test_live_target_comparison_fails_wide_when_build_tags_change_consumers(self):
+        with tempfile.TemporaryDirectory() as location:
+            root = Path(location)
+            files = {
+                "go.mod": "module test.example/target-audit\n\ngo 1.22\n",
+                "domain/domain.go": "package domain\nfunc Value() int { return 1 }\n",
+                "consumer/base.go": "package consumer\n",
+                "consumer/uses_windows.go": (
+                    'package consumer\nimport "test.example/target-audit/domain"\n'
+                    'var value = domain.Value()\n'
+                ),
+            }
+            for name, contents in files.items():
+                path = root / name
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(contents)
+
+            def git(*args):
+                subprocess.run(["git", *args], cwd=root, capture_output=True, check=True)
+
+            git("init")
+            git("add", ".")
+            git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "base")
+            (root / "domain/domain.go").write_text(files["domain/domain.go"].replace("return 1", "return 2"))
+            with patch.object(prepush, "ROOT", root):
+                result = shadow.compare_targets("HEAD", ["linux/amd64", "windows/amd64", "linux/amd64"])
+            self.assertEqual(result["disposition"], "full-verification-required")
+            self.assertFalse(result["productionAuthorization"])
+            linux, windows = result["comparisons"]
+            self.assertEqual(linux["profile"]["CGO_ENABLED"], "0")
+            self.assertNotIn("./consumer", linux["selection"]["goTests"][0])
+            self.assertIn("./consumer", windows["selection"]["goTests"][0])
+            self.assertTrue(linux["differencesFromNative"] or windows["differencesFromNative"])
+
+    def test_target_comparison_rejects_content_changes_even_if_paths_are_unchanged(self):
+        env = '{"GOVERSION":"go1.25.7","GOOS":"darwin","GOARCH":"arm64","CGO_ENABLED":"1","GOFLAGS":""}'
+        unchanged_plan = {
+            "scope": "test-only", "baseCommit": "base", "sourceCommit": "source",
+            "paths": ["p/p_test.go"], "goTests": [], "goBuilds": [],
+            "omittedLegacyPackagesBeforeFallback": [],
+        }
+        with (
+            patch.object(prepush, "git_output", return_value=b"base\n"),
+            patch.object(prepush, "run", return_value=(0, env)),
+            patch.object(shadow, "snapshot", side_effect=["original", "changed"]),
+            patch.object(shadow, "report", return_value=unchanged_plan),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "source changed during target comparison"):
+                shadow.compare_targets("base", ["linux/amd64"])
 
 
 if __name__ == "__main__":

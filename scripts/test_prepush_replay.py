@@ -43,14 +43,16 @@ class ReplayTest(unittest.TestCase):
         pairs = [{"candidate": candidate, "legacy": legacy}] * 19
         selection = {"scope": "test-only", "omittedLegacyPackagesBeforeFallback": []}
         oracle = {"status": "pass"}
-        self.assertFalse(prepush_replay.summarize(pairs, selection, oracle)["eligibleForReview"])
-        self.assertFalse(prepush_replay.summarize(pairs + [pairs[0]], selection, None)["eligibleForReview"])
-        self.assertTrue(prepush_replay.summarize(pairs + [pairs[0]], selection, oracle)["eligibleForReview"])
+        self.assertFalse(prepush_replay.summarize(pairs, selection, oracle)["warmReplayCriteriaMet"])
+        self.assertFalse(prepush_replay.summarize(pairs + [pairs[0]], selection, None)["warmReplayCriteriaMet"])
+        report = prepush_replay.summarize(pairs + [pairs[0]], selection, oracle)
+        self.assertTrue(report["warmReplayCriteriaMet"])
+        self.assertEqual(report["activationReadiness"], "not-evaluated")
         failed = {"status": "fail", "elapsedMs": 55_000}
         report = prepush_replay.summarize(pairs + [{"candidate": failed, "legacy": legacy}], selection, oracle)
         self.assertEqual(report["candidateP95Ms"], 12_000)
         self.assertEqual(report["candidateFailedSamples"], 1)
-        self.assertFalse(report["eligibleForReview"])
+        self.assertFalse(report["warmReplayCriteriaMet"])
 
     def test_full_oracle_collects_failure_packages_and_timeout(self):
         with mock.patch.object(prepush, "run", return_value=(
