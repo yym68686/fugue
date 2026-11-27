@@ -80,7 +80,7 @@ func TestFinalizationCannotResurrectCancelledTaskAfterOutage(t *testing.T) {
 	_, err := s.finalizeManagedOperation(context.Background(), op, model.OperationStatusFailed, func() (model.Operation, error) {
 		calls++
 		if calls == 1 {
-			if _, e := s.Store.CancelOperation(op.ID, "user cancelled"); e != nil {
+			if _, e := cancelFixtureOperation(s.Store, op, "user cancelled"); e != nil {
 				t.Fatal(e)
 			}
 			return model.Operation{}, &pgconn.PgError{Code: "57P01"}

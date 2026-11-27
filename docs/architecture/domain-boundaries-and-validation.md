@@ -22,6 +22,12 @@ for Compose ordering, retry and deletion run outside the Controller root;
 Controller retains worker execution and shutdown tests. Store imports the
 operation read contract without importing either read or queue policy.
 
+Operation cancellation uses an actor-bound write port for HTTP callers and
+a deploy-only supersession port for the Controller. PostgreSQL rechecks the
+actor's tenant and project in the same transaction as the transition and app
+status update. The cancellation domain independently verifies which operation
+states may transition; the read port still cannot cancel any operation.
+
 These are migrated boundaries, not a claim that the remaining API, Controller
 and Store files are composition-only. App release and reconciliation, billing,
 edge/DNS publication and operations still include root-owned logic. Migrate
