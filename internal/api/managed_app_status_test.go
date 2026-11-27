@@ -228,7 +228,7 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 	app.Status.CurrentReleaseReadyAt = &previousReady
 	var releaseReady *time.Time
 	if !implicit {
-		ready := time.Now().UTC()
+		ready := time.Now().UTC().Truncate(time.Microsecond)
 		releaseReady = &ready
 	}
 	release, err := stateStore.CreateAppRelease(model.AppRelease{

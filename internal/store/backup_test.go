@@ -636,7 +636,7 @@ func TestCreateBackupArtifactForRunFencesLeaseAndDefersPolicySuccess(t *testing.
 		if err != nil {
 			t.Fatalf("create backup run: %v", err)
 		}
-		claimedAt := time.Now().UTC()
+		claimedAt := time.Now().UTC().Truncate(time.Microsecond)
 		claimed, err := stateStore.ClaimBackupRun(run.ID, "artifact-worker", claimedAt, 2*time.Minute)
 		if err != nil {
 			t.Fatalf("claim backup run: %v", err)

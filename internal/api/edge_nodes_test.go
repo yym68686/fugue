@@ -335,7 +335,7 @@ func TestGetEdgeNodeQualityAggregatesOnlyRequestedEdge(t *testing.T) {
 	t.Parallel()
 
 	_, server, _, platformAdminKey, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	edgeTLSReadyAt := now.Add(-3 * time.Hour)
 	edgeHeartbeat := performJSONRequest(t, server, http.MethodPost, "/v1/edge/heartbeat?token=edge-secret", "", map[string]any{
 		"edge_id":              "edge-us-1",

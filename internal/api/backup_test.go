@@ -2705,7 +2705,7 @@ func TestRecoverableLonghornLockFailureGetsDurableRetryAfterRollout(t *testing.T
 	if err != nil {
 		t.Fatalf("create policy: %v", err)
 	}
-	finishedAt := time.Now().UTC().Add(-3 * time.Hour)
+	finishedAt := time.Now().UTC().Truncate(time.Microsecond).Add(-3 * time.Hour)
 	failed, err := stateStore.CreateBackupRun(model.BackupRun{
 		PolicyID: policy.ID, Target: policy.Target, BackendID: backend.ID,
 		Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusFailed,

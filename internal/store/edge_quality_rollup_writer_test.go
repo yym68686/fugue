@@ -41,7 +41,8 @@ func TestEdgeQualityRollupWorkerRequiresSeparateDatabaseRole(t *testing.T) {
 	if err := schemamigrate.EnsureEdgeQualityRollupOwnerProjection(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := admin.ExecContext(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := admin.ExecContext(ctx, "CREATE ROLE "+quotedRole+" LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '"+password+"'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -66,7 +67,7 @@ func TestEdgeQualityRollupWorkerRequiresSeparateDatabaseRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerDSN.User = url.User(role)
+	workerDSN.User = url.UserPassword(role, password)
 	worker, closeWorker, err := OpenEdgeQualityRollupWorkerStore(ctx, workerDSN.String())
 	if err != nil {
 		t.Fatal(err)

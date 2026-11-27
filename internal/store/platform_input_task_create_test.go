@@ -325,7 +325,8 @@ func TestTaskCreatePostgresOrdinaryRoleAndTenantAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	role := quotePostgresIntegrationIdentifier(t, "create_role_"+schema)
-	if _, err := s.db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := s.db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -343,7 +344,7 @@ func TestTaskCreatePostgresOrdinaryRoleAndTenantAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User("create_role_" + schema)
+	u.User = url.UserPassword("create_role_"+schema, password)
 	db, err := openPostgresDatabase(u.String())
 	if err != nil {
 		t.Fatal(err)

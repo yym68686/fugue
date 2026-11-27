@@ -1805,6 +1805,21 @@ func mustDecodeJSON(t *testing.T, recorder *httptest.ResponseRecorder, dst any) 
 	}
 }
 
+// Compare the whole wire projection without making Go-specific time.Location
+// pointers or nil/empty distinctions behind omitempty part of the contract.
+func equalJSONProjection(t *testing.T, expected, actual any) bool {
+	t.Helper()
+	want, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Equal(want, got)
+}
+
 func completeNextManagedOperation(t *testing.T, s *store.Store) {
 	t.Helper()
 	op, found, err := s.ClaimNextPendingOperation()

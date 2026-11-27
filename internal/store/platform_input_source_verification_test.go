@@ -128,7 +128,8 @@ func TestCompilerSourceVerificationPostgresReadOnlyAndMissingSource(t *testing.T
 	c := CompilerInputSourceVerificationContract{Schema: CompilerInputSourceVerificationSchema, ArtifactID: parent.ID, ExpectedContentHash: parent.ContentHash}
 	roleName := model.NewID("source_verify_role")
 	role := quotePostgresIntegrationIdentifier(t, roleName)
-	if _, err := db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -145,7 +146,7 @@ func TestCompilerSourceVerificationPostgresReadOnlyAndMissingSource(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User(roleName)
+	u.User = url.UserPassword(roleName, password)
 	readerDB, err := openPostgresDatabase(u.String())
 	if err != nil {
 		t.Fatal(err)

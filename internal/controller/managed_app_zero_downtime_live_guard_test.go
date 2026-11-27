@@ -383,12 +383,12 @@ func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *t
 	if err != nil || !claimed {
 		t.Fatalf("claim failed deploy: claimed=%v err=%v", claimed, err)
 	}
-	failedDeploy, err = stateStore.FailOperation(failedDeploy.ID, "status publish failed after rollout became ready")
-	if err != nil {
+	if _, err := stateStore.FailOperation(failedDeploy.ID, "status publish failed after rollout became ready"); err != nil {
 		t.Fatalf("fail prior deploy: %v", err)
 	}
-	if failedDeploy.CompletedAt == nil {
-		t.Fatal("failed deploy must have a completion timestamp")
+	failedDeploy, err = stateStore.GetOperation(failedDeploy.ID)
+	if err != nil || failedDeploy.CompletedAt == nil {
+		t.Fatal("failed deploy must have a durable completion timestamp", err)
 	}
 
 	svc := &Service{Store: stateStore, Renderer: runtime.Renderer{}}

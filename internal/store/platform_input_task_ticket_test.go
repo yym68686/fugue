@@ -80,7 +80,8 @@ func TestTaskPreparationTicketPostgresOrdinaryApplicationRole(t *testing.T) {
 	role := "task_prepare_role_" + strings.ReplaceAll(schema, "-", "_")
 	quotedRole := quotePostgresIntegrationIdentifier(t, role)
 	quotedSchema := quotePostgresIntegrationIdentifier(t, schema)
-	if _, err := s.db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := s.db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -99,7 +100,7 @@ func TestTaskPreparationTicketPostgresOrdinaryApplicationRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User(role)
+	u.User = url.UserPassword(role, password)
 	db, err := openPostgresDatabase(u.String())
 	if err != nil {
 		t.Fatal(err)

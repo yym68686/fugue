@@ -2917,7 +2917,7 @@ func TestEdgeDNSBundleHoldsLatencyAwareDecisionDuringCooldown(t *testing.T) {
 			t.Fatalf("record edge heartbeat: %v", err)
 		}
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if err := storeState.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{
 		{
 			ID:            "api-us-now-fast",

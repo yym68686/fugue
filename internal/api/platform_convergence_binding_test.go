@@ -232,7 +232,7 @@ func testReleaseConvergenceBinding(t *testing.T, address string) {
 	}
 	for _, prior := range sets {
 		stored, err := state.GetPlatformExpectedConsumerSet(prior.ID)
-		if err != nil || !reflect.DeepEqual(stored, prior) {
+		if err != nil || !equalJSONProjection(t, prior, stored) {
 			t.Fatal("historical expectation mutated", err)
 		}
 	}

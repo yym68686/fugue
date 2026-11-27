@@ -373,7 +373,8 @@ func TestConsumerRetirementPostgresOrdinaryRole(t *testing.T) {
 	role := model.NewID("consumer_retire_operator_test")
 	quotedRole := quotePostgresIntegrationIdentifier(t, role)
 	quotedSchema := quotePostgresIntegrationIdentifier(t, schema)
-	if _, err := db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -387,7 +388,7 @@ func TestConsumerRetirementPostgresOrdinaryRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(address)
-	u.User = url.User(role)
+	u.User = url.UserPassword(role, password)
 	p, err := RunPlatformConsumerRetirement(t.Context(), u.String(), c, false, "")
 	if err != nil {
 		t.Fatal("ordinary read-only preview", err)

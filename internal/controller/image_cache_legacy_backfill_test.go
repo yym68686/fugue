@@ -58,7 +58,7 @@ func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t 
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
 		NodeID:          "machine-1",
 		RuntimeID:       "runtime_managed_shared",
@@ -222,7 +222,7 @@ func TestReconcileLegacyDistributedImageMetadataRepairsLostImageFromFreshPhysica
 		t.Fatalf("create stale replica: %v", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
 		NodeID:          "machine-1",
 		RuntimeID:       "runtime_managed_shared",

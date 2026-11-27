@@ -119,7 +119,7 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 			app.Spec.RuntimeID = candidate.RuntimeID
 			candidate.Role, candidate.Status = model.AppReleaseRoleStable, model.AppReleaseStatusServing
 			if scenario == "deadline_worker_slow_traffic" {
-				promoted := time.Now().UTC().Add(-25 * time.Second)
+				promoted := time.Now().UTC().Truncate(time.Microsecond).Add(-25 * time.Second)
 				candidate.PromotedAt = &promoted
 				heartbeat := promoted.Add(5 * time.Second)
 				s.safeRolloutEdgeBundleObserver = canonicalHandoffTestEdgeObserver(func(since time.Time) safeRolloutEdgeBundleObservation {

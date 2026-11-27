@@ -151,7 +151,8 @@ func TestHotIndexPostgresOrdinaryRoleUsesFixedZeroTempGuard(t *testing.T) {
 	role := "hot_index_role_" + strings.ReplaceAll(schema, "-", "_")
 	quotedRole := quotePostgresIntegrationIdentifier(t, role)
 	quotedSchema := quotePostgresIntegrationIdentifier(t, schema)
-	if _, err := db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := db.Exec("CREATE ROLE " + quotedRole + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -169,7 +170,7 @@ func TestHotIndexPostgresOrdinaryRoleUsesFixedZeroTempGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User(role)
+	u.User = url.UserPassword(role, password)
 	report, err := RunCompilerInputHotIndex(t.Context(), u.String(), CompilerInputHotIndexOptions{Limit: 1, Apply: true})
 	if err != nil || !report.Applied || report.Selected != 1 || report.NextAfterID != ref.ID || report.RetirementAuthorized {
 		t.Fatal("ordinary-role bounded index", report, err)

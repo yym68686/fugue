@@ -1171,9 +1171,12 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 		}
 		consumer.HeartbeatDeadline = consumer.HeartbeatDeadline.UTC()
 		consumer.ConvergenceDeadline = consumer.ConvergenceDeadline.UTC()
+		// The set's SQL timestamp columns preserve microseconds, whereas the
+		// members' JSONB timestamps preserve nanoseconds. Compare those bounds at
+		// the precision they share so a stored set remains valid when reused.
 		if consumer.ConvergenceDeadline.Before(consumer.HeartbeatDeadline) ||
-			consumer.HeartbeatDeadline.After(in.HeartbeatDeadline) ||
-			consumer.ConvergenceDeadline.After(in.ConvergenceDeadline) {
+			consumer.HeartbeatDeadline.Truncate(time.Microsecond).After(in.HeartbeatDeadline.Truncate(time.Microsecond)) ||
+			consumer.ConvergenceDeadline.Truncate(time.Microsecond).After(in.ConvergenceDeadline.Truncate(time.Microsecond)) {
 			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 		}
 		if consumer.Required {

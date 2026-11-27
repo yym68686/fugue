@@ -19,6 +19,10 @@ func TestRetiredAppReleaseCannotChangeServingTraffic(t *testing.T) {
 	}
 	var before appTrafficResponse
 	mustDecodeJSON(t, get, &before)
+	policy, err := s.store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
+	if err != nil || policy.StableReleaseID != before.Traffic.StableReleaseID {
+		t.Fatal("initial stable policy was not persisted", err)
+	}
 	stable, err := s.store.GetAppRelease(app.TenantID, false, before.Traffic.StableReleaseID)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +42,7 @@ func TestRetiredAppReleaseCannotChangeServingTraffic(t *testing.T) {
 		t.Fatalf("retired traffic status %d: %s", resp.Code, resp.Body.String())
 	}
 	after, err := s.store.GetAppTrafficPolicy(app.TenantID, false, app.ID)
-	if err != nil || !reflect.DeepEqual(before.Traffic, after) {
+	if err != nil || !reflect.DeepEqual(policy, after) {
 		t.Fatal("rejected retirement changed policy", err)
 	}
 	afterStable, err := s.store.GetAppRelease(app.TenantID, false, stable.ID)

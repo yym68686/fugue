@@ -105,7 +105,8 @@ func TestPlatformReleaseBackupReadOnlyPostgres(t *testing.T) {
 	}
 	roleName := model.NewID("release_backup_reader")
 	role := quotePostgresIntegrationIdentifier(t, roleName)
-	if _, err = s.db.Exec(`CREATE ROLE ` + role + ` LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; GRANT USAGE ON SCHEMA public TO ` + role + `; GRANT SELECT ON fugue_platform_artifact_releases TO ` + role); err != nil {
+	password := postgresFixturePassword()
+	if _, err = s.db.Exec(`CREATE ROLE ` + role + ` LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '` + password + `'; GRANT USAGE ON SCHEMA public TO ` + role + `; GRANT SELECT ON fugue_platform_artifact_releases TO ` + role); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -114,7 +115,7 @@ func TestPlatformReleaseBackupReadOnlyPostgres(t *testing.T) {
 		}
 	})
 	u, _ := url.Parse(s.databaseURL)
-	u.User = url.User(roleName)
+	u.User = url.UserPassword(roleName, password)
 	c := PlatformReleaseBackupContract{Schema: PlatformReleaseBackupSchema, ReleaseIDs: []string{release.ID}, MaxEncodedBytes: 32 << 20}
 	var wire bytes.Buffer
 	r, err := RunPlatformReleaseBackup(t.Context(), u.String(), c, &wire)
