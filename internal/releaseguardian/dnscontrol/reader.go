@@ -211,3 +211,34 @@ func (r *Reader) Draft(ctx context.Context, j *productioncontrol.Journal, cluste
 	}
 	return Draft(cluster, request, r.origin, head, observed.Sources, observed.Before, observed.After, now())
 }
+
+// Revalidate repeats the read-only shadow of the exact signed change before
+// the native executor reserves a dispatch. Fresh evidence may have different
+// observation timestamps, but it must resolve to the same immutable sources,
+// selected release, expected LKG, hold transition and configured API origin.
+func (r *Reader) Revalidate(ctx context.Context, submitted productioncontrol.Submission, now func() time.Time) (Payload, error) {
+	approved, err := Inspect(submitted)
+	if err != nil {
+		return Payload{}, err
+	}
+	if r == nil || r.origin != approved.Origin {
+		return Payload{}, errors.New("DNS control observation origin does not match approved intent")
+	}
+	observed, err := r.Observe(ctx, approved.NextProducer.ID, now)
+	if err != nil {
+		return Payload{}, err
+	}
+	live, projection, err := ValidateSources(observed.Sources, now())
+	if err != nil {
+		return Payload{}, err
+	}
+	shadow, err := ValidatePreview(observed.Before, observed.After, observed.Sources, projection, now())
+	if err != nil {
+		return Payload{}, err
+	}
+	live.Origin, live.ShadowDigest = r.origin, shadow.Digest
+	if !EqualChange(approved, live) {
+		return Payload{}, errors.New("approved DNS change no longer matches live shadow")
+	}
+	return live, nil
+}

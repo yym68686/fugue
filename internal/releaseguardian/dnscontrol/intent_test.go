@@ -160,7 +160,7 @@ func TestDNSDraftUsesExactProducerBoundary(t *testing.T) {
 
 func TestDNSReaderUsesGETAndRechecksSelectedLKG(t *testing.T) {
 	now := time.Now().UTC()
-	s, b, a, _ := testSources(t, now)
+	s, b, a, head := testSources(t, now)
 	for _, scenario := range []string{"ok", "racing-producer", "racing-full", "racing-lkg", "redirect"} {
 		t.Run(scenario, func(t *testing.T) {
 			var producers, fulls, previews atomic.Int32
@@ -236,6 +236,23 @@ func TestDNSReaderUsesGETAndRechecksSelectedLKG(t *testing.T) {
 			}
 			if err == nil && (o.Sources.NextProducer.ID != s.NextProducer.ID || !reflect.DeepEqual(o.After.Runtime.DNSEdgeEndpoints, a.Runtime.DNSEdgeEndpoints) || producers.Load() != 2 || fulls.Load() != 2 || previews.Load() != 2) {
 				t.Fatal("did not compare both exact selected publications around dry-run previews")
+			}
+			if scenario == "ok" {
+				sub, err := Draft("fixture", "dispatch-check", server.URL, head, s, b, a, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				live, err := reader.Revalidate(t.Context(), sub, func() time.Time { return now })
+				if err != nil || live.NextProducer.ID != s.NextProducer.ID || live.ShadowDigest == "" || producers.Load() != 4 || fulls.Load() != 4 || previews.Load() != 4 {
+					t.Fatalf("dispatch did not rerun a complete exact shadow: %v", err)
+				}
+				other, err := Draft("fixture", "wrong-origin", "https://other.example.test", head, s, b, a, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := reader.Revalidate(t.Context(), other, func() time.Time { return now }); err == nil || producers.Load() != 4 {
+					t.Fatal("dispatch accepted an approved request for another origin")
+				}
 			}
 		})
 	}

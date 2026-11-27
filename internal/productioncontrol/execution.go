@@ -194,6 +194,40 @@ func (j *Journal) VerifyOpenClaim(ctx context.Context, claim Claim) error {
 	return verifyRecordedApproval(ctx, j.db, j, intent, claim.IntentDigest, claim.ApprovalDigest)
 }
 
+// LockVerifiedGlobalProducerClaim is for the native provider transaction,
+// not another claim issuer. The caller must use the platform-store SQL
+// transaction on the SAME database as the journal. This keeps the resource
+// fence locked across the real selection write and receipt commit, so no
+// terminal result or subsequent claim can race a late mutation. Public keys
+// are trusted runtime configuration; neither the claim nor the payload can
+// supply them.
+func (j *Journal) LockVerifiedGlobalProducerClaim(ctx context.Context, tx *sql.Tx, claim Claim) (Submission, error) {
+	if j == nil || tx == nil || !claim.Scope.valid() || claim.ResourceID != GlobalProducerPolicyResource ||
+		claim.Fence < 1 || !digestPattern.MatchString(claim.IntentDigest) || !digestPattern.MatchString(claim.ApprovalDigest) {
+		return Submission{}, ErrStaleFence
+	}
+	if err := lockResource(ctx, tx, claim.Scope); err != nil {
+		return Submission{}, err
+	}
+	stored, err := readClaim(ctx, tx, claim.IntentDigest)
+	if err != nil || stored != claim {
+		return Submission{}, ErrStaleFence
+	}
+	intent, payload, err := readIntent(ctx, tx, claim.IntentDigest)
+	if err != nil || intent.scope() != claim.Scope || intent.Operation != DNSMembership {
+		return Submission{}, ErrStaleFence
+	}
+	state, err := readResource(ctx, tx, claim.Scope)
+	if err != nil || state.LastFence != claim.Fence || state.Pending != claim.IntentDigest ||
+		state.LastVerified != (Version{Generation: intent.Generation, Digest: intent.CurrentDigest}) || intent.RollbackDigest != intent.CurrentDigest {
+		return Submission{}, ErrStaleFence
+	}
+	if err := verifyRecordedApproval(ctx, tx, j, intent, claim.IntentDigest, claim.ApprovalDigest); err != nil {
+		return Submission{}, err
+	}
+	return Submission{Intent: intent, Payload: payload}, nil
+}
+
 // Execution reads the persistent handle for recovery, whether or not a result
 // is already known. It does not issue or renew dispatch authority.
 func (e *ExecutionJournal) Execution(ctx context.Context, scope Scope, intentDigest string) (Claim, *ExecutionResult, error) {

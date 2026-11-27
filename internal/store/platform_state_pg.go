@@ -378,6 +378,12 @@ func (s *Store) pgReleasePlatformArtifact(id string, req model.PlatformArtifactR
 }
 
 func (s *Store) pgReleasePreparedPlatformArtifact(ctx context.Context, id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard, proof *compilerInputActivationProof, pins []compilerInputPinBinding, trace *platformMutationTrace) (artifact model.PlatformArtifact, release model.PlatformArtifactRelease, message model.PlatformReleaseMessage, lkg *model.PlatformLKGSnapshot, err error) {
+	return s.pgReleasePreparedPlatformArtifactWithAdmission(ctx, id, req, principal, guard, proof, pins, trace, nil)
+}
+
+// Only internal native adapters inject an additional transactional admission
+// check. It is not a request field and is never constructed from HTTP input.
+func (s *Store) pgReleasePreparedPlatformArtifactWithAdmission(ctx context.Context, id string, req model.PlatformArtifactReleaseRequest, principal model.Principal, guard *platformProducerReleaseGuard, proof *compilerInputActivationProof, pins []compilerInputPinBinding, trace *platformMutationTrace, admission func(context.Context, *sql.Tx) error) (artifact model.PlatformArtifact, release model.PlatformArtifactRelease, message model.PlatformReleaseMessage, lkg *model.PlatformLKGSnapshot, err error) {
 	requestBindings, bindingErr := compilerInputPublicationRequestBindings(req)
 	if !compilerInputProofHasPublication(proof, id, "", guard) ||
 		bindingErr != nil || proof.publication.requestBindings != requestBindings ||
@@ -397,6 +403,12 @@ func (s *Store) pgReleasePreparedPlatformArtifact(ctx context.Context, id string
 		}
 		return pgLockPublicationAdmissionArtifact(ctx, tx, canonicalID, guard != nil || req.DNSPublicationPrecondition != nil || NormalizePlatformReleaseChannel(req.ReleaseChannel) != model.PlatformArtifactReleaseChannelShadow, guard != nil)
 	}, func(ctx context.Context, tx *sql.Tx) error {
+		if admission != nil {
+			trace.advance("native-admission")
+			if err := admission(ctx, tx); err != nil {
+				return err
+			}
+		}
 		var inner error
 		artifact, release, message, lkg, inner = s.pgReleasePlatformArtifactInTransaction(ctx, tx, canonicalID, req, principal, guard, trace)
 		return inner
