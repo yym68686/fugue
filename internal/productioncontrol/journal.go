@@ -78,7 +78,7 @@ func (j *Journal) RecordIntent(ctx context.Context, actor string, intent Intent,
 		result, err := tx.ExecContext(ctx, `INSERT INTO fugue_control.intents
 			(digest, cluster_id, resource_id, request_id, envelope, payload)
 			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (cluster_id, resource_id, request_id) DO NOTHING`,
+			ON CONFLICT DO NOTHING`,
 			intentDigest, intent.ClusterID, intent.ResourceID, intent.RequestID, envelope, payload)
 		if err != nil {
 			return false, err
@@ -115,7 +115,7 @@ func (j *Journal) RecordApproval(ctx context.Context, approval Approval) (Record
 	if err != nil {
 		return Recorded{}, err
 	}
-	approvalDigest := digest(append([]byte(approvalDomain+".record\x00"), envelope...))
+	approvalDigest := recordedApprovalDigest(envelope)
 	return j.record(ctx, approvalDigest, func(tx *sql.Tx) (bool, error) {
 		intent, _, err := readIntent(ctx, tx, approval.IntentDigest)
 		if err != nil {
@@ -125,17 +125,32 @@ func (j *Journal) RecordApproval(ctx context.Context, approval Approval) (Record
 			return false, err
 		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO fugue_control.approvals
-			(digest, intent_digest, envelope) VALUES ($1, $2, $3) ON CONFLICT (digest) DO NOTHING`,
+			(digest, intent_digest, envelope) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
 			approvalDigest, approval.IntentDigest, envelope)
 		if err != nil {
 			return false, err
 		}
 		n, err := result.RowsAffected()
-		if err != nil || n == 0 {
+		if err != nil {
 			return false, err
+		}
+		if n == 0 {
+			var existing []byte
+			if err := tx.QueryRowContext(ctx, `SELECT envelope FROM fugue_control.approvals WHERE digest=$1 AND intent_digest=$2`,
+				approvalDigest, approval.IntentDigest).Scan(&existing); err != nil {
+				return false, err
+			}
+			if !bytes.Equal(existing, envelope) {
+				return false, errors.New("persisted production approval differs from the submitted approval")
+			}
+			return false, nil
 		}
 		return true, appendAudit(ctx, tx, "approval.recorded", approvalDigest, approval.IntentDigest, approval.KeyID)
 	})
+}
+
+func recordedApprovalDigest(envelope []byte) string {
+	return digest(append([]byte(approvalDomain+".record\x00"), envelope...))
 }
 
 func (j *Journal) ReadIntent(ctx context.Context, intentDigest string) (Intent, []byte, error) {

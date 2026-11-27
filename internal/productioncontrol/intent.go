@@ -43,21 +43,23 @@ type Intent struct {
 	Operation      Operation `json:"operation"`
 	Generation     int64     `json:"expectedGeneration"`
 	CurrentDigest  string    `json:"expectedCurrentDigest"`
+	TargetDigest   string    `json:"targetDigest"`
 	RollbackDigest string    `json:"rollbackDigest"`
 	PayloadDigest  string    `json:"payloadDigest"`
 }
 
 // NewIntent binds exact payload bytes. The resource identity must refer to
 // the actual shared write boundary, not a Git lane or a display name.
-func NewIntent(cluster, resource, request string, operation Operation, generation int64, current, rollback string, payload []byte) (Intent, error) {
-	intent := Intent{cluster, resource, request, operation, generation, current, rollback, digest(payload)}
+func NewIntent(cluster, resource, request string, operation Operation, generation int64, current, target, rollback string, payload []byte) (Intent, error) {
+	intent := Intent{cluster, resource, request, operation, generation, current, target, rollback, digest(payload)}
 	return intent, intent.VerifyPayload(payload)
 }
 
 func (intent Intent) Validate() error {
 	if !tokenPattern.MatchString(intent.ClusterID) || !resourcePattern.MatchString(intent.ResourceID) ||
 		!tokenPattern.MatchString(intent.RequestID) || intent.Generation < 1 ||
-		!digestPattern.MatchString(intent.CurrentDigest) || !digestPattern.MatchString(intent.RollbackDigest) ||
+		!digestPattern.MatchString(intent.CurrentDigest) || !digestPattern.MatchString(intent.TargetDigest) ||
+		!digestPattern.MatchString(intent.RollbackDigest) ||
 		!digestPattern.MatchString(intent.PayloadDigest) {
 		return errors.New("invalid production intent binding")
 	}
