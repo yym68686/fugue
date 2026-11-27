@@ -190,7 +190,11 @@ func TestProcessExecutorAllowsCancelledChildToEmitTerminalReceipt(t *testing.T) 
 	directory := t.TempDir()
 	started := filepath.Join(directory, "started")
 	binary := filepath.Join(directory, "executor")
-	script := fmt.Sprintf("#!/bin/sh\nset -eu\ntrap %q TERM\ntouch %q\nwhile :; do :; done\n", "printf '%s\\n' '"+string(raw)+"'; exit 1", started)
+	// Use a literal here-document and POSIX single quoting. Go's %q is not
+	// shell quoting: it preserves dollar expansion and can misquote paths.
+	shellQuote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+	script := "#!/bin/sh\nset -eu\nterminated() {\ncat <<'RECEIPT'\n" + string(raw) +
+		"\nRECEIPT\nexit 1\n}\ntrap terminated TERM\n: >" + shellQuote(started) + "\nwhile :; do :; done\n"
 	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +203,7 @@ func TestProcessExecutorAllowsCancelledChildToEmitTerminalReceipt(t *testing.T) 
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct {
 		receipt ExecutionReceipt
 		err     error
@@ -210,10 +215,18 @@ func TestProcessExecutorAllowsCancelledChildToEmitTerminalReceipt(t *testing.T) 
 			err     error
 		}{receipt: receipt, err: runErr}
 	}()
-	deadline := time.Now().Add(5 * time.Second)
+	// This includes OS process startup; on loaded hosts the shell can take
+	// several seconds to start. Keep the separate cancellation deadline
+	// below tight so this still exercises the same behavior.
+	deadline := time.Now().Add(25 * time.Second)
 	for {
 		if _, err := os.Stat(started); err == nil {
 			break
+		}
+		select {
+		case got := <-done:
+			t.Fatalf("executor fixture exited before signalling readiness: receipt=%+v err=%v", got.receipt, got.err)
+		default:
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("executor fixture did not start")

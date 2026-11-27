@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 }
 
 func runContext(ctx context.Context, args []string, output io.Writer) error {
-	const usage = "usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-preview|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ..."
+	const usage = "usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-preview|guardian-submit|render-native-cutover-policy|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ..."
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -70,6 +70,8 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runGuardianPreview(ctx, args, output)
 	case "guardian-submit":
 		return runGuardianSubmit(args, output)
+	case "render-native-cutover-policy":
+		return runRenderNativeCutoverPolicy(args, output)
 	case "repair-monitor":
 		return runRepairMonitorContext(ctx, args, output)
 	case "restore-monitor":
