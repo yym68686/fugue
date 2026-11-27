@@ -160,6 +160,13 @@ guard for a recovery transition; its stability timer must start at actual
 application, not draft time. The guard does not grant RBAC or prove that
 the legacy writer has drained. It is not wired to an installer or executor.
 
+The offline hold write primitive sends one JSON Patch over a fresh,
+hostname-verified TLS connection, without a proxy, redirects or retries.
+The patch tests the enrolled Node UID and resourceVersion before changing
+the two owned annotations. Its response is not a settlement witness. It
+is covered against an isolated Kubernetes API and is not exposed by a
+command or controller.
+
 `observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER`
 reads the policy and binding twice on the approved cluster and compares
 them to the exact proposed hold and named dedicated ServiceAccount. Like
