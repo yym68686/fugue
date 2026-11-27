@@ -63,8 +63,7 @@ func TestCanonicalAlignmentPreservesIndependentRevisionUntilRetirement(t *testin
 			if count != 0 {
 				t.Fatal("canonical alignment released an unretired revision to pruning", deleted)
 			}
-			release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-			if _, err := stateStore.UpdateAppRelease(release); err != nil {
+			if _, err := retireFixtureRelease(t.Context(), stateStore, release); err != nil {
 				t.Fatal(err)
 			}
 			if err := svc.pruneManagedAppStaleObjects(context.Background(), client, "tenant-test", app, nil); err != nil {
@@ -118,8 +117,7 @@ func TestFailedAndStartingReleaseResourcesSurviveOrdinaryPruning(t *testing.T) {
 			}
 			// Only the existing explicit retirement lifecycle releases these
 			// identities to ordinary pruning; a failed health check is insufficient.
-			release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-			if _, err = stateStore.UpdateAppRelease(release); err != nil {
+			if _, err = retireFixtureRelease(t.Context(), stateStore, release); err != nil {
 				t.Fatal(err)
 			}
 			if err := svc.pruneManagedAppStaleObjects(context.Background(), client, "tenant-test", app, nil); err != nil {
