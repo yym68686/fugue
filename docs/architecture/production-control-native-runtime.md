@@ -108,6 +108,21 @@ for two minutes. Redirect stdout straight to a new private file (use
 These credentials do not grant admission, DNS publication or Kubernetes
 permissions and cannot authenticate an admin or other component endpoint.
 
+`draft-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT NODE REQUEST
+[PRIVATE_TOKEN_FILE]` takes a fresh read-only shadow and requires a settled
+journal head for the enrolled Node. A Ready Node with a serving Service
+requires the private observation token. The resulting review submission binds
+the approved topology revision, physical UID, exact Kubernetes resourceVersion,
+and before/after values of the two owned annotations. An absent value is
+recorded as null so rollback is distinguishable from writing an empty value.
+No unrelated annotations can be included in the proposed write. The current
+state digest must match the last independently verified journal version.
+`inspect SUBMISSION` displays the decoded hold and its exact rollback values
+together with the digest, without accessing the cluster.
+The draft does not anchor a baseline, reserve a claim, recognize readmission,
+or authorize any Kubernetes action. There is no wired executor for this
+submission yet; do not record production approvals for it as a cutover.
+
 `render-participation-freeze NODE` prints a Kubernetes admission policy and
 binding. It installs nothing and grants nobody a write path. For one Node
 name it prevents admission of creates/deletes and changes to the automatic
