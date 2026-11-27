@@ -191,6 +191,15 @@ that the related DNS traffic has been withdrawn. The report has
 `executionEvidence=false`; none of these observations authorizes a retry,
 settlement or advancement of the last verified version on its own.
 
+Pre-dispatch authority for an offline hold is a separate, short-lived
+provider attestation. It binds the reviewed intent, approved Kubernetes
+identity and topology, dedicated writer, and exact type-checked policy and
+binding revisions. It must reference distinct independently retained
+records for admission across serving endpoints, old permission revocation,
+old request drainage, and native writer identity. Neither an owner
+approval nor the observation commands can supply that attestation. No
+collector or production authority has been provisioned for this operation.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`

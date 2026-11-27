@@ -16,6 +16,28 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+func draftFixtureOfflineHold(t *testing.T, topology productioncontrol.VerifiedParticipationTopology, now time.Time) (productioncontrol.Submission, *corev1.Node, map[string]string) {
+	t.Helper()
+	member := topology.Policy.Members[0]
+	node, uid, group, ns := member.Node, member.NodeUID, member.Group, topology.Policy.Namespace
+	snapshot := participationFixtureSnapshot(t, topology.Policy, now, "", 0)
+	shadow, err := evaluateKubernetesShadow(topology.Policy, node, memberCapture{report: MemberObservation{
+		Node: describeObject(&snapshot.Node), Readiness: snapshot.Node.Status.Conditions[0].Status,
+	}, snapshot: snapshot}, &ReaderObservation{Namespace: ns, Group: group, Baseline: 2}, nil, now)
+	if err != nil || shadow.Preview == nil || shadow.Preview.HoldPlan == nil {
+		t.Fatalf("fixture hold preview: %v", err)
+	}
+	previous := productioncontrol.Version{Generation: 1, Digest: HoldStateDigest(node, uid, group, snapshot.Node.Annotations)}
+	head := productioncontrol.ResourceState{LastVerified: previous, Baseline: productioncontrol.Baseline{
+		Scope: HoldResource("fixture", node), Verified: previous, EvidenceDigest: digest([]byte("evidence")),
+	}}
+	submission, err := DraftHold("fixture", "request-a", node, topology, head, shadow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return submission, &snapshot.Node, shadow.Preview.HoldPlan.After
+}
+
 func TestOfflineHoldReadbackUsesOnlyBoundLiveReads(t *testing.T) {
 	const node, uid, group, ns = "node-a", "uid-a", "cell-a", "fixture"
 	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
@@ -109,25 +131,11 @@ func TestOfflineHoldReadbackUsesOnlyBoundLiveReads(t *testing.T) {
 				Policy: policy, Version: productioncontrol.Version{Generation: 1, Digest: digest([]byte("topology"))},
 				ApprovalDigest: digest([]byte("approval")), RecordedAt: now.Add(-time.Minute),
 			}
-			snapshot := participationFixtureSnapshot(t, policy, now, "", 0)
-			original = snapshot.Node
-			shadow, err := evaluateKubernetesShadow(policy, node, memberCapture{report: MemberObservation{
-				Node: describeObject(&original), Readiness: original.Status.Conditions[0].Status,
-			}, snapshot: snapshot}, &ReaderObservation{Namespace: ns, Group: group, Baseline: 2}, nil, now)
-			if err != nil || shadow.Preview == nil || shadow.Preview.HoldPlan == nil {
-				t.Fatalf("fixture hold preview: %v", err)
-			}
-			previous := productioncontrol.Version{Generation: 1, Digest: HoldStateDigest(node, uid, group, original.Annotations)}
-			head := productioncontrol.ResourceState{LastVerified: previous, Baseline: productioncontrol.Baseline{
-				Scope: HoldResource("fixture", node), Verified: previous, EvidenceDigest: digest([]byte("evidence")),
-			}}
-			submission, err := DraftHold("fixture", "request-a", node, topology, head, shadow)
-			if err != nil {
-				t.Fatal(err)
-			}
+			submission, before, after := draftFixtureOfflineHold(t, topology, now)
+			original = *before
 			target = *original.DeepCopy()
 			target.ResourceVersion = "11"
-			target.Annotations = shadow.Preview.HoldPlan.After
+			target.Annotations = after
 			cfg := &rest.Config{Host: server.URL, BearerToken: "fixture-reader", Timeout: 2 * time.Second,
 				TLSClientConfig: rest.TLSClientConfig{CAData: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})}}
 			observer, err := NewBoundKubernetesObserver(cfg, policy)
@@ -155,7 +163,7 @@ func TestOfflineHoldReadbackUsesOnlyBoundLiveReads(t *testing.T) {
 				return
 			}
 			if err != nil || r.State != tc.want || r.Node.Name != node || r.Node.UID != uid ||
-				r.ExpectedResourceVersion != original.ResourceVersion || r.PredecessorDigest != previous.Digest ||
+				r.ExpectedResourceVersion != original.ResourceVersion || r.PredecessorDigest != submission.Intent.CurrentDigest ||
 				r.TargetDigest != submission.Intent.TargetDigest || !canonicalDigest(r.ObservedDigest) ||
 				nodeReads.Load() != 2 || nsReads.Load() != 2 {
 				t.Fatalf("wrong readback: %+v, %v (reads: node %d namespace %d)", r, err, nodeReads.Load(), nsReads.Load())
