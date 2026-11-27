@@ -47,7 +47,10 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   dependency. In narrower scopes, the tracked-source business-coupling
   and retired release mode audits also run uncached for both runtime and
   test-only edits. They scan the tracked tree regardless of which packages
-  import the changed source.
+  import the changed source. The image-tracking composition guard also runs
+  uncached for non-test Go files under `internal` and `cmd`: a package can
+  incorrectly acquire the tracking write capability without importing the
+  tracking implementation.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,

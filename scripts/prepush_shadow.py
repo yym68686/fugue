@@ -48,6 +48,8 @@ TEST_BINARY_CONSUMERS = {
 # These contracts read every tracked file, including Go tests and sources
 # with no import path to the checker. They do not affect runtime builds.
 REPOSITORY_TEST_CONSUMERS = {"./internal/declarativerelease", "./internal/platformsafety"}
+# The composition guard scans non-test Go files under both source trees.
+APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking"}
 
 
 def packages_from_stream(stream):
@@ -102,7 +104,7 @@ def full(reason):
     }
 
 
-def select(paths, packages, root, *, repository_tests=()):
+def select(paths, packages, root, *, repository_tests=(), application_source_tests=()):
     if not paths:
         return full("no diff to classify")
     if not packages or any(p.get("Incomplete") or p.get("Error") or p.get("DepsErrors") for p in packages):
@@ -151,6 +153,10 @@ def select(paths, packages, root, *, repository_tests=()):
         tests.update(reverse_test[name])
     available_labels = set(labels.values())
     implicit_tests = set(repository_tests)
+    if any(path.startswith(("internal/", "cmd/")) and path.endswith(".go")
+           and not path.endswith("_test.go") and "testdata" not in path.split("/")[:-1]
+           for path in paths):
+        implicit_tests.update(application_source_tests)
     implicit_tests.update(SOURCE_READERS[path] for path in paths if path in SOURCE_READERS)
     implicit_tests.update(
         COMMAND_TEST_CONSUMERS[labels[name]]
@@ -203,6 +209,7 @@ def report(base, *, target=None):
         plan = select(
             paths, packages_from_stream(output) if not status else [], prepush.ROOT,
             repository_tests=REPOSITORY_TEST_CONSUMERS,
+            application_source_tests=APPLICATION_SOURCE_TEST_CONSUMERS,
         )
     except (OSError, TypeError, ValueError, KeyError):
         plan = full("Go package graph could not be read")
