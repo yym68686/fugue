@@ -30,11 +30,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 			return ctx.Err()
 		}
 		if op.Type == model.OperationTypeAppStorageUnmount && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
-			s.operationClaimMu.Lock()
-			owner := operationExecutionKey(op)
-			_, active := s.runningManagedOperations.LoadOrStore(op.ID, owner)
-			s.operationClaimMu.Unlock()
-			if !active {
+			if s.operationQueue.ReserveAttempt(op) {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				_ = s.handleClaimedOperation(call, op)
 				cancel()
@@ -42,11 +38,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 			continue
 		}
 		if (op.Type == model.OperationTypeDatabaseSourceRetire || op.Type == model.OperationTypeDatabaseReplicaRetire || op.Type == pgimage.OperationType) && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
-			s.operationClaimMu.Lock()
-			owner := new(int)
-			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
-			s.operationClaimMu.Unlock()
-			if !owned {
+			if release, acquired := s.operationQueue.ReserveRecovery(op.ID); acquired {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
@@ -65,7 +57,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 				// Failure to read the app says nothing about an already
 				// accepted image mutation. Preserve its interlock and retry.
 				cancel()
-				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
+				release()
 				if err != nil && s.Logger != nil {
 					s.Logger.Printf("database operation recovery %s remains pending: %v", op.ID, err)
 				}
@@ -74,11 +66,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 		}
 		if op.Type == model.OperationTypeDatabaseResize && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged &&
 			(strings.HasPrefix(op.RequestedByID, managedPostgresAutoMemoryActor+"/") || strings.HasPrefix(op.RequestedByID, postgresRestoreRuntimeActor+"/")) {
-			s.operationClaimMu.Lock()
-			owner := new(int)
-			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
-			s.operationClaimMu.Unlock()
-			if !owned {
+			if release, acquired := s.operationQueue.ReserveRecovery(op.ID); acquired {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
@@ -90,7 +78,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 					}
 				}
 				cancel()
-				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
+				release()
 				// This path may own an accepted mutation. Read or probe failure
 				// cannot release its lock or turn an unknown state into Failed.
 				if err != nil && s.Logger != nil {
@@ -100,11 +88,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 			continue
 		}
 		if model.IsAppRequestResize(op.Type) && op.Status == model.OperationStatusRunning && op.ExecutionMode == model.ExecutionModeManaged {
-			s.operationClaimMu.Lock()
-			owner := new(int)
-			_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
-			s.operationClaimMu.Unlock()
-			if !owned {
+			if release, acquired := s.operationQueue.ReserveRecovery(op.ID); acquired {
 				call, cancel := context.WithTimeout(ctx, 20*time.Second)
 				app, err := s.Store.GetApp(op.AppID)
 				if err == nil {
@@ -114,7 +98,7 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 					_, err = s.Store.FailManagedOperationGuarded(op, err.Error())
 				}
 				cancel()
-				s.runningManagedOperations.CompareAndDelete(op.ID, owner)
+				release()
 				if err != nil && s.Logger != nil {
 					s.Logger.Printf("app resource request resize recovery %s remains pending: %v", op.ID, err)
 				}
@@ -124,17 +108,14 @@ func (s *Service) recoverCompletedManagedDeploys(ctx context.Context) error {
 		if op.Status != model.OperationStatusRunning || op.ExecutionMode != model.ExecutionModeManaged || op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil || op.ConfigBaseSpec == nil {
 			continue
 		}
-		s.operationClaimMu.Lock()
-		owner := new(int)
-		_, owned := s.runningManagedOperations.LoadOrStore(op.ID, owner)
-		s.operationClaimMu.Unlock()
-		if owned {
+		release, acquired := s.operationQueue.ReserveRecovery(op.ID)
+		if !acquired {
 			continue
 		}
 		call, cancel := context.WithTimeout(ctx, 15*time.Second)
 		recovered, err := s.recoverCompletedManagedDeploy(call, op)
 		cancel()
-		s.runningManagedOperations.CompareAndDelete(op.ID, owner)
+		release()
 		if err != nil {
 			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
 				continue
@@ -275,11 +256,4 @@ func (s *Service) observeRecoveredDeployment(ctx context.Context, app model.App,
 		return false, nil
 	}
 	return true, nil
-}
-
-func operationExecutionKey(op model.Operation) string {
-	if op.StartedAt == nil {
-		return op.ID + ":unstarted"
-	}
-	return op.StartedAt.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
 }

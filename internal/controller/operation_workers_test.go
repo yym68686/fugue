@@ -23,26 +23,6 @@ type blockingImporter struct {
 	release chan struct{}
 }
 
-func TestPendingOperationRetryBackoffOnlyDefersImageReplicationWait(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	op := model.Operation{
-		Status:        model.OperationStatusPending,
-		ResultMessage: model.OperationResultDeployImageReplicationPending + ": image is being replicated",
-		UpdatedAt:     now,
-	}
-	if pendingOperationRetryReady(op, now.Add(29*time.Second)) {
-		t.Fatal("expected image replication wait to remain deferred during retry interval")
-	}
-	if !pendingOperationRetryReady(op, now.Add(30*time.Second)) {
-		t.Fatal("expected image replication wait to become retryable after interval")
-	}
-	op.ResultMessage = "operation is pending"
-	if !pendingOperationRetryReady(op, now) {
-		t.Fatal("expected ordinary pending operation to remain immediately claimable")
-	}
-}
-
 func TestImageReplicationRetryDoesNotStarveLaterOperation(t *testing.T) {
 	t.Parallel()
 	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))

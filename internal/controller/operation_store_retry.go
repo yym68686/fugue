@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/operationqueue"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -99,7 +100,7 @@ func (s *Service) finalizeManagedOperation(ctx context.Context, expected model.O
 			if readErr != nil {
 				return readErr
 			}
-			if current.Status == status && operationExecutionKey(current) == operationExecutionKey(expected) {
+			if current.Status == status && operationqueue.ExecutionKey(current) == operationqueue.ExecutionKey(expected) {
 				result = current
 				return nil
 			}

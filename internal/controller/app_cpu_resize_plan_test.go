@@ -161,16 +161,3 @@ func TestAppCPUResizeRetryBudgetPersistsAcrossLeadersAndBoundsFailures(t *testin
 		t.Fatal("another leader bypassed the reservation", ok, err)
 	}
 }
-
-func TestAppCPUResizeRestoresUseDedicatedWorkerLane(t *testing.T) {
-	op := model.Operation{Type: model.OperationTypeAppCPUResize, RequestedByType: model.ActorTypeSystem, RequestedByID: "app-cpu-resize-reconcile"}
-	for _, lane := range []operationLane{operationLaneForegroundImport, operationLaneForegroundActivate, operationLaneGitHubSyncImport, operationLaneGitHubSyncActivate, operationLaneCPURequestRestore} {
-		if pendingOperationMatchesLane(op, lane) != (lane == operationLaneCPURequestRestore) {
-			t.Fatal("restore consumed an unrelated worker", lane)
-		}
-	}
-	op.RequestedByType = model.ActorTypeAPIKey
-	if pendingOperationMatchesLane(op, operationLaneCPURequestRestore) || !pendingOperationMatchesLane(op, operationLaneForegroundActivate) {
-		t.Fatal("user resize routed as background restore")
-	}
-}

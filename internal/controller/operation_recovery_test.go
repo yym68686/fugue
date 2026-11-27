@@ -91,7 +91,10 @@ func TestRecoverReadyDeployWithoutWorkloadWritesOrReplay(t *testing.T) {
 			case "changed-spec":
 				managed.Spec.AppSpec.Replicas = 2
 			case "live-worker":
-				s.runningManagedOperations.Store(op.ID, operationExecutionKey(op))
+				if !s.operationQueue.ReserveAttempt(op) {
+					t.Fatal("unable to register live worker")
+				}
+				t.Cleanup(func() { s.operationQueue.FinishAttempt(op) })
 			}
 			pod := readyTemplatePod("ready", deployment, kubeResourceRequirements{})
 			reads, managedReads := 0, 0

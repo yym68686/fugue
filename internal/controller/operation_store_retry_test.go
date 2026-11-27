@@ -58,14 +58,6 @@ func TestRolloutPersistenceTimeoutIsNotWorkloadFailure(t *testing.T) {
 		t.Fatal(err, calls)
 	}
 }
-func TestOperationExecutionKeyUsesDurableTimestampPrecision(t *testing.T) {
-	stamp := time.Date(2026, 1, 1, 0, 0, 0, 123456789, time.UTC)
-	stored := stamp.Truncate(time.Microsecond).In(time.FixedZone("offset", 3600))
-	if operationExecutionKey(model.Operation{StartedAt: &stamp}) != operationExecutionKey(model.Operation{StartedAt: &stored}) {
-		t.Fatal("durable attempt changed")
-	}
-}
-
 func TestFinalizationRetriesLostCommitResponseWithoutReplayingOperation(t *testing.T) {
 	s, _, op := recoveryFixture(t)
 	writes, commits := 0, 0

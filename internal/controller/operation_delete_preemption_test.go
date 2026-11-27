@@ -38,20 +38,13 @@ func TestPendingDeleteCancelsStuckDeployBeforeClaim(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		active, err := s.ListActiveOperations()
-		if err != nil {
-			t.Fatal(err)
-		}
 		svc := &Service{Store: s}
-		if changed, err := svc.cancelDeploysSupersededByDeletion(active); err != nil || !changed {
-			t.Fatalf("cancel changed=%v err=%v", changed, err)
+		if claimed, found, err := svc.claimNextPendingOperationInLane(operationLaneForegroundActivate); err != nil || !found || claimed.ID != deletion.ID {
+			t.Fatalf("deletion claim: %s, found=%v, err=%v", claimed.ID, found, err)
 		}
 		op, err := s.GetOperation(deploy.ID)
 		if err != nil || op.Status != model.OperationStatusCanceled {
 			t.Fatalf("deploy still active: %+v %v", op, err)
-		}
-		if _, ok, err := s.TryClaimPendingOperation(deletion.ID); err != nil || !ok {
-			t.Fatalf("delete remains blocked: %v %v", ok, err)
 		}
 	}
 }

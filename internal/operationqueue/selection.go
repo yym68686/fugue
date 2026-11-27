@@ -1,4 +1,4 @@
-package controller
+package operationqueue
 
 import (
 	"fmt"
@@ -11,27 +11,27 @@ import (
 
 const deployImageReplicationOperationRetryInterval = 30 * time.Second
 
-func pendingOperationRetryReady(op model.Operation, now time.Time) bool {
+func RetryReady(op model.Operation, now time.Time) bool {
 	if (!model.OperationWaitingForImageReplication(op) && !model.OperationWaitingForTrafficConfirmation(op) && !model.OperationWaitingForCanonicalHandoff(op)) || op.UpdatedAt.IsZero() {
 		return true
 	}
 	return !now.Before(op.UpdatedAt.Add(deployImageReplicationOperationRetryInterval))
 }
 
-func pendingOperationMatchesLane(op model.Operation, lane operationLane) bool {
+func pendingOperationMatchesLane(op model.Operation, lane Lane) bool {
 	restoring := model.IsAppRequestResize(op.Type) && op.RequestedByType == model.ActorTypeSystem && (op.RequestedByID == "app-cpu-resize-reconcile" || op.RequestedByID == "app-memory-resize-reconcile")
-	if restoring || lane == operationLaneCPURequestRestore {
-		return restoring && lane == operationLaneCPURequestRestore
+	if restoring || lane == CPURequestRestore {
+		return restoring && lane == CPURequestRestore
 	}
 	requestedByBackgroundController := operationRequestedByBackgroundController(op.RequestedByID)
 	switch lane {
-	case operationLaneForegroundImport:
+	case ForegroundImport:
 		return op.Type == model.OperationTypeImport && !requestedByBackgroundController
-	case operationLaneForegroundActivate:
+	case ForegroundActivate:
 		return op.Type != model.OperationTypeImport && !requestedByBackgroundController
-	case operationLaneGitHubSyncImport:
+	case GitHubSyncImport:
 		return op.Type == model.OperationTypeImport && requestedByBackgroundController
-	case operationLaneGitHubSyncActivate:
+	case GitHubSyncActivate:
 		return op.Type != model.OperationTypeImport && requestedByBackgroundController
 	default:
 		return false
@@ -78,7 +78,7 @@ func indexActiveOperationsByApp(ops []model.Operation) map[string][]model.Operat
 	return grouped
 }
 
-func pendingDeployAppIDsForLane(ops []model.Operation, lane operationLane) map[string]struct{} {
+func pendingDeployAppIDsForLane(ops []model.Operation, lane Lane) map[string]struct{} {
 	appIDs := make(map[string]struct{})
 	for _, op := range ops {
 		if op.Status != model.OperationStatusPending {
@@ -236,13 +236,13 @@ func unavailableComposeDependencyMessage(op model.Operation, app model.App, depe
 	return fmt.Sprintf("%s: %s", base, message)
 }
 
-func (s *Service) loadAppsForPendingOperationClaim(activeOps []model.Operation, lane operationLane) ([]model.App, error) {
+func loadAppsForPendingOperationClaim(repo Repository, activeOps []model.Operation, lane Lane) ([]model.App, error) {
 	deployAppIDs := pendingDeployAppIDsForLane(activeOps, lane)
 	if len(deployAppIDs) == 0 {
 		return nil, nil
 	}
 
-	directApps, err := s.Store.ListAppsMetadataByIDs(sortedStringKeys(deployAppIDs))
+	directApps, err := repo.ListAppsMetadataByIDs(sortedStringKeys(deployAppIDs))
 	if err != nil {
 		return nil, fmt.Errorf("list pending deploy apps: %w", err)
 	}
@@ -259,7 +259,7 @@ func (s *Service) loadAppsForPendingOperationClaim(activeOps []model.Operation, 
 		return directApps, nil
 	}
 
-	projectApps, err := s.Store.ListAppsMetadataByProjectIDs(sortedStringKeys(projectIDs))
+	projectApps, err := repo.ListAppsMetadataByProjectIDs(sortedStringKeys(projectIDs))
 	if err != nil {
 		return nil, fmt.Errorf("list pending deploy project apps: %w", err)
 	}

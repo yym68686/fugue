@@ -9,6 +9,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | --- | --- | --- | --- |
 | Backup usage | The backup-usage service builds the inventory and owns its tenant cache and locks. The API authorizes and adapts a read-only source. | No backup mutations are available through the usage source. | The usage package verifies cache behavior and its dependency boundary; API and Store tests cover the adapters. |
 | Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment and JSON deletions join the caller's existing transaction. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
+| Application operation queue | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. The Controller opens its existing leader scope, handles worker lifecycle and runs the resulting operation. | The Controller's queue receives only its durable transition port. Store still applies each transition through its original JSON or PostgreSQL transaction; the local reservation is not a replacement for a Store fence. API submission, cancellation and status contracts are unchanged. | The queue verifies ordering, durable attempt identity and claim/recovery exclusion without loading API, Controller or Store. Controller integration tests still verify cancellation and stale execution behavior through Store. |
 
 These are migrated boundaries, not a claim that the remaining API, Controller
 and Store files are composition-only. App release and reconciliation, billing,
@@ -37,6 +38,18 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   as failures, run the full test oracle periodically, and require zero known
   missed checks plus P95 ≤ 60 seconds for the agreed local edit classes before
   removing scheduling workarounds. CI continues to run the production gate.
+
+On a disposable worktree, apply one representative edit and run
+`python3 -m scripts.prepush_replay --case <edit-class> --base HEAD --full-oracle`.
+The replay alternates execution order, records 20 measured pairs by default
+after one warm-up pair (reported separately), and runs the uncached whole-module
+Go test oracle once. The research run uses the same scheduler and non-selection
+checks but bypasses Go scope workarounds to measure their proposed replacement.
+Its output is deliberately not a prepush receipt. Compare separate edit cases
+for domain source, test-only, transitive contracts and broad fallback; retain
+failures and retain the separate warm-up times. Warm repeated-diff P95 does not
+prove cold or real incremental performance, and an all-green oracle does not
+prove that a failing cross-domain contract would be selected.
 
 ## Production isolation decision
 

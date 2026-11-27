@@ -17,6 +17,7 @@ import (
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/operationqueue"
 	"fugue/internal/pgimage"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
@@ -25,8 +26,7 @@ import (
 )
 
 type Service struct {
-	operationClaimMu               sync.Mutex
-	runningManagedOperations       sync.Map
+	operationQueue                 operationqueue.Queue
 	Store                          *store.Store
 	Config                         config.ControllerConfig
 	Renderer                       runtime.Renderer
@@ -89,14 +89,14 @@ type sourceImporter interface {
 	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error)
 }
 
-type operationLane int
+type operationLane = operationqueue.Lane
 
 const (
-	operationLaneForegroundImport operationLane = iota
-	operationLaneForegroundActivate
-	operationLaneGitHubSyncImport
-	operationLaneGitHubSyncActivate
-	operationLaneCPURequestRestore
+	operationLaneForegroundImport   = operationqueue.ForegroundImport
+	operationLaneForegroundActivate = operationqueue.ForegroundActivate
+	operationLaneGitHubSyncImport   = operationqueue.GitHubSyncImport
+	operationLaneGitHubSyncActivate = operationqueue.GitHubSyncActivate
+	operationLaneCPURequestRestore  = operationqueue.CPURequestRestore
 )
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -683,23 +683,6 @@ func triggerPendingOperationWorkers(workers ...chan struct{}) {
 	}
 }
 
-func (lane operationLane) String() string {
-	switch lane {
-	case operationLaneForegroundImport:
-		return "foreground-import"
-	case operationLaneForegroundActivate:
-		return "foreground-activate"
-	case operationLaneGitHubSyncImport:
-		return "github-sync-import"
-	case operationLaneGitHubSyncActivate:
-		return "github-sync-activate"
-	case operationLaneCPURequestRestore:
-		return "cpu-request-restore"
-	default:
-		return "unknown"
-	}
-}
-
 type operationWorkerLifetimeKey struct{}
 
 type operationWorkerLifetime struct {
@@ -790,81 +773,19 @@ func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane oper
 }
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
-	s.operationClaimMu.Lock()
-	defer s.operationClaimMu.Unlock()
-	for {
-		now := time.Now().UTC()
-		if s.now != nil {
-			now = s.now().UTC()
-		}
-		activeOps, err := s.Store.ListActiveOperations()
-		if err != nil {
-			return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
-		}
-		if changed, err := s.cancelDeploysSupersededByDeletion(activeOps); err != nil {
-			return model.Operation{}, false, err
-		} else if changed {
-			continue
-		}
-		apps, err := s.loadAppsForPendingOperationClaim(activeOps, lane)
-		if err != nil {
-			return model.Operation{}, false, fmt.Errorf("list apps: %w", err)
-		}
-		appsByID, composeAppsByProject := indexAppsForPendingOperations(apps)
-		activeOpsByApp := indexActiveOperationsByApp(activeOps)
+	return s.operationQueue.Claim(s.Store.OperationQueue(), lane, s.now, s.observeOperationClaim)
+}
 
-		restartScan := false
-		for _, op := range activeOps {
-			if op.Status != model.OperationStatusPending {
-				continue
-			}
-			if !pendingOperationMatchesLane(op, lane) {
-				continue
-			}
-			if !pendingOperationRetryReady(op, now) {
-				continue
-			}
-			app, ok := appsByID[op.AppID]
-			ready, terminalReason := pendingOperationReadyForClaim(op, app, ok, activeOpsByApp, composeAppsByProject)
-			if terminalReason != "" {
-				if s.Logger != nil {
-					s.Logger.Printf("operation %s failed before claim: %s", op.ID, terminalReason)
-				}
-				failed, failErr := s.Store.FailOperation(op.ID, terminalReason)
-				if failErr != nil {
-					if errors.Is(failErr, store.ErrConflict) || errors.Is(failErr, store.ErrNotFound) {
-						restartScan = true
-						break
-					}
-					return model.Operation{}, false, fmt.Errorf("fail blocked pending operation %s: %w", op.ID, failErr)
-				}
-				s.logOperationAppEvent("failed_before_claim", "error", failed, app, terminalReason, map[string]any{
-					"lane": lane.String(),
-				})
-				restartScan = true
-				break
-			}
-			if !ready {
-				continue
-			}
-			claimed, claimedOK, claimErr := s.Store.TryClaimPendingOperation(op.ID)
-			if claimErr != nil {
-				return model.Operation{}, false, fmt.Errorf("try claim operation %s: %w", op.ID, claimErr)
-			}
-			if !claimedOK {
-				restartScan = true
-				break
-			}
-			s.logOperationAppEvent("claimed", "info", claimed, app, "operation claimed", map[string]any{
-				"lane": lane.String(),
-			})
-			s.runningManagedOperations.Store(claimed.ID, operationExecutionKey(claimed))
-			return claimed, true, nil
+func (s *Service) observeOperationClaim(event operationqueue.Event) {
+	switch event.Kind {
+	case operationqueue.Blocking:
+		if s.Logger != nil {
+			s.Logger.Printf("operation %s failed before claim: %s", event.Operation.ID, event.Message)
 		}
-		if restartScan {
-			continue
-		}
-		return model.Operation{}, false, nil
+	case operationqueue.Failed:
+		s.logOperationAppEvent("failed_before_claim", "error", event.Operation, event.App, event.Message, map[string]any{"lane": event.Lane.String()})
+	case operationqueue.Claimed:
+		s.logOperationAppEvent("claimed", "info", event.Operation, event.App, event.Message, map[string]any{"lane": event.Lane.String()})
 	}
 }
 
@@ -887,7 +808,7 @@ func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operati
 }
 
 func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation) error {
-	defer s.runningManagedOperations.CompareAndDelete(op.ID, operationExecutionKey(op))
+	defer s.operationQueue.FinishAttempt(op)
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {
