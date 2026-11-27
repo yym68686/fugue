@@ -21,6 +21,7 @@ import (
 
 	"fugue/internal/platformcontrol"
 	"fugue/internal/productioncontrol"
+	"fugue/internal/releaseguardian/dnscontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
 	"k8s.io/client-go/rest"
@@ -31,6 +32,9 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
+       fugue-production-control shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID
+       fugue-production-control prepare-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE HOLD_CHANGE
+       fugue-production-control draft-dns-policy JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID REQUEST
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -66,6 +70,78 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "prepare-dns-policy":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		raw, err := readFile(args[4], 64<<10, false)
+		if err != nil {
+			return err
+		}
+		change, err := dnscontrol.DecodeHoldChange(raw)
+		if err != nil {
+			return err
+		}
+		readToken, err := readFile(args[2], 4096, true)
+		if err != nil {
+			return err
+		}
+		defer clear(readToken)
+		draftToken, err := readFile(args[3], 4096, true)
+		if err != nil {
+			return err
+		}
+		defer clear(draftToken)
+		reader, err := dnscontrol.NewReader(args[1], string(bytes.TrimSpace(readToken)))
+		if err != nil {
+			return err
+		}
+		preparer, err := dnscontrol.NewDraftPreparer(reader, string(bytes.TrimSpace(draftToken)))
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		defer cancel()
+		o, err := preparer.Prepare(ctx, change, now)
+		if err != nil {
+			return err
+		}
+		return emitDNSShadow(args[1], o, now, emit)
+	case "shadow-dns-policy", "draft-dns-policy":
+		draft := args[0] == "draft-dns-policy"
+		offset := 1
+		expected := 4
+		if draft {
+			offset, expected = 2, 6
+		}
+		if len(args) != expected {
+			return errors.New(usage)
+		}
+		token, err := readFile(args[offset+1], 4096, true)
+		if err != nil {
+			return err
+		}
+		defer clear(token)
+		reader, err := dnscontrol.NewReader(args[offset], string(bytes.TrimSpace(token)))
+		if err != nil {
+			return err
+		}
+		if draft {
+			return withJournalDeadline(ctx, args[1], true, 4*time.Minute, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+				s, err := reader.Draft(ctx, j, cluster, args[5], args[4], now)
+				if err != nil {
+					return err
+				}
+				return emit(s)
+			})
+		}
+		ctx, cancel := context.WithTimeout(ctx, 4*time.Minute)
+		defer cancel()
+		o, err := reader.Observe(ctx, args[3], now)
+		if err != nil {
+			return err
+		}
+		return emitDNSShadow(args[offset], o, now, emit)
 	case "render-participation-freeze":
 		if len(args) != 2 {
 			return errors.New(usage)
@@ -425,17 +501,26 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return err
 		}
 		var hold json.RawMessage
+		var dns *dnscontrol.Payload
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			hold, err = participation.InspectHold(s)
 			if err != nil {
 				return err
 			}
 		}
+		if s.Intent.Operation == productioncontrol.DNSMembership {
+			p, err := dnscontrol.Inspect(s)
+			if err != nil {
+				return err
+			}
+			dns = &p
+		}
 		return emit(struct {
 			Digest string                   `json:"digest"`
 			Intent productioncontrol.Intent `json:"intent"`
 			Hold   json.RawMessage          `json:"hold,omitempty"`
-		}{digest, s.Intent, hold})
+			DNS    *dnscontrol.Payload      `json:"dns,omitempty"`
+		}{digest, s.Intent, hold, dns})
 	case "sign":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -450,6 +535,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		}
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			if _, err := participation.InspectHold(s); err != nil {
+				return err
+			}
+		}
+		if s.Intent.Operation == productioncontrol.DNSMembership {
+			if _, err := dnscontrol.Inspect(s); err != nil {
 				return err
 			}
 		}
@@ -509,6 +599,23 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 }
 
+func emitDNSShadow(origin string, o dnscontrol.Observation, now func() time.Time, emit func(any) error) error {
+	change, policy, err := dnscontrol.ValidateSources(o.Sources, now())
+	if err != nil {
+		return err
+	}
+	shadow, err := dnscontrol.ValidatePreview(o.Before, o.After, o.Sources, policy, now())
+	if err != nil {
+		return err
+	}
+	change.Origin, change.ShadowDigest = origin, shadow.Digest
+	return emit(struct {
+		ExecutionEvidence bool               `json:"executionEvidence"`
+		Change            dnscontrol.Payload `json:"change"`
+		Shadow            dnscontrol.Shadow  `json:"shadow"`
+	}{false, change, shadow})
+}
+
 func readKubeObservationConfig(path, context string) (*rest.Config, error) {
 	if !filepath.IsAbs(path) || context == "" {
 		return nil, errors.New("participation observation requires an absolute kubeconfig path and explicit context")
@@ -548,6 +655,10 @@ func record(ctx context.Context, path string, fn func(context.Context, *producti
 }
 
 func withJournal(ctx context.Context, path string, readOnly bool, fn func(context.Context, *productioncontrol.Journal, string) error) error {
+	return withJournalDeadline(ctx, path, readOnly, 15*time.Second, fn)
+}
+
+func withJournalDeadline(ctx context.Context, path string, readOnly bool, timeout time.Duration, fn func(context.Context, *productioncontrol.Journal, string) error) error {
 	cfg, keys, cluster, err := productioncontrol.LoadJournalEndpoint(path)
 	if err != nil {
 		return err
@@ -565,7 +676,7 @@ func withJournal(ctx context.Context, path string, readOnly bool, fn func(contex
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		return errors.New("production journal is unavailable")
