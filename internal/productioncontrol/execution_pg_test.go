@@ -30,6 +30,59 @@ func (v *testExecutionEvidence) VerifyTerminal(_ context.Context, _ Claim, _ Int
 	return nil
 }
 
+func testGlobalDNSExecutionBoundary(t *testing.T, ctx context.Context, j *Journal) {
+	t.Helper()
+	base, payload, private, trusted, now := approvalFixture(t)
+	j, err := NewJournal(j.db, trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.now = func() time.Time { return now }
+	evidence := &testExecutionEvidence{enrollment: digest([]byte("test global producer enrollment"))}
+	w, err := NewExecutionJournal(j, evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.RollbackDigest = base.CurrentDigest
+	for _, resource := range []string{GlobalProducerPolicyResource, "dns/edge-a"} {
+		b := Baseline{Scope{base.ClusterID, resource}, Version{base.Generation, base.CurrentDigest}, evidence.enrollment}
+		if created, err := w.AnchorResource(ctx, "observer-a", b); err != nil || !created {
+			t.Fatalf("fixture anchor %s: %v %v", resource, created, err)
+		}
+	}
+	reserve := func(request, resource string, operation Operation) (bool, error) {
+		t.Helper()
+		i := base
+		i.RequestID, i.ResourceID, i.Operation = request, resource, operation
+		r, err := j.RecordIntent(ctx, "operator-a", i, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, err := SignApproval(i, "owner-a", private, now, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		approved, err := j.RecordApproval(ctx, a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, created, err := j.ReserveExecution(ctx, "worker-a", r.Digest, approved.Digest)
+		return created, err
+	}
+	if created, err := reserve("dns-wrong-scope", "dns/edge-a", DNSMembership); err == nil || created {
+		t.Fatal("an independently anchored per-edge resource granted global DNS authority")
+	}
+	if created, err := reserve("dns-wrong-operation", GlobalProducerPolicyResource, Maintenance); err == nil || created {
+		t.Fatal("another operation consumed the global DNS authority")
+	}
+	if created, err := reserve("dns-edge-a", GlobalProducerPolicyResource, DNSMembership); err != nil || !created {
+		t.Fatalf("canonical DNS claim: %v %v", created, err)
+	}
+	if created, err := reserve("dns-edge-b", GlobalProducerPolicyResource, DNSMembership); !errors.Is(err, ErrResourceBusy) || created {
+		t.Fatalf("second DNS change escaped the shared claim boundary: %v %v", created, err)
+	}
+}
+
 func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Journal) {
 	t.Helper()
 	intent, payload, private, trusted, now := approvalFixture(t)

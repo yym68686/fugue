@@ -149,6 +149,7 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		t.Fatalf("unaudited intent escaped rollback: %v", err)
 	}
 	t.Run("execution-lifecycle", func(t *testing.T) { testExecutionLifecycle(t, ctx, j, second) })
+	t.Run("global-dns-execution-boundary", func(t *testing.T) { testGlobalDNSExecutionBoundary(t, ctx, j) })
 
 	// Recreate the v1 audit layout in this disposable database without
 	// touching the transition tables. The migrator must rehydrate the audit

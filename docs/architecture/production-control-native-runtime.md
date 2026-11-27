@@ -34,9 +34,27 @@ verified LKG. All three must match the observed predecessor.
 These commands use dedicated credentials and an explicit HTTPS origin, do
 not follow redirects, and never use a publication endpoint. A signed intent
 is not permission to call the existing generic artifact release API. The
-shared provider writer gate, native dispatch, independent serving readback,
-and exact inverse rollback must be verified before freezing the legacy lane
-or declaring it migrated. There is no production DNS cutover evidence yet.
+journal refuses DNS claims under per-edge identities or any other resource.
+
+The platform-store schema now installs a dormant, one-way selection freeze
+at the two tables used by the generic release and rollback transaction.
+Mutations to the global producer policy selection take a shared lock on a
+single durable gate row; the proposed freeze waits for those transactions
+to finish and verifies the exact live selected release, fence and content
+digest. Stale transactions cannot advance the selection after the freeze.
+Schema reinstallation does not reopen it, and the serving Full/LKG and
+unrelated lanes are not frozen by this selection gate. Tests use disposable
+PostgreSQL, including an unprivileged writer and the actual Store release and
+rollback paths.
+
+There is intentionally no production freeze command yet. This is not an
+admission mechanism for the native writer and does not prove credential
+revocation, draft/input immutability, externally drained work, or DNS consumer
+convergence. Do not activate the freeze manually. Complete the independently
+approved cutover coordinator, exact native dispatch, independent serving
+readback and inverse rollback before freezing the legacy lane or declaring
+it migrated. Database migration/DDL identities also require isolation from
+old clients. There is no production DNS cutover evidence yet.
 
 ## Node participation topology
 
