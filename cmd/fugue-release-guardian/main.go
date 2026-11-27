@@ -107,6 +107,10 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	if mode == "" {
 		mode = releaseguardian.ModeShadow
 	}
+	native, err := nativeGuardianConfigured(mode, len(targets))
+	if err != nil {
+		return err
+	}
 	var executor releaseguardian.Executor
 	if mode == releaseguardian.ModeWrite {
 		value, err := releaseguardian.NewProcessExecutor("/usr/local/bin/fugue-declarative-release", os.Getenv("FUGUE_RELEASE_GUARDIAN_POD_UID"))
@@ -117,52 +121,27 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	} else if mode != releaseguardian.ModeShadow {
 		return errors.New("release Guardian mode is invalid")
 	}
-	controller, err := releaseguardian.NewController(mode, store, executor)
+	var controller *releaseguardian.Controller
+	if native {
+		controller, err = releaseguardian.NewNativeController(store, executor)
+	} else {
+		controller, err = releaseguardian.NewController(mode, store, executor)
+	}
 	if err != nil {
 		return err
 	}
-	authorityStore, err := releaseguardian.NewAuthorityStore(client, targets[0].Namespace)
-	if err != nil {
-		return err
-	}
-	retention, err := parseArtifactRetentionConfig()
-	if err != nil {
-		return err
-	}
-	retentionKubeConfig := rest.CopyConfig(kubeConfig)
-	retentionKubeConfig.QPS = 5
-	retentionKubeConfig.Burst = 10
-	retentionClient, err := kubernetes.NewForConfig(retentionKubeConfig)
-	if err != nil {
-		return fmt.Errorf("create release artifact retention Kubernetes client: %w", err)
-	}
-	artifactPruner, err := releaseguardian.NewArtifactPruner(retentionClient, targets[0].Namespace, retention.Policy)
-	if err != nil {
-		return err
-	}
-	if value := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE")); value != "" {
-		if err := materializeAuthorityPublicKeys(value); err != nil {
-			return err
-		}
-	}
-	imports, err := parseCandidateImports(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS"))
-	if err != nil {
-		return err
-	}
-	startCandidateImporters(ctx, authorityStore, client, imports)
-	authority, err := newAuthorityRuntimeWithActivators(authorityStore, client, kubeConfig, targets[0].Namespace,
-		os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"), os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS"))
-	if err != nil {
-		return err
-	}
-	if authority != nil {
-		authority.nodeWrite = mode == releaseguardian.ModeWrite
-	}
-	authority.Start(ctx)
 	namespace := targets[0].Namespace
 	for _, target := range targets[1:] {
 		if target.Namespace != namespace {
 			return errors.New("one Guardian process cannot span namespaces")
+		}
+	}
+	var authority *authorityRuntime
+	var prune func()
+	if !native {
+		authority, prune, err = startLegacyGuardianRuntime(ctx, kubeConfig, client, namespace, mode)
+		if err != nil {
+			return err
 		}
 	}
 	factory := informers.NewSharedInformerFactoryWithOptions(client, 0, informers.WithNamespace(namespace))
@@ -201,9 +180,81 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 			return err
 		}
 	}
-	go runArtifactPruner(ctx, artifactPruner, retention.Interval)
+	if prune != nil {
+		go prune()
+	}
 	go enqueueFreshness(ctx, controller, store.Keys(), 20*time.Second)
 	return controller.Run(ctx, len(store.Keys()))
+}
+
+func nativeGuardianConfigured(mode releaseguardian.Mode, targets int) (bool, error) {
+	host := os.Getenv(releaseguardian.NativeRuntimeRegistryEnv)
+	if os.Getenv(releaseguardian.NativeRuntimeBindingEnv) != "" {
+		return false, errors.New("native runtime binding is per-execution and must not be set on Guardian startup")
+	}
+	if host == "" {
+		if os.Getenv(releaseguardian.NativeRuntimeAuthFileEnv) != "" {
+			return false, errors.New("native registry credential file requires an independent registry")
+		}
+		return false, nil
+	}
+	if mode != releaseguardian.ModeWrite || targets != 1 {
+		return false, errors.New("dedicated native Guardian requires write mode and exactly one enrolled target")
+	}
+	if _, err := releaseguardian.NewIndependentRegistry(host, nil, nil); err != nil {
+		return false, err
+	}
+	for _, setting := range []string{
+		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE", "FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS",
+		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS", "FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS",
+	} {
+		if strings.TrimSpace(os.Getenv(setting)) != "" {
+			return false, fmt.Errorf("dedicated native Guardian cannot run the legacy %s runtime", setting)
+		}
+	}
+	return true, nil
+}
+
+func startLegacyGuardianRuntime(ctx context.Context, kubeConfig *rest.Config, client kubernetes.Interface, namespace string, mode releaseguardian.Mode) (*authorityRuntime, func(), error) {
+	authorityStore, err := releaseguardian.NewAuthorityStore(client, namespace)
+	if err != nil {
+		return nil, nil, err
+	}
+	retention, err := parseArtifactRetentionConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	retentionKubeConfig := rest.CopyConfig(kubeConfig)
+	retentionKubeConfig.QPS = 5
+	retentionKubeConfig.Burst = 10
+	retentionClient, err := kubernetes.NewForConfig(retentionKubeConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create release artifact retention Kubernetes client: %w", err)
+	}
+	artifactPruner, err := releaseguardian.NewArtifactPruner(retentionClient, namespace, retention.Policy)
+	if err != nil {
+		return nil, nil, err
+	}
+	if value := strings.TrimSpace(os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE")); value != "" {
+		if err := materializeAuthorityPublicKeys(value); err != nil {
+			return nil, nil, err
+		}
+	}
+	imports, err := parseCandidateImports(os.Getenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS"))
+	if err != nil {
+		return nil, nil, err
+	}
+	startCandidateImporters(ctx, authorityStore, client, imports)
+	authority, err := newAuthorityRuntimeWithActivators(authorityStore, client, kubeConfig, namespace,
+		os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS"), os.Getenv("FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS"))
+	if err != nil {
+		return nil, nil, err
+	}
+	if authority != nil {
+		authority.nodeWrite = mode == releaseguardian.ModeWrite
+	}
+	authority.Start(ctx)
+	return authority, func() { runArtifactPruner(ctx, artifactPruner, retention.Interval) }, nil
 }
 
 type artifactRetentionConfig struct {

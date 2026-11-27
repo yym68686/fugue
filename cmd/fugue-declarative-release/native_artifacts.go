@@ -1,0 +1,179 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
+
+	"fugue/internal/declarativerelease"
+	"fugue/internal/releaseguardian"
+
+	"github.com/google/go-containerregistry/pkg/authn"
+	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
+)
+
+type nativeExecutionRuntime struct {
+	binding  releaseguardian.NativeRuntimeBinding
+	registry *releaseguardian.IndependentRegistry
+}
+
+// Native Guardians run with independently provisioned registry settings. A
+// marked target without those settings (or a dedicated runtime with no marked
+// target) must never drop into the legacy verifier.
+func nativeExecutionRuntimeFromEnv() (*nativeExecutionRuntime, error) {
+	raw := os.Getenv(releaseguardian.NativeRuntimeBindingEnv)
+	host := os.Getenv(releaseguardian.NativeRuntimeRegistryEnv)
+	authFile := os.Getenv(releaseguardian.NativeRuntimeAuthFileEnv)
+	if raw == "" && host == "" && authFile == "" {
+		return nil, nil
+	}
+	if os.Getenv("FUGUE_COMPONENT_LEASE_OWNER") != "guardian" || host == "" || raw == "" {
+		return nil, errors.New("native registry execution requires a marked Guardian target and an independent registry")
+	}
+	binding, err := releaseguardian.DecodeNativeRuntimeBinding(raw)
+	if err != nil {
+		return nil, err
+	}
+	var authenticator authn.Authenticator
+	if authFile != "" {
+		authenticator, err = readNativeRegistryAuth(authFile)
+		if err != nil {
+			return nil, err
+		}
+	}
+	registry, err := releaseguardian.NewIndependentRegistry(host, authenticator, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &nativeExecutionRuntime{binding, registry}, nil
+}
+
+func readNativeRegistryAuth(path string) (authn.Authenticator, error) {
+	info, err := os.Stat(path)
+	if err != nil || !filepath.IsAbs(path) || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > 8192 {
+		return nil, errors.New("native registry credentials require a bounded, mounted file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("open native registry credentials")
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, 8193))
+	var credentials struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err != nil || len(raw) > 8192 || decodeStrictJSON(raw, &credentials) != nil || credentials.Username == "" || credentials.Password == "" {
+		return nil, errors.New("native registry credentials are invalid")
+	}
+	return authn.FromConfig(authn.AuthConfig{Username: credentials.Username, Password: credentials.Password}), nil
+}
+
+func (runtime *nativeExecutionRuntime) checkPointer(ctx context.Context, client coreclient.CoreV1Interface, release declarativerelease.PlanRelease) error {
+	if runtime == nil {
+		return nil
+	}
+	if release.ComponentID != runtime.binding.Key.Component ||
+		(release.Delivery != nil && (release.Delivery.Writer != "guardian" || release.Delivery.Group != runtime.binding.Key.Group)) || release.Transition != nil ||
+		len(release.RuntimeResourcesFromForward) != 0 || release.Workload.NodeParticipation != "" ||
+		release.Workload.APIVersion != "apps/v1" || release.Workload.Kind != "Deployment" {
+		return errors.New("native execution is restricted to one enrolled Guardian Deployment")
+	}
+	return runtime.binding.Verify(ctx, client, release.Workload.Namespace)
+}
+
+type nativeArtifactPair struct {
+	target  declarativerelease.TargetIdentity
+	receipt declarativerelease.ArtifactReceipt
+}
+
+// A successful per-operation readback can only be used with these exact
+// reviewed references. Neither a foreign revision nor a historical receipt
+// supplied via the legacy env variable can satisfy this verifier.
+type nativeKubectlArtifacts struct {
+	workload declarativerelease.ResourceIdentity
+	pairs    []nativeArtifactPair
+	verify   func(context.Context, declarativerelease.ArtifactReceipt) (declarativerelease.RegistryVerification, error)
+}
+
+func (runtime *nativeExecutionRuntime) artifactSet(release declarativerelease.PlanRelease, prepared declarativerelease.ExecutionPlan, forward declarativerelease.ArtifactReceipt, lkg *monitorBundle, forwardBytes, lkgBytes []byte) (*nativeKubectlArtifacts, error) {
+	if runtime == nil {
+		return nil, nil
+	}
+	scope := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
+	pairs := []nativeArtifactPair{{prepared.Forward, forward}}
+	manifests := [][]byte{forwardBytes}
+	if lkg != nil {
+		if lkg.Record.RecordDigest != runtime.binding.LKGMonitorRecordDigest || lkg.Prepared.Forward != prepared.LKG || !bytes.Equal(lkg.Forward, lkgBytes) {
+			return nil, errors.New("native execution LKG is not the exact bound monitor record")
+		}
+		pairs = append(pairs, nativeArtifactPair{prepared.LKG, lkg.Artifact})
+		manifests = append(manifests, lkgBytes)
+	}
+	for i, pair := range pairs {
+		receipt, target := pair.receipt, pair.target
+		if !target.Present || receipt.Component != release.ComponentID || receipt.ConfigSHA != target.ConfigSHA ||
+			receipt.ImmutableRef != target.ImageRef || receipt.OCIRevision != target.OCIRevision {
+			return nil, errors.New("native runtime receipt differs from the sealed target")
+		}
+		if err := releaseguardian.VerifyNativeDeploymentImages(manifests[i], scope, target); err != nil {
+			return nil, err
+		}
+		for _, previous := range pairs[:i] {
+			if previous.receipt.ImmutableRef == receipt.ImmutableRef && previous.receipt.OCIRevision == receipt.OCIRevision &&
+				(previous.receipt.PlatformManifestDigest != receipt.PlatformManifestDigest || previous.receipt.ConfigDigest != receipt.ConfigDigest) {
+				return nil, errors.New("native runtime has conflicting receipts for one image")
+			}
+		}
+	}
+	return &nativeKubectlArtifacts{scope, pairs, runtime.registry.VerifyRuntimeArtifact}, nil
+}
+
+func (cluster *kubectlCluster) preflightNativeArtifacts(parent context.Context) error {
+	if cluster.nativeArtifacts == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
+	defer cancel()
+	for i, pair := range cluster.nativeArtifacts.pairs {
+		if err := cluster.VerifyTarget(ctx, pair.target); err != nil {
+			role := "forward"
+			if i != 0 {
+				role = "rollback"
+			}
+			return fmt.Errorf("preflight native %s image: %w", role, err)
+		}
+	}
+	cluster.registryMu.Lock()
+	cluster.nativePreflight = true
+	cluster.registryMu.Unlock()
+	return nil
+}
+
+func (artifacts *nativeKubectlArtifacts) verifyImage(ctx context.Context, image, revision string) (declarativerelease.RegistryVerification, error) {
+	for _, pair := range artifacts.pairs {
+		if pair.target.ImageRef == image && pair.target.OCIRevision == revision {
+			return artifacts.verify(ctx, pair.receipt)
+		}
+	}
+	return declarativerelease.RegistryVerification{}, errors.New("runtime image is not in the native approval's artifact set")
+}
+
+func (artifacts *nativeKubectlArtifacts) checkApply(target declarativerelease.TargetIdentity, manifest []byte) error {
+	for _, pair := range artifacts.pairs {
+		if pair.target == target {
+			return releaseguardian.VerifyNativeDeploymentImages(manifest, artifacts.workload, target)
+		}
+	}
+	return errors.New("native apply target is not approved for this execution")
+}
+
+func sameMonitorSnapshot(left, right monitorSnapshot) bool {
+	return left.RecordName == right.RecordName && left.StateUID == right.StateUID &&
+		left.StateRV == right.StateRV && left.Bundle.Record == right.Bundle.Record
+}

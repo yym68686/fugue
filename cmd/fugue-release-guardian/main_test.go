@@ -4,9 +4,38 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/releaseguardian"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestDedicatedNativeGuardianDeclinesLegacyAuthorityRuntime(t *testing.T) {
+	for _, name := range []string{
+		releaseguardian.NativeRuntimeRegistryEnv, releaseguardian.NativeRuntimeAuthFileEnv, releaseguardian.NativeRuntimeBindingEnv,
+		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE", "FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS",
+		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS", "FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS",
+	} {
+		t.Setenv(name, "")
+	}
+	if enabled, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 2); enabled || err != nil {
+		t.Fatalf("legacy configuration: enabled=%v err=%v", enabled, err)
+	}
+	t.Setenv(releaseguardian.NativeRuntimeRegistryEnv, "registry.fixture.invalid")
+	if enabled, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 1); !enabled || err != nil {
+		t.Fatalf("dedicated configuration: enabled=%v err=%v", enabled, err)
+	}
+	if _, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 2); err == nil {
+		t.Fatal("dedicated native writer accepted multiple targets")
+	}
+	if _, err := nativeGuardianConfigured(releaseguardian.ModeShadow, 1); err == nil {
+		t.Fatal("dedicated native writer started as a shadow status writer")
+	}
+	t.Setenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS", "fixture")
+	if _, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 1); err == nil {
+		t.Fatal("dedicated native writer enabled a legacy candidate importer")
+	}
+}
 
 func TestParseTargetsIsDataDrivenAndGroupScoped(t *testing.T) {
 	targets, err := parseTargets("edge-control,edge-pool-a,fugue-system,edge-control-alpha,fugue-fugue;edge-control,edge-pool-b,fugue-system,edge-control-beta,fugue-fugue")

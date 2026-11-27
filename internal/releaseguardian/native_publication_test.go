@@ -223,8 +223,10 @@ func TestLegacyPublicationRefusesMarkedResourceBeforeStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = f.client.CoreV1().ConfigMaps(preview.Namespace).Create(ctx, &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: desiredName(f.key), ResourceVersion: "20", Annotations: map[string]string{nativeIntentAnnotation: ""}},
-		Data:       map[string]string{"desired.json": string(raw)},
+		ObjectMeta: metav1.ObjectMeta{Name: desiredName(f.key), ResourceVersion: "20", Annotations: map[string]string{
+			nativeIntentAnnotation: testDigest, nativeFenceAnnotation: "1",
+		}},
+		Data: map[string]string{"desired.json": string(raw)},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
