@@ -38,7 +38,8 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   cannot be proven, and multi-package changes select whole-module Go checks.
 - Some Go tests read another package's source or execute a repository command
   without importing it. Declare those consumers as test-only edges (for
-  example, the Prometheus source audit and OpenAPI generator contract).
+  example, the Prometheus source audit, OpenAPI generator contract and the SSH
+  Kubernetes test that compiles another package's test binary).
   Run these consumers uncached: child-process inputs may not invalidate the
   test result cache. A missing declared consumer or an unowned fixture still
   selects uncached full Go tests. This is not an inventory of every implicit
@@ -96,6 +97,17 @@ A separate test-only installer host-policy edit on the same machine and
 toolchain recorded 20 warm pairs: existing P95 18.603s, candidate P95 2.207s,
 no failed samples. This replay did not run the full oracle and does not qualify
 the candidate for activation.
+
+After the PostgreSQL-only change at `130737ba8`, a local operation-queue
+runtime edit on the same host and toolchain recorded 20 warm pairs: existing
+P95 23.149s, candidate P95 9.482s, no failed samples, and 137 packages with
+executed tests in the passing uncached oracle. Native and both Linux target
+graphs agreed. This is evidence for one local edit class, not activation. A
+shared operation-read contract edit selected 21 test packages and 18 build
+packages; the affected tests exceeded the default deadline without any old
+suite omitted. A combined queue and operation-read change selected full scope
+on all three profiles. Shared, cross-domain, and unclassified changes must
+retain wider verification.
 
 ## Production isolation decision
 

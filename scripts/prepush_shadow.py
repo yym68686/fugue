@@ -40,6 +40,10 @@ SOURCE_READERS = {
 }
 COMMAND_TEST_CONSUMERS = {
     "./cmd/fugue-openapi-gen": "./internal/apispec",
+    "./cmd/fugue-ssh-helper": "./internal/sshkube",
+}
+TEST_BINARY_CONSUMERS = {
+    "./internal/sshexecutor": "./internal/sshkube",
 }
 
 
@@ -147,6 +151,12 @@ def select(paths, packages, root):
     implicit_tests.update(
         COMMAND_TEST_CONSUMERS[labels[name]]
         for name in compiled if labels[name] in COMMAND_TEST_CONSUMERS
+    )
+    # The executable contains the owner's tests as well as its runtime code.
+    # A test-only edit or one of its test imports can change the fixture.
+    implicit_tests.update(
+        TEST_BINARY_CONSUMERS[labels[name]]
+        for name in tests if labels[name] in TEST_BINARY_CONSUMERS
     )
     if implicit_tests - available_labels:
         return full("declared implicit test consumer is missing from the Go graph")

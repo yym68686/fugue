@@ -168,6 +168,29 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(plan["goBuilds"], [["go", "build", "./cmd/fugue-openapi-gen", "./render"]])
         self.assertEqual(shadow.select(["render/impl.go"], [dep, tool], ROOT)["scope"], "full")
 
+    def test_go_test_binary_contract_includes_fixture_test_sources_and_test_imports(self):
+        probe = pkg("probe")
+        fixture = pkg("internal/sshexecutor", TestImports=["demo/probe"])
+        consumer = pkg("internal/sshkube")
+        helper = pkg("cmd/fugue-ssh-helper")
+        graph = [probe, fixture, consumer, helper]
+        for path, owner in (
+            ("internal/sshexecutor/impl_test.go", "./internal/sshexecutor"),
+            ("probe/impl.go", "./probe"),
+            ("cmd/fugue-ssh-helper/impl.go", "./cmd/fugue-ssh-helper"),
+        ):
+            with self.subTest(path=path):
+                plan = shadow.select([path], graph, ROOT)
+                self.assertIn(owner, plan["goTests"][0])
+                self.assertEqual(plan["goTests"][-1], [
+                    "go", "test", "-count=1", "./internal/sshkube",
+                ])
+                self.assertFalse(any("./internal/sshkube" in cmd for cmd in plan["goBuilds"]))
+                self.assertEqual(shadow.select([path], [probe, fixture, helper], ROOT)["scope"], "full")
+        self.assertEqual(shadow.select(["probe/impl_test.go"], graph, ROOT)["goTests"], [
+            ["go", "test", "./probe"],
+        ])
+
     def test_live_target_comparison_fails_wide_when_build_tags_change_consumers(self):
         with tempfile.TemporaryDirectory() as location:
             root = Path(location)
