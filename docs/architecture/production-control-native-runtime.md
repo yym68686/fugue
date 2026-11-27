@@ -133,6 +133,10 @@ the legacy lane or declaring it migrated. The
 database principal for schema migration and authority activation must be
 isolated from the old clients, and the dedicated runtime role must not have
 authority-table, DDL, approval, or terminal-journal mutation privileges.
+The database checks role memberships and forbidden grants at enrollment and
+again when the writer inserts a receipt. On PostgreSQL installations where
+`PUBLIC` can create objects in the provider schema, use a dedicated provider
+schema or remove that shared grant before enrollment.
 There is no production DNS cutover evidence yet.
 
 ## Node participation topology
