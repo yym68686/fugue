@@ -57,19 +57,20 @@ type ArtifactRef struct {
 }
 
 type Payload struct {
-	Schema           string                                `json:"schema"`
-	Origin           string                                `json:"origin"`
-	PreviousProducer ArtifactRef                           `json:"previousProducer"`
-	PreviousDNS      ArtifactRef                           `json:"previousDNS"`
-	Static           ArtifactRef                           `json:"static"`
-	NextDNS          ArtifactRef                           `json:"nextDNS"`
-	NextProducer     ArtifactRef                           `json:"nextProducer"`
-	Precondition     model.PlatformProducerReconfiguration `json:"precondition"`
-	LKGID            string                                `json:"lkgId"`
-	ChangedEdge      string                                `json:"changedEdge"`
-	BeforeHold       *platformproducer.OfflineEdge         `json:"beforeHold"`
-	AfterHold        *platformproducer.OfflineEdge         `json:"afterHold"`
-	ShadowDigest     string                                `json:"shadowDigest"`
+	Schema           string                                       `json:"schema"`
+	Origin           string                                       `json:"origin"`
+	PreviousProducer ArtifactRef                                  `json:"previousProducer"`
+	PreviousDNS      ArtifactRef                                  `json:"previousDNS"`
+	Static           ArtifactRef                                  `json:"static"`
+	NextDNS          ArtifactRef                                  `json:"nextDNS"`
+	NextProducer     ArtifactRef                                  `json:"nextProducer"`
+	Precondition     model.PlatformProducerReconfiguration        `json:"precondition"`
+	LKGID            string                                       `json:"lkgId"`
+	ChangedEdge      string                                       `json:"changedEdge"`
+	BeforeHold       *platformproducer.OfflineEdge                `json:"beforeHold"`
+	AfterHold        *platformproducer.OfflineEdge                `json:"afterHold"`
+	ShadowDigest     string                                       `json:"shadowDigest"`
+	Reverses         *productioncontrol.GlobalProducerRollbackRef `json:"reverses,omitempty"`
 }
 
 func validOrigin(origin string) bool {
@@ -262,12 +263,19 @@ func (p Payload) validate() error {
 			return errors.New("invalid exact before or after DNS hold")
 		}
 	}
+	if p.Reverses != nil && !p.Reverses.Valid() {
+		return errors.New("invalid DNS rollback provenance")
+	}
 	return nil
 }
 
 // Draft requires the settled predecessor in the journal as well as a
 // successful read-only shadow of validated immutable artifacts.
 func Draft(cluster, request, origin string, head productioncontrol.ResourceState, s Sources, before, after Preview, now time.Time) (productioncontrol.Submission, error) {
+	return draft(cluster, request, origin, head, s, before, after, now, nil)
+}
+
+func draft(cluster, request, origin string, head productioncontrol.ResourceState, s Sources, before, after Preview, now time.Time, reverse *rollbackSource) (productioncontrol.Submission, error) {
 	p, projection, err := ValidateSources(s, now)
 	if err != nil {
 		return productioncontrol.Submission{}, err
@@ -277,6 +285,12 @@ func Draft(cluster, request, origin string, head productioncontrol.ResourceState
 		return productioncontrol.Submission{}, err
 	}
 	p.Origin, p.ShadowDigest = origin, shadow.Digest
+	if reverse != nil {
+		p.Reverses = &reverse.binding
+		if err := reverse.verifyInverse(p); err != nil {
+			return productioncontrol.Submission{}, err
+		}
+	}
 	if err := p.validate(); err != nil {
 		return productioncontrol.Submission{}, err
 	}

@@ -237,6 +237,7 @@ func (r *Reader) Revalidate(ctx context.Context, submitted productioncontrol.Sub
 		return Payload{}, err
 	}
 	live.Origin, live.ShadowDigest = r.origin, shadow.Digest
+	live.Reverses = approved.Reverses // independently checked against the journal by the executor
 	if !EqualChange(approved, live) {
 		return Payload{}, errors.New("approved DNS change no longer matches live shadow")
 	}

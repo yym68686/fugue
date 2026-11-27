@@ -317,7 +317,7 @@ func runDNSSettlement(ctx context.Context, j *productioncontrol.Journal, cluster
 	}
 	emit := json.NewEncoder(out).Encode
 	if req.command == "dns-checkpoint" {
-		c, err := r.ObserveServingCheckpoint(ctx, j, cluster, req.intent, time.Now)
+		c, coverage, err := r.ObserveListenerCoverage(ctx, j, cluster, req.intent, time.Now)
 		if err != nil {
 			return err
 		}
@@ -325,11 +325,17 @@ func runDNSSettlement(ctx context.Context, j *productioncontrol.Journal, cluster
 		if err != nil {
 			return err
 		}
+		coverageDigest, err := coverage.Digest()
+		if err != nil {
+			return err
+		}
 		return emit(struct {
-			CheckpointDigest  string                       `json:"checkpointDigest"`
-			Checkpoint        dnscontrol.ServingCheckpoint `json:"checkpoint"`
-			ExecutionEvidence bool                         `json:"executionEvidence"`
-		}{d, c, false})
+			CheckpointDigest       string                       `json:"checkpointDigest"`
+			Checkpoint             dnscontrol.ServingCheckpoint `json:"checkpoint"`
+			ListenerCoverageDigest string                       `json:"listenerCoverageDigest"`
+			ListenerCoverage       dnscontrol.ListenerCoverage  `json:"listenerCoverage"`
+			ExecutionEvidence      bool                         `json:"executionEvidence"`
+		}{d, c, coverageDigest, coverage, false})
 	}
 	root, err := os.OpenRoot(cfg.WitnessDirectory)
 	if err != nil {

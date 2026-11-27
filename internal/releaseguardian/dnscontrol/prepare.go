@@ -285,6 +285,10 @@ func (p *DraftPreparer) ensure(ctx context.Context, req model.PlatformArtifactCr
 // Prepare persists only immutable draft inputs and calls Fugue's normal
 // typed validation. The final GET-only shadow must still pass before review.
 func (p *DraftPreparer) Prepare(ctx context.Context, change HoldChange, now func() time.Time) (Observation, error) {
+	return p.prepare(ctx, change, nil, now)
+}
+
+func (p *DraftPreparer) prepare(ctx context.Context, change HoldChange, reverse *rollbackSource, now func() time.Time) (Observation, error) {
 	if p == nil || p.reader == nil || now == nil {
 		return Observation{}, errors.New("DNS draft preparer is not configured")
 	}
@@ -292,17 +296,20 @@ func (p *DraftPreparer) Prepare(ctx context.Context, change HoldChange, now func
 	if err != nil {
 		return Observation{}, err
 	}
-	if _, err := publicationRef(old, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow"); err != nil {
+	ref, err := publicationRef(old, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
+	if err != nil {
 		return Observation{}, err
+	}
+	if reverse != nil && (artifactRef(old.Artifact) != reverse.original.NextProducer ||
+		ref.FencingToken != reverse.head.LastVerified.Generation) {
+		return Observation{}, errors.New("DNS rollback predecessor drifted before draft preparation")
 	}
 	policy, err := platformproducer.Decode(old.Artifact)
 	if err != nil {
 		return Observation{}, err
 	}
-	if !lkg.ExpiresAt.After(now()) || lkg.ArtifactID != full.Artifact.ID || lkg.ContentHash != full.Artifact.ContentHash ||
-		lkg.VerifiedByReleaseID != full.Release.ID || full.Release.VerificationState != model.PlatformArtifactVerificationStateVerified ||
-		full.Artifact.Metadata[platformproducer.PolicyReleaseMetadata] != old.Release.ID {
-		return Observation{}, errors.New("no verified full predecessor for draft preparation")
+	if _, err := verifiedServingFull(old, policy, full, lkg, now()); err != nil {
+		return Observation{}, err
 	}
 	static, err := p.reader.artifact(ctx, policy.StaticIntentArtifactID, model.PlatformArtifactKindPlatformIntent, "global")
 	if err != nil {

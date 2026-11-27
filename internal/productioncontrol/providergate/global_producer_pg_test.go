@@ -233,8 +233,15 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	payload, err := json.Marshal(map[string]any{
 		"schema":           "fugue.native-global-dns-policy/v1",
 		"shadowDigest":     evidence,
+		"origin":           "https://api.example.test",
 		"previousProducer": map[string]any{"id": "next", "digest": newDigest, "generation": "gen2", "sequence": 2},
 		"nextProducer":     map[string]any{"id": "target", "digest": targetDigest, "generation": "gen3", "sequence": 3},
+		"previousDNS":      map[string]any{"id": "dns-before", "digest": newDigest, "generation": "dns-1", "sequence": 1},
+		"nextDNS":          map[string]any{"id": "dns-after", "digest": targetDigest, "generation": "dns-2", "sequence": 2},
+		"static":           map[string]any{"id": "static", "digest": evidence, "generation": "static-1", "sequence": 1},
+		"changedEdge":      "edge-a",
+		"beforeHold":       nil,
+		"afterHold":        map[string]any{"edge_id": "edge-a", "reason": "maintenance"},
 		"precondition":     map[string]any{"operation": "edge_offline", "previous_policy": map[string]any{"artifact_id": "next", "content_hash": newDigest, "release_id": "r2", "fencing_token": 2}},
 	})
 	if err != nil {
@@ -347,6 +354,10 @@ UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id='r2'`);
 	if head, err := j.ReadResource(ctx, scope); err != nil || head.Pending != "" || head.LastVerified != (productioncontrol.Version{Generation: 3, Digest: targetDigest}) {
 		t.Fatalf("settled head mismatch: %+v %v", head, err)
 	}
+	originalClaim, originalResult, err := j.ReadExecution(ctx, scope, claim.IntentDigest)
+	if err != nil || originalResult == nil {
+		t.Fatalf("read applied rollback source: %+v %v", originalResult, err)
+	}
 
 	// Second claim leaves the predecessor selected and has no committed
 	// receipt. Once positively settled it cannot write, even with its original
@@ -410,6 +421,85 @@ UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id='r2'`);
 	}
 	_, err = native.ExecContext(ctx, reserve, second.IntentDigest, second.ApprovalDigest, second.Fence, second.ClusterID, "producer-reconfiguration/"+fourthDigest, activationEvidence)
 	expectCode(err, "40001")
+
+	// A fresh, independently approved inverse may follow a positively settled
+	// not-applied attempt, but only while the original receipt remains the
+	// current provider-side mutation and the exact reviewed delta is reversed.
+	rollbackTarget := "sha256:" + strings.Repeat("8", 64)
+	exec(admin, `INSERT INTO fugue_platform_artifacts VALUES ('rollback-target','gen5','policy_snapshot','platform-config-producer','validated',$1,5)`, rollbackTarget)
+	rollbackPayload, err := json.Marshal(map[string]any{
+		"schema":           "fugue.native-global-dns-policy/v1",
+		"shadowDigest":     evidence,
+		"origin":           "https://api.example.test",
+		"previousProducer": map[string]any{"id": "target", "digest": targetDigest, "generation": "gen3", "sequence": 3},
+		"nextProducer":     map[string]any{"id": "rollback-target", "digest": rollbackTarget, "generation": "gen5", "sequence": 5},
+		"previousDNS":      map[string]any{"id": "dns-after", "digest": targetDigest, "generation": "dns-2", "sequence": 2},
+		"nextDNS":          map[string]any{"id": "dns-before-restored", "digest": newDigest, "generation": "dns-3", "sequence": 3},
+		"static":           map[string]any{"id": "static", "digest": evidence, "generation": "static-1", "sequence": 1},
+		"changedEdge":      "edge-a",
+		"beforeHold":       map[string]any{"edge_id": "edge-a", "reason": "maintenance"},
+		"afterHold":        nil,
+		"reverses": map[string]any{
+			"intentDigest": originalClaim.IntentDigest, "approvalDigest": originalClaim.ApprovalDigest,
+			"evidenceDigest": originalResult.EvidenceDigest,
+		},
+		"precondition": map[string]any{"operation": "edge_offline", "previous_policy": map[string]any{
+			"artifact_id": "target", "content_hash": targetDigest, "release_id": "r3", "fencing_token": 3,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackIntent, err := productioncontrol.NewIntent(scope.ClusterID, scope.ResourceID, "rollback", productioncontrol.DNSMembership,
+		3, targetDigest, rollbackTarget, targetDigest, rollbackPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackRecorded, err := j.RecordIntent(ctx, "owner", rollbackIntent, rollbackPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackApproval, err := productioncontrol.SignApproval(rollbackIntent, "owner", private, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackApproved, err := j.RecordApproval(ctx, rollbackApproval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackClaim, created, err := j.ReserveExecution(ctx, "native-writer", rollbackRecorded.Digest, rollbackApproved.Digest)
+	if err != nil || !created {
+		t.Fatalf("reserve exact rollback claim: %t %v", created, err)
+	}
+	rollbackTx, err := native.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rollbackTx.ExecContext(ctx, reserve, rollbackClaim.IntentDigest, rollbackClaim.ApprovalDigest, rollbackClaim.Fence,
+		rollbackClaim.ClusterID, "producer-reconfiguration/"+rollbackTarget, activationEvidence); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := rollbackTx.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET fencing_token=4,version=4 WHERE lane_key='policy_snapshot|platform-config-producer|shadow';
+UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id='r3'`); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := rollbackTx.ExecContext(ctx, `INSERT INTO fugue_platform_artifact_releases VALUES ('r4','rollback-target','policy_snapshot','platform-config-producer','shadow','policy_snapshot|platform-config-producer|shadow','gen5','active',4,$1)`,
+		"producer-reconfiguration/"+rollbackTarget); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := rollbackTx.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET active_release_id='r4' WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`); err != nil {
+		_ = rollbackTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := rollbackTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := settle(ctx, rollbackClaim, productioncontrol.Applied, 4, rollbackTarget); err != nil || !created {
+		t.Fatalf("exact inverse receipt did not settle: %t %v", created, err)
+	}
 }
 
 type fixtureWitnessFiles map[string][]byte

@@ -3,8 +3,87 @@ package productioncontrol
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"math"
 )
+
+// GlobalProducerRollbackRef puts the original execution and its independent
+// serving proof inside the new owner's signed intent.
+type GlobalProducerRollbackRef struct {
+	IntentDigest   string `json:"intentDigest"`
+	ApprovalDigest string `json:"approvalDigest"`
+	EvidenceDigest string `json:"evidenceDigest"`
+}
+
+func (r GlobalProducerRollbackRef) Valid() bool {
+	return digestPattern.MatchString(r.IntentDigest) && digestPattern.MatchString(r.ApprovalDigest) &&
+		digestPattern.MatchString(r.EvidenceDigest)
+}
+
+func (j *Journal) CheckAppliedGlobalProducerReceipt(ctx context.Context, c Claim, result ExecutionResult, throughFence int64) error {
+	if j == nil {
+		return ErrStaleFence
+	}
+	return checkAppliedGlobalProducerReceipt(ctx, j.db, c, result, throughFence)
+}
+
+func checkAppliedGlobalProducerReceipt(ctx context.Context, db queryRow, c Claim, result ExecutionResult, throughFence int64) error {
+	if !c.Scope.valid() || c.ResourceID != GlobalProducerPolicyResource || c.Fence < 1 ||
+		!(GlobalProducerRollbackRef{c.IntentDigest, c.ApprovalDigest, result.EvidenceDigest}).Valid() ||
+		throughFence < c.Fence || result.Outcome != Applied || !result.Verified.valid() || result.Verified.Generation < 2 {
+		return ErrStaleFence
+	}
+	var exact bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS(
+  SELECT 1 FROM fugue_native_global_producer_receipts r
+  JOIN fugue_native_global_producer_authority a ON a.cluster_id=r.cluster_id AND a.writer_role=r.writer_role
+  JOIN fugue_control.execution_claims c ON c.intent_digest=r.intent_digest AND c.cluster_id=r.cluster_id
+    AND c.resource_id='producer/global-policy' AND c.approval_digest=r.approval_digest AND c.fence=r.claim_fence
+  JOIN fugue_control.execution_results e ON e.intent_digest=c.intent_digest
+  WHERE r.intent_digest=$1 AND r.approval_digest=$2 AND r.cluster_id=$3 AND r.claim_fence=$4
+    AND r.target_digest=$5 AND r.previous_fence=$6-1 AND e.outcome='applied'
+    AND e.generation=$6 AND e.verified_digest=$5 AND e.evidence_digest=$7
+    AND NOT EXISTS(SELECT 1 FROM fugue_control.execution_claims lc
+      LEFT JOIN fugue_control.execution_results le ON le.intent_digest=lc.intent_digest
+      WHERE lc.cluster_id=c.cluster_id AND lc.resource_id=c.resource_id AND lc.fence>c.fence AND lc.fence<=$8
+        AND (le.outcome IS DISTINCT FROM 'not_applied'
+          OR EXISTS(SELECT 1 FROM fugue_native_global_producer_receipts later WHERE later.intent_digest=lc.intent_digest))))`,
+		c.IntentDigest, c.ApprovalDigest, c.ClusterID, c.Fence, result.Verified.Digest, result.Verified.Generation, result.EvidenceDigest, throughFence).Scan(&exact)
+	if err != nil {
+		return err
+	}
+	if !exact {
+		return errors.New("DNS rollback lacks the original committed receipt and independently recorded result")
+	}
+	return nil
+}
+
+// checkGlobalProducerRollback is deliberately called both before granting a
+// claim and before consuming it, while holding the canonical resource lock.
+// Domain-specific inverse validation is also enforced in the receipt trigger.
+func checkGlobalProducerRollback(ctx context.Context, tx *sql.Tx, intent Intent, payload []byte, state ResourceState, predecessorFence int64) error {
+	var link struct {
+		Reverses *GlobalProducerRollbackRef `json:"reverses"`
+	}
+	if err := json.Unmarshal(payload, &link); err != nil {
+		return err
+	}
+	if link.Reverses == nil {
+		return nil
+	}
+	ref := *link.Reverses
+	if !ref.Valid() || predecessorFence < 1 || intent.Generation >= math.MaxInt64 ||
+		state.LastVerified != (Version{intent.Generation, intent.CurrentDigest}) {
+		return ErrResourceDrift
+	}
+	original, err := readClaim(ctx, tx, ref.IntentDigest)
+	if err != nil || original.Scope != intent.scope() || original.ApprovalDigest != ref.ApprovalDigest {
+		return ErrResourceDrift
+	}
+	return checkAppliedGlobalProducerReceipt(ctx, tx, original,
+		ExecutionResult{Outcome: Applied, Verified: state.LastVerified, EvidenceDigest: ref.EvidenceDigest}, predecessorFence)
+}
 
 // CheckGlobalProducerFreeze verifies the closed, pre-activation provider
 // boundary from the same database that will store the enrolled baseline.

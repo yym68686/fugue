@@ -22,13 +22,15 @@ import (
 // alone is not proof that DNS consumers actually served the intended answers.
 type ServingEvidence struct {
 	CheckpointDigest       string `json:"checkpointDigest"`
+	ListenerCoverageDigest string `json:"listenerCoverageDigest"`
 	AuthoritativeDNSDigest string `json:"authoritativeDnsDigest"`
 }
 
 func EncodeServingEvidence(e ServingEvidence) ([]byte, string, error) {
-	if !platformproducer.ValidDigest(e.CheckpointDigest) || !platformproducer.ValidDigest(e.AuthoritativeDNSDigest) ||
-		e.CheckpointDigest == e.AuthoritativeDNSDigest {
-		return nil, "", errors.New("DNS serving evidence must bind separate checkpoint and authoritative DNS observations")
+	if !platformproducer.ValidDigest(e.CheckpointDigest) || !platformproducer.ValidDigest(e.ListenerCoverageDigest) ||
+		!platformproducer.ValidDigest(e.AuthoritativeDNSDigest) || e.CheckpointDigest == e.AuthoritativeDNSDigest ||
+		e.CheckpointDigest == e.ListenerCoverageDigest || e.ListenerCoverageDigest == e.AuthoritativeDNSDigest {
+		return nil, "", errors.New("DNS serving evidence requires distinct checkpoint, listener coverage, and application DNS digests")
 	}
 	raw, err := json.Marshal(e)
 	if err != nil {
@@ -119,6 +121,10 @@ func checkpointOutcome(c ServingCheckpoint, sel servingSelection, p Payload) (pr
 // ObserveServingCheckpoint performs only GETs and journal reads. It rereads
 // both selected publications and LKG after fetching the immutable DNS member.
 func (r *Reader) ObserveServingCheckpoint(ctx context.Context, j *productioncontrol.Journal, cluster, intentDigest string, now func() time.Time) (ServingCheckpoint, error) {
+	return r.observeServingCheckpoint(ctx, j, cluster, intentDigest, now, nil)
+}
+
+func (r *Reader) observeServingCheckpoint(ctx context.Context, j *productioncontrol.Journal, cluster, intentDigest string, now func() time.Time, member *platformconfig.DNSArtifactPayload) (ServingCheckpoint, error) {
 	if r == nil || j == nil || now == nil || cluster == "" {
 		return ServingCheckpoint{}, errors.New("DNS checkpoint requires an explicit journal and reader")
 	}
@@ -184,18 +190,21 @@ func (r *Reader) ObserveServingCheckpoint(ctx context.Context, j *productioncont
 			return ServingCheckpoint{}, productioncontrol.ErrStaleFence
 		}
 	}
+	if member != nil {
+		*member = decoded
+	}
 	return c, nil
 }
 
 // NewSettlement authenticates a separate observer's witness, requires a new
-// matching control-plane observation, then closes execution in the same SQL
-// lock domain as the provider. The signer is responsible for retaining direct
-// DNS answers along with the exact checkpoint as its observation evidence.
+// matching checkpoint and listener sweep, then closes execution in the same
+// SQL lock domain as the provider. The signer also retains its application
+// DNS observations independently of this sweep.
 func NewSettlement(j *productioncontrol.Journal, r *Reader, cluster string, source productioncontrol.WitnessReader, key ed25519.PublicKey) (*productioncontrol.ExecutionJournal, error) {
 	return productioncontrol.NewGlobalProducerExecutionJournal(j, source, map[string]productioncontrol.TrustedWitness{
 		"provider-observer": {Scope: Scope(cluster), PublicKey: key},
 	}, func(ctx context.Context, w productioncontrol.ExecutionWitness) error {
-		c, err := r.ObserveServingCheckpoint(ctx, j, cluster, w.IntentDigest, time.Now)
+		c, coverage, err := r.ObserveListenerCoverage(ctx, j, cluster, w.IntentDigest, time.Now)
 		if err != nil {
 			return err
 		}
@@ -211,8 +220,17 @@ func NewSettlement(j *productioncontrol.Journal, r *Reader, cluster string, sour
 		}
 		canonical, digest, err := EncodeServingEvidence(e)
 		if err != nil || digest != w.ObservationDigest || !bytes.Equal(canonical, raw) || e.CheckpointDigest != d ||
-			e.AuthoritativeDNSDigest == w.AuthorityDigest {
-			return errors.New("DNS witness does not bind this checkpoint and a separate DNS answer report")
+			e.AuthoritativeDNSDigest == w.AuthorityDigest || e.ListenerCoverageDigest == w.AuthorityDigest || d == w.AuthorityDigest {
+			return errors.New("DNS witness does not bind this checkpoint, listener sweep and separate DNS answer report")
+		}
+		coverageDigest, err := coverage.Digest()
+		if err != nil || coverageDigest != e.ListenerCoverageDigest {
+			return errors.New("DNS witness differs from fresh authoritative listener coverage")
+		}
+		coverageRecord, err := source.ReadExecutionWitness(ctx, coverageDigest)
+		coverageCanonical, encodeErr := json.Marshal(coverage)
+		if err != nil || encodeErr != nil || !bytes.Equal(coverageCanonical, coverageRecord) {
+			return errors.New("DNS listener coverage record is unavailable at its signed digest")
 		}
 		for _, ref := range []string{e.AuthoritativeDNSDigest, w.AuthorityDigest} {
 			record, err := source.ReadExecutionWitness(ctx, ref)
