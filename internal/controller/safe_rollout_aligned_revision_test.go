@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func newAlignedRevisionFixture(t *testing.T) (*Service, model.App, model.AppRelease, *drainWorkloadFixture, map[string]any, *int) {
@@ -207,13 +207,13 @@ func TestAlignedRevisionIsQueuedAndQuiescedByBackgroundSweep(t *testing.T) {
 	if err != nil || len(targets) != 1 || targets[0].AppID != app.ID {
 		t.Fatal("aligned revision omitted by background discovery", targets, err)
 	}
-	projection, err := s.Store.ListAppReleaseRetirementState(context.Background(), model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true})
+	projection, err := s.Store.AppReleaseRetirement(app.TenantID, app.ID).List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	queued := false
-	for _, item := range prioritizeAppReleaseRetirement(projection, [3]appReleaseRetirementPosition{}, nil) {
-		queued = queued || item.release.ID == release.ID && store.AppReleaseHasAlignedRevision(item.release)
+	for _, item := range projection {
+		queued = queued || item.ID == release.ID && retirement.HasAlignedRevision(item)
 	}
 	if !queued {
 		t.Fatal("serving release's immutable workload omitted by retirement queue")

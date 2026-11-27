@@ -186,6 +186,24 @@ func indexReleaseDrainInventory(replicas, pods []map[string]any) *releaseDrainIn
 	return inv
 }
 
+func (inv *releaseDrainInventory) hasScheduledReleasePod(release model.AppRelease) bool {
+	if inv == nil || release.RevisionWorkload == nil {
+		return false
+	}
+	b := release.RevisionWorkload
+	owned := map[string]string{}
+	for _, rs := range inv.replicasByDeployment[b.DeploymentUID] {
+		m := objectMapField(rs, "metadata")
+		owned[objectStringField(m, "name")] = objectStringField(m, "uid")
+	}
+	for _, pod := range inv.podsForRelease(release.ID, b.DeploymentName, false, owned) {
+		if objectStringField(objectMapField(pod, "spec"), "nodeName") != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (inv *releaseDrainInventory) podsForRelease(releaseID, workload string, canonical bool, owned map[string]string) []map[string]any {
 	byName := map[string]map[string]any{}
 	add := func(pods []map[string]any) {

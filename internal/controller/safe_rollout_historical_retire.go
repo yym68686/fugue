@@ -83,7 +83,7 @@ func (s *Service) retireUnboundStoppedRevision(ctx context.Context, app model.Ap
 	if err != nil || !reflect.DeepEqual(fresh, workload) {
 		return errors.New("historical workload changed during observation")
 	}
-	retired, err := s.Store.RetireStoppedHistoricalAppRelease(ctx, previous, stable, policy, op, *observed.RevisionWorkload)
+	retired, err := s.Store.AppReleaseRetirement(app.TenantID, app.ID).RetireStoppedHistorical(ctx, previous, stable, policy, op, *observed.RevisionWorkload)
 	if err != nil {
 		return err
 	}

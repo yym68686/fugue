@@ -20,6 +20,7 @@ import (
 	"fugue/internal/operationqueue"
 	"fugue/internal/pgimage"
 	"fugue/internal/releaseflow"
+	"fugue/internal/releaseretirement"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -63,8 +64,7 @@ type Service struct {
 	kubeClientMu                   sync.Mutex
 	kubeClients                    map[string]*kubeClient
 	managedRolloutCapacityLocks    sync.Map
-	retirementScans                appReleaseRetirementScans
-	retirementRetries              retirementRetries
+	releaseRetirement              releaseretirement.Scheduler
 	retirementWorkerRunning        atomic.Bool
 	managedPostgresStorageNoticeMu sync.Mutex
 	managedPostgresStorageNotices  map[string]struct{}
