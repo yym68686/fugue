@@ -268,11 +268,6 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if !errors.Is(err, sql.ErrNoRows) {
 			return false, err
 		}
-		if nodeScope {
-			if err := verifyParticipationExecutionTopology(ctx, tx, intent, payload); err != nil {
-				return false, err
-			}
-		}
 		state, err := readResource(ctx, tx, intent.scope())
 		if err != nil {
 			return false, err
@@ -283,6 +278,11 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		predecessor := Version{intent.Generation, intent.CurrentDigest}
 		if state.LastVerified != predecessor || intent.RollbackDigest != predecessor.Digest {
 			return false, ErrResourceDrift
+		}
+		if nodeScope {
+			if err := verifyParticipationExecutionTopology(ctx, tx, intent, payload, state); err != nil {
+				return false, err
+			}
 		}
 		if err := verifyRecordedApproval(ctx, tx, j, intent, intentDigest, approvalDigest); err != nil {
 			return false, err

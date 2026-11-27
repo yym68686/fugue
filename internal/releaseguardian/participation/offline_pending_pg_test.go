@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"fugue/internal/productioncontrol"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	authv1 "k8s.io/api/authentication/v1"
@@ -96,11 +98,26 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 			return
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/nodes/"+node && r.Header.Get("Authorization") == "Bearer fixture-writer":
 			var ops []nodePatchOperation
-			if err := json.NewDecoder(r.Body).Decode(&ops); err != nil || len(ops) != 4 ||
+			var body json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || json.Unmarshal(body, &ops) != nil || len(ops) != 4 ||
 				ops[0] != (nodePatchOperation{Op: "test", Path: "/metadata/uid", Value: string(live.Load().UID)}) ||
 				ops[1] != (nodePatchOperation{Op: "test", Path: "/metadata/resourceVersion", Value: live.Load().ResourceVersion}) {
 				t.Error("dispatch did not condition the write on the stored predecessor")
 				http.Error(w, "unexpected patch", http.StatusBadRequest)
+				return
+			}
+			patch, err := jsonpatch.DecodePatch(body)
+			if err != nil {
+				t.Errorf("invalid RFC 6902 patch: %v", err)
+				http.Error(w, "invalid patch", http.StatusBadRequest)
+				return
+			}
+			current, _ := json.Marshal(live.Load())
+			patched, err := patch.Apply(current)
+			var updated corev1.Node
+			if err != nil || json.Unmarshal(patched, &updated) != nil || !maps.Equal(updated.Annotations, target.Load().Annotations) {
+				t.Errorf("patch did not apply the exact target annotations: %v", err)
+				http.Error(w, "wrong target annotations", http.StatusBadRequest)
 				return
 			}
 			writes.Add(1)
@@ -325,11 +342,132 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, result); err != nil || created {
 		t.Fatalf("settlement did not replay the durable receipt: %v, %v", created, err)
 	}
+	// The readmission authorizes a new operation, not a replay/reversal
+	// of the original execution receipt. Draft/review only from the closed fence.
+	const rollbackRequest = "offline-rollback-a"
+	rollback, err := DraftOfflineHoldRollback(ctx, reopened, restConfig, "fixture", hold, rollbackRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := decodeHold(rollback)
+	if err != nil || p.Reverses != hold || rollback.Intent.TargetDigest != predecessor.Digest || rollback.Intent.Generation != result.Verified.Generation {
+		t.Fatalf("wrong rollback binding: %+v %v", p, err)
+	}
+	guardRollback := fixtureInstalledOfflineGuard(t, rollback, writer)
+	guardRollback.Policy.ResourceVersion, guardRollback.Binding.ResourceVersion = "33", "34"
+	readGuard.Store(&guardRollback)
+	observerReader, err := NewBoundKubernetesObserver(restConfig, topology.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observerReader.ObserveOfflineHoldRollbackBoundary(ctx, topology, rollback, writer, time.Now()); err == nil {
+		t.Fatal("NotReady Node passed rollback readmission")
+	}
+	// A changed resourceVersion forces a new draft even if the owned fields
+	// happen to be identical. Readiness data is controlled by the provider.
+	ready := visible.DeepCopy()
+	ready.ResourceVersion = "12"
+	ready.Status.Conditions = []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-20 * time.Minute))}}
+	live.Store(ready)
+	if _, err := observerReader.ObserveOfflineHoldRollbackBoundary(ctx, topology, rollback, writer, time.Now()); err == nil {
+		t.Fatal("stale resourceVersion passed rollback readmission")
+	}
+	closed.Policy.ResourceVersion, closed.Binding.ResourceVersion = "35", "36"
+	readGuard.Store(&closed)
+	rollback, err = DraftOfflineHoldRollback(ctx, reopened, restConfig, "fixture", hold, "offline-rollback-reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err = decodeHold(rollback)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedOrigin, err := decodeHold(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := "not the predecessor"
+	forgedOrigin.From.Annotations[participationAnnotation] = &changed
+	forged, err := encodeHoldRollback("fixture", "offline-rollback-forged", forgedOrigin, hold, p.ResourceVersion, result.Verified, p.ShadowReportDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedID, forgedApproval := record(forged)
+	if _, created, err := j.ReserveExecution(ctx, "fixture-writer", forgedID, forgedApproval); !errors.Is(err, productioncontrol.ErrResourceDrift) || created {
+		t.Fatalf("journal reserved a different rollback target: %v, %v", created, err)
+	}
+	rollbackID, rollbackApproval := record(rollback)
+	guardRollback = fixtureInstalledOfflineGuard(t, rollback, writer)
+	guardRollback.Policy.ResourceVersion, guardRollback.Binding.ResourceVersion = "37", "38"
+	readGuard.Store(&guardRollback)
+	at := time.Now().UTC()
+	positiveBoundary, err := observerReader.ObserveOfflineHoldRollbackBoundary(ctx, topology, rollback, writer, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackObserver, withoutReadmission := signFixtureOfflineAuthority(t, positiveBoundary.Digest, at)
+	if dispatch, err := DispatchOfflineHold(ctx, j, restConfig, writeConfig, nil, "fixture", "fixture-writer", writer, rollbackID, rollbackApproval, rollbackObserver, withoutReadmission); err == nil || dispatch.Reserved || writes.Load() != 1 {
+		t.Fatalf("dispatch gained write authority without positive recovery evidence: %+v %v", dispatch, err)
+	}
+	recovered := &OfflineHoldReadmission{
+		NetworkRecovery: digest([]byte("fixture approved recovery")), ServingAuthority: digest([]byte("fixture current Front/Worker")),
+		ServingFence: digest([]byte("fixture serving authority fence")),
+		StableSince:  at.Add(-10 * time.Minute).Unix(), ActivatedAt: at.Add(-11 * time.Minute).Unix(),
+		NetworkSuccessAt: at.Add(-time.Minute).Unix(),
+	}
+	rollbackObserver, rollbackAttestation := signFixtureOfflineAuthority(t, positiveBoundary.Digest, at, recovered)
+	restored := ready.DeepCopy()
+	restored.Annotations, restored.ResourceVersion = maps.Clone(before.Annotations), "13"
+	target.Store(restored)
+	if dispatch, err := DispatchOfflineHold(ctx, j, restConfig, writeConfig, nil, "fixture", "fixture-writer", writer, rollbackID, approval, rollbackObserver, rollbackAttestation); err == nil || dispatch.Reserved || writes.Load() != 1 {
+		t.Fatalf("original approval authorized a rollback: %+v %v", dispatch, err)
+	}
+	dispatched, err = DispatchOfflineHold(ctx, j, restConfig, writeConfig, nil, "fixture", "fixture-writer", writer, rollbackID, rollbackApproval, rollbackObserver, rollbackAttestation)
+	if err == nil || !dispatched.Reserved || writes.Load() != 2 {
+		t.Fatalf("rollback lost response did not leave one pending write: %+v %v", dispatched, err)
+	}
+	rollbackClaim := dispatched.Claim
+	pending, err := ObservePendingOfflineHold(ctx, reopened, restConfig, "fixture", rollbackID)
+	if err != nil || pending.Fence != claim.Fence+1 || pending.LastVerified != result.Verified ||
+		pending.Provider.State != OfflineHoldTargetVisible || pending.Provider.ObservedDigest != predecessor.Digest {
+		t.Fatalf("rollback readback didn't retain prior LKG while pending: %+v %v", pending, err)
+	}
+	if replay, err := DispatchOfflineHold(ctx, reopened, restConfig, writeConfig, nil, "fixture", "fixture-writer", writer, rollbackID, rollbackApproval, rollbackObserver, nil); err != nil ||
+		replay.Reserved || replay.Claim != rollbackClaim || writes.Load() != 2 {
+		t.Fatalf("rollback replay requested another write: %+v %v", replay, err)
+	}
+	closed.Policy.ResourceVersion, closed.Binding.ResourceVersion = "43", "44"
+	readGuard.Store(&closed)
+	checkpoint, err = ObserveOfflineHoldCheckpoint(ctx, reopened, restConfig, "fixture", node, rollbackID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackTerminal := makeWitness()
+	rollbackTerminal.Kind, rollbackTerminal.IntentDigest, rollbackTerminal.ApprovalDigest, rollbackTerminal.Fence = productioncontrol.TerminalWitness, rollbackID, rollbackApproval, rollbackClaim.Fence
+	rollbackTerminal.Outcome, rollbackTerminal.Generation, rollbackTerminal.VerifiedDigest = productioncontrol.Applied, result.Verified.Generation+1, predecessor.Digest
+	rollbackTerminal.ObservationDigest, err = checkpoint.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolledBack := productioncontrol.ExecutionResult{Outcome: productioncontrol.Applied,
+		Verified:       productioncontrol.Version{Generation: rollbackTerminal.Generation, Digest: predecessor.Digest},
+		EvidenceDigest: storeFixtureOfflineWitness(t, witnesses, settlementSigner, rollbackTerminal)}
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", rollbackClaim, rolledBack); err != nil || !created {
+		t.Fatalf("independent rollback settlement failed: %v, %v", created, err)
+	}
+	if head, err := reopened.ReadResource(ctx, scope); err != nil || head.Pending != "" || head.LastVerified != rolledBack.Verified {
+		t.Fatalf("rollback didn't restore the exact predecessor as a new generation: %+v %v", head, err)
+	}
+	if _, err := DraftOfflineHoldRollback(ctx, reopened, restConfig, "fixture", hold, "offline-rollback-superseded"); err == nil {
+		t.Fatal("superseded original hold was eligible to revert again")
+	}
 	if next, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval); err != nil || !next.Created {
 		t.Fatalf("settled operation prevented topology advancement: %+v, %v", next, err)
 	}
 	newRequest := s
 	newRequest.Intent.RequestID = "stale-topology"
+	newRequest.Intent.Generation = rolledBack.Verified.Generation
 	stale, staleApproval := record(newRequest)
 	if _, created, err := j.ReserveExecution(ctx, "fixture-writer", stale, staleApproval); !errors.Is(err, productioncontrol.ErrResourceDrift) || created {
 		t.Fatalf("new claim on previous topology was accepted: %v, %v", created, err)
@@ -374,6 +512,7 @@ func offlineDispatchProviderFixture(r *http.Request, live *corev1.Node, guard *i
 	case path == "/api/v1/nodes":
 		peer := live.DeepCopy()
 		peer.Name, peer.UID = "node-b", "uid-b"
+		peer.Annotations = nil
 		return corev1.NodeList{ListMeta: metav1.ListMeta{ResourceVersion: "40"}, Items: []corev1.Node{*live, *peer}}
 	case path == "/api/v1/namespaces/fixture/services":
 		return corev1.ServiceList{ListMeta: metav1.ListMeta{ResourceVersion: "40"}}

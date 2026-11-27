@@ -62,7 +62,7 @@ func (f *dispatchFixtureProvider) Write(_ context.Context, _ productioncontrol.S
 	return n, nil
 }
 
-func signFixtureOfflineAuthority(t *testing.T, boundary string, now time.Time) (ed25519.PublicKey, []byte) {
+func signFixtureOfflineAuthority(t *testing.T, boundary string, now time.Time, readmission ...*OfflineHoldReadmission) (ed25519.PublicKey, []byte) {
 	t.Helper()
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -72,6 +72,9 @@ func signFixtureOfflineAuthority(t *testing.T, boundary string, now time.Time) (
 		BoundaryDigest: boundary, EndpointAdmission: digest([]byte("fixture endpoint admission")),
 		LegacyRevocation: digest([]byte("fixture revocation")), LegacyRequestDrain: digest([]byte("fixture drainage")),
 		WriterIdentity: digest([]byte("fixture writer identity")), ObservedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+	}
+	if len(readmission) == 1 {
+		statement.Readmission = readmission[0]
 	}
 	message, err := statement.SigningInput()
 	if err != nil {

@@ -49,8 +49,8 @@ func observePendingOfflineHold(ctx context.Context, j offlinePendingJournal, clu
 	s := productioncontrol.Submission{Intent: intent, Payload: raw}
 	p, err := decodeHold(s)
 	actual, digestErr := intent.Digest()
-	if err != nil || digestErr != nil || p.Phase != ParticipationOffline || intent.ClusterID != cluster || actual != intentDigest {
-		return PendingOfflineHoldReadback{}, errors.New("pending hold does not identify this journal cluster and offline intent")
+	if err != nil || digestErr != nil || !exactHoldPhase(p.Phase) || intent.ClusterID != cluster || actual != intentDigest {
+		return PendingOfflineHoldReadback{}, errors.New("pending hold does not identify this journal cluster and offline hold or rollback intent")
 	}
 	scope := HoldResource(cluster, p.To.Node)
 	predecessor := productioncontrol.Version{Generation: intent.Generation, Digest: intent.CurrentDigest}

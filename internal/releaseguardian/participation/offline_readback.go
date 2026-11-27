@@ -38,7 +38,7 @@ func (o *KubernetesObserver) ObserveOfflineHoldReadback(ctx context.Context, top
 		return OfflineHoldReadback{}, err
 	}
 	member, err := enrolledMember(topology.Policy, p.To.Node)
-	if err != nil || p.Phase != ParticipationOffline || o == nil || o.core == nil ||
+	if err != nil || !exactHoldPhase(p.Phase) || o == nil || o.core == nil ||
 		topology.Policy.Schema != productioncontrol.BoundParticipationPolicySchema ||
 		topology.Policy.Kubernetes == nil || o.binding != *topology.Policy.Kubernetes ||
 		o.namespace != topology.Policy.Namespace || o.namespaceUID != topology.Policy.Kubernetes.NamespaceUID ||

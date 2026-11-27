@@ -12,7 +12,10 @@ import (
 	"fugue/internal/productioncontrol"
 )
 
-const holdIntentSchema = productioncontrol.ParticipationHoldIntentSchema
+const (
+	holdIntentSchema                    = productioncontrol.ParticipationHoldIntentSchema
+	rollbackPhase    ParticipationPhase = "rollback"
+)
 
 // HoldResource identifies the one protected Node object regardless of a
 // replacement UID. The physical UID is bound to the version and payload.
@@ -36,6 +39,7 @@ type holdIntentPayload struct {
 	From               holdIntentState           `json:"from"`
 	To                 holdIntentState           `json:"to"`
 	ShadowReportDigest string                    `json:"shadowReportDigest"`
+	Reverses           string                    `json:"reverses,omitempty"`
 }
 
 // HoldStateDigest identifies the exact owned metadata of an independently
@@ -148,6 +152,10 @@ func HoldTarget(s productioncontrol.Submission) (string, error) {
 	return p.To.Node, err
 }
 
+func exactHoldPhase(phase ParticipationPhase) bool {
+	return phase == ParticipationOffline || phase == rollbackPhase
+}
+
 // PreflightHold compares a proposed change with a newly gathered shadow
 // and the current LKG. A live preview generates a new timestamp, which
 // does not replace the value in the proposal. A positive result is not
@@ -200,23 +208,31 @@ func decodeHold(s productioncontrol.Submission) (holdIntentPayload, error) {
 		i.ResourceID != HoldResource(i.ClusterID, p.To.Node).ResourceID ||
 		i.CurrentDigest != p.From.digest() || i.RollbackDigest != i.CurrentDigest ||
 		i.TargetDigest != p.To.digest() || i.TargetDigest == i.CurrentDigest ||
-		(p.Phase != ParticipationOffline && p.Phase != ParticipationRecovering) ||
+		(p.Phase != ParticipationOffline && p.Phase != ParticipationRecovering && p.Phase != rollbackPhase) ||
+		(p.Phase == rollbackPhase) != (p.Reverses != "") ||
+		(p.Reverses != "" && !canonicalDigest(p.Reverses)) ||
 		len(p.From.Annotations) != 2 || len(p.To.Annotations) != 2 {
 		return holdIntentPayload{}, errors.New("invalid bound participation hold submission")
 	}
 	for _, k := range []string{participationAnnotation, edgecohort.ReleaseHoldAnnotation} {
 		old, found := p.From.Annotations[k]
-		next := p.To.Annotations[k]
-		if !found || old != nil && len(*old) > 2048 || next == nil || *next == "" || len(*next) > 2048 {
+		next, nextFound := p.To.Annotations[k]
+		if !found || !nextFound || old != nil && len(*old) > 2048 || next != nil && len(*next) > 2048 ||
+			(p.Phase != rollbackPhase && (next == nil || *next == "")) {
 			return holdIntentPayload{}, errors.New("invalid owned participation annotation in hold submission")
 		}
 	}
+	observed, phase := p.To, p.Phase
+	if p.Phase == rollbackPhase {
+		observed, phase = p.From, ParticipationOffline
+	}
 	var a memberParticipationState
 	var h edgecohort.ReleaseHold
-	if decodeStrict([]byte(*p.To.Annotations[participationAnnotation]), &a) != nil ||
-		a.Schema != participationStateSchema || !canonicalDigest(a.Owner) || a.Phase != p.Phase || a.Since.IsZero() ||
-		decodeStrict([]byte(*p.To.Annotations[edgecohort.ReleaseHoldAnnotation]), &h) != nil ||
-		h.Schema != edgecohort.ReleaseHoldSchema || h.NodeUID != p.To.UID || h.EdgeGroupID != p.To.Group ||
+	auto, release := observed.Annotations[participationAnnotation], observed.Annotations[edgecohort.ReleaseHoldAnnotation]
+	if auto == nil || release == nil || decodeStrict([]byte(*auto), &a) != nil ||
+		a.Schema != participationStateSchema || !canonicalDigest(a.Owner) || a.Phase != phase || a.Since.IsZero() ||
+		decodeStrict([]byte(*release), &h) != nil ||
+		h.Schema != edgecohort.ReleaseHoldSchema || h.NodeUID != observed.UID || h.EdgeGroupID != observed.Group ||
 		(h.Reason != "network_unavailable" && h.Reason != "quota_exhausted") {
 		return holdIntentPayload{}, errors.New("invalid resulting participation hold")
 	}

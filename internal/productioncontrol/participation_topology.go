@@ -257,24 +257,39 @@ func (j *Journal) ActivateParticipationTopology(ctx context.Context, cluster, ac
 	})
 }
 
-// verifyParticipationExecutionTopology binds the one-time reservation to
-// the current topology while its activation lock is held. The provider
-// adapter still checks the full payload, current state, and write authority.
-func verifyParticipationExecutionTopology(ctx context.Context, tx *sql.Tx, intent Intent, payload []byte) error {
-	var b struct {
-		Schema           string  `json:"schema"`
-		Phase            string  `json:"phase"`
-		Topology         Version `json:"topology"`
-		TopologyApproval string  `json:"topologyApproval"`
-		To               struct {
-			Node string `json:"node"`
-		} `json:"to"`
-	}
+type participationExecutionBinding struct {
+	Schema           string  `json:"schema"`
+	Phase            string  `json:"phase"`
+	Topology         Version `json:"topology"`
+	TopologyApproval string  `json:"topologyApproval"`
+	ResourceVersion  string  `json:"resourceVersion"`
+	Reverses         string  `json:"reverses,omitempty"`
+	To               struct {
+		Node string `json:"node"`
+	} `json:"to"`
+}
+
+func decodeParticipationExecutionBinding(intent Intent, payload []byte) (participationExecutionBinding, error) {
+	var b participationExecutionBinding
 	strict, err := kubejson.UnmarshalStrict(payload, &b, kubejson.DisallowDuplicateFields)
-	if err != nil || len(strict) != 0 || b.Schema != ParticipationHoldIntentSchema || b.Phase != "offline" ||
+	if err != nil || len(strict) != 0 || b.Schema != ParticipationHoldIntentSchema ||
+		(b.Phase != "offline" && b.Phase != "rollback") ||
+		(b.Phase == "rollback") != (b.Reverses != "") ||
+		(b.Reverses != "" && !digestPattern.MatchString(b.Reverses)) ||
 		!b.Topology.valid() || !digestPattern.MatchString(b.TopologyApproval) ||
 		!participationName.MatchString(b.To.Node) || intent.scope() != ParticipationNodeResource(intent.ClusterID, b.To.Node) {
-		return errors.New("node participation reservation requires a topology-bound offline hold")
+		return participationExecutionBinding{}, errors.New("node participation reservation requires a topology-bound offline hold or its exact rollback")
+	}
+	return b, nil
+}
+
+// verifyParticipationExecutionTopology binds the one-time reservation to
+// the current topology and preceding claim while both locks are held. The
+// provider adapter still checks the full payload, state, and write authority.
+func verifyParticipationExecutionTopology(ctx context.Context, tx *sql.Tx, intent Intent, payload []byte, state ResourceState) error {
+	b, err := decodeParticipationExecutionBinding(intent, payload)
+	if err != nil {
+		return err
 	}
 	var v Version
 	var a string
@@ -284,7 +299,37 @@ func verifyParticipationExecutionTopology(ctx context.Context, tx *sql.Tx, inten
 	if errors.Is(err, sql.ErrNoRows) || err == nil && (v != b.Topology || a != b.TopologyApproval) {
 		return ErrResourceDrift
 	}
-	return err
+	if err != nil || b.Phase != "rollback" {
+		return err
+	}
+	if state.LastIntent != b.Reverses || state.LastFence < 1 || b.ResourceVersion == "" {
+		return ErrResourceDrift
+	}
+	original, raw, err := readIntent(ctx, tx, b.Reverses)
+	if err != nil {
+		return err
+	}
+	origin, err := decodeParticipationExecutionBinding(original, raw)
+	if err != nil || origin.Phase != "offline" || original.Operation != NodeParticipation ||
+		original.scope() != intent.scope() || origin.Topology != b.Topology || origin.TopologyApproval != b.TopologyApproval ||
+		origin.ResourceVersion == "" || origin.ResourceVersion == b.ResourceVersion ||
+		original.Generation >= math.MaxInt64-1 || original.Generation+1 != intent.Generation ||
+		original.TargetDigest != intent.CurrentDigest || original.CurrentDigest != intent.TargetDigest {
+		return ErrResourceDrift
+	}
+	claim, err := readClaim(ctx, tx, b.Reverses)
+	if err != nil {
+		return err
+	}
+	result, err := readResult(ctx, tx, b.Reverses)
+	if err != nil {
+		return err
+	}
+	if claim.Scope != intent.scope() || claim.Fence != state.LastFence || result.Outcome != Applied ||
+		result.Verified != state.LastVerified || !digestPattern.MatchString(result.EvidenceDigest) {
+		return ErrResourceDrift
+	}
+	return nil
 }
 
 // ReadParticipationTopology authenticates the stored policy at the moment it

@@ -218,7 +218,8 @@ collector or production authority has been provisioned for this operation.
 
 `fugue-release-guardian participation-offline-dispatch CONFIG INTENT_DIGEST
 APPROVAL_DIGEST PROVIDER_ATTESTATION` runs one explicit offline annotation
-transition; it is not triggered by GitHub, the normal Guardian reconcile loop,
+transition or the exact approved inverse of a settled hold; it is not
+triggered by GitHub, the normal Guardian reconcile loop,
 or an owner approval alone. It loads the immutable submission from the journal,
 verifies the dedicated provider writer, and repeats the live shadow and
 authority checks after reserving the one-time fence. A lost response or crash
@@ -251,13 +252,37 @@ dedicated API-independent bootstrap profile for the exact Node:
   a fresh closed checkpoint. `applied` requires the exact target at the
   next ledger generation. `not_applied` requires the exact predecessor
   with the original generation and evidence that the claim cannot write.
-  Other observations leave the claim pending. Rollback is a separate,
-  explicitly approved operation and is not implemented for this hold.
+  Other observations leave the claim pending. A rollback settles as
+  `applied` on its own claim (the prior digest at a new generation), not
+  `restored` on the original claim.
 
 These profiles mount `mode`, `node`, `journalFile`, `actor`,
 `observerPublicKey` and `witnessDirectory`; they do not accept a Deployment
 cutover or registry credentials. Kubernetes access is read only. Use
 independent PostgreSQL roles for checkpoint, anchor and settlement.
+
+For an offline Node hold rollback, first close the original guard and settle
+the original hold as applied. `draft-participation-hold-rollback` uses the
+read-only journal and Kubernetes context to verify the closed checkpoint
+matches the current LKG in the original topology. The new intent references
+the prior result and restores exactly its predecessor, including annotation
+absence or empty strings; record and approve it independently. The journal
+rejects attempts to reverse a different, unrelated or superseded operation
+even if that request is owner-signed. Do not reopen the old writer.
+
+`observe-participation-rollback-boundary` returns the exact open guard
+revisions and the stable Node, inventory, and reader observation to which
+the independent attestation must be bound. Readiness alone is insufficient:
+the attestation separately requires approved network recovery after the
+current serving activation, the exact Front/Worker and approved probes,
+and a serving-authority fence that outlives the possible request until
+the rollback guard is closed and the request drains. Expiration disables
+dispatch; it does not discharge that fence. The dispatcher verifies the
+per-member stability window, checks both authorization layers, writes at
+most once, and leaves a missing result pending for the bootstrap. The
+repository does not provision the live serving fence or collect and sign
+these external records; production readmission cannot be inferred from
+this procedure or from fixture signatures.
 
 ## Single-Deployment release draft
 

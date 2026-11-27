@@ -131,3 +131,48 @@ func TestOfflineHoldAuthorityRequiresExactSignedCutover(t *testing.T) {
 		}
 	}
 }
+
+func TestRollbackAuthorityRequiresFreshFencedReadmission(t *testing.T) {
+	at := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+	boundary := digest([]byte("readmission boundary"))
+	required := readmissionRequirements{StableSeconds: 300, ReadySince: at.Add(-20 * time.Minute).Unix()}
+	good := OfflineHoldReadmission{
+		NetworkRecovery: digest([]byte("verified recovery")), ServingAuthority: digest([]byte("active serving")),
+		ServingFence: digest([]byte("held serving fence")),
+		StableSince:  at.Add(-15 * time.Minute).Unix(), ActivatedAt: at.Add(-12 * time.Minute).Unix(),
+		NetworkSuccessAt: at.Add(-time.Minute).Unix(),
+	}
+	pub, signed := signFixtureOfflineAuthority(t, boundary, at, &good)
+	if err := verifyOfflineDispatchAuthority(signed, pub, boundary, required, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyOfflineHoldAuthority(signed, pub, boundary, at); err == nil {
+		t.Fatal("readmission evidence was accepted for an ordinary offline hold")
+	}
+	for name, modify := range map[string]func(*OfflineHoldReadmission){
+		"network observation aged out": func(r *OfflineHoldReadmission) { r.NetworkSuccessAt = at.Add(-11 * time.Minute).Unix() },
+		"activation too recent":        func(r *OfflineHoldReadmission) { r.ActivatedAt = at.Add(-2 * time.Minute).Unix() },
+		"window predates observed readiness": func(r *OfflineHoldReadmission) {
+			r.StableSince = at.Add(-21 * time.Minute).Unix()
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := good
+			modify(&bad)
+			pub, signed := signFixtureOfflineAuthority(t, boundary, at, &bad)
+			if err := verifyOfflineDispatchAuthority(signed, pub, boundary, required, at); err == nil {
+				t.Fatal("unsafe signed readmission was accepted")
+			}
+		})
+	}
+	a := OfflineHoldAuthority{
+		BoundaryDigest: boundary, EndpointAdmission: digest([]byte("endpoints")),
+		LegacyRevocation: digest([]byte("revocation")), LegacyRequestDrain: digest([]byte("drainage")),
+		WriterIdentity: digest([]byte("writer identity")), ObservedAt: at.Unix(), ExpiresAt: at.Add(time.Minute).Unix(),
+		Readmission: &good,
+	}
+	good.ServingFence = ""
+	if _, err := a.SigningInput(); err == nil {
+		t.Fatal("readmission can be signed without a fence")
+	}
+}

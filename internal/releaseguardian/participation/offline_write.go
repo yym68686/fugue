@@ -23,7 +23,7 @@ import (
 type nodePatchOperation struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
-	Value any    `json:"value"`
+	Value any    `json:"value,omitempty"`
 }
 
 // offlineHoldPatch builds a narrow provider CAS after matching the last
@@ -32,7 +32,7 @@ type nodePatchOperation struct {
 // journal dispatch reservation and independently proven write ownership.
 func offlineHoldPatch(s productioncontrol.Submission, live *corev1.Node) (holdIntentPayload, []byte, error) {
 	p, err := decodeHold(s)
-	if err != nil || p.Phase != ParticipationOffline || len(validation.IsDNS1123Subdomain(p.To.Node)) != 0 ||
+	if err != nil || !exactHoldPhase(p.Phase) || len(validation.IsDNS1123Subdomain(p.To.Node)) != 0 ||
 		live == nil || !exactLiveObject(live, "", p.To.Node) || string(live.UID) != p.To.UID ||
 		live.ResourceVersion != p.ResourceVersion || live.Labels[participationGroup] != p.To.Group ||
 		live.Labels[participationRole] != "true" ||
@@ -50,7 +50,12 @@ func offlineHoldPatch(s productioncontrol.Submission, live *corev1.Node) (holdIn
 	} else {
 		for _, key := range []string{participationAnnotation, edgecohort.ReleaseHoldAnnotation} {
 			pointer := strings.ReplaceAll(strings.ReplaceAll(key, "~", "~0"), "/", "~1")
-			patch = append(patch, nodePatchOperation{Op: "add", Path: "/metadata/annotations/" + pointer, Value: *p.To.Annotations[key]})
+			path := "/metadata/annotations/" + pointer
+			if target := p.To.Annotations[key]; target != nil {
+				patch = append(patch, nodePatchOperation{Op: "add", Path: path, Value: *target})
+			} else if _, exists := live.Annotations[key]; exists {
+				patch = append(patch, nodePatchOperation{Op: "remove", Path: path})
+			}
 		}
 	}
 	body, err := json.Marshal(patch)
