@@ -226,6 +226,12 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	activate := `INSERT INTO fugue_native_global_producer_authority(cluster_id,writer_role,baseline_evidence_digest,activation_evidence_digest) VALUES('fixture',$1,$2,$3)`
 	_, err = admin.ExecContext(ctx, activate, "fugue_gate_fixture_writer", baselineEvidence, activationEvidence)
 	expectCode(err, "40001") // a group/non-login legacy role is not native authority
+	exec(admin, `GRANT INSERT (envelope) ON fugue_control.approvals TO fugue_gate_fixture_writer;
+GRANT fugue_gate_fixture_writer TO fugue_gate_fixture_native`)
+	_, err = admin.ExecContext(ctx, activate, "fugue_gate_fixture_native", baselineEvidence, activationEvidence)
+	expectCode(err, "40001") // even NOINHERIT can acquire privileges through SET ROLE
+	exec(admin, `REVOKE fugue_gate_fixture_writer FROM fugue_gate_fixture_native;
+REVOKE INSERT (envelope) ON fugue_control.approvals FROM fugue_gate_fixture_writer`)
 	exec(admin, activate, "fugue_gate_fixture_native", baselineEvidence, activationEvidence)
 
 	// The real journal verifies the owner's signature. The provider receipt
@@ -279,6 +285,13 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	exec(native, `SET search_path TO fugue_gate_fixture`)
 	exec(native, `SET SESSION AUTHORIZATION fugue_gate_fixture_native`)
 	defer native.ExecContext(context.Background(), `RESET SESSION AUTHORIZATION`)
+	exec(admin, `GRANT TRIGGER ON fugue_native_global_producer_gate TO fugue_gate_fixture_native`)
+	_, err = native.ExecContext(ctx, reserve, claim.IntentDigest, claim.ApprovalDigest, claim.Fence, claim.ClusterID, key, activationEvidence)
+	expectCode(err, "40001")
+	if !strings.Contains(err.Error(), "conflicting journal or provider privileges") {
+		t.Fatalf("new writer privilege was not detected: %v", err)
+	}
+	exec(admin, `REVOKE TRIGGER ON fugue_native_global_producer_gate FROM fugue_gate_fixture_native`)
 	_, err = native.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET fencing_token=3 WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`)
 	expectCode(err, "40001") // the native login alone is insufficient
 	_, err = native.ExecContext(ctx, reserve, claim.IntentDigest, claim.ApprovalDigest, claim.Fence, claim.ClusterID, key, activationEvidence)

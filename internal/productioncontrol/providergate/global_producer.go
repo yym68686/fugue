@@ -75,12 +75,35 @@ END;
 $$;
 REVOKE ALL ON FUNCTION fugue_native_global_producer_append_only() FROM PUBLIC;
 
+CREATE OR REPLACE FUNCTION fugue_native_global_producer_writer_isolated(writer_oid oid, provider_schema name) RETURNS boolean
+LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
+  SELECT NOT EXISTS (
+    SELECT 1 FROM pg_roles r
+    WHERE pg_has_role($1,r.oid,'MEMBER') AND (
+      r.rolsuper OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls
+      OR has_schema_privilege(r.oid,$2,'CREATE') OR has_schema_privilege(r.oid,'fugue_control','CREATE')
+      OR EXISTS (
+        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE c.relkind IN ('r','p') AND (n.nspname='fugue_control' OR (
+          n.nspname=$2 AND c.relname IN ('fugue_native_global_producer_gate','fugue_native_global_producer_authority',
+            'fugue_native_global_producer_receipts','fugue_platform_artifact_releases','fugue_platform_release_lanes','fugue_platform_artifacts')))
+          AND (pg_has_role(r.oid,c.relowner,'MEMBER') OR has_table_privilege(r.oid,c.oid,'DELETE,TRUNCATE,TRIGGER')
+            OR ((n.nspname='fugue_control' OR c.relname LIKE 'fugue_native_global_producer_%')
+              AND (has_any_column_privilege(r.oid,c.oid,'UPDATE') OR (
+                c.relname NOT IN ('execution_claims','fugue_native_global_producer_receipts')
+                AND has_any_column_privilege(r.oid,c.oid,'INSERT')))))
+      )
+    )
+  );
+$$;
+REVOKE ALL ON FUNCTION fugue_native_global_producer_writer_isolated(oid,name) FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION fugue_native_global_producer_enable() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   boundary record;
   writer record;
-  gate_owner oid;
+  isolated BOOLEAN;
 BEGIN
   -- Gate activation is isolated from dispatch. It is not an override or a
   -- way to reopen the legacy lane. The coordinator supplies the independently
@@ -97,11 +120,14 @@ BEGIN
   ) OR EXISTS (SELECT 1 FROM fugue_control.execution_claims c WHERE c.cluster_id=NEW.cluster_id AND c.resource_id='producer/global-policy') THEN
     RAISE EXCEPTION 'global producer activation lacks exact closed baseline enrollment' USING ERRCODE = '40001';
   END IF;
-  SELECT oid,rolcanlogin,rolsuper,rolcreaterole,rolreplication,rolbypassrls INTO writer FROM pg_roles WHERE rolname=NEW.writer_role;
-  SELECT relowner INTO gate_owner FROM pg_class WHERE oid=format('%I.fugue_native_global_producer_gate',TG_TABLE_SCHEMA)::regclass;
-  IF writer.oid IS NULL OR NOT writer.rolcanlogin OR writer.rolsuper OR writer.rolcreaterole OR writer.rolreplication
-     OR writer.rolbypassrls OR NEW.writer_role=session_user OR pg_has_role(writer.oid,gate_owner,'MEMBER') THEN
+  SELECT oid,rolcanlogin INTO writer FROM pg_roles WHERE rolname=NEW.writer_role;
+  IF writer.oid IS NULL OR NOT writer.rolcanlogin OR NEW.writer_role=session_user THEN
     RAISE EXCEPTION 'global producer requires a separate unprivileged writer login' USING ERRCODE = '40001';
+  END IF;
+  EXECUTE format('SELECT %I.fugue_native_global_producer_writer_isolated($1,$2)', TG_TABLE_SCHEMA)
+    INTO isolated USING writer.oid, TG_TABLE_SCHEMA::name;
+  IF isolated IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'global producer writer has conflicting journal or provider privileges' USING ERRCODE = '40001';
   END IF;
   NEW.writer_oid := writer.oid;
   NEW.activated_at := clock_timestamp();
@@ -118,6 +144,7 @@ DECLARE
   operation record;
   inverse BOOLEAN;
   selected BOOLEAN;
+  isolated BOOLEAN;
 BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
     RAISE EXCEPTION 'global producer dispatch requires a current observation' USING ERRCODE = '40001';
@@ -128,6 +155,11 @@ BEGIN
   IF boundary IS DISTINCT FROM TRUE OR authority.cluster_id IS DISTINCT FROM NEW.cluster_id OR authority.writer_role IS DISTINCT FROM session_user::text
      OR authority.writer_oid IS DISTINCT FROM (SELECT oid FROM pg_roles WHERE rolname=session_user) THEN
     RAISE EXCEPTION 'global producer has no active native writer for this login' USING ERRCODE = '40001';
+  END IF;
+  EXECUTE format('SELECT %I.fugue_native_global_producer_writer_isolated($1,$2)', TG_TABLE_SCHEMA)
+    INTO isolated USING authority.writer_oid, TG_TABLE_SCHEMA::name;
+  IF isolated IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'global producer writer has conflicting journal or provider privileges' USING ERRCODE = '40001';
   END IF;
   SELECT convert_from(i.envelope,'UTF8')::jsonb AS envelope, convert_from(i.payload,'UTF8')::jsonb AS payload,
     convert_from(a.envelope,'UTF8')::jsonb AS approval INTO operation
