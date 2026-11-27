@@ -89,10 +89,34 @@ reconfiguration while preserving Full/LKG; their shadow and enrollment
 evidence is synthetic. They do not prove production credential revocation,
 input immutability, external request drainage or DNS consumer convergence.
 
+The independent bootstrap profiles `dns-checkpoint`, `dns-anchor`, and
+`dns-settle` accept `dnsOrigin`, `dnsReadTokenFile`, the corresponding journal
+profile, and the observer public key and witness directory. Do not provide a
+publication or Kubernetes credential. `dns-checkpoint [INTENT_DIGEST]` is
+read-only. It reports the exact producer selection, Full/LKG and immutable
+DNS member, which it verifies before and after reading the member. A target
+policy selection while Full still points at its predecessor is not accepted.
+
+For `dns-anchor` or `dns-settle`, the observer signs the ordinary production
+execution witness. Its `observationDigest` identifies a canonical DNS
+`ServingEvidence` record with two distinct references: `checkpointDigest`
+from the read-only command and `authoritativeDnsDigest` from the separately
+collected DNS answer report. The witness also names separate `authorityDigest`
+evidence. Mount the witness, observation record, DNS answer report and authority
+record under their content digests; this verifier checks presence and SHA-256
+binding, not the underlying DNS sample's coverage. The observer must verify
+the real affected serving endpoints before signing. A baseline witness must
+also match the exact provider freeze before native activation. An `applied`
+result needs its matching committed provider receipt; `not_applied` requires
+the exact unchanged verified predecessor and no receipt. The result check
+and insert hold the same journal resource lock as publication, and once the
+terminal record commits, no late native write under that claim can commit.
+
 There is intentionally no production freeze/activation command yet. Do not
 manually edit the gate or native authority. Complete the independently
-approved cutover coordinator, independent serving readback and inverse
-rollback before freezing the legacy lane or declaring it migrated. The
+approved cutover coordinator, actual DNS answer collection and inverse
+rollback (including recovery if a selected policy cannot converge) before
+freezing the legacy lane or declaring it migrated. The
 database principal for schema migration and authority activation must be
 isolated from the old clients, and the dedicated runtime role must not have
 authority-table, DDL, approval, or terminal-journal mutation privileges.

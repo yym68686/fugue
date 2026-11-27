@@ -22,6 +22,7 @@ import (
 
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
+	"fugue/internal/releaseguardian/dnscontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -36,7 +37,10 @@ const usage = `usage: fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPRO
        fugue-release-bootstrap CONFIG settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST
        fugue-release-bootstrap CONFIG participation-checkpoint [INTENT_DIGEST]
        fugue-release-bootstrap CONFIG participation-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
-       fugue-release-bootstrap CONFIG participation-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
+       fugue-release-bootstrap CONFIG participation-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST
+       fugue-release-bootstrap CONFIG dns-checkpoint [INTENT_DIGEST]
+       fugue-release-bootstrap CONFIG dns-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
+       fugue-release-bootstrap CONFIG dns-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
@@ -51,6 +55,8 @@ type settings struct {
 	WitnessDirectory  string                                `json:"witnessDirectory"`
 	ObserverPublicKey ed25519.PublicKey                     `json:"observerPublicKey"`
 	Node              string                                `json:"node,omitempty"`
+	DNSOrigin         string                                `json:"dnsOrigin,omitempty"`
+	DNSReadTokenFile  string                                `json:"dnsReadTokenFile,omitempty"`
 }
 
 type request struct {
@@ -85,7 +91,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if req.command == "participation-checkpoint" {
+	if req.command == "participation-checkpoint" || req.command == "dns-checkpoint" {
 		dsn.RuntimeParams["default_transaction_read_only"] = "on"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -99,6 +105,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if cfg.Node != "" {
 		return runParticipation(ctx, journal, cluster, cfg, req, out)
+	}
+	if cfg.DNSOrigin != "" {
+		return runDNSSettlement(ctx, journal, cluster, cfg, req, out)
 	}
 	scope, err := releaseguardian.DeploymentCutoverScope(cfg.Cutover, cluster)
 	if err != nil {
@@ -209,17 +218,17 @@ func parseRequest(args []string) (request, error) {
 			r.intent, r.approval, r.attestation = args[1], args[2], args[3]
 			return r, nil
 		}
-	case "observe", "participation-checkpoint":
-		if r.command == "participation-checkpoint" && len(args) == 1 {
+	case "observe", "participation-checkpoint", "dns-checkpoint":
+		if r.command != "observe" && len(args) == 1 {
 			return r, nil
 		}
 		if len(args) == 2 && allDigests(args[1]) {
 			r.intent = args[1]
 			return r, nil
 		}
-	case "anchor", "settle", "participation-anchor", "participation-settle":
+	case "anchor", "settle", "participation-anchor", "participation-settle", "dns-anchor", "dns-settle":
 		version := args[1:]
-		if r.command == "settle" || r.command == "participation-settle" {
+		if r.command == "settle" || r.command == "participation-settle" || r.command == "dns-settle" {
 			if len(version) != 5 || !allDigests(version[0]) {
 				break
 			}
@@ -227,7 +236,7 @@ func parseRequest(args []string) (request, error) {
 			if r.outcome != productioncontrol.Applied && r.outcome != productioncontrol.Restored && r.outcome != productioncontrol.NotApplied {
 				break
 			}
-			if r.command == "participation-settle" && r.outcome == productioncontrol.Restored {
+			if r.command != "settle" && r.outcome == productioncontrol.Restored {
 				break
 			}
 		}
@@ -259,6 +268,11 @@ func readSettings(path, command string) (settings, error) {
 		return settings{}, errors.New("bootstrap configuration is invalid or does not authorize this command")
 	}
 	switch cfg.Mode {
+	case "dns-checkpoint", "dns-anchor", "dns-settle":
+		if cfg.DNSOrigin == "" || !filepath.IsAbs(cfg.DNSReadTokenFile) || cfg.DNSReadTokenFile == cfg.JournalFile ||
+			cfg.Node != "" || cfg.Cutover != (releaseguardian.KubeDeploymentCutover{}) || cfg.DependencyService != "" {
+			return settings{}, errors.New("bootstrap DNS profile requires an independent API reader and no Kubernetes settings")
+		}
 	case "participation-checkpoint", "participation-anchor", "participation-settle":
 		if cfg.Node == "" || len(validation.IsDNS1123Subdomain(cfg.Node)) != 0 ||
 			cfg.Cutover != (releaseguardian.KubeDeploymentCutover{}) || cfg.DependencyService != "" {
@@ -269,6 +283,9 @@ func readSettings(path, command string) (settings, error) {
 			return settings{}, errors.New("bootstrap Deployment profile must not specify a Node")
 		}
 	}
+	if cfg.Mode != "dns-checkpoint" && cfg.Mode != "dns-anchor" && cfg.Mode != "dns-settle" && (cfg.DNSOrigin != "" || cfg.DNSReadTokenFile != "") {
+		return settings{}, errors.New("only DNS bootstrap may configure a DNS reader")
+	}
 	if cfg.Mode == "publish" {
 		if cfg.Registry == "" || (cfg.RegistryAuthFile != "" && !filepath.IsAbs(cfg.RegistryAuthFile)) {
 			return settings{}, errors.New("bootstrap requires a separately configured independent registry")
@@ -277,6 +294,72 @@ func readSettings(path, command string) (settings, error) {
 		return settings{}, errors.New("only bootstrap publication may configure registry credentials")
 	}
 	return cfg, nil
+}
+
+func runDNSSettlement(ctx context.Context, j *productioncontrol.Journal, cluster string, cfg settings, req request, out io.Writer) error {
+	file, err := os.OpenFile(cfg.DNSReadTokenFile, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return errors.New("bootstrap DNS reader token is unavailable")
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("bootstrap DNS reader token must be private")
+	}
+	token, err := boundedRead(file, 4096)
+	if err != nil {
+		return err
+	}
+	defer clear(token)
+	r, err := dnscontrol.NewReader(cfg.DNSOrigin, string(bytes.TrimSpace(token)))
+	if err != nil {
+		return err
+	}
+	emit := json.NewEncoder(out).Encode
+	if req.command == "dns-checkpoint" {
+		c, err := r.ObserveServingCheckpoint(ctx, j, cluster, req.intent, time.Now)
+		if err != nil {
+			return err
+		}
+		d, err := c.Digest()
+		if err != nil {
+			return err
+		}
+		return emit(struct {
+			CheckpointDigest  string                       `json:"checkpointDigest"`
+			Checkpoint        dnscontrol.ServingCheckpoint `json:"checkpoint"`
+			ExecutionEvidence bool                         `json:"executionEvidence"`
+		}{d, c, false})
+	}
+	root, err := os.OpenRoot(cfg.WitnessDirectory)
+	if err != nil {
+		return errors.New("independent DNS witness directory is unavailable")
+	}
+	defer root.Close()
+	e, err := dnscontrol.NewSettlement(j, r, cluster, directoryWitnesses{root}, cfg.ObserverPublicKey)
+	if err != nil {
+		return err
+	}
+	scope := dnscontrol.Scope(cluster)
+	var created bool
+	switch req.command {
+	case "dns-anchor":
+		created, err = e.AnchorResource(ctx, cfg.Actor, productioncontrol.Baseline{Scope: scope, Verified: req.version, EvidenceDigest: req.witness})
+	case "dns-settle":
+		claim, _, readErr := j.ReadExecution(ctx, scope, req.intent)
+		if readErr != nil {
+			return readErr
+		}
+		created, err = e.CompleteExecution(ctx, cfg.Actor, claim, productioncontrol.ExecutionResult{Outcome: req.outcome, Verified: req.version, EvidenceDigest: req.witness})
+	default:
+		return errors.New("unsupported bootstrap DNS mode")
+	}
+	if err != nil {
+		return err
+	}
+	return emit(struct {
+		Created bool `json:"created"`
+	}{created})
 }
 
 func runParticipation(ctx context.Context, j *productioncontrol.Journal, cluster string, cfg settings, req request, out io.Writer) error {

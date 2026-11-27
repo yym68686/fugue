@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"fugue/internal/productioncontrol"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestPostgresGlobalProducerFreeze(t *testing.T) {
@@ -201,7 +202,14 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	j, err := productioncontrol.NewJournal(db, productioncontrol.Approvers{"owner": {ClusterID: "fixture", PublicKey: public}})
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RuntimeParams["search_path"] = "fugue_gate_fixture"
+	journalDB := stdlib.OpenDB(*cfg)
+	defer journalDB.Close()
+	j, err := productioncontrol.NewJournal(journalDB, productioncontrol.Approvers{"owner": {ClusterID: "fixture", PublicKey: public}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,6 +308,114 @@ UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id='r2'`);
 	expectCode(err, "40001") // predecessor already advanced; no second write
 	_, err = writer.ExecContext(ctx, `UPDATE fugue_platform_release_lanes SET active_release_id='r2' WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`)
 	expectCode(err, "40001")
+
+	observer, signer, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnesses := fixtureWitnessFiles{}
+	terminal, err := productioncontrol.NewGlobalProducerExecutionJournal(j, witnesses, map[string]productioncontrol.TrustedWitness{
+		"observer": {Scope: scope, PublicKey: observer},
+	}, func(context.Context, productioncontrol.ExecutionWitness) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	settle := func(ctx context.Context, claim productioncontrol.Claim, outcome productioncontrol.Outcome, generation int64, digest string) (bool, error) {
+		t.Helper()
+		now := time.Now().Unix()
+		witness := productioncontrol.ExecutionWitness{Kind: productioncontrol.TerminalWitness, KeyID: "observer", ClusterID: claim.ClusterID,
+			ResourceID: claim.ResourceID, Generation: generation, VerifiedDigest: digest, ObservationDigest: evidence, AuthorityDigest: activationEvidence,
+			ObservedAt: now, ExpiresAt: now + 60, IntentDigest: claim.IntentDigest, ApprovalDigest: claim.ApprovalDigest, Fence: claim.Fence, Outcome: outcome}
+		input, err := witness.SigningInput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		witness.Signature = ed25519.Sign(signer, input)
+		raw, ref, err := productioncontrol.EncodeExecutionWitness(witness)
+		if err != nil {
+			t.Fatal(err)
+		}
+		witnesses[ref] = raw
+		return terminal.CompleteExecution(ctx, "observer", claim, productioncontrol.ExecutionResult{Outcome: outcome, Verified: productioncontrol.Version{Generation: generation, Digest: digest}, EvidenceDigest: ref})
+	}
+	if created, err := settle(ctx, claim, productioncontrol.NotApplied, 2, newDigest); err == nil || created {
+		t.Fatal("committed provider write was falsely settled as not applied")
+	}
+	if created, err := settle(ctx, claim, productioncontrol.Applied, 3, targetDigest); err != nil || !created {
+		t.Fatalf("exact selected receipt did not settle: %t %v", created, err)
+	}
+	if head, err := j.ReadResource(ctx, scope); err != nil || head.Pending != "" || head.LastVerified != (productioncontrol.Version{Generation: 3, Digest: targetDigest}) {
+		t.Fatalf("settled head mismatch: %+v %v", head, err)
+	}
+
+	// Second claim leaves the predecessor selected and has no committed
+	// receipt. Once positively settled it cannot write, even with its original
+	// still-valid approval and native login.
+	const fourthID = "fourth"
+	fourthDigest := "sha256:" + strings.Repeat("7", 64)
+	exec(admin, `INSERT INTO fugue_platform_artifacts VALUES ($1,'gen4','policy_snapshot','platform-config-producer','validated',$2,4)`, fourthID, fourthDigest)
+	payload, err = json.Marshal(map[string]any{
+		"schema": "fugue.native-global-dns-policy/v1", "shadowDigest": evidence,
+		"previousProducer": map[string]any{"id": "target", "digest": targetDigest, "generation": "gen3", "sequence": 3},
+		"nextProducer":     map[string]any{"id": fourthID, "digest": fourthDigest, "generation": "gen4", "sequence": 4},
+		"precondition":     map[string]any{"operation": "edge_offline", "previous_policy": map[string]any{"artifact_id": "target", "content_hash": targetDigest, "release_id": "r3", "fencing_token": 3}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err = productioncontrol.NewIntent(scope.ClusterID, scope.ResourceID, "second", productioncontrol.DNSMembership, 3, targetDigest, fourthDigest, targetDigest, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded, err = j.RecordIntent(ctx, "owner", intent, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, err = productioncontrol.SignApproval(intent, "owner", private, time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved, err = j.RecordApproval(ctx, approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, created, err := j.ReserveExecution(ctx, "native-writer", recorded.Digest, approved.Digest)
+	if err != nil || !created {
+		t.Fatalf("reserve second claim: %t %v", created, err)
+	}
+	if created, err := settle(ctx, second, productioncontrol.Applied, 4, fourthDigest); err == nil || created {
+		t.Fatal("missing receipt was treated as successful dispatch")
+	}
+	inFlight, err := native.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Rollback()
+	if _, err := inFlight.ExecContext(ctx, reserve, second.IntentDigest, second.ApprovalDigest, second.Fence, second.ClusterID, "producer-reconfiguration/"+fourthDigest, activationEvidence); err != nil {
+		t.Fatal(err)
+	}
+	// The receipt is still invisible to other sessions, but it already holds
+	// the dispatch lock. Its absence cannot authorize terminal settlement.
+	wait, stop := context.WithTimeout(ctx, 250*time.Millisecond)
+	closed, closeErr := settle(wait, second, productioncontrol.NotApplied, 3, targetDigest)
+	stop()
+	if closed || !errors.Is(closeErr, context.DeadlineExceeded) {
+		t.Fatalf("settlement did not wait for an in-flight provider receipt: %t %v", closed, closeErr)
+	}
+	if err := inFlight.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := settle(ctx, second, productioncontrol.NotApplied, 3, targetDigest); err != nil || !created {
+		t.Fatalf("unchanged selection plus no receipt did not settle: %t %v", created, err)
+	}
+	_, err = native.ExecContext(ctx, reserve, second.IntentDigest, second.ApprovalDigest, second.Fence, second.ClusterID, "producer-reconfiguration/"+fourthDigest, activationEvidence)
+	expectCode(err, "40001")
+}
+
+type fixtureWitnessFiles map[string][]byte
+
+func (f fixtureWitnessFiles) ReadExecutionWitness(_ context.Context, ref string) ([]byte, error) {
+	return f[ref], nil
 }
 
 type fixtureGateEvidence struct{}
