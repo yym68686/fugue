@@ -1160,6 +1160,7 @@ jobs:
       edge_origin_relay_policy: ${{ steps.edge_origin_relay_policy.outputs.selected }}
       observation_writer_handoff: ${{ steps.observation_writer_handoff.outputs.selected }}
       quality_evidence_rehearsed: ${{ steps.quality_evidence_rehearsal.outputs.verified }}
+      quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1222,6 +1223,23 @@ jobs:
           docker run --rm --network none --user 26:26 --entrypoint bash \
             -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
           echo 'verified=true' >> "$GITHUB_OUTPUT"
+      - name: Admit only a declared quality evidence retention handoff
+        id: quality_evidence_retention_handoff
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/quality-evidence-retention-handoff.json
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then exit 0; fi
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "$declaration" && [[ -f "$declaration" ]]; then
+            test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+            python3 -m unittest scripts.test_apply_quality_evidence_retention_handoff scripts.test_verify_observation_rollback_floor
+            pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+            docker run --rm --network none --user 26:26 --entrypoint bash \
+              -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
         env:
@@ -4663,6 +4681,30 @@ jobs:
           git merge-base --is-ancestor "$floor" "$api_revision"
           git diff --exit-code "$floor" "$api_revision" -- internal/qualityrollup/rollup.go internal/store/edge_quality_rollup_writer.go internal/api/edge_quality_rollup_runtime.go
           python3 -m scripts.apply_observation_writer_handoff "$database" "$declaration" "$metrics" --apply
+
+  quality_evidence_retention_handoff:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.quality_evidence_retention_handoff == 'true' }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-observation-worker, cancel-in-progress: false, queue: max}
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Bind the serving and rollback artifacts and transfer the timer
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/quality-evidence-retention-handoff.json
+          metrics=deploy/environments/production/observability/scrape-policy.json
+          database=deploy/releases/observation-worker/database.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$declaration" "$metrics" "$database" .github/workflows/ci.yml scripts/apply_quality_evidence_retention_handoff.py scripts/apply_observation_writer_handoff.py scripts/verify_observation_rollback_floor.py scripts/provision_quality_evidence_retention.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py scripts/rehearse_observation_writer_fence.sh internal/schemamigrate/platform_quality_evidence_retention_activate.sql internal/schemamigrate/platform_quality_evidence_retention.sql deploy/environments/production/cnpg-controller/release.json
+          python3 -m scripts.apply_quality_evidence_retention_handoff "$database" "$declaration" "$metrics" --apply
 
   deploy_runtime_agent:
     needs: [prepush, component-build, runtime_agent_identity]
