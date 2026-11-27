@@ -107,6 +107,7 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		t.Fatal(err)
 	}
 	if draft.Preview.Record != preview.Record || draft.Intent.Generation != preview.CurrentDesired.Generation ||
+		draft.Intent.TargetDigest != preview.Record.RecordDigest ||
 		draft.Intent.CurrentDigest != preview.CurrentRecordDigest || draft.Intent.RollbackDigest != preview.Record.LKGRecordDigest ||
 		draft.Intent.ResourceID != "kubernetes/fugue-system/deployment/edge-control-de" || draft.Intent.VerifyPayload(draft.Payload) != nil {
 		t.Fatalf("native draft is not bound to the same resource and predecessor: %+v", draft.Intent)

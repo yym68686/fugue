@@ -12,7 +12,7 @@ func approvalFixture(t *testing.T) (Intent, []byte, ed25519.PrivateKey, Approver
 	t.Helper()
 	payload := []byte(`{"artifact":"immutable"}`)
 	intent, err := NewIntent("cluster-a", "namespace/api", "request-1", ComponentRelease, 9,
-		"sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64), payload)
+		"sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("c", 64), "sha256:"+strings.Repeat("b", 64), payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +38,7 @@ func TestApprovalBindsExactIntentAndTrustScope(t *testing.T) {
 		"resource":   func(i *Intent) { i.ResourceID = "namespace/other" },
 		"generation": func(i *Intent) { i.Generation++ },
 		"current":    func(i *Intent) { i.CurrentDigest = i.PayloadDigest },
+		"target":     func(i *Intent) { i.TargetDigest = i.PayloadDigest },
 		"rollback":   func(i *Intent) { i.RollbackDigest = i.CurrentDigest },
 		"payload":    func(i *Intent) { i.PayloadDigest = i.CurrentDigest },
 		"request":    func(i *Intent) { i.RequestID = "request-2" },

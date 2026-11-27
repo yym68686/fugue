@@ -56,7 +56,7 @@ func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, cluster
 	}
 	resourceID := "kubernetes/" + workload.Namespace + "/" + strings.ToLower(workload.Kind) + "/" + workload.Name
 	intent, err := productioncontrol.NewIntent(clusterID, resourceID, requestID, productioncontrol.ComponentRelease, preview.CurrentDesired.Generation,
-		preview.CurrentRecordDigest, preview.Record.LKGRecordDigest, payload)
+		preview.CurrentRecordDigest, preview.Record.RecordDigest, preview.Record.LKGRecordDigest, payload)
 	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
