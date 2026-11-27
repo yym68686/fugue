@@ -85,6 +85,19 @@ it still requires Front, Worker and network recovery checks before any
 readmission can be considered. It is not a comparison against the legacy
 runtime on production and emits no executable intent or cutover evidence.
 
+`render-participation-freeze NODE` prints a Kubernetes admission policy and
+binding. It installs nothing and grants nobody a write path. For one Node
+name it prevents admission of creates/deletes and changes to the automatic
+phase, release hold, group, role, enrollment, scheduling eligibility, and
+workload classification metadata. Ordinary Node status and unrelated labels
+can still change. Use it only during a resource-scoped freeze; legitimate
+changes to protected metadata must also wait. It does not fence recovery Pod
+deletes, Pod exec, Leases, other provider writes, or requests already past
+admission. Before handing off ownership, separately disable both the Actions
+lane and the API's Python worker, revoke their provider authority, verify
+every serving admission endpoint, and prove their in-flight operations have
+drained. This policy is not authorization to enable a native writer.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
