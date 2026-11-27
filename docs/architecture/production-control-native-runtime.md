@@ -98,6 +98,14 @@ lane and the API's Python worker, revoke their provider authority, verify
 every serving admission endpoint, and prove their in-flight operations have
 drained. This policy is not authorization to enable a native writer.
 
+`observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE` reads
+the exact admission policy and binding for an enrolled Node, on the
+approved cluster. It requires GET for those two named objects. It rejects
+drift from the rendered specification, reported expression warnings, and
+revisions that change during the read. `currentTypeChecked: false` means the
+API has not reported type checking of the current generation. No result
+claims enforcement across endpoints, credential revocation, or drainage.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
