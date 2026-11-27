@@ -173,7 +173,11 @@ func TestBackupUsagePackageDoesNotImportConcreteApplicationLayers(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.HasPrefix(path, "fugue/internal/") && path != "fugue/internal/model" && path != "fugue/internal/objectstorage" {
+			switch path {
+			case "fugue/internal/backupusage/contract", "fugue/internal/model", "fugue/internal/objectstorage":
+				continue
+			}
+			if strings.HasPrefix(path, "fugue/internal/") {
 				t.Errorf("%s depends on %s; adapt dependencies outside backupusage", file.Name(), path)
 			}
 		}
