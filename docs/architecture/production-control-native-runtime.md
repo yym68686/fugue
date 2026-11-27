@@ -61,6 +61,13 @@ login, not a group role or the schema owner. For this resource the journal and
 provider tables must be in the **same PostgreSQL database**. Do not use two
 separate connections to two databases to simulate a transactional fence.
 
+`fugue-production-control observe-dns-cutover JOURNAL_CONFIG` reads the
+selected producer, provider freeze, writer enrollment and current grants,
+and journal head in one read-only PostgreSQL snapshot. Use its output to
+distinguish a selected producer from the last verified serving version. This
+command requires a read-only profile with access to both sets of tables.
+External permission revocation and request drainage have separate evidence.
+
 `fugue-release-guardian dns-policy-dispatch CONFIG INTENT_DIGEST APPROVAL_DIGEST`
 is the native executor. Its independently mounted configuration contains
 `journalFile`, `apiOrigin`, `readTokenFile`, and `artifactKeyFile`. The journal

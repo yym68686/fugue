@@ -16,6 +16,76 @@ type GlobalProducerRollbackRef struct {
 	EvidenceDigest string `json:"evidenceDigest"`
 }
 
+// GlobalProducerBoundary reports the provider and journal state from the same
+// database snapshot. Credential revocation outside this provider needs its own evidence.
+type GlobalProducerBoundary struct {
+	Scope                    Scope          `json:"scope"`
+	SelectedReleaseID        string         `json:"selectedReleaseId"`
+	Selected                 Version        `json:"selected"`
+	Frozen                   bool           `json:"frozen"`
+	FrozenReleaseID          string         `json:"frozenReleaseId,omitempty"`
+	FrozenVersion            *Version       `json:"frozenVersion,omitempty"`
+	FreezeEvidenceDigest     string         `json:"freezeEvidenceDigest,omitempty"`
+	WriterEnrolled           bool           `json:"writerEnrolled"`
+	WriterStillIsolated      bool           `json:"writerStillIsolated"`
+	ActivationEvidenceDigest string         `json:"activationEvidenceDigest,omitempty"`
+	Journal                  *ResourceState `json:"journal,omitempty"`
+}
+
+func (j *Journal) ReadGlobalProducerBoundary(ctx context.Context, scope Scope) (GlobalProducerBoundary, error) {
+	if j == nil || !scope.valid() || scope.ResourceID != GlobalProducerPolicyResource {
+		return GlobalProducerBoundary{}, errors.New("invalid global producer cutover scope")
+	}
+	tx, err := j.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return GlobalProducerBoundary{}, err
+	}
+	defer tx.Rollback()
+
+	boundary := GlobalProducerBoundary{Scope: scope}
+	var frozenVersion Version
+	var authorityCluster string
+	err = tx.QueryRowContext(ctx, `SELECT r.id,l.fencing_token,p.content_hash,g.frozen,
+    COALESCE(g.baseline_release_id,''),COALESCE(g.baseline_fence,0),COALESCE(g.baseline_digest,''),COALESCE(g.evidence_digest,''),
+    COALESCE(a.cluster_id,''),COALESCE(a.activation_evidence_digest,''),
+    COALESCE(roles.rolcanlogin AND fugue_native_global_producer_writer_isolated(a.writer_oid,n.nspname),FALSE)
+  FROM fugue_native_global_producer_gate g
+  JOIN pg_catalog.pg_class c ON c.oid='fugue_native_global_producer_gate'::regclass
+  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+  JOIN fugue_platform_release_lanes l ON l.lane_key='policy_snapshot|platform-config-producer|shadow'
+  JOIN fugue_platform_artifact_releases r ON r.id=l.active_release_id AND r.lane_key=l.lane_key AND r.fencing_token=l.fencing_token
+  JOIN fugue_platform_artifacts p ON p.id=r.artifact_id AND p.generation=r.generation
+  LEFT JOIN fugue_native_global_producer_authority a ON a.singleton=g.singleton
+  LEFT JOIN pg_catalog.pg_roles roles ON roles.oid=a.writer_oid AND roles.rolname=a.writer_role
+  WHERE g.singleton AND NOT l.frozen AND l.artifact_kind='policy_snapshot' AND l.scope_key='platform-config-producer'
+    AND l.release_channel='shadow' AND r.artifact_kind=l.artifact_kind AND r.scope_key=l.scope_key AND r.release_channel=l.release_channel
+    AND r.status='active' AND p.artifact_kind=l.artifact_kind AND p.scope_key=l.scope_key AND p.status='validated'`).Scan(
+		&boundary.SelectedReleaseID, &boundary.Selected.Generation, &boundary.Selected.Digest, &boundary.Frozen,
+		&boundary.FrozenReleaseID, &frozenVersion.Generation, &frozenVersion.Digest, &boundary.FreezeEvidenceDigest,
+		&authorityCluster, &boundary.ActivationEvidenceDigest, &boundary.WriterStillIsolated)
+	if err != nil {
+		return GlobalProducerBoundary{}, err
+	}
+	if !boundary.Selected.valid() || (boundary.Frozen && !frozenVersion.valid()) ||
+		(authorityCluster != "" && (!boundary.Frozen || authorityCluster != scope.ClusterID)) {
+		return GlobalProducerBoundary{}, errors.New("global producer selection does not belong to this cutover")
+	}
+	boundary.WriterEnrolled = authorityCluster != ""
+	if boundary.Frozen {
+		boundary.FrozenVersion = &frozenVersion
+	}
+	state, err := readResource(ctx, tx, scope)
+	if err == nil {
+		boundary.Journal = &state
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return GlobalProducerBoundary{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return GlobalProducerBoundary{}, err
+	}
+	return boundary, nil
+}
+
 func (r GlobalProducerRollbackRef) Valid() bool {
 	return digestPattern.MatchString(r.IntentDigest) && digestPattern.MatchString(r.ApprovalDigest) &&
 		digestPattern.MatchString(r.EvidenceDigest)
