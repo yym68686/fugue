@@ -561,8 +561,37 @@ existing provider fence, restore the retained Worker when needed, or
 complete an already verified drain. It never arms or advances an existing
 handoff. A claim with no matching Kubernetes fence or terminal result
 needs independent provider readback before the journal can be settled.
-Production enrollment, rollout and independent execution settlement are
-separate from this command.
+Production enrollment and rollout are separate from this command.
+
+After recovery or dispatch reports a terminal outcome, run
+`fugue-release-guardian node-worker-checkpoint CONFIG INTENT_DIGEST` with
+a provider observer identity. It reads the pending PostgreSQL claim, the
+immutable Kubernetes receipt and archive, the released group and
+component Leases, the cleared projection, and the live serving route.
+For a verified cutover with an approved retirement, it also reads the
+DaemonSet exclusion and retirement receipt and checks that the previous
+Worker's listeners are closed. Configure the observer's Kubernetes
+identity for readback and the two pinned Front commands that read the
+recipient and activation state. The command also sets its journal
+connection to read-only. Keep the full checkpoint as observation evidence.
+
+The independent observer reviews the checkpoint and extracts the
+`witnessDraft` object. On the offline signing host, run
+`fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL`.
+The reviewed digest is the SHA-256 of the exact extracted draft file.
+The command emits the canonical signed envelope. Place those exact bytes
+in the independent evidence directory as `<sha256 hex>.json`. Keep the
+observer's private key separate from the journal and Guardian.
+
+`fugue-release-guardian node-worker-settle CONFIG INTENT_DIGEST WITNESS_DIGEST`
+uses the same `journalFile` and `cutover` configuration plus the absolute
+`witnessDirectory` and base64-encoded `observerPublicKey`. Witness digests
+use the `sha256:` prefix. Settlement repeats the serving and closure
+checks against the signed digests before advancing PostgreSQL. An expired
+handoff that never selected the candidate retains the current verified
+version. Replaying a settled result returns the recorded outcome for the
+same witness. Missing or changed provider evidence leaves the claim
+pending and preserves the last verified version.
 
 ## Single-Deployment release draft
 

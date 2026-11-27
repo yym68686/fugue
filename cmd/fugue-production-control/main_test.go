@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,65 @@ import (
 
 	"fugue/internal/productioncontrol"
 )
+
+func TestSignExecutionWitnessBindsExactObservedFileAndOriginalTime(t *testing.T) {
+	now := time.Unix(1760000000, 0)
+	d := func(letter string) string { return "sha256:" + strings.Repeat(letter, 64) }
+	draft := productioncontrol.ExecutionWitness{
+		Kind: productioncontrol.TerminalWitness, KeyID: "provider-observer", ClusterID: "cluster-a",
+		ResourceID: productioncontrol.FrontWorkerResource("fugue-system", "edge-group-a"),
+		Generation: 4, VerifiedDigest: d("a"), ObservationDigest: d("b"), AuthorityDigest: d("c"),
+		ObservedAt: now.Add(-time.Minute).Unix(), IntentDigest: d("d"), ApprovalDigest: d("e"), Fence: 7,
+		Outcome: productioncontrol.Applied,
+	}
+	raw, err := json.Marshal(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	jsonPath, keyPath := filepath.Join(dir, "draft.json"), filepath.Join(dir, "observer.pem")
+	if err := os.WriteFile(jsonPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reviewed := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	var out bytes.Buffer
+	args := []string{"sign-execution-witness", jsonPath, reviewed, keyPath, "2m"}
+	if err := run(t.Context(), args, &out, func() time.Time { return now }); err != nil {
+		t.Fatal(err)
+	}
+	var got productioncontrol.ExecutionWitness
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	input, err := got.SigningInput()
+	if err != nil || !ed25519.Verify(pub, input, got.Signature) {
+		t.Fatalf("output lacks a valid observer signature: %v", err)
+	}
+	canonical, _, err := productioncontrol.EncodeExecutionWitness(got)
+	if err != nil || !bytes.Equal(canonical, out.Bytes()) || got.ObservedAt != draft.ObservedAt || got.ExpiresAt != now.Add(time.Minute).Unix() {
+		t.Fatalf("output did not preserve observation time or canonical bytes: %v", err)
+	}
+	out.Reset()
+	args[4] = "1m"
+	if err := run(t.Context(), args, &out, func() time.Time { return now }); err == nil || out.Len() > 0 {
+		t.Fatal("stale observation produced a signature")
+	}
+	args[4], args[2] = "2m", d("f")
+	if err := run(t.Context(), args, &out, func() time.Time { return now }); err == nil || out.Len() > 0 {
+		t.Fatal("unreviewed observation produced a signature")
+	}
+}
 
 func TestOfflineApprovalRequiresExactReviewedSubmission(t *testing.T) {
 	ctx := context.Background()

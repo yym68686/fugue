@@ -184,26 +184,8 @@ func ObserveFrozenFrontWorkerBoundary(ctx context.Context, client kubernetes.Int
 				return FrozenFrontWorkerObservation{}, fmt.Errorf("read Front/Worker transaction fence %s: %w", name, err)
 			}
 		}
-		leases := client.CoordinationV1().Leases(config.Namespace)
-		names := append([]string{FrontWorkerGroupLeaseName(config.Group)}, config.ComponentLeases...)
-		leaseRevisions := make([]FrontWorkerLeaseObservation, 0, len(names))
-		for _, name := range names {
-			observed := FrontWorkerLeaseObservation{Name: name}
-			lease, err := leases.Get(ctx, name, metav1.GetOptions{})
-			if !apierrors.IsNotFound(err) {
-				if err != nil {
-					return FrozenFrontWorkerObservation{}, fmt.Errorf("read frozen Front/Worker Lease %s: %w", name, err)
-				}
-				if lease.Name != name || lease.Namespace != config.Namespace ||
-					lease.UID == "" || lease.ResourceVersion == "" || lease.DeletionTimestamp != nil ||
-					(lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "") {
-					return FrozenFrontWorkerObservation{}, fmt.Errorf("frozen Front/Worker Lease %s still has a holder or its release is unproven", name)
-				}
-				observed.UID, observed.Revision = string(lease.UID), lease.ResourceVersion
-			}
-			leaseRevisions = append(leaseRevisions, observed)
-		}
-		return FrozenFrontWorkerObservation{Policies: policyRevisions, Leases: leaseRevisions}, nil
+		leases, err := observeReleasedFrontWorkerLeases(ctx, client, config)
+		return FrozenFrontWorkerObservation{Policies: policyRevisions, Leases: leases}, err
 	}
 	before, err := read()
 	if err != nil {
@@ -217,6 +199,29 @@ func ObserveFrozenFrontWorkerBoundary(ctx context.Context, client kubernetes.Int
 		return FrozenFrontWorkerObservation{}, errors.New("frozen Front/Worker policies or Leases changed during readback")
 	}
 	return after, nil
+}
+
+func observeReleasedFrontWorkerLeases(ctx context.Context, client kubernetes.Interface, config FrontWorkerCutover) ([]FrontWorkerLeaseObservation, error) {
+	leases := client.CoordinationV1().Leases(config.Namespace)
+	names := append([]string{FrontWorkerGroupLeaseName(config.Group)}, config.ComponentLeases...)
+	observations := make([]FrontWorkerLeaseObservation, 0, len(names))
+	for _, name := range names {
+		observed := FrontWorkerLeaseObservation{Name: name}
+		lease, err := leases.Get(ctx, name, metav1.GetOptions{})
+		if !apierrors.IsNotFound(err) {
+			if err != nil {
+				return nil, fmt.Errorf("read Front/Worker Lease %s: %w", name, err)
+			}
+			if lease.Name != name || lease.Namespace != config.Namespace ||
+				lease.UID == "" || lease.ResourceVersion == "" || lease.DeletionTimestamp != nil ||
+				(lease.Spec.HolderIdentity != nil && *lease.Spec.HolderIdentity != "") {
+				return nil, fmt.Errorf("Front/Worker Lease %s still has a holder or its release is unproven", name)
+			}
+			observed.UID, observed.Revision = string(lease.UID), lease.ResourceVersion
+		}
+		observations = append(observations, observed)
+	}
+	return observations, nil
 }
 
 // ObserveFrontWorkerCutover reads the exact admission policy and binding

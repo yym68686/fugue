@@ -30,6 +30,7 @@ import (
 
 const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
+       fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
        fugue-production-control shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID
@@ -76,6 +77,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "sign-execution-witness":
+		return signExecutionWitness(args[1:], out, now)
 	case "render-front-worker-cutover", "observe-front-worker-cutover":
 		return frontWorkerCutover(ctx, args, out)
 	case "draft-front-worker":
@@ -802,18 +805,18 @@ func readSubmission(path string) (productioncontrol.Submission, error) {
 func readSigningKey(path string) (ed25519.PrivateKey, error) {
 	raw, err := readFile(path, 4096, true)
 	if err != nil {
-		return nil, errors.New("approval key must be a private owner-only regular file")
+		return nil, errors.New("signing key must be a private owner-only regular file")
 	}
 	defer clear(raw)
 	block, remainder := pem.Decode(raw)
 	if block == nil || block.Type != "PRIVATE KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(remainder)) != 0 {
-		return nil, errors.New("approval key is not one PKCS#8 PEM private key")
+		return nil, errors.New("signing key is not one PKCS#8 PEM private key")
 	}
 	defer clear(block.Bytes)
 	value, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	key, ok := value.(ed25519.PrivateKey)
 	if err != nil || !ok {
-		return nil, errors.New("approval key is not Ed25519")
+		return nil, errors.New("signing key is not Ed25519")
 	}
 	return key, nil
 }
