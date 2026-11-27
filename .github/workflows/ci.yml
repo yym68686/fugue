@@ -1173,6 +1173,7 @@ jobs:
       observation_writer_handoff: ${{ steps.observation_writer_handoff.outputs.selected }}
       quality_evidence_rehearsed: ${{ steps.quality_evidence_rehearsal.outputs.verified }}
       quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
+      storage_audit_worker_rehearsed: ${{ steps.storage_audit_worker_rehearsal.outputs.verified }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1366,6 +1367,18 @@ jobs:
           go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
+      - name: Rehearse storage audit standby and restart on the pinned PostgreSQL image
+        id: storage_audit_worker_rehearsal
+        if: ${{ contains(fromJSON(steps.release.outputs.release_components || '[]'), 'storage-audit-worker') }}
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+          binary="$RUNNER_TEMP/fugue-storage-audit-rehearsal-worker"
+          CGO_ENABLED=0 go build -trimpath -o "$binary" ./cmd/fugue-storage-audit-worker
+          python3 -m unittest scripts.test_verify_storage_audit_worker
+          python3 -m scripts.rehearse_storage_lifecycle_audit --worker "$binary" --postgres-image "$pg_image"
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Upload the immutable release plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -4680,6 +4693,58 @@ jobs:
           python3 -m scripts.provision_quality_evidence_retention deploy/releases/observation-worker/database.json --apply
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
+  deploy_storage_audit_worker:
+    needs: [prepush, component-build, deploy_schema, observability_configuration, storage_policy]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.storage_audit_worker_rehearsed == 'true' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && needs.observability_configuration.result == 'success' && needs.storage_policy.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'storage-audit-worker') }}
+    timeout-minutes: 18
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-storage-audit-worker, cancel-in-progress: false, queue: max}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Bind the initial storage audit standby credential and policy
+        run: |
+          set -euo pipefail
+          intent=deploy/releases/storage-audit-worker/intent.json
+          policy=deploy/environments/production/storage-policy/policy.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/storage-audit-worker deploy/releases/components.json "$policy" deploy/environments/production/observability/scrape-policy.json deploy/environments/production/cnpg-controller/release.json internal/schemamigrate/storage_lifecycle_audit.sql internal/storageaudit scripts/provision_storage_lifecycle_audit.py scripts/provision_observation_worker_database.py scripts/verify_storage_audit_worker.py scripts/rehearse_storage_lifecycle_audit.py .github/workflows/ci.yml
+          previous=$(jq -er '.expectedPreviousPresent | select(type == "boolean") | tostring' "$intent")
+          if [[ "$previous" == false ]]; then
+            python3 -m scripts.provision_storage_lifecycle_audit deploy/releases/storage-audit-worker/database.json "$policy" --apply
+          else
+            # An ordinary worker upgrade never reapplies the initial SQL
+            # capability or changes its current executor or audit policy.
+            git diff --exit-code HEAD^ HEAD -- deploy/releases/storage-audit-worker/database.json internal/schemamigrate/storage_lifecycle_audit.sql
+          fi
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: storage-audit-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Observe the exact audit worker, database and independent Prometheus scrape
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/storage-audit-worker deploy/environments/production/storage-policy deploy/environments/production/observability/scrape-policy.json internal/storageaudit scripts/verify_storage_audit_worker.py scripts/provision_storage_lifecycle_audit.py .github/workflows/ci.yml
+          args=()
+          if jq -e '.expectedPreviousPresent == false' deploy/releases/storage-audit-worker/intent.json >/dev/null; then
+            args+=(--standby)
+          fi
+          python3 -m scripts.verify_storage_audit_worker deploy/releases/storage-audit-worker/database.json \
+            deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json \
+            "$RUNNER_TEMP/fugue-component-artifact/fugue-storage-audit-worker-artifact-receipt.json" "$GITHUB_SHA" "${args[@]}" \
+            >"$RUNNER_TEMP/fugue-storage-audit-worker-observed.json"
+      - name: Retain independent storage audit evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-storage-audit-worker-observed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-storage-audit-worker-observed.json
+          if-no-files-found: error
+          retention-days: 30
 
   observation_writer_handoff:
     needs: prepush

@@ -264,6 +264,9 @@ release-file	deploy/releases/schema/deployment.json	migrate	native release catal
 release-file	deploy/releases/schema/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/ssh-control/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/ssh-control/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/storage-audit-worker/database.json	migrate	native scoped database role provisioning and storage audit ownership
+release-file	deploy/releases/storage-audit-worker/intent.json	migrate	import live authority and predecessor for native digest-bound release
+release-file	deploy/releases/storage-audit-worker/resources.json	migrate	native release catalog with verified runtime bindings
 release-file	deploy/releases/telemetry/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/telemetry/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
 release-file	deploy/releases/telemetry/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
@@ -320,6 +323,7 @@ release-lane	observation-worker	migrate	native digest-bound release keyed by sta
 release-lane	runtime-agent-canary	migrate	native digest-bound release keyed by stable resource identity
 release-lane	schema	migrate	native digest-bound release keyed by stable resource identity
 release-lane	ssh-control	migrate	native digest-bound release keyed by stable resource identity
+release-lane	storage-audit-worker	migrate	native digest-bound release and storage audit readiness verification
 release-lane	telemetry	migrate	native digest-bound release keyed by stable resource identity
 script	scripts/activate_agent_edge_policy.py	migrate	native platform policy and reconciliation
 script	scripts/apply_fugue_traffic_safety.sh	migrate	native platform policy and reconciliation
@@ -408,6 +412,7 @@ script	scripts/promote_dns_authority.py	migrate	native DNS policy and reconcilia
 script	scripts/provision_observation_worker_database.py	migrate	native database ownership and scoped credential provisioning
 script	scripts/provision_quality_evidence_retention.py	migrate	native maintenance role provisioning with standby and readiness verification
 script	scripts/provision_runtime_agent_identity.py	migrate	native platform policy and reconciliation
+script	scripts/provision_storage_lifecycle_audit.py	migrate	native scoped database role provisioning and storage audit ownership
 script	scripts/publish_agent_edge_shadow.py	migrate	native platform policy and reconciliation
 script	scripts/publish_diagnostic_catalog.py	migrate	native administrative operation or build interface
 script	scripts/publish_node_resource_policy.py	migrate	native policy, observation or maintenance
@@ -436,6 +441,7 @@ script	scripts/recover_longhorn_snapshot.py	migrate	native data and storage main
 script	scripts/refresh_producer_dependencies.py	migrate	native platform policy and reconciliation
 script	scripts/rehearse_edge_origin_relay.sh	migrate	unprivileged build check or scoped runtime verification
 script	scripts/rehearse_observation_writer_fence.sh	migrate	unprivileged database transition rehearsal
+script	scripts/rehearse_storage_lifecycle_audit.py	migrate	disposable database checks for native provisioning and standby safety
 script	scripts/release_edge_origin_relay_policy.py	migrate	Guardian Front/Worker coordination
 script	scripts/release_external_controller.py	migrate	native administrative operation or build interface
 script	scripts/release_idle_front_standby.py	migrate	Guardian Front/Worker coordination
@@ -484,6 +490,7 @@ script	scripts/verify_observation_writer_handoff.py	migrate	native verified data
 script	scripts/verify_registry_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_transport.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_storage_audit_worker.py	migrate	independent native readiness, database ownership and scrape verification
 workflow-job	.github/workflows/build-cli.yml#package	migrate	unprivileged source checks or build
 workflow-job	.github/workflows/ci.yml#agent_edge_activation	migrate	native platform policy and reconciliation
 workflow-job	.github/workflows/ci.yml#agent_edge_shadow_policy	migrate	native platform policy and reconciliation
@@ -517,6 +524,7 @@ workflow-job	.github/workflows/ci.yml#deploy_release_guardian	migrate	native dig
 workflow-job	.github/workflows/ci.yml#deploy_runtime_agent	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_schema	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_ssh_control	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_storage_audit_worker	migrate	native digest-bound release, scoped provisioning and independent readiness verification
 workflow-job	.github/workflows/ci.yml#deploy_telemetry	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#diagnostic_packages	migrate	native administrative operation or build interface
 workflow-job	.github/workflows/ci.yml#diagnostics_configuration	migrate	native administrative operation or build interface

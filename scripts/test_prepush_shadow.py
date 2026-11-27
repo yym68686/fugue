@@ -19,6 +19,10 @@ def pkg(path, **fields):
     }
 
 
+def repository_consumers():
+    return [pkg(path.removeprefix("./")) for path in sorted(shadow.REPOSITORY_TEST_CONSUMERS)]
+
+
 class SelectionTest(unittest.TestCase):
     def setUp(self):
         self.graph = [
@@ -73,7 +77,7 @@ class SelectionTest(unittest.TestCase):
             patch.object(prepush, "changed_files", return_value=["domain/impl.go"]),
             patch.object(prepush, "affected_test_commands", return_value=[["go", "test", "./other", "-run", "^TestX$"]]),
             patch.object(prepush, "run", return_value=(0, "")),
-            patch.object(shadow, "packages_from_stream", return_value=[pkg("domain")]),
+            patch.object(shadow, "packages_from_stream", return_value=[pkg("domain"), *repository_consumers()]),
             patch.object(prepush, "ROOT", ROOT),
             patch.object(prepush, "git_output", return_value=b"abc\n"),
         ):
@@ -138,7 +142,7 @@ class SelectionTest(unittest.TestCase):
             oracle = run(["go", "test", "-count=1", "./..."])
             for result in (witness, oracle):
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("projection drift", result.stdout)
+                self.assertIn("projection drift", result.stdout, result.stderr)
 
     def test_literal_source_reader_is_selected_but_is_not_a_build_target(self):
         path = "internal/observability/pipeline.go"
@@ -155,6 +159,75 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(shadow.select([path], [owner], ROOT)["scope"], "full")
         unrelated = shadow.select(["internal/observability/impl_test.go"], [owner, reader], ROOT)
         self.assertEqual(unrelated["goTests"], [["go", "test", "./internal/observability"]])
+
+    def test_repository_reader_covers_runtime_and_test_only_changes_uncached(self):
+        audits = repository_consumers()
+        owner = pkg("domain")
+        for name, scope, builds in [
+            ("impl.go", "dependency-closure", [["go", "build", "-o", os.devnull, "./domain"]]),
+            ("impl_test.go", "test-only", []),
+        ]:
+            with self.subTest(name=name):
+                path = f"domain/{name}"
+                kwargs = {"repository_tests": shadow.REPOSITORY_TEST_CONSUMERS}
+                plan = shadow.select([path], [owner, *audits], ROOT, **kwargs)
+                self.assertEqual(plan["scope"], scope)
+                self.assertEqual(plan["goTests"], [
+                    ["go", "test", "./domain"],
+                    ["go", "test", "-count=1", "./internal/declarativerelease", "./internal/platformsafety"],
+                ])
+                self.assertEqual(plan["goBuilds"], builds)
+                self.assertEqual(shadow.select([path], [owner, *audits[1:]], ROOT, **kwargs)["scope"], "full")
+
+    def test_report_keeps_repository_audit_when_the_go_graph_has_no_edge(self):
+        with (
+            patch.object(shadow, "git_paths", return_value=["domain/impl_test.go"]),
+            patch.object(prepush, "changed_files", return_value=["domain/impl_test.go"]),
+            patch.object(prepush, "affected_test_commands", return_value=[]),
+            patch.object(prepush, "run", return_value=(0, "")),
+            patch.object(shadow, "packages_from_stream", return_value=[pkg("domain"), *repository_consumers()]),
+            patch.object(prepush, "ROOT", ROOT),
+            patch.object(prepush, "git_output", return_value=b"abc\n"),
+        ):
+            plan = shadow.report("HEAD")
+        self.assertEqual(plan["scope"], "test-only")
+        self.assertIn(
+            ["go", "test", "-count=1", "./internal/declarativerelease", "./internal/platformsafety"],
+            plan["goTests"],
+        )
+        self.assertEqual(plan["goBuilds"], [])
+
+    def test_image_tracking_guard_is_a_runtime_source_edge_without_a_build_edge(self):
+        audit = pkg("internal/imagetracking")
+        options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
+        for path in ("internal/unrelated", "cmd/unrelated"):
+            with self.subTest(path=path):
+                owner = pkg(path)
+                plan = shadow.select([path + "/impl.go"], [owner, audit], ROOT, **options)
+                self.assertEqual(plan["goTests"], [
+                    ["go", "test", "./" + path],
+                    ["go", "test", "-count=1", "./internal/imagetracking"],
+                ])
+                self.assertEqual(plan["goBuilds"], [["go", "build", "-o", os.devnull, "./" + path]])
+                self.assertEqual(shadow.select([path + "/impl.go"], [owner], ROOT, **options)["scope"], "full")
+                self.assertEqual(shadow.select([path + "/impl_test.go"], [owner], ROOT, **options)["scope"], "test-only")
+
+    def test_report_installs_the_image_tracking_source_edge(self):
+        with (
+            patch.object(shadow, "git_paths", return_value=["internal/anotherdomain/impl.go"]),
+            patch.object(prepush, "changed_files", return_value=[]),
+            patch.object(prepush, "run", return_value=(0, "")),
+            patch.object(shadow, "packages_from_stream", return_value=[
+                pkg("internal/anotherdomain"), pkg("internal/imagetracking"), *repository_consumers(),
+            ]),
+            patch.object(prepush, "ROOT", ROOT),
+            patch.object(prepush, "git_output", return_value=b"abc\n"),
+        ):
+            plan = shadow.report("HEAD")
+        self.assertEqual(plan["scope"], "dependency-closure")
+        self.assertIn("./internal/imagetracking", plan["goTests"][-1])
+        self.assertIn("-count=1", plan["goTests"][-1])
+        self.assertNotIn("./internal/imagetracking", plan["goBuilds"][0])
 
     def test_tool_dependency_reaches_the_command_contract_without_an_import(self):
         dep = pkg("render")
@@ -215,7 +288,7 @@ class SelectionTest(unittest.TestCase):
             git("add", ".")
             git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "base")
             (root / "domain/domain.go").write_text(files["domain/domain.go"].replace("return 1", "return 2"))
-            with patch.object(prepush, "ROOT", root):
+            with patch.object(prepush, "ROOT", root), patch.object(shadow, "REPOSITORY_TEST_CONSUMERS", set()):
                 result = shadow.compare_targets("HEAD", ["linux/amd64", "windows/amd64", "linux/amd64"])
             self.assertEqual(result["disposition"], "full-verification-required")
             self.assertFalse(result["productionAuthorization"])

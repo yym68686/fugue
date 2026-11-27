@@ -12,6 +12,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
 | Node host policy (installer side) | The host policy module owns the Journald and ZRAM shell fragments; API embeds them in the existing updater and join contracts. | Host-side staging, verification and rollback remain in the original shell transaction. No Controller desired-state or Store mutation was moved by this extraction. | Shell behavior is verified from the host policy package; a small API contract test proves the installer renders the exact payload. |
 | Managed PostgreSQL image migration | API authorizes, previews and submits the command; the image migration module owns the stated plan, durable witness, execution order, and settlement decision. Controller binds the module to one already claimed operation and provides Kubernetes and SQL observations and guarded mutations. | Store keeps admission, binding locks and JSON/PostgreSQL completion transactions. Completion uses the domain's evidence check and updates the backing service, not the consuming app. | Domain tests verify loss of the PATCH response and operation ownership without importing Controller or Store. API, Controller and Store retain their HTTP, live-platform and transaction contract tests. |
+| Registry-backed image storage billing | One domain owns registry measurement, deduplication and the API's per-tenant refresh scheduling. API and Controller keep their respective triggers and provide registry adapters. | The Store port is bound to one tenant, exposes the two inventory reads, and commits only measured image storage through the existing accrual transaction. It cannot change balances, caps, or operations. | Domain tests exercise measurement, failure handling and coalescing. An HTTP contract covers scheduled storage updates and Store tests cover ledger accrual. |
 
 For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
@@ -43,7 +44,13 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   Run these consumers uncached: child-process inputs may not invalidate the
   test result cache. A missing declared consumer or an unowned fixture still
   selects uncached full Go tests. This is not an inventory of every implicit
-  dependency.
+  dependency. In narrower scopes, the tracked-source business-coupling
+  and retired release mode audits also run uncached for both runtime and
+  test-only edits. They scan the tracked tree regardless of which packages
+  import the changed source. The image-tracking composition guard also runs
+  uncached for non-test Go files under `internal` and `cmd`: a package can
+  incorrectly acquire the tracking write capability without importing the
+  tracking implementation.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,

@@ -23,6 +23,67 @@ connection preparation are not durable background operations.
 
 This is the target allocation, not a claim that these tasks have moved.
 
+### Storage lifecycle audit worker
+
+The `fugue-storage-audit-worker` candidate requires its own database login.
+That login can invoke a fixed sampler and read the redacted progress view;
+it cannot read the underlying business tables, fetch archive bodies, edit
+the policy, or alter the sample. The function runs as a separate NOLOGIN role
+with only the required source metadata columns and write access to its own
+progress row. The administrative helper sets a transaction-local no-spill
+limit without granting the caller a PostgreSQL setting privilege.
+
+A bounded page, its four private cursors, and its attempt result are committed
+together. A failed read retains the last complete sample and cursor; a
+changed policy starts a fresh sweep. PostgreSQL enforces the minimum period
+and keeps a missed reference unknown; no audit outcome authorizes retirement.
+Reinstalling the capability does not enable it or reset its owner. A rollback
+must keep the worker owner after activation; the policy can independently
+disable sampling without restoring the legacy executor.
+
+`FUGUE_STORAGE_LIFECYCLE_HANDOFF_ENABLED=true` is API startup configuration,
+not ownership activation. Set it only after the capability is installed with
+`owner=api`, and grant the API only `USAGE` on `fugue_storage_audit` and
+`SELECT` on `lifecycle_status_v1` in that schema. The API checks ownership
+under a shared advisory lock on the same PostgreSQL session as its legacy
+read-only scan. The SQL transfer refuses to change ownership while that lock
+is held. Once an API process observes `owner=worker`, it does not resume that
+scan even if the status view becomes temporarily unavailable. The existing
+API-local policy refresh projects the last durable sample into the unchanged
+diagnostic response; neither a diagnostic request nor a metrics scrape reads
+PostgreSQL. The owner also exclusively exports the existing lifecycle metrics.
+
+The standby installer verifies the CNPG cluster and database identity, binds
+a new immutable Secret to a dedicated login, and only grants the API access
+to the redacted status view. An installer retry cannot replace an active
+owner or a policy with a different digest. Run it only from a declarative
+release; it is not an additional production release path.
+
+First release `storage-audit-worker` on its own component lane. It rehearses the
+checked-in SQL and the actual worker's restart on the pinned production
+PostgreSQL image, installs the standby capability, and retains a read-only
+receipt for the exact Ready workload, matching persisted policy and active
+Prometheus scrape. The initial receipt must report `owner=api` and zero
+committed worker passes. No API rollout is required for this stage.
+
+Then roll out the compatible API with its gate enabled. Do not
+activate until the actual deployed API and its immutable rollback target
+both obey the gate, the worker's scrape is present under the namespace used
+by the existing capacity alerts, and API policy and worker policy digests
+match. Transfer is a separate release step. Validate a new durable pass and
+the existing thresholds after transfer; do not reset the owner to recover
+from a failed check. The standby release does not enable the API flag or
+transfer execution. Subsequent worker image releases do not rerun initial
+credential or SQL provisioning.
+
+Before enabling, exercise both the SQL and the worker restart against a
+disposable database:
+
+```sh
+go build -o /tmp/fugue-storage-audit-worker ./cmd/fugue-storage-audit-worker
+python3 -m scripts.rehearse_storage_lifecycle_audit --worker /tmp/fugue-storage-audit-worker
+```
+
 The PostgreSQL billing integration test uses two separate pools against the
 same database. Warming the first pool prepares all four statements there and
 none on the second pool. Warming the second pool directly prepares those same

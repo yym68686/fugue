@@ -64,6 +64,9 @@ func main() {
 	}
 	store.ConfigureDatabasePool(cfg.DatabaseMaxIdleConnections, cfg.DatabaseConnectionMaxIdleTime)
 	store.ConfigureSSHIdentityKeyFile(cfg.SSHIdentityKeyringFile)
+	if os.Getenv("FUGUE_STORAGE_LIFECYCLE_HANDOFF_ENABLED") == "true" {
+		store.EnableStorageLifecycleHandoff()
+	}
 
 	authenticator := auth.New(store, cfg.BootstrapAdminKey)
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey

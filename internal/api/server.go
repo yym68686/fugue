@@ -23,6 +23,7 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
+	"fugue/internal/imagebilling"
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
@@ -150,7 +151,7 @@ type Server struct {
 	nodeUpdaterEdgeIdentityLookups         map[string]uint64
 	consoleGalleryCache                    expiringResponseCache[consoleGalleryResponse]
 	consoleProjectsSnapshotCache           expiringResponseCache[consoleProjectsSnapshotResponse]
-	billingImageStorageRefresh             billingImageStorageRefreshScheduler
+	billingImageStorageRefresh             *imagebilling.Scheduler
 	sourceUploadSlots                      chan struct{}
 	newLogsClient                          func(namespace string) (appLogsClient, error)
 	newFilesystemPodLister                 func(namespace string) (filesystemPodLister, error)
@@ -328,7 +329,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		consoleProjectsSnapshotCache:           newExpiringResponseCache[consoleProjectsSnapshotResponse](defaultConsoleProjectsSnapshotCacheTTL),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
-		billingImageStorageRefresh:             newBillingImageStorageRefreshScheduler(0, 0),
+		billingImageStorageRefresh:             imagebilling.NewScheduler(0, 0),
 		newLogsClient: func(namespace string) (appLogsClient, error) {
 			return newKubeLogsClient(namespace)
 		},

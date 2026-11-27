@@ -49,6 +49,33 @@
       ]
     },
     {
+      "job_name": "fugue-storage-audit-worker",
+      "metrics_path": "/metrics",
+      "scrape_interval": "30s",
+      "scrape_timeout": "5s",
+      "sample_limit": 120,
+      "body_size_limit": "64KB",
+      "kubernetes_sd_configs": [
+        {"role": "pod", "namespaces": {"names": ["fugue-system"]}}
+      ],
+      "relabel_configs": [
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+            "__meta_kubernetes_pod_container_name",
+            "__meta_kubernetes_pod_container_port_name",
+            "__meta_kubernetes_pod_phase"
+          ],
+          "regex": "fugue-storage-audit-worker;storage-audit-worker;metrics;Running",
+          "action": "keep"
+        },
+        {"source_labels": ["__meta_kubernetes_pod_name"], "target_label": "pod"},
+        {"source_labels": ["__meta_kubernetes_pod_uid"], "target_label": "pod_uid"},
+        {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
+        {"target_label": "component", "replacement": "storage-audit-worker"}
+      ]
+    },
+    {
       "job_name": "fugue-quality-evidence-retention",
       "metrics_path": "/maintenance/metrics",
       "scrape_interval": "30s",
