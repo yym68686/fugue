@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -24,7 +25,11 @@ import (
 const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
-       fugue-production-control record-approval JOURNAL_CONFIG APPROVAL`
+       fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
+       fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
+       fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
+       fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
+       fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -41,6 +46,76 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "draft-participation":
+		if len(args) != 4 && len(args) != 6 {
+			return errors.New(usage)
+		}
+		var previous productioncontrol.Version
+		if len(args) == 6 {
+			generation, err := strconv.ParseInt(args[4], 10, 64)
+			if err != nil || generation < 1 || args[5] == "" {
+				return errors.New("invalid participation predecessor")
+			}
+			previous = productioncontrol.Version{Generation: generation, Digest: args[5]}
+		}
+		raw, err := readFile(args[3], productioncontrol.MaxParticipationPolicyBytes, false)
+		if err != nil {
+			return err
+		}
+		submission, err := productioncontrol.DraftParticipationTopology(args[1], args[2], previous, raw)
+		if err != nil {
+			return err
+		}
+		return emit(submission)
+	case "store-participation":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		entry, err := record(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, cluster string) (productioncontrol.Recorded, error) {
+			return j.ActivateParticipationTopology(ctx, cluster, args[2], args[3], args[4])
+		})
+		if err != nil {
+			return err
+		}
+		return emit(entry)
+	case "read-participation":
+		if len(args) != 2 && len(args) != 3 {
+			return errors.New(usage)
+		}
+		var generation int64
+		if len(args) == 3 {
+			var err error
+			generation, err = strconv.ParseInt(args[2], 10, 64)
+			if err != nil || generation < 1 {
+				return errors.New("invalid participation topology generation")
+			}
+		}
+		return withJournal(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			var topology productioncontrol.VerifiedParticipationTopology
+			var err error
+			if generation == 0 {
+				topology, err = j.ReadParticipationTopology(ctx, cluster)
+			} else {
+				topology, err = j.ReadParticipationTopologyVersion(ctx, cluster, generation)
+			}
+			if err != nil {
+				return err
+			}
+			return emit(topology)
+		})
+	case "migrate-journal":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		cfg, _, _, err := productioncontrol.LoadJournalEndpoint(args[1])
+		if err != nil {
+			return err
+		}
+		db := stdlib.OpenDB(*cfg)
+		defer db.Close()
+		ctx, cancel := context.WithTimeout(ctx, time.Minute)
+		defer cancel()
+		return productioncontrol.ApplySchema(ctx, db)
 	case "inspect":
 		if len(args) != 2 {
 			return errors.New(usage)
@@ -126,21 +201,31 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 }
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {
+	var entry productioncontrol.Recorded
+	err := withJournal(ctx, path, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+		var err error
+		entry, err = fn(ctx, j, cluster)
+		return err
+	})
+	return entry, err
+}
+
+func withJournal(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) error) error {
 	cfg, keys, cluster, err := productioncontrol.LoadJournalEndpoint(path)
 	if err != nil {
-		return productioncontrol.Recorded{}, err
+		return err
 	}
 	db := stdlib.OpenDB(*cfg)
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	j, err := productioncontrol.NewJournal(db, keys)
 	if err != nil {
-		return productioncontrol.Recorded{}, err
+		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
-		return productioncontrol.Recorded{}, errors.New("production journal is unavailable")
+		return errors.New("production journal is unavailable")
 	}
 	return fn(ctx, j, cluster)
 }

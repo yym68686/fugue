@@ -88,6 +88,21 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+CREATE TABLE IF NOT EXISTS fugue_control.participation_topologies (
+    cluster_id text NOT NULL,
+    resource_id text NOT NULL CHECK (resource_id = 'topology/node-participation'),
+    generation bigint NOT NULL CHECK (generation > 0),
+    policy_digest text NOT NULL,
+    intent_digest text NOT NULL UNIQUE,
+    approval_digest text NOT NULL,
+    actor text NOT NULL,
+    recorded_at timestamptz NOT NULL,
+    PRIMARY KEY (cluster_id, generation),
+    FOREIGN KEY (intent_digest, cluster_id, resource_id) REFERENCES fugue_control.intents (digest, cluster_id, resource_id),
+    FOREIGN KEY (approval_digest, intent_digest) REFERENCES fugue_control.approvals (digest, intent_digest)
+);
+
 REVOKE ALL ON FUNCTION fugue_control.audit_execution_transition() FROM PUBLIC;
 
 -- CREATE TABLE IF NOT EXISTS does not upgrade the original audit CHECK.
@@ -96,7 +111,7 @@ REVOKE ALL ON FUNCTION fugue_control.audit_execution_transition() FROM PUBLIC;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
-        WHERE conrelid='fugue_control.audit'::pg_catalog.regclass AND conname='audit_event_kind_v2') THEN
+        WHERE conrelid='fugue_control.audit'::pg_catalog.regclass AND conname IN ('audit_event_kind_v2', 'audit_event_kind_v3')) THEN
         LOCK TABLE fugue_control.execution_claims, fugue_control.execution_results, fugue_control.execution_launches
             IN SHARE ROW EXCLUSIVE MODE;
         ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_kind_check;
@@ -116,6 +131,21 @@ BEGIN
             FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('execution.completed');
         CREATE TRIGGER execution_launch_audit AFTER INSERT ON fugue_control.execution_launches
             FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('execution.launched');
+    END IF;
+END;
+$$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conrelid='fugue_control.audit'::pg_catalog.regclass AND conname='audit_event_kind_v3') THEN
+        ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_event_kind_v2;
+        ALTER TABLE fugue_control.audit ADD CONSTRAINT audit_event_kind_v3 CHECK (kind IN (
+            'intent.recorded', 'approval.recorded', 'execution.claimed', 'execution.launched', 'execution.completed',
+            'topology.participation_activated'
+        ));
+        CREATE TRIGGER participation_topology_audit AFTER INSERT ON fugue_control.participation_topologies
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('topology.participation_activated');
     END IF;
 END;
 $$;

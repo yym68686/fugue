@@ -157,8 +157,9 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		DROP TRIGGER execution_claim_audit ON fugue_control.execution_claims;
 		DROP TRIGGER execution_result_audit ON fugue_control.execution_results;
 		DROP TRIGGER execution_launch_audit ON fugue_control.execution_launches;
+		DROP TRIGGER participation_topology_audit ON fugue_control.participation_topologies;
 		DELETE FROM fugue_control.audit WHERE kind LIKE 'execution.%';
-		ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_event_kind_v2;
+		ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_event_kind_v3;
 		ALTER TABLE fugue_control.audit ADD CONSTRAINT audit_kind_check CHECK (kind IN ('intent.recorded','approval.recorded'));
 	`); err != nil {
 		t.Fatal(err)
@@ -176,4 +177,5 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		t.Fatalf("historical launch was not backfilled exactly: count=%d error=%v", launches, err)
 	}
 	t.Run("independent-witness-gate", func(t *testing.T) { testPostgresWitnessGate(t, ctx, runtimeDB) })
+	t.Run("participation-topology", func(t *testing.T) { testPostgresParticipationTopology(t, ctx, db, runtimeDB) })
 }
