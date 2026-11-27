@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/productioncontrol/providergate"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -2209,6 +2210,7 @@ $$`,
 		updated_at TIMESTAMPTZ NOT NULL
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_fugue_platform_release_lanes_active ON fugue_platform_release_lanes (active_release_id) WHERE active_release_id <> ''`,
+	providergate.GlobalProducerFreezeSchema,
 	`CREATE TABLE IF NOT EXISTS fugue_platform_release_messages (
 		id TEXT PRIMARY KEY,
 		release_id TEXT NOT NULL REFERENCES fugue_platform_artifact_releases(id) ON DELETE CASCADE,

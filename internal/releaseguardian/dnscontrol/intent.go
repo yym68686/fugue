@@ -25,7 +25,7 @@ import (
 
 const (
 	Schema   = "fugue.native-global-dns-policy/v1"
-	Resource = "producer/global-policy"
+	Resource = productioncontrol.GlobalProducerPolicyResource
 )
 
 // Scope is shared by changes to the same global producer policy, even when

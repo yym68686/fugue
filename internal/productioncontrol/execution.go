@@ -247,6 +247,9 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if nodeScope != (intent.Operation == NodeParticipation) {
 			return false, errors.New("node participation execution must use its canonical resource boundary")
 		}
+		if (intent.ResourceID == GlobalProducerPolicyResource) != (intent.Operation == DNSMembership) {
+			return false, errors.New("global DNS execution must use its canonical producer resource boundary")
+		}
 		if nodeScope {
 			// Lock order is topology then resource. Activation uses the
 			// same topology lock before checking for outstanding claims.

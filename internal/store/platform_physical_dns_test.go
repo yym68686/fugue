@@ -205,3 +205,41 @@ func TestPhysicalDNSProducerReconfigurationPostgres(t *testing.T) {
 		t.Fatal("PostgreSQL configuration transition changed positive LKG", err)
 	}
 }
+
+// The freeze is checked by PostgreSQL itself, so the legacy generic release
+// and rollback APIs cannot escape the global producer's shared boundary.
+func TestGlobalProducerFreezeRejectsLegacyStoreMutationsPostgres(t *testing.T) {
+	f := physicalDNSReconfigurationFixture(t, disposablePhysicalDNSDatabase(t))
+	kind, scope := model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope
+	current, release, ok, err := f.s.GetActivePlatformArtifact(kind, scope, "shadow")
+	if err != nil || !ok || current.ID != f.old.ID {
+		t.Fatalf("missing producer baseline: %t %v", ok, err)
+	}
+	lkg, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.s.db.Exec(`UPDATE fugue_native_global_producer_gate SET frozen=TRUE,
+baseline_release_id=$1,baseline_fence=$2,baseline_digest=$3,evidence_digest=$4 WHERE singleton`,
+		release.ID, release.FencingToken, current.ContentHash, "sha256:"+strings.Repeat("b", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.release(); err == nil {
+		t.Fatal("exact legacy reconfiguration escaped the provider freeze")
+	}
+	if _, _, _, _, err := f.s.ReleasePlatformArtifact(f.next.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal()); err == nil {
+		t.Fatal("generic legacy release escaped the provider freeze")
+	}
+	if _, _, _, _, err := f.s.RollbackPlatformArtifact(f.old.ID, model.PlatformArtifactRollbackRequest{ReleaseChannel: "shadow", ToGeneration: f.next.Generation, Reason: "legacy fixture"}, testPlatformPrincipal()); err == nil {
+		t.Fatal("generic legacy rollback escaped the provider freeze")
+	}
+	after, selected, ok, err := f.s.GetActivePlatformArtifact(kind, scope, "shadow")
+	if err != nil || !ok || !reflect.DeepEqual(release, selected) || !reflect.DeepEqual(current, after) {
+		t.Fatalf("freeze changed selected producer: %t %v", ok, err)
+	}
+	still, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
+	if err != nil || !reflect.DeepEqual(lkg, still) {
+		t.Fatal("freeze changed serving LKG", err)
+	}
+}

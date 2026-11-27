@@ -37,6 +37,11 @@ const (
 	ParticipationTopology Operation = "participation_topology"
 )
 
+// GlobalProducerPolicyResource is the one publication boundary shared by
+// global DNS policy changes. A per-edge claim could allow two changes to
+// consume the same selected producer generation.
+const GlobalProducerPolicyResource = "producer/global-policy"
+
 type Intent struct {
 	ClusterID      string    `json:"clusterId"`
 	ResourceID     string    `json:"resourceId"`
