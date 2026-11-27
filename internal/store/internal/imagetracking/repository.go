@@ -1,0 +1,579 @@
+package imagetracking
+
+import (
+	"sort"
+	"strings"
+	"time"
+
+	"fugue/internal/model"
+)
+
+const (
+	appImageTrackingCheckRetentionLimit  = 200
+	appImageTrackingCheckRetentionWindow = 7 * 24 * time.Hour
+)
+
+func (s *Repository) UpsertAppImageTracking(tracking model.AppImageTracking) (model.AppImageTracking, error) {
+	tracking = normalizeAppImageTracking(tracking)
+	if tracking.AppID == "" || tracking.ImageRef == "" {
+		return model.AppImageTracking{}, s.invalidInput
+	}
+	if s.postgres {
+		return s.pgUpsertAppImageTracking(tracking)
+	}
+
+	var out model.AppImageTracking
+	err := s.file(true, func(state *Rows) error {
+		app, found := state.LookupApp(tracking.AppID)
+		if !found {
+			return s.notFound
+		}
+		if tracking.TenantID != "" && tracking.TenantID != app.TenantID {
+			return s.notFound
+		}
+		tracking.TenantID = app.TenantID
+
+		now := time.Now().UTC()
+		if index := findAppImageTrackingByApp(state, tracking.AppID); index >= 0 {
+			current := state.Trackings[index]
+			tracking.ID = current.ID
+			tracking.CreatedAt = current.CreatedAt
+			preserveAppImageTrackingObservedFields(&tracking, current)
+			tracking.UpdatedAt = now
+			state.Trackings[index] = tracking
+			out = tracking
+			return nil
+		}
+
+		tracking.ID = model.NewID("imgtrack")
+		tracking.CreatedAt = now
+		tracking.UpdatedAt = now
+		state.Trackings = append(state.Trackings, tracking)
+		out = tracking
+		return nil
+	})
+	return out, err
+}
+
+func (s *Repository) GetAppImageTracking(tenantID string, platformAdmin bool, appID string) (model.AppImageTracking, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return model.AppImageTracking{}, s.invalidInput
+	}
+	if s.postgres {
+		return s.pgGetAppImageTracking(tenantID, platformAdmin, appID)
+	}
+	var out model.AppImageTracking
+	err := s.file(false, func(state *Rows) error {
+		for _, tracking := range state.Trackings {
+			if !appImageTrackingMatchesFilter(tracking, model.AppImageTrackingFilter{
+				TenantID:      tenantID,
+				PlatformAdmin: platformAdmin,
+				AppID:         appID,
+			}) {
+				continue
+			}
+			out = tracking
+			return nil
+		}
+		return s.notFound
+	})
+	return out, err
+}
+
+func (s *Repository) ListAppImageTrackings(filter model.AppImageTrackingFilter) ([]model.AppImageTracking, error) {
+	filter = normalizeAppImageTrackingFilter(filter)
+	if s.postgres {
+		return s.pgListAppImageTrackings(filter)
+	}
+	out := []model.AppImageTracking{}
+	err := s.file(false, func(state *Rows) error {
+		for _, tracking := range state.Trackings {
+			if appImageTrackingMatchesFilter(tracking, filter) {
+				out = append(out, tracking)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].UpdatedAt.After(out[j].UpdatedAt)
+	})
+	return out, nil
+}
+
+func (s *Repository) RecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError string) (model.AppImageTracking, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.AppImageTracking{}, s.invalidInput
+	}
+	digest = normalizeImageDigest(digest)
+	if s.postgres {
+		return s.pgRecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError)
+	}
+	var out model.AppImageTracking
+	err := s.file(true, func(state *Rows) error {
+		index := findAppImageTrackingByID(state, id)
+		if index < 0 {
+			return s.notFound
+		}
+		now := time.Now().UTC()
+		applyAppImageTrackingCheck(&state.Trackings[index], digest, deliveryID, event, lastError, now)
+		out = state.Trackings[index]
+		return nil
+	})
+	return out, err
+}
+
+func (s *Repository) RecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event string) (model.AppImageTracking, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return model.AppImageTracking{}, s.invalidInput
+	}
+	digest = normalizeImageDigest(digest)
+	operationID = strings.TrimSpace(operationID)
+	if digest == "" || operationID == "" {
+		return model.AppImageTracking{}, s.invalidInput
+	}
+	if s.postgres {
+		return s.pgRecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event)
+	}
+	var out model.AppImageTracking
+	err := s.file(true, func(state *Rows) error {
+		index := findAppImageTrackingByID(state, id)
+		if index < 0 {
+			return s.notFound
+		}
+		now := time.Now().UTC()
+		applyAppImageTrackingQueued(&state.Trackings[index], digest, operationID, deliveryID, event, now)
+		out = state.Trackings[index]
+		return nil
+	})
+	return out, err
+}
+
+func (s *Repository) CreateAppImageTrackingCheck(check model.AppImageTrackingCheck) (model.AppImageTrackingCheck, error) {
+	check = normalizeAppImageTrackingCheck(check)
+	if check.AppID == "" || check.TrackingID == "" || check.ImageRef == "" || check.Decision == "" {
+		return model.AppImageTrackingCheck{}, s.invalidInput
+	}
+	if s.postgres {
+		return s.pgCreateAppImageTrackingCheck(check)
+	}
+	var out model.AppImageTrackingCheck
+	err := s.file(true, func(state *Rows) error {
+		trackingIndex := findAppImageTrackingByID(state, check.TrackingID)
+		if trackingIndex < 0 {
+			return s.notFound
+		}
+		tracking := state.Trackings[trackingIndex]
+		if check.TenantID != "" && check.TenantID != tracking.TenantID {
+			return s.notFound
+		}
+		if check.AppID != tracking.AppID {
+			return s.notFound
+		}
+		now := time.Now().UTC()
+		check.TenantID = tracking.TenantID
+		if check.ImageRef == "" {
+			check.ImageRef = tracking.ImageRef
+		}
+		if check.ID == "" {
+			check.ID = model.NewID("imgtrackchk")
+		}
+		if check.CheckedAt.IsZero() {
+			check.CheckedAt = now
+		}
+		state.Checks = append(state.Checks, check)
+		state.Checks = retainAppImageTrackingChecks(state.Checks, check.AppID, now)
+		out = check
+		return nil
+	})
+	return out, err
+}
+
+func (s *Repository) ListAppImageTrackingChecks(filter model.AppImageTrackingCheckFilter) ([]model.AppImageTrackingCheck, error) {
+	filter = normalizeAppImageTrackingCheckFilter(filter)
+	if s.postgres {
+		return s.pgListAppImageTrackingChecks(filter)
+	}
+	out := []model.AppImageTrackingCheck{}
+	err := s.file(false, func(state *Rows) error {
+		for _, check := range state.Checks {
+			if appImageTrackingCheckMatchesFilter(check, filter) {
+				out = append(out, check)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sortAppImageTrackingChecksNewestFirst(out)
+	if filter.Limit > 0 && len(out) > filter.Limit {
+		out = out[:filter.Limit]
+	}
+	return out, nil
+}
+
+func (s *Repository) QueueAppImageTrackingImport(app model.App, tracking model.AppImageTracking, requestedByType, requestedByID string) (model.Operation, error) {
+	tracking = normalizeAppImageTracking(tracking)
+	if app.ID == "" || tracking.AppID == "" || tracking.ImageRef == "" || tracking.AppID != app.ID {
+		return model.Operation{}, s.invalidInput
+	}
+	if app.TenantID == "" || tracking.TenantID != app.TenantID {
+		return model.Operation{}, s.notFound
+	}
+
+	spec := s.cloneAppSpec(&app.Spec)
+	if spec == nil {
+		return model.Operation{}, s.invalidInput
+	}
+	if spec.Replicas < 1 {
+		spec.Replicas = 1
+	}
+	if strings.TrimSpace(spec.RuntimeID) == "" {
+		spec.RuntimeID = "runtime_managed_shared"
+	}
+	if spec.Workspace != nil {
+		spec.Workspace.ResetToken = model.NewID("workspace-reset")
+	}
+
+	source := model.AppSource{
+		Type:     model.AppSourceTypeDockerImage,
+		ImageRef: tracking.ImageRef,
+	}
+	inheritImageTrackingSourceMetadata(&source, app, tracking.ImageRef)
+
+	return s.createOperation(model.Operation{
+		TenantID:            app.TenantID,
+		Type:                model.OperationTypeImport,
+		RequestedByType:     strings.TrimSpace(requestedByType),
+		RequestedByID:       strings.TrimSpace(requestedByID),
+		AppID:               app.ID,
+		DesiredSpec:         spec,
+		DesiredSource:       &source,
+		DesiredOriginSource: model.CloneAppSource(&source),
+	})
+}
+
+func inheritImageTrackingSourceMetadata(source *model.AppSource, app model.App, imageRef string) {
+	if source == nil {
+		return
+	}
+	for _, candidate := range imageTrackingSourceMetadataCandidates(app, imageRef) {
+		if candidate == nil {
+			continue
+		}
+		if strings.TrimSpace(source.ImageNameSuffix) == "" {
+			source.ImageNameSuffix = strings.TrimSpace(candidate.ImageNameSuffix)
+		}
+		if strings.TrimSpace(source.ComposeService) == "" {
+			source.ComposeService = strings.TrimSpace(candidate.ComposeService)
+		}
+		if len(source.ComposeDependsOn) == 0 && len(candidate.ComposeDependsOn) > 0 {
+			source.ComposeDependsOn = append([]string(nil), candidate.ComposeDependsOn...)
+		}
+		if strings.TrimSpace(source.DetectedProvider) == "" {
+			source.DetectedProvider = strings.TrimSpace(candidate.DetectedProvider)
+		}
+		if strings.TrimSpace(source.DetectedStack) == "" {
+			source.DetectedStack = strings.TrimSpace(candidate.DetectedStack)
+		}
+		if imageTrackingSourceMetadataComplete(source) {
+			return
+		}
+	}
+}
+
+func imageTrackingSourceMetadataCandidates(app model.App, imageRef string) []*model.AppSource {
+	base := []*model.AppSource{model.AppOriginSource(app), model.AppBuildSource(app), app.Source}
+	out := make([]*model.AppSource, 0, len(base)*2)
+	seen := make(map[*model.AppSource]struct{}, len(base))
+	for _, candidate := range base {
+		if candidate == nil {
+			continue
+		}
+		if strings.TrimSpace(candidate.Type) != model.AppSourceTypeDockerImage {
+			continue
+		}
+		if strings.TrimSpace(candidate.ImageRef) != strings.TrimSpace(imageRef) {
+			continue
+		}
+		out = append(out, candidate)
+		seen[candidate] = struct{}{}
+	}
+	for _, candidate := range base {
+		if candidate == nil {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func imageTrackingSourceMetadataComplete(source *model.AppSource) bool {
+	return strings.TrimSpace(source.ImageNameSuffix) != "" &&
+		strings.TrimSpace(source.ComposeService) != "" &&
+		strings.TrimSpace(source.DetectedProvider) != "" &&
+		strings.TrimSpace(source.DetectedStack) != ""
+}
+
+func normalizeAppImageTracking(tracking model.AppImageTracking) model.AppImageTracking {
+	tracking.ID = stripImageNUL(tracking.ID)
+	tracking.TenantID = stripImageNUL(tracking.TenantID)
+	tracking.AppID = stripImageNUL(tracking.AppID)
+	tracking.ImageRef = stripImageNUL(tracking.ImageRef)
+	tracking.LastOperationID = stripImageNUL(tracking.LastOperationID)
+	tracking.LastDeliveryID = stripImageNUL(tracking.LastDeliveryID)
+	tracking.LastEvent = stripImageNUL(tracking.LastEvent)
+	tracking.LastError = stripImageNUL(tracking.LastError)
+	tracking.ID = strings.TrimSpace(tracking.ID)
+	tracking.TenantID = strings.TrimSpace(tracking.TenantID)
+	tracking.AppID = strings.TrimSpace(tracking.AppID)
+	tracking.ImageRef = strings.TrimSpace(tracking.ImageRef)
+	tracking.LastSeenDigest = normalizeImageDigest(tracking.LastSeenDigest)
+	tracking.LastQueuedDigest = normalizeImageDigest(tracking.LastQueuedDigest)
+	tracking.LastDeployedDigest = normalizeImageDigest(tracking.LastDeployedDigest)
+	tracking.LastOperationID = strings.TrimSpace(tracking.LastOperationID)
+	tracking.LastDeliveryID = strings.TrimSpace(tracking.LastDeliveryID)
+	tracking.LastEvent = strings.TrimSpace(tracking.LastEvent)
+	tracking.LastError = strings.TrimSpace(tracking.LastError)
+	return tracking
+}
+
+func normalizeAppImageTrackingFilter(filter model.AppImageTrackingFilter) model.AppImageTrackingFilter {
+	filter.TenantID = strings.TrimSpace(filter.TenantID)
+	filter.AppID = strings.TrimSpace(filter.AppID)
+	filter.ImageRef = strings.TrimSpace(filter.ImageRef)
+	return filter
+}
+
+func normalizeAppImageTrackingCheck(check model.AppImageTrackingCheck) model.AppImageTrackingCheck {
+	check.ID = stripImageNUL(check.ID)
+	check.TenantID = stripImageNUL(check.TenantID)
+	check.AppID = stripImageNUL(check.AppID)
+	check.TrackingID = stripImageNUL(check.TrackingID)
+	check.ImageRef = stripImageNUL(check.ImageRef)
+	check.ObservedDigest = stripImageNUL(check.ObservedDigest)
+	check.CurrentAppDigest = stripImageNUL(check.CurrentAppDigest)
+	check.LastQueuedDigest = stripImageNUL(check.LastQueuedDigest)
+	check.LastDeployedDigest = stripImageNUL(check.LastDeployedDigest)
+	check.Decision = stripImageNUL(check.Decision)
+	check.SkipReason = stripImageNUL(check.SkipReason)
+	check.OperationID = stripImageNUL(check.OperationID)
+	check.ActiveOperationID = stripImageNUL(check.ActiveOperationID)
+	check.ResolverError = stripImageNUL(check.ResolverError)
+	check.DeliveryID = stripImageNUL(check.DeliveryID)
+	check.Event = stripImageNUL(check.Event)
+	check.ControllerPod = stripImageNUL(check.ControllerPod)
+	check.ControllerLeaderIdentity = stripImageNUL(check.ControllerLeaderIdentity)
+	check.ID = strings.TrimSpace(check.ID)
+	check.TenantID = strings.TrimSpace(check.TenantID)
+	check.AppID = strings.TrimSpace(check.AppID)
+	check.TrackingID = strings.TrimSpace(check.TrackingID)
+	check.ImageRef = strings.TrimSpace(check.ImageRef)
+	check.ObservedDigest = normalizeImageDigest(check.ObservedDigest)
+	check.CurrentAppDigest = normalizeImageDigest(check.CurrentAppDigest)
+	check.LastQueuedDigest = normalizeImageDigest(check.LastQueuedDigest)
+	check.LastDeployedDigest = normalizeImageDigest(check.LastDeployedDigest)
+	check.Decision = strings.TrimSpace(check.Decision)
+	check.SkipReason = strings.TrimSpace(check.SkipReason)
+	check.OperationID = strings.TrimSpace(check.OperationID)
+	check.ActiveOperationID = strings.TrimSpace(check.ActiveOperationID)
+	check.ResolverError = strings.TrimSpace(check.ResolverError)
+	check.DeliveryID = strings.TrimSpace(check.DeliveryID)
+	check.Event = strings.TrimSpace(check.Event)
+	check.ControllerPod = strings.TrimSpace(check.ControllerPod)
+	check.ControllerLeaderIdentity = strings.TrimSpace(check.ControllerLeaderIdentity)
+	if check.DurationMilliseconds < 0 {
+		check.DurationMilliseconds = 0
+	}
+	if !check.CheckedAt.IsZero() {
+		check.CheckedAt = check.CheckedAt.UTC()
+	}
+	return check
+}
+
+func normalizeAppImageTrackingCheckFilter(filter model.AppImageTrackingCheckFilter) model.AppImageTrackingCheckFilter {
+	filter.TenantID = strings.TrimSpace(filter.TenantID)
+	filter.AppID = strings.TrimSpace(filter.AppID)
+	filter.TrackingID = strings.TrimSpace(filter.TrackingID)
+	if filter.Limit < 0 {
+		filter.Limit = 0
+	}
+	if filter.Limit > appImageTrackingCheckRetentionLimit {
+		filter.Limit = appImageTrackingCheckRetentionLimit
+	}
+	return filter
+}
+
+func preserveAppImageTrackingObservedFields(next *model.AppImageTracking, current model.AppImageTracking) {
+	if next.LastSeenDigest == "" {
+		next.LastSeenDigest = current.LastSeenDigest
+	}
+	if next.LastQueuedDigest == "" {
+		next.LastQueuedDigest = current.LastQueuedDigest
+	}
+	if next.LastDeployedDigest == "" {
+		next.LastDeployedDigest = current.LastDeployedDigest
+	}
+	if next.LastOperationID == "" {
+		next.LastOperationID = current.LastOperationID
+	}
+	if next.LastDeliveryID == "" {
+		next.LastDeliveryID = current.LastDeliveryID
+	}
+	if next.LastEvent == "" {
+		next.LastEvent = current.LastEvent
+	}
+	if next.LastError == "" {
+		next.LastError = current.LastError
+	}
+	if next.LastCheckedAt == nil {
+		next.LastCheckedAt = current.LastCheckedAt
+	}
+	if next.LastTriggeredAt == nil {
+		next.LastTriggeredAt = current.LastTriggeredAt
+	}
+}
+
+func findAppImageTrackingByApp(state *Rows, appID string) int {
+	for idx, existing := range state.Trackings {
+		if strings.TrimSpace(existing.AppID) == appID {
+			return idx
+		}
+	}
+	return -1
+}
+
+func findAppImageTrackingByID(state *Rows, id string) int {
+	for idx, existing := range state.Trackings {
+		if strings.TrimSpace(existing.ID) == id {
+			return idx
+		}
+	}
+	return -1
+}
+
+func appImageTrackingMatchesFilter(tracking model.AppImageTracking, filter model.AppImageTrackingFilter) bool {
+	if !filter.PlatformAdmin && strings.TrimSpace(tracking.TenantID) != filter.TenantID {
+		return false
+	}
+	if filter.AppID != "" && strings.TrimSpace(tracking.AppID) != filter.AppID {
+		return false
+	}
+	if filter.ImageRef != "" && strings.TrimSpace(tracking.ImageRef) != filter.ImageRef {
+		return false
+	}
+	if filter.Enabled != nil && tracking.Enabled != *filter.Enabled {
+		return false
+	}
+	return true
+}
+
+func appImageTrackingCheckMatchesFilter(check model.AppImageTrackingCheck, filter model.AppImageTrackingCheckFilter) bool {
+	if !filter.PlatformAdmin && strings.TrimSpace(check.TenantID) != filter.TenantID {
+		return false
+	}
+	if filter.AppID != "" && strings.TrimSpace(check.AppID) != filter.AppID {
+		return false
+	}
+	if filter.TrackingID != "" && strings.TrimSpace(check.TrackingID) != filter.TrackingID {
+		return false
+	}
+	return true
+}
+
+func sortAppImageTrackingChecksNewestFirst(checks []model.AppImageTrackingCheck) {
+	sort.Slice(checks, func(i, j int) bool {
+		left := checks[i].CheckedAt
+		right := checks[j].CheckedAt
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return strings.Compare(checks[i].ID, checks[j].ID) > 0
+	})
+}
+
+func retainAppImageTrackingChecks(checks []model.AppImageTrackingCheck, appID string, now time.Time) []model.AppImageTrackingCheck {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return checks
+	}
+	cutoff := now.UTC().Add(-appImageTrackingCheckRetentionWindow)
+	out := checks[:0]
+	appChecks := []model.AppImageTrackingCheck{}
+	for _, check := range checks {
+		if strings.TrimSpace(check.AppID) != appID {
+			out = append(out, check)
+			continue
+		}
+		if !check.CheckedAt.IsZero() && check.CheckedAt.Before(cutoff) {
+			continue
+		}
+		appChecks = append(appChecks, check)
+	}
+	sortAppImageTrackingChecksNewestFirst(appChecks)
+	if len(appChecks) > appImageTrackingCheckRetentionLimit {
+		appChecks = appChecks[:appImageTrackingCheckRetentionLimit]
+	}
+	out = append(out, appChecks...)
+	return out
+}
+
+func applyAppImageTrackingCheck(tracking *model.AppImageTracking, digest, deliveryID, event, lastError string, now time.Time) {
+	if digest != "" {
+		tracking.LastSeenDigest = digest
+	}
+	tracking.LastDeliveryID = strings.TrimSpace(deliveryID)
+	tracking.LastEvent = strings.TrimSpace(event)
+	tracking.LastError = strings.TrimSpace(lastError)
+	tracking.LastCheckedAt = &now
+	tracking.UpdatedAt = now
+}
+
+func applyAppImageTrackingQueued(tracking *model.AppImageTracking, digest, operationID, deliveryID, event string, now time.Time) {
+	tracking.LastSeenDigest = digest
+	tracking.LastQueuedDigest = digest
+	tracking.LastOperationID = operationID
+	tracking.LastDeliveryID = strings.TrimSpace(deliveryID)
+	tracking.LastEvent = strings.TrimSpace(event)
+	tracking.LastError = ""
+	tracking.LastCheckedAt = &now
+	tracking.LastTriggeredAt = &now
+	tracking.UpdatedAt = now
+}
+
+func RecordDeployment(state *Rows, op model.Operation, now time.Time) {
+	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil {
+		return
+	}
+	imageRef := strings.TrimSpace(op.DesiredSource.ImageRef)
+	digest := model.ImageDigestFromReference(op.DesiredSource.ResolvedImageRef)
+	if digest == "" && op.DesiredSpec != nil {
+		digest = model.ImageDigestFromReference(op.DesiredSpec.Image)
+	}
+	for idx := range state.Trackings {
+		tracking := &state.Trackings[idx]
+		if strings.TrimSpace(tracking.AppID) != op.AppID {
+			continue
+		}
+		if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeDockerImage ||
+			strings.TrimSpace(tracking.ImageRef) != imageRef ||
+			imageRef == "" ||
+			digest == "" {
+			tracking.LastDeployedDigest = ""
+		} else {
+			tracking.LastDeployedDigest = digest
+		}
+		tracking.LastOperationID = op.ID
+		tracking.LastError = ""
+		tracking.UpdatedAt = now
+	}
+}

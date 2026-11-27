@@ -12,7 +12,7 @@ func TestAppImageTrackingQueuesAsBackgroundImport(t *testing.T) {
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/web:latest",
 		Enabled:  true,
@@ -21,7 +21,7 @@ func TestAppImageTrackingQueuesAsBackgroundImport(t *testing.T) {
 		t.Fatalf("upsert tracking: %v", err)
 	}
 
-	op, err := s.QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
+	op, err := s.ImageTracking().QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
 	if err != nil {
 		t.Fatalf("queue image tracking import: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestAppImageTrackingImportPreservesComposeMetadataFromUploadSource(t *testi
 		t.Fatalf("get app: %v", err)
 	}
 
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/frontend:main",
 		Enabled:  true,
@@ -87,7 +87,7 @@ func TestAppImageTrackingImportPreservesComposeMetadataFromUploadSource(t *testi
 		t.Fatalf("upsert tracking: %v", err)
 	}
 
-	op, err := s.QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
+	op, err := s.ImageTracking().QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
 	if err != nil {
 		t.Fatalf("queue image tracking import: %v", err)
 	}
@@ -121,7 +121,18 @@ func TestAppImageTrackingRecordsDeployDigest(t *testing.T) {
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	assertImageTrackingRecordsDeployDigest(t, s, tenant, app)
+}
+
+func TestAppImageTrackingPostgresRecordsDeployDigest(t *testing.T) {
+	s := platformStatePostgresFixture(t)
+	tenant, _, app := seedAppImageTrackingTestStore(t, s, model.NewID("test-image-tracking"))
+	assertImageTrackingRecordsDeployDigest(t, s, tenant, app)
+}
+
+func assertImageTrackingRecordsDeployDigest(t *testing.T, s *Store, tenant model.Tenant, app model.App) {
+	t.Helper()
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/web:latest",
 		Enabled:  true,
@@ -148,16 +159,16 @@ func TestAppImageTrackingRecordsDeployDigest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create deploy operation: %v", err)
 	}
-	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
+	if claimed, found, err := s.ClaimNextPendingOperation(); err != nil {
 		t.Fatalf("claim deploy operation: %v", err)
-	} else if !found {
-		t.Fatal("expected deploy operation")
+	} else if !found || claimed.ID != deployOp.ID {
+		t.Fatalf("expected deploy operation %s, got %+v", deployOp.ID, claimed)
 	}
 	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/web.yaml", "deployed"); err != nil {
 		t.Fatalf("complete deploy operation: %v", err)
 	}
 
-	updated, err := s.GetAppImageTracking(tenant.ID, false, app.ID)
+	updated, err := s.ImageTracking().GetAppImageTracking(tenant.ID, false, app.ID)
 	if err != nil {
 		t.Fatalf("get tracking: %v", err)
 	}
@@ -173,7 +184,7 @@ func TestAppImageTrackingClearsDeployDigestWhenDifferentSourceDeploys(t *testing
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/web:latest",
 		Enabled:  true,
@@ -243,7 +254,7 @@ func TestAppImageTrackingClearsDeployDigestWhenDifferentSourceDeploys(t *testing
 		t.Fatalf("complete upload deploy operation: %v", err)
 	}
 
-	updated, err := s.GetAppImageTracking(tenant.ID, false, app.ID)
+	updated, err := s.ImageTracking().GetAppImageTracking(tenant.ID, false, app.ID)
 	if err != nil {
 		t.Fatalf("get tracking: %v", err)
 	}
@@ -259,7 +270,7 @@ func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		TenantID: tenant.ID,
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/api:main",
@@ -268,7 +279,7 @@ func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert tracking: %v", err)
 	}
-	check, err := s.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+	check, err := s.ImageTracking().CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
 		TenantID:         tenant.ID,
 		AppID:            app.ID,
 		TrackingID:       tracking.ID,
@@ -289,7 +300,7 @@ func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
 		t.Fatalf("unexpected check scope: %+v", check)
 	}
 
-	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+	checks, err := s.ImageTracking().ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
 		TenantID: tenant.ID,
 		AppID:    app.ID,
 		Limit:    10,
@@ -306,10 +317,11 @@ func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
 }
 
 func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
+	const appImageTrackingCheckRetentionLimit = 200 // public history cap under both backends
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
-	tracking, err := s.UpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		TenantID: tenant.ID,
 		AppID:    app.ID,
 		ImageRef: "ghcr.io/acme/api:main",
@@ -320,7 +332,7 @@ func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	for i := 0; i < appImageTrackingCheckRetentionLimit+5; i++ {
-		if _, err := s.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+		if _, err := s.ImageTracking().CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
 			TenantID:   tenant.ID,
 			AppID:      app.ID,
 			TrackingID: tracking.ID,
@@ -332,7 +344,7 @@ func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
 			t.Fatalf("create check %d: %v", i, err)
 		}
 	}
-	checks, err := s.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+	checks, err := s.ImageTracking().ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
 		TenantID: tenant.ID,
 		AppID:    app.ID,
 		Limit:    appImageTrackingCheckRetentionLimit + 10,
@@ -355,7 +367,13 @@ func newAppImageTrackingTestStore(t *testing.T) (*Store, model.Tenant, model.Pro
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	tenant, err := s.CreateTenant("Acme")
+	tenant, project, app := seedAppImageTrackingTestStore(t, s, "Acme")
+	return s, tenant, project, app
+}
+
+func seedAppImageTrackingTestStore(t *testing.T, s *Store, name string) (model.Tenant, model.Project, model.App) {
+	t.Helper()
+	tenant, err := s.CreateTenant(name)
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
 	}
@@ -378,5 +396,5 @@ func newAppImageTrackingTestStore(t *testing.T) (*Store, model.Tenant, model.Pro
 	}); err != nil {
 		t.Fatalf("raise billing cap: %v", err)
 	}
-	return s, tenant, project, app
+	return tenant, project, app
 }

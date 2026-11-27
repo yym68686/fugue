@@ -1,4 +1,4 @@
-package store
+package imagetracking
 
 import (
 	"context"
@@ -11,22 +11,22 @@ import (
 	"fugue/internal/model"
 )
 
-func (s *Store) pgUpsertAppImageTracking(tracking model.AppImageTracking) (model.AppImageTracking, error) {
+func (s *Repository) pgUpsertAppImageTracking(tracking model.AppImageTracking) (model.AppImageTracking, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, s.mapError(err)
 	}
 	defer tx.Rollback()
 
-	app, err := s.pgGetAppTx(ctx, tx, tracking.AppID, false)
+	app, err := s.lookupApp(ctx, tx, tracking.AppID)
 	if err != nil {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, s.mapError(err)
 	}
 	if tracking.TenantID != "" && tracking.TenantID != app.TenantID {
-		return model.AppImageTracking{}, ErrNotFound
+		return model.AppImageTracking{}, s.notFound
 	}
 	tracking.TenantID = app.TenantID
 
@@ -61,15 +61,15 @@ WHERE id = $1
 RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queued_digest, last_deployed_digest, last_operation_id, last_delivery_id, last_event, last_error, last_checked_at, last_triggered_at, created_at, updated_at
 `, tracking.ID, tracking.TenantID, tracking.ImageRef, tracking.Enabled, tracking.LastSeenDigest, tracking.LastQueuedDigest, tracking.LastDeployedDigest, tracking.LastOperationID, tracking.LastDeliveryID, tracking.LastEvent, tracking.LastError, tracking.LastCheckedAt, tracking.LastTriggeredAt, tracking.UpdatedAt))
 		if updateErr != nil {
-			return model.AppImageTracking{}, mapDBErr(updateErr)
+			return model.AppImageTracking{}, s.mapError(updateErr)
 		}
 		if err := tx.Commit(); err != nil {
-			return model.AppImageTracking{}, mapDBErr(err)
+			return model.AppImageTracking{}, s.mapError(err)
 		}
 		return out, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, s.mapError(err)
 	}
 
 	tracking.ID = model.NewID("imgtrack")
@@ -88,15 +88,15 @@ INSERT INTO fugue_app_image_trackings (
 RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queued_digest, last_deployed_digest, last_operation_id, last_delivery_id, last_event, last_error, last_checked_at, last_triggered_at, created_at, updated_at
 `, tracking.ID, tracking.TenantID, tracking.AppID, tracking.ImageRef, tracking.Enabled, tracking.LastSeenDigest, tracking.LastQueuedDigest, tracking.LastDeployedDigest, tracking.LastOperationID, tracking.LastDeliveryID, tracking.LastEvent, tracking.LastError, tracking.LastCheckedAt, tracking.LastTriggeredAt, tracking.CreatedAt, tracking.UpdatedAt))
 	if err != nil {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, s.mapError(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return model.AppImageTracking{}, mapDBErr(err)
+		return model.AppImageTracking{}, s.mapError(err)
 	}
 	return out, nil
 }
 
-func (s *Store) pgGetAppImageTracking(tenantID string, platformAdmin bool, appID string) (model.AppImageTracking, error) {
+func (s *Repository) pgGetAppImageTracking(tenantID string, platformAdmin bool, appID string) (model.AppImageTracking, error) {
 	filter := model.AppImageTrackingFilter{
 		TenantID:      tenantID,
 		PlatformAdmin: platformAdmin,
@@ -107,12 +107,12 @@ func (s *Store) pgGetAppImageTracking(tenantID string, platformAdmin bool, appID
 		return model.AppImageTracking{}, err
 	}
 	if len(trackings) == 0 {
-		return model.AppImageTracking{}, ErrNotFound
+		return model.AppImageTracking{}, s.notFound
 	}
 	return trackings[0], nil
 }
 
-func (s *Store) pgListAppImageTrackings(filter model.AppImageTrackingFilter) ([]model.AppImageTracking, error) {
+func (s *Repository) pgListAppImageTrackings(filter model.AppImageTrackingFilter) ([]model.AppImageTracking, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -145,13 +145,13 @@ FROM fugue_app_image_trackings`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, mapDBErr(err)
+		return nil, s.mapError(err)
 	}
 	defer rows.Close()
-	return scanAppImageTrackingRows(rows)
+	return s.scanAppImageTrackingRows(rows)
 }
 
-func (s *Store) pgRecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError string) (model.AppImageTracking, error) {
+func (s *Repository) pgRecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError string) (model.AppImageTracking, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -167,10 +167,10 @@ SET last_seen_digest = CASE WHEN $2 <> '' THEN $2 ELSE last_seen_digest END,
 WHERE id = $1
 RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queued_digest, last_deployed_digest, last_operation_id, last_delivery_id, last_event, last_error, last_checked_at, last_triggered_at, created_at, updated_at
 `, id, digest, strings.TrimSpace(deliveryID), strings.TrimSpace(event), strings.TrimSpace(lastError), now))
-	return tracking, mapDBErr(err)
+	return tracking, s.mapError(err)
 }
 
-func (s *Store) pgRecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event string) (model.AppImageTracking, error) {
+func (s *Repository) pgRecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event string) (model.AppImageTracking, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -189,16 +189,16 @@ SET last_seen_digest = $2,
 WHERE id = $1
 RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queued_digest, last_deployed_digest, last_operation_id, last_delivery_id, last_event, last_error, last_checked_at, last_triggered_at, created_at, updated_at
 `, id, digest, operationID, strings.TrimSpace(deliveryID), strings.TrimSpace(event), now))
-	return tracking, mapDBErr(err)
+	return tracking, s.mapError(err)
 }
 
-func (s *Store) pgCreateAppImageTrackingCheck(check model.AppImageTrackingCheck) (model.AppImageTrackingCheck, error) {
+func (s *Repository) pgCreateAppImageTrackingCheck(check model.AppImageTrackingCheck) (model.AppImageTrackingCheck, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.AppImageTrackingCheck{}, mapDBErr(err)
+		return model.AppImageTrackingCheck{}, s.mapError(err)
 	}
 	defer tx.Rollback()
 
@@ -209,13 +209,13 @@ WHERE id = $1
 FOR UPDATE
 `, check.TrackingID))
 	if err != nil {
-		return model.AppImageTrackingCheck{}, mapDBErr(err)
+		return model.AppImageTrackingCheck{}, s.mapError(err)
 	}
 	if check.TenantID != "" && check.TenantID != tracking.TenantID {
-		return model.AppImageTrackingCheck{}, ErrNotFound
+		return model.AppImageTrackingCheck{}, s.notFound
 	}
 	if check.AppID != tracking.AppID {
-		return model.AppImageTrackingCheck{}, ErrNotFound
+		return model.AppImageTrackingCheck{}, s.notFound
 	}
 	now := time.Now().UTC()
 	check.TenantID = tracking.TenantID
@@ -244,18 +244,18 @@ INSERT INTO fugue_app_image_tracking_checks (
 RETURNING id, tenant_id, app_id, tracking_id, image_ref, observed_digest, current_app_digest, last_queued_digest, last_deployed_digest, decision, skip_reason, operation_id, active_operation_id, resolver_error, delivery_id, event, duration_ms, controller_pod, controller_leader_identity, checked_at
 `, check.ID, check.TenantID, check.AppID, check.TrackingID, check.ImageRef, check.ObservedDigest, check.CurrentAppDigest, check.LastQueuedDigest, check.LastDeployedDigest, check.Decision, check.SkipReason, check.OperationID, check.ActiveOperationID, check.ResolverError, check.DeliveryID, check.Event, check.DurationMilliseconds, check.ControllerPod, check.ControllerLeaderIdentity, check.CheckedAt))
 	if err != nil {
-		return model.AppImageTrackingCheck{}, mapDBErr(err)
+		return model.AppImageTrackingCheck{}, s.mapError(err)
 	}
-	if err := pruneAppImageTrackingChecksTx(ctx, tx, check.AppID, now); err != nil {
+	if err := s.pruneAppImageTrackingChecksTx(ctx, tx, check.AppID, now); err != nil {
 		return model.AppImageTrackingCheck{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return model.AppImageTrackingCheck{}, mapDBErr(err)
+		return model.AppImageTrackingCheck{}, s.mapError(err)
 	}
 	return out, nil
 }
 
-func (s *Store) pgListAppImageTrackingChecks(filter model.AppImageTrackingCheckFilter) ([]model.AppImageTrackingCheck, error) {
+func (s *Repository) pgListAppImageTrackingChecks(filter model.AppImageTrackingCheckFilter) ([]model.AppImageTrackingCheck, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -288,13 +288,13 @@ FROM fugue_app_image_tracking_checks`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, mapDBErr(err)
+		return nil, s.mapError(err)
 	}
 	defer rows.Close()
-	return scanAppImageTrackingCheckRows(rows)
+	return s.scanAppImageTrackingCheckRows(rows)
 }
 
-func pruneAppImageTrackingChecksTx(ctx context.Context, tx *sql.Tx, appID string, now time.Time) error {
+func (s *Repository) pruneAppImageTrackingChecksTx(ctx context.Context, tx *sql.Tx, appID string, now time.Time) error {
 	_, err := tx.ExecContext(ctx, `
 DELETE FROM fugue_app_image_tracking_checks
 WHERE app_id = $1
@@ -309,10 +309,10 @@ WHERE app_id = $1
 	)
   )
 `, appID, now.UTC().Add(-appImageTrackingCheckRetentionWindow), appImageTrackingCheckRetentionLimit)
-	return mapDBErr(err)
+	return s.mapError(err)
 }
 
-func (s *Store) pgUpdateAppImageTrackingDeployedTx(ctx context.Context, tx *sql.Tx, op model.Operation, now time.Time) error {
+func (s *Repository) RecordDeploymentTx(ctx context.Context, tx *sql.Tx, op model.Operation, now time.Time) error {
 	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil {
 		return nil
 	}
@@ -336,20 +336,20 @@ SET last_deployed_digest = CASE
 	updated_at = $5
 WHERE app_id = $1
 `, op.AppID, imageRef, digest, op.ID, now, strings.TrimSpace(op.DesiredSource.Type), model.AppSourceTypeDockerImage)
-	return mapDBErr(err)
+	return s.mapError(err)
 }
 
-func scanAppImageTrackingRows(rows *sql.Rows) ([]model.AppImageTracking, error) {
+func (s *Repository) scanAppImageTrackingRows(rows *sql.Rows) ([]model.AppImageTracking, error) {
 	out := []model.AppImageTracking{}
 	for rows.Next() {
 		tracking, err := scanAppImageTracking(rows)
 		if err != nil {
-			return nil, mapDBErr(err)
+			return nil, s.mapError(err)
 		}
 		out = append(out, tracking)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, mapDBErr(err)
+		return nil, s.mapError(err)
 	}
 	return out, nil
 }
@@ -387,17 +387,17 @@ func scanAppImageTracking(scanner sqlScanner) (model.AppImageTracking, error) {
 	return normalizeAppImageTracking(tracking), nil
 }
 
-func scanAppImageTrackingCheckRows(rows *sql.Rows) ([]model.AppImageTrackingCheck, error) {
+func (s *Repository) scanAppImageTrackingCheckRows(rows *sql.Rows) ([]model.AppImageTrackingCheck, error) {
 	out := []model.AppImageTrackingCheck{}
 	for rows.Next() {
 		check, err := scanAppImageTrackingCheck(rows)
 		if err != nil {
-			return nil, mapDBErr(err)
+			return nil, s.mapError(err)
 		}
 		out = append(out, check)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, mapDBErr(err)
+		return nil, s.mapError(err)
 	}
 	return out, nil
 }

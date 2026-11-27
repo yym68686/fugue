@@ -447,18 +447,7 @@ def exact_json_types_equal(left: object, right: object) -> bool:
     return left == right
 
 
-def main() -> int:
-    started = time.monotonic()
-    timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
-    if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
-        raise SystemExit(
-            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 360"
-        )
-    deadline = started + timeout_seconds
-    base = resolve_base()
-    paths = changed_files(base)
-    packages = affected_packages(paths)
-    test_commands = affected_test_commands(base, paths)
+def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
     declarative_engine_changed = any(
         name == ".github/workflows/ci.yml"
         or name.startswith(".github/actions/deploy-declarative-component/")
@@ -473,6 +462,30 @@ def main() -> int:
         and name not in {"deploy/releases/components.json", "deploy/releases/edge-groups.json"}
         for name in paths
     )
+    return declarative_engine_changed, declarative_data_changed
+
+
+def declarative_test_command(engine: bool, data: bool) -> list[str] | None:
+    if engine:
+        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"]
+    if data:
+        return ["go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN]
+    return None
+
+
+def main() -> int:
+    started = time.monotonic()
+    timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+    if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
+        raise SystemExit(
+            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 360"
+        )
+    deadline = started + timeout_seconds
+    base = resolve_base()
+    paths = changed_files(base)
+    packages = affected_packages(paths)
+    test_commands = affected_test_commands(base, paths)
+    declarative_engine_changed, declarative_data_changed = declarative_changes(paths)
     if declarative_engine_changed:
         test_commands = without_dedicated_declarative_tests(test_commands)
     checks: dict[str, dict[str, object]] = {}
@@ -488,6 +501,10 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
+                    "scripts/test_prepush_shadow.py"} for name in paths):
+        non_go_tasks["prepush-selection-tests"] = [sys.executable, "-m", "unittest",
+            "scripts.test_prepush", "scripts.test_prepush_shadow"]
     if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
                     "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
                     "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):
@@ -602,14 +619,9 @@ def main() -> int:
            or name.startswith("deploy/environments/production/storage-policy/") for name in paths):
         non_go_tasks["storage-policy-tests"] = ["python3", "-m", "unittest", "scripts.test_publish_storage_policy"]
 
-    if declarative_engine_changed:
-        non_go_tasks["declarative-release-tests"] = [
-            "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",
-        ]
-    elif declarative_data_changed:
-        non_go_tasks["declarative-release-tests"] = [
-            "go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN,
-        ]
+    declarative_tests = declarative_test_command(declarative_engine_changed, declarative_data_changed)
+    if declarative_tests:
+        non_go_tasks["declarative-release-tests"] = declarative_tests
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),

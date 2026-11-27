@@ -1,23 +1,21 @@
-package controller
+package imagetracking
 
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
-func (s *Service) imageTrackingRetrySuppression(ctx context.Context, app model.App, tracking model.AppImageTracking, digest string) (string, error) {
-	if reason, err := s.candidateStartupRetrySuppression(ctx, app, digest); err != nil || reason != "" {
+func (s *Poller) RetrySuppression(ctx context.Context, app model.App, tracking model.AppImageTracking, digest string) (string, error) {
+	if reason, err := s.startupRetrySuppression(ctx, app, digest); err != nil || reason != "" {
 		return reason, err
 	}
 	if strings.TrimSpace(digest) == strings.TrimSpace(tracking.LastQueuedDigest) {
-		ops, err := s.Store.ListOperationSummariesFiltered(app.TenantID, true, store.OperationListFilter{AppID: app.ID, Types: []string{model.OperationTypeDeploy}, Limit: 8})
+		ops, err := s.recentDeploys(app)
 		if err != nil {
 			return "", err
 		}
@@ -37,48 +35,34 @@ func (s *Service) imageTrackingRetrySuppression(ctx context.Context, app model.A
 		for i := 1; i < failures && delay < time.Hour; i++ {
 			delay = min(2*delay, time.Hour)
 		}
-		if since != nil && s.currentTime().Before(since.Add(delay)) {
+		if since != nil && s.now().Before(since.Add(delay)) {
 			return fmt.Sprintf("digest already queued; retry backoff %s has not elapsed", delay), nil
 		}
 	}
 	// A new digest must not bypass cleanup either. Retired resources whose
 	// deletion failed still hold capacity. List live metadata once per kind so
 	// a long release history does not become two Kubernetes reads per release.
-	releases, err := s.Store.ListAppReleaseMetadataContext(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
+	releases, err := s.listReleases(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
 	if err != nil {
 		return "", err
 	}
 	var deployments, services map[string]bool
 	for _, release := range releases {
 		failed := release.Role == model.AppReleaseRoleCandidate && release.Status == model.AppReleaseStatusFailed
-		if !failed && !store.AppReleaseIsRetired(release) {
+		if !failed && !s.isRetired(release) {
 			continue
 		}
 		binding := release.RevisionWorkload
-		if !s.Config.KubectlApply {
+		if !s.liveApply {
 			if failed && binding != nil {
 				return "failed candidate still awaits verified retirement: " + release.ID, nil
 			}
 			continue
 		}
 		if deployments == nil {
-			client, err := s.kubeClient()
+			deployments, services, err = s.listWorkloads(ctx, app.TenantID)
 			if err != nil {
 				return "", err
-			}
-			deployments, services = map[string]bool{}, map[string]bool{}
-			ns := url.PathEscape(runtime.NamespaceForTenant(app.TenantID))
-			for _, item := range []struct {
-				path  string
-				names map[string]bool
-			}{{"/apis/apps/v1/namespaces/" + ns + "/deployments", deployments}, {"/api/v1/namespaces/" + ns + "/services", services}} {
-				var list kubeObjectList
-				if _, err := client.doMetadataList(ctx, item.path, &list); err != nil {
-					return "", err
-				}
-				for _, object := range list.Items {
-					item.names[objectStringField(objectMapField(object, "metadata"), "name")] = true
-				}
 			}
 		}
 		deployment, service := release.DeploymentName, release.ServiceName
@@ -88,7 +72,7 @@ func (s *Service) imageTrackingRetrySuppression(ctx context.Context, app model.A
 			// Legacy release rows may point to the shared canonical aliases.
 			// Those aliases are intentional serving resources, not evidence of
 			// an independent failed/retired revision still holding capacity.
-			options := runtime.RenderOptions{Revision: safeRolloutCandidateRevision(release.ID)}
+			options := runtime.RenderOptions{Revision: s.candidateRevision(release.ID)}
 			if deployment == "" || deployment == runtime.RuntimeAppResourceName(app) {
 				deployment = runtime.RuntimeAppResourceNameWithOptions(app, options)
 			}

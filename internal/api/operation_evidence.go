@@ -417,11 +417,12 @@ func (s *Server) appImageTrackingDebugBundleState(principal model.Principal, app
 	if app == nil {
 		return nil, nil
 	}
-	tracking, err := s.store.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	evidence := s.store.ReadImageTracking()
+	tracking, err := evidence.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
 	if err != nil {
 		return nil, nil
 	}
-	checks, err := s.store.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
+	checks, err := evidence.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
 		TenantID:      principal.TenantID,
 		PlatformAdmin: principal.IsPlatformAdmin(),
 		AppID:         app.ID,

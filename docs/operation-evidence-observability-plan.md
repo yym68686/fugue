@@ -155,9 +155,9 @@ Fugue 已经有一些可复用基础，不应重复发明：
 - image tracking decision history 的方向已在 `docs/image-tracking-observability-plan.md` 中定义，部分实现已经存在。
 - image tracking 表/接口已经有可扩展入口。
   - `internal/store/app_image_tracking.go`
-  - `internal/store/app_image_tracking_pg.go`
+  - `internal/store/internal/imagetracking/postgres.go`
   - `internal/api/app_image_tracking.go`
-  - `internal/controller/image_tracking_sync.go`
+  - `internal/imagetracking/poll.go`
 - operation diagnosis 已有 API surface，可作为 operation evidence/timeline 的上层消费方。
 - app observability 已有 metrics/logs/requests/traces 相关入口，可作为 runtime 证据的补充。
 - zero downtime rollout incident 文档已经沉淀了 rollout wait 不能只看 Deployment ready 的经验。

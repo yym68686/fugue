@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/config"
+	"fugue/internal/imagetracking"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
@@ -24,71 +25,60 @@ import (
 )
 
 type Service struct {
-	operationClaimMu                sync.Mutex
-	runningManagedOperations        sync.Map
-	Store                           *store.Store
-	Config                          config.ControllerConfig
-	Renderer                        runtime.Renderer
-	Logger                          *log.Logger
-	importer                        sourceImporter
-	registryPushBase                string
-	registryPullBase                string
-	builderRegistryPushBase         string
-	inspectManagedImage             appimages.InspectFunc
-	inspectManagedImageConfig       imageConfigInspector
-	deleteManagedImage              func(context.Context, string) (appimages.DeleteResult, error)
-	requestRegistryGC               func(context.Context, string) error
-	readRegistryMaintenance         func(context.Context) registryMaintenanceStatus
-	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
-	resolveRemoteImageDigest        func(context.Context, string) (string, error)
-	verifyDestinationImageCache     destinationImageCacheVerifyFunc
-	managedPostgresPrimarySQLProbe  managedPostgresPrimarySQLProbeFunc
-	postgresPrimarySQLConnect       managedPostgresPrimarySQLConnectFunc
-	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
-	releaseGateHTTPClient           releaseflow.HTTPDoer
-	safeRolloutEdgeBundleObserver   safeRolloutEdgeBundleObserver
-	safeRolloutDrainMetricsQuerier  safeRolloutDrainMetricsQuerier
-	safeRolloutSleep                func(context.Context, time.Duration) error
-	restoreSafeRolloutPreviousSpec  func(context.Context, model.Operation, *safeRolloutState, string) error
-	restoreFailedManagedAppSpec     func(context.Context, model.Operation, model.App, runtime.SchedulingConstraints, error) error
-	serviceURLForApp                func(context.Context, model.App) string
-	syncBillingImageStorage         bool
-	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
-	newKubeClient                   func(namespace string) (*kubeClient, error)
-	postgresImageMigrationProbe     func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
-	postgresImageDrainProbe         func(context.Context, *kubeClient, postgresImageWitness) pgimage.DrainObservation
-	postgresSourceRetirementProbe   func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
-	kubeClientMu                    sync.Mutex
-	kubeClients                     map[string]*kubeClient
-	managedRolloutCapacityLocks     sync.Map
-	retirementScans                 appReleaseRetirementScans
-	retirementRetries               retirementRetries
-	retirementWorkerRunning         atomic.Bool
-	managedPostgresStorageNoticeMu  sync.Mutex
-	managedPostgresStorageNotices   map[string]struct{}
-	importImageInspectRetryDelay    time.Duration
-	importImageInspectMaxAttempts   int
-	now                             func() time.Time
-	metricsStartedAt                time.Time
-	metricsSnapshot                 observability.MetricSnapshot
-	controllerHealthMu              sync.RWMutex
-	activeLoopRunning               bool
-	activeLoopStartedAt             time.Time
-	leaderActive                    bool
-	leaderIdentity                  string
-	imageTrackingMetricsMu          sync.RWMutex
-	imageTrackingDecisionCounts     map[string]int64
-	imageTrackingLastCheckAt        time.Time
-	imageTrackingLastQueuedAt       time.Time
-	imageTrackingLastErrorAt        time.Time
-	imageTrackingLastError          string
-	imageTrackingSyncRunning        bool
-	imageTrackingLastSyncStartedAt  time.Time
-	imageTrackingLastSyncFinishedAt time.Time
-	imageTrackingLastSyncDuration   time.Duration
-	imageTrackingLastSyncErrorAt    time.Time
-	imageTrackingLastSyncError      string
+	operationClaimMu               sync.Mutex
+	runningManagedOperations       sync.Map
+	Store                          *store.Store
+	Config                         config.ControllerConfig
+	Renderer                       runtime.Renderer
+	Logger                         *log.Logger
+	importer                       sourceImporter
+	registryPushBase               string
+	registryPullBase               string
+	builderRegistryPushBase        string
+	inspectManagedImage            appimages.InspectFunc
+	inspectManagedImageConfig      imageConfigInspector
+	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
+	requestRegistryGC              func(context.Context, string) error
+	readRegistryMaintenance        func(context.Context) registryMaintenanceStatus
+	resolveManagedImageDigestRef   func(context.Context, string) (string, error)
+	resolveRemoteImageDigest       func(context.Context, string) (string, error)
+	verifyDestinationImageCache    destinationImageCacheVerifyFunc
+	managedPostgresPrimarySQLProbe managedPostgresPrimarySQLProbeFunc
+	postgresPrimarySQLConnect      managedPostgresPrimarySQLConnectFunc
+	releaseGateMetricsQuerier      releaseflow.ReleaseGateMetricsQuerier
+	releaseGateHTTPClient          releaseflow.HTTPDoer
+	safeRolloutEdgeBundleObserver  safeRolloutEdgeBundleObserver
+	safeRolloutDrainMetricsQuerier safeRolloutDrainMetricsQuerier
+	safeRolloutSleep               func(context.Context, time.Duration) error
+	restoreSafeRolloutPreviousSpec func(context.Context, model.Operation, *safeRolloutState, string) error
+	restoreFailedManagedAppSpec    func(context.Context, model.Operation, model.App, runtime.SchedulingConstraints, error) error
+	serviceURLForApp               func(context.Context, model.App) string
+	syncBillingImageStorage        bool
+	latestGitHubCommit             func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	inspectBuilderOOMPlacement     func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
+	newKubeClient                  func(namespace string) (*kubeClient, error)
+	postgresImageMigrationProbe    func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
+	postgresImageDrainProbe        func(context.Context, *kubeClient, postgresImageWitness) pgimage.DrainObservation
+	postgresSourceRetirementProbe  func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
+	kubeClientMu                   sync.Mutex
+	kubeClients                    map[string]*kubeClient
+	managedRolloutCapacityLocks    sync.Map
+	retirementScans                appReleaseRetirementScans
+	retirementRetries              retirementRetries
+	retirementWorkerRunning        atomic.Bool
+	managedPostgresStorageNoticeMu sync.Mutex
+	managedPostgresStorageNotices  map[string]struct{}
+	importImageInspectRetryDelay   time.Duration
+	importImageInspectMaxAttempts  int
+	now                            func() time.Time
+	metricsStartedAt               time.Time
+	metricsSnapshot                observability.MetricSnapshot
+	controllerHealthMu             sync.RWMutex
+	activeLoopRunning              bool
+	activeLoopStartedAt            time.Time
+	leaderActive                   bool
+	leaderIdentity                 string
+	imageTrackingMetrics           imagetracking.Metrics
 }
 
 type sourceImporter interface {
@@ -150,7 +140,6 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
 		metricsStartedAt:             time.Now().UTC(),
-		imageTrackingDecisionCounts:  map[string]int64{},
 	}
 	s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
 	return s
@@ -348,7 +337,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer stopMigrations()
 	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
 	defer stopSourceSync()
-	stopImageTracking := s.startAppImageTracking(ctx, triggerBackgroundOps)
+	stopImageTracking := s.imageTrackingPoller().Start(ctx, triggerBackgroundOps)
 	defer stopImageTracking()
 	if s.Config.HostJournaldPolicyEnabled {
 		if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
