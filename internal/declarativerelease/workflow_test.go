@@ -305,13 +305,14 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff", "quality_evidence_retention_handoff")
-	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker")
+	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff")
+	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker", "storage_audit_activation")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
-	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff"}
+	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff", "observation_sample_retention_handoff"}
 	for _, name := range observationJobs {
 		job := yamlMappingValue(t, jobs, name)
 		for _, required := range []string{"github.event_name == 'push' && github.ref == 'refs/heads/main'", "needs.prepush.result == 'success'", "needs.prepush.outputs." + name + " == 'true'"} {
@@ -339,10 +340,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatalf("storage audit release is missing its admission gate: %s", gate)
 		}
 	}
-	storageQueue := yamlMappingValue(t, storageAudit, "concurrency")
-	if yamlMappingValue(t, storageQueue, "group").Value != "fugue-production-storage-audit-worker" ||
-		yamlMappingValue(t, storageQueue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, storageQueue, "queue").Value != "max" {
-		t.Fatal("storage audit releases must use their own non-canceling queue")
+	storageActivation := yamlMappingValue(t, jobs, "storage_audit_activation")
+	for _, gate := range []string{
+		"github.event_name == 'push' && github.ref == 'refs/heads/main'",
+		"needs.prepush.result == 'success'", "needs.prepush.outputs.storage_audit_activation == 'true'",
+	} {
+		if !strings.Contains(yamlMappingValue(t, storageActivation, "if").Value, gate) {
+			t.Fatalf("storage audit activation is missing its admission gate: %s", gate)
+		}
+	}
+	for _, job := range []*yaml.Node{storageAudit, storageActivation} {
+		queue := yamlMappingValue(t, job, "concurrency")
+		if yamlMappingValue(t, queue, "group").Value != "fugue-production-storage-audit-worker" ||
+			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {
+			t.Fatal("storage audit deployment and activation must share a non-canceling queue")
+		}
 	}
 	nodeWorker := yamlMappingValue(t, jobs, "node_worker_handoff")
 	nodeWorkerWhen := yamlMappingValue(t, nodeWorker, "if").Value

@@ -149,6 +149,80 @@ var retainedObservationTables = []observationTable{
 	{"fugue_resource_usage_samples", "observed_at"},
 }
 
+const (
+	observationRetentionLockID         = int64(315609238744311)
+	observationSampleRetentionOwnerKey = "observation-sample-retention-writer/v1"
+	observationSampleRetentionDemand   = "observation-sample-retention-demand/v1/"
+	networkSampleRetention             = "network"
+	performanceSampleRetention         = "performance"
+	resourceUsageSampleRetention       = "resource-usage"
+)
+
+var errUnrecognizedSampleRetentionWriter = errors.New("unrecognized sample retention writer")
+
+// The sample deleter and signed heartbeat retention are separate capabilities.
+// A sample cutover must take this same advisory lock before publishing the
+// owner and fencing the three legacy tables. Reading through the leased
+// connection keeps admission and every legacy sample delete in that interval.
+func apiOwnsObservationSampleRetention(ctx context.Context, conn interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (bool, error) {
+	var owner string
+	err := conn.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, observationCheckpointKey(observationSampleRetentionOwnerKey)).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if owner != "worker" {
+		return false, errUnrecognizedSampleRetentionWriter
+	}
+	return false, nil
+}
+
+func beginObservationSampleIngestion(ctx context.Context, db *sql.DB) (*sql.Tx, error) {
+	// The owner must be read from a fresh snapshot after acquiring the
+	// shared lock, even if the connection has a different default isolation.
+	return db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+}
+
+// Admission still inserts samples when the exclusive transfer lock is held.
+// Existing ingestion paths share this lock only for their optional delete;
+// none can carry stale API ownership across a transfer and commit a delete.
+// The handoff must acquire it exclusively, as well as the old timer lock.
+func apiMayPruneDuringSampleIngestion(ctx context.Context, tx *sql.Tx, target string, pruneBefore time.Time) (bool, error) {
+	key := observationCheckpointKey(observationSampleRetentionOwnerKey)
+	var locked bool
+	if err := tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0))`, key).Scan(&locked); err != nil || !locked {
+		return false, err
+	}
+	allowed, err := apiOwnsObservationSampleRetention(ctx, tx)
+	if errors.Is(err, errUnrecognizedSampleRetentionWriter) {
+		// A corrupt owner must stop deletion, not stop collection. The
+		// independent compatibility timer reports the invalid value.
+		return false, nil
+	}
+	if err != nil || allowed {
+		return allowed, err
+	}
+	// With the independent writer selected, submit the cutoff durably in
+	// the same transaction as ingestion. Do not turn the foreground's
+	// one-hour/seven-day cutoffs into a continuously advancing wall-clock
+	// deadline when a producer is idle. Flooring the demand to a minute
+	// deliberately retains up to one extra minute, never less.
+	cutoff := pruneBefore.UTC().Truncate(time.Minute).Unix()
+	key = observationCheckpointKey(observationSampleRetentionDemand + target)
+	_, err = tx.ExecContext(ctx, `INSERT INTO fugue_meta AS demand (key,value)
+SELECT $1,$2::bigint::text
+WHERE NOT EXISTS (SELECT 1 FROM fugue_meta WHERE key=$1 AND
+  CASE WHEN value ~ '^-?[0-9]{1,12}$' THEN value::bigint END >= $2::bigint)
+  AND pg_try_advisory_xact_lock(hashtextextended($1,0))
+ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value
+WHERE COALESCE(CASE WHEN demand.value ~ '^-?[0-9]{1,12}$' THEN demand.value::bigint END < $2::bigint,true)`, key, cutoff)
+	return false, err
+}
+
 func (s *Store) pruneObservationHistory(ctx context.Context, p ObservationRetentionPolicy, keys bundleauth.Keyring, now time.Time) (map[string]int64, error) {
 	raw, _ := json.Marshal(p)
 	if _, err := ParseObservationRetentionPolicy(raw); err != nil {
@@ -165,31 +239,37 @@ func (s *Store) pruneObservationHistory(ctx context.Context, p ObservationRetent
 		return counts, err
 	}
 	defer conn.Close()
-	const lockID = int64(315609238744311)
 	var locked bool
-	if err = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, lockID).Scan(&locked); err != nil || !locked {
+	if err = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, observationRetentionLockID).Scan(&locked); err != nil || !locked {
 		return counts, err
 	}
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		if _, err := conn.ExecContext(cleanup, `SELECT pg_advisory_unlock($1)`, lockID); err != nil {
+		if _, err := conn.ExecContext(cleanup, `SELECT pg_advisory_unlock($1)`, observationRetentionLockID); err != nil {
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
-	for _, table := range retainedObservationTables {
-		deleted, e := pruneObservationTable(ctx, conn, table, p, now)
-		counts[table.table] = deleted
-		if e != nil {
-			return counts, &retentionFailure{stage: table.table, cause: e}
+	var sampleErr error
+	if ownsSamples, e := apiOwnsObservationSampleRetention(ctx, conn); e != nil {
+		// Do not allow a bad sample handoff checkpoint to stop independent
+		// signed-heartbeat retention. Surface both errors if it also fails.
+		sampleErr = &retentionFailure{stage: "sample_writer_admission", cause: e}
+	} else if ownsSamples {
+		for _, table := range retainedObservationTables {
+			deleted, e := pruneObservationTable(ctx, conn, table, p, now)
+			counts[table.table] = deleted
+			if e != nil {
+				return counts, &retentionFailure{stage: table.table, cause: e}
+			}
 		}
 	}
 	deleted, err := s.pruneHeartbeatHistories(ctx, conn, p, keys, now)
 	counts["heartbeat_history"] = deleted
 	if err != nil {
-		return counts, &retentionFailure{stage: "heartbeat_history", cause: err}
+		return counts, errors.Join(sampleErr, &retentionFailure{stage: "heartbeat_history", cause: err})
 	}
-	return counts, err
+	return counts, sampleErr
 }
 
 func retentionTx(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {

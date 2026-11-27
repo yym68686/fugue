@@ -25,7 +25,8 @@
           "metadata": {
             "labels": {
               "app.kubernetes.io/name": "fugue-observation-worker",
-              "app.kubernetes.io/component": "observation-worker"
+              "app.kubernetes.io/component": "observation-worker",
+              "fugue.io/observation-sample-retention": "true"
             }
           },
           "spec": {
@@ -59,7 +60,14 @@
                   {
                     "name": "FUGUE_OBSERVATION_QUALITY_EVIDENCE_RETENTION",
                     "value": "enabled"
+                  },
+                  {
+                    "name": "FUGUE_OBSERVATION_SAMPLE_RETENTION_POLICY_FILE",
+                    "value": "/etc/fugue-observation/observation-retention.json"
                   }
+                ],
+                "volumeMounts": [
+                  {"name": "sample-retention-policy", "mountPath": "/etc/fugue-observation", "readOnly": true}
                 ],
                 "securityContext": {
                   "allowPrivilegeEscalation": false,
@@ -84,6 +92,15 @@
                   "httpGet": {"path": "/readyz", "port": "metrics"},
                   "timeoutSeconds": 3,
                   "periodSeconds": 10
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "sample-retention-policy",
+                "configMap": {
+                  "name": "fugue-storage-policy",
+                  "items": [{"key": "observation-retention.json", "path": "observation-retention.json"}]
                 }
               }
             ]

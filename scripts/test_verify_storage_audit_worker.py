@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlsplit
 
 from scripts.provision_observation_worker_database import ProvisionError
+from scripts.publish_storage_audit_policy import publish
 from scripts.rehearse_storage_lifecycle_audit import pinned_postgres
 from scripts.verify_storage_audit_worker import (
     COMPONENT, JOB, database_status, release_component, scrape_observed, witness,
@@ -68,6 +69,14 @@ class StorageAuditObservationTests(unittest.TestCase):
         for results in ([], [sample, sample], [dict(sample, metric=dict(sample["metric"], pod_uid="different-uid"))]):
             provision.kube.return_value = response(*results)
             self.assertFalse(scrape_observed(provision, "prometheus-pod", worker, "api"))
+        provision.kube.return_value = response(sample)
+        self.assertTrue(scrape_observed(provision, "prometheus-pod", worker, "worker", published=True))
+        query = parse_qs(urlsplit(provision.kube.call_args.args[2]).query)["query"][0]
+        for series in ("fugue_storage_audit_committed_passes", "fugue_storage_lifecycle_sample_current_policy",
+                       "fugue_storage_lifecycle_last_run_failed", "fugue_storage_lifecycle_free_percent_threshold"):
+            self.assertIn(series, query)
+        with self.assertRaises(ProvisionError):
+            scrape_observed(provision, "prometheus-pod", worker, "api", published=True)
 
     @patch("scripts.verify_storage_audit_worker.scrape_observed", return_value=True)
     @patch("scripts.verify_storage_audit_worker.prometheus_pods", return_value=["prometheus-pod"])
@@ -111,6 +120,32 @@ class PinnedPostgresHarnessTests(unittest.TestCase):
             with pinned_postgres("registry.example/postgres:latest", Path("/unused-test-path")):
                 self.fail("mutable fixture image unexpectedly accepted")
         run.assert_not_called()
+
+
+class StorageAuditPolicyPublicationTests(unittest.TestCase):
+    def setUp(self):
+        self.provision = Mock(policy_digest="b" * 64)
+        self.primary = ("primary", "primary-uid")
+        self.provision.find_primary.return_value = self.primary
+        self.provision.get.return_value = {"metadata": {}, "data": {"storage-lifecycle.json": '{"mode":"audit"}'}}
+        self.desired = {"name": "test-policy", "storageLifecycle": {"mode": "disabled"}}
+
+    @patch("scripts.publish_storage_audit_policy.policy_update_sql", return_value="bounded policy CAS")
+    def test_confirms_bound_database_and_carries_a_redacted_outcome(self, sql):
+        self.provision.sql.return_value = "1\n\nworker:unchanged"
+        reported = publish(self.provision, self.desired, apply=True)
+        self.assertEqual(reported, {"candidatePolicyDigest": "b" * 64, "outcome": "worker:unchanged", "applied": True})
+        sql.assert_called_once_with(self.provision, {"name": "test-policy", "storageLifecycle": {"mode": "audit"}}, apply=True)
+        self.provision.sql.assert_called_once_with("primary", "bounded policy CAS")
+        self.provision.sql.return_value = "1\n\nworker:unexpected"
+        with self.assertRaisesRegex(ProvisionError, "did not confirm"):
+            publish(self.provision, self.desired, apply=True)
+
+    def test_primary_change_stops_before_policy_transaction(self):
+        self.provision.find_primary.side_effect = [self.primary, ("replacement", "replacement-uid")]
+        with self.assertRaisesRegex(ProvisionError, "database changed"):
+            publish(self.provision, self.desired, apply=True)
+        self.provision.sql.assert_not_called()
 
 
 if __name__ == "__main__":

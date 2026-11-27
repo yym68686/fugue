@@ -17,6 +17,9 @@ from urllib.request import urlopen
 
 from scripts.provision_observation_worker_database import scram_verifier
 from scripts.provision_storage_lifecycle_audit import SCHEMA, StorageAuditProvision
+from scripts.publish_storage_audit_policy import policy_update_sql
+from scripts.storage_audit_activation_transaction import activation_sql
+from scripts.verify_storage_audit_activation import activated_status, declaration_digest, has_committed_sample
 
 INSTALL = Path("internal/schemamigrate/storage_lifecycle_audit.sql")
 WORKER_ROLE = "fugue_storage_audit_fixture"
@@ -168,7 +171,13 @@ def rehearse(socket, worker_binary, *, client=("psql",), client_socket=None):
     policy_document = {"namespace": "test-system", "name": "test-policy", "storageLifecycle": policy,
                        "policy": {"version": 1, "compiler_input_chunks": False, "checkpoint_pages": False,
                                   "database_max_open": 0, "database_max_idle": 0, "database_idle_seconds": 0}}
-    provision = StorageAuditProvision(config, policy_document)
+
+    class FixtureProvision(StorageAuditProvision):
+        def sql(self, primary, body):
+            verify(primary == "test-primary", "rehearsal addressed a different database")
+            return sql(body)
+
+    provision = FixtureProvision(config, policy_document)
     secret_uid = "b0b0b0b0-b0b0-b0b0-b0b0-b0b0b0b0b0b0"
     verifier = scram_verifier("a" * 64)
     standby_install = StorageAuditProvision(config, policy_document, require_standby=True)
@@ -202,6 +211,9 @@ FROM pg_roles WHERE rolname='fugue_storage_audit_definer';
 """) == "t", "definer gained upload body access or business write authority")
     verify(run_pass() == "standby" and status()["completed_passes"] == 0, "standby executed a pass")
     disabled, _ = policy_assignment({**policy, "mode": "disabled"})
+    declaration = {"disposableFixture": True, "policyDigest": provision.policy_digest}
+    approval = declaration_digest(declaration)
+    transfer = activation_sql(provision, secret_uid, approval)
     with sp.Popen(psql + ["fixture_storage_api"], stdin=sp.PIPE, stdout=sp.PIPE, text=True) as legacy:
         try:
             legacy.stdin.write("SELECT pg_try_advisory_lock_shared(hashtextextended('storage-lifecycle-audit/owner/v1',0));"
@@ -211,12 +223,27 @@ FROM pg_roles WHERE rolname='fugue_storage_audit_definer';
                    "the API could not read the owner under its session lock")
             sql(f"UPDATE fugue_storage_audit.lifecycle_control SET owner='worker',{disabled};",
                 refused="storage audit owner fence is busy")
+            sql(transfer, refused="lock timeout")
         finally:
             legacy.stdin.close()
             verify(legacy.wait(timeout=5) == 0, "the legacy lock holder failed")
-    sql(f"UPDATE fugue_storage_audit.lifecycle_control SET owner='worker',{disabled};")
+    sql(activation_sql(provision, "c0c0c0c0-c0c0-c0c0-c0c0-c0c0c0c0c0c0", approval),
+        refused="roles no longer match")
+    verify(status()["owner"] == "api" and status()["completed_passes"] == 0,
+           "failed activation did not roll back the owner")
+    activation = json.loads(sql(transfer).splitlines()[-1])
+    verify(activation["policyDigest"] == original_digest and activation["approvalSha256"] == approval,
+           "activation did not persist its approved policy and source")
+    verify(json.loads(sql(transfer).splitlines()[-1]) == activation, "activation retry changed its durable witness")
+    verify(not has_committed_sample(activated_status(provision, "test-primary", declaration, secret_uid)),
+           "ownership alone was accepted as a completed worker pass")
+    sql(activation_sql(provision, secret_uid, "2" * 64), refused="different handoff witness")
+    sql("SELECT * FROM fugue_storage_audit.lifecycle_activation;", reader=True, refused="permission denied")
+    sql("UPDATE fugue_storage_audit.lifecycle_activation SET approval_sha256=repeat('3',64);",
+        worker=True, refused="permission denied")
     verify(sql("SELECT owner FROM fugue_storage_audit.lifecycle_status_v1;", reader=True) == "worker",
            "an old compatible API could not see the committed handoff")
+    sql(f"UPDATE fugue_storage_audit.lifecycle_control SET {disabled};")
     verify(run_pass() == "disabled", "disabled policy ran a pass")
     for statement in (
         "UPDATE fugue_storage_audit.lifecycle_control SET owner='api';",
@@ -241,6 +268,10 @@ FROM pg_roles WHERE rolname='fugue_storage_audit_definer';
            "a pass escaped rollback before its cursor committed")
     verify(run_pass() == "sampled", "first executor did not sample")
     first = status()
+    verify(datetime.fromisoformat(first["sample"]["observed_at"]) >= datetime.fromisoformat(activation["activatedAt"]),
+           "first durable worker sample predated the exact handoff")
+    verify(has_committed_sample(activated_status(provision, "test-primary", declaration, secret_uid)),
+           "cutover observation could not verify the committed worker pass")
     page = first["sample"]["source_page"]
     verify(first["completed_passes"] == 1 and page["rows"] == 2 and page["declared_bytes"] == 300
            and page["unknown_rows"] == 1 and page["observed_referenced_rows"] == 1 and not page["page_at_end"]
@@ -271,8 +302,23 @@ FROM pg_roles WHERE rolname='fugue_storage_audit_definer';
     verify(status() == second, "standby retry reset the active owner or last sample")
     sql(standby_install.role_sql(secret_uid, verifier), refused="cannot touch an active owner")
     verify(status() == second, "initial release replay was able to change active audit state")
-    changed, rolled_digest = policy_assignment({**policy, "history_days": 8})
-    sql(f"UPDATE fugue_storage_audit.lifecycle_control SET {changed};")
+    paused_document = {**policy_document, "storageLifecycle": {**policy, "mode": "disabled"}}
+    pause = StorageAuditProvision(config, paused_document)
+    dry_run = sql(policy_update_sql(pause, policy_document, apply=False))
+    verify(dry_run.splitlines()[-1] == "worker:updated" and status() == second,
+           "policy dry run modified the active executor")
+    pause_commit = sql(policy_update_sql(pause, policy_document, apply=True))
+    verify(pause_commit.splitlines()[-1] == "worker:updated" and run_pass() == "disabled"
+           and status()["owner"] == "worker" and status()["sample"] == second["sample"],
+           "pausing the active policy discarded progress or reopened the legacy executor")
+    verify(sql(policy_update_sql(pause, policy_document, apply=True)).splitlines()[-1] == "worker:unchanged",
+           "repeating policy publication changed an already committed policy")
+    next_document = {**policy_document, "storageLifecycle": {**policy, "history_days": 8}}
+    replacement = StorageAuditProvision(config, next_document)
+    sql(policy_update_sql(replacement, policy_document, apply=True), refused="neither the live predecessor")
+    changed, rolled_digest = policy_assignment(next_document["storageLifecycle"])
+    resumed = sql(policy_update_sql(replacement, paused_document, apply=True))
+    verify(resumed.splitlines()[-1] == "worker:updated", "resuming the audit missed the committed policy")
     sql(provision.role_sql(secret_uid, verifier), refused="already exists with a different revision")
     verify(status()["policy_sha256"] == rolled_digest and status()["owner"] == "worker",
            "attempt to provision old policy changed the active worker or policy")

@@ -73,8 +73,14 @@ by the existing capacity alerts, and API policy and worker policy digests
 match. Transfer is a separate release step. Validate a new durable pass and
 the existing thresholds after transfer; do not reset the owner to recover
 from a failed check. The standby release does not enable the API flag or
-transfer execution. Subsequent worker image releases do not rerun initial
-credential or SQL provisioning.
+transfer execution. Subsequent worker image releases reuse the installed
+credential and SQL capability. The activation verifier checks every live
+executor Pod and the immutable release records. An initial worker install can
+declare an empty rollback, which means worker removal pauses sampling until
+the worker is restored. The durable owner stays with the worker throughout.
+After activation the verifier checks a committed sample under the declared
+policy and verifies threshold series on the worker scrape. The storage policy
+job can pause sampling through its existing policy update path.
 
 Before enabling, exercise both the SQL and the worker restart against a
 disposable database:
@@ -212,3 +218,42 @@ from persisted state, observe one committed outcome with an old instance
 present, and roll back a compatible binary without reopening authority.
 Only then delete the retired startup path and unused grants, secrets and
 image tools.
+
+## Sample retention: admit before transferring
+
+There are two legacy deletion paths: the observation-retention timer and
+age-based deletes performed in sample-ingestion transactions. The
+latter currently prunes edge-network samples at one hour and edge-performance
+and resource-usage samples at seven days. The next owner must preserve these
+effective cutoffs as well as the independent scheduled policy. A transfer
+must not give the worker tenant-state rights or the heartbeat audit keyring.
+
+The compatibility API defaults to the old paths when the sample owner is
+absent. Each ingestion delete takes a shared transaction lock; ingestion
+still succeeds during lock contention. Once the worker owns deletion,
+ingestion instead records a monotonic cleanup cutoff in the same transaction.
+That demand does not advance while a producer is idle, and its rounding can
+retain extra history, never make data expire earlier. The scheduled probe
+policy remains independent of these ingestion-triggered cutoffs. The API
+timer recognizes the sample owner under its existing session lock and still
+handles signed heartbeats. Neither API path can create the owner checkpoint.
+
+The standby capability processes one closed target per transaction and
+commits progress with deletion. It cannot read private table contents or
+change writer selection through its progress view or bounded procedure. A
+full batch is retried sooner to drain backlogs; each target keeps its own
+retry time and database advisory lock. The worker independently reports
+policy validity, writer, durable pass count, last completion and deleted rows
+on `/sample-retention/metrics`. The existing PostgreSQL schema bootstrap still
+uses the API's ownership of these tables; revoking permanent DDL/DELETE
+capability requires migrating that bootstrap authority, not just disabling
+the API timer.
+
+Do not set the checkpoint until a separate release has proved the worker's
+readiness, its independent scrape and source floors for all serving and
+actual rollback artifacts. The transfer must take both API locks and atomically
+attach and enable the database fence with the ownership change. The fence
+preserves legitimate tenant cascades and turns a legacy inline delete into a
+no-op rather than aborting the associated insert. The worker refuses to
+advance without that fence. These are prerequisites, not evidence that the
+sampling writer has been moved in production.

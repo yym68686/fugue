@@ -44,7 +44,7 @@ def declares_artifact(template, component):
                     for c in template["spec"].get("containers", [])))
 
 
-def verify_workload(provision, component):
+def verify_workload(provision, component, *, verify_template=None):
     deployment = provision.get("deployment", component["deployment"])
     meta, spec, status = deployment["metadata"], deployment["spec"], deployment["status"]
     count = component["replicas"]
@@ -53,6 +53,8 @@ def verify_workload(provision, component):
             or any(status.get(field) != count for field in ("replicas", "readyReplicas", "updatedReplicas", "availableReplicas"))
             or not declares_artifact(spec["template"], component)):
         raise ProvisionError(f"deployment {component['deployment']} is not settled on the declared revision")
+    if verify_template is not None:
+        verify_template(spec["template"], component)
     selector_spec = spec["selector"]
     labels = selector_spec.get("matchLabels", {})
     if not labels or selector_spec.get("matchExpressions"):
@@ -71,6 +73,8 @@ def verify_workload(provision, component):
                 or not any(c.get("name") == component["container"] and c.get("ready") is True and c.get("imageID")
                            for c in pod["status"].get("containerStatuses", []))):
             raise ProvisionError(f"old, draining or unready {component['deployment']} Pod is still present")
+        if verify_template is not None:
+            verify_template(pod, component)
         pod_versions.append((pod["metadata"]["name"], pod["metadata"]["uid"]))
     if len(pod_versions) != count:
         raise ProvisionError("unexpected number of live Pods")
