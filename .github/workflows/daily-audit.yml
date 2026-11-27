@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 120
     env:
       GOFLAGS: -p=2
+      PYTHONDONTWRITEBYTECODE: '1'
       SHADOW_CASE: ${{ inputs.shadow_case }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -52,8 +53,10 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/fugue-shadow-evidence"
           mkdir -p "$evidence" "$RUNNER_TEMP/fugue-shadow-go-cache"
-          go mod download
-          python3 -m scripts.prepush_shadow_fixture --case "$SHADOW_CASE"
+          git rev-parse HEAD > "$evidence/source-sha.txt"
+          go mod download 2> "$evidence/download.stderr"
+          git status --porcelain > "$evidence/checkout-status.txt"
+          python3 -m scripts.prepush_shadow_fixture --case "$SHADOW_CASE" 2> "$evidence/fixture.stderr"
           git diff --check
           git diff --binary > "$evidence/representative.patch"
       - name: Compare real native and artifact dependency graphs
