@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/frontnetwork"
 	"fugue/internal/releaseguardian"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -356,39 +356,12 @@ func (a *frontAuthorityActivator) nativeNodeWorkerWrite(ctx context.Context, lea
 }
 
 func (a *frontAuthorityActivator) nodeWorkerConnectionsLive(ctx context.Context, runtime nodeWorkerRuntime, refs ...releaseguardian.NodeWorkerConnection) bool {
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	path := repairHealthEndpoint(runtime.front.Status.PodIP, frontHealthPort, "/edge/tcp-connections")
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, path, nil)
-	if err != nil {
-		return false
-	}
-	reader := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := reader.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	const limit = 4 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil || len(body) > limit || resp.StatusCode != http.StatusOK {
-		return false
-	}
-	return nodeWorkerConnectionInventoryMatches(body, string(runtime.front.UID), refs)
+	view, err := readNodeWorkerInventory(ctx, runtime.front.Status.PodIP)
+	return err == nil && nodeWorkerConnectionInventoryMatches(view, string(runtime.front.UID), refs)
 }
 
-func nodeWorkerConnectionInventoryMatches(raw []byte, uid string, refs []releaseguardian.NodeWorkerConnection) bool {
-	var view struct {
-		Count  int `json:"count"`
-		Active []struct {
-			ID        string    `json:"id"`
-			Protocol  string    `json:"protocol"`
-			StartedAt time.Time `json:"started_at"`
-			Slot      string    `json:"slot"`
-			Target    string    `json:"target"`
-		} `json:"active"`
-	}
-	if len(refs) == 0 || len(refs) > 3 || json.Unmarshal(raw, &view) != nil || view.Count != len(view.Active) || view.Count > 16_384 {
+func nodeWorkerConnectionInventoryMatches(view frontnetwork.LiveConnections, uid string, refs []releaseguardian.NodeWorkerConnection) bool {
+	if len(refs) == 0 || len(refs) > 3 {
 		return false
 	}
 	seen := make(map[string]bool, len(refs))
