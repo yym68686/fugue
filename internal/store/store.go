@@ -1091,22 +1091,6 @@ func (s *Store) failOperationGuarded(id, message string, guard *operationFinaliz
 	return op, nil
 }
 
-// CancelOperation cancels an operation only while it is still pending. Once a
-// worker has claimed an operation, especially a database migration, callers
-// must observe/recover it rather than pretending that cancellation is safe.
-func (s *Store) CancelOperation(id, message string) (model.Operation, error) {
-	op, err := s.pgCancelOperation(id, message)
-	if err != nil {
-		return op, err
-	}
-	if op.Type == model.OperationTypeMigrate {
-		if ledgerErr := s.recordMigrationFailureLedger(op, op.ResultMessage, model.OperationEvidenceSourceAPI); ledgerErr != nil {
-			return op, ledgerErr
-		}
-	}
-	return op, nil
-}
-
 // FailAssignedAgentOperation atomically rejects a task that is still waiting
 // for the specific runtime agent that requested the poll. This prevents a
 // stale agent response from failing an operation after another worker has

@@ -56,12 +56,15 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 	}
 	bad := stable
 	bad.Role, bad.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-	if _, err = s.UpdateAppRelease(bad); !errors.Is(err, ErrConflict) {
+	if _, err = s.pgUpdateAppRelease(bad); !errors.Is(err, ErrConflict) {
 		t.Fatalf("serving release retired: %v", err)
 	}
 	retire := previous
 	retire.Role, retire.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-	retired, err := s.UpdateAppRelease(retire)
+	if _, err = s.UpdateAppRelease(retire); !errors.Is(err, ErrConflict) {
+		t.Fatalf("generic Store update retired a release without a witness: %v", err)
+	}
+	retired, err := s.AppReleaseRetirement(app.TenantID, app.ID).RetireDrained(t.Context(), previous, stable, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,8 +90,8 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 	if err != nil || !reflect.DeepEqual(got, policy) {
 		t.Fatal("rejected reference changed serving policy", err)
 	}
-	// Both callers use normal Store APIs, exercising the database triggers
-	// rather than a manually sequenced simulation.
+	// The prior binary's direct SQL and the serving policy write still have
+	// to serialize safely in PostgreSQL.
 	for i := 0; i < 8; i++ {
 		r := create(model.AppReleaseRolePrevious, model.AppReleaseStatusDraining)
 		var wg sync.WaitGroup
@@ -99,7 +102,7 @@ func testAppReleaseRetirementFence(t *testing.T, s *Store, app model.App) {
 			defer wg.Done()
 			<-start
 			r.Role, r.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-			_, err := s.UpdateAppRelease(r)
+			_, err := s.pgUpdateAppRelease(r)
 			results <- err
 		}()
 		go func(id string) {

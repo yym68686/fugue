@@ -188,7 +188,7 @@ func (q *Queue) Claim(repo Repository, lane Lane, clock func() time.Time, observ
 }
 
 // A deletion must not wait for the readiness of the workload being removed.
-// CancelOperation already restricts running cancellation to deploy operations;
+// The queue's write port restricts supersession to deploy operations;
 // database transitions and migrations retain their existing safety gates.
 func cancelDeploysSupersededByDeletion(repo Repository, operations []model.Operation) (bool, error) {
 	deletes := map[string]model.Operation{}

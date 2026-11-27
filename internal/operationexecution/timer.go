@@ -1,4 +1,4 @@
-package controller
+package operationexecution
 
 import (
 	"log"
@@ -9,47 +9,47 @@ import (
 	"fugue/internal/model"
 )
 
-type controllerOperationTimer struct {
+type Timer struct {
 	startedAt time.Time
 	lastMark  time.Time
 	now       func() time.Time
-	segments  []controllerOperationTimingSegment
+	segments  []timingSegment
 }
 
-type controllerOperationTimingSegment struct {
+type timingSegment struct {
 	name     string
 	duration time.Duration
 }
 
-func newControllerOperationTimer(now func() time.Time) *controllerOperationTimer {
+func NewTimer(now func() time.Time) *Timer {
 	if now == nil {
 		now = time.Now
 	}
 	startedAt := now()
-	return &controllerOperationTimer{
+	return &Timer{
 		startedAt: startedAt,
 		lastMark:  startedAt,
 		now:       now,
 	}
 }
 
-func (t *controllerOperationTimer) Mark(name string) {
+func (t *Timer) Mark(name string) {
 	if t == nil {
 		return
 	}
-	name = normalizeControllerTimingName(name)
+	name = normalizeTimingName(name)
 	if name == "" {
 		return
 	}
 	now := t.now()
-	t.segments = append(t.segments, controllerOperationTimingSegment{
+	t.segments = append(t.segments, timingSegment{
 		name:     name,
 		duration: now.Sub(t.lastMark),
 	})
 	t.lastMark = now
 }
 
-func (t *controllerOperationTimer) Log(logger *log.Logger, scope string, op model.Operation, err error) {
+func (t *Timer) Log(logger *log.Logger, scope string, op model.Operation, err error, pending bool) {
 	if t == nil || logger == nil {
 		return
 	}
@@ -57,12 +57,12 @@ func (t *controllerOperationTimer) Log(logger *log.Logger, scope string, op mode
 	if err != nil {
 		status = "failed"
 	}
-	if safeRolloutPendingResult(err) != "" {
+	if pending {
 		status = "pending"
 	}
 	logger.Printf(
 		"%s timing operation=%s app=%s type=%s status=%s total_ms=%d segments=%s",
-		normalizeControllerTimingName(scope),
+		normalizeTimingName(scope),
 		strings.TrimSpace(op.ID),
 		strings.TrimSpace(op.AppID),
 		strings.TrimSpace(op.Type),
@@ -72,7 +72,7 @@ func (t *controllerOperationTimer) Log(logger *log.Logger, scope string, op mode
 	)
 }
 
-func (t *controllerOperationTimer) segmentString() string {
+func (t *Timer) segmentString() string {
 	if t == nil || len(t.segments) == 0 {
 		return ""
 	}
@@ -81,12 +81,12 @@ func (t *controllerOperationTimer) segmentString() string {
 		if segment.name == "" {
 			continue
 		}
-		parts = append(parts, segment.name+"="+timeDurationMilliseconds(segment.duration))
+		parts = append(parts, segment.name+"="+formatMilliseconds(segment.duration))
 	}
 	return strings.Join(parts, ",")
 }
 
-func (t *controllerOperationTimer) modelSegments() []model.OperationControllerTimingSegment {
+func (t *Timer) Segments() []model.OperationControllerTimingSegment {
 	if t == nil || len(t.segments) == 0 {
 		return nil
 	}
@@ -103,7 +103,7 @@ func (t *controllerOperationTimer) modelSegments() []model.OperationControllerTi
 	return out
 }
 
-func normalizeControllerTimingName(value string) string {
+func normalizeTimingName(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {
 		return ""
@@ -122,6 +122,6 @@ func normalizeControllerTimingName(value string) string {
 	return strings.Trim(b.String(), "_")
 }
 
-func timeDurationMilliseconds(value time.Duration) string {
+func formatMilliseconds(value time.Duration) string {
 	return strconv.FormatInt(value.Milliseconds(), 10) + "ms"
 }
