@@ -1,12 +1,8 @@
 package store
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -16,95 +12,25 @@ import (
 	"time"
 
 	"fugue/internal/schemamigrate"
+	"fugue/internal/storageaudit"
 )
 
-// V1 deliberately supports observation only. Enforce is NOT an alias for audit:
-// it is refused until complete retention authorities and writer fencing exist.
-// Neither age nor the absence of a known reference confers deletion authority.
-type StorageLifecyclePolicy struct {
-	Version                 int       `json:"version"`
-	Mode                    string    `json:"mode"`
-	EffectiveFrom           time.Time `json:"effective_from"`
-	IntervalSeconds         int       `json:"interval_seconds"`
-	SourcePageRows          int       `json:"source_page_rows"`
-	HistoryDays             int       `json:"history_days"`
-	MinimumVerifiedVersions int       `json:"minimum_verified_versions"`
-	UnusedUploadHours       int       `json:"unused_upload_hours"`
-	UnreferencedUploadDays  int       `json:"unreferenced_upload_days"`
-	WarningFreePercent      int       `json:"warning_free_percent"`
-	PressureFreePercent     int       `json:"pressure_free_percent"`
-	CriticalFreePercent     int       `json:"critical_free_percent"`
-}
+type StorageLifecyclePolicy = storageaudit.Policy
+type StorageRelationAllocation = storageaudit.RelationAllocation
+type StorageSourceAuditPage = storageaudit.SourcePage
+type StorageLifecycleSample = storageaudit.Sample
+type StorageLifecycleObservation = storageaudit.Observation
 
 func ParseStorageLifecyclePolicy(raw []byte) (StorageLifecyclePolicy, error) {
-	var p StorageLifecyclePolicy
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if len(raw) > 4096 || d.Decode(&p) != nil || d.Decode(new(any)) != io.EOF ||
-		p.Version != 1 || (p.Mode != "disabled" && p.Mode != "audit") || p.EffectiveFrom.Year() <= 1 ||
-		p.IntervalSeconds < 300 || p.IntervalSeconds > 3600 || p.SourcePageRows < 1 || p.SourcePageRows > 128 ||
-		p.HistoryDays < 7 || p.HistoryDays > 90 || p.MinimumVerifiedVersions < 3 || p.MinimumVerifiedVersions > 100 ||
-		p.UnusedUploadHours < 24 || p.UnusedUploadHours > 720 || p.UnreferencedUploadDays < 30 || p.UnreferencedUploadDays > 365 ||
-		p.CriticalFreePercent < 5 || p.CriticalFreePercent >= p.PressureFreePercent ||
-		p.PressureFreePercent >= p.WarningFreePercent || p.WarningFreePercent > 50 {
-		return StorageLifecyclePolicy{}, errors.New("invalid or unsupported storage lifecycle policy")
-	}
-	p.EffectiveFrom = p.EffectiveFrom.UTC()
-	return p, nil
-}
-
-type StorageRelationAllocation struct {
-	Relation   string `json:"relation"`
-	Present    bool   `json:"present"`
-	HeapBytes  int64  `json:"heap_bytes"`
-	TableBytes int64  `json:"table_bytes"` // includes TOAST; NOT additive to heap
-	IndexBytes int64  `json:"index_bytes"`
-	TotalBytes int64  `json:"total_bytes"`
-}
-
-type StorageSourceAuditPage struct {
-	Rows                 int   `json:"rows"`
-	DeclaredBytes        int64 `json:"declared_bytes"`
-	ReferencedRows       int   `json:"observed_referenced_rows"`
-	ReferencedBytes      int64 `json:"observed_referenced_declared_bytes"`
-	UnknownRows          int   `json:"unknown_rows"`
-	UnknownBytes         int64 `json:"unknown_declared_bytes"`
-	LegacyRows           int   `json:"predating_contract_rows"`
-	OlderThan30DaysRows  int   `json:"older_than_30_days_rows"`
-	OlderThan30DaysBytes int64 `json:"older_than_30_days_declared_bytes"`
-	PageAtEnd            bool  `json:"page_at_end"`
-	ReferencesComplete   bool  `json:"references_complete"`
-	RetirementAuthorized bool  `json:"retirement_authorized"`
-	EligibleRows         int   `json:"eligible_rows"`
-}
-
-type StorageLifecycleSample struct {
-	ObservedAt    time.Time                   `json:"observed_at"`
-	PolicySHA256  string                      `json:"policy_sha256"`
-	DatabaseBytes int64                       `json:"database_bytes"`
-	Relations     []StorageRelationAllocation `json:"relations"`
-	SourcePage    StorageSourceAuditPage      `json:"source_page"`
-}
-
-type StorageLifecycleObservation struct {
-	Schema             string                  `json:"schema"`
-	Policy             StorageLifecyclePolicy  `json:"policy"`
-	PolicySHA256       string                  `json:"policy_sha256"`
-	PolicyReadFailed   bool                    `json:"policy_read_failed"`
-	LastAttemptAt      time.Time               `json:"last_attempt_at"`
-	LastRunFailed      bool                    `json:"last_run_failed"`
-	FailureCategory    string                  `json:"failure_category"`
-	Failures           uint64                  `json:"process_failures"`
-	DurationSeconds    float64                 `json:"last_duration_seconds"`
-	Sample             *StorageLifecycleSample `json:"last_successful_sample,omitempty"`
-	ExecutionSupported bool                    `json:"execution_supported"`
-	CapacitySemantics  string                  `json:"capacity_semantics"`
+	return storageaudit.ParsePolicy(raw)
 }
 
 type storageLifecycleState struct {
 	mu          sync.Mutex
 	observation StorageLifecycleObservation
 	cursor      storageLifecycleCursor // private: never expose tenant/upload identities as metrics
+	handoff     bool                   // startup-only configuration; requires installed status view
+	workerOwned bool                   // sticky until process exit; never falls back to the old loop
 }
 
 type storageLifecycleCursor struct {
@@ -112,17 +38,22 @@ type storageLifecycleCursor struct {
 }
 
 func (s *Store) StorageLifecycleObservation() StorageLifecycleObservation {
+	o, _ := s.storageLifecycleSnapshot()
+	return o
+}
+
+func (s *Store) storageLifecycleSnapshot() (StorageLifecycleObservation, bool) {
 	s.lifecycle.mu.Lock()
 	defer s.lifecycle.mu.Unlock()
 	o := s.lifecycle.observation
-	o.Schema = "fugue.storage-lifecycle.audit.v1"
-	o.CapacitySemantics = "one bounded source page, not a global inventory; declared bytes are not reclaimable physical bytes; unknown is not eligible; audit never deletes or throttles"
+	o.Schema = storageaudit.ObservationSchema
+	o.CapacitySemantics = storageaudit.CapacitySemantics
 	if o.Sample != nil {
 		copy := *o.Sample
 		copy.Relations = append([]StorageRelationAllocation(nil), copy.Relations...)
 		o.Sample = &copy
 	}
-	return o
+	return o, s.lifecycle.workerOwned
 }
 
 // A separate loop keeps both metrics scrapes and runtime observations entirely
@@ -136,6 +67,12 @@ func (s *Store) RunStorageLifecycleAudit(ctx context.Context, storagePolicyPath 
 	defer ticker.Stop()
 	for {
 		if ctx.Err() != nil {
+			return
+		}
+		s.lifecycle.mu.Lock()
+		owned := s.lifecycle.workerOwned
+		s.lifecycle.mu.Unlock()
+		if owned {
 			return
 		}
 		s.storageLifecycleTick(ctx, path, time.Now().UTC())
@@ -159,6 +96,10 @@ func (s *Store) storageLifecycleTick(ctx context.Context, path string, now time.
 		p, err = ParseStorageLifecyclePolicy(raw)
 	}
 	s.lifecycle.mu.Lock()
+	if s.lifecycle.workerOwned {
+		s.lifecycle.mu.Unlock()
+		return
+	}
 	o := &s.lifecycle.observation
 	if err != nil {
 		// Missing policies support reader-only rollback. Invalid/missing config
@@ -170,9 +111,7 @@ func (s *Store) storageLifecycleTick(ctx context.Context, path string, now time.
 		s.lifecycle.mu.Unlock()
 		return
 	}
-	canonical, _ := json.Marshal(p)
-	hash := sha256.Sum256(canonical)
-	digest := hex.EncodeToString(hash[:])
+	digest := p.Digest()
 	changed := digest != o.PolicySHA256
 	if changed {
 		s.lifecycle.cursor = storageLifecycleCursor{}
@@ -183,13 +122,28 @@ func (s *Store) storageLifecycleTick(ctx context.Context, path string, now time.
 		return
 	}
 	cursor := s.lifecycle.cursor
-	o.LastAttemptAt = now
 	s.lifecycle.mu.Unlock()
 	started := time.Now()
-	sample, next, auditErr := s.collectStorageLifecycleSample(ctx, p, digest, cursor, now)
+	var begin storageLifecycleBeginner = s.db
+	if s.lifecycle.handoff {
+		conn, release, err := s.acquireStorageLifecycleReader(ctx)
+		if err != nil {
+			s.recordStorageLifecycleStatusFailure()
+		}
+		if conn == nil {
+			return // busy/unavailable does not consume the legacy sample interval
+		}
+		defer release()
+		begin = conn
+	}
+	sample, next, auditErr := collectStorageLifecycleSample(ctx, begin, p, digest, cursor, now)
 	s.lifecycle.mu.Lock()
 	defer s.lifecycle.mu.Unlock()
+	if s.lifecycle.workerOwned {
+		return // a late legacy pass must not overwrite a worker projection
+	}
 	o = &s.lifecycle.observation
+	o.LastAttemptAt = now
 	o.DurationSeconds = time.Since(started).Seconds()
 	o.LastRunFailed, o.FailureCategory = auditErr != nil, ""
 	if auditErr != nil {
@@ -253,10 +207,18 @@ WITH page AS MATERIALIZED (
 SELECT p.id,p.created_at,p.size_bytes,EXISTS(SELECT 1 FROM refs r WHERE r.id=p.id),c.apps,c.operations,c.import_jobs
 FROM cursors c LEFT JOIN page p ON true ORDER BY p.id`
 
-func (s *Store) collectStorageLifecycleSample(ctx context.Context, p StorageLifecyclePolicy, digest string, cursor storageLifecycleCursor, now time.Time) (sample StorageLifecycleSample, next storageLifecycleCursor, err error) {
+type storageLifecycleBeginner interface {
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
+func (s *Store) collectStorageLifecycleSample(ctx context.Context, p StorageLifecyclePolicy, digest string, cursor storageLifecycleCursor, now time.Time) (StorageLifecycleSample, storageLifecycleCursor, error) {
+	return collectStorageLifecycleSample(ctx, s.db, p, digest, cursor, now)
+}
+
+func collectStorageLifecycleSample(ctx context.Context, db storageLifecycleBeginner, p StorageLifecyclePolicy, digest string, cursor storageLifecycleCursor, now time.Time) (sample StorageLifecycleSample, next storageLifecycleCursor, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if err != nil {
 		return sample, next, err
 	}

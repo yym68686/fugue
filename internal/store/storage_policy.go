@@ -98,6 +98,7 @@ func (s *Store) RunStoragePolicy(ctx context.Context, path string) {
 			s.storagePolicy.loaded = time.Now().UTC()
 		}
 		s.storagePolicy.mu.Unlock()
+		s.refreshStorageLifecycleStatus(ctx)
 		if s.artifactContentReferencesEnabled() && s.db != nil {
 			rows, err := s.deduplicatePlatformArtifactContent(ctx)
 			s.storagePolicy.mu.Lock()
