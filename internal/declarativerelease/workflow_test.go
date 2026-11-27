@@ -1139,6 +1139,17 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	if got := yamlMappingKeys(t, on); !reflect.DeepEqual(got, []string{"schedule", "workflow_dispatch"}) {
 		t.Fatalf("daily audit triggers: %v", got)
 	}
+	choices := yamlMappingValue(t, yamlMappingValue(t, on, "workflow_dispatch"), "inputs")
+	shadowCases := yamlMappingValue(t, choices, "shadow_case")
+	options := yamlMappingValue(t, shadowCases, "options")
+	gotCases := make([]string, 0, len(options.Content))
+	for _, choice := range options.Content {
+		gotCases = append(gotCases, choice.Value)
+	}
+	wantCases := []string{"none", "queue-runtime", "queue-test", "cross-domain", "contract-tracking-scope", "contract-generator-consumer"}
+	if !reflect.DeepEqual(gotCases, wantCases) {
+		t.Fatalf("daily audit shadow cases: %v", gotCases)
+	}
 	schedule := yamlMappingValue(t, on, "schedule").Content
 	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {
 		t.Fatal("daily audit cadence changed")
@@ -1148,7 +1159,7 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 		t.Fatal("daily audit should have only repository read permission")
 	}
 	jobs := yamlMappingValue(t, root, "jobs")
-	if got := yamlMappingKeys(t, jobs); !reflect.DeepEqual(got, []string{"test"}) {
+	if got := yamlMappingKeys(t, jobs); !reflect.DeepEqual(got, []string{"shadow-replay", "test"}) {
 		t.Fatalf("daily audit jobs: %v", got)
 	}
 	test := yamlMappingValue(t, jobs, "test")
@@ -1156,7 +1167,22 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 		yamlMappingValue(t, test, "runs-on").Value != "ubuntu-latest" {
 		t.Fatal("daily audit must use only a bounded, hosted test job")
 	}
-	for _, s := range []string{"secrets.", "environment:", "self-hosted", "kubectl", "uses: ./", "deploy-declarative-component"} {
+	shadow := yamlMappingValue(t, jobs, "shadow-replay")
+	if got := yamlMappingKeys(t, shadow); !reflect.DeepEqual(got, []string{"env", "if", "runs-on", "steps", "timeout-minutes"}) ||
+		yamlMappingValue(t, shadow, "runs-on").Value != "ubuntu-latest" ||
+		yamlMappingValue(t, shadow, "if").Value != "github.event_name == 'workflow_dispatch' && inputs.shadow_case != 'none'" ||
+		yamlMappingValue(t, shadow, "timeout-minutes").Value != "120" {
+		t.Fatal("shadow audits must be manual, bounded, hosted and inherit repository-only read access")
+	}
+	for _, job := range []*yaml.Node{test, shadow} {
+		steps := yamlMappingValue(t, job, "steps")
+		if len(steps.Content) == 0 ||
+			yamlMappingValue(t, steps.Content[0], "uses").Value != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+			yamlMappingValue(t, yamlMappingValue(t, steps.Content[0], "with"), "persist-credentials").Value != "false" {
+			t.Fatal("daily audit jobs must check out without persisting credentials")
+		}
+	}
+	for _, s := range []string{"secrets.", "environment:", "self-hosted", "kubectl", "uses: ./", "deploy-declarative-component", "github.token", "id-token:"} {
 		if strings.Contains(string(raw), s) {
 			t.Fatalf("daily audit retained production access: %s", s)
 		}

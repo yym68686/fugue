@@ -47,11 +47,11 @@ func (s *Store) ListAppReleaseMetadata(filter model.AppReleaseFilter) ([]model.A
 	return s.pgListAppReleaseView(filter, false)
 }
 
-// ListAppReleaseRetirementState preserves all matching release facts and only
+// listAppReleaseRetirementState preserves all matching release facts and only
 // includes executable configuration for releases awaiting drain. The retirement
 // gate needs those complete snapshots; already-retired cleanup only uses the
 // immutable workload binding. This view must not be persisted as a full release.
-func (s *Store) ListAppReleaseRetirementState(ctx context.Context, filter model.AppReleaseFilter) ([]model.AppRelease, error) {
+func (s *Store) listAppReleaseRetirementState(ctx context.Context, filter model.AppReleaseFilter) ([]model.AppRelease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

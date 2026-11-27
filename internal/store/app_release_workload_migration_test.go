@@ -118,7 +118,7 @@ func testStoppedHistoricalRetirement(t *testing.T, s *Store, app model.App) {
 				go func() {
 					defer wg.Done()
 					<-start
-					_, err := s.RetireStoppedHistoricalAppRelease(ctx, r, stable, policy, op, w)
+					_, err := s.AppReleaseRetirement(r.TenantID, r.AppID).RetireStoppedHistorical(ctx, r, stable, policy, op, w)
 					results <- err
 				}()
 				go func() {
@@ -150,7 +150,7 @@ func testStoppedHistoricalRetirement(t *testing.T, s *Store, app model.App) {
 				}
 				return
 			}
-			retired, err := s.RetireStoppedHistoricalAppRelease(ctx, r, stable, policy, op, w)
+			retired, err := s.AppReleaseRetirement(r.TenantID, r.AppID).RetireStoppedHistorical(ctx, r, stable, policy, op, w)
 			if scenario != "valid" {
 				if err == nil {
 					t.Fatal("unsafe atomic retirement accepted")

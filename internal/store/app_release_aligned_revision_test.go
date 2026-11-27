@@ -3,21 +3,40 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"testing"
 
 	"fugue/internal/model"
-	"fugue/internal/schemamigrate"
+	retirement "fugue/internal/releaseretirement/contract"
 )
 
+func TestAlignedReleaseRevisionContractKeepsServingRelease(t *testing.T) {
+	r := model.AppRelease{Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing,
+		DeploymentName: "canonical", ServiceName: "canonical", RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: "original", ServiceName: "original"}}
+	if retirement.AwaitingDrain(r) || !retirement.HasAlignedRevision(r) {
+		t.Fatal("workload withdrawal was confused with release retirement")
+	}
+	for _, scenario := range []string{"same_target", "same_service", "not_serving", "unbound", "empty_target"} {
+		copy := r
+		switch scenario {
+		case "same_target":
+			copy.DeploymentName = copy.RevisionWorkload.DeploymentName
+		case "same_service":
+			copy.ServiceName = copy.RevisionWorkload.ServiceName
+		case "not_serving":
+			copy.Role = model.AppReleaseRoleCandidate
+		case "unbound":
+			copy.RevisionWorkload = nil
+		case "empty_target":
+			copy.DeploymentName = ""
+		}
+		if retirement.HasAlignedRevision(copy) {
+			t.Fatal("unsafe aligned revision discovered", scenario)
+		}
+	}
+}
+
 func TestAlignedReleaseRevisionPostgresDiscovery(t *testing.T) {
-	s := billingBatchPGStore(t)
-	if err := s.ensureDatabaseReady(); err != nil {
-		t.Fatal(err)
-	}
-	if err := schemamigrate.MigrateAppReleaseWorkload(context.Background(), os.Getenv("FUGUE_TEST_DATABASE_URL")); err != nil {
-		t.Fatal(err)
-	}
+	s := newStoreTestDatabase(t, "")
 	tenant := billingBatchPGTenant(t, s)
 	project, err := s.CreateProject(tenant.ID, "aligned", "")
 	if err != nil {
