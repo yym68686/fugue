@@ -6,22 +6,22 @@ import (
 	"testing"
 	"time"
 
-	"fugue/internal/backupusage"
+	backupusagecontract "fugue/internal/backupusage/contract"
 	"fugue/internal/model"
 )
 
 func TestRenderBackupUsageSeparatesBillableAndPhysicalBytes(t *testing.T) {
 	physicalBytes := int64(248)
 	physicalObjects := 5
-	usage := backupusage.Usage{
+	usage := backupusagecontract.Usage{
 		Provider:            model.DataBackendProviderCloudflareR2,
 		BillableBytes:       100,
 		PhysicalBytes:       &physicalBytes,
 		PhysicalObjectCount: &physicalObjects,
 		MarkupPercent:       5,
 		EffectiveMultiplier: 1.05,
-		Reconciliation: &backupusage.Reconciliation{
-			Status:                   backupusage.ReconciliationStatusDrift,
+		Reconciliation: &backupusagecontract.Reconciliation{
+			Status:                   backupusagecontract.ReconciliationStatusDrift,
 			BackendCount:             1,
 			MeasuredBackendCount:     1,
 			ReferencedBytes:          178,
@@ -55,12 +55,12 @@ func TestRenderBackupUsageSeparatesBillableAndPhysicalBytes(t *testing.T) {
 }
 
 func TestRenderBackupUsageDoesNotRenderUnavailablePhysicalBytesAsZero(t *testing.T) {
-	usage := backupusage.Usage{
+	usage := backupusagecontract.Usage{
 		Provider:            model.DataBackendProviderCloudflareR2,
 		MarkupPercent:       5,
 		EffectiveMultiplier: 1.05,
-		Reconciliation: &backupusage.Reconciliation{
-			Status:               backupusage.ReconciliationStatusUnavailable,
+		Reconciliation: &backupusagecontract.Reconciliation{
+			Status:               backupusagecontract.ReconciliationStatusUnavailable,
 			BackendCount:         1,
 			MeasuredBackendCount: 0,
 			ObservedAt:           time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC),
