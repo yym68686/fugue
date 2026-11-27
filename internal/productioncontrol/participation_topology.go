@@ -11,12 +11,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	kubejson "sigs.k8s.io/json"
 )
 
 const (
-	ParticipationTopologyResource = "topology/node-participation"
-	ParticipationPolicySchema     = "fugue.automatic-node-participation/v1"
-	MaxParticipationPolicyBytes   = 128 << 10
+	ParticipationTopologyResource  = "topology/node-participation"
+	ParticipationPolicySchema      = "fugue.automatic-node-participation/v1"
+	BoundParticipationPolicySchema = "fugue.automatic-node-participation/v2"
+	MaxParticipationPolicyBytes    = 128 << 10
 )
 
 var (
@@ -26,12 +29,32 @@ var (
 )
 
 type ParticipationPolicy struct {
-	Schema     string                `json:"schema"`
-	Generation int64                 `json:"generation"`
-	Namespace  string                `json:"namespace"`
-	Origin     string                `json:"origin"`
-	Readers    ParticipationReaders  `json:"readers"`
-	Members    []ParticipationMember `json:"members"`
+	Schema     string                          `json:"schema"`
+	Generation int64                           `json:"generation"`
+	Namespace  string                          `json:"namespace"`
+	Origin     string                          `json:"origin"`
+	Readers    ParticipationReaders            `json:"readers"`
+	Members    []ParticipationMember           `json:"members"`
+	Kubernetes *ParticipationKubernetesBinding `json:"kubernetes,omitempty"`
+}
+
+// ParticipationKubernetesBinding identifies the approved API endpoint and
+// namespace. It contains public identity information, not credentials.
+type ParticipationKubernetesBinding struct {
+	Endpoint     string `json:"endpoint"`
+	CADigest     string `json:"ca_digest"`
+	NamespaceUID string `json:"namespace_uid"`
+}
+
+func (b ParticipationKubernetesBinding) Validate() error {
+	u, err := url.Parse(b.Endpoint)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Opaque != "" ||
+		u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" ||
+		u.Fragment != "" || u.ForceQuery || strings.Contains(b.Endpoint, "#") ||
+		!digestPattern.MatchString(b.CADigest) || !participationUID.MatchString(b.NamespaceUID) {
+		return errors.New("invalid participation Kubernetes endpoint, CA digest, or namespace UID")
+	}
+	return nil
 }
 
 type ParticipationReaders struct {
@@ -64,9 +87,23 @@ type ParticipationProbe struct {
 
 func DecodeParticipationPolicy(raw []byte) (ParticipationPolicy, error) {
 	var p ParticipationPolicy
-	if len(raw) == 0 || len(raw) > MaxParticipationPolicyBytes || decodeControlJSON(raw, &p) != nil ||
-		p.Schema != ParticipationPolicySchema || p.Generation < 1 || len(p.Members) < 1 || len(p.Members) > 16 {
+	if len(raw) == 0 || len(raw) > MaxParticipationPolicyBytes {
+		return ParticipationPolicy{}, errors.New("invalid node participation topology size")
+	}
+	strict, err := kubejson.UnmarshalStrict(raw, &p)
+	if err != nil || len(strict) != 0 ||
+		p.Generation < 1 || len(p.Members) < 1 || len(p.Members) > 16 {
 		return ParticipationPolicy{}, errors.New("invalid node participation topology")
+	}
+	switch {
+	case p.Schema == ParticipationPolicySchema && p.Kubernetes == nil:
+		// Preserve the original canonical payload for signed legacy imports.
+	case p.Schema == BoundParticipationPolicySchema && p.Kubernetes != nil:
+		if err := p.Kubernetes.Validate(); err != nil {
+			return ParticipationPolicy{}, err
+		}
+	default:
+		return ParticipationPolicy{}, errors.New("invalid node participation topology schema or Kubernetes binding")
 	}
 	origin, err := url.Parse(p.Origin)
 	if err != nil || origin.Scheme != "https" || origin.Hostname() == "" || origin.User != nil ||

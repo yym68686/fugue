@@ -142,13 +142,16 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		if err != nil {
 			return errors.New("could not load the requested read-only Kubernetes context")
 		}
-		observer, err := participation.NewKubernetesObserver(kubeConfig)
-		if err != nil {
-			return err
-		}
 		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
 			topology, err := j.ReadParticipationTopology(ctx, cluster)
 			if err != nil {
+				return err
+			}
+			observer, err := participation.NewBoundKubernetesObserver(kubeConfig, topology.Policy)
+			if err != nil {
+				return err
+			}
+			if err := observer.VerifyNamespace(ctx); err != nil {
 				return err
 			}
 			report := participationObservationReport{JournalCluster: cluster, KubeContext: args[3], Topology: topology.Version}
@@ -170,11 +173,14 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				if err != nil {
 					return err
 				}
-				latest, err := j.ReadParticipationTopology(ctx, cluster)
-				if err != nil || latest.Version != topology.Version || latest.ApprovalDigest != topology.ApprovalDigest {
-					return errors.New("approved participation topology could not be revalidated after observation")
-				}
 				report.Kind, report.Shadow = "participation_kubernetes_only_shadow", &shadow
+			}
+			if err := observer.VerifyNamespace(ctx); err != nil {
+				return err
+			}
+			latest, err := j.ReadParticipationTopology(ctx, cluster)
+			if err != nil || latest.Version != topology.Version || latest.ApprovalDigest != topology.ApprovalDigest {
+				return errors.New("approved participation topology could not be revalidated after observation")
 			}
 			return emit(report)
 		})

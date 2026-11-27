@@ -38,8 +38,10 @@ var (
 // KubernetesObserver is a GET-only collector. It does not implement Node
 // hold/recovery, read a serving transport, or accept a caller's baseline.
 type KubernetesObserver struct {
-	apps appsclient.AppsV1Interface
-	core coreclient.CoreV1Interface
+	apps         appsclient.AppsV1Interface
+	core         coreclient.CoreV1Interface
+	namespace    string
+	namespaceUID string
 }
 
 func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {
