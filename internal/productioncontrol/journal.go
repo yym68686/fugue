@@ -25,6 +25,11 @@ func ApplySchema(ctx context.Context, owner *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
+	// The schema owner can run from multiple replicas; serialize version and
+	// backfill checks before any DDL changes or data reads.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('fugue.production.schema',0))`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("apply production control schema: %w", err)
 	}

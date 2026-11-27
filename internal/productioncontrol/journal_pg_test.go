@@ -149,4 +149,30 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		t.Fatalf("unaudited intent escaped rollback: %v", err)
 	}
 	t.Run("execution-lifecycle", func(t *testing.T) { testExecutionLifecycle(t, ctx, j, second) })
+
+	// Recreate the v1 audit layout in this disposable database without
+	// touching the transition tables. The migrator must rehydrate the audit
+	// from original rows, preserving their time and actor, exactly once.
+	if _, err := db.ExecContext(ctx, `
+		DROP TRIGGER execution_claim_audit ON fugue_control.execution_claims;
+		DROP TRIGGER execution_result_audit ON fugue_control.execution_results;
+		DROP TRIGGER execution_launch_audit ON fugue_control.execution_launches;
+		DELETE FROM fugue_control.audit WHERE kind LIKE 'execution.%';
+		ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_event_kind_v2;
+		ALTER TABLE fugue_control.audit ADD CONSTRAINT audit_kind_check CHECK (kind IN ('intent.recorded','approval.recorded'));
+	`); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := ApplySchema(ctx, db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var launches int
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM fugue_control.execution_launches l
+		JOIN fugue_control.audit a ON a.intent_digest=l.intent_digest AND a.kind='execution.launched'
+		AND l.recorded_at=a.recorded_at AND l.actor=a.actor`).Scan(&launches); err != nil || launches != 1 {
+		t.Fatalf("historical launch was not backfilled exactly: count=%d error=%v", launches, err)
+	}
 }

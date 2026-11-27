@@ -90,6 +90,9 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 	other := intent
 	other.RequestID = "dispatch-b"
 	second, secondApproval := signAndRecord(other)
+	if _, created, err := w1.ReserveExecution(ctx, "audit-error", first, firstApproval); err == nil || created {
+		t.Fatal("claim with failed audit was allowed to escape")
+	}
 	type attempt struct {
 		w        *ExecutionJournal
 		digest   string
@@ -160,6 +163,9 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 		t.Fatal("launch accepted expired approval")
 	}
 	j2.now = j1.now
+	if created, err := j2.ReserveReleaseLaunch(ctx, "audit-error", winningIntent, winningPayload, claim.Fence); err == nil || created {
+		t.Fatal("launch with failed audit was allowed to escape")
+	}
 	var launched atomic.Int32
 	for i := range 10 {
 		worker := []*Journal{j1, j2}[i%2]
@@ -191,6 +197,9 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 	evidence.fenced = true
 	if _, err := w2.CompleteExecution(ctx, "worker-b", stale, completed); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("stale fence should be rejected, got %v", err)
+	}
+	if created, err := w2.CompleteExecution(ctx, "audit-error", claim, completed); err == nil || created {
+		t.Fatal("terminal result with failed audit was allowed to escape")
 	}
 	if inserted, err := w2.CompleteExecution(ctx, "worker-b", claim, completed); err != nil || !inserted {
 		t.Fatalf("verified application not persisted: inserted=%v err=%v", inserted, err)
@@ -230,5 +239,12 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 	settled, err := w1.Resource(ctx, baseline.Scope)
 	if err != nil || settled.LastVerified != restored.Verified || settled.Pending != "" {
 		t.Fatalf("verified rollback did not settle scope: %+v err=%v", settled, err)
+	}
+	for kind, actor := range map[string]string{"execution.claimed": "worker-a", "execution.launched": "guardian", "execution.completed": "worker-b"} {
+		var n int
+		if err := j.db.QueryRowContext(ctx, `SELECT count(*) FROM fugue_control.audit WHERE kind=$1 AND subject_digest=$2 AND intent_digest=$2 AND actor=$3`,
+			kind, claim.IntentDigest, actor).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("audit entry %s count=%d error=%v", kind, n, err)
+		}
 	}
 }

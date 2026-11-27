@@ -23,6 +23,9 @@ the independent cutover checks.
   on intents, approvals, resource baselines, claims, results and launches, and
   `INSERT` only on `execution_launches`. It must not own the schema. It cannot
   add approval or terminal records or update and delete historical entries.
+  Claim, launch and completion entries are written to the execution audit
+  in the same SQL transaction. If the audit fails, no corresponding entry
+  or authorization commits.
 - The dedicated writer handles exactly one enrolled target. It does not start
   legacy candidate imports, authority activators, or the legacy artifact
   pruner, and it will not publish status or reconcile an unmarked pointer.
