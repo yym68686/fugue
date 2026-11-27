@@ -22,8 +22,10 @@ import (
 
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
+	"fugue/internal/releaseguardian/participation"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/jackc/pgx/v5/stdlib"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -31,7 +33,10 @@ import (
 const usage = `usage: fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPROVAL_DIGEST ATTESTATION_FILE
        fugue-release-bootstrap CONFIG observe INTENT_DIGEST
        fugue-release-bootstrap CONFIG anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
-       fugue-release-bootstrap CONFIG settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
+       fugue-release-bootstrap CONFIG settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST
+       fugue-release-bootstrap CONFIG participation-checkpoint [INTENT_DIGEST]
+       fugue-release-bootstrap CONFIG participation-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
+       fugue-release-bootstrap CONFIG participation-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
@@ -45,6 +50,7 @@ type settings struct {
 	RegistryAuthFile  string                                `json:"registryAuthFile,omitempty"`
 	WitnessDirectory  string                                `json:"witnessDirectory"`
 	ObserverPublicKey ed25519.PublicKey                     `json:"observerPublicKey"`
+	Node              string                                `json:"node,omitempty"`
 }
 
 type request struct {
@@ -79,9 +85,8 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	scope, err := releaseguardian.DeploymentCutoverScope(cfg.Cutover, cluster)
-	if err != nil {
-		return err
+	if req.command == "participation-checkpoint" {
+		dsn.RuntimeParams["default_transaction_read_only"] = "on"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -89,6 +94,13 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	defer db.Close()
 	db.SetMaxOpenConns(2)
 	journal, err := productioncontrol.NewJournal(db, owners)
+	if err != nil {
+		return err
+	}
+	if cfg.Node != "" {
+		return runParticipation(ctx, journal, cluster, cfg, req, out)
+	}
+	scope, err := releaseguardian.DeploymentCutoverScope(cfg.Cutover, cluster)
 	if err != nil {
 		return err
 	}
@@ -197,19 +209,25 @@ func parseRequest(args []string) (request, error) {
 			r.intent, r.approval, r.attestation = args[1], args[2], args[3]
 			return r, nil
 		}
-	case "observe":
+	case "observe", "participation-checkpoint":
+		if r.command == "participation-checkpoint" && len(args) == 1 {
+			return r, nil
+		}
 		if len(args) == 2 && allDigests(args[1]) {
 			r.intent = args[1]
 			return r, nil
 		}
-	case "anchor", "settle":
+	case "anchor", "settle", "participation-anchor", "participation-settle":
 		version := args[1:]
-		if r.command == "settle" {
+		if r.command == "settle" || r.command == "participation-settle" {
 			if len(version) != 5 || !allDigests(version[0]) {
 				break
 			}
 			r.intent, r.outcome, version = version[0], productioncontrol.Outcome(version[1]), version[2:]
 			if r.outcome != productioncontrol.Applied && r.outcome != productioncontrol.Restored && r.outcome != productioncontrol.NotApplied {
+				break
+			}
+			if r.command == "participation-settle" && r.outcome == productioncontrol.Restored {
 				break
 			}
 		}
@@ -240,6 +258,17 @@ func readSettings(path, command string) (settings, error) {
 		len(cfg.ObserverPublicKey) != ed25519.PublicKeySize || cfg.Mode != command || cfg.Actor == "" {
 		return settings{}, errors.New("bootstrap configuration is invalid or does not authorize this command")
 	}
+	switch cfg.Mode {
+	case "participation-checkpoint", "participation-anchor", "participation-settle":
+		if cfg.Node == "" || len(validation.IsDNS1123Subdomain(cfg.Node)) != 0 ||
+			cfg.Cutover != (releaseguardian.KubeDeploymentCutover{}) || cfg.DependencyService != "" {
+			return settings{}, errors.New("bootstrap participation profile requires one Node and no Deployment settings")
+		}
+	default:
+		if cfg.Node != "" {
+			return settings{}, errors.New("bootstrap Deployment profile must not specify a Node")
+		}
+	}
 	if cfg.Mode == "publish" {
 		if cfg.Registry == "" || (cfg.RegistryAuthFile != "" && !filepath.IsAbs(cfg.RegistryAuthFile)) {
 			return settings{}, errors.New("bootstrap requires a separately configured independent registry")
@@ -248,6 +277,59 @@ func readSettings(path, command string) (settings, error) {
 		return settings{}, errors.New("only bootstrap publication may configure registry credentials")
 	}
 	return cfg, nil
+}
+
+func runParticipation(ctx context.Context, j *productioncontrol.Journal, cluster string, cfg settings, req request, out io.Writer) error {
+	kube, err := rest.InClusterConfig()
+	if err != nil || kube.CAFile == "" || kube.BearerTokenFile == "" {
+		return errors.New("participation bootstrap requires the dedicated read-only Kubernetes identity and mounted CA")
+	}
+	kube.Timeout = 5 * time.Second
+	emit := json.NewEncoder(out).Encode
+	if req.command == "participation-checkpoint" {
+		checkpoint, err := participation.ObserveOfflineHoldCheckpoint(ctx, j, kube, cluster, cfg.Node, req.intent)
+		if err != nil {
+			return err
+		}
+		digest, err := checkpoint.Digest()
+		if err != nil {
+			return err
+		}
+		return emit(struct {
+			ObservationDigest string                              `json:"observationDigest"`
+			Checkpoint        participation.OfflineHoldCheckpoint `json:"checkpoint"`
+			ExecutionEvidence bool                                `json:"executionEvidence"`
+		}{digest, checkpoint, false})
+	}
+	witnesses, err := os.OpenRoot(cfg.WitnessDirectory)
+	if err != nil {
+		return errors.New("independent witness directory is unavailable")
+	}
+	defer witnesses.Close()
+	e, err := participation.NewOfflineHoldSettlement(j, kube, cluster, cfg.Node, directoryWitnesses{witnesses}, cfg.ObserverPublicKey)
+	if err != nil {
+		return err
+	}
+	scope := participation.HoldResource(cluster, cfg.Node)
+	var created bool
+	switch req.command {
+	case "participation-anchor":
+		created, err = e.AnchorResource(ctx, cfg.Actor, productioncontrol.Baseline{Scope: scope, Verified: req.version, EvidenceDigest: req.witness})
+	case "participation-settle":
+		claim, _, readErr := j.ReadExecution(ctx, scope, req.intent)
+		if readErr != nil {
+			return readErr
+		}
+		created, err = e.CompleteExecution(ctx, cfg.Actor, claim, productioncontrol.ExecutionResult{
+			Outcome: req.outcome, Verified: req.version, EvidenceDigest: req.witness,
+		})
+	default:
+		return errors.New("unsupported bootstrap participation mode")
+	}
+	if err != nil {
+		return err
+	}
+	return emit(productioncontrol.Recorded{Digest: req.witness, Created: created})
 }
 
 func openRegistry(host, authFile string) (*releaseguardian.IndependentRegistry, error) {

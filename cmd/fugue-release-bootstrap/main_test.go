@@ -103,3 +103,42 @@ func TestBootstrapObservationCannotWriteThroughTransport(t *testing.T) {
 		t.Fatalf("observation dispatched %d requests instead of a single GET", requests)
 	}
 }
+
+func TestBootstrapParticipationProfilesDoNotAuthorizePublication(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bootstrap.json")
+	cfg := settings{Mode: "participation-settle", Actor: "fixture-observer", JournalFile: "/fixture/journal.json",
+		WitnessDirectory: dir, ObserverPublicKey: make(ed25519.PublicKey, ed25519.PublicKeySize), Node: "node-a"}
+	write := func() {
+		t.Helper()
+		b, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	if _, err := readSettings(path, cfg.Mode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSettings(path, "participation-anchor"); err == nil {
+		t.Fatal("settlement profile enabled anchoring")
+	}
+	cfg.Cutover.Deployment = "other"
+	write()
+	if _, err := readSettings(path, cfg.Mode); err == nil {
+		t.Fatal("participation profile accepted Deployment settings")
+	}
+	d := "sha256:" + strings.Repeat("c", 64)
+	if _, err := parseRequest([]string{"participation-checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseRequest([]string{"participation-settle", d, "restored", "8", d, d}); err == nil {
+		t.Fatal("participation settlement accepted an unimplemented rollback")
+	}
+	if r, err := parseRequest([]string{"participation-settle", d, "applied", "8", d, d}); err != nil || r.intent != d || r.outcome != productioncontrol.Applied {
+		t.Fatalf("participation settlement did not bind the claimed version: %+v %v", r, err)
+	}
+}

@@ -27,20 +27,25 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-type pendingFixtureEvidence struct{}
+type fixtureOfflineWitnesses map[string][]byte
 
-func (pendingFixtureEvidence) VerifyBaseline(context.Context, productioncontrol.Baseline) error {
-	return nil // Disposable database only.
+func (s fixtureOfflineWitnesses) ReadExecutionWitness(_ context.Context, digest string) ([]byte, error) {
+	return s[digest], nil
 }
 
-type pendingFixtureTerminalEvidence struct{ pendingFixtureEvidence }
-
-func (pendingFixtureTerminalEvidence) VerifyTerminal(context.Context, productioncontrol.Claim, productioncontrol.Intent, productioncontrol.ExecutionResult) error {
-	return nil // Used only for the synthetic transition at the end of this test.
-}
-
-func (pendingFixtureEvidence) VerifyTerminal(context.Context, productioncontrol.Claim, productioncontrol.Intent, productioncontrol.ExecutionResult) error {
-	panic("this path must not try to settle a claim")
+func storeFixtureOfflineWitness(t *testing.T, source fixtureOfflineWitnesses, signer ed25519.PrivateKey, w productioncontrol.ExecutionWitness) string {
+	t.Helper()
+	message, err := w.SigningInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Signature = ed25519.Sign(signer, message)
+	raw, digest, err := productioncontrol.EncodeExecutionWitness(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source[digest] = raw
+	return digest
 }
 
 func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
@@ -168,15 +173,43 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	hold, approval := record(s)
 	scope := HoldResource("fixture", node)
 	predecessor := productioncontrol.Version{Generation: s.Intent.Generation, Digest: s.Intent.CurrentDigest}
-	runtime, err := productioncontrol.NewExecutionJournal(j, pendingFixtureEvidence{})
+	settlementKey, settlementSigner, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.AnchorResource(ctx, "fixture-observer", productioncontrol.Baseline{
-		Scope: scope, Verified: predecessor, EvidenceDigest: digest([]byte("fixture baseline")),
-	}); err != nil {
+	witnesses := fixtureOfflineWitnesses{}
+	runtime, err := NewOfflineHoldSettlement(j, restConfig, "fixture", node, witnesses, settlementKey)
+	if err != nil {
 		t.Fatal(err)
 	}
+	live.Store(before)
+	closed := fixtureClosedOfflineGuard(t, node)
+	readGuard.Store(&closed)
+	baseline, err := ObserveOfflineHoldCheckpoint(ctx, j, restConfig, "fixture", node, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineDigest, err := baseline.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeWitness := func() productioncontrol.ExecutionWitness {
+		at := time.Now().UTC()
+		return productioncontrol.ExecutionWitness{
+			KeyID: "provider-observer", ClusterID: scope.ClusterID, ResourceID: scope.ResourceID,
+			ObservedAt: at.Unix(), ExpiresAt: at.Add(time.Minute).Unix(),
+			AuthorityDigest: digest([]byte("synthetic closed fixture")),
+		}
+	}
+	anchor := makeWitness()
+	anchor.Kind, anchor.Generation, anchor.VerifiedDigest, anchor.ObservationDigest = productioncontrol.BaselineWitness, predecessor.Generation, predecessor.Digest, baselineDigest
+	anchorID := storeFixtureOfflineWitness(t, witnesses, settlementSigner, anchor)
+	if created, err := runtime.AnchorResource(ctx, "fixture-observer", productioncontrol.Baseline{
+		Scope: scope, Verified: predecessor, EvidenceDigest: anchorID,
+	}); err != nil || !created {
+		t.Fatal(err)
+	}
+	beforeUnclaimed := nodeReads.Load()
 	readerCfg := cfg.Copy()
 	readerCfg.RuntimeParams["default_transaction_read_only"] = "on"
 	readerDB := stdlib.OpenDB(*readerCfg)
@@ -189,7 +222,7 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ObservePendingOfflineHold(ctx, reopened, restConfig, "fixture", hold); err == nil || nodeReads.Load() != 0 {
+	if _, err := ObservePendingOfflineHold(ctx, reopened, restConfig, "fixture", hold); err == nil || nodeReads.Load() != beforeUnclaimed {
 		t.Fatal("unclaimed intent read provider state")
 	}
 	guard := fixtureInstalledOfflineGuard(t, s, writer)
@@ -232,22 +265,65 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 		report.ApprovalDigest != approval || report.LastVerified != predecessor || nodeReads.Load() != beforeReadback+2 {
 		t.Fatalf("observer did not bind live state to persisted claim without advancing LKG: %+v %v", report, err)
 	}
-	stored, terminal, err := reopened.ReadExecution(ctx, scope, hold)
-	if err != nil || stored != claim || terminal != nil {
-		t.Fatalf("observer changed the durable claim: %+v %+v %v", stored, terminal, err)
+	stored, priorResult, err := reopened.ReadExecution(ctx, scope, hold)
+	if err != nil || stored != claim || priorResult != nil {
+		t.Fatalf("observer changed the durable claim: %+v %+v %v", stored, priorResult, err)
 	}
 	if replay, err := DispatchOfflineHold(ctx, reopened, restConfig, writeConfig, nil, "fixture", "fixture-writer", writer, hold, approval, observer, attestation); err != nil ||
 		replay.Reserved || replay.Claim != claim || writes.Load() != 1 {
 		t.Fatalf("reopened worker attempted a second dispatch: %+v %v writes=%d", replay, err, writes.Load())
 	}
-	terminalWriter, err := productioncontrol.NewExecutionJournal(j, pendingFixtureTerminalEvidence{})
+	if _, err := ObserveOfflineHoldCheckpoint(ctx, j, restConfig, "fixture", node, hold); err == nil {
+		t.Fatal("open guard qualified as a closed terminal checkpoint")
+	}
+	terminal := makeWitness()
+	terminal.Kind, terminal.IntentDigest, terminal.ApprovalDigest, terminal.Fence = productioncontrol.TerminalWitness, hold, approval, claim.Fence
+	terminal.Outcome, terminal.Generation, terminal.VerifiedDigest = productioncontrol.Applied, predecessor.Generation+1, s.Intent.TargetDigest
+	terminal.ObservationDigest = digest([]byte("wrong observation"))
+	badID := storeFixtureOfflineWitness(t, witnesses, settlementSigner, terminal)
+	result := productioncontrol.ExecutionResult{Outcome: terminal.Outcome,
+		Verified: productioncontrol.Version{Generation: terminal.Generation, Digest: terminal.VerifiedDigest}, EvidenceDigest: badID}
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, result); err == nil || created {
+		t.Fatal("open guard allowed settlement despite a trusted signature")
+	}
+	closed.Policy.ResourceVersion, closed.Binding.ResourceVersion = "31", "32"
+	readGuard.Store(&closed)
+	checkpoint, err := ObserveOfflineHoldCheckpoint(ctx, j, restConfig, "fixture", node, hold)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := productioncontrol.ExecutionResult{Outcome: productioncontrol.NotApplied, Verified: predecessor,
-		EvidenceDigest: digest([]byte("synthetic terminal fence"))}
-	if created, err := terminalWriter.CompleteExecution(ctx, "fixture-observer", claim, result); err != nil || !created {
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, result); err == nil || created {
+		t.Fatal("closed guard allowed settlement for a different signed observation")
+	}
+	terminal.ObservationDigest, err = checkpoint.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed := terminal
+	delayed.Outcome, delayed.Generation, delayed.VerifiedDigest = productioncontrol.NotApplied, predecessor.Generation, predecessor.Digest
+	wrongOutcome := productioncontrol.ExecutionResult{Outcome: delayed.Outcome, Verified: predecessor,
+		EvidenceDigest: storeFixtureOfflineWitness(t, witnesses, settlementSigner, delayed)}
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, wrongOutcome); err == nil || created {
+		t.Fatal("signed NotApplied displaced the actual target")
+	}
+	invalidGeneration := terminal
+	invalidGeneration.Generation++
+	wrongGeneration := productioncontrol.ExecutionResult{Outcome: terminal.Outcome,
+		Verified:       productioncontrol.Version{Generation: invalidGeneration.Generation, Digest: terminal.VerifiedDigest},
+		EvidenceDigest: storeFixtureOfflineWitness(t, witnesses, settlementSigner, invalidGeneration)}
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, wrongGeneration); err == nil || created {
+		t.Fatal("signed witness skipped the next generation")
+	}
+	result.EvidenceDigest = storeFixtureOfflineWitness(t, witnesses, settlementSigner, terminal)
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, result); err != nil || !created {
 		t.Fatalf("fixture settlement: %v, %v", created, err)
+	}
+	head, err := j.ReadResource(ctx, scope)
+	if err != nil || head.Pending != "" || head.LastVerified != result.Verified {
+		t.Fatalf("settlement failed to advance the verified head: %+v %v", head, err)
+	}
+	if created, err := runtime.CompleteExecution(ctx, "fixture-observer", claim, result); err != nil || created {
+		t.Fatalf("settlement did not replay the durable receipt: %v, %v", created, err)
 	}
 	if next, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval); err != nil || !next.Created {
 		t.Fatalf("settled operation prevented topology advancement: %+v, %v", next, err)
@@ -255,52 +331,22 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	newRequest := s
 	newRequest.Intent.RequestID = "stale-topology"
 	stale, staleApproval := record(newRequest)
-	if _, created, err := runtime.ReserveExecution(ctx, "fixture-writer", stale, staleApproval); !errors.Is(err, productioncontrol.ErrResourceDrift) || created {
+	if _, created, err := j.ReserveExecution(ctx, "fixture-writer", stale, staleApproval); !errors.Is(err, productioncontrol.ErrResourceDrift) || created {
 		t.Fatalf("new claim on previous topology was accepted: %v, %v", created, err)
 	}
 
-	current, err := j.ReadParticipationTopology(ctx, "fixture")
+}
+
+func fixtureClosedOfflineGuard(t *testing.T, node string) installedOfflineGuard {
+	t.Helper()
+	p, b, err := FreezeNodePolicy(node)
 	if err != nil {
 		t.Fatal(err)
 	}
-	racingHold, _, _ := draftFixtureOfflineHold(t, current, time.Now().UTC())
-	racingHold.Intent.RequestID = "racing-hold"
-	raceIntent, raceApproval := record(racingHold)
-	successorPolicy.Generation++
-	raw, err = json.Marshal(successorPolicy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	successor, err = productioncontrol.DraftParticipationTopology("fixture", "topology-c", current.Version, raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	successorIntent, successorApproval = record(successor)
-	start := make(chan struct{})
-	type transition struct {
-		created bool
-		err     error
-	}
-	reserved, activated := make(chan transition, 1), make(chan transition, 1)
-	go func() {
-		<-start
-		_, created, err := runtime.ReserveExecution(ctx, "fixture-writer", raceIntent, raceApproval)
-		reserved <- transition{created, err}
-	}()
-	go func() {
-		<-start
-		r, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval)
-		activated <- transition{r.Created, err}
-	}()
-	close(start)
-	h, a := <-reserved, <-activated
-	if h.created && h.err == nil && !a.created && errors.Is(a.err, productioncontrol.ErrResourceBusy) {
-		return
-	}
-	if a.created && a.err == nil && !h.created && errors.Is(h.err, productioncontrol.ErrResourceDrift) {
-		return
-	}
-	t.Fatalf("concurrent topology activation and hold must have one winner: reserve=%+v activate=%+v", h, a)
+	p.UID, p.ResourceVersion, p.Generation = "policy", "19", 1
+	p.Status.ObservedGeneration, p.Status.TypeChecking = 1, &admissionv1.TypeChecking{}
+	b.UID, b.ResourceVersion = "binding", "20"
+	return installedOfflineGuard{Policy: p, Binding: b}
 }
 
 type installedOfflineGuard struct {
