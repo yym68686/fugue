@@ -9,7 +9,15 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | --- | --- | --- | --- |
 | Backup usage | The backup-usage service builds the inventory and owns its tenant cache and locks. The API authorizes and adapts a read-only source. | No backup mutations are available through the usage source. | The usage package verifies cache behavior and its dependency boundary; API and Store tests cover the adapters. |
 | Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment and JSON deletions join the caller's existing transaction. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
-| Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through the original JSON or PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view tests run without API, Controller or Store. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
+| Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through the original JSON or PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
+| Node host policy (installer side) | The host policy module owns the Journald and ZRAM shell fragments; API embeds them in the existing updater and join contracts. | Host-side staging, verification and rollback remain in the original shell transaction. No Controller desired-state or Store mutation was moved by this extraction. | Shell behavior is verified from the host policy package; a small API contract test proves the installer renders the exact payload. |
+
+For an operation's pre-claim dependency failure, Store verifies the pending
+snapshot under its existing write transaction. A stale dependency verdict
+cannot overwrite a claimed or cancelled operation. Queue/Store contract tests
+for Compose ordering, retry and deletion run outside the Controller root;
+Controller retains worker execution and shutdown tests. Store imports the
+operation read contract without importing either read or queue policy.
 
 These are migrated boundaries, not a claim that the remaining API, Controller
 and Store files are composition-only. App release and reconciliation, billing,
@@ -50,6 +58,19 @@ for domain source, test-only, transitive contracts and broad fallback; retain
 failures and retain the separate warm-up times. Warm repeated-diff P95 does not
 prove cold or real incremental performance, and an all-green oracle does not
 prove that a failing cross-domain contract would be selected.
+
+First measured case: a test-only operation-queue edit on Darwin arm64
+(8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing
+prepush P95 13.082s, candidate 3.230s, zero timed-out or failed samples.
+The uncached whole-module oracle exceeded 600s, so this evidence does not
+qualify the candidate for activation. A separate uncached rerun finished with
+133 passing test packages. For a queue source edit, the Store's
+unnecessary import of the scheduling implementation increased the graph to
+17 test packages and 15 build packages. Returning the restricted Store
+adapter instead of importing the scheduler reduced both to 3 in the same
+edit case. A single runtime-edit scout still exceeded the deadline during
+the Controller tests, so neither the old priority rules nor the API warmup
+is removed.
 
 ## Production isolation decision
 

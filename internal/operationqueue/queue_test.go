@@ -51,7 +51,8 @@ func (r *testRepository) TryClaimPendingOperation(id string) (model.Operation, b
 	op, err := r.consume(id)
 	return op, op.ID != r.snapshotLost && err == nil, err
 }
-func (r *testRepository) FailBeforeClaim(id, _ string) (model.Operation, bool, error) {
+func (r *testRepository) FailBeforeClaim(expected model.Operation, _ string) (model.Operation, bool, error) {
+	id := expected.ID
 	r.writes = append(r.writes, "fail:"+id)
 	op, err := r.consume(id)
 	return op, op.ID != r.snapshotLost && err == nil, err

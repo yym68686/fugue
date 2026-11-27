@@ -1,4 +1,4 @@
-package api
+package nodehostpolicy
 
 import (
 	"fmt"
@@ -79,7 +79,7 @@ exit 0
 
 func runHostMemorySafetyShell(t *testing.T, env map[string]string, body string) (string, error) {
 	t.Helper()
-	script := "set -euo pipefail\n" + hostMemorySafetyShellLibrary() + "\n" + body + "\n"
+	script := "set -euo pipefail\n" + MemorySafetyShell() + "\n" + body + "\n"
 	cmd := exec.Command("bash")
 	cmd.Stdin = strings.NewReader(script)
 	cmd.Env = os.Environ()
@@ -320,7 +320,7 @@ func TestHostMemorySafetyShellHasValidBashSyntax(t *testing.T) {
 		t.Skip("bash not available")
 	}
 	cmd := exec.Command("bash", "-n")
-	cmd.Stdin = strings.NewReader(hostMemorySafetyShellLibrary())
+	cmd.Stdin = strings.NewReader(MemorySafetyShell())
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n host memory safety library: %v\n%s", err, output)
 	}

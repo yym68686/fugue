@@ -19,7 +19,7 @@ type Repository interface {
 	ListAppsMetadataByIDs([]string) ([]model.App, error)
 	ListAppsMetadataByProjectIDs([]string) ([]model.App, error)
 	TryClaimPendingOperation(string) (model.Operation, bool, error)
-	FailBeforeClaim(string, string) (model.Operation, bool, error)
+	FailBeforeClaim(model.Operation, string) (model.Operation, bool, error)
 	CancelSupersededDeploy(string, string) (bool, error)
 }
 
@@ -155,7 +155,7 @@ func (q *Queue) Claim(repo Repository, lane Lane, clock func() time.Time, observ
 			ready, terminalReason := pendingOperationReadyForClaim(op, app, ok, activeOpsByApp, composeAppsByProject)
 			if terminalReason != "" {
 				notify(observe, Event{Kind: Blocking, Lane: lane, Operation: op, App: app, Message: terminalReason})
-				failed, written, failErr := repo.FailBeforeClaim(op.ID, terminalReason)
+				failed, written, failErr := repo.FailBeforeClaim(op, terminalReason)
 				if failErr != nil {
 					return model.Operation{}, false, fmt.Errorf("fail blocked pending operation %s: %w", op.ID, failErr)
 				}

@@ -6,32 +6,15 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/operationview/contract"
 )
 
 var ErrNotVisible = errors.New("operation is not visible to this principal")
 
-type Filter struct {
-	TenantID  string
-	AppID     string
-	ProjectID string
-	ServiceID string
-	ActorID   string
-	Types     []string
-	Statuses  []string
-	Limit     int
-}
-
-type Repository interface {
-	GetOperation(string) (model.Operation, error)
-	GetApp(string) (model.App, error)
-	ListOperationEvidence(model.OperationEvidenceFilter) ([]model.OperationEvidence, error)
-	FirstDeployExecutionStarts(context.Context, []string) (map[string]time.Time, error)
-	ListOperationsFiltered(string, bool, Filter) ([]model.Operation, error)
-	ListOperationSummariesFiltered(string, bool, Filter) ([]model.Operation, error)
-}
+type Filter = contract.Filter
+type Repository = contract.Repository
 
 func List(reads Repository, principal model.Principal, filter Filter, includeDesired bool) ([]model.Operation, error) {
 	if !principal.IsPlatformAdmin() && filter.TenantID != "" && filter.TenantID != principal.TenantID {

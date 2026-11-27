@@ -4,13 +4,13 @@ import (
 	"errors"
 
 	"fugue/internal/model"
-	"fugue/internal/operationqueue"
 )
 
 // OperationQueue is the Controller's durable queue port. The existing Store
 // implementations still perform each transition atomically, including their
 // original tenant checks, runtime assignment, and database interlocks.
-func (s *Store) OperationQueue() operationqueue.Repository {
+// Return the restricted adapter; do not import the Controller's queue policy.
+func (s *Store) OperationQueue() operationQueueRepository {
 	return operationQueueRepository{store: s}
 }
 
@@ -34,8 +34,10 @@ func (r operationQueueRepository) TryClaimPendingOperation(id string) (model.Ope
 	return r.store.TryClaimPendingOperation(id)
 }
 
-func (r operationQueueRepository) FailBeforeClaim(id, reason string) (model.Operation, bool, error) {
-	op, err := r.store.FailOperation(id, reason)
+func (r operationQueueRepository) FailBeforeClaim(expected model.Operation, reason string) (model.Operation, bool, error) {
+	op, err := r.store.failOperationGuarded(expected.ID, reason, &operationFinalizationGuard{
+		Operation: expected, PendingSnapshotOnly: true,
+	})
 	if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 		return model.Operation{}, false, nil
 	}
