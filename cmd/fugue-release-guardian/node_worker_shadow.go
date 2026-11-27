@@ -19,6 +19,8 @@ import (
 type nodeWorkerShadowReport = productioncontrol.FrontWorkerShadow
 type nodeWorkerRollbackObservation = productioncontrol.FrontWorkerRollbackObservation
 
+type nodeWorkerShadowCheck func(context.Context, *frontAuthorityActivator, nodeWorkerPreflight) error
+
 func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	if len(args) != 0 || in == nil || out == nil {
 		return errors.New("node-worker-shadow requires one canonical stdin journal")
@@ -33,7 +35,7 @@ func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out i
 	}
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
-	report, err := observeNodeWorkerShadow(ctx, journal, true)
+	report, err := observeNodeWorkerShadow(ctx, journal, true, nil)
 	if err != nil {
 		return err
 	}
@@ -65,7 +67,13 @@ func runApprovedNodeWorkerShadow(ctx context.Context, args []string, out io.Writ
 	if err != nil {
 		return err
 	}
-	fresh, err := observeNodeWorkerShadow(ctx, approved.Journal, false)
+	var ingress nodeWorkerIngressObservation
+	fresh, err := observeNodeWorkerShadow(ctx, approved.Journal, false,
+		func(ctx context.Context, front *frontAuthorityActivator, preflight nodeWorkerPreflight) error {
+			var err error
+			ingress, err = front.observeNodeWorkerIngress(ctx, approved.Journal, preflight)
+			return err
+		})
 	if err != nil {
 		return err
 	}
@@ -75,10 +83,14 @@ func runApprovedNodeWorkerShadow(ctx context.Context, args []string, out io.Writ
 	if _, err := j.ReadApprovedFrontWorker(ctx, cluster, args[1], args[2]); err != nil {
 		return err
 	}
-	return json.NewEncoder(out).Encode(fresh)
+	return json.NewEncoder(out).Encode(struct {
+		Shadow  nodeWorkerShadowReport       `json:"shadow"`
+		Ingress nodeWorkerIngressObservation `json:"ingress"`
+	}{fresh, ingress})
 }
 
-func observeNodeWorkerShadow(ctx context.Context, journal edgegroupfront.NodeWorkerJournal, requireRecentJournal bool) (nodeWorkerShadowReport, error) {
+func observeNodeWorkerShadow(ctx context.Context, journal edgegroupfront.NodeWorkerJournal,
+	requireRecentJournal bool, check nodeWorkerShadowCheck) (nodeWorkerShadowReport, error) {
 	config, err := loadKubeConfig()
 	if err != nil {
 		return nodeWorkerShadowReport{}, err
@@ -95,11 +107,12 @@ func observeNodeWorkerShadow(ctx context.Context, journal edgegroupfront.NodeWor
 	if err != nil {
 		return nodeWorkerShadowReport{}, err
 	}
-	return front.shadowNodeWorker(ctx, store, component, journal, requireRecentJournal)
+	return front.shadowNodeWorker(ctx, store, component, journal, requireRecentJournal, check)
 }
 
 func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore,
-	component releaseguardian.NodeWorkerComponent, journal edgegroupfront.NodeWorkerJournal, requireRecentJournal bool) (nodeWorkerShadowReport, error) {
+	component releaseguardian.NodeWorkerComponent, journal edgegroupfront.NodeWorkerJournal,
+	requireRecentJournal bool, check nodeWorkerShadowCheck) (nodeWorkerShadowReport, error) {
 	if requireRecentJournal && !a.recentNodeWorkerJournal(journal) {
 		return nodeWorkerShadowReport{}, errors.New("node Worker shadow requires a recent journal")
 	}
@@ -119,6 +132,14 @@ func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *r
 	rollback, err := observer.observeNodeWorkerRollback(ctx, journal, preflight)
 	if err != nil {
 		return nodeWorkerShadowReport{}, err
+	}
+	if check != nil {
+		if err := check(ctx, &observer, preflight); err != nil {
+			return nodeWorkerShadowReport{}, err
+		}
+		if err := observer.requireSameNodeWorkerRuntime(ctx, journal, preflight.activation, preflight.runtime, true); err != nil {
+			return nodeWorkerShadowReport{}, err
+		}
 	}
 	retirement := preflight.retirement
 	freshRetirement, err := observer.loadWorkerRetirement(ctx, journal)

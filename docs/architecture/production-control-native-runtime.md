@@ -480,6 +480,16 @@ the exact sealed journal, rollback canary, shared fence, and any
 retirement plan. Initial group enrollment requires independent baseline
 evidence. Both commands use read-only journal sessions.
 
+The approved shadow also completes fresh route challenges and checks the
+canary body on one held public TLS socket. When the journal pins a probe
+Service, it checks a second socket on that Service too. Both must reach
+the retained Worker and agree on the route proof. Front connection
+inventory identifies the exact peer and listener. If the peer is
+translated, Guardian requires a single established kernel mapping from
+the original socket to the Front Pod. The Linux socket origin must have
+read access to that connection tracking table in its own network
+namespace. A missing mapping stops the approved shadow.
+
 The Kubernetes object client uses plain GET. The only Pod exec calls read
 the exact Front recipient and its local activation file. Keep the current
 production writer until the replacement also proves peer stability,

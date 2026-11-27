@@ -256,14 +256,18 @@ func TestNodeWorkerConnectionWitnessRejectsReconnectAndWrongUpperPort(t *testing
 		return b
 	}
 	refs := []releaseguardian.NodeWorkerConnection{original, fresh}
-	if !nodeWorkerConnectionInventoryMatches(encode(original, fresh), "front", refs) {
+	matches := func(raw []byte) bool {
+		view, err := decodeNodeWorkerInventory(raw)
+		return err == nil && nodeWorkerConnectionInventoryMatches(view, "front", refs)
+	}
+	if !matches(encode(original, fresh)) {
 		t.Fatal("exact original connection and new listener were not accepted")
 	}
 	reconnected, wrongWorker := original, fresh
 	reconnected.StartedAt = fresh.StartedAt
 	wrongWorker.Target = "192.0.2.7:18443"
 	for _, b := range [][]byte{encode(reconnected, fresh), encode(original, wrongWorker), encode(original, fresh, fresh)} {
-		if nodeWorkerConnectionInventoryMatches(b, "front", refs) {
+		if matches(b) {
 			t.Fatal("false held-connection or physical listener proof was accepted")
 		}
 	}
