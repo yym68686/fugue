@@ -2,485 +2,86 @@ package api
 
 import (
 	"context"
-	"fmt"
-	"sort"
-	"strings"
 	"time"
 
 	"fugue/internal/backupusage"
 	"fugue/internal/model"
+	"fugue/internal/store"
 )
 
-const (
-	defaultBackupUsageReconciliationCacheTTL = 30 * time.Second
-	backupUsageReconciliationTimeout         = 15 * time.Second
-)
-
-type backupUsageBackendGroup struct {
-	backends []model.BackupBackend
+type backupUsageSource struct {
+	store *store.Store
 }
 
-type backupUsageObjectReference struct {
-	artifact          model.BackupArtifact
-	physicalDeletedAt *time.Time
-	expectedSize      *int64
-	namespaceKey      string
+// Cleanup compares identities across backend records for the same physical key.
+func backupUsagePhysicalObjectID(backend model.DataBackend, key string) string {
+	return backupusage.NamespaceOf(backend).ObjectID(key)
 }
 
-type backupUsageObservedObject struct {
-	size         int64
-	lastModified time.Time
-	observedAt   time.Time
+func newBackupUsageService(db *store.Store, inventory BackupInventoryConfig, ttl time.Duration) *backupusage.Service {
+	return backupusage.New(backupUsageSource{store: db}, backupArtifactObjectKeysForDeletion, backupusage.Config{
+		CacheTTL: ttl, InventoryRefreshInterval: inventory.normalized().RefreshInterval,
+		ArtifactGCGrace: backupArtifactGCGrace, FailedRunGCGrace: backupFailedRunGCGrace,
+	})
 }
 
 func (s *Server) loadBackupUsage(ctx context.Context, tenantID string, platformAdmin bool) (backupusage.Usage, error) {
-	recordedUsage, err := s.store.BackupUsage(tenantID, platformAdmin)
+	return s.backupUsage.Load(ctx, tenantID, platformAdmin)
+}
+
+func (a backupUsageSource) BackupUsage(tenantID string, platformAdmin bool) (model.BackupUsage, error) {
+	return a.store.BackupUsage(tenantID, platformAdmin)
+}
+
+func (a backupUsageSource) ListBackupBackends(tenantID string, platformAdmin bool) ([]model.BackupBackend, error) {
+	return a.store.ListBackupBackends(tenantID, platformAdmin)
+}
+
+func (a backupUsageSource) ListUsageArtifacts(tenantID string, platformAdmin bool) ([]backupusage.UsageArtifact, error) {
+	records, err := a.store.ListBackupUsageArtifacts(tenantID, platformAdmin)
 	if err != nil {
-		return backupusage.Usage{}, err
+		return nil, err
 	}
-	usage := backupusage.FromModel(recordedUsage)
-	cacheKey := "platform"
-	if !platformAdmin {
-		cacheKey = "tenant:" + strings.TrimSpace(tenantID)
+	artifacts := make([]backupusage.UsageArtifact, len(records))
+	for i, record := range records {
+		artifacts[i] = backupusage.UsageArtifact{Artifact: record.Artifact, PhysicalDeletedAt: record.PhysicalDeletedAt}
 	}
-	reconciliation, err := s.backupUsageReconciliationCache.do(cacheKey, func() (backupusage.Reconciliation, error) {
-		return s.buildBackupUsageReconciliation(ctx, tenantID, platformAdmin)
-	})
+	return artifacts, nil
+}
+
+func (a backupUsageSource) ResolveNamespace(backendID, tenantID string, platformAdmin bool) (backupusage.Namespace, error) {
+	record, err := a.store.GetBackupBackendForUse(backendID, tenantID, platformAdmin)
 	if err != nil {
-		return backupusage.Usage{}, err
+		return backupusage.Namespace{}, err
 	}
-	usage.Reconciliation = &reconciliation
-	if reconciliationMeasuredCompletely(reconciliation) {
-		physicalBytes := reconciliation.ReferencedBytes + reconciliation.UnreferencedBytes + reconciliation.RepositoryManagedBytes
-		physicalObjects := reconciliation.ReferencedObjectCount + reconciliation.UnreferencedObjectCount + reconciliation.RepositoryManagedObjectCount
-		usage.PhysicalBytes = &physicalBytes
-		usage.PhysicalObjectCount = &physicalObjects
-	}
-	return usage, nil
-}
-
-func (s *Server) buildBackupUsageReconciliation(ctx context.Context, tenantID string, platformAdmin bool) (backupusage.Reconciliation, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(ctx, backupUsageReconciliationTimeout)
-	defer cancel()
-
-	backends, err := s.store.ListBackupBackends(tenantID, platformAdmin)
+	// Retain the existing backend configuration checks without passing the
+	// credentials or the constructed object-storage client to reconciliation.
+	backend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(record))
 	if err != nil {
-		return backupusage.Reconciliation{}, err
+		return backupusage.Namespace{}, err
 	}
-	artifacts, err := s.store.ListBackupUsageArtifacts(tenantID, platformAdmin)
+	return backupusage.NamespaceOf(backend.backend), nil
+}
+
+func (a backupUsageSource) ReadInventory(ctx context.Context, namespaceKey string) (backupusage.Inventory, error) {
+	cp, err := readBackupInventory(ctx, a.store, namespaceKey)
 	if err != nil {
-		return backupusage.Reconciliation{}, err
+		return backupusage.Inventory{}, err
 	}
-
-	now := time.Now().UTC()
-	reconciliation := backupusage.Reconciliation{}
-	backendByID := make(map[string]model.BackupBackend, len(backends))
-	groupsByKey := map[string]*backupUsageBackendGroup{}
-	groupByBackendID := map[string]*backupUsageBackendGroup{}
-	for _, backend := range backends {
-		backend = model.NormalizeBackupBackend(backend)
-		backendByID[backend.ID] = backend
-		if backend.Provider != model.DataBackendProviderCloudflareR2 {
-			continue
-		}
-		groupKey := backupUsageStorageNamespaceKey(model.BackupBackendAsDataBackend(backend))
-		group := groupsByKey[groupKey]
-		if group == nil {
-			group = &backupUsageBackendGroup{}
-			groupsByKey[groupKey] = group
-		}
-		group.backends = append(group.backends, backend)
-		groupByBackendID[backend.ID] = group
-		reconciliation.BackendCount++
+	progress := func(scan *backupInventoryScan) backupusage.InventoryProgress {
+		return backupusage.InventoryProgress{Generation: scan.Generation, Pages: scan.Pages, Objects: scan.Objects}
 	}
-
-	references := map[string]backupUsageObjectReference{}
-	unresolvedBackends := map[string]struct{}{}
-	for _, usageArtifact := range artifacts {
-		artifact := usageArtifact.Artifact
-		backendID := strings.TrimSpace(artifact.BackendID)
-		backend, ok := backendByID[backendID]
-		if !ok {
-			if usageArtifact.PhysicalDeletedAt == nil {
-				unresolvedBackends[firstNonEmptyString(backendID, "missing-backend")] = struct{}{}
-			}
-			continue
-		}
-		if backend.Provider != model.DataBackendProviderCloudflareR2 {
-			continue
-		}
-		if groupByBackendID[backend.ID] == nil {
-			unresolvedBackends[backend.ID] = struct{}{}
-			continue
-		}
-		keyBackend := &dataObjectBackend{backend: model.BackupBackendAsDataBackend(backend)}
-		logicalKeys, keyErr := backupArtifactObjectKeysForDeletion(artifact)
-		if keyErr != nil {
-			if usageArtifact.PhysicalDeletedAt == nil {
-				reconciliation.InvalidReferenceCount++
-			}
-			continue
-		}
-		for _, logicalKey := range logicalKeys {
-			if !platformAdmin && backend.TenantID == "" && !backupUsageTenantOwnsLogicalObject(tenantID, logicalKey) {
-				if usageArtifact.PhysicalDeletedAt == nil {
-					reconciliation.InvalidReferenceCount++
-				}
-				continue
-			}
-			physicalKey := keyBackend.objectKey(logicalKey)
-			objectID := backupUsagePhysicalObjectID(keyBackend.backend, physicalKey)
-			manifest := logicalKey == strings.Trim(strings.TrimSpace(artifact.ManifestObjectKey), "/")
-			var expectedSize *int64
-			if artifact.Kind != model.BackupArtifactKindLonghornSnapshot && (!manifest || artifact.Kind == model.BackupArtifactKindDataSnapshot || strings.TrimSpace(artifact.ObjectKey) == "") {
-				size := artifact.SizeBytes
-				expectedSize = &size
-			}
-			if existing, exists := references[objectID]; exists {
-				if existing.physicalDeletedAt != nil && usageArtifact.PhysicalDeletedAt != nil {
-					continue
-				}
-				reconciliation.DuplicateReferenceCount++
-				if existing.physicalDeletedAt == nil || usageArtifact.PhysicalDeletedAt != nil {
-					continue
-				}
-			}
-			references[objectID] = backupUsageObjectReference{
-				artifact:          artifact,
-				physicalDeletedAt: usageArtifact.PhysicalDeletedAt,
-				expectedSize:      expectedSize,
-				namespaceKey:      backupUsageStorageNamespaceKey(keyBackend.backend),
-			}
-			if usageArtifact.PhysicalDeletedAt == nil {
-				reconciliation.ExpectedObjectCount++
-			}
+	view := backupusage.Inventory{LastAttempt: cp.LastAttempt, Error: cp.Error}
+	if cp.Current != nil {
+		p := progress(cp.Current)
+		view.Current = &p
+	}
+	if scan := cp.Complete; scan != nil {
+		view.Complete = &backupusage.InventorySnapshot{
+			InventoryProgress: progress(scan),
+			NamespaceOwner:    scan.NamespaceOwner, StartedAt: scan.StartedAt, FinishedAt: scan.FinishedAt,
+			Wanted: scan.Wanted, References: scan.References, Totals: scan.Totals,
 		}
 	}
-
-	groupKeys := make([]string, 0, len(groupsByKey))
-	for key := range groupsByKey {
-		groupKeys = append(groupKeys, key)
-	}
-	sort.Strings(groupKeys)
-	observed := map[string]backupUsageObservedObject{}
-	measuredNamespaces := map[string]time.Time{}
-	observedWanted := map[string]bool{}
-	for _, groupKey := range groupKeys {
-		group := groupsByKey[groupKey]
-		sort.Slice(group.backends, func(i, j int) bool { return group.backends[i].ID < group.backends[j].ID })
-		var (
-			objectBackend       *dataObjectBackend
-			objects             []dataObjectInfo
-			inventoryObservedAt time.Time
-			lastErr             error
-		)
-		for _, backend := range group.backends {
-			fullBackend, getErr := s.store.GetBackupBackendForUse(backend.ID, tenantID, platformAdmin)
-			if getErr != nil {
-				lastErr = getErr
-				continue
-			}
-			candidate, openErr := newDataObjectBackend(model.BackupBackendAsDataBackend(fullBackend))
-			if openErr != nil {
-				lastErr = openErr
-				continue
-			}
-			if !backupUsageR2NamespaceIsMeasurable(candidate) {
-				lastErr = fmt.Errorf("backup backend %s has no exact measurable R2 namespace", backend.ID)
-				continue
-			}
-			cp, listErr := s.readBackupInventory(ctx, groupKey)
-			if listErr != nil {
-				lastErr = listErr
-				continue
-			}
-			reconciliation.Refreshing = reconciliation.Refreshing || cp.Current != nil
-			if !cp.LastAttempt.IsZero() {
-				t := cp.LastAttempt
-				reconciliation.LastAttemptAt = &t
-			}
-			reconciliation.ScanError = cp.Error
-			progress := cp.Current
-			if progress == nil {
-				progress = cp.Complete
-			}
-			if progress != nil {
-				reconciliation.ScannedPages += progress.Pages
-				reconciliation.ScannedObjects += progress.Objects
-				reconciliation.ScanGeneration = progress.Generation
-			}
-			if cp.Complete == nil {
-				lastErr = fmt.Errorf("physical inventory scan is not complete")
-				continue
-			}
-			complete := cp.Complete
-			for key := range complete.Wanted {
-				observedWanted[backupUsagePhysicalObjectID(candidate.backend, key)] = true
-			}
-			objectBackend = candidate
-			inventoryObservedAt = complete.StartedAt
-			reconciliation.ScanStartedAt = &complete.StartedAt
-			reconciliation.ScanFinishedAt = complete.FinishedAt
-			reconciliation.LastSuccessAt = complete.FinishedAt
-			reconciliation.Stale = reconciliation.Stale || cp.Error != "" || time.Since(*complete.FinishedAt) > 2*s.backupInventoryConfig.normalized().RefreshInterval
-			owns := platformAdmin || (tenantID != "" && complete.NamespaceOwner == tenantID)
-			totalKey := "all"
-			if !owns {
-				totalKey = "tenant:" + tenantID
-			}
-			totals := complete.Totals[totalKey]
-			reconciliation.RepositoryManagedObjectCount += totals.RepositoryCount
-			reconciliation.RepositoryManagedBytes += totals.RepositoryBytes
-			totals.Count -= totals.RepositoryCount
-			totals.Bytes -= totals.RepositoryBytes
-			for _, object := range complete.References {
-				logical, ok := candidate.logicalObjectKey(object.Key)
-				if !owns && (!ok || !backupUsageTenantOwnsLogicalObject(tenantID, logical)) {
-					continue
-				}
-				objects = append(objects, object)
-				totals.Count--
-				totals.Bytes -= object.Size
-				if backupUsageObjectWithinCleanupGrace(object.LastModified, object.ObservedAt) {
-					totals.ProvisionalCount--
-					totals.ProvisionalBytes -= object.Size
-				}
-			}
-			reconciliation.UnreferencedObjectCount += totals.Count
-			reconciliation.UnreferencedBytes += totals.Bytes
-			reconciliation.ProvisionalObjectCount += totals.ProvisionalCount
-			reconciliation.ProvisionalBytes += totals.ProvisionalBytes
-			reconciliation.OrphanedObjectCount += totals.Count - totals.ProvisionalCount
-			reconciliation.OrphanedBytes += totals.Bytes - totals.ProvisionalBytes
-			if reconciliation.ObservedAt.IsZero() || inventoryObservedAt.Before(reconciliation.ObservedAt) {
-				reconciliation.ObservedAt = inventoryObservedAt
-			}
-			break
-		}
-		if objectBackend == nil {
-			for _, backend := range group.backends {
-				unresolvedBackends[backend.ID] = struct{}{}
-			}
-			_ = lastErr
-			continue
-		}
-		reconciliation.MeasuredBackendCount += len(group.backends)
-		measuredNamespaces[groupKey] = inventoryObservedAt
-		tenantOwnsNamespace := platformAdmin
-		if !platformAdmin && len(group.backends) > 0 {
-			tenantOwnsNamespace = true
-			for _, backend := range group.backends {
-				// A shared record for the same physical namespace makes that
-				// namespace multi-tenant even when a duplicate tenant-owned
-				// record also exists. Require every record to be tenant-owned
-				// before attributing arbitrary keys to the tenant.
-				if strings.TrimSpace(backend.TenantID) != strings.TrimSpace(tenantID) {
-					tenantOwnsNamespace = false
-					break
-				}
-			}
-		}
-		for _, object := range objects {
-			logicalKey, logical := objectBackend.logicalObjectKey(object.Key)
-			// ListObjects uses an S3 string prefix. A sibling such as
-			// "backup-root-old" can therefore be returned while it is not part
-			// of the configured "backup-root/" logical namespace.
-			if !logical && !backupUsagePhysicalKeyInNamespace(objectBackend.backend, object.Key) {
-				continue
-			}
-			// Unsafe/non-canonical keys still occupy the configured physical
-			// namespace and must be included in platform (or wholly tenant-owned
-			// namespace) totals. They are never converted into logical keys or
-			// passed to a delete path. A shared namespace cannot safely attribute
-			// such a key to one tenant, so tenant views omit it.
-			if !platformAdmin && !tenantOwnsNamespace && (!logical || !backupUsageTenantOwnsLogicalObject(tenantID, logicalKey)) {
-				continue
-			}
-			objectID := backupUsagePhysicalObjectID(objectBackend.backend, object.Key)
-			if existing, exists := observed[objectID]; exists {
-				if existing.size != object.Size {
-					reconciliation.SizeMismatchCount++
-				}
-				if inventoryObservedAt.After(existing.observedAt) {
-					existing.size = object.Size
-					existing.lastModified = object.LastModified
-					existing.observedAt = inventoryObservedAt
-					observed[objectID] = existing
-				}
-				continue
-			}
-			observed[objectID] = backupUsageObservedObject{size: object.Size, lastModified: object.LastModified, observedAt: object.ObservedAt}
-		}
-	}
-
-	for objectID, object := range observed {
-		reference, referenced := references[objectID]
-		if !referenced {
-			reconciliation.UnreferencedObjectCount++
-			reconciliation.UnreferencedBytes += object.size
-			classificationTime := object.observedAt
-			if classificationTime.IsZero() {
-				classificationTime = now
-			}
-			if backupUsageObjectWithinCleanupGrace(object.lastModified, classificationTime) {
-				reconciliation.ProvisionalObjectCount++
-				reconciliation.ProvisionalBytes += object.size
-			} else {
-				reconciliation.OrphanedObjectCount++
-				reconciliation.OrphanedBytes += object.size
-			}
-			continue
-		}
-		reconciliation.ReferencedObjectCount++
-		reconciliation.ReferencedBytes += object.size
-		if reference.expectedSize != nil && *reference.expectedSize != object.size {
-			reconciliation.SizeMismatchCount++
-		}
-		artifact := reference.artifact
-		if reference.physicalDeletedAt != nil {
-			if observedAt := measuredNamespaces[reference.namespaceKey]; !observedAt.IsZero() && reference.physicalDeletedAt.After(observedAt) {
-				// The cached inventory predates the durable success marker. The
-				// object was legitimately present in that physical snapshot, but
-				// current metadata proves cleanup completed afterward; do not emit
-				// a false lingering-object alert until the inventory cache refreshes.
-				reconciliation.PendingDeletionObjectCount++
-				reconciliation.PendingDeletionBytes += object.size
-				continue
-			}
-			reconciliation.LingeringDeletedObjectCount++
-			reconciliation.LingeringDeletedBytes += object.size
-			continue
-		}
-		switch artifact.Status {
-		case model.BackupArtifactStatusActive:
-			reconciliation.ActiveObjectCount++
-			reconciliation.ActiveBytes += object.size
-		case model.BackupArtifactStatusDeleted, model.BackupArtifactStatusExpired:
-			if artifact.Protected {
-				continue
-			}
-			if artifact.DeletedAt == nil {
-				reconciliation.InvalidReferenceCount++
-				continue
-			}
-			if now.Before(artifact.DeletedAt.UTC().Add(backupArtifactGCGrace)) {
-				reconciliation.PendingDeletionObjectCount++
-				reconciliation.PendingDeletionBytes += object.size
-			} else {
-				reconciliation.OverdueDeletionObjectCount++
-				reconciliation.OverdueDeletionBytes += object.size
-			}
-		default:
-			reconciliation.InvalidReferenceCount++
-		}
-	}
-	for objectID, reference := range references {
-		if _, exists := observed[objectID]; exists {
-			continue
-		}
-		observedAt, measured := measuredNamespaces[reference.namespaceKey]
-		if !measured || !observedWanted[objectID] {
-			continue
-		}
-		artifact := reference.artifact
-		if reference.physicalDeletedAt == nil && artifact.Status == model.BackupArtifactStatusActive {
-			// A shared namespace inventory can be cached just before another
-			// request creates durable metadata for a newly uploaded object. Such
-			// an artifact did not exist at the physical snapshot boundary and is
-			// not evidence that R2 lost an active object.
-			if !artifact.CreatedAt.IsZero() && artifact.CreatedAt.After(observedAt) {
-				continue
-			}
-			reconciliation.MissingActiveObjectCount++
-		}
-	}
-
-	reconciliation.UnresolvedBackendCount = len(unresolvedBackends)
-	if reconciliation.ObservedAt.IsZero() {
-		reconciliation.ObservedAt = now
-	}
-	reconciliation.Status, reconciliation.Message = summarizeBackupUsageReconciliation(reconciliation)
-
-	return reconciliation, nil
-}
-
-func summarizeBackupUsageReconciliation(reconciliation backupusage.Reconciliation) (string, string) {
-	if reconciliation.MeasuredBackendCount < reconciliation.BackendCount || reconciliation.UnresolvedBackendCount > 0 {
-		if reconciliation.MeasuredBackendCount == 0 && (reconciliation.BackendCount > 0 || reconciliation.UnresolvedBackendCount > 0) {
-			return backupusage.ReconciliationStatusUnavailable, "R2 physical inventory is unavailable; billable bytes remain database-recorded only"
-		}
-		return backupusage.ReconciliationStatusPartial, "R2 physical inventory is incomplete; physical totals are omitted"
-	}
-	if reconciliation.OrphanedObjectCount > 0 ||
-		reconciliation.MissingActiveObjectCount > 0 ||
-		reconciliation.OverdueDeletionObjectCount > 0 ||
-		reconciliation.LingeringDeletedObjectCount > 0 ||
-		reconciliation.DuplicateReferenceCount > 0 ||
-		reconciliation.InvalidReferenceCount > 0 ||
-		reconciliation.SizeMismatchCount > 0 {
-		return backupusage.ReconciliationStatusDrift, "R2 physical inventory differs from durable backup metadata"
-	}
-	if reconciliation.ProvisionalObjectCount > 0 {
-		return backupusage.ReconciliationStatusReconciling, "recent unreferenced objects remain within the failed-upload cleanup grace period"
-	}
-	return backupusage.ReconciliationStatusComplete, "R2 physical inventory matches durable backup metadata"
-}
-
-func reconciliationMeasuredCompletely(reconciliation backupusage.Reconciliation) bool {
-	return reconciliation.MeasuredBackendCount == reconciliation.BackendCount && reconciliation.UnresolvedBackendCount == 0
-}
-
-func backupUsageStorageNamespaceKey(backend model.DataBackend) string {
-	return strings.Join([]string{
-		model.NormalizeDataBackendProvider(backend.Provider),
-		strings.ToLower(strings.TrimRight(strings.TrimSpace(backend.Endpoint), "/")),
-		strings.TrimSpace(backend.Bucket),
-		strings.Trim(strings.TrimSpace(backend.Prefix), "/"),
-	}, "\x00")
-}
-
-func backupUsagePhysicalObjectID(backend model.DataBackend, physicalKey string) string {
-	return strings.Join([]string{
-		model.NormalizeDataBackendProvider(backend.Provider),
-		strings.ToLower(strings.TrimRight(strings.TrimSpace(backend.Endpoint), "/")),
-		strings.TrimSpace(backend.Bucket),
-		physicalKey,
-	}, "\x00")
-}
-
-func backupUsagePhysicalKeyInNamespace(backend model.DataBackend, physicalKey string) bool {
-	prefix := strings.Trim(strings.TrimSpace(backend.Prefix), "/")
-	if prefix == "" {
-		return physicalKey != ""
-	}
-	return strings.HasPrefix(physicalKey, prefix+"/")
-}
-
-func backupUsageR2NamespaceIsMeasurable(objectBackend *dataObjectBackend) bool {
-	if objectBackend == nil || strings.TrimSpace(objectBackend.backend.Endpoint) == "" {
-		return false
-	}
-	const probe = "fugue-usage-namespace-probe"
-	logical, ok := objectBackend.logicalObjectKey(objectBackend.objectKey(probe))
-	return ok && logical == probe
-}
-
-func backupUsageTenantOwnsLogicalObject(tenantID, logicalKey string) bool {
-	tenantID = strings.TrimSpace(tenantID)
-	parts := strings.Split(strings.Trim(strings.TrimSpace(logicalKey), "/"), "/")
-	if tenantID == "" || len(parts) < 2 || parts[1] != tenantID {
-		return false
-	}
-	return parts[0] == "apps" || parts[0] == "data-workspaces"
-}
-
-func backupUsageObjectWithinCleanupGrace(lastModified, now time.Time) bool {
-	if lastModified.IsZero() {
-		return false
-	}
-	lastModified = lastModified.UTC()
-	return !lastModified.After(now.Add(time.Minute)) && now.Sub(lastModified) <= backupFailedRunGCGrace
+	return view, nil
 }

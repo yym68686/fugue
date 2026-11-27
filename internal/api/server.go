@@ -120,7 +120,7 @@ type Server struct {
 	appImageRegistry                       appImageRegistry
 	requestRegistryGC                      func(context.Context, string) error
 	projectImageUsageCache                 expiringResponseCache[projectImageUsageResponse]
-	backupUsageReconciliationCache         expiringResponseCache[backupusage.Reconciliation]
+	backupUsage                            *backupusage.Service
 	readinessKubernetesAPICache            expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache              expiringResponseCache[[]clusterNodeSnapshot]
 	persistentVolumeUsageCache             expiringResponseCache[persistentVolumeUsagePolicies]
@@ -320,7 +320,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		resolveRemoteImageDigest:               sourceimport.ResolveRemoteImageDigest,
 		appImageRegistry:                       newRemoteAppImageRegistry(),
 		projectImageUsageCache:                 newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
-		backupUsageReconciliationCache:         newExpiringResponseCache[backupusage.Reconciliation](defaultBackupUsageReconciliationCacheTTL),
+		backupUsage:                            newBackupUsageService(store, cfg.BackupInventory, backupusage.DefaultCacheTTL),
 		readinessKubernetesAPICache:            newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:              newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		persistentVolumeUsageCache:             newExpiringResponseCache[persistentVolumeUsagePolicies](persistentVolumeUsageCacheTTL),

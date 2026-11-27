@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"fugue/internal/backupusage"
-	"fugue/internal/model"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"fugue/internal/model"
 )
 
 func TestBackupInventoryResumesAcrossReplicasAndPreservesComplete(t *testing.T) {
@@ -42,7 +42,7 @@ func TestBackupInventoryResumesAcrossReplicasAndPreservesComplete(t *testing.T) 
 		t.Fatalf("partial scan became complete: %+v", usage)
 	}
 	b := &Server{store: state, backupInventoryConfig: BackupInventoryConfig{RefreshInterval: time.Nanosecond}}
-	b.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	b.backupUsage = newBackupUsageService(b.store, b.backupInventoryConfig, 0)
 	if err = b.advanceBackupInventories(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -10,11 +10,11 @@ import (
 
 func inventoryPagesFixture() backupInventoryCheckpoint {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	scan := &backupInventoryScan{Generation: "inventory-synthetic", StartedAt: now, Wanted: map[string]bool{}, References: map[string]dataObjectInfo{}, Totals: map[string]backupInventoryTotals{"all": {Count: 12000}}}
+	scan := &backupInventoryScan{Generation: "inventory-synthetic", StartedAt: now, Wanted: map[string]bool{}, References: map[string]backupInventoryObject{}, Totals: map[string]backupInventoryTotals{"all": {Count: 12000}}}
 	for i := 0; i < 12000; i++ {
 		key := fmt.Sprintf("objects/%06d", i)
 		scan.Wanted[key] = true
-		scan.References[key] = dataObjectInfo{Key: key, Size: int64(i), ObservedAt: now}
+		scan.References[key] = backupInventoryObject{Key: key, Size: int64(i), ObservedAt: now}
 	}
 	return backupInventoryCheckpoint{Version: 1, Current: scan}
 }

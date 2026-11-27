@@ -145,7 +145,7 @@ func decodeBackupInventoryPages(pages store.ObservationPages, legacy []byte) (ba
 			continue
 		}
 		scan.Wanted = map[string]bool{}
-		scan.References = map[string]dataObjectInfo{}
+		scan.References = map[string]backupInventoryObject{}
 		scan.Totals = map[string]backupInventoryTotals{}
 		for _, field := range []struct {
 			name   string

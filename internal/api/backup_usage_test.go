@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -134,7 +133,7 @@ func createBackupUsageArtifact(t *testing.T, stateStore *store.Store, artifact m
 func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	now := time.Now().UTC()
 
 	active := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
@@ -211,7 +210,7 @@ func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) 
 func TestBackupUsageReconciliationTreatsRecentUnreferencedUploadAsReconciling(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	_, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	fake.put("backup-root/apps/tenant_a/project_a/app_a/backup_run_upload/database.dump", 42, time.Now().UTC().Add(-time.Minute))
 
 	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
@@ -229,7 +228,7 @@ func TestBackupUsageReconciliationTreatsRecentUnreferencedUploadAsReconciling(t 
 func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	_, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	now := time.Now().UTC().Add(-2 * backupFailedRunGCGrace)
 	fake.put("backup-root//unsafe-object", 41, now)
 	fake.put("backup-root-old/not-in-fugue-namespace", 99, now)
@@ -259,7 +258,7 @@ func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *tes
 func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 
 	// Prime only the shared physical inventory. A later tenant reconciliation
 	// must not claim an artifact created after this snapshot is missing.
@@ -291,7 +290,7 @@ func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *t
 func TestBackupUsageReconciliationDoesNotReportCleanupNewerThanCachedInventoryAsLingering(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	now := time.Now().UTC()
 	deletedAt := now.Add(-2 * backupArtifactGCGrace)
 	artifact := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
@@ -329,7 +328,7 @@ func TestBackupUsageReconciliationOmitsPhysicalTotalsWhenR2IsUnavailable(t *test
 	fake := newBackupUsageS3(t)
 	fake.failList = true
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-unmeasured",
 		RunID:             "backup_run_unmeasured",
@@ -361,7 +360,7 @@ func TestBackupUsageReconciliationOmitsPhysicalTotalsWhenR2IsUnavailable(t *test
 func TestBackupUsageReconciliationFailsClosedForArtifactWithoutBackend(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-without-backend",
 		RunID:             "backup_run_without_backend",
@@ -387,7 +386,7 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 	unavailable := newBackupUsageS3(t)
 	unavailable.failList = true
 	stateStore, _, server := newBackupUsageTestServer(t, measured)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	_, err := stateStore.CreateBackupBackend(model.BackupBackend{
 		ID:           "backup_backend_usage_unavailable",
 		Name:         "usage-r2-unavailable",
@@ -424,7 +423,7 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 func TestBackupUsageReconciliationDetectsMissingOverdueAndLingeringObjects(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	now := time.Now().UTC()
 	target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_a", ProjectID: "project_a", AppID: "app_a"}
 
@@ -458,7 +457,7 @@ func TestBackupUsageReconciliationDetectsMissingOverdueAndLingeringObjects(t *te
 func TestBackupUsageReconciliationIgnoresInvalidMetadataAlreadyPhysicallyDeleted(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsageReconciliationCache = newExpiringResponseCache[backupusage.Reconciliation](0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
 	deletedAt := time.Now().UTC().Add(-2 * backupArtifactGCGrace)
 	artifact := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-legacy-invalid",
@@ -508,6 +507,9 @@ func TestBackupUsageEndpointAndMetricsExposeCompletePhysicalInventory(t *testing
 
 	if err := server.advanceBackupInventories(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+	if rejected := performJSONRequest(t, server, http.MethodGet, "/v1/backups/usage", "", nil); rejected.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated backup usage status=%d, want 401", rejected.Code)
 	}
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/backups/usage", "bootstrap-secret", nil)
 	if recorder.Code != http.StatusOK {
@@ -576,45 +578,6 @@ func clearBackupUsageSeedEnv(t *testing.T) {
 		"FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY",
 	} {
 		t.Setenv(key, "")
-	}
-}
-
-func TestBackupUsageTenantObjectOwnershipIsCanonical(t *testing.T) {
-	tests := map[string]bool{
-		"apps/tenant_a/project/app/run/database.dump":                  true,
-		"data-workspaces/tenant_a/project/workspace/run/manifest.json": true,
-		"apps/tenant_b/project/app/run/database.dump":                  false,
-		"control-plane/2026/07/30/12/run/control-plane.dump":           false,
-		"tenant_a/arbitrary": false,
-	}
-	for key, want := range tests {
-		t.Run(fmt.Sprintf("%t-%s", want, strings.ReplaceAll(key, "/", "-")), func(t *testing.T) {
-			if got := backupUsageTenantOwnsLogicalObject("tenant_a", key); got != want {
-				t.Fatalf("ownership for %q = %t, want %t", key, got, want)
-			}
-		})
-	}
-}
-
-func TestBackupUsageR2NamespaceMustRoundTripExactly(t *testing.T) {
-	tests := []struct {
-		name    string
-		backend model.DataBackend
-		want    bool
-	}{
-		{name: "safe prefix", backend: model.DataBackend{Endpoint: "https://r2.example.test", Prefix: "backup-root"}, want: true},
-		{name: "empty prefix", backend: model.DataBackend{Endpoint: "https://r2.example.test"}, want: true},
-		{name: "missing endpoint", backend: model.DataBackend{Prefix: "backup-root"}, want: false},
-		{name: "cleaned prefix", backend: model.DataBackend{Endpoint: "https://r2.example.test", Prefix: "backup-root/../other-root"}, want: false},
-		{name: "dot prefix", backend: model.DataBackend{Endpoint: "https://r2.example.test", Prefix: "."}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			objectBackend := &dataObjectBackend{backend: tt.backend}
-			if got := backupUsageR2NamespaceIsMeasurable(objectBackend); got != tt.want {
-				t.Fatalf("measurable = %t, want %t", got, tt.want)
-			}
-		})
 	}
 }
 

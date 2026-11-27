@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/backupusage"
 	"fugue/internal/model"
 	"fugue/internal/store"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -50,14 +51,8 @@ func (c BackupInventoryConfig) normalized() BackupInventoryConfig {
 
 // Memory and checkpoint size depend on known artifact references and owners,
 // not on the number of unreferenced physical objects in the bucket.
-type backupInventoryTotals struct {
-	Count            int
-	Bytes            int64
-	ProvisionalCount int
-	ProvisionalBytes int64
-	RepositoryCount  int
-	RepositoryBytes  int64
-}
+type backupInventoryTotals = backupusage.InventoryTotals
+type backupInventoryObject = backupusage.InventoryObject
 type backupInventoryScan struct {
 	NamespaceOwner     string
 	Generation         string
@@ -68,7 +63,7 @@ type backupInventoryScan struct {
 	Pages              int
 	Objects            int
 	Wanted             map[string]bool
-	References         map[string]dataObjectInfo
+	References         map[string]backupInventoryObject
 	Totals             map[string]backupInventoryTotals
 	RepositoryPrefixes []string
 }
@@ -121,7 +116,11 @@ func backupRepositoryPrefix(artifact model.BackupArtifact, backend model.DataBac
 	return prefix + "/"
 }
 func (s *Server) backupInventoryGroups() (map[string]*backupInventoryGroup, error) {
-	backends, err := s.store.ListBackupBackends("", true)
+	return backupInventoryGroups(s.store)
+}
+
+func backupInventoryGroups(db *store.Store) (map[string]*backupInventoryGroup, error) {
+	backends, err := db.ListBackupBackends("", true)
 	if err != nil {
 		return nil, err
 	}
@@ -130,11 +129,11 @@ func (s *Server) backupInventoryGroups() (map[string]*backupInventoryGroup, erro
 		if b.Provider != model.DataBackendProviderCloudflareR2 {
 			continue
 		}
-		b, err = s.store.GetBackupBackendForUse(b.ID, "", true)
+		b, err = db.GetBackupBackendForUse(b.ID, "", true)
 		if err != nil {
 			return nil, err
 		}
-		key := backupUsageStorageNamespaceKey(model.BackupBackendAsDataBackend(b))
+		key := backupusage.NamespaceOf(model.BackupBackendAsDataBackend(b)).Key()
 		if groups[key] == nil {
 			groups[key] = &backupInventoryGroup{}
 		}
@@ -222,11 +221,12 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 		if err != nil {
 			return false, err
 		}
-		if !backupUsageR2NamespaceIsMeasurable(backend) {
+		namespace := backupusage.NamespaceOf(backend.backend)
+		if !namespace.Measurable() {
 			return false, errors.New("backup namespace is not measurable")
 		}
 		if cp.Current == nil || now.Sub(cp.Current.StartedAt) > cfg.MaxScanAge {
-			cp.Current = &backupInventoryScan{Generation: model.NewID("inventory"), StartedAt: now, Wanted: map[string]bool{}, References: map[string]dataObjectInfo{}, Totals: map[string]backupInventoryTotals{}}
+			cp.Current = &backupInventoryScan{Generation: model.NewID("inventory"), StartedAt: now, Wanted: map[string]bool{}, References: map[string]backupInventoryObject{}, Totals: map[string]backupInventoryTotals{}}
 			owner := g.backends[0].TenantID
 			for _, b := range g.backends {
 				if b.TenantID != owner {
@@ -307,9 +307,9 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 			next = cp.NextAttempt
 			return true, nil
 		}
-		objects := make([]dataObjectInfo, 0, len(response.Contents))
+		objects := make([]backupInventoryObject, 0, len(response.Contents))
 		for _, o := range response.Contents {
-			objects = append(objects, dataObjectInfo{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), LastModified: aws.ToTime(o.LastModified), ObservedAt: now})
+			objects = append(objects, backupInventoryObject{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), LastModified: aws.ToTime(o.LastModified), ObservedAt: now})
 		}
 		sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
 		for _, o := range objects {
@@ -318,7 +318,7 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 			}
 			scan.LastKey = o.Key
 			scan.Objects++
-			if !backupUsagePhysicalKeyInNamespace(backend.backend, o.Key) {
+			if !namespace.ContainsPhysicalKey(o.Key) {
 				continue
 			}
 			owner := ""
@@ -341,7 +341,7 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 						return
 					}
 				}
-				if backupUsageObjectWithinCleanupGrace(o.LastModified, o.ObservedAt) {
+				if backupusage.ObjectWithinCleanupGrace(o.LastModified, o.ObservedAt, backupFailedRunGCGrace) {
 					v.ProvisionalCount++
 					v.ProvisionalBytes += o.Size
 				}
@@ -394,8 +394,8 @@ func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *back
 	return next, err
 }
 
-func (s *Server) readBackupInventory(ctx context.Context, groupKey string) (backupInventoryCheckpoint, error) {
-	groups, err := s.backupInventoryGroups()
+func readBackupInventory(ctx context.Context, db *store.Store, groupKey string) (backupInventoryCheckpoint, error) {
+	groups, err := backupInventoryGroups(db)
 	if err != nil {
 		return backupInventoryCheckpoint{}, err
 	}
@@ -403,7 +403,7 @@ func (s *Server) readBackupInventory(ctx context.Context, groupKey string) (back
 	if g == nil {
 		return backupInventoryCheckpoint{}, errors.New("backup namespace no longer configured")
 	}
-	pages, raw, err := s.store.ReadObservationPages(ctx, g.key)
+	pages, raw, err := db.ReadObservationPages(ctx, g.key)
 	if err != nil {
 		return backupInventoryCheckpoint{}, err
 	}

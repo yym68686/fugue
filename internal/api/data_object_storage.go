@@ -7,13 +7,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/objectstorage"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -125,39 +125,13 @@ func dataObjectBackendForTransfer(backend model.DataBackend) (*dataObjectBackend
 	return nil, fmt.Errorf("%w: data backend %s is not configured for direct object storage", errDataBackendConfiguration, backend.Name)
 }
 
-func (b *dataObjectBackend) objectKey(objectKey string) string {
-	objectKey = strings.Trim(strings.TrimSpace(objectKey), "/")
-	prefix := strings.Trim(strings.TrimSpace(b.backend.Prefix), "/")
-	if prefix == "" {
-		return objectKey
-	}
-	return path.Join(prefix, objectKey)
+func (b *dataObjectBackend) objectKey(key string) string {
+	return objectstorage.PhysicalKey(b.backend.Prefix, key)
 }
 
 // logicalObjectKey reverses objectKey only for an exact backend-prefix match.
-// It is used by read-only orphan reconciliation so a key from another logical
-// namespace can never be fed back through deleteLogicalObjects.
-func (b *dataObjectBackend) logicalObjectKey(physicalKey string) (string, bool) {
-	canonicalPhysicalKey := strings.Trim(strings.TrimSpace(physicalKey), "/")
-	if physicalKey != canonicalPhysicalKey || physicalKey == "" || path.Clean(physicalKey) != physicalKey || strings.ContainsRune(physicalKey, '\x00') {
-		return "", false
-	}
-	prefix := strings.Trim(strings.TrimSpace(b.backend.Prefix), "/")
-	if prefix == "" {
-		return physicalKey, true
-	}
-	if path.Clean(prefix) != prefix || strings.ContainsRune(prefix, '\x00') {
-		return "", false
-	}
-	prefix += "/"
-	if !strings.HasPrefix(physicalKey, prefix) {
-		return "", false
-	}
-	logical := strings.TrimPrefix(physicalKey, prefix)
-	if logical == "" || path.Clean(logical) != logical || strings.ContainsRune(logical, '\x00') {
-		return "", false
-	}
-	return logical, true
+func (b *dataObjectBackend) logicalObjectKey(key string) (string, bool) {
+	return objectstorage.LogicalKey(b.backend.Prefix, key)
 }
 
 func (b *dataObjectBackend) headObject(ctx context.Context, objectKey string) (bool, error) {
