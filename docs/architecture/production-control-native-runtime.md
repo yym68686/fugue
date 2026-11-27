@@ -29,9 +29,10 @@ and provider-side writer cutover have been demonstrated.
 `preview-participation JOURNAL_CONFIG NODE SNAPSHOT` uses the journal's
 read-only connection to load the current approved topology. The input JSON
 uses schema `fugue.participation-snapshot-replay/v1` with `cluster`, `topology`
-(the `version` object from `read-participation`), `observedAt` (RFC 3339),
-and `observations` (Node, inventory, retained workloads, verified-reader
-baseline count and transport projection). The preview reports the observed
+(an object with `generation` and `digest` copied from `read-participation`),
+`observedAt` (RFC 3339), and `observations` with `node`, `inventory`,
+`retained`, `validatedReaderBaseline`, and `transport` (or `null`). The
+preview reports the observed
 Node UID and resourceVersion plus any proposed hold annotation changes and
 the exact prior annotation map. A `review_recovery` result identifies the
 point at which legacy recovery begins its Front, Worker, and network checks.
@@ -39,6 +40,17 @@ The snapshot comes from the caller. Treat each report with
 `kind=untrusted_snapshot_replay` and `executionEvidence=false` as a debugging
 record only. Production shadow validation requires independent live
 observations and comparison of the recovery and rollback preconditions.
+
+`observe-participation-readers JOURNAL_CONFIG KUBECONFIG CONTEXT NODE` is a
+separate diagnostic for those live checks. It takes the reader names from the
+approved topology and reads the two reader Deployments, their selected Pods
+and owning ReplicaSets over a GET-only, hostname-verified TLS transport. It
+checks rollout convergence, capability annotations, exact runtime image
+digests and the Guardian's declared group baseline, then repeats the read and
+rejects changes to those object versions. Use a Kubernetes principal with
+Deployment and ReplicaSet GET and Pod LIST in the topology namespace only.
+The operator-selected context is not a cryptographic cluster binding; this
+report alone is not independent cutover evidence and cannot authorize a write.
 
 ## Single-Deployment release draft
 

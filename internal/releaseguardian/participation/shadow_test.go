@@ -133,7 +133,7 @@ func TestReplayParticipationBindsApprovedTopologyAndStaysAdvisory(t *testing.T) 
 		IntentDigest: digest([]byte("intent")), ApprovalDigest: digest([]byte("approval")),
 		RecordedAt: now.Add(-time.Minute), Policy: policy,
 	}
-	in := ReplayInput{Schema: ReplaySchema, Cluster: "cluster-a", Topology: head.Version,
+	in := ReplayInput{Schema: ReplaySchema, Cluster: "cluster-a", Topology: ReplayVersion{Generation: head.Version.Generation, Digest: head.Version.Digest},
 		ObservedAt: now.Add(-time.Second), Observations: &snapshot}
 	raw, err := json.Marshal(in)
 	if err != nil {
@@ -226,29 +226,29 @@ from scripts import reconcile_node_participation as legacy
 d = json.load(sys.stdin)
 p, s = d['Policy'], d['Snapshot']
 member = p['members'][0]
-t = s['Transport']
-cluster_read = None if t is None else (object(), {'spec': {'externalIPs': t['ExternalIPs']}})
+t = s['transport']
+cluster_read = None if t is None else (object(), {'spec': {'externalIPs': t['externalIPs']}})
 edge_read = None if t is None else {
-    'public_ipv4': t['PublicIPv4'],
-    'observation': {'heartbeat_fresh': t['HeartbeatFresh'], 'dns_admission_intent': {
-        'state': t['DNSState'], 'reason': t['DNSReason'], 'serving_evidence': t['DNSServingEvidence']}}}
+    'public_ipv4': t['publicIPv4'],
+    'observation': {'heartbeat_fresh': t['heartbeatFresh'], 'dns_admission_intent': {
+        'state': t['dnsState'], 'reason': t['dnsReason'], 'serving_evidence': t['dnsServingEvidence']}}}
 
 class Fixture(legacy.Participant):
     patch = None
     def get(self, kind, name):
         if kind == 'node' and name == member['node']:
-            return s['Node']
+            return s['node']
         if kind == 'daemonset':
-            return next(item for item in s['Retained'] if item['metadata']['name'] == name)
+            return next(item for item in s['retained'] if item['metadata']['name'] == name)
         raise AssertionError((kind, name))
     def kube(self, *args, **kwargs):
         if args[:2] == ('get', 'nodes'):
-            return json.dumps(s['Inventory'])
+            return json.dumps(s['inventory'])
         assert args[:3] == ('patch', 'node', member['node']) and self.patch is None, args
         self.patch = json.loads(args[args.index('-p') + 1])
-        return json.dumps(s['Node'])
+        return json.dumps(s['node'])
     def readers(self):
-        return s['ValidatedReaderBaseline']
+        return s['validatedReaderBaseline']
     def public_service(self):
         return cluster_read
     def node_local_snapshot(self, public):
@@ -263,7 +263,7 @@ with ExitStack() as stack:
     runner = Fixture(p, member)
     result = runner.run(False)
     assert result['changed'] is False
-    node = s['Node']
+    node = s['node']
     raw = node['metadata']['annotations'].get(legacy.STATE)
     prior_phase = json.loads(raw)['phase'] if raw is not None else None
     if result['state'] in ('offline', 'recovering') and prior_phase != result['state']:

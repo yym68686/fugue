@@ -50,18 +50,22 @@ type memberParticipationState struct {
 // exhaustive serving transport lookup. A nonnil transport is an independent
 // readback of exact node-local service identity and the DNS serving witness.
 type ParticipationSnapshot struct {
-	Node                    corev1.Node
-	Inventory               *corev1.NodeList
-	Retained                []appsv1.DaemonSet
-	ValidatedReaderBaseline int
-	Transport               *ParticipationTransport
+	Node                    corev1.Node             `json:"node"`
+	Inventory               *corev1.NodeList        `json:"inventory"`
+	Retained                []appsv1.DaemonSet      `json:"retained"`
+	ValidatedReaderBaseline int                     `json:"validatedReaderBaseline"`
+	Transport               *ParticipationTransport `json:"transport"`
 }
 
 type ParticipationTransport struct {
-	Node, Group, PublicIPv4                 string
-	ExternalIPs                             []string
-	DNSState, DNSReason, DNSServingEvidence string
-	HeartbeatFresh                          bool
+	Node               string   `json:"node"`
+	Group              string   `json:"group"`
+	PublicIPv4         string   `json:"publicIPv4"`
+	ExternalIPs        []string `json:"externalIPs"`
+	DNSState           string   `json:"dnsState"`
+	DNSReason          string   `json:"dnsReason"`
+	DNSServingEvidence string   `json:"dnsServingEvidence"`
+	HeartbeatFresh     bool     `json:"heartbeatFresh"`
 }
 
 type ParticipationPreview struct {
