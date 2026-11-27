@@ -4,6 +4,16 @@ on:
   schedule:
     - cron: '23 18 * * *'
   workflow_dispatch:
+    inputs:
+      shadow_case:
+        description: 'Optional non-authorizing prepush comparison'
+        type: choice
+        options:
+          - none
+          - queue-runtime
+          - queue-test
+          - cross-domain
+        default: none
 
 permissions:
   contents: read
@@ -20,3 +30,49 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make test
+
+  shadow-replay:
+    if: github.event_name == 'workflow_dispatch' && inputs.shadow_case != 'none'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GOFLAGS: -p=2
+      SHADOW_CASE: ${{ inputs.shadow_case }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare independent cache and representative edit
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/fugue-shadow-evidence"
+          mkdir -p "$evidence" "$RUNNER_TEMP/fugue-shadow-go-cache"
+          go mod download
+          python3 -m scripts.prepush_shadow_fixture --case "$SHADOW_CASE"
+          git diff --check
+          git diff --binary > "$evidence/representative.patch"
+      - name: Compare real native and artifact dependency graphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m scripts.prepush_shadow --base HEAD --compare-target linux/amd64 --compare-target linux/arm64 > "$RUNNER_TEMP/fugue-shadow-evidence/targets.json"
+      - name: Run paired shadow experiment without a production receipt
+        shell: bash
+        env:
+          GOCACHE: ${{ runner.temp }}/fugue-shadow-go-cache
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/fugue-shadow-evidence"
+          python3 -m scripts.prepush_replay --case "$SHADOW_CASE" --base HEAD --samples 20 --full-oracle --oracle-timeout 1200 > "$evidence/replay.json" 2> "$evidence/replay.stderr"
+      - name: Preserve experiment or diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fugue-shadow-evidence-${{ github.sha }}-${{ inputs.shadow_case }}
+          path: ${{ runner.temp }}/fugue-shadow-evidence
+          if-no-files-found: error
