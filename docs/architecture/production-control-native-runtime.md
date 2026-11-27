@@ -513,6 +513,34 @@ writer drainage and revocation, and production cutover. The watcher's
 `verified` line records connection survival and the terminal serving result
 for that journal only.
 
+`fugue-production-control render-front-worker-cutover SPEC` renders a
+Kubernetes List of policies and bindings for the configured authority
+group. Set `namespace`, `group`, `guardian`, `daemonSetStatusWriter`,
+`workerDaemonSets`, `componentLeases`, and `phase` in the JSON spec. The
+controller and Lease lists must cover both directly declared and shared
+Worker slots. Keep this list and the two identities fixed across phases.
+
+Before installing `frozen`, verify the group has no claimed or activated
+transaction and pause new requests into the old lanes. In the frozen phase
+both Guardian and the runner are denied writes to the handoff inputs and
+outputs, shared fences and leases, and enlisted Worker DaemonSets. The
+DaemonSet status controller can still update the status subresource. After
+verifying endpoint enforcement, revoke legacy credentials including
+Pod exec access and prove that any previously admitted requests have
+drained. The `native` phase reserves the protected mutations for the
+newly provisioned Guardian identity and keeps ordinary group transition
+journals closed. The same policies and bindings are updated in place.
+
+`observe-front-worker-cutover SPEC KUBECONFIG CONTEXT` checks both reads
+of the exact policy and binding revisions and requires current, warning-free
+Kubernetes type checking. In the frozen phase it also checks for a vacant
+transaction boundary and absent or explicitly released Leases. Record the
+output together with separate evidence of endpoint enforcement, credential
+revocation, request drainage and the read-only handoff rehearsal. The
+observation command uses only GET.
+Deployment of the signed native handoff executor and production rehearsal
+are still required before enabling this phase for a live group.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
