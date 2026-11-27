@@ -1139,6 +1139,17 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	if got := yamlMappingKeys(t, on); !reflect.DeepEqual(got, []string{"schedule", "workflow_dispatch"}) {
 		t.Fatalf("daily audit triggers: %v", got)
 	}
+	choices := yamlMappingValue(t, yamlMappingValue(t, on, "workflow_dispatch"), "inputs")
+	shadowCases := yamlMappingValue(t, choices, "shadow_case")
+	options := yamlMappingValue(t, shadowCases, "options")
+	gotCases := make([]string, 0, len(options.Content))
+	for _, choice := range options.Content {
+		gotCases = append(gotCases, choice.Value)
+	}
+	wantCases := []string{"none", "queue-runtime", "queue-test", "cross-domain", "contract-tracking-scope", "contract-generator-consumer"}
+	if !reflect.DeepEqual(gotCases, wantCases) {
+		t.Fatalf("daily audit shadow cases: %v", gotCases)
+	}
 	schedule := yamlMappingValue(t, on, "schedule").Content
 	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {
 		t.Fatal("daily audit cadence changed")

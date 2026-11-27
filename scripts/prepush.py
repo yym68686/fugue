@@ -518,9 +518,12 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
     non_go_tasks: dict[str, list[str] | None] = {}
     if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
                     "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
-                    "scripts/test_prepush_replay.py"} for name in paths):
+                    "scripts/test_prepush_replay.py", "scripts/prepush_shadow_fixture.py",
+                    "scripts/prepush_shadow_contract.py",
+                    "scripts/test_prepush_shadow_contract.py"} for name in paths):
         non_go_tasks["prepush-selection-tests"] = [sys.executable, "-m", "unittest",
-            "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay"]
+            "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay",
+            "scripts.test_prepush_shadow_contract"]
     if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
                     "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
                     "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):

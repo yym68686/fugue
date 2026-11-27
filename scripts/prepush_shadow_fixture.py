@@ -35,10 +35,35 @@ HOST_POLICY_TEST = (
     "\t// The rendered fragment must be valid on its own, before an installer runs it.\n",
 )
 
+TRACKING_SCOPE_REGRESSION = (
+    "internal/controller/candidate_startup_budget.go",
+    "s.Store.ReadImageTracking().GetAppImageTracking(",
+    "s.Store.ImageTracking().GetAppImageTracking(",
+)
+
+GENERATOR_REGRESSION = (
+    "cmd/fugue-openapi-gen/main.go",
+    'b.WriteString("package api\\n")',
+    'b.WriteString("package api\\n// Generated source differs from the checked-in routes.\\n")',
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
     "cross-domain": (QUEUE_RUNTIME, HOST_POLICY_TEST),
+}
+
+CONTRACTS = {
+    "contract-tracking-scope": (
+        TRACKING_SCOPE_REGRESSION, "./internal/imagetracking",
+        "TestTrackingWriteCapabilityIsWiredOnlyAtComposition",
+        "acquire image tracking write capability only in its composition adapter",
+    ),
+    "contract-generator-consumer": (
+        GENERATOR_REGRESSION, "./internal/apispec",
+        "TestGeneratedArtifactsAreUpToDate",
+        "generated file is out of date:",
+    ),
 }
 
 
@@ -48,7 +73,8 @@ def prepare(case, root=ROOT):
     if status:
         raise ValueError("fixture requires a clean disposable checkout")
     pending = []
-    for name, before, after in CASES[case]:
+    edits = (CONTRACTS[case][0],) if case in CONTRACTS else CASES[case]
+    for name, before, after in edits:
         path = root / name
         source = path.read_text(encoding="utf-8")
         if source.count(before) != 1:
