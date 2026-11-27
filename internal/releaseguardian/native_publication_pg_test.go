@@ -168,6 +168,7 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	}))
 	defer guardianDB.Close()
 	for _, statement := range []string{
+		`INSERT INTO fugue_control.audit (kind,subject_digest,intent_digest,actor) VALUES ('execution.launched','fixture','fixture','fixture')`,
 		`INSERT INTO fugue_control.approvals (digest,intent_digest,envelope) SELECT digest,intent_digest,envelope FROM fugue_control.approvals WHERE false`,
 		`UPDATE fugue_control.execution_claims SET actor='fixture' WHERE false`,
 		`DELETE FROM fugue_control.execution_launches WHERE false`,
@@ -219,6 +220,10 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	}
 	if allowed, err := gate.ReserveRollout(ctx, snapshot); !allowed || err != nil {
 		t.Fatalf("exact candidate did not get first launch: allowed=%t err=%v", allowed, err)
+	}
+	var audited int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM fugue_control.audit WHERE kind='execution.launched' AND intent_digest=$1 AND actor='guardian'`, recorded.Digest).Scan(&audited); err != nil || audited != 1 {
+		t.Fatalf("restricted launch was not auditable: count=%d error=%v", audited, err)
 	}
 	gate, err = NewNativeLaunchGate(f.store, reader, draft.Intent.ClusterID)
 	if err != nil {

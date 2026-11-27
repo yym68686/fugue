@@ -76,3 +76,46 @@ CREATE TABLE IF NOT EXISTS fugue_control.execution_launches (
     actor text NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Triggers keep execution audit inseparable from the append. In particular,
+-- the launch principal does not need a general INSERT grant on audit.
+-- This SECURITY DEFINER function is installed by the owner-only migrator.
+CREATE OR REPLACE FUNCTION fugue_control.audit_execution_transition() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    INSERT INTO fugue_control.audit (kind, subject_digest, intent_digest, actor)
+    VALUES (TG_ARGV[0], NEW.intent_digest, NEW.intent_digest, NEW.actor);
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION fugue_control.audit_execution_transition() FROM PUBLIC;
+
+-- CREATE TABLE IF NOT EXISTS does not upgrade the original audit CHECK.
+-- Exclude concurrent appends during the one-time backfill so no transition
+-- can land between the historical read and trigger installation.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conrelid='fugue_control.audit'::pg_catalog.regclass AND conname='audit_event_kind_v2') THEN
+        LOCK TABLE fugue_control.execution_claims, fugue_control.execution_results, fugue_control.execution_launches
+            IN SHARE ROW EXCLUSIVE MODE;
+        ALTER TABLE fugue_control.audit DROP CONSTRAINT audit_kind_check;
+        ALTER TABLE fugue_control.audit ADD CONSTRAINT audit_event_kind_v2 CHECK (kind IN (
+            'intent.recorded', 'approval.recorded', 'execution.claimed', 'execution.launched', 'execution.completed'
+        ));
+        INSERT INTO fugue_control.audit (kind, subject_digest, intent_digest, actor, recorded_at)
+        SELECT 'execution.claimed', intent_digest, intent_digest, actor, recorded_at FROM fugue_control.execution_claims
+        UNION ALL
+        SELECT 'execution.completed', intent_digest, intent_digest, actor, recorded_at FROM fugue_control.execution_results
+        UNION ALL
+        SELECT 'execution.launched', intent_digest, intent_digest, actor, recorded_at FROM fugue_control.execution_launches;
+
+        CREATE TRIGGER execution_claim_audit AFTER INSERT ON fugue_control.execution_claims
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('execution.claimed');
+        CREATE TRIGGER execution_result_audit AFTER INSERT ON fugue_control.execution_results
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('execution.completed');
+        CREATE TRIGGER execution_launch_audit AFTER INSERT ON fugue_control.execution_launches
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.audit_execution_transition('execution.launched');
+    END IF;
+END;
+$$;
