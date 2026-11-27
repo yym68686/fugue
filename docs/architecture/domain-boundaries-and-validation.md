@@ -19,8 +19,11 @@ For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
 cannot overwrite a claimed or cancelled operation. Queue/Store contract tests
 for Compose ordering, retry and deletion run outside the Controller root;
-Controller retains worker execution and shutdown tests. Store imports the
-operation read contract without importing either read or queue policy.
+Controller retains worker execution and shutdown tests. Store imports only the
+operation query data and exposes explicit read methods. The read domain owns
+its consumer-side interface; changing that interface does not rebuild Store or
+its other adapters. Release planning binds queue implementation to Controller,
+operation views to API, and shared query data to all Store-consuming lanes.
 
 Operation cancellation uses an actor-bound write port for HTTP callers and
 a deploy-only supersession port for the Controller. PostgreSQL rechecks the
