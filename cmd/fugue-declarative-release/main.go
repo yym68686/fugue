@@ -47,7 +47,7 @@ func run(args []string, output io.Writer) error {
 }
 
 func runContext(ctx context.Context, args []string, output io.Writer) error {
-	const usage = "usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-preview|guardian-submit|render-native-cutover-policy|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ..."
+	const usage = "usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-preview|guardian-native-shadow|guardian-submit|render-native-cutover-policy|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ..."
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -74,7 +74,7 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runPrepare(args, output)
 	case "execute", "resume-worker-drain":
 		return runExecuteContext(ctx, args, output)
-	case "guardian-preview":
+	case "guardian-preview", "guardian-native-shadow":
 		return runGuardianPreview(ctx, args, output)
 	case "guardian-submit":
 		return runGuardianSubmit(args, output)
