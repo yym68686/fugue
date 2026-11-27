@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"fugue/internal/declarativerelease"
@@ -26,6 +27,8 @@ type NativeRuntimeBinding struct {
 	DesiredResourceVersion string `json:"desiredResourceVersion"`
 	DesiredRecordDigest    string `json:"desiredRecordDigest"`
 	LKGMonitorRecordDigest string `json:"lkgMonitorRecordDigest"`
+	IntentDigest           string `json:"intentDigest"`
+	Fence                  int64  `json:"fence"`
 }
 
 func DecodeNativeRuntimeBinding(raw string) (NativeRuntimeBinding, error) {
@@ -39,7 +42,8 @@ func DecodeNativeRuntimeBinding(raw string) (NativeRuntimeBinding, error) {
 func (b NativeRuntimeBinding) valid() bool {
 	return b.Key.Validate() == nil && b.DesiredResourceVersion != "" && len(b.DesiredResourceVersion) <= 128 &&
 		!strings.ContainsAny(b.DesiredResourceVersion, " \r\n\t\x00") &&
-		digestPattern.MatchString(b.DesiredRecordDigest) && digestPattern.MatchString(b.LKGMonitorRecordDigest)
+		digestPattern.MatchString(b.DesiredRecordDigest) && digestPattern.MatchString(b.LKGMonitorRecordDigest) &&
+		digestPattern.MatchString(b.IntentDigest) && b.Fence > 0
 }
 
 func (b NativeRuntimeBinding) Verify(ctx context.Context, client coreclient.CoreV1Interface, namespace string) error {
@@ -56,7 +60,8 @@ func (b NativeRuntimeBinding) readPointer(ctx context.Context, client coreclient
 		return DesiredRelease{}, fmt.Errorf("read native DesiredRelease: %w", err)
 	}
 	var desired DesiredRelease
-	if current.ResourceVersion != b.DesiredResourceVersion || !validNativePublicationMarker(current.Annotations) ||
+	if current.ResourceVersion != b.DesiredResourceVersion ||
+		current.Annotations[nativeIntentAnnotation] != b.IntentDigest || current.Annotations[nativeFenceAnnotation] != strconv.FormatInt(b.Fence, 10) ||
 		decodeStrict([]byte(current.Data["desired.json"]), &desired) != nil || desired.Validate() != nil ||
 		desired.Key() != b.Key || desired.RecordDigest != b.DesiredRecordDigest {
 		return DesiredRelease{}, errors.New("Guardian native DesiredRelease changed or lost its approval fence")

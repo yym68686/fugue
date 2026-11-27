@@ -12,7 +12,10 @@ import (
 
 	"fugue/internal/productioncontrol"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clienttesting "k8s.io/client-go/testing"
 )
@@ -142,5 +145,90 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	replayed, err := restarted.Publish(ctx, "fixture-executor", recorded.Digest, approved.Digest)
 	if err != nil || replayed.Submitted || replayed.Claim != publication.Claim || writes != 3 {
 		t.Fatalf("replayed publication=%+v writes=%d error=%v", replayed, writes, err)
+	}
+	// Separate this writer from the generic journal fixture: it can append
+	// launches, not manufacture approvals, change execution fences or settle a
+	// result. Test the minimal grants against real PostgreSQL queries.
+	if _, err := db.ExecContext(ctx, `
+		CREATE ROLE fugue_test_release_launcher NOLOGIN;
+		GRANT USAGE ON SCHEMA fugue_control TO fugue_test_release_launcher;
+		GRANT SELECT ON fugue_control.intents, fugue_control.approvals, fugue_control.resource_baselines,
+			fugue_control.execution_claims, fugue_control.execution_results, fugue_control.execution_launches TO fugue_test_release_launcher;
+		GRANT INSERT ON fugue_control.execution_launches TO fugue_test_release_launcher;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	config, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardianDB := stdlib.OpenDB(*config, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `SET ROLE fugue_test_release_launcher`)
+		return err
+	}))
+	defer guardianDB.Close()
+	for _, statement := range []string{
+		`INSERT INTO fugue_control.approvals (digest,intent_digest,envelope) SELECT digest,intent_digest,envelope FROM fugue_control.approvals WHERE false`,
+		`UPDATE fugue_control.execution_claims SET actor='fixture' WHERE false`,
+		`DELETE FROM fugue_control.execution_launches WHERE false`,
+		`INSERT INTO fugue_control.execution_results (intent_digest,outcome,generation,verified_digest,evidence_digest,actor)
+		 SELECT intent_digest,outcome,generation,verified_digest,evidence_digest,actor FROM fugue_control.execution_results WHERE false`,
+	} {
+		_, err := guardianDB.ExecContext(ctx, statement)
+		var denied *pgconn.PgError
+		if !errors.As(err, &denied) || denied.Code != "42501" {
+			t.Fatalf("insufficient journal privilege separation: %v", err)
+		}
+	}
+	guardianJournal, err := productioncontrol.NewJournal(guardianDB, trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := NewNativeLaunchGate(f.store, guardianJournal, draft.Intent.ClusterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maps := f.client.CoreV1().ConfigMaps(draft.Preview.Namespace)
+	pointer, err := maps.Get(ctx, desiredName(f.key), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointer.ResourceVersion = "20"
+	if _, err := maps.Update(ctx, pointer, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := f.store.Load(ctx, f.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(*Snapshot){
+		"different approval":    func(s *Snapshot) { s.NativeIntent = testDigest },
+		"different fence":       func(s *Snapshot) { s.NativeFence++ },
+		"different predecessor": func(s *Snapshot) { s.LKGMonitorRecordDigest = otherDigest },
+		"different generation":  func(s *Snapshot) { s.Desired.Generation++ },
+		"stale pointer":         func(s *Snapshot) { s.DesiredResourceVersion = "19" },
+		"missing monitor":       func(s *Snapshot) { s.CurrentMonitorData = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := snapshot
+			edit(&invalid)
+			if allowed, err := gate.ReserveRollout(ctx, invalid); allowed || err == nil {
+				t.Fatalf("drifted candidate accepted: allowed=%t err=%v", allowed, err)
+			}
+		})
+	}
+	if allowed, err := gate.ReserveRollout(ctx, snapshot); !allowed || err != nil {
+		t.Fatalf("exact candidate did not get first launch: allowed=%t err=%v", allowed, err)
+	}
+	gate, err = NewNativeLaunchGate(f.store, reader, draft.Intent.ClusterID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := gate.ReserveRollout(ctx, snapshot); allowed || err != nil {
+		t.Fatalf("second process got an already-used launch: allowed=%t err=%v", allowed, err)
+	}
+	state, err = readerExecution.Resource(ctx, baseline.Scope)
+	if err != nil || state.LastVerified != baseline.Verified || state.Pending != recorded.Digest || writes != 3 {
+		t.Fatalf("launch authorization changed provider or settled unknown state: state=%+v writes=%d error=%v", state, writes, err)
 	}
 }

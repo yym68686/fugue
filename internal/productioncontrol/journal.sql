@@ -67,3 +67,12 @@ CREATE TABLE IF NOT EXISTS fugue_control.execution_results (
     actor text NOT NULL,
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Publication and executing a published candidate are separate write
+-- boundaries. Committing this row before launch burns the only permit, even
+-- if the worker dies before its first request. It is never a renewable lease.
+CREATE TABLE IF NOT EXISTS fugue_control.execution_launches (
+    intent_digest text PRIMARY KEY REFERENCES fugue_control.execution_claims(intent_digest),
+    actor text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);

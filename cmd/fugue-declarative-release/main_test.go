@@ -24,11 +24,15 @@ func TestExecuteAcknowledgesGuardianNoWriteOnlyAfterFinalization(t *testing.T) {
 	recordErr := errors.New("monitor CAS failed")
 	for _, tc := range []struct {
 		name, holder, result string
+		native               bool
 		leaseErr, monitorErr error
 		wantErr              error
 		wantText             string
 	}{
 		{name: "known no-write", holder: guardian, result: "failed-no-write"},
+		{name: "known native compensation", holder: guardian, result: "compensated", native: true},
+		{name: "legacy compensation retains failure", holder: guardian, result: "compensated", wantText: "ended with status=compensated"},
+		{name: "unproven native compensation", holder: guardian, result: "compensated", native: true, leaseErr: finalizeErr, wantErr: finalizeErr, wantText: "lease release is unproven"},
 		{name: "direct caller retains failure", holder: direct, result: "failed-no-write", wantText: "ended with status=failed-no-write"},
 		{name: "different component", holder: "guardian:pod-uid:0123456789abcdef:other", result: "failed-no-write", wantText: "ended with status=failed-no-write"},
 		{name: "unproven lease CAS", holder: guardian, result: "failed-no-write", leaseErr: finalizeErr, wantErr: finalizeErr, wantText: "lease release is unproven"},
@@ -37,7 +41,7 @@ func TestExecuteAcknowledgesGuardianNoWriteOnlyAfterFinalization(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := declarativerelease.ExecutionResult{Component: "edge-worker-test", Status: tc.result, Reason: "front-drain-preflight"}
-			err := executeTerminalError(result, tc.holder, tc.leaseErr, tc.monitorErr)
+			err := executeTerminalError(result, tc.holder, tc.native, tc.leaseErr, tc.monitorErr)
 			if tc.wantText == "" {
 				if err != nil {
 					t.Fatalf("Guardian did not receive the known terminal result: %v", err)

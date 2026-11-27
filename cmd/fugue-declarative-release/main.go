@@ -997,10 +997,10 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	if _, err := output.Write(append(encoded, '\n')); err != nil {
 		return err
 	}
-	return executeTerminalError(result, heldLease.Holder, leaseReleaseErr, monitorRecordErr)
+	return executeTerminalError(result, heldLease.Holder, native != nil, leaseReleaseErr, monitorRecordErr)
 }
 
-func executeTerminalError(result declarativerelease.ExecutionResult, holder string, leaseReleaseErr, monitorRecordErr error) error {
+func executeTerminalError(result declarativerelease.ExecutionResult, holder string, native bool, leaseReleaseErr, monitorRecordErr error) error {
 	if leaseReleaseErr != nil {
 		return fmt.Errorf("component release terminal state is recorded but lease release is unproven: %w", leaseReleaseErr)
 	}
@@ -1010,9 +1010,10 @@ func executeTerminalError(result declarativerelease.ExecutionResult, holder stri
 	// For the Guardian subprocess, exit zero acknowledges delivery of a known
 	// outcome, not a successful rollout. A verified no-write refusal (for
 	// example, a Front still draining) must reach Guardian's safe terminal
-	// branch instead of masquerading as a lost result. Direct CI callers
-	// still use the process exit status to fail an unsuccessful deploy.
-	if _, guardian := guardianLeasePodUID(holder, result.Component); guardian && result.Status == "failed-no-write" {
+	// branch instead of masquerading as a lost result. Native Guardian also
+	// needs a positive acknowledgment that compensation and lease release
+	// both completed. Keep the existing exit behavior for legacy callers.
+	if _, guardian := guardianLeasePodUID(holder, result.Component); guardian && (result.Status == "failed-no-write" || (native && result.Status == "compensated")) {
 		return nil
 	}
 	if result.Status != "verified" {
