@@ -123,6 +123,14 @@ The draft does not anchor a baseline, reserve a claim, recognize readmission,
 or authorize any Kubernetes action. There is no wired executor for this
 submission yet; do not record production approvals for it as a cutover.
 
+`preflight-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
+[PRIVATE_TOKEN_FILE]` re-observes the Node identified by the submission.
+It rejects drift in the approved topology and approval, journal predecessor,
+physical Node and resourceVersion, or proposed annotations and phase. The
+fresh read's preview timestamp is not the actual application time. A match
+does not check production write authority, grant a claim, permit execution,
+or establish that recovery is safe; the report has `executionEvidence=false`.
+
 `render-participation-freeze NODE` prints a Kubernetes admission policy and
 binding. It installs nothing and grants nobody a write path. For one Node
 name it prevents admission of creates/deletes and changes to the automatic
