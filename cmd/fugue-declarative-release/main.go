@@ -47,8 +47,9 @@ func run(args []string, output io.Writer) error {
 }
 
 func runContext(ctx context.Context, args []string, output io.Writer) error {
+	const usage = "usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-preview|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ..."
 	if len(args) == 0 {
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ...")
+		return errors.New(usage)
 	}
 	switch args[0] {
 	case "plan":
@@ -65,6 +66,8 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runPrepare(args, output)
 	case "execute", "resume-worker-drain":
 		return runExecuteContext(ctx, args, output)
+	case "guardian-preview":
+		return runGuardianPreview(ctx, args, output)
 	case "guardian-submit":
 		return runGuardianSubmit(args, output)
 	case "repair-monitor":
@@ -78,7 +81,7 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 	case "adopt-committed-monitor":
 		return runAdoptCommittedMonitorContext(ctx, args, output)
 	default:
-		return errors.New("usage: fugue-declarative-release <plan|emit-github-output|emit-delivery|build|receipt|prepare|execute|guardian-submit|repair-monitor|restore-monitor|reconcile|install-monitor-record|adopt-committed-monitor> ...")
+		return errors.New(usage)
 	}
 }
 
@@ -113,22 +116,10 @@ func runGuardianSubmit(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plan, err := declarativerelease.DecodePlan(bytes.NewReader(files["release-plan.json"]))
+	target, err := guardianSubmissionTarget(files)
 	if err != nil {
 		return err
 	}
-	artifact, err := declarativerelease.DecodeArtifactReceipt(bytes.NewReader(files["artifact-receipt.json"]))
-	if err != nil {
-		return err
-	}
-	release, err := selectedRelease(plan, artifact.Component)
-	if err != nil {
-		return err
-	}
-	if release.Delivery == nil || release.Delivery.Writer != "guardian" {
-		return errors.New("component is not enrolled in Guardian delivery")
-	}
-	key := releaseguardian.Key{Component: release.ComponentID, Group: release.Delivery.Group}
 	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
 		return err
@@ -137,20 +128,17 @@ func runGuardianSubmit(args []string, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create Guardian submission client: %w", err)
 	}
-	store, err := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{{
-		Key: key, Namespace: release.Workload.Namespace, MonitorComponent: release.ComponentID,
-		DependencyService: release.Delivery.DependencyService,
-	}})
+	store, err := releaseguardian.NewKubeStore(client, []releaseguardian.TargetConfig{target})
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	_, desired, err := store.PublishDesired(ctx, key, files)
+	_, desired, err := store.PublishDesired(ctx, target.Key, files)
 	if err != nil {
 		return err
 	}
-	status, waitErr := store.WaitForTerminal(ctx, key, desired, 3*time.Second)
+	status, waitErr := store.WaitForTerminal(ctx, target.Key, desired, 3*time.Second)
 	if status.StatusDigest != "" {
 		raw, encodeErr := declarativerelease.CanonicalJSON(status)
 		if encodeErr != nil {

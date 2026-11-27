@@ -1,0 +1,590 @@
+# Proposed dispositions only; no row certifies removal, revocation, or live cutover.
+# kind	identity	disposition	destination or retirement prerequisite
+local-action-file	.github/actions/deploy-declarative-component/action.yml	migrate	native Guardian release and recovery behavior
+production-file	deploy/environments/production/agent-edge-policy/active.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/agent-edge-policy/shadow.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/agent-edge-trust/package.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/app-tcp-transport/listeners.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/cell-inventory/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-inventory/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-member-enrollment/cell-public-b-secondary.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-membership-expansion/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-producer-reconfiguration/cell-dns-availability.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/cell-producer-reconfiguration/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-producer-reconfiguration/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-producers/cell-dns-availability.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/cell-producers/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-producers/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-route-promotion/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-route-promotion/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-trust/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cell-trust/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/cnpg-controller/release.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/compiler-input-safety/zero-temp.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/control-plane-backup-retention/install.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/control-plane-postgres/protection.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/controller/release.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/diagnostics/catalog.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/diagnostics/package.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/dns-authority-promotion/cell-dns-availability.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-authority-stage/cell-dns-availability.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-authority-stage/cell-dns-public.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-observation/public.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-port-retirement/de.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-port-retirement/us.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-probe-egress/availability.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-probe-egress/policy.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-slot-retirement/history/0004.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-slot-retirement/intent.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-transport/ledger-inspection.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-transport/refusal-preview.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/dns-transport/transport.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/drain-observation/rbac.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/edge-member-recovery/recovery.json	migrate	native node participation
+production-file	deploy/environments/production/edge-offline/bwg-worker-reenrollment.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/edge-offline/capacity-recovery.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/edge-offline/global.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/edge-offline/recovery-continuity-v2.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/edge-offline/single-recovery-v3.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/edge-origin-relay/trust.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/edge-release-hold/hold.json	migrate	native node participation
+production-file	deploy/environments/production/fixed-node-retention/ssh-fronts.json	migrate	native node participation
+production-file	deploy/environments/production/front-connection-observation/observer.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-egress-observation/consumers.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-a-indexed.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-a-passive.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-a-platform-traffic.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-a-quality.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-compatible-probe.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-compatible.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-fixed-v2-probe.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-fixed-v2.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-indexed.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-node-worker.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-passive.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-platform-traffic.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-probe.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-primary-quality.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-fixed-v2-probe.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-fixed-v2.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-passive.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-platform-traffic.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-quality.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/public-b-secondary-serving-probe.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/us-managed-passive.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/us-managed-platform-traffic.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-executor-replacement/us-managed-quality.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-hostport-retirement/us-bwg.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-hostport-retirement/us-primary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-observation/public-a.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-observation/public-b-primary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-observation/public-b-secondary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-observation/us-managed.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-probe-transport/listeners.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-serving-handoff/public-a.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-serving-handoff/public-b-primary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-serving-handoff/public-b-secondary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-serving-handoff/us-managed.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-serving-stage/services.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/front-transport-transition/intent.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/idle-front-standby-release/us-primary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/local-snapshot-cleanup/executor.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-cleanup/executor.service	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-cleanup/kustomization.yaml	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-cleanup/observe.py	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-cleanup/observer.yaml	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-cleanup/policy.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-review/approval.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/local-snapshot-review/review.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/longhorn-gc/engine.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/managed-postgres/bootstrap-cpu.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/managed-postgres/cpu-upscale-policy.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/managed-ssh/front-stage.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/identity-maintenance.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/keys.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/runtime.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/transport-operation.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/transport/de-primary-canary.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/transport/us-optimized-canary.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/transport/us-primary-canary.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/managed-ssh/transport/us-secondary-canary.json	migrate	native SSH lifecycle
+production-file	deploy/environments/production/node-participation/policy.json	migrate	native node participation
+production-file	deploy/environments/production/node-resource-policy/README.md	retire	merge the runbook into native operations documentation
+production-file	deploy/environments/production/node-resource-policy/policy.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/node-resource-policy/targets.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/node-worker-handoff/us-bwg-a-to-hosted-b.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-bwg-b-to-a.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-a-to-b.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-b-to-a.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-b-to-hosted-a.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-b-to-new-a-deadline.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-hosted-a-to-retained-b.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/node-worker-handoff/us-primary-new-a-to-b-empty.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/observability/scrape-policy.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/postgres-capacity-observation/rbac.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/postgres-volume-expansion/recovery.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/producer-renewal/renewal.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dns-retirement/physical-order.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/availability-recovery.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/business-adaptive.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/business-observe.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/expired-business-retirement.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/fleet-default-canary.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/fleet-default-global.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/last-valid-v8.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/mesh-redundancy.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/paired-continuity-v7.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/passive-asn-bootstrap-seeds.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-dynamic-quality/universal.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/routing-physical-dns/quality-canary.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/routing-physical-dns/wdwdl.json	migrate	native DNS policy and reconciliation
+production-file	deploy/environments/production/runtime-agent-canary/identity.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/runtime-input-reconfiguration/cell-public-a.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/runtime-input-reconfiguration/cell-public-b.json	migrate	native platform policy and reconciliation
+production-file	deploy/environments/production/runtime-input-reconfiguration/global.json	migrate	native administrative operation or build interface
+production-file	deploy/environments/production/storage-policy/maintenance.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/storage-policy/operation.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/storage-policy/policy.json	migrate	native data and storage maintenance
+production-file	deploy/environments/production/tls-issuance/config.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/tls-issuance/policy.json	migrate	native policy, observation or maintenance
+production-file	deploy/environments/production/worker-standby-observation/public-b-secondary.json	migrate	Guardian Front/Worker coordination
+production-file	deploy/environments/production/workload-memory/policy.json	migrate	native policy, observation or maintenance
+release-file	deploy/releases/api/deployment.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/api/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/components.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/controller/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/controller/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/controller/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-de/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-de/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-b/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-b/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-c/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-c/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-d/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-d/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-e/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-e/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-f/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-f/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-g/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-g/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-de-h/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-de-h/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-independent-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-independent-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-independent-b/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-independent-b/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-neutral-a-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-neutral-a-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-neutral-b-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-neutral-b-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-public-a-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-public-a-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-b/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-b/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-c/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-c/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-d/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-d/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-e/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-e/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-dns-us-f/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-dns-us-f/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-a-quality/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-a-quality/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-primary-drain/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b-primary-drain/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-primary-quality/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b-primary-quality/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-primary/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b-primary/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-primary/unselected-front.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-secondary-quality/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b-secondary-quality/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-secondary/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b-secondary/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b-secondary/unselected-front.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-public-b/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-public-b/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-us-managed-quality/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-us-managed-quality/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-front-us-managed/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-front-us-managed/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-client-us/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-client-us/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-control-de/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-control-public-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-control-public-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-control-public-b/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-control-public-b/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-control-us/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-groups.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-image-gc/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-image-gc/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-de/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-public-a-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-public-a-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-public-b-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-public-b-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-public-b-secondary-candidate/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-public-b-secondary-candidate/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-bwg-b-hosted/idle-slot.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-bwg-b-hosted/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-us-bwg-b-hosted/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-primary-a-hosted/idle-slot.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-primary-a-hosted/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-us-primary-a-hosted/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-primary-a/idle-slot.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-primary-a/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-us-primary-a/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us-primary-prewarm/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/edge-worker-us-primary-prewarm/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/edge-worker-us/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/guardian/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/guardian/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/image-cache/daemonset.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/image-cache/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/image-cache/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/retired-dns-components.json	retire	archive tombstones and verify no live predecessor depends on the file
+release-file	deploy/releases/runtime-agent-canary/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/runtime-agent-canary/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/schema/deployment.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/schema/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/ssh-control/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/ssh-control/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/telemetry/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/telemetry/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/telemetry/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-lane	api	migrate	native digest-bound release keyed by stable resource identity
+release-lane	controller	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-de	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-b	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-c	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-d	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-e	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-f	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-g	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-de-h	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-independent-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-independent-b	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-neutral-a-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-neutral-b-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-public-a-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-b	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-c	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-d	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-e	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-dns-us-f	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-a-quality	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b-primary	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b-primary-drain	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b-primary-quality	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b-secondary	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-public-b-secondary-quality	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-us-managed	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-front-us-managed-quality	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-client-us	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-control-de	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-control-public-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-control-public-b	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-control-us	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-image-gc	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-de	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-public-a-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-public-b-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-public-b-secondary-candidate	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-us	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-us-bwg-b-hosted	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-us-primary-a	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-us-primary-a-hosted	migrate	native digest-bound release keyed by stable resource identity
+release-lane	edge-worker-us-primary-prewarm	migrate	native digest-bound release keyed by stable resource identity
+release-lane	guardian	migrate	native digest-bound release keyed by stable resource identity
+release-lane	image-cache	migrate	native digest-bound release keyed by stable resource identity
+release-lane	runtime-agent-canary	migrate	native digest-bound release keyed by stable resource identity
+release-lane	schema	migrate	native digest-bound release keyed by stable resource identity
+release-lane	ssh-control	migrate	native digest-bound release keyed by stable resource identity
+release-lane	telemetry	migrate	native digest-bound release keyed by stable resource identity
+script	scripts/activate_agent_edge_policy.py	migrate	native platform policy and reconciliation
+script	scripts/apply_fugue_traffic_safety.sh	migrate	native platform policy and reconciliation
+script	scripts/artifact_content_storage.py	migrate	native data and storage maintenance
+script	scripts/audit_dns_selector_retirement.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/audit_fugue_registry_host.sh	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/backup_fugue_postgres.sh	migrate	native data and storage maintenance
+script	scripts/baked_postgres_contract.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/bootstrap_cell_inventory.py	migrate	native platform policy and reconciliation
+script	scripts/bootstrap_cell_producer.py	migrate	native platform policy and reconciliation
+script	scripts/bootstrap_dns_producer.py	migrate	native DNS policy and reconciliation
+script	scripts/build_dns_observation_verifier.sh	migrate	unprivileged build check or scoped runtime verification
+script	scripts/capture_dns_observation_policy.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/check_unselected_front_roll.py	migrate	Guardian Front/Worker coordination
+script	scripts/cleanup_fugue_registry_host.sh	migrate	native data and storage maintenance
+script	scripts/cnpg_backup_history.py	migrate	native data and storage maintenance
+script	scripts/cnpg_backup_retention.py	migrate	native data and storage maintenance
+script	scripts/compiler_input_deadline.py	migrate	native policy, observation or maintenance
+script	scripts/compiler_input_history_compatibility.py	migrate	native policy, observation or maintenance
+script	scripts/compiler_input_storage.py	migrate	native data and storage maintenance
+script	scripts/configure_business_exploration.py	migrate	native administrative operation or build interface
+script	scripts/configure_dynamic_quality.py	migrate	native administrative operation or build interface
+script	scripts/configure_edge_offline.py	migrate	native administrative operation or build interface
+script	scripts/configure_edge_release_hold.py	migrate	native node participation
+script	scripts/configure_postgres_bootstrap.py	migrate	native data and storage maintenance
+script	scripts/configure_postgres_cpu_policy.py	migrate	native data and storage maintenance
+script	scripts/configure_runtime_input.py	migrate	native administrative operation or build interface
+script	scripts/dns_availability_recovery.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_no_endpoint_observation.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_publication_precondition.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_refused_listener.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_refused_wire.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_transport_failed_predecessor.py	migrate	native DNS policy and reconciliation
+script	scripts/dns_transport_rollback_authority.py	migrate	native DNS policy and reconciliation
+script	scripts/edge_node_participation.py	migrate	native node participation
+script	scripts/emit_traffic_safety_changed.sh	retire	remove Git-diff trigger after porting validation
+script	scripts/enroll_cell_member.py	migrate	native platform policy and reconciliation
+script	scripts/expand_cell_membership.py	migrate	native platform policy and reconciliation
+script	scripts/expand_postgres_volume.py	migrate	native data and storage maintenance
+script	scripts/export_cloudflare_zone_static_records.sh	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/export_fugue_traffic_state.sh	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/front_connection_witness.py	migrate	Guardian Front/Worker coordination
+script	scripts/generate_postgres_image_catalog.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/handoff_front_serving_transport.py	migrate	Guardian Front/Worker coordination
+script	scripts/inspect_dns_predecessor.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/inspect_dns_rollback_ledger.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/install_compiler_input_zero_temp.py	migrate	native policy, observation or maintenance
+script	scripts/install_fugue_cli.ps1	migrate	unprivileged source checks, build or client packaging
+script	scripts/install_fugue_cli.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/install_fugue_ha.sh	migrate	independent installer and bounded recovery; not a production updater
+script	scripts/install_github_runner.sh	retire	deprovision production runner and verify credentials revoked
+script	scripts/install_local_node_resource_policy.py	migrate	native policy, observation or maintenance
+script	scripts/install_longhorn_gc.py	migrate	native data and storage maintenance
+script	scripts/install_longhorn_snapshot_cleanup.py	migrate	native data and storage maintenance
+script	scripts/issue_fugue_app_wildcard_tls.sh	migrate	native policy, observation or maintenance
+script	scripts/longhorn_snapshot_map.py	migrate	native data and storage maintenance
+script	scripts/migrate_fugue_registry_hostpath_to_pvc.sh	migrate	native data and storage maintenance
+script	scripts/node_worker_handoff.py	migrate	Guardian Front/Worker coordination
+script	scripts/observe_capacity_recovery.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_dns_failure_timeline.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_front_candidate.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_front_drain.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_front_node_conntrack.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_front_public_probe.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_front_restricted_egress.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_managed_ssh_front.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/observe_worker_standby.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/package_fugue_cli.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/package_fugue_entry_failover.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/package_fugue_static_edge_manager.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/package_static_edge_observability.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/plan_longhorn_snapshot_recovery.py	migrate	native data and storage maintenance
+script	scripts/postgres_baked_manager.sh	migrate	native data and storage maintenance
+script	scripts/prepare_fugue_lvm_localpv_node.sh	migrate	native administrative operation or build interface
+script	scripts/prepare_static_caddy.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/prepush.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/preview_dns_refused_stage.py	migrate	native DNS policy and reconciliation
+script	scripts/probe_fugue_public_dns.sh	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/promote_cell_routes.py	migrate	native platform policy and reconciliation
+script	scripts/promote_dns_authority.py	migrate	native DNS policy and reconciliation
+script	scripts/provision_runtime_agent_identity.py	migrate	native platform policy and reconciliation
+script	scripts/publish_agent_edge_shadow.py	migrate	native platform policy and reconciliation
+script	scripts/publish_diagnostic_catalog.py	migrate	native administrative operation or build interface
+script	scripts/publish_node_resource_policy.py	migrate	native policy, observation or maintenance
+script	scripts/publish_storage_policy.py	migrate	native data and storage maintenance
+script	scripts/publish_tls_issuance_policy.py	migrate	native policy, observation or maintenance
+script	scripts/read_front_conntrack.py	migrate	native observation and evidence; assess any retained write side effects
+script	scripts/reconcile_agent_edge_trust.py	migrate	native platform policy and reconciliation
+script	scripts/reconcile_app_tcp_transport.py	migrate	native administrative operation or build interface
+script	scripts/reconcile_cell_trust.py	migrate	native platform policy and reconciliation
+script	scripts/reconcile_dns_probe_egress.py	migrate	native DNS policy and reconciliation
+script	scripts/reconcile_dns_transport.py	migrate	native DNS policy and reconciliation
+script	scripts/reconcile_edge_member.py	migrate	native node participation
+script	scripts/reconcile_fixed_node_retention.py	migrate	native node participation
+script	scripts/reconcile_front_probe_transport.py	migrate	Guardian Front/Worker coordination
+script	scripts/reconcile_longhorn_snapshot_cleanup.py	migrate	native data and storage maintenance
+script	scripts/reconcile_managed_ssh_keys.py	migrate	native SSH lifecycle
+script	scripts/reconcile_managed_ssh_runtime.py	migrate	native SSH lifecycle
+script	scripts/reconcile_node_participation.py	migrate	native node participation
+script	scripts/reconcile_postgres_protection.py	migrate	native data and storage maintenance
+script	scripts/reconcile_prometheus_scrape_policy.py	migrate	native administrative operation or build interface
+script	scripts/reconcile_workload_memory.py	migrate	native policy, observation or maintenance
+script	scripts/reconfigure_cell_producer.py	migrate	native platform policy and reconciliation
+script	scripts/reconfigure_physical_dns.py	migrate	native DNS policy and reconciliation
+script	scripts/recover_dns_transport.py	migrate	native DNS policy and reconciliation
+script	scripts/recover_longhorn_snapshot.py	migrate	native data and storage maintenance
+script	scripts/refresh_producer_dependencies.py	migrate	native platform policy and reconciliation
+script	scripts/rehearse_edge_origin_relay.sh	migrate	unprivileged build check or scoped runtime verification
+script	scripts/release_edge_origin_relay_policy.py	migrate	Guardian Front/Worker coordination
+script	scripts/release_external_controller.py	migrate	native administrative operation or build interface
+script	scripts/release_idle_front_standby.py	migrate	Guardian Front/Worker coordination
+script	scripts/render_fugue_dns_systemd_unit.sh	migrate	native DNS policy and reconciliation
+script	scripts/render_fugue_edge_ha_bundle.sh	migrate	native administrative operation or build interface
+script	scripts/render_fugue_edge_systemd_unit.sh	migrate	native administrative operation or build interface
+script	scripts/render_fugue_mesh_agent_systemd_unit.sh	migrate	native administrative operation or build interface
+script	scripts/render_fugue_mesh_recovery_systemd_unit.sh	migrate	native administrative operation or build interface
+script	scripts/render_fugue_static_edge_manager_systemd_unit.sh	migrate	native administrative operation or build interface
+script	scripts/renew_producer_publication.py	migrate	native platform policy and reconciliation
+script	scripts/replace_front_executor.py	migrate	Guardian Front/Worker coordination
+script	scripts/replace_idle_worker_slot.py	migrate	Guardian Front/Worker coordination
+script	scripts/restore_fugue_postgres.sh	migrate	native data and storage maintenance
+script	scripts/retire_dns_hostport.py	migrate	native DNS policy and reconciliation
+script	scripts/retire_dns_selector.py	migrate	native DNS policy and reconciliation
+script	scripts/retire_dns_slots.py	migrate	native DNS policy and reconciliation
+script	scripts/retire_front_hostport.py	migrate	Guardian Front/Worker coordination
+script	scripts/run_longhorn_snapshot_cleanup.py	migrate	native data and storage maintenance
+script	scripts/run_managed_ssh_transport.py	migrate	native SSH lifecycle
+script	scripts/run_node_worker_handoff.py	migrate	Guardian Front/Worker coordination
+script	scripts/run_ssh_identity_maintenance.py	migrate	native SSH lifecycle
+script	scripts/scan_hardcoded_production_facts.sh	migrate	unprivileged source checks, build or client packaging
+script	scripts/select_dns_configuration.py	retire	remove Git-diff trigger after porting validation
+script	scripts/select_front_transport_transition.py	retire	remove Git-diff trigger after porting validation
+script	scripts/select_managed_ssh_transport.py	retire	remove Git-diff trigger after porting validation
+script	scripts/select_production_maintenance.py	retire	remove Git-diff trigger after porting validation
+script	scripts/smoke_cnpg_baked_manager.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/smoke_diagnostic_package.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/smoke_drain_agent.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/smoke_postgres_image_fast_drain.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/stage_dns_authority_transition.py	migrate	native DNS policy and reconciliation
+script	scripts/stage_edge_origin_relay_trust.py	migrate	Guardian Front/Worker coordination
+script	scripts/stage_front_serving_transport.py	migrate	Guardian Front/Worker coordination
+script	scripts/stage_managed_ssh_fronts.py	migrate	native SSH lifecycle
+script	scripts/sync_fugue_edge_proxy.sh	migrate	native administrative operation or build interface
+script	scripts/sync_managed_app_crd.sh	migrate	native administrative operation or build interface
+script	scripts/validate_managed_app_crd_transition.py	migrate	native administrative operation or build interface
+script	scripts/verify_baked_postgres.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_cnpg_candidate.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_dns_configuration_revision.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_dns_transport_isolation.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_k3s_transport.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/verify_managed_ssh_image.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_registry_image.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_ssh_front_transport.py	migrate	unprivileged build check or scoped runtime verification
+workflow-job	.github/workflows/build-cli.yml#package	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/ci.yml#agent_edge_activation	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#agent_edge_shadow_policy	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#agent_edge_trust	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#app_tcp_transport	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#audit	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/ci.yml#automatic_node_participation	migrate	native node participation
+workflow-job	.github/workflows/ci.yml#cell_inventory_enrollment	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_inventory_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#cell_member_enrollment	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_producer_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#cell_producer_reconfiguration	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_producer_shadow	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_route_promotion	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_route_promotion_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#cell_trust	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#cell_trust_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#cnpg_backup_count_retention	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#cnpg_candidate_artifact	migrate	build-only evidence with no production authority
+workflow-job	.github/workflows/ci.yml#compiler_input_storage	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#component-build	migrate	build-only evidence with no production authority
+workflow-job	.github/workflows/ci.yml#deploy_api	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_controller	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_edge_client	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_edge_control	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_edge_image_gc	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_edge_worker	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_image_cache	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_release_guardian	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_runtime_agent	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_schema	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_ssh_control	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_telemetry	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#diagnostic_packages	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#diagnostics_configuration	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#diagnostics_package_activation	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#dns_authority_promotion	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_authority_promotion_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dns_authority_stage	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_authority_stage_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dns_configuration_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dns_observation_policy	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_port_retirement	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_probe_egress	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_probe_egress_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dns_public_observation	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_selector_retirement	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_selector_retirement_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dns_slot_retirement	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#dns_transport	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#drain_observation_access	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#drain_observer_artifact	migrate	build-only evidence with no production authority
+workflow-job	.github/workflows/ci.yml#dynamic_quality_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#dynamic_quality_reconfiguration	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#edge_capacity_external_observation	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#edge_member_recovery	migrate	native node participation
+workflow-job	.github/workflows/ci.yml#edge_member_recovery_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#edge_offline_configuration	migrate	native administrative operation or build interface
+workflow-job	.github/workflows/ci.yml#edge_origin_relay_policy	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#edge_origin_relay_trust	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#edge_release_hold	migrate	native node participation
+workflow-job	.github/workflows/ci.yml#edge_release_hold_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#external_controller_release	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#fixed_node_retention	migrate	native node participation
+workflow-job	.github/workflows/ci.yml#front_drain_observation	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_external_observation	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_hostport_retirement	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_observation	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_probe_transport	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_public_recovery	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_public_verification	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_replacement	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_replacement_external	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_replacement_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#front_replacement_recovery	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_restricted_egress_observation	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_serving_handoff	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#front_serving_stage	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#idle_front_standby_release	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#k3s_transport_integration	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/ci.yml#longhorn_cleanup_executor_release	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#longhorn_cleanup_observer_release	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#longhorn_gc_build	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#longhorn_gc_install	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#managed_postgres_cpu_policy	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#managed_postgres_cpu_policy_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#managed_ssh_artifact	migrate	build-only evidence with no production authority
+workflow-job	.github/workflows/ci.yml#managed_ssh_front_artifact	migrate	build-only evidence with no production authority
+workflow-job	.github/workflows/ci.yml#managed_ssh_front_stage	migrate	native SSH lifecycle
+workflow-job	.github/workflows/ci.yml#managed_ssh_identity_maintenance	migrate	native SSH lifecycle
+workflow-job	.github/workflows/ci.yml#managed_ssh_keyrings	migrate	native SSH lifecycle
+workflow-job	.github/workflows/ci.yml#managed_ssh_runtime	migrate	native SSH lifecycle
+workflow-job	.github/workflows/ci.yml#managed_ssh_runtime_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#managed_ssh_transport	migrate	native SSH lifecycle
+workflow-job	.github/workflows/ci.yml#node_resource_policy	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#node_resource_policy_tasks	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#node_worker_handoff	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#node_worker_handoff_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#observability_configuration	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#physical_dns_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#physical_dns_reconfiguration	migrate	native DNS policy and reconciliation
+workflow-job	.github/workflows/ci.yml#postgres_bootstrap_cpu	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#postgres_bootstrap_cpu_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#postgres_protection	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#postgres_volume_recovery	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#prepush	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/ci.yml#producer_publication_renewal	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#production_maintenance_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#runtime_agent_identity	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#static_edge_observability	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/ci.yml#storage_policy	migrate	native data and storage maintenance
+workflow-job	.github/workflows/ci.yml#tls_issuance_policy	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#traffic_safety_stage0	migrate	native platform policy and reconciliation
+workflow-job	.github/workflows/ci.yml#worker_standby_observation	migrate	Guardian Front/Worker coordination
+workflow-job	.github/workflows/ci.yml#workload_memory_policy	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/daily-audit.yml#test	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/release-cli.yml#release	migrate	unprivileged source checks or build
+workflow-schedule	.github/workflows/ci.yml#*/5 * * * *	migrate	move production work to the native scheduler; separate read-only observations
+workflow-schedule	.github/workflows/ci.yml#23 18 * * *	migrate	move production work to the native scheduler; separate read-only observations
+workflow-schedule	.github/workflows/daily-audit.yml#23 18 * * *	retire	replace redundant schedule with unprivileged source checks

@@ -62,3 +62,46 @@ Until Gate D is recorded, `ownershipMode` remains
 `transitional-shared`. Production dispatch/enablement is additionally subject
 to the active release-coordination freeze and must be performed by the unique
 coordinator.
+
+## Production control-plane inventory
+
+`production-control-migration.tsv` is an exhaustive inventory of tracked
+workflow jobs and schedules, production declarations, release lanes, local
+Actions, and executable Python/shell/PowerShell scripts under the production
+control directories. Check inventory drift with
+`go run ./cmd/fugue-control-migration check .`; print the discovered surface
+set with `scan`. Every row is a **proposed** disposition: `migrate` names a
+native destination, while `retire` names the required prerequisite or
+replacement. Neither value is evidence that production write permission has
+been transferred or revoked. The scanner never connects to production and
+cannot certify a cutover.
+
+Guardian publication previews use the same candidate, live predecessor,
+health and exact rollback-manifest checks as the writer. They expose the
+current resource version and prewrite workload identity and use an HTTP
+transport that refuses every request except an ordinary GET. A preview is
+advisory only: it is not a signed approval, does not reserve or fence the
+resource, and must be repeated by the authoritative writer immediately before
+its compare-and-swap. A resource is not cut over until its legacy writers are
+independently disabled and the new writer's production identity is verified.
+
+For an already prepared bundle and an explicitly scoped reader:
+
+```sh
+go run ./cmd/fugue-declarative-release guardian-preview /path/to/read-only-kubeconfig context-name /path/to/prepared-bundle
+```
+
+Compare the proposed DesiredRelease, execution plan digest and exact rollback
+manifest digest against the legacy publisher for the **same** prepared bundle.
+Record both runs' current DesiredRelease identities; differing predecessors
+invalidate the comparison. The preview checks publication eligibility only.
+It does not verify actual workload CAS at apply time, perform an apply dry
+run, prove registry availability, or run a rollback.
+
+The current preview still consumes the existing declarative bundle. It does
+not make the Git-backed planner, runner, or artifact store removable. Before
+enabling a native writer, test it on an isolated target with independently
+verified artifact availability, then observe denied writes from the old
+identities at the Kubernetes/API, DNS provider, object store and runner/host
+boundaries. Do not use an Actions run with production credentials as proof
+that those identities have lost authority.
