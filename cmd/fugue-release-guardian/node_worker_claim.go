@@ -178,7 +178,14 @@ func (a *frontAuthorityActivator) claimNodeWorker(ctx context.Context, store *re
 	if _, err := a.preflightNodeWorker(ctx, store, component, j); err != nil {
 		return fence, err
 	}
-	fence, err = store.ClaimNodeWorker(ctx, j)
+	if a.nodeWorkerAuthorization != nil {
+		if err := a.nodeWorkerAuthorization.verifyForward(ctx, j); err != nil {
+			return fence, err
+		}
+		fence, err = store.ClaimNativeNodeWorker(ctx, j, a.nodeWorkerAuthorization.claim)
+	} else {
+		fence, err = store.ClaimNodeWorker(ctx, j)
+	}
 	if err != nil {
 		return fence, err
 	}
@@ -187,6 +194,11 @@ func (a *frontAuthorityActivator) claimNodeWorker(ctx context.Context, store *re
 
 func (a *frontAuthorityActivator) recentNodeWorkerJournal(j edgegroupfront.NodeWorkerJournal) bool {
 	now := a.now().UTC()
+	if a.nodeWorkerAuthorization != nil && a.nodeWorkerAuthorization.plan.Journal == j {
+		// The signed production intent can outlive its original observation.
+		// Native callers require fresh provider and serving checks before claim.
+		return !j.CreatedAt.After(now)
+	}
 	return !j.CreatedAt.After(now) && j.CreatedAt.Add(2*time.Minute).After(now)
 }
 

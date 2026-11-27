@@ -75,10 +75,15 @@ func frontWorkerCutover(ctx context.Context, args []string, out io.Writer) error
 	if err != nil {
 		return err
 	}
+	policyDigest, err := releaseguardian.FrontWorkerPolicyDigest(config, policies)
+	if err != nil {
+		return err
+	}
 	return emit(struct {
-		Config   releaseguardian.FrontWorkerCutover             `json:"config"`
-		Policies []releaseguardian.FrontWorkerPolicyObservation `json:"policies"`
-	}{config, policies})
+		Config       releaseguardian.FrontWorkerCutover             `json:"config"`
+		Policies     []releaseguardian.FrontWorkerPolicyObservation `json:"policies"`
+		PolicyDigest string                                         `json:"policyDigest"`
+	}{config, policies, policyDigest})
 }
 
 type frontWorkerCutoverReader struct{ next http.RoundTripper }

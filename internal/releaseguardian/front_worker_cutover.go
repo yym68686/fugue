@@ -82,9 +82,20 @@ func FrontWorkerCutoverPolicies(config FrontWorkerCutover) ([]KubeCutoverPolicy,
 			return joinCEL(" && ", labeledGroup(object), "'fugue.pro/authority-kind' in "+object+".metadata.labels",
 				object+".metadata.labels['fugue.pro/authority-kind'] == 'node-worker-journal'")
 		}
+		nativeMarker := func(subject string) string {
+			annotations := subject + ".metadata.annotations"
+			fieldMatches := func(name, pattern string) string {
+				key := strconv.Quote(name)
+				return "(" + key + " in " + annotations + " && " + annotations + "[" + key + "].matches(" + strconv.Quote(pattern) + "))"
+			}
+			return joinCEL(" && ", "has("+annotations+")",
+				fieldMatches(nativeIntentAnnotation, "^sha256:[0-9a-f]{64}$"), fieldMatches(nativeWorkerApprovalAnnotation, "^sha256:[0-9a-f]{64}$"),
+				fieldMatches(nativeWorkerClusterAnnotation, nativeWorkerClusterExpression),
+				fieldMatches(nativeFenceAnnotation, "^[1-9][0-9]{0,18}$"))
+		}
 		fenceOperations := joinCEL(" || ",
-			joinCEL(" && ", immutableCreate, isWorkerFence("object")),
-			joinCEL(" && ", "request.operation == 'DELETE'", isWorkerFence("oldObject")))
+			joinCEL(" && ", immutableCreate, isWorkerFence("object"), nativeMarker("object")),
+			joinCEL(" && ", "request.operation == 'DELETE'", isWorkerFence("oldObject"), nativeMarker("oldObject")))
 		mapPermit = joinCEL(" && ", username,
 			joinCEL(" || ",
 				joinCEL(" && ", sharedFence, fenceOperations),

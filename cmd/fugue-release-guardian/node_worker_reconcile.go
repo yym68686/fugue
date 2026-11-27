@@ -60,13 +60,16 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 		return err != nil, "", err
 	}
 	j := fence.Journal
+	if err := a.checkNodeWorkerReconcileAuthority(ctx, fence); err != nil {
+		return true, "", err
+	}
 	_, terminal, err := store.ReadNodeWorkerResult(ctx, j)
 	if err != nil {
 		return true, "", err
 	}
 	if !terminal {
 		_, armed, err := store.ReadNodeWorkerArm(ctx, j, a.now())
-		if err != nil || !armed && a.now().Before(j.CreatedAt.Add(5*time.Minute)) {
+		if err != nil || !armed && a.now().Before(nodeWorkerUnarmedDeadline(fence)) {
 			return true, "", err
 		}
 	}
@@ -86,12 +89,18 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 	if err != nil || !found || current != fence {
 		return true, "", errors.Join(errors.New("node Worker transaction was replaced before reconciliation"), err)
 	}
+	if err := a.checkNodeWorkerReconcileAuthority(ctx, current); err != nil {
+		return true, "", err
+	}
 	if err := store.RequireNoActivatedTransition(ctx, group); err != nil {
 		return true, "", err
 	}
 	if result, exists, err := store.ReadNodeWorkerResult(ctx, j); err != nil {
 		return true, "", err
 	} else if exists {
+		if !result.MatchesExecution(fence.Claim) {
+			return true, "", errors.New("node Worker result belongs to another execution")
+		}
 		if result.DrainStart != nil {
 			finished, err := a.reconcileNodeWorkerDrain(ctx, store, fence, result)
 			if err != nil || !finished {
@@ -122,6 +131,9 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 	case edgegroupfront.NodeWorkerPending:
 		if !armed || !now.Before(arm.Deadline) {
 			return true, "expired_without_cutover", store.RecordNodeWorkerResult(ctx, fence, state, "expired_without_cutover", nil)
+		}
+		if a.nodeWorkerAuthorization != nil && a.nodeWorkerAuthorization.recoverOnly {
+			return true, "", nil
 		}
 		if err := store.EnsureNodeWorkerProjection(ctx, fence); err != nil {
 			return true, "", err
@@ -168,6 +180,14 @@ func (a *frontAuthorityActivator) reconcileNodeWorker(ctx context.Context, store
 	default:
 		return true, "", edgegroupfront.ErrActivationCASConflict
 	}
+}
+
+func nodeWorkerUnarmedDeadline(fence releaseguardian.NodeWorkerFence) time.Time {
+	created := fence.Journal.CreatedAt
+	if fence.Claim.Fence > 0 {
+		created = fence.ClaimedAt
+	}
+	return created.Add(5 * time.Minute)
 }
 
 func (a *frontAuthorityActivator) prepareOrActivateNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore, lease *heldAuthorityLease,
@@ -321,6 +341,11 @@ func (a *frontAuthorityActivator) verifyNodeWorkerWitness(ctx context.Context, s
 func (a *frontAuthorityActivator) nativeNodeWorkerWrite(ctx context.Context, lease *heldAuthorityLease, fence releaseguardian.NodeWorkerFence,
 	runtime nodeWorkerRuntime, op string, until time.Time, receipt any) error {
 	j := fence.Journal
+	if a.nodeWorkerAuthorization != nil && op != "rollback" {
+		if err := a.nodeWorkerAuthorization.verifyForward(ctx, j); err != nil {
+			return err
+		}
+	}
 	if err := a.checkNodeWorkerProjection(ctx, j, runtime); err != nil {
 		return err
 	}

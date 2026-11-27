@@ -53,6 +53,9 @@ func (a *frontAuthorityActivator) loadWorkerRetirement(ctx context.Context, j ed
 	name := retirementName("retirement", j)
 	cm, err := a.client.CoreV1().ConfigMaps(a.config.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if a.nodeWorkerAuthorization != nil && a.nodeWorkerAuthorization.plan.Retirement != nil {
+			return nil, errors.New("the approved native Worker retirement record is missing")
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -66,6 +69,13 @@ func (a *frontAuthorityActivator) loadWorkerRetirement(ctx context.Context, j ed
 		p.JournalDigest != j.Digest || len(validation.IsDNS1123Subdomain(p.DaemonSet)) != 0 ||
 		p.DaemonSetUID == "" || p.Generation < 1 || p.Generation == 1<<63-1 {
 		return nil, errors.New("invalid immutable node Worker retirement declaration")
+	}
+	if a.nodeWorkerAuthorization != nil {
+		approved := a.nodeWorkerAuthorization.plan.Retirement
+		if approved == nil || approved.Schema != p.Schema || approved.JournalDigest != p.JournalDigest ||
+			approved.DaemonSet != p.DaemonSet || approved.DaemonSetUID != string(p.DaemonSetUID) || approved.Generation != p.Generation {
+			return nil, errors.New("node Worker retirement record differs from the approved native intent")
+		}
 	}
 	return &p, nil
 }

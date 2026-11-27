@@ -537,9 +537,32 @@ Kubernetes type checking. In the frozen phase it also checks for a vacant
 transaction boundary and absent or explicitly released Leases. Record the
 output together with separate evidence of endpoint enforcement, credential
 revocation, request drainage and the read-only handoff rehearsal. The
-observation command uses only GET.
-Deployment of the signed native handoff executor and production rehearsal
-are still required before enabling this phase for a live group.
+observation command uses only GET and emits the digest of the live native
+policy and binding revisions.
+
+`fugue-release-guardian node-worker-dispatch CONFIG INTENT_DIGEST APPROVAL_DIGEST ATTESTATION`
+uses the mounted `journalFile`, `cutover` and base64-encoded
+`observerPublicKey` in CONFIG. A distinct technical observer signs the
+canonical attestation for this production group, intent, approval and
+sealed journal. The signature covers the native policy digest and separate
+records for endpoint admission, legacy credential revocation, request
+drainage, the handoff rehearsal and the native runtime. Retain those
+records outside the dispatcher's credentials. The Guardian reads back the
+exact native identity and the admission revisions itself.
+
+Only creation of a new PostgreSQL execution claim can start the handoff.
+Guardian writes that claim into the group fence, opens the original and
+candidate sockets itself, and checks the native identity, attestation and
+pending approval before forward writes. The normal legacy reconciler
+leaves a native fence to this command. Repeating the same dispatch returns
+the existing claim and any recorded terminal status. Use the same
+invocation with `--recover` after a lost execution. It can reconcile an
+existing provider fence, restore the retained Worker when needed, or
+complete an already verified drain. It never arms or advances an existing
+handoff. A claim with no matching Kubernetes fence or terminal result
+needs independent provider readback before the journal can be settled.
+Production enrollment, rollout and independent execution settlement are
+separate from this command.
 
 ## Single-Deployment release draft
 
