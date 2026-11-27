@@ -40,6 +40,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control issue-participation-observer JOURNAL_CONFIG NODE KEY_ID PRIVATE_SEED_FILE
        fugue-production-control shadow-participation-dns JOURNAL_CONFIG KUBECONFIG CONTEXT NODE PRIVATE_TOKEN_FILE
        fugue-production-control draft-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT NODE REQUEST [PRIVATE_TOKEN_FILE]
+       fugue-production-control preflight-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION [PRIVATE_TOKEN_FILE]
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
@@ -184,7 +185,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New("participation observer target is not enrolled")
 		})
 	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
-		"shadow-participation-dns", "draft-participation-hold", "observe-participation-freeze":
+		"shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold", "observe-participation-freeze":
 		minArgs, maxArgs := 5, 5
 		var tokenPath string
 		var usesToken bool
@@ -201,6 +202,12 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				tokenPath = args[6]
 				usesToken = true
 			}
+		case "preflight-participation-hold":
+			maxArgs = 6
+			if len(args) == 6 {
+				tokenPath = args[5]
+				usesToken = true
+			}
 		}
 		if len(args) < minArgs || len(args) > maxArgs {
 			return errors.New(usage)
@@ -211,6 +218,19 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		if !filepath.IsAbs(args[2]) || args[3] == "" {
 			return errors.New("participation observation requires an absolute kubeconfig path and explicit context")
 		}
+		node := args[4]
+		var submission productioncontrol.Submission
+		if args[0] == "preflight-participation-hold" {
+			var err error
+			submission, err = readSubmission(args[4])
+			if err != nil {
+				return err
+			}
+			node, err = participation.HoldTarget(submission)
+			if err != nil {
+				return err
+			}
+		}
 		loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: args[2]}
 		overrides := &clientcmd.ConfigOverrides{CurrentContext: args[3]}
 		kubeConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides).ClientConfig()
@@ -218,6 +238,9 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New("could not load the requested read-only Kubernetes context")
 		}
 		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			if args[0] == "preflight-participation-hold" && submission.Intent.ClusterID != cluster {
+				return errors.New("participation hold belongs to another journal cluster")
+			}
 			topology, err := j.ReadParticipationTopology(ctx, cluster)
 			if err != nil {
 				return err
@@ -232,21 +255,21 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			report := participationObservationReport{JournalCluster: cluster, KubeContext: args[3], Topology: topology.Version}
 			switch args[0] {
 			case "observe-participation-readers":
-				readers, err := observer.ObserveReaderRollouts(ctx, topology.Policy, args[4])
+				readers, err := observer.ObserveReaderRollouts(ctx, topology.Policy, node)
 				if err != nil {
 					return err
 				}
 				report.Kind, report.Readers = "participation_reader_observation", &readers
 			case "observe-participation-member":
-				member, err := observer.ObserveMemberObjects(ctx, topology.Policy, args[4])
+				member, err := observer.ObserveMemberObjects(ctx, topology.Policy, node)
 				if err != nil {
 					return err
 				}
 				report.Kind, report.Member = "participation_member_object_observation", &member
-			case "shadow-participation-kubernetes", "shadow-participation-dns", "draft-participation-hold":
+			case "shadow-participation-kubernetes", "shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold":
 				var shadow participation.KubernetesShadow
 				if tokenPath == "" {
-					shadow, err = observer.ShadowKubernetes(ctx, topology.Policy, args[4], now)
+					shadow, err = observer.ShadowKubernetes(ctx, topology.Policy, node, now)
 					report.Kind = "participation_kubernetes_only_shadow"
 				} else {
 					token, readErr := readFile(tokenPath, 4096, true)
@@ -258,7 +281,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					if createErr != nil {
 						return createErr
 					}
-					shadow, err = observer.ShadowWithDNS(ctx, topology.Policy, args[4], dns, now)
+					shadow, err = observer.ShadowWithDNS(ctx, topology.Policy, node, dns, now)
 					report.Kind = "participation_kubernetes_and_fugue_shadow"
 				}
 				if err != nil {
@@ -266,7 +289,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				}
 				report.Shadow = &shadow
 			case "observe-participation-freeze":
-				freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, args[4])
+				freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, node)
 				if err != nil {
 					return err
 				}
@@ -279,12 +302,23 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			if err != nil || latest.Version != topology.Version || latest.ApprovalDigest != topology.ApprovalDigest {
 				return errors.New("approved participation topology could not be revalidated after observation")
 			}
-			if args[0] == "draft-participation-hold" {
-				head, err := j.ReadResource(ctx, participation.HoldResource(cluster, args[4]))
+			if args[0] == "draft-participation-hold" || args[0] == "preflight-participation-hold" {
+				head, err := j.ReadResource(ctx, participation.HoldResource(cluster, node))
 				if err != nil {
 					return errors.New("participation hold resource has no readable verified journal head")
 				}
-				draft, err := participation.DraftHold(cluster, args[5], args[4], latest, head, *report.Shadow)
+				if args[0] == "preflight-participation-hold" {
+					if err := participation.PreflightHold(submission, latest, head, *report.Shadow, now()); err != nil {
+						return err
+					}
+					report.Kind = "participation_hold_preflight"
+					report.IntentDigest, err = submission.Intent.Digest()
+					if err != nil {
+						return err
+					}
+					return emit(report)
+				}
+				draft, err := participation.DraftHold(cluster, args[5], node, latest, head, *report.Shadow)
 				if err != nil {
 					return err
 				}
@@ -408,6 +442,7 @@ type participationObservationReport struct {
 	JournalCluster    string                           `json:"journalCluster"`
 	KubeContext       string                           `json:"kubeContext"`
 	Topology          productioncontrol.Version        `json:"topology"`
+	IntentDigest      string                           `json:"intentDigest,omitempty"`
 	Readers           *participation.ReaderObservation `json:"readers,omitempty"`
 	Member            *participation.MemberObservation `json:"member,omitempty"`
 	Shadow            *participation.KubernetesShadow  `json:"shadow,omitempty"`

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"maps"
 	"math"
+	"time"
 
 	"fugue/internal/model/edgecohort"
 	"fugue/internal/productioncontrol"
@@ -134,6 +135,60 @@ func DraftHold(cluster, request, node string, topology productioncontrol.Verifie
 // InspectHold verifies the exact payload binding before making the human
 // review fields visible. It does not authenticate live observations.
 func InspectHold(s productioncontrol.Submission) (json.RawMessage, error) {
+	if _, err := decodeHold(s); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(s.Payload), nil
+}
+
+// HoldTarget returns the exact requested Node, never a separate CLI target
+// that could silently diverge from the submitted resource.
+func HoldTarget(s productioncontrol.Submission) (string, error) {
+	p, err := decodeHold(s)
+	return p.To.Node, err
+}
+
+// PreflightHold compares a proposed change with a newly gathered shadow
+// and the current LKG. A live preview generates a new timestamp, which
+// does not replace the value in the proposal. A positive result is not
+// execution clearance: actual hold application time, approval, authority,
+// and provider CAS must still be checked separately.
+func PreflightHold(s productioncontrol.Submission, topology productioncontrol.VerifiedParticipationTopology, head productioncontrol.ResourceState, live KubernetesShadow, now time.Time) error {
+	p, err := decodeHold(s)
+	if err != nil {
+		return err
+	}
+	if now.IsZero() || p.Topology != topology.Version || p.TopologyApproval != topology.ApprovalDigest {
+		return errors.New("participation hold topology changed since draft")
+	}
+	current, err := DraftHold(s.Intent.ClusterID, s.Intent.RequestID, p.To.Node, topology, head, live)
+	if err != nil {
+		return err
+	}
+	q, err := decodeHold(current)
+	if err != nil {
+		return err
+	}
+	if current.Intent.Generation != s.Intent.Generation || current.Intent.CurrentDigest != s.Intent.CurrentDigest ||
+		q.ResourceVersion != p.ResourceVersion || q.Phase != p.Phase ||
+		*q.To.Annotations[edgecohort.ReleaseHoldAnnotation] != *p.To.Annotations[edgecohort.ReleaseHoldAnnotation] {
+		return errors.New("live participation hold version or proposed change differs from the submission")
+	}
+	var proposed, observed memberParticipationState
+	if decodeStrict([]byte(*p.To.Annotations[participationAnnotation]), &proposed) != nil ||
+		decodeStrict([]byte(*q.To.Annotations[participationAnnotation]), &observed) != nil ||
+		proposed.Since.Before(topology.RecordedAt) || proposed.Since.After(observed.Since) ||
+		observed.Since.After(now) || now.Sub(observed.Since) > 15*time.Second {
+		return errors.New("participation hold draft or observation has an invalid transition time")
+	}
+	proposed.Since = observed.Since
+	if proposed != observed {
+		return errors.New("participation phase metadata differs from the live proposal")
+	}
+	return nil
+}
+
+func decodeHold(s productioncontrol.Submission) (holdIntentPayload, error) {
 	var p holdIntentPayload
 	i := s.Intent
 	if i.Operation != productioncontrol.NodeParticipation || i.VerifyPayload(s.Payload) != nil ||
@@ -147,13 +202,13 @@ func InspectHold(s productioncontrol.Submission) (json.RawMessage, error) {
 		i.TargetDigest != p.To.digest() || i.TargetDigest == i.CurrentDigest ||
 		(p.Phase != ParticipationOffline && p.Phase != ParticipationRecovering) ||
 		len(p.From.Annotations) != 2 || len(p.To.Annotations) != 2 {
-		return nil, errors.New("invalid bound participation hold submission")
+		return holdIntentPayload{}, errors.New("invalid bound participation hold submission")
 	}
 	for _, k := range []string{participationAnnotation, edgecohort.ReleaseHoldAnnotation} {
 		old, found := p.From.Annotations[k]
 		next := p.To.Annotations[k]
 		if !found || old != nil && len(*old) > 2048 || next == nil || *next == "" || len(*next) > 2048 {
-			return nil, errors.New("invalid owned participation annotation in hold submission")
+			return holdIntentPayload{}, errors.New("invalid owned participation annotation in hold submission")
 		}
 	}
 	var a memberParticipationState
@@ -163,13 +218,13 @@ func InspectHold(s productioncontrol.Submission) (json.RawMessage, error) {
 		decodeStrict([]byte(*p.To.Annotations[edgecohort.ReleaseHoldAnnotation]), &h) != nil ||
 		h.Schema != edgecohort.ReleaseHoldSchema || h.NodeUID != p.To.UID || h.EdgeGroupID != p.To.Group ||
 		(h.Reason != "network_unavailable" && h.Reason != "quota_exhausted") {
-		return nil, errors.New("invalid resulting participation hold")
+		return holdIntentPayload{}, errors.New("invalid resulting participation hold")
 	}
 	encoded, err := json.Marshal(p)
 	if err != nil || !bytes.Equal(encoded, s.Payload) {
-		return nil, errors.New("participation hold is not canonically encoded")
+		return holdIntentPayload{}, errors.New("participation hold is not canonically encoded")
 	}
-	return encoded, nil
+	return p, nil
 }
 
 func canonicalDigest(value string) bool {

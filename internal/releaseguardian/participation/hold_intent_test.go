@@ -98,6 +98,47 @@ func TestDraftHoldBindsExactRollbackAndJournalHead(t *testing.T) {
 				len(body.To.Annotations) != 2 || body.To.Annotations[edgecohort.ReleaseHoldAnnotation] == nil {
 				t.Fatalf("incorrect rollback or scope: %+v, %+v", s.Intent, body)
 			}
+			freshAt := now.Add(time.Minute)
+			for _, change := range []struct {
+				name       string
+				observedAt time.Time
+				edit       func(*productioncontrol.VerifiedParticipationTopology, *productioncontrol.ResourceState, *KubernetesShadow)
+			}{
+				{"fresh, same decision", freshAt, nil},
+				{"stale shadow", now, func(*productioncontrol.VerifiedParticipationTopology, *productioncontrol.ResourceState, *KubernetesShadow) {
+				}},
+				{"future shadow", freshAt.Add(time.Second), func(*productioncontrol.VerifiedParticipationTopology, *productioncontrol.ResourceState, *KubernetesShadow) {
+				}},
+				{"updated topology approval", freshAt, func(p *productioncontrol.VerifiedParticipationTopology, _ *productioncontrol.ResourceState, _ *KubernetesShadow) {
+					p.ApprovalDigest = digest([]byte("replaced approval"))
+				}},
+				{"moved last-known-good", freshAt, func(_ *productioncontrol.VerifiedParticipationTopology, head *productioncontrol.ResourceState, _ *KubernetesShadow) {
+					head.LastVerified.Generation++
+				}},
+				{"exact live version moved", freshAt, func(_ *productioncontrol.VerifiedParticipationTopology, _ *productioncontrol.ResourceState, result *KubernetesShadow) {
+					result.Member.Node.ResourceVersion = "11"
+					result.Preview.ResourceVersion = "11"
+				}},
+			} {
+				t.Run(change.name, func(t *testing.T) {
+					next, err := evaluateKubernetesShadow(topology.Policy, node, memberCapture{report: MemberObservation{
+						Node: describeObject(&input.Node), Readiness: input.Node.Status.Conditions[0].Status,
+					}, snapshot: input}, &ReaderObservation{Namespace: "fixture", Group: group, Baseline: 2}, nil, change.observedAt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					p, head := topology, h
+					if change.edit != nil {
+						change.edit(&p, &head, &next)
+					}
+					if got, err := HoldTarget(s); err != nil || got != node {
+						t.Fatalf("target=%q: %v", got, err)
+					}
+					if err := PreflightHold(s, p, head, next, freshAt); (err == nil) != (change.edit == nil) {
+						t.Fatalf("unexpected preflight result: %v", err)
+					}
+				})
+			}
 			s.Payload[0] ^= 1
 			if s.Intent.VerifyPayload(s.Payload) == nil {
 				t.Fatal("mutated payload still verifies")
