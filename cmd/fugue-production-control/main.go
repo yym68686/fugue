@@ -36,6 +36,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-participation-readers JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
+       fugue-production-control render-participation-freeze NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -53,6 +54,19 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "render-participation-freeze":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		policy, binding, err := participation.FreezeNodePolicy(args[1])
+		if err != nil {
+			return err
+		}
+		return emit(struct {
+			APIVersion string `json:"apiVersion"`
+			Kind       string `json:"kind"`
+			Items      []any  `json:"items"`
+		}{"v1", "List", []any{policy, binding}})
 	case "draft-participation":
 		if len(args) != 4 && len(args) != 6 {
 			return errors.New(usage)
