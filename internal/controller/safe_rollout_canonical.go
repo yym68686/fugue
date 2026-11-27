@@ -395,29 +395,6 @@ func (s *Service) prepareSafeCanonicalHandoffMode(ctx context.Context, client *k
 	if !s.safeRolloutBoundReleaseMatchesApp(app, release) || desiredKey == "" || liveKey == "" {
 		return nil, fmt.Errorf("canonical handoff retained: desired release differs from promoted executable")
 	}
-	candidate := release
-	candidate.DeploymentName, candidate.ServiceName = binding.DeploymentName, binding.ServiceName
-	candidateWorkload, err := s.captureReleaseDrainWorkload(ctx, client, app, candidate)
-	if err != nil {
-		return nil, fmt.Errorf("verify handoff destination: %w", err)
-	}
-	target, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/services/"+url.PathEscape(binding.ServiceName))
-	if err != nil || !found {
-		return nil, fmt.Errorf("canonical handoff destination Service unavailable")
-	}
-
-	gate := s.evaluateSafeRolloutCandidateRetireGate(ctx, app, release, s.safeRolloutPlanForApp(app).Gate)
-	if gate.Status == model.AppReleaseGateStatusFail {
-		return nil, fmt.Errorf("%w: promoted release health gate failed", errSafeCanonicalHandoffPending)
-	}
-	proof, err := s.edgeBundleObserverForSafeRollout().WaitForSafeRolloutEdgeRouteBundle(ctx, app, release, 0, time.Now().UTC())
-	if err != nil || !proof.Ready {
-		return nil, fmt.Errorf("%w: promoted traffic publication is unconfirmed", errSafeCanonicalHandoffPending)
-	}
-	selector := objectStringMapValue(nestedObjectValue(target, "spec", "selector"))
-	if selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName || selector[runtime.FugueLabelAppReleaseID] != release.ID {
-		return nil, fmt.Errorf("canonical handoff destination selector differs")
-	}
 	var handoff safeCanonicalHandoff
 	if marker != "" {
 		if err := json.Unmarshal([]byte(marker), &handoff); err != nil || handoff.DeploymentUID != objectStringField(metadata, "uid") || handoff.ReleaseKey == "" || handoff.Image == "" {
@@ -432,6 +409,48 @@ func (s *Service) prepareSafeCanonicalHandoffMode(ctx context.Context, client *k
 			return nil, fmt.Errorf("canonical handoff source container missing")
 		}
 		handoff = safeCanonicalHandoff{ReleaseID: release.ID, SourceReleaseID: release.RollbackTargetID, DeploymentUID: objectStringField(metadata, "uid"), ReleaseKey: liveKey, Image: objectStringField(containers[0], "image")}
+	}
+	candidate := release
+	candidate.DeploymentName, candidate.ServiceName = binding.DeploymentName, binding.ServiceName
+	candidateWorkload, err := s.captureReleaseDrainWorkload(ctx, client, app, candidate)
+	if err != nil {
+		return nil, fmt.Errorf("verify handoff destination: %w", err)
+	}
+	target, found, err := client.getRawObject(ctx, "/api/v1/namespaces/"+url.PathEscape(namespace)+"/services/"+url.PathEscape(binding.ServiceName))
+	if err != nil || !found {
+		return nil, fmt.Errorf("canonical handoff destination Service unavailable")
+	}
+	selector := objectStringMapValue(nestedObjectValue(target, "spec", "selector"))
+	if selector[runtime.FugueLabelAppWorkload] != binding.DeploymentName || selector[runtime.FugueLabelAppReleaseID] != release.ID {
+		return nil, fmt.Errorf("canonical handoff destination selector differs")
+	}
+
+	gatePolicy := s.safeRolloutPlanForApp(app).Gate
+	edgeSince := time.Now().UTC()
+	if stopOnly {
+		// This worker can stop only the already-withdrawn source; it cannot
+		// publish traffic or the replacement. Passive release metrics gate
+		// those changes, not the lifetime of an already-draining cohort.
+		if len(gatePolicy.Probes) > 0 {
+			for _, result := range s.releaseGateEvaluator().RunProbes(ctx, release, gatePolicy.Probes) {
+				if result.Status != model.AppReleaseGateStatusPass {
+					return nil, fmt.Errorf("%w: promoted release active probe failed", errSafeCanonicalHandoffPending)
+				}
+			}
+		}
+		// The live Edge proof still checks the current route digest and
+		// heartbeat freshness. Do not require a new periodic heartbeat on
+		// every short stop attempt, after withdrawal was already proved.
+		edgeSince = handoff.DrainDeadline.Add(-canonicalDrainBudget)
+		if release.PromotedAt != nil && release.PromotedAt.After(edgeSince) {
+			edgeSince = *release.PromotedAt
+		}
+	} else if gate := s.evaluateSafeRolloutCandidateRetireGate(ctx, app, release, gatePolicy); gate.Status == model.AppReleaseGateStatusFail {
+		return nil, fmt.Errorf("%w: promoted release health gate failed", errSafeCanonicalHandoffPending)
+	}
+	proof, err := s.edgeBundleObserverForSafeRollout().WaitForSafeRolloutEdgeRouteBundle(ctx, app, release, 0, edgeSince)
+	if err != nil || !proof.Ready {
+		return nil, fmt.Errorf("%w: promoted traffic publication is unconfirmed", errSafeCanonicalHandoffPending)
 	}
 	advanceTarget := marker != "" && handoff.ReleaseID != release.ID
 	if advanceTarget {
