@@ -14,8 +14,10 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 )
 
@@ -160,6 +162,7 @@ func TestDeploymentCutoverAdmissionAtProvider(t *testing.T) {
 	_, err = publisher.AppsV1().Deployments(config.Namespace).Update(ctx, write.DeepCopy(), metav1.UpdateOptions{})
 	requireCutoverDenial(t, err)
 	guardianDeploys := guardian.AppsV1().Deployments(config.Namespace)
+	id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: config.Namespace, Name: config.Deployment}
 	_, err = guardianDeploys.UpdateScale(ctx, config.Deployment, &autoscalingv1.Scale{
 		ObjectMeta: metav1.ObjectMeta{Name: config.Deployment}, Spec: autoscalingv1.ScaleSpec{Replicas: 4},
 	}, metav1.UpdateOptions{})
@@ -167,11 +170,7 @@ func TestDeploymentCutoverAdmissionAtProvider(t *testing.T) {
 	if err := guardianDeploys.Delete(ctx, config.Deployment, metav1.DeleteOptions{}); !isCutoverDenial(err) {
 		t.Fatalf("Guardian can delete the enrolled existing workload, err=%v", err)
 	}
-	updated, err := guardianDeploys.Update(ctx, write, metav1.UpdateOptions{})
-	if err != nil || updated.Spec.Template.Spec.Containers[0].Image != "fixture.invalid/demo:native" ||
-		*updated.Spec.Replicas != 1 || updated.UID != workload.UID {
-		t.Fatalf("native Guardian could not update exact workload: %v", err)
-	}
+	verifyNativeProviderCAS(t, ctx, guardian, controller, id, workload)
 	_, err = legacy.CoordinationV1().Leases(config.Namespace).Create(ctx, freshLease.DeepCopy(), metav1.CreateOptions{})
 	requireCutoverDenial(t, err)
 	if _, err := guardian.CoordinationV1().Leases(config.Namespace).Create(ctx, freshLease, metav1.CreateOptions{}); err != nil {
@@ -217,7 +216,6 @@ func TestDeploymentCutoverAdmissionAtProvider(t *testing.T) {
 		t.Fatalf("Guardian could not update rollback pointer with same fence: %v", err)
 	}
 
-	id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: config.Namespace, Name: config.Deployment}
 	pending := DesiredRelease{APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: config.Key.Component,
 		Group: config.Key.Group, RecordDigest: otherDigest, Generation: 2}
 	previous := pending
@@ -261,5 +259,58 @@ func TestDeploymentCutoverAdmissionAtProvider(t *testing.T) {
 	}
 	if err := gate.VerifyNativePublication(ctx, boundary); err == nil || errors.Is(err, missingEvidence) || checks != 1 {
 		t.Fatalf("audit-only cutover policy was accepted: checks=%d err=%v", checks, err)
+	}
+}
+
+// Exercise the actual executor write after provider admission, not only a
+// fake resource-version conflict. The payload owns an unclaimed annotation
+// so field-manager conflicts cannot mask a broken resourceVersion fence.
+func verifyNativeProviderCAS(t *testing.T, ctx context.Context, guardian, controller kubernetes.Interface, id declarativerelease.ResourceIdentity, workload *appsv1.Deployment) {
+	t.Helper()
+	const key = "fixture.invalid/cas"
+	apply := func(uid types.UID, rv, value string) error {
+		manifest, err := declarativerelease.CanonicalJSON(map[string]any{
+			"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": []any{map[string]any{
+				"apiVersion": id.APIVersion, "kind": id.Kind,
+				"metadata": map[string]any{"name": id.Name, "namespace": id.Namespace, "uid": string(uid),
+					"resourceVersion": rv, "annotations": map[string]string{key: value}},
+			}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ApplyNativeDeployment(ctx, guardian.AppsV1().RESTClient(), id, "fixture-guardian-cas", manifest)
+	}
+	moved := workload.DeepCopy()
+	moved.Status.AvailableReplicas = 1
+	moved, err := controller.AppsV1().Deployments(id.Namespace).UpdateStatus(ctx, moved, metav1.UpdateOptions{})
+	if err != nil || moved.ResourceVersion == workload.ResourceVersion {
+		t.Fatalf("could not create benign controller version drift: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		uid  types.UID
+		rv   string
+	}{
+		{"old version", workload.UID, workload.ResourceVersion},
+		{"foreign UID", "8ac426d1-536e-4197-90f3-9c32ad4b7731", moved.ResourceVersion},
+	} {
+		err := apply(tc.uid, tc.rv, tc.name)
+		if !errors.Is(err, declarativerelease.ErrWriteRejected) || (!apierrors.IsConflict(err) && !apierrors.IsInvalid(err)) {
+			t.Fatalf("%s was not definitively rejected at the provider: %v", tc.name, err)
+		}
+		observed, err := guardian.AppsV1().Deployments(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
+		if err != nil || observed.ResourceVersion != moved.ResourceVersion || observed.Annotations[key] != "" {
+			t.Fatalf("%s changed the live workload: %v", tc.name, err)
+		}
+	}
+	if err := apply(moved.UID, moved.ResourceVersion, "native"); err != nil {
+		t.Fatalf("exact native CAS was not accepted: %v", err)
+	}
+	updated, err := guardian.AppsV1().Deployments(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
+	if err != nil || updated.UID != moved.UID || updated.ResourceVersion == moved.ResourceVersion ||
+		updated.Annotations[key] != "native" || *updated.Spec.Replicas != 1 ||
+		updated.Spec.Template.Spec.Containers[0].Image != workload.Spec.Template.Spec.Containers[0].Image {
+		t.Fatalf("successful native CAS changed the wrong workload state: %v", err)
 	}
 }
