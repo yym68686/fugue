@@ -88,9 +88,18 @@ host; `activationReadiness` remains `not-evaluated`. Target comparisons,
 mutations that fail the intended contracts, and independent cache profiles
 remain separate activation evidence.
 
+For incremental timing, use `--incremental --case queue-test --base HEAD` in a
+clean disposable checkout. Each policy starts with a separate baseline cache.
+Each pair shares an edit that changes a Go test name or a runtime literal, so
+the compiler sees a different input and the edit can propagate to importers.
+The report records every input hash, the uncached Go oracle, and the native
+and Linux artifact target plans for the first sample. The manual daily audit
+exposes this profile through `shadow_incremental`. It offers operation queue,
+backup usage, retirement, installer policy, and cross-domain edit cases.
+
 For a source-owned writer capability or generator with an implicit downstream
-consumer, use the manual `contract-tracking-scope` or
-`contract-generator-consumer` shadow case. The witness first requires the
+consumer, use the manual `contract-tracking-scope`,
+`contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
 exact named consumer test to pass, applies one synthetic source regression,
 proves native and Linux artifact-target reports select that consumer uncached
 with no legacy omission, then requires the exact test and package to fail with

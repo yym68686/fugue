@@ -36,6 +36,7 @@ LOCALPV_BOOT_SOURCES = {
 DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
     "./internal/declarativerelease",
+    "./internal/releasesourceaudit",
 }
 DECLARATIVE_DATA_TEST_PATTERN = (
     "^(TestProductionRegistryNamesEveryRuntimeLane|"
@@ -459,6 +460,7 @@ def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
         or name == "deploy/releases/edge-groups.json"
         or name.startswith("cmd/fugue-declarative-release/")
         or name.startswith("internal/declarativerelease/")
+        or name.startswith("internal/releasesourceaudit/")
         for name in paths
     )
     declarative_data_changed = any(
@@ -471,7 +473,7 @@ def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
 
 def declarative_test_command(engine: bool, data: bool) -> list[str] | None:
     if engine:
-        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"]
+        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release", "./internal/releasesourceaudit"]
     if data:
         return ["go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN]
     return None

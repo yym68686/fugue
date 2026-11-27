@@ -1158,9 +1158,17 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	for _, choice := range options.Content {
 		gotCases = append(gotCases, choice.Value)
 	}
-	wantCases := []string{"none", "queue-runtime", "queue-test", "cross-domain", "contract-tracking-scope", "contract-generator-consumer"}
+	wantCases := []string{
+		"none", "queue-runtime", "queue-test", "host-policy-test", "backup-runtime", "retirement-test", "cross-domain",
+		"contract-tracking-scope", "contract-generator-consumer", "contract-retirement-scope",
+	}
 	if !reflect.DeepEqual(gotCases, wantCases) {
 		t.Fatalf("daily audit shadow cases: %v", gotCases)
+	}
+	incremental := yamlMappingValue(t, choices, "shadow_incremental")
+	if yamlMappingValue(t, incremental, "type").Value != "boolean" ||
+		yamlMappingValue(t, incremental, "default").Value != "false" {
+		t.Fatal("incremental replay must require explicit manual selection")
 	}
 	schedule := yamlMappingValue(t, on, "schedule").Content
 	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {

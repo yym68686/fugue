@@ -59,7 +59,7 @@ test:
 	python3 -m scripts.test_prepush_shadow_contract
 	python3 -m unittest scripts.test_verify_k3s_transport
 	python3 ./scripts/test_verify_registry_image.py
-	env GOCACHE=$(GOCACHE) go test ./internal/declarativerelease ./cmd/fugue-declarative-release
+	env GOCACHE=$(GOCACHE) go test ./internal/declarativerelease ./cmd/fugue-declarative-release ./internal/releasesourceaudit
 	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-openapi-gen -spec openapi/openapi.yaml -routes-out internal/api/routes_gen.go -spec-out internal/apispec/spec_gen.go -check
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_probe_fugue_public_dns.sh
