@@ -3,9 +3,11 @@ package api
 import (
 	"context"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 )
 
@@ -24,6 +26,11 @@ func TestBackgroundSnapshotCannotReplaceNewerForegroundData(t *testing.T) {
 func TestSharedImageWarmPreservesTenantSnapshotsAndObservationTimes(t *testing.T) {
 	s, server, _, tenant, _, app, _, _, currentRef, _ := setupAppImagesTestServer(t)
 	server.imageStoreMode = "distributed"
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	server.projectImageUsageCache = appimages.NewUsageSnapshots(time.Minute, func() time.Time {
+		return time.Unix(0, clock.Load())
+	})
 	foreign, err := s.CreateTenant("another tenant")
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +59,7 @@ func TestSharedImageWarmPreservesTenantSnapshotsAndObservationTimes(t *testing.T
 		{TenantID: foreign.ID},
 		{Scopes: map[string]struct{}{"platform.admin": {}}},
 	}
-	baseline := make(map[string]projectImageUsageResponse)
+	baseline := make(map[appimages.UsageScope]projectImageUsageResponse)
 	for _, principal := range principals {
 		response, err := server.loadProjectImageUsageResponse(context.Background(), principal)
 		if err != nil {
@@ -64,20 +71,25 @@ func TestSharedImageWarmPreservesTenantSnapshotsAndObservationTimes(t *testing.T
 		t.Fatal(err)
 	}
 	for key, want := range baseline {
-		got, ok := server.projectImageUsageCache.get(key)
+		got, ok := server.projectImageUsageCache.Fresh(key)
 		if !ok || !reflect.DeepEqual(got, want) {
-			t.Fatalf("scope %q changed complete evidence: got=%+v want=%+v", key, got, want)
+			t.Fatalf("scope %v changed complete evidence: got=%+v want=%+v", key, got, want)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	clock.Add(int64(30 * time.Second))
 	key := projectImageUsageCacheKey(principals[0])
-	before, _ := server.projectImageUsageCache.getEntry(key)
+	before, _ := server.projectImageUsageCache.Fresh(key)
 	if err := server.refreshDistributedProjectImageUsageSnapshots(ctx); err != context.Canceled {
 		t.Fatalf("cancelled refresh continued: %v", err)
 	}
-	after, _ := server.projectImageUsageCache.getEntry(key)
+	after, _ := server.projectImageUsageCache.Fresh(key)
 	if !reflect.DeepEqual(before, after) {
-		t.Fatal("cancelled refresh replaced data or extended freshness")
+		t.Fatal("cancelled refresh replaced data")
+	}
+	clock.Add(int64(31 * time.Second))
+	if _, ok := server.projectImageUsageCache.Fresh(key); ok {
+		t.Fatal("cancelled refresh extended freshness")
 	}
 }

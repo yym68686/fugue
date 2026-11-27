@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/auth"
 	"fugue/internal/backupusage"
 	"fugue/internal/bundleauth"
@@ -121,7 +122,7 @@ type Server struct {
 	resolveRemoteImageDigest               func(context.Context, string) (string, error)
 	appImageRegistry                       appImageRegistry
 	requestRegistryGC                      func(context.Context, string) error
-	projectImageUsageCache                 expiringResponseCache[projectImageUsageResponse]
+	projectImageUsageCache                 *appimages.UsageSnapshots
 	backupUsage                            *backupusage.Service
 	readinessKubernetesAPICache            expiringResponseCache[readinessCheckResult]
 	clusterNodeInventoryCache              expiringResponseCache[[]clusterNodeSnapshot]
@@ -313,7 +314,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		importer:                               sourceimport.NewImporter(cfg.ImportWorkDir, logger, sourceimport.BuilderPodPolicy{}),
 		resolveRemoteImageDigest:               sourceimport.ResolveRemoteImageDigest,
 		appImageRegistry:                       newRemoteAppImageRegistry(),
-		projectImageUsageCache:                 newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
+		projectImageUsageCache:                 appimages.NewUsageSnapshots(appimages.UsageSnapshotTTL, nil),
 		backupUsage:                            newBackupUsageService(store, cfg.BackupInventory, backupusage.DefaultCacheTTL),
 		readinessKubernetesAPICache:            newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:              newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
