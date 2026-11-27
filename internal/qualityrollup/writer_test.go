@@ -83,10 +83,30 @@ func TestPostgresWriterHandoffFencesOldWriterAndResumes(t *testing.T) {
 		t.Fatal("canceled writer incorrectly committed progress")
 	}
 	old.Rollback()
-	for i := 0; i < 2; i++ {
-		if ok, err := storage.TransferEdgeQualityRollupsToWorker(ctx); err != nil || !ok {
-			t.Fatalf("idempotent handoff failed: transferred=%t err=%v", ok, err)
+	// database/sql can mark a canceled transaction done before its asynchronous
+	// driver rollback releases the PostgreSQL transaction lock. Probe the
+	// actual lock through the nonblocking handoff rather than assuming that
+	// the local Rollback return means the backend is already drained.
+	drainCtx, stopDrain := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopDrain()
+	retry := time.NewTicker(10 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		transferred, err := storage.TransferEdgeQualityRollupsToWorker(drainCtx)
+		if err != nil {
+			t.Fatalf("handoff after cancellation: %v", err)
 		}
+		if transferred {
+			break
+		}
+		select {
+		case <-drainCtx.Done():
+			t.Fatal("canceled writer did not release its PostgreSQL lock")
+		case <-retry.C:
+		}
+	}
+	if ok, err := storage.TransferEdgeQualityRollupsToWorker(ctx); err != nil || !ok {
+		t.Fatalf("idempotent handoff failed: transferred=%t err=%v", ok, err)
 	}
 
 	if count, ran, err := NewWorker(storage, nil).runOwnedPass(ctx, now); err != nil || !ran || count != 0 {
