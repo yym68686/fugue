@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/observability"
 	"fugue/internal/qualityrollup"
 	"fugue/internal/store"
 )
@@ -50,9 +52,13 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		rollups.WriteMetrics(w)
+		read, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		progress, err := storage.ReadEdgeQualityRollupWorkerProgress(read)
+		writeProgressMetrics(w, progress, err)
 	})
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -85,4 +91,25 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 		return errors.Join(shutdownErr, errors.New("observation worker drain timed out"))
 	}
 	return errors.Join(err, shutdownErr)
+}
+
+func writeProgressMetrics(w io.Writer, progress store.EdgeQualityRollupWorkerProgress, err error) {
+	const storageMetric = "fugue_edge_quality_rollup_progress_storage_available"
+	if err != nil {
+		observability.WriteGaugeMetric(w, storageMetric, "Whether persisted observation worker progress can be read.", nil, 0)
+		return
+	}
+	observability.WriteGaugeMetric(w, storageMetric, "Whether persisted observation worker progress can be read.", nil, 1)
+	owner := string(progress.Owner)
+	if owner == "" {
+		owner = "api-default"
+	}
+	observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_persisted_writer_owner", "Current durable writer identity.", map[string]string{"owner": owner}, 1)
+	const watermark = "fugue_edge_quality_rollup_committed_window_end_timestamp_seconds"
+	observability.WriteMetricHeader(w, watermark, "Last durably committed window end; survives worker replacement.", "gauge")
+	for _, window := range []string{"5m", "30m", "6h", "24h"} {
+		if at, found := progress.Watermarks[window]; found {
+			observability.WriteMetricSample(w, watermark, map[string]string{"window": window}, float64(at.Unix()))
+		}
+	}
 }

@@ -20,6 +20,13 @@ const (
 
 type EdgeQualityRollupWriter string
 
+// EdgeQualityRollupWorkerProgress is read-only and contains no process-local
+// state. A new worker can report the predecessor's committed progress.
+type EdgeQualityRollupWorkerProgress struct {
+	Owner      EdgeQualityRollupWriter
+	Watermarks map[string]time.Time
+}
+
 const (
 	EdgeQualityRollupAPIWriter    EdgeQualityRollupWriter = ""
 	EdgeQualityRollupWorkerWriter EdgeQualityRollupWriter = "worker"
@@ -84,6 +91,38 @@ SELECT has_table_privilege('fugue_edge_quality_rollups', 'INSERT')
 	}
 	_, err := readEdgeQualityRollupWriter(ctx, s.db, true)
 	return err
+}
+
+func (s *Store) ReadEdgeQualityRollupWorkerProgress(ctx context.Context) (EdgeQualityRollupWorkerProgress, error) {
+	if s == nil || s.db == nil {
+		return EdgeQualityRollupWorkerProgress{}, ErrInvalidInput
+	}
+	// One read snapshot covers ownership and completed windows. The worker's
+	// restricted login reads only its owner projection and watermark table.
+	rows, err := s.db.QueryContext(ctx, `
+SELECT COALESCE((SELECT owner FROM fugue_edge_quality_rollup_owner), ''), known.name, wm.window_ended_at
+FROM (VALUES ('5m'), ('30m'), ('6h'), ('24h')) AS known(name)
+LEFT JOIN fugue_edge_quality_rollup_watermarks wm ON wm.window_name=known.name`)
+	if err != nil {
+		return EdgeQualityRollupWorkerProgress{}, err
+	}
+	defer rows.Close()
+	out := EdgeQualityRollupWorkerProgress{Watermarks: make(map[string]time.Time, 4)}
+	for rows.Next() {
+		var raw, window string
+		var at sql.NullTime
+		if err := rows.Scan(&raw, &window, &at); err != nil {
+			return EdgeQualityRollupWorkerProgress{}, err
+		}
+		out.Owner, err = parseEdgeQualityRollupWriter(raw)
+		if err != nil {
+			return EdgeQualityRollupWorkerProgress{}, err
+		}
+		if at.Valid {
+			out.Watermarks[window] = at.Time.UTC()
+		}
+	}
+	return out, rows.Err()
 }
 
 func parseEdgeQualityRollupWriter(raw string) (EdgeQualityRollupWriter, error) {

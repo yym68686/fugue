@@ -3,6 +3,7 @@ package qualityrollup
 import (
 	"strings"
 
+	"fugue/internal/edgequality"
 	"fugue/internal/model"
 )
 
@@ -11,13 +12,7 @@ func normalizedHostname(raw string) string {
 }
 
 func NormalizeTrafficClass(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "large_body_api", "small_api", "dynamic_api", "static_cacheable", "streaming", "sse", "websocket", "html_dynamic":
-		return value
-	default:
-		return ""
-	}
+	return edgequality.NormalizeTrafficClass(value)
 }
 
 func PathPrefixBucket(pathPrefix string) string {

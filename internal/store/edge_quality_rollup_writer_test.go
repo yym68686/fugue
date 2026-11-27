@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
@@ -71,6 +72,9 @@ func TestEdgeQualityRollupWorkerRequiresSeparateDatabaseRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeWorker()
+	if progress, err := worker.ReadEdgeQualityRollupWorkerProgress(ctx); err != nil || progress.Owner != EdgeQualityRollupAPIWriter || len(progress.Watermarks) != 0 {
+		t.Fatalf("unexpected standby progress: %+v %v", progress, err)
+	}
 	if _, err := worker.TransferEdgeQualityRollupsToWorker(ctx); err == nil {
 		t.Fatal("the worker credential could transfer authority")
 	}
@@ -89,7 +93,18 @@ func TestEdgeQualityRollupWorkerRequiresSeparateDatabaseRole(t *testing.T) {
 		pass.Rollback()
 		t.Fatalf("worker could not read its owner through the projection: acquired=%t err=%v", ok, err)
 	}
-	pass.Rollback()
+	end := time.Date(2026, 11, 27, 12, 45, 0, 0, time.UTC)
+	if err := pass.Commit(nil, nil, map[string]time.Time{"5m": end}); err != nil {
+		t.Fatal(err)
+	}
+	restarted, closeRestarted, err := OpenEdgeQualityRollupWorkerStore(ctx, workerDSN.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeRestarted()
+	if progress, err := restarted.ReadEdgeQualityRollupWorkerProgress(ctx); err != nil || progress.Owner != EdgeQualityRollupWorkerWriter || !progress.Watermarks["5m"].Equal(end) {
+		t.Fatalf("restarted worker did not read persisted progress: %+v %v", progress, err)
+	}
 	if _, err := admin.ExecContext(ctx, "GRANT UPDATE (value) ON fugue_meta TO "+quotedRole); err != nil {
 		t.Fatal(err)
 	}
