@@ -173,6 +173,24 @@ them to the exact proposed hold and named dedicated ServiceAccount. Like
 freeze observation, it reports stored configuration only. It does not prove
 enforcement across endpoints or authorize a write.
 
+`observe-participation-offline-readback JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION`
+uses a separate read-only client to read the enrolled Node twice, with
+the approved namespace identity checked before and after. It reports:
+
+- `target_visible`: the exact target metadata is visible on the enrolled
+  Node at a version different from the reviewed predecessor.
+- `predecessor_visible`: the reviewed resourceVersion and metadata are
+  still present; an in-flight request may yet apply.
+- `condition_changed`: the reviewed resourceVersion no longer matches,
+  but the observed owned metadata is not the target.
+
+Missing, replaced, changing or contradictory observations produce an
+error, not a terminal receipt. Even target visibility does not prove
+which identity applied the change, that old requests have drained, or
+that the related DNS traffic has been withdrawn. The report has
+`executionEvidence=false`; none of these observations authorizes a retry,
+settlement or advancement of the last verified version on its own.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`

@@ -44,6 +44,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
+       fugue-production-control observe-participation-offline-readback JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -187,11 +188,12 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		})
 	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
 		"shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold",
-		"observe-participation-freeze", "observe-participation-offline-guard":
+		"observe-participation-freeze", "observe-participation-offline-guard", "observe-participation-offline-readback":
 		minArgs, maxArgs := 5, 5
 		var tokenPath string
 		var usesToken bool
-		usesSubmission := args[0] == "preflight-participation-hold" || args[0] == "observe-participation-offline-guard"
+		usesSubmission := args[0] == "preflight-participation-hold" || args[0] == "observe-participation-offline-guard" ||
+			args[0] == "observe-participation-offline-readback"
 		switch args[0] {
 		case "shadow-participation-dns":
 			minArgs, maxArgs = 6, 6
@@ -305,6 +307,16 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Freeze = "participation_offline_guard_configuration_observation", &guard
+				report.IntentDigest, err = submission.Intent.Digest()
+				if err != nil {
+					return err
+				}
+			case "observe-participation-offline-readback":
+				readback, err := observer.ObserveOfflineHoldReadback(ctx, topology, submission)
+				if err != nil {
+					return err
+				}
+				report.Kind, report.Readback = "participation_offline_hold_readback", &readback
 				report.IntentDigest, err = submission.Intent.Digest()
 				if err != nil {
 					return err
@@ -452,16 +464,17 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 }
 
 type participationObservationReport struct {
-	Kind              string                           `json:"kind"`
-	ExecutionEvidence bool                             `json:"executionEvidence"`
-	JournalCluster    string                           `json:"journalCluster"`
-	KubeContext       string                           `json:"kubeContext"`
-	Topology          productioncontrol.Version        `json:"topology"`
-	IntentDigest      string                           `json:"intentDigest,omitempty"`
-	Readers           *participation.ReaderObservation `json:"readers,omitempty"`
-	Member            *participation.MemberObservation `json:"member,omitempty"`
-	Shadow            *participation.KubernetesShadow  `json:"shadow,omitempty"`
-	Freeze            *participation.FreezeObservation `json:"freeze,omitempty"`
+	Kind              string                             `json:"kind"`
+	ExecutionEvidence bool                               `json:"executionEvidence"`
+	JournalCluster    string                             `json:"journalCluster"`
+	KubeContext       string                             `json:"kubeContext"`
+	Topology          productioncontrol.Version          `json:"topology"`
+	IntentDigest      string                             `json:"intentDigest,omitempty"`
+	Readers           *participation.ReaderObservation   `json:"readers,omitempty"`
+	Member            *participation.MemberObservation   `json:"member,omitempty"`
+	Shadow            *participation.KubernetesShadow    `json:"shadow,omitempty"`
+	Freeze            *participation.FreezeObservation   `json:"freeze,omitempty"`
+	Readback          *participation.OfflineHoldReadback `json:"readback,omitempty"`
 }
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {
