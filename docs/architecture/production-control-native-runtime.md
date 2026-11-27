@@ -563,6 +563,31 @@ handoff. A claim with no matching Kubernetes fence or terminal result
 needs independent provider readback before the journal can be settled.
 Production enrollment and rollout are separate from this command.
 
+After observing the installed native boundary and collecting the endpoint
+admission, legacy revocation and request-drain evidence, initialize the
+group with `fugue-release-guardian node-worker-baseline-checkpoint CONFIG`.
+In addition to the settlement configuration, provide `kubernetes` with the
+pinned API origin, CA digest and namespace UID, and `evidence` with
+`endpointAdmissionDigest`, `legacyRevocationDigest` and
+`legacyRequestDrainDigest`. Retain the underlying evidence with the
+technical observer. These fields commit to separate records of provider
+enforcement and completed revocation.
+
+The `members` list covers the group's managed public Services. Each member
+pins `node`, `nodeUid`, `frontDaemonSet`, `workerDaemonSetA`,
+`workerDaemonSetB`, `serviceUid`, any `probeUid`, and the established
+`canaryHost`, `canaryPath` and `canaryDigest`. The checkpoint inspects the
+whole namespace inventory, checks that group fences and projections are
+idle, and verifies each enrolled route and local Worker. An omitted
+managed entry or a legacy direct Front listener blocks enrollment.
+
+Sign the checkpoint's `witnessDraft` and retain the canonical envelope in
+the independent evidence directory. Then run
+`fugue-release-guardian node-worker-baseline-import CONFIG WITNESS_DIGEST`.
+The command validates the observer signature and repeats the provider
+checks. PostgreSQL records the initial version and its complete serving
+snapshot atomically. Run the journal schema migrator before importing.
+
 After recovery or dispatch reports a terminal outcome, run
 `fugue-release-guardian node-worker-checkpoint CONFIG INTENT_DIGEST` with
 a provider observer identity. It reads the pending PostgreSQL claim, the

@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS fugue_control.resource_baselines (
     PRIMARY KEY (cluster_id, resource_id)
 );
 
+ALTER TABLE fugue_control.resource_baselines ADD COLUMN IF NOT EXISTS verified_snapshot bytea
+    CHECK (octet_length(verified_snapshot) BETWEEN 1 AND 262144);
+
 CREATE TABLE IF NOT EXISTS fugue_control.execution_claims (
     cluster_id text NOT NULL,
     resource_id text NOT NULL,

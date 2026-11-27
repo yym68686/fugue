@@ -2,6 +2,8 @@ package productioncontrol
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -109,7 +111,11 @@ func testPostgresFrontWorkerApproval(t *testing.T, ctx context.Context, first, s
 	}
 	left.now = func() time.Time { return now }
 	right.now = left.now
-	head := Version{7, digest([]byte("group head"))}
+	snapshot := []byte(`{"group":"edge-group-fixture","serving":["fixture-node-a","fixture-node-b"]}`)
+	head, err := FrontWorkerBaselineVersion(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stage := func(node string, local uint64) (Submission, string, string) {
 		t.Helper()
 		shadow := frontWorkerFixture(t, now, node, local)
@@ -136,13 +142,47 @@ func testPostgresFrontWorkerApproval(t *testing.T, ctx context.Context, first, s
 	if _, err := right.ReadApprovedFrontWorker(ctx, s.Intent.ClusterID, intent, approval); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("unanchored group returned approval: %v", err)
 	}
-	evidence := &testExecutionEvidence{enrollment: digest([]byte("front enrollment")), terminal: digest([]byte("terminal")), fenced: true}
-	w, err := NewExecutionJournal(left, evidence)
+	pub, observer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created, err := w.AnchorResource(ctx, "observer-a", Baseline{s.Intent.scope(), head, evidence.enrollment}); err != nil || !created {
+	source := memoryWitnesses{}
+	scope := s.Intent.scope()
+	trust := map[string]TrustedWitness{"observer": {scope, pub}}
+	if _, err := NewWitnessedExecutionJournal(left, source, trust); err == nil {
+		t.Fatal("Front/Worker group accepted a signature-only evidence verifier")
+	}
+	liveAuthority := digest([]byte("live boundary"))
+	seen := ExecutionWitness{Kind: BaselineWitness, KeyID: "observer", ClusterID: scope.ClusterID, ResourceID: scope.ResourceID,
+		Generation: head.Generation, VerifiedDigest: head.Digest, ObservationDigest: digest([]byte("live group")),
+		AuthorityDigest: liveAuthority, ObservedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix()}
+	w, err := NewObservedExecutionJournal(left, source, trust, func(_ context.Context, signed ExecutionWitness) error {
+		if signed.AuthorityDigest != liveAuthority {
+			return errors.New("provider boundary changed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := seen
+	wrong.AuthorityDigest = digest([]byte("stale boundary"))
+	baseline := Baseline{scope, head, fixtureWitness(t, observer, wrong, source)}
+	if created, err := w.AnchorFrontWorkerBaseline(ctx, "observer-a", baseline, func() []byte { return snapshot }); err == nil || created {
+		t.Fatal("Front/Worker group accepted a signed baseline with stale provider authority")
+	}
+	baseline.EvidenceDigest = fixtureWitness(t, observer, seen, source)
+	if created, err := w.AnchorResource(ctx, "observer-a", baseline); err == nil || created {
+		t.Fatal("Front/Worker group accepted a digest without a saved baseline snapshot")
+	}
+	if created, err := w.AnchorFrontWorkerBaseline(ctx, "observer-a", baseline, func() []byte { return []byte(`{}`) }); err == nil || created {
+		t.Fatal("Front/Worker group accepted a snapshot with a different verified digest")
+	}
+	if created, err := w.AnchorFrontWorkerBaseline(ctx, "observer-a", baseline, func() []byte { return snapshot }); err != nil || !created {
 		t.Fatalf("cannot seed test group baseline: %t %v", created, err)
+	}
+	if got, err := right.ReadFrontWorkerBaselineSnapshot(ctx, baseline.Scope); err != nil || string(got) != string(snapshot) {
+		t.Fatalf("baseline snapshot did not survive reopen: %s %v", got, err)
 	}
 	if p, err := right.ReadApprovedFrontWorker(ctx, s.Intent.ClusterID, intent, approval); err != nil || p.Journal.Expected.Generation != 42 {
 		t.Fatalf("stored approval after reopen: %+v %v", p, err)
@@ -172,13 +212,19 @@ func testPostgresFrontWorkerApproval(t *testing.T, ctx context.Context, first, s
 	if err != nil || during.LastVerified != head || during.Pending != intent {
 		t.Fatalf("unresolved operation displaced the verified head: %+v %v", during, err)
 	}
-	result := ExecutionResult{Applied, Version{43, s.Intent.TargetDigest}, evidence.terminal}
+	seen.Kind, seen.Outcome, seen.Fence = TerminalWitness, Applied, c.Fence
+	seen.IntentDigest, seen.ApprovalDigest = c.IntentDigest, c.ApprovalDigest
+	seen.Generation, seen.VerifiedDigest = head.Generation+1, s.Intent.TargetDigest
+	result := ExecutionResult{Applied, Version{43, s.Intent.TargetDigest}, fixtureWitness(t, observer, seen, source)}
 	if _, err := w.CompleteExecution(ctx, "observer-a", c, result); err == nil {
 		t.Fatal("Node generation was accepted as the group ledger generation")
 	}
 	result.Verified.Generation = head.Generation + 1
 	if created, err := w.CompleteExecution(ctx, "observer-a", c, result); err != nil || !created {
 		t.Fatalf("could not settle the group claim: %t %v", created, err)
+	}
+	if got, err := right.ReadFrontWorkerBaselineSnapshot(ctx, baseline.Scope); err != nil || string(got) != string(snapshot) {
+		t.Fatalf("group settlement replaced the initial snapshot: %s %v", got, err)
 	}
 	if _, err := right.ReadApprovedFrontWorker(ctx, s.Intent.ClusterID, other, otherApproval); !errors.Is(err, ErrResourceDrift) {
 		t.Fatalf("a superseded group predecessor remained dispatchable: %v", err)

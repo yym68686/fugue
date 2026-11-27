@@ -37,6 +37,38 @@ func FrontWorkerGroupFenceName(group string) string {
 	return "fugue-authority-transition-prepared-" + group
 }
 
+func FrontWorkerBaselineVersion(raw []byte) (Version, error) {
+	if len(raw) < 2 || len(raw) > 256<<10 || raw[0] != '{' || !json.Valid(raw) {
+		return Version{}, errors.New("invalid Front/Worker initial group snapshot")
+	}
+	return Version{Generation: 1, Digest: digest(append([]byte("fugue.front-worker.group-baseline.v1\x00"), raw...))}, nil
+}
+
+// ReadFrontWorkerBaselineSnapshot retrieves the immutable initial group
+// version, including after subsequent node-level executions.
+func (j *Journal) ReadFrontWorkerBaselineSnapshot(ctx context.Context, scope Scope) ([]byte, error) {
+	if !scope.valid() || !strings.HasPrefix(scope.ResourceID, FrontWorkerResourcePrefix) {
+		return nil, errors.New("invalid Front/Worker resource")
+	}
+	state, err := j.ReadResource(ctx, scope)
+	if err != nil {
+		return nil, err
+	}
+	return readFrontWorkerBaselineSnapshot(ctx, j.db, scope, state.Verified)
+}
+
+func readFrontWorkerBaselineSnapshot(ctx context.Context, db queryRow, scope Scope, verified Version) ([]byte, error) {
+	var raw []byte
+	if err := db.QueryRowContext(ctx, `SELECT verified_snapshot FROM fugue_control.resource_baselines
+		WHERE cluster_id=$1 AND resource_id=$2`, scope.ClusterID, scope.ResourceID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if version, err := FrontWorkerBaselineVersion(raw); err != nil || version != verified {
+		return nil, errors.New("stored Front/Worker baseline snapshot differs from the verified version")
+	}
+	return raw, nil
+}
+
 type FrontWorkerShadow struct {
 	Schema     string                                 `json:"schema"`
 	Namespace  string                                 `json:"namespace"`
@@ -179,6 +211,9 @@ func (j *Journal) ReadApprovedFrontWorker(ctx context.Context, cluster, intentDi
 	}
 	state, err := j.ReadResource(ctx, intent.scope())
 	if err != nil {
+		return FrontWorkerShadow{}, err
+	}
+	if _, err := readFrontWorkerBaselineSnapshot(ctx, j.db, intent.scope(), state.Verified); err != nil {
 		return FrontWorkerShadow{}, err
 	}
 	if state.Pending != "" {
