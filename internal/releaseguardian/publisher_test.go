@@ -92,12 +92,38 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	if _, err := store.LoadStableLKG(context.Background(), key, driftedRelease); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("drifted predecessor was accepted: %v", err)
 	}
+	client.ClearActions()
+	preview, err := store.PreviewDesired(context.Background(), key, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.CurrentDesired.Generation != 1 || preview.CurrentRecordDigest != stableGuardian.RecordDigest ||
+		preview.RollbackMonitorDigest != stableRecord.RecordDigest || preview.RollbackManifestDigest != stableRecord.ForwardManifestDigest ||
+		preview.PrewriteResourceVersion != "10" || preview.Health.Route.State != HealthHealthy {
+		t.Fatalf("unbound preview: %+v", preview)
+	}
+	badCandidate := make(map[string][]byte, len(candidate))
+	for name, raw := range candidate {
+		badCandidate[name] = raw
+	}
+	badCandidate["lkg.json"] = []byte(`{}`)
+	if _, err := store.PreviewDesired(context.Background(), key, badCandidate); err == nil {
+		t.Fatal("shadow accepted a changed rollback manifest")
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" && action.GetVerb() != "list" {
+			t.Fatalf("shadow was not read-only: %+v", action)
+		}
+	}
 	record, desired, err := store.PublishDesired(context.Background(), key, candidate)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if desired.RecordDigest != record.RecordDigest || desired.Generation != 2 || record.LKGRecordDigest != stableGuardian.RecordDigest {
 		t.Fatalf("record=%+v desired=%+v", record, desired)
+	}
+	if preview.Record != record || preview.ProposedDesired != desired {
+		t.Fatalf("shadow differed from publisher: preview=%+v actual record=%+v desired=%+v", preview, record, desired)
 	}
 	currentRecord, err := store.LoadRecord(context.Background(), key)
 	if err != nil || currentRecord != stableGuardian {

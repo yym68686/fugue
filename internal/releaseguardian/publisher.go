@@ -13,51 +13,79 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// PublishDesired persists one immutable CI-produced target and advances only
-// its component/group DesiredRelease pointer with a Kubernetes
-// ResourceVersion CAS. It never writes a workload.
-func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[string][]byte) (ReleaseRecord, DesiredRelease, error) {
+// PublicationPreview is an observation, not an approval, fence, or execution
+// receipt. Health and resource versions can change immediately after the read.
+type PublicationPreview struct {
+	Namespace               string                              `json:"namespace"`
+	Record                  ReleaseRecord                       `json:"record"`
+	CurrentDesired          DesiredRelease                      `json:"currentDesired"`
+	ProposedDesired         DesiredRelease                      `json:"proposedDesired"`
+	DesiredResourceVersion  string                              `json:"desiredResourceVersion"`
+	CurrentRecordDigest     string                              `json:"currentRecordDigest"`
+	RollbackManifestDigest  string                              `json:"rollbackManifestDigest"`
+	RollbackMonitorDigest   string                              `json:"rollbackMonitorDigest"`
+	ArtifactReceiptDigest   string                              `json:"artifactReceiptDigest"`
+	ExecutionPlanDigest     string                              `json:"executionPlanDigest"`
+	PrewriteWorkload        declarativerelease.ResourceIdentity `json:"prewriteWorkload"`
+	PrewriteResourceVersion string                              `json:"prewriteResourceVersion"`
+	Health                  HealthSnapshot                      `json:"health"`
+}
+
+type desiredPublication struct {
+	preview                    PublicationPreview
+	record, execution, desired *corev1.ConfigMap
+}
+
+// PreviewDesired evaluates the same candidate and predecessor rules as
+// PublishDesired, without creating any Kubernetes object, including status.
+func (store *KubeStore) PreviewDesired(ctx context.Context, key Key, files map[string][]byte) (PublicationPreview, error) {
+	publication, err := store.planDesiredPublication(ctx, key, files)
+	return publication.preview, err
+}
+
+func (store *KubeStore) planDesiredPublication(ctx context.Context, key Key, files map[string][]byte) (desiredPublication, error) {
 	if store == nil || store.client == nil {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("release Guardian store is unavailable")
+		return desiredPublication{}, errors.New("release Guardian store is unavailable")
 	}
 	target, exists := store.targets[key]
 	if !exists {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("release Guardian target is not configured")
+		return desiredPublication{}, errors.New("release Guardian target is not configured")
 	}
 	snapshot, err := store.Load(ctx, key)
 	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
 	if err := snapshot.Validate(store.now().UTC()); err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
 	bundle, err := DecodeExecutionBundle(files, key)
 	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
 	stableRecord, stableMonitor, err := canonicalStableReleaseRecord(key, snapshot.CurrentMonitorData)
 	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
 	eligible := publishDesiredEligible(snapshot, bundle, stableRecord)
 	if !eligible && snapshot.Record.LKGRecordDigest != stableRecord.RecordDigest {
 		equivalent, equivalentErr := store.immutableHistoricalLKGRecordAliasesStable(ctx, target, snapshot.Record.LKGRecordDigest, stableRecord)
 		if equivalentErr != nil {
-			return ReleaseRecord{}, DesiredRelease{}, equivalentErr
+			return desiredPublication{}, equivalentErr
 		}
 		eligible = equivalent && runtimeDriftedDesiredEdgeRecoveryEligibleWithStableBinding(snapshot, bundle, stableRecord, true)
 	}
 	if !eligible {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("current component is not a healthy settled release")
+		return desiredPublication{}, errors.New("current component is not a healthy settled release")
 	}
-	lkgMatchesStable := digest(bundle.LKG) == stableMonitor.ForwardManifestDigest
+	rollbackDigest := digest(bundle.LKG)
+	lkgMatchesStable := rollbackDigest == stableMonitor.ForwardManifestDigest
 	if len(bundle.Release.RuntimeResourcesFromForward) > 0 && strings.TrimSpace(snapshot.CurrentMonitorData["forward.json"]) != "" {
 		var compareErr error
 		lkgMatchesStable, compareErr = declarativerelease.ResourceSetsEquivalentExceptRuntimeResources(
 			bundle.LKG, []byte(snapshot.CurrentMonitorData["forward.json"]), bundle.Release.RuntimeResourcesFromForward,
 		)
 		if compareErr != nil {
-			return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("compare Guardian LKG runtime resource recovery: %w", compareErr)
+			return desiredPublication{}, fmt.Errorf("compare Guardian LKG runtime resource recovery: %w", compareErr)
 		}
 	}
 	if !bundle.Prepared.LKG.Present || bundle.Release.ExpectedPreviousConfigSHA != stableMonitor.ConfigSHA ||
@@ -65,35 +93,82 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 		bundle.Release.ExpectedPreviousOCIRevision != stableMonitor.ConfigSHA ||
 		bundle.Release.ExpectedPreviousImageDigest != stableRecord.ImageDigest ||
 		!lkgMatchesStable {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian candidate LKG is not the exact current stable release")
+		return desiredPublication{}, errors.New("Guardian candidate LKG is not the exact current stable release")
 	}
 	record, err := bundle.ReleaseRecord(key, stableRecord.RecordDigest)
 	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
 	recordRaw, err := declarativerelease.CanonicalJSON(record)
 	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
+		return desiredPublication{}, err
 	}
-	data := make(map[string]string, len(bundle.Files)+1)
-	total := 0
+	data := make(map[string]string, len(bundle.Files)+2)
 	for name, value := range bundle.Files {
 		data[name] = string(value)
-		total += len(name) + len(value)
 	}
 	data["guardian-record.json"] = string(recordRaw)
-	total += len("guardian-record.json") + len(recordRaw)
 	data["lkg-monitor-record-digest"] = stableMonitor.RecordDigest
-	total += len("lkg-monitor-record-digest") + len(stableMonitor.RecordDigest)
-	if total > maxRecordBytes {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian release record exceeds the bounded ConfigMap size")
+	if totalConfigMapBytes(data) > maxRecordBytes {
+		return desiredPublication{}, errors.New("Guardian release record exceeds the bounded ConfigMap size")
 	}
 	immutable := true
 	recordMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: releaseRecordName(key, record.RecordDigest), Namespace: target.Namespace, Labels: guardianLabels(key)},
 		Immutable:  &immutable, Data: data,
 	}
-	configMaps := store.client.CoreV1().ConfigMaps(target.Namespace)
+	next := DesiredRelease{
+		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group,
+		RecordDigest: record.RecordDigest, Generation: snapshot.Desired.Generation + 1,
+	}
+	if err := next.Validate(); err != nil {
+		return desiredPublication{}, err
+	}
+	executionData := map[string]string{
+		"execution-plan.json": string(bundle.Files["execution-plan.json"]),
+		"record-digest":       record.RecordDigest,
+	}
+	if totalConfigMapBytes(executionData) > maxRecordBytes {
+		return desiredPublication{}, errors.New("Guardian execution snapshot exceeds the bounded ConfigMap size")
+	}
+	executionMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: executionSnapshotName(key, next.Generation), Namespace: target.Namespace, Labels: guardianLabels(key)},
+		Immutable:  &immutable,
+		Data:       executionData,
+	}
+	raw, err := declarativerelease.CanonicalJSON(next)
+	if err != nil {
+		return desiredPublication{}, err
+	}
+	desiredMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: target.Namespace, Labels: guardianLabels(key)},
+		Data:       map[string]string{"desired.json": string(raw)},
+	}
+	return desiredPublication{
+		preview: PublicationPreview{
+			Namespace: target.Namespace, Record: record, CurrentDesired: snapshot.Desired, ProposedDesired: next,
+			DesiredResourceVersion: snapshot.DesiredResourceVersion, CurrentRecordDigest: snapshot.CurrentRecordDigest,
+			RollbackManifestDigest: rollbackDigest, RollbackMonitorDigest: stableMonitor.RecordDigest,
+			ArtifactReceiptDigest: bundle.Artifact.ReceiptDigest, ExecutionPlanDigest: bundle.Prepared.PlanDigest,
+			PrewriteWorkload: bundle.Prepared.Prewrite.Primary, PrewriteResourceVersion: bundle.Prepared.Prewrite.ResourceVersion,
+			Health: snapshot.Health,
+		},
+		record: recordMap, execution: executionMap, desired: desiredMap,
+	}, nil
+}
+
+// PublishDesired persists one immutable target and advances only its
+// component/group DesiredRelease pointer with a Kubernetes ResourceVersion
+// CAS. It never writes a workload.
+func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[string][]byte) (ReleaseRecord, DesiredRelease, error) {
+	publication, err := store.planDesiredPublication(ctx, key, files)
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	preview := publication.preview
+	record, next := preview.Record, preview.ProposedDesired
+	recordMap, executionMap, desiredMap := publication.record, publication.execution, publication.desired
+	configMaps := store.client.CoreV1().ConfigMaps(preview.Namespace)
 	created, createErr := configMaps.Create(ctx, recordMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) {
 		created, createErr = configMaps.Get(ctx, recordMap.Name, metav1.GetOptions{})
@@ -103,22 +178,6 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	}
 	if createErr != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian release record: %w", createErr)
-	}
-	next := DesiredRelease{
-		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: key.Component, Group: key.Group,
-		RecordDigest: record.RecordDigest, Generation: snapshot.Desired.Generation + 1,
-	}
-	executionData := map[string]string{
-		"execution-plan.json": string(bundle.Files["execution-plan.json"]),
-		"record-digest":       record.RecordDigest,
-	}
-	if totalConfigMapBytes(executionData) > maxRecordBytes {
-		return ReleaseRecord{}, DesiredRelease{}, errors.New("Guardian execution snapshot exceeds the bounded ConfigMap size")
-	}
-	executionMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: executionSnapshotName(key, next.Generation), Namespace: target.Namespace, Labels: guardianLabels(key)},
-		Immutable:  &immutable,
-		Data:       executionData,
 	}
 	executionCreated, executionErr := configMaps.Create(ctx, executionMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(executionErr) {
@@ -131,22 +190,14 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if executionErr != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian execution snapshot: %w", executionErr)
 	}
-	raw, err := declarativerelease.CanonicalJSON(next)
-	if err != nil {
-		return ReleaseRecord{}, DesiredRelease{}, err
-	}
-	desiredMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: desiredName(key), Namespace: target.Namespace, Labels: guardianLabels(key)},
-		Data:       map[string]string{"desired.json": string(raw)},
-	}
 	current, getErr := configMaps.Get(ctx, desiredMap.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(getErr) {
-		if snapshot.DesiredResourceVersion != "" {
+		if preview.DesiredResourceVersion != "" {
 			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease disappeared before CAS")
 		}
 		_, err = configMaps.Create(ctx, desiredMap, metav1.CreateOptions{})
 	} else if getErr == nil {
-		if current.ResourceVersion != snapshot.DesiredResourceVersion {
+		if current.ResourceVersion != preview.DesiredResourceVersion {
 			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease changed before resourceVersion CAS")
 		}
 		updated := current.DeepCopy()

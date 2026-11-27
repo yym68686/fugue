@@ -5,6 +5,7 @@ DOCKER ?= docker
 .PHONY: test test-scripts prepush generate-openapi generate-openapi-check build build-api build-controller build-agent build-drain-agent build-telemetry-agent build-observability-pilot build-image-cache build-edge build-dns build-cli build-app-ssh-image run-api run-controller run-agent run-telemetry-agent
 
 test:
+	go run ./cmd/fugue-control-migration check .
 	python3 scripts/generate_postgres_image_catalog.py --check
 	python3 -m unittest scripts.test_generate_postgres_image_catalog
 	python3 -m unittest scripts.test_baked_postgres scripts.test_release_external_controller
