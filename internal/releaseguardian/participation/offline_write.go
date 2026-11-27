@@ -12,6 +12,7 @@ import (
 
 	"fugue/internal/model/edgecohort"
 	"fugue/internal/productioncontrol"
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -56,15 +57,10 @@ func offlineHoldPatch(s productioncontrol.Submission, live *corev1.Node) (holdIn
 	return p, body, err
 }
 
-// writeOfflineHoldOnce is intentionally not wired to a command or controller.
 // After a request is sent, no error authorizes a replay or settlement.
 // The result is a provider response, not an independent execution witness.
-func writeOfflineHoldOnce(ctx context.Context, config *rest.Config, s productioncontrol.Submission, live *corev1.Node) (*corev1.Node, error) {
+func writeOfflineHoldOnce(ctx context.Context, client rest.Interface, s productioncontrol.Submission, live *corev1.Node) (*corev1.Node, error) {
 	p, body, err := offlineHoldPatch(s, live)
-	if err != nil {
-		return nil, err
-	}
-	client, err := offlineHoldClient(config)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +78,17 @@ func writeOfflineHoldOnce(ctx context.Context, config *rest.Config, s production
 		return nil, errors.New("offline hold response did not verify the exact changed Node; leave the claim for independent reconciliation")
 	}
 	return &observed, nil
+}
+
+func verifyOfflineWriterIdentity(ctx context.Context, client rest.Interface, writer string) error {
+	raw, err := client.Post().AbsPath("/apis/authentication.k8s.io/v1/selfsubjectreviews").MaxRetries(0).
+		SetHeader("Content-Type", "application/json").Body([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview"}`)).
+		Do(ctx).Raw()
+	var response authv1.SelfSubjectReview
+	if err != nil || json.Unmarshal(raw, &response) != nil || response.Status.UserInfo.Username != writer {
+		return errors.New("Kubernetes did not verify the designated offline hold writer identity")
+	}
+	return nil
 }
 
 func offlineHoldClient(config *rest.Config) (rest.Interface, error) {

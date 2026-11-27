@@ -21,6 +21,21 @@ const maxKubernetesCABytes = 16 << 10
 // constructing a transport carrying Kubernetes credentials. VerifyNamespace
 // must also be called before observing objects.
 func NewBoundKubernetesObserver(config *rest.Config, policy productioncontrol.ParticipationPolicy) (*KubernetesObserver, error) {
+	cfg, err := bindKubernetesConfig(config, policy)
+	if err != nil {
+		return nil, err
+	}
+	o, err := NewKubernetesObserver(cfg)
+	if err != nil {
+		return nil, err
+	}
+	o.namespace = policy.Namespace
+	o.namespaceUID = policy.Kubernetes.NamespaceUID
+	o.binding = *policy.Kubernetes
+	return o, nil
+}
+
+func bindKubernetesConfig(config *rest.Config, policy productioncontrol.ParticipationPolicy) (*rest.Config, error) {
 	if config == nil || policy.Schema != productioncontrol.BoundParticipationPolicySchema ||
 		policy.Kubernetes == nil || policy.Kubernetes.Validate() != nil ||
 		config.Host != policy.Kubernetes.Endpoint || config.ServerName != "" {
@@ -61,14 +76,7 @@ func NewBoundKubernetesObserver(config *rest.Config, policy productioncontrol.Pa
 	cfg.CAFile = ""
 	// Preserve exactly the validated certificate, never reopen a CA path.
 	cfg.CAData = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
-	o, err := NewKubernetesObserver(cfg)
-	if err != nil {
-		return nil, err
-	}
-	o.namespace = policy.Namespace
-	o.namespaceUID = policy.Kubernetes.NamespaceUID
-	o.binding = *policy.Kubernetes
-	return o, nil
+	return cfg, nil
 }
 
 // VerifyNamespace verifies the live approved namespace instance on the

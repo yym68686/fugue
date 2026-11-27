@@ -120,8 +120,8 @@ state digest must match the last independently verified journal version.
 `inspect SUBMISSION` displays the decoded hold and its exact rollback values
 together with the digest, without accessing the cluster.
 The draft does not anchor a baseline, reserve a claim, recognize readmission,
-or authorize any Kubernetes action. There is no wired executor for this
-submission yet; do not record production approvals for it as a cutover.
+or authorize any Kubernetes action. The dedicated offline dispatcher below
+does not support readmission or recovering holds.
 
 `preflight-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
 [PRIVATE_TOKEN_FILE]` re-observes the Node identified by the submission.
@@ -158,14 +158,15 @@ annotations, from the exact prior values to the proposed values, on the
 enrolled UID and pre-write resourceVersion. The writer cannot use this
 guard for a recovery transition; its stability timer must start at actual
 application, not draft time. The guard does not grant RBAC or prove that
-the legacy writer has drained. It is not wired to an installer or executor.
+the legacy writer has drained. The dispatcher verifies the stored guard
+but cannot install or promote it.
 
 The offline hold write primitive sends one JSON Patch over a fresh,
 hostname-verified TLS connection, without a proxy, redirects or retries.
 The patch tests the enrolled Node UID and resourceVersion before changing
 the two owned annotations. Its response is not a settlement witness. It
-is covered against an isolated Kubernetes API and is not exposed by a
-command or controller.
+is covered against an isolated Kubernetes API. Only the gated offline
+dispatch path below invokes it in Guardian.
 
 `observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER`
 reads the policy and binding twice on the approved cluster and compares
@@ -214,6 +215,26 @@ records for admission across serving endpoints, old permission revocation,
 old request drainage, and native writer identity. Neither an owner
 approval nor the observation commands can supply that attestation. No
 collector or production authority has been provisioned for this operation.
+
+`fugue-release-guardian participation-offline-dispatch CONFIG INTENT_DIGEST
+APPROVAL_DIGEST PROVIDER_ATTESTATION` runs one explicit offline annotation
+transition; it is not triggered by GitHub, the normal Guardian reconcile loop,
+or an owner approval alone. It loads the immutable submission from the journal,
+verifies the dedicated provider writer, and repeats the live shadow and
+authority checks after reserving the one-time fence. A lost response or crash
+leaves the claim pending; invoke `observe-participation-pending` to check it,
+not another writer. A successful PATCH response does not settle the claim.
+
+The mounted settings are `journalFile`, `actor`, `writer` (a dedicated
+ServiceAccount username), `writerKubeconfig`, `writerContext`, `readerKubeconfig`,
+`readerContext`, `observerPublicKey` (base64 Ed25519), and optional
+`dnsObserverTokenFile` for a Ready Node's Fugue observation. The journal
+principal reads stored topology, baselines, approvals, claims and results,
+and may append claims only; it cannot approve, activate topology, anchor,
+or settle. The Kubernetes reader gets observation access only and the
+writer gets SelfSubjectReview and the exact scoped Node patch permission,
+not policy management or other Node/Pod actions. No role or attestation is
+provisioned by running the command.
 
 ## Single-Deployment release draft
 

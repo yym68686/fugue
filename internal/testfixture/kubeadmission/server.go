@@ -25,7 +25,7 @@ import (
 )
 
 // Start never uses kubeconfig, an existing cluster, a
-// Docker daemon, or the network. Both child servers bind only to loopback
+// Docker daemon, or a remote network. Both child servers bind only to loopback
 // with private temporary state and a randomly generated client token.
 func Start(t *testing.T, identities ...string) (*rest.Config, map[string]*rest.Config) {
 	t.Helper()

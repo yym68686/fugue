@@ -57,6 +57,20 @@ func NewJournal(db *sql.DB, trusted Approvers) (*Journal, error) {
 	return &Journal{db: db, trusted: keys, now: time.Now}, nil
 }
 
+// VerifyIndependentObserverKey prevents an approval authority from being
+// configured as the technical witness for the same execution journal.
+func (j *Journal) VerifyIndependentObserverKey(key ed25519.PublicKey) error {
+	if len(key) != ed25519.PublicKeySize {
+		return errors.New("invalid production observer key")
+	}
+	for _, owner := range j.trusted {
+		if bytes.Equal(key, owner.PublicKey) {
+			return errors.New("provider observer key must not also authorize production intent")
+		}
+	}
+	return nil
+}
+
 type Recorded struct {
 	Digest  string
 	Created bool
