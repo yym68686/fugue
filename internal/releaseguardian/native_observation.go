@@ -52,6 +52,10 @@ func (p *NativePublisher) ObservePublication(ctx context.Context, intentDigest s
 	if result != nil {
 		return observation, nil
 	}
+	return p.observeNativePointer(ctx, intent, payload, observation)
+}
+
+func (p *NativePublisher) observeNativePointer(ctx context.Context, intent productioncontrol.Intent, payload nativeReleasePayload, observation NativePublicationObservation) (NativePublicationObservation, error) {
 	key := payload.ProposedRecord.Key()
 	target, configured := p.store.targets[key]
 	if !configured || target.Namespace != payload.Namespace {
@@ -69,8 +73,8 @@ func (p *NativePublisher) ObservePublication(ctx context.Context, intentDigest s
 		return observation, errors.New("native Guardian DesiredRelease pointer is invalid")
 	}
 	observation.Desired, observation.ResourceVersion = &desired, object.ResourceVersion
-	exactClaim := object.Annotations[nativeIntentAnnotation] == claim.IntentDigest &&
-		object.Annotations[nativeFenceAnnotation] == strconv.FormatInt(claim.Fence, 10)
+	exactClaim := object.Annotations[nativeIntentAnnotation] == observation.Claim.IntentDigest &&
+		object.Annotations[nativeFenceAnnotation] == strconv.FormatInt(observation.Claim.Fence, 10)
 	switch {
 	case intent.Generation < math.MaxInt64 && desired.Generation == intent.Generation+1 && desired.RecordDigest == intent.TargetDigest && exactClaim:
 		observation.Pointer = NativePointerCandidate

@@ -186,7 +186,8 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 	}
 	// Until the journal can atomically reserve multiple resource fences, do
 	// not allow a release to mutate shared objects or delegate a transition.
-	if workload.Namespace != preview.Namespace || workload.APIVersion != "apps/v1" || workload.Kind != "Deployment" ||
+	if publication.monitorComponent != bundle.Release.ComponentID ||
+		workload.Namespace != preview.Namespace || workload.APIVersion != "apps/v1" || workload.Kind != "Deployment" ||
 		bundle.Release.Transition != nil || len(bundle.Release.RuntimeResourcesFromForward) != 0 ||
 		bundle.Release.Workload.NodeParticipation != "" || prewrite.Participation != nil ||
 		!prewrite.Present || prewrite.UID == "" || prewrite.ResourceVersion == "" || len(prewrite.Resources) != 1 ||
