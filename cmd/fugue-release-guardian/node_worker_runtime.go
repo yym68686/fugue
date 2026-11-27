@@ -49,6 +49,10 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntime(ctx context.Context, 
 }
 
 func (a *frontAuthorityActivator) observeNodeWorkerRuntimeWithRetirement(ctx context.Context, j edgegroupfront.NodeWorkerJournal, requireCandidate, requirePublicReady, excluded bool) (nodeWorkerRuntime, error) {
+	return a.readNodeWorkerRuntime(ctx, j, requireCandidate, requirePublicReady, excluded, false)
+}
+
+func (a *frontAuthorityActivator) readNodeWorkerRuntime(ctx context.Context, j edgegroupfront.NodeWorkerJournal, requireCandidate, requirePublicReady, excluded, baseline bool) (nodeWorkerRuntime, error) {
 	var found nodeWorkerRuntime
 	ns, nodeName, group := a.config.Namespace, j.Recipient.Node, a.config.GroupID
 	if j.Recipient.Group != group {
@@ -57,10 +61,10 @@ func (a *frontAuthorityActivator) observeNodeWorkerRuntimeWithRetirement(ctx con
 	n, err := a.client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 	if err != nil || string(n.UID) != j.NodeUID || !repairNodeReady(*n) ||
 		n.Labels["fugue.io/edge-group-id"] != group || n.Labels["fugue.io/role.edge"] != "true" ||
-		n.Labels["fugue.io/schedulable"] == "false" || n.Labels[edgecohort.PhaseLabel] == edgecohort.Preparing {
+		(!baseline && n.Labels["fugue.io/schedulable"] == "false") || n.Labels[edgecohort.PhaseLabel] == edgecohort.Preparing {
 		return found, errors.Join(errors.New("node Worker does not have its exact ready Node"), err)
 	}
-	if held, err := edgecohort.ReleaseHeld(*n, group); err != nil || held {
+	if held, err := edgecohort.ReleaseHeld(*n, group); err != nil || (held && !baseline) {
 		return found, errors.Join(errors.New("node Worker is excluded from releases by Node policy"), err)
 	}
 	found.node, found.nodeRV = n.Name, n.ResourceVersion

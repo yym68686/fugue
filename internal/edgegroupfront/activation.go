@@ -194,22 +194,29 @@ func ReadActivationState(path string) (ActivationState, bool, error) {
 	if err != nil {
 		return ActivationState{}, false, err
 	}
+	state, err := DecodeActivationState(raw)
+	return state, err == nil, err
+}
+
+// DecodeActivationState applies the same validation to a provider readback
+// as the Front applies when reading its local state.
+func DecodeActivationState(raw []byte) (ActivationState, error) {
 	if len(raw) == 0 || len(raw) > 64<<10 {
-		return ActivationState{}, false, errors.New("edge front activation state size is invalid")
+		return ActivationState{}, errors.New("edge front activation state size is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var state ActivationState
 	if err := decoder.Decode(&state); err != nil {
-		return ActivationState{}, false, errors.New("edge front activation state is invalid")
+		return ActivationState{}, errors.New("edge front activation state is invalid")
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ActivationState{}, false, errors.New("edge front activation state has trailing data")
+		return ActivationState{}, errors.New("edge front activation state has trailing data")
 	}
 	if err := validateActivationState(state); err != nil {
-		return ActivationState{}, false, err
+		return ActivationState{}, err
 	}
-	return state, true, nil
+	return state, nil
 }
 
 func validateActivationRequest(request ActivationCASRequest) error {

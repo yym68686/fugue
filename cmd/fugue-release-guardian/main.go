@@ -41,6 +41,11 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && (os.Args[1] == "node-worker-baseline-checkpoint" || os.Args[1] == "node-worker-baseline-import") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runNodeWorkerBaseline(ctx, os.Args[1] == "node-worker-baseline-import", os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "node-worker-checkpoint" || os.Args[1] == "node-worker-settle") {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()

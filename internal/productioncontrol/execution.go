@@ -1,6 +1,7 @@
 package productioncontrol
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -95,6 +96,22 @@ func NewExecutionJournal(journal *Journal, evidence ExecutionEvidence) (*Executi
 }
 
 func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, baseline Baseline) (bool, error) {
+	if strings.HasPrefix(baseline.ResourceID, FrontWorkerResourcePrefix) {
+		return false, errors.New("Front/Worker enrollment requires the verified group snapshot")
+	}
+	return e.anchorResource(ctx, actor, baseline, nil)
+}
+
+// AnchorFrontWorkerBaseline persists the group snapshot with the verified head.
+func (e *ExecutionJournal) AnchorFrontWorkerBaseline(ctx context.Context, actor string, baseline Baseline,
+	verifiedSnapshot func() []byte) (bool, error) {
+	if verifiedSnapshot == nil || !strings.HasPrefix(baseline.ResourceID, FrontWorkerResourcePrefix) {
+		return false, errors.New("Front/Worker enrollment requires the verified group snapshot")
+	}
+	return e.anchorResource(ctx, actor, baseline, verifiedSnapshot)
+}
+
+func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, baseline Baseline, verifiedSnapshot func() []byte) (bool, error) {
 	if !tokenPattern.MatchString(actor) || !baseline.Scope.valid() || !baseline.Verified.valid() || !digestPattern.MatchString(baseline.EvidenceDigest) {
 		return false, errors.New("invalid production resource baseline")
 	}
@@ -109,6 +126,14 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 	}
 	if err := e.evidence.VerifyBaseline(ctx, baseline); err != nil {
 		return false, err
+	}
+	var snapshot []byte
+	if verifiedSnapshot != nil {
+		snapshot = bytes.Clone(verifiedSnapshot())
+		version, err := FrontWorkerBaselineVersion(snapshot)
+		if err != nil || version != baseline.Verified {
+			return false, errors.New("Front/Worker baseline snapshot does not match the verified version")
+		}
 	}
 	record, err := e.journal.record(ctx, baseline.EvidenceDigest, func(tx *sql.Tx) (bool, error) {
 		if isNode {
@@ -127,9 +152,9 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 			}
 		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO fugue_control.resource_baselines
-			(cluster_id,resource_id,generation,verified_digest,evidence_digest,actor)
-			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (cluster_id,resource_id) DO NOTHING`,
-			baseline.ClusterID, baseline.ResourceID, baseline.Verified.Generation, baseline.Verified.Digest, baseline.EvidenceDigest, actor)
+			(cluster_id,resource_id,generation,verified_digest,evidence_digest,actor,verified_snapshot)
+			VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (cluster_id,resource_id) DO NOTHING`,
+			baseline.ClusterID, baseline.ResourceID, baseline.Verified.Generation, baseline.Verified.Digest, baseline.EvidenceDigest, actor, snapshot)
 		if err != nil {
 			return false, err
 		}
@@ -143,6 +168,12 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 		}
 		if stored.Baseline != baseline {
 			return false, ErrBaselineConflict
+		}
+		if snapshot != nil {
+			existing, err := readFrontWorkerBaselineSnapshot(ctx, tx, baseline.Scope, stored.Verified)
+			if err != nil || !bytes.Equal(existing, snapshot) {
+				return false, errors.Join(ErrBaselineConflict, err)
+			}
 		}
 		return false, nil
 	})
@@ -325,6 +356,11 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		state, err := readResource(ctx, tx, intent.scope())
 		if err != nil {
 			return false, err
+		}
+		if intent.Operation == FrontWorker {
+			if _, err := readFrontWorkerBaselineSnapshot(ctx, tx, intent.scope(), state.Verified); err != nil {
+				return false, err
+			}
 		}
 		if state.Pending != "" {
 			return false, ErrResourceBusy

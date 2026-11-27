@@ -36,10 +36,16 @@ func NewBoundKubernetesObserver(config *rest.Config, policy productioncontrol.Pa
 }
 
 func bindKubernetesConfig(config *rest.Config, policy productioncontrol.ParticipationPolicy) (*rest.Config, error) {
-	if config == nil || policy.Schema != productioncontrol.BoundParticipationPolicySchema ||
-		policy.Kubernetes == nil || policy.Kubernetes.Validate() != nil ||
-		config.Host != policy.Kubernetes.Endpoint || config.ServerName != "" {
-		return nil, errors.New("Kubernetes endpoint does not match the approved participation topology")
+	if policy.Schema != productioncontrol.BoundParticipationPolicySchema || policy.Kubernetes == nil {
+		return nil, errors.New("participation topology has no approved Kubernetes endpoint")
+	}
+	return BindKubernetesConfig(config, *policy.Kubernetes)
+}
+
+// BindKubernetesConfig pins credentials to the provisioned endpoint and CA.
+func BindKubernetesConfig(config *rest.Config, binding productioncontrol.ParticipationKubernetesBinding) (*rest.Config, error) {
+	if config == nil || binding.Validate() != nil || config.Host != binding.Endpoint || config.ServerName != "" {
+		return nil, errors.New("Kubernetes endpoint does not match the approved provider binding")
 	}
 	raw := config.CAData
 	if len(raw) == 0 && config.CAFile != "" {
@@ -69,8 +75,8 @@ func bindKubernetesConfig(config *rest.Config, policy productioncontrol.Particip
 		return nil, errors.New("Kubernetes config does not contain one approved CA certificate")
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil || !cert.IsCA || digest(cert.Raw) != policy.Kubernetes.CADigest {
-		return nil, errors.New("Kubernetes CA does not match the approved participation topology")
+	if err != nil || !cert.IsCA || digest(cert.Raw) != binding.CADigest {
+		return nil, errors.New("Kubernetes CA does not match the approved provider binding")
 	}
 	cfg := rest.CopyConfig(config)
 	cfg.CAFile = ""
