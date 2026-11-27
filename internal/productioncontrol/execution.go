@@ -168,17 +168,23 @@ func (e *ExecutionJournal) VerifyOpenClaim(ctx context.Context, claim Claim) err
 // Execution reads the persistent handle for recovery, whether or not a result
 // is already known. It does not issue or renew dispatch authority.
 func (e *ExecutionJournal) Execution(ctx context.Context, scope Scope, intentDigest string) (Claim, *ExecutionResult, error) {
+	return e.journal.ReadExecution(ctx, scope, intentDigest)
+}
+
+// ReadExecution exposes an existing handle without equipping the caller
+// with a verifier that can anchor or settle it.
+func (j *Journal) ReadExecution(ctx context.Context, scope Scope, intentDigest string) (Claim, *ExecutionResult, error) {
 	if !scope.valid() || !digestPattern.MatchString(intentDigest) {
 		return Claim{}, nil, errors.New("invalid production execution identity")
 	}
-	claim, err := readClaim(ctx, e.journal.db, intentDigest)
+	claim, err := readClaim(ctx, j.db, intentDigest)
 	if err != nil || claim.Scope != scope {
 		if err == nil {
 			err = sql.ErrNoRows
 		}
 		return Claim{}, nil, err
 	}
-	result, err := readResult(ctx, e.journal.db, intentDigest)
+	result, err := readResult(ctx, j.db, intentDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return claim, nil, nil
 	}

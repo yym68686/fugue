@@ -191,6 +191,15 @@ that the related DNS traffic has been withdrawn. The report has
 `executionEvidence=false`; none of these observations authorizes a retry,
 settlement or advancement of the last verified version on its own.
 
+`observe-participation-pending JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST`
+is the restart/read-only form for unresolved dispatches. It loads the
+stored submission by digest, checks the same pending fence, approval
+reference, last verified version and approved topology before and after
+provider readback, and refuses output if the claim settles or ownership
+changes during observation. It never accepts a local replacement
+submission, reserves another dispatch or settles the claim. This
+command reports `executionEvidence=false` even when the target is visible.
+
 Pre-dispatch authority for an offline hold is a separate, short-lived
 provider attestation. It binds the reviewed intent, approved Kubernetes
 identity and topology, dedicated writer, and exact type-checked policy and

@@ -23,6 +23,7 @@ import (
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -45,6 +46,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
        fugue-production-control observe-participation-offline-readback JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
+       fugue-production-control observe-participation-pending JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -75,6 +77,27 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			Kind       string `json:"kind"`
 			Items      []any  `json:"items"`
 		}{"v1", "List", []any{policy, binding}})
+	case "observe-participation-pending":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		kubeConfig, err := readKubeObservationConfig(args[2], args[3])
+		if err != nil {
+			return err
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			pending, err := participation.ObservePendingOfflineHold(ctx, j, kubeConfig, cluster, args[4])
+			if err != nil {
+				return err
+			}
+			return emit(struct {
+				Kind              string                                   `json:"kind"`
+				ExecutionEvidence bool                                     `json:"executionEvidence"`
+				JournalCluster    string                                   `json:"journalCluster"`
+				KubeContext       string                                   `json:"kubeContext"`
+				Pending           participation.PendingOfflineHoldReadback `json:"pending"`
+			}{"participation_pending_offline_hold_readback", false, cluster, args[3], pending})
+		})
 	case "draft-participation":
 		if len(args) != 4 && len(args) != 6 {
 			return errors.New(usage)
@@ -222,9 +245,6 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		if usesToken && !filepath.IsAbs(tokenPath) {
 			return errors.New("participation observation requires an absolute token file path")
 		}
-		if !filepath.IsAbs(args[2]) || args[3] == "" {
-			return errors.New("participation observation requires an absolute kubeconfig path and explicit context")
-		}
 		node := args[4]
 		var submission productioncontrol.Submission
 		if usesSubmission {
@@ -238,11 +258,9 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				return err
 			}
 		}
-		loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: args[2]}
-		overrides := &clientcmd.ConfigOverrides{CurrentContext: args[3]}
-		kubeConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides).ClientConfig()
+		kubeConfig, err := readKubeObservationConfig(args[2], args[3])
 		if err != nil {
-			return errors.New("could not load the requested read-only Kubernetes context")
+			return err
 		}
 		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
 			if usesSubmission && submission.Intent.ClusterID != cluster {
@@ -461,6 +479,19 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	default:
 		return errors.New(usage)
 	}
+}
+
+func readKubeObservationConfig(path, context string) (*rest.Config, error) {
+	if !filepath.IsAbs(path) || context == "" {
+		return nil, errors.New("participation observation requires an absolute kubeconfig path and explicit context")
+	}
+	loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
+	overrides := &clientcmd.ConfigOverrides{CurrentContext: context}
+	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, overrides).ClientConfig()
+	if err != nil {
+		return nil, errors.New("could not load the requested read-only Kubernetes context")
+	}
+	return cfg, nil
 }
 
 type participationObservationReport struct {
