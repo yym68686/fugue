@@ -112,6 +112,48 @@ func TestProcessExecutorRejectsACompensatedRepairWithUnprovenTerminalMetadata(t 
 	}
 }
 
+func TestNativeProcessExecutorRequiresExactFinalizedReceipt(t *testing.T) {
+	configureInClusterExecutorFixture(t)
+	snapshot := processSnapshot(t)
+	snapshot.NativePublication, snapshot.Managed = true, true
+	snapshot.NativeIntent, snapshot.NativeFence = testDigest, 1
+	snapshot.DesiredResourceVersion = "30"
+	snapshot.Desired.RecordDigest = snapshot.Record.RecordDigest
+	snapshot.Bundle.Prepared.PlanDigest = testDigest
+	for _, tc := range []struct {
+		name, status, plan, exit string
+		accept                   bool
+	}{
+		{"verified", "verified", snapshot.Bundle.Prepared.PlanDigest, "0", true},
+		{"known compensation", "compensated", snapshot.Bundle.Prepared.PlanDigest, "0", true},
+		{"unknown compensation", "compensated", snapshot.Bundle.Prepared.PlanDigest, "1", false},
+		{"wrong execution snapshot", "verified", otherDigest, "0", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := processResult(t, tc.status, "fixture")
+			result.ExecutionPlanDigest = tc.plan
+			result = resealProcessResult(t, result)
+			raw, err := declarativerelease.CanonicalJSON(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "executor")
+			script := fmt.Sprintf("#!/bin/sh\nset -eu\ntest -n \"$FUGUE_RELEASE_NATIVE_RUNTIME_BINDING\"\ntest -z \"$FUGUE_RELEASE_TRUSTED_CURRENT_ARTIFACT\"\nprintf '%%s\\n' %q\nexit %s\n", string(raw), tc.exit)
+			if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			executor, err := NewProcessExecutor(path, "pod-uid")
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := executor.Rollout(context.Background(), snapshot)
+			if (err == nil) != tc.accept || tc.accept && (receipt.Status != tc.status || receipt.ReceiptDigest != result.ReceiptDigest) {
+				t.Fatalf("receipt=%+v error=%v", receipt, err)
+			}
+		})
+	}
+}
+
 func TestProcessExecutorFailsClosedOnMissingReceipt(t *testing.T) {
 	configureInClusterExecutorFixture(t)
 	snapshot := processSnapshot(t)

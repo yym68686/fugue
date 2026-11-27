@@ -4,13 +4,25 @@ This is an implementation boundary, not proof of a production cutover. The
 legacy workflow and runtime are still needed for resources that have not passed
 the independent cutover checks.
 
-- On an approved, marked DesiredRelease, Guardian passes the exact pointer
-  resourceVersion, candidate record digest, and LKG monitor digest to its child.
+- On an approved, marked DesiredRelease, Guardian compares the live pointer,
+  candidate, and rollback monitor with the signed journal payload. It reserves
+  an append-only launch entry under the pending resource fence and passes the
+  exact pointer resourceVersion, candidate, LKG monitor, intent, and fence to
+  its child. Publication and child launch consume different permissions. A
+  recorded launch is never renewed or replayed, even if Guardian crashes before
+  starting the child. Unknown outcomes require separate observation and recovery.
   A dedicated native Guardian must be configured with
   `FUGUE_RELEASE_NATIVE_REGISTRY` (explicit HTTPS registry host, optionally with
   port), and optionally `FUGUE_RELEASE_NATIVE_REGISTRY_AUTH_FILE` (mounted
   read-only JSON with `username` and `password`). Neither the mounted credential
   nor authorization to promote is provided by GitHub.
+- `FUGUE_RELEASE_NATIVE_JOURNAL_FILE` names a read-only mounted JSON file
+  containing `cluster`, `database` (one PostgreSQL endpoint with hostname-verified
+  TLS), and `ownerPublicKeys` (key ID to base64-encoded Ed25519 public key).
+  Provision the principal outside GitHub: `USAGE` on `fugue_control`, `SELECT`
+  on intents, approvals, resource baselines, claims, results and launches, and
+  `INSERT` only on `execution_launches`. It must not own the schema. It cannot
+  add approval or terminal records or update and delete historical entries.
 - The dedicated writer handles exactly one enrolled target. It does not start
   legacy candidate imports, authority activators, or the legacy artifact
   pruner, and it will not publish status or reconcile an unmarked pointer.

@@ -22,6 +22,7 @@ type nativeReleasePayload struct {
 	ProposedRecord        ReleaseRecord     `json:"proposedRecord"`
 	ExpectedDesiredDigest string            `json:"expectedDesiredDigest"`
 	RollbackManifest      string            `json:"rollbackManifestDigest"`
+	RollbackMonitor       string            `json:"rollbackMonitorDigest"`
 	Files                 map[string][]byte `json:"files"`
 }
 
@@ -42,6 +43,7 @@ func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, cluster
 	binding := nativeReleasePayload{
 		Namespace: preview.Namespace, ProposedRecord: preview.Record, ExpectedDesiredDigest: preview.CurrentDesired.RecordDigest,
 		RollbackManifest: preview.RollbackManifestDigest, Files: publication.bundle.Files,
+		RollbackMonitor: preview.RollbackMonitorDigest,
 	}
 	payload, err := declarativerelease.CanonicalJSON(binding)
 	if err != nil {

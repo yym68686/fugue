@@ -88,6 +88,8 @@ type storedRelease struct {
 	previousStatus       *ReleaseStatus
 	managed              bool
 	nativePublication    bool
+	nativeIntent         string
+	nativeFence          int64
 	lkgMonitorDigest     string
 	desiredRecordMissing bool
 }
@@ -113,7 +115,7 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 		PreviousStatus: stored.previousStatus,
 		Bundle:         stored.bundle, CurrentMonitorData: stored.currentMonitorData,
 		LKGMonitorRecordDigest: stored.lkgMonitorDigest, DesiredRecordMissing: stored.desiredRecordMissing, Managed: stored.managed,
-		NativePublication: stored.nativePublication,
+		NativePublication: stored.nativePublication, NativeIntent: stored.nativeIntent, NativeFence: stored.nativeFence,
 	}, nil
 }
 
@@ -231,12 +233,18 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	desiredRV := ""
 	managed := false
 	nativePublication := false
+	var nativeIntent string
+	var nativeFence int64
 	desiredMap, desiredErr := configMaps.Get(ctx, desiredName(target.Key), metav1.GetOptions{})
 	if desiredErr == nil {
 		managed = true
 		nativePublication = hasNativePublicationMarker(desiredMap.Annotations)
 		if nativePublication && !validNativePublicationMarker(desiredMap.Annotations) {
 			return storedRelease{}, errors.New("DesiredRelease has an invalid native approval fence")
+		}
+		if nativePublication {
+			nativeIntent = desiredMap.Annotations[nativeIntentAnnotation]
+			nativeFence, _ = strconv.ParseInt(desiredMap.Annotations[nativeFenceAnnotation], 10, 64)
 		}
 		desiredRV = desiredMap.ResourceVersion
 		if err := decodeStrict([]byte(desiredMap.Data["desired.json"]), &desired); err != nil || desired.Key() != target.Key || desired.Validate() != nil {
@@ -325,6 +333,8 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 		desiredRV: desiredRV, statusRV: statusRV, previousStatus: previousStatus, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
 		desiredRecordMissing: desiredRecordMissing,
 		nativePublication:    nativePublication,
+		nativeIntent:         nativeIntent,
+		nativeFence:          nativeFence,
 	}, nil
 }
 

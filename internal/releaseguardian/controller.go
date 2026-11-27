@@ -32,6 +32,8 @@ type Snapshot struct {
 	CurrentMonitorData     map[string]string
 	LKGMonitorRecordDigest string
 	NativePublication      bool
+	NativeIntent           string
+	NativeFence            int64
 	// DesiredRecordMissing means the mutable DesiredRelease points at an
 	// immutable candidate that was pruned. The stable monitor remains the
 	// runtime authority until an explicit predecessor-bound successor replaces
@@ -94,6 +96,7 @@ type Executor interface {
 type Controller struct {
 	mode       Mode
 	nativeOnly bool
+	nativeGate NativeRolloutGate
 	store      Store
 	executor   Executor
 	queue      workqueue.TypedRateLimitingInterface[Key]
@@ -104,8 +107,16 @@ func NewController(mode Mode, store Store, executor Executor) (*Controller, erro
 	return newController(mode, false, store, executor)
 }
 
-func NewNativeController(store Store, executor Executor) (*Controller, error) {
-	return newController(ModeWrite, true, store, executor)
+func NewNativeController(store Store, executor Executor, gate NativeRolloutGate) (*Controller, error) {
+	if gate == nil {
+		return nil, errors.New("native Guardian requires a durable rollout gate")
+	}
+	controller, err := newController(ModeWrite, true, store, executor)
+	if err != nil {
+		return nil, err
+	}
+	controller.nativeGate = gate
+	return controller, nil
 }
 
 func newController(mode Mode, nativeOnly bool, store Store, executor Executor) (*Controller, error) {
@@ -174,6 +185,9 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	now := controller.now().UTC()
 	if err := snapshot.Validate(now); err != nil {
 		return err
+	}
+	if controller.nativeOnly {
+		return controller.reconcileNative(ctx, snapshot, now)
 	}
 	// A crash can lose the terminal receipt after authority commits. Reconcile
 	// that exact immutable forward target before considering another rollout.

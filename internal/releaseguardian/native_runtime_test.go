@@ -26,7 +26,7 @@ func TestNativeRuntimeChecksLiveApprovalAndExactCandidate(t *testing.T) {
 		}
 	}
 	binding := NativeRuntimeBinding{Key: f.key, DesiredResourceVersion: "20",
-		DesiredRecordDigest: p.preview.Record.RecordDigest, LKGMonitorRecordDigest: f.stableMonitor.RecordDigest}
+		DesiredRecordDigest: p.preview.Record.RecordDigest, LKGMonitorRecordDigest: f.stableMonitor.RecordDigest, IntentDigest: testDigest, Fence: 2}
 	if err := binding.VerifyCandidate(ctx, core, p.preview.Namespace, f.candidate); err != nil {
 		t.Fatalf("valid approval was refused: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestNativeRuntimeChecksLiveApprovalAndExactCandidate(t *testing.T) {
 	if err := binding.VerifyCandidate(ctx, core, p.preview.Namespace, f.candidate); err == nil || !strings.Contains(err.Error(), "execution snapshot") {
 		t.Fatalf("substituted snapshot did not fail closed: %v", err)
 	}
-	for _, mode := range []string{"replaced", "malformed fence", "unmarked"} {
+	for _, mode := range []string{"replaced", "malformed fence", "different valid fence", "unmarked"} {
 		t.Run(mode, func(t *testing.T) {
 			pointer := p.desired.DeepCopy()
 			switch mode {
@@ -46,6 +46,8 @@ func TestNativeRuntimeChecksLiveApprovalAndExactCandidate(t *testing.T) {
 				pointer.ResourceVersion = "21"
 			case "malformed fence":
 				pointer.Annotations[nativeFenceAnnotation] = "bogus"
+			case "different valid fence":
+				pointer.Annotations[nativeFenceAnnotation] = "3"
 			case "unmarked":
 				pointer.Annotations = nil
 			}
@@ -68,6 +70,7 @@ func TestNativeRuntimeChecksLiveApprovalAndExactCandidate(t *testing.T) {
 func TestNativeProcessEnvironmentDoesNotPassTrustedLegacyArtifact(t *testing.T) {
 	snapshot := processSnapshot(t)
 	snapshot.NativePublication = true
+	snapshot.NativeIntent, snapshot.NativeFence = testDigest, 2
 	snapshot.Managed = true
 	snapshot.DesiredResourceVersion = "30"
 	snapshot.Desired.RecordDigest = snapshot.Record.RecordDigest

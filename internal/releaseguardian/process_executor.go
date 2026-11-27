@@ -186,6 +186,9 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 	if result.Component != snapshot.Key.Component || result.ConfigSHA != snapshot.Bundle.Prepared.ConfigSHA || result.ReceiptDigest == "" {
 		return ExecutionReceipt{}, errors.New("Guardian executor receipt binding is invalid")
 	}
+	if snapshot.NativePublication && (runErr != nil || result.ExecutionPlanDigest != snapshot.Bundle.Prepared.PlanDigest) {
+		return ExecutionReceipt{}, errors.New("native Guardian result or child finalization is unproven")
+	}
 	if result.Reason == "inactive-worker-before-write" {
 		release := snapshot.Bundle.Release
 		if runErr != nil || (operation != "execute" && operation != "resume-worker-drain") ||
@@ -230,6 +233,7 @@ func executorArtifactEnvironment(snapshot Snapshot) (nativeBinding, trustedArtif
 		Key:                    snapshot.Key,
 		DesiredResourceVersion: snapshot.DesiredResourceVersion, DesiredRecordDigest: snapshot.Desired.RecordDigest,
 		LKGMonitorRecordDigest: snapshot.LKGMonitorRecordDigest,
+		IntentDigest:           snapshot.NativeIntent, Fence: snapshot.NativeFence,
 	}
 	if !binding.valid() || !snapshot.Managed || snapshot.DesiredRecordMissing || snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest {
 		return "", "", errors.New("Guardian native execution requires the loaded, fenced DesiredRelease")

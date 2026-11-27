@@ -110,6 +110,86 @@ type fakeExecutor struct {
 	repair    *ExecutionReceipt
 }
 
+type nativeRolloutGateFunc func(context.Context, Snapshot) (bool, error)
+
+func (f nativeRolloutGateFunc) ReserveRollout(ctx context.Context, snapshot Snapshot) (bool, error) {
+	return f(ctx, snapshot)
+}
+
+type lostNativeExecutor struct{ fakeExecutor }
+
+func (e *lostNativeExecutor) Rollout(context.Context, Snapshot) (ExecutionReceipt, error) {
+	e.rollouts++
+	return ExecutionReceipt{}, context.DeadlineExceeded
+}
+
+func TestNativeControllerDoesNotRelaunchAfterUnknownResult(t *testing.T) {
+	now := time.Unix(20, 0).UTC()
+	store := &fakeStore{snapshot: testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)}
+	store.snapshot.NativePublication = true
+	executor := &lostNativeExecutor{}
+	consumed := false
+	gate := nativeRolloutGateFunc(func(context.Context, Snapshot) (bool, error) {
+		if consumed {
+			return false, nil
+		}
+		consumed = true
+		return true, nil
+	})
+	for range 2 {
+		controller, err := NewNativeController(store, executor, gate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.now = func() time.Time { return now }
+		err = controller.Reconcile(context.Background(), store.snapshot.Key)
+		controller.queue.ShutDown()
+		if err != nil || store.status.State != StateRecoveryRequired {
+			t.Fatalf("reconcile after lost outcome: %+v, %v", store.status, err)
+		}
+	}
+	if executor.rollouts != 1 || executor.rollbacks != 0 || executor.repairs != 0 || store.lkgCAS != 0 {
+		t.Fatalf("unknown outcome permitted another write: executor=%+v desiredCAS=%d", executor, store.lkgCAS)
+	}
+}
+
+func TestNativeControllerRestoresPointerOnlyForBoundTerminalReceipt(t *testing.T) {
+	now := time.Unix(20, 0).UTC()
+	for _, tc := range []struct {
+		name, status string
+		valid        bool
+		cas          int
+	}{
+		{"verified", "verified", true, 0},
+		{"compensated", "compensated", true, 1},
+		{"no write", "failed-no-write", true, 1},
+		{"wrong record", "compensated", false, 0},
+		{"uncertain", "recovery-required", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{snapshot: testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)}
+			store.snapshot.NativePublication = true
+			bound := store.snapshot.Record.RecordDigest
+			if !tc.valid {
+				bound = otherDigest
+			}
+			executor := &fakeExecutor{rollout: &ExecutionReceipt{Status: tc.status, RecordDigest: bound, ReceiptDigest: testDigest}}
+			controller, err := NewNativeController(store, executor, nativeRolloutGateFunc(func(context.Context, Snapshot) (bool, error) { return true, nil }))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer controller.queue.ShutDown()
+			controller.now = func() time.Time { return now }
+			if err := controller.Reconcile(context.Background(), store.snapshot.Key); err != nil {
+				t.Fatal(err)
+			}
+			if executor.rollouts != 1 || executor.repairs != 0 || executor.rollbacks != 0 || store.lkgCAS != tc.cas || store.status.State == StateStable {
+				t.Fatalf("unexpected terminal handling: %+v", store)
+			}
+		})
+	}
+}
+
 func (executor *fakeExecutor) Rollout(context.Context, Snapshot) (ExecutionReceipt, error) {
 	executor.rollouts++
 	if executor.rollout != nil {
@@ -177,6 +257,7 @@ func TestNativeAndLegacyControllersDoNotReconcileEachOthersTargets(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
+		controller.nativeGate = nativeRolloutGateFunc(func(context.Context, Snapshot) (bool, error) { return true, nil })
 		controller.now = func() time.Time { return now }
 		if err := controller.Reconcile(context.Background(), store.snapshot.Key); err != nil {
 			t.Fatal(err)

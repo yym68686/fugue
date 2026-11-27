@@ -123,7 +123,12 @@ func runGuardian(ctx context.Context, kubeConfig *rest.Config, client kubernetes
 	}
 	var controller *releaseguardian.Controller
 	if native {
-		controller, err = releaseguardian.NewNativeController(store, executor)
+		gate, closeJournal, openErr := openNativeLaunchGate(ctx, store)
+		if openErr != nil {
+			return openErr
+		}
+		defer closeJournal()
+		controller, err = releaseguardian.NewNativeController(store, executor, gate)
 	} else {
 		controller, err = releaseguardian.NewController(mode, store, executor)
 	}
@@ -193,8 +198,8 @@ func nativeGuardianConfigured(mode releaseguardian.Mode, targets int) (bool, err
 		return false, errors.New("native runtime binding is per-execution and must not be set on Guardian startup")
 	}
 	if host == "" {
-		if os.Getenv(releaseguardian.NativeRuntimeAuthFileEnv) != "" {
-			return false, errors.New("native registry credential file requires an independent registry")
+		if os.Getenv(releaseguardian.NativeRuntimeAuthFileEnv) != "" || os.Getenv(nativeJournalFileEnv) != "" {
+			return false, errors.New("native registry credential or journal configuration requires dedicated native Guardian")
 		}
 		return false, nil
 	}

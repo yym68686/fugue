@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -144,6 +145,41 @@ func testExecutionLifecycle(t *testing.T, ctx context.Context, j, restarted *Jou
 		t.Fatalf("pending claim expired or permitted a second writer: %v", err)
 	}
 	j2.now = j1.now
+	winningIntent, winningPayload, err := w2.ReadIntent(ctx, claim.IntentDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created, err := j2.ReserveReleaseLaunch(ctx, "guardian", winningIntent, []byte("other"), claim.Fence); err == nil || created {
+		t.Fatal("launch accepted different payload")
+	}
+	if created, err := j2.ReserveReleaseLaunch(ctx, "guardian", winningIntent, winningPayload, claim.Fence+1); !errors.Is(err, ErrStaleFence) || created {
+		t.Fatalf("launch accepted unrelated fence: created=%v err=%v", created, err)
+	}
+	j2.now = func() time.Time { return now.Add(time.Hour) }
+	if created, err := j2.ReserveReleaseLaunch(ctx, "guardian", winningIntent, winningPayload, claim.Fence); err == nil || created {
+		t.Fatal("launch accepted expired approval")
+	}
+	j2.now = j1.now
+	var launched atomic.Int32
+	for i := range 10 {
+		worker := []*Journal{j1, j2}[i%2]
+		wg.Go(func() {
+			created, err := worker.ReserveReleaseLaunch(ctx, "guardian", winningIntent, winningPayload, claim.Fence)
+			if err != nil {
+				t.Errorf("reserve launch: %v", err)
+			}
+			if created {
+				launched.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	if launched.Load() != 1 {
+		t.Fatalf("launch authorized %d contenders", launched.Load())
+	}
+	if created, err := j2.ReserveReleaseLaunch(ctx, "guardian", winningIntent, winningPayload, claim.Fence); err != nil || created {
+		t.Fatalf("restart renewed launch permit: created=%v err=%v", created, err)
+	}
 	completed := ExecutionResult{Applied, Version{intent.Generation + 1, intent.TargetDigest}, evidence.terminal}
 	if _, err := w2.CompleteExecution(ctx, "worker-b", claim, completed); err == nil {
 		t.Fatal("unfenced observation was accepted as terminal")
