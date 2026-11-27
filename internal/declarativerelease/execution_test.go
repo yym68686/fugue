@@ -286,6 +286,38 @@ func TestExecuteRetainsApplyFailureWhenNoProductionWriteOccurred(t *testing.T) {
 	}
 }
 
+func TestExecuteDoesNotCompensateOrSettleARefusedOrUnconfirmedNativeWrite(t *testing.T) {
+	plan, receipt, rendered, lkg, forward := executionFixture(t)
+	for _, tc := range []struct {
+		name, reason            string
+		applyErrors             []error
+		forwardChecks, attempts int
+	}{
+		{"forward timeout", "forward-write-outcome-unknown", []error{ErrWriteOutcomeUnknown}, 0, 1},
+		{"forward refused with drift", "forward-write-rejected", []error{ErrWriteRejected}, 0, 1},
+		{"rollback timeout", "rollback-write-outcome-unknown", []error{nil, ErrWriteOutcomeUnknown}, 1, 2},
+		{"rollback refused with drift", "rollback-write-rejected", []error{nil, ErrWriteRejected}, 1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeCluster{observations: []Observation{lkg, lkg}, health: []Observation{lkg}}
+			prepared, err := PrepareExecution(context.Background(), fake, plan, "api", receipt, rendered, time.Unix(1, 0))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake.observations = []Observation{lkg, lkg}
+			fake.health = []Observation{forward, lkg}
+			fake.healthErrors = []error{errors.New("forward health failed")}
+			fake.healthTargets = nil
+			fake.applyErrors = tc.applyErrors
+			result := Execute(context.Background(), fake, plan, prepared, rendered.Forward, rendered.LKG)
+			if result.Status != "recovery-required" || result.Reason != tc.reason || fake.applies != tc.attempts ||
+				fake.deleteCreated != 0 || len(fake.healthTargets) != tc.forwardChecks {
+				t.Fatalf("unknown write was retried, compensated, or treated as known: %+v applies=%d health=%d", result, fake.applies, len(fake.healthTargets))
+			}
+		})
+	}
+}
+
 func TestFailedEdgeGroupTransitionSkipsMixedIdentityHealthCheck(t *testing.T) {
 	applyErr := errors.New("wait Guardian authority switch: transition timed out")
 	partial := stableObservation("1", "11", "ghcr.io/example/fugue-edge@"+testDigest, testSHA1)

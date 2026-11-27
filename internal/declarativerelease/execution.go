@@ -175,6 +175,14 @@ var ErrPublicRouteHealth = errors.New("independent public route health is degrad
 // traffic promotion. Never compensate another node's safely staged Worker.
 var ErrInactiveWorkerDraining = errors.New("inactive Worker awaiting connection drain")
 
+// ErrWriteOutcomeUnknown means a provider request may still commit. A read
+// of the unchanged predecessor is not permission to compensate or close it.
+var ErrWriteOutcomeUnknown = errors.New("provider write outcome is unknown")
+
+// ErrWriteRejected is a rejected single native CAS, not a legacy compound
+// apply that might have mutated prior resources before returning its error.
+var ErrWriteRejected = errors.New("provider rejected the native write")
+
 type prewritePredecessorHealthWaitKey struct{}
 type preservedRouteHealthWaitKey struct{}
 
@@ -762,7 +770,9 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 				return sealResult(result)
 			}
 			result.ForwardApplyCount = 1
-			_ = cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
+			if refusal := nativeWriteRefusal(result, "forward", cluster.Apply(ctx, release, prepared.Forward, forwardCAS)); refusal != nil {
+				return *refusal
+			}
 		}
 		forwardObservation, healthErr := cluster.WaitHealthy(ctx, release, prepared.Forward, forwardManifest)
 		convergedErr := errors.Join(cluster.Converged(ctx, release, forwardManifest), cluster.VerifyOwnershipConverged(ctx, release, forwardManifest))
@@ -782,6 +792,9 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	}
 	result.ForwardApplyCount = 1
 	applyErr := cluster.Apply(ctx, release, prepared.Forward, forwardCAS)
+	if refusal := nativeWriteRefusal(result, "forward", applyErr); refusal != nil {
+		return *refusal
+	}
 	healthCtx := ctx
 	if prepared.DegradedRoute {
 		healthCtx = withPreservedRouteHealthWait(ctx)
@@ -850,10 +863,16 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 			return sealResult(result)
 		}
 		rollbackErr = cluster.Apply(ctx, release, prepared.LKG, lkgCAS)
+		if refusal := nativeWriteRefusal(result, "rollback", rollbackErr); refusal != nil {
+			return *refusal
+		}
 		createdDeleteErr := cluster.DeleteCreated(ctx, release, forwardManifest, prepared.Prewrite, rollbackBase)
 		rollbackErr = errors.Join(rollbackErr, createdDeleteErr)
 	} else {
 		rollbackErr = cluster.Delete(ctx, release, forwardManifest, rollbackBase)
+		if refusal := nativeWriteRefusal(result, "rollback", rollbackErr); refusal != nil {
+			return *refusal
+		}
 	}
 	var lkgObservation Observation
 	var lkgHealthErr, lkgConvergedErr error
@@ -895,6 +914,23 @@ func Execute(ctx context.Context, cluster Cluster, releasePlan Plan, prepared Ex
 	)
 	result.Final = lkgObservation
 	return sealResult(result)
+}
+
+func nativeWriteRefusal(result ExecutionResult, phase string, err error) *ExecutionResult {
+	switch {
+	case errors.Is(err, ErrWriteOutcomeUnknown):
+		result.Reason = phase + "-write-outcome-unknown"
+	case errors.Is(err, ErrWriteRejected):
+		// The denial proves only that this request did not commit. It cannot
+		// authorize rewriting a drifted workload or resetting its pointer.
+		result.Reason = phase + "-write-rejected"
+	default:
+		return nil
+	}
+	result.Status = "recovery-required"
+	result.FailureDetail = boundedFailureDetail(err.Error())
+	result = sealResult(result)
+	return &result
 }
 
 func specIdentityMismatch(expected, actual Observation) string {

@@ -30,7 +30,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	appsclient "k8s.io/client-go/kubernetes/typed/apps/v1"
 	metadataclient "k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 )
 
 const (
@@ -116,6 +118,7 @@ type kubectlCluster struct {
 	resources        dynamic.Interface
 	trustedCurrent   *declarativerelease.ArtifactReceipt
 	nativeArtifacts  *nativeKubectlArtifacts
+	nativeDeployment rest.Interface
 	registryMu       sync.Mutex
 	registryVerified map[string]declarativerelease.RegistryVerification
 	nativePreflight  bool // guarded by registryMu
@@ -202,9 +205,23 @@ func newKubectlClusterWithArtifacts(native *nativeKubectlArtifacts) (*kubectlClu
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes dynamic client: %w", err)
 	}
+	var nativeDeployment rest.Interface
+	if native != nil {
+		client, err := rest.HTTPClientFor(config)
+		if err != nil {
+			return nil, fmt.Errorf("create native Deployment transport: %w", err)
+		}
+		nativeHTTP := *client
+		nativeHTTP.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		apps, err := appsclient.NewForConfigAndClient(config, &nativeHTTP)
+		if err != nil {
+			return nil, fmt.Errorf("create native Deployment client: %w", err)
+		}
+		nativeDeployment = apps.RESTClient()
+	}
 	return &kubectlCluster{
 		kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second,
-		metadata: metadata, resources: resources, trustedCurrent: trustedCurrent, nativeArtifacts: native,
+		metadata: metadata, resources: resources, trustedCurrent: trustedCurrent, nativeArtifacts: native, nativeDeployment: nativeDeployment,
 	}, nil
 }
 
@@ -728,14 +745,18 @@ func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerel
 		preflight := cluster.nativePreflight
 		cluster.registryMu.Unlock()
 		if !preflight {
-			return errors.New("native artifact preflight has not verified the complete execution set")
+			return fmt.Errorf("%w: native artifact preflight has not verified the complete execution set", declarativerelease.ErrWriteRejected)
 		}
 		if err := cluster.nativeArtifacts.checkApply(target, manifest); err != nil {
-			return err
+			return errors.Join(declarativerelease.ErrWriteRejected, err)
 		}
 		if err := cluster.VerifyTarget(ctx, target); err != nil {
-			return err
+			return errors.Join(declarativerelease.ErrWriteRejected, err)
 		}
+		if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
+			return errors.Join(declarativerelease.ErrWriteRejected, err)
+		}
+		return cluster.applyNativeDeployment(ctx, release, manifest)
 	}
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
