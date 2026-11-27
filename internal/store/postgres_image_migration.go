@@ -175,39 +175,6 @@ func imageMigrationResourceEvidenceMatches(resources map[string]any, target mode
 	return quantityMatches("limits", "cpu", fmt.Sprintf("%dm", target.CPULimitMilliCores))
 }
 
-func validatePostgresImageMigrationProof(op model.Operation, proofs map[string]map[string]any) error {
-	baseline, intent, verified := proofs[pgimage.BaselineEvidence], proofs[pgimage.IntentEvidence], proofs[pgimage.VerifiedEvidence]
-	if op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil || len(baseline) == 0 || pgimage.Hash(baseline) != pgimage.Hash(intent) || len(verified) == 0 {
-		return ErrConflict
-	}
-	uid, _ := verified["verified_pod_uid"].(string)
-	sourceUID, _ := intent["pod_uid"].(string)
-	clusterUID, _ := intent["cluster_uid"].(string)
-	systemID, _ := intent["system_id"].(string)
-	if uid == "" || sourceUID == "" || uid == sourceUID || intent["target_image"] != op.DesiredSpec.Postgres.Image || clusterUID == "" || systemID == "" {
-		return ErrConflict
-	}
-	budget := op.DesiredSpec.Postgres.ImageMigrationDrainBudgetSeconds
-	if budget != 0 {
-		drain, ok := intent["drain"].(map[string]any)
-		if !pgimage.ValidDrainBudget(budget) || !ok || drain["budget_seconds"] != float64(budget) || verified["drain_restored"] != true {
-			return ErrConflict
-		}
-	} else if intent["drain"] != nil || verified["drain_restored"] != nil {
-		return ErrConflict
-	}
-	copy := map[string]any{}
-	for k, v := range verified {
-		if k != "verified_pod_uid" && k != "drain_restored" {
-			copy[k] = v
-		}
-	}
-	if pgimage.Hash(copy) != pgimage.Hash(intent) {
-		return ErrConflict
-	}
-	return nil
-}
-
 func applyPostgresImageMigration(state *model.State, app *model.App, op *model.Operation) error {
 	proofs := map[string]map[string]any{}
 	for _, e := range state.OperationEvidence {
@@ -215,8 +182,8 @@ func applyPostgresImageMigration(state *model.State, app *model.App, op *model.O
 			proofs[e.Type] = e.Payload
 		}
 	}
-	if err := validatePostgresImageMigrationProof(*op, proofs); err != nil {
-		return err
+	if !pgimage.ValidCompletionProof(*op, proofs) {
+		return ErrConflict
 	}
 	if err := validateManagedPostgresResizeTargetState(state, *app, op.ServiceID); err != nil {
 		return err
@@ -248,8 +215,8 @@ func (s *Store) pgApplyPostgresImageMigration(ctx context.Context, tx *sql.Tx, a
 		}
 		proofs[kind] = payload
 	}
-	if err := validatePostgresImageMigrationProof(*op, proofs); err != nil {
-		return err
+	if !pgimage.ValidCompletionProof(*op, proofs) {
+		return ErrConflict
 	}
 	svc, err := s.pgValidateManagedPostgresResizeTargetTx(ctx, tx, app, op.ServiceID)
 	if err != nil {

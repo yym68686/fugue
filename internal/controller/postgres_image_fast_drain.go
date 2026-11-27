@@ -13,13 +13,7 @@ import (
 	"fugue/internal/pgimage"
 )
 
-type postgresImageDrainWitness struct {
-	BudgetSeconds   int    `json:"budget_seconds"`
-	OriginalSeconds int    `json:"original_seconds"`
-	Marker          string `json:"marker"`
-	HadPostgresql   bool   `json:"had_postgresql"`
-	HadParameters   bool   `json:"had_parameters"`
-}
+type postgresImageDrainWitness = pgimage.DrainWitness
 
 func configurePostgresImageDrain(w *postgresImageWitness, cluster map[string]any, opID string, budget int) error {
 	spec := imageObject(cluster["spec"])

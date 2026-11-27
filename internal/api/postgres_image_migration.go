@@ -73,19 +73,7 @@ func (s *Server) handleMigrateBackingServiceImage(w http.ResponseWriter, r *http
 		httpx.WriteError(w, 409, "database ownership, consumer binding or tenant/project identity differs")
 		return
 	}
-	ownership := "app_owned"
-	if svc.OwnerAppID == "" {
-		ownership = "independent"
-	}
-	plan := pgimage.Plan{ServiceID: svc.ID, AppID: app.ID, Ownership: ownership, TargetImage: image, ConfigHash: store.PostgresImageMigrationPlanHash(app, svc, image, budget), RequiresDowntime: true, LivePreflightPending: true, DrainBudgetSeconds: budget,
-		Stages: []string{"verify current Cluster, primary, PVC, node, persisted resource envelope and writable SQL", "persist immutable preflight witness and image-change intent", "atomically compare-and-swap Cluster.spec.imageName and, if needed, align its restart template with the applied in-place resource target; let CNPG replace the primary", "verify unchanged PVC identities, system ID, placement, running resources, SQL and no bootstrap container", "persist the backing service image and verified restart template; never deploy the consumer app"}}
-	if budget != 0 {
-		standard := plan.Stages
-		plan.Stages = []string{standard[0], standard[1],
-			"sample current sessions; stage the operation-local budget and verify the source primary loaded it; recheck transactions",
-			standard[2], "restore and verify original shutdown settings; record stable Service SQL probe observations",
-			standard[3], standard[4]}
-	}
+	plan := pgimage.NewPlan(app, svc, image, store.PostgresImageMigrationPlanHash(app, svc, image, budget), budget)
 	if !req.Apply {
 		if budget != 0 {
 			sample := s.previewPostgresImageDrain(r.Context(), runtime.NamespaceForTenant(svc.TenantID), target.Postgres.ServiceName, budget)
