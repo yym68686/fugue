@@ -45,7 +45,7 @@ func (r operationQueueRepository) FailBeforeClaim(expected model.Operation, reas
 }
 
 func (r operationQueueRepository) CancelSupersededDeploy(id, reason string) (bool, error) {
-	_, err := r.store.CancelOperation(id, reason)
+	_, err := r.store.pgCancelOperation(id, reason, nil)
 	if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
