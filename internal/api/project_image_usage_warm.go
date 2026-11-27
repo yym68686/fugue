@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/model"
 
 	"golang.org/x/sync/errgroup"
@@ -62,7 +63,7 @@ func (s *Server) refreshDistributedProjectImageUsageSnapshots(ctx context.Contex
 		}
 		observedByTenant[tenantID] = observed
 	}
-	responses := make(map[string]projectImageUsageResponse, len(byTenant)+1)
+	responses := make(map[appimages.UsageScope]projectImageUsageResponse, len(byTenant)+1)
 	for tenantID, tenantInventories := range byTenant {
 		key := projectImageUsageCacheKey(model.Principal{TenantID: tenantID})
 		responses[key] = aggregateProjectImageUsageInventories(newDistributedProjectImageUsageResponse(observedByTenant[tenantID]), tenantInventories)
@@ -72,7 +73,7 @@ func (s *Server) refreshDistributedProjectImageUsageSnapshots(ctx context.Contex
 		return err
 	}
 	for key, response := range responses {
-		s.projectImageUsageCache.setUnlessUpdatedAfter(key, response, started)
+		s.projectImageUsageCache.Publish(key, response, started)
 	}
 	if s.log != nil {
 		s.log.Printf("project image snapshots refreshed duration_ms=%.1f apps=%d scopes=%d", float64(time.Since(started))/float64(time.Millisecond), len(apps), len(responses))

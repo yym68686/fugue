@@ -1185,7 +1185,7 @@ func (s *Server) buildConsoleProjectsSnapshotResponse(
 	}
 
 	visibleApps := visibleConsoleApps(apps)
-	imageUsage, imageUsageCached := s.projectImageUsageCache.get(projectImageUsageCacheKey(principal))
+	imageUsage, imageUsageCached := s.projectImageUsageCache.Fresh(projectImageUsageCacheKey(principal))
 	imageUsageResult := make(chan struct {
 		response projectImageUsageResponse
 		err      error
@@ -1211,7 +1211,7 @@ func (s *Server) buildConsoleProjectsSnapshotResponse(
 			)
 			timings.Add("snapshot_image_usage", time.Since(buildStartedAt))
 			if err == nil {
-				s.projectImageUsageCache.set(projectImageUsageCacheKey(principal), response)
+				s.projectImageUsageCache.Publish(projectImageUsageCacheKey(principal), response, time.Time{})
 			}
 			imageUsageResult <- struct {
 				response projectImageUsageResponse
