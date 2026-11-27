@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -654,7 +656,7 @@ func degradedRouteTargetTerminal(status ReleaseStatus, expected DesiredRelease) 
 }
 
 func (store *KubeStore) SetDesiredToLKG(ctx context.Context, snapshot Snapshot) error {
-	if store == nil || snapshot.Record.Validate() != nil || snapshot.DesiredResourceVersion == "" ||
+	if store == nil || snapshot.Record.Validate() != nil || snapshot.DesiredResourceVersion == "" || snapshot.Desired.Generation >= math.MaxInt64 ||
 		snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest || !digestPattern.MatchString(snapshot.Record.LKGRecordDigest) ||
 		!digestPattern.MatchString(snapshot.LKGMonitorRecordDigest) {
 		return errors.New("DesiredRelease LKG rollback request is invalid")
@@ -680,6 +682,11 @@ func (store *KubeStore) SetDesiredToLKG(ctx context.Context, snapshot Snapshot) 
 	var observed DesiredRelease
 	if decodeStrict([]byte(current.Data["desired.json"]), &observed) != nil || observed != snapshot.Desired {
 		return errors.New("DesiredRelease payload changed before LKG CAS")
+	}
+	if snapshot.NativePublication != hasNativePublicationMarker(current.Annotations) ||
+		(snapshot.NativePublication && (!validNativePublicationMarker(current.Annotations) ||
+			current.Annotations[nativeIntentAnnotation] != snapshot.NativeIntent || current.Annotations[nativeFenceAnnotation] != strconv.FormatInt(snapshot.NativeFence, 10))) {
+		return errors.New("DesiredRelease authority changed before LKG CAS")
 	}
 	next := DesiredRelease{
 		APIVersion: APIVersion, Kind: DesiredReleaseKind, Component: snapshot.Key.Component, Group: snapshot.Key.Group,

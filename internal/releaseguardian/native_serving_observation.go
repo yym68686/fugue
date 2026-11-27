@@ -77,12 +77,12 @@ func (p *NativePublisher) ObserveServingRelease(ctx context.Context, intentDiges
 	var published ReleaseRecord
 	if err != nil || candidate.Immutable == nil || !*candidate.Immutable || !stringMapEqual(candidate.Labels, guardianLabels(key)) ||
 		decodeStrict([]byte(candidate.Data["guardian-record.json"]), &published) != nil || published != payload.ProposedRecord ||
-		!digestPattern.MatchString(candidate.Data["lkg-monitor-record-digest"]) {
+		candidate.Data["lkg-monitor-record-digest"] != payload.RollbackMonitor {
 		return NativeServingObservation{}, errors.New("native serving observation has no immutable publication and LKG anchor")
 	}
 	if before.Pointer == NativePointerCandidate {
 		binding := NativeRuntimeBinding{Key: key, DesiredResourceVersion: before.ResourceVersion,
-			DesiredRecordDigest: intent.TargetDigest, LKGMonitorRecordDigest: candidate.Data["lkg-monitor-record-digest"]}
+			DesiredRecordDigest: intent.TargetDigest, LKGMonitorRecordDigest: payload.RollbackMonitor, IntentDigest: claim.IntentDigest, Fence: claim.Fence}
 		if err := binding.VerifyCandidate(ctx, p.store.client.CoreV1(), target.Namespace, payload.Files); err != nil {
 			return NativeServingObservation{}, err
 		}

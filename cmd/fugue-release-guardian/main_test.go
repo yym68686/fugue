@@ -1,6 +1,11 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +17,7 @@ import (
 
 func TestDedicatedNativeGuardianDeclinesLegacyAuthorityRuntime(t *testing.T) {
 	for _, name := range []string{
-		releaseguardian.NativeRuntimeRegistryEnv, releaseguardian.NativeRuntimeAuthFileEnv, releaseguardian.NativeRuntimeBindingEnv,
+		releaseguardian.NativeRuntimeRegistryEnv, releaseguardian.NativeRuntimeAuthFileEnv, releaseguardian.NativeRuntimeBindingEnv, nativeJournalFileEnv,
 		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_PUBLIC_KEY_SOURCE", "FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS",
 		"FUGUE_RELEASE_GUARDIAN_AUTHORITY_GROUPS", "FUGUE_RELEASE_GUARDIAN_AUTHORITY_ACTIVATORS",
 	} {
@@ -20,6 +25,10 @@ func TestDedicatedNativeGuardianDeclinesLegacyAuthorityRuntime(t *testing.T) {
 	}
 	if enabled, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 2); enabled || err != nil {
 		t.Fatalf("legacy configuration: enabled=%v err=%v", enabled, err)
+	}
+	t.Setenv(nativeJournalFileEnv, "/native/journal.json")
+	if _, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 1); err == nil {
+		t.Fatal("journal settings silently fell back into the legacy runtime")
 	}
 	t.Setenv(releaseguardian.NativeRuntimeRegistryEnv, "registry.fixture.invalid")
 	if enabled, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 1); !enabled || err != nil {
@@ -34,6 +43,45 @@ func TestDedicatedNativeGuardianDeclinesLegacyAuthorityRuntime(t *testing.T) {
 	t.Setenv("FUGUE_RELEASE_GUARDIAN_CANDIDATE_IMPORTS", "fixture")
 	if _, err := nativeGuardianConfigured(releaseguardian.ModeWrite, 1); err == nil {
 		t.Fatal("dedicated native writer enabled a legacy candidate importer")
+	}
+}
+
+func TestNativeJournalConfigRequiresAnAuthenticatedSingleHost(t *testing.T) {
+	for _, env := range []string{"PGSERVICE", "PGSSLMODE", "PGSSLROOTCERT", "PGSSLKEY", "PGSSLCERT", "PGREQUIRESSL", "PGTARGETSESSIONATTRS"} {
+		t.Setenv(env, "")
+	}
+	const database = "postgres://launcher@db.fixture.invalid/fugue?sslmode="
+	key := make([]byte, ed25519.PublicKeySize)
+	key[0] = 1
+	for _, tc := range []struct {
+		name, dsn, extra string
+		accept           bool
+	}{
+		{name: "authenticated endpoint", dsn: database + "verify-full", accept: true},
+		{name: "no TLS", dsn: database + "disable"},
+		{name: "optional TLS", dsn: database + "prefer"},
+		{name: "no certificate validation", dsn: database + "require"},
+		{name: "no hostname validation", dsn: database + "verify-ca"},
+		{name: "multiple endpoints", dsn: "postgres://launcher@db-a.fixture.invalid,db-b.fixture.invalid/fugue?sslmode=verify-full"},
+		{name: "arbitrary setting", dsn: database + "verify-full", extra: `,"unreviewed":true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(map[string]any{"cluster": "fixture", "database": tc.dsn, "ownerPublicKeys": map[string][]byte{"owner-a": key}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "journal.json")
+			if err := os.WriteFile(path, []byte(strings.TrimSuffix(string(raw), "}")+tc.extra+"}"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, keys, cluster, err := loadNativeJournalConfig(path)
+			if (err == nil) != tc.accept {
+				t.Fatalf("accepted=%t error=%v", err == nil, err)
+			}
+			if tc.accept && (cluster != "fixture" || keys["owner-a"].ClusterID != cluster || !keys["owner-a"].PublicKey.Equal(ed25519.PublicKey(key)) || cfg.TLSConfig.ServerName != "db.fixture.invalid") {
+				t.Fatal("did not preserve the exact journal and approval trust settings")
+			}
+		})
 	}
 }
 

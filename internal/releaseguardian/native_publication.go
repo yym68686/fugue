@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 
 	"fugue/internal/declarativerelease"
@@ -150,13 +151,17 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 }
 
 func (p *NativePublisher) readReleaseIntent(ctx context.Context, intentDigest string) (productioncontrol.Intent, nativeReleasePayload, error) {
-	intent, raw, err := p.journal.ReadIntent(ctx, intentDigest)
+	return readNativeReleaseIntent(ctx, p.journal.ReadIntent, p.clusterID, intentDigest)
+}
+
+func readNativeReleaseIntent(ctx context.Context, read func(context.Context, string) (productioncontrol.Intent, []byte, error), clusterID, intentDigest string) (productioncontrol.Intent, nativeReleasePayload, error) {
+	intent, raw, err := read(ctx, intentDigest)
 	if err != nil {
 		return productioncontrol.Intent{}, nativeReleasePayload{}, err
 	}
 	actualDigest, err := intent.Digest()
 	if err != nil || actualDigest != intentDigest || intent.Operation != productioncontrol.ComponentRelease ||
-		intent.ClusterID != p.clusterID || intent.VerifyPayload(raw) != nil {
+		intent.ClusterID != clusterID || intent.VerifyPayload(raw) != nil {
 		return productioncontrol.Intent{}, nativeReleasePayload{}, errors.New("production intent is not a release for this Guardian cluster")
 	}
 	var payload nativeReleasePayload
@@ -166,7 +171,7 @@ func (p *NativePublisher) readReleaseIntent(ctx context.Context, intentDigest st
 	canonical, err := declarativerelease.CanonicalJSON(payload)
 	if err != nil || !bytes.Equal(raw, canonical) || payload.ProposedRecord.Validate() != nil ||
 		payload.ProposedRecord.RecordDigest != intent.TargetDigest || payload.ExpectedDesiredDigest != intent.CurrentDigest ||
-		payload.ProposedRecord.LKGRecordDigest != intent.RollbackDigest {
+		payload.ProposedRecord.LKGRecordDigest != intent.RollbackDigest || !digestPattern.MatchString(payload.RollbackMonitor) {
 		return productioncontrol.Intent{}, nativeReleasePayload{}, errors.New("native Guardian payload is not canonical or does not match its intent")
 	}
 	return intent, payload, nil
@@ -175,12 +180,13 @@ func (p *NativePublisher) readReleaseIntent(ctx context.Context, intentDigest st
 func bindNativePublication(intent productioncontrol.Intent, payload nativeReleasePayload, publication desiredPublication) (NativePublicationBoundary, error) {
 	preview, bundle := publication.preview, publication.bundle
 	prewrite, workload := bundle.Prepared.Prewrite, preview.PrewriteWorkload
-	if intent.Generation != preview.CurrentDesired.Generation || intent.CurrentDigest != preview.CurrentDesired.RecordDigest ||
+	if intent.Generation > math.MaxInt64-2 || intent.Generation != preview.CurrentDesired.Generation || intent.CurrentDigest != preview.CurrentDesired.RecordDigest ||
 		intent.CurrentDigest != preview.CurrentRecordDigest || intent.RollbackDigest != preview.Record.LKGRecordDigest ||
 		intent.RollbackDigest != intent.CurrentDigest || intent.TargetDigest != preview.Record.RecordDigest ||
 		intent.TargetDigest == intent.CurrentDigest || intent.ResourceID != nativeKubernetesResourceID(workload) ||
 		payload.Namespace != preview.Namespace || payload.ProposedRecord != preview.Record ||
 		payload.ExpectedDesiredDigest != preview.CurrentDesired.RecordDigest || payload.RollbackManifest != preview.RollbackManifestDigest ||
+		payload.RollbackMonitor != preview.RollbackMonitorDigest ||
 		!allLayersHealthy(preview.Health) {
 		return NativePublicationBoundary{}, errors.New("native Guardian publication no longer matches the approved target or verified predecessor")
 	}
