@@ -102,6 +102,25 @@ func (r *IndependentRegistry) VerifyReleaseArtifacts(ctx context.Context, bounda
 	return nil
 }
 
+// VerifyRuntimeArtifact reads the complete image named by the bound receipt.
+// Its result can be compared with kubelet imageIDs during this execution;
+// the historic receipt alone is not proof the image can still be pulled.
+func (r *IndependentRegistry) VerifyRuntimeArtifact(ctx context.Context, receipt declarativerelease.ArtifactReceipt) (declarativerelease.RegistryVerification, error) {
+	if r == nil || r.transport == nil {
+		return declarativerelease.RegistryVerification{}, errors.New("native artifact verifier is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(ctx, nativeRegistryDeadline)
+	defer cancel()
+	if err := r.verifyReceipt(ctx, receipt); err != nil {
+		return declarativerelease.RegistryVerification{}, err
+	}
+	return declarativerelease.RegistryVerification{
+		Image: receipt.ImmutableRef, IndexDigest: receipt.TopDigest, ManifestDigest: receipt.PlatformManifestDigest,
+		ConfigDigest: receipt.ConfigDigest, OCIRevision: receipt.OCIRevision, Platform: receipt.Platform,
+		Verification: "independent_registry_full_readback",
+	}, nil
+}
+
 func (r *IndependentRegistry) verifyReceipt(ctx context.Context, receipt declarativerelease.ArtifactReceipt) error {
 	ref, err := name.NewDigest(receipt.ImmutableRef, name.StrictValidation)
 	if err != nil || ref.Context().RegistryStr() != r.host || ref.Name() != receipt.ImmutableRef || ref.DigestStr() != receipt.TopDigest ||

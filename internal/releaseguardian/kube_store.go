@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,6 +87,7 @@ type storedRelease struct {
 	statusRV             string
 	previousStatus       *ReleaseStatus
 	managed              bool
+	nativePublication    bool
 	lkgMonitorDigest     string
 	desiredRecordMissing bool
 }
@@ -111,6 +113,7 @@ func (store *KubeStore) Load(ctx context.Context, key Key) (Snapshot, error) {
 		PreviousStatus: stored.previousStatus,
 		Bundle:         stored.bundle, CurrentMonitorData: stored.currentMonitorData,
 		LKGMonitorRecordDigest: stored.lkgMonitorDigest, DesiredRecordMissing: stored.desiredRecordMissing, Managed: stored.managed,
+		NativePublication: stored.nativePublication,
 	}, nil
 }
 
@@ -227,9 +230,14 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 	desiredRecordMissing := false
 	desiredRV := ""
 	managed := false
+	nativePublication := false
 	desiredMap, desiredErr := configMaps.Get(ctx, desiredName(target.Key), metav1.GetOptions{})
 	if desiredErr == nil {
 		managed = true
+		nativePublication = hasNativePublicationMarker(desiredMap.Annotations)
+		if nativePublication && !validNativePublicationMarker(desiredMap.Annotations) {
+			return storedRelease{}, errors.New("DesiredRelease has an invalid native approval fence")
+		}
 		desiredRV = desiredMap.ResourceVersion
 		if err := decodeStrict([]byte(desiredMap.Data["desired.json"]), &desired); err != nil || desired.Key() != target.Key || desired.Validate() != nil {
 			return storedRelease{}, errors.New("desired release pointer is invalid")
@@ -316,7 +324,14 @@ func (store *KubeStore) loadRelease(ctx context.Context, target TargetConfig) (s
 		bundle: selectedBundle, currentBundle: currentBundle, currentMonitorData: monitorData,
 		desiredRV: desiredRV, statusRV: statusRV, previousStatus: previousStatus, managed: managed, lkgMonitorDigest: lkgMonitorDigest,
 		desiredRecordMissing: desiredRecordMissing,
+		nativePublication:    nativePublication,
 	}, nil
+}
+
+func validNativePublicationMarker(annotations map[string]string) bool {
+	fence, err := strconv.ParseInt(annotations[nativeFenceAnnotation], 10, 64)
+	return err == nil && fence > 0 && strconv.FormatInt(fence, 10) == annotations[nativeFenceAnnotation] &&
+		digestPattern.MatchString(annotations[nativeIntentAnnotation])
 }
 
 func stableMatchesRecord(monitor declarativerelease.MonitorRecord, artifact declarativerelease.ArtifactReceipt, record ReleaseRecord) bool {

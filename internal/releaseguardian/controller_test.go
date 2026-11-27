@@ -167,6 +167,34 @@ func TestShadowNeverExecutesProductionMutation(t *testing.T) {
 	}
 }
 
+func TestNativeAndLegacyControllersDoNotReconcileEachOthersTargets(t *testing.T) {
+	now := time.Unix(20, 0).UTC()
+	for _, native := range []bool{false, true} {
+		executor := &fakeExecutor{}
+		store := &fakeStore{snapshot: testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)}
+		store.snapshot.NativePublication = !native
+		controller, err := newController(ModeWrite, native, store, executor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		controller.now = func() time.Time { return now }
+		if err := controller.Reconcile(context.Background(), store.snapshot.Key); err != nil {
+			t.Fatal(err)
+		}
+		if store.status.State != "" || store.lkgCAS != 0 || executor.rollouts != 0 || executor.repairs != 0 || executor.rollbacks != 0 {
+			t.Fatalf("native=%v reconciled an out-of-scope release: status=%+v executor=%+v", native, store.status, executor)
+		}
+		store.snapshot.NativePublication = native
+		if err := controller.Reconcile(context.Background(), store.snapshot.Key); err != nil {
+			t.Fatal(err)
+		}
+		if store.status.State == "" || executor.rollouts != 1 {
+			t.Fatalf("native=%v did not reconcile its own release", native)
+		}
+		controller.queue.ShutDown()
+	}
+}
+
 func TestWriteModeReconcilesUnprovenLKGBeforeRetryingCandidate(t *testing.T) {
 	now := time.Unix(25, 0).UTC()
 	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), otherDigest)

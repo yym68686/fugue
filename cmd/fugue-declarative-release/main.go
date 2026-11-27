@@ -51,6 +51,14 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
+	if os.Getenv(releaseguardian.NativeRuntimeBindingEnv) != "" || os.Getenv(releaseguardian.NativeRuntimeRegistryEnv) != "" ||
+		os.Getenv(releaseguardian.NativeRuntimeAuthFileEnv) != "" {
+		switch args[0] {
+		case "execute", "repair-monitor", "restore-monitor":
+		default:
+			return errors.New("native Guardian runtime does not permit this command")
+		}
+	}
 	switch args[0] {
 	case "plan":
 		return runPlan(args, output)
@@ -829,13 +837,56 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 		}
 		return freshnessErr
 	}
-	cluster, err := newKubectlCluster()
-	if err != nil {
-		return err
-	}
 	release, err := selectedRelease(plan, prepared.Component)
 	if err != nil {
 		return err
+	}
+	native, err := nativeExecutionRuntimeFromEnv()
+	if err != nil {
+		return err
+	}
+	var nativeMonitor *monitorStore
+	var nativePredecessor monitorSnapshot
+	var artifacts *nativeKubectlArtifacts
+	if native != nil {
+		if resuming {
+			return errors.New("native Deployment execution cannot resume a Worker drain")
+		}
+		preflight, cancel := context.WithTimeout(parent, 3*time.Minute)
+		defer cancel()
+		nativeMonitor, err = newMonitorStore()
+		if err != nil {
+			return err
+		}
+		if err := native.checkPointer(preflight, nativeMonitor.client, release); err != nil {
+			return err
+		}
+		if err := native.binding.VerifyCandidate(preflight, nativeMonitor.client, release.Workload.Namespace, files); err != nil {
+			return err
+		}
+		nativePredecessor, err = nativeMonitor.load(preflight, release.Workload.Namespace, release.ComponentID)
+		if err != nil {
+			return err
+		}
+		artifacts, err = native.artifactSet(release, prepared, receipt, &nativePredecessor.Bundle, files["forward.json"], files["lkg.json"])
+		if err != nil {
+			return err
+		}
+		cancel()
+	}
+	cluster, err := newKubectlClusterWithArtifacts(artifacts)
+	if err != nil {
+		return err
+	}
+	if err := cluster.preflightNativeArtifacts(parent); err != nil {
+		return err
+	}
+	if native != nil {
+		// Downloading layers is read-only, but it must not extend the
+		// approved snapshot's prewrite lifetime.
+		if _, err := declarativerelease.DecodeExecutionPlan(bytes.NewReader(files["execution-plan.json"]), plan, files["forward.json"], files["lkg.json"]); err != nil {
+			return err
+		}
 	}
 	executeTimeout := 5 * time.Minute
 	if release.Transition != nil && release.Transition.EdgeGroupAB != nil {
@@ -882,6 +933,21 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 	heldLease, err := leaseCoordinator.acquire(ctx, release, prepared.ConfigSHA)
 	if err != nil {
 		return fmt.Errorf("acquire component mutation lease: %w", err)
+	}
+	if native != nil {
+		bindingErr := native.checkPointer(ctx, nativeMonitor.client, release)
+		if bindingErr == nil {
+			fresh, readErr := nativeMonitor.load(ctx, release.Workload.Namespace, release.ComponentID)
+			bindingErr = readErr
+			if readErr == nil && !sameMonitorSnapshot(fresh, nativePredecessor) {
+				bindingErr = errors.New("native execution predecessor changed after acquiring the component Lease")
+			}
+		}
+		if bindingErr != nil {
+			releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+			defer releaseCancel()
+			return errors.Join(bindingErr, leaseCoordinator.release(releaseCtx, heldLease))
+		}
 	}
 	// A newer DesiredRelease might have been published during read-only
 	// preparation. Rebind the original wait while holding the mutation lease.
