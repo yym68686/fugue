@@ -813,7 +813,11 @@ func guardianStableFixture(t *testing.T, key Key, now time.Time) (map[string]str
 
 func guardianCandidateFixture(t *testing.T, key Key, stable declarativerelease.TargetIdentity, stableDigest string, stableManifest []byte, now time.Time) map[string][]byte {
 	t.Helper()
-	targetSHA, targetDigest := strings.Repeat("2", 40), "sha256:"+strings.Repeat("c", 64)
+	return guardianCandidateFixtureForTarget(t, key, stable, stableDigest, stableManifest, now, strings.Repeat("2", 40), "sha256:"+strings.Repeat("c", 64))
+}
+
+func guardianCandidateFixtureForTarget(t *testing.T, key Key, stable declarativerelease.TargetIdentity, stableDigest string, stableManifest []byte, now time.Time, targetSHA, targetDigest string) map[string][]byte {
+	t.Helper()
 	delivery := &declarativerelease.Delivery{Writer: "guardian", Group: key.Group, DependencyService: "fugue-fugue"}
 	release := guardianPlanRelease(key, targetSHA, stable.ConfigSHA, stableDigest, delivery)
 	plan := guardianPlan(t, stable.ConfigSHA, targetSHA, release)

@@ -156,6 +156,10 @@ verified version only after independent terminal and fencing evidence.
 The read-only publication observation can correlate the exact claim with a
 candidate pointer or a rollback pointer even if the CAS response was lost.
 It does not infer anything about actual serving health or permit a redispatch.
+A second release keeps the already verified DesiredRelease digest as its
+predecessor and rollback identity when it is a serving-equivalent alias of the
+canonical monitor record. The rollback bytes must still match that monitor;
+changing the alias does not relax manifest, image, or health-contract checks.
 There is no production entrypoint or admission implementation configured
 for the native adapter yet. None of these behaviors establish that legacy
 identities have actually lost permission, that Guardian applied a release,
