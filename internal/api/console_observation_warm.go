@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"fugue/internal/appimages"
 )
 
 // Runtime observations already expire after 15 seconds. Refresh ahead of that
@@ -54,7 +56,7 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) <-chan str
 		}
 	})
 	if s.store != nil && strings.EqualFold(strings.TrimSpace(s.imageStoreMode), "distributed") {
-		startLoop(defaultProjectImageUsageCacheTTL/2, func() {
+		startLoop(appimages.UsageSnapshotTTL/2, func() {
 			refreshCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 			defer cancel()
 			if err := s.refreshDistributedProjectImageUsageSnapshots(refreshCtx); err != nil && ctx.Err() == nil && s.log != nil {
