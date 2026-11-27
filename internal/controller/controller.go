@@ -17,6 +17,7 @@ import (
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/operationexecution"
 	"fugue/internal/operationqueue"
 	"fugue/internal/pgimage"
 	"fugue/internal/releaseflow"
@@ -892,12 +893,12 @@ func (s *Service) executeManagedOperation(ctx context.Context, op model.Operatio
 		}
 	}
 
-	timer := newControllerOperationTimer(s.now)
+	timer := operationexecution.NewTimer(s.now)
 	defer func() {
 		if op.Type != model.OperationTypeImport {
-			s.recordOperationControllerTiming(op.ID, timer.modelSegments())
+			s.recordOperationControllerTiming(op.ID, timer.Segments())
 		}
-		timer.Log(s.Logger, "managed_operation", op, err)
+		timer.Log(s.Logger, "managed_operation", op, err, safeRolloutPendingResult(err) != "")
 	}()
 
 	app, err := s.Store.GetApp(op.AppID)
