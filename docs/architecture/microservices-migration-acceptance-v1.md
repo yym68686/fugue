@@ -110,13 +110,16 @@ that those identities have lost authority.
 
 The native journal's schema is in `internal/productioncontrol/journal.sql`.
 It is not applied by the existing production API or CI. Use a schema-owner
-identity for migration only, and a separate journal principal with
-`USAGE` on `fugue_control` and `SELECT, INSERT` on its three tables. Do not
-grant that principal DDL, `UPDATE`, `DELETE`, or any provider permissions.
+identity for migration only. Give an intent journal principal `USAGE` on
+`fugue_control` and `SELECT, INSERT` only on `intents`, `approvals` and
+`audit`. The execution journal also needs to read those records, and can
+append to `resource_baselines`, `execution_claims` and `execution_results`
+under a separate trusted identity. Neither journal identity needs DDL,
+`UPDATE`, `DELETE` or provider permissions.
 
 An intent binds the operation, immutable cluster/resource identity and
-request ID, expected generation and live digest, exact payload digest and
-rollback digest. Admission must derive that resource identity from the
+request ID, expected generation and live digest, exact payload digest,
+target digest and rollback digest. Admission must derive that resource identity from the
 actual provider write boundary. Reusing a request ID with different content
 returns a conflict and creates no second operation. Each intent or approval and its
 audit entry commit in one transaction. A component release draft can be
@@ -128,5 +131,14 @@ cluster-scoped owner key loaded from outside source and build systems. An
 artifact receipt alone is not an approval. The executor must verify the
 configured key, signature, expiration, predecessor and fence at execution
 time. An approval row in the journal is not sufficient for execution.
-The journal and release draft have no provider mutation path and are not
-evidence that a release was applied or a resource has been cut over.
+The execution journal pins the imported last verified version until an
+independent verifier can prove both the terminal version and that the old
+claim cannot still issue a write. It permits at most one unresolved claim per
+resource. A lost commit response, process restart, expired approval, or
+timeout does not expire an existing claim or confer a second dispatch.
+Recovery observes the existing claim rather than reissuing its operation.
+For this first lane the rollback target must be its existing verified version.
+These are journal guarantees: a provider adapter still has to prove exclusive
+authority and enforce the fence where it makes writes. The journal and
+release draft have no provider mutation path and are not evidence that a
+release was applied or a resource has been cut over.

@@ -148,4 +148,5 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 	if _, _, err := second.ReadIntent(ctx, failedDigest); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("unaudited intent escaped rollback: %v", err)
 	}
+	t.Run("execution-lifecycle", func(t *testing.T) { testExecutionLifecycle(t, ctx, j, second) })
 }
