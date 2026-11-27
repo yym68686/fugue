@@ -1,0 +1,200 @@
+// fugue-production-control records reviewable intent and independently signed
+// approval. It has no provider client, dispatcher, or automatic trigger.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"fugue/internal/productioncontrol"
+	"github.com/jackc/pgx/v5/stdlib"
+)
+
+const usage = `usage: fugue-production-control inspect SUBMISSION
+       fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
+       fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
+       fugue-production-control record-approval JOURNAL_CONFIG APPROVAL`
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Args[1:], os.Stdout, time.Now); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, args []string, out io.Writer, now func() time.Time) error {
+	if len(args) == 0 {
+		return errors.New(usage)
+	}
+	emit := json.NewEncoder(out).Encode
+	switch args[0] {
+	case "inspect":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		s, err := readSubmission(args[1])
+		if err != nil {
+			return err
+		}
+		digest, err := s.Intent.Digest()
+		if err != nil {
+			return err
+		}
+		return emit(struct {
+			Digest string                   `json:"digest"`
+			Intent productioncontrol.Intent `json:"intent"`
+		}{digest, s.Intent})
+	case "sign":
+		if len(args) != 6 {
+			return errors.New(usage)
+		}
+		s, err := readSubmission(args[1])
+		if err != nil {
+			return err
+		}
+		digest, err := s.Intent.Digest()
+		if err != nil || digest != args[2] {
+			return errors.New("submission differs from the exact reviewed intent digest")
+		}
+		ttl, err := time.ParseDuration(args[5])
+		if err != nil || ttl < time.Second || ttl > productioncontrol.MaxApprovalTTL {
+			return errors.New("invalid production approval lifetime")
+		}
+		key, err := readSigningKey(args[4])
+		if err != nil {
+			return err
+		}
+		defer clear(key)
+		approval, err := productioncontrol.SignApproval(s.Intent, args[3], key, now(), ttl)
+		if err != nil {
+			return err
+		}
+		return emit(approval)
+	case "record-intent":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		s, err := readSubmission(args[3])
+		if err != nil {
+			return err
+		}
+		record, err := record(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, cluster string) (productioncontrol.Recorded, error) {
+			if s.Intent.ClusterID != cluster {
+				return productioncontrol.Recorded{}, errors.New("submission belongs to a different journal cluster")
+			}
+			return j.RecordIntent(ctx, args[2], s.Intent, s.Payload)
+		})
+		if err != nil {
+			return err
+		}
+		return emit(record)
+	case "record-approval":
+		if len(args) != 3 {
+			return errors.New(usage)
+		}
+		raw, err := readFile(args[2], 4096, false)
+		if err != nil {
+			return err
+		}
+		approval, err := productioncontrol.DecodeApproval(raw)
+		if err != nil {
+			return err
+		}
+		record, err := record(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, _ string) (productioncontrol.Recorded, error) {
+			return j.RecordApproval(ctx, approval)
+		})
+		if err != nil {
+			return err
+		}
+		return emit(record)
+	default:
+		return errors.New(usage)
+	}
+}
+
+func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {
+	cfg, keys, cluster, err := productioncontrol.LoadJournalEndpoint(path)
+	if err != nil {
+		return productioncontrol.Recorded{}, err
+	}
+	db := stdlib.OpenDB(*cfg)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	j, err := productioncontrol.NewJournal(db, keys)
+	if err != nil {
+		return productioncontrol.Recorded{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return productioncontrol.Recorded{}, errors.New("production journal is unavailable")
+	}
+	return fn(ctx, j, cluster)
+}
+
+func readSubmission(path string) (productioncontrol.Submission, error) {
+	raw, err := readFile(path, productioncontrol.MaxSubmissionBytes, false)
+	if err != nil {
+		return productioncontrol.Submission{}, err
+	}
+	return productioncontrol.DecodeSubmission(raw)
+}
+
+func readSigningKey(path string) (ed25519.PrivateKey, error) {
+	raw, err := readFile(path, 4096, true)
+	if err != nil {
+		return nil, errors.New("approval key must be a private owner-only regular file")
+	}
+	defer clear(raw)
+	block, remainder := pem.Decode(raw)
+	if block == nil || block.Type != "PRIVATE KEY" || len(block.Headers) != 0 || len(bytes.TrimSpace(remainder)) != 0 {
+		return nil, errors.New("approval key is not one PKCS#8 PEM private key")
+	}
+	defer clear(block.Bytes)
+	value, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	key, ok := value.(ed25519.PrivateKey)
+	if err != nil || !ok {
+		return nil, errors.New("approval key is not Ed25519")
+	}
+	return key, nil
+}
+
+func readFile(path string, limit int64, private bool) ([]byte, error) {
+	valid := func(info os.FileInfo) bool {
+		return info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= limit && (!private || info.Mode().Perm()&0o077 == 0)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !valid(info) {
+		return nil, errors.New("production control input file is unavailable or invalid")
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("could not open production control input file")
+	}
+	defer f.Close()
+	actual, err := f.Stat()
+	if err != nil || !valid(actual) || !os.SameFile(info, actual) {
+		return nil, errors.New("production control input file changed during open")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil || len(raw) == 0 || int64(len(raw)) > limit {
+		if private {
+			clear(raw)
+		}
+		return nil, errors.New("could not read bounded production control input file")
+	}
+	return raw, nil
+}

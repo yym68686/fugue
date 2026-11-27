@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -41,8 +43,10 @@ func guardianSubmissionTarget(files map[string][]byte) (releaseguardian.TargetCo
 
 func runGuardianPreview(parent context.Context, args []string, output io.Writer) error {
 	compare := len(args) > 0 && args[0] == "guardian-native-shadow"
-	if (!compare && len(args) != 4) || (compare && len(args) != 6) || strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[2]) == "" {
-		return errors.New("usage: guardian-preview KUBECONFIG CONTEXT PLAN_DIR; guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID")
+	draft := len(args) > 0 && args[0] == "guardian-native-draft"
+	native := compare || draft
+	if (!native && len(args) != 4) || (native && len(args) != 6) || strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[2]) == "" {
+		return errors.New("usage: guardian-preview KUBECONFIG CONTEXT PLAN_DIR; guardian-native-{shadow,draft} KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID")
 	}
 	files, err := readPlanDirectory(args[3])
 	if err != nil {
@@ -71,6 +75,13 @@ func runGuardianPreview(parent context.Context, args []string, output io.Writer)
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	if draft {
+		review, err := store.DraftNativeRelease(ctx, target.Key, args[4], args[5], files)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(productioncontrol.Submission{Intent: review.Intent, Payload: review.Payload})
+	}
 	if compare {
 		observation, err := store.CompareNativeReleaseShadow(ctx, target.Key, args[4], args[5], files)
 		if err != nil {
