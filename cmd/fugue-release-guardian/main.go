@@ -41,6 +41,11 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && (os.Args[1] == "node-worker-checkpoint" || os.Args[1] == "node-worker-settle") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runNodeWorkerSettlement(ctx, os.Args[1] == "node-worker-settle", os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "node-worker-dispatch" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
