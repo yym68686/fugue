@@ -29,11 +29,12 @@ var (
 type Operation string
 
 const (
-	ComponentRelease  Operation = "component_release"
-	NodeParticipation Operation = "node_participation"
-	DNSMembership     Operation = "dns_membership"
-	FrontWorker       Operation = "front_worker_handoff"
-	Maintenance       Operation = "maintenance"
+	ComponentRelease      Operation = "component_release"
+	NodeParticipation     Operation = "node_participation"
+	DNSMembership         Operation = "dns_membership"
+	FrontWorker           Operation = "front_worker_handoff"
+	Maintenance           Operation = "maintenance"
+	ParticipationTopology Operation = "participation_topology"
 )
 
 type Intent struct {
@@ -64,7 +65,7 @@ func (intent Intent) Validate() error {
 		return errors.New("invalid production intent binding")
 	}
 	switch intent.Operation {
-	case ComponentRelease, NodeParticipation, DNSMembership, FrontWorker, Maintenance:
+	case ComponentRelease, NodeParticipation, DNSMembership, FrontWorker, Maintenance, ParticipationTopology:
 		return nil
 	}
 	return errors.New("unsupported production operation")

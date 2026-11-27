@@ -4,6 +4,30 @@ This is an implementation boundary, not proof of a production cutover. The
 legacy workflow and runtime are still needed for resources that have not passed
 the independent cutover checks.
 
+## Node participation topology
+
+An owner can migrate the existing participation policy without authorizing a
+provider mutation. Run `migrate-journal` with the schema-owner identity, then
+`draft-participation CLUSTER REQUEST POLICY` with the legacy policy as the
+initial input. Inspect, sign, and record it with the standard approval flow.
+`store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST`
+commits only a topology revision and its audit event. It cannot reserve a Node
+write. The catalog principal needs SELECT on intents, approvals and
+participation topologies, and INSERT only on participation topologies; the
+audit event is written by an owner-installed trigger. Readers need only SELECT
+on those three tables and schema USAGE.
+
+`read-participation JOURNAL_CONFIG [GENERATION]` authenticates the current or
+historical revision. An approved revision remains readable after the signing
+window closes. Subsequent drafts must name the exact previous generation and
+digest. To restore older policy content, create a new, consecutive revision
+based on that content and sign it against the current head; reading history
+never changes the head. Do not put policy files or owner signing material back
+in the program image. The legacy policy remains in use until shadow parity
+and provider-side writer cutover have been demonstrated.
+
+## Single-Deployment release draft
+
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
 compares legacy and native publication planning against the same candidate.
 It reads Kubernetes without publishing, checks the live Deployment UID and

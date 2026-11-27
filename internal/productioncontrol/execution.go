@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"time"
 )
 
 var (
@@ -200,6 +201,9 @@ func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDi
 		if err != nil {
 			return false, err
 		}
+		if intent.Operation == ParticipationTopology {
+			return false, errors.New("topology revisions do not authorize provider execution")
+		}
 		if err := lockResource(ctx, tx, intent.scope()); err != nil {
 			return false, err
 		}
@@ -334,6 +338,10 @@ func lockResource(ctx context.Context, tx *sql.Tx, s Scope) error {
 }
 
 func verifyRecordedApproval(ctx context.Context, db queryRow, journal *Journal, intent Intent, intentDigest, approvalDigest string) error {
+	return verifyRecordedApprovalAt(ctx, db, journal, intent, intentDigest, approvalDigest, journal.now())
+}
+
+func verifyRecordedApprovalAt(ctx context.Context, db queryRow, journal *Journal, intent Intent, intentDigest, approvalDigest string, at time.Time) error {
 	var envelope []byte
 	var approval Approval
 	if err := db.QueryRowContext(ctx, `SELECT envelope FROM fugue_control.approvals WHERE digest=$1 AND intent_digest=$2`, approvalDigest, intentDigest).Scan(&envelope); err != nil {
@@ -342,7 +350,7 @@ func verifyRecordedApproval(ctx context.Context, db queryRow, journal *Journal, 
 	if recordedApprovalDigest(envelope) != approvalDigest || json.Unmarshal(envelope, &approval) != nil {
 		return errors.New("stored production approval does not match its binding")
 	}
-	return approval.Verify(intent, journal.trusted, journal.now())
+	return approval.Verify(intent, journal.trusted, at)
 }
 
 func readClaim(ctx context.Context, db queryRow, intentDigest string) (Claim, error) {
