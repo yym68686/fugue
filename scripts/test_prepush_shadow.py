@@ -197,6 +197,38 @@ class SelectionTest(unittest.TestCase):
         )
         self.assertEqual(plan["goBuilds"], [])
 
+    def test_image_tracking_guard_is_a_runtime_source_edge_without_a_build_edge(self):
+        audit = pkg("internal/imagetracking")
+        options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
+        for path in ("internal/unrelated", "cmd/unrelated"):
+            with self.subTest(path=path):
+                owner = pkg(path)
+                plan = shadow.select([path + "/impl.go"], [owner, audit], ROOT, **options)
+                self.assertEqual(plan["goTests"], [
+                    ["go", "test", "./" + path],
+                    ["go", "test", "-count=1", "./internal/imagetracking"],
+                ])
+                self.assertEqual(plan["goBuilds"], [["go", "build", "-o", os.devnull, "./" + path]])
+                self.assertEqual(shadow.select([path + "/impl.go"], [owner], ROOT, **options)["scope"], "full")
+                self.assertEqual(shadow.select([path + "/impl_test.go"], [owner], ROOT, **options)["scope"], "test-only")
+
+    def test_report_installs_the_image_tracking_source_edge(self):
+        with (
+            patch.object(shadow, "git_paths", return_value=["internal/anotherdomain/impl.go"]),
+            patch.object(prepush, "changed_files", return_value=[]),
+            patch.object(prepush, "run", return_value=(0, "")),
+            patch.object(shadow, "packages_from_stream", return_value=[
+                pkg("internal/anotherdomain"), pkg("internal/imagetracking"), *repository_consumers(),
+            ]),
+            patch.object(prepush, "ROOT", ROOT),
+            patch.object(prepush, "git_output", return_value=b"abc\n"),
+        ):
+            plan = shadow.report("HEAD")
+        self.assertEqual(plan["scope"], "dependency-closure")
+        self.assertIn("./internal/imagetracking", plan["goTests"][-1])
+        self.assertIn("-count=1", plan["goTests"][-1])
+        self.assertNotIn("./internal/imagetracking", plan["goBuilds"][0])
+
     def test_tool_dependency_reaches_the_command_contract_without_an_import(self):
         dep = pkg("render")
         tool = pkg("cmd/fugue-openapi-gen", Imports=["demo/render"])
