@@ -18,10 +18,17 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformsafety"
 	"fugue/internal/schemamigrate"
+	"fugue/internal/testpostgres"
 )
 
-func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
-	s := billingBatchPGStore(t)
+func TestPostgresPeriodicQualityEvidenceFencePreservesForegroundAdmission(t *testing.T) {
+	address := testpostgres.Database(t, "")
+	db, err := openPostgresDatabase(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := &Store{db: db, databaseURL: address}
 	ctx := t.Context()
 	if err := s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
@@ -50,14 +57,30 @@ func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
 		}
 	}
 	seedExpired(digest("a"))
-	if err := s.maintainPlatformQualityEvidenceForAPI(ctx, nil, now, true); err != nil {
-		t.Fatal(err)
+	if err := s.maintainPlatformQualityEvidence(ctx, nil, now); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("API without an incoming object must not run periodic retention: %v", err)
 	}
-	assertPresent(digest("a"), false)
-	if _, err := s.db.ExecContext(ctx, `CREATE ROLE synthetic_quality_retention_worker NOLOGIN;
-GRANT USAGE ON SCHEMA fugue_observation_maintenance TO synthetic_quality_retention_worker;
-GRANT SELECT ON fugue_observation_maintenance.quality_evidence_worker_progress TO synthetic_quality_retention_worker;
-GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v1() TO synthetic_quality_retention_worker;`); err != nil {
+	assertPresent(digest("a"), true)
+	createRole := func(prefix string) string {
+		t.Helper()
+		role := quotePostgresIntegrationIdentifier(t, model.NewID(prefix))
+		if _, err := db.ExecContext(ctx, `CREATE ROLE `+role+` NOLOGIN`); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if _, err := db.ExecContext(cleanup, `DROP OWNED BY `+role+`; DROP ROLE `+role); err != nil {
+				t.Error("clean up disposable test role: ", err)
+			}
+		})
+		return role
+	}
+	workerRole := createRole("quality_worker_test")
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+GRANT USAGE ON SCHEMA fugue_observation_maintenance TO %[1]s;
+GRANT SELECT ON fugue_observation_maintenance.quality_evidence_worker_progress TO %[1]s;
+GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v1() TO %[1]s;`, workerRole)); err != nil {
 		t.Fatal(err)
 	}
 	worker, err := s.db.Conn(ctx)
@@ -65,7 +88,7 @@ GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v
 		t.Fatal(err)
 	}
 	defer worker.Close()
-	if _, err := worker.ExecContext(ctx, `SET ROLE synthetic_quality_retention_worker`); err != nil {
+	if _, err := worker.ExecContext(ctx, `SET ROLE `+workerRole); err != nil {
 		t.Fatal(err)
 	}
 	defer worker.ExecContext(ctx, `RESET ROLE`)
@@ -95,6 +118,7 @@ GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v
 		}
 	}
 	queryPass(worker, "standby", 0)
+	assertPresent(digest("a"), true)
 	for range 2 {
 		if _, err := s.db.ExecContext(ctx, schemamigrate.PlatformQualityEvidenceRetentionActivateSQL); err != nil {
 			t.Fatal(err)
@@ -106,9 +130,10 @@ GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v
 		t.Fatal(err)
 	}
 	defer legacy.Close()
-	if _, err := legacy.ExecContext(ctx, `CREATE ROLE synthetic_quality_legacy_api NOLOGIN;
-GRANT SELECT, DELETE ON public.fugue_platform_quality_evidence TO synthetic_quality_legacy_api;
-SET ROLE synthetic_quality_legacy_api;`); err != nil {
+	legacyRole := createRole("quality_api_test")
+	if _, err := legacy.ExecContext(ctx, fmt.Sprintf(`
+GRANT SELECT, DELETE ON public.fugue_platform_quality_evidence TO %[1]s;
+SET ROLE %[1]s;`, legacyRole)); err != nil {
 		t.Fatal(err)
 	}
 	defer legacy.ExecContext(ctx, `RESET ROLE`)
@@ -137,19 +162,13 @@ SET ROLE synthetic_quality_legacy_api;`); err != nil {
 	if _, err := legacy.ExecContext(ctx, `DELETE FROM fugue_platform_quality_evidence WHERE content_hash=$1`, digest("b")); err == nil {
 		t.Fatal("foreground admission authorization leaked past the transaction")
 	}
-	s.qualityEvidenceMetrics.attemptedAt.Store(1)
-	if err := s.maintainPlatformQualityEvidenceForAPI(ctx, nil, now, true); err != nil {
-		t.Fatal(err)
-	}
 	assertPresent(digest("b"), true)
-	if got := s.qualityEvidenceMetrics.attemptedAt.Load(); got != 1 {
-		t.Fatal("standby API claimed a timer pass")
-	}
 	newEvidence := model.PlatformQualityEvidence{ContentHash: digest("c"), Evidence: []byte("c"), SizeBytes: 1,
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	if err := s.maintainPlatformQualityEvidence(ctx, &newEvidence, now); err != nil {
 		t.Fatal(err)
 	}
+	assertPresent(digest("a"), false)
 	assertPresent(digest("b"), false)
 	assertPresent(digest("c"), true)
 
@@ -197,7 +216,7 @@ SET ROLE synthetic_quality_legacy_api;`); err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if _, err := reopened.ExecContext(ctx, `SET ROLE synthetic_quality_retention_worker`); err != nil {
+	if _, err := reopened.ExecContext(ctx, `SET ROLE `+workerRole); err != nil {
 		t.Fatal(err)
 	}
 	defer reopened.ExecContext(ctx, `RESET ROLE`)
@@ -337,11 +356,16 @@ func TestCompactOnlyPostgresNeverPersistsOriginalAndPoolSurvivesColdStore(t *tes
 	if got, err := fresh.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil); err != nil || len(got.DNSSelections) != 1 || string(got.DNSSelections[0].PhysicalEvidence) != `{"original":true}` {
 		t.Fatal("PG cold comparison history unavailable", err)
 	}
-	if err := s.maintainPlatformQualityEvidence(t.Context(), nil, at.Add(QualityEvidenceRetention+time.Second)); err != nil {
-		t.Fatal("PG expiry cleanup", err)
+	result, err := db.Exec(`UPDATE fugue_platform_quality_evidence
+SET created_at=NOW()-interval '15 days', expires_at=NOW()-interval '1 day' WHERE content_hash=$1`, digest)
+	if err != nil {
+		t.Fatal("make evidence eligible for expiry", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("expiry fixture matched %d rows: %v", changed, err)
 	}
 	if _, err := fresh.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil); !errors.Is(err, ErrNotFound) {
-		t.Fatal("PG removed history became evidence", err)
+		t.Fatal("PG expired history served before worker removed it", err)
 	}
 	// An unavailable optional pool must not abort independent operational writes.
 	if _, err := db.Exec(`DROP TABLE fugue_platform_quality_evidence`); err != nil {

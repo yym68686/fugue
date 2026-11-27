@@ -141,7 +141,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	go store.RunStoragePolicy(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"))
 	go store.RunObservationRetention(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"), platformConsumerHeartbeatAuditKeyringFromEnv())
-	go store.RunPlatformQualityEvidenceRetention(ctx)
 	go store.RunStorageLifecycleAudit(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"))
 	defer stop()
 	billingStatementsReady := false

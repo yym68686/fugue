@@ -23,7 +23,6 @@ const QualityEvidenceMaxObjectBytes = 64 << 20
 const QualityEvidenceMaxObjects = 4096
 const QualityEvidenceRetention = 14 * 24 * time.Hour
 const qualityEvidenceLockID int64 = 315609238744329
-const qualityEvidenceRetentionWriterCheckpoint = "platform-quality-evidence-retention-writer/v1"
 
 type qualityEvidenceCounters struct {
 	bytes, rows, attemptedAt, failed atomic.Int64
@@ -39,8 +38,8 @@ func (s *Store) WritePlatformQualityEvidenceMetrics(w io.Writer) {
 		{"objects", "Last observed retained quality objects; max across replicas.", float64(s.qualityEvidenceMetrics.rows.Load())},
 		{"budget_bytes", "Independent quality evidence payload budget.", float64(QualityEvidenceBudgetBytes)},
 		{"retention_seconds", "Maximum evidence-object age from the original input capture.", QualityEvidenceRetention.Seconds()},
-		{"last_attempt_timestamp_seconds", "Last pool write or expiry cleanup attempt.", float64(s.qualityEvidenceMetrics.attemptedAt.Load())},
-		{"last_run_failed", "Whether the last pool write or expiry cleanup failed.", float64(s.qualityEvidenceMetrics.failed.Load())},
+		{"last_attempt_timestamp_seconds", "Last foreground evidence admission attempt.", float64(s.qualityEvidenceMetrics.attemptedAt.Load())},
+		{"last_run_failed", "Whether the last foreground evidence admission failed.", float64(s.qualityEvidenceMetrics.failed.Load())},
 		{"deleted_objects_total", "Objects removed only from the independent optional quality pool.", float64(s.qualityEvidenceMetrics.deleted.Load())},
 		{"skipped_objects_total", "Empty, expired or oversized optional quality objects not persisted.", float64(s.qualityEvidenceMetrics.skipped.Load())},
 		{"unavailable_reads_total", "Quality objects unavailable or invalid; never health evidence.", float64(s.qualityEvidenceMetrics.misses.Load())},
@@ -189,19 +188,13 @@ func (s *Store) ensurePlatformQualityEvidence(ctx context.Context, snapshot plat
 	return s.maintainPlatformQualityEvidence(ctx, &object, now)
 }
 
-func (s *Store) maintainPlatformQualityEvidence(ctx context.Context, incoming *model.PlatformQualityEvidence, now time.Time) error {
-	return s.maintainPlatformQualityEvidenceForAPI(ctx, incoming, now, false)
-}
-
-func (s *Store) maintainPlatformQualityEvidenceForAPI(ctx context.Context, incoming *model.PlatformQualityEvidence, now time.Time, periodic bool) (resultErr error) {
-	if periodic && incoming != nil {
+// maintainPlatformQualityEvidence admits a new object or an immutable replay.
+// Periodic expiry is the observation worker's responsibility.
+func (s *Store) maintainPlatformQualityEvidence(ctx context.Context, incoming *model.PlatformQualityEvidence, now time.Time) (resultErr error) {
+	if incoming == nil {
 		return ErrInvalidInput
 	}
-	ran := true
 	defer func() {
-		if !ran {
-			return
-		}
 		s.qualityEvidenceMetrics.attemptedAt.Store(time.Now().Unix())
 		failed := int64(0)
 		if resultErr != nil {
@@ -228,29 +221,10 @@ func (s *Store) maintainPlatformQualityEvidenceForAPI(ctx context.Context, incom
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, qualityEvidenceLockID); err != nil {
 		return err
 	}
-	// Only the timer's ownership can move. Foreground evidence admission must
-	// keep its existing expiry and FIFO capacity guard in this transaction.
-	if periodic {
-		var owner string
-		err := tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, observationCheckpointKey(qualityEvidenceRetentionWriterCheckpoint)).Scan(&owner)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		switch owner {
-		case "": // Compatibility default: the API timer owns expiry cleanup.
-		case "worker":
-			ran = false
-			return nil
-		default:
-			return errors.New("unknown periodic quality evidence retention writer")
-		}
-	} else if incoming != nil {
-		// Tag only the current foreground admission transaction. After the
-		// worker handoff, the database can reject deletes from old timers
-		// without preventing this request from enforcing its capacity guard.
-		if _, err := tx.ExecContext(ctx, `SET LOCAL fugue.quality_evidence_admission = 'v1'`); err != nil {
-			return err
-		}
+	// Tag only this transaction so the database fence can reject obsolete
+	// timers without preventing foreground expiry and FIFO capacity checks.
+	if _, err := tx.ExecContext(ctx, `SET LOCAL fugue.quality_evidence_admission = 'v1'`); err != nil {
+		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT content_hash,size_bytes,created_at,expires_at FROM fugue_platform_quality_evidence ORDER BY created_at,content_hash LIMIT $1`, QualityEvidenceMaxObjects+1)
 	if err != nil {
@@ -290,22 +264,6 @@ func (s *Store) maintainPlatformQualityEvidenceForAPI(ctx context.Context, incom
 	}
 	s.observeQualityPool(inventory, incoming, victims)
 	return nil
-}
-
-// RunPlatformQualityEvidenceRetention performs only the independent pool's
-// expiry cleanup. FIFO capacity is enforced transactionally on every insert.
-func (s *Store) RunPlatformQualityEvidenceRetention(ctx context.Context) {
-
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for {
-		_ = s.maintainPlatformQualityEvidenceForAPI(ctx, nil, time.Now().UTC(), true)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
 }
 
 // GetPlatformArtifactQualityInputContext never uses the compact input as a

@@ -138,6 +138,13 @@ After commit, verification
 requires a durable worker pass newer than the recorded transfer timestamp;
 a timeout must not grant ownership back to the API.
 
+The `acf5f7bd9` handoff switched the timer in production without redeploying
+either process. The independent collector and the primary database both
+reported `owner=worker`; PostgreSQL recorded batches after transfer and kept
+the delete fence enabled. A zero deletion count with no eligible evidence
+is a successful batch, not a missed poll. This is not yet a post-handoff API
+rollout or worker-replacement test.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance
