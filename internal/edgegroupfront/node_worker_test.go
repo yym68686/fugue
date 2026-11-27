@@ -63,6 +63,17 @@ func TestNodeWorkerAdvancesOnlyObservedMemberAndRecoversLostResponse(t *testing.
 	secondary, secondaryPlan := nodeWorkerFixture(t, "b", 912)
 	held, heldPlan := nodeWorkerFixture(t, "a", 913)
 	now := plan.CreatedAt
+	selection, err := plan.SelectionPlan()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkSelection := func(state ActivationState, generation uint64, expected string) {
+		t.Helper()
+		raw, err := json.Marshal(activationWithoutTime(state))
+		if err != nil || state.Generation != generation || nativeDigest(raw) != expected {
+			t.Fatalf("shadow selection does not match the applied pointer: %+v, %v", state, err)
+		}
+	}
 	if _, err := testNodeWorkerWrite(t, primary, plan, "commit", now); err == nil {
 		t.Fatal("accepted commit before publication preparation")
 	}
@@ -88,6 +99,7 @@ func TestNodeWorkerAdvancesOnlyObservedMemberAndRecoversLostResponse(t *testing.
 	if err != nil || !found || state.Generation != 913 || state.ActiveSlot != "a" || plan.Progress(state) != NodeWorkerActivated {
 		t.Fatalf("fresh observations cannot recover the completed CAS: %+v err=%v", state, err)
 	}
+	checkSelection(state, selection.AdvanceGeneration, selection.AdvanceDigest)
 	if err := primary.prepareWorkerTransport(); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +127,7 @@ func TestNodeWorkerAdvancesOnlyObservedMemberAndRecoversLostResponse(t *testing.
 	if err != nil || !found || state.Generation != 914 || state.RollbackOfGeneration != 913 || plan.Progress(state) != NodeWorkerReverted {
 		t.Fatalf("fresh observations cannot recover a lost compensation reply: %+v err=%v", state, err)
 	}
+	checkSelection(state, selection.RollbackGeneration, selection.RollbackDigest)
 	_, _, targets, selected = (&Service{}).selectedWorker(primary)
 	if !selected || targets.HTTPSAddress != "127.0.0.1:28443" {
 		t.Fatalf("compensation did not reselect the retained B listener: %+v", targets)

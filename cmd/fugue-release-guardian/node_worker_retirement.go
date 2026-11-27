@@ -199,8 +199,15 @@ func workerSlotSockets(raw []byte, httpPort, httpsPort uint16) (int, error) {
 
 func (a *frontAuthorityActivator) requireWorkerRetirementPreflight(ctx context.Context, j edgegroupfront.NodeWorkerJournal, r nodeWorkerRuntime) error {
 	p, err := a.loadWorkerRetirement(ctx, j)
-	if err != nil || p == nil {
+	if err != nil {
 		return err
+	}
+	return a.checkWorkerRetirementPreflight(ctx, j, r, p)
+}
+
+func (a *frontAuthorityActivator) checkWorkerRetirementPreflight(ctx context.Context, j edgegroupfront.NodeWorkerJournal, r nodeWorkerRuntime, p *workerRetirementPlan) error {
+	if p == nil {
+		return nil
 	}
 	ds, err := a.client.AppsV1().DaemonSets(a.config.Namespace).Get(ctx, p.DaemonSet, metav1.GetOptions{})
 	if err != nil {

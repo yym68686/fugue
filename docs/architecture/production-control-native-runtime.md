@@ -450,6 +450,26 @@ repository does not provision the live serving fence or collect and sign
 these external records; production readmission cannot be inferred from
 this procedure or from fixture signatures.
 
+## Node-local Front/Worker handoff shadow
+
+`fugue-release-guardian node-worker-shadow` reads the canonical sealed
+`NodeWorkerJournal` from stdin in the configured Guardian observation
+context. `node-worker-seal` can canonicalize a journal prepared from read-only
+observations. Use a recent journal for the exact Node, Front, retained Worker
+and monitored candidate. The shadow reuses the live claim preflight, checks
+that the shared group fence is vacant on both sides of the observation, and
+reports the component Lease, exact journal and optional retirement plan.
+The projected advance and rollback digests cover the selection states
+with their execution timestamps zeroed. Rollback reselects the retained
+Worker at the next generation.
+
+The Kubernetes object client uses plain GET. The only Pod exec calls read
+the exact Front recipient and its local activation file. Keep the current
+production writer until the replacement also proves peer stability,
+existing TLS connection survival, and the exact terminal serving result.
+Those proofs, old writer drainage and revocation, and the production
+cutover require separate evidence.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
