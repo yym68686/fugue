@@ -20,6 +20,7 @@ from scripts import prepush_shadow_fixture
 
 
 MIN_SAMPLES = 20
+ARTIFACT_PROFILES = ("linux/amd64", "linux/arm64")
 
 
 def p95_ms(samples):
@@ -212,13 +213,21 @@ def replay_incremental(case, base, count, oracle_timeout):
         files = [prepush.ROOT / name for name, _, _ in fixture]
         originals = [path.read_bytes() for path in files]
         selection = None
+        target_comparison = None
         try:
             prepush_shadow_fixture.prepare(case)
             edited = [path.read_bytes() for path in files]
+            marker = prepush_shadow_fixture.SAMPLE_MARKER.encode("ascii")
+            if any(source.count(marker) != 1 for source in edited):
+                raise ValueError("each incremental fixture file must contain one sample marker")
             for index in range(count):
                 for path, source in zip(files, edited):
-                    path.write_bytes(source + f"\n// Incremental replay sample {index + 1}.\n".encode("ascii"))
+                    # Change a test identifier or runtime literal so each edit
+                    # reaches the Go compiler output, including importers.
+                    path.write_bytes(source.replace(marker, f"fugue_shadow_sample_{index + 1:03}".encode("ascii"), 1))
                 snapshot = prepush_shadow.snapshot(base)
+                if index == 0:
+                    target_comparison = prepush_shadow.compare_targets(base, ARTIFACT_PROFILES)
                 order = [("legacy", legacy_sample), ("candidate", candidate_sample)]
                 if index % 2:
                     order.reverse()
@@ -252,6 +261,7 @@ def replay_incremental(case, base, count, oracle_timeout):
         "machine": {"system": platform.system(), "release": platform.release(),
                     "machine": platform.machine(), "logicalCPU": os.cpu_count(), "goEnv": json.loads(go_env)},
         "selection": selection,
+        "targetComparison": target_comparison,
         "samples": pairs,
         "fullTestOracle": oracle,
         "summary": summary,

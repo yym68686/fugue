@@ -93,9 +93,10 @@ class ReplayTest(unittest.TestCase):
                 mock.patch.object(prepush, "git_output", return_value=b"head\n"),
                 mock.patch.object(prepush_replay.prepush_shadow, "git_paths", return_value=[]),
                 mock.patch.object(prepush_replay.prepush_shadow, "snapshot", side_effect=lambda _base: path.read_text()),
+                mock.patch.object(prepush_replay.prepush_shadow, "compare_targets", return_value={"gate": "report-only"}) as compare,
                 mock.patch.dict(prepush_replay.prepush_shadow_fixture.CASES, {"sample": (("suite_test.go", "", ""),)}),
                 mock.patch.object(prepush_replay.prepush_shadow_fixture, "prepare",
-                                  side_effect=lambda _case: path.write_bytes(original + b"// edited\n")),
+                                  side_effect=lambda _case: path.write_bytes(original + b"const identifier = \"fugue_shadow_sample_001\"\n")),
                 mock.patch.object(prepush_replay.subprocess, "check_output", return_value="{}"),
                 mock.patch.object(prepush, "run", return_value=(0, "")),
                 mock.patch.object(prepush_replay, "legacy_sample", side_effect=lambda: sample("legacy")),
@@ -110,6 +111,8 @@ class ReplayTest(unittest.TestCase):
             self.assertNotEqual(seen["legacy"][0][1], seen["legacy"][1][1])
             self.assertNotEqual(report["samples"][0]["sourceSnapshot"], report["samples"][1]["sourceSnapshot"])
             self.assertFalse(report["productionAuthorization"])
+            compare.assert_called_once_with("HEAD", ("linux/amd64", "linux/arm64"))
+            self.assertEqual(report["targetComparison"], {"gate": "report-only"})
 
 
 if __name__ == "__main__":

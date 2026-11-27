@@ -7,20 +7,18 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parent.parent
+SAMPLE_MARKER = "fugue_shadow_sample_001"
 
 QUEUE_RUNTIME = (
     "internal/operationqueue/selection.go",
-    "\tif (!model.OperationWaitingForImageReplication(op) && !model.OperationWaitingForTrafficConfirmation(op) && !model.OperationWaitingForCanonicalHandoff(op)) || op.UpdatedAt.IsZero() {\n",
-    "\tif op.UpdatedAt.IsZero() {\n"
-    "\t\treturn true\n"
-    "\t}\n"
-    "\tif !model.OperationWaitingForImageReplication(op) && !model.OperationWaitingForTrafficConfirmation(op) && !model.OperationWaitingForCanonicalHandoff(op) {\n",
+    '"list pending deploy apps: %w"',
+    f'"list pending deploy apps ({SAMPLE_MARKER}): %w"',
 )
 
 QUEUE_TEST = (
     "internal/operationqueue/queue_test.go",
     "func TestAppCPUResizeRestoresUseDedicatedWorkerLane(t *testing.T) {\n",
-    "func TestRestoreLaneDoesNotAcceptOrdinaryPendingDeploy(t *testing.T) {\n"
+    f"func TestRestoreLaneDoesNotAcceptOrdinaryPendingDeploy_{SAMPLE_MARKER}(t *testing.T) {{\n"
     "\tif pendingOperationMatchesLane(pending(\"deploy\", \"app\", model.OperationTypeDeploy), CPURequestRestore) {\n"
     "\t\tt.Fatal(\"ordinary deployments must not occupy the restore lane\")\n"
     "\t}\n"
@@ -31,8 +29,19 @@ QUEUE_TEST = (
 HOST_POLICY_TEST = (
     "internal/nodehostpolicy/host_memory_safety_test.go",
     "func TestHostMemorySafetyShellHasValidBashSyntax(t *testing.T) {\n",
-    "func TestHostMemorySafetyShellHasValidBashSyntax(t *testing.T) {\n"
-    "\t// The rendered fragment must be valid on its own, before an installer runs it.\n",
+    f"func TestHostMemorySafetyShellHasValidBashSyntax_{SAMPLE_MARKER}(t *testing.T) {{\n",
+)
+
+BACKUP_RUNTIME = (
+    "internal/backupusage/inventory.go",
+    '"fugue-usage-namespace-probe"',
+    f'"fugue-usage-namespace-probe-{SAMPLE_MARKER}"',
+)
+
+RETIREMENT_TEST = (
+    "internal/releaseretirement/scheduler_test.go",
+    "func TestSweepOnlyBacksOffAttemptsWithoutProgress(t *testing.T) {\n",
+    f"func TestSweepOnlyBacksOffAttemptsWithoutProgress_{SAMPLE_MARKER}(t *testing.T) {{\n",
 )
 
 TRACKING_SCOPE_REGRESSION = (
@@ -47,9 +56,18 @@ GENERATOR_REGRESSION = (
     'b.WriteString("package api\\n// Generated source differs from the checked-in routes.\\n")',
 )
 
+RETIREMENT_SCOPE_REGRESSION = (
+    "internal/controller/safe_rollout_resume.go",
+    "\treleases, err := s.Store.ListAppReleases(",
+    "\t_ = s.Store.AppReleaseRetirement\n\treleases, err := s.Store.ListAppReleases(",
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
+    "host-policy-test": (HOST_POLICY_TEST,),
+    "backup-runtime": (BACKUP_RUNTIME,),
+    "retirement-test": (RETIREMENT_TEST,),
     "cross-domain": (QUEUE_RUNTIME, HOST_POLICY_TEST),
 }
 
@@ -63,6 +81,11 @@ CONTRACTS = {
         GENERATOR_REGRESSION, "./internal/apispec",
         "TestGeneratedArtifactsAreUpToDate",
         "generated file is out of date:",
+    ),
+    "contract-retirement-scope": (
+        RETIREMENT_SCOPE_REGRESSION, "./internal/releaseretirement",
+        "TestOnlyControllerCompositionAcquiresReleaseRetirementWritePort",
+        "acquire the retirement write port only in its Controller composition adapter",
     ),
 }
 
