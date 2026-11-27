@@ -32,3 +32,9 @@ the independent cutover checks.
   immutable reference. The registry transition needs its own verified baseline
   and cutover procedure. Do not rewrite its historical monitor record to
   synthesize that evidence.
+- `ObserveServingRelease` is read-only. It separately verifies the exact
+  marked pointer, immutable monitor record and live Deployment, matches the
+  ReplicaSet/Pod ownership chain and actual image IDs, and checks recent
+  local, dependency, and route health. It never advances the PostgreSQL
+  last-verified version: that additionally needs proof this claim cannot
+  issue a delayed write. Unknown state is not proof of no write.
