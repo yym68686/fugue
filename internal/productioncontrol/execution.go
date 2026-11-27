@@ -289,6 +289,11 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if intent.Operation == ParticipationTopology || intent.Operation == DNSCutover || intent.ResourceID == GlobalProducerCutoverResource {
 			return false, errors.New("topology and cutover intents do not authorize ordinary execution")
 		}
+		if intent.Operation == FrontWorker {
+			if _, err := InspectFrontWorker(Submission{intent, payload}); err != nil {
+				return false, err
+			}
+		}
 		nodeScope := strings.HasPrefix(intent.ResourceID, ParticipationNodeResourcePrefix)
 		if nodeScope != (intent.Operation == NodeParticipation) {
 			return false, errors.New("node participation execution must use its canonical resource boundary")
@@ -422,6 +427,10 @@ func (e *ExecutionJournal) CompleteExecution(ctx context.Context, actor string, 
 }
 
 func (result ExecutionResult) matches(intent Intent) error {
+	if intent.Operation == FrontWorker && result.Outcome != NotApplied &&
+		(intent.Generation == math.MaxInt64 || result.Verified.Generation != intent.Generation+1) {
+		return errors.New("Front/Worker result must advance the group ledger by exactly one generation")
+	}
 	switch result.Outcome {
 	case Applied:
 		if result.Verified.Digest == intent.TargetDigest && result.Verified.Generation >= intent.Generation &&

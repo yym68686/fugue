@@ -10,30 +10,14 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
+	"github.com/jackc/pgx/v5/stdlib"
 	"k8s.io/client-go/rest"
 )
 
-const nodeWorkerShadowSchema = "fugue.release-guardian.node-worker-shadow.v1"
-
-type nodeWorkerShadowReport struct {
-	Schema     string                                 `json:"schema"`
-	Namespace  string                                 `json:"namespace"`
-	GroupFence string                                 `json:"group_fence"`
-	Component  string                                 `json:"component"`
-	LeaseName  string                                 `json:"component_lease"`
-	Journal    edgegroupfront.NodeWorkerJournal       `json:"journal"`
-	Selection  edgegroupfront.NodeWorkerSelectionPlan `json:"selection"`
-	Rollback   nodeWorkerRollbackObservation          `json:"rollback_observation"`
-	Retirement *workerRetirementPlan                  `json:"retirement,omitempty"`
-	ObservedAt time.Time                              `json:"observed_at"`
-}
-
-type nodeWorkerRollbackObservation struct {
-	RetainedWorkerUID string `json:"retained_worker_uid"`
-	RetainedTarget    string `json:"retained_target"`
-	CanaryBodyDigest  string `json:"canary_body_digest"`
-}
+type nodeWorkerShadowReport = productioncontrol.FrontWorkerShadow
+type nodeWorkerRollbackObservation = productioncontrol.FrontWorkerRollbackObservation
 
 func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	if len(args) != 0 || in == nil || out == nil {
@@ -47,9 +31,57 @@ func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out i
 	if err != nil {
 		return err
 	}
-	config, err := loadKubeConfig()
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
+	report, err := observeNodeWorkerShadow(ctx, journal, true)
 	if err != nil {
 		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
+func runApprovedNodeWorkerShadow(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 3 || out == nil {
+		return errors.New("usage: fugue-release-guardian node-worker-approved-shadow JOURNAL_CONFIG INTENT_DIGEST APPROVAL_DIGEST")
+	}
+	cfg, keys, cluster, err := productioncontrol.LoadJournalEndpoint(args[0])
+	if err != nil {
+		return err
+	}
+	if cfg.RuntimeParams == nil {
+		cfg.RuntimeParams = make(map[string]string)
+	}
+	cfg.RuntimeParams["default_transaction_read_only"] = "on"
+	db := stdlib.OpenDB(*cfg)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	j, err := productioncontrol.NewJournal(db, keys)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	approved, err := j.ReadApprovedFrontWorker(ctx, cluster, args[1], args[2])
+	if err != nil {
+		return err
+	}
+	fresh, err := observeNodeWorkerShadow(ctx, approved.Journal, false)
+	if err != nil {
+		return err
+	}
+	if err := productioncontrol.MatchFreshFrontWorkerShadow(approved, fresh); err != nil {
+		return err
+	}
+	if _, err := j.ReadApprovedFrontWorker(ctx, cluster, args[1], args[2]); err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(fresh)
+}
+
+func observeNodeWorkerShadow(ctx context.Context, journal edgegroupfront.NodeWorkerJournal, requireRecentJournal bool) (nodeWorkerShadowReport, error) {
+	config, err := loadKubeConfig()
+	if err != nil {
+		return nodeWorkerShadowReport{}, err
 	}
 	reader := rest.CopyConfig(config)
 	reader.Wrap(func(next http.RoundTripper) http.RoundTripper {
@@ -57,24 +89,18 @@ func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out i
 	})
 	targets, store, front, err := loadNodeWorkerAuthority(reader, config, journal.Recipient.Group)
 	if err != nil {
-		return err
+		return nodeWorkerShadowReport{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
 	component, err := store.FindNodeWorkerComponent(ctx, targets, journal.Recipient.Group)
 	if err != nil {
-		return err
+		return nodeWorkerShadowReport{}, err
 	}
-	report, err := front.shadowNodeWorker(ctx, store, component, journal)
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(out).Encode(report)
+	return front.shadowNodeWorker(ctx, store, component, journal, requireRecentJournal)
 }
 
 func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore,
-	component releaseguardian.NodeWorkerComponent, journal edgegroupfront.NodeWorkerJournal) (nodeWorkerShadowReport, error) {
-	if !a.recentNodeWorkerJournal(journal) {
+	component releaseguardian.NodeWorkerComponent, journal edgegroupfront.NodeWorkerJournal, requireRecentJournal bool) (nodeWorkerShadowReport, error) {
+	if requireRecentJournal && !a.recentNodeWorkerJournal(journal) {
 		return nodeWorkerShadowReport{}, errors.New("node Worker shadow requires a recent journal")
 	}
 	selection, err := journal.SelectionPlan()
@@ -103,14 +129,21 @@ func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *r
 	if err := store.CheckNodeWorkerShadowFence(ctx, journal.Recipient.Group); err != nil {
 		return nodeWorkerShadowReport{}, err
 	}
-	if !a.recentNodeWorkerJournal(journal) {
+	if requireRecentJournal && !a.recentNodeWorkerJournal(journal) {
 		return nodeWorkerShadowReport{}, errors.New("node Worker journal expired during shadow observation")
 	}
+	var retirementObservation *productioncontrol.FrontWorkerRetirement
+	if retirement != nil {
+		retirementObservation = &productioncontrol.FrontWorkerRetirement{
+			Schema: retirement.Schema, JournalDigest: retirement.JournalDigest, DaemonSet: retirement.DaemonSet,
+			DaemonSetUID: string(retirement.DaemonSetUID), Generation: retirement.Generation,
+		}
+	}
 	return nodeWorkerShadowReport{
-		Schema: nodeWorkerShadowSchema, Namespace: a.config.Namespace,
+		Schema: productioncontrol.FrontWorkerShadowSchema, Namespace: a.config.Namespace,
 		GroupFence: releaseguardian.FrontRepairFenceName(journal.Recipient.Group), Component: component.Component,
 		LeaseName: component.LeaseName, Journal: journal, Selection: selection,
-		Rollback: rollback, Retirement: retirement, ObservedAt: a.now().UTC(),
+		Rollback: rollback, Retirement: retirementObservation, ObservedAt: a.now().UTC(),
 	}, nil
 }
 
@@ -130,6 +163,7 @@ func (a *frontAuthorityActivator) observeNodeWorkerRollback(ctx context.Context,
 	}
 	return nodeWorkerRollbackObservation{
 		RetainedWorkerUID: string(prior.pod.UID), RetainedTarget: prior.target, CanaryBodyDigest: a.config.RouteBodyDigest,
+		CanaryHost: a.config.RouteHost, CanaryPath: a.config.RoutePath,
 	}, nil
 }
 

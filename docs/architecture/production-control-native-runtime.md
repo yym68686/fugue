@@ -465,6 +465,21 @@ Worker at the next generation. A successful report also proves that the
 retained listener currently serves the expected signed publication and
 TLS canary, and gives the retained Pod UID, listener and canary digest.
 
+`fugue-production-control draft-front-worker JOURNAL_CONFIG REQUEST SHADOW`
+reads the verified group head from PostgreSQL and binds it to the shadow
+report. The group has one ledger sequence, while each node keeps its own
+Front activation generation. `inspect` shows the full approved payload.
+Use the usual `record-intent`, offline `sign`, and `record-approval`
+commands to save the authorization.
+
+`fugue-release-guardian node-worker-approved-shadow JOURNAL_CONFIG INTENT_DIGEST APPROVAL_DIGEST`
+checks the recorded owner signature and the group head before and after
+fresh Kubernetes and TLS observations. An approval can outlive the
+original observation window. The fresh observations must still match
+the exact sealed journal, rollback canary, shared fence, and any
+retirement plan. Initial group enrollment requires independent baseline
+evidence. Both commands use read-only journal sessions.
+
 The Kubernetes object client uses plain GET. The only Pod exec calls read
 the exact Front recipient and its local activation file. Keep the current
 production writer until the replacement also proves peer stability,

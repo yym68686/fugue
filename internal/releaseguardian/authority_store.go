@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/productioncontrol"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -736,7 +737,7 @@ func candidateRecordLabel(recordDigest string) string {
 func candidateAuthorityName(groupID string) string { return "fugue-candidate-authority-" + groupID }
 func currentAuthorityName(groupID string) string   { return "fugue-current-authority-" + groupID }
 func transitionJournalName(groupID string) string {
-	return "fugue-authority-transition-prepared-" + groupID
+	return productioncontrol.FrontWorkerGroupFenceName(groupID)
 }
 func transitionActivatedJournalName(groupID string) string {
 	return "fugue-authority-transition-activated-" + groupID

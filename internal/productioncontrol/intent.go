@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -69,6 +70,9 @@ func (intent Intent) Validate() error {
 		!digestPattern.MatchString(intent.RollbackDigest) ||
 		!digestPattern.MatchString(intent.PayloadDigest) {
 		return errors.New("invalid production intent binding")
+	}
+	if strings.HasPrefix(intent.ResourceID, FrontWorkerResourcePrefix) != (intent.Operation == FrontWorker) {
+		return errors.New("Front/Worker intent must use its canonical resource boundary")
 	}
 	switch intent.Operation {
 	case ComponentRelease, NodeParticipation, DNSMembership, DNSCutover, FrontWorker, Maintenance, ParticipationTopology:

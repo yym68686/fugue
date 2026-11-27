@@ -85,6 +85,11 @@ func (j *Journal) RecordIntent(ctx context.Context, actor string, intent Intent,
 	if err := intent.VerifyPayload(payload); err != nil {
 		return Recorded{}, err
 	}
+	if intent.Operation == FrontWorker {
+		if _, err := InspectFrontWorker(Submission{intent, payload}); err != nil {
+			return Recorded{}, err
+		}
+	}
 	intentDigest, err := intent.Digest()
 	if err != nil {
 		return Recorded{}, err
