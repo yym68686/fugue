@@ -699,7 +699,7 @@ func (s *Server) buildAppImageInventory(
 		} else {
 			unionAppImageBlobSizes(inventory.StaleBlobSizes, inspectResult.BlobSizes)
 		}
-		for _, digest := range sortedAppImageBlobDigests(inspectResult.BlobSizes) {
+		for _, digest := range appimages.SortedBlobDigests(inspectResult.BlobSizes) {
 			blobUsageCount[digest]++
 		}
 	}
@@ -787,10 +787,10 @@ func (s *Server) buildAppImageInventory(
 		VersionCount:         len(keptCandidates),
 		CurrentVersionCount:  currentCount,
 		StaleVersionCount:    maxInt(len(keptCandidates)-currentCount, 0),
-		TotalSizeBytes:       sumAppImageBlobSizes(inventory.TotalBlobSizes),
-		CurrentSizeBytes:     sumAppImageBlobSizes(inventory.CurrentBlobSizes),
-		StaleSizeBytes:       sumAppImageBlobSizes(inventory.StaleBlobSizes),
-		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
+		TotalSizeBytes:       appimages.SumBlobSizes(inventory.TotalBlobSizes),
+		CurrentSizeBytes:     appimages.SumBlobSizes(inventory.CurrentBlobSizes),
+		StaleSizeBytes:       appimages.SumBlobSizes(inventory.StaleBlobSizes),
+		ReclaimableSizeBytes: appimages.SumBlobSizes(inventory.ReclaimableBlobSizes),
 	}
 	inventory.Response.MeasurementStatus = summarizeAppImageVersionMeasurementStatus(inventory.Response.Versions)
 	inventory.Response.MeasurementReasons = summarizeAppImageVersionMeasurementReasons(inventory.Response.Versions)

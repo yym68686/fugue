@@ -1336,7 +1336,7 @@ func (f *fakeAppImageRegistry) InspectImage(ctx context.Context, imageRef string
 		}
 	}
 	if result, ok := f.images[imageRef]; ok {
-		return cloneAppImageRegistryInspectResult(result), nil
+		return result.Clone(), nil
 	}
 	return appImageRegistryInspectResult{
 		ImageRef: imageRef,

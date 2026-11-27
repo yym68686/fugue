@@ -327,7 +327,7 @@ func MeasureTenantStorageBytes(
 		unionBlobSizes(totalBlobSizes, blobSizes)
 	}
 
-	return sumBlobSizes(totalBlobSizes), nil
+	return SumBlobSizes(totalBlobSizes), nil
 }
 
 func StorageBytesToGibibytes(bytes int64) int64 {
@@ -655,7 +655,7 @@ func unionBlobSizes(target, source map[string]int64) {
 	}
 }
 
-func sumBlobSizes(blobSizes map[string]int64) int64 {
+func SumBlobSizes(blobSizes map[string]int64) int64 {
 	var total int64
 	for _, sizeBytes := range blobSizes {
 		if sizeBytes > 0 {

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/imagecacheevidence"
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/model"
@@ -237,10 +238,10 @@ func aggregateProjectImageUsageInventories(
 			}
 			return accumulator.Summary.Apps[i].AppName < accumulator.Summary.Apps[j].AppName
 		})
-		accumulator.Summary.TotalSizeBytes = sumAppImageBlobSizes(accumulator.TotalBlobSizes)
-		accumulator.Summary.CurrentSizeBytes = sumAppImageBlobSizes(accumulator.CurrentBlobSizes)
-		accumulator.Summary.StaleSizeBytes = sumAppImageBlobSizes(accumulator.StaleBlobSizes)
-		accumulator.Summary.ReclaimableSizeBytes = sumAppImageBlobSizes(accumulator.ReclaimableBlobSizes)
+		accumulator.Summary.TotalSizeBytes = appimages.SumBlobSizes(accumulator.TotalBlobSizes)
+		accumulator.Summary.CurrentSizeBytes = appimages.SumBlobSizes(accumulator.CurrentBlobSizes)
+		accumulator.Summary.StaleSizeBytes = appimages.SumBlobSizes(accumulator.StaleBlobSizes)
+		accumulator.Summary.ReclaimableSizeBytes = appimages.SumBlobSizes(accumulator.ReclaimableBlobSizes)
 		response.Projects = append(response.Projects, accumulator.Summary)
 	}
 
@@ -422,10 +423,10 @@ func (s *Server) buildDistributedAppImageInventory(
 		VersionCount:         len(keptCandidates),
 		CurrentVersionCount:  currentCount,
 		StaleVersionCount:    maxInt(len(keptCandidates)-currentCount, 0),
-		TotalSizeBytes:       sumAppImageBlobSizes(inventory.TotalBlobSizes),
-		CurrentSizeBytes:     sumAppImageBlobSizes(inventory.CurrentBlobSizes),
-		StaleSizeBytes:       sumAppImageBlobSizes(inventory.StaleBlobSizes),
-		ReclaimableSizeBytes: sumAppImageBlobSizes(inventory.ReclaimableBlobSizes),
+		TotalSizeBytes:       appimages.SumBlobSizes(inventory.TotalBlobSizes),
+		CurrentSizeBytes:     appimages.SumBlobSizes(inventory.CurrentBlobSizes),
+		StaleSizeBytes:       appimages.SumBlobSizes(inventory.StaleBlobSizes),
+		ReclaimableSizeBytes: appimages.SumBlobSizes(inventory.ReclaimableBlobSizes),
 	}
 	inventory.Response.MeasurementStatus = summarizeAppImageVersionMeasurementStatus(inventory.Response.Versions)
 	inventory.Response.MeasurementReasons = summarizeAppImageVersionMeasurementReasons(inventory.Response.Versions)
