@@ -70,7 +70,9 @@ workflow jobs and schedules, production declarations, release lanes, local
 Actions, and executable Python/shell/PowerShell scripts under the production
 control directories. Check inventory drift with
 `go run ./cmd/fugue-control-migration check .`; print the discovered surface
-set with `scan`. Every row is a **proposed** disposition: `migrate` names a
+set with `scan`. Pass a Git ref such as `origin/main` after the repository
+path to compare the current inventory against that exact commit. Every row
+is a **proposed** disposition: `migrate` names a
 native destination, while `retire` names the required prerequisite or
 replacement. Neither value is evidence that production write permission has
 been transferred or revoked. The scanner never connects to production and

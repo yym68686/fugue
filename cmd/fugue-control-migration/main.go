@@ -38,23 +38,34 @@ func main() {
 }
 
 func run(args []string, out io.Writer) error {
-	if len(args) != 2 || (args[0] != "scan" && args[0] != "check") {
-		return errors.New("usage: fugue-control-migration <scan|check> REPOSITORY")
+	if (len(args) != 2 && len(args) != 3) || (args[0] != "scan" && args[0] != "check") {
+		return errors.New("usage: fugue-control-migration <scan|check> REPOSITORY [REF]")
 	}
 	root, err := filepath.Abs(args[1])
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("git", "-C", root, "ls-files", "--full-name", "-z", "--",
-		".github/workflows", ".github/actions", "scripts", "deploy/environments/production", "deploy/releases")
-	raw, err := cmd.Output()
+	paths := []string{".github/workflows", ".github/actions", "scripts", "deploy/environments/production", "deploy/releases"}
+	fileList := []string{"ls-files", "--full-name", "-z", "--"}
+	read := func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(root, name)) }
+	if len(args) == 3 {
+		// Resolve once so a fetch cannot mix files from two revisions.
+		rawCommit, err := exec.Command("git", "-C", root, "rev-parse", "--verify", "--end-of-options", args[2]+"^{commit}").Output()
+		if err != nil {
+			return fmt.Errorf("resolve legacy inventory ref: %w", err)
+		}
+		commit := strings.TrimSpace(string(rawCommit))
+		fileList = []string{"ls-tree", "-r", "--name-only", "-z", commit, "--"}
+		read = func(name string) ([]byte, error) {
+			return exec.Command("git", "-C", root, "show", commit+":"+name).Output()
+		}
+	}
+	raw, err := exec.Command("git", append([]string{"-C", root}, append(fileList, paths...)...)...).Output()
 	if err != nil {
 		return fmt.Errorf("list tracked legacy surfaces: %w", err)
 	}
 	files := strings.Split(strings.TrimSuffix(string(raw), "\x00"), "\x00")
-	items, err := scan(files, func(name string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(root, name))
-	})
+	items, err := scan(files, read)
 	if err != nil {
 		return err
 	}
@@ -66,6 +77,7 @@ func run(args []string, out io.Writer) error {
 		}
 		return nil
 	}
+	// Always test the current migration inventory against the chosen source.
 	manifest, err := os.ReadFile(filepath.Join(root, inventoryPath))
 	if err != nil {
 		return err
