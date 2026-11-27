@@ -150,6 +150,7 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 	}
 	t.Run("execution-lifecycle", func(t *testing.T) { testExecutionLifecycle(t, ctx, j, second) })
 	t.Run("global-dns-execution-boundary", func(t *testing.T) { testGlobalDNSExecutionBoundary(t, ctx, j) })
+	t.Run("front-worker-approval", func(t *testing.T) { testPostgresFrontWorkerApproval(t, ctx, j, second) })
 
 	// Recreate the v1 audit layout in this disposable database without
 	// touching the transition tables. The migrator must rehydrate the audit

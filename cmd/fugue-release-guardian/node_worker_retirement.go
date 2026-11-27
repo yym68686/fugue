@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/edgegroupfront"
+	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -24,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-const workerRetirementSchema = "edge-node-worker-retirement/v1"
+const workerRetirementSchema = productioncontrol.FrontWorkerRetirementSchema
 
 type workerRetirementPlan struct {
 	Schema        string    `json:"schema"`

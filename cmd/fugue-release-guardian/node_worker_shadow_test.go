@@ -64,7 +64,7 @@ func TestNodeWorkerShadowFailsClosedOnRecipientDriftWithoutWrites(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, err := front.shadowNodeWorker(context.Background(), store, releaseguardian.NodeWorkerComponent{}, journal)
+	report, err := front.shadowNodeWorker(context.Background(), store, releaseguardian.NodeWorkerComponent{}, journal, true)
 	if err == nil || !strings.Contains(err.Error(), "exact running Front recipient") || report.Schema != "" || exec.calls != 1 {
 		t.Fatalf("incorrect result for unproven recipient: %+v, %v, exec calls=%d", report, err, exec.calls)
 	}

@@ -38,6 +38,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control draft-dns-policy-rollback JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE ORIGINAL_INTENT_DIGEST REQUEST
        fugue-production-control observe-dns-cutover JOURNAL_CONFIG
        fugue-production-control draft-dns-cutover CLUSTER REQUEST PLAN
+       fugue-production-control draft-front-worker JOURNAL_CONFIG REQUEST SHADOW
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -73,6 +74,34 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "draft-front-worker":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		raw, err := readFile(args[3], productioncontrol.MaxPayloadBytes, false)
+		if err != nil {
+			return err
+		}
+		shadow, err := productioncontrol.DecodeFrontWorkerShadow(raw)
+		if err != nil {
+			return err
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			scope := productioncontrol.Scope{ClusterID: cluster,
+				ResourceID: productioncontrol.FrontWorkerResource(shadow.Namespace, shadow.Journal.Recipient.Group)}
+			state, err := j.ReadResource(ctx, scope)
+			if err != nil {
+				return err
+			}
+			if state.Pending != "" {
+				return productioncontrol.ErrResourceBusy
+			}
+			submission, err := productioncontrol.DraftFrontWorker(cluster, args[2], state.LastVerified, shadow)
+			if err != nil {
+				return err
+			}
+			return emit(submission)
+		})
 	case "draft-dns-cutover":
 		if len(args) != 4 {
 			return errors.New(usage)
@@ -562,6 +591,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		}
 		var hold json.RawMessage
 		var dns *dnscontrol.Payload
+		var handoff *productioncontrol.FrontWorkerShadow
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			hold, err = participation.InspectHold(s)
 			if err != nil {
@@ -575,12 +605,20 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			dns = &p
 		}
+		if s.Intent.Operation == productioncontrol.FrontWorker {
+			p, err := productioncontrol.InspectFrontWorker(s)
+			if err != nil {
+				return err
+			}
+			handoff = &p
+		}
 		return emit(struct {
-			Digest string                   `json:"digest"`
-			Intent productioncontrol.Intent `json:"intent"`
-			Hold   json.RawMessage          `json:"hold,omitempty"`
-			DNS    *dnscontrol.Payload      `json:"dns,omitempty"`
-		}{digest, s.Intent, hold, dns})
+			Digest      string                               `json:"digest"`
+			Intent      productioncontrol.Intent             `json:"intent"`
+			Hold        json.RawMessage                      `json:"hold,omitempty"`
+			DNS         *dnscontrol.Payload                  `json:"dns,omitempty"`
+			FrontWorker *productioncontrol.FrontWorkerShadow `json:"frontWorker,omitempty"`
+		}{digest, s.Intent, hold, dns, handoff})
 	case "sign":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -600,6 +638,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		}
 		if s.Intent.Operation == productioncontrol.DNSMembership {
 			if _, err := dnscontrol.Inspect(s); err != nil {
+				return err
+			}
+		}
+		if s.Intent.Operation == productioncontrol.FrontWorker {
+			if _, err := productioncontrol.InspectFrontWorker(s); err != nil {
 				return err
 			}
 		}
