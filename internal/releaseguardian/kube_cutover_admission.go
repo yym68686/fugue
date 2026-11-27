@@ -51,7 +51,12 @@ func NewKubeFencedNativePublisher(store *KubeStore, journal *productioncontrol.E
 		target.MonitorComponent != config.MonitorComponent || config.MonitorComponent != config.Key.Component {
 		return nil, errors.New("native publisher's Guardian target differs from its Kubernetes cutover scope")
 	}
-	publisher, err := newNativePublisher(store, journal, &kubeDeploymentAdmission{store.client, config, clusterID, evidence}, clusterID)
+	provider := store.client.CoreV1().RESTClient()
+	if provider == nil {
+		return nil, errors.New("native publisher requires the authenticated Kubernetes REST writer")
+	}
+	publisher, err := newNativePublisher(store, journal, &kubeDeploymentAdmission{store.client, config, clusterID, evidence}, clusterID,
+		nativeConfigMapWriter{provider})
 	if err != nil {
 		return nil, err
 	}

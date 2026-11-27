@@ -69,15 +69,16 @@ type NativePublisher struct {
 	store     *KubeStore
 	journal   nativeExecutionJournal
 	admission NativePublicationAdmission
+	writer    configMapPublicationWriter
 	clusterID string
 	artifacts *IndependentRegistry
 }
 
-func newNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, admission NativePublicationAdmission, clusterID string) (*NativePublisher, error) {
-	if store == nil || store.client == nil || journal == nil || admission == nil || !componentPattern.MatchString(clusterID) {
+func newNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, admission NativePublicationAdmission, clusterID string, writer configMapPublicationWriter) (*NativePublisher, error) {
+	if store == nil || store.client == nil || journal == nil || admission == nil || writer == nil || !componentPattern.MatchString(clusterID) {
 		return nil, errors.New("native Guardian publisher requires its cluster, journal and provider admission")
 	}
-	return &NativePublisher{store: store, journal: journal, admission: admission, clusterID: clusterID}, nil
+	return &NativePublisher{store: store, journal: journal, admission: admission, clusterID: clusterID, writer: writer}, nil
 }
 
 // NativePublication describes a submission, not a successful rollout. After a
@@ -90,7 +91,7 @@ type NativePublication struct {
 }
 
 func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, approvalDigest string) (NativePublication, error) {
-	if p == nil || p.store == nil || p.journal == nil || p.admission == nil {
+	if p == nil || p.store == nil || p.journal == nil || p.admission == nil || p.writer == nil {
 		return NativePublication{}, errors.New("native Guardian publisher is not configured")
 	}
 	intent, payload, err := p.readReleaseIntent(ctx, intentDigest)
@@ -137,7 +138,7 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 		nativeIntentAnnotation: claim.IntentDigest,
 		nativeFenceAnnotation:  strconv.FormatInt(claim.Fence, 10),
 	}
-	_, desired, err := p.store.commitDesiredPublication(ctx, key, publication, func(ctx context.Context) error {
+	_, desired, err := p.store.commitDesiredPublication(ctx, key, publication, p.writer, func(ctx context.Context) error {
 		if err := p.verifyBoundary(ctx, boundary); err != nil {
 			return err
 		}

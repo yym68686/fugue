@@ -35,6 +35,7 @@ func TestObserveNativeServingNeverSettlesFromPointerAlone(t *testing.T) {
 				Fence: 1, IntentDigest: intentDigest, ApprovalDigest: testDigest}
 			journal := &publicationJournalFixture{draft: draft, claim: claim}
 			p := &NativePublisher{store: f.store, journal: journal, clusterID: draft.Intent.ClusterID,
+				writer:    f.client.CoreV1().ConfigMaps(draft.Preview.Namespace),
 				admission: publicationAdmissionFunc(func(context.Context, NativePublicationBoundary) error { return nil })}
 			publication, err := p.Publish(ctx, "fixture-executor", intentDigest, testDigest)
 			if err != nil || !publication.Submitted {

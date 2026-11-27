@@ -103,7 +103,8 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	publisher, err := newNativePublisher(f.store, execution, publicationAdmissionFunc(func(context.Context, NativePublicationBoundary) error { return nil }), draft.Intent.ClusterID)
+	writer := f.client.CoreV1().ConfigMaps(draft.Preview.Namespace)
+	publisher, err := newNativePublisher(f.store, execution, publicationAdmissionFunc(func(context.Context, NativePublicationBoundary) error { return nil }), draft.Intent.ClusterID, writer)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	if err != nil || state.LastVerified != baseline.Verified || state.Pending != recorded.Digest {
 		t.Fatalf("publication advanced verified serving state: state=%+v error=%v", state, err)
 	}
-	restarted, err := newNativePublisher(f.store, readerExecution, publisher.admission, draft.Intent.ClusterID)
+	restarted, err := newNativePublisher(f.store, readerExecution, publisher.admission, draft.Intent.ClusterID, writer)
 	if err != nil {
 		t.Fatal(err)
 	}
