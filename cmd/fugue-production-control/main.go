@@ -39,6 +39,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-dns-cutover JOURNAL_CONFIG
        fugue-production-control draft-dns-cutover CLUSTER REQUEST PLAN
        fugue-production-control draft-front-worker JOURNAL_CONFIG REQUEST SHADOW
+       fugue-production-control render-front-worker-cutover SPEC
+       fugue-production-control observe-front-worker-cutover SPEC KUBECONFIG CONTEXT
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -74,6 +76,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "render-front-worker-cutover", "observe-front-worker-cutover":
+		return frontWorkerCutover(ctx, args, out)
 	case "draft-front-worker":
 		if len(args) != 4 {
 			return errors.New(usage)

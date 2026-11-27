@@ -1016,7 +1016,7 @@ func (activator *frontAuthorityActivator) acquireOrdinaryAuthorityLease(ctx cont
 }
 
 func (activator *frontAuthorityActivator) acquireLease(ctx context.Context) (*heldAuthorityLease, error) {
-	name := "fugue-authority-" + activator.config.GroupID
+	name := releaseguardian.FrontWorkerGroupLeaseName(activator.config.GroupID)
 	leases := activator.client.CoordinationV1().Leases(activator.config.Namespace)
 	now := metav1.NewMicroTime(activator.now().UTC().Truncate(time.Microsecond))
 	object, err := leases.Get(ctx, name, metav1.GetOptions{})
