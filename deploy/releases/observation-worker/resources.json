@@ -79,7 +79,8 @@
                   "limits": {"cpu": "1", "memory": "512Mi"}
                 },
                 "startupProbe": {
-                  "httpGet": {"path": "/healthz", "port": "metrics"},
+                  "httpGet": {"path": "/sample-retention/readyz", "port": "metrics"},
+                  "timeoutSeconds": 3,
                   "periodSeconds": 3,
                   "failureThreshold": 14
                 },

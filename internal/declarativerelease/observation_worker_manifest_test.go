@@ -23,6 +23,17 @@ func TestObservationWorkerManifestUsesOnlyItsDatabaseCredential(t *testing.T) {
 		t.Fatalf("worker must not inherit service account or API credential mounts: %#v", pod)
 	}
 	container := apiTLSNamedObject(t, apiTLSArray(t, pod, "containers"), "name", "observation-worker")
+	startup := apiTLSObject(t, apiTLSObject(t, container, "startupProbe"), "httpGet")
+	if stringField(startup, "path") != "/sample-retention/readyz" || stringField(startup, "port") != "metrics" {
+		t.Fatal("the new worker must prove sample retention is ready before rolling out")
+	}
+	registry, err := os.ReadFile("../../deploy/releases/components.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(registry, []byte("/sample-retention/readyz")) {
+		t.Fatal("release health checks must be supported by the previous worker")
+	}
 	env := apiTLSArray(t, container, "env")
 	if len(env) != 4 || container["envFrom"] != nil {
 		t.Fatalf("unexpected extra worker environment: %#v", env)
