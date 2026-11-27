@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -176,39 +175,6 @@ func TestTaskCreatePostgresMaintenanceAndBootstrapCompatibility(t *testing.T) {
 	}
 }
 
-func TestTaskCreateFileStoreCannotAddDependentRoot(t *testing.T) {
-	for _, mode := range []string{"explicit", "implicit", "bootstrap", "maintenance"} {
-		t.Run(mode, func(t *testing.T) {
-			s := New(filepath.Join(t.TempDir(), "state.json"))
-			if err := s.withLockedState(true, func(state *model.State) error {
-				state.NodeUpdaters = append(state.NodeUpdaters, model.NodeUpdater{ID: "create-updater", Capabilities: []string{model.NodeUpdateTaskTypeRefreshDesiredState, model.NodeUpdateTaskTypeDiagnoseNode}})
-				if mode == "implicit" {
-					state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, model.PlatformLKGSnapshot{ArtifactKind: "release_set", ScopeKey: "global"})
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			taskType, payload := model.NodeUpdateTaskTypeRefreshDesiredState, map[string]string{}
-			if mode == "explicit" {
-				payload["artifact_id"] = "neutral-artifact"
-			} else if mode == "maintenance" {
-				taskType, payload = model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"targets_json": `[]`}
-			}
-			task, err := s.CreateNodeUpdateTask(taskCreateAdmin(), "create-updater", "", "", taskType, payload)
-			if mode == "explicit" || mode == "implicit" {
-				if !errors.Is(err, ErrConflict) || task.ID != "" {
-					t.Fatal("file create bypassed durable admission", task, err)
-				}
-				return
-			}
-			if err != nil || task.Status != "pending" {
-				t.Fatal(task, err)
-			}
-		})
-	}
-}
-
 func TestTaskCreatePostgresRejectsMalformedAndOversizedPayload(t *testing.T) {
 	for _, payload := range []map[string]string{{"arguments_json": `{`}, {"artifact_id": "missing"}, {"comment": strings.Repeat("x", 65537), "artifact_id": "activation-root"}} {
 		s := taskCreateFixture(t)
@@ -359,7 +325,8 @@ func TestTaskCreatePostgresOrdinaryRoleAndTenantAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	role := quotePostgresIntegrationIdentifier(t, "create_role_"+schema)
-	if _, err := s.db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB"); err != nil {
+	password := postgresFixturePassword()
+	if _, err := s.db.Exec("CREATE ROLE " + role + " LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB PASSWORD '" + password + "'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -377,7 +344,7 @@ func TestTaskCreatePostgresOrdinaryRoleAndTenantAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User("create_role_" + schema)
+	u.User = url.UserPassword("create_role_"+schema, password)
 	db, err := openPostgresDatabase(u.String())
 	if err != nil {
 		t.Fatal(err)

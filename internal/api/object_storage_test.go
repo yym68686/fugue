@@ -14,11 +14,10 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
-	"fugue/internal/store"
 )
 
 func TestObjectStorageBusyIsRetryableWithoutExecutingMutation(t *testing.T) {
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +57,8 @@ func TestNormalizeObjectStorageUsageTimeout(t *testing.T) {
 
 func TestObjectStorageIsolationAndRetryableCredentialLifecycle(t *testing.T) {
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-object-storage-test-encryption-key")
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	db := store.New(statePath)
+	statePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	db := newStoreTestDatabase(t, statePath)
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +211,7 @@ func TestObjectStorageIsolationAndRetryableCredentialLifecycle(t *testing.T) {
 	request("PATCH", "/v1/object-stores/"+id, owner, map[string]bool{"enabled": true}, 200)
 	request("POST", credsPath, owner, body, 409)
 	// A new server over the same state keeps resources and revoked grants.
-	db2 := store.New(statePath)
+	db2 := newStoreTestDatabase(t, statePath)
 	if err = db2.Init(); err != nil {
 		t.Fatal(err)
 	}

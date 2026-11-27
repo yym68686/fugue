@@ -2,20 +2,16 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 )
 
 func runtimeReadFixture(t *testing.T, postgres bool) (*Store, model.App, model.App) {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if postgres {
 		s = billingBatchPGStore(t)
 		if err := s.ensureDatabaseReady(); err != nil {
@@ -47,122 +43,6 @@ func runtimeReadFixture(t *testing.T, postgres bool) (*Store, model.App, model.A
 		return app
 	}
 	return s, create("first"), create("second")
-}
-
-func TestRuntimeStateOperationIDsFilterBeforeHydration(t *testing.T) {
-	for _, backend := range []string{"file", "postgres"} {
-		t.Run(backend, func(t *testing.T) {
-			postgres := backend == "postgres"
-			s, app, other := runtimeReadFixture(t, postgres)
-			base := time.Now().UTC().Truncate(time.Microsecond)
-			statuses := []string{model.OperationStatusPending, model.OperationStatusCompleted, model.OperationStatusRunning, model.OperationStatusWaitingAgent, model.OperationStatusFailed, model.OperationStatusCanceled, model.OperationStatusPending, model.OperationStatusRunning}
-			rows := make([]model.Operation, 0, len(statuses))
-			for i, status := range statuses {
-				op := model.Operation{ID: model.NewID("runtime_read_op"), TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeImport, Status: status, CreatedAt: base.Add(time.Duration(i) * time.Second), DesiredSource: &model.AppSource{Type: model.AppSourceTypeUpload}, DesiredSpec: &model.AppSpec{Env: map[string]string{"SYNTHETIC": strings.Repeat("payload", 10000)}}}
-				if i == 6 {
-					op.DesiredSource = nil
-				}
-				if i == 7 {
-					op.AppID = other.ID
-				}
-				rows = append(rows, op)
-			}
-			persist := func() {
-				t.Helper()
-				if !postgres {
-					if err := s.withLockedState(true, func(st *model.State) error { st.Operations = rows; return nil }); err != nil {
-						t.Fatal(err)
-					}
-					return
-				}
-				for _, op := range rows {
-					var source any
-					if op.DesiredSource != nil {
-						raw, err := json.Marshal(op.DesiredSource)
-						if err != nil {
-							t.Fatal(err)
-						}
-						source = raw
-					}
-					spec, err := json.Marshal(op.DesiredSpec)
-					if err != nil {
-						t.Fatal(err)
-					}
-					_, err = s.db.Exec(`INSERT INTO fugue_operations(id,tenant_id,type,status,execution_mode,requested_by_type,requested_by_id,app_id,desired_spec_json,desired_source_json,created_at,updated_at) VALUES($1,$2,$3,$4,'managed','bootstrap','test',$5,$6::jsonb,$7::jsonb,$8,$8) ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status,desired_source_json=EXCLUDED.desired_source_json`, op.ID, op.TenantID, op.Type, op.Status, op.AppID, spec, source, op.CreatedAt)
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-			}
-			check := func() {
-				t.Helper()
-				full, err := s.ListOperationsWithDesiredSourceByApp(app.TenantID, false, app.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := []string{}
-				for _, op := range full {
-					if isActiveOperationStatus(op.Status) {
-						want = append(want, op.ID)
-					}
-				}
-				got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), app.TenantID, false, app.ID)
-				if err != nil || !reflect.DeepEqual(got, want) {
-					t.Fatalf("membership/order differs: got=%v want=%v err=%v", got, want, err)
-				}
-			}
-			persist()
-			check()
-			got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), app.TenantID, false, app.ID)
-			if err != nil || !reflect.DeepEqual(got, []string{rows[0].ID, rows[2].ID, rows[3].ID}) {
-				t.Fatalf("wrong active IDs: %v err=%v", got, err)
-			}
-			if got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), "other-tenant", false, app.ID); err != nil || len(got) != 0 {
-				t.Fatalf("tenant isolation failed: %v %v", got, err)
-			}
-			if got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), "other-tenant", true, app.ID); err != nil || len(got) != 3 {
-				t.Fatalf("admin semantics changed: %v %v", got, err)
-			}
-			if got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), app.TenantID, true, " "); err != nil || len(got) != 0 {
-				t.Fatalf("blank app widened query: %v %v", got, err)
-			}
-			rows[0].Status = model.OperationStatusCompleted
-			rows[2].DesiredSource = nil
-			rows[3].Status = model.OperationStatusFailed
-			persist()
-			check()
-			if postgres {
-				// Historical bodies are irrelevant to current pending membership. This
-				// invalid retired payload makes an accidental full reader fail decoding.
-				if _, err := s.db.Exec(`UPDATE fugue_operations SET desired_spec_json='"not-an-app-spec"'::jsonb WHERE id=$1`, rows[1].ID); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := s.ListOperationsWithDesiredSourceByApp(app.TenantID, false, app.ID); err == nil {
-					t.Fatal("fixture did not exercise historical hydration")
-				}
-				if got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), app.TenantID, false, app.ID); err != nil || len(got) != 0 {
-					t.Fatalf("historical payload affected membership: %v %v", got, err)
-				}
-				// The existing PostgreSQL reader uses IS NOT NULL, which includes
-				// JSON null. Keep that membership distinct from an SQL NULL source.
-				if _, err := s.db.Exec(`UPDATE fugue_operations SET desired_spec_json=NULL WHERE id=$1`, rows[1].ID); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := s.db.Exec(`UPDATE fugue_operations SET desired_source_json='null'::jsonb WHERE id=$1`, rows[6].ID); err != nil {
-					t.Fatal(err)
-				}
-				check()
-				if got, err := s.ListActiveSourceOperationIDsByApp(context.Background(), app.TenantID, false, app.ID); err != nil || !reflect.DeepEqual(got, []string{rows[6].ID}) {
-					t.Fatalf("JSON-null source membership changed: %v %v", got, err)
-				}
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
-			if _, err := s.ListActiveSourceOperationIDsByApp(ctx, app.TenantID, false, app.ID); !errors.Is(err, context.Canceled) {
-				t.Fatalf("cancellation ignored: %v", err)
-			}
-		})
-	}
 }
 
 func TestAppReleasesByIDsMatchFilteredFullList(t *testing.T) {

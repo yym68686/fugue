@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
 
@@ -114,52 +113,6 @@ func TestEnsurePlatformArtifactJSONRejectsImmutableConflicts(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestEnsurePlatformArtifactJSONRejectsCorruptOrDuplicateExistingIdentity(t *testing.T) {
-	t.Parallel()
-
-	t.Run("corrupt signature", func(t *testing.T) {
-		s := newPlatformArtifactEnsureTestStore(t)
-		input := platformArtifactEnsureFixture("routegen_corrupt", 100)
-		created, _, err := s.EnsurePlatformArtifact(input)
-		if err != nil {
-			t.Fatalf("seed artifact: %v", err)
-		}
-		if err := s.withLockedState(true, func(state *model.State) error {
-			for index := range state.PlatformArtifacts {
-				if state.PlatformArtifacts[index].ID == created.ID {
-					state.PlatformArtifacts[index].Provenance.Signature = "tampered"
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("corrupt stored artifact fixture: %v", err)
-		}
-		if _, wasCreated, err := s.EnsurePlatformArtifact(input); !errors.Is(err, ErrConflict) || wasCreated {
-			t.Fatalf("corrupt existing ensure = created %t err %v, want ErrConflict", wasCreated, err)
-		}
-	})
-
-	t.Run("duplicate identity", func(t *testing.T) {
-		s := newPlatformArtifactEnsureTestStore(t)
-		input := platformArtifactEnsureFixture("routegen_duplicate", 100)
-		created, _, err := s.EnsurePlatformArtifact(input)
-		if err != nil {
-			t.Fatalf("seed artifact: %v", err)
-		}
-		if err := s.withLockedState(true, func(state *model.State) error {
-			duplicate := created
-			duplicate.ID = "artifact-duplicate"
-			state.PlatformArtifacts = append(state.PlatformArtifacts, duplicate)
-			return nil
-		}); err != nil {
-			t.Fatalf("duplicate stored artifact fixture: %v", err)
-		}
-		if _, wasCreated, err := s.EnsurePlatformArtifact(input); !errors.Is(err, ErrConflict) || wasCreated {
-			t.Fatalf("duplicate existing ensure = created %t err %v, want ErrConflict", wasCreated, err)
-		}
-	})
 }
 
 func TestEnsurePlatformArtifactJSONSerializesConcurrentWriters(t *testing.T) {
@@ -312,7 +265,7 @@ func TestEnsurePlatformArtifactPostgresRecoversEquivalentConcurrentInsert(t *tes
 
 func newPlatformArtifactEnsureTestStore(t *testing.T) *Store {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init artifact ensure store: %v", err)

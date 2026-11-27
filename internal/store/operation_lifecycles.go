@@ -24,28 +24,7 @@ func (s *Store) ListOperationLifecycles() ([]model.Operation, error) {
 	return s.listOperationLifecycles(false)
 }
 
-func operationLifecycle(op model.Operation) model.Operation {
-	return model.Operation{
-		ID: op.ID, AppID: op.AppID, Type: op.Type, Status: op.Status,
-		CreatedAt: op.CreatedAt, StartedAt: op.StartedAt, CompletedAt: op.CompletedAt,
-	}
-}
-
 func (s *Store) listOperationLifecycles(activeOnly bool) ([]model.Operation, error) {
-	if !s.usingDatabase() {
-		var ops []model.Operation
-		err := s.withLockedState(false, func(state *model.State) error {
-			for _, op := range state.Operations {
-				if activeOnly && !isActiveOperationStatus(op.Status) {
-					continue
-				}
-				ops = append(ops, operationLifecycle(op))
-			}
-			sortActiveOperations(ops)
-			return nil
-		})
-		return ops, err
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

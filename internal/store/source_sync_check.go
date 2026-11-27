@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"time"
 
 	"fugue/internal/model"
@@ -24,26 +23,7 @@ func (s *Store) RecordAppSourceSyncCheck(ctx context.Context, app model.App, obs
 	if source == nil {
 		return false, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		recorded := false
-		err := s.withLockedState(true, func(state *model.State) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			i := findApp(state, app.ID)
-			if i < 0 || isDeletedApp(state.Apps[i]) {
-				return ErrNotFound
-			}
-			current := &state.Apps[i]
-			if !reflect.DeepEqual(model.AppOriginSource(*current), source) || !reflect.DeepEqual(current.Status.SourceSync, app.Status.SourceSync) {
-				return nil
-			}
-			current.Status.SourceSync = model.CloneAppSourceSyncStatus(observed)
-			recorded = true
-			return nil
-		})
-		return recorded, err
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	sourceJSON, err := json.Marshal(source)

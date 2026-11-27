@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -150,7 +149,7 @@ func TestTrafficRouteSourceRequiresPreparedReleaseAndPreservesOtherGroups(t *tes
 		}
 		var snapshot model.EdgeRouteIntentSnapshot
 		mustDecodeJSON(t, r, &snapshot)
-		if !reflect.DeepEqual(observed, snapshot) {
+		if !equalJSONProjection(t, observed, snapshot) {
 			t.Fatal("request-scoped artifact reads changed route projection")
 		}
 		if r.Header().Get("X-Fugue-Route-Intent-Source") != "traffic-release" || snapshot.TrafficRelease == nil || snapshot.TrafficRelease.ReleaseID != release.ID || snapshot.Generation != compiled.RouteArtifact.Generation {

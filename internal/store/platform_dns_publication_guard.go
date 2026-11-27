@@ -64,7 +64,7 @@ func validateDNSPublicationGuardRequest(a model.PlatformArtifact, req model.Plat
 
 // A failed successor cannot consume or rewrite the previous positive LKG.
 // Observed lane fences are preconditions, never publication authority.
-func validateDNSPublicationGuard(state *model.State, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, at time.Time) error {
+func validateDNSPublicationGuard(state *storeProjection, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, at time.Time) error {
 	if req.DNSPublicationPrecondition == nil {
 		return nil
 	}
@@ -146,7 +146,7 @@ func (s *Store) pgDNSPublicationGuard(ctx context.Context, tx *sql.Tx, a model.P
 	if err := validateDNSPublicationGuardRequest(a, req); err != nil {
 		return err
 	}
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{a}}
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{a}}
 	load := func(id string) error {
 		if platformArtifactReleaseIndex(state.PlatformArtifactReleases, id) >= 0 {
 			return nil

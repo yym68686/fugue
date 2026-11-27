@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -11,7 +10,7 @@ import (
 func TestVerifiedAppDomainResolvesThroughGetAppByHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestVerifiedAppDomainResolvesThroughGetAppByHostname(t *testing.T) {
 func TestDeleteAppDomainReleasesHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -129,7 +128,7 @@ func TestDeleteAppDomainReleasesHostname(t *testing.T) {
 func TestPutVerifiedAppDomainDefaultsTLSPending(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -184,7 +183,7 @@ func TestPutVerifiedAppDomainDefaultsTLSPending(t *testing.T) {
 func TestPutAppDomainAllowsSubpathRouteOnSameHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -246,7 +245,7 @@ func TestPutAppDomainAllowsSubpathRouteOnSameHostname(t *testing.T) {
 func TestRootAppRouteRejectsVerifiedAppDomainHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -328,7 +327,7 @@ func TestRootAppRouteRejectsVerifiedAppDomainHostname(t *testing.T) {
 func TestDeleteAppDomainReleasesEdgeTLSCertificate(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

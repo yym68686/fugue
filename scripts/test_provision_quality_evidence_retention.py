@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock
 from urllib.parse import urlsplit
 
+from scripts.apply_quality_evidence_retention_handoff import activation_sql
 from scripts.provision_observation_worker_database import Provision, ProvisionError
 from scripts.provision_quality_evidence_retention import INSTALLER, prepare_standby, standby_sql
 
@@ -90,8 +91,8 @@ INSERT INTO fugue_platform_quality_evidence VALUES ('expired', clock_timestamp()
         run("SELECT * FROM fugue_platform_quality_evidence;", role=role, ok=False)
         run("DELETE FROM fugue_meta;", role=role, ok=False)
         activate = INSTALLER.with_name("platform_quality_evidence_retention_activate.sql").read_text()
-        run(activate)
-        run(activate)
+        for _ in range(2):
+            run(activation_sql(Provision(config), UID, activate))
         delete = "DELETE FROM fugue_platform_quality_evidence WHERE content_hash='expired';"
         denied = run(delete, role="quality_evidence_old_api", ok=False)
         self.assertIn("legacy periodic quality evidence deletion fenced", denied)

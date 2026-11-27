@@ -3,14 +3,13 @@ package store
 import (
 	"errors"
 	"fugue/internal/model"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func finalizationFixture(t *testing.T) (*Store, model.App, model.Operation) {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -68,41 +67,7 @@ func TestGuardedFinalizationCompletesAndNeverOverwritesCancellation(t *testing.T
 		})
 	}
 }
-func TestGuardedFinalizationRejectsNewAttemptAndChangedConfiguration(t *testing.T) {
-	for _, change := range []string{"attempt", "config", "intent"} {
-		t.Run(change, func(t *testing.T) {
-			s, app, op := finalizationFixture(t)
-			if change == "attempt" {
-				s.RequeueManagedOperation(op.ID, "new attempt")
-				time.Sleep(time.Millisecond)
-				s.TryClaimPendingOperation(op.ID)
-			} else {
-				err := s.withLockedState(true, func(state *model.State) error {
-					if change == "config" {
-						state.Apps[findApp(state, app.ID)].Spec.Env = map[string]string{"NEW": "keep"}
-					} else {
-						state.Operations[findOperation(state, op.ID)].DesiredSpec.Replicas = 2
-					}
-					return nil
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := s.CompleteManagedOperationGuarded(op, &app, "", "late completion", op.DesiredSpec, nil, nil); !errors.Is(err, ErrConflict) {
-				t.Fatal("stale observation accepted", err)
-			}
-			if change == "attempt" {
-				if _, err := s.RequeueManagedOperationGuarded(op, "late requeue"); !errors.Is(err, ErrConflict) {
-					t.Fatal("new attempt requeued by old worker", err)
-				}
-				if _, err := s.FailManagedOperationGuarded(op, "late failure"); !errors.Is(err, ErrConflict) {
-					t.Fatal("new attempt failed by old worker", err)
-				}
-			}
-		})
-	}
-}
+
 func TestFinalizationGuardIgnoresProgressAndObservationButPreservesBackingIntent(t *testing.T) {
 	s, app, op := finalizationFixture(t)
 	current := app

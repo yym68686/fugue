@@ -15,7 +15,7 @@ import (
 	"fugue/internal/frontnetwork"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/store"
+
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -311,7 +311,7 @@ func TestPublicFrontObservationWaitPreservesSpacing(t *testing.T) {
 }
 
 func TestPublicFrontObservationRejectsForeignNodeCredential(t *testing.T) {
-	state := store.New(t.TempDir() + "/state.json")
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -19,6 +18,7 @@ import (
 	"fugue/internal/pgretire"
 	"fugue/internal/pgretire/retiretest"
 	"fugue/internal/store"
+
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 )
 
@@ -26,7 +26,7 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 	for _, independent := range []bool{false, true} {
 		for _, scenario := range []string{"complete", "lost-cluster-response", "lost-pvc-response", "lost-pod-response", "source-running", "sql-unhealthy", "changed-after-intent", "protected-changed-after-intent"} {
 			t.Run(fmt.Sprintf("independent=%v/%s", independent, scenario), func(t *testing.T) {
-				st := store.New(filepath.Join(t.TempDir(), "state.json"))
+				st := newStoreTestDatabase(t, "")
 				if err := st.Init(); err != nil {
 					t.Fatal(err)
 				}
@@ -55,10 +55,11 @@ func TestPostgresSourceRetirementExecutor(t *testing.T) {
 					if _, e = st.BindBackingService(tenant.ID, app.ID, svc.ID, "postgres", nil); e != nil {
 						t.Fatal(e)
 					}
-					app, err = st.GetApp(app.ID)
-					if err != nil {
-						t.Fatal(err)
-					}
+				}
+				// Admission verifies the plan against the persisted app and binding.
+				app, err = st.GetApp(app.ID)
+				if err != nil {
+					t.Fatal(err)
 				}
 				svc := app.BackingServices[0]
 				originalService, _ := st.GetBackingService(svc.ID)

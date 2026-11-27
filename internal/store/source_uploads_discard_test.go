@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"os"
 	"testing"
 
 	"fugue/internal/model"
@@ -51,39 +50,5 @@ func TestDiscardNewSourceUploadRequiresExactCapabilityAndRefusesReferences(t *te
 	}
 	if _, archive, err := stateStore.GetSourceUploadArchive(upload.ID); err != nil || string(archive) != "select 1;" {
 		t.Fatalf("referenced upload was removed: archive=%q err=%v", archive, err)
-	}
-}
-
-func TestDiscardNewSourceUploadRemovesArchiveBeforeMetadataAndToleratesMissingArchive(t *testing.T) {
-	t.Parallel()
-
-	stateStore, app, _, _ := appDatabaseImportLifecycleFixture(t)
-	for _, testCase := range []struct {
-		name          string
-		removeArchive bool
-	}{
-		{name: "complete upload"},
-		{name: "partial prior cleanup", removeArchive: true},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			upload, err := stateStore.CreateSourceUpload(app.TenantID, "discard.sql", "application/sql", []byte("sensitive dump"))
-			if err != nil {
-				t.Fatalf("create source upload: %v", err)
-			}
-			if testCase.removeArchive {
-				if err := os.Remove(stateStore.sourceUploadArchivePath(upload.ID)); err != nil {
-					t.Fatalf("prepare missing archive: %v", err)
-				}
-			}
-			if err := stateStore.DiscardNewSourceUpload(upload); err != nil {
-				t.Fatalf("discard new source upload: %v", err)
-			}
-			if _, err := os.Stat(stateStore.sourceUploadArchivePath(upload.ID)); !os.IsNotExist(err) {
-				t.Fatalf("archive remains after discard: %v", err)
-			}
-			if _, err := os.Stat(stateStore.sourceUploadMetadataPath(upload.ID)); !os.IsNotExist(err) {
-				t.Fatalf("metadata remains after discard: %v", err)
-			}
-		})
 	}
 }

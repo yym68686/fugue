@@ -30,66 +30,7 @@ type managedSharedLocationRuntimeSpec struct {
 
 func (s *Store) SyncManagedSharedLocationRuntimes(locations []map[string]string) error {
 	normalized := normalizeManagedSharedLocationRuntimeSet(locations)
-	if s.usingDatabase() {
-		return s.pgSyncManagedSharedLocationRuntimes(normalized)
-	}
-
-	return s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		baseIndex := findRuntime(state, managedSharedRuntimeID)
-		if baseIndex < 0 {
-			return ErrNotFound
-		}
-
-		now := time.Now().UTC()
-		syncManagedSharedBaseRuntime(&state.Runtimes[baseIndex], now)
-
-		desired := make(map[string]managedSharedLocationRuntimeSpec, len(normalized))
-		for _, labels := range normalized {
-			spec := buildManagedSharedLocationRuntimeSpec(labels)
-			desired[spec.ID] = spec
-
-			index := findRuntime(state, spec.ID)
-			if index >= 0 {
-				syncManagedSharedLocationRuntime(&state.Runtimes[index], spec, now)
-				continue
-			}
-
-			state.Runtimes = append(state.Runtimes, model.Runtime{
-				ID:         spec.ID,
-				Name:       spec.Name,
-				Type:       model.RuntimeTypeManagedShared,
-				AccessMode: model.RuntimeAccessModePlatformShared,
-				PoolMode:   model.RuntimePoolModeDedicated,
-				Status:     model.RuntimeStatusActive,
-				Endpoint:   "in-cluster",
-				Labels:     cloneMap(spec.Labels),
-				CreatedAt:  now,
-				UpdatedAt:  now,
-			})
-		}
-
-		for index := len(state.Runtimes) - 1; index >= 0; index-- {
-			runtimeObj := state.Runtimes[index]
-			if !isManagedSharedLocationRuntime(runtimeObj) {
-				continue
-			}
-			if _, ok := desired[runtimeObj.ID]; ok {
-				continue
-			}
-			if runtimeReferencedByState(state, runtimeObj.ID) {
-				if state.Runtimes[index].Status != model.RuntimeStatusOffline {
-					state.Runtimes[index].Status = model.RuntimeStatusOffline
-					state.Runtimes[index].UpdatedAt = now
-				}
-				continue
-			}
-			state.Runtimes = append(state.Runtimes[:index], state.Runtimes[index+1:]...)
-		}
-
-		return nil
-	})
+	return s.pgSyncManagedSharedLocationRuntimes(normalized)
 }
 
 func (s *Store) pgSyncManagedSharedLocationRuntimes(locations []map[string]string) error {
@@ -439,77 +380,6 @@ func stripManagedSharedPlacementLabels(labels map[string]string) map[string]stri
 		return nil
 	}
 	return out
-}
-
-func isManagedSharedLocationRuntime(runtimeObj model.Runtime) bool {
-	if runtimeObj.Type != model.RuntimeTypeManagedShared {
-		return false
-	}
-	if strings.HasPrefix(runtimeObj.ID, managedSharedLocationRuntimeIDPrefix) {
-		return true
-	}
-	return strings.TrimSpace(runtimeObj.Labels[managedSharedLocationKeyLabelKey]) != ""
-}
-
-func runtimeReferencedByState(state *model.State, runtimeID string) bool {
-	runtimeID = strings.TrimSpace(runtimeID)
-	if state == nil || runtimeID == "" {
-		return false
-	}
-
-	for _, app := range state.Apps {
-		if !isDeletedApp(app) && strings.TrimSpace(app.Spec.RuntimeID) == runtimeID {
-			return true
-		}
-		if app.Spec.Failover != nil && strings.TrimSpace(app.Spec.Failover.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if app.Spec.Postgres != nil {
-			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(app.Spec.RuntimeID, *app.Spec.Postgres) {
-				if postgresRuntimeID == runtimeID {
-					return true
-				}
-			}
-		}
-		if strings.TrimSpace(app.Status.CurrentRuntimeID) == runtimeID {
-			return true
-		}
-	}
-	for _, service := range state.BackingServices {
-		if service.Spec.Postgres == nil || isDeletedBackingService(service) {
-			continue
-		}
-		for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs("", *service.Spec.Postgres) {
-			if postgresRuntimeID == runtimeID {
-				return true
-			}
-		}
-	}
-	for _, op := range state.Operations {
-		if strings.TrimSpace(op.SourceRuntimeID) == runtimeID {
-			return true
-		}
-		if strings.TrimSpace(op.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if strings.TrimSpace(op.AssignedRuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && strings.TrimSpace(op.DesiredSpec.RuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && op.DesiredSpec.Failover != nil && strings.TrimSpace(op.DesiredSpec.Failover.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
-			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres) {
-				if postgresRuntimeID == runtimeID {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 func (s *Store) pgListManagedSharedLocationRuntimesTx(ctx context.Context, tx *sql.Tx) ([]model.Runtime, error) {

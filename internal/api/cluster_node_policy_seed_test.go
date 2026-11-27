@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,13 +14,12 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -95,7 +93,7 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineForPlatformAdmin(t *te
 func TestClusterNodePolicyStatusReportsDesiredActualAndDrift(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -157,7 +155,7 @@ func TestClusterNodePolicyStatusReportsDesiredActualAndDrift(t *testing.T) {
 func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLabels(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -223,7 +221,7 @@ func TestListClusterNodesSeedsBootstrapControlPlaneMachineBuildPolicyFromLiveLab
 func TestReconcileLegacyBuildTierLabelsFromSnapshotsRemovesLabelWithoutMachine(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -269,14 +267,14 @@ func TestReconcileLegacyBuildTierLabelsFromSnapshotsRemovesLabelWithoutMachine(t
 func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 
 	seeded := legacyBootstrapControlPlaneMachine()
-	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+	if err := seedBootstrapControlPlaneMachine(t, storePath, func(machine *model.Machine) {
 		*machine = seeded
 	}); err != nil {
 		t.Fatalf("seed legacy bootstrap control-plane machine: %v", err)
@@ -339,7 +337,7 @@ func TestStartBackgroundWarmersBackfillsLegacyBootstrapControlPlaneMachinePolicy
 func TestStartBackgroundWarmersPublishesInventoryAfterPolicyReconciliation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -399,14 +397,14 @@ func TestStartBackgroundWarmersPublishesInventoryAfterPolicyReconciliation(t *te
 func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRole(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 
 	updatedAt := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
-	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+	if err := seedBootstrapControlPlaneMachine(t, storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowBuilds = true
 		machine.Policy.AllowSharedPool = true
@@ -451,14 +449,14 @@ func TestSyncBootstrapControlPlaneMachinesBackfillsAuditlessLegacyControlPlaneRo
 func TestSyncBootstrapControlPlaneMachinesPreservesAuditedControlPlaneRole(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 
 	updatedAt := time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC)
-	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+	if err := seedBootstrapControlPlaneMachine(t, storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowBuilds = true
 		machine.Policy.AllowSharedPool = true
@@ -515,7 +513,7 @@ func TestSyncBootstrapControlPlaneMachinesPreservesAuditedControlPlaneRole(t *te
 func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -626,7 +624,7 @@ func TestSetClusterNodePolicySeedsBootstrapControlPlaneMachine(t *testing.T) {
 func TestSetClusterNodePolicyRemovesStaleRuntimeAppRoleLabel(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -690,7 +688,7 @@ func TestSetClusterNodePolicyRemovesStaleRuntimeAppRoleLabel(t *testing.T) {
 func TestSetClusterNodePolicyDisablingEdgeRemovesDynamicSchedulingLabels(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -822,7 +820,7 @@ func TestBuildMachineNodeLabelsPatchPreservesLocationMetadataForDNSOnlyNode(t *t
 func TestSharedPoolDriftReconcileHonorsEdgeOnlyMachinePolicy(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1306,12 +1304,12 @@ func TestBuildClusterNodePolicyStatusSurfacesFilesystemPressureBeforeDiskPressur
 func TestReconcileSharedPoolPolicyDriftFromSnapshotsRemovesBootstrapControlPlaneLabel(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+	if err := seedBootstrapControlPlaneMachine(t, storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowSharedPool = false
 	}); err != nil {
@@ -1355,12 +1353,12 @@ func TestReconcileSharedPoolPolicyDriftFromSnapshotsRemovesBootstrapControlPlane
 func TestReconcileSharedPoolPolicyDriftFromSnapshotsAddsBootstrapControlPlaneLabel(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	if err := rewriteBootstrapControlPlaneMachine(storePath, func(machine *model.Machine) {
+	if err := seedBootstrapControlPlaneMachine(t, storePath, func(machine *model.Machine) {
 		*machine = legacyBootstrapControlPlaneMachine()
 		machine.Policy.AllowSharedPool = true
 	}); err != nil {
@@ -1425,35 +1423,26 @@ func legacyBootstrapControlPlaneMachine() model.Machine {
 	}
 }
 
-func rewriteBootstrapControlPlaneMachine(storePath string, mutate func(machine *model.Machine)) error {
-	data, err := os.ReadFile(storePath)
+func seedBootstrapControlPlaneMachine(t *testing.T, fixture string, mutate func(machine *model.Machine)) error {
+	t.Helper()
+	machine := legacyBootstrapControlPlaneMachine()
+	mutate(&machine)
+	labels, err := json.Marshal(machine.Labels)
 	if err != nil {
 		return err
 	}
-	var state model.State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return err
-	}
-
-	found := false
-	for idx := range state.Machines {
-		if strings.EqualFold(strings.TrimSpace(state.Machines[idx].ClusterNodeName), "gcp1") {
-			mutate(&state.Machines[idx])
-			found = true
-			break
-		}
-	}
-	if !found {
-		machine := legacyBootstrapControlPlaneMachine()
-		mutate(&machine)
-		state.Machines = append(state.Machines, machine)
-	}
-
-	next, err := json.MarshalIndent(state, "", "  ")
+	policy, err := json.Marshal(machine.Policy)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(storePath, next, 0o600)
+	_, err = openStoreTestSQL(t, fixture).Exec(`
+INSERT INTO fugue_machines (id, name, scope, connection_mode, status, endpoint,
+    labels_json, cluster_node_name, policy_json, last_seen_at, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, $12)`,
+		machine.ID, machine.Name, machine.Scope, machine.ConnectionMode, machine.Status,
+		machine.Endpoint, labels, machine.ClusterNodeName, policy, machine.LastSeenAt,
+		machine.CreatedAt, machine.UpdatedAt)
+	return err
 }
 
 func newBootstrapControlPlaneKubeServerWithLabels(

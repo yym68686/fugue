@@ -1935,7 +1935,7 @@ func (s *Store) pgDetachRuntimeOwnershipTx(ctx context.Context, tx *sql.Tx, runt
 	if _, err := tx.ExecContext(ctx, `
 UPDATE fugue_machines
 SET status = $2,
-    node_key_id = '',
+    node_key_id = NULL,
     runtime_id = '',
     runtime_name = '',
     cluster_node_name = '',
@@ -2541,7 +2541,7 @@ WHERE id = $1 AND tenant_id = $2
 			return model.App{}, err
 		}
 	}
-	for _, runtimeID := range managedPostgresReferencedRuntimeIDs(spec.RuntimeID, derefPostgresSpec(spec.Postgres)) {
+	for _, runtimeID := range appManagedPostgresReferencedRuntimeIDs(spec) {
 		visible, err := s.pgRuntimeVisibleToTenantTx(ctx, tx, runtimeID, tenantID)
 		if err != nil {
 			return model.App{}, err
@@ -2603,7 +2603,7 @@ WHERE id = $1 AND tenant_id = $2
 		binding = &appBinding
 		app.Spec.Postgres = nil
 	}
-	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *storeProjection) {
 		projection.Apps = append(projection.Apps, cloneAppForBilling(app))
 		if ownedService != nil {
 			projection.BackingServices = append(projection.BackingServices, cloneBackingService(*ownedService))
@@ -3453,7 +3453,7 @@ LIMIT 1
 				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
-		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
+		for _, runtimeID := range appManagedPostgresReferencedRuntimeIDs(*op.DesiredSpec) {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, operationCreateOutcome{}, err
@@ -3521,7 +3521,7 @@ LIMIT 1
 				return model.Operation{}, operationCreateOutcome{}, err
 			}
 		}
-		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
+		for _, runtimeID := range appManagedPostgresReferencedRuntimeIDs(*op.DesiredSpec) {
 			runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 			if err != nil {
 				return model.Operation{}, operationCreateOutcome{}, err
@@ -3618,7 +3618,7 @@ LIMIT 1
 					return model.Operation{}, operationCreateOutcome{}, err
 				}
 			}
-			for _, runtimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, derefPostgresSpec(op.DesiredSpec.Postgres)) {
+			for _, runtimeID := range appManagedPostgresReferencedRuntimeIDs(*op.DesiredSpec) {
 				runtimeUsable, err := s.pgRuntimeUsableForAppOperationTx(ctx, tx, app, runtimeID, op.TenantID)
 				if err != nil {
 					return model.Operation{}, operationCreateOutcome{}, err
@@ -4320,7 +4320,11 @@ WHERE app_id = $1
 		if err != nil {
 			return nil, err
 		}
-		ops = append(ops, op)
+		// The persisted envelope can contain only a configuration baseline
+		// or storage request; a non-NULL JSONB value is not a source.
+		if op.DesiredSource != nil || op.DesiredOriginSource != nil {
+			ops = append(ops, op)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate operations with desired source by app: %w", err)
@@ -4366,7 +4370,7 @@ WHERE app_id IN (%s)
 			return nil, err
 		}
 		appID := strings.TrimSpace(op.AppID)
-		if appID == "" {
+		if appID == "" || op.DesiredSource == nil && op.DesiredOriginSource == nil {
 			continue
 		}
 		opsByAppID[appID] = append(opsByAppID[appID], op)
@@ -4667,6 +4671,7 @@ JOIN next_op n ON n.id = o.id
 			op.Status = model.OperationStatusRunning
 			op.ExecutionMode = model.ExecutionModeManaged
 			op.StartedAt = &now
+			op.ResultMessage = defaultInFlightOperationMessage(op)
 		}
 	}
 	op.UpdatedAt = now
@@ -5326,6 +5331,7 @@ FOR UPDATE
 	}
 	rows.Close()
 
+	requeued := 0
 	for _, id := range ids {
 		op, err := s.pgGetOperationTx(ctx, tx, id, true)
 		if err != nil {
@@ -5351,12 +5357,13 @@ FOR UPDATE
 		if err := s.notifyOperationTx(ctx, tx, op.ID); err != nil {
 			return 0, err
 		}
+		requeued++
 	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit bulk requeue transaction: %w", err)
 	}
-	return len(ids), nil
+	return requeued, nil
 }
 
 type sqlExecContexter interface {

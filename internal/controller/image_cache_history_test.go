@@ -4,8 +4,6 @@ import (
 	"context"
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +21,7 @@ func TestHistoricalImageAttributionRequiresCompletedImmutableReference(t *testin
 		{"failed deployment with receipt", model.OperationStatusFailed, "registry.example/fugue-apps/sample:old", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := store.New(filepath.Join(t.TempDir(), "state.json"))
+			s := newStoreTestDatabase(t, "")
 			if err := s.Init(); err != nil {
 				t.Fatal(err)
 			}

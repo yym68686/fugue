@@ -41,60 +41,7 @@ func (s *Store) RecoveredBackupRetirement(ctx context.Context, id string, req mo
 		(req.Confirmation != "" && !backupRetirementDigestValid(req.Confirmation)) {
 		return model.RecoveredBackupRetirement{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecoveredBackupRetirement(ctx, id, req, actor)
-	}
-	var result model.RecoveredBackupRetirement
-	err := s.withLockedState(req.Confirmation != "", func(state *model.State) error {
-		i, j := findBackupArtifact(state, id), findBackupArtifact(state, req.ReplacementArtifactID)
-		if i < 0 || j < 0 {
-			return ErrNotFound
-		}
-		a, b := state.BackupArtifacts[i], state.BackupArtifacts[j]
-		input := recoveredBackupRetirementState{Artifact: a, Replacement: b}
-		for _, plan := range state.BackupRestorePlans {
-			input.Restoring = input.Restoring || plan.ArtifactID == id
-		}
-		for _, restore := range state.BackupRestoreRuns {
-			input.Restoring = input.Restoring || restore.ArtifactID == id
-		}
-		runs := make(map[string]model.BackupRun, len(state.BackupRuns))
-		for _, run := range state.BackupRuns {
-			runs[run.ID] = run
-			switch run.ID {
-			case a.RunID:
-				input.Run = run
-			case b.RunID:
-				input.ReplacementRun = run
-			}
-		}
-		for _, other := range state.BackupArtifacts {
-			if other.ID != id && backupRetirementAlias(a, other) {
-				input.HasAlias = true
-			}
-			if other.PolicyID == b.PolicyID && other.Status == model.BackupArtifactStatusActive && !other.Protected &&
-				(other.CreatedAt.After(b.CreatedAt) || (other.CreatedAt.Equal(b.CreatedAt) && other.ID > b.ID)) {
-				input.NewerReplacement = true
-			}
-			if isRetirementRetainedCandidate(a, b, other, runs[other.RunID]) {
-				input.RetainedCandidates = append(input.RetainedCandidates, other)
-			}
-		}
-		now := time.Now().UTC()
-		var err error
-		result, err = reviewRecoveredBackupRetirement(now, input, req, actor)
-		if err != nil || req.Confirmation == "" || len(result.Blockers) != 0 {
-			return err
-		}
-		event := recoveredBackupRetirementAudit(now, result, req, actor)
-		state.BackupArtifacts[i].Protected = false
-		state.BackupArtifacts[i].Status = model.BackupArtifactStatusDeleted
-		state.BackupArtifacts[i].DeletedAt = &now
-		state.AuditEvents = append(state.AuditEvents, event)
-		result.Retired, result.AuditID = true, event.ID
-		return nil
-	})
-	return result, err
+	return s.pgRecoveredBackupRetirement(ctx, id, req, actor)
 }
 
 func (s *Store) pgRecoveredBackupRetirement(ctx context.Context, id string, req model.RecoveredBackupRetirementRequest, actor model.Principal) (model.RecoveredBackupRetirement, error) {

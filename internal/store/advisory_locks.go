@@ -26,20 +26,7 @@ func (s *Store) WithAdvisoryLock(ctx context.Context, name string, fn func() err
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if !s.usingDatabase() {
-		s.advisoryLockMu.Lock()
-		if s.advisoryLocks[name] {
-			s.advisoryLockMu.Unlock()
-			return false, nil
-		}
-		if s.advisoryLocks == nil {
-			s.advisoryLocks = map[string]bool{}
-		}
-		s.advisoryLocks[name] = true
-		s.advisoryLockMu.Unlock()
-		defer func() { s.advisoryLockMu.Lock(); delete(s.advisoryLocks, name); s.advisoryLockMu.Unlock() }()
-		return true, fn()
-	}
+
 	if err := s.ensureDatabaseReady(); err != nil {
 		return false, err
 	}

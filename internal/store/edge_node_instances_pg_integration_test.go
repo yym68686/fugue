@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +15,7 @@ import (
 
 func TestEdgeInstancePostgresSameEpochPodReplacementFencesLateOldUID(t *testing.T) {
 	databaseURL := requireEdgePostgresTestURL(t)
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +56,7 @@ func TestEdgeInstancePostgresSameEpochPodReplacementFencesLateOldUID(t *testing.
 
 func TestEdgeInstancePostgresActiveInventoryIgnoresUnactivatedLegacyGroup(t *testing.T) {
 	databaseURL := requireEdgePostgresTestURL(t)
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -114,11 +113,11 @@ func TestEdgeInstancePostgresActiveInventoryIgnoresUnactivatedLegacyGroup(t *tes
 
 func TestEdgeActivationFilePostgresSemanticParity(t *testing.T) {
 	databaseURL := requireEdgePostgresTestURL(t)
-	pg := New("", databaseURL)
+	pg := New(databaseURL)
 	if err := pg.Init(); err != nil {
 		t.Fatal(err)
 	}
-	file := New(filepath.Join(t.TempDir(), "store.json"))
+	file := newStoreTestDatabase(t, "")
 	if err := file.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +236,7 @@ func TestEdgeInstanceFencingPostgresParity(t *testing.T) {
 	if !strings.Contains(strings.ToLower(databaseURL), "test") {
 		t.Fatalf("refusing to run edge instance integration test against non-test database URL %q", databaseURL)
 	}
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init postgres store: %v", err)
 	}
@@ -277,7 +276,7 @@ func TestEdgeInstanceFencingPostgresParity(t *testing.T) {
 		t.Fatal("phase4 legacy flat heartbeat write must fail closed")
 	}
 
-	reopened := New("", databaseURL)
+	reopened := New(databaseURL)
 	if err := reopened.Init(); err != nil {
 		t.Fatalf("reopen postgres store: %v", err)
 	}
@@ -292,7 +291,7 @@ func TestEdgeInstanceFencingPostgresConcurrentReplicaWrites(t *testing.T) {
 	if !strings.Contains(strings.ToLower(databaseURL), "test") {
 		t.Fatalf("refusing to run edge instance integration test against non-test database URL %q", databaseURL)
 	}
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init postgres store: %v", err)
 	}
@@ -344,7 +343,7 @@ func TestEdgeRemediationPostgresCrashCASAndTerminalPhases(t *testing.T) {
 	if !strings.Contains(strings.ToLower(databaseURL), "test") {
 		t.Fatalf("refusing to run edge remediation integration test against non-test database URL %q", databaseURL)
 	}
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +389,7 @@ func TestEdgeRemediationPostgresCrashCASAndTerminalPhases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reopened := New("", databaseURL)
+	reopened := New(databaseURL)
 	if err := reopened.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +456,7 @@ func TestEdgeRemediationPostgresCrashCASAndTerminalPhases(t *testing.T) {
 	if err != nil || state.Remediation.Phase != model.EdgeRemediationPhaseRollbackPending {
 		t.Fatalf("rollback-pending action: %+v err=%v", state.Remediation, err)
 	}
-	finalReopen := New("", databaseURL)
+	finalReopen := New(databaseURL)
 	if err := finalReopen.Init(); err != nil {
 		t.Fatal(err)
 	}

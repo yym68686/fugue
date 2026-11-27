@@ -12,7 +12,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
-	"fugue/internal/store"
 )
 
 func createTestStaticIntent(t *testing.T, s *Server, gen, upstream string) model.PlatformArtifact {
@@ -90,7 +89,7 @@ func TestStaticIntentCaptureIgnoresAmbientRoutesAndDNS(t *testing.T) {
 }
 
 func TestProducerUsesPinnedStaticIntentAndSwitchesVersions(t *testing.T) {
-	state := store.New(t.TempDir() + "/state.json")
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

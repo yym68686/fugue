@@ -19,7 +19,7 @@ func TestDomainCertificateValidityControlsDiagnosisRepairAndReports(t *testing.T
 			if created.Code != 200 {
 				t.Fatal(created.Body.String())
 			}
-			now := time.Now().UTC()
+			now := time.Now().UTC().Truncate(time.Microsecond)
 			from, to := now.Add(-time.Hour), now.Add(time.Hour)
 			certHost := host
 			switch mode {
@@ -69,8 +69,8 @@ func TestDomainCertificateValidityControlsDiagnosisRepairAndReports(t *testing.T
 					}
 				}
 			}
-			after, _ := state.GetAppDomain(host)
-			if after.TLSStatus != "ready" || !after.TLSReadyAt.Equal(original) {
+			after, err := state.GetAppDomain(host)
+			if err != nil || after.TLSStatus != "ready" || after.TLSReadyAt == nil || !after.TLSReadyAt.Equal(original) {
 				t.Fatal("read diagnosis rewrote historical readiness")
 			}
 			repair := performJSONRequest(t, server, http.MethodPost, "/v1/apps/"+app.ID+"/domains/repair", key, map[string]any{"hostname": host})

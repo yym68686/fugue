@@ -26,17 +26,7 @@ func (s *Store) ProducerInputDeferred(ctx context.Context, scope string, policy 
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if !s.usingDatabase() {
-		err = s.withLockedState(false, func(state *model.State) error {
-			selected, err := s.inputDeferralFromState(state)
-			if err != nil || selected == nil {
-				return err
-			}
-			deferred, err = selected.Defers(time.Now().UTC(), scope, policy)
-			return err
-		})
-		return deferred, err
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted, ReadOnly: true})
@@ -74,34 +64,6 @@ func (s *Store) ProducerInputDeferred(ctx context.Context, scope string, policy 
 		return false, err // an unknown read/commit outcome never admits capture
 	}
 	return deferred, nil
-}
-
-func (s *Store) inputDeferralFromState(state *model.State) (*platformproducer.InputDeferral, error) {
-	key := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, platformproducer.InputDeferralScope, "shadow")
-	lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, key)
-	if !ok {
-		return nil, nil
-	}
-	if lane.Frozen {
-		return nil, ErrConflict
-	}
-	if lane.ActiveReleaseID == "" {
-		return nil, nil
-	}
-	i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, lane.ActiveReleaseID)
-	if i < 0 {
-		return nil, ErrConflict
-	}
-	r := state.PlatformArtifactReleases[i]
-	i = platformArtifactIndex(state.PlatformArtifacts, r.ArtifactID)
-	if i < 0 {
-		return nil, ErrConflict
-	}
-	a := state.PlatformArtifacts[i]
-	if r.Status != "active" || r.LaneKey != key || r.FencingToken != lane.FencingToken || r.FencingToken <= 0 || r.Generation != a.Generation {
-		return nil, ErrConflict
-	}
-	return s.decodeSignedInputDeferral(a)
 }
 
 func (s *Store) decodeSignedInputDeferral(a model.PlatformArtifact) (*platformproducer.InputDeferral, error) {
@@ -155,43 +117,6 @@ func inputDeferralPublicationRequest(a model.PlatformArtifact, req model.Platfor
 		return p, fmt.Errorf("%w: finite input control requires explicit admin control and exact shadow intent", ErrConflict)
 	}
 	return p, nil
-}
-
-func (s *Store) validateInputDeferralPublication(state *model.State, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, now time.Time) error {
-	if a.ScopeKey != platformproducer.InputDeferralScope {
-		return nil
-	}
-	p, err := inputDeferralPublicationRequest(a, req, principal)
-	if err != nil {
-		return err
-	}
-	previous, err := s.inputDeferralFromState(state)
-	if err != nil {
-		return err
-	}
-	if err := platformproducer.ValidateInputDeferralTransition(p, previous, now); err != nil {
-		return err
-	}
-	if p.Action == "release" {
-		return nil // release removes only the exact restriction, even after policy drift
-	}
-	for _, b := range p.Request.Authorities {
-		key := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, b.Scope, "shadow")
-		lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, key)
-		i := platformArtifactReleaseIndex(state.PlatformArtifactReleases, b.Policy.ReleaseID)
-		j := platformArtifactIndex(state.PlatformArtifacts, b.Policy.ArtifactID)
-		if !ok || lane.Frozen || lane.ActiveReleaseID != b.Policy.ReleaseID || lane.FencingToken != b.Policy.FencingToken || i < 0 || j < 0 {
-			return ErrConflict
-		}
-		r, a := state.PlatformArtifactReleases[i], state.PlatformArtifacts[j]
-		if r.ArtifactID != a.ID || r.Status != "active" || r.LaneKey != key || r.FencingToken != b.Policy.FencingToken || r.Generation != a.Generation || a.ContentHash != b.Policy.ContentHash || a.ScopeKey != b.Scope || a.Status != model.PlatformArtifactStatusValidated || s.VerifyPlatformArtifactIntegrity(a) != nil {
-			return ErrConflict
-		}
-		if _, err := platformproducer.Decode(a); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Store) pgValidateInputDeferralPublication(ctx context.Context, tx *sql.Tx, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal) error {

@@ -3,12 +3,38 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"fugue/internal/model"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
+
+func TestPostgresExpectedConsumerSetDeadlinesSurviveRoundTrip(t *testing.T) {
+	db, _, _ := hotInventoryTestDatabase(t)
+	set := expectedConsumerSetFixture(t, 1)
+	set.HeartbeatDeadline = set.HeartbeatDeadline.Truncate(time.Microsecond).Add(789 * time.Nanosecond)
+	set.ConvergenceDeadline = set.ConvergenceDeadline.Truncate(time.Microsecond).Add(789 * time.Nanosecond)
+	set.Consumers[0].HeartbeatDeadline = set.HeartbeatDeadline
+	set.Consumers[0].ConvergenceDeadline = set.ConvergenceDeadline
+	stored, err := pgInsertPlatformExpectedConsumerSet(t.Context(), db, set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.HeartbeatDeadline.Equal(set.HeartbeatDeadline.Truncate(time.Microsecond)) ||
+		!stored.Consumers[0].HeartbeatDeadline.Equal(set.HeartbeatDeadline) {
+		t.Fatalf("fixture did not exercise different database precisions: %+v", stored)
+	}
+	if _, err := normalizePlatformExpectedConsumerSetForStore(stored); err != nil {
+		t.Fatal("stored expected consumer set no longer validates", err)
+	}
+	stored.Consumers[0].ConvergenceDeadline = stored.ConvergenceDeadline.Add(time.Microsecond)
+	if _, err := normalizePlatformExpectedConsumerSetForStore(stored); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("member deadline genuinely beyond its set bound was accepted", err)
+	}
+}
 
 // This SQL mock checks row persistence/scanning. Public registration's complete
 // signed-closure and verified-pin gate is covered by the real PostgreSQL tests

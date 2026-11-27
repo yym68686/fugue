@@ -1,8 +1,6 @@
 package store
 
 import (
-	"encoding/json"
-	"sort"
 	"strings"
 	"time"
 
@@ -273,171 +271,8 @@ func buildPlatformMachineRecord(nodeKeyID, nodeName, endpoint string, labels map
 	return machine, nil
 }
 
-func findMachine(state *model.State, id string) int {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return -1
-	}
-	for idx, machine := range state.Machines {
-		if machine.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findMachineByRuntimeID(state *model.State, runtimeID string) int {
-	runtimeID = strings.TrimSpace(runtimeID)
-	if runtimeID == "" {
-		return -1
-	}
-	for idx, machine := range state.Machines {
-		if strings.TrimSpace(machine.RuntimeID) == runtimeID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findMachineByClusterNodeName(state *model.State, nodeName string) int {
-	nodeName = strings.TrimSpace(nodeName)
-	if nodeName == "" {
-		return -1
-	}
-	for idx, machine := range state.Machines {
-		if strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), nodeName) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findPlatformMachineByClusterNodeName(state *model.State, nodeName string) int {
-	nodeName = strings.TrimSpace(nodeName)
-	if nodeName == "" {
-		return -1
-	}
-	for idx, machine := range state.Machines {
-		if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), nodeName) {
-			continue
-		}
-		return idx
-	}
-	return -1
-}
-
-func findMachineByFingerprintHash(state *model.State, tenantID, fingerprintHash string) int {
-	fingerprintHash = strings.TrimSpace(fingerprintHash)
-	if fingerprintHash == "" {
-		return -1
-	}
-	tenantID = strings.TrimSpace(tenantID)
-	for idx, machine := range state.Machines {
-		if strings.TrimSpace(machine.FingerprintHash) != fingerprintHash {
-			continue
-		}
-		if strings.TrimSpace(machine.TenantID) == tenantID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findRuntimeByClusterNodeName(state *model.State, nodeName string) int {
-	nodeName = strings.TrimSpace(nodeName)
-	if nodeName == "" {
-		return -1
-	}
-	for idx, runtime := range state.Runtimes {
-		if strings.EqualFold(strings.TrimSpace(runtime.ClusterNodeName), nodeName) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func upsertMachineForRuntimeState(state *model.State, runtime model.Runtime, now time.Time) model.Machine {
-	existingIndex := findMachineByRuntimeID(state, runtime.ID)
-	if existingIndex < 0 {
-		existingIndex = findMachineByFingerprintHash(state, runtime.TenantID, runtime.FingerprintHash)
-	}
-	var existing *model.Machine
-	if existingIndex >= 0 {
-		existing = &state.Machines[existingIndex]
-	}
-	machine := machineFromRuntime(runtime, existing, now)
-	if existingIndex >= 0 {
-		state.Machines[existingIndex] = machine
-	} else {
-		state.Machines = append(state.Machines, machine)
-	}
-	return machine
-}
-
-func upsertPlatformMachineState(state *model.State, nodeKeyID, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string, now time.Time) (model.Machine, error) {
-	normalizedNodeName, err := normalizeClusterNodeName(nodeName)
-	if err != nil {
-		return model.Machine{}, err
-	}
-	machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, normalizedNodeName, endpoint)
-	fingerprintHash := model.HashSecret(machineFingerprint)
-
-	existingIndex := findPlatformMachineByClusterNodeName(state, normalizedNodeName)
-	if existingIndex < 0 {
-		existingIndex = findMachineByFingerprintHash(state, "", fingerprintHash)
-	}
-	if existingIndex < 0 && strings.TrimSpace(nodeKeyID) != "" {
-		for idx, machine := range state.Machines {
-			if strings.TrimSpace(machine.NodeKeyID) != strings.TrimSpace(nodeKeyID) {
-				continue
-			}
-			if model.NormalizeMachineScope(machine.Scope) != model.MachineScopePlatformNode {
-				continue
-			}
-			if strings.EqualFold(strings.TrimSpace(machine.ClusterNodeName), normalizedNodeName) {
-				existingIndex = idx
-				break
-			}
-		}
-	}
-
-	var existing *model.Machine
-	if existingIndex >= 0 {
-		existing = &state.Machines[existingIndex]
-	}
-	machine, err := buildPlatformMachineRecord(nodeKeyID, normalizedNodeName, endpoint, labels, machineName, machineFingerprint, existing, now)
-	if err != nil {
-		return model.Machine{}, err
-	}
-	if existingIndex >= 0 {
-		state.Machines[existingIndex] = machine
-	} else {
-		state.Machines = append(state.Machines, machine)
-	}
-	return machine, nil
-}
-
 func (s *Store) ListMachines(tenantID string, platformAdmin bool) ([]model.Machine, error) {
-	if s.usingDatabase() {
-		return s.pgListMachines(tenantID, platformAdmin)
-	}
-	var machines []model.Machine
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, machine := range state.Machines {
-			normalizeMachineForRead(&machine)
-			if platformAdmin || strings.TrimSpace(machine.TenantID) == strings.TrimSpace(tenantID) {
-				machines = append(machines, machine)
-			}
-		}
-		sort.Slice(machines, func(i, j int) bool {
-			return machines[i].CreatedAt.Before(machines[j].CreatedAt)
-		})
-		return nil
-	})
-	return machines, err
+	return s.pgListMachines(tenantID, platformAdmin)
 }
 
 func (s *Store) ListMachinesByNodeKey(nodeKeyID, tenantID string, platformAdmin bool) ([]model.Machine, error) {
@@ -445,26 +280,7 @@ func (s *Store) ListMachinesByNodeKey(nodeKeyID, tenantID string, platformAdmin 
 	if nodeKeyID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListMachinesByNodeKey(nodeKeyID, tenantID, platformAdmin)
-	}
-	var machines []model.Machine
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, machine := range state.Machines {
-			if strings.TrimSpace(machine.NodeKeyID) != nodeKeyID {
-				continue
-			}
-			normalizeMachineForRead(&machine)
-			if platformAdmin || strings.TrimSpace(machine.TenantID) == strings.TrimSpace(tenantID) {
-				machines = append(machines, machine)
-			}
-		}
-		sort.Slice(machines, func(i, j int) bool {
-			return machines[i].CreatedAt.Before(machines[j].CreatedAt)
-		})
-		return nil
-	})
-	return machines, err
+	return s.pgListMachinesByNodeKey(nodeKeyID, tenantID, platformAdmin)
 }
 
 func (s *Store) GetMachineByClusterNodeName(name string) (model.Machine, error) {
@@ -472,25 +288,7 @@ func (s *Store) GetMachineByClusterNodeName(name string) (model.Machine, error) 
 	if name == "" {
 		return model.Machine{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetMachineByClusterNodeName(name)
-	}
-	var machine model.Machine
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		if idx := findMachineByClusterNodeName(state, name); idx >= 0 {
-			machine = state.Machines[idx]
-			normalizeMachineForRead(&machine)
-			return nil
-		}
-		runtimeIndex := findRuntimeByClusterNodeName(state, name)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		machine = machineFromRuntime(state.Runtimes[runtimeIndex], nil, state.Runtimes[runtimeIndex].UpdatedAt)
-		return nil
-	})
-	return machine, err
+	return s.pgGetMachineByClusterNodeName(name)
 }
 
 func (s *Store) EnsurePlatformMachineForClusterNode(nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
@@ -498,16 +296,7 @@ func (s *Store) EnsurePlatformMachineForClusterNode(nodeName, endpoint string, l
 	if nodeName == "" {
 		return model.Machine{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEnsurePlatformMachineForClusterNode(nodeName, endpoint, labels, machineName, machineFingerprint)
-	}
-	var machine model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		var err error
-		machine, err = upsertPlatformMachineState(state, "", nodeName, endpoint, labels, machineName, machineFingerprint, time.Now().UTC())
-		return err
-	})
-	return machine, err
+	return s.pgEnsurePlatformMachineForClusterNode(nodeName, endpoint, labels, machineName, machineFingerprint)
 }
 
 func (s *Store) EnsureMachineForRuntime(runtimeID string) (model.Machine, error) {
@@ -515,24 +304,7 @@ func (s *Store) EnsureMachineForRuntime(runtimeID string) (model.Machine, error)
 	if runtimeID == "" {
 		return model.Machine{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEnsureMachineForRuntime(runtimeID)
-	}
-	var machine model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		runtimeIndex := findRuntime(state, runtimeID)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		runtimeObj := state.Runtimes[runtimeIndex]
-		if runtimeObj.Type != model.RuntimeTypeManagedOwned && runtimeObj.Type != model.RuntimeTypeExternalOwned {
-			return ErrConflict
-		}
-		machine = upsertMachineForRuntimeState(state, runtimeObj, time.Now().UTC())
-		return nil
-	})
-	return machine, err
+	return s.pgEnsureMachineForRuntime(runtimeID)
 }
 
 func (s *Store) SetMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy) (model.Machine, error) {
@@ -552,30 +324,7 @@ func (s *Store) SetMachineEdgeEnrollment(name string, policy model.MachinePolicy
 	if err := enrollment.Validate(name, enrollment.EdgeGroupID, time.Now().UTC()); err != nil || !policy.AllowEdge {
 		return model.Machine{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSetMachinePolicyWithEdgeEnrollment(name, policy, enrollment.EdgeGroupID, &enrollment)
-	}
-	var machine model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		idx := findMachineByClusterNodeName(state, name)
-		if idx < 0 {
-			return ErrNotFound
-		}
-		next := state.Machines[idx]
-		if err := applyMachineEdgeEnrollment(&next, enrollment.EdgeGroupID); err != nil {
-			return err
-		}
-		raw, err := json.Marshal(enrollment)
-		if err != nil {
-			return err
-		}
-		next.Labels[model.MachineEdgeEnrollmentLabel] = string(raw)
-		next.Policy = normalizeMachinePolicy(next.Scope, policy)
-		next.UpdatedAt = time.Now().UTC()
-		state.Machines[idx], machine = next, next
-		return nil
-	})
-	return machine, err
+	return s.pgSetMachinePolicyWithEdgeEnrollment(name, policy, enrollment.EdgeGroupID, &enrollment)
 }
 
 func (s *Store) setMachinePolicyByClusterNodeName(name string, policy model.MachinePolicy, edgeGroupID string) (model.Machine, error) {
@@ -583,36 +332,7 @@ func (s *Store) setMachinePolicyByClusterNodeName(name string, policy model.Mach
 	if name == "" {
 		return model.Machine{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSetMachinePolicyWithEdgeGroup(name, policy, edgeGroupID)
-	}
-	var machine model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		now := time.Now().UTC()
-		machineIndex := findMachineByClusterNodeName(state, name)
-		if machineIndex < 0 {
-			runtimeIndex := findRuntimeByClusterNodeName(state, name)
-			if runtimeIndex < 0 {
-				return ErrNotFound
-			}
-			machine = upsertMachineForRuntimeState(state, state.Runtimes[runtimeIndex], now)
-			machineIndex = findMachine(state, machine.ID)
-			if machineIndex < 0 {
-				return ErrNotFound
-			}
-		}
-		next := state.Machines[machineIndex]
-		if err := applyMachineEdgeEnrollment(&next, edgeGroupID); err != nil {
-			return err
-		}
-		next.Policy = normalizeMachinePolicy(next.Scope, policy)
-		next.UpdatedAt = now
-		state.Machines[machineIndex] = next
-		machine = next
-		return nil
-	})
-	return machine, err
+	return s.pgSetMachinePolicyWithEdgeGroup(name, policy, edgeGroupID)
 }
 
 func applyMachineEdgeEnrollment(machine *model.Machine, groupID string) error {
@@ -653,16 +373,7 @@ func preserveMachineEdgeEnrollment(machine *model.Machine, previous model.Machin
 }
 
 func (s *Store) attachPlatformClusterMachine(key model.NodeKey, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Machine, error) {
-	if s.usingDatabase() {
-		return s.pgAttachPlatformClusterMachine(key, nodeName, endpoint, labels, machineName, machineFingerprint)
-	}
-	var machine model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		var err error
-		machine, err = upsertPlatformMachineState(state, key.ID, nodeName, endpoint, labels, machineName, machineFingerprint, time.Now().UTC())
-		return err
-	})
-	return machine, err
+	return s.pgAttachPlatformClusterMachine(key, nodeName, endpoint, labels, machineName, machineFingerprint)
 }
 
 func (s *Store) BootstrapClusterAttachment(secret, nodeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Machine, *model.Runtime, error) {

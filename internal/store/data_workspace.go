@@ -6,7 +6,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -40,55 +39,6 @@ type DataWorkspaceUpdate struct {
 	QuotaBytes       *int64
 }
 
-func ensureDataDefaults(state *model.State) {
-	if state.DataBackends == nil {
-		state.DataBackends = []model.DataBackend{}
-	}
-	if state.DataBackendSecrets == nil {
-		state.DataBackendSecrets = []model.DataBackendSecret{}
-	}
-	if state.DataWorkspaces == nil {
-		state.DataWorkspaces = []model.DataWorkspace{}
-	}
-	if state.DataSnapshots == nil {
-		state.DataSnapshots = []model.DataSnapshot{}
-	}
-	if state.DataTransfers == nil {
-		state.DataTransfers = []model.DataTransfer{}
-	}
-	if state.DataGrants == nil {
-		state.DataGrants = []model.DataGrant{}
-	}
-	if state.DataWorkspaceAccessGrants == nil {
-		state.DataWorkspaceAccessGrants = []model.DataWorkspaceAccessGrant{}
-	}
-	if state.DataRuntimeCaches == nil {
-		state.DataRuntimeCaches = []model.RuntimeDataCacheMetadata{}
-	}
-	if findDataBackend(state, defaultDataBackendID) < 0 {
-		now := time.Now().UTC()
-		state.DataBackends = append(state.DataBackends, model.DataBackend{
-			ID:           defaultDataBackendID,
-			Name:         "fugue-managed",
-			Slug:         "fugue-managed",
-			Provider:     model.DataBackendProviderFugueManaged,
-			Status:       "active",
-			Capabilities: model.DataBackendCapabilitiesForProvider(model.DataBackendProviderFugueManaged),
-			CreatedAt:    now,
-			UpdatedAt:    now,
-		})
-	}
-	for idx := range state.DataBackends {
-		state.DataBackends[idx] = normalizeDataBackend(state.DataBackends[idx])
-	}
-	for idx := range state.DataWorkspaces {
-		state.DataWorkspaces[idx] = normalizeDataWorkspace(state.DataWorkspaces[idx])
-	}
-	for idx := range state.DataSnapshots {
-		state.DataSnapshots[idx].Manifest = model.NormalizeDataManifest(state.DataSnapshots[idx].Manifest)
-	}
-}
-
 func (s *Store) DefaultDataBackendID() string {
 	return defaultDataBackendID
 }
@@ -97,83 +47,11 @@ func (s *Store) SeedDefaultDataBackendFromEnv() error {
 	if s == nil {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgSeedDefaultDataBackendFromEnv()
-	}
-	return s.withLockedState(true, seedDefaultDataBackendFromEnvInState)
-}
-
-func seedDefaultDataBackendFromEnvInState(state *model.State) error {
-	backend, credentials, ok := defaultDataBackendConfigFromEnv()
-	if !ok {
-		return nil
-	}
-	index := findDataBackend(state, defaultDataBackendID)
-	if index < 0 {
-		state.DataBackends = append(state.DataBackends, backend)
-		index = len(state.DataBackends) - 1
-	} else {
-		existing := state.DataBackends[index]
-		if existing.CreatedAt.IsZero() {
-			existing.CreatedAt = backend.CreatedAt
-		}
-		existing.Name = backend.Name
-		existing.Slug = backend.Slug
-		existing.Provider = backend.Provider
-		existing.Bucket = backend.Bucket
-		existing.Region = backend.Region
-		existing.Endpoint = backend.Endpoint
-		existing.BaseURL = backend.BaseURL
-		existing.Prefix = backend.Prefix
-		existing.Status = backend.Status
-		existing.Capabilities = backend.Capabilities
-		existing.Credentials = redactAccessKeyOnly(credentials)
-		existing.UpdatedAt = backend.UpdatedAt
-		backend = existing
-	}
-	if dataBackendCredentialsPresent(credentials) {
-		secretID := backend.CredentialSecretID
-		secretIndex := findDataBackendSecret(state, secretID, backend.ID)
-		secret := model.DataBackendSecret{
-			ID:        secretID,
-			TenantID:  backend.TenantID,
-			BackendID: backend.ID,
-		}
-		if secretIndex >= 0 {
-			secret = state.DataBackendSecrets[secretIndex]
-		}
-		encrypted, err := encryptDataBackendSecret(secret, credentials)
-		if err != nil {
-			return err
-		}
-		backend.CredentialSecretID = encrypted.ID
-		if secretIndex >= 0 {
-			state.DataBackendSecrets[secretIndex] = encrypted
-		} else {
-			state.DataBackendSecrets = append(state.DataBackendSecrets, encrypted)
-		}
-	}
-	state.DataBackends[index] = normalizeDataBackend(backend)
-	return nil
+	return s.pgSeedDefaultDataBackendFromEnv()
 }
 
 func (s *Store) ListDataBackends(tenantID string, platformAdmin bool) ([]model.DataBackend, error) {
-	if s.usingDatabase() {
-		return s.pgListDataBackends(tenantID, platformAdmin)
-	}
-	var backends []model.DataBackend
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, backend := range state.DataBackends {
-			if platformAdmin || strings.TrimSpace(backend.TenantID) == "" || backend.TenantID == tenantID {
-				backends = append(backends, model.RedactDataBackendCredentials(normalizeDataBackend(backend)))
-			}
-		}
-		sort.Slice(backends, func(i, j int) bool {
-			return backends[i].Name < backends[j].Name
-		})
-		return nil
-	})
-	return backends, err
+	return s.pgListDataBackends(tenantID, platformAdmin)
 }
 
 func (s *Store) GetDataBackend(idOrName, tenantID string, platformAdmin bool) (model.DataBackend, error) {
@@ -181,19 +59,7 @@ func (s *Store) GetDataBackend(idOrName, tenantID string, platformAdmin bool) (m
 	if idOrName == "" {
 		return model.DataBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataBackend(idOrName, tenantID, platformAdmin, true)
-	}
-	var backend model.DataBackend
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		backend = model.RedactDataBackendCredentials(normalizeDataBackend(state.DataBackends[index]))
-		return nil
-	})
-	return backend, err
+	return s.pgGetDataBackend(idOrName, tenantID, platformAdmin, true)
 }
 
 func (s *Store) CreateDataBackend(backend model.DataBackend) (model.DataBackend, error) {
@@ -201,42 +67,7 @@ func (s *Store) CreateDataBackend(backend model.DataBackend) (model.DataBackend,
 	if backend.Name == "" || backend.Provider == "" {
 		return model.DataBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateDataBackend(backend)
-	}
-	credentials := backend.Credentials
-	backend.Credentials = redactAccessKeyOnly(credentials)
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findDataBackendBySlug(state, backend.TenantID, backend.Slug) >= 0 {
-			return ErrConflict
-		}
-		if backend.ID == "" {
-			backend.ID = model.NewID("data_backend")
-		}
-		now := time.Now().UTC()
-		if backend.CreatedAt.IsZero() {
-			backend.CreatedAt = now
-		}
-		backend.UpdatedAt = now
-		if dataBackendCredentialsPresent(credentials) {
-			secret, err := encryptDataBackendSecret(model.DataBackendSecret{
-				ID:        model.NewID("data_backend_secret"),
-				TenantID:  backend.TenantID,
-				BackendID: backend.ID,
-			}, credentials)
-			if err != nil {
-				return err
-			}
-			backend.CredentialSecretID = secret.ID
-			state.DataBackendSecrets = append(state.DataBackendSecrets, secret)
-		}
-		state.DataBackends = append(state.DataBackends, backend)
-		return nil
-	})
-	if err != nil {
-		return model.DataBackend{}, err
-	}
-	return model.RedactDataBackendCredentials(backend), nil
+	return s.pgCreateDataBackend(backend)
 }
 
 func (s *Store) GetDataBackendForUse(idOrName, tenantID string, platformAdmin bool) (model.DataBackend, error) {
@@ -244,27 +75,7 @@ func (s *Store) GetDataBackendForUse(idOrName, tenantID string, platformAdmin bo
 	if idOrName == "" {
 		return model.DataBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataBackendForUse(idOrName, tenantID, platformAdmin)
-	}
-	var backend model.DataBackend
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		backend = normalizeDataBackend(state.DataBackends[index])
-		secretIndex := findDataBackendSecret(state, backend.CredentialSecretID, backend.ID)
-		if secretIndex >= 0 {
-			credentials, err := decryptDataBackendSecret(state.DataBackendSecrets[secretIndex])
-			if err != nil {
-				return err
-			}
-			backend.Credentials = credentials
-		}
-		return nil
-	})
-	return backend, err
+	return s.pgGetDataBackendForUse(idOrName, tenantID, platformAdmin)
 }
 
 func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool, actors ...model.Principal) (model.DataBackend, error) {
@@ -275,33 +86,7 @@ func (s *Store) DeleteDataBackend(idOrName, tenantID string, platformAdmin bool,
 	if idOrName == defaultDataBackendID || strings.EqualFold(idOrName, "fugue-default-r2") {
 		return model.DataBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteDataBackend(idOrName, tenantID, platformAdmin, actors)
-	}
-	var deleted model.DataBackend
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findManagedBackend(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.DataBackends[index].ID == defaultDataBackendID {
-			return ErrInvalidInput
-		}
-		for _, workspace := range state.DataWorkspaces {
-			b := state.DataBackends[index]
-			if workspace.StorageBackendID == b.ID || (dataTenantAllowed(b.TenantID, workspace.TenantID, false) && (strings.EqualFold(workspace.StorageBackendID, b.Name) || workspace.StorageBackendID == b.Slug)) {
-				return ErrConflict
-			}
-		}
-		deleted = state.DataBackends[index]
-		recordMutation(state, mutationEvent(actors, "data.backend.delete", "data_backend", deleted.ID, deleted.TenantID))
-		state.DataBackends = append(state.DataBackends[:index], state.DataBackends[index+1:]...)
-		return nil
-	})
-	if err != nil {
-		return model.DataBackend{}, err
-	}
-	return model.RedactDataBackendCredentials(deleted), nil
+	return s.pgDeleteDataBackend(idOrName, tenantID, platformAdmin, actors)
 }
 
 func (s *Store) RotateDataBackendCredentials(idOrName, tenantID string, platformAdmin bool, credentials model.DataBackendCredentials, actors ...model.Principal) (model.DataBackend, error) {
@@ -309,72 +94,11 @@ func (s *Store) RotateDataBackendCredentials(idOrName, tenantID string, platform
 	if idOrName == "" || !dataBackendCredentialsPresent(credentials) {
 		return model.DataBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRotateDataBackendCredentials(idOrName, tenantID, platformAdmin, credentials, actors)
-	}
-	var rotated model.DataBackend
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findManagedBackend(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		backend := normalizeDataBackend(state.DataBackends[index])
-		secretIndex := findDataBackendSecret(state, backend.CredentialSecretID, backend.ID)
-		secret := model.DataBackendSecret{
-			ID:        model.NewID("data_backend_secret"),
-			TenantID:  backend.TenantID,
-			BackendID: backend.ID,
-			CreatedAt: now,
-		}
-		if secretIndex >= 0 {
-			secret = state.DataBackendSecrets[secretIndex]
-		}
-		secret.LastRotated = now
-		encrypted, err := encryptDataBackendSecret(secret, credentials)
-		if err != nil {
-			return err
-		}
-		if secretIndex >= 0 {
-			state.DataBackendSecrets[secretIndex] = encrypted
-		} else {
-			state.DataBackendSecrets = append(state.DataBackendSecrets, encrypted)
-		}
-		backend.CredentialSecretID = encrypted.ID
-		backend.Credentials = redactAccessKeyOnly(credentials)
-		backend.UpdatedAt = now
-		state.DataBackends[index] = backend
-		rotated = backend
-		recordMutation(state, mutationEvent(actors, "data.backend.credentials.rotate", "data_backend", backend.ID, backend.TenantID))
-		return nil
-	})
-	if err != nil {
-		return model.DataBackend{}, err
-	}
-	return model.RedactDataBackendCredentials(rotated), nil
+	return s.pgRotateDataBackendCredentials(idOrName, tenantID, platformAdmin, credentials, actors)
 }
 
 func (s *Store) ListDataWorkspaces(tenantID, projectID string, platformAdmin bool) ([]model.DataWorkspace, error) {
-	if s.usingDatabase() {
-		return s.pgListDataWorkspaces(tenantID, projectID, platformAdmin)
-	}
-	var workspaces []model.DataWorkspace
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, workspace := range state.DataWorkspaces {
-			if !dataTenantAllowed(workspace.TenantID, tenantID, platformAdmin) {
-				continue
-			}
-			if projectID != "" && workspace.ProjectID != projectID {
-				continue
-			}
-			workspaces = append(workspaces, normalizeDataWorkspace(workspace))
-		}
-		sort.Slice(workspaces, func(i, j int) bool {
-			return workspaces[i].UpdatedAt.After(workspaces[j].UpdatedAt)
-		})
-		return nil
-	})
-	return workspaces, err
+	return s.pgListDataWorkspaces(tenantID, projectID, platformAdmin)
 }
 
 func (s *Store) GetDataWorkspace(idOrName, tenantID string, platformAdmin bool) (model.DataWorkspace, error) {
@@ -382,41 +106,11 @@ func (s *Store) GetDataWorkspace(idOrName, tenantID string, platformAdmin bool) 
 	if idOrName == "" {
 		return model.DataWorkspace{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataWorkspace(idOrName, tenantID, platformAdmin)
-	}
-	var workspace model.DataWorkspace
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataWorkspaceByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		workspace = normalizeDataWorkspace(state.DataWorkspaces[index])
-		return nil
-	})
-	return workspace, err
+	return s.pgGetDataWorkspace(idOrName, tenantID, platformAdmin)
 }
 
 func (s *Store) ListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID string, platformAdmin bool) ([]model.DataWorkspace, error) {
-	if s.usingDatabase() {
-		return s.pgListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID, platformAdmin)
-	}
-	var workspaces []model.DataWorkspace
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, workspace := range state.DataWorkspaces {
-			if projectID != "" && workspace.ProjectID != projectID {
-				continue
-			}
-			if platformAdmin || dataWorkspaceOwnedByTenant(workspace, tenantID) || dataWorkspaceGrantVisibleToPrincipal(state, workspace.ID, tenantID, actorType, actorID) {
-				workspaces = append(workspaces, normalizeDataWorkspace(workspace))
-			}
-		}
-		sort.Slice(workspaces, func(i, j int) bool {
-			return workspaces[i].UpdatedAt.After(workspaces[j].UpdatedAt)
-		})
-		return nil
-	})
-	return workspaces, err
+	return s.pgListDataWorkspacesForPrincipal(tenantID, projectID, actorType, actorID, platformAdmin)
 }
 
 func (s *Store) GetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID string, platformAdmin bool) (model.DataWorkspace, error) {
@@ -424,23 +118,7 @@ func (s *Store) GetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, acto
 	if idOrName == "" {
 		return model.DataWorkspace{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID, platformAdmin)
-	}
-	var workspace model.DataWorkspace
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataWorkspaceByIDNameOrSlug(state, idOrName, "", true)
-		if index < 0 {
-			return ErrNotFound
-		}
-		candidate := normalizeDataWorkspace(state.DataWorkspaces[index])
-		if !platformAdmin && !dataWorkspaceOwnedByTenant(candidate, tenantID) && !dataWorkspaceGrantVisibleToPrincipal(state, candidate.ID, tenantID, actorType, actorID) {
-			return ErrNotFound
-		}
-		workspace = candidate
-		return nil
-	})
-	return workspace, err
+	return s.pgGetDataWorkspaceForPrincipal(idOrName, tenantID, actorType, actorID, platformAdmin)
 }
 
 func (s *Store) CreateDataWorkspace(workspace model.DataWorkspace) (model.DataWorkspace, error) {
@@ -448,41 +126,7 @@ func (s *Store) CreateDataWorkspace(workspace model.DataWorkspace) (model.DataWo
 	if workspace.Name == "" {
 		return model.DataWorkspace{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateDataWorkspace(workspace)
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		if workspace.TenantID != "" && findTenant(state, workspace.TenantID) < 0 {
-			return ErrNotFound
-		}
-		if workspace.ProjectID != "" {
-			projectIndex := findProject(state, workspace.ProjectID)
-			if projectIndex < 0 || state.Projects[projectIndex].TenantID != workspace.TenantID {
-				return ErrNotFound
-			}
-		}
-		if findDataWorkspaceBySlug(state, workspace.TenantID, workspace.Slug) >= 0 {
-			return ErrConflict
-		}
-		if workspace.StorageBackendID == "" {
-			workspace.StorageBackendID = defaultDataBackendID
-		}
-		backendIndex := findDataBackend(state, workspace.StorageBackendID)
-		if backendIndex < 0 || !dataTenantAllowed(state.DataBackends[backendIndex].TenantID, workspace.TenantID, false) {
-			return ErrNotFound
-		}
-		if workspace.ID == "" {
-			workspace.ID = model.NewID("data_ws")
-		}
-		now := time.Now().UTC()
-		if workspace.CreatedAt.IsZero() {
-			workspace.CreatedAt = now
-		}
-		workspace.UpdatedAt = now
-		state.DataWorkspaces = append(state.DataWorkspaces, workspace)
-		return nil
-	})
-	return workspace, err
+	return s.pgCreateDataWorkspace(workspace)
 }
 
 func (s *Store) updateDataWorkspace(idOrName, tenantID string, platformAdmin bool, update DataWorkspaceUpdate) (model.DataWorkspace, error) {
@@ -490,91 +134,11 @@ func (s *Store) updateDataWorkspace(idOrName, tenantID string, platformAdmin boo
 	if idOrName == "" {
 		return model.DataWorkspace{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateDataWorkspace(idOrName, tenantID, platformAdmin, update)
-	}
-	var updated model.DataWorkspace
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataWorkspaceByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		workspace := state.DataWorkspaces[index]
-		if update.Name != nil {
-			name := strings.TrimSpace(*update.Name)
-			if name == "" {
-				return ErrInvalidInput
-			}
-			nextSlug := model.Slugify(name)
-			if nextSlug != workspace.Slug && findDataWorkspaceBySlug(state, workspace.TenantID, nextSlug) >= 0 {
-				return ErrConflict
-			}
-			workspace.Name = name
-			workspace.Slug = nextSlug
-		}
-		if update.ProjectID != nil {
-			projectID := strings.TrimSpace(*update.ProjectID)
-			if projectID != "" {
-				projectIndex := findProject(state, projectID)
-				if projectIndex < 0 || state.Projects[projectIndex].TenantID != workspace.TenantID {
-					return ErrNotFound
-				}
-			}
-			workspace.ProjectID = projectID
-		}
-		if update.DefaultRegion != nil {
-			workspace.DefaultRegion = strings.TrimSpace(*update.DefaultRegion)
-		}
-		if update.StorageBackendID != nil {
-			backendID := strings.TrimSpace(*update.StorageBackendID)
-			if backendID == "" {
-				backendID = defaultDataBackendID
-			}
-			idx := findDataBackendByIDNameOrSlug(state, backendID, workspace.TenantID, false)
-			if idx < 0 {
-				return ErrNotFound
-			}
-			workspace.StorageBackendID = state.DataBackends[idx].ID
-		}
-		if update.Assets != nil {
-			workspace.Assets = normalizeDataAssets(*update.Assets)
-		}
-		if update.QuotaBytes != nil {
-			workspace.QuotaBytes = *update.QuotaBytes
-		}
-		workspace.UpdatedAt = time.Now().UTC()
-		state.DataWorkspaces[index] = normalizeDataWorkspace(workspace)
-		updated = state.DataWorkspaces[index]
-		return nil
-	})
-	return updated, err
+	return s.pgUpdateDataWorkspace(idOrName, tenantID, platformAdmin, update)
 }
 
 func (s *Store) DeleteDataWorkspace(idOrName, tenantID string, platformAdmin bool) (model.DataWorkspace, error) {
-	if s.usingDatabase() {
-		return s.pgDeleteDataWorkspace(idOrName, tenantID, platformAdmin)
-	}
-	var deleted model.DataWorkspace
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataWorkspaceByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		deleted = state.DataWorkspaces[index]
-		if err := guardDataDeletion(state, deleted, nil); err != nil {
-			return err
-		}
-		state.DataWorkspaces = append(state.DataWorkspaces[:index], state.DataWorkspaces[index+1:]...)
-		filteredSnapshots := state.DataSnapshots[:0]
-		for _, snapshot := range state.DataSnapshots {
-			if snapshot.WorkspaceID != deleted.ID {
-				filteredSnapshots = append(filteredSnapshots, snapshot)
-			}
-		}
-		state.DataSnapshots = filteredSnapshots
-		return nil
-	})
-	return deleted, err
+	return s.pgDeleteDataWorkspace(idOrName, tenantID, platformAdmin)
 }
 
 func (s *Store) ListDataSnapshots(workspaceID string, includeDeleted bool) ([]model.DataSnapshot, error) {
@@ -582,29 +146,7 @@ func (s *Store) ListDataSnapshots(workspaceID string, includeDeleted bool) ([]mo
 	if workspaceID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListDataSnapshots(workspaceID, includeDeleted)
-	}
-	var snapshots []model.DataSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findDataWorkspace(state, workspaceID) < 0 {
-			return ErrNotFound
-		}
-		for _, snapshot := range state.DataSnapshots {
-			if snapshot.WorkspaceID != workspaceID {
-				continue
-			}
-			if snapshot.DeletedAt != nil && !includeDeleted {
-				continue
-			}
-			snapshots = append(snapshots, snapshot)
-		}
-		sort.Slice(snapshots, func(i, j int) bool {
-			return snapshots[i].CreatedAt.After(snapshots[j].CreatedAt)
-		})
-		return nil
-	})
-	return snapshots, err
+	return s.pgListDataSnapshots(workspaceID, includeDeleted)
 }
 
 func (s *Store) GetDataSnapshot(workspaceID, idOrVersion string) (model.DataSnapshot, error) {
@@ -613,19 +155,7 @@ func (s *Store) GetDataSnapshot(workspaceID, idOrVersion string) (model.DataSnap
 	if workspaceID == "" || idOrVersion == "" {
 		return model.DataSnapshot{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataSnapshot(workspaceID, idOrVersion)
-	}
-	var snapshot model.DataSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataSnapshotByIDOrVersion(state, workspaceID, idOrVersion)
-		if index < 0 || state.DataSnapshots[index].DeletedAt != nil {
-			return ErrNotFound
-		}
-		snapshot = state.DataSnapshots[index]
-		return nil
-	})
-	return snapshot, err
+	return s.pgGetDataSnapshot(workspaceID, idOrVersion)
 }
 
 func (s *Store) LatestDataSnapshot(workspaceID string) (model.DataSnapshot, error) {
@@ -651,70 +181,11 @@ func (s *Store) createDataSnapshot(snapshot model.DataSnapshot) (model.DataSnaps
 	if snapshot.WorkspaceID == "" {
 		return model.DataSnapshot{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateDataSnapshot(snapshot)
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		workspaceIndex := findDataWorkspace(state, snapshot.WorkspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		workspace := state.DataWorkspaces[workspaceIndex]
-		if findDataSnapshotByVersion(state, snapshot.WorkspaceID, snapshot.Version) >= 0 {
-			return ErrConflict
-		}
-		if snapshot.ID == "" {
-			snapshot.ID = model.NewID("data_snap")
-		}
-		now := time.Now().UTC()
-		if snapshot.CreatedAt.IsZero() {
-			snapshot.CreatedAt = now
-		}
-		snapshot.TenantID = workspace.TenantID
-		snapshot.ProjectID = workspace.ProjectID
-		snapshot.Manifest.WorkspaceID = snapshot.WorkspaceID
-		snapshot.Manifest.SnapshotID = snapshot.ID
-		snapshot.ManifestDigest = strings.TrimSpace(snapshot.ManifestDigest)
-		if snapshot.ManifestDigest == "" {
-			snapshot.ManifestDigest = digestManifest(snapshot.Manifest)
-		}
-		snapshot.Manifest.Digest = snapshot.ManifestDigest
-		snapshot.FileCount = snapshot.Manifest.FileCount
-		snapshot.TotalBytes = snapshot.Manifest.TotalBytes
-		snapshot.AssetCount = countManifestAssets(snapshot.Manifest)
-		state.DataSnapshots = append(state.DataSnapshots, snapshot)
-		state.DataWorkspaces[workspaceIndex].UsedBytes = totalWorkspaceSnapshotBytes(state.DataSnapshots, workspace.ID)
-		state.DataWorkspaces[workspaceIndex].UpdatedAt = now
-		return nil
-	})
-	return snapshot, err
+	return s.pgCreateDataSnapshot(snapshot)
 }
 
 func (s *Store) DeleteDataSnapshot(workspaceID, idOrVersion string) (model.DataSnapshot, error) {
-	if s.usingDatabase() {
-		return s.pgDeleteDataSnapshot(workspaceID, idOrVersion)
-	}
-	var deleted model.DataSnapshot
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataSnapshotByIDOrVersion(state, workspaceID, idOrVersion)
-		if index < 0 || state.DataSnapshots[index].DeletedAt != nil {
-			return ErrNotFound
-		}
-		workspaceIndex := findDataWorkspace(state, workspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		if err := guardDataDeletion(state, state.DataWorkspaces[workspaceIndex], &state.DataSnapshots[index]); err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		state.DataSnapshots[index].DeletedAt = &now
-		deleted = state.DataSnapshots[index]
-		state.DataWorkspaces[workspaceIndex].UsedBytes = totalWorkspaceSnapshotBytes(state.DataSnapshots, workspaceID)
-		state.DataWorkspaces[workspaceIndex].UpdatedAt = now
-		return nil
-	})
-	return deleted, err
+	return s.pgDeleteDataSnapshot(workspaceID, idOrVersion)
 }
 
 func (s *Store) createDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
@@ -724,106 +195,14 @@ func (s *Store) createDataTransfer(transfer model.DataTransfer) (model.DataTrans
 	if transfer.WorkspaceID == "" || transfer.Direction == "" {
 		return model.DataTransfer{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateDataTransfer(transfer)
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		workspaceIndex := findDataWorkspace(state, transfer.WorkspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		workspace := state.DataWorkspaces[workspaceIndex]
-		if transfer.ID == "" {
-			transfer.ID = model.NewID("data_transfer")
-		}
-		now := time.Now().UTC()
-		if transfer.CreatedAt.IsZero() {
-			transfer.CreatedAt = now
-		}
-		transfer.UpdatedAt = now
-		if transfer.Status == "" {
-			transfer.Status = model.DataTransferStatusPlanned
-		}
-		if strings.TrimSpace(transfer.TenantID) == "" {
-			transfer.TenantID = workspace.TenantID
-		}
-		if transfer.PartSize == 0 {
-			transfer.PartSize = defaultDataMultipartPartSize
-		}
-		if transfer.Direction == model.DataTransferDirectionPrewarm {
-			for _, existing := range state.DataTransfers {
-				if existing.WorkspaceID == transfer.WorkspaceID && existing.SnapshotID == transfer.SnapshotID && existing.Target == transfer.Target && existing.Direction == transfer.Direction && existing.Cache != nil && (existing.Status == model.DataTransferStatusPlanned || existing.Status == model.DataTransferStatusRunning) {
-					return ErrConflict
-				}
-			}
-		}
-		state.DataTransfers = append(state.DataTransfers, transfer)
-		return nil
-	})
-	return transfer, err
+	return s.pgCreateDataTransfer(transfer)
 }
 
 func (s *Store) updateDataTransfer(transfer model.DataTransfer) (model.DataTransfer, error) {
 	if transfer.ID == "" {
 		return model.DataTransfer{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateDataTransfer(transfer)
-	}
-	var updated model.DataTransfer
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataTransfer(state, transfer.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		current := state.DataTransfers[index]
-		if !transfer.UpdatedAt.IsZero() && !current.UpdatedAt.Equal(transfer.UpdatedAt) {
-			return ErrConflict
-		}
-		if (current.Status == model.DataTransferStatusCompleted || current.Status == model.DataTransferStatusFailed || current.Status == model.DataTransferStatusCanceled) && transfer.Status != "" && current.Status != transfer.Status {
-			return ErrConflict
-		}
-		if transfer.Cache != nil {
-			current.Cache = transfer.Cache
-		}
-		if transfer.Status != "" {
-			current.Status = transfer.Status
-		}
-		if transfer.SnapshotID != "" {
-			current.SnapshotID = transfer.SnapshotID
-		}
-		if transfer.Version != "" {
-			current.Version = transfer.Version
-		}
-		if transfer.Message != "" {
-			current.Message = transfer.Message
-		}
-		if len(transfer.Manifest.Entries) > 0 {
-			current.Manifest = model.NormalizeDataManifest(transfer.Manifest)
-		}
-		if transfer.PlanBlobs != nil {
-			current.PlanBlobs = transfer.PlanBlobs
-		}
-		if transfer.PartSize > 0 {
-			current.PartSize = transfer.PartSize
-		}
-		if transfer.ExpiresAt != nil {
-			current.ExpiresAt = transfer.ExpiresAt
-		}
-		current.BytesTotal = transfer.BytesTotal
-		current.BytesDone = transfer.BytesDone
-		current.FilesTotal = transfer.FilesTotal
-		current.FilesDone = transfer.FilesDone
-		current.ErrorCode = transfer.ErrorCode
-		current.ErrorMessage = transfer.ErrorMessage
-		current.StartedAt = transfer.StartedAt
-		current.FinishedAt = transfer.FinishedAt
-		current.UpdatedAt = time.Now().UTC()
-		state.DataTransfers[index] = current
-		updated = current
-		return nil
-	})
-	return updated, err
+	return s.pgUpdateDataTransfer(transfer)
 }
 
 func (s *Store) GetDataTransfer(id string) (model.DataTransfer, error) {
@@ -831,42 +210,11 @@ func (s *Store) GetDataTransfer(id string) (model.DataTransfer, error) {
 	if id == "" {
 		return model.DataTransfer{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataTransfer(id)
-	}
-	var transfer model.DataTransfer
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataTransfer(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		transfer = state.DataTransfers[index]
-		return nil
-	})
-	return transfer, err
+	return s.pgGetDataTransfer(id)
 }
 
 func (s *Store) ListDataTransfers(tenantID, workspaceID string, platformAdmin bool) ([]model.DataTransfer, error) {
-	if s.usingDatabase() {
-		return s.pgListDataTransfers(tenantID, workspaceID, platformAdmin)
-	}
-	var transfers []model.DataTransfer
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, transfer := range state.DataTransfers {
-			if !dataTenantAllowed(transfer.TenantID, tenantID, platformAdmin) {
-				continue
-			}
-			if workspaceID != "" && transfer.WorkspaceID != workspaceID {
-				continue
-			}
-			transfers = append(transfers, transfer)
-		}
-		sort.Slice(transfers, func(i, j int) bool {
-			return transfers[i].UpdatedAt.After(transfers[j].UpdatedAt)
-		})
-		return nil
-	})
-	return transfers, err
+	return s.pgListDataTransfers(tenantID, workspaceID, platformAdmin)
 }
 
 func (s *Store) CancelDataTransfer(id string) (model.DataTransfer, error) {
@@ -910,34 +258,8 @@ func (s *Store) createDataGrant(grant model.DataGrant) (model.DataGrant, string,
 	secret := model.NewSecret("fugue_data_grant")
 	grant.TokenPrefix = model.SecretPrefix(secret)
 	grant.TokenHash = model.HashSecret(secret)
-	if s.usingDatabase() {
-		created, err := s.pgCreateDataGrant(grant)
-		return created, secret, err
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		workspaceIndex := findDataWorkspace(state, grant.WorkspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		workspace := state.DataWorkspaces[workspaceIndex]
-		if grant.ID == "" {
-			grant.ID = model.NewID("data_grant")
-		}
-		now := time.Now().UTC()
-		if grant.CreatedAt.IsZero() {
-			grant.CreatedAt = now
-		}
-		if grant.Status == "" {
-			grant.Status = model.DataGrantStatusActive
-		}
-		grant.TenantID = workspace.TenantID
-		state.DataGrants = append(state.DataGrants, grant)
-		return nil
-	})
-	if err != nil {
-		return model.DataGrant{}, "", err
-	}
-	return redactDataGrant(grant), secret, nil
+	created, err := s.pgCreateDataGrant(grant)
+	return created, secret, err
 }
 
 func (s *Store) ListDataGrants(workspaceID string) ([]model.DataGrant, error) {
@@ -945,25 +267,7 @@ func (s *Store) ListDataGrants(workspaceID string) ([]model.DataGrant, error) {
 	if workspaceID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListDataGrants(workspaceID)
-	}
-	var grants []model.DataGrant
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findDataWorkspace(state, workspaceID) < 0 {
-			return ErrNotFound
-		}
-		for _, grant := range state.DataGrants {
-			if grant.WorkspaceID == workspaceID {
-				grants = append(grants, redactDataGrant(grant))
-			}
-		}
-		sort.Slice(grants, func(i, j int) bool {
-			return grants[i].CreatedAt.After(grants[j].CreatedAt)
-		})
-		return nil
-	})
-	return grants, err
+	return s.pgListDataGrants(workspaceID)
 }
 
 func (s *Store) RevokeDataGrant(id string) (model.DataGrant, error) {
@@ -971,22 +275,7 @@ func (s *Store) RevokeDataGrant(id string) (model.DataGrant, error) {
 	if id == "" {
 		return model.DataGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRevokeDataGrant(id)
-	}
-	var revoked model.DataGrant
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDataGrant(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.DataGrants[index].Status = model.DataGrantStatusRevoked
-		state.DataGrants[index].RevokedAt = &now
-		revoked = redactDataGrant(state.DataGrants[index])
-		return nil
-	})
-	return revoked, err
+	return s.pgRevokeDataGrant(id)
 }
 
 func (s *Store) GetDataGrant(id string) (model.DataGrant, error) {
@@ -994,19 +283,7 @@ func (s *Store) GetDataGrant(id string) (model.DataGrant, error) {
 	if id == "" {
 		return model.DataGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDataGrant(id)
-	}
-	var grant model.DataGrant
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataGrant(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		grant = redactDataGrant(state.DataGrants[index])
-		return nil
-	})
-	return grant, err
+	return s.pgGetDataGrant(id)
 }
 
 func (s *Store) AuthenticateDataGrant(secret string) (model.DataGrant, error) {
@@ -1014,31 +291,7 @@ func (s *Store) AuthenticateDataGrant(secret string) (model.DataGrant, error) {
 	if hash == "" {
 		return model.DataGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateDataGrant(hash)
-	}
-	var grant model.DataGrant
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		for index := range state.DataGrants {
-			current := state.DataGrants[index]
-			if subtle.ConstantTimeCompare([]byte(current.TokenHash), []byte(hash)) != 1 {
-				continue
-			}
-			if current.Status != model.DataGrantStatusActive {
-				return ErrNotFound
-			}
-			if current.ExpiresAt != nil && current.ExpiresAt.Before(now) {
-				state.DataGrants[index].Status = model.DataGrantStatusExpired
-				return ErrNotFound
-			}
-			state.DataGrants[index].LastUsedAt = &now
-			grant = redactDataGrant(state.DataGrants[index])
-			return nil
-		}
-		return ErrNotFound
-	})
-	return grant, err
+	return s.pgAuthenticateDataGrant(hash)
 }
 
 func (s *Store) ListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataWorkspaceAccessGrant, error) {
@@ -1046,25 +299,7 @@ func (s *Store) ListDataWorkspaceAccessGrants(workspaceID string) ([]model.DataW
 	if workspaceID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListDataWorkspaceAccessGrants(workspaceID)
-	}
-	var grants []model.DataWorkspaceAccessGrant
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findDataWorkspace(state, workspaceID) < 0 {
-			return ErrNotFound
-		}
-		for _, grant := range state.DataWorkspaceAccessGrants {
-			if grant.WorkspaceID == workspaceID {
-				grants = append(grants, normalizeDataWorkspaceAccessGrant(grant))
-			}
-		}
-		sort.Slice(grants, func(i, j int) bool {
-			return grants[i].CreatedAt.Before(grants[j].CreatedAt)
-		})
-		return nil
-	})
-	return grants, err
+	return s.pgListDataWorkspaceAccessGrants(workspaceID)
 }
 
 func (s *Store) GrantDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID, role, createdBy string) (model.DataWorkspaceAccessGrant, error) {
@@ -1089,58 +324,7 @@ func (s *Store) grantDataWorkspaceAccess(workspaceID, ownerTenantID string, plat
 	if workspaceID == "" || subjectType == "" || subjectID == "" || role == "" {
 		return model.DataWorkspaceAccessGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGrantDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID, role, createdBy)
-	}
-	var grant model.DataWorkspaceAccessGrant
-	err := s.withLockedState(true, func(state *model.State) error {
-		workspaceIndex := findDataWorkspace(state, workspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		workspace := normalizeDataWorkspace(state.DataWorkspaces[workspaceIndex])
-		if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
-			return ErrNotFound
-		}
-		if subjectType == model.DataWorkspaceAccessSubjectTenant {
-			if dataWorkspaceOwnedByTenant(workspace, subjectID) {
-				return ErrInvalidInput
-			}
-			if findTenant(state, subjectID) < 0 {
-				return ErrNotFound
-			}
-		}
-		if subjectType == model.DataWorkspaceAccessSubjectAPIKey {
-			index := findAPIKey(state, subjectID)
-			if index < 0 || normalizeAPIKeyStatus(state.APIKeys[index].Status) != model.APIKeyStatusActive {
-				return ErrNotFound
-			}
-			if dataWorkspaceOwnedByTenant(workspace, state.APIKeys[index].TenantID) {
-				return ErrInvalidInput
-			}
-		}
-		now := time.Now().UTC()
-		grant = model.DataWorkspaceAccessGrant{
-			WorkspaceID: workspace.ID,
-			SubjectType: subjectType,
-			SubjectID:   subjectID,
-			Role:        role,
-			CreatedBy:   strings.TrimSpace(createdBy),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if index := findDataWorkspaceAccessGrant(state, workspace.ID, subjectType, subjectID); index >= 0 {
-			grant.CreatedAt = state.DataWorkspaceAccessGrants[index].CreatedAt
-			if grant.CreatedBy == "" {
-				grant.CreatedBy = state.DataWorkspaceAccessGrants[index].CreatedBy
-			}
-			state.DataWorkspaceAccessGrants[index] = grant
-			return nil
-		}
-		state.DataWorkspaceAccessGrants = append(state.DataWorkspaceAccessGrants, grant)
-		return nil
-	})
-	return grant, err
+	return s.pgGrantDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID, role, createdBy)
 }
 
 func (s *Store) RevokeDataWorkspaceAccess(workspaceID, ownerTenantID string, platformAdmin bool, subjectType, subjectID string) (bool, error) {
@@ -1151,28 +335,7 @@ func (s *Store) RevokeDataWorkspaceAccess(workspaceID, ownerTenantID string, pla
 	if workspaceID == "" || subjectType == "" || subjectID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRevokeDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID)
-	}
-	var removed bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		workspaceIndex := findDataWorkspace(state, workspaceID)
-		if workspaceIndex < 0 {
-			return ErrNotFound
-		}
-		workspace := normalizeDataWorkspace(state.DataWorkspaces[workspaceIndex])
-		if !platformAdmin && !dataWorkspaceOwnedByTenant(workspace, ownerTenantID) {
-			return ErrNotFound
-		}
-		index := findDataWorkspaceAccessGrant(state, workspace.ID, subjectType, subjectID)
-		if index < 0 {
-			return nil
-		}
-		state.DataWorkspaceAccessGrants = append(state.DataWorkspaceAccessGrants[:index], state.DataWorkspaceAccessGrants[index+1:]...)
-		removed = true
-		return nil
-	})
-	return removed, err
+	return s.pgRevokeDataWorkspaceAccess(workspaceID, ownerTenantID, platformAdmin, subjectType, subjectID)
 }
 
 func (s *Store) DataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID string, platformAdmin bool) (string, bool, error) {
@@ -1180,35 +343,7 @@ func (s *Store) DataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorI
 	if workspaceID == "" {
 		return "", false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID, platformAdmin)
-	}
-	var role string
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDataWorkspace(state, workspaceID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		workspace := normalizeDataWorkspace(state.DataWorkspaces[index])
-		if platformAdmin || dataWorkspaceOwnedByTenant(workspace, tenantID) {
-			role = model.DataWorkspaceAccessRoleAdmin
-			return nil
-		}
-		for _, grant := range state.DataWorkspaceAccessGrants {
-			grant = normalizeDataWorkspaceAccessGrant(grant)
-			if grant.WorkspaceID != workspace.ID || !dataWorkspaceAccessGrantMatches(grant, tenantID, actorType, actorID) {
-				continue
-			}
-			if dataWorkspaceAccessRoleRank(grant.Role) > dataWorkspaceAccessRoleRank(role) {
-				role = grant.Role
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return "", false, err
-	}
-	return role, role != "", nil
+	return s.pgDataWorkspaceAccessRole(workspaceID, tenantID, actorType, actorID, platformAdmin)
 }
 
 func (s *Store) DataBlobExists(sha256Digest string) bool {
@@ -1343,11 +478,10 @@ func (s *Store) DeleteDataBlobDigest(sha256Digest string) error {
 }
 
 func (s *Store) dataBlobRoot() string {
-	baseDir := filepath.Dir(strings.TrimSpace(s.path))
-	if baseDir == "" || baseDir == "." {
-		baseDir = "."
+	if s.dataBlobDir != "" {
+		return s.dataBlobDir
 	}
-	return filepath.Join(baseDir, "data-blobs")
+	return filepath.Join("data", "data-blobs")
 }
 
 func (s *Store) dataBlobPath(sha256Digest string) string {
@@ -1425,16 +559,6 @@ func normalizeDataAssets(assets []model.DataAsset) []model.DataAsset {
 	return out
 }
 
-func dataTenantAllowed(resourceTenantID, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	if strings.TrimSpace(resourceTenantID) == "" {
-		return true
-	}
-	return strings.TrimSpace(resourceTenantID) == strings.TrimSpace(tenantID)
-}
-
 func normalizeDataWorkspaceAccessSubjectType(raw string) string {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case model.DataWorkspaceAccessSubjectTenant, "workspace", "user":
@@ -1476,28 +600,6 @@ func dataWorkspaceOwnedByTenant(workspace model.DataWorkspace, tenantID string) 
 	return workspaceTenantID != "" && tenantID != "" && workspaceTenantID == tenantID
 }
 
-func dataWorkspaceAccessGrantMatches(grant model.DataWorkspaceAccessGrant, tenantID, actorType, actorID string) bool {
-	grant = normalizeDataWorkspaceAccessGrant(grant)
-	switch grant.SubjectType {
-	case model.DataWorkspaceAccessSubjectTenant:
-		return strings.TrimSpace(tenantID) != "" && grant.SubjectID == strings.TrimSpace(tenantID)
-	case model.DataWorkspaceAccessSubjectAPIKey:
-		return actorType == model.ActorTypeAPIKey && strings.TrimSpace(actorID) != "" && grant.SubjectID == strings.TrimSpace(actorID)
-	default:
-		return false
-	}
-}
-
-func dataWorkspaceGrantVisibleToPrincipal(state *model.State, workspaceID, tenantID, actorType, actorID string) bool {
-	for _, grant := range state.DataWorkspaceAccessGrants {
-		grant = normalizeDataWorkspaceAccessGrant(grant)
-		if grant.WorkspaceID == workspaceID && dataWorkspaceAccessGrantMatches(grant, tenantID, actorType, actorID) {
-			return true
-		}
-	}
-	return false
-}
-
 func dataWorkspaceAccessRoleRank(role string) int {
 	if strings.TrimSpace(role) == "" {
 		return 0
@@ -1512,154 +614,6 @@ func dataWorkspaceAccessRoleRank(role string) int {
 	default:
 		return 0
 	}
-}
-
-func findDataBackend(state *model.State, id string) int {
-	for idx, backend := range state.DataBackends {
-		if backend.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataBackendBySlug(state *model.State, tenantID, slug string) int {
-	slug = model.Slugify(slug)
-	for idx, backend := range state.DataBackends {
-		if backend.Slug == slug && strings.TrimSpace(backend.TenantID) == strings.TrimSpace(tenantID) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataBackendByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
-	return findMatchingBackend(state, value, tenantID, platformAdmin, false)
-}
-
-func findManagedBackend(state *model.State, value, tenantID string, admin bool) int {
-	return findMatchingBackend(state, value, tenantID, admin, true)
-}
-
-func findMatchingBackend(state *model.State, value, tenantID string, platformAdmin, managing bool) int {
-	value = strings.TrimSpace(value)
-	slug := model.Slugify(value)
-	for idx, backend := range state.DataBackends {
-		if !platformAdmin && managing && (tenantID == "" || backend.TenantID != tenantID) {
-			continue
-		}
-		if !dataTenantAllowed(backend.TenantID, tenantID, platformAdmin) {
-			continue
-		}
-		if backend.ID == value || strings.EqualFold(backend.Name, value) || backend.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataWorkspace(state *model.State, id string) int {
-	for idx, workspace := range state.DataWorkspaces {
-		if workspace.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataWorkspaceBySlug(state *model.State, tenantID, slug string) int {
-	slug = model.Slugify(slug)
-	for idx, workspace := range state.DataWorkspaces {
-		if workspace.Slug == slug && workspace.TenantID == tenantID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataWorkspaceByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
-	value = strings.TrimSpace(value)
-	slug := model.Slugify(value)
-	for idx, workspace := range state.DataWorkspaces {
-		if !dataTenantAllowed(workspace.TenantID, tenantID, platformAdmin) {
-			continue
-		}
-		if workspace.ID == value || strings.EqualFold(workspace.Name, value) || workspace.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataSnapshotByVersion(state *model.State, workspaceID, version string) int {
-	for idx, snapshot := range state.DataSnapshots {
-		if snapshot.WorkspaceID == workspaceID && snapshot.Version == version {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataSnapshotByIDOrVersion(state *model.State, workspaceID, value string) int {
-	value = strings.TrimSpace(value)
-	if strings.EqualFold(value, "latest") {
-		latest := -1
-		for idx, snapshot := range state.DataSnapshots {
-			if snapshot.WorkspaceID != workspaceID || snapshot.DeletedAt != nil {
-				continue
-			}
-			if latest < 0 || snapshot.CreatedAt.After(state.DataSnapshots[latest].CreatedAt) {
-				latest = idx
-			}
-		}
-		return latest
-	}
-	for idx, snapshot := range state.DataSnapshots {
-		if snapshot.WorkspaceID == workspaceID && (snapshot.ID == value || snapshot.Version == value) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataTransfer(state *model.State, id string) int {
-	for idx, transfer := range state.DataTransfers {
-		if transfer.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataGrant(state *model.State, id string) int {
-	for idx, grant := range state.DataGrants {
-		if grant.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataWorkspaceAccessGrant(state *model.State, workspaceID, subjectType, subjectID string) int {
-	for idx, grant := range state.DataWorkspaceAccessGrants {
-		grant = normalizeDataWorkspaceAccessGrant(grant)
-		if grant.WorkspaceID == workspaceID && grant.SubjectType == subjectType && grant.SubjectID == subjectID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findDataBackendSecret(state *model.State, id, backendID string) int {
-	for idx, secret := range state.DataBackendSecrets {
-		if id != "" && secret.ID == id {
-			return idx
-		}
-		if id == "" && secret.BackendID == backendID {
-			return idx
-		}
-	}
-	return -1
 }
 
 func digestManifest(manifest model.DataManifest) string {
@@ -1677,27 +631,6 @@ func countManifestAssets(manifest model.DataManifest) int {
 		}
 	}
 	return len(seen)
-}
-
-func totalWorkspaceSnapshotBytes(snapshots []model.DataSnapshot, workspaceID string) int64 {
-	seen := map[string]struct{}{}
-	var total int64
-	for _, snapshot := range snapshots {
-		if snapshot.WorkspaceID != workspaceID || snapshot.DeletedAt != nil {
-			continue
-		}
-		for _, entry := range snapshot.Manifest.Entries {
-			if entry.Kind != model.DataManifestEntryKindFile || entry.SHA256 == "" {
-				continue
-			}
-			if _, exists := seen[entry.SHA256]; exists {
-				continue
-			}
-			seen[entry.SHA256] = struct{}{}
-			total += entry.Size
-		}
-	}
-	return total
 }
 
 func defaultDataSnapshotVersion(now time.Time) string {
@@ -2686,10 +1619,7 @@ func (s *Store) pgListDataTransfers(tenantID, workspaceID string, platformAdmin 
 // ListDataTransferSummaries excludes historical manifests and signed plans;
 // those can be enormous and belong to the paged detail endpoints.
 func (s *Store) ListDataTransferSummaries(tenantID, workspaceID string, platformAdmin bool) ([]model.DataTransfer, error) {
-	if s.usingDatabase() {
-		return s.pgListDataTransferRows(tenantID, workspaceID, platformAdmin, false)
-	}
-	return s.ListDataTransfers(tenantID, workspaceID, platformAdmin)
+	return s.pgListDataTransferRows(tenantID, workspaceID, platformAdmin, false)
 }
 
 func (s *Store) pgListDataTransferRows(tenantID, workspaceID string, platformAdmin, includePlan bool) ([]model.DataTransfer, error) {

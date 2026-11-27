@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -317,7 +316,7 @@ func TestAppImageTrackingCheckHistoryRecordsAndFilters(t *testing.T) {
 }
 
 func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
-	const appImageTrackingCheckRetentionLimit = 200 // public history cap under both backends
+	const appImageTrackingCheckRetentionLimit = 200 // public history cap
 	t.Parallel()
 
 	s, tenant, _, app := newAppImageTrackingTestStore(t)
@@ -363,7 +362,7 @@ func TestAppImageTrackingCheckRetentionKeepsBoundedRecentHistory(t *testing.T) {
 func newAppImageTrackingTestStore(t *testing.T) (*Store, model.Tenant, model.Project, model.App) {
 	t.Helper()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

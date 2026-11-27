@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"fmt"
 	"fugue/internal/storagerecovery"
 	"sort"
@@ -25,50 +24,7 @@ func (s *Store) EnrollNodeUpdater(secret, nodeName, endpoint string, labels map[
 	if runtimeObj != nil {
 		runtimeID = runtimeObj.ID
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertNodeUpdater(key, machine, runtimeID, updaterVersion, joinScriptVersion, capabilities)
-	}
-
-	token := model.NewSecret("fugue_nu")
-	now := time.Now().UTC()
-	updater := model.NodeUpdater{
-		ID:                model.NewID("nodeupdater"),
-		TenantID:          strings.TrimSpace(machine.TenantID),
-		NodeKeyID:         strings.TrimSpace(key.ID),
-		MachineID:         strings.TrimSpace(machine.ID),
-		RuntimeID:         runtimeID,
-		ClusterNodeName:   strings.TrimSpace(machine.ClusterNodeName),
-		Status:            model.NodeUpdaterStatusActive,
-		TokenPrefix:       model.SecretPrefix(token),
-		TokenHash:         model.HashSecret(token),
-		Labels:            cloneMap(machine.Labels),
-		Capabilities:      normalizeStringList(capabilities),
-		UpdaterVersion:    strings.TrimSpace(updaterVersion),
-		JoinScriptVersion: strings.TrimSpace(joinScriptVersion),
-		LastSeenAt:        &now,
-		LastHeartbeatAt:   &now,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-	}
-
-	err = s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdaterByMachine(state, updater.MachineID)
-		if index < 0 {
-			index = findNodeUpdaterByClusterNode(state, updater.NodeKeyID, updater.ClusterNodeName)
-		}
-		if index >= 0 {
-			updater.ID = state.NodeUpdaters[index].ID
-			updater.CreatedAt = state.NodeUpdaters[index].CreatedAt
-			state.NodeUpdaters[index] = updater
-			return nil
-		}
-		state.NodeUpdaters = append(state.NodeUpdaters, updater)
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdater{}, "", err
-	}
-	return redactNodeUpdater(updater), token, nil
+	return s.pgUpsertNodeUpdater(key, machine, runtimeID, updaterVersion, joinScriptVersion, capabilities)
 }
 
 func (s *Store) AuthenticateNodeUpdater(secret string) (model.NodeUpdater, model.Principal, error) {
@@ -76,32 +32,7 @@ func (s *Store) AuthenticateNodeUpdater(secret string) (model.NodeUpdater, model
 	if secret == "" {
 		return model.NodeUpdater{}, model.Principal{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateNodeUpdater(secret)
-	}
-
-	var updater model.NodeUpdater
-	err := s.withLockedState(true, func(state *model.State) error {
-		hash := model.HashSecret(secret)
-		for idx := range state.NodeUpdaters {
-			if state.NodeUpdaters[idx].TokenHash != hash {
-				continue
-			}
-			if state.NodeUpdaters[idx].Status == model.NodeUpdaterStatusRevoked {
-				return ErrConflict
-			}
-			now := time.Now().UTC()
-			state.NodeUpdaters[idx].LastSeenAt = &now
-			state.NodeUpdaters[idx].UpdatedAt = now
-			updater = state.NodeUpdaters[idx]
-			return nil
-		}
-		return ErrNotFound
-	})
-	if err != nil {
-		return model.NodeUpdater{}, model.Principal{}, err
-	}
-	return redactNodeUpdater(updater), nodeUpdaterPrincipal(updater), nil
+	return s.pgAuthenticateNodeUpdater(secret)
 }
 
 func (s *Store) UpdateNodeUpdaterHeartbeat(updaterID string, heartbeat model.NodeUpdater) (model.NodeUpdater, error) {
@@ -109,70 +40,11 @@ func (s *Store) UpdateNodeUpdaterHeartbeat(updaterID string, heartbeat model.Nod
 	if updaterID == "" {
 		return model.NodeUpdater{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateNodeUpdaterHeartbeat(updaterID, heartbeat)
-	}
-
-	var updater model.NodeUpdater
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdater(state, updaterID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		current := state.NodeUpdaters[index]
-		current.Labels = cloneMap(heartbeat.Labels)
-		current.Capabilities = normalizeStringList(heartbeat.Capabilities)
-		current.UpdaterVersion = strings.TrimSpace(heartbeat.UpdaterVersion)
-		current.JoinScriptVersion = strings.TrimSpace(heartbeat.JoinScriptVersion)
-		current.K3SVersion = strings.TrimSpace(heartbeat.K3SVersion)
-		current.K3SServer = strings.TrimSpace(heartbeat.K3SServer)
-		current.K3SFallbackServers = strings.TrimSpace(heartbeat.K3SFallbackServers)
-		current.RegistryMirror = strings.TrimSpace(heartbeat.RegistryMirror)
-		current.LabelsHash = strings.TrimSpace(heartbeat.LabelsHash)
-		current.TaintsHash = strings.TrimSpace(heartbeat.TaintsHash)
-		current.EdgeEnvGeneration = strings.TrimSpace(heartbeat.EdgeEnvGeneration)
-		current.DNSEnvGeneration = strings.TrimSpace(heartbeat.DNSEnvGeneration)
-		current.ConfigHash = strings.TrimSpace(heartbeat.ConfigHash)
-		current.DiscoveryGeneration = strings.TrimSpace(heartbeat.DiscoveryGeneration)
-		current.OS = strings.TrimSpace(heartbeat.OS)
-		current.Arch = strings.TrimSpace(heartbeat.Arch)
-		current.LastError = strings.TrimSpace(heartbeat.LastError)
-		current.LastSeenAt = &now
-		current.LastHeartbeatAt = &now
-		current.UpdatedAt = now
-		state.NodeUpdaters[index] = current
-		updater = current
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdater{}, err
-	}
-	return redactNodeUpdater(updater), nil
+	return s.pgUpdateNodeUpdaterHeartbeat(updaterID, heartbeat)
 }
 
 func (s *Store) ListNodeUpdaters(tenantID string, platformAdmin bool) ([]model.NodeUpdater, error) {
-	if s.usingDatabase() {
-		return s.pgListNodeUpdaters(tenantID, platformAdmin)
-	}
-	tenantID = strings.TrimSpace(tenantID)
-	updaters := []model.NodeUpdater{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, updater := range state.NodeUpdaters {
-			if !platformAdmin && strings.TrimSpace(updater.TenantID) != tenantID {
-				continue
-			}
-			updaters = append(updaters, redactNodeUpdater(updater))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(updaters, func(i, j int) bool {
-		return updaters[i].UpdatedAt.After(updaters[j].UpdatedAt)
-	})
-	return updaters, nil
+	return s.pgListNodeUpdaters(tenantID, platformAdmin)
 }
 
 func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType string) (bool, error) {
@@ -180,23 +52,7 @@ func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtim
 	if taskType == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType)
-	}
-
-	var supported bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		updater, err := findNodeUpdaterTarget(state, updaterID, clusterNodeName, runtimeID)
-		if err != nil {
-			return err
-		}
-		supported = nodeUpdaterSupportsTask(updater, taskType)
-		return nil
-	})
-	if err != nil {
-		return false, err
-	}
-	return supported, nil
+	return s.pgNodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtimeID, taskType)
 }
 
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
@@ -227,95 +83,7 @@ func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clust
 	if taskType == "" {
 		return model.NodeUpdateTask{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateNodeUpdateTask(principal, updaterID, clusterNodeName, runtimeID, taskType, payload)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	s.platformArtifactKeyringMu.RLock()
-	defer s.platformArtifactKeyringMu.RUnlock()
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		updater, err := findNodeUpdaterTarget(state, updaterID, clusterNodeName, runtimeID)
-		if err != nil {
-			return err
-		}
-		if !principal.IsPlatformAdmin() && strings.TrimSpace(updater.TenantID) != strings.TrimSpace(principal.TenantID) {
-			return ErrNotFound
-		}
-		if !nodeUpdaterSupportsTask(updater, taskType) {
-			return fmt.Errorf("%w: node updater %s does not support task type %q", ErrInvalidInput, updater.ID, taskType)
-		}
-		taskPayload := cloneMap(payload)
-		if existing, ok := duplicatePendingNodeUpdateTask(state, updater.ID, taskType, taskPayload); ok {
-			task = existing
-			return nil
-		}
-		if err := checkFileNodeTaskInputAdmission(ctx, state, taskType, taskPayload, s.platformArtifactKeyring); err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		task = model.NodeUpdateTask{
-			ID:              model.NewID("nodeupdate"),
-			TenantID:        strings.TrimSpace(updater.TenantID),
-			NodeUpdaterID:   updater.ID,
-			MachineID:       updater.MachineID,
-			RuntimeID:       updater.RuntimeID,
-			NodeKeyID:       updater.NodeKeyID,
-			ClusterNodeName: updater.ClusterNodeName,
-			Type:            taskType,
-			Status:          model.NodeUpdateTaskStatusPending,
-			Payload:         taskPayload,
-			RequestedByType: principal.ActorType,
-			RequestedByID:   principal.ActorID,
-			CreatedAt:       now,
-			UpdatedAt:       now,
-		}
-		state.NodeUpdateTasks = append(state.NodeUpdateTasks, task)
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
-}
-
-func duplicatePendingNodeUpdateTask(state *model.State, updaterID, taskType string, payload map[string]string) (model.NodeUpdateTask, bool) {
-	switch taskType {
-	case model.NodeUpdateTaskTypeUpgradeUpdater,
-		model.NodeUpdateTaskTypePrepullAppImages,
-		model.NodeUpdateTaskTypeReplicateAppImage,
-		model.NodeUpdateTaskTypeVerifyImageCache,
-		model.NodeUpdateTaskTypePruneImageCache,
-		model.NodeUpdateTaskTypeReportImageCache,
-		model.NodeUpdateTaskTypeReportLocalPV,
-		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
-		model.NodeUpdateTaskTypeRepairManagedIPTables,
-		model.NodeUpdateTaskTypeRefreshDesiredState,
-		model.NodeUpdateTaskTypeReloadLKGBundle,
-		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeRunDeepHealth,
-		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
-	default:
-		return model.NodeUpdateTask{}, false
-	}
-	updaterID = strings.TrimSpace(updaterID)
-	for _, task := range state.NodeUpdateTasks {
-		if strings.TrimSpace(task.NodeUpdaterID) != updaterID || task.Type != taskType {
-			continue
-		}
-		switch task.Status {
-		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
-		default:
-			continue
-		}
-		if stringMapEqual(task.Payload, payload) {
-			return task, true
-		}
-	}
-	return model.NodeUpdateTask{}, false
+	return s.pgCreateNodeUpdateTask(principal, updaterID, clusterNodeName, runtimeID, taskType, payload)
 }
 
 func (s *Store) ListNodeUpdateTasks(tenantID string, platformAdmin bool, updaterID, status string) ([]model.NodeUpdateTask, error) {
@@ -333,382 +101,39 @@ func (s *Store) ListNodeUpdateTasksWithOptions(tenantID string, platformAdmin bo
 		return nil, ErrInvalidInput
 	}
 	options.TaskID = strings.TrimSpace(options.TaskID)
-	if s.usingDatabase() {
-		return s.pgListNodeUpdateTasks(tenantID, platformAdmin, updaterID, status, options)
-	}
-	tenantID = strings.TrimSpace(tenantID)
-	updaterID = strings.TrimSpace(updaterID)
-	status = normalizeNodeUpdateTaskStatus(status)
-	tasks := []model.NodeUpdateTask{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, task := range state.NodeUpdateTasks {
-			if options.TaskID != "" && task.ID != options.TaskID {
-				continue
-			}
-			if !platformAdmin && strings.TrimSpace(task.TenantID) != tenantID {
-				continue
-			}
-			if updaterID != "" && strings.TrimSpace(task.NodeUpdaterID) != updaterID {
-				continue
-			}
-			if status != "" && strings.TrimSpace(task.Status) != status {
-				continue
-			}
-			if options.Summary {
-				task.Payload = nil
-				task.Logs = nil
-			}
-			tasks = append(tasks, redactNodeUpdateTask(task))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(tasks, func(i, j int) bool {
-		if tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
-			return tasks[i].ID > tasks[j].ID
-		}
-		return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
-	})
-	if options.Limit > 0 && len(tasks) > options.Limit {
-		tasks = tasks[:options.Limit]
-	}
-	return tasks, nil
+	return s.pgListNodeUpdateTasks(tenantID, platformAdmin, updaterID, status, options)
 }
 
 func (s *Store) ListPendingNodeUpdateTasks(updaterID string, limit int) ([]model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgListPendingNodeUpdateTasks(updaterID, limit)
-	}
-	updaterID = strings.TrimSpace(updaterID)
-	if updaterID == "" {
-		return nil, ErrInvalidInput
-	}
-	if limit <= 0 {
-		limit = 10
-	}
-	tasks := []model.NodeUpdateTask{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, task := range state.NodeUpdateTasks {
-			if strings.TrimSpace(task.NodeUpdaterID) != updaterID || task.Status != model.NodeUpdateTaskStatusPending {
-				continue
-			}
-			tasks = append(tasks, redactNodeUpdateTask(task))
-		}
-		return nil
-	})
-	sortNodeUpdateTasksForDelivery(tasks)
-	if len(tasks) > limit {
-		tasks = tasks[:limit]
-	}
-	return tasks, err
+	return s.pgListPendingNodeUpdateTasks(updaterID, limit)
 }
 
 func (s *Store) GetNodeUpdateTaskForUpdater(taskID, updaterID string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgGetNodeUpdateTaskForUpdaterPublic(taskID, updaterID)
-	}
-	var task model.NodeUpdateTask
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
-}
-
-func sortNodeUpdateTasksForDelivery(tasks []model.NodeUpdateTask) {
-	now := time.Now().UTC()
-	sort.SliceStable(tasks, func(i, j int) bool {
-		priorityI := nodeUpdateTaskDeliveryPriority(tasks[i], now)
-		priorityJ := nodeUpdateTaskDeliveryPriority(tasks[j], now)
-		if priorityI != priorityJ {
-			return priorityI < priorityJ
-		}
-		if !tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
-			return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
-		}
-		return tasks[i].ID < tasks[j].ID
-	})
-}
-
-func nodeUpdateTaskDeliveryPriority(task model.NodeUpdateTask, now time.Time) int {
-	if task.Type == model.NodeUpdateTaskTypeUpgradeUpdater {
-		return 0
-	}
-	if task.Type == model.NodeUpdateTaskTypeRefreshJoinConfig && task.Payload["pod_capacity_mode"] != "" {
-		return 1
-	}
-	// A stopped database cannot recover while periodic inventory replenishes
-	// the queue. Rescue growth is administrator-only, bounded and preflighted
-	// against live host facts; it must precede routine inventory and pruning.
-	if task.Type == storagerecovery.ExpandPoolTask {
-		return 1
-	}
-	if nodeUpdateTaskInventoryOverdue(task, now) {
-		return 1
-	}
-	// A deploy-blocking image copy is on the critical path of an app
-	// operation, so it outranks fresh periodic inventory reports. Overdue
-	// inventory is promoted above it to keep failing copies from hiding
-	// recoverable node-local images indefinitely.
-	if task.Type == model.NodeUpdateTaskTypeReplicateAppImage &&
-		strings.EqualFold(strings.TrimSpace(task.Payload["priority"]), model.ImageReplicationPriorityDeployBlocking) {
-		return 2
-	}
-	// With one task per polling cycle, replenished inventories can otherwise
-	// starve a safe prune forever. Age only changes delivery priority: claim-time
-	// inventory, policy, workload and graph validation still decides permission.
-	if task.Type == model.NodeUpdateTaskTypePruneImageCache && !task.CreatedAt.IsZero() && !task.CreatedAt.After(now.Add(-nodeUpdateTaskPruneMaxWait)) {
-		return 3
-	}
-	// Host configuration recovery must eventually run even when inventories
-	// replenish faster than the updater's one-task-per-poll delivery rate.
-	if (task.Type == model.NodeUpdateTaskTypeReconcileHostJournaldPolicy || task.Type == noderesourcepolicy.TaskType) &&
-		!task.CreatedAt.IsZero() && !task.CreatedAt.After(now.Add(-nodeUpdateTaskHostPolicyMaxWait)) {
-		return 3
-	}
-	switch task.Type {
-	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
-		return 3
-	case model.NodeUpdateTaskTypePruneImageCache,
-		model.NodeUpdateTaskTypeDecommissionLocalPV, storagerecovery.ExpandPoolTask,
-		model.NodeUpdateTaskTypeRepairManagedIPTables,
-		model.NodeUpdateTaskTypeReloadLKGBundle,
-		model.NodeUpdateTaskTypeRestartStatelessNodeService,
-		model.NodeUpdateTaskTypeReconcileHostZRAM,
-		model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, noderesourcepolicy.TaskType:
-		return 4
-	default:
-		return 5
-	}
-}
-
-func nodeUpdateTaskInventoryOverdue(task model.NodeUpdateTask, now time.Time) bool {
-	switch task.Type {
-	case model.NodeUpdateTaskTypeReportImageCache, model.NodeUpdateTaskTypeReportLocalPV:
-	default:
-		return false
-	}
-	if task.CreatedAt.IsZero() || now.IsZero() {
-		return false
-	}
-	return !task.CreatedAt.After(now.Add(-nodeUpdateTaskInventoryMaxWait))
+	return s.pgGetNodeUpdateTaskForUpdaterPublic(taskID, updaterID)
 }
 
 func (s *Store) FailStaleRunningNodeUpdateTasks(updaterID string, staleAfter time.Duration) (int, error) {
-	if s.usingDatabase() {
-		return s.pgFailStaleRunningNodeUpdateTasks(updaterID, staleAfter)
-	}
-	updaterID = strings.TrimSpace(updaterID)
-	if updaterID == "" || staleAfter <= 0 {
-		return 0, ErrInvalidInput
-	}
-	now := time.Now().UTC()
-	cutoff := now.Add(-staleAfter)
-	resultMessage := staleNodeUpdateTaskResultMessage()
-	errorMessage := staleNodeUpdateTaskErrorMessage(staleAfter)
-	count := 0
-	err := s.withLockedState(true, func(state *model.State) error {
-		for i := range state.NodeUpdateTasks {
-			task := &state.NodeUpdateTasks[i]
-			if strings.TrimSpace(task.NodeUpdaterID) != updaterID || task.Status != model.NodeUpdateTaskStatusRunning {
-				continue
-			}
-			if !task.UpdatedAt.Before(cutoff) {
-				continue
-			}
-			task.Status = model.NodeUpdateTaskStatusFailed
-			task.ResultMessage = resultMessage
-			task.ErrorMessage = errorMessage
-			task.CompletedAt = &now
-			task.UpdatedAt = now
-			count++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return count, nil
+	return s.pgFailStaleRunningNodeUpdateTasks(updaterID, staleAfter)
 }
 
 func (s *Store) ClaimNodeUpdateTask(taskID, updaterID string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgClaimNodeUpdateTask(taskID, updaterID)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	s.platformArtifactKeyringMu.RLock()
-	defer s.platformArtifactKeyringMu.RUnlock()
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		if err := checkFileNodeTaskInputAdmission(ctx, state, state.NodeUpdateTasks[index].Type, state.NodeUpdateTasks[index].Payload, s.platformArtifactKeyring); err != nil {
-			return err
-		}
-		switch state.NodeUpdateTasks[index].Status {
-		case model.NodeUpdateTaskStatusPending:
-			now := time.Now().UTC()
-			state.NodeUpdateTasks[index].Status = model.NodeUpdateTaskStatusRunning
-			state.NodeUpdateTasks[index].ClaimedAt = &now
-			state.NodeUpdateTasks[index].UpdatedAt = now
-		case model.NodeUpdateTaskStatusRunning:
-		default:
-			return ErrConflict
-		}
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
+	return s.pgClaimNodeUpdateTask(taskID, updaterID)
 }
 
 func (s *Store) AppendNodeUpdateTaskLog(taskID, updaterID, message string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgAppendNodeUpdateTaskLog(taskID, updaterID, message)
-	}
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.NodeUpdateTasks[index].Logs = append(state.NodeUpdateTasks[index].Logs, model.NodeUpdateTaskLog{
-			At:      now,
-			Message: strings.TrimSpace(message),
-		})
-		state.NodeUpdateTasks[index].UpdatedAt = now
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
+	return s.pgAppendNodeUpdateTaskLog(taskID, updaterID, message)
 }
 
 func (s *Store) FailNodeUpdateTask(taskID, updaterID, message, errorMessage string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgFailNodeUpdateTask(taskID, updaterID, message, errorMessage)
-	}
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		switch state.NodeUpdateTasks[index].Status {
-		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
-		default:
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		state.NodeUpdateTasks[index].Status = model.NodeUpdateTaskStatusFailed
-		state.NodeUpdateTasks[index].ResultMessage = strings.TrimSpace(message)
-		state.NodeUpdateTasks[index].ErrorMessage = strings.TrimSpace(errorMessage)
-		state.NodeUpdateTasks[index].CompletedAt = &now
-		state.NodeUpdateTasks[index].UpdatedAt = now
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
+	return s.pgFailNodeUpdateTask(taskID, updaterID, message, errorMessage)
 }
 
 func (s *Store) CancelNodeUpdateTask(taskID, updaterID, message string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgCancelNodeUpdateTask(taskID, updaterID, message)
-	}
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		switch state.NodeUpdateTasks[index].Status {
-		case model.NodeUpdateTaskStatusPending, model.NodeUpdateTaskStatusRunning:
-		default:
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		state.NodeUpdateTasks[index].Status = model.NodeUpdateTaskStatusCanceled
-		state.NodeUpdateTasks[index].ResultMessage = strings.TrimSpace(message)
-		state.NodeUpdateTasks[index].ErrorMessage = ""
-		state.NodeUpdateTasks[index].CompletedAt = &now
-		state.NodeUpdateTasks[index].UpdatedAt = now
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
+	return s.pgCancelNodeUpdateTask(taskID, updaterID, message)
 }
 
 func (s *Store) CompleteNodeUpdateTask(taskID, updaterID, status, message, errorMessage string) (model.NodeUpdateTask, error) {
-	if s.usingDatabase() {
-		return s.pgCompleteNodeUpdateTask(taskID, updaterID, status, message, errorMessage)
-	}
-	var task model.NodeUpdateTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeUpdateTask(state, taskID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.NodeUpdateTasks[index].NodeUpdaterID) != strings.TrimSpace(updaterID) {
-			return ErrNotFound
-		}
-		if state.NodeUpdateTasks[index].Status != model.NodeUpdateTaskStatusRunning {
-			return ErrConflict
-		}
-		normalizedStatus := normalizeTerminalNodeUpdateTaskStatus(status)
-		if normalizedStatus == "" {
-			return ErrInvalidInput
-		}
-		now := time.Now().UTC()
-		state.NodeUpdateTasks[index].Status = normalizedStatus
-		state.NodeUpdateTasks[index].ResultMessage = strings.TrimSpace(message)
-		state.NodeUpdateTasks[index].ErrorMessage = strings.TrimSpace(errorMessage)
-		state.NodeUpdateTasks[index].CompletedAt = &now
-		state.NodeUpdateTasks[index].UpdatedAt = now
-		task = state.NodeUpdateTasks[index]
-		return nil
-	})
-	if err != nil {
-		return model.NodeUpdateTask{}, err
-	}
-	return redactNodeUpdateTask(task), nil
+	return s.pgCompleteNodeUpdateTask(taskID, updaterID, status, message, errorMessage)
 }
 
 func staleNodeUpdateTaskResultMessage() string {
@@ -861,71 +286,4 @@ func normalizeStringList(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func findNodeUpdater(state *model.State, id string) int {
-	id = strings.TrimSpace(id)
-	for idx := range state.NodeUpdaters {
-		if strings.TrimSpace(state.NodeUpdaters[idx].ID) == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findNodeUpdaterByMachine(state *model.State, machineID string) int {
-	machineID = strings.TrimSpace(machineID)
-	if machineID == "" {
-		return -1
-	}
-	for idx := range state.NodeUpdaters {
-		if strings.TrimSpace(state.NodeUpdaters[idx].MachineID) == machineID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findNodeUpdaterByClusterNode(state *model.State, nodeKeyID, clusterNodeName string) int {
-	nodeKeyID = strings.TrimSpace(nodeKeyID)
-	clusterNodeName = strings.TrimSpace(clusterNodeName)
-	if clusterNodeName == "" {
-		return -1
-	}
-	for idx := range state.NodeUpdaters {
-		if strings.TrimSpace(state.NodeUpdaters[idx].ClusterNodeName) != clusterNodeName {
-			continue
-		}
-		if nodeKeyID == "" || strings.TrimSpace(state.NodeUpdaters[idx].NodeKeyID) == nodeKeyID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findNodeUpdaterTarget(state *model.State, updaterID, clusterNodeName, runtimeID string) (model.NodeUpdater, error) {
-	if index := findNodeUpdater(state, updaterID); index >= 0 {
-		return state.NodeUpdaters[index], nil
-	}
-	clusterNodeName = strings.TrimSpace(clusterNodeName)
-	runtimeID = strings.TrimSpace(runtimeID)
-	for _, updater := range state.NodeUpdaters {
-		if clusterNodeName != "" && strings.TrimSpace(updater.ClusterNodeName) == clusterNodeName {
-			return updater, nil
-		}
-		if runtimeID != "" && strings.TrimSpace(updater.RuntimeID) == runtimeID {
-			return updater, nil
-		}
-	}
-	return model.NodeUpdater{}, ErrNotFound
-}
-
-func findNodeUpdateTask(state *model.State, id string) int {
-	id = strings.TrimSpace(id)
-	for idx := range state.NodeUpdateTasks {
-		if strings.TrimSpace(state.NodeUpdateTasks[idx].ID) == id {
-			return idx
-		}
-	}
-	return -1
 }

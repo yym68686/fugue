@@ -3,15 +3,13 @@ package api
 import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestStorageMaintenanceRequiresAdminAndPersistsPreview(t *testing.T) {
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

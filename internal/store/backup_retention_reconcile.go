@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fugue/internal/model"
-	"sort"
 	"time"
 )
 
@@ -16,24 +15,11 @@ func (s *Store) ReconcileBackupRetention(policyID string) error {
 }
 
 func (s *Store) reconcileBackupRetention(policyID string, enabledOnly bool) error {
-	if s.usingDatabase() {
-		p, err := s.pgGetBackupPolicy(policyID, "", true)
-		if err != nil {
-			return err
-		}
-		return s.pgReconcileRetentionCandidates(p, enabledOnly)
+	p, err := s.pgGetBackupPolicy(policyID, "", true)
+	if err != nil {
+		return err
 	}
-	return s.withLockedState(true, func(state *model.State) error {
-		i := findBackupPolicy(state, policyID)
-		if i < 0 {
-			return ErrNotFound
-		}
-		if enabledOnly && (!state.BackupPolicies[i].Enabled || state.BackupPolicies[i].Status == model.BackupPolicyStatusDisabled) {
-			return nil
-		}
-		applyBackupRetentionInState(state, policyID)
-		return nil
-	})
+	return s.pgReconcileRetentionCandidates(p, enabledOnly)
 }
 
 func (s *Store) ReconcileEnabledBackupRetention() error {
@@ -72,57 +58,30 @@ const retentionEligibleSQL = `status='active' AND protected=FALSE
 
 func (s *Store) PreviewBackupRetention(policyID string) ([]string, error) {
 	ids := []string{}
-	if s.usingDatabase() {
-		p, err := s.pgGetBackupPolicy(policyID, "", true)
-		if err != nil {
+	p, err := s.pgGetBackupPolicy(policyID, "", true)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT id,created_at FROM fugue_backup_artifacts WHERE policy_id=$1 AND `+retentionEligibleSQL+` ORDER BY created_at DESC,id DESC`, p.ID)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	rank, now := 0, time.Now().UTC()
+	for rows.Next() {
+		var id string
+		var created time.Time
+		if err := rows.Scan(&id, &created); err != nil {
 			return nil, err
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		rows, err := s.db.QueryContext(ctx, `SELECT id,created_at FROM fugue_backup_artifacts WHERE policy_id=$1 AND `+retentionEligibleSQL+` ORDER BY created_at DESC,id DESC`, p.ID)
-		if err != nil {
-			return nil, mapDBErr(err)
+		if retentionExpired(p, rank, created, now) {
+			ids = append(ids, id)
 		}
-		defer rows.Close()
-		rank, now := 0, time.Now().UTC()
-		for rows.Next() {
-			var id string
-			var created time.Time
-			if err := rows.Scan(&id, &created); err != nil {
-				return nil, err
-			}
-			if retentionExpired(p, rank, created, now) {
-				ids = append(ids, id)
-			}
-			rank++
-		}
-		return ids, mapDBErr(rows.Err())
+		rank++
 	}
-	err := s.withLockedState(false, func(st *model.State) error {
-		i := findBackupPolicy(st, policyID)
-		if i < 0 {
-			return ErrNotFound
-		}
-		artifacts := []model.BackupArtifact{}
-		for _, a := range st.BackupArtifacts {
-			if a.PolicyID == policyID && a.Status == "active" && !a.Protected && !backupArtifactHasInFlightRestore(st, a.ID) {
-				artifacts = append(artifacts, a)
-			}
-		}
-		sort.Slice(artifacts, func(i, j int) bool {
-			if artifacts[i].CreatedAt.Equal(artifacts[j].CreatedAt) {
-				return artifacts[i].ID > artifacts[j].ID
-			}
-			return artifacts[i].CreatedAt.After(artifacts[j].CreatedAt)
-		})
-		for rank, a := range artifacts {
-			if retentionExpired(st.BackupPolicies[i], rank, a.CreatedAt, time.Now().UTC()) {
-				ids = append(ids, a.ID)
-			}
-		}
-		return nil
-	})
-	return ids, err
+	return ids, mapDBErr(rows.Err())
 }
 
 func (s *Store) pgReconcileRetentionCandidates(policy model.BackupPolicy, enabledOnly bool) error {

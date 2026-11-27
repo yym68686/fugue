@@ -11,13 +11,13 @@ import (
 )
 
 func TestStorageMaintenanceDurabilityCASAndDedup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if e := s.Init(); e != nil {
 		t.Fatal(e)
 	}
 	testMaintenanceStore(t, s)
-	fresh := New(path)
+	fresh := newStoreTestDatabase(t, path)
 	if e := fresh.Init(); e != nil {
 		t.Fatal(e)
 	}
@@ -49,7 +49,7 @@ func TestStorageMaintenancePostgresIntegration(t *testing.T) {
 	if dsn == "" {
 		t.Skip("disposable database required")
 	}
-	s := New("", dsn)
+	s := New(dsn)
 	if e := s.Init(); e != nil {
 		t.Fatal(e)
 	}

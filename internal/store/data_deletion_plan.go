@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fugue/internal/model"
-	"sort"
 	"time"
 )
 
@@ -14,71 +13,8 @@ type DataDeletionBlocker struct {
 	State string `json:"state"`
 }
 
-func dataDeletionBlockers(st *model.State, ws model.DataWorkspace, snapshot *model.DataSnapshot) []DataDeletionBlocker {
-	out := []DataDeletionBlocker{}
-	now := time.Now().UTC()
-	if j := dataRetirementJobState(st, ws.ID); j != nil {
-		out = append(out, DataDeletionBlocker{"retirement", j.ID, j.Status})
-	}
-	backupMatches := func(target model.BackupTarget) bool {
-		return target.Type == model.BackupTargetDataWorkspace && (target.WorkspaceID == ws.ID || (target.WorkspaceID == "" && target.TenantID == ws.TenantID && (target.Name == ws.Name || target.Name == ws.Slug)))
-	}
-	for _, p := range st.BackupPolicies {
-		if p.Enabled && backupMatches(p.Target) {
-			out = append(out, DataDeletionBlocker{"backup_policy", p.ID, p.Status})
-		}
-	}
-	for _, r := range st.BackupRuns {
-		if (r.Status == "pending" || r.Status == "running") && backupMatches(r.Target) {
-			out = append(out, DataDeletionBlocker{"backup_run", r.ID, r.Status})
-		}
-	}
-	for _, a := range st.BackupArtifacts {
-		if a.Status == "active" && backupMatches(a.Target) {
-			out = append(out, DataDeletionBlocker{"backup_artifact", a.ID, a.Status})
-		}
-	}
-	for _, t := range st.DataTransfers {
-		if t.WorkspaceID == ws.ID && (t.Status == "planned" || t.Status == "running" || (t.Direction == "prewarm" && (t.Cache == nil || t.Cache.State != "removed"))) {
-			out = append(out, DataDeletionBlocker{"transfer", t.ID, t.Status})
-		}
-	}
-	for _, g := range st.DataGrants {
-		if g.WorkspaceID == ws.ID && g.Status == "active" && (g.ExpiresAt == nil || g.ExpiresAt.After(now)) && (snapshot == nil || g.SnapshotID == "" || g.SnapshotID == snapshot.ID) {
-			out = append(out, DataDeletionBlocker{"grant", g.ID, g.Status})
-		}
-	}
-	if snapshot == nil {
-		for _, s := range st.DataSnapshots {
-			if s.WorkspaceID == ws.ID && s.DeletedAt == nil {
-				out = append(out, DataDeletionBlocker{"snapshot", s.ID, "retained"})
-			}
-		}
-	}
-	for _, a := range st.Apps {
-		if dataSpecReferences(&a.Spec, a.TenantID, ws, snapshot) {
-			out = append(out, DataDeletionBlocker{"app", a.ID, "referenced"})
-		}
-	}
-	for _, op := range st.Operations {
-		if (op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent) && dataSpecReferences(op.DesiredSpec, op.TenantID, ws, snapshot) {
-			out = append(out, DataDeletionBlocker{"operation", op.ID, op.Status})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Kind == out[j].Kind {
-			return out[i].ID < out[j].ID
-		}
-		return out[i].Kind < out[j].Kind
-	})
-	return out
-}
 func (s *Store) InspectDataDeletion(ws model.DataWorkspace, snapshot *model.DataSnapshot) ([]DataDeletionBlocker, error) {
-	if !s.usingDatabase() {
-		var out []DataDeletionBlocker
-		err := s.withLockedState(false, func(st *model.State) error { out = dataDeletionBlockers(st, ws, snapshot); return nil })
-		return out, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return queryDataDeletionBlockers(ctx, s.db, ws, snapshot)

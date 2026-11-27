@@ -126,7 +126,6 @@ func testProducerDependencyRefresh(t *testing.T, address string) {
 	})
 }
 
-func TestProducerDependencyRefresh(t *testing.T) { testProducerDependencyRefresh(t, "") }
 func TestProducerDependencyRefreshPostgres(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -138,108 +137,6 @@ func TestProducerDependencyRefreshPostgres(t *testing.T) {
 	}
 	testProducerDependencyRefresh(t, dsn)
 	testDNSDependencyRefresh(t, dsn)
-}
-
-func dnsDependencyFixture(t *testing.T, address string) reconfigurationFixture {
-	t.Helper()
-	f := newReconfigurationFixture(t, address)
-	req, policies, releases := prepareAuthorizedCellDNSPublication(t, f.s, true)
-	celldns.RetainGlobalOnly(&req)
-	pin := *req.PreviousTrafficPublication.ProducerPolicy
-	previousPin := pin
-	for i, a := range policies {
-		if a.ID == pin.ArtifactID {
-			if _, _, err := f.s.EnsurePlatformArtifact(a); err != nil {
-				t.Fatal(err)
-			}
-			seedDNSRouteRelease(t, f.s, releases[i])
-			if f.s.db != nil {
-				// The previous producer must reference a real, signed historical
-				// authority rather than a nonexistent placeholder. It is retained
-				// without replacing the current source's active lane.
-				previous := a
-				previous.Content = make(map[string]any, len(a.Content))
-				for key, value := range a.Content {
-					previous.Content[key] = value
-				}
-				previous.Generation += "-previous"
-				previous.Content["generation"] = previous.Generation
-				previous = celldns.Sign(t, previous, "previous-approved-policy", 1)
-				previous, _, err := f.s.EnsurePlatformArtifact(previous)
-				if err != nil {
-					t.Fatal(err)
-				}
-				r := releases[i]
-				r.ID, r.ArtifactID, r.Generation = "previous-approved-release", previous.ID, previous.Generation
-				r.Status, r.Version = model.PlatformArtifactReleaseStatusSuperseded, 1
-				r.CreatedAt, r.UpdatedAt = r.ReleasedAt, r.ReleasedAt
-				if _, err := pgInsertPlatformArtifactRelease(t.Context(), f.s.db, r); err != nil {
-					t.Fatal(err)
-				}
-				previousPin = model.PlatformPublicationPrecondition{ArtifactID: previous.ID, ContentHash: previous.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
-			}
-		}
-	}
-	seedCellDNSRoutePublications(t, f.s, &req)
-	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-before", Mode: "serving", InputSource: platformproducer.DNSProducerInputSource, PublicationRole: platformconfig.PublicationRoleCellDNS, AuthorityCellID: "cell-dns", TargetScope: "authority-cell:cell-dns", IntervalSeconds: 30, RefreshSeconds: 120, Serving: &platformproducer.ServingPolicy{CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}, DNSSource: &platformproducer.DNSProducerSource{ProducerPolicy: pin, PreviousTopology: req.Intent.RouteAuthorityTransition.PreviousTopology, DNSNodeIDs: []string{"dns-a"}}}
-	p.DNSSource.ProducerPolicy.ArtifactID = "previous-approved-policy"
-	if f.s.db != nil {
-		p.DNSSource.ProducerPolicy = previousPin
-	}
-	f.old = f.save(t, p)
-	_, oldRelease, _, _, err := f.s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	compiled := celldns.Compile(t, req)
-	prepareCompiledInputPin(t, f.s, compiled)
-	if _, _, err := f.s.EnsurePlatformArtifact(compiled.PolicyArtifact); err != nil {
-		t.Fatal(err)
-	}
-	child, _, err := f.s.EnsurePlatformArtifact(compiled.DNSArtifact)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{child.ID}, time.Now().UTC())
-	parent.Metadata[platformproducer.PolicyReleaseMetadata] = oldRelease.ID
-	parent, err = f.s.CreatePlatformArtifact(parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent, err = f.s.ValidatePlatformArtifact(parent.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	full := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, LaneKey: platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, "full"), FencingToken: 1, Version: 1, VerificationState: model.PlatformArtifactVerificationStateVerified, VerifiedLKGGeneration: parent.Generation, VerifiedAt: &now, ReleasedByType: model.ActorTypeBootstrap, ReleasedByID: platformproducer.Actor, ReleasedAt: now}
-	seedDNSRouteRelease(t, f.s, full)
-	lkg, err := buildPlatformLKGSnapshot(parent, full.ID, "sha256:"+strings.Repeat("a", 64), now, celldns.Keys())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.s.db != nil {
-		_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, lkg)
-	} else {
-		err = f.s.withLockedState(true, func(st *model.State) error {
-			st.PlatformLKGSnapshots = append(st.PlatformLKGSnapshots, lkg)
-			return nil
-		})
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	storedLKG, err := f.s.GetPlatformLKG(lkg.ArtifactKind, lkg.ScopeKey)
-	if err != nil || storedLKG == nil {
-		t.Fatal("stored DNS baseline unavailable", err)
-	}
-	f.lkg = *storedLKG
-	p.Generation = "dns-approved-successor"
-	p.DNSSource.ProducerPolicy = pin
-	f.policy = p
-	f.next = f.save(t, p)
-	f.request = model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", ProducerReconfiguration: &model.PlatformProducerReconfiguration{Operation: "dns_source", PreviousPolicy: model.PlatformPublicationPrecondition{ArtifactID: f.old.ID, ContentHash: f.old.ContentHash, ReleaseID: oldRelease.ID, FencingToken: oldRelease.FencingToken}, ServingFull: model.PlatformPublicationPrecondition{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: full.ID, FencingToken: full.FencingToken}, VerificationEvidenceHash: lkg.VerificationEvidenceHash}}
-	f.bindKey(t)
-	return f
 }
 
 func testDNSDependencyRefresh(t *testing.T, address string) {
@@ -282,3 +179,100 @@ func testDNSDependencyRefresh(t *testing.T, address string) {
 }
 
 func TestDNSDependencyRefresh(t *testing.T) { testDNSDependencyRefresh(t, "") }
+
+func dnsDependencyFixture(t *testing.T, address string) reconfigurationFixture {
+	t.Helper()
+	f := newReconfigurationFixture(t, address)
+	req, policies, releases := prepareAuthorizedCellDNSPublication(t, f.s, true)
+	celldns.RetainGlobalOnly(&req)
+	pin := *req.PreviousTrafficPublication.ProducerPolicy
+	previousPin := pin
+	for i, a := range policies {
+		if a.ID == pin.ArtifactID {
+			if _, _, err := f.s.EnsurePlatformArtifact(a); err != nil {
+				t.Fatal(err)
+			}
+			seedDNSRouteRelease(t, f.s, releases[i])
+
+			// The previous producer must reference a real, signed historical
+			// authority rather than a nonexistent placeholder. It is retained
+			// without replacing the current source's active lane.
+			previous := a
+			previous.Content = make(map[string]any, len(a.Content))
+			for key, value := range a.Content {
+				previous.Content[key] = value
+			}
+			previous.Generation += "-previous"
+			previous.Content["generation"] = previous.Generation
+			previous = celldns.Sign(t, previous, "previous-approved-policy", 1)
+			previous, _, err := f.s.EnsurePlatformArtifact(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := releases[i]
+			r.ID, r.ArtifactID, r.Generation = "previous-approved-release", previous.ID, previous.Generation
+			r.Status, r.Version = model.PlatformArtifactReleaseStatusSuperseded, 1
+			r.CreatedAt, r.UpdatedAt = r.ReleasedAt, r.ReleasedAt
+			if _, err := pgInsertPlatformArtifactRelease(t.Context(), f.s.db, r); err != nil {
+				t.Fatal(err)
+			}
+			previousPin = model.PlatformPublicationPrecondition{ArtifactID: previous.ID, ContentHash: previous.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
+
+		}
+	}
+	seedCellDNSRoutePublications(t, f.s, &req)
+	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-before", Mode: "serving", InputSource: platformproducer.DNSProducerInputSource, PublicationRole: platformconfig.PublicationRoleCellDNS, AuthorityCellID: "cell-dns", TargetScope: "authority-cell:cell-dns", IntervalSeconds: 30, RefreshSeconds: 120, Serving: &platformproducer.ServingPolicy{CanaryRuleRef: "cohort=complete", GrayMinSeconds: 1, FullMinSeconds: 1, RolloutTimeoutSeconds: 60}, DNSSource: &platformproducer.DNSProducerSource{ProducerPolicy: pin, PreviousTopology: req.Intent.RouteAuthorityTransition.PreviousTopology, DNSNodeIDs: []string{"dns-a"}}}
+	p.DNSSource.ProducerPolicy.ArtifactID = "previous-approved-policy"
+
+	p.DNSSource.ProducerPolicy = previousPin
+
+	f.old = f.save(t, p)
+	_, oldRelease, _, _, err := f.s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled := celldns.Compile(t, req)
+	prepareCompiledInputPin(t, f.s, compiled)
+	if _, _, err := f.s.EnsurePlatformArtifact(compiled.PolicyArtifact); err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := f.s.EnsurePlatformArtifact(compiled.DNSArtifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, []string{child.ID}, time.Now().UTC())
+	parent.Metadata[platformproducer.PolicyReleaseMetadata] = oldRelease.ID
+	parent, err = f.s.CreatePlatformArtifact(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err = f.s.ValidatePlatformArtifact(parent.ID, []model.PlatformArtifactValidationResult{{Name: "fixture", Pass: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	full := model.PlatformArtifactRelease{ID: "dns-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind, Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full", Status: model.PlatformArtifactReleaseStatusActive, LaneKey: platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, "full"), FencingToken: 1, Version: 1, VerificationState: model.PlatformArtifactVerificationStateVerified, VerifiedLKGGeneration: parent.Generation, VerifiedAt: &now, ReleasedByType: model.ActorTypeBootstrap, ReleasedByID: platformproducer.Actor, ReleasedAt: now}
+	seedDNSRouteRelease(t, f.s, full)
+	lkg, err := buildPlatformLKGSnapshot(parent, full.ID, "sha256:"+strings.Repeat("a", 64), now, celldns.Keys())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, lkg)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedLKG, err := f.s.GetPlatformLKG(lkg.ArtifactKind, lkg.ScopeKey)
+	if err != nil || storedLKG == nil {
+		t.Fatal("stored DNS baseline unavailable", err)
+	}
+	f.lkg = *storedLKG
+	p.Generation = "dns-approved-successor"
+	p.DNSSource.ProducerPolicy = pin
+	f.policy = p
+	f.next = f.save(t, p)
+	f.request = model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", ProducerReconfiguration: &model.PlatformProducerReconfiguration{Operation: "dns_source", PreviousPolicy: model.PlatformPublicationPrecondition{ArtifactID: f.old.ID, ContentHash: f.old.ContentHash, ReleaseID: oldRelease.ID, FencingToken: oldRelease.FencingToken}, ServingFull: model.PlatformPublicationPrecondition{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: full.ID, FencingToken: full.FencingToken}, VerificationEvidenceHash: lkg.VerificationEvidenceHash}}
+	f.bindKey(t)
+	return f
+}

@@ -15,7 +15,7 @@ func TestDataBlobStoreRejectsNonCanonicalDigestsBeforeFilesystemAccess(t *testin
 	t.Parallel()
 
 	root := t.TempDir()
-	stateStore := New(filepath.Join(root, "store.json"))
+	stateStore := newStoreTestDatabase(t, filepath.Join(root, "postgres-fixture"))
 	validDigest := dataBlobTestDigest("valid")
 	invalidDigests := []string{
 		strings.ToUpper(validDigest),
@@ -50,7 +50,7 @@ func TestDataBlobStoreRejectsNonCanonicalDigestsBeforeFilesystemAccess(t *testin
 func TestWriteDataBlobExactEnforcesPlannedSizeBeforeCommit(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 
 	tooLargeDigest := dataBlobTestDigest("abcdef")
 	if _, err := stateStore.WriteDataBlobExact(tooLargeDigest, strings.NewReader("abcdef"), 5); !errors.Is(err, ErrDataBlobTooLarge) {

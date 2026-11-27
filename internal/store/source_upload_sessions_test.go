@@ -11,8 +11,8 @@ import (
 )
 
 func TestSourceSessionChunksPersistAndSubmissionReservationIsAtomic(t *testing.T) {
-	path := t.TempDir() + "/state.json"
-	s := New(path)
+	fixture := "source-session"
+	s := newStoreTestDatabase(t, fixture)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestSourceSessionChunksPersistAndSubmissionReservationIsAtomic(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	s = New(path)
+	s = newStoreTestDatabase(t, fixture)
 	if err = s.Init(); err != nil {
 		t.Fatal(err)
 	}

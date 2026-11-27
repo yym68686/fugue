@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestScaleAppIfMatchGuardsCommittedSpec(t *testing.T) {
@@ -122,7 +120,7 @@ func TestScaleAppWithCurrentImageKeepsScaleOperation(t *testing.T) {
 func TestScaleAppRejectsPositiveReplicasWhenDeployBaselineCannotBeRecovered(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

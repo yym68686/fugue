@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -138,39 +137,6 @@ WHERE id IN ('tie-a','tie-z')`, terminal); err != nil {
 	task := latest["worker"]
 	if err != nil || !busy || task.ID != "tie-z" || task.CompletedAt == nil || !task.CompletedAt.Equal(terminal) || !task.UpdatedAt.After(terminal) || task.RequestedByID != "scheduler" || task.Payload["policy_hash"] != "new" {
 		t.Fatalf("terminal time or scheduler ownership lost in projection: %+v busy=%t error=%v", task, busy, err)
-	}
-}
-
-func TestHostJournaldStateFilePreservesOldInflightAndTieOrder(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	err := s.withLockedState(true, func(state *model.State) error {
-		state.NodeUpdateTasks = []model.NodeUpdateTask{
-			{ID: "a", NodeUpdaterID: "worker", Type: model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, Status: "completed", CreatedAt: now, Payload: map[string]string{"policy_hash": "a"}},
-			{ID: "z", NodeUpdaterID: "worker", Type: model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, Status: "failed", CreatedAt: now, Payload: map[string]string{"policy_hash": "z"}},
-			{ID: "old", NodeUpdaterID: "missing", Type: model.NodeUpdateTaskTypeReconcileHostJournaldPolicy, Status: "running", CreatedAt: now.Add(-time.Hour)},
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	latest, busy, err := s.ReadHostJournaldPolicyTaskState(context.Background())
-	if err != nil || !busy || latest["worker"].ID != "z" {
-		t.Fatal("file semantics differ", err)
-	}
-	latest["worker"].Payload["policy_hash"] = "mutation"
-	again, _, err := s.ReadHostJournaldPolicyTaskState(context.Background())
-	if err != nil || again["worker"].Payload["policy_hash"] != "z" {
-		t.Fatal("state alias escaped", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := s.ReadHostJournaldPolicyTaskState(ctx); err == nil {
-		t.Fatal("ignored cancellation")
 	}
 }
 

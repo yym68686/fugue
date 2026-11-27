@@ -119,34 +119,6 @@ func migrationLedgerPayload(ledger model.AppMigrationLedger) map[string]any {
 	return payload
 }
 
-func migrationLedgerFromEvidence(evidence model.OperationEvidence) (model.AppMigrationLedger, error) {
-	if len(evidence.Payload) == 0 {
-		return model.AppMigrationLedger{}, errMigrationCutoverEvidenceMissing
-	}
-	data, err := json.Marshal(evidence.Payload)
-	if err != nil {
-		return model.AppMigrationLedger{}, err
-	}
-	var ledger model.AppMigrationLedger
-	if err := json.Unmarshal(data, &ledger); err != nil {
-		return model.AppMigrationLedger{}, err
-	}
-	ledger = model.NormalizeAppMigrationLedger(ledger, evidence.CollectedAt)
-	if ledger.ID == "" {
-		ledger.ID = evidence.ID
-	}
-	if ledger.TenantID == "" {
-		ledger.TenantID = evidence.TenantID
-	}
-	if ledger.AppID == "" {
-		ledger.AppID = evidence.AppID
-	}
-	if ledger.OperationID == "" {
-		ledger.OperationID = evidence.OperationID
-	}
-	return ledger, nil
-}
-
 // RecordAppMigrationLedger appends an immutable, versioned ledger snapshot to
 // operation evidence.  Keeping snapshots immutable makes the 90-day audit
 // trail reconstructible even when a later attempt fails.
@@ -271,17 +243,7 @@ func (s *Store) ListAppMigrationLedgers(filter model.OperationEvidenceFilter) ([
 }
 
 func (s *Store) LatestAppMigrationLedger(operationID string) (model.AppMigrationLedger, bool, error) {
-	if s.usingDatabase() {
-		return s.pgLatestAppMigrationLedgerArchive(operationID)
-	}
-	items, err := s.ListAppMigrationLedgers(model.OperationEvidenceFilter{OperationID: strings.TrimSpace(operationID), PlatformAdmin: true})
-	if err != nil {
-		return model.AppMigrationLedger{}, false, err
-	}
-	if len(items) == 0 {
-		return model.AppMigrationLedger{}, false, nil
-	}
-	return items[0], true, nil
+	return s.pgLatestAppMigrationLedgerArchive(operationID)
 }
 
 // latestMigrationLedgerForApp resolves migration history by operation
@@ -660,30 +622,6 @@ func (s *Store) recordMigrationFailureLedger(op model.Operation, message, source
 	}
 	_, err := s.RecordAppMigrationLedger(ledger)
 	return err
-}
-
-func validateMigrationCutoverInState(state *model.State, op model.Operation) error {
-	if state == nil {
-		return errMigrationCutoverEvidenceMissing
-	}
-	var latest model.AppMigrationLedger
-	found := false
-	for _, candidate := range state.AppMigrationLedgers {
-		if strings.TrimSpace(candidate.OperationID) != strings.TrimSpace(op.ID) {
-			continue
-		}
-		if !found || candidate.UpdatedAt.After(latest.UpdatedAt) || (candidate.UpdatedAt.Equal(latest.UpdatedAt) && candidate.ID > latest.ID) {
-			latest = cloneAppMigrationLedger(candidate)
-			found = true
-		}
-	}
-	if !found {
-		return errMigrationCutoverEvidenceMissing
-	}
-	if latest.CutoverStatus != model.AppMigrationCutoverVerified && latest.CutoverStatus != model.AppMigrationCutoverCompleted {
-		return fmt.Errorf("%w: cutover status=%s", errMigrationCutoverEvidenceMissing, latest.CutoverStatus)
-	}
-	return ValidateAppMigrationCutover(latest)
 }
 
 func (s *Store) pgLatestMigrationLedgerTx(ctx context.Context, tx *sql.Tx, operationID string) (model.AppMigrationLedger, bool, error) {

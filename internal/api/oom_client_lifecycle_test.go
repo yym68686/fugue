@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +14,6 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	fugueruntime "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestOOMScanReusesNamespaceConnectionsAndClosesEachPass(t *testing.T) {
@@ -23,7 +21,7 @@ func TestOOMScanReusesNamespaceConnectionsAndClosesEachPass(t *testing.T) {
 	for _, mode := range []string{"complete", "cancel", "server-error"} {
 		cancelDuringScan := mode == "cancel"
 		t.Run(mode, func(t *testing.T) {
-			stateStore := store.New(filepath.Join(t.TempDir(), "state.json"))
+			stateStore := newStoreTestDatabase(t, "")
 			if err := stateStore.Init(); err != nil {
 				t.Fatal(err)
 			}

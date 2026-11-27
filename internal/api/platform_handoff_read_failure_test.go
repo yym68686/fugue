@@ -4,65 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"reflect"
-	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 )
-
-func TestManagedHandoffUnreadableInputDoesNotPublishNegativeRoute(t *testing.T) {
-	s, p, b, path := handoffPartitionFixture(t)
-	ctx := context.Background()
-	source, err := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The route, its authority, LKG and consumer receipts remain valid, but
-	// reconstructing the complete compiler input fails (for example a timed
-	// out read). A partial proof must neither authorize reuse nor silently
-	// turn that failure into an unavailable replacement.
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state model.State
-	if err = json.Unmarshal(raw, &state); err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	for i := range state.PlatformArtifactContents {
-		if state.PlatformArtifactContents[i].ContentHash == source.parent.Metadata["input_snapshot_digest"] {
-			state.PlatformArtifactContents[i].Content = nil
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("fixture has no persisted compiler input")
-	}
-	raw, _ = json.Marshal(state)
-	if err = os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	partial, err := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
-	if err == nil || !managedHandoffSourcePositive(partial, platformconfig.ManagedServingHandoff{TenantID: "tenant-a", AppID: "app-a", ReleaseID: "release-a"}, model.DefaultManagedRuntimeID) {
-		t.Fatal("unreadable complete input was confused with no signed positive source", err)
-	}
-	before, _ := json.Marshal(p)
-	if err = s.captureManagedHandoffPartitions(ctx, &p, b); err == nil || !strings.Contains(err.Error(), "handoff evidence unavailable") {
-		t.Fatal("failed continuity proof allowed negative publication", err)
-	}
-	after, _ := json.Marshal(p)
-	if string(before) != string(after) {
-		t.Fatal("partial proof changed authority, invented readiness or renewed evidence")
-	}
-	active, release, ok, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "full")
-	if err != nil || !ok || active.ID != source.parent.ID || release.ID != source.release.ID {
-		t.Fatal("failed capture changed the serving artifact", err)
-	}
-}
 
 func TestManagedHandoffReadFailureBoundariesAndRetry(t *testing.T) {
 	s, base, b, _ := handoffPartitionFixture(t)

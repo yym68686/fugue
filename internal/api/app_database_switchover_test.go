@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +14,7 @@ import (
 func TestSwitchoverAppDatabaseAllowsOwnedManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestSwitchoverAppDatabaseAllowsOwnedManagedPostgres(t *testing.T) {
 func TestLocalizeAppDatabaseCreatesSingleInstanceOperationOnAppRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -169,7 +168,7 @@ func TestLocalizeAppDatabaseCreatesSingleInstanceOperationOnAppRuntime(t *testin
 func TestDeployAppDefaultsManagedPostgresStorageWhenEnablingDatabase(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -230,7 +229,7 @@ func TestDeployAppDefaultsManagedPostgresStorageWhenEnablingDatabase(t *testing.
 func TestDeployAppPreservesExistingManagedPostgresStorageClass(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -297,7 +296,7 @@ func TestDeployAppPreservesExistingManagedPostgresStorageClass(t *testing.T) {
 func TestLocalizeAppDatabaseCanTargetRuntimeBeforeAppMove(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -388,7 +387,7 @@ func TestLocalizeAppDatabaseCanTargetRuntimeBeforeAppMove(t *testing.T) {
 func TestLocalizeAppDatabaseAcceptsStorageMigrationTarget(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -465,7 +464,7 @@ func TestLocalizeAppDatabaseAcceptsStorageMigrationTarget(t *testing.T) {
 func TestSwitchoverAppDatabaseRejectsAppWithoutManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -513,7 +512,7 @@ func TestSwitchoverAppDatabaseRejectsAppWithoutManagedPostgres(t *testing.T) {
 func TestSwitchoverAppDatabaseRejectsSameTargetRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -560,7 +559,7 @@ func TestSwitchoverAppDatabaseRejectsSameTargetRuntime(t *testing.T) {
 func TestSwitchoverAppDatabaseRejectsExternalRuntimeTarget(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

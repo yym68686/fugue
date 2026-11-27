@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"strings"
 	"time"
 
@@ -15,19 +14,6 @@ func marshalReleaseWorkload(workload *model.AppReleaseWorkload) ([]byte, error) 
 		return nil, nil
 	}
 	return json.Marshal(workload)
-}
-
-func preserveReleaseWorkload(current model.AppRelease, desired *model.AppRelease) error {
-	if desired.RevisionWorkload != nil && !reflect.DeepEqual(current.RevisionWorkload, desired.RevisionWorkload) {
-		return ErrConflict
-	}
-	if current.RevisionWorkload != nil && (desired.AppID != current.AppID || desired.TenantID != current.TenantID ||
-		desired.SourceRef != current.SourceRef || desired.ResolvedImageRef != current.ResolvedImageRef ||
-		desired.RuntimeID != current.RuntimeID || !reflect.DeepEqual(desired.SpecSnapshot, current.SpecSnapshot)) {
-		return ErrConflict
-	}
-	desired.RevisionWorkload = current.RevisionWorkload
-	return nil
 }
 
 // BindAppReleaseWorkload compares the observed release under the same lock as
@@ -56,36 +42,7 @@ func (s *Store) bindAppReleaseWorkload(ctx context.Context, expected model.AppRe
 	if err := ctx.Err(); err != nil {
 		return model.AppRelease{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgBindAppReleaseWorkload(ctx, expected, workload, source)
-	}
-	var out model.AppRelease
-	err := s.withLockedState(true, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		index := findAppReleaseByID(state.AppReleases, expected.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		var op model.Operation
-		for _, item := range state.Operations {
-			if item.ID == workload.OperationID {
-				op = item
-				break
-			}
-		}
-		bound, err := bindReleaseWorkload(state.AppReleases[index], expected, op, workload)
-		if source != nil {
-			bound, err = migrateReleaseWorkload(state.AppReleases[index], expected, op, *source, workload, state.AuditEvents)
-		}
-		if err != nil {
-			return err
-		}
-		state.AppReleases[index], out = bound, bound
-		return nil
-	})
-	return out, err
+	return s.pgBindAppReleaseWorkload(ctx, expected, workload, source)
 }
 
 func bindReleaseWorkload(current, expected model.AppRelease, op model.Operation, workload model.AppReleaseWorkload) (model.AppRelease, error) {

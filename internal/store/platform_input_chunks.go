@@ -18,6 +18,7 @@ import (
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -696,7 +697,7 @@ func (s *Store) GetPlatformCompilerInputContext(parent context.Context, digest s
 	if err := ctx.Err(); err != nil {
 		return platformconfig.RuntimeSnapshot{}, err
 	}
-	if s.usingDatabase() {
+	{
 		// Keep the manifest and every streamed chunk in one MVCC snapshot.
 		// A concurrent GC may commit after the manifest read; this reader must
 		// still see the complete pre-collection representation.
@@ -717,13 +718,11 @@ func (s *Store) GetPlatformCompilerInputContext(parent context.Context, digest s
 		}
 		finish() // Release the connection and session lease before the legacy fallback.
 	}
+
 	var content model.PlatformArtifactContent
 	var err error
-	if s.usingDatabase() {
-		content, err = s.pgGetPlatformArtifactContentContext(ctx, digest)
-	} else {
-		content, err = s.GetPlatformArtifactContent(digest)
-	}
+	content, err = s.pgGetPlatformArtifactContentContext(ctx, digest)
+
 	if ctx.Err() != nil {
 		return platformconfig.RuntimeSnapshot{}, ctx.Err()
 	}

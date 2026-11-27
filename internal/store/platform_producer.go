@@ -61,11 +61,7 @@ func producerRecoveryPhase(guard *platformProducerReleaseGuard) bool {
 	return guard.Phase == "rollback" || guard.Phase == "verify-recovery"
 }
 
-func validateProducerReleaseGuard(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard) error {
-	return validateProducerReleaseGuardWithTrace(state, parent, req, principal, keys, guard, nil)
-}
-
-func validateProducerReleaseGuardWithTrace(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard, trace *platformProducerGuardTrace) error {
+func validateProducerReleaseGuardWithTrace(state *storeProjection, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, principal model.Principal, keys bundleauth.Keyring, guard *platformProducerReleaseGuard, trace *platformProducerGuardTrace) error {
 	if guard == nil {
 		if _, marked := parent.Metadata[platformproducer.OfflinePredecessorMetadata]; marked && req.ReleaseChannel != model.PlatformArtifactReleaseChannelShadow {
 			return ErrConflict
@@ -271,7 +267,7 @@ func (s *Store) pgProducerReleaseGuard(ctx context.Context, tx *sql.Tx, parent m
 	if err != nil {
 		return ErrConflict
 	}
-	state := &model.State{}
+	state := &storeProjection{}
 	for _, key := range []string{
 		platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, policyScope, model.PlatformArtifactReleaseChannelShadow),
 		platformsafety.ReleaseLaneKey(parent.ArtifactKind, parent.ScopeKey, model.PlatformArtifactReleaseChannelShadow),

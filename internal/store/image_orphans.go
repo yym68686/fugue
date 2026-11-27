@@ -14,15 +14,7 @@ import (
 
 func (s *Store) GetImageOrphanPolicy() (model.ImageOrphanPolicy, error) {
 	p := imagecachepolicy.DefaultOrphanPolicy()
-	if !s.usingDatabase() {
-		err := s.withLockedState(false, func(st *model.State) error {
-			if st.ImageOrphanPolicy != nil {
-				p = *st.ImageOrphanPolicy
-			}
-			return nil
-		})
-		return p, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var raw []byte
@@ -47,21 +39,7 @@ func (s *Store) UpdateImageOrphanPolicy(p model.ImageOrphanPolicy, expected int6
 	p.Generation = expected + 1
 	p.UpdatedAt = time.Now().UTC()
 	p.UpdatedBy = actor
-	if !s.usingDatabase() {
-		err := s.withLockedState(true, func(st *model.State) error {
-			g := int64(0)
-			if st.ImageOrphanPolicy != nil {
-				g = st.ImageOrphanPolicy.Generation
-			}
-			if g != expected {
-				return ErrConflict
-			}
-			st.ImageOrphanPolicy = &p
-			st.ImageOrphanPolicyHistory = append(st.ImageOrphanPolicyHistory, p)
-			return nil
-		})
-		return p, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -90,10 +68,7 @@ func (s *Store) UpdateImageOrphanPolicy(p model.ImageOrphanPolicy, expected int6
 }
 func (s *Store) ListImageOrphanDecisions() ([]model.ImageOrphanDecision, error) {
 	out := []model.ImageOrphanDecision{}
-	if !s.usingDatabase() {
-		err := s.withLockedState(false, func(st *model.State) error { out = append(out, st.ImageOrphanDecisions...); return nil })
-		return out, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT body FROM fugue_image_orphan_decisions ORDER BY id`)
@@ -121,23 +96,7 @@ func (s *Store) SaveImageOrphanDecisions(items []model.ImageOrphanDecision) erro
 	if len(items) == 0 {
 		return nil
 	}
-	if !s.usingDatabase() {
-		return s.withLockedState(true, func(st *model.State) error {
-			idx := map[string]int{}
-			for i, d := range st.ImageOrphanDecisions {
-				idx[d.ID] = i
-			}
-			for _, d := range items {
-				if i, ok := idx[d.ID]; ok {
-					st.ImageOrphanDecisions[i] = d
-				} else {
-					idx[d.ID] = len(st.ImageOrphanDecisions)
-					st.ImageOrphanDecisions = append(st.ImageOrphanDecisions, d)
-				}
-			}
-			return nil
-		})
-	}
+
 	raw, err := json.Marshal(items)
 	if err != nil {
 		return err

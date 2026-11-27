@@ -40,22 +40,10 @@ func (s *Store) GetTenantBillingSnapshot(ctx context.Context, tenantIDs []string
 	if len(ids) == 0 || len(ids) > 500 {
 		return TenantBillingSnapshot{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetTenantBillingSnapshot(ctx, ids)
-	}
-	var snapshot TenantBillingSnapshot
-	err := s.withLockedState(true, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		summaries, missing := accrueBillingSummaries(state, ids, time.Now().UTC())
-		snapshot = completeTenantBillingSnapshot(state, ids, summaries, missing)
-		return nil
-	})
-	return snapshot, err
+	return s.pgGetTenantBillingSnapshot(ctx, ids)
 }
 
-func completeTenantBillingSnapshot(state *model.State, ids []string, summaries []model.TenantBillingSummary, missing []string) TenantBillingSnapshot {
+func completeTenantBillingSnapshot(state *storeProjection, ids []string, summaries []model.TenantBillingSummary, missing []string) TenantBillingSnapshot {
 	selected := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		selected[id] = true
@@ -76,7 +64,7 @@ func completeTenantBillingSnapshot(state *model.State, ids []string, summaries [
 	return result
 }
 
-func accrueBillingSummaries(state *model.State, ids []string, now time.Time) ([]model.TenantBillingSummary, []string) {
+func accrueBillingSummaries(state *storeProjection, ids []string, now time.Time) ([]model.TenantBillingSummary, []string) {
 	index := newBillingStateIndex(state)
 	present := make(map[string]bool, len(state.Tenants))
 	for _, tenant := range state.Tenants {

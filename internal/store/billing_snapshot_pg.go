@@ -56,15 +56,15 @@ SELECT jsonb_build_object(
 // The billing snapshot is read inside the ledger transaction. Combining its
 // independent relations avoids six inter-region round trips without caching
 // balances or changing the transaction's repeatable-read snapshot.
-func (s *Store) pgLoadBillingSummaryInputsTx(ctx context.Context, tx *sql.Tx, ids []string) (model.State, error) {
+func (s *Store) pgLoadBillingSummaryInputsTx(ctx context.Context, tx *sql.Tx, ids []string) (storeProjection, error) {
 	var raw []byte
 	err := tx.QueryRowContext(ctx, billingSnapshotInputsSQL, ids, billingHistoryLimit).Scan(&raw)
 	if err != nil {
-		return model.State{}, fmt.Errorf("read billing snapshot inputs: %w", err)
+		return storeProjection{}, fmt.Errorf("read billing snapshot inputs: %w", err)
 	}
-	var state model.State
+	var state storeProjection
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return model.State{}, fmt.Errorf("decode billing snapshot inputs: %w", err)
+		return storeProjection{}, fmt.Errorf("decode billing snapshot inputs: %w", err)
 	}
 	for i := range state.Apps {
 		model.ApplyAppSpecDefaults(&state.Apps[i].Spec)

@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -77,7 +76,7 @@ func TestCreateAppStagesGitHubSource(t *testing.T) {
 func TestCreateAppDefaultsManagedPostgresStorageClass(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

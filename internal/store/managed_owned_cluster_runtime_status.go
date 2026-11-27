@@ -11,37 +11,7 @@ import (
 )
 
 func (s *Store) SyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName map[string]bool) (int, error) {
-	if s.usingDatabase() {
-		return s.pgSyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName)
-	}
-
-	var count int
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		now := time.Now().UTC()
-		for idx := range state.Runtimes {
-			if state.Runtimes[idx].Type != model.RuntimeTypeManagedOwned {
-				continue
-			}
-			if syncManagedOwnedClusterRuntimeStatus(&state.Runtimes[idx], nodeReadyByName, now) {
-				count++
-			}
-			// The machine record is a read-model of the runtime registration. Keep
-			// its serving status aligned even when the runtime status was already
-			// correct (for example after an older controller missed the projection).
-			if machineIndex := findMachineByRuntimeID(state, state.Runtimes[idx].ID); machineIndex >= 0 {
-				state.Machines[machineIndex].Status = state.Runtimes[idx].Status
-				if state.Runtimes[idx].LastSeenAt != nil {
-					lastSeen := state.Runtimes[idx].LastSeenAt.UTC()
-					state.Machines[machineIndex].LastSeenAt = &lastSeen
-				}
-				state.Machines[machineIndex].UpdatedAt = now
-			}
-		}
-		return nil
-	})
-	return count, err
+	return s.pgSyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName)
 }
 
 func (s *Store) pgSyncManagedOwnedClusterRuntimeStatuses(nodeReadyByName map[string]bool) (int, error) {

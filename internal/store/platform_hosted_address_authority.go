@@ -25,7 +25,7 @@ func rejectUnboundHostedPublication(parent model.PlatformArtifact, channel strin
 
 // Run with the producer scope, serving lane and LKG held by the same
 // transaction. No lookup by hostname, latest generation or mutable label.
-func validateHostedAddressBaseline(state *model.State, parent, dns model.PlatformArtifact, baseline model.PlatformArtifactRelease, lkg model.PlatformLKGSnapshot, now time.Time, keys bundleauth.Keyring) error {
+func validateHostedAddressBaseline(state *storeProjection, parent, dns model.PlatformArtifact, baseline model.PlatformArtifactRelease, lkg model.PlatformLKGSnapshot, now time.Time, keys bundleauth.Keyring) error {
 	reject := fmt.Errorf("%w: hosted address publication lost its verified predecessor or member identity", ErrConflict)
 	ref, digest, err := platformconfig.HostedAddressAuthority(dns)
 	parentRef, parentDigest, parentErr := platformconfig.HostedAddressAuthority(parent)

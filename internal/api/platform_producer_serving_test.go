@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -86,8 +85,8 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	delayedShadow := len(options) == 1 && options[0].delayedShadow
 	legacyRecovery := len(options) == 1 && options[0].legacyRecovery
 	expiredRecovery := len(options) == 1 && options[0].expiredRecovery
-	path := t.TempDir() + "/state.json"
-	state := store.New(path)
+	const path = "producer-serving"
+	state := newStoreTestDatabase(t, path)
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -241,34 +240,19 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 			t.Fatal(err)
 		}
 	}
-	// All aging and corruption is confined to this disposable file store.
-	edit := func(change func(*model.State)) {
+	db := openStoreTestSQL(t, path)
+	edit := func(query string, args ...any) {
 		t.Helper()
-		raw, err := os.ReadFile(path)
+		result, err := db.Exec(query, args...)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var st model.State
-		if err = json.Unmarshal(raw, &st); err != nil {
-			t.Fatal(err)
-		}
-		change(&st)
-		raw, err = json.Marshal(st)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err = os.WriteFile(path, raw, 0600); err != nil {
-			t.Fatal(err)
+		if n, err := result.RowsAffected(); err != nil || n == 0 {
+			t.Fatalf("aging fixture did not modify PostgreSQL rows: %v", err)
 		}
 	}
 	age := func(id string, seconds int) {
-		edit(func(st *model.State) {
-			for i := range st.PlatformArtifactReleases {
-				if st.PlatformArtifactReleases[i].ID == id {
-					st.PlatformArtifactReleases[i].ReleasedAt = time.Now().Add(-time.Duration(seconds) * time.Second)
-				}
-			}
-		})
+		edit(`UPDATE fugue_platform_artifact_releases SET released_at=$2 WHERE id=$1`, id, time.Now().Add(-time.Duration(seconds)*time.Second))
 	}
 	report := func(parent model.PlatformArtifact, r model.PlatformArtifactRelease) {
 		t.Helper()
@@ -305,11 +289,7 @@ func testServingProducerProgressesRecovers(t *testing.T, dynamic, supersede, gat
 	p.Generation = "producer-two"
 	authority = activate()
 	if delayedShadow {
-		edit(func(st *model.State) {
-			for i := range st.PlatformConsumerInstances {
-				st.PlatformConsumerInstances[i].LastHeartbeatAt = time.Now().Add(-3 * time.Minute)
-			}
-		})
+		edit(`UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=$1`, time.Now().Add(-3*time.Minute))
 		if _, err := server.reconcilePlatformConfiguration(ctx); !errors.Is(err, store.ErrConflict) {
 			t.Fatal("missing reader evidence did not block gray", err)
 		}

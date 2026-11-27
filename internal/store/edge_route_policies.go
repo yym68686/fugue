@@ -2,10 +2,8 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -14,32 +12,18 @@ import (
 )
 
 func (s *Store) ListEdgeRoutePolicies() ([]model.EdgeRoutePolicy, error) {
-	if s.usingDatabase() {
-		policies, err := s.pgListEdgeRoutePolicies()
-		if err != nil {
-			return nil, err
-		}
-		now, err := s.EdgeRoutePolicyTime()
-		if err != nil {
-			return nil, err
-		}
-		for index := range policies {
-			policies[index].ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policies[index], now)
-		}
-		return policies, nil
+	policies, err := s.pgListEdgeRoutePolicies()
+	if err != nil {
+		return nil, err
 	}
-
-	policies := make([]model.EdgeRoutePolicy, 0)
-	err := s.withLockedState(false, func(state *model.State) error {
-		policies = append(policies, state.EdgeRoutePolicies...)
-		now := time.Now().UTC()
-		for index := range policies {
-			policies[index].ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policies[index], now)
-		}
-		sortEdgeRoutePolicies(policies)
-		return nil
-	})
-	return policies, err
+	now, err := s.EdgeRoutePolicyTime()
+	if err != nil {
+		return nil, err
+	}
+	for index := range policies {
+		policies[index].ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policies[index], now)
+	}
+	return policies, nil
 }
 
 func (s *Store) GetEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, error) {
@@ -47,30 +31,16 @@ func (s *Store) GetEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, erro
 	if hostname == "" {
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		policy, err := s.pgGetEdgeRoutePolicy(hostname)
-		if err != nil {
-			return model.EdgeRoutePolicy{}, err
-		}
-		now, err := s.EdgeRoutePolicyTime()
-		if err != nil {
-			return model.EdgeRoutePolicy{}, err
-		}
-		policy.ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policy, now)
-		return policy, nil
+	policy, err := s.pgGetEdgeRoutePolicy(hostname)
+	if err != nil {
+		return model.EdgeRoutePolicy{}, err
 	}
-
-	var policy model.EdgeRoutePolicy
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findEdgeRoutePolicy(state, hostname)
-		if index < 0 {
-			return ErrNotFound
-		}
-		policy = state.EdgeRoutePolicies[index]
-		policy.ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policy, time.Now().UTC())
-		return nil
-	})
-	return policy, err
+	now, err := s.EdgeRoutePolicyTime()
+	if err != nil {
+		return model.EdgeRoutePolicy{}, err
+	}
+	policy.ExclusionLifecycle = model.EdgeRoutePolicyExclusionLifecycleAt(policy, now)
+	return policy, nil
 }
 
 func (s *Store) PutEdgeRoutePolicy(policy model.EdgeRoutePolicy) (model.EdgeRoutePolicy, error) {
@@ -78,63 +48,7 @@ func (s *Store) PutEdgeRoutePolicy(policy model.EdgeRoutePolicy) (model.EdgeRout
 	if err != nil {
 		return model.EdgeRoutePolicy{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgPutEdgeRoutePolicy(policy)
-	}
-
-	var out model.EdgeRoutePolicy
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findEdgeRoutePolicy(state, policy.Hostname)
-		if index >= 0 {
-			existing := state.EdgeRoutePolicies[index]
-			if (model.EdgeRoutePolicyHasExclusions(existing) || model.EdgeRoutePolicyHasExclusions(policy)) && !edgeRoutePolicyExclusionMaterialEqual(existing, policy) {
-				return ErrConflict
-			}
-			if policy.ID == "" {
-				policy.ID = existing.ID
-			}
-			if policy.CreatedAt.IsZero() {
-				policy.CreatedAt = existing.CreatedAt
-			}
-		} else {
-			if policy.ID == "" {
-				policy.ID = model.NewID("edge_route_policy")
-			}
-			if policy.CreatedAt.IsZero() {
-				policy.CreatedAt = now
-			}
-		}
-		policy.UpdatedAt = now
-		if err := s.validateRoutePolicyMigration(state, policy.Hostname, &policy); err != nil {
-			return err
-		}
-		if index >= 0 {
-			state.EdgeRoutePolicies[index] = policy
-		} else {
-			state.EdgeRoutePolicies = append(state.EdgeRoutePolicies, policy)
-		}
-		out = policy
-		return nil
-	})
-	return out, err
-}
-
-func edgeRoutePolicyExclusionMaterialEqual(a, b model.EdgeRoutePolicy) bool {
-	return reflect.DeepEqual(a.ExcludedEdgeIDs, b.ExcludedEdgeIDs) &&
-		reflect.DeepEqual(a.ExcludedEdgeGroupIDs, b.ExcludedEdgeGroupIDs) &&
-		strings.TrimSpace(a.ExclusionReason) == strings.TrimSpace(b.ExclusionReason) &&
-		edgeRoutePolicyTimesEqual(a.ExclusionExpiresAt, b.ExclusionExpiresAt) &&
-		strings.TrimSpace(a.ExclusionOwnerDigest) == strings.TrimSpace(b.ExclusionOwnerDigest) &&
-		a.ExclusionGeneration == b.ExclusionGeneration &&
-		strings.TrimSpace(a.ExclusionFence) == strings.TrimSpace(b.ExclusionFence)
-}
-
-func edgeRoutePolicyTimesEqual(a, b *time.Time) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.Equal(*b)
+	return s.pgPutEdgeRoutePolicy(policy)
 }
 
 // PutEdgeRoutePolicyCAS is the only mutation path for exclusion state. The
@@ -149,63 +63,7 @@ func (s *Store) PutEdgeRoutePolicyCAS(policy model.EdgeRoutePolicy, expectedGene
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
 	expectedFence = strings.TrimSpace(expectedFence)
-	if s.usingDatabase() {
-		return s.pgPutEdgeRoutePolicyCAS(policy, expectedGeneration, expectedFence)
-	}
-	var out model.EdgeRoutePolicy
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		migrateLegacyEdgeRoutePolicyExclusionsInState(state, now)
-		index := findEdgeRoutePolicy(state, policy.Hostname)
-		if index < 0 {
-			if expectedGeneration != 0 || expectedFence != "" {
-				return ErrConflict
-			}
-			policy.ID = firstNonEmptyStore(policy.ID, model.NewID("edge_route_policy"))
-			policy.CreatedAt = now
-		} else {
-			existing := state.EdgeRoutePolicies[index]
-			if existing.ExclusionGeneration != expectedGeneration || strings.TrimSpace(existing.ExclusionFence) != expectedFence {
-				return ErrConflict
-			}
-			removedEdges := removedEdgeExclusionIDs(existing.ExcludedEdgeIDs, policy.ExcludedEdgeIDs, false)
-			removedGroups := removedEdgeExclusionIDs(existing.ExcludedEdgeGroupIDs, policy.ExcludedEdgeGroupIDs, true)
-			if len(removedEdges) > 0 || len(removedGroups) > 0 {
-				if err := validateFileEdgeExclusionClearState(state, removedEdges, removedGroups, now); err != nil {
-					return err
-				}
-			}
-			policy.ID = existing.ID
-			policy.CreatedAt = existing.CreatedAt
-		}
-		policy.ExclusionGeneration = expectedGeneration + 1
-		policy.ExclusionFence = model.NewID("edge_exclusion_fence")
-		policy.UpdatedAt = now
-		if model.EdgeRoutePolicyHasExclusions(policy) {
-			if policy.ExclusionCreatedAt == nil {
-				created := now
-				policy.ExclusionCreatedAt = &created
-			}
-			policy.ExclusionScope = model.EdgeRoutePolicyExclusionScope(policy)
-		} else {
-			clearEdgeRoutePolicyExclusionMetadata(&policy)
-			// Clearing is itself a fenced exclusion mutation; keep the new CAS
-			// boundary even though there is no active exclusion.
-			policy.ExclusionGeneration = expectedGeneration + 1
-			policy.ExclusionFence = model.NewID("edge_exclusion_fence")
-		}
-		if err := s.validateRoutePolicyMigration(state, policy.Hostname, &policy); err != nil {
-			return err
-		}
-		if index >= 0 {
-			state.EdgeRoutePolicies[index] = policy
-		} else {
-			state.EdgeRoutePolicies = append(state.EdgeRoutePolicies, policy)
-		}
-		out = policy
-		return nil
-	})
-	return out, err
+	return s.pgPutEdgeRoutePolicyCAS(policy, expectedGeneration, expectedFence)
 }
 
 func (s *Store) DeleteEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, error) {
@@ -213,27 +71,7 @@ func (s *Store) DeleteEdgeRoutePolicy(hostname string) (model.EdgeRoutePolicy, e
 	if hostname == "" {
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteEdgeRoutePolicy(hostname)
-	}
-
-	var removed model.EdgeRoutePolicy
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findEdgeRoutePolicy(state, hostname)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = state.EdgeRoutePolicies[index]
-		if err := s.validateRoutePolicyMigration(state, hostname, nil); err != nil {
-			return err
-		}
-		if model.EdgeRoutePolicyHasExclusions(removed) {
-			return ErrConflict
-		}
-		state.EdgeRoutePolicies = append(state.EdgeRoutePolicies[:index], state.EdgeRoutePolicies[index+1:]...)
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteEdgeRoutePolicy(hostname)
 }
 
 func (s *Store) DeleteEdgeRoutePolicyCAS(hostname string, expectedGeneration uint64, expectedFence string) (model.EdgeRoutePolicy, error) {
@@ -242,32 +80,7 @@ func (s *Store) DeleteEdgeRoutePolicyCAS(hostname string, expectedGeneration uin
 	if hostname == "" || expectedGeneration == 0 || expectedFence == "" {
 		return model.EdgeRoutePolicy{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteEdgeRoutePolicyCAS(hostname, expectedGeneration, expectedFence)
-	}
-	var removed model.EdgeRoutePolicy
-	err := s.withLockedState(true, func(state *model.State) error {
-		migrateLegacyEdgeRoutePolicyExclusionsInState(state, time.Now().UTC())
-		index := findEdgeRoutePolicy(state, hostname)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = state.EdgeRoutePolicies[index]
-		if err := s.validateRoutePolicyMigration(state, hostname, nil); err != nil {
-			return err
-		}
-		if removed.ExclusionGeneration != expectedGeneration || strings.TrimSpace(removed.ExclusionFence) != expectedFence {
-			return ErrConflict
-		}
-		if model.EdgeRoutePolicyHasExclusions(removed) {
-			if err := validateFileEdgeExclusionClearState(state, removed.ExcludedEdgeIDs, removed.ExcludedEdgeGroupIDs, time.Now().UTC()); err != nil {
-				return err
-			}
-		}
-		state.EdgeRoutePolicies = append(state.EdgeRoutePolicies[:index], state.EdgeRoutePolicies[index+1:]...)
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteEdgeRoutePolicyCAS(hostname, expectedGeneration, expectedFence)
 }
 
 func normalizeEdgeRoutePolicyForStore(policy model.EdgeRoutePolicy) (model.EdgeRoutePolicy, error) {
@@ -326,46 +139,10 @@ func normalizeEdgeRoutePolicyForStore(policy model.EdgeRoutePolicy) (model.EdgeR
 	return policy, nil
 }
 
-func migrateLegacyEdgeRoutePolicyExclusionsInState(state *model.State, now time.Time) {
-	if state == nil {
-		return
-	}
-	for index := range state.EdgeRoutePolicies {
-		policy := &state.EdgeRoutePolicies[index]
-		policy.ExclusionLifecycle = ""
-		policy.ExclusionEvidenceFresh = false
-		policy.ExclusionEvidenceCheckedAt = nil
-		policy.ExclusionEvidenceReason = ""
-		if !model.EdgeRoutePolicyHasExclusions(*policy) {
-			clearEdgeRoutePolicyExclusionMetadata(policy)
-			continue
-		}
-		policy.ExclusionScope = model.EdgeRoutePolicyExclusionScope(*policy)
-		if policy.ExclusionCreatedAt == nil {
-			created := policy.UpdatedAt.UTC()
-			if created.IsZero() {
-				created = policy.CreatedAt.UTC()
-			}
-			if created.IsZero() {
-				created = now.UTC()
-			}
-			policy.ExclusionCreatedAt = &created
-		}
-		if policy.ExclusionGeneration == 0 {
-			policy.ExclusionGeneration = 1
-		}
-		if strings.TrimSpace(policy.ExclusionFence) == "" {
-			policy.ExclusionFence = legacyEdgeExclusionFence(*policy)
-		}
-	}
-}
-
 // EdgeRoutePolicyTime is the canonical lifecycle clock. PostgreSQL-backed API
 // replicas share database server time so expiry cannot disagree across pods.
 func (s *Store) EdgeRoutePolicyTime() (time.Time, error) {
-	if !s.usingDatabase() {
-		return time.Now().UTC(), nil
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var now time.Time
@@ -373,18 +150,6 @@ func (s *Store) EdgeRoutePolicyTime() (time.Time, error) {
 		return time.Time{}, fmt.Errorf("read edge exclusion lifecycle time: %w", err)
 	}
 	return now.UTC(), nil
-}
-
-func legacyEdgeExclusionFence(policy model.EdgeRoutePolicy) string {
-	material := strings.Join([]string{
-		strings.TrimSpace(strings.ToLower(policy.Hostname)),
-		strings.Join(policy.ExcludedEdgeIDs, ","),
-		strings.Join(policy.ExcludedEdgeGroupIDs, ","),
-		policy.ExclusionReason,
-		policy.CreatedAt.UTC().Format(time.RFC3339Nano),
-	}, "\x00")
-	digest := sha256.Sum256([]byte(material))
-	return "legacy-sha256:" + hex.EncodeToString(digest[:])
 }
 
 func validEdgeExclusionOwnerDigest(value string) bool {
@@ -418,19 +183,6 @@ func firstNonEmptyStore(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func findEdgeRoutePolicy(state *model.State, hostname string) int {
-	if state == nil {
-		return -1
-	}
-	hostname = normalizeEdgeRoutePolicyHostname(hostname)
-	for index, policy := range state.EdgeRoutePolicies {
-		if strings.EqualFold(policy.Hostname, hostname) {
-			return index
-		}
-	}
-	return -1
 }
 
 func sortEdgeRoutePolicies(policies []model.EdgeRoutePolicy) {

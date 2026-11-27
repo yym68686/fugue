@@ -106,7 +106,7 @@ func prepareManagedPostgresResizeOperation(app model.App, op *model.Operation) e
 	return nil
 }
 
-func validateManagedPostgresResizeTargetState(state *model.State, app model.App, serviceID string) error {
+func validateManagedPostgresResizeTargetState(state *storeProjection, app model.App, serviceID string) error {
 	if state == nil {
 		return ErrInvalidInput
 	}
@@ -142,7 +142,7 @@ func validateManagedPostgresResizeTargetState(state *model.State, app model.App,
 	return nil
 }
 
-func applyManagedPostgresResizeState(state *model.State, app *model.App, op *model.Operation) error {
+func applyManagedPostgresResizeState(state *storeProjection, app *model.App, op *model.Operation) error {
 	if state == nil || app == nil || op == nil || op.Type != model.OperationTypeDatabaseResize ||
 		op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 		return ErrInvalidInput
@@ -162,20 +162,4 @@ func applyManagedPostgresResizeState(state *model.State, app *model.App, op *mod
 	service.UpdatedAt = time.Now().UTC()
 	state.BackingServices[serviceIndex] = service
 	return nil
-}
-
-func hasActiveAppDatabaseRestoreRunForManagedPostgres(state *model.State, app model.App) bool {
-	if state == nil || strings.TrimSpace(app.ID) == "" {
-		return false
-	}
-	for _, run := range state.BackupRestoreRuns {
-		run = model.NormalizeBackupRestoreRun(run)
-		if strings.TrimSpace(run.AppID) != strings.TrimSpace(app.ID) {
-			continue
-		}
-		if run.Status == model.BackupRestoreStatusPlanned || run.Status == model.BackupRestoreStatusRunning {
-			return true
-		}
-	}
-	return false
 }

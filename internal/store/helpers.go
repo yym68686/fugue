@@ -27,23 +27,6 @@ func normalizeAPIKeyForRead(key *model.APIKey) {
 	}
 }
 
-func repairAllAPIKeyStatuses(state *model.State) bool {
-	changed := false
-	for index := range state.APIKeys {
-		originalStatus := state.APIKeys[index].Status
-		normalizedStatus := normalizeAPIKeyStatus(originalStatus)
-		if normalizedStatus != originalStatus {
-			state.APIKeys[index].Status = normalizedStatus
-			changed = true
-		}
-		if normalizedStatus != model.APIKeyStatusDisabled && state.APIKeys[index].DisabledAt != nil {
-			state.APIKeys[index].DisabledAt = nil
-			changed = true
-		}
-	}
-	return changed
-}
-
 func isDeletedPhase(phase string) bool {
 	return strings.EqualFold(strings.TrimSpace(phase), "deleted")
 }
@@ -159,44 +142,6 @@ func invalidateStoredPhaseAfterFailure(app *model.App) bool {
 	}
 }
 
-func repairAllAppStatuses(state *model.State) bool {
-	changed := false
-	latestFailures := make(map[string]model.Operation)
-	for _, op := range state.Operations {
-		if op.Status != model.OperationStatusFailed || strings.TrimSpace(op.AppID) == "" {
-			continue
-		}
-		if existing, ok := latestFailures[op.AppID]; ok && !operationIsNewerForStatusRepair(op, existing) {
-			continue
-		}
-		latestFailures[op.AppID] = op
-	}
-	for index := range state.Apps {
-		if repairFailedAppPhase(&state.Apps[index]) {
-			changed = true
-		}
-		failure := model.AppOperationFailureFromOperation(latestFailures[state.Apps[index].ID])
-		if !appOperationFailureEqual(state.Apps[index].Status.LastFailedOperation, failure) {
-			state.Apps[index].Status.LastFailedOperation = failure
-			changed = true
-		}
-		if invalidateStoredPhaseAfterFailure(&state.Apps[index]) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-func operationIsNewerForStatusRepair(candidate, existing model.Operation) bool {
-	if candidate.UpdatedAt.Equal(existing.UpdatedAt) {
-		if candidate.CreatedAt.Equal(existing.CreatedAt) {
-			return candidate.ID > existing.ID
-		}
-		return candidate.CreatedAt.After(existing.CreatedAt)
-	}
-	return candidate.UpdatedAt.After(existing.UpdatedAt)
-}
-
 func appOperationFailureEqual(left, right *model.AppOperationFailure) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -236,25 +181,4 @@ func shortSlugSuffix(value string, maxLen int) string {
 		return value
 	}
 	return strings.Trim(value[len(value)-maxLen:], "-")
-}
-
-func findIdempotencyRecord(state *model.State, scope, tenantID, key string) int {
-	for index := range state.Idempotency {
-		record := state.Idempotency[index]
-		if record.Scope == scope && record.TenantID == tenantID && record.Key == key {
-			return index
-		}
-	}
-	return -1
-}
-
-func deleteIdempotencyRecordsByTenant(records []model.IdempotencyRecord, tenantID string) []model.IdempotencyRecord {
-	filtered := records[:0]
-	for _, record := range records {
-		if record.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, record)
-	}
-	return filtered
 }

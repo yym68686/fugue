@@ -11,13 +11,12 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestExecuteManagedDeployOperationSkipsStaleSnapshotAfterNewerDeploy(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -149,7 +148,7 @@ func TestExecuteManagedDeployOperationSkipsStaleSnapshotAfterNewerDeploy(t *test
 func TestExecuteManagedDeployOperationSkipsNoopDesiredStateWithoutRender(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

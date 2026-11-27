@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -393,7 +392,7 @@ func TestBackingServiceLifecycleRefreshesStaleTransitionToTerminal(t *testing.T)
 func TestBackingServiceLifecycleEnforcesProjectScopedPrincipal(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -497,7 +496,7 @@ func completeManagedPostgresLifecycleForTest(t *testing.T, stateStore *store.Sto
 
 func managedPostgresLifecycleFixture(t *testing.T, replicas int) (*store.Store, *Server, string, model.App, model.BackingService) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -659,7 +658,7 @@ func assertNoLifecycleOperation(t *testing.T, stateStore *store.Store, tenantID 
 func TestManagedPostgresOrphanListAndAdoptAreAdminOnlyAndSecretSafe(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

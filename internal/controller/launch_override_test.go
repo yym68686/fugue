@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fugue/internal/config"
-	"fugue/internal/store"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -302,11 +300,15 @@ func TestLaunchOverrideUsesDistributedCacheWithoutLogicalDNSFallback(t *testing.
 		{name: "explicit registry fallback", mode: "distributed-with-registry-fallback", cached: true, want: []string{"192.0.2.10:5000/apps/demo:tag", "logical.example:5000/apps/demo:tag"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
-			app := model.App{ID: "app-demo", TenantID: "tenant-demo", Spec: model.AppSpec{Image: "logical.example:5000/apps/demo:tag", Command: []string{"sh", "-lc", "run-service"}}, BuildSource: &model.AppSource{BuildStrategy: model.AppBuildStrategyBuildpacks}}
+			tenant, err := state.CreateTenant("launch-override")
+			if err != nil {
+				t.Fatal(err)
+			}
+			app := model.App{ID: "app-demo", TenantID: tenant.ID, Spec: model.AppSpec{Image: "logical.example:5000/apps/demo:tag", Command: []string{"sh", "-lc", "run-service"}}, BuildSource: &model.AppSource{BuildStrategy: model.AppBuildStrategyBuildpacks}}
 			if tc.cached {
 				_, err := state.UpsertImageLocation(model.ImageLocation{TenantID: app.TenantID, AppID: app.ID, ImageRef: app.Spec.Image, RuntimeID: "runtime-demo", CacheEndpoint: "http://192.0.2.10:5000", Status: model.ImageLocationStatusPresent})
 				if err != nil {

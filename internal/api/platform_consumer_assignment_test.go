@@ -3,7 +3,6 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -156,7 +155,7 @@ func TestPlatformConsumerAssignmentUsesActiveReleaseAndVerifiedIdentity(t *testi
 			var body consumerArtifactLookup
 			mustDecodeJSON(t, response, &body)
 			stored, err := state.GetPlatformArtifact(artifactID)
-			if err != nil || !reflect.DeepEqual(body.Artifact, stored) || body.Assignment.ExpectedConsumerSetID != setID || body.Assignment.ArtifactReleaseID != body.Release.ID || body.Assignment.FencingToken != body.Release.FencingToken {
+			if err != nil || !equalJSONProjection(t, stored, body.Artifact) || body.Assignment.ExpectedConsumerSetID != setID || body.Assignment.ArtifactReleaseID != body.Release.ID || body.Assignment.FencingToken != body.Release.FencingToken {
 				t.Fatalf("download must preserve signed content and release binding: %+v %v", body, err)
 			}
 			if response.Header().Get("ETag") != strconv.Quote(stored.ContentHash) || response.Header().Get("Cache-Control") != "private, no-store" {

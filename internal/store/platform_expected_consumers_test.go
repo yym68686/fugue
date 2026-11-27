@@ -17,7 +17,7 @@ import (
 
 func TestPlatformHostedOnlyConsumerNeedsSignedHeldIdentity(t *testing.T) {
 	at := time.Now().UTC().Truncate(time.Second)
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	keys := bundleauth.NewKeyring("test-key-for-hosted-only-registration", "test", "", "", nil)
 	s.ConfigurePlatformArtifactSigning(keys)
 	hold := platformproducer.OfflineEdge{EdgeID: "edge-test", EdgeGroupID: "edge-group-test", PublicIPv4: "8.8.8.8", Reason: "quota_exhausted", KeepHostedRouteTLS: true,
@@ -73,7 +73,7 @@ func TestPlatformHostedOnlyConsumerNeedsSignedHeldIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = s.validateHostedRouteTLSExpectations(stateDNSRouteSourceReader(&model.State{PlatformArtifacts: []model.PlatformArtifact{parent, policy}}), set)
+			err = s.validateHostedRouteTLSExpectations(stateDNSRouteSourceReader(&storeProjection{PlatformArtifacts: []model.PlatformArtifact{parent, policy}}), set)
 			if (err == nil) != (scenario == "signed") {
 				t.Fatalf("unexpected registration result: %v", err)
 			}
@@ -84,8 +84,8 @@ func TestPlatformHostedOnlyConsumerNeedsSignedHeldIdentity(t *testing.T) {
 func TestPlatformExpectedConsumerSetPersistsAndCannotMutateRevision(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestPlatformExpectedConsumerSetPersistsAndCannotMutateRevision(t *testing.T
 		t.Fatalf("stored expected consumer set was mutated through returned data: %+v", got.Consumers[0])
 	}
 
-	reopened := New(path)
+	reopened := newStoreTestDatabase(t, path)
 	if err := reopened.Init(); err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestPlatformExpectedConsumerSetPersistsAndCannotMutateRevision(t *testing.T
 func TestPlatformExpectedConsumerSetRejectsInvalidCardinality(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

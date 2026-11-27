@@ -86,16 +86,7 @@ func (s *Store) ListImageCandidateOperationsByAppsWithTiming(tenantID string, pl
 }
 
 func (s *Store) listImageCandidateOperationsByApps(tenantID string, platformAdmin bool, appIDs []string, timing *SQLReadTiming) (map[string][]model.Operation, error) {
-	if !s.usingDatabase() {
-		groups, err := s.ListImageOperationsByApps(tenantID, platformAdmin, appIDs)
-		if err != nil {
-			return nil, err
-		}
-		for id, ops := range groups {
-			groups[id] = CompactImageCandidateOperations(ops)
-		}
-		return groups, nil
-	}
+
 	ids := sortedTrimmedStringKeys(trimmedStringSet(appIDs))
 	if len(ids) == 0 {
 		return map[string][]model.Operation{}, nil

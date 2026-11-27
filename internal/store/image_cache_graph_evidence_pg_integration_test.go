@@ -137,7 +137,7 @@ INSERT INTO fugue_image_cache_manifests (
 			t.Fatal("install disposable production schema", err)
 		}
 	}
-	stateStore := New("", schemaURL)
+	stateStore := New(schemaURL)
 	if err := stateStore.Init(); err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("apply additive image-cache graph evidence migration: %v", err)
@@ -209,7 +209,7 @@ WHERE id = $1
 		_ = legacyDB.Close()
 		t.Fatalf("close first Postgres store: %v", err)
 	}
-	reopened := New("", schemaURL)
+	reopened := New(schemaURL)
 	if err := reopened.Init(); err != nil {
 		_ = legacyDB.Close()
 		t.Fatalf("reopen Postgres store after graph evidence migration: %v", err)

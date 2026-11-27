@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
-	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -13,7 +13,7 @@ import (
 	"fugue/internal/store"
 )
 
-func handoffPartitionFixture(t *testing.T) (*Server, platformIntentProjectionResponse, store.RouteBusinessSnapshot, string) {
+func handoffPartitionFixture(t *testing.T) (*Server, platformIntentProjectionResponse, store.RouteBusinessSnapshot, *sql.DB) {
 	t.Helper()
 	s, r, _, path := retainedTrafficAPIFixture(t, func(r *platformconfig.CompileRequest) {
 		route := &r.Intent.Routes[0]
@@ -43,34 +43,78 @@ func handoffPartitionFixture(t *testing.T) (*Server, platformIntentProjectionRes
 		Operations:      []store.RouteBusinessOperation{{ID: "deploy-next", TenantID: "tenant-a", AppID: "app-a", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning}},
 		TrafficPolicies: []model.AppTrafficPolicy{{ID: "traffic-a", AppID: "app-a", TenantID: "tenant-a", Mode: "single", StableReleaseID: "release-a", StableWeight: 100}},
 	}
-	persistHandoffBusiness(t, path, b)
-	return s, platformIntentProjectionResponse{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot, CapturedAt: now}, b, path
+	db := openStoreTestSQL(t, path)
+	persistHandoffBusiness(t, db, b)
+	return s, platformIntentProjectionResponse{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot, CapturedAt: now}, b, db
 }
 
-func persistHandoffBusiness(t *testing.T, path string, b store.RouteBusinessSnapshot) {
+func persistHandoffBusiness(t *testing.T, db *sql.DB, b store.RouteBusinessSnapshot) {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	tx, err := db.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var state model.State
-	if err = json.Unmarshal(raw, &state); err != nil {
-		t.Fatal(err)
+	defer tx.Rollback()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := tx.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
 	}
-	state.Apps = b.Apps
-	state.AppTrafficPolicies = b.TrafficPolicies
+	encode := func(value any) []byte {
+		t.Helper()
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	for _, app := range b.Apps {
+		projectID := app.ProjectID
+		if projectID == "" {
+			projectID = "project-" + app.TenantID
+		}
+		name := app.Name
+		if name == "" {
+			name = app.ID
+		}
+		exec(`INSERT INTO fugue_tenants (id, name, slug, status, created_at, updated_at)
+VALUES ($1, $1, $1, 'active', now(), now()) ON CONFLICT (id) DO NOTHING`, app.TenantID)
+		exec(`INSERT INTO fugue_projects (id, tenant_id, name, slug, created_at, updated_at)
+VALUES ($1, $2, $1, $1, now(), now()) ON CONFLICT (id) DO NOTHING`, projectID, app.TenantID)
+		exec(`INSERT INTO fugue_apps (id, tenant_id, project_id, name, description, source_json, route_json, spec_json, status_json, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, NULLIF($6::jsonb, 'null'::jsonb), NULLIF($7::jsonb, 'null'::jsonb), $8::jsonb, $9::jsonb, $10, $11)
+ON CONFLICT (id) DO UPDATE SET spec_json=excluded.spec_json, status_json=excluded.status_json, route_json=excluded.route_json, updated_at=excluded.updated_at`,
+			app.ID, app.TenantID, projectID, name, app.Description, encode(model.AppOriginSource(app)), encode(app.Route),
+			encode(app.Spec), encode(app.Status), app.CreatedAt, app.UpdatedAt)
+	}
 	if b.Releases != nil {
-		state.AppReleases = b.Releases
+		exec(`DELETE FROM fugue_app_releases`)
+		for _, r := range b.Releases {
+			exec(`INSERT INTO fugue_app_releases (id, tenant_id, app_id, role, source_ref, resolved_image_ref, upstream_url,
+    runtime_id, deployment_name, service_name, status, status_reason, rollback_target_release_id, release_message,
+    spec_snapshot_json, revision_workload_json, ready_at, promoted_at, retired_at, retention_until, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULLIF($15::jsonb, 'null'::jsonb),NULLIF($16::jsonb, 'null'::jsonb),$17,$18,$19,$20,$21,$22)`,
+				r.ID, r.TenantID, r.AppID, r.Role, r.SourceRef, r.ResolvedImageRef, r.UpstreamURL, r.RuntimeID,
+				r.DeploymentName, r.ServiceName, r.Status, r.StatusReason, r.RollbackTargetID, r.ReleaseMessage,
+				encode(r.SpecSnapshot), encode(r.RevisionWorkload), r.ReadyAt, r.PromotedAt, r.RetiredAt, r.RetentionUntil, r.CreatedAt, r.UpdatedAt)
+		}
 	}
-	state.Operations = nil
+	exec(`DELETE FROM fugue_app_traffic_policies`)
+	for _, p := range b.TrafficPolicies {
+		exec(`INSERT INTO fugue_app_traffic_policies (id, tenant_id, app_id, mode, stable_release_id, candidate_release_id,
+    stable_weight, candidate_weight, sticky_header, sticky_cookie, updated_by_type, updated_by_id, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, p.ID, p.TenantID, p.AppID, p.Mode,
+			p.StableReleaseID, p.CandidateReleaseID, p.StableWeight, p.CandidateWeight, p.StickyHeader,
+			p.StickyCookie, p.UpdatedByType, p.UpdatedByID, p.CreatedAt, p.UpdatedAt)
+	}
+	exec(`DELETE FROM fugue_operations`)
 	for _, op := range b.Operations {
-		state.Operations = append(state.Operations, model.Operation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status, CompletedAt: op.CompletedAt})
+		exec(`INSERT INTO fugue_operations (id, tenant_id, app_id, type, status, execution_mode,
+    requested_by_type, requested_by_id, created_at, updated_at, completed_at)
+VALUES ($1,$2,$3,$4,$5,'managed','system','handoff-fixture',now(),now(),$6)`, op.ID, op.TenantID, op.AppID, op.Type, op.Status, op.CompletedAt)
 	}
-	raw, err = json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = os.WriteFile(path, raw, 0600); err != nil {
+	if err = tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -275,7 +319,7 @@ func TestManagedHandoffPartitionAuthorityAndOriginBoundaries(t *testing.T) {
 }
 
 func TestManagedHandoffAdmissionRechecksDurableOperationAndExactSource(t *testing.T) {
-	s, p, b, path := handoffPartitionFixture(t)
+	s, p, b, db := handoffPartitionFixture(t)
 	s.captureManagedHandoffPartitions(context.Background(), &p, b)
 	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{Intent: p.Intent, Policy: p.Policy, RuntimeSnapshot: p.RuntimeSnapshot})
 	if err != nil {
@@ -323,8 +367,8 @@ func TestManagedHandoffAdmissionRechecksDurableOperationAndExactSource(t *testin
 					_, _ = s.store.ValidatePlatformArtifact(source.route.ID, []model.PlatformArtifactValidationResult{{Name: "restore", Pass: true}})
 				}()
 			}
-			persistHandoffBusiness(t, path, business)
-			defer persistHandoffBusiness(t, path, b)
+			persistHandoffBusiness(t, db, business)
+			defer persistHandoffBusiness(t, db, b)
 			if e := s.validateRetainedTrafficCompilation(context.Background(), copy); e == nil {
 				t.Fatal("untrusted handoff admitted", scenario)
 			}

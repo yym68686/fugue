@@ -13,17 +13,6 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-// Capability is evidence about executable support, not success of the candidate.
-// In particular, recovery may use fresh negative facts from the currently
-// serving release. The caller holds the publication transaction through commit.
-func validateLeasedTrafficAdmission(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time) error {
-	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, false)
-}
-
-func validateVerifiedTrafficRecoveryAdmission(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) error {
-	return validateLeasedTrafficAdmissionWithRecovery(state, parent, channel, canaryRef, keys, now, verifiedTrafficRecovery(parent, channel, keys, now, lkg, guard))
-}
-
 func verifiedTrafficRecovery(parent model.PlatformArtifact, channel string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) bool {
 	return guard != nil && guard.Phase == "rollback" && guard.BaselineArtifactID == parent.ID &&
 		channel == model.PlatformArtifactReleaseChannelFull && parent.ArtifactKind == model.PlatformArtifactKindReleaseSet && lkg != nil &&
@@ -32,11 +21,7 @@ func verifiedTrafficRecovery(parent model.PlatformArtifact, channel string, keys
 		lkg.VerificationEvidenceHash != "" && platformsafety.EvaluatePlatformLKGSnapshot(*lkg, parent, keys, now).Pass
 }
 
-func validateLeasedTrafficAdmissionWithRecovery(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool) error {
-	return validateLeasedTrafficAdmissionWithTrace(state, parent, channel, canaryRef, keys, now, verifiedRecovery, nil)
-}
-
-func validateLeasedTrafficAdmissionWithTrace(state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool, trace *platformAdmissionTrace) (resultErr error) {
+func validateLeasedTrafficAdmissionWithTrace(state *storeProjection, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, verifiedRecovery bool, trace *platformAdmissionTrace) (resultErr error) {
 	defer func() { trace.finish(resultErr) }()
 	if channel == model.PlatformArtifactReleaseChannelShadow {
 		return nil

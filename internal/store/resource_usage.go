@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -15,30 +14,7 @@ func (s *Store) RecordResourceUsageSamples(samples []model.ResourceUsageSample, 
 	if len(samples) == 0 && pruneBefore.IsZero() {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgRecordResourceUsageSamples(samples, pruneBefore)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		if !pruneBefore.IsZero() {
-			filtered := state.ResourceUsageSamples[:0]
-			for _, sample := range state.ResourceUsageSamples {
-				if !sample.ObservedAt.Before(pruneBefore) {
-					filtered = append(filtered, sample)
-				}
-			}
-			state.ResourceUsageSamples = filtered
-		}
-		for _, sample := range samples {
-			if strings.TrimSpace(sample.TargetKind) == "" || strings.TrimSpace(sample.TargetID) == "" || sample.ObservedAt.IsZero() {
-				continue
-			}
-			if strings.TrimSpace(sample.ID) == "" {
-				sample.ID = model.NewID("usage")
-			}
-			state.ResourceUsageSamples = append(state.ResourceUsageSamples, sample)
-		}
-		return nil
-	})
+	return s.pgRecordResourceUsageSamples(samples, pruneBefore)
 }
 
 func (s *Store) ListResourceUsageSamples(tenantID, targetKind, targetID string, since time.Time) ([]model.ResourceUsageSample, error) {
@@ -47,27 +23,7 @@ func (s *Store) ListResourceUsageSamples(tenantID, targetKind, targetID string, 
 	if targetKind == "" || targetID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListResourceUsageSamples(tenantID, targetKind, targetID, since)
-	}
-	var samples []model.ResourceUsageSample
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, sample := range state.ResourceUsageSamples {
-			if strings.TrimSpace(sample.TargetKind) != targetKind || strings.TrimSpace(sample.TargetID) != targetID {
-				continue
-			}
-			if strings.TrimSpace(tenantID) != "" && strings.TrimSpace(sample.TenantID) != strings.TrimSpace(tenantID) {
-				continue
-			}
-			if !since.IsZero() && sample.ObservedAt.Before(since) {
-				continue
-			}
-			samples = append(samples, sample)
-		}
-		return nil
-	})
-	sortResourceUsageSamples(samples)
-	return samples, err
+	return s.pgListResourceUsageSamples(tenantID, targetKind, targetID, since)
 }
 
 func (s *Store) pgRecordResourceUsageSamples(samples []model.ResourceUsageSample, pruneBefore time.Time) error {
@@ -179,12 +135,6 @@ WHERE target_kind = $1 AND target_id = $2
 		return nil, fmt.Errorf("iterate resource usage samples: %w", err)
 	}
 	return samples, nil
-}
-
-func sortResourceUsageSamples(samples []model.ResourceUsageSample) {
-	sort.Slice(samples, func(i, j int) bool {
-		return samples[i].ObservedAt.Before(samples[j].ObservedAt)
-	})
 }
 
 func nullableText(value string) sql.NullString {

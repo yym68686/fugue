@@ -21,41 +21,25 @@ func applyEdgeAdmission(machine *model.Machine, id string) error {
 }
 
 func (s *Store) AdmitMachineEdgeEnrollment(name, id string) (model.Machine, error) {
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return model.Machine{}, err
-		}
-		defer tx.Rollback()
-		m, found, err := s.pgFindMachineByClusterNodeNameTx(ctx, tx, name, true)
-		if err != nil {
-			return m, err
-		}
-		if !found {
-			return m, ErrNotFound
-		}
-		if err = applyEdgeAdmission(&m, id); err != nil {
-			return m, err
-		}
-		if err = s.pgUpsertMachineTx(ctx, tx, m); err != nil {
-			return m, err
-		}
-		return m, tx.Commit()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Machine{}, err
 	}
-	var m model.Machine
-	err := s.withLockedState(true, func(state *model.State) error {
-		idx := findMachineByClusterNodeName(state, name)
-		if idx < 0 {
-			return ErrNotFound
-		}
-		m = state.Machines[idx]
-		if err := applyEdgeAdmission(&m, id); err != nil {
-			return err
-		}
-		state.Machines[idx] = m
-		return nil
-	})
-	return m, err
+	defer tx.Rollback()
+	m, found, err := s.pgFindMachineByClusterNodeNameTx(ctx, tx, name, true)
+	if err != nil {
+		return m, err
+	}
+	if !found {
+		return m, ErrNotFound
+	}
+	if err = applyEdgeAdmission(&m, id); err != nil {
+		return m, err
+	}
+	if err = s.pgUpsertMachineTx(ctx, tx, m); err != nil {
+		return m, err
+	}
+	return m, tx.Commit()
 }

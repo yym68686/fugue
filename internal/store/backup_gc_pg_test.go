@@ -35,11 +35,26 @@ func TestPGBackupArtifactPhysicalCleanupIsRestoreSafeAndDurable(t *testing.T) {
 	}
 
 	completedAt := cutoff.Add(time.Minute)
-	mock.ExpectExec(`(?s)UPDATE fugue_backup_artifacts SET physical_deleted_at = \$2,.*longhorn_cleanup_version.*WHERE id = \$1 AND status IN \('deleted', 'expired'\) AND protected = FALSE`).
+	markQuery := `(?s)UPDATE fugue_backup_artifacts SET physical_deleted_at = \$2,.*longhorn_cleanup_version.*WHERE id = \$1 AND status IN \('deleted', 'expired'\) AND protected = FALSE.*SELECT EXISTS .*EXISTS`
+	mock.ExpectQuery(markQuery).
 		WithArgs("artifact-1", completedAt).
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"marked", "present"}).AddRow(true, true))
 	if err := stateStore.MarkBackupArtifactPhysicalDeleted("artifact-1", completedAt); err != nil {
 		t.Fatalf("mark physical cleanup: %v", err)
+	}
+	for _, tc := range []struct {
+		id      string
+		present bool
+		want    error
+	}{
+		{"active-artifact", true, ErrConflict},
+		{"absent-artifact", false, ErrNotFound},
+	} {
+		mock.ExpectQuery(markQuery).WithArgs(tc.id, completedAt).
+			WillReturnRows(sqlmock.NewRows([]string{"marked", "present"}).AddRow(false, tc.present))
+		if err := stateStore.MarkBackupArtifactPhysicalDeleted(tc.id, completedAt); !errors.Is(err, tc.want) {
+			t.Fatalf("mark %s: got %v, want %v", tc.id, err, tc.want)
+		}
 	}
 
 	failureAt := completedAt.Add(time.Minute)

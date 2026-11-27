@@ -224,7 +224,7 @@ Neither the CLI result nor the layer size guarantees physical reclamation.
 
 ## Verification
 
-Normal tests use an isolated fake provider and file-backed state. The opt-in
+Normal tests use an isolated fake provider and disposable PostgreSQL. The opt-in
 `TestR2ObjectStorageIntegration` creates uniquely named disposable resources,
 verifies S3 operations and credential revocation, then cleans up only its own
 bucket and tokens. Enable it with FUGUE_S3_INTEGRATION=1 and the two platform R2

@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -1129,7 +1128,7 @@ func setupAppDomainTestServer(t *testing.T) (*store.Store, *Server, string, stri
 func setupAppDomainTestServerWithDomains(t *testing.T, appBaseDomain string) (*store.Store, *Server, string, string, model.App, *fakeAppDomainResolver) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

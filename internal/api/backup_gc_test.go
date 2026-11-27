@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -77,20 +76,40 @@ func TestBackupArtifactObjectKeysForDeletion(t *testing.T) {
 func TestBackupArtifactCleanupCandidatesHonorRestoreInterlocksAndMarker(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := stateStore.CreateTenant("Backup Cleanup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := stateStore.CreateProject(tenant.ID, "backup-cleanup", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "backup-cleanup", "", model.AppSpec{
+		Image: "registry.invalid/example:latest", RuntimeID: model.DefaultManagedRuntimeID, Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	newArtifact := func(id string) model.BackupArtifact {
 		t.Helper()
+		target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenant.ID, ProjectID: project.ID, AppID: app.ID}
+		run, err := stateStore.CreateBackupRun(model.BackupRun{TenantID: tenant.ID, ProjectID: project.ID, AppID: app.ID, Target: target})
+		if err != nil {
+			t.Fatalf("create backup run for %s: %v", id, err)
+		}
+		objectDir := "apps/" + tenant.ID + "/" + project.ID + "/" + app.ID + "/" + run.ID
 		artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
 			ID:                id,
-			RunID:             "run-" + id,
-			TenantID:          "tenant-a",
-			Target:            model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant-a"},
+			RunID:             run.ID,
+			TenantID:          tenant.ID,
+			Target:            target,
 			Kind:              model.BackupArtifactKindAppPGDump,
-			ObjectKey:         "apps/tenant-a/project/app/run-" + id + "/database.dump",
-			ManifestObjectKey: "apps/tenant-a/project/app/run-" + id + "/manifest.json",
+			ObjectKey:         objectDir + "/database.dump",
+			ManifestObjectKey: objectDir + "/manifest.json",
 			Status:            model.BackupArtifactStatusActive,
 		})
 		if err != nil {
@@ -189,7 +208,7 @@ func TestSweepDeletedBackupArtifactsDeletesObjectsAndPersistsMarker(t *testing.T
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -210,15 +229,21 @@ func TestSweepDeletedBackupArtifactsDeletesObjectsAndPersistsMarker(t *testing.T
 	if err != nil {
 		t.Fatalf("create backup backend: %v", err)
 	}
+	target := model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{Target: target, BackendID: backend.ID})
+	if err != nil {
+		t.Fatalf("create backup run: %v", err)
+	}
+	objectDir := "control-plane/2026/07/29/" + run.ID
 	deletedAt := time.Now().UTC().Add(-2 * backupArtifactGCGrace)
 	artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
 		ID:                "artifact-gc",
-		RunID:             "backup_run_gc",
-		Target:            model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		RunID:             run.ID,
+		Target:            target,
 		BackendID:         backend.ID,
 		Kind:              model.BackupArtifactKindControlPlanePGDump,
-		ObjectKey:         "control-plane/2026/07/29/backup_run_gc/control-plane.dump",
-		ManifestObjectKey: "control-plane/2026/07/29/backup_run_gc/manifest.json",
+		ObjectKey:         objectDir + "/control-plane.dump",
+		ManifestObjectKey: objectDir + "/manifest.json",
 		Status:            model.BackupArtifactStatusDeleted,
 		DeletedAt:         &deletedAt,
 	})

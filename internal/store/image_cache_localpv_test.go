@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 func TestImageCacheIncompleteGraphEvidenceIsOptInAndNeverCarriesBytes(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -77,7 +76,7 @@ func TestImageCacheIncompleteGraphEvidenceIsOptInAndNeverCarriesBytes(t *testing
 func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -124,7 +123,7 @@ func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 func TestImageCacheInventoryCompleteSnapshotMarksMissingManifestsAbsent(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -192,7 +191,7 @@ func TestImageCacheInventoryCompleteSnapshotMarksMissingManifestsAbsent(t *testi
 func TestLocalPVInventoryUpsertReplacesNodeSnapshot(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

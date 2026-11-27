@@ -11,7 +11,7 @@ import (
 // A rollback, or a move from observation into current serving authority, changes
 // the desired artifact without resetting the authenticated replay stream.
 // The caller holds the configuration scope transaction through fact persistence.
-func consumerCursorForTrafficRollback(state *model.State, previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, set model.PlatformExpectedConsumerSet, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
+func consumerCursorForTrafficRollback(state *storeProjection, previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, set model.PlatformExpectedConsumerSet, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
 	fail := func() (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
 		return nil, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack
 	}

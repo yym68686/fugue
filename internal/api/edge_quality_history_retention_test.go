@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,7 +12,6 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
-	"fugue/internal/platformsafety"
 	"fugue/internal/store"
 )
 
@@ -148,67 +145,6 @@ func TestPreparedHistoricalFactsAreSharedWithoutStorageReads(t *testing.T) {
 	p.inputErr = store.ErrConflict
 	if _, err := s.historicalQualityFacts(ctx, source, "dns-a", "app.example.test"); err == nil {
 		t.Fatal("failed preparation was silently accepted or retried in live window")
-	}
-}
-
-func TestHistoryPreparationFindsEarlierVerifiedComparisonBehindAvailabilityOrder(t *testing.T) {
-	receipt := historicalBoundReceiptFixture(t)
-	raw, _ := json.Marshal(receipt)
-	selection, _ := compileBoundPhysicalQualitySelection(receipt, receipt.Snapshot.CapturedAt)
-	input := platformconfig.RuntimeSnapshot{IntentGeneration: "intent-a", PolicyGeneration: "policy-a", DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: "dns-a", Hostname: receipt.Snapshot.Hostname, Type: "A", PhysicalEvidence: raw, PhysicalSelection: selection}}}
-	s, previous, path := qualityRestoreInputFixture(t, input)
-	input.DNSSelections[0].PhysicalEvidence, input.DNSSelections[0].PhysicalSelection = nil, nil
-	digest, _ := platformconfig.RuntimeSnapshotDigest(input)
-	if err := s.store.EnsurePlatformCompilerInput(input, digest); err != nil {
-		t.Fatal(err)
-	}
-	next, err := s.store.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindReleaseSet,
-		Generation: "quality-next", Status: model.PlatformArtifactStatusValidated, Content: map[string]any{"artifact_ids": []string{"quality-child"}},
-		Metadata: map[string]string{"input_snapshot_digest": digest, "intent_generation": "intent-a", "policy_generation": "policy-a"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	at := time.Now().UTC()
-	release := model.PlatformArtifactRelease{ID: "quality-next-full", ArtifactID: next.ID, ArtifactKind: next.ArtifactKind, Scope: next.Scope, ScopeKey: next.ScopeKey,
-		Generation: next.Generation, ReleaseChannel: model.PlatformArtifactReleaseChannelFull, Status: model.PlatformArtifactReleaseStatusActive,
-		FencingToken: 2, VerificationState: model.PlatformArtifactVerificationStateVerified, VerifiedLKGGeneration: next.Generation, VerifiedAt: &at, ReleasedAt: at, UpdatedAt: at}
-	lkg, err := platformsafety.SignPlatformLKGSnapshot(model.PlatformLKGSnapshot{ID: "quality-next-lkg", ArtifactID: next.ID, ArtifactKind: next.ArtifactKind, Scope: next.Scope, ScopeKey: next.ScopeKey,
-		SchemaVersion: next.SchemaVersion, Generation: next.Generation, GenerationSequence: next.GenerationSequence, ContentHash: next.ContentHash, ArtifactProvenance: next.Provenance,
-		VerifiedByReleaseID: release.ID, VerificationEvidenceHash: "sha256:" + strings.Repeat("c", 64), ExpiresAt: at.Add(time.Hour), CreatedAt: at, UpdatedAt: at}, s.bundleKeyring())
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := os.ReadFile(path)
-	var state model.State
-	if err := json.Unmarshal(body, &state); err != nil {
-		t.Fatal(err)
-	}
-	state.PlatformArtifactReleases[0].Status = model.PlatformArtifactReleaseStatusSuperseded
-	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-	state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
-	body, _ = json.Marshal(state)
-	if err := os.WriteFile(path, body, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, err := s.prepareHistoricalQualityContext(t.Context(), "global")
-	if err != nil {
-		t.Fatal(err)
-	}
-	current := receipt.Snapshot
-	current.Policy, current.CapturedAt = edgequality.DefaultPairedContinuityPolicy(), time.Now().UTC()
-	s.bindHistoricalQualityEvidence(ctx, &current, "dns-a")
-	if current.HistoricalEvidence == nil || current.HistoricalEvidence.SourceArtifactID != previous.ID || current.HistoricalEvidence.Receipt.Digest != receipt.Digest {
-		t.Fatal("verified predecessor comparison was hidden by availability-only publication")
-	}
-	state.PlatformArtifactReleases[0].VerificationState = model.PlatformArtifactVerificationStateFailed
-	body, _ = json.Marshal(state)
-	if err := os.WriteFile(path, body, 0600); err != nil {
-		t.Fatal(err)
-	}
-	current.HistoricalEvidence = nil
-	s.bindHistoricalQualityEvidence(ctx, &current, "dns-a")
-	if current.HistoricalEvidence != nil {
-		t.Fatal("preparation cached revoked historical publication authority")
 	}
 }
 

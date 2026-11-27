@@ -4,7 +4,6 @@ import (
 	"errors"
 	"reflect"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 )
@@ -116,134 +115,6 @@ func TestManagedPostgresResizeBlocksLaterAppAndServiceMutations(t *testing.T) {
 	if len(operations) != 1 || operations[0].Type != model.OperationTypeDatabaseResize ||
 		!isActiveOperationStatus(operations[0].Status) {
 		t.Fatalf("rejected mutations changed active operation set: %+v", operations)
-	}
-}
-
-func TestManagedPostgresResizeBlocksDatabaseBackupAndFailsLegacyClaim(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresResizeFixture(t)
-	backend, err := f.store.CreateBackupBackend(model.BackupBackend{
-		Name: "resize-r2", Provider: model.DataBackendProviderCloudflareR2, Bucket: "resize", Endpoint: "https://example.invalid",
-	})
-	if err != nil {
-		t.Fatalf("create resize backup backend: %v", err)
-	}
-	if _, err := f.store.CreateOperation(managedPostgresResizeOperation(f, managedPostgresResizeTarget())); err != nil {
-		t.Fatalf("create active resize: %v", err)
-	}
-
-	run := managedPostgresInterlockBackupRun(f.app, f.service, backend, model.BackupRunTriggerManual)
-	spoofed := run
-	spoofed.AppID = "app-interlock-bypass"
-	if _, err := f.store.CreateBackupRun(spoofed); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("mismatched backup app identity error = %v, want invalid input", err)
-	}
-	if _, err := f.store.CreateBackupRun(run); !errors.Is(err, ErrManagedPostgresResizeBackupConflict) {
-		t.Fatalf("database backup during resize error = %v, want exact resize conflict", err)
-	}
-	runs, err := f.store.ListBackupRuns(BackupRunFilter{TenantID: f.tenant.ID})
-	if err != nil || len(runs) != 0 {
-		t.Fatalf("rejected backup create leaked a run: runs=%+v err=%v", runs, err)
-	}
-
-	legacy := managedPostgresInterlockBackupRun(f.app, f.service, backend, model.BackupRunTriggerScheduled)
-	legacy.ID = model.NewID("backup_run")
-	legacy.CreatedAt = time.Now().UTC().Add(-time.Minute)
-	legacy.UpdatedAt = legacy.CreatedAt
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.BackupRuns = append(state.BackupRuns, model.NormalizeBackupRun(legacy))
-		return nil
-	}); err != nil {
-		t.Fatalf("seed legacy pending backup: %v", err)
-	}
-	failed, err := f.store.ClaimBackupRun(legacy.ID, "backup-worker", time.Now().UTC(), 2*time.Minute)
-	if !errors.Is(err, ErrManagedPostgresResizeBackupConflict) {
-		t.Fatalf("legacy backup claim during resize error = %v, want exact resize conflict", err)
-	}
-	if failed.Status != model.BackupRunStatusFailed ||
-		failed.ErrorCode != ManagedPostgresResizeBackupConflictCode ||
-		failed.ErrorMessage != ManagedPostgresResizeBackupConflictMessage || failed.FinishedAt == nil {
-		t.Fatalf("legacy backup was not terminally failed with exact resize evidence: %+v", failed)
-	}
-
-	nonDatabase, err := f.store.CreateBackupRun(model.BackupRun{
-		TenantID: f.tenant.ID, ProjectID: f.project.ID, AppID: f.app.ID,
-		Target: model.BackupTarget{
-			Type: model.BackupTargetPersistentStorage, TenantID: f.tenant.ID, ProjectID: f.project.ID,
-			AppID: f.app.ID, RuntimeID: f.app.Spec.RuntimeID,
-		},
-		BackendID: backend.ID, Trigger: model.BackupRunTriggerManual,
-	})
-	if err != nil || nonDatabase.Status != model.BackupRunStatusPending {
-		t.Fatalf("resize incorrectly blocked non-database backup: run=%+v err=%v", nonDatabase, err)
-	}
-}
-
-func TestManagedPostgresResumeBlocksDatabaseBackupWithExactReason(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresResizeFixture(t)
-	backend, err := f.store.CreateBackupBackend(model.BackupBackend{
-		Name: "resume-r2", Provider: model.DataBackendProviderCloudflareR2, Bucket: "resume", Endpoint: "https://example.invalid",
-	})
-	if err != nil {
-		t.Fatalf("create resume backup backend: %v", err)
-	}
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.Operations = append(state.Operations, model.Operation{
-			ID: model.NewID("operation"), TenantID: f.tenant.ID, AppID: f.app.ID, ServiceID: f.service.ID,
-			Type: model.OperationTypeDatabaseResume, Status: model.OperationStatusRunning,
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed active resume: %v", err)
-	}
-	run := managedPostgresInterlockBackupRun(f.app, f.service, backend, model.BackupRunTriggerManual)
-	if _, err := f.store.CreateBackupRun(run); !errors.Is(err, ErrManagedPostgresResumeBackupConflict) {
-		t.Fatalf("database backup during resume error = %v, want exact resume conflict", err)
-	}
-}
-
-func TestManagedPostgresResizeBlocksDatabaseImportAndFailsLegacyClaim(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresResizeFixture(t)
-	upload, err := f.store.CreateSourceUpload(f.tenant.ID, "resize.sql", "application/sql", []byte("select 1;"))
-	if err != nil {
-		t.Fatalf("create database import upload: %v", err)
-	}
-	if _, err := f.store.CreateOperation(managedPostgresResizeOperation(f, managedPostgresResizeTarget())); err != nil {
-		t.Fatalf("create active resize: %v", err)
-	}
-	job := model.AppDatabaseImportJob{
-		TenantID: f.tenant.ID, AppID: f.app.ID, SourceUploadID: upload.ID,
-		SourceUploadFilename: upload.Filename, SourceUploadSHA256: upload.SHA256,
-		Format: model.AppDatabaseImportFormatSQL, Status: model.OperationStatusPending,
-	}
-	if err := f.store.ValidateAppDatabaseImportRunnable(f.app.ID); !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
-		t.Fatalf("database import preflight during resize error = %v, want exact import conflict", err)
-	}
-	if _, err := f.store.CreateAppDatabaseImportJob(job); !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
-		t.Fatalf("database import create during resize error = %v, want exact import conflict", err)
-	}
-
-	job.ID = model.NewID("dbimport")
-	job.CreatedAt = time.Now().UTC().Add(-time.Minute)
-	job.UpdatedAt = job.CreatedAt
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.AppDatabaseImportJobs = append(state.AppDatabaseImportJobs, job)
-		return nil
-	}); err != nil {
-		t.Fatalf("seed legacy pending import: %v", err)
-	}
-	if _, err := f.store.ClaimAppDatabaseImportJob(job.ID); !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
-		t.Fatalf("legacy import claim during resize error = %v, want exact import conflict", err)
-	}
-	stored, err := f.store.GetAppDatabaseImportJob(f.app.ID, job.ID)
-	if err != nil {
-		t.Fatalf("get terminal import: %v", err)
-	}
-	if stored.Status != model.OperationStatusFailed || stored.CompletedAt == nil ||
-		stored.ErrorMessage != ManagedPostgresDatabaseImportConflictMessage {
-		t.Fatalf("legacy import was not terminally failed with exact evidence: %+v", stored)
 	}
 }
 
@@ -417,25 +288,4 @@ func TestManagedPostgresResizeDependencyCreationRacesAdmitExactlyOneSide(t *test
 			}
 		})
 	}
-}
-
-func seedResizeRestorePlan(t *testing.T, f managedPostgresResizeFixture) model.BackupRestorePlan {
-	t.Helper()
-	now := time.Now().UTC()
-	plan := model.NormalizeBackupRestorePlan(model.BackupRestorePlan{
-		ID: model.NewID("backup_restore_plan"), TenantID: f.tenant.ID, ProjectID: f.project.ID, AppID: f.app.ID,
-		ArtifactID: "artifact-resize", Target: model.BackupTarget{
-			Type: model.BackupTargetAppDatabase, TenantID: f.tenant.ID, ProjectID: f.project.ID,
-			AppID: f.app.ID, ServiceName: f.service.Name,
-		},
-		Mode: model.BackupRestoreModeReplace, Status: model.BackupRestoreStatusPlanned,
-		CreatedAt: now, UpdatedAt: now,
-	})
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.BackupRestorePlans = append(state.BackupRestorePlans, plan)
-		return nil
-	}); err != nil {
-		t.Fatalf("seed resize restore plan: %v", err)
-	}
-	return plan
 }

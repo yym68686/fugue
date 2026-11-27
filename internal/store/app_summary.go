@@ -25,25 +25,11 @@ func AppReadSummary(app model.App) model.App {
 }
 
 func (s *Store) ListAppSummaries(tenantID string, platformAdmin bool, hydrateServices bool) ([]model.App, error) {
-	if s.usingDatabase() {
-		return s.pgListAppsView(tenantID, platformAdmin, hydrateServices, true)
-	}
-	apps, err := s.listAppsView(tenantID, platformAdmin, hydrateServices)
-	if err != nil {
-		return nil, err
-	}
-	for i := range apps {
-		apps[i] = AppReadSummary(apps[i])
-	}
-	return apps, nil
+	return s.pgListAppsView(tenantID, platformAdmin, hydrateServices, true)
 }
 
 func (s *Store) ListAppSummariesWithTiming(tenantID string, platformAdmin, hydrateServices bool) ([]model.App, AppListReadTiming, error) {
 	var timing AppListReadTiming
-	if s.usingDatabase() {
-		apps, err := s.pgListAppsViewWithTiming(tenantID, platformAdmin, hydrateServices, true, &timing)
-		return apps, timing, err
-	}
-	apps, err := s.ListAppSummaries(tenantID, platformAdmin, hydrateServices)
+	apps, err := s.pgListAppsViewWithTiming(tenantID, platformAdmin, hydrateServices, true, &timing)
 	return apps, timing, err
 }

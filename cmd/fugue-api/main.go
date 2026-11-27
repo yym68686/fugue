@@ -57,7 +57,8 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	store := store.New(cfg.StorePath, cfg.DatabaseURL)
+	store := store.New(cfg.DatabaseURL)
+	store.ConfigureDataBlobDir(os.Getenv("FUGUE_DATA_BLOB_DIR"))
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}
@@ -145,7 +146,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	go store.RunStoragePolicy(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"))
 	go store.RunObservationRetention(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"), platformConsumerHeartbeatAuditKeyringFromEnv())
-	go store.RunPlatformQualityEvidenceRetention(ctx)
 	go store.RunStorageLifecycleAudit(ctx, os.Getenv("FUGUE_STORAGE_POLICY_FILE"))
 	defer stop()
 	billingStatementsReady := false

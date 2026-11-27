@@ -30,10 +30,19 @@ func testTrustedAuthorityCursors(t *testing.T, component string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := normalizePlatformExpectedConsumerSetForStore(set); err != nil {
+	s := newStoreTestDatabase(t, "")
+	set, err = s.CreatePlatformExpectedConsumerSet(set)
+	if err != nil {
 		t.Fatal(err)
 	}
-	state := &model.State{ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}}
+	readCursors := func() []model.PlatformConsumerInstance {
+		t.Helper()
+		rows, err := s.ListPlatformAuthorityConsumers(req.ArtifactKind, "edge-node-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
 	for _, authority := range []string{"", "cell-a", "cell-b"} {
 		claims := trustedHeartbeatClaims(t, now)
 		claims.AuthorityID, claims.Component = authority, component
@@ -42,10 +51,10 @@ func testTrustedAuthorityCursors(t *testing.T, component string) {
 			claims.CredentialID = "kubernetes:test-system:dns-account:pod-a"
 		}
 		h := trustedHeartbeatEnvelope(t, claims, set, now)
-		if _, err := acceptTrustedPlatformConsumerHeartbeatInState(state, claims, set.ID, h, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
+		if _, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, h, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
 			t.Fatal(authority, err)
 		}
-		before, _ := json.Marshal(state)
+		before, _ := json.Marshal(readCursors())
 		for _, member := range set.Consumers {
 			other := member.ConsumerID
 			if other == h.ConsumerID {
@@ -57,17 +66,17 @@ func testTrustedAuthorityCursors(t *testing.T, component string) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := acceptTrustedPlatformConsumerHeartbeatInState(state, claims, set.ID, forged, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err == nil {
+			if _, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, forged, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err == nil {
 				t.Fatal("cross-authority heartbeat accepted")
 			}
 		}
-		after, _ := json.Marshal(state)
+		after, _ := json.Marshal(readCursors())
 		if string(before) != string(after) {
 			t.Fatal("rejected scope changed durable state")
 		}
 	}
-	if len(state.PlatformConsumerInstances) != 3 {
-		t.Fatal("consumer cursor collision", state.PlatformConsumerInstances)
+	if rows := readCursors(); len(rows) != 3 {
+		t.Fatal("consumer cursor collision", rows)
 	}
 	bad := set
 	bad.Consumers = append([]model.PlatformExpectedConsumer(nil), set.Consumers...)
@@ -77,7 +86,7 @@ func testTrustedAuthorityCursors(t *testing.T, component string) {
 			break
 		}
 	}
-	if _, err := normalizePlatformExpectedConsumerSetForStore(bad); err == nil {
+	if _, err := s.CreatePlatformExpectedConsumerSet(bad); err == nil {
 		t.Fatal("unbound authority persisted")
 	}
 }

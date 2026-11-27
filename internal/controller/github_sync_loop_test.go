@@ -20,7 +20,7 @@ import (
 
 func newSourceSyncFixture(t *testing.T) (*store.Store, model.App) {
 	t.Helper()
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

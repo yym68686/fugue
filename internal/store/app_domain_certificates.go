@@ -19,57 +19,7 @@ func (s *Store) ImportAppDomainCertificate(cert model.EdgeTLSCertificate, projec
 	if cert.CertificateSHA256 == "" || cert.NotAfter == nil || projectID == "" || len(names) == 0 || len(names) > 16 {
 		return model.EdgeTLSCertificate{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgImportAppDomainCertificate(cert, projectID, expected, names)
-	}
-	var out model.EdgeTLSCertificate
-	err = s.withLockedState(true, func(state *model.State) error {
-		ai := findApp(state, cert.AppID)
-		if ai < 0 || state.Apps[ai].TenantID != cert.TenantID || state.Apps[ai].ProjectID != projectID {
-			return ErrConflict
-		}
-		for _, host := range names {
-			di := findAppDomain(state, host)
-			if di < 0 {
-				return ErrConflict
-			}
-			d := state.AppDomains[di]
-			if d.AppID != cert.AppID || d.TenantID != cert.TenantID || d.Status != model.AppDomainStatusVerified {
-				return ErrConflict
-			}
-		}
-		index := findEdgeTLSCertificate(state, cert.Hostname)
-		now := time.Now().UTC()
-		if index >= 0 {
-			current := state.EdgeTLSCertificates[index]
-			if current.AppID != cert.AppID || current.TenantID != cert.TenantID {
-				return ErrConflict
-			}
-			if current.CertificateSHA256 == cert.CertificateSHA256 {
-				out = cloneEdgeTLSCertificate(current)
-				return nil
-			}
-			if expected == "" || current.CertificateSHA256 != expected ||
-				(current.NotAfter != nil && current.NotAfter.After(now) && !cert.NotAfter.After(*current.NotAfter)) {
-				return ErrConflict
-			}
-			cert.CreatedAt = current.CreatedAt
-		} else {
-			if expected != "" {
-				return ErrConflict
-			}
-			cert.CreatedAt = now
-		}
-		cert.UpdatedAt = now
-		if index >= 0 {
-			state.EdgeTLSCertificates[index] = cloneEdgeTLSCertificate(cert)
-		} else {
-			state.EdgeTLSCertificates = append(state.EdgeTLSCertificates, cloneEdgeTLSCertificate(cert))
-		}
-		out = cloneEdgeTLSCertificate(cert)
-		return nil
-	})
-	return out, err
+	return s.pgImportAppDomainCertificate(cert, projectID, expected, names)
 }
 
 func (s *Store) pgImportAppDomainCertificate(cert model.EdgeTLSCertificate, projectID, expected string, names []string) (model.EdgeTLSCertificate, error) {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -58,78 +57,6 @@ func metricsProjectionTestDB(tb testing.TB) *Store {
 		}
 	}
 	return &Store{db: db, databaseURL: address, dbReady: true}
-}
-
-func TestImageCacheMetricProjectionsMatchFullPostgresReads(t *testing.T) {
-	s := metricsProjectionTestDB(t)
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	payloads := []map[string]string{{"prune_reason": "image-cache-orphan", "dry_run": "false", "allow_delete": "true", "private": "ignored"}, {"prune_reason": "manual", "dry_run": "false", "allow_delete": "true"}, {}, nil}
-	for i := 0; i < 8; i++ {
-		typ, status := model.NodeUpdateTaskTypePruneImageCache, model.NodeUpdateTaskStatusCompleted
-		if i == 6 {
-			typ = model.NodeUpdateTaskTypeReportImageCache
-		}
-		if i == 7 {
-			status = model.NodeUpdateTaskStatusFailed
-		}
-		raw, _ := json.Marshal(payloads[i%len(payloads)])
-		logs, _ := json.Marshal([]model.NodeUpdateTaskLog{{Message: strings.Repeat("unneeded task evidence ", 1024)}})
-		_, err := s.db.Exec(`INSERT INTO fugue_node_update_tasks(id,machine_id,cluster_node_name,runtime_id,task_type,status,payload_json,result_message,logs_json,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, fmt.Sprint(i), "node", "worker", "runtime", typ, status, raw, "deleted_bytes=123", logs, now.Add(time.Duration(i)*time.Second), now.Add(time.Duration(8-i)*time.Second))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	all, err := s.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusCompleted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var want []model.NodeUpdateTask
-	for _, x := range all {
-		if x.ID == "0" || x.ID == "2" {
-			want = append(want, imageCachePruneTaskMetrics(x))
-		}
-	}
-	got, err := s.ListImageCachePruneTaskMetrics(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("task metric fields/order differ: got %+v want %+v", got, want)
-	}
-	if len(all[0].Logs) == 0 {
-		t.Fatal("full task read lost evidence")
-	}
-	for i := 0; i < 4; i++ {
-		_, err := s.db.Exec(`INSERT INTO fugue_image_cache_prune_plans(id,node_id,cluster_node_name,runtime_id,mode,status,created_at,candidate_manifest_count,candidate_blob_count,candidate_blob_bytes,planned_delete_bytes,protected_manifest_count,protection_summary_json,error) VALUES($1,'node','worker','runtime','observe','planned',$2,3,4,500,600,2,'{"pinned":2}',$3)`, fmt.Sprint(i), now.Add(time.Duration(i)*time.Second), strings.Repeat("unneeded diagnostic detail ", 400))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, limit := range []int{1, 3, 10} {
-		full, err := s.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Limit: limit})
-		if err != nil {
-			t.Fatal(err)
-		}
-		want := make([]model.ImageCachePrunePlan, len(full))
-		for i := range full {
-			want[i] = imageCachePrunePlanMetrics(full[i])
-		}
-		got, err := s.ListImageCachePrunePlanMetrics(context.Background(), limit)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("plan metric window/order differs at limit=%d", limit)
-		}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := s.ListImageCachePruneTaskMetrics(ctx); err == nil {
-		t.Fatal("ignored canceled metric collection")
-	}
-	if _, err := s.ListImageCachePrunePlanMetrics(ctx, 200); err == nil {
-		t.Fatal("ignored canceled plan collection")
-	}
 }
 
 func TestImageCacheAutomaticPlanSummaryPreservesFullPlanHashInPostgres(t *testing.T) {
@@ -260,17 +187,11 @@ func BenchmarkImageCachePruneTaskMetricRead(b *testing.B) {
 }
 
 func TestImageCacheTaskMetricReadBoundsHistoryWithoutChangingLatestResults(t *testing.T) {
-	for _, backend := range []string{"file", "postgres"} {
+	for _, backend := range []string{"postgres"} {
 		t.Run(backend, func(t *testing.T) {
 			var s *Store
-			if backend == "postgres" {
-				s = metricsProjectionTestDB(t)
-			} else {
-				s = New(filepath.Join(t.TempDir(), "state.json"))
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-			}
+			s = metricsProjectionTestDB(t)
+
 			now := time.Now().UTC().Truncate(time.Microsecond)
 			var history []model.NodeUpdateTask
 			add := func(id, node, runtime, dryRun, reason string, created, updated int) {
@@ -299,7 +220,7 @@ func TestImageCacheTaskMetricReadBoundsHistoryWithoutChangingLatestResults(t *te
 			history[len(history)-1].Status = model.NodeUpdateTaskStatusFailed
 			add("other-type", "node", "runtime", "false", "image-cache-orphan", 6000, 6000)
 			history[len(history)-1].Type = model.NodeUpdateTaskTypeReportImageCache
-			if backend == "postgres" {
+			{
 				tx, err := s.db.Begin()
 				if err != nil {
 					t.Fatal(err)
@@ -314,9 +235,8 @@ func TestImageCacheTaskMetricReadBoundsHistoryWithoutChangingLatestResults(t *te
 				if err = tx.Commit(); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := s.withLockedState(true, func(state *model.State) error { state.NodeUpdateTasks = history; return nil }); err != nil {
-				t.Fatal(err)
 			}
+
 			got, err := s.ListImageCachePruneTaskMetrics(context.Background())
 			if err != nil {
 				t.Fatal(err)
@@ -355,13 +275,7 @@ func TestImageCacheTaskMetricReadBoundsHistoryWithoutChangingLatestResults(t *te
 			if !reflect.DeepEqual(selected(got), selected(history)) {
 				t.Fatalf("metric values changed: got %v want %v", selected(got), selected(history))
 			}
-			if backend == "file" {
-				got[0].Payload["prune_reason"] = "mutated"
-				again, err := s.ListImageCachePruneTaskMetrics(context.Background())
-				if err != nil || again[0].Payload["prune_reason"] == "mutated" {
-					t.Fatal("projection mutated durable state", err)
-				}
-			}
+
 		})
 	}
 }

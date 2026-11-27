@@ -226,7 +226,7 @@ func pgReadEdgeActivation(ctx context.Context, db sqlQueryer, forUpdate bool) (m
 }
 
 func verifyEdgeInstanceMaterialForActivation(instances []model.EdgeNodeInstance, epochs []model.EdgeActiveEpoch, controls []model.EdgeNode, activation model.EdgeActivationState) error {
-	state := model.State{
+	state := storeProjection{
 		EdgeInstanceFencingSchema: model.EdgeInstanceFencingSchemaV1,
 		EdgeNodeInstances:         instances,
 		EdgeActiveEpochs:          epochs,

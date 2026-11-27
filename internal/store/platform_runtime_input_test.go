@@ -3,11 +3,8 @@ package store
 import (
 	"encoding/json"
 	"errors"
-	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
@@ -77,94 +74,6 @@ func TestConfigurationRuntimeRetentionStillProtectsOriginalProvenancePostgres(t 
 	report, err = RunCompilerInputRetentionInventory(t.Context(), address)
 	if err == nil || report.UniverseComplete || report.ClassificationComplete || len(report.Entries) != 0 || report.ExecutionAuthorized {
 		t.Fatal("missing original compiler source was treated as disposable or a complete inventory", report, err)
-	}
-}
-
-func TestConfigurationRuntimeColdFileReadIsIndependentAndFailsClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	keys := bundleauth.NewKeyring("synthetic-runtime-input-key", "runtime", "", "", nil)
-	s := New(path)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	s.ConfigurePlatformArtifactSigning(keys)
-	compiled, err := platformconfig.Compile(platformconfig.CompileRequest{
-		Intent:          platformconfig.PlatformIntent{Generation: "intent"},
-		Policy:          platformconfig.PolicySnapshot{Generation: "policy", RuntimeInputMode: platformconfig.RuntimeInputConfigurationV1},
-		RuntimeSnapshot: platformconfig.RuntimeSnapshot{Facts: map[string]any{"audit": strings.Repeat("original", 10000)}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.EnsurePlatformCompilerInput(*compiled.RuntimeInput, compiled.Lineage.RuntimeInputDigest); err != nil {
-		t.Fatal(err)
-	}
-	var ids []string
-	for _, a := range []model.PlatformArtifact{compiled.IntentArtifact, compiled.PolicyArtifact, compiled.RouteArtifact, compiled.DNSArtifact, compiled.TLSArtifact} {
-		stored, _, err := s.EnsurePlatformArtifact(a)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if a.ArtifactKind != model.PlatformArtifactKindPlatformIntent && a.ArtifactKind != model.PlatformArtifactKindPolicySnapshot {
-			ids = append(ids, stored.ID)
-		}
-	}
-	parent, _, err := s.EnsurePlatformArtifact(platformconfig.BuildReleaseSetArtifact(compiled.ReleaseSet, ids, time.Now().UTC()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Delete only the original synthetic audit input in this disposable fixture.
-	// No retirement permission or production obligation is inferred by this test.
-	if err := s.withLockedState(true, func(st *model.State) error {
-		st.PlatformArtifactContents = slices.DeleteFunc(st.PlatformArtifactContents, func(c model.PlatformArtifactContent) bool {
-			return c.ContentHash == compiled.Lineage.InputSnapshotDigest
-		})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	s = New(path) // empty process caches, persisted signed artifacts only
-	s.ConfigurePlatformArtifactSigning(keys)
-	parent, err = s.GetPlatformArtifact(parent.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reads := []PlatformInputReadSelection{{ArtifactID: parent.ID, ContentHash: parent.ContentHash}}
-	if err := s.CheckPlatformInputRead(t.Context(), reads); err != nil {
-		t.Fatal("operational closure still reads original history", err)
-	}
-	if err := s.CheckPlatformInputRead(t.Context(), []PlatformInputReadSelection{{ArtifactID: parent.ID, ContentHash: parent.ContentHash, OriginalInput: true}}); err == nil {
-		t.Fatal("full-history disclosure silently dropped original input protection")
-	}
-	if _, err := s.GetPlatformCompilerInput(compiled.Lineage.InputSnapshotDigest); !errors.Is(err, ErrNotFound) {
-		t.Fatal("original unexpectedly readable", err)
-	}
-	got, err := s.GetPlatformArtifactRuntimeInput(parent)
-	if err != nil || got.Facts != nil || got.IntentGeneration != compiled.Lineage.IntentGeneration {
-		t.Fatal("cold runtime read failed", err)
-	}
-	// A restored full original must not hide a corrupt operational input.
-	if err := s.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(true, func(st *model.State) error {
-		for i := range st.PlatformArtifactContents {
-			if st.PlatformArtifactContents[i].ContentHash == compiled.Lineage.RuntimeInputDigest {
-				st.PlatformArtifactContents[i].Content["policy_generation"] = "corrupt"
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.GetPlatformArtifactRuntimeInput(parent); err == nil {
-		t.Fatal("corrupt runtime input fell back to full history")
-	}
-	if err := s.CheckPlatformInputRead(t.Context(), reads); err == nil {
-		t.Fatal("corrupt runtime input admitted")
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -58,7 +57,7 @@ func TestPostgresCredentialAssignmentLiveStore(t *testing.T) {
 	if err != nil || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost") || parsed.Path != "/fugue_credential_test" {
 		t.Fatal("requires exact local test database")
 	}
-	s := New(filepath.Join(t.TempDir(), "state.json"), address)
+	s := New(address)
 	if err := s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
 	}

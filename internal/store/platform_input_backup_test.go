@@ -236,7 +236,8 @@ func TestCompilerInputBackupReadOnlyPostgres(t *testing.T) {
 	c := CompilerInputBackupContract{Schema: CompilerInputBackupSchema, Digest: digest, ExpectedLogicalBytes: int64(len(raw)), MaxEncodedBytes: inputBackupStreamLimit}
 	roleName := model.NewID("input_backup_reader")
 	role := quotePostgresIntegrationIdentifier(t, roleName)
-	if _, err = s.db.Exec(`CREATE ROLE ` + role + ` LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; GRANT USAGE ON SCHEMA public TO ` + role + `; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ` + role + `; REVOKE SELECT ON fugue_platform_input_chunks FROM ` + role); err != nil {
+	password := postgresFixturePassword()
+	if _, err = s.db.Exec(`CREATE ROLE ` + role + ` LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '` + password + `'; GRANT USAGE ON SCHEMA public TO ` + role + `; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ` + role + `; REVOKE SELECT ON fugue_platform_input_chunks FROM ` + role); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -245,7 +246,7 @@ func TestCompilerInputBackupReadOnlyPostgres(t *testing.T) {
 		}
 	})
 	u, _ := url.Parse(s.databaseURL)
-	u.User = url.User(roleName)
+	u.User = url.UserPassword(roleName, password)
 	var encoded, rebuilt bytes.Buffer
 	r, err := RunCompilerInputBackup(t.Context(), u.String(), c, &encoded)
 	if err != nil || !r.Complete || r.FullOriginalSHA256Verified || r.Snapshot == "" || r.ObservedAt.IsZero() {

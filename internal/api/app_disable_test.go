@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,7 +145,7 @@ func setupDisableAppTestServer(t *testing.T) (*Server, string, model.App) {
 
 func storeForDisableAppTest(t *testing.T) *store.Store {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

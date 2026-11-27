@@ -131,8 +131,8 @@ func TestEdgeInstanceConcurrentReplicasCannotOverwriteActiveEpoch(t *testing.T) 
 
 func TestEdgeInstanceCrashReopenAndFenceRollover(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestEdgeInstanceCrashReopenAndFenceRollover(t *testing.T) {
 		t.Fatalf("first transient failure before restart: %v", err)
 	}
 
-	reopened := New(path)
+	reopened := newStoreTestDatabase(t, path)
 	if err := reopened.Init(); err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
@@ -201,36 +201,10 @@ func TestEdgeInstanceMinimumHealthyIsExactActiveEpochNOfM(t *testing.T) {
 	}
 }
 
-func TestLegacyEdgeMigrationRemainsAuthoritativeUntilCutover(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
-	if _, _, err := s.CreateEdgeNodeToken(model.EdgeNode{ID: "edge-old", EdgeGroupID: "edge-group-old", Status: model.EdgeHealthUnknown}); err != nil {
-		t.Fatalf("create legacy edge token: %v", err)
-	}
-	if _, _, err := s.UpdateEdgeHeartbeat(model.EdgeNode{ID: "edge-old", EdgeGroupID: "edge-group-old", Status: model.EdgeHealthHealthy, Healthy: true}); err != nil {
-		t.Fatalf("write legacy heartbeat: %v", err)
-	}
-	if err := s.Init(); err != nil {
-		t.Fatalf("migrate legacy store: %v", err)
-	}
-	instances, epochs, err := s.ListEdgeNodeInstances("")
-	if err != nil {
-		t.Fatalf("list migrated instances: %v", err)
-	}
-	if len(instances) != 1 || instances[0].Slot != edgeLegacyMigrationSlot || instances[0].EffectiveHealthy || instances[0].Node.TokenHash != "" || len(epochs) != 0 {
-		t.Fatalf("legacy row must be inert migration input: instances=%+v epochs=%+v", instances, epochs)
-	}
-	nodes, _, err := s.ListActiveEdgeNodes("")
-	if err != nil || len(nodes) != 1 || !nodes[0].Healthy {
-		t.Fatalf("phase0 must preserve legacy route authority: nodes=%+v err=%v", nodes, err)
-	}
-}
-
 func TestActiveEdgeInventoryIgnoresUnactivatedLegacyGroups(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	for _, legacy := range []struct {
 		edgeID  string
 		groupID string
@@ -283,55 +257,9 @@ func TestActiveEdgeInventoryIgnoresUnactivatedLegacyGroups(t *testing.T) {
 	}
 }
 
-func TestEdgeInstanceStateTamperFailsReadiness(t *testing.T) {
-	t.Parallel()
-	s := newEdgeInstanceTestStore(t)
-	createEdgeInstanceControl(t, s, "edge-us-1", "edge-group-country-us")
-	putEdgeTestEpoch(t, s, "edge-group-country-us", model.EdgeSlotB, "release-b", 1, 1)
-	heartbeatEdgeInstanceTwice(t, s, healthyEdgeTestInstance("edge-us-1", "edge-group-country-us", model.EdgeSlotB, "pod-b", "release-b"))
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.EdgeNodeInstances[0].ReleaseEpoch = "tampered"
-		return nil
-	}); err != nil {
-		t.Fatalf("tamper state: %v", err)
-	}
-	if err := s.CheckReadiness(nil); !errors.Is(err, ErrEdgeInstanceFencingNotReady) {
-		t.Fatalf("tampered instance must make store not ready, got %v", err)
-	}
-}
-
-func TestEdgeInstanceWithoutCentralEpochFailsReadiness(t *testing.T) {
-	t.Parallel()
-	s := newEdgeInstanceTestStore(t)
-	createEdgeInstanceControl(t, s, "edge-us-1", "edge-group-country-us")
-	instance := healthyEdgeTestInstance("edge-us-1", "edge-group-country-us", model.EdgeSlotB, "pod-b", "release-b")
-	if _, err := s.UpdateEdgeInstanceHeartbeat(instance); err != nil {
-		t.Fatalf("write unfenced instance: %v", err)
-	}
-	if err := s.CheckReadiness(nil); err != nil {
-		t.Fatalf("shadow observation without a fence must remain ready: %v", err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.EdgeActivation.Phase = model.EdgeActivationPhaseActive
-		state.EdgeActivation.RouteAuthority = model.EdgeRouteAuthorityActiveEpoch
-		state.EdgeActivation.Generation++
-		state.EdgeActivation.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		t.Fatalf("force incomplete active mode: %v", err)
-	}
-	if err := s.CheckReadiness(nil); !errors.Is(err, ErrEdgeInstanceFencingNotReady) {
-		t.Fatalf("active mode without central epoch must fail readiness, got %v", err)
-	}
-	putEdgeTestEpoch(t, s, "edge-group-country-us", model.EdgeSlotB, "release-b", 1, 1)
-	if err := s.CheckReadiness(nil); err != nil {
-		t.Fatalf("exact central epoch must restore readiness: %v", err)
-	}
-}
-
 func newEdgeInstanceTestStore(t *testing.T) *Store {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -365,35 +293,6 @@ func heartbeatEdgeInstanceTwice(t *testing.T, s *Store, instance model.EdgeNodeI
 	}
 }
 
-func putEdgeTestEpoch(t *testing.T, s *Store, groupID, slot, epoch string, sequence uint64, minHealthy int) {
-	t.Helper()
-	err := s.withLockedState(true, func(state *model.State) error {
-		active, err := normalizeEdgeActiveEpoch(model.EdgeActiveEpoch{
-			EdgeGroupID: groupID, Slot: slot, ReleaseEpoch: epoch, FenceSequence: sequence, MinHealthyInstances: minHealthy,
-		})
-		if err != nil {
-			return err
-		}
-		index := findEdgeActiveEpoch(state.EdgeActiveEpochs, groupID)
-		if index >= 0 {
-			if sequence <= state.EdgeActiveEpochs[index].FenceSequence {
-				return ErrConflict
-			}
-			state.EdgeActiveEpochs[index] = active
-		} else {
-			state.EdgeActiveEpochs = append(state.EdgeActiveEpochs, active)
-		}
-		state.EdgeActivation.Phase = model.EdgeActivationPhaseActive
-		state.EdgeActivation.RouteAuthority = model.EdgeRouteAuthorityActiveEpoch
-		state.EdgeActivation.Generation++
-		state.EdgeActivation.UpdatedAt = time.Now().UTC()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("put active epoch: %v", err)
-	}
-}
-
 func assertOnlyActiveEdge(t *testing.T, s *Store, groupID, expectedEpoch string, healthy bool) {
 	t.Helper()
 	nodes, _, err := s.ListActiveEdgeNodes(groupID)
@@ -412,17 +311,19 @@ func assertOnlyActiveEdge(t *testing.T, s *Store, groupID, expectedEpoch string,
 	}
 }
 
-func TestEdgeInstanceServerTimeIgnoresCallerClockInFileHarness(t *testing.T) {
+func TestEdgeInstanceServerTimeIgnoresCallerClock(t *testing.T) {
 	t.Parallel()
 	s := newEdgeInstanceTestStore(t)
 	createEdgeInstanceControl(t, s, "edge-us-1", "edge-group-country-us")
 	instance := healthyEdgeTestInstance("edge-us-1", "edge-group-country-us", model.EdgeSlotB, "pod-b", "release-b")
-	serverNow := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
-	stored, err := s.updateEdgeInstanceHeartbeatAt(instance, serverNow)
+	callerTime := time.Date(2001, 8, 1, 0, 0, 0, 0, time.UTC)
+	before := time.Now().Add(-time.Second)
+	stored, err := s.updateEdgeInstanceHeartbeatAt(instance, callerTime)
 	if err != nil {
 		t.Fatalf("heartbeat: %v", err)
 	}
-	if !stored.LastHeartbeatAt.Equal(serverNow) || stored.Node.LastHeartbeatAt == nil || !stored.Node.LastHeartbeatAt.Equal(serverNow) {
+	if stored.LastHeartbeatAt.Before(before) || stored.LastHeartbeatAt.After(time.Now().Add(time.Second)) ||
+		stored.Node.LastHeartbeatAt == nil || !stored.Node.LastHeartbeatAt.Equal(stored.LastHeartbeatAt) {
 		t.Fatalf("heartbeat must bind the store clock: %+v", stored)
 	}
 }

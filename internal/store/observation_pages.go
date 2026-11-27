@@ -185,7 +185,7 @@ func readObservationPageBodies(ctx context.Context, db inputQueryer, key string,
 }
 
 func (s *Store) ReadObservationPages(ctx context.Context, key string) (ObservationPages, []byte, error) {
-	if s.usingDatabase() {
+	{
 		// One transaction gives head and pages a consistent generation during
 		// another replica's cursor update or completion swap.
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
@@ -206,14 +206,13 @@ func (s *Store) ReadObservationPages(ctx context.Context, key string) (Observati
 			return p, nil, err
 		}
 	}
+
 	raw, err := s.ReadObservationCheckpoint(ctx, key)
 	return ObservationPages{}, raw, err
 }
 
 func (s *Store) UpdateObservationPages(ctx context.Context, key string, update ObservationPageUpdate, legacy func([]byte) ([]byte, error)) (bool, error) {
-	if !s.usingDatabase() {
-		return s.UpdateObservationCheckpoint(ctx, key, legacy)
-	}
+
 	originalKey := key
 	key = observationCheckpointKey(key)
 	tx, err := s.db.BeginTx(ctx, nil)

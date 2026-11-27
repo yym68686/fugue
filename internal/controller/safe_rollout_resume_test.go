@@ -151,8 +151,12 @@ func TestSafeRolloutResumeRejectsChangedIntentWithoutMutation(t *testing.T) {
 			case "image":
 				candidate.Spec.Image = "registry.example/other:v3"
 			case "owner":
+				other, createErr := st.CreateTenant("Different owner")
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
 				r := state.Candidate
-				r.TenantID = "other"
+				r.TenantID = other.ID
 				_, err = st.UpdateAppRelease(r)
 			case "failed":
 				r := state.Candidate

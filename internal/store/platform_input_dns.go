@@ -145,7 +145,7 @@ func (s *Store) GetPlatformCompilerInputDNSSelectionsContext(ctx context.Context
 	if !inputDigestPattern.MatchString(digest) {
 		return CompilerInputDNSSelections{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
+	{
 		tx, finish, err := s.BeginCompilerInputReadLease(ctx)
 		if err != nil {
 			return CompilerInputDNSSelections{}, err
@@ -195,6 +195,7 @@ func (s *Store) GetPlatformCompilerInputDNSSelectionsContext(ctx context.Context
 		tx.Rollback()
 		finish() // Release the session lease before obtaining another reader.
 	}
+
 	snapshot, err := s.GetPlatformCompilerInputContext(ctx, digest)
 	if err != nil {
 		return CompilerInputDNSSelections{}, err

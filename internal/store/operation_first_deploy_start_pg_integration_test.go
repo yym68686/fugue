@@ -3,29 +3,20 @@ package store
 import (
 	"context"
 	"database/sql"
-	"net/url"
-	"os"
-	"strings"
 	"testing"
 	"time"
+
+	"fugue/internal/testpostgres"
 )
 
 func TestFirstDeployExecutionStartsPostgres(t *testing.T) {
-	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("set FUGUE_TEST_DATABASE_URL for disposable PostgreSQL integration")
-	}
-	u, err := url.Parse(dsn)
-	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
-		t.Fatal("requires a disposable loopback fugue_test database")
-	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := sql.Open("pgx", testpostgres.Database(t, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	db.SetMaxOpenConns(1)
-	st := &Store{databaseURL: dsn, db: db, dbReady: true}
+	st := &Store{db: db, dbReady: true}
 	_, err = db.Exec(`
 CREATE TEMPORARY TABLE fugue_release_steps (
   operation_id text NOT NULL, step_type text NOT NULL,

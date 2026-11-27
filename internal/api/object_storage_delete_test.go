@@ -34,8 +34,8 @@ type objectDeleteFixture struct {
 func newObjectDeleteFixture(t *testing.T) *objectDeleteFixture {
 	t.Helper()
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-object-storage-delete-key")
-	statePath := filepath.Join(t.TempDir(), "state.json")
-	db := store.New(statePath)
+	statePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	db := newStoreTestDatabase(t, statePath)
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestObjectStoreDeletePreviewConfirmationIsolationAndResume(t *testing.T) {
 		t.Fatal("incomplete batch reported completed")
 	}
 	// Reload durable state to model an API process restart between batches.
-	f.srv.store = store.New(f.statePath)
+	f.srv.store = newStoreTestDatabase(t, f.statePath)
 	if err := f.srv.store.Init(); err != nil {
 		t.Fatal(err)
 	}

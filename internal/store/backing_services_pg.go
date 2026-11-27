@@ -131,7 +131,7 @@ WHERE id = $1 AND tenant_id = $2
 		return model.BackingService{}, err
 	}
 	service.Name = s.pgNextAvailableBackingServiceNameTx(ctx, tx, tenantID, projectID, service.Name)
-	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *storeProjection) {
 		projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
 	}); err != nil {
 		return model.BackingService{}, err
@@ -346,7 +346,7 @@ func (s *Store) pgBindBackingService(tenantID, appID, serviceID, alias string, e
 	if err != nil {
 		return model.ServiceBinding{}, err
 	}
-	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *model.State) {
+	if err := validateTenantManagedCapacityProjection(&billingState, billing, func(projection *storeProjection) {
 		projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
 	}); err != nil {
 		return model.ServiceBinding{}, err
@@ -419,7 +419,7 @@ func (s *Store) pgHasInFlightManagedPostgresExclusiveMutationTx(ctx context.Cont
 SELECT EXISTS (
 	SELECT 1
 	FROM fugue_operations
-	WHERE type IN ($1, $2, $3, 'database-recover', 'database-image-migrate', 'database-replica-retire')
+	WHERE type IN ($1, $2, $3, 'database-recover', 'database-image-migrate', 'database-replica-retire', 'database-source-retire')
 	  AND status IN ($4, $5, $6)
 `
 	args := []any{

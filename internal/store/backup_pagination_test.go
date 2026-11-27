@@ -1,102 +1,12 @@
 package store
 
 import (
-	"fmt"
-	"path/filepath"
-	"reflect"
 	"regexp"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
-
-func TestBackupListCursorPagesStableTimestampsWithoutDuplicates(t *testing.T) {
-	t.Parallel()
-
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	base := time.Date(2026, 7, 31, 0, 0, 0, 0, time.UTC)
-	if err := stateStore.withLockedState(true, func(state *model.State) error {
-		for i := 0; i < 6; i++ {
-			createdAt := base.Add(time.Duration(i/2) * time.Minute)
-			id := fmt.Sprintf("backup_page_%02d", i)
-			state.BackupRuns = append(state.BackupRuns, model.BackupRun{
-				ID:        "run_" + id,
-				Status:    model.BackupRunStatusBlocked,
-				CreatedAt: createdAt,
-			})
-			state.BackupArtifacts = append(state.BackupArtifacts, model.BackupArtifact{
-				ID:        "artifact_" + id,
-				Status:    model.BackupArtifactStatusActive,
-				CreatedAt: createdAt,
-			})
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed backups: %v", err)
-	}
-
-	wantRuns := []string{
-		"run_backup_page_05", "run_backup_page_04",
-		"run_backup_page_03", "run_backup_page_02",
-		"run_backup_page_01", "run_backup_page_00",
-	}
-	var gotRuns []string
-	var runCursor *BackupListCursor
-	for {
-		page, err := stateStore.ListBackupRuns(BackupRunFilter{
-			PlatformAdmin: true,
-			Cursor:        runCursor,
-			Limit:         2,
-		})
-		if err != nil {
-			t.Fatalf("list run page: %v", err)
-		}
-		if len(page) == 0 {
-			break
-		}
-		for _, run := range page {
-			gotRuns = append(gotRuns, run.ID)
-		}
-		last := page[len(page)-1]
-		runCursor = &BackupListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
-	}
-	if !reflect.DeepEqual(gotRuns, wantRuns) {
-		t.Fatalf("run order mismatch:\n got: %v\nwant: %v", gotRuns, wantRuns)
-	}
-
-	wantArtifacts := []string{
-		"artifact_backup_page_05", "artifact_backup_page_04",
-		"artifact_backup_page_03", "artifact_backup_page_02",
-		"artifact_backup_page_01", "artifact_backup_page_00",
-	}
-	var gotArtifacts []string
-	var artifactCursor *BackupListCursor
-	for {
-		page, err := stateStore.ListBackupArtifacts(BackupArtifactFilter{
-			PlatformAdmin: true,
-			Cursor:        artifactCursor,
-			Limit:         2,
-		})
-		if err != nil {
-			t.Fatalf("list artifact page: %v", err)
-		}
-		if len(page) == 0 {
-			break
-		}
-		for _, artifact := range page {
-			gotArtifacts = append(gotArtifacts, artifact.ID)
-		}
-		last := page[len(page)-1]
-		artifactCursor = &BackupListCursor{CreatedAt: last.CreatedAt, ID: last.ID}
-	}
-	if !reflect.DeepEqual(gotArtifacts, wantArtifacts) {
-		t.Fatalf("artifact order mismatch:\n got: %v\nwant: %v", gotArtifacts, wantArtifacts)
-	}
-}
 
 func TestPostgresBackupListQueriesUseCursorTupleAndStableOrder(t *testing.T) {
 	t.Run("runs", func(t *testing.T) {

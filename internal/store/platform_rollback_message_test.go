@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,7 +9,7 @@ import (
 )
 
 func TestCurrentFullRollbackMessage(t *testing.T) {
-	for _, backend := range []string{"file", "postgres"} {
+	for _, backend := range []string{"postgres"} {
 		t.Run(backend, func(t *testing.T) {
 			ctx := t.Context()
 			old := time.Now().UTC().Truncate(time.Microsecond).Add(-48 * time.Hour)
@@ -19,7 +18,7 @@ func TestCurrentFullRollbackMessage(t *testing.T) {
 			var s *Store
 			var put func(model.PlatformReleaseMessage) error
 			var replace func() error
-			if backend == "postgres" {
+			{
 				dsn := disposablePhysicalDNSDatabase(t)
 				db, err := openPostgresDatabase(dsn)
 				if err != nil {
@@ -41,28 +40,8 @@ func TestCurrentFullRollbackMessage(t *testing.T) {
 					_, e := db.ExecContext(ctx, "UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id=$1", r.ID)
 					return e
 				}
-			} else {
-				s = New(filepath.Join(t.TempDir(), "store.json"))
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-				if err := s.withLockedState(true, func(st *model.State) error {
-					st.PlatformArtifacts = append(st.PlatformArtifacts, a)
-					st.PlatformArtifactReleases = append(st.PlatformArtifactReleases, r)
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				put = func(m model.PlatformReleaseMessage) error {
-					return s.withLockedState(true, func(st *model.State) error {
-						st.PlatformReleaseMessages = append(st.PlatformReleaseMessages, m)
-						return nil
-					})
-				}
-				replace = func() error {
-					return s.withLockedState(true, func(st *model.State) error { st.PlatformArtifactReleases[0].Status = "superseded"; return nil })
-				}
 			}
+
 			write := func(m model.PlatformReleaseMessage) {
 				t.Helper()
 				if err := put(m); err != nil {
@@ -105,17 +84,16 @@ func TestCurrentFullRollbackMessage(t *testing.T) {
 				}
 			}
 			duplicate := original
-			if backend == "postgres" {
-				if _, err := s.db.ExecContext(ctx, `UPDATE fugue_platform_release_messages SET scope_json=scope_json || '{"future-scope":"other"}'::jsonb WHERE id=$1`, original.ID); err != nil {
-					t.Fatal(err)
-				}
-				if m, err := s.CurrentFullRollbackMessage(ctx, r); m != nil || !errors.Is(err, ErrConflict) {
-					t.Fatalf("unknown scope field lost: %v %v", m, err)
-				}
-				if _, err := s.db.ExecContext(ctx, `UPDATE fugue_platform_release_messages SET scope_json=scope_json - 'future-scope' WHERE id=$1`, original.ID); err != nil {
-					t.Fatal(err)
-				}
+			if _, err := s.db.ExecContext(ctx, `UPDATE fugue_platform_release_messages SET scope_json=scope_json || '{"future-scope":"other"}'::jsonb WHERE id=$1`, original.ID); err != nil {
+				t.Fatal(err)
 			}
+			if m, err := s.CurrentFullRollbackMessage(ctx, r); m != nil || !errors.Is(err, ErrConflict) {
+				t.Fatalf("unknown scope field lost: %v %v", m, err)
+			}
+			if _, err := s.db.ExecContext(ctx, `UPDATE fugue_platform_release_messages SET scope_json=scope_json - 'future-scope' WHERE id=$1`, original.ID); err != nil {
+				t.Fatal(err)
+			}
+
 			duplicate.ID = "duplicate"
 			write(duplicate)
 			if m, err := s.CurrentFullRollbackMessage(ctx, r); m != nil || !errors.Is(err, ErrConflict) {

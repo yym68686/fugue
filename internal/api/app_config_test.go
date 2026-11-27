@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -473,7 +472,7 @@ func TestGetAppEnvRecoversFailedImportedAppDesiredState(t *testing.T) {
 func TestRestartAppRejectsBlankDeployableImage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1215,7 +1214,7 @@ func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 func TestGetImportedAppEnvMergesBindingEnvWithoutRecovery(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1623,7 +1622,7 @@ func TestForceDeleteBlocksActiveManagedPostgresResizeWithoutMutation(t *testing.
 func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1654,7 +1653,7 @@ func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *
 func setupFailedImportedAppRecoveryServer(t *testing.T) (*store.Store, *Server, string, model.App, string, model.AppSource) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1804,6 +1803,21 @@ func mustDecodeJSON(t *testing.T, recorder *httptest.ResponseRecorder, dst any) 
 	if err := json.Unmarshal(recorder.Body.Bytes(), dst); err != nil {
 		t.Fatalf("decode response: %v body=%s", err, recorder.Body.String())
 	}
+}
+
+// Compare the whole wire projection without making Go-specific time.Location
+// pointers or nil/empty distinctions behind omitempty part of the contract.
+func equalJSONProjection(t *testing.T, expected, actual any) bool {
+	t.Helper()
+	want, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(actual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Equal(want, got)
 }
 
 func completeNextManagedOperation(t *testing.T, s *store.Store) {

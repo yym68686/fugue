@@ -1,17 +1,13 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func replicaProtectionFixture(tb testing.TB, count int) (*Server, []model.Image, []model.ImageReplica) {
@@ -40,15 +36,42 @@ func replicaProtectionFixture(tb testing.TB, count int) (*Server, []model.Image,
 	}
 	// A replica belonging to an image outside the input must not affect protection.
 	replicas = append(replicas, model.ImageReplica{ID: "unrelated", ImageID: "unrelated-image", Status: model.ImageReplicaStatusPresent, Digest: "sha256:" + strings.Repeat("f", 64), LeaseExpiresAt: &future, UpdatedAt: now})
-	path := filepath.Join(tb.TempDir(), "state.json")
-	raw, err := json.Marshal(model.State{Images: images, ImageReplicas: replicas})
+	const fixture = "replica-protection"
+	state := newStoreTestDatabase(tb, fixture)
+	db := openStoreTestSQL(tb, fixture)
+	tx, err := db.BeginTx(tb.Context(), nil)
 	if err != nil {
 		tb.Fatal(err)
 	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	defer tx.Rollback()
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("tenant-%d", i)
+		if _, err := tx.ExecContext(tb.Context(), `INSERT INTO fugue_tenants(id,name,slug,status,created_at,updated_at) VALUES($1,$1,$1,'active',$2,$2)`, id, now); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	const insertImage = `INSERT INTO fugue_images(id,tenant_id,image_ref,canonical_digest,lifecycle_state,created_at,updated_at)
+		VALUES($1,NULLIF($2,''),$3,$4,$5,$6,$6)`
+	for _, image := range images {
+		if _, err := tx.ExecContext(tb.Context(), insertImage, image.ID, image.TenantID, image.ImageRef, image.CanonicalDigest, image.LifecycleState, now); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	if _, err := tx.ExecContext(tb.Context(), insertImage, "unrelated-image", "", "", replicas[len(replicas)-1].Digest, model.ImageLifecycleAvailable, now); err != nil {
 		tb.Fatal(err)
 	}
-	return &Server{store: store.New(path)}, images, replicas
+	for _, replica := range replicas {
+		if _, err := tx.ExecContext(tb.Context(), `INSERT INTO fugue_image_replicas
+			(id,image_id,tenant_id,digest,node_id,runtime_id,cluster_node_name,status,lease_expires_at,created_at,updated_at)
+			VALUES($1,$2,NULLIF($3,''),$4,$5,$6,$7,$8,$9,$10,$10)`, replica.ID, replica.ImageID, replica.TenantID, replica.Digest,
+			replica.NodeID, replica.RuntimeID, replica.ClusterNodeName, replica.Status, replica.LeaseExpiresAt, replica.UpdatedAt); err != nil {
+			tb.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		tb.Fatal(err)
+	}
+	return &Server{store: state}, images, replicas
 }
 
 func newReplicaProtectionSet() imageCacheProtectedSet {
@@ -104,7 +127,11 @@ func TestImageCacheReplicaProtectionKeepsEligibilityAndNodeBindings(t *testing.T
 }
 
 func TestImageCacheReplicaProtectionPropagatesReadErrors(t *testing.T) {
-	server := &Server{store: store.New(t.TempDir())}
+	state := newStoreTestDatabase(t, "")
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{store: state}
 	images := []model.Image{{ID: "image", LifecycleState: model.ImageLifecycleAvailable}}
 	for _, run := range []func(*imageCacheProtectedSet, []model.Image) error{server.populateImageCacheReplicaCandidateRefs, server.populateImageCacheMinimumReplicaRefs} {
 		protected := newReplicaProtectionSet()

@@ -7,8 +7,7 @@ x-fugue-compiler-input-history-admission:
     prepared. Complete dependency closure and pin admission requirements below
     apply in the enforced phase, and always while input writes are fenced or
     retirement has started. Explicit preparation and confirmation always perform
-    strict verification, including in capability phase. File storage always
-    verifies its original inputs. Missing or invalid persisted phase state fails
+    strict verification, including in capability phase. Missing or invalid persisted phase state fails
     closed. Enforcement is one-way and survives restarts and schema reruns;
     requests and environment flags cannot disable it. Capability deployment does
     not authorize routing, fencing, deletion or retirement, and does not assert
@@ -603,7 +602,7 @@ x-fugue-release-set-atomic-convergence:
     Full ReleaseSet publication re-evaluates every child artifact, the newest
     active release, latest immutable expected-set revisions and fresh trusted
     applied/probed consumer facts inside the publishing store transaction.
-    File storage holds one state lock. PostgreSQL uses a per-scope transaction
+    PostgreSQL uses a per-scope transaction
     lock shared by expected-set creation, trusted heartbeats and ReleaseSet lane
     changes; full promotion excludes those writes until its commit or rollback.
     Failed or expired convergence cannot advance a release lane, append a release
@@ -1013,8 +1012,7 @@ paths:
         release must have immutable expected topology for the group and verified
         parent/child integrity and lineage. Its complete signed compiler-input
         dependency closure must, under enforced PostgreSQL history admission, be locally available with current durable
-        full-readback pins in PostgreSQL, or actual verified original inputs in
-        file storage. The selected publication and expected topology are
+        full-readback pins in PostgreSQL. The selected publication and expected topology are
         rechecked before returning; this read never restores cold inputs or
         falls back to unrelated shadow or historical publications.
         Missing, invalid, cold or unprepared
@@ -4729,7 +4727,7 @@ paths:
     get:
       operationId: getPlatformConsumerAssignment
       summary: Get the expected ReleaseSet assignments for a trusted consumer
-      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded. Serving-only selection honors the signed publication role; cell-dns requires its prepared DNS membership and selected parent/fence without requiring a route child. After selection, each returned publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL, or verified original input content in file mode. Cold, missing or changed dependencies return 503 without restoration or fallback. Unselected shadow publications do not add a serving-only dependency. Assignment authority is independently rechecked before disclosure. If that final check observes a changed assignment envelope or, for a serving-only DNS consumer, successfully selects a different cell-dns publication, discovery, selection, input verification and authority checks are repeated once using a fresh read session; no earlier assignment is returned on failure or continued change.
+      description: Returns the latest expected set revision for each authorized artifact kind in each active ReleaseSet channel. Assignments are bound to the signed child artifact and the active release fencing token. Shadow assignments authorize validation only and must not replace serving state. Superseded releases and unrelated topology are excluded. Serving-only selection honors the signed publication role; cell-dns requires its prepared DNS membership and selected parent/fence without requiring a route child. After selection, each returned publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL. Cold, missing or changed dependencies return 503 without restoration or fallback. Unselected shadow publications do not add a serving-only dependency. Assignment authority is independently rechecked before disclosure. If that final check observes a changed assignment envelope or, for a serving-only DNS consumer, successfully selects a different cell-dns publication, discovery, selection, input verification and authority checks are repeated once using a fresh read session; no earlier assignment is returned on failure or continued change.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerAssignment
       security:
@@ -4758,7 +4756,7 @@ paths:
     get:
       operationId: getPlatformConsumerArtifact
       summary: Pull an artifact assigned to a trusted consumer
-      description: Returns a validated signed child artifact or its exact signed ReleaseSet parent only when the verified component identity is currently present in that child assignment. Parent reads require the same expected_consumer_set_id and retain the child assignment and release envelope; arbitrary parents and nonselected canary members are denied. The selected publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL, or verified original input content in file mode; cold, missing or changed dependencies return 503 without restoration or fallback. Assignment authority is independently rechecked before disclosure. The endpoint is read-only and never records runtime facts.
+      description: Returns a validated signed child artifact or its exact signed ReleaseSet parent only when the verified component identity is currently present in that child assignment. Parent reads require the same expected_consumer_set_id and retain the child assignment and release envelope; arbitrary parents and nonselected canary members are denied. The selected publication requires its complete signed input dependency closure and current durable full-readback pins in PostgreSQL; cold, missing or changed dependencies return 503 without restoration or fallback. Assignment authority is independently rechecked before disclosure. The endpoint is read-only and never records runtime facts.
       tags: [Admin]
       x-fugue-handler: handleGetPlatformConsumerArtifact
       security:
@@ -7075,8 +7073,7 @@ paths:
         routes are excluded; weighted targets are never flattened to one origin.
         Group modes, TTL, disabled state and route policy retain artifact semantics.
         The exact selected LKG requires its complete signed input dependency closure
-        and current durable full-readback pins in PostgreSQL, or verified original
-        input content in file mode, including when a node reselects configuration
+        and current durable full-readback pins in PostgreSQL, including when a node reselects configuration
         after claiming a task. This read never restores cold inputs or falls back
         to disposable history. LKG selection, including initial absence, is checked
         again with the input proof before disclosure.
@@ -13144,10 +13141,7 @@ paths:
         changed, or over-budget dependency metadata returns 409 without
         creating a task. In PostgreSQL, cold inputs may be queued and remain
         protected; claim still requires current durable full-readback pins
-        after bounded preparation. File storage verifies actual original
-        input size and canonical full SHA with the complete signed closure
-        and current LKG in the same locked state before creating or claiming
-        a dependent task; missing or corrupt originals return 409.
+        after bounded preparation.
         Creation never restores archives or claims the task.
         Maintenance tasks with no such dependencies remain independent of
         compiler-input archive admission.
@@ -13171,7 +13165,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/NodeUpdateTaskResponse"
         '409':
-          description: Task dependency metadata unavailable, changed, or over budget, or required file-backed original input missing or corrupt; no task created.
+          description: Task dependency metadata unavailable, changed, or over budget; no task created.
           content:
             application/json:
               schema:
@@ -13492,17 +13486,14 @@ paths:
         verified its complete declared artifact and input dependency closure.
         In PostgreSQL, referenced compiler inputs must have an independent local
         representation protected by durable verified pins produced by complete
-        local readback. File storage instead verifies actual original size and
-        canonical full SHA, complete signatures and the current LKG together
-        with the task under one state lock before changing its status.
+        local readback.
         A missing, cold, changed, unsigned, or unprepared dependency returns a
         conflict without changing task state; restore and verify dependencies
         before claiming again. This endpoint does not restore cold archives or
         weaken existing task authorization, expiry, or execution checks.
         A missing dependency is a conflict (409); a missing or inaccessible
         task remains not found (404).
-        Unrelated maintenance tasks require no archive infrastructure in either
-        backend.
+        Unrelated maintenance tasks require no archive infrastructure.
       tags: [Node Updater]
       x-fugue-handler: handleNodeUpdaterClaimTask
       security:

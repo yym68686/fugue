@@ -47,23 +47,61 @@ func trafficLKGState(t *testing.T, s *Store, scope string) []*model.PlatformLKGS
 	return out
 }
 
+// Report a new publication through the real identity/replay-checked ingress.
+func reportTrafficLKGFixture(t *testing.T, s *Store, f promotionFixture) {
+	t.Helper()
+	for _, previous := range f.sets {
+		set := clonePlatformExpectedConsumerSet(previous)
+		set.ID = model.NewID("expected")
+		set.Revision += 10
+		set.ArtifactReleaseID = f.release.ID
+		if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
+			t.Fatal(err)
+		}
+		for _, consumer := range f.consumers {
+			if consumer.ArtifactKind != set.ArtifactKind {
+				continue
+			}
+			now := time.Now().UTC()
+			keys := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "key", Keys: map[string]string{"key": "synthetic-serving-identity"}}
+			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "credential", TokenID: "token", Component: consumer.Component, NodeID: consumer.NodeID, ScopeKey: consumer.ScopeKey, ArtifactKinds: []string{consumer.ArtifactKind}}
+			token, err := platformcontrol.IssuePlatformComponentIdentity(keys, claims, now, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err = platformcontrol.ParsePlatformComponentIdentity(keys, token, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: consumer.ConsumerID, Component: consumer.Component, NodeID: consumer.NodeID, ArtifactKind: consumer.ArtifactKind, ScopeKey: consumer.ScopeKey, ReleaseSetID: f.parent.ID, ExpectedConsumerSetID: set.ID, FencingToken: f.release.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: consumer.Sequence + 1, IssuedAt: now, Nonce: fmt.Sprintf("%032d", now.UnixNano()), GenerationSequence: consumer.GenerationSequence, DesiredGeneration: consumer.DesiredGeneration, ActualGeneration: consumer.ActualGeneration, LKGGeneration: consumer.LKGGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
+			if f.release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
+				heartbeat.ApplyStatus, heartbeat.ProbeStatus = "staged", "shadow_validated"
+				heartbeat.CandidateGeneration, heartbeat.ActualGeneration, heartbeat.LKGGeneration = heartbeat.DesiredGeneration, "", ""
+			}
+			heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func testTrafficLKGAtomicRecovery(t *testing.T, address string) {
 	for _, scenario := range []string{"complete", "full complete", "shadow", "not explicit", "missing member", "failed probe", "expired", "wrong fence", "unverified", "missing policy", "tampered policy", "new topology", "new publication", "frozen", "full without fresh facts", "queued probe failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			if scenario == "queued probe failure" && address == "" {
 				t.Skip("Postgres concurrency")
 			}
-			s := New(t.TempDir()+"/state.json", address)
-			if address != "" {
-				db, isolated, _ := hotInventoryTestDatabase(t)
-				s = &Store{db: db, databaseURL: isolated}
-			}
+			s := New(address)
+
+			db, isolated, _ := hotInventoryTestDatabase(t)
+			s = &Store{db: db, databaseURL: isolated}
+
 			configureTestPlatformArtifactSigning(s)
-			if address == "" {
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			scope := "recovery-" + model.NewID("test")
 			channel := "gray"
 			if scenario == "shadow" {
@@ -116,54 +154,23 @@ func testTrafficLKGAtomicRecovery(t *testing.T, address string) {
 					t.Fatal(err)
 				}
 			}
-			if address == "" {
-				if err := s.withLockedState(true, func(state *model.State) error {
-					switch scenario {
-					case "missing member":
-						state.ExpectedConsumerSets = state.ExpectedConsumerSets[:2]
-					case "failed probe":
-						state.PlatformConsumerInstances[0].ProbeStatus = "failed"
-					case "expired":
-						state.PlatformConsumerInstances[0].LastHeartbeatAt = time.Now().Add(-time.Hour)
-					case "wrong fence":
-						state.PlatformConsumerInstances[0].FencingToken++
-					case "unverified":
-						state.PlatformConsumerInstances[0].IdentityVerified = false
-					case "frozen":
-						state.PlatformReleaseLanes[0].Frozen = true
-					case "missing policy", "tampered policy":
-						for i := range state.PlatformArtifacts {
-							if state.PlatformArtifacts[i].ArtifactKind == model.PlatformArtifactKindPolicySnapshot {
-								if scenario == "missing policy" {
-									state.PlatformArtifacts = append(state.PlatformArtifacts[:i], state.PlatformArtifacts[i+1:]...)
-								} else {
-									state.PlatformArtifacts[i].Content["tampered"] = true
-								}
-								break
-							}
-						}
-					}
-					return nil
-				}); err != nil {
+
+			queries := map[string]string{
+				"missing member":  `DELETE FROM fugue_platform_expected_consumer_sets WHERE scope_key=$1 AND artifact_kind='caddy_route_config'`,
+				"failed probe":    `UPDATE fugue_platform_consumer_instances SET probe_status='failed' WHERE scope_key=$1`,
+				"expired":         `UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '1 hour' WHERE scope_key=$1`,
+				"wrong fence":     `UPDATE fugue_platform_consumer_instances SET fencing_token=fencing_token+1 WHERE scope_key=$1`,
+				"unverified":      `UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE scope_key=$1`,
+				"frozen":          `UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`,
+				"missing policy":  `DELETE FROM fugue_platform_artifacts WHERE scope_key=$1 AND artifact_kind='policy_snapshot'`,
+				"tampered policy": `UPDATE fugue_platform_artifacts SET content_json=content_json||'{"tampered":true}'::jsonb WHERE scope_key=$1 AND artifact_kind='policy_snapshot'`,
+			}
+			if query := queries[scenario]; query != "" {
+				if _, err := s.db.Exec(query, scope); err != nil {
 					t.Fatal(err)
 				}
-			} else {
-				queries := map[string]string{
-					"missing member":  `DELETE FROM fugue_platform_expected_consumer_sets WHERE scope_key=$1 AND artifact_kind='caddy_route_config'`,
-					"failed probe":    `UPDATE fugue_platform_consumer_instances SET probe_status='failed' WHERE scope_key=$1`,
-					"expired":         `UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '1 hour' WHERE scope_key=$1`,
-					"wrong fence":     `UPDATE fugue_platform_consumer_instances SET fencing_token=fencing_token+1 WHERE scope_key=$1`,
-					"unverified":      `UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE scope_key=$1`,
-					"frozen":          `UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`,
-					"missing policy":  `DELETE FROM fugue_platform_artifacts WHERE scope_key=$1 AND artifact_kind='policy_snapshot'`,
-					"tampered policy": `UPDATE fugue_platform_artifacts SET content_json=content_json||'{"tampered":true}'::jsonb WHERE scope_key=$1 AND artifact_kind='policy_snapshot'`,
-				}
-				if query := queries[scenario]; query != "" {
-					if _, err := s.db.Exec(query, scope); err != nil {
-						t.Fatal(err)
-					}
-				}
 			}
+
 			verify := func() error {
 				_, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(f.release.ID, request, testPlatformPrincipal())
 				return err
@@ -242,47 +249,5 @@ func testTrafficLKGAtomicRecovery(t *testing.T, address string) {
 				t.Fatal("retry rewrote recovery evidence", err)
 			}
 		})
-	}
-}
-
-// Report a new publication through the real identity/replay-checked ingress.
-func reportTrafficLKGFixture(t *testing.T, s *Store, f promotionFixture) {
-	t.Helper()
-	for _, previous := range f.sets {
-		set := clonePlatformExpectedConsumerSet(previous)
-		set.ID = model.NewID("expected")
-		set.Revision += 10
-		set.ArtifactReleaseID = f.release.ID
-		if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
-			t.Fatal(err)
-		}
-		for _, consumer := range f.consumers {
-			if consumer.ArtifactKind != set.ArtifactKind {
-				continue
-			}
-			now := time.Now().UTC()
-			keys := platformcontrol.PlatformComponentIdentityKeyring{ActiveKeyID: "key", Keys: map[string]string{"key": "synthetic-serving-identity"}}
-			claims := platformcontrol.PlatformComponentIdentityClaims{CredentialID: "credential", TokenID: "token", Component: consumer.Component, NodeID: consumer.NodeID, ScopeKey: consumer.ScopeKey, ArtifactKinds: []string{consumer.ArtifactKind}}
-			token, err := platformcontrol.IssuePlatformComponentIdentity(keys, claims, now, time.Minute)
-			if err != nil {
-				t.Fatal(err)
-			}
-			claims, err = platformcontrol.ParsePlatformComponentIdentity(keys, token, now)
-			if err != nil {
-				t.Fatal(err)
-			}
-			heartbeat := platformcontrol.PlatformConsumerHeartbeatEnvelope{ConsumerID: consumer.ConsumerID, Component: consumer.Component, NodeID: consumer.NodeID, ArtifactKind: consumer.ArtifactKind, ScopeKey: consumer.ScopeKey, ReleaseSetID: f.parent.ID, ExpectedConsumerSetID: set.ID, FencingToken: f.release.FencingToken, ProtocolVersion: "v1", SchemaVersion: "v1", Sequence: consumer.Sequence + 1, IssuedAt: now, Nonce: fmt.Sprintf("%032d", now.UnixNano()), GenerationSequence: consumer.GenerationSequence, DesiredGeneration: consumer.DesiredGeneration, ActualGeneration: consumer.ActualGeneration, LKGGeneration: consumer.LKGGeneration, ApplyStatus: "applied", ProbeStatus: "passed"}
-			if f.release.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow {
-				heartbeat.ApplyStatus, heartbeat.ProbeStatus = "staged", "shadow_validated"
-				heartbeat.CandidateGeneration, heartbeat.ActualGeneration, heartbeat.LKGGeneration = heartbeat.DesiredGeneration, "", ""
-			}
-			heartbeat.EvidenceHash, err = platformcontrol.ComputePlatformConsumerHeartbeatEvidenceHash(heartbeat)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, heartbeat, now, platformcontrol.PlatformConsumerHeartbeatValidationPolicy{}); err != nil {
-				t.Fatal(err)
-			}
-		}
 	}
 }

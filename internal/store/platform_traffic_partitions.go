@@ -15,7 +15,7 @@ import (
 // The producer already holds the target scope, full lane and LKG locks. Repeat
 // retention's source/fence/expiry checks at gray, full and verification, so a
 // slow rollout cannot publish expired evidence or rebase it to a new baseline.
-func validateRetainedTrafficBaseline(state *model.State, parent model.PlatformArtifact, baseline model.PlatformArtifactRelease, lkg model.PlatformLKGSnapshot, now time.Time, keys bundleauth.Keyring) error {
+func validateRetainedTrafficBaseline(state *storeProjection, parent model.PlatformArtifact, baseline model.PlatformArtifactRelease, lkg model.PlatformLKGSnapshot, now time.Time, keys bundleauth.Keyring) error {
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok {
 		return ErrConflict

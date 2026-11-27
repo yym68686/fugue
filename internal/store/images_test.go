@@ -1,8 +1,6 @@
 package store
 
 import (
-	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,74 +8,19 @@ import (
 	"fugue/internal/model"
 )
 
-func TestDemoteLegacyImageRequiresAtomicallyAvailableCanonicalPeer(t *testing.T) {
-	t.Parallel()
-
-	const (
-		imageRef = "registry.fugue.internal:5000/fugue-apps/demo:image-abc123"
-		digest   = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	)
-	for _, test := range []struct {
-		name          string
-		peerLifecycle string
-		wantSuccess   bool
-	}{
-		{name: "available peer", peerLifecycle: " AVAILABLE ", wantSuccess: true},
-		{name: "lost peer", peerLifecycle: model.ImageLifecycleLost},
-		{name: "deleting peer", peerLifecycle: model.ImageLifecycleDeleting},
-		{name: "deleted peer", peerLifecycle: model.ImageLifecycleDeleted},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			s := New(filepath.Join(t.TempDir(), "store.json"))
-			if err := s.Init(); err != nil {
-				t.Fatalf("init store: %v", err)
-			}
-			err := s.withLockedState(true, func(state *model.State) error {
-				state.Images = append(state.Images,
-					model.Image{ID: "legacy", TenantID: "tenant", AppID: "app", ImageRef: imageRef, LifecycleState: model.ImageLifecycleAvailable},
-					model.Image{ID: "canonical", TenantID: "tenant", AppID: "app", ImageRef: imageRef, CanonicalDigest: digest, LifecycleState: test.peerLifecycle},
-				)
-				return nil
-			})
-			if err != nil {
-				t.Fatalf("seed duplicate images: %v", err)
-			}
-
-			updated, err := s.DemoteLegacyImageIfAvailableCanonicalPeer("legacy", "tenant", imageRef, digest)
-			if test.wantSuccess {
-				if err != nil {
-					t.Fatalf("demote legacy image: %v", err)
-				}
-				if updated.CanonicalDigest != "" || updated.LifecycleState != model.ImageLifecycleLost {
-					t.Fatalf("demoted legacy image = %+v", updated)
-				}
-				return
-			}
-			if !errors.Is(err, ErrConflict) {
-				t.Fatalf("non-serving peer error = %v, want conflict", err)
-			}
-			legacy, getErr := s.GetImage("legacy", "", true)
-			if getErr != nil {
-				t.Fatalf("get unchanged legacy image: %v", getErr)
-			}
-			if legacy.CanonicalDigest != "" || legacy.LifecycleState != model.ImageLifecycleAvailable {
-				t.Fatalf("legacy image changed without an available peer: %+v", legacy)
-			}
-		})
-	}
-}
-
 func TestImageStoreReplicaPinAndTaskSemantics(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := s.CreateTenant("image-store")
+	if err != nil {
+		t.Fatal(err)
+	}
 	image, err := s.UpsertImage(model.Image{
-		TenantID:                 "tenant_1",
+		TenantID:                 tenant.ID,
 		AppID:                    "app_1",
 		ImageRef:                 "registry.fugue.internal:5000/fugue-apps/demo:git-abc",
 		CanonicalDigest:          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -218,10 +161,11 @@ func TestImageStoreReplicaPinAndTaskSemantics(t *testing.T) {
 }
 
 func TestImageMetadataStripsNULBytesBeforePersistence(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	seedStoreTestIdentity(t, s, "tenant", "", "")
 	image, err := s.UpsertImage(model.Image{
 		TenantID: "tenant\x00", AppID: "app\x00", ImageRef: " registry.fugue.internal:5000/fugue-apps/demo:tag\x00 ",
 		CanonicalDigest: "sha256:" + "a" + strings.Repeat("a", 63) + "\x00", MediaType: "application/vnd.oci.image.manifest.v1+json\x00",

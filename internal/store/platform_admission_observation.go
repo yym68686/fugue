@@ -122,7 +122,7 @@ func (t *platformDNSReferenceTrace) finish() {
 	}
 }
 
-func beginPlatformAdmissionTrace(ctx context.Context, state *model.State) *platformAdmissionTrace {
+func beginPlatformAdmissionTrace(ctx context.Context, state *storeProjection) *platformAdmissionTrace {
 	mutation, _ := ctx.Value(platformMutationTraceKey{}).(*platformMutationTrace)
 	if mutation == nil {
 		return nil
@@ -173,11 +173,11 @@ func (t *platformAdmissionTrace) finish(err error) {
 	t.mutation.admissions = append(t.mutation.admissions, t.value)
 }
 
-func validateLeasedTrafficAdmissionObserved(ctx context.Context, state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time) error {
+func validateLeasedTrafficAdmissionObserved(ctx context.Context, state *storeProjection, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time) error {
 	return validateLeasedTrafficAdmissionWithTrace(state, parent, channel, canaryRef, keys, now, false, beginPlatformAdmissionTrace(ctx, state))
 }
 
-func validateVerifiedTrafficRecoveryAdmissionObserved(ctx context.Context, state *model.State, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) error {
+func validateVerifiedTrafficRecoveryAdmissionObserved(ctx context.Context, state *storeProjection, parent model.PlatformArtifact, channel, canaryRef string, keys bundleauth.Keyring, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) error {
 	return validateLeasedTrafficAdmissionWithTrace(state, parent, channel, canaryRef, keys, now,
 		verifiedTrafficRecovery(parent, channel, keys, now, lkg, guard), beginPlatformAdmissionTrace(ctx, state))
 }

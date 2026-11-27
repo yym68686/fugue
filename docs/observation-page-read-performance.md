@@ -13,8 +13,8 @@ replica change or hash mismatch reads the page body again, in batches of at most
 128 pages. Readers use a repeatable-read transaction; writers retain their
 transaction-scoped advisory lock. Fetched bodies must match the observed size
 and actual SHA-256 before entering the cache. Existing size, key, page
-hash and manifest checks remain enforced. The file backend and legacy checkpoint
-fallback are unchanged.
+hash and manifest checks remain enforced. The legacy PostgreSQL checkpoint
+fallback is unchanged.
 
 The regression test proves that the first read fetches page bodies and the next
 read fetches only the head and hashes while returning identical pages. The

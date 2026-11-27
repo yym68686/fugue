@@ -12,10 +12,7 @@ import (
 // source, routes, executable configuration and service bindings are not read.
 func (s *Store) ListAppWorkloadIdentitiesWithTiming(tenantID string, platformAdmin bool) ([]model.App, AppListReadTiming, error) {
 	var timing AppListReadTiming
-	if !s.usingDatabase() {
-		apps, err := s.ListAppsMetadata(tenantID, platformAdmin)
-		return apps, timing, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	query := `SELECT id, tenant_id, project_id, name, ''::text, NULL::jsonb, NULL::jsonb,

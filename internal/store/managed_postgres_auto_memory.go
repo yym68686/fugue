@@ -28,10 +28,9 @@ func (s *Store) ManagedPostgresAutoMemoryBackoffs(ctx context.Context, tenantID,
 	}
 	prefix := ManagedPostgresAutoMemoryRequestActorPrefix + "/"
 	failedAfter, completedAfter := now.Add(-6*time.Hour), now.Add(-time.Hour)
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		rows, err := s.db.QueryContext(ctx, `
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `
 SELECT service_id,
        bool_or(status IN ($5, $6, $7)),
        bool_or(status = $8)
@@ -41,46 +40,19 @@ WHERE tenant_id = $1 AND app_id = $2 AND service_id = ANY($3::text[]) AND type =
        (requested_by_type = $9 AND starts_with(requested_by_id, $10)
         AND ((status = $7 AND updated_at > $11) OR (status = $8 AND updated_at > $12))))
 GROUP BY service_id`, tenantID, appID, serviceIDs, model.OperationTypeDatabaseResize,
-			model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusFailed, model.OperationStatusCompleted,
-			model.ActorTypeSystem, prefix, failedAfter, completedAfter)
-		if err != nil {
-			return nil, fmt.Errorf("read PostgreSQL memory resize backoff: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			var backoff ManagedPostgresAutoMemoryBackoff
-			if err := rows.Scan(&id, &backoff.Blocked, &backoff.Downscale); err != nil {
-				return nil, err
-			}
-			out[id] = backoff
-		}
-		return out, rows.Err()
+		model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusFailed, model.OperationStatusCompleted,
+		model.ActorTypeSystem, prefix, failedAfter, completedAfter)
+	if err != nil {
+		return nil, fmt.Errorf("read PostgreSQL memory resize backoff: %w", err)
 	}
-	wanted := make(map[string]bool, len(serviceIDs))
-	for _, id := range serviceIDs {
-		wanted[id] = true
-	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !wanted[op.ServiceID] || strings.TrimSpace(op.TenantID) != tenantID || strings.TrimSpace(op.AppID) != appID || op.Type != model.OperationTypeDatabaseResize {
-				continue
-			}
-			state := out[op.ServiceID]
-			system := op.RequestedByType == model.ActorTypeSystem && strings.HasPrefix(op.RequestedByID, prefix)
-			switch {
-			case op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning:
-				state.Blocked = true
-			case system && op.Status == model.OperationStatusFailed && op.UpdatedAt.After(failedAfter):
-				state.Blocked = true
-			case system && op.Status == model.OperationStatusCompleted && op.UpdatedAt.After(completedAfter):
-				state.Downscale = true
-			default:
-				continue
-			}
-			out[op.ServiceID] = state
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var backoff ManagedPostgresAutoMemoryBackoff
+		if err := rows.Scan(&id, &backoff.Blocked, &backoff.Downscale); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return out, err
+		out[id] = backoff
+	}
+	return out, rows.Err()
 }

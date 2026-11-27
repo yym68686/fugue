@@ -42,7 +42,7 @@ func TestPGActiveOperationSummariesFilterBeforeReadingHistory(t *testing.T) {
 func TestListOperationSummariesOmitsDesiredState(t *testing.T) {
 	t.Parallel()
 
-	s := New(t.TempDir() + "/store.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

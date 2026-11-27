@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +13,10 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestRecoveryCapturePinsObservedImageAndSeparatesActualClaimNames(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +286,7 @@ func TestRecoveryObjectsNeverAdoptCollidingNames(t *testing.T) {
 }
 
 func TestRecoveryExpiredIntentKeepsHoldAndCanCancelWithoutRuntimeWrites(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

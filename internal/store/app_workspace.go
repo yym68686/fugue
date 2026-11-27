@@ -126,14 +126,6 @@ func validatePersistentStorageSpec(spec model.AppSpec) error {
 	return nil
 }
 
-func validateWorkspaceRuntimeState(state *model.State, runtimeID string, spec model.AppSpec) error {
-	runtimeIndex := findRuntime(state, runtimeID)
-	if runtimeIndex < 0 {
-		return ErrNotFound
-	}
-	return validateWorkspaceSpecForRuntime(spec, state.Runtimes[runtimeIndex].Type)
-}
-
 func hasMigrationBlockingPersistentWorkspace(app model.App) bool {
 	return appSpecHasMigrationBlockingPersistentWorkspace(app.Spec)
 }

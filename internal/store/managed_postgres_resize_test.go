@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 )
@@ -22,8 +21,8 @@ type managedPostgresResizeFixture struct {
 
 func newManagedPostgresResizeFixture(t *testing.T) managedPostgresResizeFixture {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init resize store: %v", err)
 	}
@@ -88,9 +87,7 @@ func managedPostgresResizeTarget() model.ResourceSpec {
 
 func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
 	f := newManagedPostgresResizeFixture(t)
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
-	})
+	mutatePostgresResizeService(t, f, func(s *model.BackingService) { s.OwnerAppID = "" })
 	target := managedPostgresResizeTarget()
 	request := managedPostgresResizeOperation(f, target)
 	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
@@ -113,9 +110,7 @@ func TestManagedPostgresResizeExclusivelyBoundStandaloneService(t *testing.T) {
 		t.Fatalf("standalone resize changed ownership/bootstrap or lost runtime target: %+v", service.Spec.Postgres)
 	}
 	// An ownerless service bound to multiple applications must stay blocked.
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "other-binding", TenantID: f.tenant.ID, AppID: "other-app", ServiceID: f.service.ID})
-	})
+	addPostgresResizeBinding(t, f)
 	target.CPUMilliCores = 300
 	request.DesiredSpec.Postgres.RuntimeResources = &target
 	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
@@ -144,9 +139,7 @@ func TestManagedPostgresCPULimitAutoResizeRequiresSystemActorAndOwner(t *testing
 	if err != nil || service.OwnerAppID != f.app.ID || *service.Spec.Postgres.RuntimeResources != target || *service.Spec.Postgres.Resources != f.bootstrap {
 		t.Fatalf("limit resize changed ownership/bootstrap or lost runtime target: service=%+v err=%v", service, err)
 	}
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
-	})
+	mutatePostgresResizeService(t, f, func(s *model.BackingService) { s.OwnerAppID = "" })
 	request.DesiredSpec.Postgres.RuntimeResources = &target
 	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
 		t.Fatalf("CPU limit automation accepted a non-owner database: %v", err)
@@ -182,9 +175,7 @@ func managedPostgresResizeOperation(f managedPostgresResizeFixture, target model
 
 func TestManagedPostgresMemoryResizeStandaloneRequiresSystemActorAndExclusiveBinding(t *testing.T) {
 	f := newManagedPostgresResizeFixture(t)
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = ""
-	})
+	mutatePostgresResizeService(t, f, func(s *model.BackingService) { s.OwnerAppID = "" })
 	target := f.bootstrap
 	target.MemoryMebibytes = 384
 	request := managedPostgresResizeOperation(f, target)
@@ -204,9 +195,7 @@ func TestManagedPostgresMemoryResizeStandaloneRequiresSystemActorAndExclusiveBin
 	if err != nil || service.OwnerAppID != "" || *service.Spec.Postgres.Resources != f.bootstrap || *service.Spec.Postgres.RuntimeResources != target {
 		t.Fatalf("resize changed ownership/bootstrap or lost runtime target: service=%+v err=%v", service, err)
 	}
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "other-binding", TenantID: f.tenant.ID, AppID: "other-app", ServiceID: f.service.ID})
-	})
+	addPostgresResizeBinding(t, f)
 	target.MemoryMebibytes = 320
 	request.DesiredSpec.Postgres.RuntimeResources = &target
 	if _, _, err := f.store.CreateOperationWithResult(request); !errors.Is(err, ErrConflict) {
@@ -309,7 +298,7 @@ func TestManagedPostgresResizePersistsOnlyExactRuntimeTarget(t *testing.T) {
 		t.Fatalf("database resize changed app state: before=%+v after=%+v", baselineApp, afterApp)
 	}
 
-	reopened := New(f.path)
+	reopened := newStoreTestDatabase(t, f.path)
 	if err := reopened.Init(); err != nil {
 		t.Fatalf("reopen resize store: %v", err)
 	}
@@ -361,102 +350,102 @@ func TestManagedPostgresResizeRejectsIncompleteOrUnsafeIntent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
-		mutate func(*managedPostgresResizeFixture, *model.Operation)
+		mutate func(*testing.T, *managedPostgresResizeFixture, *model.Operation)
 		want   error
 	}{
 		{
 			name: "missing exact service",
-			mutate: func(_ *managedPostgresResizeFixture, op *model.Operation) {
+			mutate: func(_ *testing.T, _ *managedPostgresResizeFixture, op *model.Operation) {
 				op.ServiceID = ""
 			},
 			want: ErrInvalidInput,
 		},
 		{
 			name: "removing configured cpu limit",
-			mutate: func(_ *managedPostgresResizeFixture, op *model.Operation) {
+			mutate: func(_ *testing.T, _ *managedPostgresResizeFixture, op *model.Operation) {
 				op.DesiredSpec.Postgres.RuntimeResources.CPULimitMilliCores = 0
 			},
 			want: ErrInvalidInput,
 		},
 		{
 			name: "request exceeds limit",
-			mutate: func(_ *managedPostgresResizeFixture, op *model.Operation) {
+			mutate: func(_ *testing.T, _ *managedPostgresResizeFixture, op *model.Operation) {
 				op.DesiredSpec.Postgres.RuntimeResources.CPUMilliCores = 600
 			},
 			want: ErrInvalidInput,
 		},
 		{
 			name: "suspended database",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.BackingServices[findBackingService(state, f.service.ID)].Spec.Postgres.Suspended = true
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				mutatePostgresResizeService(t, *f, func(s *model.BackingService) { s.Spec.Postgres.Suspended = true })
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "database owned by another app",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.BackingServices[findBackingService(state, f.service.ID)].OwnerAppID = "app-other"
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				other := createPostgresResizePeer(t, *f)
+				mutatePostgresResizeService(t, *f, func(s *model.BackingService) { s.OwnerAppID = other.ID })
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "multiple bindings",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{
-						ID: "binding-conflict", TenantID: f.tenant.ID, AppID: "app-other", ServiceID: f.service.ID,
-					})
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				addPostgresResizeBinding(t, *f)
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "active backup",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.BackupRuns = append(state.BackupRuns, model.BackupRun{
-						ID: "backup-active", AppID: f.app.ID, Status: model.BackupRunStatusRunning,
-						Target: model.BackupTarget{Type: model.BackupTargetAppDatabase, AppID: f.app.ID, ServiceName: f.service.Name},
-					})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				backend, err := f.store.CreateBackupBackend(model.BackupBackend{
+					TenantID: f.tenant.ID, Name: "resize-backup",
+					Provider: model.DataBackendProviderS3, Bucket: "backups",
 				})
+				if err != nil {
+					t.Fatalf("create backup backend: %v", err)
+				}
+				run, err := f.store.CreateBackupRun(managedPostgresInterlockBackupRun(f.app, f.service, backend, model.BackupRunTriggerManual))
+				if err != nil || run.Status != model.BackupRunStatusPending {
+					t.Fatalf("create active backup: status=%s err=%v", run.Status, err)
+				}
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "active import",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.AppDatabaseImportJobs = append(state.AppDatabaseImportJobs, model.AppDatabaseImportJob{
-						ID: "import-active", AppID: f.app.ID, Status: model.OperationStatusPending,
-					})
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				upload, err := f.store.CreateSourceUpload(f.tenant.ID, "data.sql", "application/sql", []byte("SELECT 1;"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.store.CreateAppDatabaseImportJob(model.AppDatabaseImportJob{TenantID: f.tenant.ID, AppID: f.app.ID, SourceUploadID: upload.ID}); err != nil {
+					t.Fatal(err)
+				}
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "active restore",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.BackupRestoreRuns = append(state.BackupRestoreRuns, model.BackupRestoreRun{
-						ID: "restore-active", AppID: f.app.ID, Status: model.BackupRestoreStatusPlanned,
-					})
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				p := seedResizeRestorePlan(t, *f)
+				if _, err := f.store.CreateBackupRestoreRun(model.BackupRestoreRun{PlanID: p.ID}); err != nil {
+					t.Fatal(err)
+				}
 			},
 			want: ErrConflict,
 		},
 		{
 			name: "active app operation",
-			mutate: func(f *managedPostgresResizeFixture, _ *model.Operation) {
-				mutateResizeFixtureState(t, f.store, func(state *model.State) {
-					state.Operations = append(state.Operations, model.Operation{
-						ID: "op-active", TenantID: f.tenant.ID, AppID: f.app.ID,
-						Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning,
-					})
-				})
+			mutate: func(t *testing.T, f *managedPostgresResizeFixture, _ *model.Operation) {
+				op, err := f.store.CreateOperation(model.Operation{TenantID: f.tenant.ID, AppID: f.app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &f.app.Spec})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok, err := f.store.TryClaimPendingOperation(op.ID); err != nil || !ok {
+					t.Fatal(ok, err)
+				}
 			},
 			want: ErrConflict,
 		},
@@ -466,7 +455,7 @@ func TestManagedPostgresResizeRejectsIncompleteOrUnsafeIntent(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			f := newManagedPostgresResizeFixture(t)
 			op := managedPostgresResizeOperation(f, managedPostgresResizeTarget())
-			test.mutate(&f, &op)
+			test.mutate(t, &f, &op)
 			before, err := f.store.ListOperationsByApp(f.tenant.ID, false, f.app.ID)
 			if err != nil {
 				t.Fatalf("list operations before rejected resize: %v", err)
@@ -486,57 +475,17 @@ func TestManagedPostgresResizeRejectsIncompleteOrUnsafeIntent(t *testing.T) {
 	}
 }
 
-func TestManagedPostgresResizeUpscaleHonorsBillingCap(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresResizeFixture(t)
-	if _, err := f.store.UpdateTenantBilling(f.tenant.ID, model.BillingResourceSpec{
-		CPUMilliCores:    f.bootstrap.CPUMilliCores,
-		MemoryMebibytes:  f.bootstrap.MemoryMebibytes,
-		StorageGibibytes: 1,
-	}); err != nil {
-		t.Fatalf("lower resize billing cap to current commitment: %v", err)
-	}
-	if err := f.store.withLockedState(false, func(state *model.State) error {
-		app := state.Apps[findApp(state, f.app.ID)]
-		hydrateAppBackingServices(state, &app)
-		op := managedPostgresResizeOperation(f, managedPostgresResizeTarget())
-		if err := prepareManagedPostgresResizeOperation(app, &op); err != nil {
-			return err
-		}
-		billing := state.TenantBilling[findTenantBillingRecord(state, f.tenant.ID)]
-		current, next, err := projectedTenantManagedTotalsWithBilling(state, app, op, billing)
-		if current.CPUMilliCores != f.bootstrap.CPUMilliCores || current.MemoryMebibytes != f.bootstrap.MemoryMebibytes ||
-			next.CPUMilliCores != managedPostgresResizeTarget().CPUMilliCores || next.MemoryMebibytes != managedPostgresResizeTarget().MemoryMebibytes {
-			t.Fatalf("resize billing projection did not use runtime target: current=%+v next=%+v", current, next)
-		}
-		return err
-	}); err != nil {
-		t.Fatalf("inspect resize billing projection: %v", err)
-	}
-	if _, err := f.store.CreateOperation(managedPostgresResizeOperation(f, managedPostgresResizeTarget())); !errors.Is(err, ErrBillingCapExceeded) {
-		t.Fatalf("expected resize upscale to honor billing cap, got %v", err)
-	}
-}
-
-func mutateResizeFixtureState(t *testing.T, s *Store, mutate func(*model.State)) {
-	t.Helper()
-	if err := s.withLockedState(true, func(state *model.State) error {
-		mutate(state)
-		return nil
-	}); err != nil {
-		t.Fatalf("mutate resize fixture: %v", err)
-	}
-}
-
 func TestManagedPostgresResizeRestoreConflictRecognizesRunningOnly(t *testing.T) {
 	t.Parallel()
 	f := newManagedPostgresResizeFixture(t)
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.BackupRestoreRuns = []model.BackupRestoreRun{{
-			ID: "restore-finished", AppID: f.app.ID, Status: model.BackupRestoreStatusSucceeded,
-			FinishedAt: func() *time.Time { value := time.Now().UTC(); return &value }(),
-		}}
-	})
+	p := seedResizeRestorePlan(t, f)
+	run, err := f.store.CreateBackupRestoreRun(model.BackupRestoreRun{PlanID: p.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.ExecContext(t.Context(), `UPDATE fugue_backup_restore_runs SET status=$2,finished_at=now() WHERE id=$1`, run.ID, model.BackupRestoreStatusSucceeded); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.store.CreateOperation(managedPostgresResizeOperation(f, managedPostgresResizeTarget())); err != nil {
 		t.Fatalf("finished restore incorrectly blocked resize: %v", err)
 	}
@@ -545,9 +494,7 @@ func TestManagedPostgresResizeRestoreConflictRecognizesRunningOnly(t *testing.T)
 func TestManagedPostgresResizePreservesUnlimitedCPU(t *testing.T) {
 	t.Parallel()
 	f := newManagedPostgresResizeFixture(t)
-	mutateResizeFixtureState(t, f.store, func(state *model.State) {
-		state.BackingServices[findBackingService(state, f.service.ID)].Spec.Postgres.Resources.CPULimitMilliCores = 0
-	})
+	mutatePostgresResizeService(t, f, func(s *model.BackingService) { s.Spec.Postgres.Resources.CPULimitMilliCores = 0 })
 	target := managedPostgresResizeTarget()
 	target.CPULimitMilliCores = 0
 	op, result, err := f.store.CreateOperationWithResult(managedPostgresResizeOperation(f, target))

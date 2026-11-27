@@ -8,39 +8,6 @@ import (
 	"strings"
 )
 
-func validateDataReferencesState(st *model.State, tenant string, spec *model.AppSpec) error {
-	if spec == nil || spec.Data == nil {
-		return nil
-	}
-	for _, ref := range spec.Data.Workspaces {
-		matches := []model.DataWorkspace{}
-		for _, ws := range st.DataWorkspaces {
-			if (ref.WorkspaceID != "" && ws.ID == ref.WorkspaceID) || (ref.WorkspaceID == "" && ws.TenantID == tenant && (ws.ID == ref.Workspace || ws.Name == ref.Workspace || ws.Slug == model.Slugify(ref.Workspace))) {
-				matches = append(matches, ws)
-			}
-		}
-		if len(matches) != 1 {
-			return ErrConflict
-		}
-		if dataRetirementJobState(st, matches[0].ID) != nil {
-			return ErrDataWorkspaceRetiring
-		}
-		if ref.Version != "" && !strings.EqualFold(ref.Version, "latest") {
-			found := false
-			for _, snapshot := range st.DataSnapshots {
-				if snapshot.WorkspaceID == matches[0].ID && snapshot.DeletedAt == nil && (snapshot.ID == ref.Version || snapshot.Version == ref.Version) {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ErrConflict
-			}
-		}
-	}
-	return nil
-}
-
 // JSON references have no FK. Hold parent key-share locks until the app or
 // operation write commits, so deletion's FOR UPDATE and reference scan cannot
 // miss a reference that was validated just before the deletion started.

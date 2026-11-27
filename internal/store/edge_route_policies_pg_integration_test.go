@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,14 +11,10 @@ import (
 	"fugue/internal/model"
 )
 
-func TestEdgeRoutePolicyExclusionFilePostgresParityAndCAS(t *testing.T) {
+func TestEdgeRoutePolicyExclusionPostgresCAS(t *testing.T) {
 	databaseURL := requireEdgePostgresTestURL(t)
-	pg := New("", databaseURL)
+	pg := New(databaseURL)
 	if err := pg.Init(); err != nil {
-		t.Fatal(err)
-	}
-	file := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := file.Init(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -56,15 +51,12 @@ func TestEdgeRoutePolicyExclusionFilePostgresParityAndCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fileInput := input
-	fileInput.Hostname, fileInput.AppID, fileInput.TenantID = "file.example.test", "file-app", "file-tenant"
-	fileCreated, err := file.PutEdgeRoutePolicyCAS(fileInput, 0, "")
-	if err != nil {
-		t.Fatal(err)
+	if pgCreated.ExclusionScope != model.EdgeExclusionScopeEdgeGroup || pgCreated.ExclusionGeneration != 1 ||
+		pgCreated.ExclusionOwnerDigest != input.ExclusionOwnerDigest || pgCreated.ExclusionReason != input.ExclusionReason {
+		t.Fatalf("unexpected initial exclusion: %+v", pgCreated)
 	}
-	assertExclusionSemanticParity(t, fileCreated, pgCreated)
 
-	second := New("", databaseURL)
+	second := New(databaseURL)
 	if err := second.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -134,12 +126,5 @@ func TestEdgeRoutePolicyExclusionFilePostgresParityAndCAS(t *testing.T) {
 	}
 	if model.EdgeRoutePolicyHasExclusions(cleared) || cleared.ExclusionGeneration != stored.ExclusionGeneration+1 {
 		t.Fatalf("PG clear did not preserve CAS semantics: %+v", cleared)
-	}
-}
-
-func assertExclusionSemanticParity(t *testing.T, file, pg model.EdgeRoutePolicy) {
-	t.Helper()
-	if file.ExclusionScope != pg.ExclusionScope || file.ExclusionOwnerDigest != pg.ExclusionOwnerDigest || file.ExclusionGeneration != pg.ExclusionGeneration || file.ExclusionReason != pg.ExclusionReason || file.MinHealthyEdgeNodes != pg.MinHealthyEdgeNodes || model.EdgeRoutePolicyExclusionLifecycleAt(file, *file.ExclusionCreatedAt) != model.EdgeRoutePolicyExclusionLifecycleAt(pg, *pg.ExclusionCreatedAt) {
-		t.Fatalf("file/PG exclusion semantics differ:\nfile=%+v\npg=%+v", file, pg)
 	}
 }

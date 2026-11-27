@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -39,7 +38,7 @@ services:
       PASSKEY_RP_ID: '${FUGUE_ENTRYPOINT_HOST:public}'
 `, "Dockerfile": "FROM scratch\nEXPOSE 3000\n",
 	})
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

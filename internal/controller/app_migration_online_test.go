@@ -1,11 +1,9 @@
 package controller
 
 import (
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestManagedClusterRuntimeForOnlineMigration(t *testing.T) {
@@ -49,7 +47,7 @@ func TestManagedClusterRuntimeForOnlineMigration(t *testing.T) {
 }
 
 func TestApplyManagedMigrationOnlineRolloutIntentRequiresManagedRuntimes(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -13,7 +13,7 @@ func TestPostgresAppPageQueryPlanUsesBoundedSortIndex(t *testing.T) {
 		t.Skip("set FUGUE_TEST_DATABASE_URL to run app pagination query-plan integration test")
 	}
 
-	stateStore := New("", databaseURL)
+	stateStore := New(databaseURL)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init postgres store: %v", err)
 	}

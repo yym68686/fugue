@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -57,18 +56,6 @@ func assertAutoMemoryBackoffs(t *testing.T, s *Store, now time.Time, ids []strin
 	if err != nil || !reflect.DeepEqual(want, got) {
 		t.Fatalf("backoffs = %#v, %v; want %#v", got, err, want)
 	}
-}
-
-func TestManagedPostgresAutoMemoryBackoffs(t *testing.T) {
-	now, ops, ids, want := autoMemoryBackoffFixture()
-	s := New(filepath.Join(t.TempDir(), "state.json"), "")
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(true, func(st *model.State) error { st.Operations = ops; return nil }); err != nil {
-		t.Fatal(err)
-	}
-	assertAutoMemoryBackoffs(t, s, now, ids, want)
 }
 
 func TestManagedPostgresAutoMemoryBackoffsPostgres(t *testing.T) {

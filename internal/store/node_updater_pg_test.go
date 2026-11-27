@@ -1,10 +1,8 @@
 package store
 
 import (
-	"database/sql"
-	"net/url"
-	"os"
 	"regexp"
+	"slices"
 	"testing"
 
 	"fugue/internal/model"
@@ -13,48 +11,56 @@ import (
 )
 
 func TestPostgresStorageRescueDeliveryOrder(t *testing.T) {
-	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("requires local PostgreSQL")
-	}
-	parsed, err := url.Parse(address)
-	if err != nil || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "localhost") {
-		t.Fatal("requires local PostgreSQL")
-	}
-	db, err := sql.Open("pgx", address)
-	if err != nil {
+	s := newStoreTestDatabase(t, "")
+	if _, err := s.db.ExecContext(t.Context(), `
+INSERT INTO fugue_node_updaters(id,status,token_prefix,token_hash,created_at,updated_at)
+VALUES ('updater','active','test','test',now(),now());
+INSERT INTO fugue_node_update_tasks(id,node_updater_id,task_type,status,payload_json,created_at,updated_at)
+SELECT id,'updater',kind,'pending',payload::jsonb,now()-age::interval,now()
+FROM (VALUES
+ ('inventory','report-lvm-localpv-inventory','{}','1 minute'),
+ ('overdue','report-image-cache-inventory','{}','31 minutes'),
+ ('rescue','expand-lvm-localpv','{}','1 second'),
+ ('prune','prune-image-cache','{}','11 minutes'),
+ ('upgrade','upgrade-node-updater','{}','1 second'),
+ ('deploy','replicate-app-image','{"priority":"deploy_blocking"}','1 second'),
+ ('capacity','refresh-join-config','{"pod_capacity_mode":"resources","dry_run":"true"}','2 seconds'),
+ ('refresh','refresh-join-config','{}','1 second'),
+ ('policy','reconcile-host-inotify-policy','{}','11 minutes'),
+ ('journald','reconcile-host-journald-policy','{}','11 minutes'),
+ ('fresh-policy','reconcile-host-inotify-policy','{}','1 minute')) AS f(id,kind,payload,age)`); err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`create temporary table fugue_node_update_tasks (
- id text, tenant_id text default '', node_updater_id text default 'test', machine_id text default '', runtime_id text default '', node_key_id text default '',
- cluster_node_name text default '',task_type text,status text default 'pending',payload_json jsonb default '{}',result_message text default '',error_message text default '',logs_json jsonb default '[]',
- requested_by_type text default '',requested_by_id text default '',created_at timestamptz default now(),updated_at timestamptz default now(),claimed_at timestamptz,completed_at timestamptz)`)
-	if err != nil {
-		t.Fatal(err)
+	want := []string{"upgrade", "overdue", "capacity", "rescue", "deploy", "journald", "policy", "prune", "inventory", "fresh-policy", "refresh"}
+	for _, limit := range []int{1, 5, 11} {
+		tasks, err := s.ListPendingNodeUpdateTasks("updater", limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(tasks))
+		for _, task := range tasks {
+			got = append(got, task.ID)
+		}
+		if !slices.Equal(got, want[:limit]) {
+			t.Fatalf("PostgreSQL delivery with limit %d: got %v, want %v", limit, got, want[:limit])
+		}
 	}
-	_, err = db.Exec(`insert into fugue_node_update_tasks(id,task_type,payload_json) values
- ('inventory','report-lvm-localpv-inventory','{}'),('rescue','expand-lvm-localpv','{}'),('prune','prune-image-cache','{}'),('upgrade','upgrade-node-updater','{}'),
- ('capacity','refresh-join-config','{"pod_capacity_mode":"resources","dry_run":"true"}'),('refresh','refresh-join-config','{}'),
- ('policy','reconcile-host-inotify-policy','{}'),('journald','reconcile-host-journald-policy','{}'),('fresh-policy','reconcile-host-inotify-policy','{}')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`UPDATE fugue_node_update_tasks SET created_at=now()-interval '11 minutes' WHERE id IN ('prune','policy','journald')`); err != nil {
-		t.Fatal(err)
-	}
-	s := &Store{databaseURL: address, db: db, dbReady: true}
-	tasks, err := s.ListPendingNodeUpdateTasks("test", 9)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tasks) != 9 {
-		t.Fatalf("missing tasks: %+v", tasks)
-	}
-	for i, want := range []string{"upgrade", "capacity", "rescue", "journald", "policy", "prune", "inventory", "fresh-policy", "refresh"} {
-		if tasks[i].ID != want {
-			t.Fatalf("Postgres order %d: got %s want %s", i, tasks[i].ID, want)
+
+	// Poll with another fresh inventory task as each waiting policy and prune
+	// completes. New periodic inventory must not starve either recovery class.
+	for i, expected := range want[5:8] {
+		if _, err := s.db.ExecContext(t.Context(),
+			`UPDATE fugue_node_update_tasks SET status='completed' WHERE id=ANY($1)`, want[:5+i]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(t.Context(), `INSERT INTO fugue_node_update_tasks
+(id,node_updater_id,task_type,status,created_at,updated_at)
+VALUES ($1,'updater','report-image-cache-inventory','pending',now(),now())`, "inventory-"+expected); err != nil {
+			t.Fatal(err)
+		}
+		tasks, err := s.ListPendingNodeUpdateTasks("updater", 1)
+		if err != nil || len(tasks) != 1 || tasks[0].ID != expected {
+			t.Fatalf("delivery after replenishing inventory: got %v, want %s: %v", tasks, expected, err)
 		}
 	}
 }

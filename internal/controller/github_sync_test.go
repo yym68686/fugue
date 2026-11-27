@@ -5,20 +5,18 @@ import (
 	"errors"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -113,7 +111,7 @@ func TestSyncGitHubAppsQueuesImportWhenCommitChanges(t *testing.T) {
 func TestSyncGitHubAppsBacksOffAndSuspendsDiscoveryFailures(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -256,7 +254,7 @@ func TestSyncGitHubAppsBacksOffAndSuspendsDiscoveryFailures(t *testing.T) {
 func TestSyncGitHubAppsRecordsDiscoveryRecovery(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -343,7 +341,7 @@ func TestSyncGitHubAppsRecordsDiscoveryRecovery(t *testing.T) {
 func TestSyncGitHubAppsQueuesImportWhenCurrentRuntimeIsHiddenInternalShared(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -453,7 +451,7 @@ func TestSyncGitHubAppsQueuesImportWhenCurrentRuntimeIsHiddenInternalShared(t *t
 func TestSyncGitHubAppsSkipsAppsWithInFlightOperations(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -523,7 +521,7 @@ func TestSyncGitHubAppsSkipsAppsWithInFlightOperations(t *testing.T) {
 func TestSyncGitHubAppsSkipsCommitThatAlreadyFailed(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -614,7 +612,7 @@ func TestSyncGitHubAppsSkipsCommitThatAlreadyFailed(t *testing.T) {
 func TestSyncGitHubAppsRetriesFailedCommitAfterBackoff(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -709,7 +707,7 @@ func TestSyncGitHubAppsRetriesFailedCommitAfterBackoff(t *testing.T) {
 func TestSyncGitHubAppsRetriesTransientControlPlaneFailureQuickly(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -804,7 +802,7 @@ func TestSyncGitHubAppsRetriesTransientControlPlaneFailureQuickly(t *testing.T) 
 func TestSyncGitHubAppsSkipsDeletedTombstoneAfterLaterFailure(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -916,7 +914,7 @@ func TestSyncGitHubAppsSkipsDeletedTombstoneAfterLaterFailure(t *testing.T) {
 func TestSyncGitHubAppsBacksOffRepeatedFailuresForSameCommit(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1028,7 +1026,7 @@ func TestSyncGitHubAppsBacksOffRepeatedFailuresForSameCommit(t *testing.T) {
 func TestSyncGitHubAppsStopsAfterThreeAutomaticFailuresForSameCommit(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1123,7 +1121,7 @@ func TestSyncGitHubAppsStopsAfterThreeAutomaticFailuresForSameCommit(t *testing.
 func TestSyncGitHubAppsManualRebuildResetsAutomaticFailureBudget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

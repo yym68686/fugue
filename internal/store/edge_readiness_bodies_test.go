@@ -15,6 +15,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 

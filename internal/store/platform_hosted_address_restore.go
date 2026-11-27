@@ -63,7 +63,7 @@ func (s *Store) ReadHostedDeclarationHistory(ctx context.Context, plan pc.Hosted
 
 // Run under the producer's scope/full/LKG transaction, after decoding the
 // signed current pin. Recover only the exact declaration the compiler got.
-func validateHostedDeclarationRestore(state *model.State, previous, parent, dns, priorDNS model.PlatformArtifact,
+func validateHostedDeclarationRestore(state *storeProjection, previous, parent, dns, priorDNS model.PlatformArtifact,
 	ref pc.PreviousTrafficPublicationReference, plan pc.HostedDeclarationRestorePlan, keys bundleauth.Keyring) error {
 	bad := fmt.Errorf("%w: shared DNS restore lacks current signed scope or offline authority", ErrConflict)
 	for _, key := range []string{"intent_digest", "policy_digest"} {

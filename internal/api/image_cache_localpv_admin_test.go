@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ import (
 func TestImageCacheInventoryAndDryRunPrunePlanAPI(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -295,7 +294,7 @@ func TestImageCacheInventoryCorrectsUnderreportedFilesystemPressure(t *testing.T
 func TestImageCacheInventoryAndLocalPVAdminListsReturnEmptyArrays(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -338,7 +337,7 @@ func TestImageCacheInventoryAndLocalPVAdminListsReturnEmptyArrays(t *testing.T) 
 func TestLocalPVInventoryAPIRecomputesEligibility(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -419,10 +418,14 @@ func TestImageCachePrunePlanClassifiesStaleReplicaAPI(t *testing.T) {
 	t.Parallel()
 
 	stateStore, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Stale Replica API Tenant")
+	tenants, err := stateStore.ListTenants()
+	if err != nil || len(tenants) != 1 {
+		t.Fatalf("list tenants: tenants=%+v err=%v", tenants, err)
+	}
 	digest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	reportImageCacheTestManifest(t, server, updaterToken, digest)
 	image, err := stateStore.UpsertImage(model.Image{
-		TenantID:        "tenant_1",
+		TenantID:        tenants[0].ID,
 		AppID:           "app_1",
 		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
 		CanonicalDigest: digest,
@@ -534,10 +537,14 @@ func TestImageCachePrunePlanClassifiesDeletedGenerationAPI(t *testing.T) {
 	t.Parallel()
 
 	stateStore, adminSecret, updaterToken, server := newImageCacheAdminAPITest(t, "Deleted Generation API Tenant")
+	tenants, err := stateStore.ListTenants()
+	if err != nil || len(tenants) != 1 {
+		t.Fatalf("list tenants: tenants=%+v err=%v", tenants, err)
+	}
 	digest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	reportImageCacheTestManifest(t, server, updaterToken, digest)
 	if _, err := stateStore.UpsertImage(model.Image{
-		TenantID:        "tenant_1",
+		TenantID:        tenants[0].ID,
 		AppID:           "app_1",
 		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
 		CanonicalDigest: digest,
@@ -801,7 +808,7 @@ func TestImageCacheInventoryChunkedSnapshotMarksMissingManifestsAbsent(t *testin
 
 func newImageCacheAdminAPITest(t *testing.T, tenantName string) (*store.Store, string, string, *Server) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

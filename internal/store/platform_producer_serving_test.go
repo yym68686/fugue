@@ -4,17 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
+	"fugue/internal/platformproducer"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/model"
-	"fugue/internal/platformconfig"
-	"fugue/internal/platformcontrol"
-	"fugue/internal/platformproducer"
 )
 
 type servingFixture struct {
@@ -27,19 +26,11 @@ type servingFixture struct {
 	coldObjects *archiveTestObjects
 }
 
-func newServingFixture(t *testing.T, dsn string, legacyPolicyInput ...bool) servingFixture {
+func newServingFixture(t *testing.T, _ string, legacyPolicyInput ...bool) servingFixture {
 	t.Helper()
-	s := New(t.TempDir()+"/state.json", dsn)
-	if dsn != "" {
-		db, isolated, _ := hotInventoryTestDatabase(t)
-		s = &Store{db: db, databaseURL: isolated}
-	}
+	db, isolated, _ := hotInventoryTestDatabase(t)
+	s := &Store{db: db, databaseURL: isolated}
 	configureTestPlatformArtifactSigning(s)
-	if dsn == "" {
-		if err := s.Init(); err != nil {
-			t.Fatal(err)
-		}
-	}
 	var coldDigest string
 	var coldObjects *archiveTestObjects
 	if len(legacyPolicyInput) > 0 && legacyPolicyInput[0] {
@@ -118,11 +109,6 @@ func (f servingFixture) candidate(t *testing.T) model.PlatformArtifact {
 	compiled, err := platformconfig.Compile(request)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if f.s.db == nil {
-		if err := f.s.EnsurePlatformCompilerInput(compiled.InputSnapshot, compiled.Lineage.InputSnapshotDigest); err != nil {
-			t.Fatal("persist file-store fixture compiler input", err)
-		}
 	}
 	prepareCompiledInputPin(t, f.s, compiled)
 	save := func(a model.PlatformArtifact) model.PlatformArtifact {
@@ -226,21 +212,11 @@ func prepareProducedPublication(t *testing.T, s *Store, parent model.PlatformArt
 func ageProducerPublication(t *testing.T, s *Store, id string, age time.Duration) {
 	t.Helper()
 	when := time.Now().Add(-age)
-	if s.usingDatabase() {
-		if _, err := s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_at=$2 WHERE id=$1`, id, when); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	if err := s.withLockedState(true, func(st *model.State) error {
-		st.PlatformArtifactReleases[platformArtifactReleaseIndex(st.PlatformArtifactReleases, id)].ReleasedAt = when
-		return nil
-	}); err != nil {
+	if _, err := s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_at=$2 WHERE id=$1`, id, when); err != nil {
 		t.Fatal(err)
 	}
+	return
 }
-
-func TestProducedTrafficLifecycle(t *testing.T) { testProducedTrafficLifecycle(t, "") }
 
 func assertProducedExpectationsPublished(t *testing.T, s *Store, parent model.PlatformArtifact, release model.PlatformArtifactRelease) {
 	t.Helper()
@@ -281,6 +257,7 @@ func TestProducedTrafficLifecyclePostgres(t *testing.T) {
 	}
 	testProducedTrafficLifecycle(t, dsn)
 }
+
 func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 	f := newServingFixture(t, dsn)
 	s := f.s
@@ -310,24 +287,24 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 		t.Fatal(err)
 	}
 	reportProducedPublication(t, s, candidate, shadow, true)
-	if s.db != nil {
-		// Failure to persist even one expectation must roll back the release,
-		// its supersession and lane pointer in the same PostgreSQL transaction.
-		if _, err := s.db.Exec(`CREATE FUNCTION fugue_test_reject_expectation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected expectation failure'; END $$`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.db.Exec(`CREATE TRIGGER fugue_test_reject_expectation BEFORE INSERT ON fugue_platform_expected_consumer_sets FOR EACH ROW EXECUTE FUNCTION fugue_test_reject_expectation()`); err != nil {
-			t.Fatal(err)
-		}
-		_, _, _, _, failed := s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "gray", baseline.release.ID, full.ID, lkg.ArtifactID, "cohort=test", p)
-		if _, err := s.db.Exec(`DROP TRIGGER fugue_test_reject_expectation ON fugue_platform_expected_consumer_sets; DROP FUNCTION fugue_test_reject_expectation()`); err != nil {
-			t.Fatal(err)
-		}
-		_, unchanged, found, err := s.GetActivePlatformArtifact(candidate.ArtifactKind, candidate.ScopeKey, "gray")
-		if failed == nil || err != nil || !found || unchanged.ID != baseline.release.ID {
-			t.Fatal("failed expectation insert exposed a new release", failed, unchanged, err)
-		}
+
+	// Failure to persist even one expectation must roll back the release,
+	// its supersession and lane pointer in the same PostgreSQL transaction.
+	if _, err := s.db.Exec(`CREATE FUNCTION fugue_test_reject_expectation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected expectation failure'; END $$`); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`CREATE TRIGGER fugue_test_reject_expectation BEFORE INSERT ON fugue_platform_expected_consumer_sets FOR EACH ROW EXECUTE FUNCTION fugue_test_reject_expectation()`); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, failed := s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "gray", baseline.release.ID, full.ID, lkg.ArtifactID, "cohort=test", p)
+	if _, err := s.db.Exec(`DROP TRIGGER fugue_test_reject_expectation ON fugue_platform_expected_consumer_sets; DROP FUNCTION fugue_test_reject_expectation()`); err != nil {
+		t.Fatal(err)
+	}
+	_, unchanged, found, err := s.GetActivePlatformArtifact(candidate.ArtifactKind, candidate.ScopeKey, "gray")
+	if failed == nil || err != nil || !found || unchanged.ID != baseline.release.ID {
+		t.Fatal("failed expectation insert exposed a new release", failed, unchanged, err)
+	}
+
 	_, gray, _, _, err := s.ReleaseProducedTrafficArtifact(candidate.ID, f.authority.ID, "gray", baseline.release.ID, full.ID, lkg.ArtifactID, "cohort=test", p)
 	if err != nil {
 		t.Fatal("gray", err)
@@ -352,55 +329,55 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 	}
 	reportProducedPublication(t, s, candidate, next, true)
 	ageProducerPublication(t, s, next.ID, 2*time.Second)
-	if dsn != "" {
-		// The policy is revoked while a verification transaction waits for its
-		// scope lock: the guard must read the committed revocation, not a
-		// preflight snapshot. No serving or recovery pointer may change.
-		tx, err := s.db.BeginTx(context.Background(), nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tx.Rollback()
-		if err = pgLockPromotionScope(context.Background(), tx, platformproducer.Scope, true); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan error, 1)
-		go func() {
-			_, _, _, _, err := s.VerifyProducedTrafficLKG(next.ID, f.authority.ID, lkg.ArtifactID, completePlatformVerificationRequest(next.FencingToken, false), p)
-			done <- err
-		}()
-		deadline := time.Now().Add(5 * time.Second)
-		for {
-			var n int
-			if err = s.db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND wait_event='advisory'`).Scan(&n); err != nil {
-				t.Fatal(err)
-			}
-			if n > 0 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("verification did not acquire policy scope before mutable reads")
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		if _, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`, platformproducer.Scope); err != nil {
-			t.Fatal(err)
-		}
-		if err = tx.Commit(); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case err := <-done:
-			if !errors.Is(err, ErrConflict) {
-				t.Fatal("queued verification ignored revocation", err)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("verification deadlocked")
-		}
-		if _, err = s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=false WHERE scope_key=$1`, platformproducer.Scope); err != nil {
-			t.Fatal(err)
-		}
+
+	// The policy is revoked while a verification transaction waits for its
+	// scope lock: the guard must read the committed revocation, not a
+	// preflight snapshot. No serving or recovery pointer may change.
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer tx.Rollback()
+	if err = pgLockPromotionScope(context.Background(), tx, platformproducer.Scope, true); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, _, err := s.VerifyProducedTrafficLKG(next.ID, f.authority.ID, lkg.ArtifactID, completePlatformVerificationRequest(next.FencingToken, false), p)
+		done <- err
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		if err = s.db.QueryRow(`SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND wait_event='advisory'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("verification did not acquire policy scope before mutable reads")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`, platformproducer.Scope); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrConflict) {
+			t.Fatal("queued verification ignored revocation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("verification deadlocked")
+	}
+	if _, err = s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=false WHERE scope_key=$1`, platformproducer.Scope); err != nil {
+		t.Fatal(err)
+	}
+
 	_, next, _, positive, err := s.VerifyProducedTrafficLKG(next.ID, f.authority.ID, lkg.ArtifactID, request, p)
 	if err != nil {
 		t.Fatal("verify", err)
@@ -492,15 +469,6 @@ func testProducedTrafficLifecycle(t *testing.T, dsn string) {
 		before := trafficLKGState(t, s, "global")
 		if address := os.Getenv("FUGUE_TEST_DATABASE_URL"); dsn != "" && address == dsn {
 			if _, err := s.db.Exec(`UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '1 hour' WHERE scope_key='global'`); err != nil {
-				t.Fatal(err)
-			}
-		} else if dsn == "" {
-			if err := s.withLockedState(true, func(state *model.State) error {
-				for index := range state.PlatformConsumerInstances {
-					state.PlatformConsumerInstances[index].LastHeartbeatAt = time.Now().Add(-time.Hour)
-				}
-				return nil
-			}); err != nil {
 				t.Fatal(err)
 			}
 		}

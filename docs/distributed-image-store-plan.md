@@ -764,7 +764,7 @@ fugue node cache status
 - [x] Add `Image`, `ImageAlias`, `ImageReplica`, `ImagePin`, and
       `ImageReplicationTask` model structs.
 - [x] Add Postgres bootstrap DDL in `internal/store/postgres.go`.
-- [x] Add file-store support for tests and development mode.
+- [x] Use PostgreSQL for development and store-backed regression tests.
 - [x] Add store methods for upsert/list/get images, aliases, replicas, pins,
       and replication tasks.
 - [x] Add compatibility methods so current image-location handlers can read

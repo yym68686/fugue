@@ -1,7 +1,6 @@
 package store
 
 import (
-	"sort"
 	"strings"
 
 	"fugue/internal/model"
@@ -20,23 +19,6 @@ func hasInFlightOperationForApp(ops []model.Operation, appID string) bool {
 		}
 	}
 	return false
-}
-
-func activeOperationsForLifecycleTarget(ops []model.Operation, appID, serviceID string) []model.Operation {
-	appID = strings.TrimSpace(appID)
-	serviceID = strings.TrimSpace(serviceID)
-	active := make([]model.Operation, 0, 1)
-	for _, op := range ops {
-		if !isActiveOperationStatus(op.Status) {
-			continue
-		}
-		if strings.TrimSpace(op.AppID) != appID && strings.TrimSpace(op.ServiceID) != serviceID {
-			continue
-		}
-		active = append(active, op)
-	}
-	sortActiveOperations(active)
-	return active
 }
 
 func managedPostgresLifecycleRetryMatches(existing, candidate model.Operation) bool {
@@ -132,49 +114,8 @@ func isManagedPostgresExclusiveMutationOperationType(operationType string) bool 
 		operationType == model.OperationTypeDatabaseResize || operationType == storagerecovery.OperationType || operationType == pgimage.OperationType
 }
 
-func hasInFlightManagedPostgresExclusiveMutationForApp(ops []model.Operation, appID string) bool {
-	appID = strings.TrimSpace(appID)
-	for _, op := range ops {
-		if strings.TrimSpace(op.AppID) != appID ||
-			!isManagedPostgresExclusiveMutationOperationType(op.Type) ||
-			!isActiveOperationStatus(op.Status) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func hasInFlightManagedPostgresExclusiveMutationForService(ops []model.Operation, serviceID string) bool {
-	serviceID = strings.TrimSpace(serviceID)
-	for _, op := range ops {
-		if strings.TrimSpace(op.ServiceID) != serviceID ||
-			!isManagedPostgresExclusiveMutationOperationType(op.Type) ||
-			!isActiveOperationStatus(op.Status) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
 func isManagedPostgresLifecycleOperationType(operationType string) bool {
 	return operationType == model.OperationTypeDatabaseSuspend || operationType == model.OperationTypeDatabaseResume
-}
-
-func firstActiveDeployOperationForApp(ops []model.Operation, appID string) (model.Operation, bool) {
-	active := make([]model.Operation, 0, 1)
-	for _, op := range ops {
-		if op.AppID != appID || op.Type != model.OperationTypeDeploy || !isActiveOperationStatus(op.Status) {
-			continue
-		}
-		active = append(active, op)
-	}
-	if len(active) == 0 {
-		return model.Operation{}, false
-	}
-	sortActiveOperations(active)
-	return active[0], true
 }
 
 func isActiveOperationStatus(status string) bool {
@@ -184,13 +125,4 @@ func isActiveOperationStatus(status string) bool {
 	default:
 		return false
 	}
-}
-
-func sortActiveOperations(ops []model.Operation) {
-	sort.Slice(ops, func(i, j int) bool {
-		if ops[i].CreatedAt.Equal(ops[j].CreatedAt) {
-			return ops[i].ID < ops[j].ID
-		}
-		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-	})
 }

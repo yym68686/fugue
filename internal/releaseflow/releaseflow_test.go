@@ -4,23 +4,18 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestAppReleaseServicePromoteReplacesStable(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "state.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	app := releaseflowTestApp()
+	stateStore := newStoreTestDatabase(t, "")
+	app := seedReleaseflowApp(t, stateStore, releaseflowTestApp())
 	app.Spec.Continuity = &model.AppContinuityPolicy{ZeroDowntime: &model.AppZeroDowntimePolicy{
 		Enabled:               true,
 		Mode:                  model.AppZeroDowntimeModeSafe,
@@ -100,11 +95,8 @@ func TestAppReleaseServicePromoteReplacesStable(t *testing.T) {
 func TestAppReleaseServiceAbortRestoresStableTraffic(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "state.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	app := releaseflowTestApp()
+	stateStore := newStoreTestDatabase(t, "")
+	app := seedReleaseflowApp(t, stateStore, releaseflowTestApp())
 	service := AppReleaseService{
 		Store: stateStore,
 		ServiceURLForApp: func(context.Context, model.App) string {

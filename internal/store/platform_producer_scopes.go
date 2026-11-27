@@ -15,7 +15,7 @@ const maxPlatformProducerScopes = 32
 // signed current policy and publication transaction before producing output.
 func (s *Store) ListPlatformProducerScopes() ([]string, error) {
 	scopes := []string{}
-	if s.usingDatabase() {
+	{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		rows, err := s.db.QueryContext(ctx, `SELECT scope_key FROM fugue_platform_release_lanes
@@ -36,21 +36,8 @@ ORDER BY scope_key LIMIT $4`, model.PlatformArtifactKindPolicySnapshot, platform
 		if err := rows.Err(); err != nil {
 			return nil, mapDBErr(err)
 		}
-	} else {
-		if err := s.withLockedState(false, func(state *model.State) error {
-			for _, lane := range state.PlatformReleaseLanes {
-				if lane.ArtifactKind == model.PlatformArtifactKindPolicySnapshot && lane.ReleaseChannel == model.PlatformArtifactReleaseChannelShadow && lane.ActiveReleaseID != "" && platformproducer.IsPolicyScope(lane.ScopeKey) {
-					scopes = append(scopes, lane.ScopeKey)
-					if len(scopes) > maxPlatformProducerScopes {
-						return ErrConflict
-					}
-				}
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
 	}
+
 	if len(scopes) > maxPlatformProducerScopes {
 		return nil, ErrConflict
 	}

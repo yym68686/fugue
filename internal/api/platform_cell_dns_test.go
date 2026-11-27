@@ -2,8 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"net/http"
-	"os"
 	"testing"
 	"time"
 
@@ -11,88 +9,9 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/platformsafety"
 	"fugue/internal/routeprobe"
-	"fugue/internal/store"
 	"fugue/internal/testfixture/celldns"
 )
-
-func TestCellDNSAPICompilationRequiresCurrentSignedReferences(t *testing.T) {
-	for _, scenario := range []string{"complete", "untrusted embedded artifact", "obsolete publication", "wrong fence", "invalid retained TLS"} {
-		t.Run(scenario, func(t *testing.T) {
-			_, s, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
-			req := celldns.Request(t)
-			state := model.State{}
-			for i := range req.CellRoutePublications {
-				p := &req.CellRoutePublications[i]
-				for _, a := range []*model.PlatformArtifact{&p.Parent, &p.Route, &p.TLS} {
-					var err error
-					*a, err = platformsafety.SignPlatformArtifact(*a, s.bundleKeyring())
-					if err != nil {
-						t.Fatal(err)
-					}
-					state.PlatformArtifacts = append(state.PlatformArtifacts, *a)
-				}
-				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, celldns.Publication(*p))
-				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: celldns.Publication(*p).LaneKey, ArtifactKind: celldns.Publication(*p).ArtifactKind, ScopeKey: celldns.Publication(*p).ScopeKey, ReleaseChannel: celldns.Publication(*p).ReleaseChannel, ActiveReleaseID: celldns.Publication(*p).ID, FencingToken: celldns.Publication(*p).FencingToken, Version: 1, UpdatedAt: celldns.Publication(*p).ReleasedAt})
-			}
-			switch scenario {
-			case "untrusted embedded artifact":
-				req.CellRoutePublications[0].TLS.Provenance.Signature = "forged"
-			case "obsolete publication":
-				state.PlatformArtifactReleases[0].ID = "successor"
-				state.PlatformReleaseLanes[0].ActiveReleaseID = "successor"
-			case "invalid retained TLS":
-				state.PlatformArtifacts[2].Status = model.PlatformArtifactStatusDraft
-			case "wrong fence":
-
-				req.CellRoutePublications[0].Reference.FencingToken++
-				req.Intent.CellRoutePublications[0].FencingToken++
-			}
-			path := t.TempDir() + "/state.json"
-			raw, _ := json.Marshal(state)
-			if err := os.WriteFile(path, raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-			s.store = store.New(path)
-			s.store.ConfigurePlatformArtifactSigning(s.bundleKeyring())
-			request := platformConfigCompileRequest{CellRoutePublications: req.CellRoutePublications, Intent: req.Intent, Policy: req.Policy, RuntimeSnapshot: req.RuntimeSnapshot}
-			response := performJSONRequest(t, s, http.MethodPost, "/v1/admin/platform-config/compile", admin, request)
-			if scenario != "complete" {
-				if response.Code != http.StatusConflict {
-					t.Fatalf("untrusted reference response %d: %s", response.Code, response.Body.String())
-				}
-				artifacts, err := s.store.ListPlatformArtifacts(model.PlatformArtifactFilter{Limit: 100})
-				if err != nil || len(artifacts) != 6 {
-					t.Fatal("rejected reference wrote artifacts", err, len(artifacts))
-				}
-				return
-			}
-			if response.Code != http.StatusCreated {
-				t.Fatalf("compile failed %d: %s", response.Code, response.Body.String())
-			}
-			var rawResponse map[string]any
-			json.Unmarshal(response.Body.Bytes(), &rawResponse)
-			if rawResponse["route_artifact"] != nil || rawResponse["tls_artifact"] != nil || rawResponse["dns_artifact"] == nil {
-				t.Fatal("compile response does not match DNS-only contract")
-			}
-			var result platformConfigCompileResponse
-			json.Unmarshal(response.Body.Bytes(), &result)
-			if _, err := decodePlatformDNSArtifact(result.DNSArtifact); err != nil {
-				t.Fatal(err)
-			}
-			replay := performJSONRequest(t, s, http.MethodPost, "/v1/admin/platform-config/compile-from-artifacts", admin, platformConfigCompileArtifactsRequest{CellRoutePublications: req.CellRoutePublications, IntentArtifactID: result.IntentArtifact.ID, PolicyArtifactID: result.PolicyArtifact.ID, RuntimeSnapshot: req.RuntimeSnapshot})
-			if replay.Code != http.StatusCreated {
-				t.Fatalf("replay failed %d: %s", replay.Code, replay.Body.String())
-			}
-			var repeated platformConfigCompileResponse
-			json.Unmarshal(replay.Body.Bytes(), &repeated)
-			if repeated.ReleaseArtifact.ID != result.ReleaseArtifact.ID || repeated.DNSArtifact.ID != result.DNSArtifact.ID {
-				t.Fatal("replay created a different DNS publication")
-			}
-		})
-	}
-}
 
 func TestCellDNSRuntimeFactsKeepEachRouteAuthority(t *testing.T) {
 	for _, transition := range []bool{false, true} {

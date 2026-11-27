@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 )
 
 func TestRecoveredBackupRetirementFile(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +30,7 @@ func TestRecoveredBackupRetirementPostgresIntegration(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires disposable loopback fugue_test database")
 	}
-	s := New("", dsn)
+	s := New(dsn)
 	if err := s.Init(); err != nil {
 		if err := schemamigrate.MigrateEdgeInstanceFencing(context.Background(), dsn); err != nil {
 			t.Fatal(err)
@@ -120,17 +119,10 @@ func testRecoveredBackupRetirement(t *testing.T, s *Store) {
 		t.Fatalf("duplicate reference must block: %+v, %v", got, err)
 	}
 	// Any alias (including a logically deleted one) is conservatively excluded.
-	if s.usingDatabase() {
-		if _, err := s.db.Exec("DELETE FROM fugue_backup_artifacts WHERE id=$1", alias.ID); err != nil {
-			t.Fatal(err)
-		}
-	} else if err := s.withLockedState(true, func(state *model.State) error {
-		i := findBackupArtifact(state, alias.ID)
-		state.BackupArtifacts = append(state.BackupArtifacts[:i], state.BackupArtifacts[i+1:]...)
-		return nil
-	}); err != nil {
+	if _, err := s.db.Exec("DELETE FROM fugue_backup_artifacts WHERE id=$1", alias.ID); err != nil {
 		t.Fatal(err)
 	}
+
 	req.Confirmation = preview.Confirmation
 	retired, err := s.RecoveredBackupRetirement(ctx, old.ID, req, admin)
 	if err != nil || !retired.Retired || retired.AuditID == "" {

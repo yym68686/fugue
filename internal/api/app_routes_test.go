@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -213,7 +212,7 @@ func TestPatchAppRouteUpdatesHostnameAndIsIdempotent(t *testing.T) {
 func TestAppRouteEndpointsRejectBackgroundApps(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -262,7 +261,7 @@ func TestAppRouteEndpointsRejectBackgroundApps(t *testing.T) {
 func setupAppRouteTestServer(t *testing.T) (*store.Store, *Server, string, model.App, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

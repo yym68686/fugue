@@ -28,24 +28,3 @@ func consumerCursorForLaneTransition(previous model.PlatformConsumerInstance, cu
 	copy.FencingToken = nextFence
 	return &copy, nil
 }
-
-func consumerLaneTransitionInState(state *model.State, previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, nextSet model.PlatformExpectedConsumerSet, nextFence int64) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
-	var oldSet model.PlatformExpectedConsumerSet
-	for _, s := range state.ExpectedConsumerSets {
-		if s.ID == previous.ExpectedConsumerSetID {
-			oldSet = s
-			break
-		}
-	}
-	var oldRelease, nextRelease model.PlatformArtifactRelease
-	for _, r := range state.PlatformArtifactReleases {
-		if r.ID == oldSet.ArtifactReleaseID {
-			oldRelease = r
-		}
-		if r.ID == nextSet.ArtifactReleaseID {
-			nextRelease = r
-		}
-	}
-	lane, _ := platformReleaseLaneByKey(state.PlatformReleaseLanes, nextRelease.LaneKey)
-	return consumerCursorForLaneTransition(previous, cursor, oldSet, nextSet, oldRelease, nextRelease, lane, nextFence)
-}

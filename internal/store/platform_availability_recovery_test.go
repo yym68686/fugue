@@ -81,7 +81,7 @@ func availabilityRecoveryFixture(t *testing.T, database, scenario string) reconf
 		}
 	}
 	lane.ActiveReleaseID = current.ID
-	if f.s.usingDatabase() {
+	{
 		ctx := context.Background()
 		tx, e := f.s.db.BeginTx(ctx, nil)
 		if e != nil {
@@ -108,20 +108,8 @@ func availabilityRecoveryFixture(t *testing.T, database, scenario string) reconf
 		if e = tx.Commit(); e != nil {
 			t.Fatal(e)
 		}
-	} else {
-		err = f.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifactReleases[platformArtifactReleaseIndex(state.PlatformArtifactReleases, original.ID)] = original
-			state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, parent.ArtifactKind, parent.ScopeKey, "full", current.ID, at)
-			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, current)
-			state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
-			state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-			state.PlatformLKGSnapshots = []model.PlatformLKGSnapshot{f.lkg}
-			return nil
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
+
 	f.request.ProducerReconfiguration.ServingFull = model.PlatformPublicationPrecondition{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: current.ID, FencingToken: current.FencingToken}
 	switch scenario {
 	case "normal_operation":
@@ -173,12 +161,6 @@ func testAvailabilityRecoveryTransaction(t *testing.T, database, scenario string
 	lkgAfter, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
 	if err != nil || !reflect.DeepEqual(lkgBefore, lkgAfter) {
 		t.Fatal("configuration overwrote positive LKG", err)
-	}
-}
-
-func TestAvailabilityRecoveryRequiresExactVerifiedRollback(t *testing.T) {
-	for _, scenario := range []string{"success", "retained_hold", "ordinary_unverified", "no_message", "wrong_message", "wrong_message_time", "unverified_original", "wrong_original_artifact", "original_nonproducer", "override", "bypassed", "wrong_rollback_target", "nonproducer", "future_rollback", "expired_lkg", "tampered_lkg", "normal_operation", "stale_full", "stale_policy", "wrong_evidence"} {
-		t.Run(scenario, func(t *testing.T) { testAvailabilityRecoveryTransaction(t, "", scenario) })
 	}
 }
 

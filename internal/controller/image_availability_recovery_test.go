@@ -3,19 +3,21 @@ package controller
 import (
 	"context"
 	"fugue/internal/model"
-	"fugue/internal/store"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestVerifiedReplicaRestoresLostImageWithoutResurrectingRetirement(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
-	im, err := st.UpsertImage(model.Image{TenantID: "tenant_fixture", AppID: "app_fixture", ImageRef: "registry.example/demo:v1", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 1})
+	tenant, err := st.CreateTenant("image-recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	im, err := st.UpsertImage(model.Image{TenantID: tenant.ID, AppID: "app_fixture", ImageRef: "registry.example/demo:v1", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

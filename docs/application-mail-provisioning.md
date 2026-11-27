@@ -25,7 +25,7 @@ codes distinguish pending DNS, pending provider verification, missing/restricted
 platform credentials, provider limits and temporary unavailability. GET remains
 read-only and no status response proves final recipient delivery.
 
-Verification includes PostgreSQL/file-store generation and response-order fencing,
+Verification includes PostgreSQL generation and response-order fencing,
 frozen DNS projection, namespace restrictions, manual-policy conflict handling,
 the generated OpenAPI drift gate and the synchronized console contract.
 

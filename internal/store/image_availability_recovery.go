@@ -16,20 +16,8 @@ func (s *Store) RestoreLostImageAvailability(id, tenant, digest string) error {
 		return ErrInvalidInput
 	}
 	now := time.Now().UTC()
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, err := s.db.ExecContext(ctx, `UPDATE fugue_images SET lifecycle_state=$4, updated_at=$5 WHERE id=$1 AND tenant_id=$2 AND canonical_digest=$3 AND lifecycle_state=$6`, id, tenant, digest, model.ImageLifecycleAvailable, now, model.ImageLifecycleLost)
-		return mapDBErr(err)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		for i := range state.Images {
-			im := &state.Images[i]
-			if im.ID == id && im.TenantID == tenant && CanonicalImageDigest(im.CanonicalDigest) == digest && im.LifecycleState == model.ImageLifecycleLost {
-				im.LifecycleState = model.ImageLifecycleAvailable
-				im.UpdatedAt = now
-			}
-		}
-		return nil
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.db.ExecContext(ctx, `UPDATE fugue_images SET lifecycle_state=$4, updated_at=$5 WHERE id=$1 AND tenant_id=$2 AND canonical_digest=$3 AND lifecycle_state=$6`, id, tenant, digest, model.ImageLifecycleAvailable, now, model.ImageLifecycleLost)
+	return mapDBErr(err)
 }

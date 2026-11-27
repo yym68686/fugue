@@ -15,7 +15,7 @@ func TestDNSRouteSourcesValidateImmutablePolicyAndExactActivationLedger(t *testi
 			t.Run(scenario+"/transition="+map[bool]string{true: "true", false: "false"}[transition], func(t *testing.T) {
 				req, artifacts, releases := celldns.SourceAuthorizedRequest(t, transition)
 				c := celldns.Compile(t, req)
-				state := &model.State{PlatformArtifacts: artifacts, PlatformArtifactReleases: releases}
+				state := &storeProjection{PlatformArtifacts: artifacts, PlatformArtifactReleases: releases}
 				switch scenario {
 				case "superseded activation":
 					state.PlatformArtifactReleases[0].Status = model.PlatformArtifactReleaseStatusSuperseded

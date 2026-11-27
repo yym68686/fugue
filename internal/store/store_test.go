@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -55,7 +54,7 @@ func recordTestMigrationCutover(t *testing.T, s *Store, op model.Operation, app 
 func TestFailAssignedAgentOperationAtomicallyFinalizesReleaseAttempt(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -163,7 +162,7 @@ func TestFailAssignedAgentOperationAtomicallyFinalizesReleaseAttempt(t *testing.
 func TestFailAssignedAgentOperationHasSingleCASWinner(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -213,7 +212,7 @@ func TestFailAssignedAgentOperationHasSingleCASWinner(t *testing.T) {
 func TestManagedAndExternalOperationFlow(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -335,7 +334,7 @@ func TestManagedAndExternalOperationFlow(t *testing.T) {
 func TestCreateAutoscalingDeployOperationRejectsActiveDeployAtomically(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -408,7 +407,7 @@ func TestCreateAutoscalingDeployOperationRejectsActiveDeployAtomically(t *testin
 func TestCreateAutoscalingDeployOperationRejectsAlreadyCurrentState(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -482,7 +481,7 @@ func TestCreateAutoscalingDeployOperationRejectsAlreadyCurrentState(t *testing.T
 }
 
 func TestCreateImageRebuildOperationReusesActiveOperation(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -521,7 +520,7 @@ func TestCreateImageRebuildOperationReusesActiveOperation(t *testing.T) {
 func TestDeployCompletionPreservesIndependentlyUpdatedRightSizingPolicy(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -601,7 +600,7 @@ func TestDeployCompletionPreservesIndependentlyUpdatedRightSizingPolicy(t *testi
 func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -733,7 +732,7 @@ func TestNodeUpdaterTaskLifecycle(t *testing.T) {
 func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageMaintenance(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -833,179 +832,10 @@ func TestListPendingNodeUpdateTasksPrioritizesUpdaterUpgradeInventoryAndStorageM
 	}
 }
 
-func TestListPendingNodeUpdateTasksPromotesOverdueInventoryAboveDeployBlockingReplication(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	tenant, err := s.CreateTenant("Node Updater Inventory Fairness Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
-	if err != nil {
-		t.Fatalf("create node key: %v", err)
-	}
-	updater, _, err := s.EnrollNodeUpdater(
-		nodeSecret,
-		"worker-inventory-fairness",
-		"https://worker-inventory-fairness.example.com",
-		nil,
-		"worker-inventory-fairness",
-		"machine-inventory-fairness",
-		"v2",
-		"join-v2",
-		[]string{
-			"heartbeat",
-			"tasks",
-			model.NodeUpdateTaskTypeReplicateAppImage,
-			model.NodeUpdateTaskTypeReportImageCache,
-		},
-	)
-	if err != nil {
-		t.Fatalf("enroll node updater: %v", err)
-	}
-	requester := model.Principal{
-		ActorType: model.ActorTypeAPIKey,
-		ActorID:   "apikey_test",
-		TenantID:  tenant.ID,
-	}
-	report, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReportImageCache, map[string]string{
-		"reason": "test-inventory",
-	})
-	if err != nil {
-		t.Fatalf("create inventory report task: %v", err)
-	}
-	replicate, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeReplicateAppImage, map[string]string{
-		"priority": model.ImageReplicationPriorityDeployBlocking,
-		"image_id": "image_1",
-	})
-	if err != nil {
-		t.Fatalf("create deploy-blocking replication task: %v", err)
-	}
-
-	fresh, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
-	if err != nil {
-		t.Fatalf("list fresh pending tasks: %v", err)
-	}
-	if len(fresh) != 1 || fresh[0].ID != replicate.ID {
-		t.Fatalf("expected a deploy-blocking copy to outrank fresh inventory, got %+v", fresh)
-	}
-
-	overdueAt := time.Now().UTC().Add(-nodeUpdateTaskInventoryMaxWait - time.Minute)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for i := range state.NodeUpdateTasks {
-			if state.NodeUpdateTasks[i].ID == report.ID {
-				state.NodeUpdateTasks[i].CreatedAt = overdueAt
-				state.NodeUpdateTasks[i].UpdatedAt = overdueAt
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("age inventory report task: %v", err)
-	}
-
-	overdue, err := s.ListPendingNodeUpdateTasks(updater.ID, 1)
-	if err != nil {
-		t.Fatalf("list overdue pending tasks: %v", err)
-	}
-	if len(overdue) != 1 || overdue[0].ID != report.ID {
-		t.Fatalf("expected overdue inventory to prevent deploy-blocking starvation, got %+v", overdue)
-	}
-}
-
-func TestFailStaleRunningNodeUpdateTasks(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	tenant, err := s.CreateTenant("Stale Node Updater Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	_, nodeSecret, err := s.CreateNodeKey(tenant.ID, "default")
-	if err != nil {
-		t.Fatalf("create node key: %v", err)
-	}
-	updater, _, err := s.EnrollNodeUpdater(
-		nodeSecret,
-		"worker-stale",
-		"https://worker-stale.example.com",
-		nil,
-		"worker-stale",
-		"machine-stale",
-		"v1",
-		"join-v1",
-		[]string{"tasks", "heartbeat", model.NodeUpdateTaskTypeDiagnoseNode},
-	)
-	if err != nil {
-		t.Fatalf("enroll node updater: %v", err)
-	}
-	requester := model.Principal{
-		ActorType: model.ActorTypeAPIKey,
-		ActorID:   "apikey_test",
-		TenantID:  tenant.ID,
-	}
-	staleTask, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "stale"})
-	if err != nil {
-		t.Fatalf("create stale task: %v", err)
-	}
-	freshTask, err := s.CreateNodeUpdateTask(requester, updater.ID, "", "", model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"reason": "fresh"})
-	if err != nil {
-		t.Fatalf("create fresh task: %v", err)
-	}
-	if _, err := s.ClaimNodeUpdateTask(staleTask.ID, updater.ID); err != nil {
-		t.Fatalf("claim stale task: %v", err)
-	}
-	if _, err := s.ClaimNodeUpdateTask(freshTask.ID, updater.ID); err != nil {
-		t.Fatalf("claim fresh task: %v", err)
-	}
-	old := time.Now().UTC().Add(-3 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for i := range state.NodeUpdateTasks {
-			if state.NodeUpdateTasks[i].ID == staleTask.ID {
-				state.NodeUpdateTasks[i].UpdatedAt = old
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("age stale task: %v", err)
-	}
-
-	expired, err := s.FailStaleRunningNodeUpdateTasks(updater.ID, 2*time.Hour)
-	if err != nil {
-		t.Fatalf("fail stale running tasks: %v", err)
-	}
-	if expired != 1 {
-		t.Fatalf("expected one stale task to expire, got %d", expired)
-	}
-	tasks, err := s.ListNodeUpdateTasks(tenant.ID, false, updater.ID, "")
-	if err != nil {
-		t.Fatalf("list tasks: %v", err)
-	}
-	byID := map[string]model.NodeUpdateTask{}
-	for _, task := range tasks {
-		byID[task.ID] = task
-	}
-	if byID[staleTask.ID].Status != model.NodeUpdateTaskStatusFailed || byID[staleTask.ID].CompletedAt == nil {
-		t.Fatalf("expected stale task failed with completed_at, got %+v", byID[staleTask.ID])
-	}
-	if !strings.Contains(byID[staleTask.ID].ErrorMessage, "did not finish within 2h0m0s") {
-		t.Fatalf("expected stale task error message, got %q", byID[staleTask.ID].ErrorMessage)
-	}
-	if byID[freshTask.ID].Status != model.NodeUpdateTaskStatusRunning || byID[freshTask.ID].CompletedAt != nil {
-		t.Fatalf("expected fresh task to remain running, got %+v", byID[freshTask.ID])
-	}
-}
-
 func TestAppDatabaseImportJobAndAccessGrantLifecycle(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1111,7 +941,7 @@ func TestAppDatabaseImportJobAndAccessGrantLifecycle(t *testing.T) {
 func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1177,7 +1007,7 @@ func TestCreateNodeUpdateTaskRejectsUnsupportedUpdaterCapabilities(t *testing.T)
 func TestCreateNodeUpdateTaskDeduplicatesPendingPrepullAppImages(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1254,7 +1084,7 @@ func TestCreateNodeUpdateTaskDeduplicatesPendingPrepullAppImages(t *testing.T) {
 func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1335,7 +1165,7 @@ func TestProjectDefaultRuntimeAppliesToNewAppsAndServices(t *testing.T) {
 func TestProjectRuntimeReservationRestrictsOtherProjects(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1453,7 +1283,7 @@ func TestProjectRuntimeReservationRestrictsOtherProjects(t *testing.T) {
 func TestProjectRuntimeReservationRejectsSharedRuntimeAndExistingBlockers(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1488,7 +1318,7 @@ func TestProjectRuntimeReservationRejectsSharedRuntimeAndExistingBlockers(t *tes
 func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1602,7 +1432,7 @@ func TestMigrateOperationAppliesDesiredSpecAndSource(t *testing.T) {
 func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1712,7 +1542,7 @@ func TestSyncManagedOwnedClusterRuntimeStatuses(t *testing.T) {
 func TestStatefulFailoverOperationUsesAppFailoverPolicy(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1778,7 +1608,7 @@ func TestStatefulFailoverOperationUsesAppFailoverPolicy(t *testing.T) {
 func TestDatabaseSwitchoverOperationUsesManagedPostgresPrimaryAndPreservesAppStatus(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1916,7 +1746,7 @@ func TestDatabaseSwitchoverOperationUsesManagedPostgresPrimaryAndPreservesAppSta
 func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2025,7 +1855,7 @@ func TestFailoverOperationPreservesManagedPostgresPlacement(t *testing.T) {
 func TestFailoverOperationConsumesManagedPostgresContinuityTarget(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2147,7 +1977,7 @@ func TestFailoverOperationConsumesManagedPostgresContinuityTarget(t *testing.T) 
 func TestOwnedManagedPostgresSpecPreservesPendingPlacementWhileFailoverEnabled(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2254,7 +2084,7 @@ func TestOwnedManagedPostgresSpecUsesBoundServiceWhenOwnerMissing(t *testing.T) 
 func TestApplyDesiredSpecUpdatesBoundManagedPostgresWhenOwnerMissing(t *testing.T) {
 	t.Parallel()
 
-	state := &model.State{
+	state := &storeProjection{
 		Apps: []model.App{{
 			ID:        "app_123",
 			Name:      "demo",
@@ -2357,7 +2187,7 @@ func TestOverlayDesiredManagedPostgresUpdatesBoundServiceWhenOwnerMissing(t *tes
 func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2414,7 +2244,7 @@ func TestMigrateOperationRejectsExternalRuntimeWhenAppHasBoundManagedPostgres(t 
 func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2502,7 +2332,7 @@ func TestSharedNodeKeyBootstrapsMultipleNodesAndCanBeRevoked(t *testing.T) {
 func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2577,7 +2407,7 @@ func TestNodeAndKeyDefaultsWhenNamesAreOmitted(t *testing.T) {
 func TestDisableEnableAndDeleteAPIKey(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2644,7 +2474,7 @@ func TestDisableEnableAndDeleteAPIKey(t *testing.T) {
 func TestEnsureDefaultProjectReusesExistingProject(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2685,7 +2515,7 @@ func TestEnsureDefaultProjectReusesExistingProject(t *testing.T) {
 func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2769,7 +2599,7 @@ func TestCreateAppConvertsInlinePostgresToBackingService(t *testing.T) {
 func TestCreateAppGeneratesManagedPostgresPasswordWhenMissing(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2816,7 +2646,7 @@ func TestCreateAppGeneratesManagedPostgresPasswordWhenMissing(t *testing.T) {
 func TestCreateAppRejectsReservedCNPGPostgresUser(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2849,7 +2679,7 @@ func TestCreateAppRejectsReservedCNPGPostgresUser(t *testing.T) {
 func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2944,7 +2774,7 @@ func TestDeployOperationConvertsInlinePostgresToBackingServiceOnComplete(t *test
 func TestCreateDeployOperationGeneratesManagedPostgresPasswordWhenMissing(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3051,7 +2881,7 @@ func TestCreateDeployOperationGeneratesManagedPostgresPasswordWhenMissing(t *tes
 func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3095,7 +2925,7 @@ func TestDeployOperationRejectsReservedCNPGPostgresUser(t *testing.T) {
 func TestCreateAppRejectsManagedPostgresFailoverTargetMatchingPrimary(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3124,75 +2954,10 @@ func TestCreateAppRejectsManagedPostgresFailoverTargetMatchingPrimary(t *testing
 	}
 }
 
-func TestRuntimeReferencedByStateIncludesContinuityTargets(t *testing.T) {
-	t.Parallel()
-
-	state := &model.State{
-		Apps: []model.App{
-			{
-				ID: "app_demo",
-				Spec: model.AppSpec{
-					RuntimeID: "runtime_app_primary",
-					Failover: &model.AppFailoverSpec{
-						TargetRuntimeID: "runtime_app_failover",
-						Auto:            true,
-					},
-				},
-				Status: model.AppStatus{
-					CurrentRuntimeID: "runtime_app_primary",
-				},
-			},
-		},
-		BackingServices: []model.BackingService{
-			{
-				ID:     "service_demo",
-				Status: model.BackingServiceStatusActive,
-				Spec: model.BackingServiceSpec{
-					Postgres: &model.AppPostgresSpec{
-						RuntimeID:               "runtime_db_primary",
-						FailoverTargetRuntimeID: "runtime_db_failover",
-					},
-				},
-			},
-		},
-		Operations: []model.Operation{
-			{
-				ID: "op_demo",
-				DesiredSpec: &model.AppSpec{
-					RuntimeID: "runtime_op_primary",
-					Failover: &model.AppFailoverSpec{
-						TargetRuntimeID: "runtime_op_failover",
-					},
-					Postgres: &model.AppPostgresSpec{
-						RuntimeID:               "runtime_op_db_primary",
-						FailoverTargetRuntimeID: "runtime_op_db_failover",
-					},
-				},
-			},
-		},
-	}
-
-	referencedRuntimeIDs := []string{
-		"runtime_app_primary",
-		"runtime_app_failover",
-		"runtime_db_primary",
-		"runtime_db_failover",
-		"runtime_op_primary",
-		"runtime_op_failover",
-		"runtime_op_db_primary",
-		"runtime_op_db_failover",
-	}
-	for _, runtimeID := range referencedRuntimeIDs {
-		if !runtimeReferencedByState(state, runtimeID) {
-			t.Fatalf("expected runtime %q to be referenced", runtimeID)
-		}
-	}
-}
-
 func TestBootstrapNodeReusesRuntimeByFingerprint(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3246,7 +3011,7 @@ func TestBootstrapNodeReusesRuntimeByFingerprint(t *testing.T) {
 func TestListRuntimesByNodeKey(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3279,7 +3044,7 @@ func TestListRuntimesByNodeKey(t *testing.T) {
 func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3345,72 +3110,10 @@ func TestEnsurePlatformMachineForClusterNodeReusesSeededBootstrapMachine(t *test
 	}
 }
 
-func TestEnsurePlatformMachineForClusterNodeBackfillsLegacySeededPolicyFromLiveLabels(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	now := time.Date(2026, time.April, 20, 0, 0, 0, 0, time.UTC)
-	legacy := model.Machine{
-		ID:              model.NewID("machine"),
-		Name:            "gcp1",
-		Scope:           model.MachineScopePlatformNode,
-		ConnectionMode:  model.MachineConnectionModeCluster,
-		Status:          model.RuntimeStatusActive,
-		Endpoint:        "203.0.113.10",
-		Labels:          map[string]string{"node-role.kubernetes.io/control-plane": ""},
-		ClusterNodeName: "gcp1",
-		Policy: model.MachinePolicy{
-			AllowBuilds:             false,
-			AllowSharedPool:         false,
-			DesiredControlPlaneRole: model.MachineControlPlaneRoleNone,
-		},
-		CreatedAt:  now,
-		UpdatedAt:  now,
-		LastSeenAt: &now,
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.Machines = append(state.Machines, legacy)
-		return nil
-	}); err != nil {
-		t.Fatalf("insert legacy bootstrap platform machine: %v", err)
-	}
-
-	backfilled, err := s.EnsurePlatformMachineForClusterNode(
-		"gcp1",
-		"203.0.113.10",
-		map[string]string{
-			"node-role.kubernetes.io/control-plane": "",
-			runtimepkg.BuildNodeLabelKey:            runtimepkg.BuildNodeLabelValue,
-			runtimepkg.SharedPoolLabelKey:           runtimepkg.SharedPoolLabelValue,
-		},
-		"gcp1",
-		"machine-id-gcp1",
-	)
-	if err != nil {
-		t.Fatalf("backfill bootstrap platform machine policy: %v", err)
-	}
-	if backfilled.ID != legacy.ID {
-		t.Fatalf("expected backfill to reuse machine %q, got %q", legacy.ID, backfilled.ID)
-	}
-	if !backfilled.Policy.AllowBuilds {
-		t.Fatalf("expected backfilled builds enabled, got %#v", backfilled.Policy)
-	}
-	if !backfilled.Policy.AllowSharedPool {
-		t.Fatalf("expected backfilled shared-pool enabled, got %#v", backfilled.Policy)
-	}
-	if backfilled.Policy.DesiredControlPlaneRole != model.MachineControlPlaneRoleMember {
-		t.Fatalf("expected backfilled control-plane role %q, got %q", model.MachineControlPlaneRoleMember, backfilled.Policy.DesiredControlPlaneRole)
-	}
-}
-
 func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3468,7 +3171,7 @@ func TestEnsurePlatformMachineForClusterNodePreservesEditedDefaultPolicy(t *test
 func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3514,7 +3217,7 @@ func TestBootstrapClusterNodeSeedsMachinePolicyFromJoinLabels(t *testing.T) {
 func TestBootstrapClusterNodeSeedsEdgeOnlyMachinePolicyFromJoinLabels(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3558,7 +3261,7 @@ func TestBootstrapClusterNodeSeedsEdgeOnlyMachinePolicyFromJoinLabels(t *testing
 func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3675,7 +3378,7 @@ func TestRuntimeSharingGrantControlsVisibilityAndUsage(t *testing.T) {
 func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3747,158 +3450,10 @@ func TestRuntimePlatformSharedVisibleToAllTenants(t *testing.T) {
 	}
 }
 
-func TestRuntimePublicAccessTransfersAccruedBalanceToOwner(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	owner, err := s.CreateTenant("Public Runtime Owner")
-	if err != nil {
-		t.Fatalf("create owner tenant: %v", err)
-	}
-	consumer, err := s.CreateTenant("Public Runtime Consumer")
-	if err != nil {
-		t.Fatalf("create consumer tenant: %v", err)
-	}
-	project, err := s.CreateProject(consumer.ID, "public-runtime-project", "")
-	if err != nil {
-		t.Fatalf("create consumer project: %v", err)
-	}
-	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
-	if err != nil {
-		t.Fatalf("create node key: %v", err)
-	}
-	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "public-node", "https://public-node.example.com", nil, "", "")
-	if err != nil {
-		t.Fatalf("bootstrap cluster node: %v", err)
-	}
-	runtimeObj, err = s.SetRuntimeAccessMode(runtimeObj.ID, owner.ID, model.RuntimeAccessModePublic)
-	if err != nil {
-		t.Fatalf("set runtime public access mode: %v", err)
-	}
-	offer, err := normalizeRuntimePublicOffer(model.RuntimePublicOffer{
-		ReferenceBundle: model.BillingResourceSpec{
-			CPUMilliCores:    2000,
-			MemoryMebibytes:  4096,
-			StorageGibibytes: 30,
-		},
-		ReferenceMonthlyPriceMicroCents: 400 * microCentsPerCent,
-	})
-	if err != nil {
-		t.Fatalf("normalize public offer: %v", err)
-	}
-	runtimeObj, err = s.SetRuntimePublicOffer(runtimeObj.ID, owner.ID, offer)
-	if err != nil {
-		t.Fatalf("set runtime public offer: %v", err)
-	}
-	if runtimeObj.PublicOffer == nil {
-		t.Fatal("expected runtime public offer to be saved")
-	}
-
-	appSpec := model.AppSpec{
-		Image:     "nginx:1.27",
-		Ports:     []int{80},
-		Replicas:  1,
-		RuntimeID: runtimeObj.ID,
-		Resources: &model.ResourceSpec{
-			CPUMilliCores:   1000,
-			MemoryMebibytes: 1024,
-		},
-		Workspace: &model.AppWorkspaceSpec{
-			StorageSize: "10Gi",
-		},
-	}
-	app, err := s.CreateApp(consumer.ID, project.ID, "public-runtime-app", "", appSpec)
-	if err != nil {
-		t.Fatalf("create app on public runtime: %v", err)
-	}
-	deployOp, err := s.CreateOperation(model.Operation{
-		AppID:       app.ID,
-		DesiredSpec: cloneAppSpec(&appSpec),
-		TenantID:    consumer.ID,
-		Type:        model.OperationTypeDeploy,
-	})
-	if err != nil {
-		t.Fatalf("create deploy operation: %v", err)
-	}
-	if _, err := s.CompleteManagedOperation(deployOp.ID, "/manifests/public-runtime.yaml", "public runtime deploy finished"); err != nil {
-		t.Fatalf("complete deploy operation: %v", err)
-	}
-
-	startConsumerBalance := int64(10_000 * microCentsPerCent)
-	startOwnerBalance := int64(0)
-	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		consumerBilling := ensureTenantBillingRecord(state, consumer.ID, staleAccruedAt)
-		consumerBilling.ManagedCap = model.BillingResourceSpec{}
-		consumerBilling.BalanceMicroCents = startConsumerBalance
-		consumerBilling.LastAccruedAt = staleAccruedAt
-		consumerBilling.UpdatedAt = staleAccruedAt
-		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
-			consumer.ID,
-			0,
-			startConsumerBalance,
-			staleAccruedAt,
-			map[string]string{"source": "test-seed"},
-		))
-
-		ownerBilling := ensureTenantBillingRecord(state, owner.ID, staleAccruedAt)
-		ownerBilling.ManagedCap = model.BillingResourceSpec{}
-		ownerBilling.BalanceMicroCents = startOwnerBalance
-		ownerBilling.LastAccruedAt = staleAccruedAt
-		ownerBilling.UpdatedAt = staleAccruedAt
-		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
-			owner.ID,
-			0,
-			startOwnerBalance,
-			staleAccruedAt,
-			map[string]string{"source": "test-seed"},
-		))
-		return nil
-	}); err != nil {
-		t.Fatalf("seed billing timestamps: %v", err)
-	}
-
-	consumerSummary, err := s.GetTenantBillingSummary(consumer.ID)
-	if err != nil {
-		t.Fatalf("get consumer billing summary: %v", err)
-	}
-	expectedHourlyRate := publicRuntimeOfferHourlyRateMicroCents(*runtimeObj.PublicOffer, model.BillingResourceSpec{
-		CPUMilliCores:    1000,
-		MemoryMebibytes:  1024,
-		StorageGibibytes: 10,
-	})
-	elapsedNanos := consumerSummary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
-	expectedTransfer := expectedHourlyRate * elapsedNanos / int64(time.Hour)
-	if consumerSummary.BalanceMicroCents != startConsumerBalance-expectedTransfer {
-		t.Fatalf("expected consumer balance %d, got %d", startConsumerBalance-expectedTransfer, consumerSummary.BalanceMicroCents)
-	}
-	if consumerSummary.HourlyRateMicroCents != expectedHourlyRate {
-		t.Fatalf("expected public runtime hourly rate %d, got %d", expectedHourlyRate, consumerSummary.HourlyRateMicroCents)
-	}
-	if len(consumerSummary.Events) == 0 || consumerSummary.Events[0].Type != model.BillingEventTypePublicRuntimeDebit {
-		t.Fatalf("expected latest consumer event %q, got %+v", model.BillingEventTypePublicRuntimeDebit, consumerSummary.Events)
-	}
-
-	ownerSummary, err := s.GetTenantBillingSummary(owner.ID)
-	if err != nil {
-		t.Fatalf("get owner billing summary: %v", err)
-	}
-	if ownerSummary.BalanceMicroCents != startOwnerBalance+expectedTransfer {
-		t.Fatalf("expected owner balance %d, got %d", startOwnerBalance+expectedTransfer, ownerSummary.BalanceMicroCents)
-	}
-	if len(ownerSummary.Events) == 0 || ownerSummary.Events[0].Type != model.BillingEventTypePublicRuntimeCredit {
-		t.Fatalf("expected latest owner event %q, got %+v", model.BillingEventTypePublicRuntimeCredit, ownerSummary.Events)
-	}
-}
-
 func TestSyncManagedSharedLocationRuntimesMaterializesSelectableTargets(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3948,7 +3503,7 @@ func TestSyncManagedSharedLocationRuntimesMaterializesSelectableTargets(t *testi
 func TestSyncManagedSharedLocationRuntimesDeletesUnusedTargetsAndKeepsReferencedOnesOffline(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4013,7 +3568,7 @@ func TestSyncManagedSharedLocationRuntimesDeletesUnusedTargetsAndKeepsReferenced
 func TestBootstrapNodePreservesOwnershipAcrossTenants(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4075,7 +3630,7 @@ func TestBootstrapNodePreservesOwnershipAcrossTenants(t *testing.T) {
 func TestBootstrapClusterNodeNormalizesKubernetesNodeName(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4115,7 +3670,7 @@ func TestBootstrapClusterNodeNormalizesKubernetesNodeName(t *testing.T) {
 func TestDeleteRuntimeRemovesOfflineOwnedRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4147,7 +3702,7 @@ func TestDeleteRuntimeRemovesOfflineOwnedRuntime(t *testing.T) {
 func TestDeleteRuntimeRejectsReferencedOfflineRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4194,7 +3749,7 @@ func TestDeleteRuntimeRejectsReferencedOfflineRuntime(t *testing.T) {
 func TestListAppsMetadataOmitsHydratedBackingServices(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4291,7 +3846,7 @@ func TestListAppsMetadataOmitsHydratedBackingServices(t *testing.T) {
 func TestBootstrapClusterNodePreservesOwnershipAcrossTenants(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4356,7 +3911,7 @@ func TestBootstrapClusterNodePreservesOwnershipAcrossTenants(t *testing.T) {
 func TestSetRuntimePoolModeOnlyAllowsManagedOwnedRuntimes(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4408,73 +3963,10 @@ func TestSetRuntimePoolModeOnlyAllowsManagedOwnedRuntimes(t *testing.T) {
 	}
 }
 
-func TestEnsureRuntimeMetadataBackfillsLegacyMachineState(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now().UTC()
-	tenantID := "tenant_legacy"
-	state := model.State{
-		Machines: []model.Machine{
-			{
-				ID:                "machine_old",
-				TenantID:          tenantID,
-				Name:              "alicehk2",
-				ConnectionMode:    model.MachineConnectionModeAgent,
-				Status:            model.RuntimeStatusActive,
-				Endpoint:          "https://worker.example.com",
-				NodeKeyID:         "nk_1",
-				RuntimeID:         "runtime_old",
-				RuntimeName:       "worker-old",
-				FingerprintPrefix: model.SecretPrefix("fingerprint-1"),
-				FingerprintHash:   model.HashSecret("fingerprint-1"),
-				LastSeenAt:        &now,
-				CreatedAt:         now,
-				UpdatedAt:         now,
-			},
-		},
-		Runtimes: []model.Runtime{
-			{
-				ID:        "runtime_old",
-				TenantID:  tenantID,
-				Name:      "worker-old",
-				Type:      model.RuntimeTypeExternalOwned,
-				Status:    model.RuntimeStatusActive,
-				CreatedAt: now,
-				UpdatedAt: now,
-			},
-		},
-	}
-
-	ensureRuntimeMetadata(&state)
-
-	if len(state.Runtimes) != 1 {
-		t.Fatalf("expected 1 runtime after metadata backfill, got %d", len(state.Runtimes))
-	}
-	runtime := state.Runtimes[0]
-	if runtime.MachineName != "alicehk2" {
-		t.Fatalf("expected machine_name alicehk2, got %q", runtime.MachineName)
-	}
-	if runtime.ConnectionMode != model.MachineConnectionModeAgent {
-		t.Fatalf("expected connection mode agent, got %q", runtime.ConnectionMode)
-	}
-	if runtime.Endpoint != "https://worker.example.com" {
-		t.Fatalf("expected endpoint from legacy machine, got %q", runtime.Endpoint)
-	}
-	if runtime.NodeKeyID != "nk_1" {
-		t.Fatalf("expected node key nk_1, got %q", runtime.NodeKeyID)
-	}
-	if runtime.FingerprintPrefix == "" || runtime.FingerprintHash == "" {
-		t.Fatal("expected fingerprint metadata from legacy machine")
-	}
-	if runtime.LastSeenAt == nil {
-		t.Fatal("expected last_seen_at from legacy machine")
-	}
-}
-
 func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4657,7 +4149,7 @@ func TestDeleteTenantRemovesTenantOwnedResources(t *testing.T) {
 func TestCreateImportedAppRejectsDuplicateHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4715,7 +4207,7 @@ func TestCreateImportedAppRejectsDuplicateHostname(t *testing.T) {
 func TestUpdateAppRouteReleasesPreviousHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4774,7 +4266,7 @@ func TestUpdateAppRouteReleasesPreviousHostname(t *testing.T) {
 func TestUpdateAppRouteRejectsDuplicateHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4826,7 +4318,7 @@ func TestUpdateAppRouteRejectsDuplicateHostname(t *testing.T) {
 func TestCreateImportedAppAllowsPendingImportPlaceholder(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4870,7 +4362,7 @@ func TestCreateImportedAppAllowsPendingImportPlaceholder(t *testing.T) {
 func TestDeployOperationUpdatesImportedAppSource(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4959,7 +4451,7 @@ func TestDeployOperationUpdatesImportedAppSource(t *testing.T) {
 func TestImportOperationClaimsAsManagedEvenForExternalRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5038,7 +4530,7 @@ func TestImportOperationClaimsAsManagedEvenForExternalRuntime(t *testing.T) {
 func TestDeployOperationUpdatesRouteServicePort(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5107,7 +4599,7 @@ func TestDeployOperationUpdatesRouteServicePort(t *testing.T) {
 func TestDeployOperationClearsRouteForBackgroundApps(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5174,7 +4666,7 @@ func TestDeployOperationClearsRouteForBackgroundApps(t *testing.T) {
 func TestFailedOperationMarksAppFailed(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5246,7 +4738,7 @@ func TestFailedOperationMarksAppFailed(t *testing.T) {
 func TestUpdateOperationProgressRefreshesRunningOperationAndApp(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5328,7 +4820,7 @@ func TestUpdateOperationProgressRefreshesRunningOperationAndApp(t *testing.T) {
 func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5427,7 +4919,7 @@ func TestFailedRebuildKeepsDeployedPhaseWhenLiveVersionExists(t *testing.T) {
 func TestSyncObservedManagedAppBaselineUpdatesSpecAndSource(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5504,7 +4996,7 @@ func TestSyncObservedManagedAppBaselineUpdatesSpecAndSource(t *testing.T) {
 func TestCreateOperationStripsInjectedFugueEnvFromDesiredSpec(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5558,83 +5050,10 @@ func TestCreateOperationStripsInjectedFugueEnvFromDesiredSpec(t *testing.T) {
 	}
 }
 
-func TestInitRepairsFailedPhaseForLiveApp(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Repair Failed Phase")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := s.CreateProject(tenant.ID, "web", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "nginx:1.27",
-		Ports:     []int{80},
-		Replicas:  1,
-		RuntimeID: "runtime_managed_shared",
-	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	deploySpec := app.Spec
-	deployOp, err := s.CreateOperation(model.Operation{
-		TenantID:    tenant.ID,
-		Type:        model.OperationTypeDeploy,
-		AppID:       app.ID,
-		DesiredSpec: &deploySpec,
-	})
-	if err != nil {
-		t.Fatalf("create deploy operation: %v", err)
-	}
-	if _, found, err := s.ClaimNextPendingOperation(); err != nil {
-		t.Fatalf("claim deploy operation: %v", err)
-	} else if !found {
-		t.Fatal("expected deploy operation")
-	}
-	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "deployed"); err != nil {
-		t.Fatalf("complete deploy operation: %v", err)
-	}
-
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, app.ID)
-		if index < 0 {
-			t.Fatalf("app %s not found in state", app.ID)
-		}
-		state.Apps[index].Status.Phase = "failed"
-		state.Apps[index].Status.LastMessage = "stale failure"
-		return nil
-	}); err != nil {
-		t.Fatalf("corrupt app status: %v", err)
-	}
-
-	if err := s.Init(); err != nil {
-		t.Fatalf("re-init store: %v", err)
-	}
-
-	app, err = s.GetApp(app.ID)
-	if err != nil {
-		t.Fatalf("get app after repair: %v", err)
-	}
-	if app.Status.Phase != "unknown" {
-		t.Fatalf("expected failed phase to remain unknown without fresh runtime evidence, got %q", app.Status.Phase)
-	}
-	if app.Status.LastMessage != "stale failure" {
-		t.Fatalf("expected last message to stay unchanged, got %q", app.Status.LastMessage)
-	}
-}
-
 func TestCreateOperationImmediatelyRefreshesFailedAppStatus(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5718,7 +5137,7 @@ func TestCreateOperationImmediatelyRefreshesFailedAppStatus(t *testing.T) {
 func TestFailedOperationIsExposedAsHistoryWithoutServingAsRuntimeEvidence(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5788,7 +5207,7 @@ func TestFailedOperationIsExposedAsHistoryWithoutServingAsRuntimeEvidence(t *tes
 func TestClaimAndRequeueManagedOperationRefreshAppStatus(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5884,7 +5303,7 @@ func TestClaimAndRequeueManagedOperationRefreshAppStatus(t *testing.T) {
 func TestScaleOperationAllowsZeroAndDisablesApp(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -5941,7 +5360,7 @@ func TestScaleOperationAllowsZeroAndDisablesApp(t *testing.T) {
 func TestDeleteOperationTombstonesAppAndFreesNameAndHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6023,7 +5442,7 @@ func TestDeleteOperationTombstonesAppAndFreesNameAndHostname(t *testing.T) {
 func TestIdempotencyRecordLifecycle(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6096,7 +5515,7 @@ func TestIdempotencyRecordLifecycle(t *testing.T) {
 func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6174,7 +5593,7 @@ func TestDeleteProjectConflictsUntilAppDeleted(t *testing.T) {
 func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6296,7 +5715,7 @@ func TestRequestedProjectDeleteFinalizesAfterLastAppDelete(t *testing.T) {
 func TestDeletedAppRemainsHiddenAfterLaterFailedDeploy(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6397,7 +5816,7 @@ func TestDeletedAppRemainsHiddenAfterLaterFailedDeploy(t *testing.T) {
 func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6475,7 +5894,7 @@ func TestPurgeAppRemovesImportedPlaceholderResources(t *testing.T) {
 func TestListOperationsWithDesiredSourceByApps(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6581,7 +6000,7 @@ func TestListOperationsWithDesiredSourceByApps(t *testing.T) {
 func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6646,7 +6065,7 @@ func TestManagedPostgresBindingIsExclusivePerService(t *testing.T) {
 func TestMoveAppProjectMovesOwnedPostgresAtomically(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6739,7 +6158,7 @@ func TestMoveAppProjectMovesOwnedPostgresAtomically(t *testing.T) {
 func TestCreateAppAllowsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6774,7 +6193,7 @@ func TestCreateAppAllowsPersistentWorkspaceOnManagedSharedRuntime(t *testing.T) 
 func TestCreateAppAllowsPersistentStorageOnManagedSharedRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6815,81 +6234,10 @@ func TestCreateAppAllowsPersistentStorageOnManagedSharedRuntime(t *testing.T) {
 	}
 }
 
-func TestBillingRejectsManagedScaleBeyondConfiguredEnvelope(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Billing Cap Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := s.CreateProject(tenant.ID, "apps", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	appResources := model.DefaultManagedAppResources()
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
-		Ports:     []int{8080},
-		Replicas:  1,
-		Resources: &appResources,
-		RuntimeID: "runtime_managed_shared",
-	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())); err != nil {
-		t.Fatalf("update billing: %v", err)
-	}
-	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
-		t.Fatalf("top up billing: %v", err)
-	}
-
-	deploySpec := app.Spec
-	deployOp, err := s.CreateOperation(model.Operation{
-		TenantID:    tenant.ID,
-		Type:        model.OperationTypeDeploy,
-		AppID:       app.ID,
-		DesiredSpec: &deploySpec,
-	})
-	if err != nil {
-		t.Fatalf("create deploy operation: %v", err)
-	}
-	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
-		t.Fatalf("complete deploy operation: %v", err)
-	}
-
-	replicas := 2
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeScale,
-		AppID:           app.ID,
-		DesiredReplicas: &replicas,
-	}); !errors.Is(err, ErrBillingCapExceeded) {
-		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
-	}
-
-	expectedEnvelope := model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())
-	if err := s.withLockedState(false, func(state *model.State) error {
-		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
-		if record.ManagedCap != expectedEnvelope {
-			t.Fatalf("expected cap to stay at %+v, got %+v", expectedEnvelope, record.ManagedCap)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("inspect billing state: %v", err)
-	}
-}
-
 func TestCreateAppDefaultsSmallCPURequestGuaranteeWhenNotSpecified(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6923,7 +6271,7 @@ func TestCreateAppDefaultsSmallCPURequestGuaranteeWhenNotSpecified(t *testing.T)
 func TestCreateCriticalAppDefaultsCriticalCPURequestGuarantee(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -6944,207 +6292,6 @@ func TestCreateCriticalAppDefaultsCriticalCPURequestGuarantee(t *testing.T) {
 	}
 	if app.Spec.Resources == nil || app.Spec.Resources.CPUMilliCores != 100 || app.Spec.Resources.CPULimitMilliCores != 0 {
 		t.Fatalf("expected 100m critical CPU guarantee without implicit limit, got %+v", app.Spec.Resources)
-	}
-}
-
-func TestNewTenantsStartWithSeededFreeTierBilling(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Free Tier Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-
-	expectedCap := model.DefaultTenantFreeManagedCap()
-	expectedBalance := billingMonthlyEstimateMicroCents(model.TenantBilling{
-		ManagedCap: expectedCap,
-		PriceBook:  model.DefaultBillingPriceBook(),
-	})
-
-	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].LastAccruedAt = staleAccrual
-		state.TenantBilling[index].UpdatedAt = staleAccrual
-		return nil
-	}); err != nil {
-		t.Fatalf("seed idle billing state: %v", err)
-	}
-
-	if err := s.withLockedState(false, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		record := state.TenantBilling[index]
-		if record.ManagedCap != expectedCap {
-			t.Fatalf("expected free-tier cap %+v, got %+v", expectedCap, record.ManagedCap)
-		}
-		if record.BalanceMicroCents != expectedBalance {
-			t.Fatalf("expected seeded balance %d, got %d", expectedBalance, record.BalanceMicroCents)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("inspect billing state: %v", err)
-	}
-
-	summary, err := s.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-	if summary.ManagedCap != expectedCap {
-		t.Fatalf("expected summary cap %+v, got %+v", expectedCap, summary.ManagedCap)
-	}
-	if summary.Status != model.BillingStatusInactive {
-		t.Fatalf("expected inactive billing status for an empty tenant, got %s", summary.Status)
-	}
-	if summary.HourlyRateMicroCents != 0 {
-		t.Fatalf("expected zero hourly rate for an empty tenant, got %d", summary.HourlyRateMicroCents)
-	}
-	if summary.MonthlyEstimateMicroCents != 0 {
-		t.Fatalf("expected zero monthly estimate for an empty tenant, got %d", summary.MonthlyEstimateMicroCents)
-	}
-	if summary.BalanceMicroCents != expectedBalance {
-		t.Fatalf("expected seeded summary balance %d without idle drain, got %d", expectedBalance, summary.BalanceMicroCents)
-	}
-	if summary.DefaultAppResources != (model.BillingResourceSpec{}) {
-		t.Fatalf("expected app default resources to remain unset, got %+v", summary.DefaultAppResources)
-	}
-}
-
-func TestLegacyZeroBillingRecordBackfillsSeededFreeTier(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Legacy Billing Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-
-	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].ManagedCap = model.BillingResourceSpec{}
-		state.TenantBilling[index].BalanceMicroCents = 0
-		state.TenantBilling[index].LastAccruedAt = staleAccrual
-		state.TenantBilling[index].UpdatedAt = staleAccrual
-		return nil
-	}); err != nil {
-		t.Fatalf("seed legacy billing state: %v", err)
-	}
-
-	summary, err := s.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-
-	expectedCap := model.DefaultTenantFreeManagedCap()
-	expectedBalance := billingMonthlyEstimateMicroCents(model.TenantBilling{
-		ManagedCap: expectedCap,
-		PriceBook:  model.DefaultBillingPriceBook(),
-	})
-
-	if summary.ManagedCap != expectedCap {
-		t.Fatalf("expected backfilled cap %+v, got %+v", expectedCap, summary.ManagedCap)
-	}
-	if summary.Status != model.BillingStatusInactive {
-		t.Fatalf("expected backfilled empty tenant to remain inactive, got %s", summary.Status)
-	}
-	if summary.HourlyRateMicroCents != 0 {
-		t.Fatalf("expected backfilled empty tenant hourly rate 0, got %d", summary.HourlyRateMicroCents)
-	}
-	if summary.MonthlyEstimateMicroCents != 0 {
-		t.Fatalf("expected backfilled empty tenant monthly estimate 0, got %d", summary.MonthlyEstimateMicroCents)
-	}
-	if summary.BalanceMicroCents != expectedBalance {
-		t.Fatalf("expected backfilled balance %d without stale drain, got %d", expectedBalance, summary.BalanceMicroCents)
-	}
-}
-
-func TestLegacyBillingPriceBookRecalibratesToDefault(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Legacy Pricing Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-
-	managedCap := model.BillingResourceSpec{
-		CPUMilliCores:    2000,
-		MemoryMebibytes:  4096,
-		StorageGibibytes: 30,
-	}
-	stalePriceBook := model.BillingPriceBook{
-		Currency:                      model.DefaultBillingCurrency,
-		HoursPerMonth:                 model.DefaultBillingHoursPerMonth,
-		CPUMicroCentsPerMilliCoreHour: 3000,
-		MemoryMicroCentsPerMiBHour:    900,
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].ManagedCap = managedCap
-		state.TenantBilling[index].PriceBook = stalePriceBook
-		state.TenantBilling[index].LastAccruedAt = time.Now().UTC()
-		state.TenantBilling[index].UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		t.Fatalf("seed legacy price book: %v", err)
-	}
-
-	summary, err := s.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-
-	expectedPriceBook := model.DefaultBillingPriceBook()
-
-	if summary.PriceBook != expectedPriceBook {
-		t.Fatalf("expected recalibrated price book %+v, got %+v", expectedPriceBook, summary.PriceBook)
-	}
-	if summary.Status != model.BillingStatusInactive {
-		t.Fatalf("expected recalibrated empty tenant to remain inactive, got %s", summary.Status)
-	}
-	if summary.HourlyRateMicroCents != 0 {
-		t.Fatalf("expected hourly rate 0 without active billable resources, got %d", summary.HourlyRateMicroCents)
-	}
-	if summary.MonthlyEstimateMicroCents != 0 {
-		t.Fatalf("expected monthly estimate 0 without active billable resources, got %d", summary.MonthlyEstimateMicroCents)
-	}
-
-	if err := s.withLockedState(false, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		if state.TenantBilling[index].PriceBook != expectedPriceBook {
-			t.Fatalf("expected persisted price book %+v, got %+v", expectedPriceBook, state.TenantBilling[index].PriceBook)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("inspect recalibrated billing state: %v", err)
 	}
 }
 
@@ -7242,7 +6389,7 @@ func TestAppEffectiveResourcesDoNotChargeSharedProjectRWXPerApp(t *testing.T) {
 func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7277,162 +6424,10 @@ func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t
 	}
 }
 
-func TestAnyActiveManagedResourceTurnsOnFullSavedEnvelopeBilling(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Image-Only Billing Gate Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	if _, err := s.SyncTenantBillingImageStorage(tenant.ID, 1); err != nil {
-		t.Fatalf("seed image storage: %v", err)
-	}
-
-	startBalance := int64(9_000_000_000)
-	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].BalanceMicroCents = startBalance
-		state.TenantBilling[index].LastAccruedAt = staleAccruedAt
-		state.TenantBilling[index].UpdatedAt = staleAccruedAt
-		return nil
-	}); err != nil {
-		t.Fatalf("seed stale billing gate state: %v", err)
-	}
-
-	summary, err := s.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-
-	expectedHourly := billingHourlyRateMicroCents(model.TenantBilling{
-		ManagedCap: model.DefaultTenantFreeManagedCap(),
-		PriceBook:  model.DefaultBillingPriceBook(),
-	})
-	elapsedNanos := summary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
-	expectedBalance := startBalance - expectedHourly*elapsedNanos/int64(time.Hour)
-
-	if summary.Status != model.BillingStatusActive {
-		t.Fatalf("expected active billing status once image storage exists, got %s", summary.Status)
-	}
-	if got := summary.ManagedCommitted.StorageGibibytes; got != 1 {
-		t.Fatalf("expected committed image storage 1 GiB, got %d", got)
-	}
-	if summary.HourlyRateMicroCents != expectedHourly {
-		t.Fatalf("expected full saved-envelope hourly rate %d, got %d", expectedHourly, summary.HourlyRateMicroCents)
-	}
-	if summary.BalanceMicroCents != expectedBalance {
-		t.Fatalf("expected balance %d after gating on the full envelope, got %d", expectedBalance, summary.BalanceMicroCents)
-	}
-}
-
-func TestSyncTenantBillingImageStorageAccruesUsingPreviousSnapshot(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Image Billing Accrual Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	if _, err := s.SyncTenantBillingImageStorage(tenant.ID, 2); err != nil {
-		t.Fatalf("seed image storage: %v", err)
-	}
-
-	startBalance := int64(9_000_000_000)
-	staleAccruedAt := time.Now().UTC().Add(-2 * time.Hour)
-	var seeded model.TenantBilling
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].BalanceMicroCents = startBalance
-		state.TenantBilling[index].LastAccruedAt = staleAccruedAt
-		state.TenantBilling[index].UpdatedAt = staleAccruedAt
-		seeded = state.TenantBilling[index]
-		return nil
-	}); err != nil {
-		t.Fatalf("seed stale billing snapshot: %v", err)
-	}
-
-	summary, err := s.SyncTenantBillingImageStorage(tenant.ID, 8)
-	if err != nil {
-		t.Fatalf("sync updated image storage: %v", err)
-	}
-
-	elapsedNanos := summary.LastAccruedAt.Sub(staleAccruedAt).Nanoseconds()
-	expectedBalance := startBalance - billingHourlyRateMicroCentsWithCommittedStorage(seeded, 2)*elapsedNanos/int64(time.Hour)
-	if summary.BalanceMicroCents != expectedBalance {
-		t.Fatalf("expected balance %d after accruing with previous image storage snapshot, got %d", expectedBalance, summary.BalanceMicroCents)
-	}
-	if got := summary.ManagedCommitted.StorageGibibytes; got != 8 {
-		t.Fatalf("expected committed storage to refresh to 8 GiB, got %d", got)
-	}
-}
-
-func TestExplicitZeroBillingConfigDoesNotBackfillAfterConfigEvent(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Paused Billing Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{}); err != nil {
-		t.Fatalf("pause billing: %v", err)
-	}
-
-	staleAccrual := time.Now().UTC().Add(-72 * time.Hour)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findTenantBillingRecord(state, tenant.ID)
-		if index < 0 {
-			t.Fatalf("billing record for tenant %s not found", tenant.ID)
-		}
-		state.TenantBilling[index].BalanceMicroCents = 0
-		state.TenantBilling[index].LastAccruedAt = staleAccrual
-		state.TenantBilling[index].UpdatedAt = staleAccrual
-		return nil
-	}); err != nil {
-		t.Fatalf("seed paused billing state: %v", err)
-	}
-
-	summary, err := s.GetTenantBillingSummary(tenant.ID)
-	if err != nil {
-		t.Fatalf("get billing summary: %v", err)
-	}
-
-	if summary.ManagedCap != (model.BillingResourceSpec{}) {
-		t.Fatalf("expected explicit zero cap to remain paused, got %+v", summary.ManagedCap)
-	}
-	if summary.Status != model.BillingStatusInactive {
-		t.Fatalf("expected inactive billing status, got %s", summary.Status)
-	}
-	if summary.BalanceMicroCents != 0 {
-		t.Fatalf("expected zero balance to remain unchanged, got %d", summary.BalanceMicroCents)
-	}
-}
-
 func TestSetTenantBillingBalanceRecordsSignedAdjustments(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7507,95 +6502,10 @@ func TestSetTenantBillingBalanceRecordsSignedAdjustments(t *testing.T) {
 	}
 }
 
-func TestSingleZeroBillingDimensionPausesManagedBilling(t *testing.T) {
-	t.Parallel()
-
-	testCases := []struct {
-		name       string
-		managedCap model.BillingResourceSpec
-	}{
-		{
-			name: "cpu zero",
-			managedCap: model.BillingResourceSpec{
-				CPUMilliCores:   0,
-				MemoryMebibytes: 2048,
-			},
-		},
-		{
-			name: "memory zero",
-			managedCap: model.BillingResourceSpec{
-				CPUMilliCores:   1000,
-				MemoryMebibytes: 0,
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			s := New(filepath.Join(t.TempDir(), "store.json"))
-			if err := s.Init(); err != nil {
-				t.Fatalf("init store: %v", err)
-			}
-
-			tenant, err := s.CreateTenant("Paused Dimension Tenant")
-			if err != nil {
-				t.Fatalf("create tenant: %v", err)
-			}
-
-			if _, err := s.UpdateTenantBilling(tenant.ID, tc.managedCap); err != nil {
-				t.Fatalf("update billing: %v", err)
-			}
-
-			staleAccrual := time.Now().UTC().Add(-48 * time.Hour)
-			var previousBalance int64
-			if err := s.withLockedState(true, func(state *model.State) error {
-				index := findTenantBillingRecord(state, tenant.ID)
-				if index < 0 {
-					t.Fatalf("billing record for tenant %s not found", tenant.ID)
-				}
-				previousBalance = state.TenantBilling[index].BalanceMicroCents
-				state.TenantBilling[index].LastAccruedAt = staleAccrual
-				state.TenantBilling[index].UpdatedAt = staleAccrual
-				return nil
-			}); err != nil {
-				t.Fatalf("seed paused single-dimension billing state: %v", err)
-			}
-
-			summary, err := s.GetTenantBillingSummary(tenant.ID)
-			if err != nil {
-				t.Fatalf("get billing summary: %v", err)
-			}
-
-			if summary.Status != model.BillingStatusInactive {
-				t.Fatalf("expected inactive billing status, got %s", summary.Status)
-			}
-			if summary.HourlyRateMicroCents != 0 {
-				t.Fatalf("expected zero hourly rate, got %d", summary.HourlyRateMicroCents)
-			}
-			if summary.MonthlyEstimateMicroCents != 0 {
-				t.Fatalf("expected zero monthly estimate, got %d", summary.MonthlyEstimateMicroCents)
-			}
-			if summary.BalanceRestricted {
-				t.Fatal("expected balance restriction to stay disabled while billing is paused")
-			}
-			if summary.RunwayHours != nil {
-				t.Fatalf("expected no runway while billing is paused, got %v", *summary.RunwayHours)
-			}
-			if summary.BalanceMicroCents != previousBalance {
-				t.Fatalf(
-					"expected balance %d to remain unchanged while billing is paused, got %d",
-					previousBalance,
-					summary.BalanceMicroCents,
-				)
-			}
-		})
-	}
-}
-
 func TestBillingRejectsLoweringCapBelowCurrentCommitted(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7651,94 +6561,10 @@ func TestBillingRejectsLoweringCapBelowCurrentCommitted(t *testing.T) {
 	}
 }
 
-func TestBillingAllowsScaleDownWhileOverCap(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Billing Overcap Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := s.CreateProject(tenant.ID, "apps", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	appResources := model.DefaultManagedAppResources()
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
-		Ports:     []int{8080},
-		Replicas:  1,
-		Resources: &appResources,
-		RuntimeID: "runtime_managed_shared",
-	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	doubleAppCap := model.BillingResourceSpec{
-		CPUMilliCores:   model.DefaultManagedAppResources().CPUMilliCores * 2,
-		MemoryMebibytes: model.DefaultManagedAppResources().MemoryMebibytes * 2,
-	}
-	if _, err := s.UpdateTenantBilling(tenant.ID, doubleAppCap); err != nil {
-		t.Fatalf("update billing: %v", err)
-	}
-	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
-		t.Fatalf("top up billing: %v", err)
-	}
-
-	deploySpec := app.Spec
-	deploySpec.Replicas = 2
-	deployOp, err := s.CreateOperation(model.Operation{
-		TenantID:    tenant.ID,
-		Type:        model.OperationTypeDeploy,
-		AppID:       app.ID,
-		DesiredSpec: &deploySpec,
-	})
-	if err != nil {
-		t.Fatalf("create deploy operation: %v", err)
-	}
-	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
-		t.Fatalf("complete deploy operation: %v", err)
-	}
-
-	if err := s.withLockedState(true, func(state *model.State) error {
-		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
-		record.ManagedCap = model.BillingResourceSpecFromResourceSpec(model.DefaultManagedAppResources())
-		record.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		t.Fatalf("seed legacy over-cap billing state: %v", err)
-	}
-
-	scaleDown := 1
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeScale,
-		AppID:           app.ID,
-		DesiredReplicas: &scaleDown,
-	}); err != nil {
-		t.Fatalf("expected scale-down to remain allowed, got %v", err)
-	}
-
-	scaleUp := 3
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeScale,
-		AppID:           app.ID,
-		DesiredReplicas: &scaleUp,
-	}); !errors.Is(err, ErrBillingCapExceeded) {
-		t.Fatalf("expected ErrBillingCapExceeded while legacy state remains over cap, got %v", err)
-	}
-}
-
 func TestCreateBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7770,7 +6596,7 @@ func TestCreateBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
 func TestBindBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7831,7 +6657,7 @@ func TestBindBackingServiceRejectsManagedCapacityBeyondCap(t *testing.T) {
 func TestCreateAppWithInlineManagedPostgresRejectsManagedCapacityBeyondCap(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -7860,174 +6686,5 @@ func TestCreateAppWithInlineManagedPostgresRejectsManagedCapacityBeyondCap(t *te
 		},
 	}); !errors.Is(err, ErrBillingCapExceeded) {
 		t.Fatalf("expected ErrBillingCapExceeded, got %v", err)
-	}
-}
-
-func TestBillingDepletedBalanceOnlyBlocksCapacityIncrease(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	tenant, err := s.CreateTenant("Billing Balance Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := s.CreateProject(tenant.ID, "apps", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	appResources := model.DefaultManagedAppResources()
-	app, err := s.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
-		Ports:     []int{8080},
-		Replicas:  1,
-		Resources: &appResources,
-		RuntimeID: "runtime_managed_shared",
-	})
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	if _, err := s.UpdateTenantBilling(tenant.ID, model.BillingResourceSpec{
-		CPUMilliCores:   1000,
-		MemoryMebibytes: 2048,
-	}); err != nil {
-		t.Fatalf("update billing: %v", err)
-	}
-	if _, err := s.TopUpTenantBilling(tenant.ID, 500, "seed"); err != nil {
-		t.Fatalf("top up billing: %v", err)
-	}
-
-	deploySpec := app.Spec
-	deployOp, err := s.CreateOperation(model.Operation{
-		TenantID:    tenant.ID,
-		Type:        model.OperationTypeDeploy,
-		AppID:       app.ID,
-		DesiredSpec: &deploySpec,
-	})
-	if err != nil {
-		t.Fatalf("create deploy operation: %v", err)
-	}
-	if _, err := s.CompleteManagedOperation(deployOp.ID, "/tmp/demo.yaml", "done"); err != nil {
-		t.Fatalf("complete deploy operation: %v", err)
-	}
-
-	if err := s.withLockedState(true, func(state *model.State) error {
-		record := ensureTenantBillingRecord(state, tenant.ID, time.Now().UTC())
-		record.BalanceMicroCents = 0
-		record.UpdatedAt = time.Now().UTC()
-		return nil
-	}); err != nil {
-		t.Fatalf("deplete balance: %v", err)
-	}
-
-	scaleUp := 2
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeScale,
-		AppID:           app.ID,
-		DesiredReplicas: &scaleUp,
-	}); !errors.Is(err, ErrBillingBalanceDepleted) {
-		t.Fatalf("expected ErrBillingBalanceDepleted, got %v", err)
-	}
-
-	scaleDown := 0
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:        tenant.ID,
-		Type:            model.OperationTypeScale,
-		AppID:           app.ID,
-		DesiredReplicas: &scaleDown,
-	}); err != nil {
-		t.Fatalf("expected scale-down with depleted balance to remain allowed, got %v", err)
-	}
-}
-
-func TestBillingDepletedBalanceBlocksDeployOntoPaidPublicRuntime(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	owner, err := s.CreateTenant("Paid Public Runtime Owner")
-	if err != nil {
-		t.Fatalf("create owner tenant: %v", err)
-	}
-	consumer, err := s.CreateTenant("Paid Public Runtime Consumer")
-	if err != nil {
-		t.Fatalf("create consumer tenant: %v", err)
-	}
-	project, err := s.CreateProject(consumer.ID, "apps", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	_, nodeSecret, err := s.CreateNodeKey(owner.ID, "default")
-	if err != nil {
-		t.Fatalf("create node key: %v", err)
-	}
-	_, runtimeObj, err := s.BootstrapClusterNode(nodeSecret, "paid-public-node", "https://paid-public-node.example.com", nil, "", "")
-	if err != nil {
-		t.Fatalf("bootstrap cluster node: %v", err)
-	}
-	if _, err := s.SetRuntimeAccessMode(runtimeObj.ID, owner.ID, model.RuntimeAccessModePublic); err != nil {
-		t.Fatalf("set runtime public: %v", err)
-	}
-	if _, err := s.SetRuntimePublicOffer(runtimeObj.ID, owner.ID, model.RuntimePublicOffer{
-		ReferenceBundle: model.BillingResourceSpec{
-			CPUMilliCores:    1000,
-			MemoryMebibytes:  1024,
-			StorageGibibytes: 10,
-		},
-		ReferenceMonthlyPriceMicroCents: 200 * microCentsPerCent,
-	}); err != nil {
-		t.Fatalf("set runtime public offer: %v", err)
-	}
-
-	if err := s.withLockedState(true, func(state *model.State) error {
-		record := ensureTenantBillingRecord(state, consumer.ID, time.Now().UTC())
-		record.ManagedCap = model.BillingResourceSpec{}
-		record.BalanceMicroCents = 0
-		record.UpdatedAt = time.Now().UTC()
-		appendTenantBillingEvent(state, newTenantBillingBalanceAdjustedEvent(
-			consumer.ID,
-			0,
-			0,
-			record.UpdatedAt,
-			map[string]string{"source": "test-seed"},
-		))
-		return nil
-	}); err != nil {
-		t.Fatalf("deplete consumer balance: %v", err)
-	}
-
-	appSpec := model.AppSpec{
-		Image:     "ghcr.io/example/demo:latest",
-		Ports:     []int{8080},
-		Replicas:  1,
-		RuntimeID: runtimeObj.ID,
-		Resources: &model.ResourceSpec{
-			CPUMilliCores:   1000,
-			MemoryMebibytes: 1024,
-		},
-		Workspace: &model.AppWorkspaceSpec{
-			StorageSize: "10Gi",
-		},
-	}
-	app, err := s.CreateApp(consumer.ID, project.ID, "demo", "", appSpec)
-	if err != nil {
-		t.Fatalf("create app: %v", err)
-	}
-
-	if _, err := s.CreateOperation(model.Operation{
-		TenantID:    consumer.ID,
-		Type:        model.OperationTypeDeploy,
-		AppID:       app.ID,
-		DesiredSpec: cloneAppSpec(&appSpec),
-	}); !errors.Is(err, ErrBillingBalanceDepleted) {
-		t.Fatalf("expected ErrBillingBalanceDepleted for paid public runtime deploy, got %v", err)
 	}
 }

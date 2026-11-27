@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"slices"
 	"testing"
 	"time"
@@ -14,14 +13,14 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/store"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestDNSDecisionsBackendBindingAndNoPublicationSubstitution(t *testing.T) {
-	filename := t.TempDir() + "/state.json"
-	state := store.New(filename)
+	const fixtureName = "dns-decisions"
+	state := newStoreTestDatabase(t, fixtureName)
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +75,11 @@ func TestDNSDecisionsBackendBindingAndNoPublicationSubstitution(t *testing.T) {
 		json.NewEncoder(writer).Encode(snapshot)
 	}
 	fixture.install(t, server)
-	before, _ := os.ReadFile(filename)
+	db := openStoreTestSQL(t, fixtureName)
+	var before int64
+	if err := db.QueryRow(`SELECT count(*) FROM fugue_platform_release_messages`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	endpoint := "/v1/admin/platform-state/dns-decisions/" + fixture.claims.NodeID + "?hostname=target.example.test&limit=2"
 	response := performJSONRequest(t, server, http.MethodGet, endpoint, "decision-admin", nil)
 	var result platformDNSDecisionResponse
@@ -87,8 +90,11 @@ func TestDNSDecisionsBackendBindingAndNoPublicationSubstitution(t *testing.T) {
 	if response.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatal("cacheable private data")
 	}
-	after, _ := os.ReadFile(filename)
-	if string(before) != string(after) {
+	var after int64
+	if err := db.QueryRow(`SELECT count(*) FROM fugue_platform_release_messages`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
 		t.Fatal("read changed stored publication")
 	}
 	fixture.proxyHandler = func(writer http.ResponseWriter, request *http.Request) {

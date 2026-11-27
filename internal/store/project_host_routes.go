@@ -70,45 +70,7 @@ func (s *Store) EditProjectHostRoutes(ctx context.Context, projectID, hostname s
 	if projectID == "" || hostname == "" || edit == nil {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEditProjectHostRoutes(ctx, projectID, hostname, write, edit)
-	}
-	return s.withLockedState(write, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		pi, di := findProject(state, projectID), findAppDomain(state, hostname)
-		if pi < 0 || di < 0 {
-			return ErrNotFound
-		}
-		in := ProjectHostRouteInputs{Project: state.Projects[pi], Domain: cloneAppDomain(state.AppDomains[di]), Apps: projectRouteAppsForProject(state.Apps, projectID)}
-		if in.Domain.DNSMode == model.AppDomainDNSModeManaged {
-			if ri := findDNSRecord(state, in.Domain.DNSZoneID, in.Domain.DNSRecordID); ri >= 0 {
-				in.DNS = state.DNSRecords[ri]
-			}
-			for _, zone := range state.HostedZones {
-				if zone.ID == in.Domain.DNSZoneID {
-					in.Zone = zone
-					break
-				}
-			}
-		}
-		i := findProjectRouteTable(state.ProjectRouteTables, projectID)
-		if i >= 0 {
-			in.Table = cloneProjectRouteTable(state.ProjectRouteTables[i])
-		}
-		next, err := edit(in)
-		if err != nil || next == nil || !write {
-			return err
-		}
-		table := stampProjectHostRouteTable(in, *next)
-		if i < 0 {
-			state.ProjectRouteTables = append(state.ProjectRouteTables, table)
-		} else {
-			state.ProjectRouteTables[i] = table
-		}
-		return nil
-	})
+	return s.pgEditProjectHostRoutes(ctx, projectID, hostname, write, edit)
 }
 
 func stampProjectHostRouteTable(in ProjectHostRouteInputs, next model.ProjectRouteTable) model.ProjectRouteTable {

@@ -89,9 +89,8 @@ lineage makes the inventory incomplete. Typed lineage digests differ from
 artifact content hashes; metadata traversal does not authenticate the original
 sources or replace full local readback and authority verification.
 
-Local coverage includes persisted file-store cold reads after removing only a
-synthetic original, retained-route reuse after a fresh Store instance, an actual
-disposable PostgreSQL18 separated-input read without original chunks, and a
+Local coverage includes retained-route reuse after a fresh Store instance, a
+disposable PostgreSQL 18 separated-input read without original chunks, and a
 PostgreSQL retention census that keeps both digests H. Corrupt operational
 input refuses even when the complete original is present. Existing v4 complete
 SHA/corruption refusals remain unchanged.

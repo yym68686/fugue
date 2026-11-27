@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -110,7 +109,7 @@ func TestGetAppImageTrackingDiagnosisResolvesRemoteDigest(t *testing.T) {
 func setupAppImageSyncTestServer(t *testing.T) (*store.Store, *Server, string, model.App, string) {
 	t.Helper()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

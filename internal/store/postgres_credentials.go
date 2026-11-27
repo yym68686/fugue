@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
@@ -37,55 +38,35 @@ func (s *Store) AssignManagedPostgresCredentialSecret(expected model.BackingServ
 		current.UpdatedAt = time.Now().UTC()
 		return current, nil
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return model.BackingService{}, err
-		}
-		defer tx.Rollback()
-		current, err := s.pgGetBackingServiceTx(ctx, tx, expected.ID, true)
-		if err != nil {
-			return model.BackingService{}, mapDBErr(err)
-		}
-		busy, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, "", current.ID)
-		if err != nil {
-			return model.BackingService{}, err
-		}
-		if busy {
-			return model.BackingService{}, ErrConflict
-		}
-		next, err := assign(current)
-		if err != nil {
-			return model.BackingService{}, err
-		}
-		if current.Spec.Postgres.CredentialSecretName == "" {
-			if err := s.pgUpdateBackingServiceTx(ctx, tx, next); err != nil {
-				return model.BackingService{}, err
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			return model.BackingService{}, fmt.Errorf("commit postgres credential identity: %w", err)
-		}
-		return next, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.BackingService{}, err
 	}
-	var result model.BackingService
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackingService(state, expected.ID)
-		if index < 0 {
-			return ErrNotFound
+	defer tx.Rollback()
+	current, err := s.pgGetBackingServiceTx(ctx, tx, expected.ID, true)
+	if err != nil {
+		return model.BackingService{}, mapDBErr(err)
+	}
+	busy, err := s.pgHasInFlightManagedPostgresExclusiveMutationTx(ctx, tx, "", current.ID)
+	if err != nil {
+		return model.BackingService{}, err
+	}
+	if busy {
+		return model.BackingService{}, ErrConflict
+	}
+	next, err := assign(current)
+	if err != nil {
+		return model.BackingService{}, err
+	}
+	if current.Spec.Postgres.CredentialSecretName == "" {
+		if err := s.pgUpdateBackingServiceTx(ctx, tx, next); err != nil {
+			return model.BackingService{}, err
 		}
-		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, expected.ID) {
-			return ErrConflict
-		}
-		next, err := assign(state.BackingServices[index])
-		if err != nil {
-			return err
-		}
-		state.BackingServices[index] = next
-		result = cloneBackingService(next)
-		return nil
-	})
-	return result, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.BackingService{}, fmt.Errorf("commit postgres credential identity: %w", err)
+	}
+	return next, nil
 }

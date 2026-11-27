@@ -22,7 +22,7 @@ func TestCLIWorkflowPostgresIntegration(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("this test requires a disposable loopback fugue_test database")
 	}
-	s := New("", address)
+	s := New(address)
 	if err = s.Init(); err != nil {
 		t.Fatal(err)
 	}

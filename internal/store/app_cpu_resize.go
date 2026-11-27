@@ -56,16 +56,6 @@ func applyAppRequestResize(app *model.App, op *model.Operation) error {
 	return nil
 }
 
-func activeAppRequestResize(ops []model.Operation, appID string) bool {
-	for _, op := range ops {
-		if op.AppID == appID && model.IsAppRequestResize(op.Type) &&
-			(op.Status == model.OperationStatusPending || op.Status == model.OperationStatusRunning || op.Status == model.OperationStatusWaitingAgent) {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *Store) pgHasActiveAppRequestResizeTx(ctx context.Context, tx *sql.Tx, appID string) (bool, error) {
 	var active bool
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_operations WHERE app_id=$1 AND type IN ($2,$3) AND status IN ('pending','running','waiting-agent'))`, appID, model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize).Scan(&active)

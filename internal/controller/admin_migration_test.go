@@ -2,18 +2,16 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestAdministratorMigrationAuthorityAndSafetyBoundary(t *testing.T) {
 	t.Parallel()
-	state := store.New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +138,7 @@ func TestRevisionServiceSelectorAcceptsOnlyKnownSchemas(t *testing.T) {
 
 func TestAdministratorMigrationResumptionRequiresStoredActiveAuthority(t *testing.T) {
 	t.Parallel()
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

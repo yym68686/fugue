@@ -8,8 +8,8 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Domain | Command ownership | Persistence boundary | Verification |
 | --- | --- | --- | --- |
 | Backup usage | The backup-usage service builds the inventory and owns its tenant cache and locks. The API authorizes and adapts a read-only source. | No backup mutations are available through the usage source. | The usage package verifies cache behavior and its dependency boundary; API and Store tests cover the adapters. |
-| Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment and JSON deletions join the caller's existing transaction. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
-| Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through the original JSON or PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
+| Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private PostgreSQL tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment joins the caller's existing transaction and deletions use foreign-key cascades. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
+| Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
 | Node host policy (installer side) | The host policy module owns the Journald and ZRAM shell fragments; API embeds them in the existing updater and join contracts. | Host-side staging, verification and rollback remain in the original shell transaction. No Controller desired-state or Store mutation was moved by this extraction. | Shell behavior is verified from the host policy package; a small API contract test proves the installer renders the exact payload. |
 | Managed PostgreSQL image migration | API authorizes, previews and submits the command; the image migration module owns the stated plan, durable witness, execution order, and settlement decision. Controller binds the module to one already claimed operation and provides Kubernetes and SQL observations and guarded mutations. | Store keeps admission, binding locks and JSON/PostgreSQL completion transactions. Completion uses the domain's evidence check and updates the backing service, not the consuming app. | Domain tests verify loss of the PATCH response and operation ownership without importing Controller or Store. API, Controller and Store retain their HTTP, live-platform and transaction contract tests. |
 
@@ -36,6 +36,14 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   not rebuild downstream packages.
 - Unknown inputs, missing graph data, deleted/renamed paths whose old owner
   cannot be proven, and multi-package changes select whole-module Go checks.
+- Some Go tests read another package's source or execute a repository command
+  without importing it. Declare those consumers as test-only edges (for
+  example, the Prometheus source audit, OpenAPI generator contract and the SSH
+  Kubernetes test that compiles another package's test binary).
+  Run these consumers uncached: child-process inputs may not invalidate the
+  test result cache. A missing declared consumer or an unowned fixture still
+  selects uncached full Go tests. This is not an inventory of every implicit
+  dependency.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,
@@ -48,6 +56,14 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   missed checks plus P95 ≤ 60 seconds for the agreed local edit classes before
   removing scheduling workarounds. CI continues to run the production gate.
 
+Run `python3 -m scripts.prepush_shadow --base <base> --compare-target linux/amd64`
+to compare the native graph with a CGO-disabled component build profile. Repeat
+`--compare-target` for each required target, and run separate comparisons with
+the actual build tags when they differ. The comparison binds the exact diff,
+reports differences in selected packages and falls back to full verification
+when profiles disagree or an input cannot be owned in one profile. It does not
+execute a cross-platform test or supply release authorization.
+
 On a disposable worktree, apply one representative edit and run
 `python3 -m scripts.prepush_replay --case <edit-class> --base HEAD --full-oracle`.
 The replay alternates execution order, records 20 measured pairs by default
@@ -59,6 +75,10 @@ for domain source, test-only, transitive contracts and broad fallback; retain
 failures and retain the separate warm-up times. Warm repeated-diff P95 does not
 prove cold or real incremental performance, and an all-green oracle does not
 prove that a failing cross-domain contract would be selected.
+The report's `warmReplayCriteriaMet` covers only this run on its recorded
+host; `activationReadiness` remains `not-evaluated`. Target comparisons,
+mutations that fail the intended contracts, and independent cache profiles
+remain separate activation evidence.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing
@@ -77,6 +97,17 @@ A separate test-only installer host-policy edit on the same machine and
 toolchain recorded 20 warm pairs: existing P95 18.603s, candidate P95 2.207s,
 no failed samples. This replay did not run the full oracle and does not qualify
 the candidate for activation.
+
+After the PostgreSQL-only change at `130737ba8`, a local operation-queue
+runtime edit on the same host and toolchain recorded 20 warm pairs: existing
+P95 23.149s, candidate P95 9.482s, no failed samples, and 137 packages with
+executed tests in the passing uncached oracle. Native and both Linux target
+graphs agreed. This is evidence for one local edit class, not activation. A
+shared operation-read contract edit selected 21 test packages and 18 build
+packages; the affected tests exceeded the default deadline without any old
+suite omitted. A combined queue and operation-read change selected full scope
+on all three profiles. Shared, cross-domain, and unclassified changes must
+retain wider verification.
 
 ## Production isolation decision
 
@@ -104,12 +135,7 @@ if Gate B's credential/transaction isolation or Gate C's recovery proof is
 missing. Separate release jobs and ordinary health checks never substitute for
 the Gate D canary and rollback witnesses.
 
-JSON retirement remains independent. The production API, Controller and SSH
-Control manifests require the configured PostgreSQL secret; standalone API and
-Controller still fall back to `./data/store.json` when the DSN is absent, as
-documented in both READMEs. File-backed initialization, image-tracking and
-operation tests still exercise it. The agent's cell-local JSON state is not the
-control-plane Store. Do not infer that there are no external standalone
-consumers from managed production wiring. Verify the import and recovery path,
-the standalone upgrade behavior and real PostgreSQL test coverage before
-deprecation. Neither backend nor schema is changed here.
+The control-plane Store and image-tracking repository require PostgreSQL.
+Store integration tests use disposable PostgreSQL databases; use
+`make test-postgres` to run them locally. The agent's cell-local JSON state
+is not part of the control-plane Store.

@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
-	"fugue/internal/store"
 )
 
 type b2APITestTransport func(*http.Request) (*http.Response, error)
@@ -27,7 +25,7 @@ func TestObjectStoreBackblazeConfigurationAndProvisioning(t *testing.T) {
 		path      = "/v1/admin/object-storage/backblaze-b2"
 	)
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-b2-encryption-key")
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

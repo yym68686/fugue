@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fugue/internal/platformconfig"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5/pgconn"
 )

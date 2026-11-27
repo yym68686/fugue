@@ -2,10 +2,9 @@ package api
 
 import (
 	"context"
+	"fugue/internal/model"
 	"net/http"
 	"testing"
-
-	"fugue/internal/model"
 )
 
 func TestTenantSecurityBoundaries(t *testing.T) {

@@ -5,18 +5,16 @@ import (
 	"errors"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/appimages"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestSweepManagedAppImageRetentionBlocksWhenLiveScanIncomplete(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -127,7 +125,7 @@ func TestSweepManagedAppImageRetentionBlocksWhenLiveScanIncomplete(t *testing.T)
 func TestSweepManagedAppImageRetentionStopsAfterContextCancellation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

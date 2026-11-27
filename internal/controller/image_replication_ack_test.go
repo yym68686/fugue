@@ -2,18 +2,18 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestCompleteSatisfiedImageReplicationTasksRequiresTargetCanonicalReplica(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	s := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

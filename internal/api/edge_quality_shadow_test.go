@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,12 +13,11 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
-	"fugue/internal/store"
 )
 
 func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
-	filename := t.TempDir() + "/state.json"
-	state := store.New(filename)
+	const fixture = "quality-shadow"
+	state := newStoreTestDatabase(t, fixture)
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +38,11 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	if err := state.RecordEdgeNetworkSamples(context.Background(), []model.EdgeNetworkSample{{ID: "network-a", EdgeID: "edge-a", EdgeGroupID: "shared", Hostname: "app.example.test", PathPrefix: "/", TrafficClass: "streaming", RouteDigest: "sha256:" + strings.Repeat("a", 64), BundleVersion: "bundle-1", ServiceTarget: "app.tenant.svc.cluster.local:3000", Source: "service_endpoint_tcp_info_v1", ServiceRTTMS: &rtt, ObservedAt: now}}, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(filename)
+	db := openStoreTestSQL(t, fixture)
+	var before int64
+	if err := db.QueryRow(`SELECT count(*) FROM fugue_edge_quality_rollups`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
 	response := performJSONRequest(t, server, http.MethodGet, "/v1/edge/quality-shadow/app.example.test?traffic_class=streaming", "shadow-admin", nil)
 	if response.Code != 200 {
 		t.Fatal(response.Code, response.Body.String())
@@ -71,8 +73,11 @@ func TestPhysicalQualityShadowReadOnlyAndLegacyUnknown(t *testing.T) {
 	if _, err := edgequality.Replay(receipt); err == nil {
 		t.Fatal("network evidence was not covered by the receipt digest")
 	}
-	after, _ := os.ReadFile(filename)
-	if string(before) != string(after) {
+	var after int64
+	if err := db.QueryRow(`SELECT count(*) FROM fugue_edge_quality_rollups`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
 		t.Fatal("shadow read mutated serving state")
 	}
 	for _, query := range []string{"", "?traffic_class=bad", "?traffic_class=streaming&scope=invalid", "?traffic_class=streaming&path_prefix=", "?traffic_class=streaming&path_prefix=/a/../b", "?traffic_class=streaming&path_prefix=/a&path_prefix=/b"} {

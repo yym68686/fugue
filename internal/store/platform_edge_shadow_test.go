@@ -1,20 +1,15 @@
 package store
 
 import (
+	"fugue/internal/model"
+	"fugue/internal/platformcontrol"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/model"
-	"fugue/internal/platformcontrol"
 )
-
-func TestEdgeShadowObservationIsolation(t *testing.T) {
-	testEdgeShadowObservationIsolation(t, false)
-}
 
 func TestEdgeShadowPostgresObservationIsolation(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
@@ -25,16 +20,11 @@ func TestEdgeShadowPostgresObservationIsolation(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires disposable loopback database")
 	}
-	testEdgeShadowObservationIsolation(t, true)
+	testEdgeShadowObservationIsolation(t)
 }
 
-func testEdgeShadowObservationIsolation(t *testing.T, postgres bool) {
-	s := New(t.TempDir() + "/state.json")
-	if postgres {
-		s = platformStatePostgresFixture(t)
-	} else if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
+func testEdgeShadowObservationIsolation(t *testing.T) {
+	s := platformStatePostgresFixture(t)
 	configureTestPlatformArtifactSigning(s)
 	f := prepareTrafficLKGFixture(t, s, "neutral-shadow", "gray", true)
 	before := append([]model.PlatformConsumerInstance(nil), f.consumers...)
@@ -142,22 +132,18 @@ func testEdgeShadowObservationIsolation(t *testing.T, postgres bool) {
 			if err != nil || len(rows) != 1 || rows[0].Sequence != 1 {
 				t.Fatal("shadow latest slot/cursor invalid", err)
 			}
-			var state *model.State
-			if s.db != nil {
-				tx, err := s.db.BeginTx(t.Context(), nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer tx.Rollback()
-				state, err = s.pgReleaseSetSnapshot(t.Context(), tx, f.parent)
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := s.withLockedState(false, func(v *model.State) error { state = v; return nil }); err != nil {
-					t.Fatal(err)
-				}
+			var state *storeProjection
+
+			tx, err := s.db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
 			}
+			defer tx.Rollback()
+			state, err = s.pgReleaseSetSnapshot(t.Context(), tx, f.parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+
 			facts := trafficCapabilityObservations(state, f.parent, child, set, time.Now().UTC())
 			found := false
 			for _, v := range facts {

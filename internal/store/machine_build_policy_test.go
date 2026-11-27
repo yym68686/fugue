@@ -3,18 +3,12 @@ package store
 import (
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 )
-
-func TestMachineSharedPoolPreservesDisabledBuilds(t *testing.T) {
-	t.Parallel()
-	testMachineSharedPoolPreservesDisabledBuilds(t, "")
-}
 
 func TestMachineSharedPoolPreservesDisabledBuildsPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
@@ -30,8 +24,8 @@ func TestMachineSharedPoolPreservesDisabledBuildsPostgres(t *testing.T) {
 
 func testMachineSharedPoolPreservesDisabledBuilds(t *testing.T, address string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "state.json")
-	s := New(path, address)
+
+	s := New(address)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +67,7 @@ func testMachineSharedPoolPreservesDisabledBuilds(t *testing.T, address string) 
 	if _, err := s.SetRuntimePoolMode(runtime.ID, model.RuntimePoolModeInternalShared); err != nil {
 		t.Fatal(err)
 	}
-	reopened := New(path, address)
+	reopened := New(address)
 	if err := reopened.Init(); err != nil {
 		t.Fatal(err)
 	}

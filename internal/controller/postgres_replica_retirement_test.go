@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -20,7 +19,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/pgretire"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
+
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 )
 
@@ -41,7 +40,7 @@ func TestManagedPostgresReplicaRetirement(t *testing.T) {
 	for _, scenario := range []string{"sync-then-scale", "stale-replica", "volume-pending-resumes", "retained-volume", "primary-replaced", "postmaster-restarted"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			db := store.New(filepath.Join(t.TempDir(), "state.json"))
+			db := newStoreTestDatabase(t, "")
 			if err := db.Init(); err != nil {
 				t.Fatal(err)
 			}

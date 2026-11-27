@@ -23,7 +23,6 @@ type APIConfig struct {
 	CompilerInputOmitOriginal              bool
 	BindAddr                               string
 	MetricsBindAddr                        string
-	StorePath                              string
 	DatabaseURL                            string
 	DatabaseMaxIdleConnections             int
 	DatabaseBillingWarmConnections         int
@@ -180,7 +179,6 @@ type ControllerConfig struct {
 	BundleSigningPreviousKeyID                 string
 	BundleRevokedKeyIDs                        []string
 	MetricsBindAddr                            string
-	StorePath                                  string
 	DatabaseURL                                string
 	Observability                              observability.Config
 	APIPublicDomain                            string
@@ -417,7 +415,6 @@ func APIFromEnv() APIConfig {
 	cfg := APIConfig{
 		BindAddr:                        getenv("FUGUE_BIND_ADDR", ":8080"),
 		MetricsBindAddr:                 strings.TrimSpace(os.Getenv("FUGUE_API_METRICS_BIND_ADDR")),
-		StorePath:                       getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                     getenv("FUGUE_DATABASE_URL", ""),
 		DatabaseMaxIdleConnections:      max(0, getenvInt("FUGUE_DATABASE_MAX_IDLE_CONNECTIONS", 16)),
 		DatabaseBillingWarmConnections:  max(0, min(16, getenvInt("FUGUE_DATABASE_BILLING_WARM_CONNECTIONS", 4))),
@@ -570,7 +567,6 @@ func ControllerFromEnv() ControllerConfig {
 		BundleSigningPreviousKeyID:                 strings.TrimSpace(os.Getenv("FUGUE_BUNDLE_SIGNING_PREVIOUS_KEY_ID")),
 		BundleRevokedKeyIDs:                        getenvList("FUGUE_BUNDLE_REVOKED_KEY_IDS"),
 		MetricsBindAddr:                            strings.TrimSpace(os.Getenv("FUGUE_CONTROLLER_METRICS_BIND_ADDR")),
-		StorePath:                                  getenv("FUGUE_STORE_PATH", "./data/store.json"),
 		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),
 		Observability:                              ObservabilityFromEnv(),
 		APIPublicDomain:                            getenv("FUGUE_API_PUBLIC_DOMAIN", ""),

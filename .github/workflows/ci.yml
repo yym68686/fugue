@@ -1145,6 +1145,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: fugue-ci-fixture
+          POSTGRES_DB: fugue_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fugue_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     outputs:
       release_count: ${{ steps.release.outputs.release_count }}
       release_matrix: ${{ steps.release.outputs.release_matrix }}
@@ -1159,6 +1171,8 @@ jobs:
       edge_origin_relay_trust: ${{ steps.edge_origin_relay_trust.outputs.selected }}
       edge_origin_relay_policy: ${{ steps.edge_origin_relay_policy.outputs.selected }}
       observation_writer_handoff: ${{ steps.observation_writer_handoff.outputs.selected }}
+      quality_evidence_rehearsed: ${{ steps.quality_evidence_rehearsal.outputs.verified }}
+      quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1203,6 +1217,56 @@ jobs:
               -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
+      - name: Rehearse quality evidence retention on the pinned PostgreSQL image
+        id: quality_evidence_rehearsal
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          resource=deploy/releases/observation-worker/resources.json
+          installer=internal/schemamigrate/platform_quality_evidence_retention.sql
+          activation=internal/schemamigrate/platform_quality_evidence_retention_activate.sql
+          git cat-file -e "${BASE_SHA}^{commit}"
+          if git diff --quiet "$BASE_SHA" HEAD -- deploy/releases/observation-worker/intent.json "$resource" "$installer" "$activation" scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py; then
+            exit 0
+          fi
+          pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+          docker run --rm --network none --user 26:26 --entrypoint bash \
+            -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
+      - name: Admit only a declared quality evidence retention handoff
+        id: quality_evidence_retention_handoff
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/quality-evidence-retention-handoff.json
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then exit 0; fi
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "$declaration" && [[ -f "$declaration" ]]; then
+            test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+            python3 -m unittest scripts.test_apply_quality_evidence_retention_handoff scripts.test_verify_observation_rollback_floor
+            pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+            docker run --rm --network none --user 26:26 --entrypoint bash \
+              -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run store-backed regressions on disposable PostgreSQL
+        timeout-minutes: 50
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          FUGUE_STORE_TEST_POSTGRES: postgres://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- internal cmd go.mod go.sum scripts/test_postgres_store.sh .github/workflows/ci.yml; then exit 0; fi
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          make test-postgres
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
         env:
@@ -4361,7 +4425,15 @@ jobs:
             base="$(git rev-parse HEAD^)"
           fi
           changed=false
-          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/package.json Dockerfile.diagnostics cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/runtimeobservation internal/observability internal/model go.mod go.sum .github/workflows/ci.yml; then
+          # A different job in the shared workflow must not publish a new
+          # diagnostics image. Still verify edits to this job's build steps.
+          diagnostic_build_steps() {
+            sed -n '/^  diagnostic_packages:$/,/^  diagnostics_configuration:$/p' |
+              sed -n '/^      - uses: docker\/setup-buildx-action@/,$p'
+          }
+          if ! git diff --quiet "$base" HEAD -- deploy/environments/production/diagnostics/package.json Dockerfile.diagnostics scripts/smoke_diagnostic_package.py cmd/fugue-diagnostic-probe cmd/fugue-api/diagnostic_agent internal/diagnosticprobe internal/livediagnostics internal/runtimeobservation internal/observability internal/model go.mod go.sum; then
+            changed=true
+          elif ! diff -q <(git show "$base:.github/workflows/ci.yml" | diagnostic_build_steps) <(diagnostic_build_steps < .github/workflows/ci.yml) >/dev/null; then
             changed=true
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
@@ -4595,23 +4667,16 @@ jobs:
           git diff --exit-code HEAD origin/main -- "$declaration" scripts/provision_observation_worker_database.py scripts/test_provision_observation_worker_database.py deploy/releases/components.json deploy/releases/observation-worker/resources.json deploy/releases/observation-worker/intent.json .github/workflows/ci.yml
           python3 -m unittest scripts.test_provision_observation_worker_database
           python3 -m scripts.provision_observation_worker_database "$declaration"
-      - name: Rehearse and provision the quality evidence retention capability
+      - name: Provision the rehearsed quality evidence retention capability
         env:
-          BASE_SHA: ${{ github.event.before }}
+          QUALITY_EVIDENCE_REHEARSED: ${{ needs.prepush.outputs.quality_evidence_rehearsed }}
         run: |
           set -euo pipefail
+          test "$QUALITY_EVIDENCE_REHEARSED" = true
           installer=internal/schemamigrate/platform_quality_evidence_retention.sql
           activation=internal/schemamigrate/platform_quality_evidence_retention_activate.sql
-          resource=deploy/releases/observation-worker/resources.json
-          git cat-file -e "${BASE_SHA}^{commit}"
-          if git diff --quiet "$BASE_SHA" HEAD -- "$installer" "$activation" "$resource" scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py; then
-            exit 0
-          fi
           git fetch origin main
           git diff --exit-code HEAD origin/main -- deploy/releases/observation-worker deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py scripts/rehearse_observation_writer_fence.sh scripts/provision_observation_worker_database.py "$installer" "$activation" .github/workflows/ci.yml
-          pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
-          docker run --rm --network none --user 26:26 --entrypoint bash \
-            -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
           python3 -m scripts.provision_quality_evidence_retention deploy/releases/observation-worker/database.json --apply
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
@@ -4643,6 +4708,30 @@ jobs:
           git merge-base --is-ancestor "$floor" "$api_revision"
           git diff --exit-code "$floor" "$api_revision" -- internal/qualityrollup/rollup.go internal/store/edge_quality_rollup_writer.go internal/api/edge_quality_rollup_runtime.go
           python3 -m scripts.apply_observation_writer_handoff "$database" "$declaration" "$metrics" --apply
+
+  quality_evidence_retention_handoff:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.quality_evidence_retention_handoff == 'true' }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-observation-worker, cancel-in-progress: false, queue: max}
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Bind the serving and rollback artifacts and transfer the timer
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/quality-evidence-retention-handoff.json
+          metrics=deploy/environments/production/observability/scrape-policy.json
+          database=deploy/releases/observation-worker/database.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$declaration" "$metrics" "$database" .github/workflows/ci.yml scripts/apply_quality_evidence_retention_handoff.py scripts/apply_observation_writer_handoff.py scripts/verify_observation_rollback_floor.py scripts/provision_quality_evidence_retention.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py scripts/rehearse_observation_writer_fence.sh internal/schemamigrate/platform_quality_evidence_retention_activate.sql internal/schemamigrate/platform_quality_evidence_retention.sql deploy/environments/production/cnpg-controller/release.json
+          python3 -m scripts.apply_quality_evidence_retention_handoff "$database" "$declaration" "$metrics" --apply
 
   deploy_runtime_agent:
     needs: [prepush, component-build, runtime_agent_identity]

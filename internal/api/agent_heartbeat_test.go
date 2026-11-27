@@ -2,20 +2,18 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestAgentHeartbeatPersistsCellSnapshotLabels(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

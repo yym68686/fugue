@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ func TestAdoptBackupArtifactPostgresIntegration(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires disposable loopback fugue_test database")
 	}
-	s := New("", address)
+	s := New(address)
 	if err := s.Init(); err != nil {
 		if err := schemamigrate.MigrateEdgeInstanceFencing(context.Background(), address); err != nil {
 			t.Fatal(err)
@@ -69,63 +68,5 @@ func TestAdoptBackupArtifactPostgresIntegration(t *testing.T) {
 	updated, err := s.GetBackupRun(run.ID, "", true)
 	if err != nil || updated.Status != model.BackupRunStatusFailed || updated.ErrorMessage != run.ErrorMessage || updated.ArtifactCount != 1 || updated.BytesWritten != 1000 || updated.LogicalBytes != 4096 {
 		t.Fatalf("run=%+v error=%v", updated, err)
-	}
-}
-
-func TestAdoptBackupArtifactRejectsChangedOrDuplicateRun(t *testing.T) {
-	for _, mode := range []string{"changed-run", "duplicate", "unprotected", "wrong-backend", "running", "active-lease", "existing-retired"} {
-		t.Run(mode, func(t *testing.T) {
-			s := New(filepath.Join(t.TempDir(), "state.json"))
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
-			backend := adoptionTestBackend(t, s)
-			run, err := s.CreateBackupRun(model.BackupRun{ID: "backup_run_fixture", BackendID: backend.ID, Status: model.BackupRunStatusFailed, Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase, Engine: model.BackupEngineLonghornSnapshot}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			artifact := model.BackupArtifact{RunID: run.ID, BackendID: backend.ID, Target: run.Target, Kind: model.BackupArtifactKindLonghornSnapshot, Status: model.BackupArtifactStatusActive, Protected: true}
-			switch mode {
-			case "changed-run":
-				run.UpdatedAt = run.UpdatedAt.Add(-time.Second)
-			case "unprotected":
-				artifact.Protected = false
-			case "wrong-backend":
-				artifact.BackendID = "other-backend"
-			case "running", "active-lease":
-				err = s.withLockedState(true, func(state *model.State) error {
-					idx := findBackupRun(state, run.ID)
-					if mode == "running" {
-						state.BackupRuns[idx].Status = model.BackupRunStatusRunning
-					} else {
-						until := time.Now().Add(time.Hour)
-						state.BackupRuns[idx].LockedUntil = &until
-					}
-					return nil
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-			case "duplicate":
-				if _, err := s.AdoptBackupArtifact(artifact, run); err != nil {
-					t.Fatal(err)
-				}
-			case "existing-retired":
-				if _, err := s.CreateBackupArtifact(model.BackupArtifact{RunID: run.ID, Target: run.Target, Kind: artifact.Kind, Status: model.BackupArtifactStatusDeleted}); err != nil {
-					t.Fatal(err)
-				}
-				// Deliberately inconsistent counters must not bypass the reference guard.
-				if err := s.withLockedState(true, func(state *model.State) error {
-					idx := findBackupRun(state, run.ID)
-					state.BackupRuns[idx] = run
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if _, err := s.AdoptBackupArtifact(artifact, run); !errors.Is(err, ErrConflict) && !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("mode=%s unexpected error %v", mode, err)
-			}
-		})
 	}
 }

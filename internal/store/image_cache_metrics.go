@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -16,16 +14,7 @@ func (s *Store) ListImageCachePrunePlanMetrics(parent context.Context, limit int
 	if limit <= 0 {
 		return nil, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		plans, err := s.ListImageCachePrunePlans(model.ImageCachePrunePlanFilter{Limit: limit})
-		if err != nil {
-			return nil, err
-		}
-		for i := range plans {
-			plans[i] = imageCachePrunePlanMetrics(plans[i])
-		}
-		return plans, nil
-	}
+
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, cluster_node_name, runtime_id, mode, status, created_at,
@@ -52,15 +41,6 @@ func (s *Store) ListImageCachePrunePlanMetrics(parent context.Context, limit int
 	return plans, mapDBErr(rows.Err())
 }
 
-func imageCachePrunePlanMetrics(p model.ImageCachePrunePlan) model.ImageCachePrunePlan {
-	protection := make(map[string]int, len(p.ProtectionSummary))
-	for k, v := range p.ProtectionSummary {
-		protection[k] = v
-	}
-	return model.ImageCachePrunePlan{ID: p.ID, NodeID: p.NodeID, ClusterNodeName: p.ClusterNodeName, RuntimeID: p.RuntimeID, Mode: p.Mode, Status: p.Status, CreatedAt: p.CreatedAt,
-		CandidateManifestCount: p.CandidateManifestCount, CandidateBlobCount: p.CandidateBlobCount, CandidateBlobBytes: p.CandidateBlobBytes, PlannedDeleteBytes: p.PlannedDeleteBytes, ProtectedManifestCount: p.ProtectedManifestCount, ProtectionSummary: protection}
-}
-
 // ListImageCachePruneTaskMetrics excludes unrelated maintenance history and
 // task logs, and returns only the latest completed task per raw metric label set.
 // Do not filter prune_reason before selecting the latest task: a newer manual
@@ -69,32 +49,7 @@ func imageCachePrunePlanMetrics(p model.ImageCachePrunePlan) model.ImageCachePru
 // preserves distinct whitespace spellings without duplicating Go normalization
 // rules in SQL.
 func (s *Store) ListImageCachePruneTaskMetrics(parent context.Context) ([]model.NodeUpdateTask, error) {
-	if !s.usingDatabase() {
-		latest := make(map[[5]string]model.NodeUpdateTask)
-		err := s.withLockedState(false, func(state *model.State) error {
-			for _, t := range state.NodeUpdateTasks {
-				if strings.TrimSpace(t.Status) == model.NodeUpdateTaskStatusCompleted && t.Type == model.NodeUpdateTaskTypePruneImageCache {
-					key := [5]string{t.MachineID, t.ClusterNodeName, t.RuntimeID, t.Payload["dry_run"], t.Payload["allow_delete"]}
-					current, ok := latest[key]
-					if !ok || t.UpdatedAt.After(current.UpdatedAt) || (t.UpdatedAt.Equal(current.UpdatedAt) && (t.CreatedAt.After(current.CreatedAt) || (t.CreatedAt.Equal(current.CreatedAt) && t.ID > current.ID))) {
-						latest[key] = imageCachePruneTaskMetrics(t)
-					}
-				}
-			}
-			return nil
-		})
-		var tasks []model.NodeUpdateTask
-		for _, task := range latest {
-			tasks = append(tasks, task)
-		}
-		sort.Slice(tasks, func(i, j int) bool {
-			if tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) {
-				return tasks[i].ID > tasks[j].ID
-			}
-			return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
-		})
-		return tasks, err
-	}
+
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, machine_id, cluster_node_name, runtime_id, created_at, updated_at, result_message,
@@ -128,14 +83,4 @@ func (s *Store) ListImageCachePruneTaskMetrics(parent context.Context) ([]model.
 		tasks = append(tasks, t)
 	}
 	return tasks, mapDBErr(rows.Err())
-}
-
-func imageCachePruneTaskMetrics(t model.NodeUpdateTask) model.NodeUpdateTask {
-	payload := map[string]string{}
-	for _, k := range []string{"dry_run", "allow_delete", "prune_reason"} {
-		if v, ok := t.Payload[k]; ok {
-			payload[k] = v
-		}
-	}
-	return model.NodeUpdateTask{ID: t.ID, MachineID: t.MachineID, ClusterNodeName: t.ClusterNodeName, RuntimeID: t.RuntimeID, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt, ResultMessage: t.ResultMessage, Type: t.Type, Status: t.Status, Payload: payload}
 }

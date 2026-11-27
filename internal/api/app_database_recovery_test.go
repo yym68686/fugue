@@ -5,14 +5,12 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/storagerecovery"
-	"fugue/internal/store"
 	"net/http"
-	"path/filepath"
 	"testing"
 )
 
 func TestDatabaseRecoveryAuthorizationDryRunAndIdempotency(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

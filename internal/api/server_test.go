@@ -24,10 +24,65 @@ import (
 	"fugue/internal/store"
 )
 
+func TestInstallScriptsUseConfiguredPublicAPIDomain(t *testing.T) {
+	t.Parallel()
+
+	stateStore := newStoreTestDatabase(t, "")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	server := NewServer(stateStore, nil, nil, ServerConfig{
+		APIPublicDomain:              "api.fugue.pro",
+		ClusterJoinServer:            "https://k3s.example.com",
+		ClusterJoinBootstrapTokenTTL: time.Minute,
+		RegistryPushBase:             "registry.fugue.internal:5000",
+		RegistryPullBase:             "registry.fugue.internal:5000",
+		ClusterJoinRegistryEndpoint:  "127.0.0.1:30500",
+	})
+
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "join cluster",
+			path: "/install/join-cluster.sh",
+			want: `FUGUE_API_BASE=${FUGUE_API_BASE:-"https://api.fugue.pro"}`,
+		},
+		{
+			name: "node updater",
+			path: "/install/node-updater.sh",
+			want: `FUGUE_API_BASE="${FUGUE_API_BASE:-https://api.fugue.pro}"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			req.Host = "fugue-fugue.fugue-system.svc.cluster.local:80"
+			recorder := httptest.NewRecorder()
+
+			server.Handler().ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, tc.want) {
+				t.Fatalf("expected script to contain %q, got:\n%s", tc.want, body[:min(len(body), 512)])
+			}
+			if strings.Contains(body, "fugue-fugue.fugue-system.svc.cluster.local") {
+				t.Fatalf("script leaked internal service hostname")
+			}
+		})
+	}
+}
+
 func TestCreateNodeKeyAllowsEmptyBodyForTenantKey(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -63,7 +118,7 @@ func TestCreateNodeKeyAllowsEmptyBodyForTenantKey(t *testing.T) {
 func TestInternalControlPlaneHostsBypassAppProxy(t *testing.T) {
 	// Keep the store intentionally uninitialized. If app proxy tries an app-route
 	// lookup for these hosts, the request fails before it reaches /healthz.
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	server := NewServer(s, auth.New(s, ""), nil, ServerConfig{AppBaseDomain: "fugue.pro"})
 
 	for _, host := range []string{
@@ -88,7 +143,7 @@ func TestInternalControlPlaneHostsBypassAppProxy(t *testing.T) {
 func TestReadyzReportsHealthyDependencies(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -137,7 +192,7 @@ func TestReadyzReportsHealthyDependencies(t *testing.T) {
 func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -181,7 +236,7 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 func TestHandlerDoesNotRegisterLegacyCoreEdgeRoutes(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -199,7 +254,7 @@ func TestHandlerDoesNotRegisterLegacyCoreEdgeRoutes(t *testing.T) {
 func TestReadyzReportsKubernetesDependencyAsDegradedWithoutFailingReadiness(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -234,7 +289,7 @@ func TestReadyzReportsKubernetesDependencyAsDegradedWithoutFailingReadiness(t *t
 func TestReadyzObservabilityDisabledIsSkipped(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -263,7 +318,7 @@ func TestReadyzObservabilityDisabledIsSkipped(t *testing.T) {
 func TestReadyzObservabilityEnabledWithoutBackendsIsNonCriticalDegradation(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -293,7 +348,7 @@ func TestReadyzObservabilityEnabledWithoutBackendsIsNonCriticalDegradation(t *te
 func TestReadyzObservabilityMetricsQueryBackendIsHealthy(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -326,7 +381,7 @@ func TestReadyzObservabilityMetricsQueryBackendIsHealthy(t *testing.T) {
 func TestReadyzCachesKubernetesDependencyDegradation(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -362,7 +417,7 @@ func TestReadyzCachesKubernetesDependencyDegradation(t *testing.T) {
 func TestListAuditEventsDefaultsToRecentLimit(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -437,7 +492,7 @@ func TestListAuditEventsDefaultsToRecentLimit(t *testing.T) {
 func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -568,7 +623,7 @@ func TestJoinClusterEnvIncludesMeshConfig(t *testing.T) {
 func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -674,7 +729,7 @@ func TestJoinClusterEnvSupportsEdgeOnlyJoinLabels(t *testing.T) {
 func TestJoinClusterEnvNormalizesNodeNameAndWritesRequestedAudit(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -753,7 +808,7 @@ func TestJoinClusterEnvNormalizesNodeNameAndWritesRequestedAudit(t *testing.T) {
 func TestJoinClusterEnvRejectsInvalidKubernetesNodeName(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -852,61 +907,6 @@ func TestJoinClusterInstallScriptAddsTopologyLabels(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("expected join-cluster install script to contain %q", want)
 		}
-	}
-}
-
-func TestInstallScriptsUseConfiguredPublicAPIDomain(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	server := NewServer(stateStore, nil, nil, ServerConfig{
-		APIPublicDomain:              "api.fugue.pro",
-		ClusterJoinServer:            "https://k3s.example.com",
-		ClusterJoinBootstrapTokenTTL: time.Minute,
-		RegistryPushBase:             "registry.fugue.internal:5000",
-		RegistryPullBase:             "registry.fugue.internal:5000",
-		ClusterJoinRegistryEndpoint:  "127.0.0.1:30500",
-	})
-
-	for _, tc := range []struct {
-		name string
-		path string
-		want string
-	}{
-		{
-			name: "join cluster",
-			path: "/install/join-cluster.sh",
-			want: `FUGUE_API_BASE=${FUGUE_API_BASE:-"https://api.fugue.pro"}`,
-		},
-		{
-			name: "node updater",
-			path: "/install/node-updater.sh",
-			want: `FUGUE_API_BASE="${FUGUE_API_BASE:-https://api.fugue.pro}"`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			req.Host = "fugue-fugue.fugue-system.svc.cluster.local:80"
-			recorder := httptest.NewRecorder()
-
-			server.Handler().ServeHTTP(recorder, req)
-
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, recorder.Code, recorder.Body.String())
-			}
-			body := recorder.Body.String()
-			if !strings.Contains(body, tc.want) {
-				t.Fatalf("expected script to contain %q, got:\n%s", tc.want, body[:min(len(body), 512)])
-			}
-			if strings.Contains(body, "fugue-fugue.fugue-system.svc.cluster.local") {
-				t.Fatalf("script leaked internal service hostname")
-			}
-		})
 	}
 }
 
@@ -1089,7 +1089,7 @@ func TestJoinClusterInstallScriptHasValidBashSyntax(t *testing.T) {
 func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1272,7 +1272,7 @@ func TestJoinClusterCleanupRemovesStaleSameMachineNode(t *testing.T) {
 func TestRevokeNodeKeyCleansManagedOwnedNodesAndBootstrapTokens(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1382,7 +1382,7 @@ func TestRevokeNodeKeyCleansManagedOwnedNodesAndBootstrapTokens(t *testing.T) {
 func TestRevokeNodeKeyInvalidatesExternalRuntimeCredentialsWithoutClusterJoinConfig(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1449,7 +1449,7 @@ func TestRevokeNodeKeyInvalidatesExternalRuntimeCredentialsWithoutClusterJoinCon
 func TestNodesEndpointIsDeprecatedCompatibilityView(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1491,7 +1491,7 @@ func TestNodesEndpointIsDeprecatedCompatibilityView(t *testing.T) {
 func TestNodeKeyUsagesEndpointReturnsRuntimes(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1534,7 +1534,7 @@ func TestNodeKeyUsagesEndpointReturnsRuntimes(t *testing.T) {
 func TestListRuntimesAllowsSkippingManagedLocationSync(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

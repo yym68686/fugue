@@ -67,7 +67,7 @@ func runActiveImports(args []string) {
 	format := flags.String("format", "count", "Output format: count or json")
 	_ = flags.Parse(args)
 
-	stateStore := store.New("/tmp/fugue-registry-maintenance-store.json", strings.TrimSpace(os.Getenv("FUGUE_DATABASE_URL")))
+	stateStore := store.New(os.Getenv("FUGUE_DATABASE_URL"))
 	if err := stateStore.Init(); err != nil {
 		fatalf("init store: %v", err)
 	}

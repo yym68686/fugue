@@ -54,9 +54,7 @@ func verifyManagedSSHBindingStore(test *testing.T, stateStore *Store, app model.
 		go func() {
 			defer group.Done()
 			independent := stateStore
-			if !stateStore.usingDatabase() {
-				independent = New(stateStore.path)
-			}
+
 			binding, err := independent.PrepareManagedSSHBinding(app.TenantID, app.ID, identityID, digest, "ssh.example", start, end)
 			bindings <- binding
 			failures <- err
@@ -96,11 +94,10 @@ func verifyManagedSSHBindingStore(test *testing.T, stateStore *Store, app model.
 		if _, _, err := stateStore.DisableAppSSH(app.ID); err != nil {
 			test.Fatal(err)
 		}
-		if stateStore.usingDatabase() {
-			if _, err := stateStore.db.Exec(`UPDATE fugue_app_ssh_endpoints SET released_at=now()-interval '2 hours' WHERE app_id=$1`, app.ID); err != nil {
-				test.Fatal(err)
-			}
+		if _, err := stateStore.db.Exec(`UPDATE fugue_app_ssh_endpoints SET released_at=now()-interval '2 hours' WHERE app_id=$1`, app.ID); err != nil {
+			test.Fatal(err)
 		}
+
 	}
 	stored, err := stateStore.GetManagedSSHBinding(app.TenantID, app.ID)
 	if err != nil || !reflect.DeepEqual(expected, stored) {
@@ -118,14 +115,13 @@ func verifyManagedSSHBindingStore(test *testing.T, stateStore *Store, app model.
 	if err != nil || rotated.PublicPort == allocated.PublicPort || rotated.PublicPort == expected.PublicPort {
 		test.Fatal("native rotation reused current or managed port", err)
 	}
-	if stateStore.usingDatabase() {
-		if _, err := stateStore.db.Exec(`UPDATE fugue_app_ssh_endpoints SET public_port=$1 WHERE app_id=$2`, expected.PublicPort, other.ID); err == nil {
-			test.Fatal("older writer bypassed independent port reservation")
-		}
-		if _, err := stateStore.db.Exec(`UPDATE fugue_managed_ssh_bindings SET public_port=public_port+1,body=jsonb_set(body,'{public_port}',to_jsonb(public_port+1)) WHERE app_id=$1`, app.ID); err == nil {
-			test.Fatal("binding mutated without an explicit migration")
-		}
+	if _, err := stateStore.db.Exec(`UPDATE fugue_app_ssh_endpoints SET public_port=$1 WHERE app_id=$2`, expected.PublicPort, other.ID); err == nil {
+		test.Fatal("older writer bypassed independent port reservation")
 	}
+	if _, err := stateStore.db.Exec(`UPDATE fugue_managed_ssh_bindings SET public_port=public_port+1,body=jsonb_set(body,'{public_port}',to_jsonb(public_port+1)) WHERE app_id=$1`, app.ID); err == nil {
+		test.Fatal("binding mutated without an explicit migration")
+	}
+
 	verifyMixedSSHPortAllocation(test, stateStore, app)
 }
 
@@ -158,9 +154,7 @@ func verifyMixedSSHPortAllocation(test *testing.T, stateStore *Store, owner mode
 		go func() {
 			defer group.Done()
 			independent := stateStore
-			if !stateStore.usingDatabase() {
-				independent = New(stateStore.path)
-			}
+
 			if operation.identityID != "" {
 				binding, err := independent.PrepareManagedSSHBinding(operation.app.TenantID, operation.app.ID, operation.identityID, "", "ssh.example", 40000, 41000)
 				ports <- binding.PublicPort

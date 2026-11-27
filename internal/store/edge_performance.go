@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -16,116 +15,20 @@ func (s *Store) UpsertEdgeQualityRollups(rollups []model.EdgeQualityRollup, rete
 	if len(rollups) == 0 && len(retentionBefore) == 0 {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertEdgeQualityRollups(rollups, retentionBefore)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		applyEdgeQualityRollupsToState(state, rollups, retentionBefore, time.Now().UTC())
-		return nil
-	})
-}
-
-func applyEdgeQualityRollupsToState(state *model.State, rollups []model.EdgeQualityRollup, retentionBefore map[string]time.Time, now time.Time) {
-	if len(retentionBefore) > 0 {
-		filtered := state.EdgeQualityRollups[:0]
-		for _, rollup := range state.EdgeQualityRollups {
-			before := retentionBefore[strings.TrimSpace(rollup.Window)]
-			if !before.IsZero() && rollup.WindowEndedAt.Before(before) {
-				continue
-			}
-			filtered = append(filtered, rollup)
-		}
-		state.EdgeQualityRollups = filtered
-	}
-	byKey := make(map[string]int, len(state.EdgeQualityRollups))
-	for index, rollup := range state.EdgeQualityRollups {
-		byKey[edgeQualityRollupKey(rollup)] = index
-	}
-	for _, rollup := range rollups {
-		normalized := normalizeEdgeQualityRollupForStore(rollup, now)
-		if normalized.Window == "" || normalized.Hostname == "" || normalized.EdgeGroupID == "" {
-			continue
-		}
-		key := edgeQualityRollupKey(normalized)
-		if index, ok := byKey[key]; ok {
-			state.EdgeQualityRollups[index] = normalized
-			continue
-		}
-		state.EdgeQualityRollups = append(state.EdgeQualityRollups, normalized)
-		byKey[key] = len(state.EdgeQualityRollups) - 1
-	}
-	sortEdgeQualityRollups(state.EdgeQualityRollups)
+	return s.pgUpsertEdgeQualityRollups(rollups, retentionBefore)
 }
 
 func (s *Store) ListEdgeQualityRollups(hostname, window string, since time.Time) ([]model.EdgeQualityRollup, error) {
 	hostname = normalizeEdgePerformanceHostname(hostname)
 	window = strings.TrimSpace(strings.ToLower(window))
-	if s.usingDatabase() {
-		return s.pgListEdgeQualityRollups(hostname, window, since)
-	}
-	var rollups []model.EdgeQualityRollup
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, rollup := range state.EdgeQualityRollups {
-			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(rollup.Hostname), hostname) {
-				continue
-			}
-			if window != "" && !strings.EqualFold(strings.TrimSpace(rollup.Window), window) {
-				continue
-			}
-			if !since.IsZero() && rollup.WindowEndedAt.Before(since) {
-				continue
-			}
-			rollups = append(rollups, rollup)
-		}
-		return nil
-	})
-	sortEdgeQualityRollups(rollups)
-	return rollups, err
+	return s.pgListEdgeQualityRollups(hostname, window, since)
 }
 
 func (s *Store) RecordEdgePerformanceSamples(samples []model.EdgePerformanceSample, pruneBefore time.Time) error {
 	if len(samples) == 0 && pruneBefore.IsZero() {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgRecordEdgePerformanceSamples(samples, pruneBefore)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		if !pruneBefore.IsZero() {
-			filtered := state.EdgePerformanceSamples[:0]
-			for _, sample := range state.EdgePerformanceSamples {
-				if !sample.SampledAt.Before(pruneBefore) {
-					filtered = append(filtered, sample)
-				}
-			}
-			state.EdgePerformanceSamples = filtered
-		}
-		now := time.Now().UTC()
-		byID := make(map[string]int, len(state.EdgePerformanceSamples))
-		for index, sample := range state.EdgePerformanceSamples {
-			if strings.TrimSpace(sample.ID) == "" {
-				continue
-			}
-			byID[sample.ID] = index
-		}
-		for _, sample := range samples {
-			normalized, err := normalizeEdgePerformanceSampleForStore(sample, now)
-			if err != nil {
-				continue
-			}
-			if normalized.ID == "" {
-				normalized.ID = model.NewID("edge_perf")
-			}
-			if index, ok := byID[normalized.ID]; ok {
-				state.EdgePerformanceSamples[index] = normalized
-				continue
-			}
-			state.EdgePerformanceSamples = append(state.EdgePerformanceSamples, normalized)
-			byID[normalized.ID] = len(state.EdgePerformanceSamples) - 1
-		}
-		sortEdgePerformanceSamples(state.EdgePerformanceSamples)
-		return nil
-	})
+	return s.pgRecordEdgePerformanceSamples(samples, pruneBefore)
 }
 
 func (s *Store) ListEdgePerformanceSamples(hostname string, since time.Time) ([]model.EdgePerformanceSample, error) {
@@ -142,27 +45,7 @@ func (s *Store) ListEdgePerformanceSamplesForEdge(edgeID string, since time.Time
 }
 
 func (s *Store) listEdgePerformanceSamples(hostname, edgeID string, since time.Time) ([]model.EdgePerformanceSample, error) {
-	if s.usingDatabase() {
-		return s.pgListEdgePerformanceSamples(hostname, edgeID, since)
-	}
-	var samples []model.EdgePerformanceSample
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, sample := range state.EdgePerformanceSamples {
-			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(sample.Hostname), hostname) {
-				continue
-			}
-			if edgeID != "" && !strings.EqualFold(strings.TrimSpace(sample.EdgeID), edgeID) {
-				continue
-			}
-			if !since.IsZero() && sample.SampledAt.Before(since) {
-				continue
-			}
-			samples = append(samples, sample)
-		}
-		return nil
-	})
-	sortEdgePerformanceSamples(samples)
-	return samples, err
+	return s.pgListEdgePerformanceSamples(hostname, edgeID, since)
 }
 
 const pgRecordEdgePerformanceSampleInsertSQL = `
@@ -371,7 +254,7 @@ func (s *Store) pgListEdgePerformanceSamples(hostname, edgeID string, since time
 }
 
 // WalkEdgePerformanceSamples visits the same ordered snapshot as List without
-// retaining its raw rows. The callback must not call back into a file store.
+// retaining its raw rows.
 func (s *Store) WalkEdgePerformanceSamples(ctx context.Context, hostname string, since time.Time, visit func(model.EdgePerformanceSample) error) error {
 	if ctx == nil || visit == nil {
 		return ErrInvalidInput
@@ -380,28 +263,7 @@ func (s *Store) WalkEdgePerformanceSamples(ctx context.Context, hostname string,
 		return err
 	}
 	hostname = normalizeEdgePerformanceHostname(hostname)
-	if s.usingDatabase() {
-		return s.pgWalkEdgePerformanceSamples(ctx, hostname, "", since, visit)
-	}
-	return s.withLockedState(false, func(state *model.State) error {
-		// Match List even when an imported file predates canonical ordering.
-		sortEdgePerformanceSamples(state.EdgePerformanceSamples)
-		for _, sample := range state.EdgePerformanceSamples {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(sample.Hostname), hostname) {
-				continue
-			}
-			if !since.IsZero() && sample.SampledAt.Before(since) {
-				continue
-			}
-			if err := visit(sample); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return s.pgWalkEdgePerformanceSamples(ctx, hostname, "", since, visit)
 }
 
 func (s *Store) pgWalkEdgePerformanceSamples(ctx context.Context, hostname, edgeID string, since time.Time, visit func(model.EdgePerformanceSample) error) error {
@@ -1131,21 +993,6 @@ func normalizeEdgeFailureClass(value string) string {
 	return b.String()
 }
 
-func sortEdgePerformanceSamples(samples []model.EdgePerformanceSample) {
-	sort.Slice(samples, func(i, j int) bool {
-		if !samples[i].SampledAt.Equal(samples[j].SampledAt) {
-			return samples[i].SampledAt.Before(samples[j].SampledAt)
-		}
-		if samples[i].Hostname != samples[j].Hostname {
-			return samples[i].Hostname < samples[j].Hostname
-		}
-		if samples[i].EdgeGroupID != samples[j].EdgeGroupID {
-			return samples[i].EdgeGroupID < samples[j].EdgeGroupID
-		}
-		return samples[i].ID < samples[j].ID
-	})
-}
-
 func normalizeEdgeQualityRollupForStore(rollup model.EdgeQualityRollup, now time.Time) model.EdgeQualityRollup {
 	rollup.Window = strings.TrimSpace(strings.ToLower(rollup.Window))
 	rollup.Hostname = normalizeEdgePerformanceHostname(rollup.Hostname)
@@ -1216,48 +1063,6 @@ func clampEdgeQualityRate(value float64) float64 {
 		return 1
 	}
 	return value
-}
-
-func edgeQualityRollupKey(rollup model.EdgeQualityRollup) string {
-	return strings.Join([]string{
-		strings.TrimSpace(rollup.Window),
-		rollup.WindowStartedAt.UTC().Format(time.RFC3339Nano),
-		normalizeEdgePerformanceHostname(rollup.Hostname),
-		strings.TrimSpace(strings.ToLower(rollup.TrafficClass)),
-		strings.ToUpper(strings.TrimSpace(rollup.Method)),
-		strings.TrimSpace(rollup.PathPrefixBucket),
-		strings.TrimSpace(strings.ToLower(rollup.ClientScopeKind)),
-		normalizeEdgeQualityScopeValue(rollup.ClientScopeKind, rollup.ClientScopeValue),
-		normalizeEdgeGroupID(rollup.EdgeGroupID),
-		normalizeEdgeID(rollup.EdgeID),
-	}, "\x00")
-}
-
-func sortEdgeQualityRollups(rollups []model.EdgeQualityRollup) {
-	sort.Slice(rollups, func(i, j int) bool {
-		if !rollups[i].WindowEndedAt.Equal(rollups[j].WindowEndedAt) {
-			return rollups[i].WindowEndedAt.Before(rollups[j].WindowEndedAt)
-		}
-		if rollups[i].Window != rollups[j].Window {
-			return rollups[i].Window < rollups[j].Window
-		}
-		if rollups[i].Hostname != rollups[j].Hostname {
-			return rollups[i].Hostname < rollups[j].Hostname
-		}
-		if rollups[i].TrafficClass != rollups[j].TrafficClass {
-			return rollups[i].TrafficClass < rollups[j].TrafficClass
-		}
-		if rollups[i].ClientScopeKind != rollups[j].ClientScopeKind {
-			return rollups[i].ClientScopeKind < rollups[j].ClientScopeKind
-		}
-		if rollups[i].ClientScopeValue != rollups[j].ClientScopeValue {
-			return rollups[i].ClientScopeValue < rollups[j].ClientScopeValue
-		}
-		if rollups[i].EdgeGroupID != rollups[j].EdgeGroupID {
-			return rollups[i].EdgeGroupID < rollups[j].EdgeGroupID
-		}
-		return rollups[i].EdgeID < rollups[j].EdgeID
-	})
 }
 
 func normalizeEdgePerformanceHostname(hostname string) string {

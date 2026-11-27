@@ -8,8 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -63,21 +61,42 @@ func TestPostgresImageDrainPreservesConcurrentDatabaseSettings(t *testing.T) {
 }
 
 func TestPostgresImageMigrationRecoveryReadFailurePreservesRunningOperation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	op := model.Operation{ID: "migration", AppID: "client", TenantID: "tenant", Type: pgimage.OperationType, Status: model.OperationStatusRunning, ExecutionMode: model.ExecutionModeManaged}
-	state := model.State{Apps: []model.App{{ID: op.AppID, TenantID: op.TenantID, Status: model.AppStatus{Phase: "deleted"}}}, Operations: []model.Operation{op}}
-	raw, err := json.Marshal(state)
+	const fixture = "image-migration-recovery"
+	state := newStoreTestDatabase(t, fixture)
+	tenant, err := state.CreateTenant("image-migration")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = os.WriteFile(path, raw, 0600); err != nil {
+	project, err := state.CreateProject(tenant.ID, "image-migration", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := &Service{Store: store.New(path), Config: config.ControllerConfig{KubectlApply: true}, Logger: log.New(io.Discard, "", 0)}
+	app, err := state.CreateImportedAppWithoutRoute(tenant.ID, project.ID, "client", "",
+		model.AppSpec{Image: "registry.example/client:1", Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID},
+		model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/client", RepoBranch: "main", BuildStrategy: model.AppBuildStrategyDockerfile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := openStoreTestSQL(t, fixture)
+	const operationID = "migration"
+	if _, err = db.Exec(`
+INSERT INTO fugue_operations (id, tenant_id, type, status, execution_mode,
+    requested_by_type, requested_by_id, app_id, created_at, updated_at, started_at)
+VALUES ($1, $2, $3, $4, $5, 'system', 'test-recovery', $6, now(), now(), now())`,
+		operationID, tenant.ID, pgimage.OperationType, model.OperationStatusRunning, model.ExecutionModeManaged, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE fugue_apps SET status_json = status_json || '{"phase":"deleted"}'::jsonb WHERE id = $1`, app.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = state.GetApp(app.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expected app read failure before recovery, got %v", err)
+	}
+	s := &Service{Store: state, Config: config.ControllerConfig{KubectlApply: true}, Logger: log.New(io.Discard, "", 0)}
 	if err = s.recoverCompletedManagedDeploys(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	current, err := s.Store.GetOperation(op.ID)
+	current, err := state.GetOperation(operationID)
 	if err != nil || current.Status != model.OperationStatusRunning {
 		t.Fatalf("app read failure released an unknown mutation: status=%s err=%v", current.Status, err)
 	}
@@ -101,8 +120,8 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 			// Each case owns its own Store, fake Kubernetes API, and Controller.
 			// Keep the real polling path without adding up every case's delay.
 			t.Parallel()
-			statePath := filepath.Join(t.TempDir(), "state.json")
-			state := store.New(statePath)
+			const stateFixture = "image-migration-executor"
+			state := newStoreTestDatabase(t, stateFixture)
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -631,7 +650,7 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 					return
 				}
 				// Reopen durable state to simulate recovery by a fresh controller.
-				s.Store = store.New(statePath)
+				s.Store = newStoreTestDatabase(t, stateFixture)
 				err = s.executePostgresImageMigration(context.Background(), op, before)
 			}
 			if err != nil {

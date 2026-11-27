@@ -10,9 +10,6 @@ import (
 	"testing"
 )
 
-func TestTrafficCanaryPublicationRejectsUnboundSelectorsAtomically(t *testing.T) {
-	testTrafficCanaryPublication(t, "")
-}
 func TestTrafficCanaryPostgresPublication(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -27,7 +24,7 @@ func TestTrafficCanaryPostgresPublication(t *testing.T) {
 func testTrafficCanaryPublication(t *testing.T, address string) {
 	for _, ref := range []string{"edge=edge-a", "cohort=missing", "cohort=test"} {
 		t.Run(ref, func(t *testing.T) {
-			s := New(t.TempDir()+"/state.json", address)
+			s := New(address)
 			if address != "" {
 				s = platformStatePostgresFixture(t)
 			}

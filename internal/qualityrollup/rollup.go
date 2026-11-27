@@ -20,9 +20,6 @@ import (
 const Interval = 5 * time.Minute
 const PlatformHostname = "__platform__"
 const edgeQualityRollupSampleChunkSize = 128
-const writerLock = store.EdgeQualityRollupWriterLock
-const writerCheckpoint = store.EdgeQualityRollupWriterCheckpoint
-const dedicatedWriter = string(store.EdgeQualityRollupWorkerWriter)
 
 var edgeQualityRollupWindows = []struct {
 	Name      string
@@ -108,40 +105,17 @@ func (b *Builder) runOnce(ctx context.Context, now time.Time) {
 }
 
 func (b *Builder) runOwnedPass(ctx context.Context, now time.Time) (int, bool, error) {
-	if b.store.BackendKind() == "postgres" {
-		session, err := b.store.BeginEdgeQualityRollupBuild(ctx)
-		if err != nil {
-			return 0, false, err
-		}
-		defer session.Rollback()
-		acquired, err := session.AcquireWriter(b.writer)
-		if !acquired || err != nil {
-			return 0, false, err
-		}
-		count, err := b.rebuildSession(session, now)
-		return count, true, err
+	session, err := b.store.BeginEdgeQualityRollupBuild(ctx)
+	if err != nil {
+		return 0, false, err
 	}
-	var count int
-	var ran bool
-	_, err := b.store.WithAdvisoryLock(ctx, writerLock, func() error {
-		owner, err := b.store.ReadObservationCheckpoint(ctx, writerCheckpoint)
-		if err != nil {
-			return fmt.Errorf("read edge quality rollup writer: %w", err)
-		}
-		switch string(owner) {
-		case "", dedicatedWriter:
-		default:
-			return fmt.Errorf("unknown edge quality rollup writer")
-		}
-		if string(owner) != string(b.writer) {
-			return nil
-		}
-		ran = true
-		var buildErr error
-		count, buildErr = b.rebuild(ctx, now)
-		return buildErr
-	})
-	return count, ran, err
+	defer session.Rollback()
+	acquired, err := session.AcquireWriter(b.writer)
+	if !acquired || err != nil {
+		return 0, false, err
+	}
+	count, err := b.rebuildSession(session, now)
+	return count, true, err
 }
 
 func (b *Builder) rebuild(ctx context.Context, now time.Time) (int, error) {
@@ -171,16 +145,9 @@ func (b *Builder) rebuildSession(session *store.EdgeQualityRollupBuildSession, n
 	}
 	builder := newEdgeQualityRollupBuildState(plans)
 	session.SetPercentileWindows(builder.percentileWindows())
-	var percentileWeights map[store.EdgeQualityPercentileValueKey]int
-	if session.NeedsPercentileWeights() {
-		percentileWeights = map[store.EdgeQualityPercentileValueKey]int{}
-	}
 	if err := session.ForEachSampleChunk(earliest, latest, edgeQualityRollupSampleChunkSize, func(samples []model.EdgePerformanceSample) error {
-		if percentileWeights != nil {
-			clear(percentileWeights)
-		}
-		builder.addSamples(samples, percentileWeights)
-		return session.AddPercentileWeights(percentileWeights)
+		builder.addSamples(samples, nil)
+		return nil
 	}); err != nil {
 		return 0, err
 	}

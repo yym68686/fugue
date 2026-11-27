@@ -119,14 +119,6 @@ func managedPostgresIdlePlacementConsumesFailover(
 	return true, nil
 }
 
-func managedPostgresFailoverSourceUnavailableInState(state *model.State, runtimeID string) bool {
-	runtimeIndex := findRuntime(state, strings.TrimSpace(runtimeID))
-	if runtimeIndex < 0 {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(state.Runtimes[runtimeIndex].Status), model.RuntimeStatusOffline)
-}
-
 func applyManagedPostgresPlacementState(spec *model.AppPostgresSpec, state ManagedPostgresPlacementState) {
 	if spec == nil {
 		return
@@ -138,12 +130,6 @@ func applyManagedPostgresPlacementState(spec *model.AppPostgresSpec, state Manag
 	spec.Instances = state.Instances
 	spec.SynchronousReplicas = state.SynchronousReplicas
 	spec.PrimaryPlacementPendingRebalance = state.PrimaryPlacementPendingRebalance
-}
-
-type managedPostgresPlacementPersistTarget struct {
-	appIndex     int
-	serviceIndex int
-	postgres     model.AppPostgresSpec
 }
 
 func validateManagedPostgresPlacementIdentity(
@@ -207,92 +193,6 @@ func validateManagedPostgresPlacementIdentity(
 	}
 }
 
-func managedPostgresPlacementTargetInState(
-	state *model.State,
-	witness ManagedPostgresPlacementWitness,
-) (managedPostgresPlacementPersistTarget, error) {
-	appIndex := findApp(state, witness.AppID)
-	if appIndex < 0 || isDeletedApp(state.Apps[appIndex]) {
-		return managedPostgresPlacementPersistTarget{}, ErrNotFound
-	}
-	app := state.Apps[appIndex]
-	hydrateAppBackingServices(state, &app)
-	target, err := ManagedPostgresOperationTargetForApp(app, witness.ServiceID)
-	if err != nil {
-		return managedPostgresPlacementPersistTarget{}, err
-	}
-
-	bindingCount := 0
-	serviceIndex := -1
-	if witness.ServiceID != "" {
-		serviceIndex = findBackingService(state, witness.ServiceID)
-		if serviceIndex < 0 {
-			return managedPostgresPlacementPersistTarget{}, ErrNotFound
-		}
-		for _, binding := range state.ServiceBindings {
-			if strings.TrimSpace(binding.ServiceID) == witness.ServiceID {
-				bindingCount++
-			}
-		}
-	}
-	if err := validateManagedPostgresPlacementIdentity(app, target, witness, bindingCount); err != nil {
-		return managedPostgresPlacementPersistTarget{}, err
-	}
-
-	var postgres *model.AppPostgresSpec
-	if serviceIndex >= 0 {
-		postgres = state.BackingServices[serviceIndex].Spec.Postgres
-	} else {
-		postgres = state.Apps[appIndex].Spec.Postgres
-	}
-	if postgres == nil {
-		return managedPostgresPlacementPersistTarget{}, ErrNotFound
-	}
-	return managedPostgresPlacementPersistTarget{
-		appIndex: appIndex, serviceIndex: serviceIndex, postgres: *model.CloneAppPostgresSpec(postgres),
-	}, nil
-}
-
-func activeOperationsForManagedPostgresPlacementTarget(
-	operations []model.Operation,
-	appID, serviceID string,
-) []model.Operation {
-	if strings.TrimSpace(serviceID) != "" {
-		return activeOperationsForLifecycleTarget(operations, appID, serviceID)
-	}
-	active := make([]model.Operation, 0, 1)
-	for _, op := range operations {
-		if strings.TrimSpace(op.AppID) == strings.TrimSpace(appID) && isActiveOperationStatus(op.Status) {
-			active = append(active, op)
-		}
-	}
-	sortActiveOperations(active)
-	return active
-}
-
-func applyManagedPostgresPlacementStateInState(
-	state *model.State,
-	target managedPostgresPlacementPersistTarget,
-	desired ManagedPostgresPlacementState,
-	now time.Time,
-) {
-	postgres := *model.CloneAppPostgresSpec(&target.postgres)
-	applyManagedPostgresPlacementState(&postgres, desired)
-	if target.serviceIndex >= 0 {
-		service := cloneBackingService(state.BackingServices[target.serviceIndex])
-		if strings.TrimSpace(target.postgres.RuntimeID) != strings.TrimSpace(postgres.RuntimeID) {
-			service.CurrentRuntimeStartedAt = nil
-			service.CurrentRuntimeReadyAt = nil
-		}
-		service.Spec.Postgres = &postgres
-		service.UpdatedAt = now
-		state.BackingServices[target.serviceIndex] = service
-	} else {
-		state.Apps[target.appIndex].Spec.Postgres = &postgres
-	}
-	state.Apps[target.appIndex].UpdatedAt = now
-}
-
 // SyncObservedManagedPostgresPlacement persists an idle placement correction.
 // The no-active-operation check and exact app/service/snapshot validation live
 // in the same store critical section as the write, closing the controller-side
@@ -302,41 +202,7 @@ func (s *Store) SyncObservedManagedPostgresPlacement(mutation ManagedPostgresPla
 	if err != nil {
 		return model.App{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgSyncObservedManagedPostgresPlacement(mutation)
-	}
-
-	var app model.App
-	err = s.withLockedState(true, func(state *model.State) error {
-		target, err := managedPostgresPlacementTargetInState(state, mutation.Witness)
-		if err != nil {
-			return err
-		}
-		if active := activeOperationsForManagedPostgresPlacementTarget(
-			state.Operations, mutation.Witness.AppID, mutation.Witness.ServiceID,
-		); len(active) != 0 {
-			return ErrConflict
-		}
-		if !managedPostgresPlacementStateEqual(
-			ManagedPostgresPlacementStateFromSpec(target.postgres), mutation.Expected,
-		) {
-			return ErrConflict
-		}
-		consumeFailover, err := managedPostgresIdlePlacementConsumesFailover(mutation.Expected, mutation.Desired)
-		if err != nil {
-			return err
-		}
-		if consumeFailover && !managedPostgresFailoverSourceUnavailableInState(state, mutation.Expected.RuntimeID) {
-			return ErrConflict
-		}
-
-		applyManagedPostgresPlacementStateInState(state, target, mutation.Desired, time.Now().UTC())
-		app = state.Apps[target.appIndex]
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgSyncObservedManagedPostgresPlacement(mutation)
 }
 
 func validateManagedPostgresSwitchoverPlacementOperation(
@@ -410,50 +276,5 @@ func (s *Store) completeManagedPostgresPlacement(id, manifestPath, message strin
 	if err != nil {
 		return model.Operation{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCompleteManagedPostgresPlacement(id, manifestPath, message, mutation, retirement)
-	}
-
-	var completed model.Operation
-	err = s.withLockedState(true, func(state *model.State) error {
-		opIndex := findOperation(state, id)
-		if opIndex < 0 {
-			return ErrNotFound
-		}
-		op := state.Operations[opIndex]
-		if err := validateManagedPostgresPlacementCompletion(op, mutation, retirement); err != nil {
-			return err
-		}
-		target, err := managedPostgresPlacementTargetInState(state, mutation.Witness)
-		if err != nil {
-			return err
-		}
-		active := activeOperationsForManagedPostgresPlacementTarget(
-			state.Operations, mutation.Witness.AppID, mutation.Witness.ServiceID,
-		)
-		if len(active) != 1 || strings.TrimSpace(active[0].ID) != id {
-			return ErrConflict
-		}
-		if !managedPostgresPlacementStateEqual(
-			ManagedPostgresPlacementStateFromSpec(target.postgres), mutation.Expected,
-		) {
-			return ErrConflict
-		}
-
-		now := time.Now().UTC()
-		applyManagedPostgresPlacementStateInState(state, target, mutation.Desired, now)
-		app := state.Apps[target.appIndex]
-		if err := completeManagedPostgresSwitchoverOperationModel(&op, &app, manifestPath, message, now); err != nil {
-			return err
-		}
-		state.Operations[opIndex] = op
-		state.Apps[target.appIndex] = app
-		if err := syncStableReleaseForCompletedDeployInState(state, app, op, now); err != nil {
-			return err
-		}
-		updateAppImageTrackingDeployedInState(state, op, now)
-		completed = op
-		return nil
-	})
-	return completed, err
+	return s.pgCompleteManagedPostgresPlacement(id, manifestPath, message, mutation, retirement)
 }

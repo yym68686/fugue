@@ -3,17 +3,16 @@ package store
 import (
 	"context"
 	"errors"
+	"fugue/internal/edgequality"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/edgequality"
-	"fugue/internal/model"
-	"fugue/internal/platformconfig"
-	"fugue/internal/platformcontrol"
 )
 
 func TestLeasedTrafficAdmission(t *testing.T) { testLeasedTrafficAdmission(t, "") }
@@ -45,19 +44,13 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if strings.HasPrefix(scenario, "static ") && !planning {
 				t.Skip("independent static endpoints require consumer readiness")
 			}
-			if scenario == "queued revocation" && address == "" {
-				t.Skip("Postgres concurrency")
-			}
-			s := New(t.TempDir()+"/state.json", address)
-			if address != "" {
-				s = platformStatePostgresFixture(t)
-			}
+
+			s := New(address)
+
+			s = platformStatePostgresFixture(t)
+
 			configureTestPlatformArtifactSigning(s)
-			if address == "" {
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			scope := model.NewID("leased-admission")
 			now := time.Now().UTC()
 			input := platformconfig.CompileRequest{Intent: platformconfig.PlatformIntent{Generation: "intent", Scope: scope, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: true}}, ACMEChallenges: []platformconfig.ACMEChallengeIntent{{ID: "challenge", Zone: "example.test", Hostname: "_acme-challenge.example.test", Value: "synthetic-proof", TTL: 60, ExpiresAt: now.Add(time.Hour)}}}, Policy: platformconfig.PolicySnapshot{Generation: "policy", Scope: scope, TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"edge-group-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now}}
@@ -236,44 +229,21 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 				}
 			}
 			if scenario == "stale issued" || scenario == "missing issued" || scenario == "stale received" || scenario == "unverified" {
-				if address == "" {
-					if err := s.withLockedState(true, func(st *model.State) error {
-						for i := range st.PlatformConsumerInstances {
-							c := &st.PlatformConsumerInstances[i]
-							if c.ScopeKey != scope {
-								continue
-							}
-							switch scenario {
-							case "stale issued":
-								expired := now.Add(-3 * time.Minute)
-								c.IssuedAt = &expired
-							case "missing issued":
-								c.IssuedAt = nil
-							case "stale received":
-								c.LastHeartbeatAt = now.Add(-3 * time.Minute)
-							case "unverified":
-								c.IdentityVerified = false
-							}
-						}
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					query := "UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE scope_key=$1"
-					if scenario == "stale issued" {
-						query = "UPDATE fugue_platform_consumer_instances SET issued_at=now()-interval '3 minutes' WHERE scope_key=$1"
-					}
-					if scenario == "missing issued" {
-						query = "UPDATE fugue_platform_consumer_instances SET issued_at=NULL WHERE scope_key=$1"
-					}
-					if scenario == "stale received" {
-						query = "UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '3 minutes' WHERE scope_key=$1"
-					}
-					if _, err := s.db.Exec(query, scope); err != nil {
-						t.Fatal(err)
-					}
+
+				query := "UPDATE fugue_platform_consumer_instances SET identity_verified=false WHERE scope_key=$1"
+				if scenario == "stale issued" {
+					query = "UPDATE fugue_platform_consumer_instances SET issued_at=now()-interval '3 minutes' WHERE scope_key=$1"
 				}
+				if scenario == "missing issued" {
+					query = "UPDATE fugue_platform_consumer_instances SET issued_at=NULL WHERE scope_key=$1"
+				}
+				if scenario == "stale received" {
+					query = "UPDATE fugue_platform_consumer_instances SET last_heartbeat_at=now()-interval '3 minutes' WHERE scope_key=$1"
+				}
+				if _, err := s.db.Exec(query, scope); err != nil {
+					t.Fatal(err)
+				}
+
 			}
 			request := model.PlatformArtifactReleaseRequest{ReleaseChannel: "gray", CanaryRuleRef: "cohort=test"}
 			if scenario == "soft override" {
@@ -302,24 +272,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 			if scenario == "soft override" {
 				principal = testPlatformSoftOverridePrincipal()
 			}
-			if address == "" && (scenario == "availability supported" || scenario == "missing DNS capability") {
-				if err := s.withLockedState(false, func(state *model.State) error {
-					checkedAt := time.Now().UTC()
-					want := validateLeasedTrafficAdmission(state, f.parent, request.ReleaseChannel, request.CanaryRuleRef, s.platformArtifactSigningKeyring(), checkedAt)
-					ctx, mutation := startPlatformMutationTrace(context.Background(), "admission-observation-parity-test")
-					got := validateLeasedTrafficAdmissionObserved(ctx, state, f.parent, request.ReleaseChannel, request.CanaryRuleRef, s.platformArtifactSigningKeyring(), checkedAt)
-					if (want == nil) != (got == nil) || want != nil && got.Error() != want.Error() {
-						return errors.New("admission observation changed decision")
-					}
-					if len(mutation.admissions) != 1 || mutation.admissions[0].Failed != (want != nil) ||
-						mutation.admissions[0].CapabilityProjections == 0 || mutation.admissions[0].CapabilityFacts == 0 {
-						return errors.New("admission subphase observation incomplete")
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			publish := func() error {
 				if strings.HasPrefix(scenario, "rollback") {
 					_, _, _, _, err := s.RollbackPlatformArtifact(f.parent.ID, model.PlatformArtifactRollbackRequest{ReleaseChannel: "gray", ToGeneration: f.parent.Generation, CanaryRuleRef: "cohort=test", Reason: "explicit recovery"}, principal)
@@ -396,21 +349,7 @@ func testTrafficExecutionAdmission(t *testing.T, address string, planning bool) 
 					t.Fatal("capability admission claimed a positive LKG", kind, err)
 				}
 			}
-			if scenario == "paired missing route" && address == "" {
-				if err := s.withLockedState(true, func(st *model.State) error {
-					for i := range st.PlatformConsumerInstances {
-						if st.PlatformConsumerInstances[i].ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle {
-							st.PlatformConsumerInstances[i].LastHeartbeatAt = now.Add(-time.Hour)
-						}
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				if err := publish(); !errors.Is(err, ErrConflict) || strings.Contains(err.Error(), "lacks physical paired") {
-					t.Fatal("stale old process capability was treated as current incompatibility", err)
-				}
-			}
+
 		})
 	}
 }

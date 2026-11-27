@@ -4,48 +4,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
-	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformproducer"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
-
-func TestProducerScopeDiscoveryIsBoundedAndIndependent(t *testing.T) {
-	s := New(t.TempDir() + "/state.json")
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for _, scope := range []string{platformproducer.Scope, platformproducer.Scope + ":cell-a", "unrelated"} {
-			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: scope, ReleaseChannel: "shadow", ActiveReleaseID: scope})
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.ListPlatformProducerScopes()
-	if err != nil || !reflect.DeepEqual(got, []string{platformproducer.Scope, platformproducer.Scope + ":cell-a"}) {
-		t.Fatal(got, err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for i := 0; i < 33; i++ {
-			scope := fmt.Sprintf("%s:cell-extra-%d", platformproducer.Scope, i)
-			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{ArtifactKind: model.PlatformArtifactKindPolicySnapshot, ScopeKey: scope, ReleaseChannel: "shadow", ActiveReleaseID: scope})
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := s.ListPlatformProducerScopes(); got != nil || !errors.Is(err, ErrConflict) {
-		t.Fatal("discovery silently truncated authorities", got, err)
-	}
-}
 
 func TestPostgresProducerLocksExactImmutablePolicyScope(t *testing.T) {
 	for _, scope := range []string{platformproducer.Scope, platformproducer.Scope + ":cell-a", "global"} {

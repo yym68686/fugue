@@ -130,7 +130,7 @@ func TestAutomationActionDispatchReadEndpointsRespectBoundary(t *testing.T) {
 			{StatusCode: 504, Count: 1, FailureDomain: "edge:edge-us"},
 		}, "edge", nil
 	}
-	now := time.Date(2026, 7, 29, 3, 10, 7, 987654321, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second).Add(987654321 * time.Nanosecond)
 	if _, _, err := fixture.server.runAutomationShadowLoopOnce(
 		context.Background(),
 		now,

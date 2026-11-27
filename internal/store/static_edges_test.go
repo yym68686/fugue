@@ -9,7 +9,7 @@ import (
 
 func TestStaticEdgeRegistrationTenantAndProjectBoundaries(t *testing.T) {
 	t.Parallel()
-	s := New(t.TempDir() + "/state.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

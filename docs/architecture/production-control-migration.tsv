@@ -254,6 +254,7 @@ release-file	deploy/releases/image-cache/intent.json	migrate	import live authori
 release-file	deploy/releases/image-cache/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
 release-file	deploy/releases/observation-worker/database.json	migrate	native database ownership and scoped credential provisioning
 release-file	deploy/releases/observation-worker/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/observation-worker/quality-evidence-retention-handoff.json	migrate	native fenced maintenance ownership transfer and exact rollback floor
 release-file	deploy/releases/observation-worker/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
 release-file	deploy/releases/observation-worker/writer-handoff.json	migrate	native verified database writer transition
 release-file	deploy/releases/retired-dns-components.json	retire	archive tombstones and verify no live predecessor depends on the file
@@ -323,6 +324,7 @@ release-lane	telemetry	migrate	native digest-bound release keyed by stable resou
 script	scripts/activate_agent_edge_policy.py	migrate	native platform policy and reconciliation
 script	scripts/apply_fugue_traffic_safety.sh	migrate	native platform policy and reconciliation
 script	scripts/apply_observation_writer_handoff.py	migrate	native verified database writer transition
+script	scripts/apply_quality_evidence_retention_handoff.py	migrate	native fenced maintenance ownership transfer
 script	scripts/artifact_content_storage.py	migrate	native data and storage maintenance
 script	scripts/audit_dns_selector_retirement.py	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/audit_fugue_registry_host.sh	migrate	native observation and evidence; assess any retained write side effects
@@ -477,6 +479,7 @@ script	scripts/verify_dns_configuration_revision.py	migrate	unprivileged build c
 script	scripts/verify_dns_transport_isolation.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_k3s_transport.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/verify_managed_ssh_image.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_observation_rollback_floor.py	migrate	native read-only exact serving revision and rollback floor verification
 script	scripts/verify_observation_writer_handoff.py	migrate	native verified database writer transition observations
 script	scripts/verify_registry_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
@@ -591,6 +594,7 @@ workflow-job	.github/workflows/ci.yml#postgres_volume_recovery	migrate	native da
 workflow-job	.github/workflows/ci.yml#prepush	migrate	unprivileged source checks or build
 workflow-job	.github/workflows/ci.yml#producer_publication_renewal	migrate	native platform policy and reconciliation
 workflow-job	.github/workflows/ci.yml#production_maintenance_plan	retire	remove Git-diff trigger after porting validation
+workflow-job	.github/workflows/ci.yml#quality_evidence_retention_handoff	migrate	native fenced maintenance ownership transfer and exact rollback floor
 workflow-job	.github/workflows/ci.yml#runtime_agent_identity	migrate	native platform policy and reconciliation
 workflow-job	.github/workflows/ci.yml#static_edge_observability	migrate	unprivileged source checks or build
 workflow-job	.github/workflows/ci.yml#storage_policy	migrate	native data and storage maintenance

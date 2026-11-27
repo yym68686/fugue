@@ -3,13 +3,12 @@ package store
 import (
 	"errors"
 	"fugue/internal/model"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
 
 func TestRolloutConstraintPolicyOperation(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -116,45 +115,5 @@ func testRolloutConstraintPolicyOperation(t *testing.T, s *Store) {
 	}
 	if _, err := s.CompleteRolloutConstraintPolicyOperation(op2, after, "cancelled"); !errors.Is(err, ErrConflict) {
 		t.Fatal("cancelled policy completed", err)
-	}
-}
-
-func TestPolicyLifecyclePreservesRuntimeFactsAcrossCodeAdvance(t *testing.T) {
-	for _, lifecycle := range []string{"inflight", "failed", "canceled"} {
-		t.Run(lifecycle, func(t *testing.T) {
-			base := model.AppSpec{Image: "registry.example/service:v1", Replicas: 2, Continuity: &model.AppContinuityPolicy{
-				ZeroDowntime: &model.AppZeroDowntimePolicy{Enabled: true, Mode: model.AppZeroDowntimeModeSafe},
-			}}
-			desired := base
-			desired.Continuity = model.CloneAppContinuityPolicy(base.Continuity)
-			desired.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{LatencyCohortModel: true}
-			op := model.Operation{ID: "policy", AppID: "service", Type: model.OperationTypeDeploy, Status: model.OperationStatusRunning, DesiredSpec: &desired, ConfigBaseSpec: &base}
-			app := model.App{ID: op.AppID, Spec: base, Status: model.AppStatus{Phase: "degraded", CurrentReplicas: 1, CurrentRuntimeID: "runtime-observed"}}
-			app.Spec.Image = "registry.example/service:v2"
-			fileState := model.State{Apps: []model.App{app}}
-			pgApp := app
-			switch lifecycle {
-			case "inflight":
-				if err := applyInFlightOperationToApp(&fileState, &op); err != nil {
-					t.Fatal(err)
-				}
-				if err := applyInFlightOperationToAppModel(&pgApp, &op); err != nil {
-					t.Fatal(err)
-				}
-			case "failed":
-				op.Status = model.OperationStatusFailed
-				applyFailedOperationToApp(&fileState, &op)
-				applyFailedOperationToAppModel(&pgApp, &op)
-			case "canceled":
-				op.Status = model.OperationStatusCanceled
-				applyCanceledOperationToApp(&fileState, &op)
-				applyCanceledOperationToAppModel(&pgApp, &op)
-			}
-			for _, got := range []model.App{pgApp, fileState.Apps[0]} {
-				if got.Status.Phase != app.Status.Phase || got.Status.CurrentReplicas != app.Status.CurrentReplicas || got.Status.CurrentRuntimeID != app.Status.CurrentRuntimeID || !reflect.DeepEqual(got.Spec, app.Spec) {
-					t.Fatal("policy lifecycle changed concurrent executable or runtime facts", got)
-				}
-			}
-		})
 	}
 }

@@ -24,34 +24,6 @@ func (s *Store) SaveBuildArtifact(a model.BuildArtifact) (model.BuildArtifact, e
 	if a.VerifiedAt != nil && (CanonicalImageDigest(a.Digest) == "" || a.CacheEndpoint == "" || a.ClusterNodeName == "") {
 		return a, ErrInvalidInput
 	}
-	merge := func(old model.BuildArtifact) error {
-		if old.ID != "" {
-			a.RegisteredAt = old.RegisteredAt
-			if old.Digest != "" {
-				if a.Digest != "" && a.Digest != old.Digest {
-					return ErrConflict
-				}
-				a = old
-			}
-		}
-		return nil
-	}
-	if !s.usingDatabase() {
-		err := s.withLockedState(true, func(st *model.State) error {
-			for i, old := range st.BuildArtifacts {
-				if old.ID == a.ID {
-					if err := merge(old); err != nil {
-						return err
-					}
-					st.BuildArtifacts[i] = a
-					return nil
-				}
-			}
-			st.BuildArtifacts = append(st.BuildArtifacts, a)
-			return nil
-		})
-		return a, err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	raw, err := json.Marshal(a)
@@ -75,10 +47,7 @@ func (s *Store) SaveBuildArtifact(a model.BuildArtifact) (model.BuildArtifact, e
 }
 func (s *Store) ListBuildArtifacts() ([]model.BuildArtifact, error) {
 	out := []model.BuildArtifact{}
-	if !s.usingDatabase() {
-		err := s.withLockedState(false, func(st *model.State) error { out = append(out, st.BuildArtifacts...); return nil })
-		return out, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT body FROM fugue_build_artifacts ORDER BY id`)

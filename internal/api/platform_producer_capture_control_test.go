@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +16,45 @@ import (
 	"fugue/internal/platformproducer"
 	"fugue/internal/store"
 )
+
+func TestCaptureControlHTTPRefusesAmbiguousTargetsBeforeNativeCall(t *testing.T) {
+	_, authn, keys := captureControlAuthFixture(t)
+	control, _ := captureControlFixture(t)
+	encoded, _ := json.Marshal(control)
+	body := string(encoded)
+	handler := authn.RequireAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveProducerCaptureControl(w, r, func(context.Context, platformproducer.CaptureDeferralControlRequest, model.Principal) (store.ProducerCaptureDeferralReceipt, error) {
+			t.Fatal("invalid request reached control storage")
+			return store.ProducerCaptureDeferralReceipt{}, nil
+		})
+	}))
+	for _, tc := range []struct {
+		name, path, media, body string
+		status                  int
+	}{
+		{"missing media", captureControlPath, "", body, 415},
+		{"wrong media", captureControlPath, "text/plain", body, 415},
+		{"query", captureControlPath + "?enable=true", "application/json", body, 400},
+		{"duplicate action", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"action":"observe"}`, 400},
+		{"escaped duplicate", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"act\u0069on":"observe"}`, 400},
+		{"alternate case", captureControlPath, "application/json", strings.Replace(body, `"action"`, `"Action"`, 1), 400},
+		{"unknown actor", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"actor_id":"forged"}`, 400},
+		{"null", captureControlPath, "application/json", strings.Replace(body, `"release"`, `null`, 1), 400},
+		{"array", captureControlPath, "application/json", "[" + body + "]", 400},
+		{"trailing object", captureControlPath, "application/json", body + "{}", 400},
+		{"trailing invalid", captureControlPath, "application/json", body + "garbage", 400},
+		{"enable", captureControlPath, "application/json", strings.Replace(body, `"release"`, `"enable"`, 1), 400},
+		{"extend", captureControlPath, "application/json", strings.Replace(body, `"release"`, `"extend"`, 1), 400},
+		{"oversized whitespace", captureControlPath, "application/json", body + strings.Repeat(" ", maxProducerCaptureControlBytes), 413},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := captureControlHTTP(t, handler, keys["bootstrap"], tc.path, tc.media, tc.body)
+			if w.Code != tc.status || strings.Contains(w.Body.String(), `"record"`) {
+				t.Fatal("ambiguous request produced a receipt", w.Code, w.Body.String())
+			}
+		})
+	}
+}
 
 const captureControlPath = "/v1/admin/platform/producer-capture-deferrals/control"
 
@@ -34,7 +72,7 @@ func captureControlFixture(t *testing.T) (platformproducer.CaptureDeferralContro
 
 func captureControlAuthFixture(t *testing.T) (*store.Store, *auth.Authenticator, map[string]string) {
 	t.Helper()
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,50 +132,11 @@ func TestCaptureControlHTTPAuthenticatesExactCallerAndTerminalReceipt(t *testing
 		})
 	}
 	// The generated production route also uses real authentication, but an
-	// ordinary file store cannot install schema or enable controls as a side effect.
+	// ordinary Store startup does not install or enable the optional controls.
 	s := NewServer(db, authn, nil, ServerConfig{})
 	w := performJSONRequest(t, s, http.MethodPost, captureControlPath, keys["bootstrap"], control)
 	if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), `"record"`) || s.producerCaptureAdmission != nil {
 		t.Fatal("generated route bypassed the uninstalled-storage gate", w.Code, w.Body.String())
-	}
-}
-
-func TestCaptureControlHTTPRefusesAmbiguousTargetsBeforeNativeCall(t *testing.T) {
-	_, authn, keys := captureControlAuthFixture(t)
-	control, _ := captureControlFixture(t)
-	encoded, _ := json.Marshal(control)
-	body := string(encoded)
-	handler := authn.RequireAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveProducerCaptureControl(w, r, func(context.Context, platformproducer.CaptureDeferralControlRequest, model.Principal) (store.ProducerCaptureDeferralReceipt, error) {
-			t.Fatal("invalid request reached control storage")
-			return store.ProducerCaptureDeferralReceipt{}, nil
-		})
-	}))
-	for _, tc := range []struct {
-		name, path, media, body string
-		status                  int
-	}{
-		{"missing media", captureControlPath, "", body, 415},
-		{"wrong media", captureControlPath, "text/plain", body, 415},
-		{"query", captureControlPath + "?enable=true", "application/json", body, 400},
-		{"duplicate action", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"action":"observe"}`, 400},
-		{"escaped duplicate", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"act\u0069on":"observe"}`, 400},
-		{"alternate case", captureControlPath, "application/json", strings.Replace(body, `"action"`, `"Action"`, 1), 400},
-		{"unknown actor", captureControlPath, "application/json", strings.TrimSuffix(body, "}") + `,"actor_id":"forged"}`, 400},
-		{"null", captureControlPath, "application/json", strings.Replace(body, `"release"`, `null`, 1), 400},
-		{"array", captureControlPath, "application/json", "[" + body + "]", 400},
-		{"trailing object", captureControlPath, "application/json", body + "{}", 400},
-		{"trailing invalid", captureControlPath, "application/json", body + "garbage", 400},
-		{"enable", captureControlPath, "application/json", strings.Replace(body, `"release"`, `"enable"`, 1), 400},
-		{"extend", captureControlPath, "application/json", strings.Replace(body, `"release"`, `"extend"`, 1), 400},
-		{"oversized whitespace", captureControlPath, "application/json", body + strings.Repeat(" ", maxProducerCaptureControlBytes), 413},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := captureControlHTTP(t, handler, keys["bootstrap"], tc.path, tc.media, tc.body)
-			if w.Code != tc.status || strings.Contains(w.Body.String(), `"record"`) {
-				t.Fatal("ambiguous request produced a receipt", w.Code, w.Body.String())
-			}
-		})
 	}
 }
 

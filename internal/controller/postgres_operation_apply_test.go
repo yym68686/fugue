@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,13 +12,14 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 )
 
 func TestPostgresPlacementOperationWritesOnlyExactExistingCluster(t *testing.T) {
 	for _, scenario := range []string{"stage", "release hold", "foreign", "missing", "replaced", "concurrent", "inactive", "ordinary deploy"} {
 		t.Run(scenario, func(t *testing.T) {
-			st := store.New(filepath.Join(t.TempDir(), "state.json"))
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

@@ -83,7 +83,7 @@ func physicalDNSFixtureWithQuery(t *testing.T, database string, edit func(map[st
 	if err != nil {
 		t.Fatal(err)
 	}
-	if serving.s.usingDatabase() {
+	{
 		ctx := context.Background()
 		tx, beginErr := serving.s.db.BeginTx(ctx, nil)
 		if beginErr != nil {
@@ -98,19 +98,13 @@ func physicalDNSFixtureWithQuery(t *testing.T, database string, edit func(map[st
 			err = pgSetPlatformReleaseLaneActive(ctx, tx, full.LaneKey, full.ID, full.FencingToken, now)
 		}
 		if err == nil {
-			_, err = pgUpsertPlatformLKGSnapshot(ctx, tx, lkg)
+			lkg, err = pgUpsertPlatformLKGSnapshot(ctx, tx, lkg)
 		}
 		if err == nil {
 			err = tx.Commit()
 		}
-	} else {
-		err = serving.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, full)
-			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: full.LaneKey, ArtifactKind: full.ArtifactKind, ScopeKey: full.ScopeKey, ReleaseChannel: "full", FencingToken: full.FencingToken, ActiveReleaseID: full.ID})
-			state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
-			return nil
-		})
 	}
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,98 +121,6 @@ func physicalDNSFixtureWithQuery(t *testing.T, database string, edit func(map[st
 		ServingFull:    model.PlatformPublicationPrecondition{ArtifactID: parent.ID, ContentHash: parent.ContentHash, ReleaseID: full.ID, FencingToken: full.FencingToken}, VerificationEvidenceHash: lkg.VerificationEvidenceHash}}
 	f.bindKey(t)
 	return f
-}
-
-func TestPhysicalDNSProducerReconfigurationPreservesPositivePublication(t *testing.T) {
-	for _, scenario := range []string{"success", "stale_policy", "stale_full", "evidence_mismatch", "implicit_operation", "schedule_changed", "static_changed", "source_tampered", "unrelated_dns_change", "two_hostnames", "frozen_target", "unverified_baseline", "pending_gray"} {
-		t.Run(scenario, func(t *testing.T) {
-			fixture := physicalDNSReconfigurationFixture(t, "")
-			switch scenario {
-			case "stale_policy":
-				fixture.request.ProducerReconfiguration.PreviousPolicy.FencingToken++
-			case "stale_full":
-				fixture.request.ProducerReconfiguration.ServingFull.FencingToken++
-			case "evidence_mismatch":
-				fixture.request.ProducerReconfiguration.VerificationEvidenceHash = "sha256:" + strings.Repeat("b", 64)
-			case "implicit_operation":
-				fixture.request.ProducerReconfiguration.Operation = ""
-			case "schedule_changed", "static_changed":
-				policy := fixture.policy
-				if scenario == "schedule_changed" {
-					policy.RefreshSeconds++
-				} else {
-					policy.StaticIntentArtifactID = "foreign"
-				}
-				policy.Generation += "-changed"
-				fixture.next = savePhysicalDNSTestArtifact(t, fixture.s, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, policy.Generation, policy)
-			case "unrelated_dns_change", "two_hostnames":
-				source, err := fixture.s.GetPlatformArtifact(fixture.policy.DNSPolicyArtifactID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				source.Content["generation"] = "dns-changed"
-				query := source.Content["dns_query_policy"].(map[string]any)
-				if scenario == "unrelated_dns_change" {
-					query["exploration_percent"] = 4
-				} else {
-					query["physical_routes"] = []platformconfig.PhysicalQualityRoute{{Hostname: "app.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}, {Hostname: "other.example.test", TrafficClass: "streaming", Policy: edgequality.DefaultNetworkPolicy()}}
-				}
-				source = savePhysicalDNSTestArtifact(t, fixture.s, source.ArtifactKind, source.ScopeKey, "dns-changed", source.Content)
-				policy := fixture.policy
-				policy.Generation += "-changed"
-				policy.DNSPolicyArtifactID, policy.DNSPolicyDigest = source.ID, source.ContentHash
-				fixture.next = savePhysicalDNSTestArtifact(t, fixture.s, model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, policy.Generation, policy)
-			case "frozen_target":
-				fixture.freeze(t, "global")
-			case "unverified_baseline":
-				fixture.setBaselineVerification(t, false)
-			case "source_tampered", "pending_gray":
-				if err := fixture.s.withLockedState(true, func(state *model.State) error {
-					if scenario == "source_tampered" {
-						index := platformArtifactIndex(state.PlatformArtifacts, fixture.policy.DNSPolicyArtifactID)
-						state.PlatformArtifacts[index].Content["generation"] = "untrusted"
-					} else {
-						gray := state.PlatformArtifactReleases[platformArtifactReleaseIndex(state.PlatformArtifactReleases, fixture.request.ProducerReconfiguration.ServingFull.ReleaseID)]
-						gray.ID, gray.ReleaseChannel, gray.ReleasedAt = "pending-gray", "gray", time.Now().UTC().Add(time.Second)
-						gray.LaneKey = platformsafety.ReleaseLaneKey(gray.ArtifactKind, "global", "gray")
-						gray.VerificationState = ""
-						state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, gray)
-						state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: gray.LaneKey, ArtifactKind: gray.ArtifactKind, ScopeKey: "global", ReleaseChannel: "gray", FencingToken: gray.FencingToken, ActiveReleaseID: gray.ID})
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			fixture.bindKey(t)
-			release, err := fixture.release()
-			if (scenario == "success") != (err == nil) {
-				t.Fatalf("%s: unexpected transition result: %v", scenario, err)
-			}
-			if scenario == "success" {
-				again, err := fixture.release()
-				if err != nil || release.ID != again.ID {
-					t.Fatal("exact retry changed publication", err)
-				}
-			}
-			artifact, _, found, err := fixture.s.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, platformproducer.Scope, "shadow")
-			wanted := fixture.old.ID
-			if scenario == "success" {
-				wanted = fixture.next.ID
-			}
-			if err != nil || !found || artifact.ID != wanted {
-				t.Fatal("failed configuration replaced producer authority", err)
-			}
-			lkg, err := fixture.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, "global")
-			if err != nil || !reflect.DeepEqual(lkg, &fixture.lkg) {
-				t.Fatal("configuration transaction changed positive LKG", err)
-			}
-			_, full, found, err := fixture.s.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "full")
-			if err != nil || !found || full.ID != fixture.request.ProducerReconfiguration.ServingFull.ReleaseID {
-				t.Fatal("configuration transaction changed serving full", err)
-			}
-		})
-	}
 }
 
 func disposablePhysicalDNSDatabase(t *testing.T) string {

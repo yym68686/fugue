@@ -4,8 +4,6 @@ import (
 	"context"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -57,10 +55,9 @@ func TestCanonicalStableTargetRequiresCompleteOwnedReference(t *testing.T) {
 			}
 		})
 	}
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
+	s := newStoreTestDatabase(t, "")
+	app = seedReleaseflowApp(t, s, app)
+	upstream = "http://" + runtime.RuntimeAppServiceName(app) + "." + runtime.NamespaceForTenant(app.TenantID) + ".svc.cluster.local:8080"
 	service := AppReleaseService{Store: s, ServiceURLForApp: func(context.Context, model.App) string { return upstream }}
 	r, err := service.EnsureStableRelease(context.Background(), app)
 	if err != nil || r.DeploymentName != runtime.RuntimeAppResourceName(app) || r.ServiceName != runtime.RuntimeAppServiceName(app) {

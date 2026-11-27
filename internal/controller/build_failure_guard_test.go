@@ -9,12 +9,11 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
-	"fugue/internal/store"
 )
 
 func TestPermanentBuildFailureSurvivesRestartAndChangedInputsResume(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := &Service{Store: store.New(path)}
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := &Service{Store: newStoreTestDatabase(t, path)}
 	if err := s.Store.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +27,7 @@ func TestPermanentBuildFailureSurvivesRestartAndChangedInputsResume(t *testing.T
 		t.Fatal(err)
 	}
 	// A new controller instance reads the durable fact, not an in-memory cache.
-	s = &Service{Store: store.New(path)}
+	s = &Service{Store: newStoreTestDatabase(t, path)}
 	ledger, err := s.readBuildFailureLedger(ctx, app)
 	if err != nil {
 		t.Fatal(err)

@@ -42,7 +42,11 @@ func TestRuntimeStatePreservesReferencedSnapshotsAndMissingEvidence(t *testing.T
 	}
 	current := create(app.ID, model.AppReleaseRoleStable, model.AppReleaseStatusServing)
 	retired := create(app.ID, model.AppReleaseRoleRetired, model.AppReleaseStatusRetired)
-	foreign := create("other-app", model.AppReleaseRoleStable, model.AppReleaseStatusServing)
+	other, err := st.CreateApp(app.TenantID, app.ProjectID, "other-app", "", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := create(other.ID, model.AppReleaseRoleStable, model.AppReleaseStatusServing)
 	create(app.ID, model.AppReleaseRolePrevious, model.AppReleaseStatusServing)
 	selector, container, err := runtimeLogTarget(app, "app")
 	if err != nil {

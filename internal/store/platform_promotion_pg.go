@@ -15,7 +15,7 @@ import (
 	"fugue/internal/platformproducer"
 )
 
-func (s *Store) pgRollbackReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, channel string, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) (*model.State, error) {
+func (s *Store) pgRollbackReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, channel string, now time.Time, lkg *model.PlatformLKGSnapshot, guard *platformProducerReleaseGuard) (*storeProjection, error) {
 	if verifiedTrafficRecovery(parent, channel, s.platformArtifactSigningKeyring(), now, lkg, guard) {
 		return s.pgReleaseSetSnapshot(ctx, tx, parent)
 	}
@@ -40,7 +40,7 @@ func pgLockPromotionScope(ctx context.Context, tx *sql.Tx, scope string, exclusi
 	return err
 }
 
-func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
+func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*storeProjection, error) {
 	state, err := s.pgReleaseSetSnapshot(ctx, tx, parent)
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func (s *Store) pgFullReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent
 // Recovery of an exact positive LKG needs its signed members and declared
 // consumers, independently of whether its former routing source is available.
 // Ordinary publication still loads and validates current sources above.
-func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
+func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*storeProjection, error) {
 	state, err := s.pgRoutingReleaseSetSnapshot(ctx, tx, parent)
 	if err != nil {
 		return nil, err
@@ -66,8 +66,8 @@ func (s *Store) pgReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent mod
 // never the source's consumer expectations or heartbeat rows. Loading those
 // rows under DNS publication locks couples unrelated heartbeat writers to the
 // DNS transaction and can exhaust its deadline before admission even starts.
-func (s *Store) pgRoutingReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*model.State, error) {
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{parent}}
+func (s *Store) pgRoutingReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact) (*storeProjection, error) {
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{parent}}
 	ids, ok := parent.Content["artifact_ids"].([]any)
 	if !ok || len(ids) == 0 || len(ids) > 64 {
 		return nil, fmt.Errorf("%w: release set members invalid", ErrConflict)
@@ -115,7 +115,7 @@ func (s *Store) pgRoutingReleaseSetSnapshot(ctx context.Context, tx *sql.Tx, par
 	return state, nil
 }
 
-func pgLoadReleaseSetConsumers(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, state *model.State) (*model.State, error) {
+func pgLoadReleaseSetConsumers(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, state *storeProjection) (*storeProjection, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT id, release_set_id, artifact_release_id, artifact_kind, scope_key, scope_json,
  expected_generation, topology_revision, revision, requires_consumers,
  required_cardinality, optional_cardinality, heartbeat_deadline,

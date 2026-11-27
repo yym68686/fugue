@@ -51,54 +51,31 @@ func (s *Store) commitRecoveryPostgresTarget(operationID, expected string, next 
 		return nil
 	}
 	var saved model.BackingService
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return saved, err
-		}
-		defer tx.Rollback()
-		op, err := s.pgGetOperationTx(ctx, tx, operationID, true)
-		if err != nil {
-			return saved, mapDBErr(err)
-		}
-		svc, err := s.pgGetBackingServiceTx(ctx, tx, op.ServiceID, true)
-		if err != nil {
-			return saved, mapDBErr(err)
-		}
-		if err := validate(op, svc); err != nil {
-			return saved, err
-		}
-		svc.Spec.Postgres = model.CloneAppPostgresSpec(&next)
-		svc.UpdatedAt = time.Now().UTC()
-		if err := s.pgUpdateBackingServiceTx(ctx, tx, svc); err != nil {
-			return saved, err
-		}
-		if err := tx.Commit(); err != nil {
-			return saved, err
-		}
-		return svc, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return saved, err
 	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		oi := findOperation(state, operationID)
-		if oi < 0 {
-			return ErrNotFound
-		}
-		op := state.Operations[oi]
-		si := findBackingService(state, op.ServiceID)
-		if si < 0 {
-			return ErrNotFound
-		}
-		svc := state.BackingServices[si]
-		if err := validate(op, svc); err != nil {
-			return err
-		}
-		svc.Spec.Postgres = model.CloneAppPostgresSpec(&next)
-		svc.UpdatedAt = time.Now().UTC()
-		state.BackingServices[si] = svc
-		saved = cloneBackingService(svc)
-		return nil
-	})
-	return saved, err
+	defer tx.Rollback()
+	op, err := s.pgGetOperationTx(ctx, tx, operationID, true)
+	if err != nil {
+		return saved, mapDBErr(err)
+	}
+	svc, err := s.pgGetBackingServiceTx(ctx, tx, op.ServiceID, true)
+	if err != nil {
+		return saved, mapDBErr(err)
+	}
+	if err := validate(op, svc); err != nil {
+		return saved, err
+	}
+	svc.Spec.Postgres = model.CloneAppPostgresSpec(&next)
+	svc.UpdatedAt = time.Now().UTC()
+	if err := s.pgUpdateBackingServiceTx(ctx, tx, svc); err != nil {
+		return saved, err
+	}
+	if err := tx.Commit(); err != nil {
+		return saved, err
+	}
+	return svc, nil
 }

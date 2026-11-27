@@ -166,7 +166,7 @@ func TestCaptureDeferralPrivatePostgresAtomicDrainCrashAndExpiry(t *testing.T) {
 	if err := s.RegisterProducerCaptureParticipant(ctx, participant, principal); err == nil {
 		t.Fatal("same boot registered twice")
 	}
-	file := New(filepath.Join(t.TempDir(), "fixture.json"))
+	file := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(file)
 	if err := file.Init(); err != nil {
 		t.Fatal(err)

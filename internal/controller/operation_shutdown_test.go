@@ -23,6 +23,10 @@ func TestCanceledOperationDrainDoesNotClaimPendingWork(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			op, err = st.GetOperation(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			svc := &Service{Store: st, Logger: log.New(io.Discard, "", 0)}
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -38,7 +42,7 @@ func TestCanceledOperationDrainDoesNotClaimPendingWork(t *testing.T) {
 				t.Fatalf("canceled drain did not stop: %v", drainErr)
 			}
 			got, err := st.GetOperation(op.ID)
-			if err != nil || got.Status != op.Status || got.UpdatedAt != op.UpdatedAt {
+			if err != nil || got.Status != op.Status || !got.UpdatedAt.Equal(op.UpdatedAt) {
 				t.Fatalf("canceled drain mutated pending work: before=%+v after=%+v err=%v", op, got, err)
 			}
 		})

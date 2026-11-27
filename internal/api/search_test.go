@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -107,7 +106,7 @@ func TestListAppsSupportsSearchAndProjectFilters(t *testing.T) {
 func setupSearchTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

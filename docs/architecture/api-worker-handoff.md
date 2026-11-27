@@ -119,6 +119,32 @@ cutover, a pre-compatibility API binary is not a supported rollback: it did
 not identify evidence-admission transactions, so the database will reject
 its old delete path. A worker rollback may not re-enable the API timer.
 
+The separately deployed standby worker only receives execute access to the
+bounded expiry procedure and read access to its durable progress projection.
+It cannot read the evidence table or modify the owner. PostgreSQL commits
+successful batches with progress; interruptions roll back both and retries
+never broaden the expiry predicate. The worker exposes these facts on its
+own `/maintenance/metrics` endpoint, separate from the rollup scrape.
+
+Keep the handoff declaration absent until both running images **and both
+actual rollback artifacts** contain the compatibility boundary. The handoff
+compares the pinned running workloads with the immutable production release
+records and fails before changing PostgreSQL if an older rollback target
+would remove admission or scheduling support. If an intervening refactor
+changes the API sources, the declaration must name separately tested source
+floors for the running API and its actual rollback artifact. The worker
+must retain its scheduler and bounded database capability in both artifacts.
+After commit, verification
+requires a durable worker pass newer than the recorded transfer timestamp;
+a timeout must not grant ownership back to the API.
+
+The `acf5f7bd9` handoff switched the timer in production without redeploying
+either process. The independent collector and the primary database both
+reported `owner=worker`; PostgreSQL recorded batches after transfer and kept
+the delete fence enabled. A zero deletion count with no eligible evidence
+is a successful batch, not a missed poll. This is not yet a post-handoff API
+rollout or worker-replacement test.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance

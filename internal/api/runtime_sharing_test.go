@@ -2,18 +2,16 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestRuntimeSharingGrantExposesRuntimeAndNodeToGrantee(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -112,7 +110,7 @@ func TestRuntimeSharingGrantExposesRuntimeAndNodeToGrantee(t *testing.T) {
 func TestRuntimeSharingMutationRequiresOwner(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -162,7 +160,7 @@ func TestRuntimeSharingMutationRequiresOwner(t *testing.T) {
 func TestPlatformAdminCanManageRuntimeSharingAcrossTenants(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -209,7 +207,7 @@ func TestPlatformAdminCanManageRuntimeSharingAcrossTenants(t *testing.T) {
 func TestSetRuntimeAccessModeRequiresPlatformAdmin(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -275,7 +273,7 @@ func TestSetRuntimeAccessModeRequiresPlatformAdmin(t *testing.T) {
 func TestRuntimeOwnerCanSetPublicAccessAndOffer(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

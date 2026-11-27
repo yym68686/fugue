@@ -14,7 +14,6 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestRecoveredBackupRetirementAPI(t *testing.T) {
@@ -50,7 +49,7 @@ func TestRecoveredBackupRetirementAPI(t *testing.T) {
 		w.Header().Set("ETag", `"fixture-config-etag"`)
 	}))
 	defer r2.Close()
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

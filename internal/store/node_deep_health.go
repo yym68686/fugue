@@ -13,27 +13,7 @@ func (s *Store) RecordNodeDeepHealthResult(result model.NodeDeepHealthResult) (m
 	if result.NodeUpdaterID == "" {
 		return model.NodeDeepHealthResult{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecordNodeDeepHealthResult(result)
-	}
-	result = normalizeNodeDeepHealthResult(result, time.Now().UTC())
-	var saved model.NodeDeepHealthResult
-	err := s.withLockedState(true, func(state *model.State) error {
-		for idx := range state.NodeDeepHealthResults {
-			if strings.TrimSpace(state.NodeDeepHealthResults[idx].NodeUpdaterID) == result.NodeUpdaterID {
-				state.NodeDeepHealthResults[idx] = result
-				saved = result
-				return nil
-			}
-		}
-		state.NodeDeepHealthResults = append(state.NodeDeepHealthResults, result)
-		saved = result
-		return nil
-	})
-	if err != nil {
-		return model.NodeDeepHealthResult{}, err
-	}
-	return saved, nil
+	return s.pgRecordNodeDeepHealthResult(result)
 }
 
 func (s *Store) ListNodeDeepHealthResults() ([]model.NodeDeepHealthResult, error) {
@@ -47,23 +27,7 @@ func (s *Store) ListNodeDeepHealthEnforcementCandidates() ([]model.NodeDeepHealt
 }
 
 func (s *Store) listNodeDeepHealthResults(enforcedOnly bool) ([]model.NodeDeepHealthResult, error) {
-	if s.usingDatabase() {
-		return s.pgListNodeDeepHealthResults(enforcedOnly)
-	}
-	results := []model.NodeDeepHealthResult{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, result := range state.NodeDeepHealthResults {
-			if !enforcedOnly || !result.ObservedOnly {
-				results = append(results, result)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortNodeDeepHealthResults(results)
-	return results, nil
+	return s.pgListNodeDeepHealthResults(enforcedOnly)
 }
 
 func (s *Store) GetNodeDeepHealthResult(nodeUpdaterID string) (model.NodeDeepHealthResult, error) {
@@ -71,23 +35,7 @@ func (s *Store) GetNodeDeepHealthResult(nodeUpdaterID string) (model.NodeDeepHea
 	if nodeUpdaterID == "" {
 		return model.NodeDeepHealthResult{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetNodeDeepHealthResult(nodeUpdaterID)
-	}
-	var result model.NodeDeepHealthResult
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.NodeDeepHealthResults {
-			if strings.TrimSpace(candidate.NodeUpdaterID) == nodeUpdaterID {
-				result = candidate
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	if err != nil {
-		return model.NodeDeepHealthResult{}, err
-	}
-	return result, nil
+	return s.pgGetNodeDeepHealthResult(nodeUpdaterID)
 }
 
 func normalizeNodeDeepHealthResult(result model.NodeDeepHealthResult, now time.Time) model.NodeDeepHealthResult {
@@ -285,13 +233,4 @@ func nodeQuarantineReasonForCheck(check model.NodeDeepHealthCheck) string {
 	default:
 		return "hard_fail"
 	}
-}
-
-func sortNodeDeepHealthResults(results []model.NodeDeepHealthResult) {
-	sort.SliceStable(results, func(i, j int) bool {
-		if !results[i].UpdatedAt.Equal(results[j].UpdatedAt) {
-			return results[i].UpdatedAt.After(results[j].UpdatedAt)
-		}
-		return strings.TrimSpace(results[i].NodeUpdaterID) < strings.TrimSpace(results[j].NodeUpdaterID)
-	})
 }

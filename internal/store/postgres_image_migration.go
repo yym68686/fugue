@@ -175,7 +175,7 @@ func imageMigrationResourceEvidenceMatches(resources map[string]any, target mode
 	return quantityMatches("limits", "cpu", fmt.Sprintf("%dm", target.CPULimitMilliCores))
 }
 
-func applyPostgresImageMigration(state *model.State, app *model.App, op *model.Operation) error {
+func applyPostgresImageMigration(state *storeProjection, app *model.App, op *model.Operation) error {
 	proofs := map[string]map[string]any{}
 	for _, e := range state.OperationEvidence {
 		if e.OperationID == op.ID && e.TenantID == op.TenantID {

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,52 +25,28 @@ func (s *Store) ListImageReplicasByImageIDs(filter model.ImageReplicaFilter, ima
 	if len(ids) == 0 {
 		return out, nil
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		clauses, args := imageReplicaFilterClauses(filter)
-		// One array parameter avoids PostgreSQL's parameter-count limit for
-		// large image histories. All other filters retain their existing scope.
-		args = append(args, sortedTrimmedStringKeys(ids))
-		clauses = append(clauses, "image_id = ANY($"+strconv.Itoa(len(args))+"::text[])")
-		query := "SELECT " + imageReplicaColumns() + " FROM fugue_image_replicas WHERE " + strings.Join(clauses, " AND ") + " ORDER BY COALESCE(last_verified_at, updated_at) DESC, updated_at DESC"
-		rows, err := s.db.QueryContext(ctx, query, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	clauses, args := imageReplicaFilterClauses(filter)
+	// One array parameter avoids PostgreSQL's parameter-count limit for
+	// large image histories. All other filters retain their existing scope.
+	args = append(args, sortedTrimmedStringKeys(ids))
+	clauses = append(clauses, "image_id = ANY($"+strconv.Itoa(len(args))+"::text[])")
+	query := "SELECT " + imageReplicaColumns() + " FROM fugue_image_replicas WHERE " + strings.Join(clauses, " AND ") + " ORDER BY COALESCE(last_verified_at, updated_at) DESC, updated_at DESC"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		replica, err := scanImageReplica(rows)
 		if err != nil {
 			return nil, mapDBErr(err)
 		}
-		defer rows.Close()
-		for rows.Next() {
-			replica, err := scanImageReplica(rows)
-			if err != nil {
-				return nil, mapDBErr(err)
-			}
-			out[replica.ImageID] = append(out[replica.ImageID], replica)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, mapDBErr(err)
-		}
-		return out, nil
+		out[replica.ImageID] = append(out[replica.ImageID], replica)
 	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, replica := range state.ImageReplicas {
-			id := strings.TrimSpace(replica.ImageID)
-			if _, selected := ids[id]; selected && imageReplicaMatchesFilter(replica, filter) {
-				out[id] = append(out[id], replica)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	for _, replicas := range out {
-		sort.Slice(replicas, func(i, j int) bool {
-			left, right := imageReplicaSeenAt(replicas[i]), imageReplicaSeenAt(replicas[j])
-			if !left.Equal(right) {
-				return left.After(right)
-			}
-			return replicas[i].UpdatedAt.After(replicas[j].UpdatedAt)
-		})
+	if err := rows.Err(); err != nil {
+		return nil, mapDBErr(err)
 	}
 	return out, nil
 }

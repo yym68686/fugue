@@ -2,12 +2,11 @@ package store
 
 import (
 	"fugue/internal/model"
-	"path/filepath"
 	"testing"
 )
 
 func TestReserveImportIdempotencyReclaimsDeletedResultOnce(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

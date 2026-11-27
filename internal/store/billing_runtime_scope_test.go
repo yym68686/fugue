@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -41,7 +40,7 @@ func deployBillingTestApp(t *testing.T, s *Store, tenantID, projectID, name stri
 func TestManagedOwnedAppRuntimeDoesNotConsumeBillingOrBlockScale(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -98,7 +97,7 @@ func TestManagedOwnedAppRuntimeDoesNotConsumeBillingOrBlockScale(t *testing.T) {
 func TestManagedOwnedBackingServiceDoesNotConsumeManagedBilling(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -143,7 +142,7 @@ func TestManagedOwnedBackingServiceDoesNotConsumeManagedBilling(t *testing.T) {
 func TestManagedSharedBackingServiceStillCountsWhenAppRunsOnManagedOwned(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

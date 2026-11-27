@@ -3,8 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"slices"
-	"strings"
 	"time"
 
 	"fugue/internal/model"
@@ -27,59 +25,25 @@ func (s *Store) ListPassiveEdgeNetworkSamples(ctx context.Context, edgeIDs []str
 		}
 		wanted[id] = true
 	}
-	if s.usingDatabase() {
-		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM (
+	rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM (
  SELECT edge_id, sample_json, row_number() OVER (PARTITION BY edge_id ORDER BY (sample_json->>'source' = $4) DESC, observed_at DESC, id) AS position
  FROM fugue_edge_network_samples
  WHERE edge_id = ANY($1::text[]) AND observed_at >= $2 AND observed_at < $5 AND sample_json->>'source' IN ('public_front_tcp_info_v1', $4)
 ) AS observations WHERE position <= $3 ORDER BY edge_id, position`, edgeIDs, since, limit, model.EdgeNetworkPassiveFrontSource, before)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw []byte
-			var sample model.EdgeNetworkSample
-			if err := rows.Scan(&raw); err != nil {
-				return nil, err
-			}
-			if err := json.Unmarshal(raw, &sample); err != nil {
-				return nil, err
-			}
-			samples = append(samples, sample)
-		}
-		return samples, rows.Err()
-	}
-	byEdge := make(map[string][]model.EdgeNetworkSample)
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, sample := range state.EdgeNetworkSamples {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if wanted[sample.EdgeID] && (sample.Source == "public_front_tcp_info_v1" || sample.Source == model.EdgeNetworkPassiveFrontSource) && !sample.ObservedAt.Before(since) && sample.ObservedAt.Before(before) {
-				byEdge[sample.EdgeID] = append(byEdge[sample.EdgeID], sample)
-			}
-		}
-		return nil
-	})
 	if err != nil {
 		return nil, err
 	}
-	for _, edgeID := range slices.Sorted(slices.Values(edgeIDs)) {
-		edge := byEdge[edgeID]
-		slices.SortFunc(edge, func(a, b model.EdgeNetworkSample) int {
-			if first, second := a.Source == model.EdgeNetworkPassiveFrontSource, b.Source == model.EdgeNetworkPassiveFrontSource; first != second {
-				if first {
-					return -1
-				}
-				return 1
-			}
-			if order := b.ObservedAt.Compare(a.ObservedAt); order != 0 {
-				return order
-			}
-			return strings.Compare(a.ID, b.ID)
-		})
-		samples = append(samples, edge[:min(limit, len(edge))]...)
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var sample model.EdgeNetworkSample
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &sample); err != nil {
+			return nil, err
+		}
+		samples = append(samples, sample)
 	}
-	return samples, nil
+	return samples, rows.Err()
 }

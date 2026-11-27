@@ -1,7 +1,6 @@
 package api
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -150,7 +149,7 @@ func TestBuildQueuedImageSourcePreservesComposeMetadata(t *testing.T) {
 func TestImportResolvedGitHubTopologyHydratesGitHubRevisionMetadata(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -399,7 +398,7 @@ func TestComposeDeployDependenciesIgnoreEnvironmentBindings(t *testing.T) {
 func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -559,7 +558,7 @@ func TestImportResolvedGitHubTopologySupportsImageBackedComposeServices(t *testi
 func TestImportResolvedGitHubTopologyAppliesManagedPostgresOverridesToBackingService(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -662,7 +661,7 @@ func TestImportResolvedGitHubTopologyAppliesManagedPostgresOverridesToBackingSer
 func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -752,7 +751,7 @@ func TestImportResolvedGitHubTopologyPreservesBackgroundWorkerNetworkMode(t *tes
 func TestImportResolvedGitHubTopologyAssignsRoutesToAllPublishedServices(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -852,7 +851,7 @@ func TestImportResolvedGitHubTopologyAssignsRoutesToAllPublishedServices(t *test
 func TestImportResolvedGitHubTopologyCompilesDomainsAndEntrypoints(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -959,7 +958,7 @@ func TestImportResolvedGitHubTopologyCompilesDomainsAndEntrypoints(t *testing.T)
 func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1044,7 +1043,7 @@ func TestImportResolvedGitHubTopologyAppliesPersistentStorageSeedFileOverrides(t
 func TestImportResolvedGitHubTopologyAppliesServiceEnvOverridesPerService(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

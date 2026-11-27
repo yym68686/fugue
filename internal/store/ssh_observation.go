@@ -3,11 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"os"
-	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"fugue/internal/model"
@@ -28,25 +24,14 @@ func (stateStore *Store) RecordAppSSHObservation(observation model.AppSSHObserva
 	if err := validateSSHObservation(observation, identity, time.Now().UTC()); err != nil {
 		return err
 	}
-	if stateStore.usingDatabase() {
-		raw, err := json.Marshal(observation)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, err = stateStore.db.ExecContext(ctx, `INSERT INTO fugue_app_ssh_observations(id,tenant_id,app_id,identity_id,observed_at,body) VALUES($1,$2,$3,$4,$5,$6::jsonb)`, observation.ID, observation.TenantID, observation.AppID, observation.IdentityID, observation.ObservedAt, string(raw))
-		return mapDBErr(err)
+	raw, err := json.Marshal(observation)
+	if err != nil {
+		return err
 	}
-	return stateStore.withSSHObservationFile(true, func(observations *[]model.AppSSHObservation) error {
-		for _, existing := range *observations {
-			if existing.ID == observation.ID {
-				return ErrConflict
-			}
-		}
-		*observations = append(*observations, observation)
-		return nil
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = stateStore.db.ExecContext(ctx, `INSERT INTO fugue_app_ssh_observations(id,tenant_id,app_id,identity_id,observed_at,body) VALUES($1,$2,$3,$4,$5,$6::jsonb)`, observation.ID, observation.TenantID, observation.AppID, observation.IdentityID, observation.ObservedAt, string(raw))
+	return mapDBErr(err)
 }
 
 func (stateStore *Store) LatestAppSSHObservation(tenantID, appID string) (model.AppSSHObservation, error) {
@@ -57,38 +42,20 @@ func (stateStore *Store) LatestAppSSHObservation(tenantID, appID string) (model.
 	if app.TenantID != tenantID || isDeletedApp(app) {
 		return model.AppSSHObservation{}, ErrNotFound
 	}
-	if stateStore.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var raw []byte
-		if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_app_ssh_observations WHERE tenant_id=$1 AND app_id=$2 ORDER BY observed_at DESC,id DESC LIMIT 1`, tenantID, appID).Scan(&raw); err != nil {
-			return model.AppSSHObservation{}, mapDBErr(err)
-		}
-		var observation model.AppSSHObservation
-		if err := json.Unmarshal(raw, &observation); err != nil {
-			return model.AppSSHObservation{}, err
-		}
-		if observation.TenantID != tenantID || observation.AppID != appID {
-			return model.AppSSHObservation{}, ErrConflict
-		}
-		return observation, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var raw []byte
+	if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_app_ssh_observations WHERE tenant_id=$1 AND app_id=$2 ORDER BY observed_at DESC,id DESC LIMIT 1`, tenantID, appID).Scan(&raw); err != nil {
+		return model.AppSSHObservation{}, mapDBErr(err)
 	}
-	var result model.AppSSHObservation
-	err = stateStore.withSSHObservationFile(false, func(observations *[]model.AppSSHObservation) error {
-		for _, observation := range *observations {
-			if observation.AppID != appID || observation.TenantID != tenantID {
-				continue
-			}
-			if result.ID == "" || observation.ObservedAt.After(result.ObservedAt) || (observation.ObservedAt.Equal(result.ObservedAt) && observation.ID > result.ID) {
-				result = observation
-			}
-		}
-		if result.ID == "" {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return result, err
+	var observation model.AppSSHObservation
+	if err := json.Unmarshal(raw, &observation); err != nil {
+		return model.AppSSHObservation{}, err
+	}
+	if observation.TenantID != tenantID || observation.AppID != appID {
+		return model.AppSSHObservation{}, ErrConflict
+	}
+	return observation, nil
 }
 
 func validateSSHObservation(observation model.AppSSHObservation, identity model.AppSSHIdentity, now time.Time) error {
@@ -116,49 +83,4 @@ func validateSSHObservation(observation model.AppSSHObservation, identity model.
 		}
 	}
 	return nil
-}
-
-func (stateStore *Store) withSSHObservationFile(write bool, callback func(*[]model.AppSSHObservation) error) error {
-	path := stateStore.path + ".ssh-observations.json"
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	observations := []model.AppSSHObservation{}
-	raw, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err == nil {
-		if err := json.Unmarshal(raw, &observations); err != nil {
-			return err
-		}
-	}
-	if err := callback(&observations); err != nil {
-		return err
-	}
-	if !write {
-		return nil
-	}
-	sort.Slice(observations, func(first, second int) bool {
-		return observations[first].ObservedAt.After(observations[second].ObservedAt)
-	})
-	counts := map[string]int{}
-	retained := observations[:0]
-	for _, observation := range observations {
-		if counts[observation.AppID] < 128 {
-			retained = append(retained, observation)
-			counts[observation.AppID]++
-		}
-	}
-	raw, err = json.Marshal(retained)
-	if err != nil {
-		return err
-	}
-	return writeSSHIdentityFile(path, raw)
 }

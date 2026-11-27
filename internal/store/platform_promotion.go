@@ -15,7 +15,7 @@ import (
 // Evaluate only immutable declared expectations and facts loaded in the same
 // store transaction as publication. Live inventory projection is a preflight;
 // it cannot silently rewrite the topology being authorized by this transaction.
-func validateFullReleaseSetInState(state *model.State, parent model.PlatformArtifact, keyring bundleauth.Keyring, now time.Time) error {
+func validateFullReleaseSetInState(state *storeProjection, parent model.PlatformArtifact, keyring bundleauth.Keyring, now time.Time) error {
 	fail := func(reason string) error {
 		return fmt.Errorf("%w: release set atomic convergence: %s", ErrConflict, reason)
 	}

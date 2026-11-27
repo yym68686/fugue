@@ -2,60 +2,41 @@
 package rolluptest
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"net/url"
-	"os"
 	"sort"
-	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
 	"fugue/internal/store"
+	"fugue/internal/testpostgres"
 )
+
+func Store(t testing.TB, fixture string) *store.Store {
+	t.Helper()
+	s := store.New(testpostgres.Database(t, fixture))
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Init(); err != nil {
+		t.Fatal("init isolated PostgreSQL store: ", err)
+	}
+	return s
+}
 
 func PostgresStore(b testing.TB, samples []model.EdgePerformanceSample) *store.Store {
 	b.Helper()
-	databaseURL := strings.TrimSpace(os.Getenv("FUGUE_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		b.Skip("set FUGUE_TEST_DATABASE_URL to run Postgres rollup benchmark")
-	}
-	if !strings.Contains(databaseURL, "fugue-pgtest") && !strings.Contains(databaseURL, "fugue_test") {
-		b.Fatal("refusing non-disposable Postgres benchmark target")
-	}
-	parsed, err := url.Parse(databaseURL)
-	if err != nil {
-		b.Fatal(err)
-	}
-	schemaName := strings.ReplaceAll(model.NewID("rollup_benchmark"), "-", "_")
-	baseDB, err := sql.Open("pgx", databaseURL)
-	if err != nil {
-		b.Fatal(err)
-	}
-	if _, err := baseDB.ExecContext(context.Background(), `CREATE SCHEMA "`+schemaName+`"`); err != nil {
-		_ = baseDB.Close()
-		b.Fatal(err)
-	}
-	b.Cleanup(func() {
-		_, _ = baseDB.ExecContext(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`)
-		_ = baseDB.Close()
-	})
-	query := parsed.Query()
-	query.Set("search_path", schemaName)
-	parsed.RawQuery = query.Encode()
-	stateStore := store.New("", parsed.String())
-	if err := stateStore.RecordEdgePerformanceSamples(samples, time.Time{}); err != nil {
-		b.Fatal(err)
-	}
-	db, err := sql.Open("pgx", parsed.String())
+	const fixture = "postgres-rollup"
+	stateStore := Store(b, fixture)
+	db, err := sql.Open("pgx", testpostgres.Database(b, fixture))
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer db.Close()
 	if err := schemamigrate.EnsureEdgeQualityRollupOwnerProjection(b.Context(), db); err != nil {
+		b.Fatal(err)
+	}
+	if err := stateStore.RecordEdgePerformanceSamples(samples, time.Time{}); err != nil {
 		b.Fatal(err)
 	}
 	return stateStore

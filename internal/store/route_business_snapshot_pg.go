@@ -149,8 +149,8 @@ func readRouteBusinessRows[T any](ctx context.Context, tx *sql.Tx, query string,
 	return values, rows.Err()
 }
 
-// Project at the database boundary as well as in the detached file-store
-// snapshot. Presence-only configuration (e.g. SSH) must not cross this boundary.
+// Project at the database boundary. Presence-only configuration (e.g. SSH)
+// must not cross this boundary.
 var routeBusinessReleaseSpecSQL = func() string {
 	var pairs []string
 	for _, key := range []string{"image", "runtime_id", "replicas", "ports", "network_mode", "workload_generation"} {

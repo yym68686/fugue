@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +55,7 @@ func TestRuntimeInspectionMissingEvidenceNeverPasses(t *testing.T) {
 	}
 }
 func TestImagePinsAreTenantScoped(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "store.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

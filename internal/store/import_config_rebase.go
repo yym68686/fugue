@@ -143,61 +143,35 @@ func mergeInterveningConfiguration(base, desired, current map[string]json.RawMes
 // The app and operation are read and the merged snapshot is persisted in one
 // transaction. A failed/cancelled operation can never be revived by this path.
 func (s *Store) RebaseDeployOperationForExecution(id string) (model.Operation, error) {
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return model.Operation{}, err
-		}
-		defer tx.Rollback()
-		op, err := s.pgGetOperationTx(ctx, tx, id, true)
-		if err != nil {
-			return model.Operation{}, mapDBErr(err)
-		}
-		if op.Type != model.OperationTypeDeploy || op.ConfigBaseSpec == nil {
-			return op, nil
-		}
-		if op.Status != model.OperationStatusPending && op.Status != model.OperationStatusRunning {
-			return model.Operation{}, ErrConflict
-		}
-		app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
-		if err != nil {
-			return model.Operation{}, mapDBErr(err)
-		}
-		if err = rebaseImportDeployConfiguration(&op, app, op.ConfigBaseSpec); err != nil {
-			return model.Operation{}, err
-		}
-		if err = s.pgUpdateOperationTx(ctx, tx, op); err != nil {
-			return model.Operation{}, err
-		}
-		if err = tx.Commit(); err != nil {
-			return model.Operation{}, err
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Operation{}, err
+	}
+	defer tx.Rollback()
+	op, err := s.pgGetOperationTx(ctx, tx, id, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if op.Type != model.OperationTypeDeploy || op.ConfigBaseSpec == nil {
 		return op, nil
 	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		idx := findOperation(state, id)
-		if idx < 0 {
-			return ErrNotFound
-		}
-		op = cloneOperation(state.Operations[idx])
-		if op.Type != model.OperationTypeDeploy || op.ConfigBaseSpec == nil {
-			return nil
-		}
-		if op.Status != model.OperationStatusPending && op.Status != model.OperationStatusRunning {
-			return ErrConflict
-		}
-		ai := findApp(state, op.AppID)
-		if ai < 0 {
-			return ErrNotFound
-		}
-		if err := rebaseImportDeployConfiguration(&op, state.Apps[ai], op.ConfigBaseSpec); err != nil {
-			return err
-		}
-		state.Operations[idx] = cloneOperation(op)
-		return nil
-	})
-	return op, err
+	if op.Status != model.OperationStatusPending && op.Status != model.OperationStatusRunning {
+		return model.Operation{}, ErrConflict
+	}
+	app, err := s.pgGetAppTx(ctx, tx, op.AppID, true)
+	if err != nil {
+		return model.Operation{}, mapDBErr(err)
+	}
+	if err = rebaseImportDeployConfiguration(&op, app, op.ConfigBaseSpec); err != nil {
+		return model.Operation{}, err
+	}
+	if err = s.pgUpdateOperationTx(ctx, tx, op); err != nil {
+		return model.Operation{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return model.Operation{}, err
+	}
+	return op, nil
 }

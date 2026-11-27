@@ -3,10 +3,11 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +17,10 @@ import (
 	"fugue/internal/backupusage"
 	"fugue/internal/model"
 	"fugue/internal/store"
+	"fugue/internal/testpostgres"
 )
+
+const backupUsageFixture = "backup-usage"
 
 type backupUsageS3Object struct {
 	body         []byte
@@ -94,7 +98,21 @@ func (f *backupUsageS3) calls() int {
 func newBackupUsageTestServer(t *testing.T, fake *backupUsageS3) (*store.Store, model.BackupBackend, *Server) {
 	t.Helper()
 	clearBackupUsageSeedEnv(t)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, backupUsageFixture)
+	db, err := sql.Open("pgx", testpostgres.Database(t, backupUsageFixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, statement := range []string{
+		`INSERT INTO fugue_tenants(id,name,slug,status,created_at,updated_at) VALUES('tenant_a','Tenant A','tenant-a','active',now(),now())`,
+		`INSERT INTO fugue_projects(id,tenant_id,name,slug,created_at,updated_at) VALUES('project_a','tenant_a','Project A','project-a',now(),now())`,
+		`INSERT INTO fugue_apps(id,tenant_id,project_id,name,spec_json,status_json,created_at,updated_at) VALUES('app_a','tenant_a','project_a','App A','{}','{}',now(),now())`,
+	} {
+		if _, err := db.ExecContext(t.Context(), statement); err != nil {
+			t.Fatal("seed backup usage identity: ", err)
+		}
+	}
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -123,6 +141,20 @@ func newBackupUsageTestServer(t *testing.T, fake *backupUsageS3) (*store.Store, 
 
 func createBackupUsageArtifact(t *testing.T, stateStore *store.Store, artifact model.BackupArtifact) model.BackupArtifact {
 	t.Helper()
+	if artifact.RunID != "" {
+		if _, err := stateStore.GetBackupRun(artifact.RunID, "", true); errors.Is(err, store.ErrNotFound) {
+			target := artifact.Target
+			if target.Type == "" {
+				target.Type = model.BackupTargetControlPlaneDatabase
+			}
+			_, err = stateStore.CreateBackupRun(model.BackupRun{ID: artifact.RunID, Target: target, BackendID: artifact.BackendID, Status: model.BackupRunStatusSucceeded})
+			if err != nil {
+				t.Fatalf("seed backup run: %v", err)
+			}
+		} else if err != nil {
+			t.Fatalf("find backup run: %v", err)
+		}
+	}
 	created, err := stateStore.CreateBackupArtifact(artifact)
 	if err != nil {
 		t.Fatalf("create backup artifact %s: %v", artifact.ID, err)

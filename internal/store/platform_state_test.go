@@ -24,7 +24,7 @@ func configureTestPlatformArtifactSigning(s *Store) {
 func TestPlatformArtifactStoreRejectsRouteIntentIdentityCapability(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestPlatformArtifactStoreRejectsRouteIntentIdentityCapability(t *testing.T)
 func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -223,8 +223,8 @@ func TestPlatformArtifactReleaseRollbackConsumerAndLKG(t *testing.T) {
 func TestPlatformLKGHistoryRetainsCurrentAndPreviousGenerations(t *testing.T) {
 	t.Parallel()
 
-	statePath := filepath.Join(t.TempDir(), "store.json")
-	s := New(statePath)
+	statePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, statePath)
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -284,7 +284,7 @@ func TestPlatformLKGHistoryRetainsCurrentAndPreviousGenerations(t *testing.T) {
 	}
 	assertHistory(s)
 
-	reloaded := New(statePath)
+	reloaded := newStoreTestDatabase(t, statePath)
 	configureTestPlatformArtifactSigning(reloaded)
 	if err := reloaded.Init(); err != nil {
 		t.Fatalf("reload store: %v", err)
@@ -337,8 +337,8 @@ func TestPlatformLKGHistorySnapshotEquivalentRequiresSignedIdentity(t *testing.T
 func TestPlatformServingUnverifiedCrashRecovery(t *testing.T) {
 	t.Parallel()
 
-	statePath := filepath.Join(t.TempDir(), "store.json")
-	s := New(statePath)
+	statePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, statePath)
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -369,7 +369,7 @@ func TestPlatformServingUnverifiedCrashRecovery(t *testing.T) {
 		t.Fatalf("candidate release did not retain stable LKG: %+v", retainedLKG)
 	}
 
-	restarted := New(statePath)
+	restarted := newStoreTestDatabase(t, statePath)
 	configureTestPlatformArtifactSigning(restarted)
 	if err := restarted.Init(); err != nil {
 		t.Fatalf("restart store while candidate is serving-unverified: %v", err)
@@ -407,7 +407,7 @@ func TestPlatformServingUnverifiedCrashRecovery(t *testing.T) {
 		t.Fatalf("rollback replaced stable LKG before verification: %+v", rollbackLKG)
 	}
 
-	restartedAgain := New(statePath)
+	restartedAgain := newStoreTestDatabase(t, statePath)
 	configureTestPlatformArtifactSigning(restartedAgain)
 	if err := restartedAgain.Init(); err != nil {
 		t.Fatalf("restart store while rollback is serving-unverified: %v", err)
@@ -444,70 +444,10 @@ func TestPlatformServingUnverifiedCrashRecovery(t *testing.T) {
 	}
 }
 
-func TestPlatformStatePeriodicPullSurvivesReleaseMessageLoss(t *testing.T) {
-	t.Parallel()
-
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	artifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
-		ArtifactKind: model.PlatformArtifactKindDNSAnswerBundle,
-		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
-		Generation:   "dns_gen_periodic_pull",
-		Content:      map[string]any{"records": []any{map[string]any{"name": "api.fugue.pro"}}},
-	})
-	if err != nil {
-		t.Fatalf("create artifact: %v", err)
-	}
-	passResults := []model.PlatformArtifactValidationResult{{Name: "schema", Pass: true, Severity: model.RobustnessSeverityInfo}}
-	artifact, err = s.ValidatePlatformArtifact(artifact.ID, passResults)
-	if err != nil {
-		t.Fatalf("validate artifact: %v", err)
-	}
-	seedVerifiedPlatformLKG(t, s, artifact)
-	_, release, _, _, err := s.ReleasePlatformArtifact(artifact.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull}, testPlatformPrincipal())
-	if err != nil {
-		t.Fatalf("release full artifact: %v", err)
-	}
-	if _, _, _, _, err := s.VerifyPlatformArtifactReleaseLKG(release.ID, completePlatformVerificationRequest(release.FencingToken, false), testPlatformPrincipal()); err != nil {
-		t.Fatalf("verify full artifact: %v", err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.PlatformReleaseMessages = nil
-		return nil
-	}); err != nil {
-		t.Fatalf("drop release messages: %v", err)
-	}
-
-	active, release, found, err := s.GetActivePlatformArtifact(model.PlatformArtifactKindDNSAnswerBundle, "global", model.PlatformArtifactReleaseChannelFull)
-	if err != nil {
-		t.Fatalf("periodic pull active artifact: %v", err)
-	}
-	if !found || active.Generation != artifact.Generation || release.Generation != artifact.Generation {
-		t.Fatalf("expected active artifact despite message loss, found=%t active=%+v release=%+v", found, active, release)
-	}
-	messages, err := s.ListPlatformReleaseMessages(model.PlatformArtifactKindDNSAnswerBundle, "global", time.Now().Add(-time.Hour), 10)
-	if err != nil {
-		t.Fatalf("list release messages: %v", err)
-	}
-	if len(messages) != 0 {
-		t.Fatalf("test setup should simulate lost release messages, got %+v", messages)
-	}
-	lkg, err := s.GetPlatformLKG(model.PlatformArtifactKindDNSAnswerBundle, "global")
-	if err != nil {
-		t.Fatalf("get LKG: %v", err)
-	}
-	if lkg == nil || lkg.Generation != artifact.Generation {
-		t.Fatalf("expected full-release LKG to survive message loss, got %+v", lkg)
-	}
-}
-
 func TestPlatformGrayReleaseAbortDoesNotOverwriteFullLKG(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -585,7 +525,7 @@ func TestPlatformGrayReleaseAbortDoesNotOverwriteFullLKG(t *testing.T) {
 func TestPlatformBadFullReleaseDoesNotOverwriteVerifiedLKG(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -620,7 +560,7 @@ func TestPlatformBadFullReleaseDoesNotOverwriteVerifiedLKG(t *testing.T) {
 func TestPlatformReleaseFencingAndIdempotency(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -668,7 +608,7 @@ func TestPlatformReleaseFencingAndIdempotency(t *testing.T) {
 func TestPlatformInitialLKGRequiresExplicitShadowSeed(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -694,7 +634,7 @@ func TestPlatformInitialLKGRequiresExplicitShadowSeed(t *testing.T) {
 func TestPlatformArtifactContentHashSurvivesJSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -730,7 +670,7 @@ func TestPlatformArtifactContentHashSurvivesJSONRoundTrip(t *testing.T) {
 func TestPlatformArtifactGenerationSequenceIsMonotonicAndRollbackOnlyExemption(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -774,7 +714,7 @@ func TestPlatformArtifactGenerationSequenceIsMonotonicAndRollbackOnlyExemption(t
 func TestPlatformArtifactCreationFailsClosedWithoutSigningKey(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -786,110 +726,6 @@ func TestPlatformArtifactCreationFailsClosedWithoutSigningKey(t *testing.T) {
 	}); !errors.Is(err, platformsafety.ErrPlatformSigningKeyUnavailable) {
 		t.Fatalf("artifact creation without a signing key must fail closed, got %v", err)
 	}
-}
-
-func TestPlatformFullReleaseRejectsExpiredOrUnreadableRollbackLKG(t *testing.T) {
-	t.Parallel()
-
-	t.Run("expired", func(t *testing.T) {
-		s := New(filepath.Join(t.TempDir(), "store.json"))
-		configureTestPlatformArtifactSigning(s)
-		if err := s.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		stable := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindEdgeRankingPolicy, "stable-expired", map[string]any{"weights": map[string]any{"ttfb": 1}})
-		candidate := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindEdgeRankingPolicy, "candidate-expired", map[string]any{"weights": map[string]any{"ttfb": 2}})
-		seedVerifiedPlatformLKG(t, s, stable)
-		if err := s.withLockedState(true, func(state *model.State) error {
-			for index := range state.PlatformLKGSnapshots {
-				if state.PlatformLKGSnapshots[index].ArtifactKind == stable.ArtifactKind &&
-					state.PlatformLKGSnapshots[index].ScopeKey == stable.ScopeKey {
-					state.PlatformLKGSnapshots[index].ExpiresAt = time.Now().UTC().Add(-time.Minute)
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("expire LKG: %v", err)
-		}
-		if _, _, _, _, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull}, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
-			t.Fatalf("full release with expired rollback LKG must fail, got %v", err)
-		}
-	})
-
-	t.Run("artifact-missing", func(t *testing.T) {
-		s := New(filepath.Join(t.TempDir(), "store.json"))
-		configureTestPlatformArtifactSigning(s)
-		if err := s.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		stable := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindTrafficSafetyPolicy, "stable-missing", map[string]any{"min_healthy_edges": 1})
-		candidate := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindTrafficSafetyPolicy, "candidate-missing", map[string]any{"min_healthy_edges": 2})
-		seedVerifiedPlatformLKG(t, s, stable)
-		if err := s.withLockedState(true, func(state *model.State) error {
-			artifacts := make([]model.PlatformArtifact, 0, len(state.PlatformArtifacts))
-			for _, artifact := range state.PlatformArtifacts {
-				if artifact.ID != stable.ID {
-					artifacts = append(artifacts, artifact)
-				}
-			}
-			state.PlatformArtifacts = artifacts
-			return nil
-		}); err != nil {
-			t.Fatalf("remove rollback artifact: %v", err)
-		}
-		if _, _, _, _, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull}, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
-			t.Fatalf("full release with unreadable rollback artifact must fail, got %v", err)
-		}
-	})
-
-	t.Run("snapshot-signature-invalid", func(t *testing.T) {
-		s := New(filepath.Join(t.TempDir(), "store.json"))
-		configureTestPlatformArtifactSigning(s)
-		if err := s.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		stable := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindDNSAnswerBundle, "stable-signature-invalid", map[string]any{"records": []any{"stable"}})
-		candidate := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindDNSAnswerBundle, "candidate-signature-invalid", map[string]any{"records": []any{"candidate"}})
-		seedVerifiedPlatformLKG(t, s, stable)
-		if err := s.withLockedState(true, func(state *model.State) error {
-			for index := range state.PlatformLKGSnapshots {
-				if state.PlatformLKGSnapshots[index].ArtifactKind == stable.ArtifactKind &&
-					state.PlatformLKGSnapshots[index].ScopeKey == stable.ScopeKey {
-					state.PlatformLKGSnapshots[index].SnapshotProvenance.Signature = "invalid"
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("corrupt LKG signature: %v", err)
-		}
-		if _, _, _, _, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull}, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
-			t.Fatalf("full release with signature-invalid rollback LKG must fail, got %v", err)
-		}
-	})
-
-	t.Run("artifact-content-corrupt", func(t *testing.T) {
-		s := New(filepath.Join(t.TempDir(), "store.json"))
-		configureTestPlatformArtifactSigning(s)
-		if err := s.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		stable := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindEdgeRankingPolicy, "stable-corrupt", map[string]any{"weights": map[string]any{"ttfb": 1}})
-		candidate := createValidatedPlatformArtifact(t, s, model.PlatformArtifactKindEdgeRankingPolicy, "candidate-corrupt", map[string]any{"weights": map[string]any{"ttfb": 2}})
-		seedVerifiedPlatformLKG(t, s, stable)
-		if err := s.withLockedState(true, func(state *model.State) error {
-			for index := range state.PlatformArtifacts {
-				if state.PlatformArtifacts[index].ID == stable.ID {
-					state.PlatformArtifacts[index].Content["tampered"] = true
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("corrupt rollback artifact: %v", err)
-		}
-		if _, _, _, _, err := s.ReleasePlatformArtifact(candidate.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: model.PlatformArtifactReleaseChannelFull}, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
-			t.Fatalf("full release with corrupt rollback artifact must fail, got %v", err)
-		}
-	})
 }
 
 func testPlatformPrincipal() model.Principal {

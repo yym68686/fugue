@@ -14,12 +14,6 @@ import (
 	"fugue/internal/schemamigrate"
 )
 
-func TestCompilerInputRetention(t *testing.T) { testCompilerInputRetention(t, "") }
-
-func TestCompilerInputPhysicalEvidenceSurvivesJSONStorageOrder(t *testing.T) {
-	testCompilerPhysicalEvidence(t, "")
-}
-
 func TestCompilerInputPhysicalEvidenceSurvivesPostgresJSONB(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -41,7 +35,7 @@ func testCompilerPhysicalEvidence(t *testing.T, dsn string) {
 			}
 		}
 	}
-	state := New(t.TempDir()+"/state.json", dsn)
+	state := New(dsn)
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -81,14 +75,15 @@ func TestCompilerInputRetentionPostgres(t *testing.T) {
 	}
 	testCompilerInputRetention(t, dsn)
 }
+
 func testCompilerInputRetention(t *testing.T, dsn string) {
-	s := New(t.TempDir()+"/state.json", dsn)
+	s := New(dsn)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if dsn != "" {
-		defer s.db.Close()
-	}
+
+	defer s.db.Close()
+
 	now := time.Now().UTC()
 	snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: model.NewID("intent"), PolicyGeneration: "policy", CapturedAt: &now, Facts: map[string]any{"source": "fixed", "weight": 0.25}}
 	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
@@ -116,26 +111,15 @@ func testCompilerInputRetention(t *testing.T, dsn string) {
 	if err != nil || !before.CreatedAt.Equal(after.CreatedAt) || !before.UpdatedAt.Equal(after.UpdatedAt) {
 		t.Fatal("retry mutated input", err)
 	}
-	if dsn != "" {
-		result, err := s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=data || ' '::bytea WHERE content_hash=$1`, digest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if rows, err := result.RowsAffected(); err != nil || rows == 0 {
-			t.Fatal("corruption fixture did not change current stored input", rows, err)
-		}
-	} else {
-		if err = s.withLockedState(true, func(st *model.State) error {
-			for i := range st.PlatformArtifactContents {
-				if st.PlatformArtifactContents[i].ContentHash == digest {
-					st.PlatformArtifactContents[i].Content["unexpected"] = true
-				}
-			}
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
+
+	result, err := s.db.Exec(`UPDATE fugue_platform_input_hot_chunks SET data=data || ' '::bytea WHERE content_hash=$1`, digest)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if rows, err := result.RowsAffected(); err != nil || rows == 0 {
+		t.Fatal("corruption fixture did not change current stored input", rows, err)
+	}
+
 	if err = s.EnsurePlatformCompilerInput(snapshot, digest); err == nil {
 		t.Fatal("corrupt input silently replaced")
 	}

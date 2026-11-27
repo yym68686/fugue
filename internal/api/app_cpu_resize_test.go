@@ -3,7 +3,6 @@ package api
 import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"testing"
 	"time"
 )
@@ -37,7 +36,7 @@ func TestAppCPURequestOnlyChangeDoesNotSwallowOtherDimensions(t *testing.T) {
 func TestAppCPUResizeAutoQueuesWithoutRollingCapacityOrBuildSource(t *testing.T) {
 	t.Setenv("FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED", "true")
 	t.Setenv("FUGUE_APP_MEMORY_REQUEST_RESIZE_ENABLED", "false")
-	s := store.New(t.TempDir() + "/state.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

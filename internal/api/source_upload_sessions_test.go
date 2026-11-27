@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"net/http/httptest"
 	"testing"
 )
 
 func TestSourceUploadSessionResumeAndExactOnceSubmission(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

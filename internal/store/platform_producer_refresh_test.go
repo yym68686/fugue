@@ -32,65 +32,6 @@ func refreshFixture(t *testing.T, address string) reconfigurationFixture {
 	return f
 }
 
-// The real gray/full/probe flow is covered by API tests. This local fixture
-// isolates the subsequent configuration transaction and signs its checkpoint.
-func (f *reconfigurationFixture) seedCompletedPublication(t *testing.T, policy, actor string) {
-	t.Helper()
-	parent, err := f.s.GetPlatformArtifact(f.lkg.ArtifactID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parent.Metadata == nil {
-		parent.Metadata = map[string]string{}
-	}
-	parent.Metadata[platformproducer.PolicyReleaseMetadata] = policy
-	parent.Metadata[platformproducer.StaticIntentIDMetadata] = f.policy.StaticIntentArtifactID
-	parent.Metadata[platformproducer.StaticIntentDigestMetadata] = f.policy.StaticIntentDigest
-	parent.Metadata[platformproducer.DNSPolicyIDMetadata] = f.policy.DNSPolicyArtifactID
-	parent.Metadata[platformproducer.DNSPolicyDigestMetadata] = f.policy.DNSPolicyDigest
-	parent, err = platformsafety.SignPlatformArtifact(parent, celldns.Keys())
-	if err != nil {
-		t.Fatal(err)
-	}
-	full, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	full.ReleasedByType, full.ReleasedByID = model.ActorTypeBootstrap, actor
-	lkg := f.lkg
-	lkg.ArtifactProvenance = parent.Provenance
-	lkg, err = platformsafety.SignPlatformLKGSnapshot(lkg, celldns.Keys())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.s.db != nil {
-		metadata, _ := json.Marshal(parent.Metadata)
-		provenance, _ := json.Marshal(parent.Provenance)
-		_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET metadata_json=$2::jsonb,provenance_json=$3::jsonb WHERE id=$1`, parent.ID, metadata, provenance)
-		if err == nil {
-			_, err = f.s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_by_type=$2,released_by_id=$3 WHERE id=$1`, full.ID, full.ReleasedByType, full.ReleasedByID)
-		}
-		if err == nil {
-			_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, lkg)
-		}
-	} else {
-		err = f.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, parent.ID)] = parent
-			state.PlatformArtifactReleases[platformArtifactReleaseIndex(state.PlatformArtifactReleases, full.ID)] = full
-			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, lkg)
-			return nil
-		})
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, f.policy.TargetScope)
-	if err != nil || stored == nil {
-		t.Fatal("seeded LKG", err)
-	}
-	f.lkg = *stored
-}
-
 func testProducerServingRefresh(t *testing.T, address string) {
 	t.Run("simultaneous successors", func(t *testing.T) { testSimultaneousProducerReconfiguration(t, address, refreshFixture) })
 	for _, scenario := range []string{"success", "implicit", "activation", "foreign policy", "operator full", "unverified", "bounds", "source", "schedule", "constraint", "stale", "frozen", "superseded retry"} {
@@ -161,7 +102,6 @@ func testProducerServingRefresh(t *testing.T, address string) {
 	}
 }
 
-func TestProducerServingRefresh(t *testing.T) { testProducerServingRefresh(t, "") }
 func TestProducerServingRefreshPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -172,4 +112,54 @@ func TestProducerServingRefreshPostgres(t *testing.T) {
 		t.Fatal("requires disposable loopback database")
 	}
 	testProducerServingRefresh(t, address)
+}
+
+func (f *reconfigurationFixture) seedCompletedPublication(t *testing.T, policy, actor string) {
+	t.Helper()
+	parent, err := f.s.GetPlatformArtifact(f.lkg.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.Metadata == nil {
+		parent.Metadata = map[string]string{}
+	}
+	parent.Metadata[platformproducer.PolicyReleaseMetadata] = policy
+	parent.Metadata[platformproducer.StaticIntentIDMetadata] = f.policy.StaticIntentArtifactID
+	parent.Metadata[platformproducer.StaticIntentDigestMetadata] = f.policy.StaticIntentDigest
+	parent.Metadata[platformproducer.DNSPolicyIDMetadata] = f.policy.DNSPolicyArtifactID
+	parent.Metadata[platformproducer.DNSPolicyDigestMetadata] = f.policy.DNSPolicyDigest
+	parent, err = platformsafety.SignPlatformArtifact(parent, celldns.Keys())
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full.ReleasedByType, full.ReleasedByID = model.ActorTypeBootstrap, actor
+	lkg := f.lkg
+	lkg.ArtifactProvenance = parent.Provenance
+	lkg, err = platformsafety.SignPlatformLKGSnapshot(lkg, celldns.Keys())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	metadata, _ := json.Marshal(parent.Metadata)
+	provenance, _ := json.Marshal(parent.Provenance)
+	_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET metadata_json=$2::jsonb,provenance_json=$3::jsonb WHERE id=$1`, parent.ID, metadata, provenance)
+	if err == nil {
+		_, err = f.s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_by_type=$2,released_by_id=$3 WHERE id=$1`, full.ID, full.ReleasedByType, full.ReleasedByID)
+	}
+	if err == nil {
+		_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, lkg)
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, f.policy.TargetScope)
+	if err != nil || stored == nil {
+		t.Fatal("seeded LKG", err)
+	}
+	f.lkg = *stored
 }

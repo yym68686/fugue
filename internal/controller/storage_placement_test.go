@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
+
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -332,7 +331,7 @@ func TestStoragePlacementRechecksBeforeWritingAndDoesNotBlockStop(t *testing.T) 
 
 func TestManagedStoragePlacementValidatesOwnedRuntimeAndPreservesServingNode(t *testing.T) {
 	f := newStoragePlacementFixture(t)
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

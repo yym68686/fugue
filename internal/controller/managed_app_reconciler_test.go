@@ -17,7 +17,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 	"fugue/internal/workloadidentity"
 )
 
@@ -2133,7 +2132,7 @@ func TestSelectManagedAppDesiredAppUsesStoredBaselineWhenRecoveryIsNotNeeded(t *
 func TestReconcileManagedAppObjectSkipsApplyWhileOperationIsActive(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2200,7 +2199,7 @@ func TestReconcileManagedAppObjectSkipsApplyWhileOperationIsActive(t *testing.T)
 func TestReconcileManagedAppEventTargetsOnlyNotifiesApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2497,7 +2496,7 @@ func TestSelectManagedAppDesiredAppPreservesStatelessOnlineImageRolloutSnapshot(
 func TestRefreshStoredManagedAppDesiredBeforeApplyUsesLatestOnlineRolloutSnapshot(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2845,7 +2844,7 @@ func TestSelectManagedAppDesiredAppPreservesCurrentOnlineRolloutSnapshotDespiteS
 func TestReconcileManagedAppObjectRefreshesStoredDesiredStateBeforeApply(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2971,7 +2970,7 @@ func TestReconcileManagedAppObjectRefreshesStoredDesiredStateBeforeApply(t *test
 func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyManagedSnapshot(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3138,7 +3137,7 @@ func TestReconcileManagedAppObjectRepairsIncompleteStoredGitHubSourceFromReadyMa
 func TestReconcileManagedAppObjectScalesDownUnrecoverableFailedSnapshot(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3309,7 +3308,7 @@ func TestValidateManagedAppDeployableImageRejectsPositiveReplicasWithoutImage(t 
 func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObjects(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3539,7 +3538,7 @@ func TestApplyManagedAppDesiredStateInjectsWorkloadIdentityOnlyIntoRuntimeObject
 func TestApplyManagedAppDesiredStateOmitsDeploymentForDisabledAppWithoutImage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3683,7 +3682,7 @@ func TestApplyManagedAppDesiredStateOmitsDeploymentForDisabledAppWithoutImage(t 
 func TestApplyManagedAppDesiredStateUsesRequestedSchedulingWhenManagedAppReadIsStale(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -4104,7 +4103,7 @@ func TestDeleteManagedAppResourcesIgnoresMissingCustomResourceAPIsForStatelessAp
 func TestReconcileManagedAppObjectDeletesOrphanedManagedApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(t.TempDir() + "/store.json")
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

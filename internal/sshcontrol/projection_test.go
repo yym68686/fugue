@@ -58,8 +58,8 @@ func (r *projectedRuntime) Observe(ctx context.Context, slot managedssh.ServingS
 func projectionFixture(test *testing.T) (*Reconciler, *projectedRuntime, string, string) {
 	test.Helper()
 	ctx := context.Background()
-	storePath := filepath.Join(test.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(test.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(test, storePath)
 	if err := stateStore.Init(); err != nil {
 		test.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func projectionFixture(test *testing.T) (*Reconciler, *projectedRuntime, string,
 
 	delayed := &projectedRuntime{testRuntime: runtime, delay: 30 * time.Second}
 	delayed.restartStore = func() *store.Store {
-		reopened := store.New(storePath)
+		reopened := newStoreTestDatabase(test, storePath)
 		if err := reopened.Init(); err != nil {
 			test.Fatal(err)
 		}

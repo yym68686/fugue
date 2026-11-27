@@ -1,12 +1,7 @@
 package api
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
-	"os"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,13 +9,11 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/store"
 )
 
-func routeDiagnosticFixture(t *testing.T) (string, *Server) {
+func routeDiagnosticFixture(t *testing.T) *Server {
 	t.Helper()
-	path := t.TempDir() + "/state.json"
-	state := store.New(path)
+	state := newStoreTestDatabase(t, "route-diagnostics")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -31,113 +24,11 @@ func routeDiagnosticFixture(t *testing.T) (string, *Server) {
 			t.Fatal(err)
 		}
 	}
-	return path, s
-}
-
-func TestAdminRouteDiagnosticsUsePublishedArtifactsAndFreshFacts(t *testing.T) {
-	path, s := routeDiagnosticFixture(t)
-	s.platformRoutes = []model.PlatformRoute{{Hostname: "ambient.example.test", UpstreamURL: "http://ambient:8080"}}
-	for _, endpoint := range []string{"/v1/admin/routes", "/v1/admin/routes/explain/ambient.example.test"} {
-		r := performJSONRequest(t, s, http.MethodGet, endpoint, "diagnostic-admin", nil)
-		if r.Code != 503 || strings.Contains(r.Body.String(), "http://ambient") {
-			t.Fatal("missing publication used ambient input", r.Code, r.Body.String())
-		}
-	}
-	seedVerifiedDNSDelegationFixture(t, s, "example.test", platformconfig.RouteIntent{Hostname: "published.example.test", UpstreamURL: "http://published:8080", Enabled: true})
-	if _, err := s.store.PutEdgeRoutePolicy(model.EdgeRoutePolicy{Hostname: "published.example.test", AppID: "synthetic-app", TenantID: "synthetic-tenant", EdgeGroupID: "edge-group-unpublished", RoutePolicy: model.EdgeRoutePolicyEnabled}); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	list := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes", "diagnostic-admin", nil)
-	var result publishedRouteServingModesResponse
-	mustDecodeJSON(t, list, &result)
-	if list.Code != 200 || result.TrafficRelease == nil || len(result.Routes) != 2 || len(result.HealthyEdgeGroups) != 2 || !result.HealthyEdgeGroups["edge-group-a"] || !result.HealthyEdgeGroups["edge-group-b"] {
-		t.Fatal(list.Code, list.Body.String())
-	}
-	for _, suffix := range []string{"", "?edge_group_id=edge-group-a"} {
-		r := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/published.example.test"+suffix, "diagnostic-admin", nil)
-		var response struct {
-			Explain model.RouteExplainResponse `json:"explain"`
-		}
-		mustDecodeJSON(t, r, &response)
-		if r.Code != 200 || response.Explain.TrafficRelease.ReleaseID != result.TrafficRelease.ReleaseID || response.Explain.ServingMode != "edge" || response.Explain.Route.UpstreamURL != "http://published:8080" || r.Header().Get("Cache-Control") != "private, no-store" {
-			t.Fatal(r.Code, r.Body.String())
-		}
-	}
-	missing := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/ambient.example.test", "diagnostic-admin", nil)
-	if missing.Code != 200 || !strings.Contains(missing.Body.String(), `"serving_mode":"unrouted"`) || strings.Contains(missing.Body.String(), `"published_routes"`) {
-		t.Fatal(missing.Code, missing.Body.String())
-	}
-	for _, query := range []string{"?edge_group_id=", "?edge_group_id=BAD", "?edge_group_id=edge-group-a&edge_group_id=edge-group-b"} {
-		if r := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes"+query, "diagnostic-admin", nil); r.Code != 400 {
-			t.Fatal(query, r.Code)
-		}
-	}
-	after, _ := os.ReadFile(path)
-	if !reflect.DeepEqual(raw, after) {
-		t.Fatal("read-only diagnostic changed persistent configuration")
-	}
-	for _, scenario := range []string{"stale facts", "foreign fence", "release_set", "edge_route_bundle", "dns_answer_bundle", "caddy_route_config", "missing membership"} {
-		t.Run(scenario, func(t *testing.T) {
-			var st model.State
-			if err := json.Unmarshal(raw, &st); err != nil {
-				t.Fatal(err)
-			}
-			for i := range st.PlatformArtifacts {
-				if st.PlatformArtifacts[i].ArtifactKind == scenario {
-					st.PlatformArtifacts[i].Provenance.Signature = "corrupt"
-				}
-			}
-			for i := range st.PlatformConsumerInstances {
-				if scenario == "stale facts" {
-					st.PlatformConsumerInstances[i].LastHeartbeatAt = time.Now().Add(-time.Hour)
-				}
-				if scenario == "foreign fence" {
-					st.PlatformConsumerInstances[i].FencingToken++
-				}
-			}
-			if scenario == "missing membership" {
-				st.ExpectedConsumerSets = nil
-			}
-			damaged, _ := json.Marshal(st)
-			if err := os.WriteFile(path, damaged, 0600); err != nil {
-				t.Fatal(err)
-			}
-			r := performJSONRequest(t, s, http.MethodGet, "/v1/admin/routes/explain/published.example.test", "diagnostic-admin", nil)
-			if scenario == "stale facts" || scenario == "foreign fence" {
-				var response struct {
-					Explain model.RouteExplainResponse `json:"explain"`
-				}
-				mustDecodeJSON(t, r, &response)
-				selection := response.Explain.PublishedRoutes
-				if r.Code != 200 || response.Explain.ServingMode != "degraded" || response.Explain.Route.UpstreamURL != "" || len(response.Explain.Route.Upstreams) != 0 ||
-					len(selection) == 0 || selection[0].Status != model.EdgeRouteStatusActive || !selection[0].HasUpstream || strings.Contains(r.Body.String(), "http://published:8080") {
-					t.Fatal(r.Code, r.Body.String())
-				}
-			} else if r.Code != 503 {
-				t.Fatal(r.Code, r.Body.String())
-			}
-			after, _ := os.ReadFile(path)
-			if !reflect.DeepEqual(damaged, after) {
-				t.Fatal("diagnostic repaired or changed persistent data")
-			}
-		})
-	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := s.publishedRouteDiagnostics(ctx, ""); err != context.Canceled {
-		t.Fatal(err)
-	}
+	return s
 }
 
 func TestAdminRouteDiagnosticsDoNotCombineFullAndGrayPublications(t *testing.T) {
-	_, s := routeDiagnosticFixture(t)
+	s := routeDiagnosticFixture(t)
 	seedVerifiedDNSDelegationFixture(t, s, "example.test")
 	baseline, _, _, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, "global", "gray")
 	if err != nil {

@@ -14,7 +14,7 @@ import (
 // Automatic promotion carries the complete prepared topology from the previous
 // phase into the same transaction as its new release. These are expectations,
 // never runtime evidence: every new release still needs fresh bound heartbeats.
-func producedReleaseExpectations(state *model.State, parent model.PlatformArtifact, release model.PlatformArtifactRelease, guard *platformProducerReleaseGuard, now time.Time) ([]model.PlatformExpectedConsumerSet, error) {
+func producedReleaseExpectations(state *storeProjection, parent model.PlatformArtifact, release model.PlatformArtifactRelease, guard *platformProducerReleaseGuard, now time.Time) ([]model.PlatformExpectedConsumerSet, error) {
 	if guard == nil || (guard.Phase != "gray" && guard.Phase != "full") {
 		return nil, nil
 	}

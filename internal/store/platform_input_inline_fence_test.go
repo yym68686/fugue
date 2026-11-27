@@ -25,7 +25,8 @@ func TestCompilerInputInlineFenceRejectsPreparedAndReconnectingOldCredentials(t 
 	s := archiveTestStore(t)
 	resetArchiveFenceFixture(t, s)
 	role := fmt.Sprintf("fugue_test_inline_%d", time.Now().UnixNano())
-	if _, err := s.db.Exec(`CREATE ROLE ` + role + ` LOGIN; GRANT SELECT,INSERT,UPDATE,DELETE ON fugue_platform_artifact_contents,fugue_platform_input_chunks TO ` + role); err != nil {
+	password := postgresFixturePassword()
+	if _, err := s.db.Exec(`CREATE ROLE ` + role + ` LOGIN PASSWORD '` + password + `'; GRANT SELECT,INSERT,UPDATE,DELETE ON fugue_platform_artifact_contents,fugue_platform_input_chunks TO ` + role); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -37,7 +38,7 @@ func TestCompilerInputInlineFenceRejectsPreparedAndReconnectingOldCredentials(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	u.User = url.User(role)
+	u.User = url.UserPassword(role, password)
 	open := func() *sql.DB {
 		db, err := openPostgresDatabase(u.String())
 		if err != nil {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -1364,7 +1363,7 @@ func (f *fakeAppImageRegistry) DeleteImage(_ context.Context, imageRef string) (
 func setupAppImagesTestServer(t *testing.T) (*store.Store, *Server, string, model.Tenant, model.Project, model.App, *fakeAppImageRegistry, string, string, string) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -8,8 +8,7 @@ the last complete body and its original observation time. The
 `fugue_metrics_snapshot_*` metrics distinguish cold start, failed refresh and
 stale observations. Component readiness is separate from inventory freshness.
 
-Backup inventories use `observation/v1/` checkpoints in the existing metadata
-store (a separate locked sidecar file for the file-backed Store). These are
+Backup inventories use `observation/v1/` checkpoints in PostgreSQL. These are
 rebuildable runtime facts, not serving configuration or artifact authority.
 Each bounded transaction coordinates one LIST page and the corresponding
 cursor across API replicas. A canceled transaction cannot advance the cursor.

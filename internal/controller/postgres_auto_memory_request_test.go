@@ -15,7 +15,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func postgresMemorySamples(now time.Time, mib int64, count int) []model.ResourceUsageSample {
@@ -332,7 +331,7 @@ func TestManagedPostgresAutoMemoryInitFloorNeverMutates(t *testing.T) {
 }
 
 func TestReconcileManagedPostgresAutoMemoryQueuesIndependentlyOfAppMode(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

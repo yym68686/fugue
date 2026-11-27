@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -13,7 +12,7 @@ import (
 
 func TestStorageUnmountOperationCommitsOnlyThePlannedMount(t *testing.T) {
 	t.Run("file", func(t *testing.T) {
-		s := New(filepath.Join(t.TempDir(), "store.json"))
+		s := newStoreTestDatabase(t, "")
 		if err := s.Init(); err != nil {
 			t.Fatal(err)
 		}

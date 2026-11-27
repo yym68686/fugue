@@ -28,13 +28,12 @@ func verifyPlatformArtifactMetadata(t *testing.T, s *Store) {
 		if err != nil || !created {
 			t.Fatalf("create artifact: created=%v error=%v", created, err)
 		}
-		if s.usingDatabase() {
-			t.Cleanup(func() {
-				if _, err := s.db.Exec(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, artifact.ID); err != nil {
-					t.Error(err)
-				}
-			})
-		}
+		t.Cleanup(func() {
+			if _, err := s.db.Exec(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, artifact.ID); err != nil {
+				t.Error(err)
+			}
+		})
+
 	}
 	for _, limit := range []int{1, 10} {
 		filter := model.PlatformArtifactFilter{ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle, ScopeKey: " " + strings.ToUpper(scope) + " ", Limit: limit}

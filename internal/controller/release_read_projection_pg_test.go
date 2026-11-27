@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -98,7 +97,7 @@ func controllerProjectionPostgres(t *testing.T) (*store.Store, *sql.DB, *atomic.
 		workers.Wait()
 	})
 	u.Host = listener.Addr().String()
-	state := store.New(filepath.Join(t.TempDir(), "state.json"), u.String())
+	state := store.New(u.String())
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

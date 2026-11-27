@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +62,7 @@ func TestCompletedLonghornReconcileVerifiesBlocksBeforeAdoption(t *testing.T) {
 				json.NewEncoder(w).Encode(remote)
 			}))
 			defer kube.Close()
-			db := store.New(filepath.Join(t.TempDir(), "state.json"))
+			db := newStoreTestDatabase(t, "")
 			if e := db.Init(); e != nil {
 				t.Fatal(e)
 			}

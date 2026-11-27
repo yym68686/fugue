@@ -28,6 +28,35 @@ import (
 	"fugue/internal/routeproof"
 )
 
+func TestAgentGrantRejectsCallerChosenIdentityAndUnprivilegedPreview(t *testing.T) {
+	f := setupAgentAuthorityFixture(t)
+	for _, tc := range []struct {
+		path, key string
+		code      int
+	}{
+		{"/v1/agent/edge-candidates", f.admin, 403},
+		{"/v1/agent/edge-candidates?runtime_id=foreign", f.runtimeKey, 400},
+		{"/v1/admin/agent-edge/preview?runtime_id=" + f.runtimeID, f.tenant, 403},
+		{"/v1/admin/agent-edge/trust", f.tenant, 403},
+		{"/v1/admin/agent-edge/preview?runtime_id=" + f.runtimeID + "&runtime_id=other", f.admin, 400},
+	} {
+		r := performJSONRequest(t, f.s, http.MethodGet, tc.path, tc.key, nil)
+		if r.Code != tc.code {
+			t.Fatalf("%s: got %d want %d: %s", tc.path, r.Code, tc.code, r.Body.String())
+		}
+	}
+	if err := os.Remove(f.s.agentEdgeSigningKeyFile); err != nil {
+		t.Fatal(err)
+	}
+	r := performJSONRequest(t, f.s, http.MethodGet, "/v1/agent/edge-candidates", f.runtimeKey, nil)
+	if r.Code != 503 {
+		t.Fatal("missing independent key did not fail closed", r.Code)
+	}
+	if _, err := os.Stat(f.s.agentEdgeSigningKeyFile); !os.IsNotExist(err) {
+		t.Fatal("request generated a new trust root")
+	}
+}
+
 type agentAuthorityFixture struct {
 	s                                    *Server
 	admin, tenant, runtimeID, runtimeKey string
@@ -294,35 +323,6 @@ func TestAgentGrantBindsRuntimeAndEveryPathWithoutChangingTraffic(t *testing.T) 
 	trust := performJSONRequest(t, f.s, http.MethodGet, "/v1/admin/agent-edge/trust", f.admin, nil)
 	if trust.Code != 200 || strings.Contains(trust.Body.String(), "private_key") || !strings.Contains(trust.Body.String(), "public_key") {
 		t.Fatal("private material exposed", trust.Code)
-	}
-}
-
-func TestAgentGrantRejectsCallerChosenIdentityAndUnprivilegedPreview(t *testing.T) {
-	f := setupAgentAuthorityFixture(t)
-	for _, tc := range []struct {
-		path, key string
-		code      int
-	}{
-		{"/v1/agent/edge-candidates", f.admin, 403},
-		{"/v1/agent/edge-candidates?runtime_id=foreign", f.runtimeKey, 400},
-		{"/v1/admin/agent-edge/preview?runtime_id=" + f.runtimeID, f.tenant, 403},
-		{"/v1/admin/agent-edge/trust", f.tenant, 403},
-		{"/v1/admin/agent-edge/preview?runtime_id=" + f.runtimeID + "&runtime_id=other", f.admin, 400},
-	} {
-		r := performJSONRequest(t, f.s, http.MethodGet, tc.path, tc.key, nil)
-		if r.Code != tc.code {
-			t.Fatalf("%s: got %d want %d: %s", tc.path, r.Code, tc.code, r.Body.String())
-		}
-	}
-	if err := os.Remove(f.s.agentEdgeSigningKeyFile); err != nil {
-		t.Fatal(err)
-	}
-	r := performJSONRequest(t, f.s, http.MethodGet, "/v1/agent/edge-candidates", f.runtimeKey, nil)
-	if r.Code != 503 {
-		t.Fatal("missing independent key did not fail closed", r.Code)
-	}
-	if _, err := os.Stat(f.s.agentEdgeSigningKeyFile); !os.IsNotExist(err) {
-		t.Fatal("request generated a new trust root")
 	}
 }
 

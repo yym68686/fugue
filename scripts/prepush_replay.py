@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -23,21 +22,6 @@ MIN_SAMPLES = 20
 def p95_ms(samples):
     values = sorted(sample["elapsedMs"] for sample in samples)
     return values[math.ceil(0.95 * len(values)) - 1] if values else None
-
-
-def snapshot(base):
-    """Detect source drift in a disposable worktree, including untracked inputs."""
-    digest = hashlib.sha256()
-    for command in (["rev-parse", base, "HEAD"], ["diff", "--binary", "HEAD", "--"]):
-        digest.update(prepush.git_output(command))
-        digest.update(b"\0")
-    for path in sorted(prepush.nul_paths(["ls-files", "--others", "--exclude-standard", "-z", "--"])):
-        file = prepush.ROOT / path
-        content = os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
-        digest.update(path.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(hashlib.sha256(content).digest())
-    return digest.hexdigest()
 
 
 def legacy_sample():
@@ -108,7 +92,7 @@ def go_oracle(timeout):
 def summarize(samples, selection, oracle):
     legacy = [pair["legacy"] for pair in samples]
     candidate = [pair["candidate"] for pair in samples]
-    eligible = (
+    warm_replay_pass = (
         len(samples) >= MIN_SAMPLES
         and selection["scope"] != "full"
         and not selection["omittedLegacyPackagesBeforeFallback"]
@@ -122,12 +106,13 @@ def summarize(samples, selection, oracle):
         "candidateP95Ms": p95_ms(candidate),
         "legacyFailedSamples": sum(s["status"] != "pass" for s in legacy),
         "candidateFailedSamples": sum(s["status"] != "pass" for s in candidate),
-        "eligibleForReview": eligible,
+        "warmReplayCriteriaMet": warm_replay_pass,
+        "activationReadiness": "not-evaluated",
     }
 
 
 def replay(case, base, count, run_oracle, oracle_timeout):
-    initial = snapshot(base)
+    initial = prepush_shadow.snapshot(base)
     # Capture the case's edit paths and graph before warming. Empty/no-op diffs
     # are still reportable via prepush-shadow, but not benchmark cases.
     selection = prepush_shadow.report(base)
@@ -155,7 +140,7 @@ def replay(case, base, count, run_oracle, oracle_timeout):
     if "selection" in warmup["candidate"]:
         warmup["candidate"].pop("selection")
     oracle = go_oracle(oracle_timeout) if run_oracle else None
-    if initial != snapshot(base):
+    if initial != prepush_shadow.snapshot(base):
         raise ValueError("source changed during replay; discard the samples")
     return {
         "apiVersion": "prepush.fugue.dev/replay-v1",

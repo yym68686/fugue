@@ -8,7 +8,7 @@ import (
 )
 
 func TestCancelOperationOnlyCancelsPendingOperations(t *testing.T) {
-	s := New(t.TempDir() + "/store.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

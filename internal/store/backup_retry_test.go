@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"regexp"
 	"sync"
 	"testing"
@@ -12,7 +11,7 @@ import (
 )
 
 func TestBackupRetryCreationFencesConcurrentAndStaleWorkers(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

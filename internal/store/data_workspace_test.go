@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -10,7 +9,7 @@ import (
 func TestDefaultDataBackendWithoutEnvUsesManagedBlobAPI(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -35,7 +34,7 @@ func TestSeedDefaultDataBackendFromEnvStoresEncryptedCredentials(t *testing.T) {
 	t.Setenv("FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY", "secret-key")
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "test-encryption-key")
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

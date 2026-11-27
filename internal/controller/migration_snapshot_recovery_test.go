@@ -4,8 +4,6 @@ import (
 	"context"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -13,7 +11,7 @@ import (
 func TestMigrationSnapshotRecoveryIncludesRunningRollbackAndFailedRetry(t *testing.T) {
 	for _, running := range []bool{true, false} {
 		t.Run(map[bool]string{true: "running rollback", false: "failed retry"}[running], func(t *testing.T) {
-			st := store.New(filepath.Join(t.TempDir(), "store.json"))
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

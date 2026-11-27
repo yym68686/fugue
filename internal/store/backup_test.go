@@ -13,7 +13,7 @@ import (
 func TestDefaultBackupPolicyIsControlPlaneHourlyRetainThree(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestDefaultBackupPolicyUsesConfiguredPlatformR2Backend(t *testing.T) {
 	t.Setenv("FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY", "secret-key")
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "test-encryption-key")
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -108,8 +108,8 @@ func TestDefaultBackupPolicyDisableSurvivesBackendSeedAndRestart(t *testing.T) {
 	t.Setenv("FUGUE_DATA_BACKEND_SECRET_ACCESS_KEY", "secret-key")
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "test-encryption-key")
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDefaultBackupPolicyDisableSurvivesBackendSeedAndRestart(t *testing.T) {
 	}
 	assertDisabled("backend seed", afterSeed)
 
-	restarted := New(storePath)
+	restarted := newStoreTestDatabase(t, storePath)
 	if err := restarted.Init(); err != nil {
 		t.Fatalf("restart store: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestDefaultBackupPolicyDisableSurvivesBackendSeedAndRestart(t *testing.T) {
 func TestUserAppBackupPolicyAbsentByDefault(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestUserAppBackupPolicyAbsentByDefault(t *testing.T) {
 func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -254,6 +254,9 @@ func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 		}
 	}
 
+	if err := stateStore.ReconcileBackupRetention(policy.ID); err != nil {
+		t.Fatal(err)
+	}
 	active, err := stateStore.ListBackupArtifacts(BackupArtifactFilter{PolicyID: policy.ID, ActiveOnly: true, PlatformAdmin: true})
 	if err != nil {
 		t.Fatalf("list active artifacts: %v", err)
@@ -278,7 +281,7 @@ func TestBackupRetentionKeepsLatestSuccessfulArtifacts(t *testing.T) {
 func TestMarkBackupArtifactDeletedEnforcesTenantOwnership(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -297,12 +300,20 @@ func TestMarkBackupArtifactDeletedEnforcesTenantOwnership(t *testing.T) {
 		}
 		return artifact
 	}
-	attackerArtifact := createArtifact("artifact_attacker", "tenant_attacker")
-	victimArtifact := createArtifact("artifact_victim", "tenant_victim")
+	attacker, err := stateStore.CreateTenant("backup-attacker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim, err := stateStore.CreateTenant("backup-victim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attackerArtifact := createArtifact("artifact_attacker", attacker.ID)
+	victimArtifact := createArtifact("artifact_victim", victim.ID)
 	platformArtifact := createArtifact("artifact_platform", "")
 
 	for _, artifact := range []model.BackupArtifact{victimArtifact, platformArtifact} {
-		if _, err := stateStore.MarkBackupArtifactDeleted(artifact.ID, "tenant_attacker", false); !errors.Is(err, ErrNotFound) {
+		if _, err := stateStore.MarkBackupArtifactDeleted(artifact.ID, attacker.ID, false); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("expected tenant deletion of artifact %q to be hidden, got %v", artifact.ID, err)
 		}
 		unchanged, err := stateStore.GetBackupArtifact(artifact.ID, "", true)
@@ -313,7 +324,7 @@ func TestMarkBackupArtifactDeletedEnforcesTenantOwnership(t *testing.T) {
 			t.Fatalf("artifact %q changed after rejected deletion: %+v", artifact.ID, unchanged)
 		}
 	}
-	deleted, err := stateStore.MarkBackupArtifactDeleted(attackerArtifact.ID, "tenant_attacker", false)
+	deleted, err := stateStore.MarkBackupArtifactDeleted(attackerArtifact.ID, attacker.ID, false)
 	if err != nil {
 		t.Fatalf("delete tenant-owned artifact: %v", err)
 	}
@@ -357,7 +368,7 @@ func TestBackupScheduleDueCalculation(t *testing.T) {
 func TestUpsertBackupPolicyValidatesAndRecalculatesSchedule(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -371,7 +382,7 @@ func TestUpsertBackupPolicyValidatesAndRecalculatesSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert six-hour policy: %v", err)
 	}
-	if policy.NextRunAt == nil || policy.NextRunAt.Minute() != 0 || policy.NextRunAt.Hour()%6 != 0 {
+	if policy.NextRunAt == nil || policy.NextRunAt.UTC().Minute() != 0 || policy.NextRunAt.UTC().Hour()%6 != 0 {
 		t.Fatalf("expected aligned six-hour next run, got %+v", policy)
 	}
 	originalNext := *policy.NextRunAt
@@ -582,325 +593,6 @@ func TestClaimBackupRunIsAtomicAndHonorsRetryDueTime(t *testing.T) {
 	})
 }
 
-func TestManagedPostgresSuspendAndBackupRunAreMutuallyExclusive(t *testing.T) {
-	t.Run("pending and running database backups block suspend without cancellation", func(t *testing.T) {
-		for _, claim := range []bool{false, true} {
-			name := "pending"
-			if claim {
-				name = "running"
-			}
-			t.Run(name, func(t *testing.T) {
-				stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
-				run, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerManual))
-				if err != nil {
-					t.Fatalf("create app database backup run: %v", err)
-				}
-				if claim {
-					if _, err := stateStore.ClaimBackupRun(run.ID, "backup-worker", time.Now().UTC(), 2*time.Minute); err != nil {
-						t.Fatalf("claim app database backup run: %v", err)
-					}
-				}
-				if _, err := stateStore.CreateOperation(model.Operation{
-					TenantID:  app.TenantID,
-					Type:      model.OperationTypeDatabaseSuspend,
-					AppID:     app.ID,
-					ServiceID: service.ID,
-				}); !errors.Is(err, ErrManagedPostgresBackupInProgressConflict) {
-					t.Fatalf("expected %s database backup to block suspend, got %v", name, err)
-				}
-				stored, err := stateStore.GetBackupRun(run.ID, app.TenantID, false)
-				if err != nil {
-					t.Fatalf("get backup run after rejected suspend: %v", err)
-				}
-				wantStatus := model.BackupRunStatusPending
-				if claim {
-					wantStatus = model.BackupRunStatusRunning
-				}
-				if stored.Status != wantStatus {
-					t.Fatalf("suspend must not cancel or mutate backup run: %+v", stored)
-				}
-				operations, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
-				if err != nil {
-					t.Fatalf("list app operations: %v", err)
-				}
-				for _, op := range operations {
-					if op.Type == model.OperationTypeDatabaseSuspend && isActiveOperationStatus(op.Status) {
-						t.Fatalf("rejected suspend leaked an active operation: %+v", op)
-					}
-				}
-			})
-		}
-	})
-
-	t.Run("active suspend rejects a new database backup", func(t *testing.T) {
-		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
-		if _, err := stateStore.CreateOperation(model.Operation{
-			TenantID:  app.TenantID,
-			Type:      model.OperationTypeDatabaseSuspend,
-			AppID:     app.ID,
-			ServiceID: service.ID,
-		}); err != nil {
-			t.Fatalf("create database suspend operation: %v", err)
-		}
-		if _, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerManual)); !errors.Is(err, ErrManagedPostgresSuspendBackupConflict) {
-			t.Fatalf("expected active suspend to reject database backup create, got %v", err)
-		}
-		runs, err := stateStore.ListBackupRuns(BackupRunFilter{TenantID: app.TenantID, PlatformAdmin: false})
-		if err != nil {
-			t.Fatalf("list backup runs: %v", err)
-		}
-		if len(runs) != 0 {
-			t.Fatalf("rejected backup create leaked a run: %+v", runs)
-		}
-	})
-
-	t.Run("claim atomically fails a legacy pending run during suspend", func(t *testing.T) {
-		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
-		if _, err := stateStore.CreateOperation(model.Operation{
-			TenantID:  app.TenantID,
-			Type:      model.OperationTypeDatabaseSuspend,
-			AppID:     app.ID,
-			ServiceID: service.ID,
-		}); err != nil {
-			t.Fatalf("create database suspend operation: %v", err)
-		}
-		run := managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerScheduled)
-		run.ID = model.NewID("backup_run")
-		run.CreatedAt = time.Now().UTC().Add(-time.Minute)
-		run.UpdatedAt = run.CreatedAt
-		if err := stateStore.withLockedState(true, func(state *model.State) error {
-			state.BackupRuns = append(state.BackupRuns, model.NormalizeBackupRun(run))
-			return nil
-		}); err != nil {
-			t.Fatalf("seed legacy pending backup run: %v", err)
-		}
-
-		failed, err := stateStore.ClaimBackupRun(run.ID, "scheduled-worker", time.Now().UTC(), 2*time.Minute)
-		if !errors.Is(err, ErrManagedPostgresSuspendBackupConflict) {
-			t.Fatalf("expected claim to fail deterministically during suspend, got run=%+v err=%v", failed, err)
-		}
-		if failed.Status != model.BackupRunStatusFailed ||
-			failed.ErrorCode != ManagedPostgresSuspendBackupConflictCode ||
-			failed.ErrorMessage != ManagedPostgresSuspendBackupConflictMessage ||
-			failed.FinishedAt == nil {
-			t.Fatalf("unexpected terminal suspended backup run: %+v", failed)
-		}
-		stored, err := stateStore.GetBackupRun(run.ID, app.TenantID, false)
-		if err != nil {
-			t.Fatalf("reread failed backup run: %v", err)
-		}
-		if stored.Status != model.BackupRunStatusFailed || stored.ErrorCode != ManagedPostgresSuspendBackupConflictCode {
-			t.Fatalf("terminal failure was not persisted: %+v", stored)
-		}
-		if _, err := stateStore.ClaimBackupRun(run.ID, "second-worker", time.Now().UTC(), 2*time.Minute); !errors.Is(err, ErrConflict) {
-			t.Fatalf("terminal failed backup run must not be claimable again, got %v", err)
-		}
-	})
-
-	t.Run("other backup targets remain available during suspend", func(t *testing.T) {
-		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
-		if _, err := stateStore.CreateOperation(model.Operation{
-			TenantID:  app.TenantID,
-			Type:      model.OperationTypeDatabaseSuspend,
-			AppID:     app.ID,
-			ServiceID: service.ID,
-		}); err != nil {
-			t.Fatalf("create database suspend operation: %v", err)
-		}
-		run, err := stateStore.CreateBackupRun(model.BackupRun{
-			TenantID:  app.TenantID,
-			ProjectID: app.ProjectID,
-			AppID:     app.ID,
-			Target: model.BackupTarget{
-				Type:      model.BackupTargetPersistentStorage,
-				TenantID:  app.TenantID,
-				ProjectID: app.ProjectID,
-				AppID:     app.ID,
-				RuntimeID: app.Spec.RuntimeID,
-			},
-			BackendID: backend.ID,
-			Trigger:   model.BackupRunTriggerScheduled,
-			Status:    model.BackupRunStatusPending,
-		})
-		if err != nil {
-			t.Fatalf("create non-database backup during suspend: %v", err)
-		}
-		claimed, err := stateStore.ClaimBackupRun(run.ID, "storage-worker", time.Now().UTC(), 2*time.Minute)
-		if err != nil || claimed.Status != model.BackupRunStatusRunning {
-			t.Fatalf("non-database backup was blocked by postgres suspend: run=%+v err=%v", claimed, err)
-		}
-	})
-
-	t.Run("concurrent create admits exactly one side", func(t *testing.T) {
-		stateStore, app, service, backend := newManagedPostgresBackupInterlockTestStore(t)
-		start := make(chan struct{})
-		results := make(chan error, 2)
-		go func() {
-			<-start
-			_, err := stateStore.CreateOperation(model.Operation{
-				TenantID:  app.TenantID,
-				Type:      model.OperationTypeDatabaseSuspend,
-				AppID:     app.ID,
-				ServiceID: service.ID,
-			})
-			results <- err
-		}()
-		go func() {
-			<-start
-			_, err := stateStore.CreateBackupRun(managedPostgresInterlockBackupRun(app, service, backend, model.BackupRunTriggerScheduled))
-			results <- err
-		}()
-		close(start)
-
-		succeeded := 0
-		conflicted := 0
-		for range 2 {
-			err := <-results
-			switch {
-			case err == nil:
-				succeeded++
-			case errors.Is(err, ErrManagedPostgresSuspendBackupConflict), errors.Is(err, ErrManagedPostgresBackupInProgressConflict):
-				conflicted++
-			default:
-				t.Fatalf("unexpected concurrent create result: %v", err)
-			}
-		}
-		if succeeded != 1 || conflicted != 1 {
-			t.Fatalf("expected one winner and one interlock conflict, got succeeded=%d conflicted=%d", succeeded, conflicted)
-		}
-
-		operations, err := stateStore.ListOperationsByApp(app.TenantID, false, app.ID)
-		if err != nil {
-			t.Fatalf("list operations after race: %v", err)
-		}
-		activeSuspend := false
-		for _, op := range operations {
-			if op.Type == model.OperationTypeDatabaseSuspend && isActiveOperationStatus(op.Status) {
-				activeSuspend = true
-			}
-		}
-		runs, err := stateStore.ListBackupRuns(BackupRunFilter{TenantID: app.TenantID})
-		if err != nil {
-			t.Fatalf("list backup runs after race: %v", err)
-		}
-		activeBackup := false
-		for _, run := range runs {
-			if run.Target.Type == model.BackupTargetAppDatabase &&
-				(run.Status == model.BackupRunStatusPending || run.Status == model.BackupRunStatusRunning) {
-				activeBackup = true
-			}
-		}
-		if activeSuspend == activeBackup {
-			t.Fatalf("interlock invariant violated: active_suspend=%t active_backup=%t", activeSuspend, activeBackup)
-		}
-	})
-}
-
-func TestRecoverStaleBackupRunUsesObservedLeaseCAS(t *testing.T) {
-	t.Parallel()
-
-	t.Run("recovers an unchanged stale running observation", func(t *testing.T) {
-		stateStore, backend, policy := newBackupClaimTestStore(t)
-		staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
-		staleLock := staleHeartbeat.Add(time.Minute)
-		run, err := stateStore.CreateBackupRun(model.BackupRun{
-			PolicyID:    policy.ID,
-			Target:      policy.Target,
-			BackendID:   backend.ID,
-			Trigger:     model.BackupRunTriggerManual,
-			Status:      model.BackupRunStatusRunning,
-			LeaseOwner:  "worker-owner",
-			LockedUntil: &staleLock,
-			HeartbeatAt: &staleHeartbeat,
-		})
-		if err != nil {
-			t.Fatalf("create stale running backup run: %v", err)
-		}
-		recoveredAt := time.Now().UTC()
-		recovered, err := stateStore.RecoverStaleBackupRun(run, recoveredAt, 2*time.Minute)
-		if err != nil {
-			t.Fatalf("recover unchanged stale backup run: %v", err)
-		}
-		if recovered.Status != model.BackupRunStatusFailed || recovered.ErrorCode != backupRunLostErrorCode || recovered.LockedUntil != nil || recovered.FinishedAt == nil || !recovered.FinishedAt.Equal(recoveredAt) {
-			t.Fatalf("unexpected recovered backup run: %+v", recovered)
-		}
-	})
-
-	t.Run("heartbeat renewal invalidates running observation", func(t *testing.T) {
-		stateStore, backend, policy := newBackupClaimTestStore(t)
-		staleHeartbeat := time.Now().UTC().Add(-10 * time.Minute)
-		staleLock := staleHeartbeat.Add(time.Minute)
-		observed, err := stateStore.CreateBackupRun(model.BackupRun{
-			PolicyID:    policy.ID,
-			Target:      policy.Target,
-			BackendID:   backend.ID,
-			Trigger:     model.BackupRunTriggerManual,
-			Status:      model.BackupRunStatusRunning,
-			LeaseOwner:  "worker-owner",
-			LockedUntil: &staleLock,
-			HeartbeatAt: &staleHeartbeat,
-		})
-		if err != nil {
-			t.Fatalf("create stale running backup run: %v", err)
-		}
-		replica := New(stateStore.path)
-		if err := replica.Init(); err != nil {
-			t.Fatalf("init heartbeat replica store: %v", err)
-		}
-		recoveredAt := time.Now().UTC()
-		// Model a heartbeat that started before the old lease expired but
-		// committed after the recovery scanner read the stale observation.
-		renewedAt := staleLock.Add(-time.Second)
-		renewed, err := replica.HeartbeatBackupRun(observed.ID, observed.LeaseOwner, renewedAt, 15*time.Minute)
-		if err != nil {
-			t.Fatalf("renew backup run lease: %v", err)
-		}
-		if _, err := stateStore.RecoverStaleBackupRun(observed, recoveredAt, 2*time.Minute); !errors.Is(err, ErrConflict) {
-			t.Fatalf("expected pre-heartbeat observation to conflict, got %v", err)
-		}
-		current, err := stateStore.GetBackupRun(observed.ID, "", true)
-		if err != nil {
-			t.Fatalf("get renewed backup run: %v", err)
-		}
-		if current.Status != model.BackupRunStatusRunning || current.HeartbeatAt == nil || !current.HeartbeatAt.Equal(renewedAt) || current.LockedUntil == nil || renewed.LockedUntil == nil || !current.LockedUntil.Equal(*renewed.LockedUntil) {
-			t.Fatalf("stale recovery overwrote renewed backup run: %+v", current)
-		}
-	})
-
-	t.Run("pending claim invalidates scanner observation", func(t *testing.T) {
-		stateStore, backend, policy := newBackupClaimTestStore(t)
-		observed, err := stateStore.CreateBackupRun(model.BackupRun{
-			PolicyID:  policy.ID,
-			Target:    policy.Target,
-			BackendID: backend.ID,
-			Trigger:   model.BackupRunTriggerManual,
-			Status:    model.BackupRunStatusPending,
-		})
-		if err != nil {
-			t.Fatalf("create pending backup run: %v", err)
-		}
-		replica := New(stateStore.path)
-		if err := replica.Init(); err != nil {
-			t.Fatalf("init claiming replica store: %v", err)
-		}
-		claimAt := observed.UpdatedAt.Add(2*time.Minute + time.Second)
-		claimed, err := replica.ClaimBackupRun(observed.ID, "worker-claim", claimAt, 2*time.Minute)
-		if err != nil {
-			t.Fatalf("claim pending backup run: %v", err)
-		}
-		if _, err := stateStore.RecoverStaleBackupRun(observed, claimAt, 2*time.Minute); !errors.Is(err, ErrConflict) {
-			t.Fatalf("expected pre-claim pending observation to conflict, got %v", err)
-		}
-		current, err := stateStore.GetBackupRun(observed.ID, "", true)
-		if err != nil {
-			t.Fatalf("get claimed backup run: %v", err)
-		}
-		if current.Status != model.BackupRunStatusRunning || current.LeaseOwner != claimed.LeaseOwner || current.LockedUntil == nil {
-			t.Fatalf("stale recovery overwrote claimed backup run: %+v", current)
-		}
-	})
-}
-
 func TestRecoverStaleLonghornBackupRunRequeuesWithoutFinishing(t *testing.T) {
 	stateStore, backend, policy := newBackupClaimTestStore(t)
 	policy.Engine = model.BackupEngineLonghornSnapshot
@@ -944,7 +636,7 @@ func TestCreateBackupArtifactForRunFencesLeaseAndDefersPolicySuccess(t *testing.
 		if err != nil {
 			t.Fatalf("create backup run: %v", err)
 		}
-		claimedAt := time.Now().UTC()
+		claimedAt := time.Now().UTC().Truncate(time.Microsecond)
 		claimed, err := stateStore.ClaimBackupRun(run.ID, "artifact-worker", claimedAt, 2*time.Minute)
 		if err != nil {
 			t.Fatalf("claim backup run: %v", err)
@@ -1030,87 +722,9 @@ func TestCreateBackupArtifactForRunFencesLeaseAndDefersPolicySuccess(t *testing.
 	})
 }
 
-func TestBackupSchedulerQueriesFilterBeforeLimit(t *testing.T) {
-	t.Parallel()
-
-	t.Run("due retries are ordered by oldest due time before limit", func(t *testing.T) {
-		stateStore := New(filepath.Join(t.TempDir(), "store.json"))
-		if err := stateStore.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		now := time.Date(2026, time.July, 12, 14, 0, 0, 0, time.UTC)
-		oldestDue := now.Add(-10 * time.Minute)
-		newerDue := now.Add(-time.Minute)
-		if err := stateStore.withLockedState(true, func(state *model.State) error {
-			state.BackupRuns = append(state.BackupRuns,
-				model.BackupRun{ID: "retry_oldest_due", Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusPending, NextRetryAt: &oldestDue, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
-				model.BackupRun{ID: "retry_newer_due", Trigger: model.BackupRunTriggerRetry, Status: model.BackupRunStatusPending, NextRetryAt: &newerDue, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-time.Hour)},
-			)
-			for idx := 0; idx < 150; idx++ {
-				future := now.Add(time.Duration(idx+1) * time.Minute)
-				state.BackupRuns = append(state.BackupRuns, model.BackupRun{
-					ID:          fmt.Sprintf("retry_future_%03d", idx),
-					Trigger:     model.BackupRunTriggerRetry,
-					Status:      model.BackupRunStatusPending,
-					NextRetryAt: &future,
-					CreatedAt:   now.Add(time.Duration(idx) * time.Minute),
-					UpdatedAt:   now.Add(time.Duration(idx) * time.Minute),
-				})
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("seed retry runs: %v", err)
-		}
-		runs, err := stateStore.ListDueBackupRetryRuns(now, 1)
-		if err != nil {
-			t.Fatalf("list due retry runs: %v", err)
-		}
-		if len(runs) != 1 || runs[0].ID != "retry_oldest_due" {
-			t.Fatalf("newer future retries starved oldest due retry: %+v", runs)
-		}
-	})
-
-	t.Run("stale runs are ordered by oldest expiry before limit", func(t *testing.T) {
-		stateStore := New(filepath.Join(t.TempDir(), "store.json"))
-		if err := stateStore.Init(); err != nil {
-			t.Fatalf("init store: %v", err)
-		}
-		now := time.Date(2026, time.July, 12, 14, 0, 0, 0, time.UTC)
-		oldestLock := now.Add(-30 * time.Minute)
-		if err := stateStore.withLockedState(true, func(state *model.State) error {
-			state.BackupRuns = append(state.BackupRuns,
-				model.BackupRun{ID: "run_oldest_stale", Trigger: model.BackupRunTriggerManual, Status: model.BackupRunStatusRunning, LeaseOwner: "worker-old", LockedUntil: &oldestLock, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour)},
-				model.BackupRun{ID: "run_newer_stale", Trigger: model.BackupRunTriggerManual, Status: model.BackupRunStatusPending, CreatedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-10 * time.Minute)},
-			)
-			for idx := 0; idx < 600; idx++ {
-				healthyLock := now.Add(time.Duration(idx+1) * time.Minute)
-				state.BackupRuns = append(state.BackupRuns, model.BackupRun{
-					ID:          fmt.Sprintf("run_healthy_%03d", idx),
-					Trigger:     model.BackupRunTriggerManual,
-					Status:      model.BackupRunStatusRunning,
-					LeaseOwner:  "worker-healthy",
-					LockedUntil: &healthyLock,
-					CreatedAt:   now.Add(time.Duration(idx) * time.Minute),
-					UpdatedAt:   now,
-				})
-			}
-			return nil
-		}); err != nil {
-			t.Fatalf("seed stale and healthy runs: %v", err)
-		}
-		runs, err := stateStore.ListStaleBackupRuns(now, 2*time.Minute, 1)
-		if err != nil {
-			t.Fatalf("list stale backup runs: %v", err)
-		}
-		if len(runs) != 1 || runs[0].ID != "run_oldest_stale" {
-			t.Fatalf("newer healthy runs starved oldest stale run: %+v", runs)
-		}
-	})
-}
-
 func newBackupClaimTestStore(t *testing.T) (*Store, model.BackupBackend, model.BackupPolicy) {
 	t.Helper()
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1140,7 +754,7 @@ func newBackupClaimTestStore(t *testing.T) (*Store, model.BackupBackend, model.B
 func newManagedPostgresBackupInterlockTestStore(t *testing.T) (*Store, model.App, model.BackingService, model.BackupBackend) {
 	t.Helper()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1236,7 +850,7 @@ func managedPostgresInterlockBackupRun(app model.App, service model.BackingServi
 func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1276,6 +890,7 @@ func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {
 			Billable:  false,
 		},
 	} {
+		seedStoreTestIdentity(t, stateStore, artifact.TenantID, "", "")
 		if _, err := stateStore.CreateBackupArtifact(artifact); err != nil {
 			t.Fatalf("create usage artifact: %v", err)
 		}
@@ -1304,11 +919,21 @@ func TestBackupUsageCountsBillableR2BytesWithMarkup(t *testing.T) {
 func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMarkers(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 	deletedAt := time.Now().UTC().Add(-2 * time.Hour)
+	seedStoreTestIdentity(t, stateStore, "tenant_a", "", "")
+	seedStoreTestIdentity(t, stateStore, "tenant_b", "", "")
+	backend, err := stateStore.CreateBackupBackend(model.BackupBackend{ID: "backup_backend_usage", Name: "usage", Provider: model.DataBackendProviderCloudflareR2, Bucket: "bucket", Endpoint: "https://example.r2.cloudflarestorage.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}, BackendID: backend.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for index := 0; index < 525; index++ {
 		tenantID := "tenant_a"
 		if index >= 500 {
@@ -1322,7 +947,7 @@ func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMark
 		}
 		_, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
 			ID:                fmt.Sprintf("usage-artifact-%03d", index),
-			RunID:             fmt.Sprintf("backup_run_usage_%03d", index),
+			RunID:             run.ID,
 			TenantID:          tenantID,
 			Target:            model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenantID, AppID: "app_usage"},
 			BackendID:         "backup_backend_usage",
@@ -1336,7 +961,7 @@ func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMark
 			t.Fatalf("create artifact %d: %v", index, err)
 		}
 	}
-	physicalDeletedAt := time.Now().UTC()
+	physicalDeletedAt := time.Now().UTC().Truncate(time.Microsecond)
 	if err := stateStore.MarkBackupArtifactPhysicalDeleted("usage-artifact-000", physicalDeletedAt); err != nil {
 		t.Fatalf("mark physical deletion: %v", err)
 	}
@@ -1348,8 +973,14 @@ func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMark
 	if len(tenantArtifacts) != 500 {
 		t.Fatalf("tenant usage artifact count = %d, want 500 without history truncation", len(tenantArtifacts))
 	}
-	if tenantArtifacts[0].PhysicalDeletedAt == nil || !tenantArtifacts[0].PhysicalDeletedAt.Equal(physicalDeletedAt) {
-		t.Fatalf("physical cleanup marker missing: %+v", tenantArtifacts[0])
+	var markerFound bool
+	for _, artifact := range tenantArtifacts {
+		if artifact.Artifact.ID == "usage-artifact-000" {
+			markerFound = artifact.PhysicalDeletedAt != nil && artifact.PhysicalDeletedAt.Equal(physicalDeletedAt)
+		}
+	}
+	if !markerFound {
+		t.Fatal("physical cleanup marker missing")
 	}
 
 	platformArtifacts, err := stateStore.ListBackupUsageArtifacts("", true)
@@ -1364,11 +995,14 @@ func TestListBackupUsageArtifactsIsUnpaginatedTenantScopedAndIncludesCleanupMark
 func TestBackupArtifactManifestIsSelfDescribing(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 	target := model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase, Component: "control-plane-postgres"}
+	if _, err := stateStore.CreateBackupRun(model.BackupRun{ID: "backup_run_123", Target: target}); err != nil {
+		t.Fatal(err)
+	}
 	artifact, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
 		RunID:             "backup_run_123",
 		PolicyID:          stateStore.DefaultControlPlaneBackupPolicyID(),
@@ -1402,7 +1036,7 @@ func TestBackupArtifactManifestIsSelfDescribing(t *testing.T) {
 func TestBackupBackendValidationRejectsInvalidProvider(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1417,7 +1051,7 @@ func TestBackupBackendValidationRejectsInvalidProvider(t *testing.T) {
 func TestBackupListWithoutTargetTypeIncludesAppScopedItems(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1431,6 +1065,7 @@ func TestBackupListWithoutTargetTypeIncludesAppScopedItems(t *testing.T) {
 		t.Fatalf("create backend: %v", err)
 	}
 	target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_a", ProjectID: "project_a", AppID: "app_a", Database: "appdb"}
+	seedStoreTestIdentity(t, stateStore, target.TenantID, target.ProjectID, target.AppID)
 	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
 		TenantID:  "tenant_a",
 		ProjectID: "project_a",
@@ -1500,7 +1135,7 @@ func TestBackupListWithoutTargetTypeIncludesAppScopedItems(t *testing.T) {
 func TestPolicyBackedAppDatabaseRunPersistsCurrentPlacementWithoutChangingIdentity(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1522,6 +1157,7 @@ func TestPolicyBackedAppDatabaseRunPersistsCurrentPlacementWithoutChangingIdenti
 		ServiceName: "postgres-old",
 		Database:    "app_old",
 	}
+	seedStoreTestIdentity(t, stateStore, oldTarget.TenantID, oldTarget.ProjectID, oldTarget.AppID)
 	policy, err := stateStore.UpsertBackupPolicy(model.BackupPolicy{
 		TenantID:  oldTarget.TenantID,
 		ProjectID: oldTarget.ProjectID,

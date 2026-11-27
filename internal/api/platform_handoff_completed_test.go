@@ -31,7 +31,7 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 		{"new release already ready", "ready", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			s, p, b, path := handoffPartitionFixture(t)
+			s, p, b, db := handoffPartitionFixture(t)
 			ctx := t.Context()
 			p.RuntimeSnapshot.Releases[0].ID = "release-next"
 			p.RuntimeSnapshot.Releases[0].StatusReason = platformconfig.ManagedHandoffEndpointsReason
@@ -73,7 +73,7 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 			case "ready":
 				p.RuntimeSnapshot.Releases[0].Status, p.RuntimeSnapshot.Releases[0].StatusReason = model.EdgeRouteStatusActive, ""
 			}
-			persistHandoffBusiness(t, path, b)
+			persistHandoffBusiness(t, db, b)
 
 			if err := s.guardPendingStableHandoffs(ctx, p, b); err != nil {
 				t.Fatal("whole-scope guard must allow DNS/peer changes", err)
@@ -117,7 +117,7 @@ func TestCompletedManagedHandoffDuringDNSChange(t *testing.T) {
 				t.Fatal("exact automatic handoff failed admission", err)
 			}
 			promoted = promoted.Add(-time.Second)
-			persistHandoffBusiness(t, path, b)
+			persistHandoffBusiness(t, db, b)
 			if err = s.validateRetainedTrafficCompilation(ctx, compiled); err == nil {
 				t.Fatal("stale handoff claim bypassed fresh release and operation proof")
 			}

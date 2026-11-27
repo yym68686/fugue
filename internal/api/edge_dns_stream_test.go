@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -14,14 +13,13 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/qualityrollup/rolluptest"
-	"fugue/internal/store"
 )
 
 func TestStreamedDNSProfilesMatchMaterializedEveryField(t *testing.T) {
 	for _, minute := range []int{0, 3} {
 		t.Run(fmt.Sprint(minute), func(t *testing.T) {
 			now := time.Date(2026, 9, 5, 12, minute, 0, 0, time.UTC)
-			st := store.New(filepath.Join(t.TempDir(), "state.json"))
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

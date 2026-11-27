@@ -3,16 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"fugue/internal/storagerecovery"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"fugue/internal/bundleauth"
@@ -43,8 +39,8 @@ type Store struct {
 	platformContentHintMu  sync.Mutex
 	platformContentHints   map[string][32]byte
 
-	path                                 string
 	databaseURL                          string
+	dataBlobDir                          string
 	db                                   *sql.DB
 	dbInitMu                             sync.Mutex
 	dbReady                              bool
@@ -53,23 +49,6 @@ type Store struct {
 	lifecycle                            storageLifecycleState
 	compilerInputArchiveObjects          inputarchive.Objects
 	compilerInputArchiveReadLeaseEnabled bool
-
-	advisoryLockMu sync.Mutex
-	advisoryLocks  map[string]bool
-
-	// backupArtifactPhysicalCleanup tracks successful object deletion for the
-	// file-backed store. PostgreSQL persists this marker in the artifact row;
-	// keeping the marker out of the public model preserves the existing API
-	// contract while making the in-memory implementation idempotent as well.
-	backupArtifactPhysicalCleanupMu sync.Mutex
-	backupArtifactPhysicalCleanup   map[string]time.Time
-	backupArtifactPhysicalAttempts  map[string]time.Time
-
-	// backupRunObjectCleanup tracks durable-equivalent cleanup state for the
-	// file-backed store. PostgreSQL stores the same markers on the run row.
-	backupRunObjectCleanupMu       sync.Mutex
-	backupRunObjectCleanup         map[string]time.Time
-	backupRunObjectCleanupAttempts map[string]time.Time
 
 	platformArtifactKeyringMu       sync.RWMutex
 	platformArtifactKeyring         bundleauth.Keyring
@@ -126,176 +105,92 @@ type ProjectUpdate struct {
 	ClearDefaultRuntimeID bool
 }
 
-func New(path string, databaseURL ...string) *Store {
-	var dsn string
-	if len(databaseURL) > 0 {
-		dsn = strings.TrimSpace(databaseURL[0])
-	}
-	return &Store{
-		path:        path,
-		databaseURL: dsn,
-	}
+func New(databaseURL string) *Store {
+	return &Store{databaseURL: strings.TrimSpace(databaseURL)}
 }
 
-func (s *Store) BackendKind() string {
-	if s != nil && s.usingDatabase() {
-		return "postgres"
+// ConfigureDataBlobDir sets the directory for local workspace blob payloads.
+// Call it before serving requests; relational metadata remains in PostgreSQL.
+func (s *Store) ConfigureDataBlobDir(dir string) {
+	s.dataBlobDir = strings.TrimSpace(dir)
+}
+
+func (*Store) BackendKind() string {
+	return "postgres"
+}
+
+// Close releases the PostgreSQL connection pool after the store stops serving.
+func (s *Store) Close() error {
+	s.dbInitMu.Lock()
+	defer s.dbInitMu.Unlock()
+	if s.db == nil {
+		return nil
 	}
-	return "json"
+	return s.db.Close()
 }
 
 func (s *Store) Init() error {
-	if s.usingDatabase() {
-		if err := s.ensureDatabaseReady(); err != nil {
-			return err
-		}
+	if err := s.ensureDatabaseReady(); err != nil {
+		return err
 	}
+
 	if err := s.ConfigureCompilerInputArchiveFromEnv(); err != nil {
 		return err
 	}
-	if s.usingDatabase() {
-		if err := s.SeedDefaultDataBackendFromEnv(); err != nil {
-			return err
-		}
-		if err := s.SeedDefaultBackupBackendFromEnv(); err != nil {
-			return err
-		}
-		if err := s.EnsureDefaultBackupPolicy(); err != nil {
-			return err
-		}
-		if err := s.repairBackupPolicySchedules(); err != nil {
-			return err
-		}
-		if err := s.pgRepairAppStatuses(); err != nil {
-			return err
-		}
-		if err := s.pgVerifyEdgeInstanceFencing(); err != nil {
-			return err
-		}
-		return nil
+	if err := s.SeedDefaultDataBackendFromEnv(); err != nil {
+		return err
 	}
-	return s.withFileLockedState(true, func(state *model.State) error {
-		ensureDefaults(state)
-		if state.EdgeActivation == nil {
-			activation := defaultEdgeActivationState(time.Now().UTC())
-			state.EdgeActivation = &activation
-		}
-		if err := migrateLegacyEdgeInstancesInState(state, time.Now().UTC()); err != nil {
-			return err
-		}
-		migrateLegacyEdgeRoutePolicyExclusionsInState(state, time.Now().UTC())
-		repairAllAPIKeyStatuses(state)
-		repairAllAppStatuses(state)
-		if err := seedDefaultDataBackendFromEnvInState(state); err != nil {
-			return err
-		}
-		if err := seedDefaultBackupBackendFromEnvInState(state); err != nil {
-			return err
-		}
-		repairBackupPolicySchedulesInState(state, time.Now().UTC())
-		return nil
-	})
+	if err := s.SeedDefaultBackupBackendFromEnv(); err != nil {
+		return err
+	}
+	if err := s.EnsureDefaultBackupPolicy(); err != nil {
+		return err
+	}
+	if err := s.repairBackupPolicySchedules(); err != nil {
+		return err
+	}
+	if err := s.pgRepairAppStatuses(); err != nil {
+		return err
+	}
+	if err := s.pgVerifyEdgeInstanceFencing(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// BootstrapSchema creates the baseline PostgreSQL schema before independent
+// schema migrations. It does not start or mark the control plane as ready.
+func (s *Store) BootstrapSchema() error {
+	return s.ensureDatabaseReady()
 }
 
 func (s *Store) CheckReadiness(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.usingDatabase() {
-		if s.db == nil || !s.dbReady {
-			if err := s.ensureDatabaseReady(); err != nil {
-				return err
-			}
+	if s.db == nil || !s.dbReady {
+		if err := s.ensureDatabaseReady(); err != nil {
+			return err
 		}
-		pingCtx := ctx
-		cancel := func() {}
-		if _, ok := ctx.Deadline(); !ok {
-			pingCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
-		}
-		defer cancel()
-		if err := s.db.PingContext(pingCtx); err != nil {
-			return fmt.Errorf("ping postgres: %w", err)
-		}
-		return s.pgVerifyEdgeActivationReadiness(pingCtx)
 	}
-	return s.withFileLockedState(false, func(state *model.State) error {
-		return verifyEdgeActivationReadiness(state)
-	})
-}
-
-func (s *Store) usingDatabase() bool {
-	return strings.TrimSpace(s.databaseURL) != ""
-}
-
-func (s *Store) withLockedState(write bool, fn func(*model.State) error) error {
-	if s.usingDatabase() {
-		return fmt.Errorf("internal error: database mode requires SQL store methods")
+	pingCtx := ctx
+	cancel := func() {}
+	if _, ok := ctx.Deadline(); !ok {
+		pingCtx, cancel = context.WithTimeout(ctx, 3*time.Second)
 	}
-	return s.withFileLockedState(write, fn)
-}
-
-func (s *Store) withFileLockedState(write bool, fn func(*model.State) error) error {
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
-		return fmt.Errorf("create store directory: %w", err)
+	defer cancel()
+	if err := s.db.PingContext(pingCtx); err != nil {
+		return fmt.Errorf("ping postgres: %w", err)
 	}
-
-	lockPath := s.path + ".lock"
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file: %w", err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock store file: %w", err)
-	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
-	state, err := s.readState()
-	if err != nil {
-		return err
-	}
-	ensureDefaults(&state)
-
-	if err := fn(&state); err != nil {
-		return err
-	}
-
-	if !write {
-		return nil
-	}
-	return s.writeState(state)
+	return s.pgVerifyEdgeActivationReadiness(pingCtx)
 }
 
 func (s *Store) ListTenants() ([]model.Tenant, error) {
-	if s.usingDatabase() {
-		return s.pgListTenants()
-	}
-	var tenants []model.Tenant
-	err := s.withLockedState(false, func(state *model.State) error {
-		tenants = append(tenants, state.Tenants...)
-		sort.Slice(tenants, func(i, j int) bool {
-			return tenants[i].CreatedAt.Before(tenants[j].CreatedAt)
-		})
-		return nil
-	})
-	return tenants, err
+	return s.pgListTenants()
 }
 
 func (s *Store) GetTenant(id string) (model.Tenant, error) {
-	if s.usingDatabase() {
-		return s.pgGetTenant(id)
-	}
-	var tenant model.Tenant
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findTenant(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		tenant = state.Tenants[index]
-		return nil
-	})
-	return tenant, err
+	return s.pgGetTenant(id)
 }
 
 func (s *Store) CreateTenant(name string) (model.Tenant, error) {
@@ -303,32 +198,7 @@ func (s *Store) CreateTenant(name string) (model.Tenant, error) {
 	if name == "" {
 		return model.Tenant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateTenant(name)
-	}
-
-	var tenant model.Tenant
-	err := s.withLockedState(true, func(state *model.State) error {
-		slug := model.Slugify(name)
-		for _, existing := range state.Tenants {
-			if existing.Slug == slug {
-				return ErrConflict
-			}
-		}
-		now := time.Now().UTC()
-		tenant = model.Tenant{
-			ID:        model.NewID("tenant"),
-			Name:      name,
-			Slug:      slug,
-			Status:    "active",
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		state.Tenants = append(state.Tenants, tenant)
-		ensureTenantBillingRecord(state, tenant.ID, now)
-		return nil
-	})
-	return tenant, err
+	return s.pgCreateTenant(name)
 }
 
 func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
@@ -336,119 +206,19 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 	if id == "" {
 		return model.Tenant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteTenant(id)
-	}
-
-	var tenant model.Tenant
-	err := s.withLockedState(true, func(state *model.State) error {
-		for _, r := range state.AppRecoveries {
-			if r.TenantID == id && r.Active {
-				return ErrConflict
-			}
-		}
-		index := findTenant(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		for _, objectStore := range state.ObjectStorage.Stores {
-			if objectStore.TenantID == id {
-				return ErrConflict
-			}
-		}
-		tenant = state.Tenants[index]
-		state.Tenants = append(state.Tenants[:index], state.Tenants[index+1:]...)
-
-		state.Projects = deleteProjectsByTenant(state.Projects, id)
-		state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByTenant(state.ProjectRuntimeReservations, id)
-		state.APIKeys = deleteAPIKeysByTenant(state.APIKeys, id)
-		state.SSHKeys = deleteSSHKeysByTenant(state.SSHKeys, id)
-		state.AppSSHEndpoints = deleteAppSSHEndpointsByTenant(state.AppSSHEndpoints, id)
-		state.EnrollmentTokens = deleteEnrollmentTokensByTenant(state.EnrollmentTokens, id)
-
-		deletedNodeKeyIDs := make(map[string]struct{})
-		deletedRuntimeIDs := make(map[string]struct{})
-		state.NodeKeys = deleteNodeKeysByTenant(state.NodeKeys, id, deletedNodeKeyIDs)
-		state.Machines = deleteLegacyMachinesByTenant(state.Machines, id, deletedNodeKeyIDs)
-		state.Runtimes = deleteRuntimesByTenant(state.Runtimes, id, deletedNodeKeyIDs, deletedRuntimeIDs)
-		state.RuntimeGrants = deleteRuntimeAccessGrants(state.RuntimeGrants, id, deletedRuntimeIDs)
-		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
-		state.Apps = deleteAppsByTenant(state.Apps, id)
-		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, id, "")
-		deleteTenantImageTracking(state, id)
-		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
-		state.ReleaseAttempts = deleteReleaseAttemptsByTenant(state.ReleaseAttempts, id)
-		state.ReleaseSteps = deleteReleaseStepsByTenant(state.ReleaseSteps, id)
-		state.AppTrafficPolicies = deleteAppTrafficPoliciesByTenant(state.AppTrafficPolicies, id)
-		state.AutomationPolicies = deleteAutomationPoliciesByTenant(state.AutomationPolicies, id)
-		state.AutomationActionIntents = deleteAutomationActionIntentsByTenant(state.AutomationActionIntents, id)
-		state.AutomationActionDispatches = deleteAutomationActionDispatchesByTenant(state.AutomationActionDispatches, id)
-		state.AutomationActionFencing = deleteAutomationActionFencingByTenant(state.AutomationActionFencing, id)
-		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByTenant(state.AppDatabaseImportJobs, id)
-		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByTenant(state.AppDatabaseAccessGrants, id)
-		state.BackingServices = deleteBackingServicesByTenant(state.BackingServices, id)
-		state.ServiceBindings = deleteServiceBindingsByTenant(state.ServiceBindings, id)
-		state.Operations = deleteOperationsByTenant(state.Operations, id)
-		state.OperationEvidence = deleteOperationEvidenceByTenant(state.OperationEvidence, id)
-		state.AuditEvents = deleteAuditEventsByTenant(state.AuditEvents, id)
-		state.TenantBilling = deleteTenantBillingRecords(state.TenantBilling, id)
-		state.BillingEvents = deleteTenantBillingEvents(state.BillingEvents, id)
-		state.Idempotency = deleteIdempotencyRecordsByTenant(state.Idempotency, id)
-		deleteBackupStateByTenant(state, id)
-		return nil
-	})
-	return tenant, err
+	return s.pgDeleteTenant(id)
 }
 
 func (s *Store) ListProjects(tenantID string) ([]model.Project, error) {
-	if s.usingDatabase() {
-		return s.pgListProjects(tenantID)
-	}
-	var projects []model.Project
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, project := range state.Projects {
-			if project.TenantID == tenantID {
-				projects = append(projects, project)
-			}
-		}
-		sort.Slice(projects, func(i, j int) bool {
-			return projects[i].CreatedAt.Before(projects[j].CreatedAt)
-		})
-		return nil
-	})
-	return projects, err
+	return s.pgListProjects(tenantID)
 }
 
 func (s *Store) ListAllProjects() ([]model.Project, error) {
-	if s.usingDatabase() {
-		return s.pgListAllProjects()
-	}
-
-	var projects []model.Project
-	err := s.withLockedState(false, func(state *model.State) error {
-		projects = append(projects, state.Projects...)
-		sort.Slice(projects, func(i, j int) bool {
-			return projects[i].CreatedAt.Before(projects[j].CreatedAt)
-		})
-		return nil
-	})
-	return projects, err
+	return s.pgListAllProjects()
 }
 
 func (s *Store) GetProject(id string) (model.Project, error) {
-	if s.usingDatabase() {
-		return s.pgGetProject(id)
-	}
-	var project model.Project
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findProject(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		project = state.Projects[index]
-		return nil
-	})
-	return project, err
+	return s.pgGetProject(id)
 }
 
 func (s *Store) UpdateProject(id string, name, description *string) (model.Project, error) {
@@ -463,77 +233,7 @@ func (s *Store) UpdateProjectFields(id string, update ProjectUpdate) (model.Proj
 	if update.ClearDefaultRuntimeID && update.DefaultRuntimeID != nil && strings.TrimSpace(*update.DefaultRuntimeID) != "" {
 		return model.Project{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateProjectFields(id, update)
-	}
-
-	var project model.Project
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findProject(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if projectDeleteRequested(state, id) {
-			return ErrConflict
-		}
-		project = state.Projects[index]
-		changed := false
-
-		if update.Name != nil {
-			trimmedName := strings.TrimSpace(*update.Name)
-			if trimmedName == "" {
-				return ErrInvalidInput
-			}
-			slug := model.Slugify(trimmedName)
-			for _, existing := range state.Projects {
-				if existing.ID == project.ID {
-					continue
-				}
-				if existing.TenantID == project.TenantID && existing.Slug == slug {
-					return ErrConflict
-				}
-			}
-			if project.Name != trimmedName || project.Slug != slug {
-				project.Name = trimmedName
-				project.Slug = slug
-				changed = true
-			}
-		}
-
-		if update.Description != nil {
-			trimmedDescription := strings.TrimSpace(*update.Description)
-			if project.Description != trimmedDescription {
-				project.Description = trimmedDescription
-				changed = true
-			}
-		}
-
-		if update.DefaultRuntimeID != nil {
-			runtimeID := strings.TrimSpace(*update.DefaultRuntimeID)
-			if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, project.TenantID) {
-				return ErrNotFound
-			}
-			if err := validateRuntimeReservedForProjectState(state, project.ID, runtimeID); err != nil {
-				return err
-			}
-			if project.DefaultRuntimeID != runtimeID {
-				project.DefaultRuntimeID = runtimeID
-				changed = true
-			}
-		} else if update.ClearDefaultRuntimeID {
-			if project.DefaultRuntimeID != "" {
-				project.DefaultRuntimeID = ""
-				changed = true
-			}
-		}
-
-		if changed {
-			project.UpdatedAt = time.Now().UTC()
-			state.Projects[index] = project
-		}
-		return nil
-	})
-	return project, err
+	return s.pgUpdateProjectFields(id, update)
 }
 
 func (s *Store) CreateProject(tenantID, name, description string, defaultRuntimeID ...string) (model.Project, error) {
@@ -545,42 +245,7 @@ func (s *Store) CreateProject(tenantID, name, description string, defaultRuntime
 	if tenantID == "" || name == "" {
 		return model.Project{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateProject(tenantID, name, description, runtimeID)
-	}
-
-	var project model.Project
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		if runtimeID != "" && !runtimeVisibleToTenant(state, runtimeID, tenantID) {
-			return ErrNotFound
-		}
-		if err := validateRuntimeReservedForProjectState(state, "", runtimeID); err != nil {
-			return err
-		}
-		slug := model.Slugify(name)
-		for _, existing := range state.Projects {
-			if existing.TenantID == tenantID && existing.Slug == slug {
-				return ErrConflict
-			}
-		}
-		now := time.Now().UTC()
-		project = model.Project{
-			ID:               model.NewID("project"),
-			TenantID:         tenantID,
-			Name:             name,
-			Slug:             slug,
-			Description:      strings.TrimSpace(description),
-			DefaultRuntimeID: runtimeID,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		state.Projects = append(state.Projects, project)
-		return nil
-	})
-	return project, err
+	return s.pgCreateProject(tenantID, name, description, runtimeID)
 }
 
 func (s *Store) MarkProjectDeleteRequested(id string) (model.Project, bool, error) {
@@ -588,30 +253,7 @@ func (s *Store) MarkProjectDeleteRequested(id string) (model.Project, bool, erro
 	if id == "" {
 		return model.Project{}, false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgMarkProjectDeleteRequested(id)
-	}
-
-	var (
-		alreadyRequested bool
-		project          model.Project
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findProject(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		project = state.Projects[index]
-		alreadyRequested = projectDeleteRequested(state, id)
-		if !alreadyRequested {
-			now := time.Now().UTC()
-			markProjectDeleteRequested(state, id, now)
-			project.UpdatedAt = now
-			state.Projects[index] = project
-		}
-		return nil
-	})
-	return project, alreadyRequested, err
+	return s.pgMarkProjectDeleteRequested(id)
 }
 
 func (s *Store) DeleteProject(id string) (model.Project, error) {
@@ -619,23 +261,7 @@ func (s *Store) DeleteProject(id string) (model.Project, error) {
 	if id == "" {
 		return model.Project{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteProject(id)
-	}
-
-	var project model.Project
-	err := s.withLockedState(true, func(state *model.State) error {
-		if projectHasLiveResources(state, id) {
-			return ErrConflict
-		}
-		deletedProject, err := deleteProjectFromState(state, id)
-		if err != nil {
-			return err
-		}
-		project = deletedProject
-		return nil
-	})
-	return project, err
+	return s.pgDeleteProject(id)
 }
 
 func (s *Store) EnsureDefaultProject(tenantID string) (model.Project, error) {
@@ -648,74 +274,15 @@ func (s *Store) EnsureDefaultProjectWithStatus(tenantID string) (model.Project, 
 	if tenantID == "" {
 		return model.Project{}, false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEnsureDefaultProject(tenantID)
-	}
-
-	var project model.Project
-	var created bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		for _, existing := range state.Projects {
-			if existing.TenantID == tenantID && existing.Slug == "default" {
-				project = existing
-				return nil
-			}
-		}
-		now := time.Now().UTC()
-		project = model.Project{
-			ID:          model.NewID("project"),
-			TenantID:    tenantID,
-			Name:        "default",
-			Slug:        "default",
-			Description: "default project",
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		state.Projects = append(state.Projects, project)
-		created = true
-		return nil
-	})
-	return project, created, err
+	return s.pgEnsureDefaultProject(tenantID)
 }
 
 func (s *Store) ListAPIKeys(tenantID string, platformAdmin bool) ([]model.APIKey, error) {
-	if s.usingDatabase() {
-		return s.pgListAPIKeys(tenantID, platformAdmin)
-	}
-	var keys []model.APIKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, key := range state.APIKeys {
-			normalizeAPIKeyForRead(&key)
-			if platformAdmin || key.TenantID == tenantID {
-				keys = append(keys, redactAPIKey(key))
-			}
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			return keys[i].CreatedAt.Before(keys[j].CreatedAt)
-		})
-		return nil
-	})
-	return keys, err
+	return s.pgListAPIKeys(tenantID, platformAdmin)
 }
 
 func (s *Store) GetAPIKey(id string) (model.APIKey, error) {
-	if s.usingDatabase() {
-		return s.pgGetAPIKey(id)
-	}
-	var key model.APIKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key = state.APIKeys[index]
-		normalizeAPIKeyForRead(&key)
-		return nil
-	})
-	return key, err
+	return s.pgGetAPIKey(id)
 }
 
 func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.APIKey, string, error) {
@@ -726,34 +293,7 @@ func (s *Store) CreateAPIKey(tenantID, label string, scopes []string) (model.API
 	if len(scopes) == 0 {
 		return model.APIKey{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateAPIKey(tenantID, label, scopes)
-	}
-
-	secret := model.NewSecret("fugue_pk")
-	key := model.APIKey{
-		ID:        model.NewID("apikey"),
-		TenantID:  tenantID,
-		Label:     label,
-		Prefix:    model.SecretPrefix(secret),
-		Hash:      model.HashSecret(secret),
-		Status:    model.APIKeyStatusActive,
-		Scopes:    model.NormalizeScopes(scopes),
-		CreatedAt: time.Now().UTC(),
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		if tenantID != "" && findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		state.APIKeys = append(state.APIKeys, key)
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, "", err
-	}
-
-	return redactAPIKey(key), secret, nil
+	return s.pgCreateAPIKey(tenantID, label, scopes)
 }
 
 func (s *Store) UpdateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, error) {
@@ -761,28 +301,7 @@ func (s *Store) UpdateAPIKey(id string, label *string, scopes *[]string) (model.
 	if id == "" || (label == nil && scopes == nil) {
 		return model.APIKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateAPIKey(id, label, scopes)
-	}
-
-	var key model.APIKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		updated, err := applyAPIKeyUpdates(state.APIKeys[index], label, scopes)
-		if err != nil {
-			return err
-		}
-		state.APIKeys[index] = updated
-		key = updated
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, err
-	}
-	return redactAPIKey(key), nil
+	return s.pgUpdateAPIKey(id, label, scopes)
 }
 
 func (s *Store) RotateAPIKey(id string, label *string, scopes *[]string) (model.APIKey, string, error) {
@@ -790,31 +309,7 @@ func (s *Store) RotateAPIKey(id string, label *string, scopes *[]string) (model.
 	if id == "" {
 		return model.APIKey{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRotateAPIKey(id, label, scopes)
-	}
-
-	secret := model.NewSecret("fugue_pk")
-	var key model.APIKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		updated, err := applyAPIKeyUpdates(state.APIKeys[index], label, scopes)
-		if err != nil {
-			return err
-		}
-		updated.Prefix = model.SecretPrefix(secret)
-		updated.Hash = model.HashSecret(secret)
-		state.APIKeys[index] = updated
-		key = updated
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, "", err
-	}
-	return redactAPIKey(key), secret, nil
+	return s.pgRotateAPIKey(id, label, scopes)
 }
 
 func (s *Store) DisableAPIKey(id string) (model.APIKey, error) {
@@ -822,28 +317,7 @@ func (s *Store) DisableAPIKey(id string) (model.APIKey, error) {
 	if id == "" {
 		return model.APIKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDisableAPIKey(id)
-	}
-
-	var key model.APIKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if normalizeAPIKeyStatus(state.APIKeys[index].Status) != model.APIKeyStatusDisabled || state.APIKeys[index].DisabledAt == nil {
-			now := time.Now().UTC()
-			state.APIKeys[index].Status = model.APIKeyStatusDisabled
-			state.APIKeys[index].DisabledAt = &now
-		}
-		key = state.APIKeys[index]
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, err
-	}
-	return redactAPIKey(key), nil
+	return s.pgDisableAPIKey(id)
 }
 
 func (s *Store) EnableAPIKey(id string) (model.APIKey, error) {
@@ -851,25 +325,7 @@ func (s *Store) EnableAPIKey(id string) (model.APIKey, error) {
 	if id == "" {
 		return model.APIKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEnableAPIKey(id)
-	}
-
-	var key model.APIKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		state.APIKeys[index].Status = model.APIKeyStatusActive
-		state.APIKeys[index].DisabledAt = nil
-		key = state.APIKeys[index]
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, err
-	}
-	return redactAPIKey(key), nil
+	return s.pgEnableAPIKey(id)
 }
 
 func (s *Store) DeleteAPIKey(id string) (model.APIKey, error) {
@@ -877,80 +333,18 @@ func (s *Store) DeleteAPIKey(id string) (model.APIKey, error) {
 	if id == "" {
 		return model.APIKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteAPIKey(id)
-	}
-
-	var key model.APIKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAPIKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key = state.APIKeys[index]
-		state.APIKeys = append(state.APIKeys[:index], state.APIKeys[index+1:]...)
-		return nil
-	})
-	if err != nil {
-		return model.APIKey{}, err
-	}
-	return redactAPIKey(key), nil
+	return s.pgDeleteAPIKey(id)
 }
 
 func (s *Store) AuthenticateAPIKey(secret string) (model.Principal, error) {
 	if strings.TrimSpace(secret) == "" {
 		return model.Principal{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateAPIKey(secret)
-	}
-
-	var principal model.Principal
-	err := s.withLockedState(true, func(state *model.State) error {
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		for idx := range state.APIKeys {
-			if state.APIKeys[idx].Hash != hash {
-				continue
-			}
-			if normalizeAPIKeyStatus(state.APIKeys[idx].Status) != model.APIKeyStatusActive {
-				return ErrNotFound
-			}
-			state.APIKeys[idx].LastUsedAt = &now
-			scopes := make(map[string]struct{}, len(state.APIKeys[idx].Scopes))
-			for _, scope := range state.APIKeys[idx].Scopes {
-				scopes[scope] = struct{}{}
-			}
-			principal = model.Principal{
-				ActorType: model.ActorTypeAPIKey,
-				ActorID:   state.APIKeys[idx].ID,
-				TenantID:  state.APIKeys[idx].TenantID,
-				Scopes:    scopes,
-			}
-			return nil
-		}
-		return ErrNotFound
-	})
-	return principal, err
+	return s.pgAuthenticateAPIKey(secret)
 }
 
 func (s *Store) ListEnrollmentTokens(tenantID string) ([]model.EnrollmentToken, error) {
-	if s.usingDatabase() {
-		return s.pgListEnrollmentTokens(tenantID)
-	}
-	var tokens []model.EnrollmentToken
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, token := range state.EnrollmentTokens {
-			if token.TenantID == tenantID {
-				tokens = append(tokens, redactEnrollmentToken(token))
-			}
-		}
-		sort.Slice(tokens, func(i, j int) bool {
-			return tokens[i].CreatedAt.Before(tokens[j].CreatedAt)
-		})
-		return nil
-	})
-	return tokens, err
+	return s.pgListEnrollmentTokens(tenantID)
 }
 
 func (s *Store) CreateEnrollmentToken(tenantID, label string, ttl time.Duration) (model.EnrollmentToken, string, error) {
@@ -958,73 +352,15 @@ func (s *Store) CreateEnrollmentToken(tenantID, label string, ttl time.Duration)
 	if tenantID == "" || label == "" || ttl <= 0 {
 		return model.EnrollmentToken{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateEnrollmentToken(tenantID, label, ttl)
-	}
-
-	secret := model.NewSecret("fugue_enroll")
-	token := model.EnrollmentToken{
-		ID:        model.NewID("enroll"),
-		TenantID:  tenantID,
-		Label:     label,
-		Prefix:    model.SecretPrefix(secret),
-		Hash:      model.HashSecret(secret),
-		ExpiresAt: time.Now().UTC().Add(ttl),
-		CreatedAt: time.Now().UTC(),
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		state.EnrollmentTokens = append(state.EnrollmentTokens, token)
-		return nil
-	})
-	if err != nil {
-		return model.EnrollmentToken{}, "", err
-	}
-
-	return redactEnrollmentToken(token), secret, nil
+	return s.pgCreateEnrollmentToken(tenantID, label, ttl)
 }
 
 func (s *Store) ListNodeKeys(tenantID string, platformAdmin bool) ([]model.NodeKey, error) {
-	if s.usingDatabase() {
-		return s.pgListNodeKeys(tenantID, platformAdmin)
-	}
-	var keys []model.NodeKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, key := range state.NodeKeys {
-			if platformAdmin || key.TenantID == tenantID {
-				keys = append(keys, redactNodeKey(key))
-			}
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			return keys[i].CreatedAt.Before(keys[j].CreatedAt)
-		})
-		return nil
-	})
-	return keys, err
+	return s.pgListNodeKeys(tenantID, platformAdmin)
 }
 
 func (s *Store) GetNodeKey(id string) (model.NodeKey, error) {
-	if s.usingDatabase() {
-		return s.pgGetNodeKey(id)
-	}
-	var key model.NodeKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findNodeKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key = state.NodeKeys[index]
-		return nil
-	})
-	return key, err
-}
-
-func nodeKeyUnavailable(state *model.State, key model.NodeKey) bool {
-	return key.RevokedAt != nil || key.Status == model.NodeKeyStatusRevoked ||
-		(key.Scope == model.NodeKeyScopePlatformNode && key.TenantID != "") || tenantAccessHeld(state, key.TenantID)
+	return s.pgGetNodeKey(id)
 }
 
 func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
@@ -1032,38 +368,7 @@ func (s *Store) AuthenticateNodeKey(secret string) (model.NodeKey, error) {
 	if secret == "" {
 		return model.NodeKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateNodeKey(secret)
-	}
-
-	var key model.NodeKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		keyIndex := -1
-		for idx := range state.NodeKeys {
-			if state.NodeKeys[idx].Hash != hash {
-				continue
-			}
-			keyIndex = idx
-			break
-		}
-		if keyIndex < 0 {
-			return ErrNotFound
-		}
-		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
-			return ErrConflict
-		}
-
-		state.NodeKeys[keyIndex].LastUsedAt = &now
-		state.NodeKeys[keyIndex].UpdatedAt = now
-		key = state.NodeKeys[keyIndex]
-		return nil
-	})
-	if err != nil {
-		return model.NodeKey{}, err
-	}
-	return redactNodeKey(key), nil
+	return s.pgAuthenticateNodeKey(secret)
 }
 
 func (s *Store) CreateNodeKey(tenantID, label string) (model.NodeKey, string, error) {
@@ -1080,58 +385,11 @@ func (s *Store) CreateScopedNodeKey(tenantID, label, scope string) (model.NodeKe
 	if (scope == model.NodeKeyScopePlatformNode) != (tenantID == "") {
 		return model.NodeKey{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateScopedNodeKey(tenantID, label, scope)
-	}
-
-	secret := model.NewSecret("fugue_nk")
-	now := time.Now().UTC()
-	key := model.NodeKey{
-		ID:        model.NewID("nodekey"),
-		TenantID:  tenantID,
-		Label:     label,
-		Prefix:    model.SecretPrefix(secret),
-		Hash:      model.HashSecret(secret),
-		Scope:     scope,
-		Status:    model.NodeKeyStatusActive,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		if tenantID != "" && findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		state.NodeKeys = append(state.NodeKeys, key)
-		return nil
-	})
-	if err != nil {
-		return model.NodeKey{}, "", err
-	}
-
-	return redactNodeKey(key), secret, nil
+	return s.pgCreateScopedNodeKey(tenantID, label, scope)
 }
 
 func (s *Store) RevokeNodeKey(id string) (model.NodeKey, error) {
-	if s.usingDatabase() {
-		return s.pgRevokeNodeKey(id)
-	}
-	var key model.NodeKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findNodeKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		if state.NodeKeys[index].RevokedAt == nil {
-			state.NodeKeys[index].Status = model.NodeKeyStatusRevoked
-			state.NodeKeys[index].RevokedAt = &now
-			state.NodeKeys[index].UpdatedAt = now
-		}
-		key = state.NodeKeys[index]
-		return nil
-	})
-	return redactNodeKey(key), err
+	return s.pgRevokeNodeKey(id)
 }
 
 func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, string, error) {
@@ -1140,116 +398,7 @@ func (s *Store) BootstrapNode(secret, runtimeName, endpoint string, labels map[s
 	if secret == "" {
 		return model.NodeKey{}, model.Runtime{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgBootstrapNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
-	}
-
-	var key model.NodeKey
-	var runtime model.Runtime
-	var runtimeSecret string
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		keyIndex := -1
-		for idx := range state.NodeKeys {
-			if state.NodeKeys[idx].Hash != hash {
-				continue
-			}
-			keyIndex = idx
-			break
-		}
-		if keyIndex < 0 {
-			return ErrNotFound
-		}
-		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
-			return ErrConflict
-		}
-
-		state.NodeKeys[keyIndex].LastUsedAt = &now
-		state.NodeKeys[keyIndex].UpdatedAt = now
-		key = state.NodeKeys[keyIndex]
-
-		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
-		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
-		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
-		fingerprintHash := model.HashSecret(machineFingerprint)
-
-		sameTenantFingerprintIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
-		runtimeIndex := sameTenantFingerprintIndex
-		if runtimeIndex < 0 && explicitFingerprint {
-			runtimeIndex = findRuntimeCandidate(state, key.TenantID, key.ID, model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
-		}
-		transferByFingerprint := false
-		if explicitFingerprint {
-			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
-			for _, index := range matchingIndexes {
-				if state.Runtimes[index].TenantID != key.TenantID {
-					return ErrConflict
-				}
-			}
-			keepFingerprintIndex := sameTenantFingerprintIndex
-			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
-				transferByFingerprint = true
-			}
-			for _, matchIndex := range matchingIndexes {
-				if matchIndex == keepFingerprintIndex {
-					continue
-				}
-				detachRuntimeOwnership(state, matchIndex, now)
-			}
-		}
-
-		runtimeSecret = model.NewSecret("fugue_rt")
-		if runtimeIndex >= 0 {
-			if transferByFingerprint {
-				resetRuntimeSharing(state, state.Runtimes[runtimeIndex].ID)
-				state.Runtimes[runtimeIndex].AccessMode = model.RuntimeAccessModePrivate
-			}
-			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeExternalOwned
-			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
-			state.Runtimes[runtimeIndex].TenantID = key.TenantID
-			state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
-			state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
-			state.Runtimes[runtimeIndex].NodeKeyID = key.ID
-			state.Runtimes[runtimeIndex].AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
-			state.Runtimes[runtimeIndex].AgentKeyHash = model.HashSecret(runtimeSecret)
-			state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
-			state.Runtimes[runtimeIndex].UpdatedAt = now
-			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
-			runtime = state.Runtimes[runtimeIndex]
-			_ = upsertMachineForRuntimeState(state, runtime, now)
-			return nil
-		}
-
-		runtime = model.Runtime{
-			ID:              model.NewID("runtime"),
-			TenantID:        key.TenantID,
-			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
-			Type:            model.RuntimeTypeExternalOwned,
-			AccessMode:      model.RuntimeAccessModePrivate,
-			PoolMode:        model.RuntimePoolModeDedicated,
-			Status:          model.RuntimeStatusActive,
-			Endpoint:        strings.TrimSpace(endpoint),
-			Labels:          cloneMap(labels),
-			NodeKeyID:       key.ID,
-			AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
-			AgentKeyHash:    model.HashSecret(runtimeSecret),
-			LastHeartbeatAt: &now,
-			CreatedAt:       now,
-			UpdatedAt:       now,
-		}
-		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
-		state.Runtimes = append(state.Runtimes, runtime)
-		_ = upsertMachineForRuntimeState(state, runtime, now)
-		return nil
-	})
-	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, "", err
-	}
-
-	return redactNodeKey(key), runtime, runtimeSecret, nil
+	return s.pgBootstrapNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 }
 
 func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.NodeKey, model.Runtime, error) {
@@ -1263,115 +412,7 @@ func (s *Store) BootstrapClusterNode(secret, runtimeName, endpoint string, label
 		return model.NodeKey{}, model.Runtime{}, err
 	}
 	runtimeName = normalizedRuntimeName
-	if s.usingDatabase() {
-		return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
-	}
-
-	var key model.NodeKey
-	var runtime model.Runtime
-	err = s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		keyIndex := -1
-		for idx := range state.NodeKeys {
-			if state.NodeKeys[idx].Hash != hash {
-				continue
-			}
-			keyIndex = idx
-			break
-		}
-		if keyIndex < 0 {
-			return ErrNotFound
-		}
-		if nodeKeyUnavailable(state, state.NodeKeys[keyIndex]) {
-			return ErrConflict
-		}
-
-		state.NodeKeys[keyIndex].LastUsedAt = &now
-		state.NodeKeys[keyIndex].UpdatedAt = now
-		key = state.NodeKeys[keyIndex]
-
-		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
-		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
-		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
-		fingerprintHash := model.HashSecret(machineFingerprint)
-
-		sameTenantFingerprintIndex := findRuntimeByFingerprintHash(state, key.TenantID, fingerprintHash)
-		runtimeIndex := sameTenantFingerprintIndex
-		if runtimeIndex < 0 && explicitFingerprint {
-			runtimeIndex = findRuntimeCandidate(state, key.TenantID, key.ID, model.RuntimeTypeManagedOwned, machineName, runtimeName, endpoint)
-		}
-		transferByFingerprint := false
-		if explicitFingerprint {
-			matchingIndexes := findRuntimeIndexesByFingerprintHash(state, fingerprintHash)
-			for _, index := range matchingIndexes {
-				if state.Runtimes[index].TenantID != key.TenantID {
-					return ErrConflict
-				}
-			}
-			keepFingerprintIndex := sameTenantFingerprintIndex
-			if sameTenantFingerprintIndex < 0 && len(matchingIndexes) > 0 {
-				transferByFingerprint = true
-			}
-			for _, matchIndex := range matchingIndexes {
-				if matchIndex == keepFingerprintIndex {
-					continue
-				}
-				detachRuntimeOwnership(state, matchIndex, now)
-			}
-		}
-
-		if runtimeIndex >= 0 {
-			if transferByFingerprint {
-				resetRuntimeSharing(state, state.Runtimes[runtimeIndex].ID)
-				state.Runtimes[runtimeIndex].AccessMode = model.RuntimeAccessModePrivate
-			}
-			if runtimeName != "" {
-				state.Runtimes[runtimeIndex].Name = runtimeName
-			}
-			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeManagedOwned
-			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
-			state.Runtimes[runtimeIndex].TenantID = key.TenantID
-			state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
-			state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
-			state.Runtimes[runtimeIndex].NodeKeyID = key.ID
-			state.Runtimes[runtimeIndex].AgentKeyPrefix = ""
-			state.Runtimes[runtimeIndex].AgentKeyHash = ""
-			state.Runtimes[runtimeIndex].UpdatedAt = now
-			state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
-			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeManagedOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
-			runtime = state.Runtimes[runtimeIndex]
-			_ = upsertMachineForRuntimeState(state, runtime, now)
-			return nil
-		}
-
-		runtime = model.Runtime{
-			ID:              model.NewID("runtime"),
-			TenantID:        key.TenantID,
-			Name:            nextAvailableRuntimeName(state, key.TenantID, runtimeName),
-			Type:            model.RuntimeTypeManagedOwned,
-			AccessMode:      model.RuntimeAccessModePrivate,
-			PoolMode:        model.RuntimePoolModeDedicated,
-			Status:          model.RuntimeStatusActive,
-			Endpoint:        strings.TrimSpace(endpoint),
-			Labels:          cloneMap(labels),
-			NodeKeyID:       key.ID,
-			LastHeartbeatAt: &now,
-			CreatedAt:       now,
-			UpdatedAt:       now,
-		}
-		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeManagedOwned, strings.TrimSpace(endpoint), labels, key.ID, now)
-		state.Runtimes = append(state.Runtimes, runtime)
-		_ = upsertMachineForRuntimeState(state, runtime, now)
-		return nil
-	})
-	if err != nil {
-		return model.NodeKey{}, model.Runtime{}, err
-	}
-
-	return redactNodeKey(key), runtime, nil
+	return s.pgBootstrapClusterNode(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 }
 
 func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labels map[string]string) (model.Runtime, string, error) {
@@ -1385,48 +426,7 @@ func (s *Store) CreateRuntime(tenantID, name, runtimeType, endpoint string, labe
 	if runtimeType != model.RuntimeTypeManagedShared && runtimeType != model.RuntimeTypeManagedOwned && runtimeType != model.RuntimeTypeExternalOwned {
 		return model.Runtime{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateRuntime(tenantID, name, runtimeType, endpoint, labels)
-	}
-
-	secret := model.NewSecret("fugue_rt")
-	now := time.Now().UTC()
-	runtime := model.Runtime{
-		ID:             model.NewID("runtime"),
-		TenantID:       tenantID,
-		Name:           name,
-		Type:           runtimeType,
-		AccessMode:     normalizeRuntimeAccessMode(runtimeType, ""),
-		PoolMode:       model.NormalizeRuntimePoolMode(runtimeType, ""),
-		Status:         model.RuntimeStatusPending,
-		Endpoint:       strings.TrimSpace(endpoint),
-		Labels:         cloneMap(labels),
-		AgentKeyPrefix: model.SecretPrefix(secret),
-		AgentKeyHash:   model.HashSecret(secret),
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	if runtimeType == model.RuntimeTypeManagedShared || runtimeType == model.RuntimeTypeManagedOwned {
-		runtime.Status = model.RuntimeStatusActive
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		if tenantID != "" && findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		for _, existing := range state.Runtimes {
-			if existing.TenantID == tenantID && strings.EqualFold(existing.Name, name) {
-				return ErrConflict
-			}
-		}
-		state.Runtimes = append(state.Runtimes, runtime)
-		return nil
-	})
-	if err != nil {
-		return model.Runtime{}, "", err
-	}
-
-	return runtime, secret, nil
+	return s.pgCreateRuntime(tenantID, name, runtimeType, endpoint, labels)
 }
 
 func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, labels map[string]string, machineName, machineFingerprint string) (model.Runtime, string, error) {
@@ -1435,182 +435,25 @@ func (s *Store) ConsumeEnrollmentToken(secret, runtimeName, endpoint string, lab
 	if secret == "" {
 		return model.Runtime{}, "", ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgConsumeEnrollmentToken(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
-	}
-
-	var runtime model.Runtime
-	var runtimeSecret string
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		tokenIndex := -1
-		for idx := range state.EnrollmentTokens {
-			if state.EnrollmentTokens[idx].Hash != hash {
-				continue
-			}
-			tokenIndex = idx
-			break
-		}
-		if tokenIndex < 0 {
-			return ErrNotFound
-		}
-		token := &state.EnrollmentTokens[tokenIndex]
-		if tenantAccessHeld(state, token.TenantID) || token.UsedAt != nil || token.ExpiresAt.Before(now) {
-			return ErrConflict
-		}
-		token.UsedAt = &now
-		token.LastUsedAt = &now
-
-		explicitFingerprint := strings.TrimSpace(machineFingerprint) != ""
-		machineName = normalizedMachineName(machineName, runtimeName, endpoint)
-		machineFingerprint = normalizedMachineFingerprint(machineFingerprint, machineName, runtimeName, endpoint)
-		fingerprintHash := model.HashSecret(machineFingerprint)
-
-		runtimeIndex := findRuntimeByFingerprintHash(state, token.TenantID, fingerprintHash)
-		if runtimeIndex < 0 && explicitFingerprint {
-			runtimeIndex = findRuntimeCandidate(state, token.TenantID, "", model.RuntimeTypeExternalOwned, machineName, runtimeName, endpoint)
-		}
-
-		runtimeSecret = model.NewSecret("fugue_rt")
-		if runtimeIndex >= 0 {
-			state.Runtimes[runtimeIndex].Type = model.RuntimeTypeExternalOwned
-			state.Runtimes[runtimeIndex].Status = model.RuntimeStatusActive
-			state.Runtimes[runtimeIndex].Endpoint = strings.TrimSpace(endpoint)
-			state.Runtimes[runtimeIndex].Labels = cloneMap(labels)
-			state.Runtimes[runtimeIndex].AgentKeyPrefix = model.SecretPrefix(runtimeSecret)
-			state.Runtimes[runtimeIndex].AgentKeyHash = model.HashSecret(runtimeSecret)
-			state.Runtimes[runtimeIndex].LastHeartbeatAt = &now
-			state.Runtimes[runtimeIndex].UpdatedAt = now
-			applyRuntimeIdentity(&state.Runtimes[runtimeIndex], machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, state.Runtimes[runtimeIndex].NodeKeyID, now)
-			runtime = state.Runtimes[runtimeIndex]
-			_ = upsertMachineForRuntimeState(state, runtime, now)
-			return nil
-		}
-
-		runtime = model.Runtime{
-			ID:              model.NewID("runtime"),
-			TenantID:        token.TenantID,
-			Name:            nextAvailableRuntimeName(state, token.TenantID, runtimeName),
-			Type:            model.RuntimeTypeExternalOwned,
-			AccessMode:      model.RuntimeAccessModePrivate,
-			PoolMode:        model.RuntimePoolModeDedicated,
-			Status:          model.RuntimeStatusActive,
-			Endpoint:        strings.TrimSpace(endpoint),
-			Labels:          cloneMap(labels),
-			AgentKeyPrefix:  model.SecretPrefix(runtimeSecret),
-			AgentKeyHash:    model.HashSecret(runtimeSecret),
-			LastHeartbeatAt: &now,
-			CreatedAt:       now,
-			UpdatedAt:       now,
-		}
-		applyRuntimeIdentity(&runtime, machineName, machineFingerprint, model.RuntimeTypeExternalOwned, strings.TrimSpace(endpoint), labels, "", now)
-		state.Runtimes = append(state.Runtimes, runtime)
-		_ = upsertMachineForRuntimeState(state, runtime, now)
-		return nil
-	})
-	if err != nil {
-		return model.Runtime{}, "", err
-	}
-
-	return runtime, runtimeSecret, nil
+	return s.pgConsumeEnrollmentToken(secret, runtimeName, endpoint, labels, machineName, machineFingerprint)
 }
 
 func (s *Store) AuthenticateRuntimeKey(secret string) (model.Runtime, model.Principal, error) {
 	if strings.TrimSpace(secret) == "" {
 		return model.Runtime{}, model.Principal{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateRuntimeKey(secret)
-	}
-
-	var runtime model.Runtime
-	var principal model.Principal
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		hash := model.HashSecret(secret)
-		now := time.Now().UTC()
-		for idx := range state.Runtimes {
-			if state.Runtimes[idx].AgentKeyHash != hash {
-				continue
-			}
-			state.Runtimes[idx].LastHeartbeatAt = &now
-			state.Runtimes[idx].LastSeenAt = &now
-			state.Runtimes[idx].Status = model.RuntimeStatusActive
-			state.Runtimes[idx].UpdatedAt = now
-			runtime = state.Runtimes[idx]
-			principal = model.Principal{
-				ActorType: model.ActorTypeRuntime,
-				ActorID:   runtime.ID,
-				TenantID:  runtime.TenantID,
-				Scopes: map[string]struct{}{
-					"runtime.agent": {},
-				},
-			}
-			return nil
-		}
-		return ErrNotFound
-	})
-	return runtime, principal, err
+	return s.pgAuthenticateRuntimeKey(secret)
 }
 
 func (s *Store) UpdateRuntimeHeartbeat(runtimeID, endpoint string) (model.Runtime, error) {
-	if s.usingDatabase() {
-		return s.pgUpdateRuntimeHeartbeat(runtimeID, endpoint)
-	}
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.Runtimes[index].LastHeartbeatAt = &now
-		state.Runtimes[index].LastSeenAt = &now
-		state.Runtimes[index].UpdatedAt = now
-		state.Runtimes[index].Status = model.RuntimeStatusActive
-		if strings.TrimSpace(endpoint) != "" {
-			state.Runtimes[index].Endpoint = strings.TrimSpace(endpoint)
-		}
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgUpdateRuntimeHeartbeat(runtimeID, endpoint)
 }
 
 func (s *Store) UpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint string, labels map[string]string) (model.Runtime, error) {
 	if len(labels) == 0 {
 		return s.UpdateRuntimeHeartbeat(runtimeID, endpoint)
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint, labels)
-	}
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.Runtimes[index].LastHeartbeatAt = &now
-		state.Runtimes[index].LastSeenAt = &now
-		state.Runtimes[index].UpdatedAt = now
-		state.Runtimes[index].Status = model.RuntimeStatusActive
-		if strings.TrimSpace(endpoint) != "" {
-			state.Runtimes[index].Endpoint = strings.TrimSpace(endpoint)
-		}
-		state.Runtimes[index].Labels = mergeRuntimeHeartbeatLabels(state.Runtimes[index].Labels, labels)
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgUpdateRuntimeHeartbeatWithLabels(runtimeID, endpoint, labels)
 }
 
 func mergeRuntimeHeartbeatLabels(current, incoming map[string]string) map[string]string {
@@ -1638,56 +481,11 @@ func mergeRuntimeHeartbeatLabels(current, incoming map[string]string) map[string
 }
 
 func (s *Store) MarkRuntimeOfflineStale(after time.Duration) (int, error) {
-	if s.usingDatabase() {
-		return s.pgMarkRuntimeOfflineStale(after)
-	}
-	var count int
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		if after <= 0 {
-			return nil
-		}
-		threshold := time.Now().UTC().Add(-after)
-		for idx := range state.Runtimes {
-			runtime := &state.Runtimes[idx]
-			if runtime.Type == model.RuntimeTypeManagedShared || runtime.Type == model.RuntimeTypeManagedOwned {
-				continue
-			}
-			if runtime.LastHeartbeatAt == nil || runtime.LastHeartbeatAt.Before(threshold) {
-				if runtime.Status != model.RuntimeStatusOffline {
-					runtime.Status = model.RuntimeStatusOffline
-					runtime.UpdatedAt = time.Now().UTC()
-					count++
-				}
-			}
-		}
-		return nil
-	})
-	return count, err
+	return s.pgMarkRuntimeOfflineStale(after)
 }
 
 func (s *Store) ListNodes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
-	if s.usingDatabase() {
-		return s.pgListNodes(tenantID, platformAdmin)
-	}
-	var nodes []model.Runtime
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		for _, runtime := range state.Runtimes {
-			if runtime.Type != model.RuntimeTypeExternalOwned && runtime.Type != model.RuntimeTypeManagedOwned {
-				continue
-			}
-			if platformAdmin || runtimeVisibleToTenant(state, runtime.ID, tenantID) {
-				nodes = append(nodes, runtime)
-			}
-		}
-		sort.Slice(nodes, func(i, j int) bool {
-			return nodes[i].CreatedAt.Before(nodes[j].CreatedAt)
-		})
-		return nil
-	})
-	return nodes, err
+	return s.pgListNodes(tenantID, platformAdmin)
 }
 
 func (s *Store) ListRuntimesByNodeKey(nodeKeyID, tenantID string, platformAdmin bool) ([]model.Runtime, error) {
@@ -1695,64 +493,15 @@ func (s *Store) ListRuntimesByNodeKey(nodeKeyID, tenantID string, platformAdmin 
 	if nodeKeyID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListRuntimesByNodeKey(nodeKeyID, tenantID, platformAdmin)
-	}
-
-	var runtimes []model.Runtime
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		for _, runtime := range state.Runtimes {
-			if runtime.NodeKeyID != nodeKeyID {
-				continue
-			}
-			if platformAdmin || runtime.TenantID == tenantID {
-				runtimes = append(runtimes, runtime)
-			}
-		}
-		sort.Slice(runtimes, func(i, j int) bool {
-			return runtimes[i].CreatedAt.Before(runtimes[j].CreatedAt)
-		})
-		return nil
-	})
-	return runtimes, err
+	return s.pgListRuntimesByNodeKey(nodeKeyID, tenantID, platformAdmin)
 }
 
 func (s *Store) ListRuntimes(tenantID string, platformAdmin bool) ([]model.Runtime, error) {
-	if s.usingDatabase() {
-		return s.pgListRuntimes(tenantID, platformAdmin)
-	}
-	var runtimes []model.Runtime
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		for _, runtime := range state.Runtimes {
-			if platformAdmin || runtimeVisibleToTenant(state, runtime.ID, tenantID) {
-				runtimes = append(runtimes, runtime)
-			}
-		}
-		sort.Slice(runtimes, func(i, j int) bool {
-			return runtimes[i].CreatedAt.Before(runtimes[j].CreatedAt)
-		})
-		return nil
-	})
-	return runtimes, err
+	return s.pgListRuntimes(tenantID, platformAdmin)
 }
 
 func (s *Store) GetRuntime(id string) (model.Runtime, error) {
-	if s.usingDatabase() {
-		return s.pgGetRuntime(id)
-	}
-	var runtime model.Runtime
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		index := findRuntime(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgGetRuntime(id)
 }
 
 func (s *Store) DetachRuntimeOwnership(runtimeID string) (model.Runtime, error) {
@@ -1760,22 +509,7 @@ func (s *Store) DetachRuntimeOwnership(runtimeID string) (model.Runtime, error) 
 	if runtimeID == "" {
 		return model.Runtime{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDetachRuntimeOwnership(runtimeID)
-	}
-
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		detachRuntimeOwnership(state, index, time.Now().UTC())
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgDetachRuntimeOwnership(runtimeID)
 }
 
 func (s *Store) DeleteRuntime(runtimeID string) (model.Runtime, error) {
@@ -1783,39 +517,7 @@ func (s *Store) DeleteRuntime(runtimeID string) (model.Runtime, error) {
 	if runtimeID == "" {
 		return model.Runtime{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteRuntime(runtimeID)
-	}
-
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-
-		candidate := state.Runtimes[index]
-		if err := validateRuntimeDeletion(candidate); err != nil {
-			return err
-		}
-		if runtimeHasDeleteBlockersState(state, runtimeID) {
-			return fmt.Errorf("%w: runtime still has apps, services, or active operations", ErrConflict)
-		}
-
-		state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(
-			state.RuntimeGrants,
-			runtimeID,
-		)
-		state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByRuntime(
-			state.ProjectRuntimeReservations,
-			runtimeID,
-		)
-		runtime = candidate
-		state.Runtimes = append(state.Runtimes[:index], state.Runtimes[index+1:]...)
-		return nil
-	})
-	return runtime, err
+	return s.pgDeleteRuntime(runtimeID)
 }
 
 func (s *Store) RuntimeVisibleToTenant(runtimeID, tenantID string, platformAdmin bool) (bool, error) {
@@ -1823,21 +525,7 @@ func (s *Store) RuntimeVisibleToTenant(runtimeID, tenantID string, platformAdmin
 	if runtimeID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRuntimeVisibleToTenant(runtimeID, tenantID, platformAdmin)
-	}
-
-	var visible bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		if platformAdmin {
-			visible = findRuntime(state, runtimeID) >= 0
-			return nil
-		}
-		visible = runtimeVisibleToTenant(state, runtimeID, tenantID)
-		return nil
-	})
-	return visible, err
+	return s.pgRuntimeVisibleToTenant(runtimeID, tenantID, platformAdmin)
 }
 
 func (s *Store) ListRuntimeAccessGrants(runtimeID string) ([]model.RuntimeAccessGrant, error) {
@@ -1845,28 +533,7 @@ func (s *Store) ListRuntimeAccessGrants(runtimeID string) ([]model.RuntimeAccess
 	if runtimeID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListRuntimeAccessGrants(runtimeID)
-	}
-
-	var grants []model.RuntimeAccessGrant
-	err := s.withLockedState(false, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		if findRuntime(state, runtimeID) < 0 {
-			return ErrNotFound
-		}
-		for _, grant := range state.RuntimeGrants {
-			if grant.RuntimeID != runtimeID {
-				continue
-			}
-			grants = append(grants, grant)
-		}
-		sort.Slice(grants, func(i, j int) bool {
-			return grants[i].CreatedAt.Before(grants[j].CreatedAt)
-		})
-		return nil
-	})
-	return grants, err
+	return s.pgListRuntimeAccessGrants(runtimeID)
 }
 
 func (s *Store) GrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID string) (model.RuntimeAccessGrant, error) {
@@ -1876,47 +543,7 @@ func (s *Store) GrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID str
 	if runtimeID == "" || ownerTenantID == "" || granteeTenantID == "" {
 		return model.RuntimeAccessGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
-	}
-
-	var grant model.RuntimeAccessGrant
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		runtimeIndex := findRuntime(state, runtimeID)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		runtime := state.Runtimes[runtimeIndex]
-		if runtime.TenantID != ownerTenantID || runtime.TenantID == "" {
-			return ErrNotFound
-		}
-		if runtime.Type == model.RuntimeTypeManagedShared {
-			return ErrInvalidInput
-		}
-		if granteeTenantID == runtime.TenantID {
-			return ErrInvalidInput
-		}
-		if findTenant(state, granteeTenantID) < 0 {
-			return ErrNotFound
-		}
-		if index := findRuntimeAccessGrant(state, runtimeID, granteeTenantID); index >= 0 {
-			state.RuntimeGrants[index].UpdatedAt = time.Now().UTC()
-			grant = state.RuntimeGrants[index]
-			return nil
-		}
-		now := time.Now().UTC()
-		grant = model.RuntimeAccessGrant{
-			RuntimeID: runtimeID,
-			TenantID:  granteeTenantID,
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		state.RuntimeGrants = append(state.RuntimeGrants, grant)
-		return nil
-	})
-	return grant, err
+	return s.pgGrantRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
 }
 
 func (s *Store) RevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID string) (bool, error) {
@@ -1926,31 +553,7 @@ func (s *Store) RevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID st
 	if runtimeID == "" || ownerTenantID == "" || granteeTenantID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
-	}
-
-	var removed bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		runtimeIndex := findRuntime(state, runtimeID)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		runtime := state.Runtimes[runtimeIndex]
-		if runtime.TenantID != ownerTenantID || runtime.TenantID == "" {
-			return ErrNotFound
-		}
-		index := findRuntimeAccessGrant(state, runtimeID, granteeTenantID)
-		if index < 0 {
-			return nil
-		}
-		state.RuntimeGrants = append(state.RuntimeGrants[:index], state.RuntimeGrants[index+1:]...)
-		removed = true
-		return nil
-	})
-	return removed, err
+	return s.pgRevokeRuntimeAccess(runtimeID, ownerTenantID, granteeTenantID)
 }
 
 func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string) (model.Runtime, error) {
@@ -1965,30 +568,7 @@ func (s *Store) SetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode string
 	default:
 		return model.Runtime{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode)
-	}
-
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.Runtimes[index].TenantID != ownerTenantID || state.Runtimes[index].TenantID == "" {
-			return ErrNotFound
-		}
-		if model.RuntimeIsInternal(state.Runtimes[index]) {
-			return ErrInvalidInput
-		}
-		state.Runtimes[index].AccessMode = normalizeRuntimeAccessMode(state.Runtimes[index].Type, accessMode)
-		state.Runtimes[index].UpdatedAt = time.Now().UTC()
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgSetRuntimeAccessMode(runtimeID, ownerTenantID, accessMode)
 }
 
 func (s *Store) SetRuntimePublicOffer(runtimeID, ownerTenantID string, offer model.RuntimePublicOffer) (model.Runtime, error) {
@@ -2001,30 +581,7 @@ func (s *Store) SetRuntimePublicOffer(runtimeID, ownerTenantID string, offer mod
 	if err != nil {
 		return model.Runtime{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgSetRuntimePublicOffer(runtimeID, ownerTenantID, normalizedOffer)
-	}
-
-	var runtime model.Runtime
-	err = s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.Runtimes[index].TenantID != ownerTenantID || state.Runtimes[index].TenantID == "" {
-			return ErrNotFound
-		}
-		if state.Runtimes[index].Type == model.RuntimeTypeManagedShared {
-			return ErrInvalidInput
-		}
-		state.Runtimes[index].PublicOffer = cloneRuntimePublicOffer(&normalizedOffer)
-		state.Runtimes[index].UpdatedAt = time.Now().UTC()
-		runtime = state.Runtimes[index]
-		return nil
-	})
-	return runtime, err
+	return s.pgSetRuntimePublicOffer(runtimeID, ownerTenantID, normalizedOffer)
 }
 
 func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, error) {
@@ -2037,87 +594,12 @@ func (s *Store) SetRuntimePoolMode(runtimeID, poolMode string) (model.Runtime, e
 	default:
 		return model.Runtime{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSetRuntimePoolMode(runtimeID, poolMode)
-	}
-
-	var runtime model.Runtime
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-		now := time.Now().UTC()
-
-		index := findRuntime(state, runtimeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.Runtimes[index].Type != model.RuntimeTypeManagedOwned || state.Runtimes[index].TenantID == "" {
-			return ErrInvalidInput
-		}
-		wasInternal := model.RuntimeIsInternal(state.Runtimes[index])
-		state.Runtimes[index].PoolMode = model.NormalizeRuntimePoolMode(state.Runtimes[index].Type, poolMode)
-		if state.Runtimes[index].PoolMode == model.RuntimePoolModeInternalShared {
-			state.Runtimes[index].AccessMode = model.RuntimeAccessModePlatformShared
-			state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(state.RuntimeGrants, state.Runtimes[index].ID)
-		}
-		if wasInternal && !model.RuntimeIsInternal(state.Runtimes[index]) {
-			state.Runtimes[index].AccessMode = model.RuntimeAccessModePrivate
-		}
-		state.Runtimes[index].ApplyNormalizedScope()
-		state.Runtimes[index].UpdatedAt = now
-		runtime = state.Runtimes[index]
-		_ = upsertMachineForRuntimeState(state, runtime, now)
-		return nil
-	})
-	return runtime, err
+	return s.pgSetRuntimePoolMode(runtimeID, poolMode)
 }
 
 func (s *Store) EnsureManagedSharedLocationLabels(labels map[string]string) (model.Runtime, bool, error) {
 	labels = normalizeManagedSharedLocationLabels(labels)
-	if s.usingDatabase() {
-		return s.pgEnsureManagedSharedLocationLabels(labels)
-	}
-
-	var runtimeObj model.Runtime
-	var changed bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		ensureRuntimeMetadata(state)
-
-		index := findRuntime(state, "runtime_managed_shared")
-		if index < 0 {
-			return ErrNotFound
-		}
-		runtimeObj = state.Runtimes[index]
-		if len(labels) == 0 {
-			return nil
-		}
-
-		runtimeLabels := cloneMap(runtimeObj.Labels)
-		if runtimeLabels == nil {
-			runtimeLabels = map[string]string{}
-		}
-		placementLocked := len(runtimepkg.PlacementNodeSelector(runtimeObj)) > 0
-		for key, value := range labels {
-			// Explicit edge identity is orthogonal to placement metadata and
-			// must remain writable even when a location selector is already set.
-			if key != runtimepkg.EdgeGroupIDLabelKey && placementLocked {
-				continue
-			}
-			if runtimeLabels[key] == value {
-				continue
-			}
-			runtimeLabels[key] = value
-			changed = true
-		}
-		if !changed {
-			return nil
-		}
-		state.Runtimes[index].Labels = runtimeLabels
-		state.Runtimes[index].UpdatedAt = time.Now().UTC()
-		runtimeObj = state.Runtimes[index]
-		changed = true
-		return nil
-	})
-	return runtimeObj, changed, err
+	return s.pgEnsureManagedSharedLocationLabels(labels)
 }
 
 func normalizeManagedSharedLocationLabels(labels map[string]string) map[string]string {
@@ -2137,46 +619,20 @@ func normalizeManagedSharedLocationLabels(labels map[string]string) map[string]s
 }
 
 func (s *Store) ListApps(tenantID string, platformAdmin bool) ([]model.App, error) {
-	if s.usingDatabase() {
-		return s.pgListApps(tenantID, platformAdmin)
-	}
-	return s.listAppsView(tenantID, platformAdmin, true)
+	return s.pgListApps(tenantID, platformAdmin)
 }
 
 // ListAppsMetadata returns app records without hydrating backing services or bindings.
 // Callers that only need routing, source, spec, and status should prefer this lighter view.
 func (s *Store) ListAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
-	if s.usingDatabase() {
-		return s.pgListAppsMetadata(tenantID, platformAdmin)
-	}
-	return s.listAppsView(tenantID, platformAdmin, false)
+	return s.pgListAppsMetadata(tenantID, platformAdmin)
 }
 
 // ListDeletedAppsMetadata returns only durable app tombstones. It is kept
 // separate from the normal app views so background cleanup can replay after a
 // restart without exposing deleted applications to serving or user APIs.
 func (s *Store) ListDeletedAppsMetadata(tenantID string, platformAdmin bool) ([]model.App, error) {
-	if s.usingDatabase() {
-		return s.pgListDeletedAppsMetadata(tenantID, platformAdmin)
-	}
-	var apps []model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.Apps {
-			app := candidate
-			normalizeAppStatusForRead(&app)
-			if !isDeletedApp(app) || (!platformAdmin && app.TenantID != tenantID) {
-				continue
-			}
-			app.Bindings = nil
-			app.BackingServices = nil
-			apps = append(apps, app)
-		}
-		sort.Slice(apps, func(i, j int) bool {
-			return apps[i].CreatedAt.Before(apps[j].CreatedAt)
-		})
-		return nil
-	})
-	return apps, err
+	return s.pgListDeletedAppsMetadata(tenantID, platformAdmin)
 }
 
 func (s *Store) ListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
@@ -2184,13 +640,7 @@ func (s *Store) ListAppsMetadataByIDs(appIDs []string) ([]model.App, error) {
 	if len(appIDSet) == 0 {
 		return nil, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListAppsMetadataByIDs(sortedTrimmedStringKeys(appIDSet))
-	}
-	return s.listAppsViewFiltered(false, func(app model.App) bool {
-		_, ok := appIDSet[strings.TrimSpace(app.ID)]
-		return ok
-	})
+	return s.pgListAppsMetadataByIDs(sortedTrimmedStringKeys(appIDSet))
 }
 
 func (s *Store) ListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App, error) {
@@ -2198,13 +648,7 @@ func (s *Store) ListAppsMetadataByProjectIDs(projectIDs []string) ([]model.App, 
 	if len(projectIDSet) == 0 {
 		return nil, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListAppsMetadataByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
-	}
-	return s.listAppsViewFiltered(false, func(app model.App) bool {
-		_, ok := projectIDSet[strings.TrimSpace(app.ProjectID)]
-		return ok
-	})
+	return s.pgListAppsMetadataByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
 }
 
 func (s *Store) ListAppsByProjectIDs(projectIDs []string) ([]model.App, error) {
@@ -2212,216 +656,40 @@ func (s *Store) ListAppsByProjectIDs(projectIDs []string) ([]model.App, error) {
 	if len(projectIDSet) == 0 {
 		return nil, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListAppsByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
-	}
-	return s.listAppsViewFiltered(true, func(app model.App) bool {
-		_, ok := projectIDSet[strings.TrimSpace(app.ProjectID)]
-		return ok
-	})
-}
-
-func (s *Store) listAppsView(tenantID string, platformAdmin bool, hydrateBackingServices bool) ([]model.App, error) {
-	return s.listAppsViewFiltered(hydrateBackingServices, func(app model.App) bool {
-		return platformAdmin || app.TenantID == tenantID
-	})
-}
-
-func (s *Store) listAppsViewFiltered(hydrateBackingServices bool, include func(model.App) bool) ([]model.App, error) {
-	var apps []model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		var backingServiceIndex appBackingServiceIndex
-		if hydrateBackingServices {
-			backingServiceIndex = newAppBackingServiceIndex(state)
-		}
-		for _, app := range state.Apps {
-			if isDeletedApp(app) {
-				continue
-			}
-			normalizeAppStatusForRead(&app)
-			if hydrateBackingServices {
-				hydrateAppBackingServicesWithIndex(backingServiceIndex, &app)
-			} else {
-				app.Bindings = nil
-				app.BackingServices = nil
-			}
-			if include == nil || include(app) {
-				apps = append(apps, app)
-			}
-		}
-		sort.Slice(apps, func(i, j int) bool {
-			return apps[i].CreatedAt.Before(apps[j].CreatedAt)
-		})
-		return nil
-	})
-	return apps, err
+	return s.pgListAppsByProjectIDs(sortedTrimmedStringKeys(projectIDSet))
 }
 
 func (s *Store) GetApp(id string) (model.App, error) {
-	if s.usingDatabase() {
-		return s.pgGetApp(id)
-	}
-	var app model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return app, err
+	return s.pgGetApp(id)
 }
 
 func (s *Store) GetAppMetadata(id string) (model.App, error) {
-	if s.usingDatabase() {
-		return s.pgGetAppMetadata(id)
-	}
-	var app model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		normalizeAppStatusForRead(&app)
-		app.Bindings = nil
-		app.BackingServices = nil
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return app, err
+	return s.pgGetAppMetadata(id)
 }
 
 func (s *Store) GetAppByHostname(hostname string) (model.App, error) {
 	hostname = normalizeAppDomainHostname(hostname)
-	if s.usingDatabase() {
-		return s.pgGetAppByHostname(hostname)
-	}
-	var app model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.Apps {
-			if isDeletedApp(candidate) {
-				continue
-			}
-			if candidate.Route == nil {
-				continue
-			}
-			if strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
-				app = candidate
-				normalizeAppStatusForRead(&app)
-				hydrateAppBackingServices(state, &app)
-				return nil
-			}
-		}
-		if domain, found := activeAppDomainByHostname(state, hostname); found {
-			index := findApp(state, domain.AppID)
-			if index >= 0 {
-				app = state.Apps[index]
-				normalizeAppStatusForRead(&app)
-				hydrateAppBackingServices(state, &app)
-				if !isDeletedApp(app) {
-					return nil
-				}
-			}
-		}
-		return ErrNotFound
-	})
-	return app, err
+	return s.pgGetAppByHostname(hostname)
 }
 
 func (s *Store) GetAppByRoutePrefix(hostname, pathPrefix string) (model.App, error) {
 	hostname = normalizeAppDomainHostname(hostname)
 	pathPrefix = model.NormalizeAppRoutePathPrefix(pathPrefix)
-	if s.usingDatabase() {
-		app, err := s.pgGetAppByRoutePrefix(hostname, pathPrefix)
-		if !errors.Is(err, ErrNotFound) {
-			return app, err
-		}
-		return s.pgGetAppByProjectRoute(hostname, pathPrefix, true)
+	app, err := s.pgGetAppByRoutePrefix(hostname, pathPrefix)
+	if !errors.Is(err, ErrNotFound) {
+		return app, err
 	}
-	var app model.App
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.Apps {
-			if isDeletedApp(candidate) || candidate.Route == nil {
-				continue
-			}
-			if !strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
-				continue
-			}
-			if model.NormalizeAppRoutePathPrefix(candidate.Route.PathPrefix) != pathPrefix {
-				continue
-			}
-			app = candidate
-			normalizeAppStatusForRead(&app)
-			hydrateAppBackingServices(state, &app)
-			return nil
-		}
-		if matched, ok := findAppByProjectRouteTables(state.Apps, state.ProjectRouteTables, hostname, pathPrefix, true); ok {
-			app = matched
-			normalizeAppStatusForRead(&app)
-			hydrateAppBackingServices(state, &app)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return app, err
+	return s.pgGetAppByProjectRoute(hostname, pathPrefix, true)
 }
 
 func (s *Store) GetAppByRoute(hostname, requestPath string) (model.App, error) {
 	hostname = normalizeAppDomainHostname(hostname)
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
-	if s.usingDatabase() {
-		app, err := s.pgGetAppByRoute(hostname, requestPath)
-		if !errors.Is(err, ErrNotFound) {
-			return app, err
-		}
-		return s.pgGetAppByProjectRoute(hostname, requestPath, false)
+	app, err := s.pgGetAppByRoute(hostname, requestPath)
+	if !errors.Is(err, ErrNotFound) {
+		return app, err
 	}
-	var (
-		app     model.App
-		bestLen int
-		matched bool
-	)
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.Apps {
-			if isDeletedApp(candidate) || candidate.Route == nil {
-				continue
-			}
-			if !strings.EqualFold(strings.TrimSpace(candidate.Route.Hostname), hostname) {
-				continue
-			}
-			prefix := model.NormalizeAppRoutePathPrefix(candidate.Route.PathPrefix)
-			if !routePathPrefixMatches(prefix, requestPath) {
-				continue
-			}
-			if !matched || len(prefix) > bestLen || (len(prefix) == bestLen && candidate.UpdatedAt.After(app.UpdatedAt)) {
-				app = candidate
-				bestLen = len(prefix)
-				matched = true
-			}
-		}
-		if !matched {
-			if matchedApp, ok := findAppByProjectRouteTables(state.Apps, state.ProjectRouteTables, hostname, requestPath, false); ok {
-				app = matchedApp
-				normalizeAppStatusForRead(&app)
-				hydrateAppBackingServices(state, &app)
-				return nil
-			}
-			return ErrNotFound
-		}
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgGetAppByProjectRoute(hostname, requestPath, false)
 }
 
 func (s *Store) CreateApp(tenantID, projectID, name, description string, spec model.AppSpec) (model.App, error) {
@@ -2449,56 +717,7 @@ func (s *Store) UpdateAppRoute(id string, route model.AppRoute) (model.App, erro
 	if id == "" || route.Hostname == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateAppRoute(id, route)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		if activeRecovery(state.AppRecoveries, id) {
-			return ErrConflict
-		}
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		for _, existing := range state.Apps {
-			if existing.ID == app.ID || isDeletedApp(existing) || existing.Route == nil {
-				continue
-			}
-			if appRouteConflictKey(existing.Route) == appRouteConflictKey(&route) {
-				return ErrConflict
-			}
-		}
-		if appRouteConflictsWithVerifiedAppDomain(state, &route, app.ID) {
-			return ErrConflict
-		}
-		if route.BaseDomain == "" && app.Route != nil {
-			route.BaseDomain = strings.TrimSpace(strings.ToLower(app.Route.BaseDomain))
-		}
-		if route.PublicURL == "" {
-			route.PublicURL = model.AppRoutePublicURL(route.Hostname, route.PathPrefix)
-		}
-		if route.ServicePort <= 0 {
-			if app.Route != nil && app.Route.ServicePort > 0 {
-				route.ServicePort = app.Route.ServicePort
-			}
-			if route.ServicePort <= 0 {
-				route.ServicePort = model.AppPublicServicePort(app.Spec)
-			}
-		}
-		app.Route = cloneAppRoute(&route)
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgUpdateAppRoute(id, route)
 }
 
 func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, error) {
@@ -2507,28 +726,7 @@ func (s *Store) UpdateAppImageMirrorLimit(id string, limit int) (model.App, erro
 		return model.App{}, ErrInvalidInput
 	}
 	limit = model.EffectiveAppImageMirrorLimit(limit)
-	if s.usingDatabase() {
-		return s.pgUpdateAppImageMirrorLimit(id, limit)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		app.Spec.ImageMirrorLimit = limit
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgUpdateAppImageMirrorLimit(id, limit)
 }
 
 // UpdateAppRightSizing updates control-plane recommendation policy only. The
@@ -2540,28 +738,7 @@ func (s *Store) UpdateAppRightSizing(id string, rightSizing model.AppRightSizing
 		return model.App{}, ErrInvalidInput
 	}
 	rightSizing = model.NormalizeAppRightSizingSpec(rightSizing)
-	if s.usingDatabase() {
-		return s.pgUpdateAppRightSizing(id, rightSizing)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		app.Spec.RightSizing = cloneAppRightSizingSpec(&rightSizing)
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgUpdateAppRightSizing(id, rightSizing)
 }
 
 func (s *Store) UpdateAppOriginSource(id string, source model.AppSource) (model.App, error) {
@@ -2569,31 +746,7 @@ func (s *Store) UpdateAppOriginSource(id string, source model.AppSource) (model.
 	if id == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateAppOriginSource(id, source)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		model.SetAppSourceState(&app, &source, model.AppBuildSource(app))
-		now := time.Now().UTC()
-		app.Status.SourceSync = nil
-		app.Status.UpdatedAt = now
-		app.UpdatedAt = now
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgUpdateAppOriginSource(id, source)
 }
 
 func (s *Store) UpdateAppSourceSyncStatus(id string, sourceSync *model.AppSourceSyncStatus) (model.App, error) {
@@ -2601,30 +754,7 @@ func (s *Store) UpdateAppSourceSyncStatus(id string, sourceSync *model.AppSource
 	if id == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateAppSourceSyncStatus(id, sourceSync)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		app.Status.SourceSync = model.CloneAppSourceSyncStatus(sourceSync)
-		app.Status.UpdatedAt = now
-		app.UpdatedAt = now
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgUpdateAppSourceSyncStatus(id, sourceSync)
 }
 
 func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.AppSpec) (model.App, error) {
@@ -2632,52 +762,7 @@ func (s *Store) SyncObservedManagedPostgresSpec(id string, desiredSpec model.App
 	if id == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSyncObservedManagedPostgresSpec(id, desiredSpec)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppRequestResize(state.Operations, app.ID) {
-			return ErrConflict
-		}
-
-		spec := cloneAppSpec(&desiredSpec)
-		if spec == nil {
-			return ErrInvalidInput
-		}
-		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
-		model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
-		model.PreserveAppNodeLossPolicy(spec, app.Spec)
-		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
-			return err
-		}
-		if err := validateManagedPostgresSuspensionTransition(spec.Postgres, ManagedPostgresSpecForOperation(app, "")); err != nil {
-			return err
-		}
-		if spec.Replicas > 0 && appHasSuspendedManagedPostgres(app) {
-			return ErrConflict
-		}
-		if err := applyDesiredSpecBackingServicesState(state, &app, spec); err != nil {
-			return err
-		}
-		app.Spec = *spec
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgSyncObservedManagedPostgresSpec(id, desiredSpec)
 }
 
 func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppSpec, desiredSource *model.AppSource) (model.App, error) {
@@ -2685,57 +770,7 @@ func (s *Store) SyncObservedManagedAppBaseline(id string, desiredSpec model.AppS
 	if id == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSyncObservedManagedAppBaseline(id, desiredSpec, desiredSource)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		hydrateAppBackingServices(state, &app)
-		if hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) || activeAppRequestResize(state.Operations, app.ID) {
-			return ErrConflict
-		}
-
-		spec := cloneAppSpec(&desiredSpec)
-		if spec == nil {
-			return ErrInvalidInput
-		}
-		model.PreserveVerifiedAppCPURequest(spec, app.Spec)
-		model.PreserveVerifiedAppMemoryRequest(spec, app.Spec)
-		model.PreserveAppNodeLossPolicy(spec, app.Spec)
-		if err := applyGeneratedEnvSpec(spec, &app.Spec); err != nil {
-			return err
-		}
-		if err := validateManagedPostgresSuspensionTransition(spec.Postgres, ManagedPostgresSpecForOperation(app, "")); err != nil {
-			return err
-		}
-		if spec.Replicas > 0 && appHasSuspendedManagedPostgres(app) {
-			return ErrConflict
-		}
-		if err := applyDesiredSpecBackingServicesState(state, &app, spec); err != nil {
-			return err
-		}
-		app.Spec = *spec
-		buildSource := model.AppBuildSource(app)
-		if desiredSource != nil {
-			buildSource = cloneAppSource(desiredSource)
-		}
-		model.SetAppSourceState(&app, model.AppOriginSource(app), buildSource)
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, err
+	return s.pgSyncObservedManagedAppBaseline(id, desiredSpec, desiredSource)
 }
 
 func (s *Store) PurgeApp(id string) (model.App, error) {
@@ -2743,53 +778,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 	if id == "" {
 		return model.App{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgPurgeApp(id)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		if activeRecovery(state.AppRecoveries, id) {
-			return ErrConflict
-		}
-		index := findApp(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-
-		app = state.Apps[index]
-		normalizeAppStatusForRead(&app)
-		if app.Status.CurrentReplicas > 0 || strings.TrimSpace(app.Status.CurrentRuntimeID) != "" {
-			return ErrConflict
-		}
-		if !isDeletedApp(app) {
-			phase := strings.TrimSpace(strings.ToLower(app.Status.Phase))
-			if strings.TrimSpace(app.Spec.Image) != "" || (phase != "importing" && phase != "failed") {
-				return ErrConflict
-			}
-		}
-
-		state.Apps = append(state.Apps[:index], state.Apps[index+1:]...)
-		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, "", id)
-		state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, []string{id})
-		deleteAppDomainsByApp(state, id)
-		deleteAppImageTracking(state, id)
-		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
-		deletedReleaseAttemptIDs := releaseAttemptIDsByApp(state.ReleaseAttempts, id)
-		state.ReleaseAttempts = deleteReleaseAttemptsByApp(state.ReleaseAttempts, id)
-		state.ReleaseSteps = deleteReleaseStepsByAttemptIDs(state.ReleaseSteps, deletedReleaseAttemptIDs)
-		state.AppTrafficPolicies = deleteAppTrafficPoliciesByApp(state.AppTrafficPolicies, id)
-		state.AutomationPolicies = deleteAutomationPoliciesByAppScope(state.AutomationPolicies, id)
-		state.AppSSHEndpoints = deleteAppSSHEndpointsByApp(state.AppSSHEndpoints, id)
-		state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByApp(state.AppDatabaseImportJobs, id)
-		state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByApp(state.AppDatabaseAccessGrants, id)
-		state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, id)
-		state.BackingServices = deleteOwnedBackingServicesByApp(state.BackingServices, id)
-		state.Operations = deleteOperationsByApp(state.Operations, id)
-		state.OperationEvidence = deleteOperationEvidenceByApp(state.OperationEvidence, id)
-		return maybeFinalizeRequestedProjectDelete(state, app.ProjectID)
-	})
-	return app, err
+	return s.pgPurgeApp(id)
 }
 
 func (s *Store) createApp(tenantID, projectID, name, description string, spec model.AppSpec, source *model.AppSource, route *model.AppRoute) (model.App, error) {
@@ -2836,124 +825,7 @@ func (s *Store) createApp(tenantID, projectID, name, description string, spec mo
 	if err := validateManagedPostgresSpecForAppName(name, spec.Postgres); err != nil {
 		return model.App{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreateApp(tenantID, projectID, name, description, spec, source, route)
-	}
-
-	var app model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		projectIndex := findProject(state, projectID)
-		if projectIndex < 0 || state.Projects[projectIndex].TenantID != tenantID {
-			return ErrNotFound
-		}
-		if projectDeleteRequested(state, projectID) {
-			return ErrConflict
-		}
-		if err := validateDataReferencesState(state, tenantID, &spec); err != nil {
-			return err
-		}
-		spec.RuntimeID = resolveProjectRuntimeID(state.Projects[projectIndex], spec.RuntimeID)
-		if !runtimeVisibleToTenant(state, spec.RuntimeID, tenantID) {
-			return ErrNotFound
-		}
-		if err := validateWorkspaceRuntimeState(state, spec.RuntimeID, spec); err != nil {
-			return err
-		}
-		if err := validateFailoverRuntimeState(state, tenantID, spec); err != nil {
-			return err
-		}
-		if err := validateManagedPostgresRuntimeState(state, tenantID, spec.RuntimeID, spec.Postgres); err != nil {
-			return err
-		}
-		if err := validateAppSpecRuntimeReservationsState(state, projectID, spec); err != nil {
-			return err
-		}
-		routeKey := appRouteConflictKey(route)
-		for _, existing := range state.Apps {
-			if existing.TenantID == tenantID && existing.ProjectID == projectID && strings.EqualFold(existing.Name, name) {
-				return ErrConflict
-			}
-			if routeKey != "" && existing.Route != nil && appRouteConflictKey(existing.Route) == routeKey {
-				return ErrConflict
-			}
-		}
-		if appRouteConflictsWithVerifiedAppDomain(state, route, "") {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
-		if billing == nil {
-			return ErrNotFound
-		}
-		phase := "created"
-		if allowPendingImport {
-			phase = "importing"
-		}
-		app = model.App{
-			ID:          model.NewID("app"),
-			TenantID:    tenantID,
-			ProjectID:   projectID,
-			Name:        name,
-			Description: strings.TrimSpace(description),
-			Route:       cloneAppRoute(route),
-			Spec:        spec,
-			Status: model.AppStatus{
-				Phase:           phase,
-				CurrentReplicas: 0,
-				UpdatedAt:       now,
-			},
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		model.SetAppSourceState(&app, source, source)
-		var ownedService *model.BackingService
-		var ownedBinding *model.ServiceBinding
-		if app.Spec.Postgres != nil {
-			service, binding := ownedManagedPostgresResources(app)
-			service.Name = nextAvailableBackingServiceName(state, tenantID, projectID, service.Name)
-			ownedService = &service
-			ownedBinding = &binding
-			app.Spec.Postgres = nil
-		}
-		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
-			projection.Apps = append(projection.Apps, cloneAppForBilling(app))
-			if ownedService != nil {
-				projection.BackingServices = append(projection.BackingServices, cloneBackingService(*ownedService))
-			}
-			if ownedBinding != nil {
-				projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(*ownedBinding))
-			}
-		}); err != nil {
-			return err
-		}
-		if ownedService != nil {
-			state.BackingServices = append(state.BackingServices, *ownedService)
-			state.ServiceBindings = append(state.ServiceBindings, *ownedBinding)
-		}
-		hydrateAppBackingServices(state, &app)
-		state.Apps = append(state.Apps, app)
-		return nil
-	})
-	return app, err
-}
-
-func isBackgroundControllerImportOperation(op model.Operation) bool {
-	if op.Type != model.OperationTypeImport {
-		return false
-	}
-	switch strings.TrimSpace(op.RequestedByID) {
-	case model.OperationRequestedByGitHubSyncController, model.OperationRequestedByImageTracking:
-		return true
-	default:
-		return false
-	}
-}
-
-func isForegroundPendingOperation(op model.Operation) bool {
-	return !isBackgroundControllerImportOperation(op)
+	return s.pgCreateApp(tenantID, projectID, name, description, spec, source, route)
 }
 
 func (s *Store) CreateOperation(op model.Operation) (model.Operation, error) {
@@ -3014,560 +886,7 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 	if op.TenantID == "" || op.Type == "" || op.AppID == "" {
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateOperation(op, policy)
-	}
-
-	var outcome operationCreateOutcome
-	err := s.withLockedState(true, func(state *model.State) error {
-		appIndex := findApp(state, op.AppID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		app := state.Apps[appIndex]
-		if app.TenantID != op.TenantID {
-			return ErrNotFound
-		}
-		if activeRecovery(state.AppRecoveries, app.ID) {
-			return fmt.Errorf("%w: app has an active incident recovery hold", ErrConflict)
-		}
-		if policy.IdempotencyKey != "" {
-			if idx := findIdempotencyRecord(state, policy.IdempotencyScope, op.TenantID, policy.IdempotencyKey); idx >= 0 {
-				record := state.Idempotency[idx]
-				if record.RequestHash != policy.RequestHash {
-					return ErrIdempotencyMismatch
-				}
-				for _, existing := range state.Operations {
-					if existing.ID == record.OperationID {
-						op = existing
-						outcome.ReusedExistingOperation = true
-						return nil
-					}
-				}
-				return ErrNotFound
-			}
-		}
-		hydrateAppBackingServices(state, &app)
-		if err := rebaseImportDeployConfiguration(&op, app, policy.ImportConfigBase); err != nil {
-			return err
-		}
-		if activeAppRequestResize(state.Operations, app.ID) {
-			return ErrConflict
-		}
-		if err := reconcileAppRequestResizeSnapshot(&op, app); err != nil {
-			return err
-		}
-		if err := validateDataReferencesState(state, op.TenantID, op.DesiredSpec); err != nil {
-			return err
-		}
-		if op.Type == model.OperationTypeImport || op.Type == model.OperationTypeDeploy || op.Type == model.OperationTypeAppStorageUnmount {
-			op.ConfigBaseSpec = cloneAppSpec(&app.Spec)
-		}
-		if policy.ExpectedAppSpecHash != "" && (model.AppSpecSHA256(app.Spec) != policy.ExpectedAppSpecHash || hasInFlightOperationForApp(state.Operations, app.ID)) {
-			return ErrConflict
-		}
-		if err := validateStorageUnmountOperation(op, app, policy.ExpectedAppSpecHash); err != nil {
-			return err
-		}
-		if op.DesiredSpec != nil && op.Type != model.OperationTypeAppStorageUnmount && op.Type != model.OperationTypeDatabaseSourceRetire && op.Type != model.OperationTypeDatabaseReplicaRetire && op.Type != pgimage.OperationType && op.Type != model.OperationTypeDatabaseResize && !model.IsAppRequestResize(op.Type) {
-			if err := reconcileManagedPostgresRuntimeResources(op.DesiredSpec.Postgres, ManagedPostgresSpecForOperation(app, op.ServiceID)); err != nil {
-				return err
-			}
-			if err := applyGeneratedEnvSpec(op.DesiredSpec, &app.Spec); err != nil {
-				return err
-			}
-			if err := ensureManagedPostgresPasswordWithExisting(op.DesiredSpec.Postgres, OwnedManagedPostgresSpec(app)); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresSuspensionForOperation(
-				op.Type,
-				op.DesiredSpec.Postgres,
-				ManagedPostgresSpecForOperation(app, op.ServiceID),
-			); err != nil {
-				return err
-			}
-		}
-
-		if !isManagedPostgresExclusiveMutationOperationType(op.Type) &&
-			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, app.ID) {
-			return ErrConflict
-		}
-		if err := validateManagedPostgresActiveForOperation(app, op); err != nil {
-			return err
-		}
-
-		switch op.Type {
-		case model.OperationTypeImport:
-			if op.DesiredSpec == nil || op.DesiredSource == nil {
-				return ErrInvalidInput
-			}
-			if !isQueuedImportSourceType(op.DesiredSource.Type) {
-				return ErrInvalidInput
-			}
-			if policy.ReuseActiveImageRebuildForApp || policy.RejectActiveImportForApp {
-				for _, existing := range state.Operations {
-					if existing.TenantID != app.TenantID || existing.AppID != app.ID ||
-						existing.Type != model.OperationTypeImport ||
-						(existing.Status != model.OperationStatusPending && existing.Status != model.OperationStatusRunning && existing.Status != model.OperationStatusWaitingAgent) {
-						continue
-					}
-					if policy.ReuseActiveImageRebuildForApp &&
-						existing.RequestedByType == model.ActorTypeSystem &&
-						existing.RequestedByID == model.OperationRequestedByImageRebuild {
-						op = existing
-						outcome.ReusedExistingOperation = true
-						outcome.ExistingOperationID = existing.ID
-						return nil
-					}
-					if policy.RejectActiveImportForApp {
-						return ErrConflict
-					}
-				}
-			}
-			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
-		case model.OperationTypeAppStorageUnmount:
-			op.TargetRuntimeID = app.Spec.RuntimeID
-		case model.OperationTypeDeploy:
-			if op.DesiredSpec == nil {
-				return ErrInvalidInput
-			}
-			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			op.TargetRuntimeID = op.DesiredSpec.RuntimeID
-			if policy.RejectActiveDeployForApp {
-				if active, found := firstActiveDeployOperationForApp(state.Operations, app.ID); found {
-					outcome.Decision = AutoscalingDeployDecisionActiveDeployExists
-					outcome.ExistingOperationID = active.ID
-					return nil
-				}
-			}
-			if policy.RejectNoopDeploy && deployOperationDesiredStateAlreadyCurrent(op, app) {
-				outcome.Decision = AutoscalingDeployDecisionAlreadyCurrent
-				return nil
-			}
-		case model.OperationTypeScale:
-			if op.DesiredReplicas == nil || *op.DesiredReplicas < 0 {
-				return ErrInvalidInput
-			}
-			op.TargetRuntimeID = app.Spec.RuntimeID
-		case model.OperationTypeDelete:
-			if strings.TrimSpace(app.Spec.RuntimeID) == "" {
-				return ErrInvalidInput
-			}
-			op.SourceRuntimeID = app.Spec.RuntimeID
-			op.TargetRuntimeID = app.Spec.RuntimeID
-		case model.OperationTypeMigrate:
-			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
-			if op.DesiredSpec != nil {
-				if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-					return err
-				}
-				if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-					return err
-				}
-				if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-					return err
-				}
-				if strings.TrimSpace(op.DesiredSpec.RuntimeID) == "" {
-					op.DesiredSpec.RuntimeID = targetRuntimeID
-				}
-				if strings.TrimSpace(op.DesiredSpec.RuntimeID) != targetRuntimeID {
-					return ErrInvalidInput
-				}
-				if !runtimeUsableForAppOperation(state, app, op.DesiredSpec.RuntimeID, op.TenantID) {
-					return ErrNotFound
-				}
-				if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
-					return err
-				}
-				if err := validateFailoverRuntimeStateForAppOperation(state, app, op.TenantID, *op.DesiredSpec); err != nil {
-					return err
-				}
-				if err := validateManagedPostgresRuntimeStateForAppOperation(state, app, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
-					return err
-				}
-				targetRuntimeID = op.DesiredSpec.RuntimeID
-			}
-			if targetRuntimeID == "" || !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			if (hasMigrationBlockingPersistentWorkspace(app) && !PermitsStoppedDedicatedPVCMigration(app, op.DesiredSpec)) || (op.DesiredSpec != nil && appSpecHasMigrationBlockingPersistentWorkspace(*op.DesiredSpec)) {
-				return ErrInvalidInput
-			}
-			if appHasManagedPostgresService(app) {
-				targetRuntimeIndex := findRuntime(state, targetRuntimeID)
-				if targetRuntimeIndex < 0 {
-					return ErrNotFound
-				}
-				if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
-					return err
-				}
-			}
-			op.TargetRuntimeID = targetRuntimeID
-			op.SourceRuntimeID = app.Spec.RuntimeID
-		case model.OperationTypeFailover:
-			if hasInFlightOperationForApp(state.Operations, app.ID) {
-				return ErrConflict
-			}
-			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
-			if targetRuntimeID == "" && app.Spec.Failover != nil {
-				targetRuntimeID = strings.TrimSpace(app.Spec.Failover.TargetRuntimeID)
-			}
-			if targetRuntimeID == "" {
-				return ErrInvalidInput
-			}
-			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
-			if targetRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
-				return err
-			}
-			sourceRuntimeIndex := findRuntime(state, app.Spec.RuntimeID)
-			if sourceRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
-				return err
-			}
-			if strings.TrimSpace(app.Spec.RuntimeID) == targetRuntimeID {
-				return ErrInvalidInput
-			}
-			if err := validateFailoverVolumeReplication(app); err != nil {
-				return err
-			}
-			op.SourceRuntimeID = app.Spec.RuntimeID
-			op.TargetRuntimeID = targetRuntimeID
-		case model.OperationTypeDatabaseSwitchover:
-			if hasInFlightOperationForApp(state.Operations, app.ID) {
-				return ErrConflict
-			}
-			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
-			if targetRuntimeID == "" {
-				return ErrInvalidInput
-			}
-			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
-			if postgresSpec == nil {
-				return ErrInvalidInput
-			}
-			sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
-			if sourceRuntimeID == "" {
-				sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
-			}
-			if sourceRuntimeID == "" {
-				return ErrInvalidInput
-			}
-			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
-			if targetRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
-				return err
-			}
-			sourceRuntimeIndex := findRuntime(state, sourceRuntimeID)
-			if sourceRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
-				return err
-			}
-			if sourceRuntimeID == targetRuntimeID {
-				return ErrInvalidInput
-			}
-			op.SourceRuntimeID = sourceRuntimeID
-			op.TargetRuntimeID = targetRuntimeID
-			if op.DesiredSpec == nil {
-				op.DesiredSpec = cloneAppSpec(&app.Spec)
-			}
-		case model.OperationTypeDatabaseLocalize, storagerecovery.OperationType:
-			if hasInFlightOperationForApp(state.Operations, app.ID) {
-				return ErrConflict
-			}
-			postgresSpec := ManagedPostgresSpecForOperation(app, op.ServiceID)
-			if postgresSpec == nil {
-				return ErrInvalidInput
-			}
-			sourceRuntimeID := strings.TrimSpace(postgresSpec.RuntimeID)
-			if sourceRuntimeID == "" {
-				sourceRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
-			}
-			targetRuntimeID := strings.TrimSpace(op.TargetRuntimeID)
-			if targetRuntimeID == "" && op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
-				targetRuntimeID = strings.TrimSpace(op.DesiredSpec.Postgres.RuntimeID)
-			}
-			if targetRuntimeID == "" {
-				targetRuntimeID = strings.TrimSpace(app.Spec.RuntimeID)
-			}
-			if sourceRuntimeID == "" || targetRuntimeID == "" {
-				return ErrInvalidInput
-			}
-			if !runtimeVisibleToTenant(state, targetRuntimeID, op.TenantID) {
-				return ErrNotFound
-			}
-			targetRuntimeIndex := findRuntime(state, targetRuntimeID)
-			if targetRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[targetRuntimeIndex].Type); err != nil {
-				return err
-			}
-			sourceRuntimeIndex := findRuntime(state, sourceRuntimeID)
-			if sourceRuntimeIndex < 0 {
-				return ErrNotFound
-			}
-			if err := validateFailoverTargetRuntimeType(state.Runtimes[sourceRuntimeIndex].Type); err != nil {
-				return err
-			}
-			if op.DesiredSpec == nil {
-				op.DesiredSpec = cloneAppSpec(&app.Spec)
-			}
-			if op.DesiredSpec == nil {
-				return ErrInvalidInput
-			}
-			if err := normalizeAppSpecResources(op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateAppNetworkMode(*op.DesiredSpec); err != nil {
-				return err
-			}
-			if op.DesiredSpec.Postgres == nil {
-				op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
-			}
-			op.DesiredSpec.Postgres.RuntimeID = targetRuntimeID
-			if op.Type == storagerecovery.OperationType {
-				op.DesiredSpec.Postgres.Instances = postgresSpec.Instances
-				op.DesiredSpec.Postgres.SynchronousReplicas = postgresSpec.SynchronousReplicas
-			} else if ManagedPostgresStorageGrowthInPlace(postgresSpec, op.DesiredSpec.Postgres, sourceRuntimeID, targetRuntimeID, op.DesiredSpec.Postgres.PrimaryNodeName) {
-				size := op.DesiredSpec.Postgres.StorageSize
-				op.DesiredSpec.Postgres = model.CloneAppPostgresSpec(postgresSpec)
-				op.DesiredSpec.Postgres.StorageSize = size
-			} else {
-				op.DesiredSpec.Postgres.FailoverTargetRuntimeID = ""
-				op.DesiredSpec.Postgres.Instances = 1
-				op.DesiredSpec.Postgres.SynchronousReplicas = 0
-				op.DesiredSpec.Postgres.PrimaryPlacementPendingRebalance = false
-			}
-			if err := validateManagedPostgresSpecForAppName(app.Name, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			if err := validateWorkspaceRuntimeState(state, op.DesiredSpec.RuntimeID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateFailoverRuntimeState(state, op.TenantID, *op.DesiredSpec); err != nil {
-				return err
-			}
-			if err := validateManagedPostgresRuntimeState(state, op.TenantID, op.DesiredSpec.RuntimeID, op.DesiredSpec.Postgres); err != nil {
-				return err
-			}
-			op.SourceRuntimeID = sourceRuntimeID
-			op.TargetRuntimeID = targetRuntimeID
-		case model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume:
-			if err := validateManagedPostgresLifecycleTargetState(state, app, op.ServiceID); err != nil {
-				return err
-			}
-			if err := prepareManagedPostgresLifecycleOperation(app, &op, op.Type == model.OperationTypeDatabaseSuspend); err != nil {
-				return err
-			}
-			active := activeOperationsForLifecycleTarget(state.Operations, app.ID, op.ServiceID)
-			if len(active) > 0 {
-				if len(active) == 1 && managedPostgresLifecycleRetryMatches(active[0], op) {
-					op = cloneOperation(active[0])
-					outcome.ReusedExistingOperation = true
-					outcome.ExistingOperationID = op.ID
-					return nil
-				}
-				return ErrConflict
-			}
-			if op.Type == model.OperationTypeDatabaseSuspend && appHasDesiredOrCurrentReplicas(app) {
-				return ErrConflict
-			}
-			if op.Type == model.OperationTypeDatabaseSuspend &&
-				hasActiveAppDatabaseBackupRunForManagedPostgres(state, app, op.ServiceID) {
-				return ErrManagedPostgresBackupInProgressConflict
-			}
-			if op.Type == model.OperationTypeDatabaseSuspend &&
-				hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) {
-				return ErrManagedPostgresImportInProgressConflict
-			}
-		case model.OperationTypeAppCPUResize, model.OperationTypeAppMemoryResize:
-			if hasInFlightOperationForApp(state.Operations, app.ID) {
-				return ErrConflict
-			}
-			ri := findRuntime(state, app.Spec.RuntimeID)
-			if ri < 0 || (state.Runtimes[ri].Type != model.RuntimeTypeManagedShared && state.Runtimes[ri].Type != model.RuntimeTypeManagedOwned) {
-				return ErrInvalidInput
-			}
-			if err := prepareAppRequestResizeOperation(app, &op); err != nil {
-				return err
-			}
-		case model.OperationTypeDatabaseSourceRetire, model.OperationTypeDatabaseReplicaRetire, pgimage.OperationType, model.OperationTypeDatabaseResize:
-			if err := validateManagedPostgresResizeTargetState(state, app, op.ServiceID); err != nil {
-				return err
-			}
-			prepare := prepareManagedPostgresResizeOperation
-			if op.Type == pgimage.OperationType {
-				prepare = preparePostgresImageMigration
-			}
-			if op.Type == model.OperationTypeDatabaseSourceRetire {
-				prepare = preparePostgresSourceRetirement
-			}
-			if op.Type == model.OperationTypeDatabaseReplicaRetire {
-				prepare = preparePostgresReplicaRetirement
-			}
-			if err := prepare(app, &op); err != nil {
-				return err
-			}
-			active := activeOperationsForLifecycleTarget(state.Operations, app.ID, op.ServiceID)
-			if len(active) > 0 {
-				if len(active) == 1 && (sourceRetirementRetryMatches(active[0], op) || managedPostgresResizeRetryMatches(active[0], op) || postgresImageMigrationRetryMatches(active[0], op)) {
-					op = cloneOperation(active[0])
-					outcome.ReusedExistingOperation = true
-					outcome.ExistingOperationID = op.ID
-					return nil
-				}
-				return ErrConflict
-			}
-			if hasActiveAppDatabaseBackupRunForManagedPostgres(state, app, op.ServiceID) {
-				return ErrManagedPostgresBackupInProgressConflict
-			}
-			if hasActiveAppDatabaseImportJobForManagedPostgres(state, app, op.ServiceID) {
-				return ErrManagedPostgresImportInProgressConflict
-			}
-			if hasActiveAppDatabaseRestoreRunForManagedPostgres(state, app) {
-				return ErrManagedPostgresRestoreInProgressConflict
-			}
-		default:
-			return ErrInvalidInput
-		}
-		if operationWouldRunApp(app, op) && appHasSuspendedManagedPostgres(app) {
-			return ErrConflict
-		}
-		if err := validateOperationRuntimeReservationsState(state, app.ProjectID, op); err != nil {
-			return err
-		}
-
-		now := time.Now().UTC()
-		op.DesiredSpec = cloneAppSpec(op.DesiredSpec)
-		op.DesiredSource = cloneAppSource(op.DesiredSource)
-		op.DesiredOriginSource = cloneAppSource(op.DesiredOriginSource)
-		billing := accrueTenantBillingLedger(state, app.TenantID, now)
-		if billing == nil {
-			return ErrNotFound
-		}
-		currentTotal, nextTotal, err := projectedTenantManagedTotalsWithBilling(state, app, op, *billing)
-		if err != nil {
-			return err
-		}
-		currentPublicHourlyRateMicroCents, nextPublicHourlyRateMicroCents, err := projectedTenantPublicRuntimeHourlyRates(state, app, op)
-		if err != nil {
-			return err
-		}
-		if err := validateTenantOperationBilling(
-			*billing,
-			currentTotal,
-			nextTotal,
-			currentPublicHourlyRateMicroCents,
-			nextPublicHourlyRateMicroCents,
-		); err != nil {
-			return err
-		}
-		if duplicateOOMRightSizingOperation(state.Operations, op) {
-			return ErrConflict
-		}
-		op.ID = model.NewID("op")
-		op.Status = model.OperationStatusPending
-		op.ExecutionMode = model.ExecutionModeManaged
-		op.ResultMessage = defaultInFlightOperationMessage(op)
-		op.CreatedAt = now
-		op.UpdatedAt = now
-		if policy.SourceSessionID != "" {
-			found := false
-			for i := range state.SourceUploadSessions {
-				if state.SourceUploadSessions[i].ID == policy.SourceSessionID {
-					if err := recordSourceSessionOperation(&state.SourceUploadSessions[i], op); err != nil {
-						return err
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
-				return ErrNotFound
-			}
-		}
-		state.Operations = append(state.Operations, op)
-		if err := applyInFlightOperationToApp(state, &state.Operations[len(state.Operations)-1]); err != nil {
-			return err
-		}
-		op = state.Operations[len(state.Operations)-1]
-		if policy.IdempotencyKey != "" {
-			state.Idempotency = append(state.Idempotency, model.IdempotencyRecord{Scope: policy.IdempotencyScope, TenantID: op.TenantID, Key: policy.IdempotencyKey, RequestHash: policy.RequestHash, Status: model.IdempotencyStatusCompleted, AppID: op.AppID, OperationID: op.ID, CreatedAt: now, UpdatedAt: now})
-		}
-		outcome.Decision = AutoscalingDeployDecisionQueued
-		return nil
-	})
-	return op, outcome, err
-}
-
-func duplicateOOMRightSizingOperation(operations []model.Operation, candidate model.Operation) bool {
-	if candidate.RequestedByType != model.ActorTypeSystem ||
-		!strings.HasPrefix(candidate.RequestedByID, model.OperationRequestedByOOMRightSizing+"/") {
-		return false
-	}
-	for _, operation := range operations {
-		if operation.TenantID == candidate.TenantID &&
-			operation.RequestedByType == candidate.RequestedByType &&
-			operation.RequestedByID == candidate.RequestedByID {
-			return true
-		}
-	}
-	return false
+	return s.pgCreateOperation(op, policy)
 }
 
 type OperationListFilter = contract.Filter
@@ -3577,23 +896,7 @@ func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Ope
 }
 
 func (s *Store) ListOperationsFiltered(tenantID string, platformAdmin bool, filter OperationListFilter) ([]model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, true)
-	}
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		appProjects := operationAppProjectIndex(state)
-		for _, op := range state.Operations {
-			if !operationMatchesListFilter(op, tenantID, platformAdmin, filter, appProjects) {
-				continue
-			}
-			ops = append(ops, op)
-		}
-		sortOperationsOldestFirst(ops)
-		ops = limitOperationsToNewest(ops, filter.Limit)
-		return nil
-	})
-	return ops, err
+	return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, true)
 }
 
 func (s *Store) ListOperationSummaries(tenantID string, platformAdmin bool) ([]model.Operation, error) {
@@ -3601,23 +904,7 @@ func (s *Store) ListOperationSummaries(tenantID string, platformAdmin bool) ([]m
 }
 
 func (s *Store) ListOperationSummariesFiltered(tenantID string, platformAdmin bool, filter OperationListFilter) ([]model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, false)
-	}
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		appProjects := operationAppProjectIndex(state)
-		for _, op := range state.Operations {
-			if !operationMatchesListFilter(op, tenantID, platformAdmin, filter, appProjects) {
-				continue
-			}
-			ops = append(ops, operationSummary(op))
-		}
-		sortOperationsOldestFirst(ops)
-		ops = limitOperationsToNewest(ops, filter.Limit)
-		return nil
-	})
-	return ops, err
+	return s.pgListOperationsFiltered(tenantID, platformAdmin, filter, false)
 }
 
 func (s *Store) ListOperationsByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
@@ -3636,73 +923,6 @@ func (s *Store) ListOperationSummariesByApp(tenantID string, platformAdmin bool,
 	return s.ListOperationSummariesFiltered(tenantID, platformAdmin, OperationListFilter{AppID: appID})
 }
 
-func operationSummary(op model.Operation) model.Operation {
-	op.DesiredSpec = nil
-	op.ConfigBaseSpec = nil
-	op.StorageUnmount = nil
-	op.DesiredSource = nil
-	op.DesiredOriginSource = nil
-	return op
-}
-
-func operationAppProjectIndex(state *model.State) map[string]string {
-	index := make(map[string]string, len(state.Apps))
-	for _, app := range state.Apps {
-		appID := strings.TrimSpace(app.ID)
-		if appID == "" {
-			continue
-		}
-		index[appID] = strings.TrimSpace(app.ProjectID)
-	}
-	return index
-}
-
-func operationMatchesListFilter(op model.Operation, tenantID string, platformAdmin bool, filter OperationListFilter, appProjects map[string]string) bool {
-	effectiveTenantID := strings.TrimSpace(tenantID)
-	if platformAdmin {
-		effectiveTenantID = strings.TrimSpace(filter.TenantID)
-	}
-	if effectiveTenantID != "" && strings.TrimSpace(op.TenantID) != effectiveTenantID {
-		return false
-	}
-	if appID := strings.TrimSpace(filter.AppID); appID != "" && strings.TrimSpace(op.AppID) != appID {
-		return false
-	}
-	if serviceID := strings.TrimSpace(filter.ServiceID); serviceID != "" && op.ServiceID != serviceID {
-		return false
-	}
-	if actorID := strings.TrimSpace(filter.ActorID); actorID != "" && op.RequestedByID != actorID {
-		return false
-	}
-	if projectID := strings.TrimSpace(filter.ProjectID); projectID != "" {
-		if appProjects == nil || strings.TrimSpace(appProjects[strings.TrimSpace(op.AppID)]) != projectID {
-			return false
-		}
-	}
-	if !stringInNormalizedSet(op.Type, filter.Types) {
-		return false
-	}
-	if !stringInNormalizedSet(op.Status, filter.Statuses) {
-		return false
-	}
-	return true
-}
-
-func stringInNormalizedSet(value string, requested []string) bool {
-	if len(requested) == 0 {
-		return true
-	}
-	value = strings.ToLower(strings.TrimSpace(value))
-	for _, raw := range requested {
-		for _, candidate := range strings.Split(raw, ",") {
-			if value == strings.ToLower(strings.TrimSpace(candidate)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func sortOperationsOldestFirst(ops []model.Operation) {
 	sort.Slice(ops, func(i, j int) bool {
 		if ops[i].CreatedAt.Equal(ops[j].CreatedAt) {
@@ -3710,13 +930,6 @@ func sortOperationsOldestFirst(ops []model.Operation) {
 		}
 		return ops[i].CreatedAt.Before(ops[j].CreatedAt)
 	})
-}
-
-func limitOperationsToNewest(ops []model.Operation, limit int) []model.Operation {
-	if limit <= 0 || len(ops) <= limit {
-		return ops
-	}
-	return append([]model.Operation(nil), ops[len(ops)-limit:]...)
 }
 
 func cloneOperationControllerTimingSegments(segments []model.OperationControllerTimingSegment) []model.OperationControllerTimingSegment {
@@ -3741,27 +954,7 @@ func (s *Store) HasActiveOperationByApp(tenantID string, platformAdmin bool, app
 	if appID == "" {
 		return false, nil
 	}
-	if s.usingDatabase() {
-		return s.pgHasActiveOperationByApp(tenantID, platformAdmin, appID)
-	}
-
-	var found bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if strings.TrimSpace(op.AppID) != appID {
-				continue
-			}
-			if isActiveOperationStatus(op.Status) {
-				found = true
-				return nil
-			}
-		}
-		return nil
-	})
-	return found, err
+	return s.pgHasActiveOperationByApp(tenantID, platformAdmin, appID)
 }
 
 func (s *Store) ListConsoleOperationsByApp(tenantID string, platformAdmin bool, appID string, recentLimit int) ([]model.Operation, error) {
@@ -3772,57 +965,7 @@ func (s *Store) ListConsoleOperationsByApp(tenantID string, platformAdmin bool, 
 	if recentLimit < 1 {
 		recentLimit = 1
 	}
-	if s.usingDatabase() {
-		return s.pgListConsoleOperationsByApp(tenantID, platformAdmin, appID, recentLimit)
-	}
-
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		candidates := make([]model.Operation, 0)
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if strings.TrimSpace(op.AppID) != appID {
-				continue
-			}
-			candidates = append(candidates, op)
-		}
-		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
-				return candidates[i].ID > candidates[j].ID
-			}
-			return candidates[i].CreatedAt.After(candidates[j].CreatedAt)
-		})
-
-		seen := make(map[string]struct{}, len(candidates))
-		for _, op := range candidates {
-			if isActiveOperationStatus(op.Status) {
-				ops = append(ops, op)
-				seen[op.ID] = struct{}{}
-			}
-		}
-		recentCount := 0
-		for _, op := range candidates {
-			if recentCount >= recentLimit {
-				break
-			}
-			recentCount++
-			if _, ok := seen[op.ID]; ok {
-				continue
-			}
-			ops = append(ops, op)
-			seen[op.ID] = struct{}{}
-		}
-		sort.Slice(ops, func(i, j int) bool {
-			if ops[i].CreatedAt.Equal(ops[j].CreatedAt) {
-				return ops[i].ID < ops[j].ID
-			}
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
-		return nil
-	})
-	return ops, err
+	return s.pgListConsoleOperationsByApp(tenantID, platformAdmin, appID, recentLimit)
 }
 
 func (s *Store) ListOperationsWithDesiredSourceByApp(tenantID string, platformAdmin bool, appID string) ([]model.Operation, error) {
@@ -3830,27 +973,7 @@ func (s *Store) ListOperationsWithDesiredSourceByApp(tenantID string, platformAd
 	if appID == "" {
 		return []model.Operation{}, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListOperationsWithDesiredSourceByApp(tenantID, platformAdmin, appID)
-	}
-
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if strings.TrimSpace(op.AppID) != appID || op.DesiredSource == nil {
-				continue
-			}
-			ops = append(ops, op)
-		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
-		return nil
-	})
-	return ops, err
+	return s.pgListOperationsWithDesiredSourceByApp(tenantID, platformAdmin, appID)
 }
 
 func (s *Store) ListOperationsWithDesiredSourceByApps(tenantID string, platformAdmin bool, appIDs []string) (map[string][]model.Operation, error) {
@@ -3858,30 +981,7 @@ func (s *Store) ListOperationsWithDesiredSourceByApps(tenantID string, platformA
 	if len(appIDSet) == 0 {
 		return map[string][]model.Operation{}, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListOperationsWithDesiredSourceByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(appIDSet))
-	}
-
-	opsByAppID := make(map[string][]model.Operation, len(appIDSet))
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			appID := strings.TrimSpace(op.AppID)
-			if _, ok := appIDSet[appID]; !ok || op.DesiredSource == nil {
-				continue
-			}
-			opsByAppID[appID] = append(opsByAppID[appID], op)
-		}
-		for appID := range opsByAppID {
-			sort.Slice(opsByAppID[appID], func(i, j int) bool {
-				return opsByAppID[appID][i].CreatedAt.Before(opsByAppID[appID][j].CreatedAt)
-			})
-		}
-		return nil
-	})
-	return opsByAppID, err
+	return s.pgListOperationsWithDesiredSourceByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(appIDSet))
 }
 
 // ListImageOperationsByApps is a narrow projection for console image usage.
@@ -3892,173 +992,31 @@ func (s *Store) ListImageOperationsByApps(tenantID string, platformAdmin bool, a
 	if len(ids) == 0 {
 		return map[string][]model.Operation{}, nil
 	}
-	if s.usingDatabase() {
-		return s.pgListImageOperationsByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(ids))
-	}
-	out := make(map[string][]model.Operation, len(ids))
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !platformAdmin && op.TenantID != tenantID {
-				continue
-			}
-			if _, ok := ids[strings.TrimSpace(op.AppID)]; !ok || op.DesiredSource == nil {
-				continue
-			}
-			if op.DesiredSpec != nil {
-				op.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
-			}
-			op.ConfigBaseSpec = nil
-			out[op.AppID] = append(out[op.AppID], op)
-		}
-		for id := range out {
-			sort.Slice(out[id], func(i, j int) bool { return out[id][i].CreatedAt.Before(out[id][j].CreatedAt) })
-		}
-		return nil
-	})
-	return out, err
+	return s.pgListImageOperationsByApps(tenantID, platformAdmin, sortedTrimmedStringKeys(ids))
 }
 
 func (s *Store) ListActiveOperations() ([]model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgListActiveOperations()
-	}
-
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if !isActiveOperationStatus(op.Status) {
-				continue
-			}
-			ops = append(ops, op)
-		}
-		sortActiveOperations(ops)
-		return nil
-	})
-	return ops, err
+	return s.pgListActiveOperations()
 }
 
 func (s *Store) GetOperation(id string) (model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgGetOperation(id)
-	}
-	var op model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
+	return s.pgGetOperation(id)
 }
 
 func (s *Store) TryClaimPendingOperation(id string) (model.Operation, bool, error) {
-	if s.usingDatabase() {
-		return s.pgTryClaimPendingOperation(id)
-	}
-
-	var (
-		op      model.Operation
-		claimed bool
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return nil
-		}
-		if state.Operations[index].Status != model.OperationStatusPending || tenantAccessHeld(state, state.Operations[index].TenantID) {
-			return nil
-		}
-		claimedOp, err := claimPendingOperationLocked(state, index)
-		if err != nil {
-			return err
-		}
-		op = claimedOp
-		claimed = true
-		return nil
-	})
-	return op, claimed, err
+	return s.pgTryClaimPendingOperation(id)
 }
 
 func (s *Store) ClaimNextPendingOperation() (model.Operation, bool, error) {
-	if s.usingDatabase() {
-		return s.pgClaimNextPendingOperation()
-	}
-	return s.claimNextPendingOperationMatching(nil)
+	return s.pgClaimNextPendingOperation()
 }
 
 func (s *Store) ClaimNextPendingForegroundOperation() (model.Operation, bool, error) {
-	if s.usingDatabase() {
-		return s.pgClaimNextPendingForegroundOperation()
-	}
-	return s.claimNextPendingOperationMatching(isForegroundPendingOperation)
+	return s.pgClaimNextPendingForegroundOperation()
 }
 
 func (s *Store) ClaimNextPendingGitHubSyncImportOperation() (model.Operation, bool, error) {
-	if s.usingDatabase() {
-		return s.pgClaimNextPendingGitHubSyncImportOperation()
-	}
-	return s.claimNextPendingOperationMatching(isBackgroundControllerImportOperation)
-}
-
-func (s *Store) claimNextPendingOperationMatching(match func(model.Operation) bool) (model.Operation, bool, error) {
-	var op model.Operation
-	var found bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		pending := make([]int, 0)
-		for idx := range state.Operations {
-			if state.Operations[idx].Status != model.OperationStatusPending || tenantAccessHeld(state, state.Operations[idx].TenantID) {
-				continue
-			}
-			if match != nil && !match(state.Operations[idx]) {
-				continue
-			}
-			pending = append(pending, idx)
-		}
-		if len(pending) == 0 {
-			return nil
-		}
-		sort.Slice(pending, func(i, j int) bool {
-			return state.Operations[pending[i]].CreatedAt.Before(state.Operations[pending[j]].CreatedAt)
-		})
-		claimed, err := claimPendingOperationLocked(state, pending[0])
-		if err != nil {
-			return err
-		}
-		op = claimed
-		found = true
-		return nil
-	})
-	return op, found, err
-}
-
-func claimPendingOperationLocked(state *model.State, index int) (model.Operation, error) {
-	now := time.Now().UTC()
-	if operationRequiresManagedController(state.Operations[index].Type) {
-		state.Operations[index].Status = model.OperationStatusRunning
-		state.Operations[index].ExecutionMode = model.ExecutionModeManaged
-		state.Operations[index].StartedAt = &now
-		state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
-	} else {
-		runtimeIndex := findRuntime(state, state.Operations[index].TargetRuntimeID)
-		if runtimeIndex >= 0 && state.Runtimes[runtimeIndex].Type == model.RuntimeTypeExternalOwned {
-			state.Operations[index].Status = model.OperationStatusWaitingAgent
-			state.Operations[index].ExecutionMode = model.ExecutionModeAgent
-			state.Operations[index].AssignedRuntimeID = state.Operations[index].TargetRuntimeID
-			state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
-		} else {
-			state.Operations[index].Status = model.OperationStatusRunning
-			state.Operations[index].ExecutionMode = model.ExecutionModeManaged
-			state.Operations[index].StartedAt = &now
-			state.Operations[index].ResultMessage = defaultInFlightOperationMessage(state.Operations[index])
-		}
-	}
-	state.Operations[index].UpdatedAt = now
-	if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
-		return model.Operation{}, err
-	}
-	return state.Operations[index], nil
+	return s.pgClaimNextPendingGitHubSyncImportOperation()
 }
 
 func (s *Store) CompleteManagedOperationWithResult(id, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource *model.AppSource) (model.Operation, error) {
@@ -4082,28 +1040,7 @@ func (s *Store) UpdateOperationProgress(id, message string) (model.Operation, er
 	if message == "" {
 		return model.Operation{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateOperationProgress(id, message)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if !operationCanUpdateProgress(state.Operations[index]) {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		state.Operations[index].ResultMessage = message
-		state.Operations[index].UpdatedAt = now
-		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
-			return err
-		}
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
+	return s.pgUpdateOperationProgress(id, message)
 }
 
 func (s *Store) SetOperationControllerTiming(id string, segments []model.OperationControllerTimingSegment) (model.Operation, error) {
@@ -4111,20 +1048,7 @@ func (s *Store) SetOperationControllerTiming(id string, segments []model.Operati
 	if id == "" {
 		return model.Operation{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSetOperationControllerTiming(id, segments)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		state.Operations[index].ControllerTimingSegments = cloneOperationControllerTimingSegments(segments)
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
+	return s.pgSetOperationControllerTiming(id, segments)
 }
 
 func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource) (model.Operation, error) {
@@ -4132,110 +1056,10 @@ func (s *Store) completeOperation(id, runtimeID, manifestPath, message string, d
 }
 
 func (s *Store) completeOperationGuarded(id, runtimeID, manifestPath, message string, desiredSpec *model.AppSpec, desiredSource, desiredOriginSource *model.AppSource, guard *operationFinalizationGuard) (model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgCompleteOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, guard)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if guard != nil {
-			ai := findApp(state, state.Operations[index].AppID)
-			if ai < 0 {
-				return ErrNotFound
-			}
-			if err := validateOperationFinalization(state.Operations[index], state.Apps[ai], guard); err != nil {
-				return err
-			}
-		}
-		if runtimeID != "" && state.Operations[index].AssignedRuntimeID != runtimeID {
-			return ErrNotFound
-		}
-		if state.Operations[index].Type == model.OperationTypeMigrate {
-			if err := validateMigrationCutoverInState(state, state.Operations[index]); err != nil {
-				return err
-			}
-		}
-		if !operationCanTransitionToCompleted(state.Operations[index]) {
-			return ErrConflict
-		}
-		if state.Operations[index].Type == model.OperationTypeDatabaseReplicaRetire {
-			return ErrConflict // Requires atomic placement settlement.
-		}
-		immutableDesiredOperation := isManagedPostgresLifecycleOperationType(state.Operations[index].Type) ||
-			state.Operations[index].Type == model.OperationTypeDatabaseSourceRetire || state.Operations[index].Type == pgimage.OperationType || state.Operations[index].Type == model.OperationTypeDatabaseResize || model.IsAppRequestResize(state.Operations[index].Type)
-		if desiredSpec != nil && !immutableDesiredOperation {
-			state.Operations[index].DesiredSpec = cloneAppSpec(desiredSpec)
-		}
-		if desiredSource != nil && !immutableDesiredOperation {
-			state.Operations[index].DesiredSource = cloneAppSource(desiredSource)
-		}
-		if desiredOriginSource != nil && !immutableDesiredOperation {
-			state.Operations[index].DesiredOriginSource = cloneAppSource(desiredOriginSource)
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusCompleted
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].CompletedAt = &now
-		state.Operations[index].ManifestPath = manifestPath
-		state.Operations[index].ResultMessage = strings.TrimSpace(message)
-		if state.Operations[index].StartedAt == nil {
-			state.Operations[index].StartedAt = &now
-		}
-		if guard != nil && guard.ConstraintPolicyOnly {
-			applyRolloutConstraintPolicy(&state.Apps[findApp(state, state.Operations[index].AppID)], state.Operations[index])
-			op = state.Operations[index]
-			return nil
-		}
-		if err := applyOperationToApp(state, &state.Operations[index]); err != nil {
-			return err
-		}
-		currentOp := state.Operations[index]
-		if appIndex := findApp(state, currentOp.AppID); appIndex >= 0 {
-			if err := syncStableReleaseForCompletedDeployInState(state, state.Apps[appIndex], currentOp, now); err != nil {
-				return err
-			}
-		}
-		updateAppImageTrackingDeployedInState(state, currentOp, now)
-		if currentOp.Type == model.OperationTypeDelete {
-			deleteAppDomainsByApp(state, currentOp.AppID)
-			appIndex := findApp(state, currentOp.AppID)
-			if appIndex >= 0 {
-				if err := maybeFinalizeRequestedProjectDelete(state, state.Apps[appIndex].ProjectID); err != nil {
-					return err
-				}
-			}
-		}
-		op = currentOp
-		return nil
-	})
-	return op, err
+	return s.pgCompleteOperationGuarded(id, runtimeID, manifestPath, message, desiredSpec, desiredSource, desiredOriginSource, guard)
 }
 func (s *Store) DispatchOperationToRuntime(id, runtimeID string) (model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgDispatchOperationToRuntime(id, runtimeID)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusWaitingAgent
-		state.Operations[index].ExecutionMode = model.ExecutionModeAgent
-		state.Operations[index].AssignedRuntimeID = runtimeID
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].ResultMessage = "task dispatched to external runtime agent"
-		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
-			return err
-		}
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
+	return s.pgDispatchOperationToRuntime(id, runtimeID)
 }
 
 func (s *Store) RequeueManagedOperation(id, message string) (model.Operation, error) {
@@ -4243,50 +1067,11 @@ func (s *Store) RequeueManagedOperation(id, message string) (model.Operation, er
 }
 
 func (s *Store) requeueManagedOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgRequeueManagedOperationGuarded(id, message, guard)
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if !isRequeueableManagedOperation(state.Operations[index]) {
-			return ErrConflict
-		}
-		if err := validateOperationFinalization(state.Operations[index], model.App{}, guard); err != nil {
-			return err
-		}
-		requeueManagedOperationState(&state.Operations[index], message)
-		if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
-			return err
-		}
-		op = state.Operations[index]
-		return nil
-	})
-	return op, err
+	return s.pgRequeueManagedOperationGuarded(id, message, guard)
 }
 
 func (s *Store) RequeueInFlightManagedOperations(message string) (int, error) {
-	if s.usingDatabase() {
-		return s.pgRequeueInFlightManagedOperations(message)
-	}
-	count := 0
-	err := s.withLockedState(true, func(state *model.State) error {
-		for index := range state.Operations {
-			if !isRequeueableManagedOperation(state.Operations[index]) {
-				continue
-			}
-			requeueManagedOperationState(&state.Operations[index], message)
-			if err := applyInFlightOperationToApp(state, &state.Operations[index]); err != nil {
-				return err
-			}
-			count++
-		}
-		return nil
-	})
-	return count, err
+	return s.pgRequeueInFlightManagedOperations(message)
 }
 
 func (s *Store) FailOperation(id, message string) (model.Operation, error) {
@@ -4294,52 +1079,13 @@ func (s *Store) FailOperation(id, message string) (model.Operation, error) {
 }
 
 func (s *Store) failOperationGuarded(id, message string, guard *operationFinalizationGuard) (model.Operation, error) {
-	if s.usingDatabase() {
-		op, err := s.pgFailOperationGuarded(id, message, guard)
-		if err != nil {
-			return op, err
-		}
-		if op.Type == model.OperationTypeMigrate {
-			if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
-				return op, errors.Join(err, ledgerErr)
-			}
-		}
-		return op, nil
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if (state.Operations[index].Type == model.OperationTypeDatabaseSourceRetire || state.Operations[index].Type == model.OperationTypeDatabaseReplicaRetire || state.Operations[index].Type == pgimage.OperationType) && state.Operations[index].Status == model.OperationStatusRunning && guard == nil {
-			return ErrConflict
-		}
-		if guard != nil {
-			ai := findApp(state, state.Operations[index].AppID)
-			if ai < 0 {
-				return ErrNotFound
-			}
-			if err := validateOperationFinalization(state.Operations[index], state.Apps[ai], guard); err != nil {
-				return err
-			}
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusFailed
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].CompletedAt = &now
-		state.Operations[index].ErrorMessage = strings.TrimSpace(message)
-		state.Operations[index].ResultMessage = strings.TrimSpace(message)
-		applyFailedOperationToApp(state, &state.Operations[index])
-		op = state.Operations[index]
-		return nil
-	})
+	op, err := s.pgFailOperationGuarded(id, message, guard)
 	if err != nil {
 		return op, err
 	}
 	if op.Type == model.OperationTypeMigrate {
 		if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
-			return op, ledgerErr
+			return op, errors.Join(err, ledgerErr)
 		}
 	}
 	return op, nil
@@ -4349,39 +1095,7 @@ func (s *Store) failOperationGuarded(id, message string, guard *operationFinaliz
 // worker has claimed an operation, especially a database migration, callers
 // must observe/recover it rather than pretending that cancellation is safe.
 func (s *Store) CancelOperation(id, message string) (model.Operation, error) {
-	if s.usingDatabase() {
-		op, err := s.pgCancelOperation(id, message)
-		if err != nil {
-			return op, err
-		}
-		if op.Type == model.OperationTypeMigrate {
-			if ledgerErr := s.recordMigrationFailureLedger(op, op.ResultMessage, model.OperationEvidenceSourceAPI); ledgerErr != nil {
-				return op, ledgerErr
-			}
-		}
-		return op, nil
-	}
-	var op model.Operation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.Operations[index].Status != model.OperationStatusPending && !(state.Operations[index].Status == model.OperationStatusRunning && state.Operations[index].Type == model.OperationTypeDeploy) {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusCanceled
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].CompletedAt = &now
-		state.Operations[index].ResultMessage = strings.TrimSpace(message)
-		if state.Operations[index].ResultMessage == "" {
-			state.Operations[index].ResultMessage = "operation canceled before execution"
-		}
-		applyCanceledOperationToApp(state, &state.Operations[index])
-		op = state.Operations[index]
-		return nil
-	})
+	op, err := s.pgCancelOperation(id, message)
 	if err != nil {
 		return op, err
 	}
@@ -4403,42 +1117,7 @@ func (s *Store) FailAssignedAgentOperation(id, runtimeID, message string) (model
 	if id == "" || runtimeID == "" {
 		return model.Operation{}, false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		op, claimed, err := s.pgFailAssignedAgentOperation(id, runtimeID, message)
-		if err != nil || !claimed || op.Type != model.OperationTypeMigrate {
-			return op, claimed, err
-		}
-		if ledgerErr := s.recordMigrationFailureLedger(op, message, model.OperationEvidenceSourceController); ledgerErr != nil {
-			return op, claimed, ledgerErr
-		}
-		return op, claimed, nil
-	}
-	var op model.Operation
-	claimed := false
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOperation(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.Operations[index].Status != model.OperationStatusWaitingAgent ||
-			strings.TrimSpace(state.Operations[index].AssignedRuntimeID) != runtimeID {
-			op = state.Operations[index]
-			return nil
-		}
-		now := time.Now().UTC()
-		state.Operations[index].Status = model.OperationStatusFailed
-		state.Operations[index].UpdatedAt = now
-		state.Operations[index].CompletedAt = &now
-		state.Operations[index].ErrorMessage = strings.TrimSpace(message)
-		if state.Operations[index].StartedAt == nil {
-			state.Operations[index].StartedAt = &now
-		}
-		applyFailedOperationToApp(state, &state.Operations[index])
-		op = state.Operations[index]
-		finalizeAssignedAgentReleaseFailure(state, op, now, message)
-		claimed = true
-		return nil
-	})
+	op, claimed, err := s.pgFailAssignedAgentOperation(id, runtimeID, message)
 	if err != nil || !claimed || op.Type != model.OperationTypeMigrate {
 		return op, claimed, err
 	}
@@ -4446,100 +1125,6 @@ func (s *Store) FailAssignedAgentOperation(id, runtimeID, message string) (model
 		return op, claimed, ledgerErr
 	}
 	return op, claimed, nil
-}
-
-func finalizeAssignedAgentReleaseFailure(state *model.State, op model.Operation, now time.Time, message string) {
-	attemptIndex := releaseAttemptIndexForOperationState(state, op.ID)
-	attemptID := ""
-	if attemptIndex >= 0 {
-		attemptID = strings.TrimSpace(state.ReleaseAttempts[attemptIndex].ID)
-	}
-
-	evidence := normalizeOperationEvidence(model.OperationEvidence{
-		TenantID:         op.TenantID,
-		AppID:            op.AppID,
-		OperationID:      op.ID,
-		ReleaseAttemptID: attemptID,
-		Type:             model.OperationEvidenceTypeOperationFailed,
-		Source:           model.OperationEvidenceSourceController,
-		Severity:         model.OperationEvidenceSeverityError,
-		Confidence:       model.OperationEvidenceConfidenceConfirmed,
-		SubjectKind:      "agent_operation_preflight",
-		SubjectName:      strings.TrimSpace(op.AssignedRuntimeID),
-		ObservedAt:       now,
-		CollectedAt:      now,
-		Summary:          "agent operation refused before apply",
-		Message:          strings.TrimSpace(message),
-		Reason:           "zero_downtime_preflight_refused",
-		FinishedAt:       &now,
-		RedactionStatus:  model.OperationEvidenceRedactionRedacted,
-		Payload: map[string]any{
-			"operation_type": op.Type,
-			"runtime_id":     strings.TrimSpace(op.AssignedRuntimeID),
-		},
-	})
-	state.OperationEvidence = append(state.OperationEvidence, evidence)
-	state.OperationEvidence = retainOperationEvidence(state.OperationEvidence, evidence)
-
-	if attemptIndex < 0 || releaseAttemptTerminal(state.ReleaseAttempts[attemptIndex].Status) {
-		return
-	}
-	attempt := state.ReleaseAttempts[attemptIndex]
-	attempt.Status = model.ReleaseAttemptStatusFailed
-	attempt.Confidence = evidence.Confidence
-	attempt.FailureOperationID = op.ID
-	attempt.FailureEvidenceID = evidence.ID
-	attempt.Summary = strings.TrimSpace(message)
-	attempt.FinishedAt = &now
-	attempt.UpdatedAt = now
-	state.ReleaseAttempts[attemptIndex] = attempt
-
-	step := normalizeReleaseStep(model.ReleaseStep{
-		TenantID:         op.TenantID,
-		ReleaseAttemptID: attempt.ID,
-		OperationID:      op.ID,
-		Type:             model.ReleaseStepTypeFinalize,
-		Status:           model.ReleaseStepStatusFailed,
-		StartedAt:        now,
-		FinishedAt:       &now,
-		Summary:          strings.TrimSpace(message),
-		EvidenceID:       evidence.ID,
-		Payload: map[string]any{
-			"reason":     "zero_downtime_preflight_refused",
-			"runtime_id": strings.TrimSpace(op.AssignedRuntimeID),
-		},
-	})
-	state.ReleaseSteps = append(state.ReleaseSteps, step)
-}
-
-func releaseAttemptIndexForOperationState(state *model.State, operationID string) int {
-	operationID = strings.TrimSpace(operationID)
-	if state == nil || operationID == "" {
-		return -1
-	}
-	selected := -1
-	selectAttempt := func(index int) {
-		if index < 0 || index >= len(state.ReleaseAttempts) {
-			return
-		}
-		if selected < 0 || state.ReleaseAttempts[index].StartedAt.After(state.ReleaseAttempts[selected].StartedAt) {
-			selected = index
-		}
-	}
-	for index, attempt := range state.ReleaseAttempts {
-		if strings.TrimSpace(attempt.SourceOperationID) == operationID ||
-			strings.TrimSpace(attempt.RootOperationID) == operationID ||
-			strings.TrimSpace(attempt.FailureOperationID) == operationID {
-			selectAttempt(index)
-		}
-	}
-	for _, step := range state.ReleaseSteps {
-		if strings.TrimSpace(step.OperationID) != operationID {
-			continue
-		}
-		selectAttempt(findReleaseAttempt(state, step.ReleaseAttemptID))
-	}
-	return selected
 }
 
 func releaseAttemptTerminal(status string) bool {
@@ -4555,22 +1140,7 @@ func releaseAttemptTerminal(status string) bool {
 }
 
 func (s *Store) ListAssignedOperations(runtimeID string) ([]model.Operation, error) {
-	if s.usingDatabase() {
-		return s.pgListAssignedOperations(runtimeID)
-	}
-	var ops []model.Operation
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, op := range state.Operations {
-			if op.AssignedRuntimeID == runtimeID && op.Status == model.OperationStatusWaitingAgent {
-				ops = append(ops, op)
-			}
-		}
-		sort.Slice(ops, func(i, j int) bool {
-			return ops[i].CreatedAt.Before(ops[j].CreatedAt)
-		})
-		return nil
-	})
-	return ops, err
+	return s.pgListAssignedOperations(runtimeID)
 }
 
 func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
@@ -4587,246 +1157,11 @@ func (s *Store) AppendAuditEvent(event model.AuditEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgAppendAuditEvent(event)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		state.AuditEvents = append(state.AuditEvents, event)
-		return nil
-	})
+	return s.pgAppendAuditEvent(event)
 }
 
 func (s *Store) ListAuditEvents(tenantID string, platformAdmin bool, limit int) ([]model.AuditEvent, error) {
-	if s.usingDatabase() {
-		return s.pgListAuditEvents(tenantID, platformAdmin, limit)
-	}
-	var events []model.AuditEvent
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, event := range state.AuditEvents {
-			if platformAdmin || event.TenantID == tenantID || event.TenantID == "" {
-				events = append(events, event)
-			}
-		}
-		sort.Slice(events, func(i, j int) bool {
-			return events[i].CreatedAt.After(events[j].CreatedAt)
-		})
-		if limit > 0 && len(events) > limit {
-			events = events[:limit]
-		}
-		return nil
-	})
-	return events, err
-}
-
-func (s *Store) readState() (model.State, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return model.State{}, nil
-		}
-		return model.State{}, fmt.Errorf("read state: %w", err)
-	}
-	if len(data) == 0 {
-		return model.State{}, nil
-	}
-	var state model.State
-	if err := json.Unmarshal(data, &state); err != nil {
-		return model.State{}, fmt.Errorf("unmarshal state: %w", err)
-	}
-	return state, nil
-}
-
-func (s *Store) writeState(state model.State) error {
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal state: %w", err)
-	}
-	tmpPath := s.path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return fmt.Errorf("write temp state: %w", err)
-	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
-		return fmt.Errorf("rename temp state: %w", err)
-	}
-	return nil
-}
-
-func ensureDefaults(state *model.State) {
-	if state.Version == "" {
-		state.Version = "v0"
-	}
-	if state.Tenants == nil {
-		state.Tenants = []model.Tenant{}
-	}
-	if state.Projects == nil {
-		state.Projects = []model.Project{}
-	}
-	if state.ProjectDeleteRequests == nil {
-		state.ProjectDeleteRequests = map[string]time.Time{}
-	}
-	if state.ProjectRuntimeReservations == nil {
-		state.ProjectRuntimeReservations = []model.ProjectRuntimeReservation{}
-	}
-	if state.APIKeys == nil {
-		state.APIKeys = []model.APIKey{}
-	}
-	repairAllAPIKeyStatuses(state)
-	if state.SSHKeys == nil {
-		state.SSHKeys = []model.SSHKey{}
-	}
-	if state.AppSSHEndpoints == nil {
-		state.AppSSHEndpoints = []model.AppSSHEndpoint{}
-	}
-	if state.EnrollmentTokens == nil {
-		state.EnrollmentTokens = []model.EnrollmentToken{}
-	}
-	if state.NodeKeys == nil {
-		state.NodeKeys = []model.NodeKey{}
-	}
-	for idx := range state.NodeKeys {
-		state.NodeKeys[idx].Scope = model.NormalizeNodeKeyScope(state.NodeKeys[idx].Scope)
-	}
-	if state.Machines == nil {
-		state.Machines = []model.Machine{}
-	}
-	for idx := range state.Machines {
-		normalizeMachineForRead(&state.Machines[idx])
-	}
-	if state.NodeUpdaters == nil {
-		state.NodeUpdaters = []model.NodeUpdater{}
-	}
-	if state.NodeUpdateTasks == nil {
-		state.NodeUpdateTasks = []model.NodeUpdateTask{}
-	}
-	if state.ImageLocations == nil {
-		state.ImageLocations = []model.ImageLocation{}
-	}
-	if state.Images == nil {
-		state.Images = []model.Image{}
-	}
-	if state.ImageAliases == nil {
-		state.ImageAliases = []model.ImageAlias{}
-	}
-	if state.ImageReplicas == nil {
-		state.ImageReplicas = []model.ImageReplica{}
-	}
-	if state.ImagePins == nil {
-		state.ImagePins = []model.ImagePin{}
-	}
-	if state.ImageReplicationTasks == nil {
-		state.ImageReplicationTasks = []model.ImageReplicationTask{}
-	}
-	initializeImageTracking(state)
-	if state.AppReleases == nil {
-		state.AppReleases = []model.AppRelease{}
-	}
-	if state.ReleaseAttempts == nil {
-		state.ReleaseAttempts = []model.ReleaseAttempt{}
-	}
-	if state.ReleaseSteps == nil {
-		state.ReleaseSteps = []model.ReleaseStep{}
-	}
-	if state.AppTrafficPolicies == nil {
-		state.AppTrafficPolicies = []model.AppTrafficPolicy{}
-	}
-	if state.Runtimes == nil {
-		state.Runtimes = []model.Runtime{}
-	}
-	if state.RuntimeGrants == nil {
-		state.RuntimeGrants = []model.RuntimeAccessGrant{}
-	}
-	if state.AppDatabaseImportJobs == nil {
-		state.AppDatabaseImportJobs = []model.AppDatabaseImportJob{}
-	}
-	if state.AppDatabaseAccessGrants == nil {
-		state.AppDatabaseAccessGrants = []model.AppDatabaseAccessGrant{}
-	}
-	if state.Apps == nil {
-		state.Apps = []model.App{}
-	}
-	for idx := range state.Apps {
-		model.NormalizeAppSourceState(&state.Apps[idx])
-	}
-	if state.AppDomains == nil {
-		state.AppDomains = []model.AppDomain{}
-	}
-	if state.EdgeGroups == nil {
-		state.EdgeGroups = []model.EdgeGroup{}
-	}
-	if state.EdgeNodes == nil {
-		state.EdgeNodes = []model.EdgeNode{}
-	}
-	for idx := range state.EdgeNodes {
-		normalizeEdgeNodeForRead(&state.EdgeNodes[idx])
-	}
-	if state.DNSNodes == nil {
-		state.DNSNodes = []model.DNSNode{}
-	}
-	for idx := range state.DNSNodes {
-		normalizeDNSNodeForRead(&state.DNSNodes[idx])
-	}
-	if state.DNSACMEChallenges == nil {
-		state.DNSACMEChallenges = []model.DNSACMEChallenge{}
-	}
-	for idx := range state.DNSACMEChallenges {
-		normalizeDNSACMEChallengeForRead(&state.DNSACMEChallenges[idx])
-	}
-	if state.EdgePerformanceSamples == nil {
-		state.EdgePerformanceSamples = []model.EdgePerformanceSample{}
-	}
-	if state.EdgeQualityRollups == nil {
-		state.EdgeQualityRollups = []model.EdgeQualityRollup{}
-	}
-	if state.EdgeQualityWatermarks == nil {
-		state.EdgeQualityWatermarks = map[string]time.Time{}
-	}
-	if state.StorePromotions == nil {
-		state.StorePromotions = []model.StorePromotion{}
-	}
-	if state.BackingServices == nil {
-		state.BackingServices = []model.BackingService{}
-	}
-	if state.ServiceBindings == nil {
-		state.ServiceBindings = []model.ServiceBinding{}
-	}
-	if state.Operations == nil {
-		state.Operations = []model.Operation{}
-	}
-	for idx := range state.Operations {
-		model.NormalizeOperationSourceState(&state.Operations[idx])
-	}
-	if state.OperationEvidence == nil {
-		state.OperationEvidence = []model.OperationEvidence{}
-	}
-	if state.AppMigrationLedgers == nil {
-		state.AppMigrationLedgers = []model.AppMigrationLedger{}
-	}
-	backfillMigrationLedgerArchiveInState(state, time.Now().UTC())
-	if state.AuditEvents == nil {
-		state.AuditEvents = []model.AuditEvent{}
-	}
-	if state.Idempotency == nil {
-		state.Idempotency = []model.IdempotencyRecord{}
-	}
-	ensureTenantBillingDefaults(state)
-	ensureDataDefaults(state)
-	ensureBackupDefaults(state)
-	if findRuntime(state, "runtime_managed_shared") < 0 {
-		now := time.Now().UTC()
-		state.Runtimes = append(state.Runtimes, model.Runtime{
-			ID:         "runtime_managed_shared",
-			Name:       "managed-shared",
-			Type:       model.RuntimeTypeManagedShared,
-			AccessMode: model.RuntimeAccessModePlatformShared,
-			PoolMode:   model.RuntimePoolModeDedicated,
-			Status:     model.RuntimeStatusActive,
-			Endpoint:   "in-cluster",
-			Labels:     map[string]string{"managed": "true"},
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		})
-	}
-	ensureRuntimeMetadata(state)
+	return s.pgListAuditEvents(tenantID, platformAdmin, limit)
 }
 
 func redactAPIKey(key model.APIKey) model.APIKey {
@@ -4951,83 +1286,6 @@ func runtimeConnectionMode(runtimeType string) string {
 		return model.MachineConnectionModeAgent
 	default:
 		return ""
-	}
-}
-
-func runtimeTypeFromConnectionMode(connectionMode string) string {
-	switch strings.TrimSpace(connectionMode) {
-	case model.MachineConnectionModeCluster:
-		return model.RuntimeTypeManagedOwned
-	case model.MachineConnectionModeAgent:
-		return model.RuntimeTypeExternalOwned
-	default:
-		return ""
-	}
-}
-
-func ensureRuntimeMetadata(state *model.State) {
-	if state == nil {
-		return
-	}
-	if state.Runtimes == nil {
-		state.Runtimes = []model.Runtime{}
-	}
-
-	legacyMachines := make(map[string]model.Machine, len(state.Machines))
-	for _, machine := range state.Machines {
-		if strings.TrimSpace(machine.RuntimeID) == "" {
-			continue
-		}
-		existing, ok := legacyMachines[machine.RuntimeID]
-		if ok && existing.UpdatedAt.After(machine.UpdatedAt) {
-			continue
-		}
-		legacyMachines[machine.RuntimeID] = machine
-	}
-
-	for _, machine := range legacyMachines {
-		if findRuntime(state, machine.RuntimeID) >= 0 {
-			continue
-		}
-		runtimeType := runtimeTypeFromConnectionMode(machine.ConnectionMode)
-		if runtimeType == "" {
-			continue
-		}
-		runtimeName := strings.TrimSpace(machine.RuntimeName)
-		if runtimeName == "" {
-			runtimeName = strings.TrimSpace(machine.ClusterNodeName)
-		}
-		if runtimeName == "" {
-			runtimeName = strings.TrimSpace(machine.Name)
-		}
-		if runtimeName == "" {
-			runtimeName = "node"
-		}
-		state.Runtimes = append(state.Runtimes, model.Runtime{
-			ID:                machine.RuntimeID,
-			TenantID:          machine.TenantID,
-			Name:              runtimeName,
-			MachineName:       machine.Name,
-			Type:              runtimeType,
-			AccessMode:        normalizeRuntimeAccessMode(runtimeType, ""),
-			PoolMode:          model.NormalizeRuntimePoolMode(runtimeType, ""),
-			ConnectionMode:    machine.ConnectionMode,
-			Status:            machine.Status,
-			Endpoint:          machine.Endpoint,
-			Labels:            cloneMap(machine.Labels),
-			NodeKeyID:         machine.NodeKeyID,
-			ClusterNodeName:   machine.ClusterNodeName,
-			FingerprintPrefix: machine.FingerprintPrefix,
-			FingerprintHash:   machine.FingerprintHash,
-			LastSeenAt:        machine.LastSeenAt,
-			LastHeartbeatAt:   machine.LastSeenAt,
-			CreatedAt:         machine.CreatedAt,
-			UpdatedAt:         machine.UpdatedAt,
-		})
-	}
-
-	for idx := range state.Runtimes {
-		backfillRuntimeMetadata(&state.Runtimes[idx], legacyMachines[state.Runtimes[idx].ID])
 	}
 }
 
@@ -5285,17 +1543,6 @@ func normalizeAppRouteForStore(in *model.AppRoute) *model.AppRoute {
 	return &out
 }
 
-func appRouteConflictKey(route *model.AppRoute) string {
-	if route == nil {
-		return ""
-	}
-	normalized := model.NormalizeAppRoute(*route)
-	if normalized.Hostname == "" {
-		return ""
-	}
-	return normalized.Hostname + "\x00" + normalized.PathPrefix
-}
-
 func routePathPrefixMatches(prefix, requestPath string) bool {
 	prefix = model.NormalizeAppRoutePathPrefix(prefix)
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
@@ -5305,7 +1552,7 @@ func routePathPrefixMatches(prefix, requestPath string) bool {
 	return requestPath == prefix || strings.HasPrefix(requestPath, prefix+"/")
 }
 
-func applyOperationToApp(state *model.State, op *model.Operation) error {
+func applyOperationToApp(state *storeProjection, op *model.Operation) error {
 	appIndex := findApp(state, op.AppID)
 	if appIndex < 0 {
 		return ErrNotFound
@@ -5424,34 +1671,6 @@ func applyOperationToApp(state *model.State, op *model.Operation) error {
 		app.Status.LastOperationID = op.ID
 		app.Status.LastMessage = op.ResultMessage
 	}
-	app.Status.UpdatedAt = now
-	app.UpdatedAt = now
-	return nil
-}
-
-func applyInFlightOperationToApp(state *model.State, op *model.Operation) error {
-	appIndex := findApp(state, op.AppID)
-	if appIndex < 0 {
-		return ErrNotFound
-	}
-	if operationOnlyChangesRolloutConstraints(state.Apps[appIndex], *op) {
-		return nil
-	}
-	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) || op.Type == model.OperationTypeAppStorageUnmount {
-		return nil
-	}
-	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
-		return nil
-	}
-	phase, err := inFlightOperationPhase(*op)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC()
-	app := &state.Apps[appIndex]
-	app.Status.Phase = phase
-	app.Status.LastOperationID = op.ID
-	app.Status.LastMessage = effectiveInFlightOperationMessage(*op)
 	app.Status.UpdatedAt = now
 	app.UpdatedAt = now
 	return nil
@@ -5612,184 +1831,6 @@ func firstPositiveSpecPort(ports []int) int {
 	return 0
 }
 
-func applyFailedOperationToApp(state *model.State, op *model.Operation) {
-	appIndex := findApp(state, op.AppID)
-	if appIndex < 0 {
-		return
-	}
-	if isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) {
-		return
-	}
-	if isDeletedApp(state.Apps[appIndex]) && op.Type != model.OperationTypeDelete {
-		return
-	}
-	now := time.Now().UTC()
-	app := &state.Apps[appIndex]
-	if op.Type != model.OperationTypeAppStorageUnmount && !operationOnlyChangesRolloutConstraints(*app, *op) {
-		app.Status.Phase = failedPhaseForApp(*app)
-	}
-	app.Status.LastOperationID = op.ID
-	app.Status.LastMessage = strings.TrimSpace(op.ErrorMessage)
-	app.Status.LastFailedOperation = model.AppOperationFailureFromOperation(*op)
-	app.Status.UpdatedAt = now
-	app.UpdatedAt = now
-}
-
-func applyCanceledOperationToApp(state *model.State, op *model.Operation) {
-	appIndex := findApp(state, op.AppID)
-	if appIndex < 0 || isManagedPostgresServiceOperation(op.Type) || model.IsAppRequestResize(op.Type) ||
-		op.Type == model.OperationTypeAppStorageUnmount || isDeletedApp(state.Apps[appIndex]) {
-		return
-	}
-	app := &state.Apps[appIndex]
-	if !operationOnlyChangesRolloutConstraints(*app, *op) {
-		if phase, ok := fallbackLiveAppPhase(*app); ok {
-			app.Status.Phase = phase
-		} else {
-			app.Status.Phase = "unknown"
-		}
-		app.Status.LastFailedOperation = nil
-	}
-	app.Status.LastOperationID = op.ID
-	app.Status.LastMessage = strings.TrimSpace(op.ResultMessage)
-	app.Status.UpdatedAt = time.Now().UTC()
-	app.UpdatedAt = app.Status.UpdatedAt
-}
-
-func deleteProjectsByTenant(projects []model.Project, tenantID string) []model.Project {
-	filtered := projects[:0]
-	for _, project := range projects {
-		if project.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, project)
-	}
-	return filtered
-}
-
-func deleteProjectRouteTablesByTenant(tables []model.ProjectRouteTable, tenantID string) []model.ProjectRouteTable {
-	filtered := tables[:0]
-	for _, table := range tables {
-		if table.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, table)
-	}
-	return filtered
-}
-
-func deleteProjectRouteTablesByProject(tables []model.ProjectRouteTable, projectID string) []model.ProjectRouteTable {
-	filtered := tables[:0]
-	for _, table := range tables {
-		if table.ProjectID == projectID {
-			continue
-		}
-		filtered = append(filtered, table)
-	}
-	return filtered
-}
-
-func deleteAppsByProject(apps []model.App, projectID string) []model.App {
-	filtered := apps[:0]
-	for _, app := range apps {
-		if app.ProjectID == projectID {
-			continue
-		}
-		filtered = append(filtered, app)
-	}
-	return filtered
-}
-
-func deleteAPIKeysByTenant(keys []model.APIKey, tenantID string) []model.APIKey {
-	filtered := keys[:0]
-	for _, key := range keys {
-		if key.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, key)
-	}
-	return filtered
-}
-
-func deleteEnrollmentTokensByTenant(tokens []model.EnrollmentToken, tenantID string) []model.EnrollmentToken {
-	filtered := tokens[:0]
-	for _, token := range tokens {
-		if token.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, token)
-	}
-	return filtered
-}
-
-func deleteNodeKeysByTenant(keys []model.NodeKey, tenantID string, deletedIDs map[string]struct{}) []model.NodeKey {
-	filtered := keys[:0]
-	for _, key := range keys {
-		if key.TenantID == tenantID {
-			deletedIDs[key.ID] = struct{}{}
-			continue
-		}
-		filtered = append(filtered, key)
-	}
-	return filtered
-}
-
-func deleteLegacyMachinesByTenant(machines []model.Machine, tenantID string, deletedNodeKeyIDs map[string]struct{}) []model.Machine {
-	filtered := machines[:0]
-	for _, machine := range machines {
-		if machine.TenantID == tenantID {
-			continue
-		}
-		if _, ok := deletedNodeKeyIDs[machine.NodeKeyID]; ok {
-			machine.NodeKeyID = ""
-		}
-		filtered = append(filtered, machine)
-	}
-	return filtered
-}
-
-func deleteRuntimesByTenant(runtimes []model.Runtime, tenantID string, deletedNodeKeyIDs, deletedRuntimeIDs map[string]struct{}) []model.Runtime {
-	filtered := runtimes[:0]
-	for _, runtime := range runtimes {
-		if runtime.TenantID == tenantID {
-			if deletedRuntimeIDs != nil {
-				deletedRuntimeIDs[runtime.ID] = struct{}{}
-			}
-			continue
-		}
-		if _, ok := deletedNodeKeyIDs[runtime.NodeKeyID]; ok {
-			runtime.NodeKeyID = ""
-		}
-		filtered = append(filtered, runtime)
-	}
-	return filtered
-}
-
-func deleteRuntimeAccessGrants(grants []model.RuntimeAccessGrant, tenantID string, deletedRuntimeIDs map[string]struct{}) []model.RuntimeAccessGrant {
-	filtered := grants[:0]
-	for _, grant := range grants {
-		if grant.TenantID == tenantID {
-			continue
-		}
-		if _, ok := deletedRuntimeIDs[grant.RuntimeID]; ok {
-			continue
-		}
-		filtered = append(filtered, grant)
-	}
-	return filtered
-}
-
-func deleteRuntimeAccessGrantsByRuntime(grants []model.RuntimeAccessGrant, runtimeID string) []model.RuntimeAccessGrant {
-	filtered := grants[:0]
-	for _, grant := range grants {
-		if grant.RuntimeID == runtimeID {
-			continue
-		}
-		filtered = append(filtered, grant)
-	}
-	return filtered
-}
-
 func validateRuntimeDeletion(runtimeObj model.Runtime) error {
 	if runtimeObj.Type == model.RuntimeTypeManagedShared {
 		return fmt.Errorf("%w: managed shared runtimes cannot be deleted", ErrConflict)
@@ -5803,261 +1844,7 @@ func validateRuntimeDeletion(runtimeObj model.Runtime) error {
 	return nil
 }
 
-func runtimeHasDeleteBlockersState(state *model.State, runtimeID string) bool {
-	runtimeID = strings.TrimSpace(runtimeID)
-	if state == nil || runtimeID == "" {
-		return false
-	}
-
-	for _, app := range state.Apps {
-		if isDeletedApp(app) {
-			continue
-		}
-		if strings.TrimSpace(app.Spec.RuntimeID) == runtimeID {
-			return true
-		}
-		if app.Spec.Failover != nil && strings.TrimSpace(app.Spec.Failover.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if app.Spec.Postgres != nil {
-			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(app.Spec.RuntimeID, *app.Spec.Postgres) {
-				if postgresRuntimeID == runtimeID {
-					return true
-				}
-			}
-		}
-		if strings.TrimSpace(app.Status.CurrentRuntimeID) == runtimeID {
-			return true
-		}
-	}
-
-	for _, service := range state.BackingServices {
-		if service.Spec.Postgres == nil || isDeletedBackingService(service) {
-			continue
-		}
-		for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs("", *service.Spec.Postgres) {
-			if postgresRuntimeID == runtimeID {
-				return true
-			}
-		}
-	}
-
-	for _, op := range state.Operations {
-		if !isActiveOperationStatus(op.Status) {
-			continue
-		}
-		if strings.TrimSpace(op.SourceRuntimeID) == runtimeID {
-			return true
-		}
-		if strings.TrimSpace(op.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if strings.TrimSpace(op.AssignedRuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && strings.TrimSpace(op.DesiredSpec.RuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && op.DesiredSpec.Failover != nil && strings.TrimSpace(op.DesiredSpec.Failover.TargetRuntimeID) == runtimeID {
-			return true
-		}
-		if op.DesiredSpec != nil && op.DesiredSpec.Postgres != nil {
-			for _, postgresRuntimeID := range managedPostgresReferencedRuntimeIDs(op.DesiredSpec.RuntimeID, *op.DesiredSpec.Postgres) {
-				if postgresRuntimeID == runtimeID {
-					return true
-				}
-			}
-		}
-	}
-
-	return false
-}
-
-func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
-	filtered := apps[:0]
-	for _, app := range apps {
-		if app.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, app)
-	}
-	return filtered
-}
-
-func deleteAppReleasesByTenant(releases []model.AppRelease, tenantID string) []model.AppRelease {
-	filtered := releases[:0]
-	for _, release := range releases {
-		if release.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, release)
-	}
-	return filtered
-}
-
-func deleteAppReleasesByApp(releases []model.AppRelease, appID string) []model.AppRelease {
-	filtered := releases[:0]
-	for _, release := range releases {
-		if release.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, release)
-	}
-	return filtered
-}
-
-func deleteReleaseAttemptsByTenant(attempts []model.ReleaseAttempt, tenantID string) []model.ReleaseAttempt {
-	filtered := attempts[:0]
-	for _, attempt := range attempts {
-		if attempt.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, attempt)
-	}
-	return filtered
-}
-
-func deleteReleaseAttemptsByApp(attempts []model.ReleaseAttempt, appID string) []model.ReleaseAttempt {
-	filtered := attempts[:0]
-	for _, attempt := range attempts {
-		if attempt.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, attempt)
-	}
-	return filtered
-}
-
-func releaseAttemptIDsByApp(attempts []model.ReleaseAttempt, appID string) map[string]struct{} {
-	ids := map[string]struct{}{}
-	for _, attempt := range attempts {
-		if attempt.AppID != appID {
-			continue
-		}
-		if id := strings.TrimSpace(attempt.ID); id != "" {
-			ids[id] = struct{}{}
-		}
-	}
-	return ids
-}
-
-func deleteReleaseStepsByTenant(steps []model.ReleaseStep, tenantID string) []model.ReleaseStep {
-	filtered := steps[:0]
-	for _, step := range steps {
-		if step.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, step)
-	}
-	return filtered
-}
-
-func deleteReleaseStepsByAttemptIDs(steps []model.ReleaseStep, attemptIDs map[string]struct{}) []model.ReleaseStep {
-	if len(attemptIDs) == 0 {
-		return steps
-	}
-	filtered := steps[:0]
-	for _, step := range steps {
-		if _, ok := attemptIDs[strings.TrimSpace(step.ReleaseAttemptID)]; ok {
-			continue
-		}
-		filtered = append(filtered, step)
-	}
-	return filtered
-}
-
-func deleteAppTrafficPoliciesByTenant(policies []model.AppTrafficPolicy, tenantID string) []model.AppTrafficPolicy {
-	filtered := policies[:0]
-	for _, policy := range policies {
-		if policy.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, policy)
-	}
-	return filtered
-}
-
-func deleteAppTrafficPoliciesByApp(policies []model.AppTrafficPolicy, appID string) []model.AppTrafficPolicy {
-	filtered := policies[:0]
-	for _, policy := range policies {
-		if policy.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, policy)
-	}
-	return filtered
-}
-
-func deleteOperationsByApp(ops []model.Operation, appID string) []model.Operation {
-	return deleteOperationsByAppIDs(ops, []string{appID})
-}
-
-func deleteOperationEvidenceByTenant(evidence []model.OperationEvidence, tenantID string) []model.OperationEvidence {
-	filtered := evidence[:0]
-	for _, item := range evidence {
-		if item.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	return filtered
-}
-
-func deleteOperationEvidenceByApp(evidence []model.OperationEvidence, appID string) []model.OperationEvidence {
-	filtered := evidence[:0]
-	for _, item := range evidence {
-		if item.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-	return filtered
-}
-
-func deleteOperationsByAppIDs(ops []model.Operation, appIDs []string) []model.Operation {
-	if len(appIDs) == 0 {
-		return ops
-	}
-	remove := make(map[string]struct{}, len(appIDs))
-	for _, appID := range appIDs {
-		if strings.TrimSpace(appID) == "" {
-			continue
-		}
-		remove[appID] = struct{}{}
-	}
-	filtered := ops[:0]
-	for _, op := range ops {
-		if _, ok := remove[op.AppID]; ok {
-			continue
-		}
-		filtered = append(filtered, op)
-	}
-	return filtered
-}
-
-func deleteOperationsByTenant(ops []model.Operation, tenantID string) []model.Operation {
-	filtered := ops[:0]
-	for _, op := range ops {
-		if op.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, op)
-	}
-	return filtered
-}
-
-func deleteAuditEventsByTenant(events []model.AuditEvent, tenantID string) []model.AuditEvent {
-	filtered := events[:0]
-	for _, event := range events {
-		if event.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, event)
-	}
-	return filtered
-}
-
-func findTenant(state *model.State, id string) int {
+func findTenant(state *storeProjection, id string) int {
 	for idx, tenant := range state.Tenants {
 		if tenant.ID == id {
 			return idx
@@ -6066,7 +1853,7 @@ func findTenant(state *model.State, id string) int {
 	return -1
 }
 
-func findProject(state *model.State, id string) int {
+func findProject(state *storeProjection, id string) int {
 	for idx, project := range state.Projects {
 		if project.ID == id {
 			return idx
@@ -6075,83 +1862,7 @@ func findProject(state *model.State, id string) int {
 	return -1
 }
 
-func findAPIKey(state *model.State, id string) int {
-	for idx, key := range state.APIKeys {
-		if key.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findRuntime(state *model.State, id string) int {
-	for idx, runtime := range state.Runtimes {
-		if runtime.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findNodeKey(state *model.State, id string) int {
-	for idx, key := range state.NodeKeys {
-		if key.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findRuntimeByFingerprintHash(state *model.State, tenantID, fingerprintHash string) int {
-	bestIndex := -1
-	for idx, runtime := range state.Runtimes {
-		if runtime.TenantID != tenantID || runtime.FingerprintHash != fingerprintHash {
-			continue
-		}
-		if bestIndex < 0 {
-			bestIndex = idx
-			continue
-		}
-		best := state.Runtimes[bestIndex]
-		if runtime.UpdatedAt.After(best.UpdatedAt) || (runtime.UpdatedAt.Equal(best.UpdatedAt) && runtime.CreatedAt.After(best.CreatedAt)) {
-			bestIndex = idx
-		}
-	}
-	return bestIndex
-}
-
-func findRuntimeCandidate(state *model.State, tenantID, nodeKeyID, runtimeType, machineName, runtimeName, endpoint string) int {
-	bestIndex := -1
-	bestScore := 0
-	for idx, runtime := range state.Runtimes {
-		if runtime.TenantID != tenantID || runtime.NodeKeyID != nodeKeyID || runtime.Type != runtimeType {
-			continue
-		}
-		score := 0
-		if endpoint != "" && strings.EqualFold(strings.TrimSpace(runtime.Endpoint), strings.TrimSpace(endpoint)) {
-			score += 1
-		}
-		if runtimeName != "" && strings.EqualFold(runtime.Name, strings.TrimSpace(runtimeName)) {
-			score += 4
-		}
-		if runtimeName != "" && strings.EqualFold(runtime.ClusterNodeName, strings.TrimSpace(runtimeName)) {
-			score += 4
-		}
-		if machineName != "" && strings.EqualFold(runtime.MachineName, strings.TrimSpace(machineName)) {
-			score += 2
-		}
-		if score > bestScore {
-			bestScore = score
-			bestIndex = idx
-		}
-	}
-	if bestScore == 0 {
-		return -1
-	}
-	return bestIndex
-}
-
-func findApp(state *model.State, id string) int {
+func findApp(state *storeProjection, id string) int {
 	for idx, app := range state.Apps {
 		if app.ID == id {
 			return idx
@@ -6160,25 +1871,7 @@ func findApp(state *model.State, id string) int {
 	return -1
 }
 
-func findOperation(state *model.State, id string) int {
-	for idx, op := range state.Operations {
-		if op.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func projectBelongsToTenant(state *model.State, projectID, tenantID string) bool {
-	for _, project := range state.Projects {
-		if project.ID == projectID && project.TenantID == tenantID {
-			return true
-		}
-	}
-	return false
-}
-
-func projectDeleteRequested(state *model.State, projectID string) bool {
+func projectDeleteRequested(state *storeProjection, projectID string) bool {
 	if state.ProjectDeleteRequests == nil {
 		return false
 	}
@@ -6199,99 +1892,6 @@ func projectDeleteFinalizedAuditEvent(project model.Project) model.AuditEvent {
 			"name":                   project.Name,
 		},
 	}
-}
-
-func markProjectDeleteRequested(state *model.State, projectID string, requestedAt time.Time) bool {
-	if state.ProjectDeleteRequests == nil {
-		state.ProjectDeleteRequests = make(map[string]time.Time)
-	}
-	normalizedProjectID := strings.TrimSpace(projectID)
-	_, alreadyRequested := state.ProjectDeleteRequests[normalizedProjectID]
-	state.ProjectDeleteRequests[normalizedProjectID] = requestedAt
-	return alreadyRequested
-}
-
-func clearProjectDeleteRequested(state *model.State, projectID string) {
-	if state.ProjectDeleteRequests == nil {
-		return
-	}
-	delete(state.ProjectDeleteRequests, strings.TrimSpace(projectID))
-	if len(state.ProjectDeleteRequests) == 0 {
-		state.ProjectDeleteRequests = nil
-	}
-}
-
-func projectHasLiveApps(state *model.State, projectID string) bool {
-	for _, app := range state.Apps {
-		if app.ProjectID == projectID && !isDeletedApp(app) {
-			return true
-		}
-	}
-	return false
-}
-
-func deleteProjectFromState(state *model.State, projectID string) (model.Project, error) {
-	index := findProject(state, projectID)
-	if index < 0 {
-		return model.Project{}, ErrNotFound
-	}
-	project := state.Projects[index]
-	appIDs := appIDsForProject(state.Apps, projectID)
-	state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, appIDs)
-	state.Projects = append(state.Projects[:index], state.Projects[index+1:]...)
-	state.ProjectRuntimeReservations = deleteProjectRuntimeReservationsByProject(state.ProjectRuntimeReservations, projectID)
-	state.ProjectRouteTables = deleteProjectRouteTablesByProject(state.ProjectRouteTables, projectID)
-	state.AutomationPolicies = deleteAutomationPoliciesByProject(state.AutomationPolicies, projectID)
-	state.Apps = deleteAppsByProject(state.Apps, projectID)
-	state.ServiceBindings = deleteServiceBindingsByAppIDs(state.ServiceBindings, appIDs)
-	state.AppDatabaseImportJobs = deleteAppDatabaseImportJobsByAppIDs(state.AppDatabaseImportJobs, appIDs)
-	state.AppDatabaseAccessGrants = deleteAppDatabaseAccessGrantsByAppIDs(state.AppDatabaseAccessGrants, appIDs)
-	state.BackingServices = deleteBackingServicesByProject(state.BackingServices, projectID)
-	state.Operations = deleteOperationsByAppIDs(state.Operations, appIDs)
-	deleteBackupStateByProject(state, projectID, appIDs)
-	clearProjectDeleteRequested(state, projectID)
-	return project, nil
-}
-
-func maybeFinalizeRequestedProjectDelete(state *model.State, projectID string) error {
-	if !projectDeleteRequested(state, projectID) {
-		return nil
-	}
-	if projectHasLiveApps(state, projectID) {
-		return nil
-	}
-	deleteUnboundBackingServicesByProject(state, projectID)
-	if projectHasLiveResources(state, projectID) {
-		return nil
-	}
-	project, err := deleteProjectFromState(state, projectID)
-	if err != nil {
-		return err
-	}
-	state.AuditEvents = append(state.AuditEvents, projectDeleteFinalizedAuditEvent(project))
-	return nil
-}
-
-func projectHasLiveResources(state *model.State, projectID string) bool {
-	if projectHasLiveApps(state, projectID) {
-		return true
-	}
-	for _, service := range state.BackingServices {
-		if service.ProjectID == projectID && !isDeletedBackingService(service) {
-			return true
-		}
-	}
-	return false
-}
-
-func appIDsForProject(apps []model.App, projectID string) []string {
-	out := make([]string, 0)
-	for _, app := range apps {
-		if app.ProjectID == projectID {
-			out = append(out, app.ID)
-		}
-	}
-	return out
 }
 
 func trimmedStringSet(values []string) map[string]struct{} {
@@ -6328,39 +1928,6 @@ func sortedTrimmedStringKeys(values map[string]struct{}) []string {
 	return out
 }
 
-func runtimeVisibleToTenant(state *model.State, runtimeID, tenantID string) bool {
-	index := findRuntime(state, runtimeID)
-	if index < 0 {
-		return false
-	}
-	runtime := state.Runtimes[index]
-	if runtime.TenantID != "" && runtime.TenantID == tenantID {
-		return true
-	}
-	if model.RuntimeIsInternal(runtime) {
-		return true
-	}
-	switch normalizeRuntimeAccessMode(runtime.Type, runtime.AccessMode) {
-	case model.RuntimeAccessModePlatformShared, model.RuntimeAccessModePublic:
-		return true
-	}
-	return findRuntimeAccessGrant(state, runtime.ID, tenantID) >= 0
-}
-
-func runtimeUsableForAppOperation(state *model.State, app model.App, runtimeID, tenantID string) bool {
-	runtimeID = strings.TrimSpace(runtimeID)
-	if runtimeID == "" {
-		return false
-	}
-	if runtimeVisibleToTenant(state, runtimeID, tenantID) {
-		return true
-	}
-	if !appReferencesRuntime(app, runtimeID) {
-		return false
-	}
-	return findRuntime(state, runtimeID) >= 0
-}
-
 func resolveProjectRuntimeID(project model.Project, requestedRuntimeID string) string {
 	if runtimeID := strings.TrimSpace(requestedRuntimeID); runtimeID != "" {
 		return runtimeID
@@ -6379,79 +1946,6 @@ func defaultBackingServiceRuntimeForProject(spec model.BackingServiceSpec, proje
 	out := cloneBackingServiceSpec(spec)
 	out.Postgres.RuntimeID = defaultRuntimeID
 	return out
-}
-
-func nextAvailableRuntimeName(state *model.State, tenantID, requested string) string {
-	requested = strings.TrimSpace(requested)
-	if requested == "" {
-		requested = "node"
-	}
-	name := requested
-	suffix := 2
-	for runtimeNameExists(state, tenantID, name) {
-		name = fmt.Sprintf("%s-%d", requested, suffix)
-		suffix++
-	}
-	return name
-}
-
-func runtimeNameExists(state *model.State, tenantID, name string) bool {
-	for _, runtime := range state.Runtimes {
-		if runtime.TenantID == tenantID && strings.EqualFold(runtime.Name, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func resetRuntimeSharing(state *model.State, runtimeID string) {
-	if state == nil {
-		return
-	}
-	state.RuntimeGrants = deleteRuntimeAccessGrantsByRuntime(state.RuntimeGrants, runtimeID)
-}
-
-func detachRuntimeOwnership(state *model.State, runtimeIndex int, now time.Time) {
-	if state == nil || runtimeIndex < 0 || runtimeIndex >= len(state.Runtimes) {
-		return
-	}
-	runtime := &state.Runtimes[runtimeIndex]
-	detachMachineOwnershipByRuntime(state, runtime.ID, now)
-	resetRuntimeSharing(state, runtime.ID)
-	runtime.AccessMode = model.RuntimeAccessModePrivate
-	runtime.PublicOffer = nil
-	runtime.PoolMode = model.RuntimePoolModeDedicated
-	runtime.Status = model.RuntimeStatusOffline
-	runtime.NodeKeyID = ""
-	runtime.ClusterNodeName = ""
-	runtime.FingerprintPrefix = ""
-	runtime.FingerprintHash = ""
-	runtime.AgentKeyPrefix = ""
-	runtime.AgentKeyHash = ""
-	runtime.UpdatedAt = now
-}
-
-func detachMachineOwnershipByRuntime(state *model.State, runtimeID string, now time.Time) {
-	if state == nil {
-		return
-	}
-	runtimeID = strings.TrimSpace(runtimeID)
-	if runtimeID == "" {
-		return
-	}
-	for idx := range state.Machines {
-		if strings.TrimSpace(state.Machines[idx].RuntimeID) != runtimeID {
-			continue
-		}
-		machine := state.Machines[idx]
-		machine.RuntimeID = ""
-		machine.RuntimeName = ""
-		machine.NodeKeyID = ""
-		machine.ClusterNodeName = ""
-		machine.Status = model.RuntimeStatusOffline
-		machine.UpdatedAt = now
-		state.Machines[idx] = machine
-	}
 }
 
 func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {
@@ -6474,38 +1968,4 @@ func normalizeRuntimeAccessMode(runtimeType, accessMode string) string {
 		}
 		return model.RuntimeAccessModePrivate
 	}
-}
-
-func findRuntimeAccessGrant(state *model.State, runtimeID, tenantID string) int {
-	if state == nil {
-		return -1
-	}
-	for idx, grant := range state.RuntimeGrants {
-		if grant.RuntimeID == runtimeID && grant.TenantID == tenantID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findRuntimeIndexesByFingerprintHash(state *model.State, fingerprintHash string) []int {
-	if state == nil || strings.TrimSpace(fingerprintHash) == "" {
-		return nil
-	}
-	indexes := make([]int, 0, 1)
-	for idx, runtime := range state.Runtimes {
-		if runtime.FingerprintHash != fingerprintHash {
-			continue
-		}
-		indexes = append(indexes, idx)
-	}
-	sort.Slice(indexes, func(i, j int) bool {
-		left := state.Runtimes[indexes[i]]
-		right := state.Runtimes[indexes[j]]
-		if !left.UpdatedAt.Equal(right.UpdatedAt) {
-			return left.UpdatedAt.After(right.UpdatedAt)
-		}
-		return left.CreatedAt.After(right.CreatedAt)
-	})
-	return indexes
 }

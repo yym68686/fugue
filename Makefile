@@ -160,6 +160,13 @@ build-cli:
 build-app-ssh-image:
 	$(DOCKER) build -f Dockerfile.app-ssh -t fugue-app-ssh:dev .
 
+.PHONY: setup-store test-postgres
+setup-store:
+	env GOCACHE=$(GOCACHE) go run ./cmd/fugue-store-setup
+
+test-postgres:
+	bash ./scripts/test_postgres_store.sh
+
 run-api: build-api
 	FUGUE_BIND_ADDR=:8080 $(BIN_DIR)/fugue-api
 

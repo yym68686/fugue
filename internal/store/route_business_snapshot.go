@@ -2,9 +2,6 @@ package store
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"sort"
 	"time"
 
@@ -65,43 +62,7 @@ func (s *Store) CaptureRouteBusinessSnapshot(ctx context.Context) (RouteBusiness
 	if err := ctx.Err(); err != nil {
 		return RouteBusinessSnapshot{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCaptureRouteBusinessSnapshot(ctx)
-	}
-	var snapshot RouteBusinessSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		snapshot = RouteBusinessSnapshot{CapturedAt: time.Now().UTC(), Domains: state.AppDomains, RouteTables: state.ProjectRouteTables, Runtimes: state.Runtimes, RoutePolicies: state.EdgeRoutePolicies, Releases: state.AppReleases, TrafficPolicies: state.AppTrafficPolicies, HostedZones: state.HostedZones, DNSRecords: state.DNSRecords, ACMEChallenges: state.DNSACMEChallenges}
-		snapshot.MailPlatformConfig, snapshot.AppMailBindings = state.MailPlatformConfig, state.AppMailBindings
-		snapshot.StaticEdgeRegistrations = state.StaticEdgeRegistrations
-		for _, app := range state.Apps {
-			snapshot.Apps = append(snapshot.Apps, routeBusinessAppProjection(app))
-		}
-		for _, op := range state.Operations {
-			snapshot.Operations = append(snapshot.Operations, RouteBusinessOperation{ID: op.ID, TenantID: op.TenantID, AppID: op.AppID, Type: op.Type, Status: op.Status, CompletedAt: op.CompletedAt})
-		}
-		raw, err := json.Marshal(snapshot)
-		if err != nil {
-			return err
-		}
-		// Detach maps/slices while still holding the file-store read lock.
-		return json.Unmarshal(raw, &snapshot)
-	})
-	if err != nil {
-		return RouteBusinessSnapshot{}, err
-	}
-	if err = ctx.Err(); err != nil {
-		return RouteBusinessSnapshot{}, err
-	}
-	snapshot.normalize()
-	material := snapshot
-	material.CapturedAt = time.Time{}
-	raw, err := json.Marshal(material)
-	if err != nil {
-		return RouteBusinessSnapshot{}, err
-	}
-	digest := sha256.Sum256(raw)
-	snapshot.Revision = "json:" + hex.EncodeToString(digest[:])
-	return snapshot, nil
+	return s.pgCaptureRouteBusinessSnapshot(ctx)
 }
 
 func (snapshot *RouteBusinessSnapshot) normalize() {

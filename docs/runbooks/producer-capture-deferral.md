@@ -203,7 +203,7 @@ until its exact completion. Set `FUGUE_PRODUCER_DEFERRAL_POSTGRES_BIN` to Postgr
 it accepts no external DSN, existing data directory or production clone.
 
 `TestCaptureDeferralPreservesRealPendingRecoveryAndObservation` exercises the
-real file-store producer, dynamic observation queue, gray/full promotion,
+real PostgreSQL-backed producer, dynamic observation queue, gray/full promotion,
 failed-candidate timeout recovery and server restarts with a denying new-input
 gate. It also checks refusal at the idle capture boundary without changing
 publication identities. This proves those local business paths and hook
@@ -222,7 +222,7 @@ budget needed for production enablement.
 `TestCaptureControlHTTP*` covers the real Bearer authentication middleware,
 separate explicit permission, strict request boundaries, authenticated caller
 binding and refusal to serialize partial, uncertain or unbound receipts. The
-generated route refuses on a real ordinary file store without installing the
-optional schema or enabling admission. Successful HTTP responses in these tests
+generated route refuses on PostgreSQL without installing the optional schema
+or enabling admission. Successful HTTP responses in these tests
 use a synthetic native callback; real PostgreSQL transaction/restart behavior is
 tested separately above. This is not a full fleet or production HTTP/PG rehearsal.

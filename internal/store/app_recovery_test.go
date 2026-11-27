@@ -11,6 +11,7 @@ import (
 	"context"
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -26,7 +27,7 @@ func recoveryTestRequest() model.AppRecoveryStartRequest {
 
 func TestRecoveryCapacityReservationDoesNotActivateBilling(t *testing.T) {
 	app := model.App{ID: "app_capacity", TenantID: "tenant_capacity", Spec: model.AppSpec{RuntimeID: "runtime_managed_shared", Replicas: 1, Resources: &model.ResourceSpec{CPUMilliCores: 250, MemoryMebibytes: 512}}}
-	st := model.State{Apps: []model.App{app}, Runtimes: []model.Runtime{{ID: "runtime_managed_shared", Type: model.RuntimeTypeManagedShared}}}
+	st := storeProjection{Apps: []model.App{app}, Runtimes: []model.Runtime{{ID: "runtime_managed_shared", Type: model.RuntimeTypeManagedShared}}}
 	billing := defaultTenantBilling(app.TenantID, time.Now())
 	billing.ManagedCap = model.BillingResourceSpec{CPUMilliCores: 500, MemoryMebibytes: 1024}
 	if err := validateRecoveryCapacity(&st, app, billing); err != nil {

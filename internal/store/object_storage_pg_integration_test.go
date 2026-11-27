@@ -22,7 +22,7 @@ func TestObjectStoragePostgresIntegration(t *testing.T) {
 		t.Fatal("requires disposable loopback database")
 	}
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-object-storage-pg-key")
-	s := New("", address)
+	s := New(address)
 	if err = s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestObjectStoragePostgresIntegration(t *testing.T) {
 		t.Fatal(r2Err)
 	}
 	t.Cleanup(func() {
-		testDB := New("", address)
+		testDB := New(address)
 		if err := testDB.ensureDatabaseReady(); err != nil {
 			t.Error(err)
 			return

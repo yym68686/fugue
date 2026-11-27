@@ -300,7 +300,7 @@ func pgValidateOperationRuntimeReservationsTx(ctx context.Context, tx *sql.Tx, p
 }
 
 func (s *Store) pgRuntimeHasProjectReservationBlockersTx(ctx context.Context, tx *sql.Tx, projectID, runtimeID string) (bool, error) {
-	state := model.State{}
+	state := storeProjection{}
 
 	projectRows, err := tx.QueryContext(ctx, `
 SELECT id, tenant_id, name, slug, description, default_runtime_id, created_at, updated_at

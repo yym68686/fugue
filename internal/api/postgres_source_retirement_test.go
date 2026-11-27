@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -96,8 +97,8 @@ func TestPostgresSourceRetirementAdmission(t *testing.T) {
 			if !reflect.DeepEqual(before.Spec, after.Spec) || before.OwnerAppID != after.OwnerAppID || mutations != 0 {
 				t.Fatal("admission mutated runtime or desired state")
 			}
-			if _, err = st.UnbindBackingService(app.Bindings[0].ID); err != store.ErrConflict {
-				t.Fatal("binding changed during retirement")
+			if _, err = st.UnbindBackingService(app.Bindings[0].ID); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("binding did not remain locked during retirement: %v", err)
 			}
 		})
 	}

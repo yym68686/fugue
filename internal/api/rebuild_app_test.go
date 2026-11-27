@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -470,7 +469,7 @@ func TestRebuildAppRecoversFailedImportedAppPatchedEnv(t *testing.T) {
 func setupRebuildAppTestServer(t *testing.T) (*store.Store, *Server, string, model.Tenant, model.Project) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

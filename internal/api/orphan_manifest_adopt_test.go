@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
@@ -103,7 +101,7 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 				json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"name": "backup-test", "labels": map[string]any{"fugue.pro/backup-run": label}}, "spec": map[string]any{"snapshotName": "snapshot-test"}, "status": map[string]any{"state": state, "url": backupURL, "volumeName": "volume-test"}})
 			}))
 			defer fakeKube.Close()
-			db := store.New(filepath.Join(t.TempDir(), "state.json"))
+			db := newStoreTestDatabase(t, "")
 			if err := db.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -195,7 +193,7 @@ func TestOrphanManifestAdoptionProtectedReconciliation(t *testing.T) {
 }
 
 func TestOrphanManifestAdoptionRequiresPlatformAdmin(t *testing.T) {
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

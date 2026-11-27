@@ -12,53 +12,6 @@ import (
 
 const stableReleaseSyncActorID = "stable-release-sync"
 
-func syncStableReleaseForCompletedDeployInState(state *model.State, app model.App, op model.Operation, now time.Time) error {
-	if state == nil || !shouldSyncStableReleaseForCompletedDeploy(app, op) {
-		return nil
-	}
-	policyIndex := findAppTrafficPolicyByApp(state.AppTrafficPolicies, app.ID)
-	if policyIndex < 0 {
-		return nil
-	}
-	policy := state.AppTrafficPolicies[policyIndex]
-	if !trafficPolicyAllowsStableReleaseAutoSync(app, policy) {
-		return nil
-	}
-
-	desired, ok := currentStableReleaseForApp(app, now)
-	if !ok {
-		return nil
-	}
-	releaseIndex := findReusableCurrentStableRelease(state.AppReleases, desired)
-	if releaseIndex >= 0 {
-		desired = state.AppReleases[releaseIndex]
-		desired.Role = model.AppReleaseRoleStable
-		desired.Status = model.AppReleaseStatusServing
-		desired.StatusReason = ""
-		desired.ReadyAt = firstNonNilTime(desired.ReadyAt, &now)
-		desired.PromotedAt = &now
-		desired.UpdatedAt = now
-		state.AppReleases[releaseIndex] = desired
-	} else {
-		var err error
-		desired, err = normalizeAppReleaseForStore(desired)
-		if err != nil {
-			return err
-		}
-		state.AppReleases = append(state.AppReleases, desired)
-	}
-
-	if oldStableID := strings.TrimSpace(policy.StableReleaseID); oldStableID != "" && oldStableID != desired.ID {
-		if oldIndex := findAppReleaseByID(state.AppReleases, oldStableID); oldIndex >= 0 && state.AppReleases[oldIndex].AppID == app.ID {
-			state.AppReleases[oldIndex].Role = model.AppReleaseRolePrevious
-			state.AppReleases[oldIndex].UpdatedAt = now
-		}
-	}
-
-	state.AppTrafficPolicies[policyIndex] = stableReleaseSyncedTrafficPolicy(policy, desired.ID, now)
-	return nil
-}
-
 func shouldSyncStableReleaseForCompletedDeploy(app model.App, op model.Operation) bool {
 	if op.Type != model.OperationTypeDeploy || op.DesiredSpec == nil {
 		return false
@@ -119,15 +72,6 @@ func appStableReleaseSourceRef(app model.App) string {
 		return firstNonEmpty(app.Source.ImageRef, app.Source.RepoURL, app.Spec.Image)
 	}
 	return strings.TrimSpace(app.Spec.Image)
-}
-
-func findReusableCurrentStableRelease(releases []model.AppRelease, desired model.AppRelease) int {
-	for idx, release := range releases {
-		if appReleaseMatchesCurrentStable(release, desired) {
-			return idx
-		}
-	}
-	return -1
 }
 
 func appReleaseMatchesCurrentStable(release, desired model.AppRelease) bool {

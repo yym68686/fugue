@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -10,7 +9,7 @@ import (
 func TestRecordNodeDeepHealthObserveOnlyHardFailDegradesWithoutQuarantine(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	failed, err := s.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
 		NodeUpdaterID:   "nodeupdater_dns",
 		ClusterNodeName: "node-a",
@@ -62,7 +61,7 @@ func TestRecordNodeDeepHealthObserveOnlyHardFailDegradesWithoutQuarantine(t *tes
 func TestRecordNodeDeepHealthUnknownGateCannotEnforce(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	result, err := s.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
 		NodeUpdaterID:   "nodeupdater_unknown_gate",
 		ClusterNodeName: "node-a",
@@ -112,7 +111,7 @@ func TestNodeDeepHealthDecisionQuarantinesOnlyWhenEnforced(t *testing.T) {
 func TestRecordNodeDeepHealthDetectsStaleManagedIptablesIncidentShape(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	result, err := s.RecordNodeDeepHealthResult(model.NodeDeepHealthResult{
 		NodeUpdaterID:   "nodeupdater_iptables",
 		ClusterNodeName: "node-a",

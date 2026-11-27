@@ -2,18 +2,17 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -67,26 +66,6 @@ func checkReplicaBatchMatchesIndividualReads(t *testing.T, s *Store) {
 		if _, exists := got["image-1"]; exists {
 			t.Fatal("unselected image leaked into batch")
 		}
-	}
-}
-
-func TestImageReplicaBatchMatchesFileReads(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "state.json")
-	raw, err := json.Marshal(model.State{ImageReplicas: replicaBatchRows()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(p, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	s := New(p)
-	checkReplicaBatchMatchesIndividualReads(t, s)
-	bad := New(t.TempDir())
-	if _, err := bad.ListImageReplicasByImageIDs(model.ImageReplicaFilter{PlatformAdmin: true}, []string{"selected"}); err == nil {
-		t.Fatal("storage failure became empty success")
-	}
-	if got, err := bad.ListImageReplicasByImageIDs(model.ImageReplicaFilter{PlatformAdmin: true}, []string{" ", ""}); err != nil || len(got) != 0 {
-		t.Fatal("empty batch scanned storage", err)
 	}
 }
 

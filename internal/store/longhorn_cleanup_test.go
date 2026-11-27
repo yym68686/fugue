@@ -3,49 +3,13 @@ package store
 import (
 	"encoding/json"
 	"fugue/internal/model"
-	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
-func TestLegacyLonghornCleanupReceiptIsReconciled(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	a, err := s.CreateBackupArtifact(model.BackupArtifact{Kind: model.BackupArtifactKindLonghornSnapshot, Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}, Status: model.BackupArtifactStatusActive})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.MarkBackupArtifactDeleted(a.ID, "", true); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate the old collector's false physical deletion receipt.
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	s.backupArtifactPhysicalCleanup = map[string]time.Time{a.ID: time.Now().UTC()}
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-	filter := BackupArtifactCleanupFilter{Before: time.Now().Add(time.Hour), Limit: 10}
-	items, err := s.ListBackupArtifactCleanupCandidates(filter)
-	if err != nil || len(items) != 1 {
-		t.Fatalf("legacy receipt skipped: %v %v", items, err)
-	}
-	if err = s.MarkBackupArtifactPhysicalDeleted(a.ID, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	items, err = s.ListBackupArtifactCleanupCandidates(filter)
-	if err != nil || len(items) != 0 {
-		t.Fatalf("engine-confirmed receipt retried: %v %v", items, err)
-	}
-	loaded, err := s.GetBackupArtifact(a.ID, "", true)
-	if err != nil || loaded.Manifest.Metadata[model.BackupLonghornCleanupVersionKey] != "1" {
-		t.Fatalf("receipt not durable: %+v %v", loaded, err)
-	}
-}
-
 func TestLonghornCleanupBlocksSharedLiveReferences(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

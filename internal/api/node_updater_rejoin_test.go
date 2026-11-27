@@ -16,7 +16,6 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestValidKubernetesBootstrapTokenComponent(t *testing.T) {
@@ -38,7 +37,7 @@ func TestValidKubernetesBootstrapTokenComponent(t *testing.T) {
 }
 
 func TestNodeUpdaterClusterRejoinIssuesReusesAndRevokesBoundedCredential(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -207,7 +206,7 @@ func TestNodeUpdaterClusterRejoinIssuesReusesAndRevokesBoundedCredential(t *test
 }
 
 func TestNodeUpdaterClusterRejoinSuppressesBindingMismatchWithoutKubernetesMutation(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -257,7 +256,7 @@ func TestNodeUpdaterClusterRejoinSuppressesBindingMismatchWithoutKubernetesMutat
 }
 
 func TestNodeUpdaterClusterRejoinSuppressesLegacyUpdaterBeforeKubernetesAccess(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -493,7 +492,7 @@ grep -q '"action":"cluster_rejoin_restart_requested"' "${FUGUE_NODE_GUARDIAN_AUT
 }
 
 func TestClusterNodeDeletionAuditRecordsExactActorReasonAndOutcome(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -5,21 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestLonghornErrorGCPaginatesAndPreservesArtifactsAndActiveRuns(t *testing.T) {
 	now := time.Now().UTC()
 	finished := now.Add(-48 * time.Hour)
 	message := "failed to acquire lock backupstore/volumes/aa/bb when performing backup create/restore"
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

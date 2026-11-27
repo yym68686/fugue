@@ -5,54 +5,12 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
-
-func TestPlatformArtifactContentReusePreservesOriginalAndRejectsCorruption(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	first, err := s.CreatePlatformArtifact(platformArtifactEnsureFixture("content-first", 100))
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := s.GetPlatformArtifactContent(first.ContentHash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := s.CreatePlatformArtifact(platformArtifactEnsureFixture("content-second", 100))
-	if err != nil || second.ID == first.ID || second.GenerationSequence != first.GenerationSequence+1 {
-		t.Fatal("distinct signed generations must still be created", second, err)
-	}
-	after, err := s.GetPlatformArtifactContent(first.ContentHash)
-	if err != nil || !after.CreatedAt.Equal(before.CreatedAt) || !after.UpdatedAt.Equal(before.UpdatedAt) {
-		t.Fatal("reusing immutable bytes changed their original timestamps", err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for i := range state.PlatformArtifactContents {
-			if state.PlatformArtifactContents[i].ContentHash == first.ContentHash {
-				state.PlatformArtifactContents[i].Content = map[string]any{"corrupt": true}
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.CreatePlatformArtifact(platformArtifactEnsureFixture("content-third", 100)); !errors.Is(err, ErrConflict) {
-		t.Fatal("existing corrupt content was silently repaired", err)
-	}
-	after, err = s.GetPlatformArtifactContent(first.ContentHash)
-	if err != nil || after.Content["corrupt"] != true {
-		t.Fatal("a refused create overwrote the original stored evidence", err)
-	}
-}
 
 // This test uses an existing disposable loopback database, rolls back the main
 // transaction and removes its one committed concurrency fixture. It installs

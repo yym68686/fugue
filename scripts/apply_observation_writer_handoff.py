@@ -19,7 +19,7 @@ from scripts.verify_observation_writer_handoff import (
 )
 
 
-def verify_collector(provision, scrape_policy, pods):
+def verify_collector(provision, scrape_policy, pods, expression=None):
     namespace = provision.config["namespace"]
     prometheus = scrape_policy["deployment"]
     if scrape_policy["namespace"] != namespace or not matches(prometheus, NAME):
@@ -34,7 +34,8 @@ def verify_collector(provision, scrape_policy, pods):
              and any(x.get("type") == "Ready" and x.get("status") == "True" for x in c["status"].get("conditions", []))]
     if not ready:
         raise ProvisionError("no ready independent metrics collector")
-    expression = 'up{job="fugue-observation-worker"} == 1 and on(pod) (time() - timestamp(fugue_edge_quality_rollup_errors_total{job="fugue-observation-worker"}) < 90)'
+    if expression is None:
+        expression = 'up{job="fugue-observation-worker"} == 1 and on(pod) (time() - timestamp(fugue_edge_quality_rollup_errors_total{job="fugue-observation-worker"}) < 90)'
     for collector in ready:
         if not matches(collector, NAME):
             raise ProvisionError("unexpected metrics collector Pod name")

@@ -23,7 +23,7 @@ func dependencyReconfiguration(operation string) bool {
 // A dependency repair authorizes a new producer input, never a positive traffic
 // checkpoint. The exact signed baseline survives unchanged, including rollback
 // fences that cannot yet be verified because the old dependency was revoked.
-func validateDependencyReconfiguration(state *model.State, a model.PlatformArtifact, p platformproducer.Policy, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, now time.Time) error {
+func validateDependencyReconfiguration(state *storeProjection, a model.PlatformArtifact, p platformproducer.Policy, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, now time.Time) error {
 	r := req.ProducerReconfiguration
 	old, _, err := exactPublication(state, r.PreviousPolicy, a.ArtifactKind, a.ScopeKey, "shadow", keys, false)
 	if err != nil {
@@ -117,7 +117,7 @@ func pgTrySharedPromotionScope(ctx context.Context, tx *sql.Tx, scope string) er
 	return nil
 }
 
-func pgLoadDependencyReconfiguration(ctx context.Context, tx *sql.Tx, state *model.State, p platformproducer.Policy) error {
+func pgLoadDependencyReconfiguration(ctx context.Context, tx *sql.Tx, state *storeProjection, p platformproducer.Policy) error {
 	key := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, p.TargetScope, "gray")
 	lane, err := pgGetPlatformReleaseLaneForUpdate(ctx, tx, key)
 	if err != nil && err != ErrNotFound {

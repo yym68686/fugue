@@ -2,9 +2,7 @@ package store
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,12 +22,14 @@ func testExclusionPolicy() model.EdgeRoutePolicy {
 }
 
 func TestEdgeRoutePolicyExclusionCASAndCrashReopen(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	created, err := s.PutEdgeRoutePolicyCAS(testExclusionPolicy(), 0, "")
+	input := testExclusionPolicy()
+	seedStoreTestIdentity(t, s, input.TenantID, "edge-test", input.AppID)
+	created, err := s.PutEdgeRoutePolicyCAS(input, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestEdgeRoutePolicyExclusionCASAndCrashReopen(t *testing.T) {
 		t.Fatalf("CAS wins = %d, want 1", wins.Load())
 	}
 
-	reopened := New(path)
+	reopened := newStoreTestDatabase(t, path)
 	if err := reopened.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -77,13 +77,6 @@ func TestEdgeRoutePolicyExclusionCASAndCrashReopen(t *testing.T) {
 	if stored.ExclusionGeneration != 2 || stored.ExclusionFence == created.ExclusionFence || stored.ExclusionReason != "concurrent update" {
 		t.Fatalf("reopened CAS record mismatch: %+v", stored)
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(raw), "exclusion_lifecycle") || strings.Contains(string(raw), "exclusion_evidence_fresh") {
-		t.Fatalf("derived lifecycle/evidence became authoritative file state: %s", raw)
-	}
 	if _, err := reopened.DeleteEdgeRoutePolicyCAS(stored.Hostname, created.ExclusionGeneration, created.ExclusionFence); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale delete = %v, want conflict", err)
 	}
@@ -93,7 +86,7 @@ func TestEdgeRoutePolicyExclusionCASAndCrashReopen(t *testing.T) {
 }
 
 func TestEdgeRoutePolicyExclusionCASRejectsUnsealedOwnerMaterial(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +138,8 @@ func TestEdgeExclusionClearMaterialRequiresEnforcedAuthorityAndNoConflict(t *tes
 }
 
 func TestLegacyEdgeRoutePolicyExclusionMigratesToHold(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -155,11 +148,31 @@ func TestLegacyEdgeRoutePolicyExclusionMigratesToHold(t *testing.T) {
 	legacy.ExclusionCreatedAt = nil
 	legacy.ExclusionGeneration = 0
 	legacy.ExclusionFence = ""
-	if _, err := s.PutEdgeRoutePolicy(legacy); err != nil {
+	seedStoreTestIdentity(t, s, legacy.TenantID, "edge-test", legacy.AppID)
+	// Simulate data from before PostgreSQL started rejecting unfenced
+	// exclusions, then rerun the real schema migration against it.
+	tx, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(t.Context(), `ALTER TABLE fugue_edge_route_policies DISABLE TRIGGER fugue_edge_route_policy_exclusion_cas_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(t.Context(), `INSERT INTO fugue_edge_route_policies
+		(id,hostname,tenant_id,app_id,excluded_edge_ids,route_policy,enabled,created_at,updated_at)
+		VALUES ('legacy',$1,$2,$3,'["edge-de-1"]',$4,true,now(),now())`,
+		legacy.Hostname, legacy.TenantID, legacy.AppID, legacy.RoutePolicy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(t.Context(), postgresSchemaBatch()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 
-	reopened := New(path)
+	reopened := newStoreTestDatabase(t, path)
 	if err := reopened.Init(); err != nil {
 		t.Fatal(err)
 	}

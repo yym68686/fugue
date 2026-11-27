@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
-	"fugue/internal/store"
 )
 
 func TestCompletedBuilderRegistersSharedRuntimeImageOnActualNode(t *testing.T) {
@@ -21,7 +19,7 @@ func TestCompletedBuilderRegistersSharedRuntimeImageOnActualNode(t *testing.T) {
 	for _, scenario := range []string{"complete", "failed-pod", "old-job-pod", "wrong-owner", "ambiguous-node", "remote-push", "read-failed", "incomplete-graph"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

@@ -14,7 +14,6 @@ import (
 	"fugue/internal/edgequality"
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
-	"fugue/internal/store"
 )
 
 func clientReportFixture(t *testing.T, server *Server) model.EdgeClientProbeReport {
@@ -41,7 +40,7 @@ func clientReportFixture(t *testing.T, server *Server) model.EdgeClientProbeRepo
 }
 
 func TestClientProbeReportAuthenticatesCompleteRoundAndKeepsLegacyCollectionSeparate(t *testing.T) {
-	state := store.New(t.TempDir() + "/state.json")
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

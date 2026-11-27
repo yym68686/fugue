@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,13 +16,14 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestRecordImportedDistributedImageStrictVerifiesExactDestinationCacheGraph(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestRecordImportedDistributedImageStrictRejectsIncompleteDestinationCacheGr
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			stateStore := newStoreTestDatabase(t, "")
 			if err := stateStore.Init(); err != nil {
 				t.Fatalf("init store: %v", err)
 			}
@@ -145,7 +145,7 @@ func TestRecordImportedDistributedImageStrictRejectsIncompleteDestinationCacheGr
 func TestHandleClaimedOperationFailsDeployWhenManagedImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestHandleClaimedOperationFailsDeployWhenManagedImageIsMissingFromRegistry(
 }
 
 func TestMissingImageRebuildUsesFailureBackoff(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestMissingImageRebuildUsesFailureBackoff(t *testing.T) {
 }
 
 func TestBackgroundReconcileQueuesSingleMissingImageRebuild(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestBackgroundReconcileQueuesSingleMissingImageRebuild(t *testing.T) {
 }
 
 func TestMissingInternalImageDoesNotQueueUnrebuildableImport(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +382,7 @@ func TestMissingInternalImageDoesNotQueueUnrebuildableImport(t *testing.T) {
 func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestHandleClaimedOperationFailsDeployWhenRuntimeImageIsMissingFromRegistry(
 func TestHandleClaimedOperationFailsMigrateWhenManagedImageIsMissingFromRegistry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -624,7 +624,9 @@ func TestEnsureManagedDeployImageReadyInspectsPullBaseRuntimeViaPushBase(t *test
 func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMiss(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -687,7 +689,9 @@ func TestEnsureManagedDeployImageReadyDoesNotInspectPullBaseAliasAfterPushRefMis
 func TestEnsureManagedDeployImageReadyAllowsRuntimeDigestWhenManagedSourceTagIsStale(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -832,7 +836,9 @@ func TestManagedReconcileImageGuardChecksChangedRelease(t *testing.T) {
 func TestDeployImageRefAvailableUsesLocationEvidenceWhenNodeLocalBuilderRegistryEnabled(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -881,7 +887,7 @@ func TestDeployImageRefAvailableUsesLocationEvidenceWhenNodeLocalBuilderRegistry
 func TestStrictDistributedDeploySchedulesTargetReplicaInsteadOfRegistryFallback(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -970,7 +976,7 @@ func TestStrictDistributedDeploySchedulesTargetReplicaInsteadOfRegistryFallback(
 func TestStrictDistributedDeployUsesTargetLocationWhenReplicaLeaseExpired(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1091,7 +1097,7 @@ func TestStrictDistributedDeployUsesTargetLocationWhenReplicaLeaseExpired(t *tes
 func TestStrictDistributedDeployReportsStaleInventoryInsteadOfRebuildWhenLocationExists(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1185,7 +1191,7 @@ func TestStrictDistributedDeployReportsStaleInventoryInsteadOfRebuildWhenLocatio
 func TestImageReplicaPolicyRestoresLostImageWhenLocationEvidenceExists(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1251,7 +1257,7 @@ func TestImageReplicaPolicyRestoresLostImageWhenLocationEvidenceExists(t *testin
 func TestStrictDistributedDeployPinnedManagedSharedTargetUsesClusterNode(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1336,7 +1342,7 @@ func TestStrictDistributedDeployPinnedManagedSharedTargetUsesClusterNode(t *test
 func TestStrictDistributedDeployAllowsAbstractManagedSharedTargetWithHealthyReplica(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1422,7 +1428,7 @@ func TestStrictDistributedDeployAllowsAbstractManagedSharedTargetWithHealthyRepl
 func TestStrictDistributedDeployWithoutImageIndexDoesNotInspectRegistry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1463,7 +1469,7 @@ func TestStrictDistributedDeployWithoutImageIndexDoesNotInspectRegistry(t *testi
 func TestStrictDistributedDeployUsesLegacyLocationEvidenceWithoutRegistryFallback(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1521,7 +1527,7 @@ func TestStrictDistributedDeployUsesLegacyLocationEvidenceWithoutRegistryFallbac
 func TestStrictDistributedDeployIgnoresExpiredLegacyLocationEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1576,7 +1582,7 @@ func TestStrictDistributedDeployIgnoresExpiredLegacyLocationEvidence(t *testing.
 func TestScheduleImageHydrationSkipsLegacyUpdaterWithoutWarning(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1628,7 +1634,7 @@ func TestScheduleImageHydrationSkipsLegacyUpdaterWithoutWarning(t *testing.T) {
 func TestScheduleImageHydrationCreatesTaskForCapableUpdater(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1679,7 +1685,7 @@ func TestScheduleImageHydrationCreatesTaskForCapableUpdater(t *testing.T) {
 func TestScheduleImageHydrationSkipsFilesystemPressureTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1740,8 +1746,8 @@ func TestScheduleImageHydrationSkipsFilesystemPressureTarget(t *testing.T) {
 func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1805,8 +1811,8 @@ func TestScheduleImageHydrationSkipsRecentlyMissingImageLocation(t *testing.T) {
 func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1852,7 +1858,13 @@ func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert old missing image location: %v", err)
 	}
-	ageImageLocationInStoreFile(t, storePath, location.ID, seenAt)
+	result, err := openStoreTestSQL(t, storePath).Exec(`UPDATE fugue_image_locations SET updated_at = $2 WHERE id = $1`, location.ID, seenAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("age image location: updated %d records: %v", n, err)
+	}
 
 	svc.scheduleImageHydration(context.Background(), app, deployImageTarget{RuntimeID: updater.RuntimeID, ClusterNodeName: updater.ClusterNodeName}, imageRef)
 
@@ -1868,37 +1880,10 @@ func TestScheduleImageHydrationRetriesOldMissingImageLocation(t *testing.T) {
 	}
 }
 
-func ageImageLocationInStoreFile(t *testing.T, storePath, locationID string, updatedAt time.Time) {
-	t.Helper()
-
-	raw, err := os.ReadFile(storePath)
-	if err != nil {
-		t.Fatalf("read store: %v", err)
-	}
-	var state model.State
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode store: %v", err)
-	}
-	for i := range state.ImageLocations {
-		if state.ImageLocations[i].ID == locationID {
-			state.ImageLocations[i].UpdatedAt = updatedAt
-			encoded, err := json.MarshalIndent(state, "", "  ")
-			if err != nil {
-				t.Fatalf("encode store: %v", err)
-			}
-			if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
-				t.Fatalf("write store: %v", err)
-			}
-			return
-		}
-	}
-	t.Fatalf("image location %s not found", locationID)
-}
-
 func TestScheduleImageHydrationNormalizesLegacyManagedRegistryRef(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

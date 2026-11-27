@@ -3,14 +3,25 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fugue/internal/model"
+	"fugue/internal/platformproducer"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
-
-	"fugue/internal/model"
-	"fugue/internal/platformproducer"
 )
+
+func TestProducerPublicationLedgerPostgres(t *testing.T) {
+	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
+	if address == "" {
+		t.Skip("disposable PostgreSQL not configured")
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
+		t.Fatal("requires disposable loopback database")
+	}
+	testProducerPublicationLedger(t, address)
+}
 
 func testProducerPublicationLedger(t *testing.T, address string) {
 	f := activationFixture(t, address)
@@ -37,19 +48,13 @@ func testProducerPublicationLedger(t *testing.T, address string) {
 	}
 	full.ReleasedByType, full.ReleasedByID = model.ActorTypeBootstrap, platformproducer.Actor
 	full.Status = model.PlatformArtifactReleaseStatusSuperseded
-	if f.s.db != nil {
-		raw, _ := json.Marshal(parent.Metadata)
-		_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET metadata_json=$2::jsonb WHERE id=$1`, parent.ID, raw)
-		if err == nil {
-			_, err = f.s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_by_type=$2,released_by_id=$3,status=$4 WHERE id=$1`, full.ID, full.ReleasedByType, full.ReleasedByID, full.Status)
-		}
-	} else {
-		err = f.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, parent.ID)] = parent
-			state.PlatformArtifactReleases[platformArtifactReleaseIndex(state.PlatformArtifactReleases, full.ID)] = full
-			return nil
-		})
+
+	raw, _ := json.Marshal(parent.Metadata)
+	_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET metadata_json=$2::jsonb WHERE id=$1`, parent.ID, raw)
+	if err == nil {
+		_, err = f.s.db.Exec(`UPDATE fugue_platform_artifact_releases SET released_by_type=$2,released_by_id=$3,status=$4 WHERE id=$1`, full.ID, full.ReleasedByType, full.ReleasedByID, full.Status)
 	}
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,29 +66,16 @@ func testProducerPublicationLedger(t *testing.T, address string) {
 		if err != nil || done != query.want {
 			t.Fatal("durable bound differs", query, done, err)
 		}
-		if f.s.db != nil {
-			tx, err := f.s.db.BeginTx(context.Background(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			done, err = pgHasVerifiedProducerPublication(context.Background(), tx, query.scope, query.policy)
-			tx.Rollback()
-			if err != nil || done != query.want {
-				t.Fatal("transaction bound differs", done, err)
-			}
-		}
-	}
-}
 
-func TestProducerPublicationLedger(t *testing.T) { testProducerPublicationLedger(t, "") }
-func TestProducerPublicationLedgerPostgres(t *testing.T) {
-	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("disposable PostgreSQL not configured")
+		tx, err := f.s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done, err = pgHasVerifiedProducerPublication(context.Background(), tx, query.scope, query.policy)
+		tx.Rollback()
+		if err != nil || done != query.want {
+			t.Fatal("transaction bound differs", done, err)
+		}
+
 	}
-	u, err := url.Parse(address)
-	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
-		t.Fatal("requires disposable loopback database")
-	}
-	testProducerPublicationLedger(t, address)
 }

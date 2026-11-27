@@ -45,7 +45,7 @@ func TestAutomationShadowLoopCreatesOneTrustedIntentAcrossLeaderReplay(t *testin
 		ClickHouseDSN: "http://clickhouse.example.test",
 	}.Normalize()
 
-	now := time.Date(2026, 7, 29, 3, 10, 7, 987654321, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second).Add(987654321 * time.Nanosecond)
 	var queryCount int
 	fixture.server.automationRequestOutcomeQuery = func(
 		_ context.Context,
@@ -257,7 +257,7 @@ func TestAutomationShadowLoopContinuesAfterPolicyQueryError(t *testing.T) {
 
 	summary, _, err := fixture.server.runAutomationShadowLoopOnce(
 		context.Background(),
-		time.Date(2026, 7, 29, 3, 20, 7, 0, time.UTC),
+		time.Now().UTC(),
 		automationShadowLoopCursor{},
 	)
 	if err == nil || summary.Errors != 1 {

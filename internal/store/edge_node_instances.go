@@ -1,8 +1,6 @@
 package store
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -28,31 +26,7 @@ func (s *Store) PutEdgeActiveEpoch(model.EdgeActiveEpoch) (model.EdgeActiveEpoch
 
 func (s *Store) ListEdgeNodeInstances(edgeGroupID string) ([]model.EdgeNodeInstance, []model.EdgeActiveEpoch, error) {
 	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
-	if s.usingDatabase() {
-		return s.pgListEdgeNodeInstances(edgeGroupID)
-	}
-	var instances []model.EdgeNodeInstance
-	var epochs []model.EdgeActiveEpoch
-	err := s.withLockedState(false, func(state *model.State) error {
-		if err := verifyEdgeInstanceState(state); err != nil {
-			return err
-		}
-		for _, instance := range state.EdgeNodeInstances {
-			if edgeGroupID == "" || instance.EdgeGroupID == edgeGroupID {
-				instance.Node = redactEdgeNode(instance.Node)
-				instances = append(instances, instance)
-			}
-		}
-		for _, epoch := range state.EdgeActiveEpochs {
-			if edgeGroupID == "" || epoch.EdgeGroupID == edgeGroupID {
-				epochs = append(epochs, epoch)
-			}
-		}
-		sortEdgeNodeInstances(instances)
-		sort.Slice(epochs, func(i, j int) bool { return epochs[i].EdgeGroupID < epochs[j].EdgeGroupID })
-		return nil
-	})
-	return instances, epochs, err
+	return s.pgListEdgeNodeInstances(edgeGroupID)
 }
 
 func (s *Store) GetLatestEdgeNodeInstance(edgeID string) (model.EdgeNodeInstance, error) {
@@ -96,124 +70,17 @@ func (s *Store) updateEdgeInstanceHeartbeatAt(instance model.EdgeNodeInstance, n
 	if now.IsZero() {
 		return model.EdgeNodeInstance{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateEdgeInstanceHeartbeatAt(instance, now)
-	}
-	var out model.EdgeNodeInstance
-	err = s.withLockedState(true, func(state *model.State) error {
-		if strings.TrimSpace(state.EdgeInstanceFencingSchema) != model.EdgeInstanceFencingSchemaV1 {
-			return ErrEdgeInstanceFencingNotReady
-		}
-		controlIndex := findEdgeNode(state, instance.EdgeID)
-		if controlIndex < 0 || normalizeEdgeGroupID(state.EdgeNodes[controlIndex].EdgeGroupID) != instance.EdgeGroupID {
-			return fmt.Errorf("%w: edge instance has no exact control identity", ErrEdgeInstanceFencingNotReady)
-		}
-		index := findEdgeNodeInstance(state.EdgeNodeInstances, instance)
-		if index >= 0 {
-			applyEdgeInstanceHealthTransition(&instance, state.EdgeNodeInstances[index], now)
-			instance.CreatedAt = state.EdgeNodeInstances[index].CreatedAt
-		} else {
-			applyEdgeInstanceHealthTransition(&instance, model.EdgeNodeInstance{}, now)
-			instance.CreatedAt = now
-		}
-		instance.LastHeartbeatAt = now
-		instance.UpdatedAt = now
-		instance.Node.LastSeenAt = edgeInstanceTimePtr(now)
-		instance.Node.LastHeartbeatAt = edgeInstanceTimePtr(now)
-		instance.Node.UpdatedAt = now
-		if instance.Node.CreatedAt.IsZero() {
-			instance.Node.CreatedAt = instance.CreatedAt
-		}
-		if index >= 0 {
-			state.EdgeNodeInstances[index] = instance
-		} else {
-			state.EdgeNodeInstances = append(state.EdgeNodeInstances, instance)
-		}
-		out = instance
-		return nil
-	})
-	return out, err
+	return s.pgUpdateEdgeInstanceHeartbeatAt(instance, now)
 }
 
 // ListActiveEdgeNodes is the only health inventory suitable for route and DNS
 // selection. It never falls back to the legacy edge_nodes heartbeat fields.
 func (s *Store) ListActiveEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error) {
 	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
-	if s.usingDatabase() {
-		return s.pgListRouteEdgeNodes(edgeGroupID)
-	}
-	var nodes []model.EdgeNode
-	var groups []model.EdgeGroup
-	err := s.withLockedState(false, func(state *model.State) error {
-		if err := verifyEdgeActivationReadiness(state); err != nil {
-			return err
-		}
-		activation, err := normalizeStoredEdgeActivation(*state.EdgeActivation)
-		if err != nil {
-			return err
-		}
-		if !edgeActivationUsesInstanceRoutes(activation) {
-			for _, node := range state.EdgeNodes {
-				normalizeEdgeNodeForRead(&node)
-				if edgeGroupID == "" || node.EdgeGroupID == edgeGroupID {
-					nodes = append(nodes, redactEdgeNode(node))
-				}
-			}
-			groups = edgeGroupSummaries(state.EdgeGroups, state.EdgeNodes, edgeGroupID)
-			sortEdgeNodes(nodes)
-			return nil
-		}
-		var aggregateErr error
-		nodes, groups, aggregateErr = aggregateActiveEdgeNodes(state.EdgeNodeInstances, state.EdgeActiveEpochs, state.EdgeGroups, edgeGroupID)
-		return aggregateErr
-	})
-	return nodes, groups, err
+	return s.pgListRouteEdgeNodes(edgeGroupID)
 }
 
-func migrateLegacyEdgeInstancesInState(state *model.State, now time.Time) error {
-	if state == nil {
-		return ErrInvalidInput
-	}
-	schema := strings.TrimSpace(state.EdgeInstanceFencingSchema)
-	if schema == model.EdgeInstanceFencingSchemaV1 {
-		return verifyEdgeInstanceState(state)
-	}
-	if schema != "" || len(state.EdgeNodeInstances) != 0 || len(state.EdgeActiveEpochs) != 0 {
-		return fmt.Errorf("%w: partial file-store edge instance schema", ErrEdgeInstanceFencingNotReady)
-	}
-	now = now.UTC()
-	for index := range state.EdgeNodes {
-		node := state.EdgeNodes[index]
-		normalizeEdgeNodeForRead(&node)
-		if node.ID == "" || node.EdgeGroupID == "" {
-			continue
-		}
-		node.TokenHash = ""
-		instance := model.EdgeNodeInstance{
-			EdgeID:           node.ID,
-			EdgeGroupID:      node.EdgeGroupID,
-			Slot:             edgeLegacyMigrationSlot,
-			InstanceUID:      legacyEdgeInstanceUID(node.ID),
-			ReleaseEpoch:     edgeLegacyMigrationEpoch,
-			Node:             node,
-			EffectiveHealthy: false,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		}
-		if node.LastHeartbeatAt != nil {
-			instance.LastHeartbeatAt = node.LastHeartbeatAt.UTC()
-		}
-		state.EdgeNodeInstances = append(state.EdgeNodeInstances, instance)
-	}
-	state.EdgeInstanceFencingSchema = model.EdgeInstanceFencingSchemaV1
-	return verifyEdgeInstanceMaterialForPhase(state, model.EdgeActivationPhaseLegacyAuthoritative)
-}
-
-func verifyEdgeInstanceState(state *model.State) error {
-	return verifyEdgeInstanceMaterialForPhase(state, model.EdgeActivationPhaseActive)
-}
-
-func verifyEdgeActivationReadiness(state *model.State) error {
+func verifyEdgeActivationReadiness(state *storeProjection) error {
 	if state == nil || state.EdgeActivation == nil {
 		return fmt.Errorf("%w: activation state missing", ErrEdgeInstanceFencingNotReady)
 	}
@@ -230,7 +97,7 @@ func verifyEdgeActivationReadiness(state *model.State) error {
 	return nil
 }
 
-func verifyEdgeInstanceMaterialForPhase(state *model.State, phase string) error {
+func verifyEdgeInstanceMaterialForPhase(state *storeProjection, phase string) error {
 	if state == nil || strings.TrimSpace(state.EdgeInstanceFencingSchema) != model.EdgeInstanceFencingSchemaV1 {
 		return fmt.Errorf("%w: schema marker missing", ErrEdgeInstanceFencingNotReady)
 	}
@@ -530,16 +397,6 @@ func edgeNodeInstanceKey(instance model.EdgeNodeInstance) string {
 	return strings.Join([]string{instance.EdgeID, instance.EdgeGroupID, instance.Slot, instance.InstanceUID, instance.ReleaseEpoch}, "\x00")
 }
 
-func findEdgeNodeInstance(instances []model.EdgeNodeInstance, needle model.EdgeNodeInstance) int {
-	key := edgeNodeInstanceKey(needle)
-	for index := range instances {
-		if edgeNodeInstanceKey(instances[index]) == key {
-			return index
-		}
-	}
-	return -1
-}
-
 func findEdgeActiveEpoch(epochs []model.EdgeActiveEpoch, edgeGroupID string) int {
 	for index := range epochs {
 		if normalizeEdgeGroupID(epochs[index].EdgeGroupID) == edgeGroupID {
@@ -547,15 +404,6 @@ func findEdgeActiveEpoch(epochs []model.EdgeActiveEpoch, edgeGroupID string) int
 		}
 	}
 	return -1
-}
-
-func sortEdgeNodeInstances(instances []model.EdgeNodeInstance) {
-	sort.Slice(instances, func(i, j int) bool { return edgeNodeInstanceKey(instances[i]) < edgeNodeInstanceKey(instances[j]) })
-}
-
-func legacyEdgeInstanceUID(edgeID string) string {
-	digest := sha256.Sum256([]byte(normalizeEdgeID(edgeID)))
-	return "legacy-" + hex.EncodeToString(digest[:12])
 }
 
 func edgeInstanceTimePtr(value time.Time) *time.Time {

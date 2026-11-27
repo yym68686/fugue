@@ -12,8 +12,7 @@ policy task. Fresh policy tasks retain their existing maintenance priority.
 Updater upgrades, storage rescue, overdue inventory and deploy-blocking image
 copies keep their higher priorities.
 
-Both PostgreSQL and file-backed stores apply the same policy ordering. This
-changes delivery order only: task claim checks, node execution preflight,
+The policy changes delivery order only: task claim checks, node execution preflight,
 dry-run behavior and signed configuration semantics remain in force. The
 ten-minute threshold is not an execution deadline; higher-priority work or an
 offline updater can still delay execution.

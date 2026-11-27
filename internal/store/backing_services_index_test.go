@@ -35,7 +35,7 @@ func TestHydrateAppBackingServicesWithIndexPreservesBindingsAndDedupesServices(t
 		CreatedAt: now.Add(2 * time.Second),
 	}
 
-	state := &model.State{
+	state := &storeProjection{
 		BackingServices: []model.BackingService{firstService, secondService, deletedService},
 		ServiceBindings: []model.ServiceBinding{
 			{ID: "binding_late", AppID: app.ID, ServiceID: firstService.ID, CreatedAt: now.Add(2 * time.Second)},

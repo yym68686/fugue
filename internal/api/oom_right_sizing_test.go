@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -50,7 +49,7 @@ func TestRecentOOMEventKeysOnlyIncludesRecentOOMKilledContainers(t *testing.T) {
 func TestQueueOOMRightSizingDeployHonorsTenantEnvelopeOnOwnedRuntime(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -124,7 +123,7 @@ func TestOOMExpandedResourceSpecGrowsRequestAndLimitWithoutChangingCPU(t *testin
 func TestQueueOOMRightSizingDeployGrowsAppAndPostgres(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -210,7 +209,7 @@ func TestQueueOOMRightSizingDeployGrowsAppAndPostgres(t *testing.T) {
 func TestQueueOOMRightSizingDeployDeduplicatesEventAcrossServers(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

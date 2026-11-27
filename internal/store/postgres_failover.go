@@ -41,6 +41,13 @@ func managedPostgresReferencedRuntimeIDs(appRuntimeID string, spec model.AppPost
 	return ordered
 }
 
+func appManagedPostgresReferencedRuntimeIDs(spec model.AppSpec) []string {
+	if spec.Postgres == nil {
+		return nil
+	}
+	return managedPostgresReferencedRuntimeIDs(spec.RuntimeID, *spec.Postgres)
+}
+
 func validateManagedPostgresRuntimeSpec(appRuntimeID string, spec model.AppPostgresSpec) error {
 	runtimeID := normalizedManagedPostgresRuntimeID(appRuntimeID, spec)
 	targetRuntimeID := strings.TrimSpace(spec.FailoverTargetRuntimeID)
@@ -49,52 +56,6 @@ func validateManagedPostgresRuntimeSpec(appRuntimeID string, spec model.AppPostg
 	}
 	if runtimeID != "" && targetRuntimeID != "" && runtimeID == targetRuntimeID {
 		return ErrInvalidInput
-	}
-	return nil
-}
-
-func validateManagedPostgresRuntimeState(state *model.State, tenantID, appRuntimeID string, spec *model.AppPostgresSpec) error {
-	if spec == nil {
-		return nil
-	}
-	if err := validateManagedPostgresRuntimeSpec(appRuntimeID, *spec); err != nil {
-		return err
-	}
-
-	for _, runtimeID := range managedPostgresReferencedRuntimeIDs(appRuntimeID, *spec) {
-		if !runtimeVisibleToTenant(state, runtimeID, tenantID) {
-			return ErrNotFound
-		}
-		runtimeIndex := findRuntime(state, runtimeID)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		if err := validateFailoverTargetRuntimeType(state.Runtimes[runtimeIndex].Type); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validateManagedPostgresRuntimeStateForAppOperation(state *model.State, app model.App, tenantID, appRuntimeID string, spec *model.AppPostgresSpec) error {
-	if spec == nil {
-		return nil
-	}
-	if err := validateManagedPostgresRuntimeSpec(appRuntimeID, *spec); err != nil {
-		return err
-	}
-
-	for _, runtimeID := range managedPostgresReferencedRuntimeIDs(appRuntimeID, *spec) {
-		if !runtimeUsableForAppOperation(state, app, runtimeID, tenantID) {
-			return ErrNotFound
-		}
-		runtimeIndex := findRuntime(state, runtimeID)
-		if runtimeIndex < 0 {
-			return ErrNotFound
-		}
-		if err := validateFailoverTargetRuntimeType(state.Runtimes[runtimeIndex].Type); err != nil {
-			return err
-		}
 	}
 	return nil
 }

@@ -2,13 +2,11 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestLegacyDistributedImageManifestForRefsMatchesTaggedDigestReference(t *testing.T) {
@@ -33,7 +31,7 @@ func TestLegacyDistributedImageManifestForRefsMatchesTaggedDigestReference(t *te
 func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -60,7 +58,7 @@ func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t 
 	if err != nil {
 		t.Fatalf("create app: %v", err)
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
 		NodeID:          "machine-1",
 		RuntimeID:       "runtime_managed_shared",
@@ -156,7 +154,7 @@ func TestReconcileLegacyDistributedImageMetadataBackfillsCurrentPhysicalImage(t 
 func TestReconcileLegacyDistributedImageMetadataRepairsLostImageFromFreshPhysicalInventory(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -224,7 +222,7 @@ func TestReconcileLegacyDistributedImageMetadataRepairsLostImageFromFreshPhysica
 		t.Fatalf("create stale replica: %v", err)
 	}
 
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
 		NodeID:          "machine-1",
 		RuntimeID:       "runtime_managed_shared",

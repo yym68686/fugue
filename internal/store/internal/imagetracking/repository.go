@@ -1,7 +1,6 @@
 package imagetracking
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -18,41 +17,7 @@ func (s *Repository) UpsertAppImageTracking(tracking model.AppImageTracking) (mo
 	if tracking.AppID == "" || tracking.ImageRef == "" {
 		return model.AppImageTracking{}, s.invalidInput
 	}
-	if s.postgres {
-		return s.pgUpsertAppImageTracking(tracking)
-	}
-
-	var out model.AppImageTracking
-	err := s.file(true, func(state *Rows) error {
-		app, found := state.LookupApp(tracking.AppID)
-		if !found {
-			return s.notFound
-		}
-		if tracking.TenantID != "" && tracking.TenantID != app.TenantID {
-			return s.notFound
-		}
-		tracking.TenantID = app.TenantID
-
-		now := time.Now().UTC()
-		if index := findAppImageTrackingByApp(state, tracking.AppID); index >= 0 {
-			current := state.Trackings[index]
-			tracking.ID = current.ID
-			tracking.CreatedAt = current.CreatedAt
-			preserveAppImageTrackingObservedFields(&tracking, current)
-			tracking.UpdatedAt = now
-			state.Trackings[index] = tracking
-			out = tracking
-			return nil
-		}
-
-		tracking.ID = model.NewID("imgtrack")
-		tracking.CreatedAt = now
-		tracking.UpdatedAt = now
-		state.Trackings = append(state.Trackings, tracking)
-		out = tracking
-		return nil
-	})
-	return out, err
+	return s.pgUpsertAppImageTracking(tracking)
 }
 
 func (s *Repository) GetAppImageTracking(tenantID string, platformAdmin bool, appID string) (model.AppImageTracking, error) {
@@ -60,48 +25,12 @@ func (s *Repository) GetAppImageTracking(tenantID string, platformAdmin bool, ap
 	if appID == "" {
 		return model.AppImageTracking{}, s.invalidInput
 	}
-	if s.postgres {
-		return s.pgGetAppImageTracking(tenantID, platformAdmin, appID)
-	}
-	var out model.AppImageTracking
-	err := s.file(false, func(state *Rows) error {
-		for _, tracking := range state.Trackings {
-			if !appImageTrackingMatchesFilter(tracking, model.AppImageTrackingFilter{
-				TenantID:      tenantID,
-				PlatformAdmin: platformAdmin,
-				AppID:         appID,
-			}) {
-				continue
-			}
-			out = tracking
-			return nil
-		}
-		return s.notFound
-	})
-	return out, err
+	return s.pgGetAppImageTracking(tenantID, platformAdmin, appID)
 }
 
 func (s *Repository) ListAppImageTrackings(filter model.AppImageTrackingFilter) ([]model.AppImageTracking, error) {
 	filter = normalizeAppImageTrackingFilter(filter)
-	if s.postgres {
-		return s.pgListAppImageTrackings(filter)
-	}
-	out := []model.AppImageTracking{}
-	err := s.file(false, func(state *Rows) error {
-		for _, tracking := range state.Trackings {
-			if appImageTrackingMatchesFilter(tracking, filter) {
-				out = append(out, tracking)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListAppImageTrackings(filter)
 }
 
 func (s *Repository) RecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError string) (model.AppImageTracking, error) {
@@ -110,21 +39,7 @@ func (s *Repository) RecordAppImageTrackingCheck(id, digest, deliveryID, event, 
 		return model.AppImageTracking{}, s.invalidInput
 	}
 	digest = normalizeImageDigest(digest)
-	if s.postgres {
-		return s.pgRecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError)
-	}
-	var out model.AppImageTracking
-	err := s.file(true, func(state *Rows) error {
-		index := findAppImageTrackingByID(state, id)
-		if index < 0 {
-			return s.notFound
-		}
-		now := time.Now().UTC()
-		applyAppImageTrackingCheck(&state.Trackings[index], digest, deliveryID, event, lastError, now)
-		out = state.Trackings[index]
-		return nil
-	})
-	return out, err
+	return s.pgRecordAppImageTrackingCheck(id, digest, deliveryID, event, lastError)
 }
 
 func (s *Repository) RecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event string) (model.AppImageTracking, error) {
@@ -137,21 +52,7 @@ func (s *Repository) RecordAppImageTrackingQueued(id, digest, operationID, deliv
 	if digest == "" || operationID == "" {
 		return model.AppImageTracking{}, s.invalidInput
 	}
-	if s.postgres {
-		return s.pgRecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event)
-	}
-	var out model.AppImageTracking
-	err := s.file(true, func(state *Rows) error {
-		index := findAppImageTrackingByID(state, id)
-		if index < 0 {
-			return s.notFound
-		}
-		now := time.Now().UTC()
-		applyAppImageTrackingQueued(&state.Trackings[index], digest, operationID, deliveryID, event, now)
-		out = state.Trackings[index]
-		return nil
-	})
-	return out, err
+	return s.pgRecordAppImageTrackingQueued(id, digest, operationID, deliveryID, event)
 }
 
 func (s *Repository) CreateAppImageTrackingCheck(check model.AppImageTrackingCheck) (model.AppImageTrackingCheck, error) {
@@ -159,63 +60,12 @@ func (s *Repository) CreateAppImageTrackingCheck(check model.AppImageTrackingChe
 	if check.AppID == "" || check.TrackingID == "" || check.ImageRef == "" || check.Decision == "" {
 		return model.AppImageTrackingCheck{}, s.invalidInput
 	}
-	if s.postgres {
-		return s.pgCreateAppImageTrackingCheck(check)
-	}
-	var out model.AppImageTrackingCheck
-	err := s.file(true, func(state *Rows) error {
-		trackingIndex := findAppImageTrackingByID(state, check.TrackingID)
-		if trackingIndex < 0 {
-			return s.notFound
-		}
-		tracking := state.Trackings[trackingIndex]
-		if check.TenantID != "" && check.TenantID != tracking.TenantID {
-			return s.notFound
-		}
-		if check.AppID != tracking.AppID {
-			return s.notFound
-		}
-		now := time.Now().UTC()
-		check.TenantID = tracking.TenantID
-		if check.ImageRef == "" {
-			check.ImageRef = tracking.ImageRef
-		}
-		if check.ID == "" {
-			check.ID = model.NewID("imgtrackchk")
-		}
-		if check.CheckedAt.IsZero() {
-			check.CheckedAt = now
-		}
-		state.Checks = append(state.Checks, check)
-		state.Checks = retainAppImageTrackingChecks(state.Checks, check.AppID, now)
-		out = check
-		return nil
-	})
-	return out, err
+	return s.pgCreateAppImageTrackingCheck(check)
 }
 
 func (s *Repository) ListAppImageTrackingChecks(filter model.AppImageTrackingCheckFilter) ([]model.AppImageTrackingCheck, error) {
 	filter = normalizeAppImageTrackingCheckFilter(filter)
-	if s.postgres {
-		return s.pgListAppImageTrackingChecks(filter)
-	}
-	out := []model.AppImageTrackingCheck{}
-	err := s.file(false, func(state *Rows) error {
-		for _, check := range state.Checks {
-			if appImageTrackingCheckMatchesFilter(check, filter) {
-				out = append(out, check)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortAppImageTrackingChecksNewestFirst(out)
-	if filter.Limit > 0 && len(out) > filter.Limit {
-		out = out[:filter.Limit]
-	}
-	return out, nil
+	return s.pgListAppImageTrackingChecks(filter)
 }
 
 func (s *Repository) QueueAppImageTrackingImport(app model.App, tracking model.AppImageTracking, requestedByType, requestedByID string) (model.Operation, error) {
@@ -440,140 +290,5 @@ func preserveAppImageTrackingObservedFields(next *model.AppImageTracking, curren
 	}
 	if next.LastTriggeredAt == nil {
 		next.LastTriggeredAt = current.LastTriggeredAt
-	}
-}
-
-func findAppImageTrackingByApp(state *Rows, appID string) int {
-	for idx, existing := range state.Trackings {
-		if strings.TrimSpace(existing.AppID) == appID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findAppImageTrackingByID(state *Rows, id string) int {
-	for idx, existing := range state.Trackings {
-		if strings.TrimSpace(existing.ID) == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func appImageTrackingMatchesFilter(tracking model.AppImageTracking, filter model.AppImageTrackingFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(tracking.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(tracking.AppID) != filter.AppID {
-		return false
-	}
-	if filter.ImageRef != "" && strings.TrimSpace(tracking.ImageRef) != filter.ImageRef {
-		return false
-	}
-	if filter.Enabled != nil && tracking.Enabled != *filter.Enabled {
-		return false
-	}
-	return true
-}
-
-func appImageTrackingCheckMatchesFilter(check model.AppImageTrackingCheck, filter model.AppImageTrackingCheckFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(check.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(check.AppID) != filter.AppID {
-		return false
-	}
-	if filter.TrackingID != "" && strings.TrimSpace(check.TrackingID) != filter.TrackingID {
-		return false
-	}
-	return true
-}
-
-func sortAppImageTrackingChecksNewestFirst(checks []model.AppImageTrackingCheck) {
-	sort.Slice(checks, func(i, j int) bool {
-		left := checks[i].CheckedAt
-		right := checks[j].CheckedAt
-		if !left.Equal(right) {
-			return left.After(right)
-		}
-		return strings.Compare(checks[i].ID, checks[j].ID) > 0
-	})
-}
-
-func retainAppImageTrackingChecks(checks []model.AppImageTrackingCheck, appID string, now time.Time) []model.AppImageTrackingCheck {
-	appID = strings.TrimSpace(appID)
-	if appID == "" {
-		return checks
-	}
-	cutoff := now.UTC().Add(-appImageTrackingCheckRetentionWindow)
-	out := checks[:0]
-	appChecks := []model.AppImageTrackingCheck{}
-	for _, check := range checks {
-		if strings.TrimSpace(check.AppID) != appID {
-			out = append(out, check)
-			continue
-		}
-		if !check.CheckedAt.IsZero() && check.CheckedAt.Before(cutoff) {
-			continue
-		}
-		appChecks = append(appChecks, check)
-	}
-	sortAppImageTrackingChecksNewestFirst(appChecks)
-	if len(appChecks) > appImageTrackingCheckRetentionLimit {
-		appChecks = appChecks[:appImageTrackingCheckRetentionLimit]
-	}
-	out = append(out, appChecks...)
-	return out
-}
-
-func applyAppImageTrackingCheck(tracking *model.AppImageTracking, digest, deliveryID, event, lastError string, now time.Time) {
-	if digest != "" {
-		tracking.LastSeenDigest = digest
-	}
-	tracking.LastDeliveryID = strings.TrimSpace(deliveryID)
-	tracking.LastEvent = strings.TrimSpace(event)
-	tracking.LastError = strings.TrimSpace(lastError)
-	tracking.LastCheckedAt = &now
-	tracking.UpdatedAt = now
-}
-
-func applyAppImageTrackingQueued(tracking *model.AppImageTracking, digest, operationID, deliveryID, event string, now time.Time) {
-	tracking.LastSeenDigest = digest
-	tracking.LastQueuedDigest = digest
-	tracking.LastOperationID = operationID
-	tracking.LastDeliveryID = strings.TrimSpace(deliveryID)
-	tracking.LastEvent = strings.TrimSpace(event)
-	tracking.LastError = ""
-	tracking.LastCheckedAt = &now
-	tracking.LastTriggeredAt = &now
-	tracking.UpdatedAt = now
-}
-
-func RecordDeployment(state *Rows, op model.Operation, now time.Time) {
-	if op.Type != model.OperationTypeDeploy || op.DesiredSource == nil {
-		return
-	}
-	imageRef := strings.TrimSpace(op.DesiredSource.ImageRef)
-	digest := model.ImageDigestFromReference(op.DesiredSource.ResolvedImageRef)
-	if digest == "" && op.DesiredSpec != nil {
-		digest = model.ImageDigestFromReference(op.DesiredSpec.Image)
-	}
-	for idx := range state.Trackings {
-		tracking := &state.Trackings[idx]
-		if strings.TrimSpace(tracking.AppID) != op.AppID {
-			continue
-		}
-		if strings.TrimSpace(op.DesiredSource.Type) != model.AppSourceTypeDockerImage ||
-			strings.TrimSpace(tracking.ImageRef) != imageRef ||
-			imageRef == "" ||
-			digest == "" {
-			tracking.LastDeployedDigest = ""
-		} else {
-			tracking.LastDeployedDigest = digest
-		}
-		tracking.LastOperationID = op.ID
-		tracking.LastError = ""
-		tracking.UpdatedAt = now
 	}
 }

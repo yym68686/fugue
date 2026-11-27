@@ -20,6 +20,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/sshcontrol"
 	"fugue/internal/store"
+
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/flowcontrol"
@@ -62,7 +63,7 @@ func run(ctx context.Context, namespace, runtimeFile, signingFile, identityFile,
 	if databaseURL == "" || namespace == "" || runtimeFile == "" || signingFile == "" || identityFile == "" {
 		return fmt.Errorf("database, namespace, runtime config, identity keyring, and signing keyring are required")
 	}
-	stateStore := store.New("", databaseURL)
+	stateStore := store.New(databaseURL)
 	if err := stateStore.Init(); err != nil {
 		return fmt.Errorf("managed SSH store initialization failed")
 	}

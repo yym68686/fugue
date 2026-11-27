@@ -499,7 +499,7 @@ func (s *Store) pgReleasePlatformArtifactInTransaction(ctx context.Context, tx *
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
-	var promotionSnapshot *model.State
+	var promotionSnapshot *storeProjection
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
 		trace.advance("promotion-snapshot")
 		promotionSnapshot, err = s.pgFullReleaseSetSnapshot(ctx, tx, artifact)
@@ -749,7 +749,7 @@ func (s *Store) pgRollbackPlatformArtifactInTransaction(ctx context.Context, tx 
 	if lkg != nil {
 		pinnedRollbackGeneration = lkg.Generation
 	}
-	var admissionSnapshot *model.State
+	var admissionSnapshot *storeProjection
 	if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel != model.PlatformArtifactReleaseChannelShadow {
 		trace.advance("recovery-snapshot")
 		admissionSnapshot, err = s.pgRollbackReleaseSetSnapshot(ctx, tx, target, channel, now, lkg, guard)
@@ -1009,7 +1009,7 @@ func (s *Store) pgVerifyPlatformArtifactReleaseLKGInTransaction(ctx context.Cont
 	}
 	now := time.Now().UTC()
 	var memberSnapshots []model.PlatformLKGSnapshot
-	var recoveryState *model.State
+	var recoveryState *storeProjection
 	if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet {
 		trace.advance("verification-snapshot")
 		state, err := s.pgFullReleaseSetSnapshot(ctx, tx, artifact)

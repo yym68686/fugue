@@ -5,9 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"math"
 	"reflect"
-	"sort"
 	"strings"
 	"time"
 
@@ -62,86 +60,7 @@ func (s *Store) CreateAutomationActionDispatch(
 		)
 	}
 	normalized.Status = expectedStatus
-	if s.usingDatabase() {
-		return s.pgCreateAutomationActionDispatch(normalized)
-	}
-
-	var (
-		out     model.AutomationActionDispatch
-		created bool
-	)
-	err = s.withLockedState(true, func(state *model.State) error {
-		intent, err := findAutomationActionIntentInState(state, normalized.IntentID)
-		if err != nil {
-			return err
-		}
-		if err := validateAutomationActionDispatchIntent(intent, normalized); err != nil {
-			return err
-		}
-
-		for _, existing := range state.AutomationActionDispatches {
-			if existing.IntentID != normalized.IntentID &&
-				existing.IdempotencyKey != normalized.IdempotencyKey {
-				continue
-			}
-			existing, err = normalizePersistedAutomationActionDispatch(existing)
-			if err != nil {
-				return err
-			}
-			// The immutable intent is the exactly-once boundary. A replay can
-			// evaluate the same intent at a slightly different wall-clock
-			// instant (the safety decision carries generated/expiry times);
-			// the first durable decision therefore wins.
-			if existing.IntentID == normalized.IntentID {
-				out = cloneAutomationActionDispatch(existing)
-				return nil
-			}
-			if !automationActionDispatchEquivalent(existing, normalized) {
-				return ErrIdempotencyMismatch
-			}
-			out = cloneAutomationActionDispatch(existing)
-			return nil
-		}
-
-		now := time.Now().UTC().Truncate(time.Microsecond)
-		normalized.ID = strings.TrimSpace(normalized.ID)
-		if normalized.ID == "" {
-			normalized.ID = model.NewID("automation_dispatch")
-		}
-		for _, existing := range state.AutomationActionDispatches {
-			if existing.ID == normalized.ID {
-				return ErrConflict
-			}
-		}
-		token, err := nextAutomationActionFencingTokenLocked(
-			state,
-			automationActionDispatchSubjectKey(normalized),
-			now,
-		)
-		if err != nil {
-			return err
-		}
-		normalized.FencingToken = token
-		normalized.Version = 1
-		normalized.CreatedAt = now
-		normalized.UpdatedAt = now
-		if normalized.Status == "" {
-			normalized.Status = automationActionDispatchInitialStatus(normalized.SafetyDecision)
-		}
-		normalized.WALHash = automationActionDispatchWALHash(normalized)
-		normalized, err = normalizePersistedAutomationActionDispatch(normalized)
-		if err != nil {
-			return err
-		}
-		state.AutomationActionDispatches = append(
-			state.AutomationActionDispatches,
-			cloneAutomationActionDispatch(normalized),
-		)
-		out = cloneAutomationActionDispatch(normalized)
-		created = true
-		return nil
-	})
-	return out, created, err
+	return s.pgCreateAutomationActionDispatch(normalized)
 }
 
 func (s *Store) ListAutomationActionDispatches(
@@ -154,29 +73,7 @@ func (s *Store) ListAutomationActionDispatches(
 	if !filter.PlatformAdmin && filter.TenantID == "" {
 		return nil, fmt.Errorf("%w: tenant ID is required", ErrInvalidInput)
 	}
-	if s.usingDatabase() {
-		return s.pgListAutomationActionDispatches(filter)
-	}
-
-	out := make([]model.AutomationActionDispatch, 0)
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, dispatch := range state.AutomationActionDispatches {
-			if !automationActionDispatchVisible(dispatch, filter) {
-				continue
-			}
-			normalized, err := normalizePersistedAutomationActionDispatch(dispatch)
-			if err != nil {
-				return err
-			}
-			out = append(out, cloneAutomationActionDispatch(normalized))
-		}
-		sortAutomationActionDispatches(out)
-		if len(out) > filter.Limit {
-			out = out[:filter.Limit]
-		}
-		return nil
-	})
-	return out, err
+	return s.pgListAutomationActionDispatches(filter)
 }
 
 func (s *Store) GetAutomationActionDispatch(
@@ -189,27 +86,7 @@ func (s *Store) GetAutomationActionDispatch(
 	if id == "" || (!platformAdmin && tenantID == "") {
 		return model.AutomationActionDispatch{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAutomationActionDispatch(id, tenantID, platformAdmin)
-	}
-
-	var out model.AutomationActionDispatch
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, dispatch := range state.AutomationActionDispatches {
-			if dispatch.ID != id ||
-				(!platformAdmin && dispatch.TenantID != tenantID) {
-				continue
-			}
-			normalized, err := normalizePersistedAutomationActionDispatch(dispatch)
-			if err != nil {
-				return err
-			}
-			out = cloneAutomationActionDispatch(normalized)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetAutomationActionDispatch(id, tenantID, platformAdmin)
 }
 
 // GetAutomationActionDispatchByIntent returns the single WAL entry bound to an
@@ -222,25 +99,7 @@ func (s *Store) GetAutomationActionDispatchByIntent(
 	if intentID == "" {
 		return model.AutomationActionDispatch{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAutomationActionDispatchByIntent(intentID)
-	}
-	var out model.AutomationActionDispatch
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, dispatch := range state.AutomationActionDispatches {
-			if dispatch.IntentID != intentID {
-				continue
-			}
-			normalized, err := normalizePersistedAutomationActionDispatch(dispatch)
-			if err != nil {
-				return err
-			}
-			out = cloneAutomationActionDispatch(normalized)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetAutomationActionDispatchByIntent(intentID)
 }
 
 // ClaimAutomationActionDispatch obtains a short lease and advances the
@@ -266,90 +125,7 @@ func (s *Store) ClaimAutomationActionDispatch(
 		now = time.Now().UTC()
 	}
 	now = now.UTC().Truncate(time.Microsecond)
-	if s.usingDatabase() {
-		return s.pgClaimAutomationActionDispatch(id, owner, now, lease)
-	}
-
-	var (
-		out     model.AutomationActionDispatch
-		claimed bool
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := -1
-		for i := range state.AutomationActionDispatches {
-			if state.AutomationActionDispatches[i].ID == id {
-				index = i
-				break
-			}
-		}
-		if index < 0 {
-			return ErrNotFound
-		}
-		dispatch, err := normalizePersistedAutomationActionDispatch(state.AutomationActionDispatches[index])
-		if err != nil {
-			return err
-		}
-		if !dispatch.ExpiresAt.After(now) {
-			dispatch.Status = model.AutomationActionDispatchStatusExpired
-			dispatch.Version++
-			dispatch.UpdatedAt = now
-			dispatch.LastError = "dispatch ttl expired before claim"
-			dispatch.LeaseOwner = ""
-			dispatch.LeaseExpiresAt = nil
-			dispatch.CompletedAt = timePtr(now)
-			dispatch.WALHash = automationActionDispatchWALHash(dispatch)
-			state.AutomationActionDispatches[index] = dispatch
-			return nil
-		}
-		if dispatch.Status != model.AutomationActionDispatchStatusReady &&
-			!(dispatch.Status == model.AutomationActionDispatchStatusClaimed ||
-				dispatch.Status == model.AutomationActionDispatchStatusExecuting) {
-			return nil
-		}
-		if dispatch.CooldownUntil != nil && dispatch.CooldownUntil.After(now) {
-			return nil
-		}
-		if dispatch.Status == model.AutomationActionDispatchStatusClaimed ||
-			dispatch.Status == model.AutomationActionDispatchStatusExecuting {
-			if dispatch.LeaseExpiresAt != nil && dispatch.LeaseExpiresAt.After(now) {
-				return nil
-			}
-		}
-
-		subjectKey := automationActionDispatchSubjectKey(dispatch)
-		currentToken, found := automationActionFencingTokenLocked(state, subjectKey)
-		if !found || currentToken != dispatch.FencingToken {
-			dispatch.Status = model.AutomationActionDispatchStatusHeld
-			dispatch.Version++
-			dispatch.UpdatedAt = now
-			dispatch.LastError = "dispatch fencing token is stale"
-			dispatch.LeaseOwner = ""
-			dispatch.LeaseExpiresAt = nil
-			dispatch.WALHash = automationActionDispatchWALHash(dispatch)
-			state.AutomationActionDispatches[index] = dispatch
-			return nil
-		}
-		token, err := nextAutomationActionFencingTokenLocked(state, subjectKey, now)
-		if err != nil {
-			return err
-		}
-		leaseExpires := now.Add(lease)
-		dispatch.FencingToken = token
-		dispatch.Version++
-		dispatch.Status = model.AutomationActionDispatchStatusClaimed
-		dispatch.LeaseOwner = owner
-		dispatch.LeaseExpiresAt = &leaseExpires
-		dispatch.ClaimedAt = timePtr(now)
-		dispatch.CompletedAt = nil
-		dispatch.UpdatedAt = now
-		dispatch.LastError = ""
-		dispatch.WALHash = automationActionDispatchWALHash(dispatch)
-		state.AutomationActionDispatches[index] = dispatch
-		out = cloneAutomationActionDispatch(dispatch)
-		claimed = true
-		return nil
-	})
-	return out, claimed, err
+	return s.pgClaimAutomationActionDispatch(id, owner, now, lease)
 }
 
 // ValidateAutomationActionDispatchFence is the executor-side stale-writer
@@ -368,39 +144,7 @@ func (s *Store) ValidateAutomationActionDispatchFence(
 		now = time.Now().UTC()
 	}
 	now = now.UTC()
-	if s.usingDatabase() {
-		return s.pgValidateAutomationActionDispatchFence(id, fencingToken, version, now)
-	}
-	return s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.AutomationActionDispatches {
-			if candidate.ID != id {
-				continue
-			}
-			dispatch, err := normalizePersistedAutomationActionDispatch(candidate)
-			if err != nil {
-				return err
-			}
-			if dispatch.FencingToken != fencingToken ||
-				dispatch.Version != version ||
-				(dispatch.Status != model.AutomationActionDispatchStatusClaimed &&
-					dispatch.Status != model.AutomationActionDispatchStatusExecuting) {
-				return ErrConflict
-			}
-			if !dispatch.ExpiresAt.After(now) ||
-				dispatch.LeaseExpiresAt == nil ||
-				!dispatch.LeaseExpiresAt.After(now) {
-				return ErrConflict
-			}
-			for _, fencing := range state.AutomationActionFencing {
-				if fencing.SubjectKey == automationActionDispatchSubjectKey(dispatch) &&
-					fencing.LastToken == fencingToken {
-					return nil
-				}
-			}
-			return ErrConflict
-		}
-		return ErrNotFound
-	})
+	return s.pgValidateAutomationActionDispatchFence(id, fencingToken, version, now)
 }
 
 func normalizeAutomationActionDispatchFilter(
@@ -678,19 +422,6 @@ func ValidateAutomationActionDispatchIntentForReplay(
 	return validateAutomationActionDispatchIntent(intent, dispatch)
 }
 
-func findAutomationActionIntentInState(
-	state *model.State,
-	id string,
-) (model.AutomationActionIntent, error) {
-	for _, intent := range state.AutomationActionIntents {
-		if intent.ID != id {
-			continue
-		}
-		return normalizePersistedAutomationActionIntent(intent)
-	}
-	return model.AutomationActionIntent{}, ErrNotFound
-}
-
 func automationActionDispatchInitialStatus(
 	decision model.ActionSafetyDecision,
 ) string {
@@ -710,48 +441,6 @@ func automationActionDispatchSubjectKey(
 		dispatch.ActionType,
 		dispatch.Subject,
 	}, "\n")
-}
-
-func nextAutomationActionFencingTokenLocked(
-	state *model.State,
-	subjectKey string,
-	now time.Time,
-) (int64, error) {
-	if state == nil || strings.TrimSpace(subjectKey) == "" {
-		return 0, ErrInvalidInput
-	}
-	for index := range state.AutomationActionFencing {
-		if state.AutomationActionFencing[index].SubjectKey != subjectKey {
-			continue
-		}
-		if state.AutomationActionFencing[index].LastToken == math.MaxInt64 {
-			return 0, fmt.Errorf("%w: automation fencing token exhausted", ErrConflict)
-		}
-		state.AutomationActionFencing[index].LastToken++
-		state.AutomationActionFencing[index].UpdatedAt = now
-		return state.AutomationActionFencing[index].LastToken, nil
-	}
-	state.AutomationActionFencing = append(state.AutomationActionFencing, model.AutomationActionFencing{
-		SubjectKey: subjectKey,
-		LastToken:  1,
-		UpdatedAt:  now,
-	})
-	return 1, nil
-}
-
-func automationActionFencingTokenLocked(
-	state *model.State,
-	subjectKey string,
-) (int64, bool) {
-	if state == nil {
-		return 0, false
-	}
-	for _, fencing := range state.AutomationActionFencing {
-		if fencing.SubjectKey == subjectKey {
-			return fencing.LastToken, true
-		}
-	}
-	return 0, false
 }
 
 func automationActionDispatchWALHash(
@@ -854,32 +543,6 @@ func automationActionDispatchEquivalent(
 	return reflect.DeepEqual(existing, candidate)
 }
 
-func automationActionDispatchVisible(
-	dispatch model.AutomationActionDispatch,
-	filter AutomationActionDispatchFilter,
-) bool {
-	if filter.PlatformAdmin {
-		if filter.TenantID != "" && dispatch.TenantID != filter.TenantID {
-			return false
-		}
-	} else if dispatch.TenantID != filter.TenantID {
-		return false
-	}
-	return (filter.ProjectID == "" || dispatch.ProjectID == filter.ProjectID) &&
-		(filter.PolicyID == "" || dispatch.PolicyID == filter.PolicyID) &&
-		(filter.AppID == "" || (dispatch.Scope.Type == model.AutomationScopeApp && dispatch.Scope.ID == filter.AppID)) &&
-		(filter.Status == "" || dispatch.Status == filter.Status)
-}
-
-func sortAutomationActionDispatches(dispatches []model.AutomationActionDispatch) {
-	sort.Slice(dispatches, func(i, j int) bool {
-		if !dispatches[i].CreatedAt.Equal(dispatches[j].CreatedAt) {
-			return dispatches[i].CreatedAt.After(dispatches[j].CreatedAt)
-		}
-		return dispatches[i].ID > dispatches[j].ID
-	})
-}
-
 func cloneAutomationActionDispatch(
 	dispatch model.AutomationActionDispatch,
 ) model.AutomationActionDispatch {
@@ -941,33 +604,6 @@ func cloneIntMap(input map[string]int) map[string]int {
 		output[key] = value
 	}
 	return output
-}
-
-func deleteAutomationActionDispatchesByTenant(
-	dispatches []model.AutomationActionDispatch,
-	tenantID string,
-) []model.AutomationActionDispatch {
-	filtered := dispatches[:0]
-	for _, dispatch := range dispatches {
-		if dispatch.TenantID != tenantID {
-			filtered = append(filtered, dispatch)
-		}
-	}
-	return filtered
-}
-
-func deleteAutomationActionFencingByTenant(
-	fencing []model.AutomationActionFencing,
-	tenantID string,
-) []model.AutomationActionFencing {
-	prefix := strings.TrimSpace(tenantID) + "\n"
-	filtered := fencing[:0]
-	for _, record := range fencing {
-		if !strings.HasPrefix(record.SubjectKey, prefix) {
-			filtered = append(filtered, record)
-		}
-	}
-	return filtered
 }
 
 func timePtr(value time.Time) *time.Time {

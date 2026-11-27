@@ -8,8 +8,8 @@ import (
 )
 
 func TestObservationCheckpointRestartLockAndCanceledWrite(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	a, b := New(path), New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	a, b := newStoreTestDatabase(t, path), newStoreTestDatabase(t, path)
 	ok, err := a.UpdateObservationCheckpoint(t.Context(), "scan", func(raw []byte) ([]byte, error) {
 		if len(raw) != 0 {
 			t.Fatal("unexpected initial value")

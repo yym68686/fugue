@@ -3,19 +3,17 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestPatchAppContinuityQueuesDeploy(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -99,7 +97,7 @@ func TestPatchAppContinuityQueuesDeploy(t *testing.T) {
 func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -180,7 +178,7 @@ func TestPatchAppContinuityZeroDowntimeQueuesDeployWithoutDatabaseFailover(t *te
 func TestPatchAppContinuitySafeZeroDowntimeRequiresPublicFlagForTenant(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -223,7 +221,7 @@ func TestPatchAppContinuitySafeZeroDowntimeRequiresPublicFlagForTenant(t *testin
 func TestPatchAppContinuitySafeZeroDowntimeAllowsPlatformAdminDuringPrivateRollout(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -259,7 +257,7 @@ func TestPatchAppContinuitySafeZeroDowntimeAllowsPlatformAdminDuringPrivateRollo
 func TestPatchAppContinuityReturnsAlreadyCurrent(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -323,7 +321,7 @@ func TestPatchAppContinuityReturnsAlreadyCurrent(t *testing.T) {
 func TestPatchAppContinuityDisableDatabaseFailoverQueuesPendingPlacementRebalance(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -402,7 +400,7 @@ func TestPatchAppContinuityDisableDatabaseFailoverQueuesPendingPlacementRebalanc
 func TestPatchAppContinuityDisableDatabaseFailoverRebalanceNowClearsPendingPlacement(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -471,7 +469,7 @@ func TestPatchAppContinuityDisableDatabaseFailoverRebalanceNowClearsPendingPlace
 func TestPatchAppContinuityEnableDatabaseFailoverRebalanceNowClearsPendingPlacement(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

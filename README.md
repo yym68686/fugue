@@ -252,7 +252,19 @@ make generate-openapi
 
 `make test` already checks OpenAPI generated-artifact drift.
 
-For quick local runs, the binaries fall back to `./data/store.json` when `FUGUE_DATABASE_URL` is unset.
+The API and controller require PostgreSQL. Create a development database and run
+the schema initializer once before starting either process:
+
+```bash
+export FUGUE_DATABASE_URL='postgres://localhost/fugue_dev?sslmode=disable'
+make setup-store
+```
+
+Set the same URL in both terminals. For local workspace blob payloads, set
+`FUGUE_DATA_BLOB_DIR` to use a directory other than `./data/data-blobs`.
+An existing `store.json` is not read or imported. Preserve any data you still
+need from it before upgrading a legacy file-backed installation. Existing blob
+files can stay in place by pointing `FUGUE_DATA_BLOB_DIR` at their directory.
 
 Run the API and controller in separate terminals:
 

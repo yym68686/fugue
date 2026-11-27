@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestDisabledMigrationCutoverRequiresQuiescentTarget(t *testing.T) {
@@ -38,7 +36,7 @@ func TestDisabledMigrationCutoverRequiresQuiescentTarget(t *testing.T) {
 		{name: "stale_generation", violation: "generation_not_observed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -166,13 +164,17 @@ func TestDisabledMigrationCutoverRequiresQuiescentTarget(t *testing.T) {
 
 func migrationImageEvidenceFixture(t *testing.T, strict bool) (*Service, model.App, model.Operation, string) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := stateStore.CreateTenant("migration-image-evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	app := model.App{
-		ID: "app_migration_image", TenantID: "tenant_migration_image",
+		ID: "app_migration_image", TenantID: tenant.ID,
 		Spec: model.AppSpec{Image: "registry.fugue.internal:5000/fugue-apps/demo:v1", Replicas: 1, RuntimeID: "runtime-old"},
 	}
 	op := model.Operation{

@@ -17,9 +17,8 @@ func verifyEdgeSSHAcknowledgementStore(test *testing.T, stateStore *Store) {
 	test.Helper()
 	now := time.Now().UTC()
 	ack := model.EdgeSSHAcknowledgement{EdgeSSHAcknowledgementRequest: model.EdgeSSHAcknowledgementRequest{EdgeID: model.NewID("edge-ssh"), EdgeGroupID: "group-a", InstanceUID: "pod-a", BundleVersion: "bundle-a", RouteDigest: model.SSHRoutesDigest(nil), Persisted: true, LoadedAt: now, Connections: []model.EdgeSSHRouteConnections{}}, Routes: []model.EdgeSSHRoute{}, ObservedAt: now, ExpiresAt: now.Add(time.Minute)}
-	if stateStore.usingDatabase() {
-		defer stateStore.db.Exec(`DELETE FROM fugue_edge_ssh_acknowledgements WHERE edge_id=$1`, ack.EdgeID)
-	}
+	defer stateStore.db.Exec(`DELETE FROM fugue_edge_ssh_acknowledgements WHERE edge_id=$1`, ack.EdgeID)
+
 	if err := stateStore.RecordEdgeSSHAcknowledgement(ack); err != nil {
 		test.Fatal(err)
 	}

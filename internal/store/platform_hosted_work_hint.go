@@ -10,9 +10,7 @@ import (
 // table; a withdrawal may leave only an existing offer. Neither row is
 // proof of project ownership, current selection, or a valid program.
 func (s *Store) HostedPathWakeHint(ctx context.Context) (string, error) {
-	if !s.usingDatabase() {
-		return "", nil
-	}
+
 	var hint string
 	e := s.db.QueryRowContext(ctx, hostedPathWakeSQL).Scan(&hint)
 	if errors.Is(e, sql.ErrNoRows) {

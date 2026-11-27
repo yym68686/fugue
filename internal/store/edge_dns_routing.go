@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -13,61 +12,14 @@ import (
 
 func (s *Store) ListEdgeDNSRoutingDecisions(hostname string) ([]model.EdgeDNSRoutingDecision, error) {
 	hostname = normalizeEdgePerformanceHostname(hostname)
-	if s.usingDatabase() {
-		return s.pgListEdgeDNSRoutingDecisions(hostname)
-	}
-	var decisions []model.EdgeDNSRoutingDecision
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, decision := range state.EdgeDNSRoutingDecisions {
-			if hostname != "" && !strings.EqualFold(normalizeEdgePerformanceHostname(decision.Hostname), hostname) {
-				continue
-			}
-			decisions = append(decisions, decision)
-		}
-		return nil
-	})
-	sortEdgeDNSRoutingDecisions(decisions)
-	return decisions, err
+	return s.pgListEdgeDNSRoutingDecisions(hostname)
 }
 
 func (s *Store) UpsertEdgeDNSRoutingDecisions(decisions []model.EdgeDNSRoutingDecision) error {
 	if len(decisions) == 0 {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertEdgeDNSRoutingDecisions(decisions)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		byKey := make(map[string]int, len(state.EdgeDNSRoutingDecisions))
-		for index, decision := range state.EdgeDNSRoutingDecisions {
-			normalized, ok := normalizeEdgeDNSRoutingDecisionForStore(decision, now)
-			if !ok {
-				continue
-			}
-			state.EdgeDNSRoutingDecisions[index] = normalized
-			byKey[edgeDNSRoutingDecisionKey(normalized.Hostname, normalized.ScopeKey)] = index
-		}
-		for _, decision := range decisions {
-			normalized, ok := normalizeEdgeDNSRoutingDecisionForStore(decision, now)
-			if !ok {
-				continue
-			}
-			key := edgeDNSRoutingDecisionKey(normalized.Hostname, normalized.ScopeKey)
-			if index, exists := byKey[key]; exists {
-				if state.EdgeDNSRoutingDecisions[index].CreatedAt.IsZero() {
-					state.EdgeDNSRoutingDecisions[index].CreatedAt = normalized.CreatedAt
-				}
-				normalized.CreatedAt = state.EdgeDNSRoutingDecisions[index].CreatedAt
-				state.EdgeDNSRoutingDecisions[index] = normalized
-				continue
-			}
-			state.EdgeDNSRoutingDecisions = append(state.EdgeDNSRoutingDecisions, normalized)
-			byKey[key] = len(state.EdgeDNSRoutingDecisions) - 1
-		}
-		sortEdgeDNSRoutingDecisions(state.EdgeDNSRoutingDecisions)
-		return nil
-	})
+	return s.pgUpsertEdgeDNSRoutingDecisions(decisions)
 }
 
 func (s *Store) pgListEdgeDNSRoutingDecisions(hostname string) ([]model.EdgeDNSRoutingDecision, error) {
@@ -209,19 +161,6 @@ func normalizeEdgeDNSRoutingDecisionForStore(decision model.EdgeDNSRoutingDecisi
 		decision.SwitchedAt = decision.UpdatedAt
 	}
 	return decision, true
-}
-
-func edgeDNSRoutingDecisionKey(hostname, scopeKey string) string {
-	return normalizeEdgePerformanceHostname(hostname) + "\x00" + strings.TrimSpace(strings.ToLower(scopeKey))
-}
-
-func sortEdgeDNSRoutingDecisions(decisions []model.EdgeDNSRoutingDecision) {
-	sort.Slice(decisions, func(i, j int) bool {
-		if decisions[i].Hostname != decisions[j].Hostname {
-			return decisions[i].Hostname < decisions[j].Hostname
-		}
-		return decisions[i].ScopeKey < decisions[j].ScopeKey
-	})
 }
 
 func nullTime(value time.Time) any {

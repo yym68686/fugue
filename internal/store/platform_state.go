@@ -14,7 +14,6 @@ import (
 	"fugue/internal/bundleauth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
 )
 
@@ -119,35 +118,7 @@ func (s *Store) CreatePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 	if err != nil {
 		return model.PlatformArtifact{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreatePlatformArtifact(artifact)
-	}
-	err = s.withLockedState(true, func(state *model.State) error {
-		artifact.GenerationSequence = nextPlatformArtifactGenerationSequence(
-			state.PlatformArtifacts,
-			artifact.ArtifactKind,
-			artifact.ScopeKey,
-		)
-		artifact, err = platformsafety.SignPlatformArtifact(artifact, s.platformArtifactSigningKeyring())
-		if err != nil {
-			return err
-		}
-		for _, existing := range state.PlatformArtifacts {
-			if existing.ID == artifact.ID {
-				return ErrConflict
-			}
-		}
-		state.PlatformArtifactContents, err = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
-		if err != nil {
-			return err
-		}
-		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
-		return nil
-	})
-	if err != nil {
-		return model.PlatformArtifact{}, err
-	}
-	return artifact, nil
+	return s.pgCreatePlatformArtifact(artifact)
 }
 
 // EnsurePlatformArtifact creates an immutable generation once and otherwise
@@ -165,62 +136,7 @@ func (s *Store) ensurePlatformArtifact(in model.PlatformArtifact) (model.Platfor
 	if err != nil {
 		return model.PlatformArtifact{}, false, err
 	}
-	if s.usingDatabase() {
-		return s.pgEnsurePlatformArtifact(artifact)
-	}
-
-	created := false
-	err = s.withLockedState(true, func(state *model.State) error {
-		matches := make([]model.PlatformArtifact, 0, 1)
-		for _, existing := range state.PlatformArtifacts {
-			if platformArtifactHasIdentity(existing, artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation) {
-				matches = append(matches, existing)
-			}
-		}
-		switch len(matches) {
-		case 0:
-		case 1:
-			if err := ensurePlatformArtifactEquivalent(matches[0], artifact, s.platformArtifactSigningKeyring()); err != nil {
-				return err
-			}
-			artifact = matches[0]
-			return nil
-		default:
-			return fmt.Errorf("%w: multiple platform artifacts use kind=%s scope=%s generation=%s", ErrConflict, artifact.ArtifactKind, artifact.ScopeKey, artifact.Generation)
-		}
-
-		artifact.GenerationSequence = nextPlatformArtifactGenerationSequence(
-			state.PlatformArtifacts,
-			artifact.ArtifactKind,
-			artifact.ScopeKey,
-		)
-		artifact, err = platformsafety.SignPlatformArtifact(artifact, s.platformArtifactSigningKeyring())
-		if err != nil {
-			return err
-		}
-		for _, existing := range state.PlatformArtifacts {
-			if existing.ID == artifact.ID {
-				return ErrConflict
-			}
-		}
-		state.PlatformArtifactContents, err = upsertPlatformArtifactContent(state.PlatformArtifactContents, buildPlatformArtifactContent(artifact))
-		if err != nil {
-			return err
-		}
-		state.PlatformArtifacts = append(state.PlatformArtifacts, artifact)
-		created = true
-		return nil
-	})
-	if err != nil {
-		return model.PlatformArtifact{}, false, err
-	}
-	return artifact, created, nil
-}
-
-func platformArtifactHasIdentity(artifact model.PlatformArtifact, kind, scopeKey, generation string) bool {
-	return strings.TrimSpace(artifact.ArtifactKind) == strings.TrimSpace(kind) &&
-		strings.TrimSpace(artifact.ScopeKey) == strings.TrimSpace(scopeKey) &&
-		strings.TrimSpace(artifact.Generation) == strings.TrimSpace(generation)
+	return s.pgEnsurePlatformArtifact(artifact)
 }
 
 func (s *Store) GetPlatformArtifactByIdentity(kind, scope, generation string) (model.PlatformArtifact, error) {
@@ -230,25 +146,7 @@ func (s *Store) GetPlatformArtifactByIdentity(kind, scope, generation string) (m
 	if kind == "" || scope == "" || generation == "" {
 		return model.PlatformArtifact{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetPlatformArtifactByIdentity(kind, scope, generation)
-	}
-	var result model.PlatformArtifact
-	err := s.withLockedState(false, func(st *model.State) error {
-		for _, a := range st.PlatformArtifacts {
-			if platformArtifactHasIdentity(a, kind, scope, generation) {
-				if result.ID != "" {
-					return ErrConflict
-				}
-				result = a
-			}
-		}
-		if result.ID == "" {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return result, err
+	return s.pgGetPlatformArtifactByIdentity(kind, scope, generation)
 }
 
 func ensurePlatformArtifactEquivalent(existing, candidate model.PlatformArtifact, keyring bundleauth.Keyring) error {
@@ -296,30 +194,7 @@ func (s *Store) listPlatformArtifacts(filter model.PlatformArtifactFilter, inclu
 	filter.ScopeKey = strings.TrimSpace(strings.ToLower(filter.ScopeKey))
 	filter.Status = strings.TrimSpace(strings.ToLower(filter.Status))
 	filter.Generation = strings.TrimSpace(filter.Generation)
-	if s.usingDatabase() {
-		return s.pgListPlatformArtifactsView(filter, includeContent)
-	}
-	artifacts := []model.PlatformArtifact{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.PlatformArtifacts {
-			if !platformArtifactMatchesFilter(artifact, filter) {
-				continue
-			}
-			if !includeContent {
-				artifact.Content = nil
-			}
-			artifacts = append(artifacts, artifact)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortPlatformArtifacts(artifacts)
-	if filter.Limit > 0 && len(artifacts) > filter.Limit {
-		artifacts = artifacts[:filter.Limit]
-	}
-	return artifacts, nil
+	return s.pgListPlatformArtifactsView(filter, includeContent)
 }
 
 func (s *Store) GetPlatformArtifact(idOrGeneration string) (model.PlatformArtifact, error) {
@@ -334,20 +209,7 @@ func (s *Store) GetPlatformArtifactContext(ctx context.Context, idOrGeneration s
 	if err := ctx.Err(); err != nil {
 		return model.PlatformArtifact{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgGetPlatformArtifact(ctx, idOrGeneration)
-	}
-	var out model.PlatformArtifact
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.PlatformArtifacts {
-			if artifact.ID == idOrGeneration || artifact.Generation == idOrGeneration {
-				out = artifact
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetPlatformArtifact(ctx, idOrGeneration)
 }
 
 func (s *Store) GetPlatformArtifactContent(contentHash string) (model.PlatformArtifactContent, error) {
@@ -355,20 +217,7 @@ func (s *Store) GetPlatformArtifactContent(contentHash string) (model.PlatformAr
 	if contentHash == "" {
 		return model.PlatformArtifactContent{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetPlatformArtifactContent(contentHash)
-	}
-	var out model.PlatformArtifactContent
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, content := range state.PlatformArtifactContents {
-			if content.ContentHash == contentHash {
-				out = content
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetPlatformArtifactContent(contentHash)
 }
 
 func (s *Store) ValidatePlatformArtifact(id string, results []model.PlatformArtifactValidationResult) (model.PlatformArtifact, error) {
@@ -377,27 +226,7 @@ func (s *Store) ValidatePlatformArtifact(id string, results []model.PlatformArti
 		return model.PlatformArtifact{}, ErrInvalidInput
 	}
 	results = normalizePlatformArtifactValidationResults(results)
-	if s.usingDatabase() {
-		return s.pgValidatePlatformArtifact(id, results)
-	}
-	var out model.PlatformArtifact
-	err := s.withLockedState(true, func(state *model.State) error {
-		for index := range state.PlatformArtifacts {
-			if state.PlatformArtifacts[index].ID != id && state.PlatformArtifacts[index].Generation != id {
-				continue
-			}
-			if state.PlatformArtifacts[index].ArtifactKind == model.PlatformArtifactKindHostedPathProposal {
-				return ErrConflict
-			}
-			state.PlatformArtifacts[index].ValidationResults = results
-			state.PlatformArtifacts[index].Status = platformArtifactStatusFromValidation(results)
-			state.PlatformArtifacts[index].UpdatedAt = time.Now().UTC()
-			out = state.PlatformArtifacts[index]
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgValidatePlatformArtifact(id, results)
 }
 
 func (s *Store) ReleasePlatformArtifact(id string, req model.PlatformArtifactReleaseRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
@@ -409,168 +238,7 @@ func (s *Store) releasePlatformArtifact(id string, req model.PlatformArtifactRel
 	if channel == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgReleasePlatformArtifact(id, req, principal, guard)
-	}
-	var artifact model.PlatformArtifact
-	var release model.PlatformArtifactRelease
-	var message model.PlatformReleaseMessage
-	var lkg *model.PlatformLKGSnapshot
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := platformArtifactIndex(state.PlatformArtifacts, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		artifact = state.PlatformArtifacts[index]
-		if (req.ProducerReconfiguration != nil || req.DNSPublicationPrecondition != nil) && artifact.ID != id {
-			return ErrInvalidInput
-		}
-		if err := validateProducerPolicyPublication(artifact, channel); err != nil {
-			return platformReleaseRejected("producer_policy", err)
-		}
-		if err := s.validateInputDeferralPublication(state, artifact, req, principal, time.Now().UTC()); err != nil {
-			return platformReleaseRejected("producer_input_deferral", err)
-		}
-		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return platformReleaseRejected("producer_reconfiguration", err)
-		}
-		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return platformReleaseRejected("dns_precondition", err)
-		}
-		if err := validateProducerReleaseGuard(state, artifact, req, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
-			return platformReleaseRejected("producer_authority", err)
-		}
-		now := time.Now().UTC()
-		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
-		if err != nil {
-			return err
-		}
-		if err := validatePlatformArtifactOverrideAuthorization(
-			overrideMode,
-			req.Reason,
-			req.KernelBreakGlass,
-			artifact,
-			principal,
-			now,
-		); err != nil {
-			return err
-		}
-		laneKey := platformsafety.ReleaseLaneKey(artifact.ArtifactKind, artifact.ScopeKey, channel)
-		if existingRelease, ok := platformReleaseByIdempotencyKey(state.PlatformArtifactReleases, laneKey, req.IdempotencyKey); ok {
-			existingArtifactIndex := platformArtifactIndex(state.PlatformArtifacts, existingRelease.ArtifactID)
-			if existingArtifactIndex < 0 {
-				return ErrNotFound
-			}
-			existingMessage, found := platformReleaseMessageForRelease(state.PlatformReleaseMessages, existingRelease.ID)
-			if !found {
-				return ErrConflict
-			}
-			artifact = state.PlatformArtifacts[existingArtifactIndex]
-			release = existingRelease
-			message = existingMessage
-			return nil
-		}
-		if artifact.Status != model.PlatformArtifactStatusValidated &&
-			overrideMode == model.PlatformArtifactOverrideModeNone {
-			return ErrConflict
-		}
-		lkg = verifiedPlatformLKGSnapshotFromState(
-			state,
-			artifact.ArtifactKind,
-			artifact.ScopeKey,
-			now,
-			s.platformArtifactSigningKeyring(),
-		)
-		pinnedRollbackGeneration := ""
-		if lkg != nil {
-			pinnedRollbackGeneration = lkg.Generation
-		}
-		previousGenerationSequence, err := activePlatformReleaseGenerationSequence(
-			state.PlatformArtifactReleases,
-			state.PlatformArtifacts,
-			artifact.ArtifactKind,
-			artifact.ScopeKey,
-			channel,
-		)
-		if err != nil {
-			return err
-		}
-		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
-			if err := validateTrafficCanary(artifact, req.CanaryRuleRef, state.PlatformArtifacts, s.platformArtifactSigningKeyring()); err != nil {
-				return platformReleaseRejected("canary", err)
-			}
-		}
-		decision := platformsafety.EvaluateArtifactReleaseWithOverride(
-			artifact,
-			channel,
-			pinnedRollbackGeneration,
-			req.CanaryRuleRef,
-			previousGenerationSequence,
-			overrideMode,
-			s.platformArtifactSigningKeyring(),
-		)
-		if !decision.Pass {
-			return platformReleaseRejected("artifact_release_policy", ErrConflict)
-		}
-		if artifact.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelFull {
-			now = time.Now().UTC()
-			if err := validateFullReleaseSetInState(state, artifact, s.platformArtifactSigningKeyring(), now); err != nil {
-				return platformReleaseRejected("serving_convergence", err)
-			}
-		}
-		if err := validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return platformReleaseRejected("capability_admission", err)
-		}
-		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, artifact.ArtifactKind, artifact.ScopeKey, channel, now)
-		if err != nil {
-			return err
-		}
-		entry := buildPlatformArtifactReleaseLedgerEntry(
-			artifact,
-			channel,
-			pinnedRollbackGeneration,
-			req.CanaryRuleRef,
-			req.Reason,
-			req.IdempotencyKey,
-			model.PlatformReleaseMessageTypeRelease,
-			overrideMode,
-			platformKernelBreakGlassExpiry(req.KernelBreakGlass),
-			platformsafety.BypassedInvariantIDs(decision),
-			principal,
-			lane,
-			now,
-		)
-		release = entry.Release
-		expectations, err := producedReleaseExpectations(state, artifact, release, guard, now)
-		if err != nil {
-			return err
-		}
-		state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, expectations...)
-		state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, artifact.ArtifactKind, artifact.ScopeKey, channel, release.ID, now)
-		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-		lane.ActiveReleaseID = release.ID
-		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
-		message = entry.Message
-		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-		if overrideMode != model.PlatformArtifactOverrideModeNone {
-			if err := appendPlatformSafetyOverrideAuditEventToState(
-				state,
-				release,
-				model.PlatformReleaseMessageTypeRelease,
-				s.platformArtifactSigningKeyring(),
-			); err != nil {
-				return err
-			}
-		}
-		if err := validateProducerReconfiguration(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return platformReleaseRejected("producer_reconfiguration", err)
-		}
-		if err := validateDNSPublicationGuard(state, artifact, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			return platformReleaseRejected("dns_precondition", err)
-		}
-		return platformReleaseRejected("capability_admission", validateLeasedTrafficAdmission(state, artifact, channel, req.CanaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC()))
-	})
-	return artifact, release, message, lkg, err
+	return s.pgReleasePlatformArtifact(id, req, principal, guard)
 }
 
 func (s *Store) RollbackPlatformArtifact(id string, req model.PlatformArtifactRollbackRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
@@ -585,159 +253,7 @@ func (s *Store) rollbackPlatformArtifact(id string, req model.PlatformArtifactRo
 	if channel == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRollbackPlatformArtifact(id, req, principal, guard)
-	}
-	var target model.PlatformArtifact
-	var release model.PlatformArtifactRelease
-	var message model.PlatformReleaseMessage
-	var lkg *model.PlatformLKGSnapshot
-	err := s.withLockedState(true, func(state *model.State) error {
-		currentIndex := platformArtifactIndex(state.PlatformArtifacts, id)
-		if currentIndex < 0 {
-			return ErrNotFound
-		}
-		current := state.PlatformArtifacts[currentIndex]
-		targetIndex := platformArtifactGenerationIndex(state.PlatformArtifacts, current.ArtifactKind, current.ScopeKey, strings.TrimSpace(req.ToGeneration))
-		if targetIndex < 0 {
-			return ErrNotFound
-		}
-		target = state.PlatformArtifacts[targetIndex]
-		if guard == nil {
-			if err := rejectUnboundHostedPublication(target, channel); err != nil {
-				return err
-			}
-			if err := rejectUnboundHostedPublication(current, channel); err != nil {
-				return err
-			}
-		}
-		if guard != nil {
-			if target.ID != guard.BaselineArtifactID {
-				return ErrConflict
-			}
-			if err := validateProducerReleaseGuard(state, current, model.PlatformArtifactReleaseRequest{ReleaseChannel: channel}, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
-				return err
-			}
-		}
-
-		if err := validateProducerPolicyPublication(target, channel); err != nil {
-			return err
-		}
-		if current.ScopeKey == platformproducer.InputDeferralScope || target.ScopeKey == platformproducer.InputDeferralScope {
-			return ErrConflict // use an exact terminal release, never reactivate by rollback
-		}
-		now := time.Now().UTC()
-		overrideMode, err := platformArtifactOverrideMode(req.SoftOverride, req.ForcePublish, req.KernelBreakGlass)
-		if err != nil {
-			return err
-		}
-		if err := validatePlatformArtifactOverrideAuthorization(
-			overrideMode,
-			req.Reason,
-			req.KernelBreakGlass,
-			target,
-			principal,
-			now,
-		); err != nil {
-			return err
-		}
-		if target.Status != model.PlatformArtifactStatusValidated &&
-			overrideMode == model.PlatformArtifactOverrideModeNone {
-			return ErrConflict
-		}
-		lkg = verifiedPlatformLKGSnapshotFromState(
-			state,
-			target.ArtifactKind,
-			target.ScopeKey,
-			now,
-			s.platformArtifactSigningKeyring(),
-		)
-		pinnedRollbackGeneration := ""
-		if lkg != nil {
-			pinnedRollbackGeneration = lkg.Generation
-		}
-		canaryRuleRef := strings.TrimSpace(req.CanaryRuleRef)
-		if channel == model.PlatformArtifactReleaseChannelGray && canaryRuleRef == "" {
-			if activeRelease, ok := activePlatformReleaseForScope(state.PlatformArtifactReleases, current.ArtifactKind, current.ScopeKey, channel); ok {
-				canaryRuleRef = activeRelease.CanaryRuleRef
-			}
-		}
-		if target.ArtifactKind == model.PlatformArtifactKindReleaseSet && channel == model.PlatformArtifactReleaseChannelGray {
-			if err := validateTrafficCanary(target, canaryRuleRef, state.PlatformArtifacts, s.platformArtifactSigningKeyring()); err != nil {
-				return err
-			}
-		}
-		decision := platformsafety.EvaluateArtifactRollbackWithOverride(
-			target,
-			channel,
-			pinnedRollbackGeneration,
-			canaryRuleRef,
-			overrideMode,
-			s.platformArtifactSigningKeyring(),
-		)
-		if !decision.Pass {
-			return ErrConflict
-		}
-		if err := validateVerifiedTrafficRecoveryAdmission(state, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard); err != nil {
-			return err
-		}
-		lane, err := nextPlatformReleaseLane(state.PlatformReleaseLanes, target.ArtifactKind, target.ScopeKey, channel, now)
-		if err != nil {
-			return err
-		}
-		entry := buildPlatformArtifactReleaseLedgerEntry(
-			target,
-			channel,
-			pinnedRollbackGeneration,
-			canaryRuleRef,
-			req.Reason,
-			"",
-			model.PlatformReleaseMessageTypeRollback,
-			overrideMode,
-			platformKernelBreakGlassExpiry(req.KernelBreakGlass),
-			platformsafety.BypassedInvariantIDs(decision),
-			principal,
-			lane,
-			now,
-		)
-		release = entry.Release
-		state.PlatformArtifactReleases = supersedePlatformReleases(state.PlatformArtifactReleases, target.ArtifactKind, target.ScopeKey, channel, release.ID, now)
-		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-		lane.ActiveReleaseID = release.ID
-		state.PlatformReleaseLanes = upsertPlatformReleaseLane(state.PlatformReleaseLanes, lane)
-		message = entry.Message
-		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-		if overrideMode != model.PlatformArtifactOverrideModeNone {
-			if err := appendPlatformSafetyOverrideAuditEventToState(
-				state,
-				release,
-				model.PlatformReleaseMessageTypeRollback,
-				s.platformArtifactSigningKeyring(),
-			); err != nil {
-				return err
-			}
-		}
-		if guard != nil {
-			index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, guard.FailedReleaseID)
-			if index < 0 {
-				return ErrConflict
-			}
-			grayLane, _ := platformReleaseLaneByKey(state.PlatformReleaseLanes, platformsafety.ReleaseLaneKey(current.ArtifactKind, current.ScopeKey, model.PlatformArtifactReleaseChannelGray))
-			for i, failed := range state.PlatformArtifactReleases {
-				if failed.ID != guard.FailedReleaseID && !(failed.ID == grayLane.ActiveReleaseID && failed.ArtifactID == current.ID && producerOwnsPublication(failed)) {
-					continue
-				}
-				failed.VerificationState = model.PlatformArtifactVerificationStateFailed
-				failed.VerificationEvidence = map[string]string{"producer_policy_release_id": guard.PolicyReleaseID, "failed_source_digest": current.Metadata[platformproducer.SourceDigestMetadata], "recovered_by_release_id": release.ID}
-				failed.Version++
-				failed.UpdatedAt = now
-				state.PlatformArtifactReleases[i] = failed
-			}
-		}
-
-		return validateVerifiedTrafficRecoveryAdmission(state, target, channel, canaryRuleRef, s.platformArtifactSigningKeyring(), time.Now().UTC(), lkg, guard)
-	})
-	return target, release, message, lkg, err
+	return s.pgRollbackPlatformArtifact(id, req, principal, guard)
 }
 
 func (s *Store) VerifyPlatformArtifactReleaseLKG(releaseID string, req model.PlatformArtifactVerifyLKGRequest, principal model.Principal) (model.PlatformArtifact, model.PlatformArtifactRelease, model.PlatformReleaseMessage, *model.PlatformLKGSnapshot, error) {
@@ -749,102 +265,7 @@ func (s *Store) verifyPlatformArtifactReleaseLKG(releaseID string, req model.Pla
 	if releaseID == "" {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, model.PlatformReleaseMessage{}, nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgVerifyPlatformArtifactReleaseLKG(releaseID, req, principal, guard)
-	}
-	var artifact model.PlatformArtifact
-	var release model.PlatformArtifactRelease
-	var message model.PlatformReleaseMessage
-	var lkg *model.PlatformLKGSnapshot
-	err := s.withLockedState(true, func(state *model.State) error {
-		releaseIndex := platformArtifactReleaseIndex(state.PlatformArtifactReleases, releaseID)
-		if releaseIndex < 0 {
-			return ErrNotFound
-		}
-		release = state.PlatformArtifactReleases[releaseIndex]
-		if release.ArtifactKind == model.PlatformArtifactKindHostedPathProposal || release.Status != model.PlatformArtifactReleaseStatusActive {
-			return ErrConflict
-		}
-		lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, release.LaneKey)
-		if !ok || lane.Frozen || lane.ActiveReleaseID != release.ID || lane.FencingToken != release.FencingToken {
-			return ErrConflict
-		}
-		currentLKG := verifiedPlatformLKGSnapshotFromState(
-			state,
-			release.ArtifactKind,
-			release.ScopeKey,
-			time.Now().UTC(),
-			s.platformArtifactSigningKeyring(),
-		)
-		requestEvidenceHash := platformsafety.VerificationEvidenceHash(req)
-		if release.VerificationState == model.PlatformArtifactVerificationStateVerified {
-			if currentLKG != nil &&
-				currentLKG.Generation == release.Generation &&
-				currentLKG.VerifiedByReleaseID == release.ID &&
-				currentLKG.VerificationEvidenceHash == requestEvidenceHash {
-				artifactIndex := platformArtifactIndex(state.PlatformArtifacts, release.ArtifactID)
-				if artifactIndex < 0 {
-					return ErrNotFound
-				}
-				artifact = state.PlatformArtifacts[artifactIndex]
-				message, _ = platformReleaseMessageForRelease(state.PlatformReleaseMessages, release.ID)
-				lkg = currentLKG
-				return nil
-			}
-			return ErrConflict
-		}
-		artifactIndex := platformArtifactIndex(state.PlatformArtifacts, release.ArtifactID)
-		if artifactIndex < 0 {
-			return ErrNotFound
-		}
-		artifact = state.PlatformArtifacts[artifactIndex]
-		if err := validateProducerReleaseGuard(state, artifact, model.PlatformArtifactReleaseRequest{ReleaseChannel: release.ReleaseChannel}, principal, s.platformArtifactSigningKeyring(), guard); err != nil {
-			return err
-		}
-
-		if decision := platformsafety.EvaluateArtifactIntegrity(artifact, s.platformArtifactSigningKeyring()); !decision.Pass {
-			return ErrConflict
-		}
-		if decision := platformsafety.EvaluateLKGPromotion(release, req, currentLKG != nil); !decision.Pass {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		members, err := trafficLKGMembers(state, artifact, release, s.platformArtifactSigningKeyring(), now)
-		if err != nil {
-			return err
-		}
-		memberSnapshots, err := buildTrafficMemberLKGs(members, release.ID, requestEvidenceHash, now, s.platformArtifactSigningKeyring())
-		if err != nil {
-			return err
-		}
-		snapshot, err := buildPlatformLKGSnapshot(
-			artifact,
-			release.ID,
-			requestEvidenceHash,
-			now,
-			s.platformArtifactSigningKeyring(),
-		)
-		if err != nil {
-			return err
-		}
-		state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, snapshot)
-		for _, member := range memberSnapshots {
-			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, member)
-		}
-		lkg = &snapshot
-		release.VerificationState = model.PlatformArtifactVerificationStateVerified
-		release.VerificationEvidence = platformsafety.VerificationEvidenceMap(req)
-		release.VerifiedLKGGeneration = artifact.Generation
-		release.ServingUnverifiedGeneration = ""
-		release.VerifiedAt = &now
-		release.Version++
-		release.UpdatedAt = now
-		state.PlatformArtifactReleases[releaseIndex] = release
-		message = buildPlatformReleaseMessage(artifact, release, model.PlatformReleaseMessageTypeVerifiedLKG, now)
-		state.PlatformReleaseMessages = append(state.PlatformReleaseMessages, message)
-		return nil
-	})
-	return artifact, release, message, lkg, err
+	return s.pgVerifyPlatformArtifactReleaseLKG(releaseID, req, principal, guard)
 }
 
 func (s *Store) GetActivePlatformArtifact(kind, scopeKey, channel string) (model.PlatformArtifact, model.PlatformArtifactRelease, bool, error) {
@@ -870,35 +291,7 @@ func (s *Store) GetActivePlatformArtifactWithReaderContext(ctx context.Context, 
 	if err := ctx.Err(); err != nil {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, false, err
 	}
-	if s.usingDatabase() {
-		return s.pgGetActivePlatformArtifactWithReader(ctx, kind, scopeKey, channel, read)
-	}
-	var artifact model.PlatformArtifact
-	var release model.PlatformArtifactRelease
-	found := false
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.PlatformArtifactReleases {
-			if candidate.ArtifactKind == kind && candidate.ScopeKey == scopeKey && candidate.ReleaseChannel == channel && candidate.Status == model.PlatformArtifactReleaseStatusActive {
-				if !found || candidate.ReleasedAt.After(release.ReleasedAt) {
-					release = candidate
-					found = true
-				}
-			}
-		}
-		if !found {
-			return nil
-		}
-		index := platformArtifactIndex(state.PlatformArtifacts, release.ArtifactID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		artifact = state.PlatformArtifacts[index]
-		return nil
-	})
-	if err == nil && found && read != nil {
-		artifact, err = read(release.ArtifactID)
-	}
-	return artifact, release, found, err
+	return s.pgGetActivePlatformArtifactWithReader(ctx, kind, scopeKey, channel, read)
 }
 
 // CurrentFullRollbackMessage returns historical identity, never serving authority.
@@ -911,41 +304,7 @@ func (s *Store) CurrentFullRollbackMessage(ctx context.Context, expected model.P
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		return s.pgCurrentFullRollbackMessage(ctx, expected)
-	}
-	var result *model.PlatformReleaseMessage
-	err := s.withLockedState(false, func(state *model.State) error {
-		var current *model.PlatformArtifactRelease
-		for i := range state.PlatformArtifactReleases {
-			r := &state.PlatformArtifactReleases[i]
-			if r.ArtifactKind == expected.ArtifactKind && r.ScopeKey == expected.ScopeKey && r.ReleaseChannel == expected.ReleaseChannel && r.Status == expected.Status &&
-				(current == nil || r.ReleasedAt.After(current.ReleasedAt) || r.ReleasedAt.Equal(current.ReleasedAt) && r.ID < current.ID) {
-				current = r
-			}
-		}
-		if current == nil || current.ID != expected.ID || current.Version != expected.Version || current.FencingToken != expected.FencingToken ||
-			current.ArtifactID != expected.ArtifactID || current.Generation != expected.Generation || current.Scope != expected.Scope || !current.ReleasedAt.Equal(expected.ReleasedAt) {
-			return ErrConflict
-		}
-		for _, m := range state.PlatformReleaseMessages {
-			if m.ReleaseID == expected.ID && m.MessageType == model.PlatformReleaseMessageTypeRollback &&
-				m.ArtifactID == expected.ArtifactID && m.ArtifactKind == expected.ArtifactKind &&
-				m.ScopeKey == expected.ScopeKey && m.Generation == expected.Generation &&
-				m.ReleaseChannel == expected.ReleaseChannel && m.CreatedAt.Equal(expected.ReleasedAt) {
-				if result != nil || m.Scope != expected.Scope || m.ID == "" {
-					return ErrConflict
-				}
-				msg := m
-				result = &msg
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return result, nil
+	return s.pgCurrentFullRollbackMessage(ctx, expected)
 }
 
 // GetPlatformArtifactRelease returns an immutable release ledger entry by ID.
@@ -963,22 +322,9 @@ func (s *Store) GetPlatformArtifactReleaseContext(ctx context.Context, id string
 	if err := ctx.Err(); err != nil {
 		return model.PlatformArtifactRelease{}, err
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		return pgGetPlatformArtifactRelease(ctx, s.db, id, false)
-	}
-	var out model.PlatformArtifactRelease
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, release := range state.PlatformArtifactReleases {
-			if release.ID == id {
-				out = release
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return out, err
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return pgGetPlatformArtifactRelease(ctx, s.db, id, false)
 }
 
 func (s *Store) VerifyPlatformArtifactIntegrity(artifact model.PlatformArtifact) error {
@@ -1000,30 +346,7 @@ func (s *Store) ListPlatformReleaseMessages(kind, scopeKey string, since time.Ti
 	if kind == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformReleaseMessages(kind, scopeKey, since, limit)
-	}
-	messages := []model.PlatformReleaseMessage{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, message := range state.PlatformReleaseMessages {
-			if message.ArtifactKind != kind || message.ScopeKey != scopeKey {
-				continue
-			}
-			if !since.IsZero() && !message.CreatedAt.After(since) {
-				continue
-			}
-			messages = append(messages, message)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortPlatformReleaseMessages(messages)
-	if limit > 0 && len(messages) > limit {
-		messages = messages[:limit]
-	}
-	return messages, nil
+	return s.pgListPlatformReleaseMessages(kind, scopeKey, since, limit)
 }
 
 func (s *Store) UpsertPlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatRequest) (model.PlatformConsumerInstance, error) {
@@ -1031,29 +354,7 @@ func (s *Store) UpsertPlatformConsumerHeartbeat(req model.PlatformConsumerHeartb
 	if consumer.ConsumerID == "" || consumer.ArtifactKind == "" {
 		return model.PlatformConsumerInstance{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertPlatformConsumerHeartbeat(consumer)
-	}
-	var out model.PlatformConsumerInstance
-	err := s.withLockedState(true, func(state *model.State) error {
-		for index := range state.PlatformConsumerInstances {
-			if state.PlatformConsumerInstances[index].ConsumerID == consumer.ConsumerID &&
-				state.PlatformConsumerInstances[index].ArtifactKind == consumer.ArtifactKind &&
-				state.PlatformConsumerInstances[index].ScopeKey == consumer.ScopeKey {
-				if state.PlatformConsumerInstances[index].IdentityVerified {
-					return ErrConflict
-				}
-				consumer.ID = state.PlatformConsumerInstances[index].ID
-				state.PlatformConsumerInstances[index] = consumer
-				out = consumer
-				return nil
-			}
-		}
-		state.PlatformConsumerInstances = append(state.PlatformConsumerInstances, consumer)
-		out = consumer
-		return nil
-	})
-	return out, err
+	return s.pgUpsertPlatformConsumerHeartbeat(consumer)
 }
 
 func (s *Store) AcceptTrustedPlatformConsumerHeartbeat(
@@ -1096,26 +397,7 @@ func (s *Store) acceptTrustedPlatformConsumerHeartbeat(
 	if expectedSetID == "" {
 		return model.PlatformConsumerInstance{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, auditKeyring, observation...)
-	}
-	var out model.PlatformConsumerInstance
-	err := s.withLockedState(true, func(state *model.State) error {
-		consumer, err := acceptTrustedPlatformConsumerHeartbeatInState(
-			state, claims, expectedSetID, heartbeat, receivedAt, policy, s.platformArtifactSigningKeyring(),
-		)
-		if err != nil {
-			return err
-		}
-		if auditKeyring != nil {
-			if err := appendPlatformConsumerHeartbeatAuditEventToState(state, consumer, *auditKeyring); err != nil {
-				return err
-			}
-		}
-		out = consumer
-		return nil
-	})
-	return out, err
+	return s.pgAcceptTrustedPlatformConsumerHeartbeat(claims, expectedSetID, heartbeat, receivedAt, policy, auditKeyring, observation...)
 }
 
 func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformConsumerInstance, error) {
@@ -1127,23 +409,7 @@ func (s *Store) ListPlatformConsumers(kind, scopeKey string) ([]model.PlatformCo
 	if kind == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformConsumers(kind, scopeKey)
-	}
-	consumers := []model.PlatformConsumerInstance{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, consumer := range state.PlatformConsumerInstances {
-			if consumer.ArtifactKind == kind && consumer.ScopeKey == scopeKey {
-				consumers = append(consumers, consumer)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortPlatformConsumers(consumers)
-	return consumers, nil
+	return s.pgListPlatformConsumers(kind, scopeKey)
 }
 
 // ListPlatformAuthorityConsumers reads retained global/cell identities for
@@ -1167,27 +433,7 @@ func (s *Store) ListPlatformAuthorityConsumersContext(ctx context.Context, kind,
 	if nodeID != "" {
 		limit = 64
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformAuthorityConsumers(ctx, kind, nodeID, limit)
-	}
-	consumers := []model.PlatformConsumerInstance{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, consumer := range state.PlatformConsumerInstances {
-			if consumer.ArtifactKind != kind || (nodeID != "" && consumer.NodeID != nodeID) || (consumer.ScopeKey != "global" && !strings.HasPrefix(consumer.ScopeKey, "authority-cell:cell-")) {
-				continue
-			}
-			if len(consumers) == limit {
-				return ErrConflict
-			}
-			consumers = append(consumers, consumer)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortPlatformConsumers(consumers)
-	return consumers, nil
+	return s.pgListPlatformAuthorityConsumers(ctx, kind, nodeID, limit)
 }
 
 func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsumerSet) (model.PlatformExpectedConsumerSet, error) {
@@ -1195,37 +441,7 @@ func (s *Store) CreatePlatformExpectedConsumerSet(in model.PlatformExpectedConsu
 	if err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreatePlatformExpectedConsumerSet(set)
-	}
-	err = s.withLockedState(true, func(state *model.State) error {
-		if err := s.validateHostedRouteTLSExpectations(stateDNSRouteSourceReader(state), set); err != nil {
-			return err
-		}
-		for _, existing := range state.ExpectedConsumerSets {
-			if existing.ID == set.ID {
-				return ErrConflict
-			}
-			if set.ReleaseSetID != "" &&
-				existing.ReleaseSetID == set.ReleaseSetID &&
-				existing.ArtifactKind == set.ArtifactKind &&
-				existing.ScopeKey == set.ScopeKey &&
-				existing.Revision == set.Revision {
-				return ErrConflict
-			}
-			if set.ArtifactReleaseID != "" &&
-				existing.ArtifactReleaseID == set.ArtifactReleaseID &&
-				existing.Revision == set.Revision {
-				return ErrConflict
-			}
-		}
-		state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, set)
-		return nil
-	})
-	if err != nil {
-		return model.PlatformExpectedConsumerSet{}, err
-	}
-	return clonePlatformExpectedConsumerSet(set), nil
+	return s.pgCreatePlatformExpectedConsumerSet(set)
 }
 
 func (s *Store) GetPlatformExpectedConsumerSet(id string) (model.PlatformExpectedConsumerSet, error) {
@@ -1240,20 +456,7 @@ func (s *Store) GetPlatformExpectedConsumerSetContext(ctx context.Context, id st
 	if err := ctx.Err(); err != nil {
 		return model.PlatformExpectedConsumerSet{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgGetPlatformExpectedConsumerSet(ctx, id)
-	}
-	var out model.PlatformExpectedConsumerSet
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, set := range state.ExpectedConsumerSets {
-			if set.ID == id {
-				out = clonePlatformExpectedConsumerSet(set)
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetPlatformExpectedConsumerSet(ctx, id)
 }
 
 func (s *Store) ListPlatformExpectedConsumerSets(filter model.PlatformExpectedConsumerSetFilter) ([]model.PlatformExpectedConsumerSet, error) {
@@ -1268,36 +471,7 @@ func (s *Store) ListPlatformExpectedConsumerSetsContext(ctx context.Context, fil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformExpectedConsumerSets(ctx, filter)
-	}
-	sets := []model.PlatformExpectedConsumerSet{}
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, set := range state.ExpectedConsumerSets {
-			if filter.ReleaseSetID != "" && set.ReleaseSetID != filter.ReleaseSetID {
-				continue
-			}
-			if filter.ArtifactReleaseID != "" && set.ArtifactReleaseID != filter.ArtifactReleaseID {
-				continue
-			}
-			if filter.ArtifactKind != "" && set.ArtifactKind != filter.ArtifactKind {
-				continue
-			}
-			if filter.ScopeKey != "" && set.ScopeKey != filter.ScopeKey {
-				continue
-			}
-			sets = append(sets, clonePlatformExpectedConsumerSet(set))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortPlatformExpectedConsumerSets(sets)
-	if filter.Limit > 0 && len(sets) > filter.Limit {
-		sets = sets[:filter.Limit]
-	}
-	return sets, nil
+	return s.pgListPlatformExpectedConsumerSets(ctx, filter)
 }
 
 func (s *Store) GetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapshot, error) {
@@ -1309,24 +483,7 @@ func (s *Store) GetPlatformLKG(kind, scopeKey string) (*model.PlatformLKGSnapsho
 	if kind == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetPlatformLKG(kind, scopeKey)
-	}
-	var out *model.PlatformLKGSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		for index := range state.PlatformLKGSnapshots {
-			snapshot := state.PlatformLKGSnapshots[index]
-			if snapshot.ArtifactKind != kind || snapshot.ScopeKey != scopeKey {
-				continue
-			}
-			if out == nil || platformLKGSnapshotIsNewer(snapshot, *out) {
-				copy := snapshot
-				out = &copy
-			}
-		}
-		return nil
-	})
-	return out, err
+	return s.pgGetPlatformLKG(kind, scopeKey)
 }
 
 func (s *Store) ListPlatformLKGHistory(kind, scopeKey string, limit int) ([]model.PlatformLKGSnapshot, error) {
@@ -1341,29 +498,7 @@ func (s *Store) ListPlatformLKGHistory(kind, scopeKey string, limit int) ([]mode
 	if limit == 0 {
 		limit = platformLKGHistoryDefaultLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformLKGHistory(kind, scopeKey, limit)
-	}
-	var out []model.PlatformLKGSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		for index := range state.PlatformLKGSnapshots {
-			snapshot := state.PlatformLKGSnapshots[index]
-			if snapshot.ArtifactKind == kind && snapshot.ScopeKey == scopeKey {
-				out = append(out, snapshot)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		return platformLKGSnapshotIsNewer(out[i], out[j])
-	})
-	if len(out) > limit {
-		out = out[:limit]
-	}
-	return out, nil
+	return s.pgListPlatformLKGHistory(kind, scopeKey, limit)
 }
 
 func normalizePlatformArtifactForStore(artifact model.PlatformArtifact) (model.PlatformArtifact, error) {
@@ -1415,18 +550,6 @@ func normalizePlatformArtifactForStore(artifact model.PlatformArtifact) (model.P
 	}
 	artifact.UpdatedAt = now
 	return artifact, nil
-}
-
-func nextPlatformArtifactGenerationSequence(artifacts []model.PlatformArtifact, kind, scopeKey string) int64 {
-	var sequence int64
-	for _, artifact := range artifacts {
-		if artifact.ArtifactKind == kind &&
-			artifact.ScopeKey == scopeKey &&
-			artifact.GenerationSequence > sequence {
-			sequence = artifact.GenerationSequence
-		}
-	}
-	return sequence + 1
 }
 
 func platformArtifactContentHash(content map[string]any) (string, error) {
@@ -1487,43 +610,6 @@ func verifyReusedPlatformArtifactContent(existing, candidate model.PlatformArtif
 	return nil
 }
 
-func upsertPlatformArtifactContent(contents []model.PlatformArtifactContent, content model.PlatformArtifactContent) ([]model.PlatformArtifactContent, error) {
-	for index := range contents {
-		if contents[index].ContentHash == content.ContentHash {
-			if err := verifyReusedPlatformArtifactContent(contents[index], content); err != nil {
-				return contents, err
-			}
-			return contents, nil
-		}
-	}
-	return append(contents, content), nil
-}
-
-func platformArtifactMatchesFilter(artifact model.PlatformArtifact, filter model.PlatformArtifactFilter) bool {
-	if filter.Generation != "" && artifact.Generation != filter.Generation {
-		return false
-	}
-	if filter.ArtifactKind != "" && artifact.ArtifactKind != filter.ArtifactKind {
-		return false
-	}
-	if filter.ScopeKey != "" && artifact.ScopeKey != filter.ScopeKey {
-		return false
-	}
-	if filter.Status != "" && artifact.Status != filter.Status {
-		return false
-	}
-	return true
-}
-
-func sortPlatformArtifacts(artifacts []model.PlatformArtifact) {
-	sort.Slice(artifacts, func(i, j int) bool {
-		if !artifacts[i].UpdatedAt.Equal(artifacts[j].UpdatedAt) {
-			return artifacts[i].UpdatedAt.After(artifacts[j].UpdatedAt)
-		}
-		return artifacts[i].ID < artifacts[j].ID
-	})
-}
-
 func normalizePlatformArtifactValidationResults(results []model.PlatformArtifactValidationResult) []model.PlatformArtifactValidationResult {
 	out := make([]model.PlatformArtifactValidationResult, 0, len(results))
 	for _, result := range results {
@@ -1556,15 +642,6 @@ func platformArtifactIndex(artifacts []model.PlatformArtifact, idOrGeneration st
 	idOrGeneration = strings.TrimSpace(idOrGeneration)
 	for index, artifact := range artifacts {
 		if artifact.ID == idOrGeneration || artifact.Generation == idOrGeneration {
-			return index
-		}
-	}
-	return -1
-}
-
-func platformArtifactGenerationIndex(artifacts []model.PlatformArtifact, kind, scopeKey, generation string) int {
-	for index, artifact := range artifacts {
-		if artifact.ArtifactKind == kind && artifact.ScopeKey == scopeKey && artifact.Generation == generation {
 			return index
 		}
 	}
@@ -1701,40 +778,6 @@ func clonePlatformTimePointer(value *time.Time) *time.Time {
 	return &copy
 }
 
-func appendPlatformSafetyOverrideAuditEventToState(
-	state *model.State,
-	release model.PlatformArtifactRelease,
-	messageType string,
-	keyring bundleauth.Keyring,
-) error {
-	if state == nil {
-		return ErrInvalidInput
-	}
-	var sequence int64
-	previousHash := ""
-	for _, event := range state.AuditEvents {
-		if event.ChainID != platformsafety.PlatformSafetyAuditChainID ||
-			event.ChainSequence <= sequence {
-			continue
-		}
-		sequence = event.ChainSequence
-		previousHash = event.EventHash
-	}
-	sequence++
-	event, err := buildPlatformSafetyOverrideAuditEvent(
-		release,
-		messageType,
-		sequence,
-		previousHash,
-		keyring,
-	)
-	if err != nil {
-		return err
-	}
-	state.AuditEvents = append(state.AuditEvents, event)
-	return nil
-}
-
 func buildPlatformSafetyOverrideAuditEvent(
 	release model.PlatformArtifactRelease,
 	messageType string,
@@ -1796,80 +839,6 @@ func platformReleaseByIdempotencyKey(releases []model.PlatformArtifactRelease, l
 	return model.PlatformArtifactRelease{}, false
 }
 
-func activePlatformReleaseForScope(releases []model.PlatformArtifactRelease, kind, scopeKey, channel string) (model.PlatformArtifactRelease, bool) {
-	var out model.PlatformArtifactRelease
-	found := false
-	for _, release := range releases {
-		if release.ArtifactKind != kind ||
-			release.ScopeKey != scopeKey ||
-			release.ReleaseChannel != channel ||
-			release.Status != model.PlatformArtifactReleaseStatusActive {
-			continue
-		}
-		if !found || release.ReleasedAt.After(out.ReleasedAt) {
-			out = release
-			found = true
-		}
-	}
-	return out, found
-}
-
-func activePlatformReleaseGenerationSequence(
-	releases []model.PlatformArtifactRelease,
-	artifacts []model.PlatformArtifact,
-	kind string,
-	scopeKey string,
-	channel string,
-) (int64, error) {
-	release, found := activePlatformReleaseForScope(releases, kind, scopeKey, channel)
-	if !found {
-		return 0, nil
-	}
-	index := platformArtifactIndex(artifacts, release.ArtifactID)
-	if index < 0 {
-		return 0, ErrConflict
-	}
-	return artifacts[index].GenerationSequence, nil
-}
-
-func platformReleaseMessageForRelease(messages []model.PlatformReleaseMessage, releaseID string) (model.PlatformReleaseMessage, bool) {
-	var out model.PlatformReleaseMessage
-	found := false
-	for _, message := range messages {
-		if message.ReleaseID != releaseID {
-			continue
-		}
-		if !found || message.CreatedAt.After(out.CreatedAt) {
-			out = message
-			found = true
-		}
-	}
-	return out, found
-}
-
-func nextPlatformReleaseLane(lanes []model.PlatformReleaseLane, kind, scopeKey, channel string, now time.Time) (model.PlatformReleaseLane, error) {
-	laneKey := platformsafety.ReleaseLaneKey(kind, scopeKey, channel)
-	lane, ok := platformReleaseLaneByKey(lanes, laneKey)
-	if !ok {
-		return model.PlatformReleaseLane{
-			LaneKey:        laneKey,
-			ArtifactKind:   kind,
-			ScopeKey:       scopeKey,
-			ReleaseChannel: channel,
-			FencingToken:   1,
-			Version:        1,
-			UpdatedAt:      now,
-		}, nil
-	}
-	if lane.Frozen {
-		return model.PlatformReleaseLane{}, ErrConflict
-	}
-	lane.FencingToken++
-	lane.Version++
-	lane.UpdatedAt = now
-	return lane, nil
-}
-
 func platformReleaseLaneByKey(lanes []model.PlatformReleaseLane, laneKey string) (model.PlatformReleaseLane, bool) {
 	for _, lane := range lanes {
 		if lane.LaneKey == laneKey {
@@ -1891,18 +860,6 @@ func upsertPlatformReleaseLane(lanes []model.PlatformReleaseLane, lane model.Pla
 	return out
 }
 
-func supersedePlatformReleases(releases []model.PlatformArtifactRelease, kind, scopeKey, channel, keepID string, now time.Time) []model.PlatformArtifactRelease {
-	out := make([]model.PlatformArtifactRelease, 0, len(releases))
-	for _, release := range releases {
-		if release.ID != keepID && release.ArtifactKind == kind && release.ScopeKey == scopeKey && release.ReleaseChannel == channel && release.Status == model.PlatformArtifactReleaseStatusActive {
-			release.Status = model.PlatformArtifactReleaseStatusSuperseded
-			release.UpdatedAt = now
-		}
-		out = append(out, release)
-	}
-	return out
-}
-
 func buildPlatformReleaseMessage(artifact model.PlatformArtifact, release model.PlatformArtifactRelease, messageType string, now time.Time) model.PlatformReleaseMessage {
 	expiresAt := now.Add(7 * 24 * time.Hour)
 	return model.PlatformReleaseMessage{
@@ -1918,15 +875,6 @@ func buildPlatformReleaseMessage(artifact model.PlatformArtifact, release model.
 		CreatedAt:      now,
 		ExpiresAt:      &expiresAt,
 	}
-}
-
-func sortPlatformReleaseMessages(messages []model.PlatformReleaseMessage) {
-	sort.Slice(messages, func(i, j int) bool {
-		if !messages[i].CreatedAt.Equal(messages[j].CreatedAt) {
-			return messages[i].CreatedAt.After(messages[j].CreatedAt)
-		}
-		return messages[i].ID < messages[j].ID
-	})
 }
 
 func buildPlatformLKGSnapshot(
@@ -1983,8 +931,7 @@ func platformLKGSnapshotIsNewer(candidate, current model.PlatformLKGSnapshot) bo
 }
 
 func verifiedPlatformLKGSnapshotFromState(
-	state *model.State,
-	kind string,
+	state *storeProjection, kind string,
 	scopeKey string,
 	now time.Time,
 	keyring bundleauth.Keyring,
@@ -2013,18 +960,6 @@ func platformLKGSnapshotMatchesArtifact(
 		return false
 	}
 	return platformsafety.EvaluatePlatformLKGSnapshot(snapshot, artifact, keyring, now).Pass
-}
-
-func upsertPlatformLKGSnapshot(snapshots []model.PlatformLKGSnapshot, snapshot model.PlatformLKGSnapshot) []model.PlatformLKGSnapshot {
-	out := make([]model.PlatformLKGSnapshot, 0, len(snapshots)+1)
-	for _, existing := range snapshots {
-		if existing.ID == snapshot.ID {
-			continue
-		}
-		out = append(out, existing)
-	}
-	out = append(out, snapshot)
-	return out
 }
 
 func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatRequest) model.PlatformConsumerInstance {
@@ -2072,111 +1007,6 @@ func normalizePlatformConsumerHeartbeat(req model.PlatformConsumerHeartbeatReque
 		LastHeartbeatAt:           now,
 		UpdatedAt:                 now,
 	}
-}
-
-func acceptTrustedPlatformConsumerHeartbeatInState(
-	state *model.State,
-	claims platformcontrol.PlatformComponentIdentityClaims,
-	expectedSetID string,
-	heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope,
-	receivedAt time.Time,
-	policy platformcontrol.PlatformConsumerHeartbeatValidationPolicy,
-	keyrings ...bundleauth.Keyring,
-) (model.PlatformConsumerInstance, error) {
-	expectedSetID = strings.TrimSpace(expectedSetID)
-	if state == nil || expectedSetID == "" {
-		return model.PlatformConsumerInstance{}, ErrInvalidInput
-	}
-	var expectedSet model.PlatformExpectedConsumerSet
-	foundSet := false
-	for _, candidate := range state.ExpectedConsumerSets {
-		if candidate.ID == expectedSetID {
-			expectedSet = candidate
-			foundSet = true
-			break
-		}
-	}
-	if !foundSet {
-		return model.PlatformConsumerInstance{}, ErrNotFound
-	}
-	heartbeat.ExpectedConsumerSetID = firstNonEmptyStoreValue(heartbeat.ExpectedConsumerSetID, expectedSetID)
-	bound, err := platformcontrol.BindPlatformConsumerHeartbeatToExpectedSet(claims, expectedSet, heartbeat)
-	if err != nil {
-		return model.PlatformConsumerInstance{}, err
-	}
-	index := -1
-	var cursor *platformcontrol.PlatformConsumerHeartbeatCursor
-	for candidateIndex := range state.PlatformConsumerInstances {
-		candidate := state.PlatformConsumerInstances[candidateIndex]
-		if candidate.ConsumerID != bound.ConsumerID ||
-			candidate.ArtifactKind != bound.ArtifactKind ||
-			candidate.ScopeKey != bound.ScopeKey {
-			continue
-		}
-		index = candidateIndex
-		cursor, err = platformcontrol.PlatformConsumerHeartbeatCursorFromInstance(candidate)
-		if err != nil {
-			return model.PlatformConsumerInstance{}, err
-		}
-		if cursor != nil && bound.GenerationSequence < cursor.GenerationSequence {
-			if len(keyrings) != 1 {
-				return model.PlatformConsumerInstance{}, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack
-			}
-			cursor, err = consumerCursorForTrafficRollback(state, candidate, cursor, expectedSet, bound, keyrings[0])
-			if err != nil {
-				return model.PlatformConsumerInstance{}, err
-			}
-		} else if cursor != nil && (bound.FencingToken < cursor.FencingToken || bound.FencingToken == cursor.FencingToken && candidate.ExpectedConsumerSetID != expectedSet.ID) {
-			cursor, err = consumerLaneTransitionInState(state, candidate, cursor, expectedSet, bound.FencingToken)
-			if err != nil {
-				return model.PlatformConsumerInstance{}, err
-			}
-		}
-		break
-	}
-	consumer, _, err := platformcontrol.VerifyTrustedPlatformConsumerHeartbeat(
-		claims, expectedSet, bound, cursor, receivedAt, policy,
-	)
-	if err != nil {
-		return model.PlatformConsumerInstance{}, err
-	}
-	consumer.ID = platformConsumerInstanceID(consumer.ConsumerID, consumer.ArtifactKind, consumer.ScopeKey)
-	if index >= 0 {
-		consumer.ID = state.PlatformConsumerInstances[index].ID
-		state.PlatformConsumerInstances[index] = consumer
-	} else {
-		state.PlatformConsumerInstances = append(state.PlatformConsumerInstances, consumer)
-	}
-	return consumer, nil
-}
-
-func appendPlatformConsumerHeartbeatAuditEventToState(
-	state *model.State,
-	consumer model.PlatformConsumerInstance,
-	keyring bundleauth.Keyring,
-) error {
-	if state == nil {
-		return ErrInvalidInput
-	}
-	chainID := platformConsumerHeartbeatAuditChainID(consumer)
-	if chainID == "" {
-		return ErrInvalidInput
-	}
-	var sequence int64
-	previousHash := ""
-	for _, event := range state.AuditEvents {
-		if event.ChainID != chainID || event.ChainSequence <= sequence {
-			continue
-		}
-		sequence = event.ChainSequence
-		previousHash = event.EventHash
-	}
-	event, err := buildPlatformConsumerHeartbeatAuditEvent(consumer, sequence+1, previousHash, keyring)
-	if err != nil {
-		return err
-	}
-	state.AuditEvents = append(state.AuditEvents, event)
-	return nil
 }
 
 func buildPlatformConsumerHeartbeatAuditEvent(
@@ -2341,9 +1171,12 @@ func normalizePlatformExpectedConsumerSetForStore(in model.PlatformExpectedConsu
 		}
 		consumer.HeartbeatDeadline = consumer.HeartbeatDeadline.UTC()
 		consumer.ConvergenceDeadline = consumer.ConvergenceDeadline.UTC()
+		// The set's SQL timestamp columns preserve microseconds, whereas the
+		// members' JSONB timestamps preserve nanoseconds. Compare those bounds at
+		// the precision they share so a stored set remains valid when reused.
 		if consumer.ConvergenceDeadline.Before(consumer.HeartbeatDeadline) ||
-			consumer.HeartbeatDeadline.After(in.HeartbeatDeadline) ||
-			consumer.ConvergenceDeadline.After(in.ConvergenceDeadline) {
+			consumer.HeartbeatDeadline.Truncate(time.Microsecond).After(in.HeartbeatDeadline.Truncate(time.Microsecond)) ||
+			consumer.ConvergenceDeadline.Truncate(time.Microsecond).After(in.ConvergenceDeadline.Truncate(time.Microsecond)) {
 			return model.PlatformExpectedConsumerSet{}, ErrInvalidInput
 		}
 		if consumer.Required {
@@ -2392,18 +1225,6 @@ func normalizePlatformExpectedConsumerSetFilter(filter model.PlatformExpectedCon
 	return filter, nil
 }
 
-func clonePlatformExpectedConsumerSet(in model.PlatformExpectedConsumerSet) model.PlatformExpectedConsumerSet {
-	out := in
-	out.Consumers = make([]model.PlatformExpectedConsumer, len(in.Consumers))
-	copy(out.Consumers, in.Consumers)
-	for index := range out.Consumers {
-		out.Consumers[index].AcceptedProtocolVersions = append([]string(nil), in.Consumers[index].AcceptedProtocolVersions...)
-		out.Consumers[index].AcceptedSchemaVersions = append([]string(nil), in.Consumers[index].AcceptedSchemaVersions...)
-		out.Consumers[index].CompatibilityCapabilities = append([]string(nil), in.Consumers[index].CompatibilityCapabilities...)
-	}
-	return out
-}
-
 func platformStringListContains(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
@@ -2411,25 +1232,4 @@ func platformStringListContains(values []string, expected string) bool {
 		}
 	}
 	return false
-}
-
-func sortPlatformExpectedConsumerSets(sets []model.PlatformExpectedConsumerSet) {
-	sort.Slice(sets, func(i, j int) bool {
-		if !sets[i].CreatedAt.Equal(sets[j].CreatedAt) {
-			return sets[i].CreatedAt.After(sets[j].CreatedAt)
-		}
-		if sets[i].Revision != sets[j].Revision {
-			return sets[i].Revision > sets[j].Revision
-		}
-		return sets[i].ID < sets[j].ID
-	})
-}
-
-func sortPlatformConsumers(consumers []model.PlatformConsumerInstance) {
-	sort.Slice(consumers, func(i, j int) bool {
-		if !consumers[i].UpdatedAt.Equal(consumers[j].UpdatedAt) {
-			return consumers[i].UpdatedAt.After(consumers[j].UpdatedAt)
-		}
-		return consumers[i].ConsumerID < consumers[j].ConsumerID
-	})
 }

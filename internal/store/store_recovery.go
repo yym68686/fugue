@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,26 +57,16 @@ func (s *Store) CreateProtectiveBackup(targetStore, generation string) (string, 
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	name := safeBackupName(targetStore + "-" + generation + "-" + stamp)
-	if s.usingDatabase() {
-		if strings.TrimSpace(s.databaseURL) == "" {
-			return "", ErrInvalidInput
-		}
-		path := filepath.Join(backupDir, name+".dump")
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "pg_dump", "--format=custom", "--file", path, s.databaseURL)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			_ = os.Remove(path)
-			return "", fmt.Errorf("pg_dump protective backup failed: %w: %s", err, strings.TrimSpace(string(output)))
-		}
-		return path, nil
-	}
-	if strings.TrimSpace(s.path) == "" {
+	if strings.TrimSpace(s.databaseURL) == "" {
 		return "", ErrInvalidInput
 	}
-	path := filepath.Join(backupDir, name+".json")
-	if err := copyFile(path, s.path, 0o600); err != nil {
-		return "", err
+	path := filepath.Join(backupDir, name+".dump")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pg_dump", "--format=custom", "--file", path, s.databaseURL)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("pg_dump protective backup failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	return path, nil
 }
@@ -86,13 +75,7 @@ func (s *Store) VerifyControlPlanePermissions(requiredGrants []string) ([]model.
 	if s == nil {
 		return nil, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		return []model.StoreInvariantCheck{{
-			Name:    "permission_verification",
-			Pass:    true,
-			Message: "json store verified through file-backed API service identity",
-		}}, nil
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s.CheckReadiness(ctx); err != nil {
@@ -154,29 +137,6 @@ func (s *Store) VerifyControlPlanePermissions(requiredGrants []string) ([]model.
 	}
 	checks = append(checks, sequenceCheck)
 	return checks, nil
-}
-
-func copyFile(target, source string, mode os.FileMode) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	tmp := target + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		_ = out.Close()
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, target)
 }
 
 func parseRequiredGrant(raw string) (string, string, bool) {

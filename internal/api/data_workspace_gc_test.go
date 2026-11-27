@@ -12,14 +12,14 @@ import (
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestSweepDataWorkspaceGCPreservesLiveBlobsAndDeletesOrphans(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(storePath)
+	blobDir := t.TempDir()
+	stateStore := newStoreTestDatabase(t, "")
+	stateStore.ConfigureDataBlobDir(blobDir)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -40,10 +40,10 @@ func TestSweepDataWorkspaceGCPreservesLiveBlobsAndDeletesOrphans(t *testing.T) {
 		t.Fatalf("write orphan blob: %v", err)
 	}
 	old := time.Now().Add(-10 * 24 * time.Hour)
-	if err := touchDataBlob(storePath, liveDigest, old); err != nil {
+	if err := touchDataBlob(blobDir, liveDigest, old); err != nil {
 		t.Fatalf("touch live blob: %v", err)
 	}
-	if err := touchDataBlob(storePath, orphanDigest, old); err != nil {
+	if err := touchDataBlob(blobDir, orphanDigest, old); err != nil {
 		t.Fatalf("touch orphan blob: %v", err)
 	}
 	_, err = stateStore.CreateDataSnapshot(model.DataSnapshot{
@@ -120,7 +120,7 @@ func TestSweepDataWorkspaceGCCleansOldMigrationBackendObjects(t *testing.T) {
 		t.Fatalf("unexpected target backend request %s %s", r.Method, r.URL.String())
 	}))
 	defer targetServer.Close()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -200,7 +200,7 @@ func clearDefaultDataBackendEnv(t *testing.T) {
 	}
 }
 
-func touchDataBlob(storePath, digest string, when time.Time) error {
-	blobPath := filepath.Join(filepath.Dir(storePath), "data-blobs", "sha256", digest[:2], digest[2:4], digest)
+func touchDataBlob(blobDir, digest string, when time.Time) error {
+	blobPath := filepath.Join(blobDir, "sha256", digest[:2], digest[2:4], digest)
 	return os.Chtimes(blobPath, when, when)
 }

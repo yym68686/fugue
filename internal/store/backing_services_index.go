@@ -7,7 +7,7 @@ type appBackingServiceIndex struct {
 	servicesByAppID map[string]map[string]model.BackingService
 }
 
-func newAppBackingServiceIndex(state *model.State) appBackingServiceIndex {
+func newAppBackingServiceIndex(state *storeProjection) appBackingServiceIndex {
 	index := appBackingServiceIndex{
 		bindingsByAppID: map[string][]model.ServiceBinding{},
 		servicesByAppID: map[string]map[string]model.BackingService{},

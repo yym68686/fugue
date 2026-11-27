@@ -73,6 +73,9 @@ func (s *Store) prepareCompilerInputPublication(ctx context.Context, id, rollbac
 	}
 	proof, err := s.prepareOrdinaryCompilerInputProof(ctx, nil, nil, &intent, nil, nil)
 	if err != nil {
+		if errors.Is(err, ErrInvalidInput) {
+			return nil, nil, err
+		}
 		return nil, nil, errors.Join(mapDBErr(err), ErrConflict)
 	}
 	return s.prepareCompilerInputActivationPins(ctx, proof)

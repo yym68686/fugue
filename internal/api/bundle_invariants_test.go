@@ -2,15 +2,11 @@ package api
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestEdgeDNSBundleInvariantRejectsMissingProtectedRecord(t *testing.T) {
@@ -176,8 +172,8 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	now := time.Now().UTC()
 	stale := now.Add(-(platformNodeHeartbeatStaleAfter + time.Second))
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	storeState := store.New(storePath)
+	const storePath = "stale-edge-heartbeat"
+	storeState := newStoreTestDatabase(t, storePath)
 	if err := storeState.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -211,44 +207,35 @@ func TestEdgeRouteHealthyGroupsIgnoreStaleHeartbeat(t *testing.T) {
 	}
 }
 
-func forceEdgeInstanceHeartbeatTimeForAPITest(t *testing.T, path string, heartbeatAt time.Time) {
+func forceEdgeInstanceHeartbeatTimeForAPITest(t *testing.T, fixture string, heartbeatAt time.Time) {
 	t.Helper()
-	payload, err := os.ReadFile(path)
+	db := openStoreTestSQL(t, fixture)
+	tx, err := db.Begin()
 	if err != nil {
-		t.Fatalf("read edge instance fixture: %v", err)
+		t.Fatal(err)
 	}
-	var state model.State
-	if err := json.Unmarshal(payload, &state); err != nil {
-		t.Fatalf("decode edge instance fixture: %v", err)
-	}
-	if len(state.EdgeNodeInstances) == 0 {
-		t.Fatal("edge instance fixture is empty")
-	}
-	for index := range state.EdgeNodeInstances {
-		state.EdgeNodeInstances[index].LastHeartbeatAt = heartbeatAt
-		state.EdgeNodeInstances[index].UpdatedAt = heartbeatAt
-		state.EdgeNodeInstances[index].Node.LastHeartbeatAt = &heartbeatAt
-		state.EdgeNodeInstances[index].Node.LastSeenAt = &heartbeatAt
-		state.EdgeNodeInstances[index].Node.UpdatedAt = heartbeatAt
-	}
-	for index := range state.EdgeNodes {
-		state.EdgeNodes[index].LastHeartbeatAt = &heartbeatAt
-		state.EdgeNodes[index].LastSeenAt = &heartbeatAt
-		state.EdgeNodes[index].UpdatedAt = heartbeatAt
-	}
-	payload, err = json.MarshalIndent(state, "", "  ")
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE fugue_edge_node_instances
+SET last_heartbeat_at = $1, updated_at = $1, node_json = node_json || jsonb_build_object(
+    'last_heartbeat_at', $1::timestamptz, 'last_seen_at', $1::timestamptz, 'updated_at', $1::timestamptz)`, heartbeatAt)
 	if err != nil {
-		t.Fatalf("encode edge instance fixture: %v", err)
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, payload, 0o600); err != nil {
-		t.Fatalf("write edge instance fixture: %v", err)
+	if n, err := result.RowsAffected(); err != nil || n == 0 {
+		t.Fatalf("edge instance fixture is empty: %v", err)
+	}
+	if _, err := tx.Exec(`UPDATE fugue_edge_nodes SET last_heartbeat_at = $1, last_seen_at = $1, updated_at = $1`, heartbeatAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestEdgeRouteHealthyGroupsIncludeDegradedServingCache(t *testing.T) {
 	t.Parallel()
 
-	storeState := store.New(filepath.Join(t.TempDir(), "store.json"))
+	storeState := newStoreTestDatabase(t, "")
 	if err := storeState.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

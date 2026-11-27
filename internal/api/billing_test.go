@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -54,7 +53,7 @@ func deployBillingUsageTestApp(
 func TestHandleGetBillingCurrentUsageOnlyCountsInternalClusterWorkloads(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -282,7 +281,7 @@ func TestHandleGetBillingCurrentUsageOnlyCountsInternalClusterWorkloads(t *testi
 func TestGetBillingAllowsSkippingCurrentUsageAggregation(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

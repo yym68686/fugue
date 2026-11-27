@@ -25,6 +25,10 @@ func TestOperationReadReportsFirstExecutionAndCurrentSafeRolloutWait(t *testing.
 			if err != nil || !claimed || first.StartedAt == nil {
 				t.Fatal("first claim", claimed, err)
 			}
+			persistedFirst, err := st.GetOperation(op.ID)
+			if err != nil || persistedFirst.StartedAt == nil {
+				t.Fatal("first claim was not persisted", err)
+			}
 			attempt, err := st.CreateReleaseAttempt(model.ReleaseAttempt{TenantID: app.TenantID, AppID: app.ID,
 				TriggerType: model.ReleaseAttemptTriggerImageTrackingAuto, RootOperationID: op.ID})
 			if err != nil {
@@ -52,13 +56,13 @@ func TestOperationReadReportsFirstExecutionAndCurrentSafeRolloutWait(t *testing.
 			rec := performJSONRequest(t, server, http.MethodGet, path, key, nil)
 			var detail struct{ Operation model.Operation }
 			mustDecodeJSON(t, rec, &detail)
-			if detail.Operation.StartedAt == nil || !detail.Operation.StartedAt.Equal(*first.StartedAt) {
+			if detail.Operation.StartedAt == nil || !detail.Operation.StartedAt.Equal(*persistedFirst.StartedAt) {
 				t.Fatal("detail lost first execution time", detail.Operation.StartedAt)
 			}
 			rec = performJSONRequest(t, server, http.MethodGet, "/v1/operations?status=pending&app_id="+app.ID, key, nil)
 			var list struct{ Operations []model.Operation }
 			mustDecodeJSON(t, rec, &list)
-			if len(list.Operations) != 1 || list.Operations[0].StartedAt == nil || !list.Operations[0].StartedAt.Equal(*first.StartedAt) {
+			if len(list.Operations) != 1 || list.Operations[0].StartedAt == nil || !list.Operations[0].StartedAt.Equal(*persistedFirst.StartedAt) {
 				t.Fatal("summary lost first execution time", list)
 			}
 			rec = performJSONRequest(t, server, http.MethodGet, path+"/diagnosis", key, nil)

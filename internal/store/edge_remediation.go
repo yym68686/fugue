@@ -15,31 +15,7 @@ func (s *Store) AdvanceEdgeRemediation(advance model.EdgeRemediationAdvance) (mo
 	if err != nil {
 		return model.EdgeActivationState{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgAdvanceEdgeRemediation(advance)
-	}
-	var out model.EdgeActivationState
-	err = s.withLockedState(true, func(state *model.State) error {
-		if state.EdgeActivation == nil {
-			return ErrEdgeInstanceFencingNotReady
-		}
-		current, err := normalizeStoredEdgeActivation(*state.EdgeActivation)
-		if err != nil {
-			return err
-		}
-		if current.Generation != advance.ExpectedActivationGeneration {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		next, err := buildNextEdgeRemediation(current, advance, state.EdgeNodeInstances, state.EdgeActiveEpochs, now)
-		if err != nil {
-			return err
-		}
-		state.EdgeActivation = &next
-		out = next
-		return nil
-	})
-	return out, err
+	return s.pgAdvanceEdgeRemediation(advance)
 }
 
 func buildNextEdgeRemediation(current model.EdgeActivationState, advance model.EdgeRemediationAdvance, instances []model.EdgeNodeInstance, epochs []model.EdgeActiveEpoch, now time.Time) (model.EdgeActivationState, error) {

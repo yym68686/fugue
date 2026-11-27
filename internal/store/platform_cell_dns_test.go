@@ -14,6 +14,7 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/testfixture/celldns"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
@@ -57,21 +58,199 @@ func seedCellDNSRoutePublications(t *testing.T, s *Store, req *platformconfig.Co
 	}
 }
 
+func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
+	t.Run("neutral", func(t *testing.T) { testCellDNSPublication(t, "", false, true) })
+	t.Run("transition", func(t *testing.T) { testCellDNSPublication(t, "", true, true) })
+	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true) })
+	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true) })
+	t.Run("advancing source", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true, true) })
+}
+
+func testDNSPublicationAdmissionRefusesLongContention(t *testing.T, s *Store, parent model.PlatformArtifact) {
+	t.Helper()
+	before, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || before == nil {
+		t.Fatal("verified baseline missing", err)
+	}
+	// Use a neutral policy in the same scope so the delay cannot alter the DNS
+	// publication or borrow its existing LKG as a new positive checkpoint.
+	successor, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, Scope: parent.Scope, Generation: "bounded-budget-successor", Content: map[string]any{"weights": map[string]any{"latency": 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err = s.ValidatePlatformArtifact(successor.ID, []model.PlatformArtifactValidationResult{{Name: "compiler", Pass: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if err := pgLockPromotionScope(context.Background(), blocker, parent.ScopeKey, true); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		_, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal())
+		done <- err
+	}()
+	// Input admission adds a strict 250ms lock bound. A queued publication
+	// must refuse without changing its lane; a later explicit request prepares
+	// a new proof instead of continuing the old transaction or retrying itself.
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("publication bypassed the held scope")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("publication exceeded bounded admission lock wait")
+	}
+	if _, _, found, err := s.GetActivePlatformArtifact(successor.ArtifactKind, successor.ScopeKey, "shadow"); err != nil || found {
+		t.Fatal("refused publication changed lane", err)
+	}
+	if err := blocker.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal()); err != nil {
+		t.Fatal("fresh publication failed after contention cleared", err)
+	}
+	after, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
+	if err != nil || after == nil || after.ID != before.ID || after.VerifiedByReleaseID != before.VerifiedByReleaseID || !after.ExpiresAt.Equal(before.ExpiresAt) {
+		t.Fatal("publication wait renewed or replaced verified LKG", err)
+	}
+	t.Logf("bounded refusal and fresh publication completed in %s", time.Since(started))
+}
+
+// Source consumer state does not authorize a DNS routing reference. Exercise
+// the real loader while those unrelated tables are locked by another writer;
+// the old full snapshot incorrectly waited on them until its deadline.
+func testDNSReferencesIndependentOfSourceHeartbeats(t *testing.T, s *Store, child model.PlatformArtifact) {
+	t.Helper()
+	blocker, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback()
+	if _, err := blocker.Exec(`LOCK TABLE fugue_platform_consumer_instances, fugue_platform_expected_consumer_sets IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{child}}
+	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
+	started := time.Now()
+	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
+		t.Fatal("DNS reference read waited on unrelated source consumers", err)
+	}
+	if len(state.ExpectedConsumerSets) != 0 || len(state.PlatformConsumerInstances) != 0 || len(state.PlatformShadowConsumers) != 0 {
+		t.Fatal("DNS routing dependency loaded unrelated source consumer state")
+	}
+	if err := validateCellDNSReferencesInState(state, child, celldns.Keys()); err != nil {
+		t.Fatal("narrow routing snapshot lost source authorization", err)
+	}
+	t.Logf("DNS reference authorization completed with source consumer tables exclusively locked: %s", time.Since(started))
+}
+
+func TestCellDNSAdmissionReportsBusySourceSeparately(t *testing.T) {
+	child := celldns.Compile(t, celldns.Request(t)).DNSArtifact
+	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_xact_lock_shared($1)")).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
+	mock.ExpectRollback()
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{db: db}
+	err = s.pgLoadCellDNSReferences(t.Context(), tx, parent, &storeProjection{PlatformArtifacts: []model.PlatformArtifact{child}})
+	if !errors.Is(err, ErrConflict) || PlatformReleaseFailureStage(err) != PlatformReleaseStageDNSRoutingSourceBusy {
+		t.Fatalf("source lock failure lost its retryable rejection stage: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
+	for _, scenario := range []string{"fence", "new full", "new gray", "frozen", "missing TLS"} {
+		t.Run(scenario, func(t *testing.T) {
+			r := celldns.Request(t)
+			c := celldns.Compile(t, r)
+			state := &storeProjection{}
+			for _, p := range r.CellRoutePublications {
+				state.PlatformArtifacts = append(state.PlatformArtifacts, p.Parent, p.Route, p.TLS)
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, celldns.Publication(p))
+				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: celldns.Publication(p).LaneKey, ActiveReleaseID: celldns.Publication(p).ID, FencingToken: celldns.Publication(p).FencingToken})
+			}
+			if err := validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys()); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "fence":
+				state.PlatformReleaseLanes[0].FencingToken++
+			case "frozen":
+				state.PlatformReleaseLanes[0].Frozen = true
+			case "missing TLS":
+				state.PlatformArtifacts = append(state.PlatformArtifacts[:2], state.PlatformArtifacts[3:]...)
+			case "new full":
+				state.PlatformArtifactReleases[0].ID = "successor"
+				state.PlatformReleaseLanes[0].ActiveReleaseID = "successor"
+			case "new gray":
+				v := state.PlatformArtifactReleases[0]
+				v.ID = "successor-gray"
+				v.ReleaseChannel = "gray"
+				v.CanaryRuleRef = "cohort=complete"
+				v.LaneKey = "gray-lane"
+				v.ReleasedAt = v.ReleasedAt.Add(time.Second)
+				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, v)
+				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: v.LaneKey, ActiveReleaseID: v.ID, FencingToken: v.FencingToken})
+			}
+			err := validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys())
+			if !errors.Is(err, ErrConflict) {
+				t.Fatal("stale dependency admitted")
+			}
+			if PlatformReleaseFailureStage(err) != "routing_source_selection" {
+				t.Fatal("source failure lost diagnostic stage", err)
+			}
+		})
+	}
+}
+
+func TestDNSAuthorityTransitionPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "", true) }
+func TestDNSAuthorityTransitionPublicationAndLKGPostgres(t *testing.T) {
+	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
+	if address == "" {
+		t.Skip("set disposable test database")
+	}
+	u, err := url.Parse(address)
+	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
+		t.Fatal("requires disposable loopback database")
+	}
+	testCellDNSPublication(t, address, true)
+}
+
 func seedDNSRouteRelease(t *testing.T, s *Store, r model.PlatformArtifactRelease) {
 	t.Helper()
 	r.Version = 1
 	r.CreatedAt, r.UpdatedAt = r.ReleasedAt, r.ReleasedAt
 	r.OverrideMode = model.PlatformArtifactOverrideModeNone
-	if s.db == nil {
-		if err := s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
-			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, Version: 1, ActiveReleaseID: r.ID, UpdatedAt: r.ReleasedAt})
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
+
 	ctx := context.Background()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -92,26 +271,14 @@ func seedDNSRouteRelease(t *testing.T, s *Store, r model.PlatformArtifactRelease
 	}
 }
 
-func TestCellDNSPublicationWithSourceAuthorization(t *testing.T) {
-	t.Run("neutral", func(t *testing.T) { testCellDNSPublication(t, "", false, true) })
-	t.Run("transition", func(t *testing.T) { testCellDNSPublication(t, "", true, true) })
-	t.Run("retained routing only", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true) })
-	t.Run("verified source renewal", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true) })
-	t.Run("advancing source", func(t *testing.T) { testCellDNSPublication(t, "", true, true, true, true, true) })
-}
-
 func testCellDNSPublication(t *testing.T, address string, transition bool, sources ...bool) {
-	s := New(t.TempDir()+"/state.json", address)
-	if address != "" {
-		db, isolated, _ := hotInventoryTestDatabase(t)
-		s = &Store{db: db, databaseURL: isolated}
-	}
+	s := New(address)
+
+	db, isolated, _ := hotInventoryTestDatabase(t)
+	s = &Store{db: db, databaseURL: isolated}
+
 	s.ConfigurePlatformArtifactSigning(celldns.Keys())
-	if s.db == nil {
-		if err := s.Init(); err != nil {
-			t.Fatal(err)
-		}
-	}
+
 	req := celldns.Request(t)
 	if transition {
 		req = celldns.TransitionRequest(t)
@@ -120,26 +287,24 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 	retained := len(sources) > 1 && sources[1]
 	var policies []model.PlatformArtifact
 	var releases []model.PlatformArtifactRelease
-	if s.db != nil {
-		var inputs []platformconfig.CompileResult
-		var originals []model.PlatformArtifact
-		req, policies, releases, inputs, originals = celldns.CompletePublication(t, transition, withSources)
-		for _, c := range inputs {
-			prepareCompiledInputPin(t, s, c)
-			if _, _, err := s.EnsurePlatformArtifact(c.PolicyArtifact); err != nil {
-				t.Fatal("persist exact scoped publication policy", err)
-			}
-		}
-		for _, a := range originals {
-			if _, _, err := s.EnsurePlatformArtifact(a); err != nil {
-				t.Fatal("persist exact producer source", err)
-			}
+
+	var inputs []platformconfig.CompileResult
+	var originals []model.PlatformArtifact
+	req, policies, releases, inputs, originals = celldns.CompletePublication(t, transition, withSources)
+	for _, c := range inputs {
+		prepareCompiledInputPin(t, s, c)
+		if _, _, err := s.EnsurePlatformArtifact(c.PolicyArtifact); err != nil {
+			t.Fatal("persist exact scoped publication policy", err)
 		}
 	}
-	if withSources {
-		if s.db == nil {
-			req, policies, releases = celldns.SourceAuthorizedRequest(t, transition)
+	for _, a := range originals {
+		if _, _, err := s.EnsurePlatformArtifact(a); err != nil {
+			t.Fatal("persist exact producer source", err)
 		}
+	}
+
+	if withSources {
+
 		for _, policy := range policies {
 			if _, _, err := s.EnsurePlatformArtifact(policy); err != nil {
 				t.Fatal(err)
@@ -250,51 +415,51 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		t.Fatal("DNS without explicit capability admitted", err)
 	}
 	report(shadow, 2, fullCaps, false)
-	if s.db != nil {
-		// A competing routing publication cannot deadlock this DNS transaction.
+
+	// A competing routing publication cannot deadlock this DNS transaction.
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := "global"
+	if !transition {
+		scope = req.CellRoutePublications[0].Parent.ScopeKey
+	}
+	if err = pgLockPromotionScope(context.Background(), tx, scope, true); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
+		t.Fatal("compilation waited on changing authority", err)
+	}
+	started = time.Now()
+	_, _, _, _, err = s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal())
+	tx.Rollback()
+	if !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
+		t.Fatal("DNS did not fail promptly during a Cell mutation", err)
+	}
+	if withSources {
+		producerScope := "platform-config-producer"
+		if !retained {
+			producerScope += ":" + req.CellRoutePublications[0].Reference.AuthorityCellID
+		}
 		tx, err := s.db.BeginTx(context.Background(), nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		scope := "global"
-		if !transition {
-			scope = req.CellRoutePublications[0].Parent.ScopeKey
-		}
-		if err = pgLockPromotionScope(context.Background(), tx, scope, true); err != nil {
+		if err := pgLockPromotionScope(context.Background(), tx, producerScope, true); err != nil {
 			tx.Rollback()
 			t.Fatal(err)
 		}
 		started := time.Now()
-		if err := s.ValidateDNSPublicationReferences(compiled.DNSArtifact); !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
-			t.Fatal("compilation waited on changing authority", err)
-		}
-		started = time.Now()
-		_, _, _, _, err = s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal())
+		err = s.ValidateDNSPublicationReferences(compiled.DNSArtifact)
 		tx.Rollback()
 		if !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
-			t.Fatal("DNS did not fail promptly during a Cell mutation", err)
-		}
-		if withSources {
-			producerScope := "platform-config-producer"
-			if !retained {
-				producerScope += ":" + req.CellRoutePublications[0].Reference.AuthorityCellID
-			}
-			tx, err := s.db.BeginTx(context.Background(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := pgLockPromotionScope(context.Background(), tx, producerScope, true); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-			started := time.Now()
-			err = s.ValidateDNSPublicationReferences(compiled.DNSArtifact)
-			tx.Rollback()
-			if !errors.Is(err, ErrConflict) || time.Since(started) > 2*time.Second {
-				t.Fatal("DNS did not fail promptly during a producer policy mutation", err)
-			}
+			t.Fatal("DNS did not fail promptly during a producer policy mutation", err)
 		}
 	}
+
 	_, gray, _, _, err := s.ReleasePlatformArtifact(parent.ID, grayRequest, testPlatformPrincipal())
 	if err != nil {
 		t.Fatal(err)
@@ -317,29 +482,12 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 			}
 			renewed = advanced
 		}
-		if s.db != nil {
-			if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET status=$1 WHERE id=$2", model.PlatformArtifactReleaseStatusSuperseded, originalID); err != nil {
-				t.Fatal(err)
-			}
-			seedDNSRouteRelease(t, s, renewed)
-		} else {
-			if err := s.withLockedState(true, func(state *model.State) error {
-				index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, originalID)
-				state.PlatformArtifactReleases[index].Status = model.PlatformArtifactReleaseStatusSuperseded
-				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, renewed)
-				for i := range state.PlatformReleaseLanes {
-					lane := &state.PlatformReleaseLanes[i]
-					if lane.LaneKey == renewed.LaneKey {
-						lane.ActiveReleaseID = renewed.ID
-						lane.FencingToken = renewed.FencingToken
-						lane.Version++
-					}
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
+
+		if _, err := s.db.Exec("UPDATE fugue_platform_artifact_releases SET status=$1 WHERE id=$2", model.PlatformArtifactReleaseStatusSuperseded, originalID); err != nil {
+			t.Fatal(err)
 		}
+		seedDNSRouteRelease(t, s, renewed)
+
 	}
 	if s.db != nil && len(sources) > 3 && sources[3] {
 		if err := s.ValidateDNSPublicationReferences(child); err != nil {
@@ -408,29 +556,29 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 				t.Fatal("source observation lost selected full publication")
 			}
 		}
-		if s.db != nil {
-			tx, err := s.db.BeginTx(context.Background(), nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			parentID := req.PreviousTrafficPublication
-			lockedID := ""
-			if retained {
-				lockedID = parentID.Parent.ID
-			} else {
-				lockedID = req.CellRoutePublications[0].Parent.ID
-			}
-			if _, err := pgGetPlatformArtifactForUpdate(context.Background(), tx, lockedID, true); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-			started := time.Now()
-			_, err = s.ObserveDNSRouteSources(context.Background(), child)
-			tx.Rollback()
-			if err != nil || time.Since(started) > 2*time.Second {
-				t.Fatal("read-only source observation waited on a publication row lock", err)
-			}
+
+		tx, err := s.db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
 		}
+		parentID := req.PreviousTrafficPublication
+		lockedID := ""
+		if retained {
+			lockedID = parentID.Parent.ID
+		} else {
+			lockedID = req.CellRoutePublications[0].Parent.ID
+		}
+		if _, err := pgGetPlatformArtifactForUpdate(context.Background(), tx, lockedID, true); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		started := time.Now()
+		_, err = s.ObserveDNSRouteSources(context.Background(), child)
+		tx.Rollback()
+		if err != nil || time.Since(started) > 2*time.Second {
+			t.Fatal("read-only source observation waited on a publication row lock", err)
+		}
+
 	}
 	testDNSPublicationSuccessorGuard(t, s, req, parent, shadow, gray, full)
 	// Complete the winning successor through the same real capability,
@@ -506,183 +654,4 @@ func testCellDNSPublication(t *testing.T, address string, transition bool, sourc
 		}
 		testDNSPositiveRecoveryAfterSourceRevocation(t, s, parent)
 	}
-}
-
-func testDNSPublicationAdmissionRefusesLongContention(t *testing.T, s *Store, parent model.PlatformArtifact) {
-	t.Helper()
-	before, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
-	if err != nil || before == nil {
-		t.Fatal("verified baseline missing", err)
-	}
-	// Use a neutral policy in the same scope so the delay cannot alter the DNS
-	// publication or borrow its existing LKG as a new positive checkpoint.
-	successor, err := s.CreatePlatformArtifact(model.PlatformArtifact{ArtifactKind: model.PlatformArtifactKindEdgeRankingPolicy, Scope: parent.Scope, Generation: "bounded-budget-successor", Content: map[string]any{"weights": map[string]any{"latency": 1}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	successor, err = s.ValidatePlatformArtifact(successor.ID, []model.PlatformArtifactValidationResult{{Name: "compiler", Pass: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	blocker, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Rollback()
-	if err := pgLockPromotionScope(context.Background(), blocker, parent.ScopeKey, true); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	started := time.Now()
-	go func() {
-		_, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal())
-		done <- err
-	}()
-	// Input admission adds a strict 250ms lock bound. A queued publication
-	// must refuse without changing its lane; a later explicit request prepares
-	// a new proof instead of continuing the old transaction or retrying itself.
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("publication bypassed the held scope")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("publication exceeded bounded admission lock wait")
-	}
-	if _, _, found, err := s.GetActivePlatformArtifact(successor.ArtifactKind, successor.ScopeKey, "shadow"); err != nil || found {
-		t.Fatal("refused publication changed lane", err)
-	}
-	if err := blocker.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, _, _, err := s.ReleasePlatformArtifact(successor.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "bounded-publication-delay"}, testPlatformPrincipal()); err != nil {
-		t.Fatal("fresh publication failed after contention cleared", err)
-	}
-	after, err := s.GetPlatformLKG(parent.ArtifactKind, parent.ScopeKey)
-	if err != nil || after == nil || after.ID != before.ID || after.VerifiedByReleaseID != before.VerifiedByReleaseID || !after.ExpiresAt.Equal(before.ExpiresAt) {
-		t.Fatal("publication wait renewed or replaced verified LKG", err)
-	}
-	t.Logf("bounded refusal and fresh publication completed in %s", time.Since(started))
-}
-
-// Source consumer state does not authorize a DNS routing reference. Exercise
-// the real loader while those unrelated tables are locked by another writer;
-// the old full snapshot incorrectly waited on them until its deadline.
-func testDNSReferencesIndependentOfSourceHeartbeats(t *testing.T, s *Store, child model.PlatformArtifact) {
-	t.Helper()
-	blocker, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer blocker.Rollback()
-	if _, err := blocker.Exec(`LOCK TABLE fugue_platform_consumer_instances, fugue_platform_expected_consumer_sets IN ACCESS EXCLUSIVE MODE`); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{child}}
-	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
-	started := time.Now()
-	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
-		t.Fatal("DNS reference read waited on unrelated source consumers", err)
-	}
-	if len(state.ExpectedConsumerSets) != 0 || len(state.PlatformConsumerInstances) != 0 || len(state.PlatformShadowConsumers) != 0 {
-		t.Fatal("DNS routing dependency loaded unrelated source consumer state")
-	}
-	if err := validateCellDNSReferencesInState(state, child, celldns.Keys()); err != nil {
-		t.Fatal("narrow routing snapshot lost source authorization", err)
-	}
-	t.Logf("DNS reference authorization completed with source consumer tables exclusively locked: %s", time.Since(started))
-}
-
-func TestCellDNSAdmissionReportsBusySourceSeparately(t *testing.T) {
-	child := celldns.Compile(t, celldns.Request(t)).DNSArtifact
-	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT pg_try_advisory_xact_lock_shared($1)")).
-		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(false))
-	mock.ExpectRollback()
-	tx, err := db.BeginTx(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &Store{db: db}
-	err = s.pgLoadCellDNSReferences(t.Context(), tx, parent, &model.State{PlatformArtifacts: []model.PlatformArtifact{child}})
-	if !errors.Is(err, ErrConflict) || PlatformReleaseFailureStage(err) != PlatformReleaseStageDNSRoutingSourceBusy {
-		t.Fatalf("source lock failure lost its retryable rejection stage: %v", err)
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestCellDNSAdmissionRejectsChangedReferencedAuthority(t *testing.T) {
-	for _, scenario := range []string{"fence", "new full", "new gray", "frozen", "missing TLS"} {
-		t.Run(scenario, func(t *testing.T) {
-			r := celldns.Request(t)
-			c := celldns.Compile(t, r)
-			state := &model.State{}
-			for _, p := range r.CellRoutePublications {
-				state.PlatformArtifacts = append(state.PlatformArtifacts, p.Parent, p.Route, p.TLS)
-				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, celldns.Publication(p))
-				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: celldns.Publication(p).LaneKey, ActiveReleaseID: celldns.Publication(p).ID, FencingToken: celldns.Publication(p).FencingToken})
-			}
-			if err := validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys()); err != nil {
-				t.Fatal(err)
-			}
-			switch scenario {
-			case "fence":
-				state.PlatformReleaseLanes[0].FencingToken++
-			case "frozen":
-				state.PlatformReleaseLanes[0].Frozen = true
-			case "missing TLS":
-				state.PlatformArtifacts = append(state.PlatformArtifacts[:2], state.PlatformArtifacts[3:]...)
-			case "new full":
-				state.PlatformArtifactReleases[0].ID = "successor"
-				state.PlatformReleaseLanes[0].ActiveReleaseID = "successor"
-			case "new gray":
-				v := state.PlatformArtifactReleases[0]
-				v.ID = "successor-gray"
-				v.ReleaseChannel = "gray"
-				v.CanaryRuleRef = "cohort=complete"
-				v.LaneKey = "gray-lane"
-				v.ReleasedAt = v.ReleasedAt.Add(time.Second)
-				state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, v)
-				state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: v.LaneKey, ActiveReleaseID: v.ID, FencingToken: v.FencingToken})
-			}
-			err := validateCellDNSReferencesInState(state, c.DNSArtifact, celldns.Keys())
-			if !errors.Is(err, ErrConflict) {
-				t.Fatal("stale dependency admitted")
-			}
-			if PlatformReleaseFailureStage(err) != "routing_source_selection" {
-				t.Fatal("source failure lost diagnostic stage", err)
-			}
-		})
-	}
-}
-
-func TestDNSAuthorityTransitionPublicationAndLKG(t *testing.T) { testCellDNSPublication(t, "", true) }
-func TestDNSAuthorityTransitionPublicationAndLKGPostgres(t *testing.T) {
-	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("set disposable test database")
-	}
-	u, err := url.Parse(address)
-	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
-		t.Fatal("requires disposable loopback database")
-	}
-	testCellDNSPublication(t, address, true)
 }

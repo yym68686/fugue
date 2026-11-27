@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,24 +12,13 @@ import (
 )
 
 func TestReleaseRetirementStatePreservesDrainConfigurationAndAllFacts(t *testing.T) {
-	for _, backend := range []string{"file", "postgres"} {
+	for _, backend := range []string{"postgres"} {
 		t.Run(backend, func(t *testing.T) {
 			var s *Store
 			var tenant model.Tenant
-			if backend == "postgres" {
-				s = billingBatchPGStore(t)
-				tenant = billingBatchPGTenant(t, s)
-			} else {
-				s = New(filepath.Join(t.TempDir(), "state.json"))
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-				var err error
-				tenant, err = s.CreateTenant("retirement projection")
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
+			s = billingBatchPGStore(t)
+			tenant = billingBatchPGTenant(t, s)
+
 			project, err := s.CreateProject(tenant.ID, "projection", "")
 			if err != nil {
 				t.Fatal(err)
@@ -46,7 +34,7 @@ func TestReleaseRetirementStatePreservesDrainConfigurationAndAllFacts(t *testing
 			created := 0
 			for _, role := range roles {
 				for _, status := range statuses {
-					// The file backend rejects a partially retired lifecycle state.
+					// Keep generated rows in valid retirement states.
 					if (role == model.AppReleaseRoleRetired) != (status == model.AppReleaseStatusRetired) {
 						continue
 					}
@@ -88,18 +76,7 @@ func TestReleaseRetirementStatePreservesDrainConfigurationAndAllFacts(t *testing
 			if bound.ID == "" {
 				t.Fatal("retired fixture missing")
 			}
-			if backend == "file" {
-				if err := s.withLockedState(true, func(state *model.State) error {
-					for i := range state.AppReleases {
-						if state.AppReleases[i].ID == bound.ID {
-							state.AppReleases[i].RevisionWorkload = binding
-						}
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			full, err = s.ListAppReleases(filter)
 			if err != nil {
 				t.Fatal(err)

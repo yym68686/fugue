@@ -1,13 +1,11 @@
 package api
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestManagedAppServingIdentityRequiresHealthyCurrentCohort(t *testing.T) {
@@ -74,7 +72,7 @@ func TestManagedAppServingIdentityRequiresHealthyCurrentCohort(t *testing.T) {
 			snapshot := managedAppKubeSnapshot{namespaces: map[string]struct{}{ns: {}}, deployments: map[string]kubeDeploymentRuntimeEvidence{key: deployment}, services: map[string]struct{}{key: {}}, endpointSlicesAvailable: true, endpointSlices: map[string]kubeEndpointRuntimeEvidence{key: {Present: true, ReadyAddresses: 1}}}
 			release := model.AppRelease{ID: "release-a", AppID: app.ID, TenantID: app.TenantID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing, RuntimeID: app.Spec.RuntimeID, ResolvedImageRef: app.Spec.Image, ServiceName: name, DeploymentName: name}
 			frozen := &managedAppStoreSnapshot{policies: map[string]model.AppTrafficPolicy{app.ID: {Mode: model.AppTrafficModeSingle, StableWeight: 100, StableReleaseID: release.ID}}, releases: map[string]model.AppRelease{release.ID: release}}
-			server := &Server{store: store.New(filepath.Join(t.TempDir(), "unused.json"))}
+			server := &Server{store: newStoreTestDatabase(t, "")}
 			test.change(&snapshot, key)
 			evidence, err := server.buildManagedAppRuntimeEvidenceWithStoreSnapshot(app, managed, true, snapshot, frozen)
 			if err != nil {

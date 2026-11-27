@@ -1,21 +1,29 @@
 package operationqueue_test
 
 import (
-	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/operationqueue"
 	"fugue/internal/store"
+	"fugue/internal/testpostgres"
 )
+
+func newQueueContractStore(t *testing.T, fixture string) *store.Store {
+	t.Helper()
+	s := store.New(testpostgres.Database(t, fixture))
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	return s
+}
 
 func TestImageReplicationRetryDoesNotStarveLaterOperation(t *testing.T) {
 	t.Parallel()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	stateStore := newQueueContractStore(t, "")
 	tenant, err := stateStore.CreateTenant("Retry Fairness Tenant")
 	if err != nil {
 		t.Fatalf("create tenant: %v", err)
@@ -60,10 +68,7 @@ func TestImageReplicationRetryDoesNotStarveLaterOperation(t *testing.T) {
 func TestForegroundActivateClaimsDependencyReadyDeployFirst(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	stateStore := newQueueContractStore(t, "")
 
 	tenant, err := stateStore.CreateTenant("Tenant")
 	if err != nil {
@@ -169,10 +174,7 @@ func TestForegroundActivateClaimsDependencyReadyDeployFirst(t *testing.T) {
 func TestForegroundActivateFailsDeployWithMissingComposeDependency(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	stateStore := newQueueContractStore(t, "")
 
 	tenant, err := stateStore.CreateTenant("Tenant")
 	if err != nil {
@@ -235,10 +237,7 @@ func TestForegroundActivateFailsDeployWithMissingComposeDependency(t *testing.T)
 func TestForegroundActivateCancelsBlockedComposeDeployAndClaimsQueuedDelete(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	stateStore := newQueueContractStore(t, "")
 
 	tenant, err := stateStore.CreateTenant("Tenant")
 	if err != nil {
@@ -349,10 +348,7 @@ func TestForegroundActivateCancelsBlockedComposeDeployAndClaimsQueuedDelete(t *t
 
 func TestPendingDeleteCancelsStuckDeployBeforeClaim(t *testing.T) {
 	for _, running := range []bool{false, true} {
-		s := store.New(filepath.Join(t.TempDir(), "state.json"))
-		if err := s.Init(); err != nil {
-			t.Fatal(err)
-		}
+		s := newQueueContractStore(t, strconv.FormatBool(running))
 		tenant, err := s.CreateTenant("example")
 		if err != nil {
 			t.Fatal(err)

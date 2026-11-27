@@ -84,16 +84,7 @@ func (s *Store) MoveAppProject(id string, opts AppProjectMoveOptions) (ProjectMo
 	if id == "" {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgMoveAppProject(id, opts)
-	}
-	var plan ProjectMovePlan
-	err := s.withLockedState(!opts.DryRun, func(state *model.State) error {
-		out, err := buildAppProjectMovePlanState(state, id, opts, !opts.DryRun)
-		plan = out
-		return err
-	})
-	return plan, err
+	return s.pgMoveAppProject(id, opts)
 }
 
 func (s *Store) MoveBackingServiceProject(id string, opts BackingServiceProjectMoveOptions) (ProjectMovePlan, error) {
@@ -101,16 +92,7 @@ func (s *Store) MoveBackingServiceProject(id string, opts BackingServiceProjectM
 	if id == "" {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgMoveBackingServiceProject(id, opts)
-	}
-	var plan ProjectMovePlan
-	err := s.withLockedState(!opts.DryRun, func(state *model.State) error {
-		out, err := buildBackingServiceProjectMovePlanState(state, id, opts, !opts.DryRun)
-		plan = out
-		return err
-	})
-	return plan, err
+	return s.pgMoveBackingServiceProject(id, opts)
 }
 
 func (s *Store) PlanProjectSplit(projectID string, opts ProjectSplitOptions) (ProjectMovePlan, error) {
@@ -123,19 +105,10 @@ func (s *Store) SplitProject(projectID string, opts ProjectSplitOptions) (Projec
 	if projectID == "" {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSplitProject(projectID, opts)
-	}
-	var plan ProjectMovePlan
-	err := s.withLockedState(!opts.DryRun, func(state *model.State) error {
-		out, err := buildProjectSplitPlanState(state, projectID, opts, !opts.DryRun)
-		plan = out
-		return err
-	})
-	return plan, err
+	return s.pgSplitProject(projectID, opts)
 }
 
-func buildAppProjectMovePlanState(state *model.State, appID string, opts AppProjectMoveOptions, apply bool) (ProjectMovePlan, error) {
+func buildAppProjectMovePlanState(state *storeProjection, appID string, opts AppProjectMoveOptions, apply bool) (ProjectMovePlan, error) {
 	if state == nil {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
@@ -229,7 +202,7 @@ func buildAppProjectMovePlanState(state *model.State, appID string, opts AppProj
 	return plan, nil
 }
 
-func buildBackingServiceProjectMovePlanState(state *model.State, serviceID string, opts BackingServiceProjectMoveOptions, apply bool) (ProjectMovePlan, error) {
+func buildBackingServiceProjectMovePlanState(state *storeProjection, serviceID string, opts BackingServiceProjectMoveOptions, apply bool) (ProjectMovePlan, error) {
 	if state == nil {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
@@ -303,7 +276,7 @@ func buildBackingServiceProjectMovePlanState(state *model.State, serviceID strin
 	return plan, nil
 }
 
-func buildProjectSplitPlanState(state *model.State, sourceProjectID string, opts ProjectSplitOptions, apply bool) (ProjectMovePlan, error) {
+func buildProjectSplitPlanState(state *storeProjection, sourceProjectID string, opts ProjectSplitOptions, apply bool) (ProjectMovePlan, error) {
 	if state == nil || len(opts.Targets) == 0 {
 		return ProjectMovePlan{}, ErrInvalidInput
 	}
@@ -434,7 +407,7 @@ func buildProjectSplitPlanState(state *model.State, sourceProjectID string, opts
 	return plan, nil
 }
 
-func planServiceProjectTargetState(state *model.State, service model.BackingService, targetProjectID, policy string, movingApps map[string]string) (projectMoveServiceTarget, []string, []string) {
+func planServiceProjectTargetState(state *storeProjection, service model.BackingService, targetProjectID, policy string, movingApps map[string]string) (projectMoveServiceTarget, []string, []string) {
 	target := projectMoveServiceTarget{
 		ServiceID:       service.ID,
 		TargetProjectID: targetProjectID,
@@ -482,7 +455,7 @@ func planServiceProjectTargetState(state *model.State, service model.BackingServ
 	return target, blockers, warnings
 }
 
-func applyProjectMoveMutationState(state *model.State, plan ProjectMovePlan, mutation projectMoveStateMutation, apply bool) ProjectMovePlan {
+func applyProjectMoveMutationState(state *storeProjection, plan ProjectMovePlan, mutation projectMoveStateMutation, apply bool) ProjectMovePlan {
 	now := time.Now().UTC()
 	apps := make([]model.App, 0, len(mutation.appTargets))
 	for appID, targetProjectID := range mutation.appTargets {
@@ -561,7 +534,7 @@ func applyProjectMoveMutationState(state *model.State, plan ProjectMovePlan, mut
 	return plan
 }
 
-func planAutomationPolicyProjectMovesState(state *model.State, plan ProjectMovePlan, mutation *projectMoveStateMutation) ProjectMovePlan {
+func planAutomationPolicyProjectMovesState(state *storeProjection, plan ProjectMovePlan, mutation *projectMoveStateMutation) ProjectMovePlan {
 	if state == nil || mutation == nil || len(mutation.appTargets) == 0 {
 		return plan
 	}
@@ -637,7 +610,7 @@ func planAutomationPolicyProjectMovesState(state *model.State, plan ProjectMoveP
 	return plan
 }
 
-func resolveProjectMoveTargetState(state *model.State, tenantID, targetProjectID, targetProjectName string, create, apply bool) (model.Project, bool, error) {
+func resolveProjectMoveTargetState(state *storeProjection, tenantID, targetProjectID, targetProjectName string, create, apply bool) (model.Project, bool, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	targetProjectID = strings.TrimSpace(targetProjectID)
 	targetProjectName = strings.TrimSpace(targetProjectName)
@@ -712,7 +685,7 @@ func projectMoveBlockedError(plan ProjectMovePlan) error {
 	return ErrConflict
 }
 
-func projectByIDState(state *model.State, id string) (model.Project, error) {
+func projectByIDState(state *storeProjection, id string) (model.Project, error) {
 	index := findProject(state, strings.TrimSpace(id))
 	if index < 0 {
 		return model.Project{}, ErrNotFound
@@ -720,7 +693,7 @@ func projectByIDState(state *model.State, id string) (model.Project, error) {
 	return state.Projects[index], nil
 }
 
-func resolveSplitTargetAppState(state *model.State, sourceProject model.Project, target ProjectSplitTarget) (model.App, error) {
+func resolveSplitTargetAppState(state *storeProjection, sourceProject model.Project, target ProjectSplitTarget) (model.App, error) {
 	appID := strings.TrimSpace(target.AppID)
 	appName := strings.TrimSpace(target.AppName)
 	if appID == "" && appName == "" {
@@ -756,7 +729,7 @@ func resolveSplitTargetAppState(state *model.State, sourceProject model.Project,
 	return matches[0], nil
 }
 
-func ownedBackingServicesForAppState(state *model.State, appID string) []model.BackingService {
+func ownedBackingServicesForAppState(state *storeProjection, appID string) []model.BackingService {
 	services := make([]model.BackingService, 0)
 	for _, service := range state.BackingServices {
 		if service.OwnerAppID != appID || isDeletedBackingService(service) {
@@ -768,7 +741,7 @@ func ownedBackingServicesForAppState(state *model.State, appID string) []model.B
 	return services
 }
 
-func boundBackingServicesForAppState(state *model.State, appID string) []model.BackingService {
+func boundBackingServicesForAppState(state *storeProjection, appID string) []model.BackingService {
 	servicesByID := map[string]model.BackingService{}
 	for _, binding := range state.ServiceBindings {
 		if binding.AppID != appID {
@@ -800,7 +773,7 @@ func hasInFlightOperationForService(ops []model.Operation, serviceID string) boo
 	return false
 }
 
-func hasBindingsOutsideMovingTargetState(state *model.State, serviceID, targetProjectID string, movingApps map[string]string) bool {
+func hasBindingsOutsideMovingTargetState(state *storeProjection, serviceID, targetProjectID string, movingApps map[string]string) bool {
 	if movingApps == nil {
 		return hasServiceBindings(state, serviceID)
 	}
@@ -816,7 +789,7 @@ func hasBindingsOutsideMovingTargetState(state *model.State, serviceID, targetPr
 	return false
 }
 
-func updateMovingAppBindingsToExistingServiceState(state *model.State, mutation *projectMoveStateMutation, appID, sourceServiceID, targetServiceID string) {
+func updateMovingAppBindingsToExistingServiceState(state *storeProjection, mutation *projectMoveStateMutation, appID, sourceServiceID, targetServiceID string) {
 	if mutation == nil {
 		return
 	}
@@ -827,7 +800,7 @@ func updateMovingAppBindingsToExistingServiceState(state *model.State, mutation 
 	}
 }
 
-func conflictingBackingServiceState(state *model.State, tenantID, projectID, name, exceptID string) *model.BackingService {
+func conflictingBackingServiceState(state *storeProjection, tenantID, projectID, name, exceptID string) *model.BackingService {
 	for _, service := range state.BackingServices {
 		if service.ID == exceptID || isDeletedBackingService(service) {
 			continue
@@ -1035,8 +1008,8 @@ WHERE id = $1
 	return plan, nil
 }
 
-func (s *Store) pgLoadProjectMoveTenantStateTx(ctx context.Context, tx *sql.Tx, tenantID string, forUpdate bool) (model.State, error) {
-	state := model.State{}
+func (s *Store) pgLoadProjectMoveTenantStateTx(ctx context.Context, tx *sql.Tx, tenantID string, forUpdate bool) (storeProjection, error) {
+	state := storeProjection{}
 	tenant, err := scanTenant(tx.QueryRowContext(ctx, `
 SELECT id, name, slug, status, created_at, updated_at
 FROM fugue_tenants
@@ -1205,7 +1178,7 @@ ORDER BY created_at ASC
 	return state, nil
 }
 
-func (s *Store) pgPersistProjectMoveStateDiffTx(ctx context.Context, tx *sql.Tx, before, after model.State) error {
+func (s *Store) pgPersistProjectMoveStateDiffTx(ctx context.Context, tx *sql.Tx, before, after storeProjection) error {
 	beforeProjects := mapProjectsByID(before.Projects)
 	for _, project := range after.Projects {
 		if _, ok := beforeProjects[project.ID]; ok {
@@ -1310,8 +1283,8 @@ func scanProjectWithDeleteRequest(scanner sqlScanner) (model.Project, *time.Time
 	return project, nil, nil
 }
 
-func cloneProjectMoveState(state model.State) model.State {
-	out := model.State{
+func cloneProjectMoveState(state storeProjection) storeProjection {
+	out := storeProjection{
 		Tenants:               append([]model.Tenant(nil), state.Tenants...),
 		Projects:              append([]model.Project(nil), state.Projects...),
 		ProjectDeleteRequests: cloneTimeMap(state.ProjectDeleteRequests),

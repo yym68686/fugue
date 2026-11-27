@@ -1,19 +1,19 @@
 package controller
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestPresentImageLocationsFallsBackWhenAppScopedEvidenceIsExpired(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_shared")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -40,22 +40,7 @@ func (s *Store) RecordImportBuildResult(expected model.Operation, spec model.App
 		op.UpdatedAt = time.Now().UTC()
 		return op, nil
 	}
-	if !s.usingDatabase() {
-		var saved model.Operation
-		err := s.withLockedState(true, func(state *model.State) error {
-			i := findOperation(state, expected.ID)
-			if i < 0 {
-				return ErrNotFound
-			}
-			var err error
-			saved, err = apply(state.Operations[i])
-			if err == nil {
-				state.Operations[i] = saved
-			}
-			return err
-		})
-		return saved, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)

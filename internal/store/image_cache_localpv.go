@@ -3,7 +3,6 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"strings"
 	"time"
 
@@ -20,130 +19,17 @@ func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, ma
 	if node.NodeID == "" && node.ClusterNodeName == "" {
 		return model.ImageCacheNodeInventory{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageCacheInventory(node, manifests)
-	}
-	var out model.ImageCacheNodeInventory
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageCacheNodeInventory(state.ImageCacheNodes, node)
-		if index >= 0 {
-			current := state.ImageCacheNodes[index]
-			if node.ObservedAt.Before(current.ObservedAt) {
-				return ErrConflict
-			}
-			node.ID = current.ID
-			node.CreatedAt = current.CreatedAt
-			node.UpdatedAt = now
-			state.ImageCacheNodes[index] = node
-		} else {
-			node.ID = firstNonEmptyImageCacheString(node.ID, model.NewID("imgcache"))
-			node.CreatedAt = now
-			node.UpdatedAt = now
-			state.ImageCacheNodes = append(state.ImageCacheNodes, node)
-		}
-		out = node
-		for _, manifest := range manifests {
-			manifest = normalizeImageCacheManifest(manifest)
-			manifest.NodeID = firstNonEmptyImageCacheString(manifest.NodeID, node.NodeID)
-			manifest.ClusterNodeName = firstNonEmptyImageCacheString(manifest.ClusterNodeName, node.ClusterNodeName)
-			manifest.RuntimeID = firstNonEmptyImageCacheString(manifest.RuntimeID, node.RuntimeID)
-			if manifest.Repo == "" || manifest.Target == "" {
-				continue
-			}
-			if manifest.LastSeenAt.IsZero() {
-				manifest.LastSeenAt = node.ObservedAt
-			}
-			if manifest.LastSeenAt.IsZero() {
-				manifest.LastSeenAt = now
-			}
-			index := findImageCacheManifest(state.ImageCacheManifests, manifest)
-			if index >= 0 {
-				current := state.ImageCacheManifests[index]
-				manifest.ID = current.ID
-				manifest.CreatedAt = current.CreatedAt
-				manifest.UpdatedAt = now
-				state.ImageCacheManifests[index] = manifest
-			} else {
-				manifest.ID = firstNonEmptyImageCacheString(manifest.ID, model.NewID("imgcacheman"))
-				manifest.CreatedAt = now
-				manifest.UpdatedAt = now
-				state.ImageCacheManifests = append(state.ImageCacheManifests, manifest)
-			}
-		}
-		if node.SnapshotComplete {
-			count := 0
-			for _, m := range state.ImageCacheManifests {
-				if imageCacheManifestBelongsToNode(m, node) && m.Present && m.LastSeenAt.Equal(node.ObservedAt) {
-					count++
-				}
-			}
-			node.SnapshotComplete = count == node.ManifestCount
-			state.ImageCacheNodes[findImageCacheNodeInventory(state.ImageCacheNodes, node)] = node
-			out = node
-		}
-
-		if node.SnapshotComplete {
-			for idx, manifest := range state.ImageCacheManifests {
-				if !imageCacheManifestBelongsToNode(manifest, node) || !manifest.Present {
-					continue
-				}
-				if manifest.LastSeenAt.Before(node.ObservedAt) {
-					manifest.Present = false
-					manifest.UpdatedAt = now
-					state.ImageCacheManifests[idx] = manifest
-				}
-			}
-		}
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImageCacheInventory(node, manifests)
 }
 
 func (s *Store) ListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
 	filter = normalizeImageCacheNodeInventoryFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageCacheNodeInventories(filter)
-	}
-	out := []model.ImageCacheNodeInventory{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, node := range state.ImageCacheNodes {
-			if imageCacheNodeInventoryMatchesFilter(node, filter) {
-				out = append(out, node)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ObservedAt.After(out[j].ObservedAt)
-	})
-	return out, nil
+	return s.pgListImageCacheNodeInventories(filter)
 }
 
 func (s *Store) ListImageCacheManifests(filter model.ImageCacheManifestFilter) ([]model.ImageCacheManifest, error) {
 	filter = normalizeImageCacheManifestFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageCacheManifests(filter)
-	}
-	out := []model.ImageCacheManifest{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, manifest := range state.ImageCacheManifests {
-			if imageCacheManifestMatchesFilter(manifest, filter) {
-				out = append(out, manifest)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].LastSeenAt.After(out[j].LastSeenAt)
-	})
-	return out, nil
+	return s.pgListImageCacheManifests(filter)
 }
 
 func (s *Store) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
@@ -154,10 +40,7 @@ func (s *Store) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model
 	if plan.Mode == "" || plan.Status == "" {
 		return model.ImageCachePrunePlan{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageCachePrunePlan(plan)
-	}
-	return s.upsertImageCachePrunePlanState(plan)
+	return s.pgUpsertImageCachePrunePlan(plan)
 }
 
 // UpsertImageCachePrunePlanSummary persists the bounded diagnostic projection
@@ -185,10 +68,7 @@ func (s *Store) UpsertImageCachePrunePlanSummary(plan model.ImageCachePrunePlan)
 	plan.ProtectedManifests = nil
 	plan.SkippedManifests = nil
 	plan.UnreferencedBlobs = nil
-	if s.usingDatabase() {
-		return s.pgUpsertImageCachePrunePlan(plan)
-	}
-	return s.upsertImageCachePrunePlanState(plan)
+	return s.pgUpsertImageCachePrunePlan(plan)
 }
 
 func imageCachePruneSummaryID(plan model.ImageCachePrunePlan) string {
@@ -197,54 +77,9 @@ func imageCachePruneSummaryID(plan model.ImageCachePrunePlan) string {
 	return "imgcacheprune-summary-" + hex.EncodeToString(sum[:16])
 }
 
-func (s *Store) upsertImageCachePrunePlanState(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
-	var out model.ImageCachePrunePlan
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageCachePrunePlan(state.ImageCachePrunePlans, plan.ID)
-		if index >= 0 {
-			current := state.ImageCachePrunePlans[index]
-			plan.ID = current.ID
-			plan.CreatedAt = current.CreatedAt
-			state.ImageCachePrunePlans[index] = plan
-			out = plan
-			return nil
-		}
-		plan.ID = firstNonEmptyImageCacheString(plan.ID, model.NewID("imgcacheprune"))
-		if plan.CreatedAt.IsZero() {
-			plan.CreatedAt = now
-		}
-		state.ImageCachePrunePlans = append(state.ImageCachePrunePlans, plan)
-		out = plan
-		return nil
-	})
-	return out, err
-}
-
 func (s *Store) ListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter) ([]model.ImageCachePrunePlan, error) {
 	filter = normalizeImageCachePrunePlanFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageCachePrunePlans(filter)
-	}
-	out := []model.ImageCachePrunePlan{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, plan := range state.ImageCachePrunePlans {
-			if imageCachePrunePlanMatchesFilter(plan, filter) {
-				out = append(out, plan)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].CreatedAt.After(out[j].CreatedAt)
-	})
-	if filter.Limit > 0 && len(out) > filter.Limit {
-		out = out[:filter.Limit]
-	}
-	return out, nil
+	return s.pgListImageCachePrunePlans(filter)
 }
 
 func (s *Store) UpsertLocalPVInventory(inventory model.LocalPVInventory) (model.LocalPVInventory, error) {
@@ -252,52 +87,12 @@ func (s *Store) UpsertLocalPVInventory(inventory model.LocalPVInventory) (model.
 	if inventory.NodeID == "" && inventory.ClusterNodeName == "" {
 		return model.LocalPVInventory{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertLocalPVInventory(inventory)
-	}
-	var out model.LocalPVInventory
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findLocalPVInventory(state.LocalPVInventories, inventory)
-		if index >= 0 {
-			current := state.LocalPVInventories[index]
-			inventory.ID = current.ID
-			inventory.CreatedAt = current.CreatedAt
-			inventory.UpdatedAt = now
-			state.LocalPVInventories[index] = inventory
-		} else {
-			inventory.ID = firstNonEmptyImageCacheString(inventory.ID, model.NewID("localpv"))
-			inventory.CreatedAt = now
-			inventory.UpdatedAt = now
-			state.LocalPVInventories = append(state.LocalPVInventories, inventory)
-		}
-		out = inventory
-		return nil
-	})
-	return out, err
+	return s.pgUpsertLocalPVInventory(inventory)
 }
 
 func (s *Store) ListLocalPVInventories(filter model.LocalPVInventoryFilter) ([]model.LocalPVInventory, error) {
 	filter = normalizeLocalPVInventoryFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListLocalPVInventories(filter)
-	}
-	out := []model.LocalPVInventory{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, inventory := range state.LocalPVInventories {
-			if localPVInventoryMatchesFilter(inventory, filter) {
-				out = append(out, inventory)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].ObservedAt.After(out[j].ObservedAt)
-	})
-	return out, nil
+	return s.pgListLocalPVInventories(filter)
 }
 
 func normalizeImageCacheNodeInventory(in model.ImageCacheNodeInventory) model.ImageCacheNodeInventory {
@@ -462,159 +257,6 @@ func normalizeLocalPVInventoryFilter(filter model.LocalPVInventoryFilter) model.
 	filter.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
 	filter.RuntimeID = strings.TrimSpace(filter.RuntimeID)
 	return filter
-}
-
-func imageCacheNodeInventoryMatchesFilter(in model.ImageCacheNodeInventory, filter model.ImageCacheNodeInventoryFilter) bool {
-	if filter.NodeID != "" && strings.TrimSpace(in.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(in.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(in.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if !filter.StaleAfter.IsZero() && in.ObservedAt.Before(filter.StaleAfter) {
-		return false
-	}
-	return true
-}
-
-func imageCacheManifestMatchesFilter(in model.ImageCacheManifest, filter model.ImageCacheManifestFilter) bool {
-	if !filter.IncludeIncomplete && imagecacheevidence.GraphIsIncomplete(in.GraphStatus) {
-		return false
-	}
-	if filter.NodeID != "" && strings.TrimSpace(in.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(in.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(in.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if filter.Repo != "" && strings.Trim(strings.TrimSpace(in.Repo), "/") != filter.Repo {
-		return false
-	}
-	if filter.Target != "" && strings.TrimSpace(in.Target) != filter.Target {
-		return false
-	}
-	if filter.Digest != "" && strings.TrimSpace(in.Digest) != filter.Digest {
-		return false
-	}
-	if filter.PresentOnly && !in.Present {
-		return false
-	}
-	if !filter.SeenAfter.IsZero() && in.LastSeenAt.Before(filter.SeenAfter) {
-		return false
-	}
-	return true
-}
-
-func imageCacheManifestBelongsToNode(manifest model.ImageCacheManifest, node model.ImageCacheNodeInventory) bool {
-	nodeID := strings.TrimSpace(node.NodeID)
-	clusterNodeName := strings.TrimSpace(node.ClusterNodeName)
-	if nodeID != "" && strings.TrimSpace(manifest.NodeID) != nodeID {
-		return false
-	}
-	if clusterNodeName != "" && strings.TrimSpace(manifest.ClusterNodeName) != clusterNodeName {
-		return false
-	}
-	return nodeID != "" || clusterNodeName != ""
-}
-
-func imageCachePrunePlanMatchesFilter(in model.ImageCachePrunePlan, filter model.ImageCachePrunePlanFilter) bool {
-	if filter.NodeID != "" && strings.TrimSpace(in.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(in.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(in.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if filter.Mode != "" && strings.TrimSpace(in.Mode) != filter.Mode {
-		return false
-	}
-	if filter.Status != "" && strings.TrimSpace(in.Status) != filter.Status {
-		return false
-	}
-	return true
-}
-
-func localPVInventoryMatchesFilter(in model.LocalPVInventory, filter model.LocalPVInventoryFilter) bool {
-	if filter.NodeID != "" && strings.TrimSpace(in.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(in.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(in.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if !filter.StaleAfter.IsZero() && in.ObservedAt.Before(filter.StaleAfter) {
-		return false
-	}
-	return true
-}
-
-func findImageCacheNodeInventory(nodes []model.ImageCacheNodeInventory, needle model.ImageCacheNodeInventory) int {
-	for idx, node := range nodes {
-		if strings.TrimSpace(needle.NodeID) != "" && strings.TrimSpace(node.NodeID) == strings.TrimSpace(needle.NodeID) {
-			return idx
-		}
-		if strings.TrimSpace(needle.NodeID) == "" && strings.TrimSpace(needle.ClusterNodeName) != "" && strings.TrimSpace(node.ClusterNodeName) == strings.TrimSpace(needle.ClusterNodeName) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findImageCacheManifest(manifests []model.ImageCacheManifest, needle model.ImageCacheManifest) int {
-	for idx, manifest := range manifests {
-		if strings.TrimSpace(manifest.NodeID) != strings.TrimSpace(needle.NodeID) {
-			continue
-		}
-		if strings.TrimSpace(manifest.ClusterNodeName) != strings.TrimSpace(needle.ClusterNodeName) {
-			continue
-		}
-		if strings.Trim(strings.TrimSpace(manifest.Repo), "/") != strings.Trim(strings.TrimSpace(needle.Repo), "/") {
-			continue
-		}
-		if strings.TrimSpace(manifest.Target) != strings.TrimSpace(needle.Target) {
-			continue
-		}
-		if strings.TrimSpace(manifest.Digest) != strings.TrimSpace(needle.Digest) {
-			continue
-		}
-		return idx
-	}
-	return -1
-}
-
-func findImageCachePrunePlan(plans []model.ImageCachePrunePlan, id string) int {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return -1
-	}
-	for idx, plan := range plans {
-		if strings.TrimSpace(plan.ID) == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findLocalPVInventory(inventories []model.LocalPVInventory, needle model.LocalPVInventory) int {
-	for idx, inventory := range inventories {
-		if strings.TrimSpace(needle.NodeID) != "" && strings.TrimSpace(inventory.NodeID) == strings.TrimSpace(needle.NodeID) {
-			return idx
-		}
-		if strings.TrimSpace(needle.NodeID) == "" && strings.TrimSpace(needle.ClusterNodeName) != "" && strings.TrimSpace(inventory.ClusterNodeName) == strings.TrimSpace(needle.ClusterNodeName) {
-			return idx
-		}
-	}
-	return -1
 }
 
 func firstNonEmptyImageCacheString(values ...string) string {

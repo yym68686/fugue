@@ -4,16 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/model"
-	"fugue/internal/platformconfig"
-	"fugue/internal/platformcontrol"
 )
 
 func TestTrafficConsumerRollback(t *testing.T) { testTrafficConsumerRollback(t, "") }
@@ -37,16 +36,12 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 			if scenario == "queued revocation" && address == "" {
 				t.Skip("Postgres concurrency")
 			}
-			s := New(t.TempDir()+"/state.json", address)
-			if address != "" {
-				s = platformStatePostgresFixture(t)
-			}
+			s := New(address)
+
+			s = platformStatePostgresFixture(t)
+
 			configureTestPlatformArtifactSigning(s)
-			if address == "" {
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			scope := "rollback-" + model.NewID("test")
 			old := preparePromotionFixture(t, s, scope)
 			now := time.Now().UTC()
@@ -101,14 +96,9 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 			if fromShadow {
 				// Model a newly enrolled consumer that has only observed shadow;
 				// the fixture's established serving publication remains selected.
-				if address != "" {
-					_, err = s.db.Exec(`DELETE FROM fugue_platform_consumer_instances WHERE scope_key=$1`, scope)
-				} else {
-					err = s.withLockedState(true, func(state *model.State) error {
-						state.PlatformConsumerInstances = nil
-						return nil
-					})
-				}
+
+				_, err = s.db.Exec(`DELETE FROM fugue_platform_consumer_instances WHERE scope_key=$1`, scope)
+
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -200,45 +190,19 @@ func testTrafficConsumerRollback(t *testing.T, address string) {
 					t.Fatal(err)
 				}
 			}
-			if address == "" {
-				if err = s.withLockedState(true, func(state *model.State) error {
-					switch scenario {
-					case "ordinary message":
-						for i := range state.PlatformReleaseMessages {
-							if state.PlatformReleaseMessages[i].ReleaseID == rollback.ID {
-								state.PlatformReleaseMessages[i].MessageType = model.PlatformReleaseMessageTypeRelease
-							}
-						}
-					case "tampered child":
-						for i := range state.PlatformArtifacts {
-							if state.PlatformArtifacts[i].Generation == h.DesiredGeneration {
-								state.PlatformArtifacts[i].Content["tampered"] = true
-							}
-						}
-					case "frozen":
-						for i := range state.PlatformReleaseLanes {
-							if state.PlatformReleaseLanes[i].LaneKey == rollback.LaneKey {
-								state.PlatformReleaseLanes[i].Frozen = true
-							}
-						}
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				switch scenario {
-				case "ordinary message":
-					_, err = s.db.Exec(`UPDATE fugue_platform_release_messages SET message_type='release' WHERE release_id=$1`, rollback.ID)
-				case "tampered child":
-					_, err = s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json||'{"tampered":true}'::jsonb WHERE scope_key=$1 AND generation=$2`, scope, h.DesiredGeneration)
-				case "frozen":
-					_, err = s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, rollback.LaneKey)
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
+
+			switch scenario {
+			case "ordinary message":
+				_, err = s.db.Exec(`UPDATE fugue_platform_release_messages SET message_type='release' WHERE release_id=$1`, rollback.ID)
+			case "tampered child":
+				_, err = s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json||'{"tampered":true}'::jsonb WHERE scope_key=$1 AND generation=$2`, scope, h.DesiredGeneration)
+			case "frozen":
+				_, err = s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, rollback.LaneKey)
 			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
 			accept := func() error {
 				_, err := s.AcceptTrustedPlatformConsumerHeartbeat(claims, set.ID, h, time.Now().UTC(), platformcontrol.PlatformConsumerHeartbeatValidationPolicy{})
 				return err
