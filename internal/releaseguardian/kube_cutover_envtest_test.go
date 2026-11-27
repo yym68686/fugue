@@ -98,6 +98,12 @@ func startAdmissionTestServer(t *testing.T) *rest.Config {
 	}); err != nil {
 		t.Fatalf("isolated Kubernetes API server did not start: %v", err)
 	}
+	servingCert, err := os.ReadFile(filepath.Join(data, "apiserver.crt"))
+	if err != nil {
+		t.Fatalf("read isolated Kubernetes serving certificate: %v", err)
+	}
+	cfg.Insecure = false
+	cfg.CAData = servingCert
 	return cfg
 }
 

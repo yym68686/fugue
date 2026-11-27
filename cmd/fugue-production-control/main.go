@@ -43,6 +43,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control preflight-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION [PRIVATE_TOKEN_FILE]
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
+       fugue-production-control observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -185,10 +186,12 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New("participation observer target is not enrolled")
 		})
 	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
-		"shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold", "observe-participation-freeze":
+		"shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold",
+		"observe-participation-freeze", "observe-participation-offline-guard":
 		minArgs, maxArgs := 5, 5
 		var tokenPath string
 		var usesToken bool
+		usesSubmission := args[0] == "preflight-participation-hold" || args[0] == "observe-participation-offline-guard"
 		switch args[0] {
 		case "shadow-participation-dns":
 			minArgs, maxArgs = 6, 6
@@ -208,6 +211,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				tokenPath = args[5]
 				usesToken = true
 			}
+		case "observe-participation-offline-guard":
+			minArgs, maxArgs = 6, 6
 		}
 		if len(args) < minArgs || len(args) > maxArgs {
 			return errors.New(usage)
@@ -220,7 +225,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		}
 		node := args[4]
 		var submission productioncontrol.Submission
-		if args[0] == "preflight-participation-hold" {
+		if usesSubmission {
 			var err error
 			submission, err = readSubmission(args[4])
 			if err != nil {
@@ -238,7 +243,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New("could not load the requested read-only Kubernetes context")
 		}
 		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
-			if args[0] == "preflight-participation-hold" && submission.Intent.ClusterID != cluster {
+			if usesSubmission && submission.Intent.ClusterID != cluster {
 				return errors.New("participation hold belongs to another journal cluster")
 			}
 			topology, err := j.ReadParticipationTopology(ctx, cluster)
@@ -294,6 +299,16 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Freeze = "participation_freeze_configuration_observation", &freeze
+			case "observe-participation-offline-guard":
+				guard, err := observer.ObserveOfflineHoldGuard(ctx, topology, submission, args[5])
+				if err != nil {
+					return err
+				}
+				report.Kind, report.Freeze = "participation_offline_guard_configuration_observation", &guard
+				report.IntentDigest, err = submission.Intent.Digest()
+				if err != nil {
+					return err
+				}
 			}
 			if err := observer.VerifyNamespace(ctx); err != nil {
 				return err

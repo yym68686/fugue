@@ -152,6 +152,20 @@ revisions that change during the read. `currentTypeChecked: false` means the
 API has not reported type checking of the current generation. No result
 claims enforcement across endpoints, credential revocation, or drainage.
 
+The offline hold guard uses the same policy and binding identity as the
+freeze. It permits the dedicated writer to change only the two owned
+annotations, from the exact prior values to the proposed values, on the
+enrolled UID and pre-write resourceVersion. The writer cannot use this
+guard for a recovery transition; its stability timer must start at actual
+application, not draft time. The guard does not grant RBAC or prove that
+the legacy writer has drained. It is not wired to an installer or executor.
+
+`observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER`
+reads the policy and binding twice on the approved cluster and compares
+them to the exact proposed hold and named dedicated ServiceAccount. Like
+freeze observation, it reports stored configuration only. It does not prove
+enforcement across endpoints or authorize a write.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
