@@ -426,6 +426,7 @@ func (s *Server) registerGeneratedRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /v1/edge/nodes", s.auth.RequireAPI(http.HandlerFunc(s.handleListEdgeNodes)))
 	mux.Handle("GET /v1/edge/nodes/{edge_id}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetEdgeNode)))
 	mux.Handle("GET /v1/edge/nodes/{edge_id}/desired-state", http.HandlerFunc(s.handleGetEdgeNodeDesiredState))
+	mux.Handle("GET /v1/edge/nodes/{edge_id}/participation-observation", s.auth.RequireParticipationObserver(http.HandlerFunc(s.handleEdgeParticipationObservation)))
 	mux.Handle("GET /v1/edge/nodes/{edge_id}/quality", s.auth.RequireAPI(http.HandlerFunc(s.handleGetEdgeNodeQuality)))
 	mux.Handle("POST /v1/edge/nodes/{edge_id}/token", s.auth.RequireAPI(http.HandlerFunc(s.handleCreateEdgeNodeToken)))
 	mux.Handle("GET /v1/edge/quality-rank/{hostname}", s.auth.RequireAPI(http.HandlerFunc(s.handleGetEdgeQualityRank)))

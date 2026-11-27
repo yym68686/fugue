@@ -37,6 +37,7 @@ type Authenticator struct {
 	WorkloadIdentitySigningKey       string
 	PlatformComponentIdentityKeyring platformcontrol.PlatformComponentIdentityKeyring
 	EdgeRouteIntentIdentityKeyring   platformcontrol.PlatformComponentIdentityKeyring
+	ParticipationObserverKeyring     platformcontrol.PlatformComponentIdentityKeyring
 }
 
 func New(store *store.Store, bootstrapAdminKey string) *Authenticator {
@@ -123,6 +124,14 @@ func (a *Authenticator) RequireEdgeRouteIntentComponent(next http.Handler) http.
 	var keyring platformcontrol.PlatformComponentIdentityKeyring
 	if a != nil {
 		keyring = a.EdgeRouteIntentIdentityKeyring
+	}
+	return a.requirePlatformComponentWithKeyring(next, keyring)
+}
+
+func (a *Authenticator) RequireParticipationObserver(next http.Handler) http.Handler {
+	var keyring platformcontrol.PlatformComponentIdentityKeyring
+	if a != nil {
+		keyring = a.ParticipationObserverKeyring
 	}
 	return a.requirePlatformComponentWithKeyring(next, keyring)
 }

@@ -1027,6 +1027,20 @@ type EdgeNodeInventoryObservation struct {
 	RouteProofStatus   string                  `json:"route_proof_status"`
 }
 
+// EdgeParticipationObservation is the narrow observation returned to the
+// node-scoped shadow reader. It carries no authority to admit or mutate.
+type EdgeParticipationObservation struct {
+	Node               string     `json:"node"`
+	Group              string     `json:"group"`
+	PublicIPv4         string     `json:"public_ipv4"`
+	EvaluatedAt        time.Time  `json:"evaluated_at"`
+	FreshUntil         *time.Time `json:"fresh_until,omitempty"`
+	HeartbeatFresh     bool       `json:"heartbeat_fresh"`
+	DNSState           string     `json:"dns_state"`
+	DNSReason          string     `json:"dns_reason"`
+	DNSServingEvidence string     `json:"dns_serving_evidence"`
+}
+
 type EdgeDNSAdmissionIntent struct {
 	RecoveryCodeDetail                  string                `json:"recovery_code_detail,omitempty"`
 	RecoveryCodePlan                    *EdgeCodeRecoveryPlan `json:"recovery_code_plan,omitempty"`

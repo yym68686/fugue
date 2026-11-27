@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"fugue/internal/platformcontrol"
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -36,6 +37,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-participation-readers JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
+       fugue-production-control issue-participation-observer JOURNAL_CONFIG NODE KEY_ID PRIVATE_SEED_FILE
+       fugue-production-control shadow-participation-dns JOURNAL_CONFIG KUBECONFIG CONTEXT NODE PRIVATE_TOKEN_FILE
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
@@ -144,8 +147,45 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			return emit(report)
 		})
-	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes", "observe-participation-freeze":
-		if len(args) != 5 {
+	case "issue-participation-observer":
+		if len(args) != 5 || !filepath.IsAbs(args[4]) {
+			return errors.New(usage)
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			topology, err := j.ReadParticipationTopology(ctx, cluster)
+			if err != nil {
+				return err
+			}
+			if topology.Policy.Schema != productioncontrol.BoundParticipationPolicySchema {
+				return errors.New("participation observer credentials require a cluster-bound topology")
+			}
+			for _, m := range topology.Policy.Members {
+				if m.Node != args[2] {
+					continue
+				}
+				claims, err := platformcontrol.ParticipationObserverClaims(m.Node, m.Group)
+				if err != nil {
+					return err
+				}
+				seed, err := readFile(args[4], 4096, true)
+				if err != nil {
+					return err
+				}
+				defer clear(seed)
+				keys := platformcontrol.DeriveParticipationObserverKeyring(string(seed), args[3])
+				token, err := platformcontrol.IssuePlatformComponentIdentity(keys, claims, now(), platformcontrol.ParticipationObserverTTL)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(out, token)
+				return err
+			}
+			return errors.New("participation observer target is not enrolled")
+		})
+	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
+		"shadow-participation-dns", "observe-participation-freeze":
+		if (args[0] == "shadow-participation-dns" && len(args) != 6) ||
+			(args[0] != "shadow-participation-dns" && len(args) != 5) {
 			return errors.New(usage)
 		}
 		if !filepath.IsAbs(args[2]) || args[3] == "" {
@@ -189,6 +229,24 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Shadow = "participation_kubernetes_only_shadow", &shadow
+			case "shadow-participation-dns":
+				if !filepath.IsAbs(args[5]) {
+					return errors.New("participation observation requires an absolute token file path")
+				}
+				token, err := readFile(args[5], 4096, true)
+				if err != nil {
+					return err
+				}
+				defer clear(token)
+				dns, err := participation.NewDNSObserver(topology.Policy.Origin, string(token))
+				if err != nil {
+					return err
+				}
+				shadow, err := observer.ShadowWithDNS(ctx, topology.Policy, args[4], dns, now)
+				if err != nil {
+					return err
+				}
+				report.Kind, report.Shadow = "participation_kubernetes_and_fugue_shadow", &shadow
 			case "observe-participation-freeze":
 				freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, args[4])
 				if err != nil {
