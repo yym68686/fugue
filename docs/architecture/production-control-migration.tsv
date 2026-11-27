@@ -404,6 +404,7 @@ script	scripts/probe_fugue_public_dns.sh	migrate	native observation and evidence
 script	scripts/promote_cell_routes.py	migrate	native platform policy and reconciliation
 script	scripts/promote_dns_authority.py	migrate	native DNS policy and reconciliation
 script	scripts/provision_observation_worker_database.py	migrate	native database ownership and scoped credential provisioning
+script	scripts/provision_quality_evidence_retention.py	migrate	native maintenance role provisioning with standby and readiness verification
 script	scripts/provision_runtime_agent_identity.py	migrate	native platform policy and reconciliation
 script	scripts/publish_agent_edge_shadow.py	migrate	native platform policy and reconciliation
 script	scripts/publish_diagnostic_catalog.py	migrate	native administrative operation or build interface
