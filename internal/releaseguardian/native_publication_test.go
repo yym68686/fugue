@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func (check publicationAdmissionFunc) VerifyNativePublication(ctx context.Contex
 }
 
 func TestNativePublicationIsBoundAndNeverRedispatched(t *testing.T) {
-	for _, mode := range []string{"submitted", "legacy writer active", "workload drift", "claim expires before pointer", "lost successful CAS response"} {
+	for _, mode := range []string{"submitted", "legacy writer active", "workload drift", "artifact not in independent registry", "claim expires before pointer", "lost successful CAS response"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := context.Background()
 			f := healthyPublicationFixture(t)
@@ -82,7 +83,9 @@ func TestNativePublicationIsBoundAndNeverRedispatched(t *testing.T) {
 					b.RecordObject != releaseRecordName(f.key, b.Candidate.RecordDigest) ||
 					b.WorkloadUID != "uid" || b.WorkloadVersion != "10" || b.Workload != draft.Preview.PrewriteWorkload ||
 					b.ForwardOCI == "" || b.RollbackOCI == "" || b.ForwardOCI == b.RollbackOCI ||
-					b.ArtifactReceiptDigest != draft.Preview.ArtifactReceiptDigest {
+					b.ArtifactReceiptDigest != draft.Preview.ArtifactReceiptDigest ||
+					b.ForwardReceipt.ImmutableRef != b.ForwardOCI || b.RollbackReceipt.ImmutableRef != b.RollbackOCI ||
+					b.RollbackReceipt.TopDigest != f.stableGuardian.ImageDigest {
 					t.Fatalf("provider is asked to prove the wrong boundary: %+v", b)
 				}
 				if mode == "legacy writer active" {
@@ -92,6 +95,15 @@ func TestNativePublicationIsBoundAndNeverRedispatched(t *testing.T) {
 			})
 			p := &NativePublisher{store: f.store, journal: journal, clusterID: draft.Intent.ClusterID, admission: admission}
 			switch mode {
+			case "artifact not in independent registry":
+				registry, err := NewIndependentRegistry("registry.fixture.invalid", nil, registryRoundTrip(func(*http.Request) (*http.Response, error) {
+					t.Error("must not contact any registry for an out-of-origin artifact")
+					return nil, errors.New("unexpected registry request")
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				p.artifacts = registry
 			case "workload drift":
 				deploys := f.client.AppsV1().Deployments(draft.Preview.Namespace)
 				live, err := deploys.Get(ctx, draft.Preview.PrewriteWorkload.Name, metav1.GetOptions{})
@@ -131,7 +143,7 @@ func TestNativePublicationIsBoundAndNeverRedispatched(t *testing.T) {
 				}
 			}
 			switch mode {
-			case "legacy writer active", "workload drift":
+			case "legacy writer active", "workload drift", "artifact not in independent registry":
 				if checks != 1 || writes != 0 || journal.reservations != 0 || result.Claim != (productioncontrol.Claim{}) {
 					t.Fatalf("unverified authority or predecessor reserved a claim or wrote: %+v", result)
 				}
