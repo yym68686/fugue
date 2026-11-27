@@ -102,6 +102,19 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		preview.PrewriteResourceVersion != "10" || preview.Health.Route.State != HealthHealthy {
 		t.Fatalf("unbound preview: %+v", preview)
 	}
+	draft, err := store.DraftNativeRelease(context.Background(), key, "cluster-a", "request-a", candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Preview.Record != preview.Record || draft.Intent.Generation != preview.CurrentDesired.Generation ||
+		draft.Intent.CurrentDigest != preview.CurrentRecordDigest || draft.Intent.RollbackDigest != preview.Record.LKGRecordDigest ||
+		draft.Intent.ResourceID != "kubernetes/fugue-system/deployment/edge-control-de" || draft.Intent.VerifyPayload(draft.Payload) != nil {
+		t.Fatalf("native draft is not bound to the same resource and predecessor: %+v", draft.Intent)
+	}
+	draft.Payload[len(draft.Payload)-1] ^= 1
+	if err := draft.Intent.VerifyPayload(draft.Payload); err == nil {
+		t.Fatal("native draft permitted editing the persisted bundle")
+	}
 	badCandidate := make(map[string][]byte, len(candidate))
 	for name, raw := range candidate {
 		badCandidate[name] = raw
@@ -135,6 +148,9 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	}
 	if _, _, err := store.PublishDesired(context.Background(), key, candidate); err == nil || !strings.Contains(err.Error(), "not a healthy settled release") {
 		t.Fatalf("unsettled successor was accepted: %v", err)
+	}
+	if _, err := store.DraftNativeRelease(context.Background(), key, "cluster-a", "request-b", candidate); err == nil {
+		t.Fatal("native release draft accepted an in-flight legacy publication")
 	}
 	desiredMap, err := client.CoreV1().ConfigMaps("fugue-system").Get(context.Background(), desiredName(key), metav1.GetOptions{})
 	if err != nil {

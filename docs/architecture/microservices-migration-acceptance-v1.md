@@ -105,3 +105,28 @@ verified artifact availability, then observe denied writes from the old
 identities at the Kubernetes/API, DNS provider, object store and runner/host
 boundaries. Do not use an Actions run with production credentials as proof
 that those identities have lost authority.
+
+## Native intent journal (pre-cutover)
+
+The native journal's schema is in `internal/productioncontrol/journal.sql`.
+It is not applied by the existing production API or CI. Use a schema-owner
+identity for migration only, and a separate journal principal with
+`USAGE` on `fugue_control` and `SELECT, INSERT` on its three tables. Do not
+grant that principal DDL, `UPDATE`, `DELETE`, or any provider permissions.
+
+An intent binds the operation, immutable cluster/resource identity and
+request ID, expected generation and live digest, exact payload digest and
+rollback digest. Admission must derive that resource identity from the
+actual provider write boundary. Reusing a request ID with different content
+returns a conflict and creates no second operation. Each intent or approval and its
+audit entry commit in one transaction. A component release draft can be
+derived from Guardian's read-only preview for a healthy settled predecessor;
+the exact prepared bundle is bound to it, not a Git lane or mutable tag.
+
+Ed25519 approvals cover only the digest of that exact intent, under a
+cluster-scoped owner key loaded from outside source and build systems. An
+artifact receipt alone is not an approval. The executor must verify the
+configured key, signature, expiration, predecessor and fence at execution
+time. An approval row in the journal is not sufficient for execution.
+The journal and release draft have no provider mutation path and are not
+evidence that a release was applied or a resource has been cut over.
