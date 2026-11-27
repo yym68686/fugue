@@ -23,7 +23,7 @@ func TestTenantResourceOwnership(t *testing.T) {
 		if !localOwnershipTestDB(url) {
 			t.Fatal("requires a test database")
 		}
-		s := New("", url)
+		s := New(url)
 		if err := s.Init(); err != nil {
 			if err := schemamigrate.MigrateEdgeInstanceFencing(context.Background(), url); err != nil {
 				t.Fatal(err)

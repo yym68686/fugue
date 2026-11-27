@@ -3,20 +3,18 @@ package store
 import (
 	"context"
 	"fmt"
+	"fugue/internal/bundleauth"
+	"fugue/internal/model"
+	"fugue/internal/platformsafety"
+	"fugue/internal/schemamigrate"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/bundleauth"
-	"fugue/internal/model"
-	"fugue/internal/platformsafety"
-	"fugue/internal/schemamigrate"
 )
 
-func TestPlatformRuntimeFactsFiltering(t *testing.T) { testPlatformRuntimeFactsFiltering(t, "") }
 func TestPlatformRuntimeFactsFilteringPostgres(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -30,30 +28,25 @@ func TestPlatformRuntimeFactsFilteringPostgres(t *testing.T) {
 }
 
 func testPlatformRuntimeFactsFiltering(t *testing.T, dsn string) {
-	s := New(t.TempDir()+"/state.json", dsn)
+	s := New(dsn)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if s.db != nil {
-		t.Cleanup(func() { s.db.Close() })
-	}
+
+	t.Cleanup(func() { s.db.Close() })
+
 	ctx := context.Background()
 	prefix := model.NewID("facts")
 	parent, baseline := prefix+"-parent", prefix+"-baseline"
 	consumerID, instance := prefix+"-consumer", prefix+"-instance"
 	at := time.Now().UTC().Truncate(time.Microsecond)
 	consumer := model.PlatformConsumerInstance{ID: instance, ConsumerID: consumerID, ArtifactKind: "dns_answer_bundle", ScopeKey: "global", LastHeartbeatAt: at, UpdatedAt: at}
-	if s.db != nil {
-		_, err := s.db.Exec(`INSERT INTO fugue_platform_consumer_instances (id,consumer_id,artifact_kind,scope_key,last_heartbeat_at,updated_at) VALUES ($1,$2,$3,$4,$5,$5)`, instance, consumerID, consumer.ArtifactKind, consumer.ScopeKey, at)
-		if err != nil {
-			t.Fatal(err)
-		}
-	} else if err := s.withLockedState(true, func(st *model.State) error {
-		st.PlatformConsumerInstances = append(st.PlatformConsumerInstances, consumer)
-		return nil
-	}); err != nil {
+
+	_, err := s.db.Exec(`INSERT INTO fugue_platform_consumer_instances (id,consumer_id,artifact_kind,scope_key,last_heartbeat_at,updated_at) VALUES ($1,$2,$3,$4,$5,$5)`, instance, consumerID, consumer.ArtifactKind, consumer.ScopeKey, at)
+	if err != nil {
 		t.Fatal(err)
 	}
+
 	events := []model.AuditEvent{}
 	add := func(id, action, targetType, target string, meta map[string]string, when time.Time) {
 		events = append(events, model.AuditEvent{ID: prefix + id, ActorType: "bootstrap", ActorID: "synthetic", Action: action, TargetType: targetType, TargetID: target, Metadata: meta, CreatedAt: when})
@@ -80,23 +73,21 @@ func testPlatformRuntimeFactsFiltering(t *testing.T, dsn string) {
 	for i := 0; i < 30; i++ {
 		add(fmt.Sprintf("-noise-%02d", i), "app.updated", "app", prefix+"-noise", nil, at.Add(time.Duration(i+1)*time.Second))
 	}
-	if s.db != nil {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range events {
-			if err := s.pgAppendAuditEventTx(ctx, tx, e); err != nil {
-				tx.Rollback()
-				t.Fatal(err)
-			}
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
-		}
-	} else if err := s.withLockedState(true, func(st *model.State) error { st.AuditEvents = append(st.AuditEvents, events...); return nil }); err != nil {
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	for _, e := range events {
+		if err := s.pgAppendAuditEventTx(ctx, tx, e); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name    string
 		filter  PlatformRuntimeFactFilter
@@ -113,20 +104,20 @@ func testPlatformRuntimeFactsFiltering(t *testing.T, dsn string) {
 		{"literal query string", PlatformRuntimeFactFilter{ReleaseSetID: parent + "' OR true --", Limit: 20}, nil},
 		{"unknown", PlatformRuntimeFactFilter{ReleaseSetID: prefix + "-missing", Limit: 20}, nil},
 	}
-	if s.db != nil {
-		if err := schemamigrate.MigratePlatformRuntimeFactIndexes(ctx, dsn); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_audit_events (id,actor_type,actor_id,action,target_type,target_id,metadata_json,created_at) SELECT $1||n::text,'bootstrap','synthetic','platform_consumer.heartbeat_accepted','platform_consumer','unrelated',jsonb_build_object('release_set_id','unrelated-'||(n/3)),NOW()+n*interval '1 second' FROM generate_series(1,100000)n`, prefix+"-bulk-"); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			_, _ = s.db.Exec(`DELETE FROM fugue_audit_events WHERE left(id,length($1))=$1`, prefix+"-bulk-")
-		})
-		if _, err := s.db.Exec(`ANALYZE fugue_audit_events`); err != nil {
-			t.Fatal(err)
-		}
+
+	if err := schemamigrate.MigratePlatformRuntimeFactIndexes(ctx, dsn); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_audit_events (id,actor_type,actor_id,action,target_type,target_id,metadata_json,created_at) SELECT $1||n::text,'bootstrap','synthetic','platform_consumer.heartbeat_accepted','platform_consumer','unrelated',jsonb_build_object('release_set_id','unrelated-'||(n/3)),NOW()+n*interval '1 second' FROM generate_series(1,100000)n`, prefix+"-bulk-"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.db.Exec(`DELETE FROM fugue_audit_events WHERE left(id,length($1))=$1`, prefix+"-bulk-")
+	})
+	if _, err := s.db.Exec(`ANALYZE fugue_audit_events`); err != nil {
+		t.Fatal(err)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -174,18 +165,9 @@ func testPlatformRuntimeFactsFiltering(t *testing.T, dsn string) {
 	}
 	// Selection cannot rewrite signatures or mutate the historical source.
 	var stored model.AuditEvent
-	if s.db != nil {
-		stored, err = scanAuditEvent(s.db.QueryRow(`SELECT id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,chain_id,chain_sequence,previous_hash,event_hash,provenance_json,created_at FROM fugue_audit_events WHERE id=$1`, signed.ID))
-	} else {
-		err = s.withLockedState(false, func(st *model.State) error {
-			for _, e := range st.AuditEvents {
-				if e.ID == signed.ID {
-					stored = e
-				}
-			}
-			return nil
-		})
-	}
+
+	stored, err = scanAuditEvent(s.db.QueryRow(`SELECT id,tenant_id,actor_type,actor_id,action,target_type,target_id,metadata_json,chain_id,chain_sequence,previous_hash,event_hash,provenance_json,created_at FROM fugue_audit_events WHERE id=$1`, signed.ID))
+
 	stored.CreatedAt = stored.CreatedAt.UTC()
 	if err != nil || !reflect.DeepEqual(stored, signed) {
 		t.Fatal("query rewrote signed event", err)

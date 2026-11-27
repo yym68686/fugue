@@ -4,17 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
+	"fugue/internal/platformsafety"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/model"
-	"fugue/internal/platformconfig"
-	"fugue/internal/platformproducer"
-	"fugue/internal/platformsafety"
 )
 
 func TestPlatformProducerGuard(t *testing.T) { testPlatformProducerGuard(t, "") }
@@ -36,24 +35,19 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 			if strings.HasPrefix(scenario, "queued") && dsn == "" {
 				t.Skip("real PostgreSQL queue")
 			}
-			s := New(t.TempDir()+"/state.json", dsn)
-			if dsn != "" {
-				s = platformStatePostgresFixture(t)
-				if historyPhase(t, s) != "capability" {
-					t.Fatal("producer business guard fixture must exercise the capability phase")
-				}
+			s := New(dsn)
+
+			s = platformStatePostgresFixture(t)
+			if historyPhase(t, s) != "capability" {
+				t.Fatal("producer business guard fixture must exercise the capability phase")
 			}
+
 			configureTestPlatformArtifactSigning(s)
-			if dsn == "" {
-				if err := s.Init(); err != nil {
-					t.Fatal(err)
-				}
+
+			if _, err := s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=false WHERE scope_key IN ('global','platform-config-producer')`); err != nil {
+				t.Fatal(err)
 			}
-			if dsn != "" {
-				if _, err := s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=false WHERE scope_key IN ('global','platform-config-producer')`); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			since := time.Now().UTC()
 			principal := model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
 			var static, dnsInput model.PlatformArtifact
@@ -232,22 +226,11 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 				if scope == platformproducer.Scope {
 					key = platformsafety.ReleaseLaneKey(model.PlatformArtifactKindPolicySnapshot, scope, "shadow")
 				}
-				if dsn != "" {
-					if _, err := s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, key); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := s.withLockedState(true, func(st *model.State) error {
-						for i := range st.PlatformReleaseLanes {
-							if st.PlatformReleaseLanes[i].LaneKey == key {
-								st.PlatformReleaseLanes[i].Frozen = true
-							}
-						}
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
+
+				if _, err := s.db.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, key); err != nil {
+					t.Fatal(err)
 				}
+
 			}
 			switch scenario {
 			case "dns invalidated":
@@ -255,35 +238,21 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					t.Fatal(err)
 				}
 			case "dns tampered":
-				if dsn != "" {
-					if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, dnsInput.ID); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := s.withLockedState(true, func(st *model.State) error {
-						st.PlatformArtifacts[platformArtifactIndex(st.PlatformArtifacts, dnsInput.ID)].Content["tampered"] = true
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
+
+				if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, dnsInput.ID); err != nil {
+					t.Fatal(err)
 				}
+
 			case "static revoked validation":
 				if _, err := s.ValidatePlatformArtifact(static.ID, []model.PlatformArtifactValidationResult{{Name: "invalidated", Pass: false, Severity: model.RobustnessSeverityBlockPublish}}); err != nil {
 					t.Fatal(err)
 				}
 			case "static tampered":
-				if dsn != "" {
-					if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, static.ID); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := s.withLockedState(true, func(st *model.State) error {
-						st.PlatformArtifacts[platformArtifactIndex(st.PlatformArtifacts, static.ID)].Content["tampered"] = true
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
+
+				if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, static.ID); err != nil {
+					t.Fatal(err)
 				}
+
 			case "paused":
 				makePolicy("paused")
 			case "superseded":
@@ -297,18 +266,11 @@ func testPlatformProducerGuard(t *testing.T, dsn string) {
 					t.Fatal(err)
 				}
 			case "tampered member":
-				if dsn != "" {
-					if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, ids[1]); err != nil {
-						t.Fatal(err)
-					}
-				} else {
-					if err := s.withLockedState(true, func(st *model.State) error {
-						st.PlatformArtifacts[platformArtifactIndex(st.PlatformArtifacts, ids[1])].Content["tampered"] = true
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
+
+				if _, err := s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=content_json || '{"tampered":true}'::jsonb WHERE id=$1`, ids[1]); err != nil {
+					t.Fatal(err)
 				}
+
 			case "wrong actor":
 				principal.ActorID = "another-producer"
 			}

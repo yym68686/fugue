@@ -21,18 +21,7 @@ func (s *Store) ListActiveSourceOperationIDsByApp(ctx context.Context, tenantID 
 	if appID == "" {
 		return ids, nil
 	}
-	if !s.usingDatabase() {
-		operations, err := s.ListOperationsWithDesiredSourceByApp(tenantID, platformAdmin, appID)
-		if err != nil {
-			return nil, err
-		}
-		for _, op := range operations {
-			if isActiveOperationStatus(op.Status) {
-				ids = append(ids, op.ID)
-			}
-		}
-		return ids, ctx.Err()
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	args := []any{appID, model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent}
@@ -71,20 +60,5 @@ func (s *Store) ListAppReleasesByIDs(ctx context.Context, filter model.AppReleas
 		return out, nil
 	}
 	filter = normalizeAppReleaseFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListAppReleaseProjectionIDsContext(ctx, filter, appReleaseFullSpec, sortedTrimmedStringKeys(ids))
-	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, release := range state.AppReleases {
-			if _, found := ids[release.ID]; found && appReleaseMatchesFilter(release, filter) {
-				out = append(out, release)
-			}
-		}
-		sortAppReleases(out)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return out, ctx.Err()
+	return s.pgListAppReleaseProjectionIDsContext(ctx, filter, appReleaseFullSpec, sortedTrimmedStringKeys(ids))
 }

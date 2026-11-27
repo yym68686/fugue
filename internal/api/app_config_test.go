@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -473,7 +472,7 @@ func TestGetAppEnvRecoversFailedImportedAppDesiredState(t *testing.T) {
 func TestRestartAppRejectsBlankDeployableImage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1215,7 +1214,7 @@ func TestGetAppEnvMergesBindingEnvAndAppEnvOverrides(t *testing.T) {
 func TestGetImportedAppEnvMergesBindingEnvWithoutRecovery(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1623,7 +1622,7 @@ func TestForceDeleteBlocksActiveManagedPostgresResizeWithoutMutation(t *testing.
 func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1654,7 +1653,7 @@ func setupAppConfigTestServer(t *testing.T, spec model.AppSpec) (*store.Store, *
 func setupFailedImportedAppRecoveryServer(t *testing.T) (*store.Store, *Server, string, model.App, string, model.AppSource) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

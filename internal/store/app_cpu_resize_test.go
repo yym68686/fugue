@@ -11,7 +11,7 @@ import (
 
 func cpuResizeStoreFixture(t *testing.T) (*Store, model.App) {
 	t.Helper()
-	s := New(t.TempDir() + "/state.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

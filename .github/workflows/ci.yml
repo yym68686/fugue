@@ -1145,6 +1145,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: fugue-ci-fixture
+          POSTGRES_DB: fugue_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d fugue_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     outputs:
       release_count: ${{ steps.release.outputs.release_count }}
       release_matrix: ${{ steps.release.outputs.release_matrix }}
@@ -1240,6 +1252,21 @@ jobs:
               -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
+      - name: Run store-backed regressions on disposable PostgreSQL
+        timeout-minutes: 50
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
+          FUGUE_STORE_TEST_POSTGRES: postgres://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          base="$BASE_SHA"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
+          if git diff --quiet "$base" HEAD -- internal cmd go.mod go.sum scripts/test_postgres_store.sh .github/workflows/ci.yml; then exit 0; fi
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          make test-postgres
       - name: Rehearse Edge origin relay over isolated private network hops
         timeout-minutes: 4
         env:

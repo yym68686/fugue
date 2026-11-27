@@ -10,7 +10,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestPostgresRuntimeRestoreSourceEvidence(t *testing.T) {
@@ -67,7 +66,7 @@ func TestPostgresRuntimeRestoreSourceEvidence(t *testing.T) {
 func TestReconcilePostgresRuntimeRestoreQueuesOnlySafeVerifiedTarget(t *testing.T) {
 	for _, name := range []string{"cpu request", "limit change", "foreign drift", "unproven", "downscale disabled", "memory without fresh evidence", "already current"} {
 		t.Run(name, func(t *testing.T) {
-			state := store.New(t.TempDir() + "/state.json")
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

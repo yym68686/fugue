@@ -26,7 +26,7 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 	if capture.Desired.InputSnapshot.CapturedAt == nil {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
+	{
 		var guarded bool
 		if err := s.db.QueryRowContext(ctx, schemamigrate.HostedProposalGuardsReadySQL).Scan(&guarded); err != nil {
 			return nil, err
@@ -35,6 +35,7 @@ func (s *Store) EnsureCompiledHostedPathProposals(ctx context.Context, src pc.Ho
 			return nil, fmt.Errorf("%w: proposal storage guards are not installed", ErrConflict)
 		}
 	}
+
 	proposals, rejected := pc.BuildIndependentHostedScopeProposals(src, stage, capture)
 	refusals := hostedExternalRefusals(rejected)
 	if len(proposals) == 0 && len(refusals) == 0 {

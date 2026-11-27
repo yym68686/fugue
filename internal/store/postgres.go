@@ -2483,7 +2483,7 @@ func (s *Store) ensureDatabaseReady() error {
 		return nil
 	}
 	if strings.TrimSpace(s.databaseURL) == "" {
-		return fmt.Errorf("database url is empty")
+		return fmt.Errorf("FUGUE_DATABASE_URL is required for the PostgreSQL store")
 	}
 
 	if s.db == nil {

@@ -5,14 +5,12 @@ import (
 	"errors"
 	"io"
 	"log"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestInternalImageImportVerifiesSourceAndPreparesDeployTarget(t *testing.T) {
@@ -20,7 +18,7 @@ func TestInternalImageImportVerifiesSourceAndPreparesDeployTarget(t *testing.T) 
 	for _, scenario := range []string{"source-only", "target-present", "no-source", "wrong-digest", "missing-blob", "foreign-source", "pull-base", "unresolved-shared"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

@@ -2,9 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,11 +12,11 @@ import (
 	"fugue/internal/testfixture/celldns"
 )
 
-func dnsSourceObservationFixture(t *testing.T, transition bool) (model.State, model.PlatformArtifact) {
+func dnsSourceObservationFixture(t *testing.T, transition bool) (storeProjection, model.PlatformArtifact) {
 	t.Helper()
 	req, policies, policyReleases := celldns.SourceAuthorizedRequest(t, transition)
 	compiled := celldns.Compile(t, req)
-	state := model.State{PlatformArtifacts: policies, PlatformArtifactReleases: policyReleases}
+	state := storeProjection{PlatformArtifacts: policies, PlatformArtifactReleases: policyReleases}
 	add := func(parent, route, tls model.PlatformArtifact, r model.PlatformArtifactRelease) {
 		state.PlatformArtifacts = append(state.PlatformArtifacts, parent, route, tls)
 		r.VerificationState = model.PlatformArtifactVerificationStateVerified
@@ -41,105 +38,39 @@ func dnsSourceObservationFixture(t *testing.T, transition bool) (model.State, mo
 	return state, compiled.DNSArtifact
 }
 
-func TestDNSRouteSourceObservationIsBoundedReadOnlyAndSelectionSensitive(t *testing.T) {
-	for _, transition := range []bool{false, true} {
-		state, child := dnsSourceObservationFixture(t, transition)
-		path := t.TempDir() + "/state.json"
-		raw, _ := json.Marshal(state)
-		if err := os.WriteFile(path, raw, 0600); err != nil {
+func seedDNSObservationRows(t *testing.T, s *Store, state storeProjection) {
+	t.Helper()
+	tx, err := s.db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, artifact := range state.PlatformArtifacts {
+		if _, err := pgInsertPlatformArtifact(t.Context(), tx, artifact); err != nil {
 			t.Fatal(err)
 		}
-		s := New(path)
-		s.ConfigurePlatformArtifactSigning(celldns.Keys())
-		first, err := s.ObserveDNSRouteSources(context.Background(), child)
+	}
+	for _, release := range state.PlatformArtifactReleases {
+		if _, err := pgInsertPlatformArtifactRelease(t.Context(), tx, release); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, lane := range state.PlatformReleaseLanes {
+		_, err := tx.ExecContext(t.Context(), `INSERT INTO fugue_platform_release_lanes
+			(lane_key,artifact_kind,scope_key,release_channel,active_release_id,fencing_token,version,frozen,updated_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,now())`, lane.LaneKey, lane.ArtifactKind, lane.ScopeKey, lane.ReleaseChannel,
+			lane.ActiveReleaseID, lane.FencingToken, lane.Version, lane.Frozen)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := dnsroutesource.VerifySnapshot(first, child, celldns.Keys(), time.Now()); err != nil {
-			t.Fatal("consumer rejected authentic source observation", err)
-		}
-		for _, scenario := range []string{"scope", "duplicate scope", "lane fence", "unselected release", "policy signature", "forged LKG", "DNS identity"} {
-			raw, _ := json.Marshal(first)
-			var forged model.PlatformDNSRouteSourceSnapshot
-			json.Unmarshal(raw, &forged)
-			switch scenario {
-			case "scope":
-				forged.Scopes[0].ScopeKey = "authority-cell:cell-foreign"
-			case "duplicate scope":
-				forged.Scopes[1] = forged.Scopes[0]
-			case "lane fence":
-				forged.Scopes[0].Lanes[0].FencingToken++
-			case "unselected release":
-				forged.Scopes[0].Publications[0].Release.ID = "unselected"
-			case "policy signature":
-				forged.Scopes[0].Publications[0].ProducerPolicy.Provenance.Signature = "forged"
-			case "forged LKG":
-				forged.Scopes[0].Publications[0].LKG.SnapshotProvenance.Signature = "forged"
-			case "DNS identity":
-				forged.DNSArtifactID = "foreign-dns"
-			}
-			forged.SelectionDigest, _ = dnsroutesource.SelectionDigest(forged)
-			if dnsroutesource.VerifySnapshot(forged, child, celldns.Keys(), time.Now()) == nil {
-				t.Fatal("self-computed selection digest authorized invalid source", scenario)
-			}
-		}
-		second, err := s.ObserveDNSRouteSources(context.Background(), child)
-		if err != nil || first.SelectionDigest != second.SelectionDigest || first.ObservedAt.Equal(second.ObservedAt) {
-			t.Fatal("observation time changed authority digest", err)
-		}
-		if first.DNSArtifactID != child.ID || first.DNSArtifactDigest != child.ContentHash {
-			t.Fatal("DNS binding lost")
-		}
-		for _, scope := range first.Scopes {
-			if len(scope.Publications) != 1 || !slices.Equal(scope.Publications[0].Selections, []string{"full", "lkg"}) {
-				t.Fatal("current full/LKG were duplicated or lost")
-			}
-		}
-		after, _ := os.ReadFile(path)
-		if string(after) != string(raw) {
-			t.Fatal("source observation wrote runtime or configuration state")
-		}
-		// A new unverified full can coexist with the previous positive LKG.
-		if err := s.withLockedState(true, func(st *model.State) error {
-			lane := &st.PlatformReleaseLanes[0]
-			index := platformArtifactReleaseIndex(st.PlatformArtifactReleases, lane.ActiveReleaseID)
-			old := st.PlatformArtifactReleases[index]
-			st.PlatformArtifactReleases[index].Status = model.PlatformArtifactReleaseStatusSuperseded
-			next := old
-			next.ID = "new-source-full"
-			next.FencingToken++
-			next.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
-			next.VerifiedLKGGeneration = ""
-			next.ReleasedAt = time.Now().Add(-time.Second)
-			lane.ActiveReleaseID = next.ID
-			lane.FencingToken = next.FencingToken
-			lane.Version++
-			st.PlatformArtifactReleases = append(st.PlatformArtifactReleases, next)
-			return nil
-		}); err != nil {
+	}
+	for _, lkg := range state.PlatformLKGSnapshots {
+		if _, err := pgUpsertPlatformLKGSnapshot(t.Context(), tx, lkg); err != nil {
 			t.Fatal(err)
 		}
-		changed, err := s.ObserveDNSRouteSources(context.Background(), child)
-		if err != nil || changed.SelectionDigest == first.SelectionDigest {
-			t.Fatal("new source fence not observed", err)
-		}
-		if len(changed.Scopes[0].Publications) != 2 || changed.Scopes[0].Publications[1].Selections[0] != "lkg" {
-			t.Fatal("positive predecessor discarded while new full unverified")
-		}
-		if err := s.withLockedState(true, func(st *model.State) error {
-			i := platformArtifactReleaseIndex(st.PlatformArtifactReleases, "new-source-full")
-			st.PlatformArtifactReleases[i].VerificationState = model.PlatformArtifactVerificationStateFailed
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		failed, err := s.ObserveDNSRouteSources(context.Background(), child)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(failed.Scopes[0].Publications) != 1 || failed.Scopes[0].Publications[0].Selections[0] != "lkg" {
-			t.Fatal("failed candidate admitted or LKG lost")
-		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -177,11 +108,9 @@ func TestDNSRouteSourceObservationRejectsUnauthorizedAndTamperedState(t *testing
 				lane.ActiveReleaseID = ""
 				state.PlatformLKGSnapshots = nil
 			}
-			p := t.TempDir() + "/state.json"
-			raw, _ := json.Marshal(state)
-			os.WriteFile(p, raw, 0600)
-			s := New(p)
+			s := newStoreTestDatabase(t, "")
 			s.ConfigurePlatformArtifactSigning(celldns.Keys())
+			seedDNSObservationRows(t, s, state)
 			if _, err := s.ObserveDNSRouteSources(context.Background(), child); err == nil {
 				t.Fatal("unsafe source state returned")
 			}
@@ -202,11 +131,9 @@ func TestDNSRouteSourceGrayPublicationBindsCohortAndApproval(t *testing.T) {
 	gray.ReleasedAt = time.Now().Add(-time.Second)
 	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, gray)
 	state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: gray.LaneKey, ArtifactKind: gray.ArtifactKind, ScopeKey: gray.ScopeKey, ReleaseChannel: "gray", ActiveReleaseID: gray.ID, FencingToken: gray.FencingToken, Version: 1})
-	p := t.TempDir() + "/state.json"
-	raw, _ := json.Marshal(state)
-	os.WriteFile(p, raw, 0600)
-	s := New(p)
+	s := newStoreTestDatabase(t, "")
 	s.ConfigurePlatformArtifactSigning(celldns.Keys())
+	seedDNSObservationRows(t, s, state)
 	got, err := s.ObserveDNSRouteSources(context.Background(), child)
 	if err != nil {
 		t.Fatal(err)

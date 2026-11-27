@@ -13,24 +13,7 @@ import (
 // and rollback specs are deliberately excluded from maintenance snapshots.
 // Do not limit this list: an older operation can still protect an image.
 func (s *Store) ListImageRetentionOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
-	if !s.usingDatabase() {
-		var result []model.Operation
-		err := s.withLockedState(false, func(state *model.State) error {
-			for _, op := range state.Operations {
-				if !platformAdmin && op.TenantID != tenantID {
-					continue
-				}
-				if op.DesiredSpec != nil {
-					op.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
-				}
-				op.ConfigBaseSpec = nil
-				result = append(result, op)
-			}
-			sortOperationsOldestFirst(result)
-			return nil
-		})
-		return result, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	// The transactionally maintained candidate projection excludes config_base_spec.

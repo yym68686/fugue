@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -218,7 +217,7 @@ func TestDeleteAPIKeyRevokesSecretAndRemovesItFromList(t *testing.T) {
 func setupAPIKeyTestServer(t *testing.T) (*store.Store, *Server, string, string, model.APIKey, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

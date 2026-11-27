@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -162,30 +161,6 @@ func TestTaskClaimPostgresRejectsChangesBetweenPrepareAndClaim(t *testing.T) {
 				t.Fatal("rejected preparation mutated task", status, claimed, err)
 			}
 		})
-	}
-}
-
-func TestTaskClaimFileStoreCannotBypassDurableAdmission(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.NodeUpdateTasks = append(state.NodeUpdateTasks, model.NodeUpdateTask{ID: "neutral-task", NodeUpdaterID: "neutral-updater", Status: "pending", Payload: map[string]string{"artifact_id": "neutral-artifact"}})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ClaimNodeUpdateTask("neutral-task", "other"); !errors.Is(err, ErrNotFound) {
-		t.Fatal(err)
-	}
-	if task, err := s.ClaimNodeUpdateTask("neutral-task", "neutral-updater"); !errors.Is(err, ErrConflict) || task.ID != "" {
-		t.Fatal("file store bypassed durable dependency check", task, err)
-	}
-	if err := s.withLockedState(false, func(state *model.State) error {
-		if state.NodeUpdateTasks[0].Status != "pending" || state.NodeUpdateTasks[0].ClaimedAt != nil {
-			t.Fatal("rejected task was mutated")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
 	}
 }
 

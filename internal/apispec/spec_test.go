@@ -55,7 +55,7 @@ func TestNodeUpdateTaskCreationDeclaresInputAdmissionConflict(t *testing.T) {
 	if op == nil || op.OperationID != "createNodeUpdateTask" || op.Responses.Status(409) == nil {
 		t.Fatal("task create input-admission conflict is undocumented")
 	}
-	for _, term := range []string{"signed dependency closure", "In PostgreSQL, cold inputs may be queued", "full-readback pins", "global verified ReleaseSet selector", "without", "never restores", "Maintenance tasks", "File storage verifies actual original", "canonical full SHA", "same locked state"} {
+	for _, term := range []string{"signed dependency closure", "In PostgreSQL, cold inputs may be queued", "full-readback pins", "global verified ReleaseSet selector", "without", "never restores", "Maintenance tasks"} {
 		if !strings.Contains(op.Description, term) {
 			t.Errorf("task create admission contract omits %q", term)
 		}

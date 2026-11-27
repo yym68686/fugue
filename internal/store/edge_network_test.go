@@ -4,18 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestNetworkSamplesImmutableDeduplicatedBoundedAndScoped(t *testing.T) {
-	state := New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestNetworkSamplesImmutableDeduplicatedBoundedAndScoped(t *testing.T) {
 }
 
 func TestNetworkWitnessCollectionDoesNotBreakPreviousReaders(t *testing.T) {
-	state := New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestNetworkSamplesPostgresBatchAtomicityAndParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	file := New(filepath.Join(t.TempDir(), "state.json"))
+	file := newStoreTestDatabase(t, "")
 	if err := file.Init(); err != nil {
 		t.Fatal(err)
 	}

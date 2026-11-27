@@ -833,8 +833,8 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 
 func archiveCanonicalTestRelease(release *model.AppRelease) {
 	release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-	release.CreatedAt = time.Now().Add(-2 * time.Hour)
-	ready, retired := time.Now().Add(-time.Hour), time.Now().Add(-30*time.Minute)
+	// Creation time is immutable in PostgreSQL.
+	ready, retired := release.CreatedAt, release.CreatedAt.Add(time.Microsecond)
 	release.ReadyAt, release.PromotedAt, release.RetiredAt = &ready, &ready, &retired
 }
 

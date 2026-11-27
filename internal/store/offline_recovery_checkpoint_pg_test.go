@@ -13,7 +13,7 @@ import (
 
 func TestCapacityRecoveryCheckpointPostgresReplicaIsolation(t *testing.T) {
 	database := disposablePhysicalDNSDatabase(t)
-	first, second := New("", database), New("", database)
+	first, second := New(database), New(database)
 	for _, s := range []*Store{first, second} {
 		if err := s.Init(); err != nil {
 			t.Fatal(err)

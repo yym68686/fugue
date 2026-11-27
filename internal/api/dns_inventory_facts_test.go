@@ -10,7 +10,6 @@ import (
 	"fugue/internal/dnsfacts"
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
-	"fugue/internal/store"
 )
 
 func TestDNSInventoryServingProjectionPreservesHistoryAndRechecksExpiry(t *testing.T) {
@@ -50,7 +49,7 @@ func TestDNSInventoryServingProjectionPreservesHistoryAndRechecksExpiry(t *testi
 }
 
 func TestDNSInventoryUnenrolledNodesKeepExistingBehavior(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

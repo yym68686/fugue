@@ -2,8 +2,6 @@ package store
 
 import (
 	"errors"
-	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -12,16 +10,15 @@ import (
 )
 
 func TestTrafficOverrideStoreCASAndSigningKeyRotation(t *testing.T) {
-	path := t.TempDir() + "/state.json"
-	s := New(path)
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
-	initial, err := os.ReadFile(path)
-	if err != nil {
+	var initialized bool
+	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM fugue_traffic_override_signing_keys)`).Scan(&initialized); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(initial), "traffic_override_signing") {
+	if initialized {
 		t.Fatal("store init must not create override signing state before the independent management path is used")
 	}
 	keyring, err := s.GetTrafficOverrideSigningKeyring()

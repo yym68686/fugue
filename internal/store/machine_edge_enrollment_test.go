@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 )
 
 func TestMachineEdgeEnrollmentPreservesTenantAccessAndRejectsAuthorityMigration(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 )
 
 func TestImportDeployPreservesInterveningConfiguration(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -122,41 +121,6 @@ func TestImportConfigBasePersistsWithSourceEnvelope(t *testing.T) {
 	}
 }
 
-func TestLegacyImportRemainsExecutableWithoutInventingBaseline(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	tenant, err := s.CreateTenant("legacy import")
-	if err != nil {
-		t.Fatal(err)
-	}
-	project, err := s.CreateProject(tenant.ID, "legacy", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	app, err := s.CreateApp(tenant.ID, project.ID, "legacy", "", model.AppSpec{Image: "registry.example/legacy:old", Ports: []int{8080}, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	parent, err := s.CreateOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeImport, DesiredSpec: cloneAppSpec(&app.Spec), DesiredSource: &model.AppSource{Type: model.AppSourceTypeDockerImage, ImageRef: "registry.example/legacy:new"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.Operations[findOperation(state, parent.ID)].ConfigBaseSpec = nil
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	built := *cloneAppSpec(&app.Spec)
-	built.Image = "registry.example/legacy:new"
-	deploy, err := s.CreateDeployOperationAfterImport(parent.ID, model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeDeploy, DesiredSpec: &built})
-	if err != nil || deploy.DesiredSpec.Image != built.Image {
-		t.Fatalf("legacy import was blocked: %v", err)
-	}
-}
-
 func TestImportConfigurationBaselinePostgres(t *testing.T) {
 	s := billingBatchPGStore(t)
 	tenant := billingBatchPGTenant(t, s)
@@ -209,7 +173,7 @@ func TestImportConfigurationBaselinePostgres(t *testing.T) {
 }
 
 func TestQueuedBuildDeployRebasesAfterScaleAndEnvironmentComplete(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

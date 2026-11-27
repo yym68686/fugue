@@ -26,8 +26,8 @@ specs even though release readiness uses only image/runtime identity.
   definitions are rejected, and normal task writes remain available.
 - Route snapshots retain all release rows, workload bindings, and all metadata.
   Spec bodies are projected to image/runtime identity, preserving nil versus
-  present snapshots and the repeatable-read transaction boundary. File-backed
-  snapshots use the same projection. Readiness, provenance, fences, membership,
+  present snapshots and the repeatable-read transaction boundary. Readiness,
+  provenance, fences, membership,
   post-probe authority checks and positive LKG behavior remain authoritative.
 
 ## Verification

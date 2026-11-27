@@ -20,7 +20,7 @@ func TestDemoteLegacyImageLocationPostgresIdentityCollisionIntegration(t *testin
 		t.Fatalf("refusing to run image location demotion integration test against non-test database URL %q", databaseURL)
 	}
 
-	stateStore := New("", databaseURL)
+	stateStore := New(databaseURL)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init Postgres store: %v", err)
 	}

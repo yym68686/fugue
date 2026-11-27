@@ -56,14 +56,7 @@ func (s *Store) observeDNSRouteSources(ctx context.Context, child model.Platform
 		return model.PlatformDNSRouteSourceSnapshot{}, fmt.Errorf("%w: %s", ErrConflict, err)
 	}
 	var result model.PlatformDNSRouteSourceSnapshot
-	if s.db == nil {
-		err := s.withLockedState(false, func(state *model.State) error {
-			var err error
-			result, err = observeDNSRouteSources(ctx, child, stateDNSRouteSourceReader(state), keys, time.Now().UTC())
-			return err
-		})
-		return result, err
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
@@ -279,7 +272,7 @@ func pgDNSRouteSourceReader(ctx context.Context, tx *sql.Tx) dnsRouteSourceReade
 	}
 }
 
-func stateDNSRouteSourceReader(state *model.State) dnsRouteSourceReader {
+func stateDNSRouteSourceReader(state *storeProjection) dnsRouteSourceReader {
 	return dnsRouteSourceReader{
 		artifact: func(id string) (model.PlatformArtifact, error) {
 			i := platformArtifactIndex(state.PlatformArtifacts, id)

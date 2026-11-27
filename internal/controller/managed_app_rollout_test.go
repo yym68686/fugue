@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,13 +17,12 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestRefreshManagedAppStatusPublishesReadyWhileOperationIsActive(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -131,7 +129,7 @@ func TestClassifyKubernetesEventEvidenceTypeDetectsAttachFailure(t *testing.T) {
 func TestWaitForManagedAppRolloutPublishesReadyBeforeGatingOnObservedStatus(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2575,7 +2573,7 @@ func setKubeDeploymentPrimaryImage(deployment *kubeDeployment, name, image strin
 func TestCaptureDeploymentRolloutFailureEvidenceCapturesLogsEventsSnapshotsAndReleaseLink(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2704,7 +2702,7 @@ func TestCaptureDeploymentRolloutFailureEvidenceCapturesLogsEventsSnapshotsAndRe
 func TestCaptureDeploymentRolloutFailureEvidenceCollectorErrorDoesNotHidePrimaryFailure(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

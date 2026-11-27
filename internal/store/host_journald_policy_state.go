@@ -17,46 +17,26 @@ func (s *Store) ReadHostJournaldPolicyTaskState(ctx context.Context) (latest map
 	if err = ctx.Err(); err != nil {
 		return
 	}
-	if s.usingDatabase() {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		rows, queryErr := s.db.QueryContext(ctx, hostJournaldPolicyTaskStateSQL, model.NodeUpdateTaskTypeReconcileHostJournaldPolicy)
-		if queryErr != nil {
-			err = mapDBErr(queryErr)
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var task model.NodeUpdateTask
-			var policyHash string
-			if err = rows.Scan(&task.ID, &task.NodeUpdaterID, &task.Status, &policyHash, &task.RequestedByID, &task.CreatedAt, &task.UpdatedAt, &task.CompletedAt, &inFlight); err != nil {
-				return
-			}
-			task.Type = model.NodeUpdateTaskTypeReconcileHostJournaldPolicy
-			task.Payload = map[string]string{"policy_hash": policyHash}
-			latest[task.NodeUpdaterID] = task
-		}
-		err = rows.Err()
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, queryErr := s.db.QueryContext(ctx, hostJournaldPolicyTaskStateSQL, model.NodeUpdateTaskTypeReconcileHostJournaldPolicy)
+	if queryErr != nil {
+		err = mapDBErr(queryErr)
 		return
 	}
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, task := range state.NodeUpdateTasks {
-			if task.Type != model.NodeUpdateTaskTypeReconcileHostJournaldPolicy {
-				continue
-			}
-			if task.Status == model.NodeUpdateTaskStatusPending || task.Status == model.NodeUpdateTaskStatusRunning {
-				inFlight = true
-			}
-			previous, exists := latest[task.NodeUpdaterID]
-			if !exists || task.CreatedAt.After(previous.CreatedAt) || (task.CreatedAt.Equal(previous.CreatedAt) && task.ID > previous.ID) {
-				task.Payload = map[string]string{"policy_hash": task.Payload["policy_hash"]}
-				task.Logs = nil
-				latest[task.NodeUpdaterID] = task
-			}
+	defer rows.Close()
+	for rows.Next() {
+		var task model.NodeUpdateTask
+		var policyHash string
+		if err = rows.Scan(&task.ID, &task.NodeUpdaterID, &task.Status, &policyHash, &task.RequestedByID, &task.CreatedAt, &task.UpdatedAt, &task.CompletedAt, &inFlight); err != nil {
+			return
 		}
-		return ctx.Err()
-	})
+		task.Type = model.NodeUpdateTaskTypeReconcileHostJournaldPolicy
+		task.Payload = map[string]string{"policy_hash": policyHash}
+		latest[task.NodeUpdaterID] = task
+	}
+	err = rows.Err()
 	return
 }
 

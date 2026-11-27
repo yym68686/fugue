@@ -2,10 +2,8 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
@@ -17,7 +15,7 @@ const testOtherSSHPublicKey = "ssh-ed25519 CQoLDA0ODxA= workstation"
 func TestAppSSHKeyCRUDAndTenantIsolation(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -73,7 +71,7 @@ func TestAppSSHKeyCRUDAndTenantIsolation(t *testing.T) {
 }
 
 func TestAppSSHConcurrentPortAllocationIsUnique(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -147,38 +145,10 @@ func TestAppSSHConcurrentPortAllocationIsUnique(t *testing.T) {
 	}
 }
 
-func TestAppSSHReleasedPortCooldown(t *testing.T) {
-	now := time.Now().UTC()
-	oldRelease := now.Add(-2 * time.Hour)
-	state := &model.State{
-		AppSSHEndpoints: []model.AppSSHEndpoint{
-			{
-				AppID:      "app_recent",
-				PublicPort: 26000,
-				Status:     model.AppSSHEndpointStatusReleased,
-				ReleasedAt: &now,
-			},
-			{
-				AppID:      "app_old",
-				PublicPort: 26001,
-				Status:     model.AppSSHEndpointStatusReleased,
-				ReleasedAt: &oldRelease,
-			},
-		},
-	}
-	port, err := allocateAppSSHPublicPortState(state, 26000, 26001, 0)
-	if err != nil {
-		t.Fatalf("allocate after cooldown: %v", err)
-	}
-	if port != 26001 {
-		t.Fatalf("expected old released port to be reused first, got %d", port)
-	}
-}
-
 func TestAppSSHAllocatesPortsAndRoutesByEdgeGroup(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -268,7 +238,7 @@ func TestAppSSHAllocatesPortsAndRoutesByEdgeGroup(t *testing.T) {
 func TestAppSSHMarksExternalOwnedRuntimeUnsupported(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

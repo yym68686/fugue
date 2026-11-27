@@ -7,7 +7,6 @@ import (
 	"fugue/internal/imagecachepolicy"
 	"fugue/internal/model"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +15,7 @@ import (
 func TestOrphanPolicyAndArtifactDurability(t *testing.T) {
 	for _, backend := range []string{"json", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
-			s := New(filepath.Join(t.TempDir(), "state.json"))
+			s := newStoreTestDatabase(t, "")
 			if backend == "postgres" {
 				dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 				if dsn == "" {

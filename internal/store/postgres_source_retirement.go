@@ -48,7 +48,7 @@ func validateSourceRetirementProof(op model.Operation, proofs map[string]map[str
 	}
 	return nil
 }
-func applyPostgresSourceRetirement(state *model.State, app *model.App, op *model.Operation) error {
+func applyPostgresSourceRetirement(state *storeProjection, app *model.App, op *model.Operation) error {
 	proofs := map[string]map[string]any{}
 	for _, e := range state.OperationEvidence {
 		if e.OperationID == op.ID && e.TenantID == op.TenantID {

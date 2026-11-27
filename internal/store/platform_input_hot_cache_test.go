@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/inputarchive"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 

@@ -16,6 +16,7 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/schemamigrate"
 	"fugue/internal/store"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -209,7 +210,7 @@ func testPhysicalWorkerTransport(t *testing.T, scenario, dsn string) {
 		node.ID = model.NewID("edge")
 		front.Spec.NodeName, owner.Spec.NodeName, claims.NodeID = node.ID, node.ID, node.ID
 		ep.Items[0].Endpoints[0].NodeName = &node.ID
-		s.store = store.New("", dsn)
+		s.store = store.New(dsn)
 		if err := s.store.Init(); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			t.Fatal(err)
 		}

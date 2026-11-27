@@ -2259,7 +2259,7 @@ func TestEdgeDNSBundleLetsConfiguredPlatformRouteOverrideStaticAddressRecords(t 
 func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 	t.Parallel()
 
-	storeState, server, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
+	storeState, server, _, _, app, _ := setupAppDomainTestServerWithDomains(t, "fugue.pro")
 	server.platformRoutes = []model.PlatformRoute{
 		{
 			Hostname:      "api.fugue.pro",
@@ -2354,14 +2354,15 @@ func TestEdgeDNSBundleGatesDynamicEdgeUntilCanaryAndProbePass(t *testing.T) {
 		t.Fatalf("unexpected dynamic canary candidate: %+v candidates=%+v", jpCandidate, apiA.Candidates)
 	}
 
-	if _, err := storeState.PutEdgeRoutePolicy(model.EdgeRoutePolicy{
-		Hostname:        "api.fugue.pro",
-		AppID:           "platform-api",
-		TenantID:        "platform",
-		RoutePolicy:     model.EdgeRoutePolicyEnabled,
-		ExcludedEdgeIDs: []string{"edge-jp-1"},
-		ExclusionReason: "dynamic edge canary blocked for service",
-	}); err != nil {
+	if _, err := storeState.PutEdgeRoutePolicyCAS(model.EdgeRoutePolicy{
+		Hostname:             "api.fugue.pro",
+		AppID:                app.ID,
+		TenantID:             app.TenantID,
+		RoutePolicy:          model.EdgeRoutePolicyEnabled,
+		ExcludedEdgeIDs:      []string{"edge-jp-1"},
+		ExclusionReason:      "dynamic edge canary blocked for service",
+		ExclusionOwnerDigest: "sha256:" + strings.Repeat("a", 64),
+	}, 0, ""); err != nil {
 		t.Fatalf("put dynamic edge exclusion policy: %v", err)
 	}
 	recorder = httptest.NewRecorder()

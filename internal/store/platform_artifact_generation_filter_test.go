@@ -26,13 +26,12 @@ func verifyPlatformArtifactGenerationFilter(t *testing.T, s *Store) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.usingDatabase() {
-			t.Cleanup(func() {
-				if _, err := s.db.Exec(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, a.ID); err != nil {
-					t.Error(err)
-				}
-			})
-		}
+		t.Cleanup(func() {
+			if _, err := s.db.Exec(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, a.ID); err != nil {
+				t.Error(err)
+			}
+		})
+
 		return a
 	}
 	kind := model.PlatformArtifactKindEdgeRouteBundle
@@ -62,16 +61,15 @@ func verifyPlatformArtifactGenerationFilter(t *testing.T, s *Store) {
 		}
 	}
 	wantDuplicates, wantRows := 2, 3
-	if s.usingDatabase() {
+	{
 		in := platformArtifactEnsureFixture("TargetCase", 100)
 		in.Scope = model.PlatformArtifactScope{ScopeType: "global", Key: scope}
 		if _, err := s.CreatePlatformArtifact(in); !errors.Is(err, ErrConflict) {
 			t.Fatal("PostgreSQL generation uniqueness changed", err)
 		}
 		wantDuplicates, wantRows = 1, 2
-	} else {
-		create("TargetCase", scope, kind)
 	}
+
 	duplicates, err := s.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: kind, ScopeKey: scope, Generation: "TargetCase", Limit: 2})
 	if err != nil || len(duplicates) != wantDuplicates {
 		t.Fatal("exact lookup concealed ambiguous generations", len(duplicates), err)

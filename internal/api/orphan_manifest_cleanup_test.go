@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestOrphanManifestLogicalKeyAllowed(t *testing.T) {
@@ -111,7 +109,7 @@ func TestOrphanManifestCleanupSafetyFlow(t *testing.T) {
 				}
 			}))
 			defer fake.Close()
-			db := store.New(filepath.Join(t.TempDir(), "state.json"))
+			db := newStoreTestDatabase(t, "")
 			if err := db.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +172,7 @@ func TestOrphanManifestCleanupSafetyFlow(t *testing.T) {
 }
 
 func TestOrphanManifestCleanupRequiresPlatformAdmin(t *testing.T) {
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

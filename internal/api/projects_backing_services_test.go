@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +14,7 @@ import (
 func TestPatchProjectUpdatesNameAndDescription(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -60,7 +59,7 @@ func TestPatchProjectUpdatesNameAndDescription(t *testing.T) {
 func TestPatchProjectDefaultRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -127,7 +126,7 @@ func TestPatchProjectDefaultRuntime(t *testing.T) {
 func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -254,7 +253,7 @@ func TestDeleteProjectCascadeQueuesDeleteAndFinalizesProject(t *testing.T) {
 func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -384,7 +383,7 @@ func TestBackingServiceLifecycleAndBindingsQueueDeploy(t *testing.T) {
 func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -495,7 +494,7 @@ func TestMigrateBackingServiceQueuesManagedPostgresSwitchover(t *testing.T) {
 
 func TestRetireBackingServiceReplicaQueuesOnlyExactDatabaseIntent(t *testing.T) {
 	t.Parallel()
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -547,7 +546,7 @@ func TestRetireBackingServiceReplicaQueuesOnlyExactDatabaseIntent(t *testing.T) 
 func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -656,7 +655,7 @@ func TestLocalizeBackingServiceQueuesManagedPostgresLocalize(t *testing.T) {
 func TestCreateBackingServiceDefaultsManagedPostgresStorageClass(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -705,7 +704,7 @@ func TestCreateBackingServiceDefaultsManagedPostgresStorageClass(t *testing.T) {
 func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -766,7 +765,7 @@ func TestGetAppIncludesStructuredTechStack(t *testing.T) {
 func TestImportGitHubInlineProjectRollbackOnSynchronousFailure(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

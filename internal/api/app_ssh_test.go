@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -162,7 +161,7 @@ const testAPISSHPublicKey = "ssh-ed25519 AQIDBAUGBwg= laptop"
 
 func setupAppSSHTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
 	t.Helper()
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

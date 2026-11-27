@@ -45,7 +45,7 @@ func TestHostedAddressServingUsesLockedSignedBaseline(t *testing.T) {
 			lkg := model.PlatformLKGSnapshot{ArtifactID: ref.ReleaseSetID, ContentHash: ref.ReleaseSetDigest, VerifiedByReleaseID: r.ID, ExpiresAt: now.Add(time.Hour)}
 			fixref(ref, &parent)
 			fixref(ref, &child)
-			state := model.State{PlatformArtifacts: []model.PlatformArtifact{p.Route, p.TLS}}
+			state := storeProjection{PlatformArtifacts: []model.PlatformArtifact{p.Route, p.TLS}}
 			switch scenario {
 			case "move full":
 				r.FencingToken++

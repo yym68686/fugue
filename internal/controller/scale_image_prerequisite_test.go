@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestScaleImagePrerequisiteWaitsWithoutFailingOrChangingStableState(t *testing.T) {
@@ -29,7 +27,7 @@ func TestScaleImagePrerequisiteWaitsWithoutFailingOrChangingStableState(t *testi
 		{"ordinary inspection failure", 0, 1, true, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			st := store.New(filepath.Join(t.TempDir(), "state.json"))
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

@@ -5,10 +5,11 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"fugue/internal/model"
-	"github.com/DATA-DOG/go-sqlmock"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestEdgePerformanceScannerReusePreservesValuesAndNulls(t *testing.T) {

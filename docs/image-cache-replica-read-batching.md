@@ -16,8 +16,7 @@ gate remain in place.
 uses one PostgreSQL text-array parameter, and preserves each image's observation
 ordering and complete replica fields. An empty ID set performs no storage read.
 Database, decode and iteration errors fail the plan instead of producing empty
-success. The file backend scans state once per pass rather than reopening and
-decoding it once per image.
+success.
 
 For N candidate images and E eligible images, replica query count falls from
 N + E to at most two. Result processing still covers every selected replica;

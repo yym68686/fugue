@@ -10,40 +10,6 @@ import (
 	"fugue/internal/schemamigrate"
 )
 
-func TestAlignedReleaseRevisionDiscoveryKeepsServingRelease(t *testing.T) {
-	s, _, _, app := newAppImageTrackingTestStore(t)
-	r := model.AppRelease{ID: "aligned", TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleStable, Status: model.AppReleaseStatusServing,
-		DeploymentName: "canonical", ServiceName: "canonical", RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: "original", ServiceName: "original"}}
-	if err := s.withLockedState(true, func(state *model.State) error { state.AppReleases = append(state.AppReleases, r); return nil }); err != nil {
-		t.Fatal(err)
-	}
-	if AppReleaseAwaitingDrain(r) || !AppReleaseHasAlignedRevision(r) {
-		t.Fatal("workload withdrawal was confused with release retirement")
-	}
-	targets, err := s.ListAppReleaseRetirementTargets(context.Background())
-	if err != nil || len(targets) != 1 || targets[0].AppID != app.ID {
-		t.Fatal("aligned original workload was never scheduled", targets, err)
-	}
-	for _, scenario := range []string{"same_target", "same_service", "not_serving", "unbound", "empty_target"} {
-		copy := r
-		switch scenario {
-		case "same_target":
-			copy.DeploymentName = copy.RevisionWorkload.DeploymentName
-		case "same_service":
-			copy.ServiceName = copy.RevisionWorkload.ServiceName
-		case "not_serving":
-			copy.Role = model.AppReleaseRoleCandidate
-		case "unbound":
-			copy.RevisionWorkload = nil
-		case "empty_target":
-			copy.DeploymentName = ""
-		}
-		if AppReleaseHasAlignedRevision(copy) {
-			t.Fatal("unsafe aligned revision discovered", scenario)
-		}
-	}
-}
-
 func TestAlignedReleaseRevisionPostgresDiscovery(t *testing.T) {
 	s := billingBatchPGStore(t)
 	if err := s.ensureDatabaseReady(); err != nil {

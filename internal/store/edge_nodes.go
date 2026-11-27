@@ -10,53 +10,17 @@ import (
 
 func (s *Store) ListEdgeNodes(edgeGroupID string) ([]model.EdgeNode, []model.EdgeGroup, error) {
 	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
-	if s.usingDatabase() {
-		return s.pgListEdgeNodes(edgeGroupID)
-	}
-
-	var nodes []model.EdgeNode
-	var groups []model.EdgeGroup
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, node := range state.EdgeNodes {
-			normalizeEdgeNodeForRead(&node)
-			if edgeGroupID != "" && !strings.EqualFold(node.EdgeGroupID, edgeGroupID) {
-				continue
-			}
-			nodes = append(nodes, redactEdgeNode(node))
-		}
-		groups = edgeGroupSummaries(state.EdgeGroups, state.EdgeNodes, edgeGroupID)
-		sortEdgeNodes(nodes)
-		return nil
-	})
-	return nodes, groups, err
+	return s.pgListEdgeNodes(edgeGroupID)
 }
 
 // EdgeGroupExists validates control-plane group identity without loading the
-// complete edge-node inventory. File-backed stores retain the legacy behavior
-// of recognizing groups inferred from node rows.
+// complete edge-node inventory.
 func (s *Store) EdgeGroupExists(edgeGroupID string) (bool, error) {
 	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
 	if edgeGroupID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgEdgeGroupExists(edgeGroupID)
-	}
-	var exists bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		exists = findEdgeGroup(state, edgeGroupID) >= 0
-		if exists {
-			return nil
-		}
-		for _, node := range state.EdgeNodes {
-			if normalizeEdgeGroupID(node.EdgeGroupID) == edgeGroupID {
-				exists = true
-				break
-			}
-		}
-		return nil
-	})
-	return exists, err
+	return s.pgEdgeGroupExists(edgeGroupID)
 }
 
 func (s *Store) GetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, error) {
@@ -64,26 +28,7 @@ func (s *Store) GetEdgeNode(edgeID string) (model.EdgeNode, model.EdgeGroup, err
 	if edgeID == "" {
 		return model.EdgeNode{}, model.EdgeGroup{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetEdgeNode(edgeID)
-	}
-
-	var node model.EdgeNode
-	var group model.EdgeGroup
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findEdgeNode(state, edgeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		node = state.EdgeNodes[index]
-		normalizeEdgeNodeForRead(&node)
-		group = edgeGroupSummary(node.EdgeGroupID, state.EdgeGroups, state.EdgeNodes)
-		return nil
-	})
-	if err != nil {
-		return model.EdgeNode{}, model.EdgeGroup{}, err
-	}
-	return redactEdgeNode(node), group, nil
+	return s.pgGetEdgeNode(edgeID)
 }
 
 func (s *Store) CreateEdgeNodeToken(node model.EdgeNode) (model.EdgeNode, string, error) {
@@ -91,45 +36,7 @@ func (s *Store) CreateEdgeNodeToken(node model.EdgeNode) (model.EdgeNode, string
 	if err != nil {
 		return model.EdgeNode{}, "", err
 	}
-	if s.usingDatabase() {
-		return s.pgCreateEdgeNodeToken(node)
-	}
-
-	secret := model.NewSecret("fugue_edge")
-	node.TokenPrefix = model.SecretPrefix(secret)
-	node.TokenHash = model.HashSecret(secret)
-	var out model.EdgeNode
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findEdgeNode(state, node.ID)
-		if index >= 0 {
-			existing := state.EdgeNodes[index]
-			if node.CreatedAt.IsZero() {
-				node.CreatedAt = existing.CreatedAt
-			}
-			if node.LastSeenAt == nil {
-				node.LastSeenAt = existing.LastSeenAt
-			}
-			if node.LastHeartbeatAt == nil {
-				node.LastHeartbeatAt = existing.LastHeartbeatAt
-			}
-		} else if node.CreatedAt.IsZero() {
-			node.CreatedAt = now
-		}
-		node.UpdatedAt = now
-		if index >= 0 {
-			state.EdgeNodes[index] = node
-		} else {
-			state.EdgeNodes = append(state.EdgeNodes, node)
-		}
-		upsertEdgeGroupForNode(state, node, now)
-		out = redactEdgeNode(node)
-		return nil
-	})
-	if err != nil {
-		return model.EdgeNode{}, "", err
-	}
-	return out, secret, nil
+	return s.pgCreateEdgeNodeToken(node)
 }
 
 func (s *Store) AuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
@@ -137,26 +44,7 @@ func (s *Store) AuthenticateEdgeNode(secret string) (model.EdgeNode, error) {
 	if secret == "" {
 		return model.EdgeNode{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateEdgeNode(secret)
-	}
-
-	var node model.EdgeNode
-	err := s.withLockedState(false, func(state *model.State) error {
-		hash := model.HashSecret(secret)
-		for idx := range state.EdgeNodes {
-			if strings.TrimSpace(state.EdgeNodes[idx].TokenHash) == "" || state.EdgeNodes[idx].TokenHash != hash {
-				continue
-			}
-			node = state.EdgeNodes[idx]
-			return nil
-		}
-		return ErrNotFound
-	})
-	if err != nil {
-		return model.EdgeNode{}, err
-	}
-	return redactEdgeNode(node), nil
+	return s.pgAuthenticateEdgeNode(secret)
 }
 
 // RecordEdgeRouteSync records freshness only after route-bundle validation.
@@ -167,19 +55,7 @@ func (s *Store) RecordEdgeRouteSync(edgeID string) error {
 	if edgeID == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecordEdgeRouteSync(edgeID)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		index := findEdgeNode(state, edgeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		state.EdgeNodes[index].LastSeenAt = &now
-		state.EdgeNodes[index].UpdatedAt = now
-		return nil
-	})
+	return s.pgRecordEdgeRouteSync(edgeID)
 }
 
 func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {
@@ -187,61 +63,7 @@ func (s *Store) UpdateEdgeHeartbeat(node model.EdgeNode) (model.EdgeNode, model.
 	if err != nil {
 		return model.EdgeNode{}, model.EdgeGroup{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateEdgeHeartbeat(node)
-	}
-
-	var out model.EdgeNode
-	var group model.EdgeGroup
-	err = s.withLockedState(true, func(state *model.State) error {
-		if state.EdgeActivation != nil && state.EdgeActivation.Phase == model.EdgeActivationPhaseEnforced {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		index := findEdgeNode(state, node.ID)
-		if index >= 0 {
-			existing := state.EdgeNodes[index]
-			node.TokenPrefix = existing.TokenPrefix
-			node.TokenHash = existing.TokenHash
-			node.CanaryState = firstNonEmpty(node.CanaryState, existing.CanaryState)
-			if node.CanaryWeight <= 0 {
-				node.CanaryWeight = existing.CanaryWeight
-			}
-			node.PublicProbeStatus = firstNonEmpty(node.PublicProbeStatus, existing.PublicProbeStatus)
-			if node.PublicProbeStatus == model.EdgePublicProbeStatusPassing && strings.TrimSpace(node.PublicProbeLastError) == "" {
-				node.PublicProbeLastError = ""
-			} else {
-				node.PublicProbeLastError = firstNonEmpty(node.PublicProbeLastError, existing.PublicProbeLastError)
-			}
-			if node.PublicProbeLastAt == nil {
-				node.PublicProbeLastAt = existing.PublicProbeLastAt
-			}
-			if existing.Draining && !node.Draining {
-				node.Draining = true
-			}
-			if node.CreatedAt.IsZero() {
-				node.CreatedAt = existing.CreatedAt
-			}
-		} else if node.CreatedAt.IsZero() {
-			node.CreatedAt = now
-		}
-		node.LastSeenAt = &now
-		node.LastHeartbeatAt = &now
-		node.UpdatedAt = now
-		if index >= 0 {
-			state.EdgeNodes[index] = node
-		} else {
-			state.EdgeNodes = append(state.EdgeNodes, node)
-		}
-		upsertEdgeGroupForNode(state, node, now)
-		out = redactEdgeNode(node)
-		group = edgeGroupSummary(node.EdgeGroupID, state.EdgeGroups, state.EdgeNodes)
-		return nil
-	})
-	if err != nil {
-		return model.EdgeNode{}, model.EdgeGroup{}, err
-	}
-	return out, group, nil
+	return s.pgUpdateEdgeHeartbeat(node)
 }
 
 func (s *Store) UpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode) (model.EdgeNode, model.EdgeGroup, error) {
@@ -249,41 +71,7 @@ func (s *Store) UpdateEdgeNodeControlState(edgeID string, patch model.EdgeNode) 
 	if edgeID == "" {
 		return model.EdgeNode{}, model.EdgeGroup{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateEdgeNodeControlState(edgeID, patch)
-	}
-
-	var out model.EdgeNode
-	var group model.EdgeGroup
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findEdgeNode(state, edgeID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		node := state.EdgeNodes[index]
-		applyEdgeNodeControlPatch(&node, patch)
-		node.UpdatedAt = time.Now().UTC()
-		state.EdgeNodes[index] = node
-		for instanceIndex := range state.EdgeNodeInstances {
-			if normalizeEdgeID(state.EdgeNodeInstances[instanceIndex].EdgeID) != edgeID {
-				continue
-			}
-			applyEdgeNodeControlPatch(&state.EdgeNodeInstances[instanceIndex].Node, patch)
-			if state.EdgeNodeInstances[instanceIndex].Node.Draining {
-				state.EdgeNodeInstances[instanceIndex].EffectiveHealthy = false
-				state.EdgeNodeInstances[instanceIndex].ConsecutiveHealthy = 0
-			}
-			state.EdgeNodeInstances[instanceIndex].UpdatedAt = node.UpdatedAt
-		}
-		upsertEdgeGroupForNode(state, node, node.UpdatedAt)
-		out = redactEdgeNode(node)
-		group = edgeGroupSummary(node.EdgeGroupID, state.EdgeGroups, state.EdgeNodes)
-		return nil
-	})
-	if err != nil {
-		return model.EdgeNode{}, model.EdgeGroup{}, err
-	}
-	return out, group, nil
+	return s.pgUpdateEdgeNodeControlState(edgeID, patch)
 }
 
 func applyEdgeNodeControlPatch(node *model.EdgeNode, patch model.EdgeNode) {
@@ -394,34 +182,6 @@ func normalizeEdgeNodeForRead(node *model.EdgeNode) {
 	}
 }
 
-func upsertEdgeGroupForNode(state *model.State, node model.EdgeNode, now time.Time) {
-	if state == nil || strings.TrimSpace(node.EdgeGroupID) == "" {
-		return
-	}
-	group := model.EdgeGroup{
-		ID:        node.EdgeGroupID,
-		Region:    node.Region,
-		Country:   node.Country,
-		Status:    "",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	index := findEdgeGroup(state, node.EdgeGroupID)
-	if index >= 0 {
-		group = state.EdgeGroups[index]
-		if strings.TrimSpace(node.Region) != "" {
-			group.Region = node.Region
-		}
-		if strings.TrimSpace(node.Country) != "" {
-			group.Country = node.Country
-		}
-		group.UpdatedAt = now
-		state.EdgeGroups[index] = group
-		return
-	}
-	state.EdgeGroups = append(state.EdgeGroups, group)
-}
-
 func edgeGroupSummaries(groups []model.EdgeGroup, nodes []model.EdgeNode, edgeGroupID string) []model.EdgeGroup {
 	groupIDs := make(map[string]struct{}, len(groups)+len(nodes))
 	for _, group := range groups {
@@ -494,32 +254,6 @@ func edgeGroupSummary(edgeGroupID string, groups []model.EdgeGroup, nodes []mode
 		}
 	}
 	return group
-}
-
-func findEdgeNode(state *model.State, edgeID string) int {
-	if state == nil {
-		return -1
-	}
-	edgeID = normalizeEdgeID(edgeID)
-	for index, node := range state.EdgeNodes {
-		if strings.EqualFold(node.ID, edgeID) {
-			return index
-		}
-	}
-	return -1
-}
-
-func findEdgeGroup(state *model.State, edgeGroupID string) int {
-	if state == nil {
-		return -1
-	}
-	edgeGroupID = normalizeEdgeGroupID(edgeGroupID)
-	for index, group := range state.EdgeGroups {
-		if strings.EqualFold(group.ID, edgeGroupID) {
-			return index
-		}
-	}
-	return -1
 }
 
 func redactEdgeNode(node model.EdgeNode) model.EdgeNode {

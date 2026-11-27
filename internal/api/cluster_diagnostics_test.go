@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,13 +14,12 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestGetControlPlaneStatusIncludesDeployWorkflowRunWhenConfigured(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -143,7 +141,7 @@ func TestGetControlPlaneStatusIncludesDeployWorkflowRunWhenConfigured(t *testing
 func TestListClusterPodsReturnsSystemPods(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -236,7 +234,7 @@ func TestListClusterPodsReturnsSystemPods(t *testing.T) {
 func TestGetClusterLogsPreservesKubernetesClientErrorStatus(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -287,7 +285,7 @@ func (c clusterLogsErrorClient) streamPodLogs(context.Context, string, string, k
 func TestListClusterEventsFallsBackToEventsV1WhenCoreEventsForbidden(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -354,7 +352,7 @@ func TestListClusterEventsFallsBackToEventsV1WhenCoreEventsForbidden(t *testing.
 func TestGetClusterWorkloadReturnsNodeSelectorAndPods(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -466,7 +464,7 @@ func TestGetClusterWorkloadReturnsNodeSelectorAndPods(t *testing.T) {
 func TestExecClusterPodUsesExecRunner(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -502,7 +500,7 @@ func TestExecClusterPodUsesExecRunner(t *testing.T) {
 func TestExecClusterPodRetriesTransientEOF(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -588,7 +586,7 @@ func TestRunClusterExecRetriesUseFreshAttemptTimeout(t *testing.T) {
 func TestProbeClusterWebSocketDistinguishesService101FromPublic502(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

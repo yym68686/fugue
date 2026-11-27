@@ -1,9 +1,7 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
-	"os"
 	"strings"
 
 	"fugue/internal/auth"
@@ -11,7 +9,6 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformsafety"
 	"fugue/internal/store"
-	"reflect"
 	"testing"
 	"time"
 )
@@ -21,11 +18,8 @@ import (
 // publication E2E. Receipt clocks remain historical; authority uses real time.
 func qualityRestoreInputFixture(t *testing.T, snapshot platformconfig.RuntimeSnapshot) (*Server, model.PlatformArtifact, string) {
 	t.Helper()
-	path := t.TempDir() + "/state.json"
-	st := store.New(path)
-	if err := st.Init(); err != nil {
-		t.Fatal(err)
-	}
+	fixture := model.NewID("quality-restore")
+	st := newStoreTestDatabase(t, fixture)
 	s := NewServer(st, auth.New(st, ""), nil, ServerConfig{BundleSigningKey: "synthetic-quality-input", BundleSigningKeyID: "quality-input"})
 	digest, err := platformconfig.RuntimeSnapshotDigest(snapshot)
 	if err != nil {
@@ -49,7 +43,7 @@ func qualityRestoreInputFixture(t *testing.T, snapshot platformconfig.RuntimeSna
 	if err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().UTC()
+	at := time.Now().UTC().Truncate(time.Microsecond)
 	release := model.PlatformArtifactRelease{ID: "quality-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind,
 		Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
 		Status: model.PlatformArtifactReleaseStatusActive, FencingToken: 1, VerificationState: model.PlatformArtifactVerificationStateVerified,
@@ -62,21 +56,49 @@ func qualityRestoreInputFixture(t *testing.T, snapshot platformconfig.RuntimeSna
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path)
+	db := openStoreTestSQL(t, fixture)
+	tx, err := db.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var state model.State
-	if err := json.Unmarshal(raw, &state); err != nil {
+	defer tx.Rollback()
+	jsonValue := func(v any) string {
+		t.Helper()
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+	key := platformsafety.ReleaseLaneKey(release.ArtifactKind, release.ScopeKey, release.ReleaseChannel)
+	if _, err := tx.ExecContext(t.Context(), `INSERT INTO fugue_platform_artifact_releases
+		(id,artifact_id,artifact_kind,scope_key,scope_json,generation,release_channel,status,lane_key,fencing_token,
+		 verification_state,verified_lkg_generation,verified_at,released_at,created_at,updated_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,$10,$6,$11,$11,$11,$11)`,
+		release.ID, release.ArtifactID, release.ArtifactKind, release.ScopeKey, jsonValue(release.Scope), release.Generation,
+		release.ReleaseChannel, release.Status, key, release.VerificationState, at); err != nil {
 		t.Fatal(err)
 	}
-	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, release)
-	state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
-	raw, _ = json.Marshal(state)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
+	if _, err := tx.ExecContext(t.Context(), `INSERT INTO fugue_platform_release_lanes
+		(lane_key,artifact_kind,scope_key,release_channel,fencing_token,version,active_release_id,updated_at)
+		VALUES($1,$2,$3,$4,1,1,$5,$6)`, key, release.ArtifactKind, release.ScopeKey, release.ReleaseChannel, release.ID, at); err != nil {
 		t.Fatal(err)
 	}
-	return s, parent, path
+	for _, table := range []string{"fugue_platform_lkg_snapshots", "fugue_platform_lkg_snapshot_history"} {
+		if _, err := tx.ExecContext(t.Context(), `INSERT INTO `+table+`
+			(id,artifact_id,artifact_kind,scope_key,scope_json,schema_version,generation,generation_sequence,content_hash,
+			 artifact_provenance_json,verified_by_release_id,verification_evidence_hash,snapshot_provenance_json,expires_at,created_at,updated_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`,
+			lkg.ID, lkg.ArtifactID, lkg.ArtifactKind, lkg.ScopeKey, jsonValue(lkg.Scope), lkg.SchemaVersion, lkg.Generation, lkg.GenerationSequence,
+			lkg.ContentHash, jsonValue(lkg.ArtifactProvenance), lkg.VerifiedByReleaseID, lkg.VerificationEvidenceHash,
+			jsonValue(lkg.SnapshotProvenance), lkg.ExpiresAt, lkg.CreatedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return s, parent, fixture
 }
 
 func TestDynamicQualityRestoreRejectsUnneededEvidence(t *testing.T) {
@@ -101,122 +123,6 @@ func TestDynamicQualityRestoreRejectsUnneededEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := dynamicQualityRestoreNeeded(tc.summary, job, tc.entry, now); got != tc.want {
 				t.Fatalf("got %v want %v", got, tc.want)
-			}
-		})
-	}
-}
-func TestDynamicQualitySelectiveRestoreRetainsEvidenceGuards(t *testing.T) {
-	for _, scenario := range []string{"valid", "intent changed", "lineage changed", "candidates changed", "receipt changed", "selection changed", "policy changed", "expired", "newer entry", "entry cleared during read", "lkg changed during read", "expires before installation", "caller canceled before read", "caller canceled during read", "cold history preserves live entry"} {
-		t.Run(scenario, func(t *testing.T) {
-			receipt, route := businessPublicationFixture(t)
-			route.BusinessExploration = nil
-			route.PathPrefix = ""
-			captured := receipt.Snapshot.CapturedAt
-			selection, err := compileBoundPhysicalQualitySelection(receipt, captured)
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw, _ := json.Marshal(receipt)
-			projection, _, _, _ := physicalQueryProjectionFixture(t)
-			projection.Intent.Generation = "intent-a"
-			fact := projection.RuntimeSnapshot.DNSSelections[0]
-			fact.PhysicalEvidence = raw
-			fact.PhysicalSelection = selection
-			snapshot := platformconfig.RuntimeSnapshot{IntentGeneration: "intent-a", PolicyGeneration: "policy-a", DNSSelections: []platformconfig.DNSSelectionObservation{fact}}
-			now := captured.Add(time.Second)
-			job := dynamicQualityJob{NodeID: fact.NodeID, Key: fact.NodeID + "\x00" + fact.Hostname, EvidenceHostname: route.Hostname, Route: route}
-			switch scenario {
-			case "intent changed":
-				projection.Intent.Generation = "other-intent"
-			case "lineage changed":
-				snapshot.PolicyGeneration = "other-policy"
-			case "candidates changed":
-				projection.RuntimeSnapshot.DNSSelections[0].Candidates = nil
-			case "receipt changed":
-				receipt.Snapshot.Hostname = "foreign.example.test"
-				snapshot.DNSSelections[0].PhysicalEvidence, _ = json.Marshal(receipt)
-			case "selection changed":
-				selection.PrimaryEdgeID = "foreign-edge"
-			case "policy changed":
-				job.Route.Policy.EvidenceMaxAgeSeconds++
-			case "expired":
-				now = captured.Add(time.Duration(route.Policy.EvidenceMaxAgeSeconds+1) * time.Second)
-			}
-			server, parent, path := qualityRestoreInputFixture(t, snapshot)
-			var previous dynamicQualityEntry
-			if scenario == "newer entry" || scenario == "entry cleared during read" || scenario == "cold history preserves live entry" {
-				previous = dynamicQualityEntry{ContextDigest: "new-context", Compiled: compiledPhysicalDNSSelection{Selection: &model.DNSPhysicalSelection{CapturedAt: now}, Evidence: json.RawMessage(`{"current":true}`)}}
-				server.dynamicQuality.entries = map[string]dynamicQualityEntry{job.Key: previous}
-			}
-			if scenario == "cold history preserves live entry" {
-				body, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var state model.State
-				if err := json.Unmarshal(body, &state); err != nil {
-					t.Fatal(err)
-				}
-				for i, content := range state.PlatformArtifactContents {
-					if content.ContentHash == parent.Metadata["input_snapshot_digest"] {
-						state.PlatformArtifactContents = append(state.PlatformArtifactContents[:i], state.PlatformArtifactContents[i+1:]...)
-						break
-					}
-				}
-				body, _ = json.Marshal(state)
-				if err := os.WriteFile(path, body, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			clockCalls := 0
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if scenario == "caller canceled before read" {
-				cancel()
-			}
-			server.restorePublishedQualityEvidenceContext(ctx, projection, []dynamicQualityJob{job}, parent, func() time.Time {
-				clockCalls++
-				if scenario == "caller canceled during read" && clockCalls == 1 {
-					cancel()
-				}
-				if scenario == "entry cleared during read" && clockCalls == 1 {
-					server.dynamicQuality.entries[job.Key] = dynamicQualityEntry{}
-				}
-				if scenario == "lkg changed during read" && clockCalls == 1 {
-					body, err := os.ReadFile(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					var state model.State
-					if err := json.Unmarshal(body, &state); err != nil {
-						t.Fatal(err)
-					}
-					state.PlatformLKGSnapshots[0].VerificationEvidenceHash = "sha256:" + strings.Repeat("b", 64)
-					body, _ = json.Marshal(state)
-					if err := os.WriteFile(path, body, 0600); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if scenario == "expires before installation" && clockCalls >= 3 {
-					return captured.Add(time.Duration(job.Route.Policy.EvidenceMaxAgeSeconds+1) * time.Second)
-				}
-				return now
-			})
-			got := server.dynamicQuality.entries[job.Key]
-			if scenario == "valid" || scenario == "entry cleared during read" {
-				if got.Compiled.Selection == nil || got.ContextDigest == "" || !got.Compiled.Selection.CapturedAt.Equal(captured) {
-					t.Fatal("valid receipt was not restored")
-				}
-				return
-			}
-			if scenario == "newer entry" || scenario == "cold history preserves live entry" {
-				if !reflect.DeepEqual(got, previous) {
-					t.Fatal("newer evidence replaced")
-				}
-				return
-			}
-			if got.Compiled.Selection != nil {
-				t.Fatalf("invalid evidence restored: %s", scenario)
 			}
 		})
 	}

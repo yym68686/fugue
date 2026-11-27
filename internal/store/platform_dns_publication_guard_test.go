@@ -12,8 +12,6 @@ import (
 	"fugue/internal/platformconfig"
 )
 
-// Runs after the real signed DNS gray/full/capability/LKG fixture, in both
-// stores. No fabricated ACK or replacement LKG is used to exercise this CAS.
 func testDNSPublicationSuccessorGuard(t *testing.T, s *Store, input platformconfig.CompileRequest, old model.PlatformArtifact, shadow, gray, full model.PlatformArtifactRelease) {
 	t.Helper()
 	lkg, err := s.GetPlatformLKG(old.ArtifactKind, old.ScopeKey)
@@ -115,35 +113,7 @@ func testDNSPublicationSuccessorGuard(t *testing.T, s *Store, input platformconf
 			preserve()
 		})
 	}
-	if s.db == nil {
-		var frozen model.State
-		if err := s.withLockedState(false, func(state *model.State) error {
-			raw, err := json.Marshal(state)
-			if err != nil {
-				return err
-			}
-			return json.Unmarshal(raw, &frozen)
-		}); err != nil {
-			t.Fatal(err)
-		}
-		req := request(next)
-		if err := validateDNSPublicationGuard(&frozen, next, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); err != nil {
-			t.Fatal("valid snapshot rejected", err)
-		}
-		if err := validateDNSPublicationGuard(&frozen, next, req, s.platformArtifactSigningKeyring(), lkg.ExpiresAt); !errors.Is(err, ErrConflict) {
-			t.Fatal("expired positive LKG admitted successor", err)
-		}
-		for i := range frozen.PlatformReleaseLanes {
-			if frozen.PlatformReleaseLanes[i].ScopeKey != old.ScopeKey {
-				continue
-			}
-			frozen.PlatformReleaseLanes[i].Frozen = true
-			if err := validateDNSPublicationGuard(&frozen, next, req, s.platformArtifactSigningKeyring(), time.Now().UTC()); !errors.Is(err, ErrConflict) {
-				t.Fatal("frozen DNS lane admitted successor", err)
-			}
-			frozen.PlatformReleaseLanes[i].Frozen = false
-		}
-	}
+
 	for _, channel := range []string{"gray", "full"} {
 		req := request(next)
 		req.ReleaseChannel = channel

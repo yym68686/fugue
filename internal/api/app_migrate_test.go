@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,7 +15,7 @@ import (
 func TestMigrateAppDryRunChecksRuntimeVisibility(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestMigrateAppDryRunChecksRuntimeVisibility(t *testing.T) {
 func TestMigrateAppDryRunRejectsManifestOnlyTrackedImage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -163,7 +162,7 @@ func TestMigrateAppDryRunRejectsManifestOnlyTrackedImage(t *testing.T) {
 func TestMigrateAppRejectsUnlocalizedManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -229,7 +228,7 @@ func TestMigrateAppRejectsUnlocalizedManagedPostgres(t *testing.T) {
 func TestMigrateAppRejectsStatefulFailoverBlockers(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -284,7 +283,7 @@ func TestMigrateAppRejectsStatefulFailoverBlockers(t *testing.T) {
 func TestMigrateAppRequiresManagedPostgresLocalization(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -343,7 +342,7 @@ func TestMigrateAppRequiresManagedPostgresLocalization(t *testing.T) {
 func TestCreateAppRejectsSharedProjectRWXPersistentStorage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -380,7 +379,7 @@ func TestCreateAppRejectsSharedProjectRWXPersistentStorage(t *testing.T) {
 func TestMigrateAppAllowsMovableRWOPersistentStorage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -437,7 +436,7 @@ func TestMigrateAppAllowsMovableRWOPersistentStorage(t *testing.T) {
 func TestMigrateAppRejectsExternalRuntimeForManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -544,7 +543,7 @@ func TestMigrateAppRecoversFailedImportedAppBaseline(t *testing.T) {
 }
 
 func TestMigrateAppOfflineDedicatedVolumeKeepsSourceAndStoppedState(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +637,7 @@ func TestMigrateAppOfflineDedicatedVolumeKeepsSourceAndStoppedState(t *testing.T
 }
 
 func TestMigrateAppOfflineVolumeRejectsRunningApp(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

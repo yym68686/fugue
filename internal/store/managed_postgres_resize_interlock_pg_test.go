@@ -330,7 +330,7 @@ func TestPGCreateBackupRestoreRunUsesAppFenceAndAtomicPlanTransition(t *testing.
 }
 
 func expectPGManagedPostgresExclusiveMutation(mock sqlmock.Sqlmock, appID, serviceID string, active bool) {
-	pattern := `(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover', 'database-image-migrate', 'database-replica-retire'\).*status IN \(\$4, \$5, \$6\)`
+	pattern := `(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover', 'database-image-migrate', 'database-replica-retire', 'database-source-retire'\).*status IN \(\$4, \$5, \$6\)`
 	args := []driver.Value{
 		model.OperationTypeDatabaseSuspend, model.OperationTypeDatabaseResume, model.OperationTypeDatabaseResize,
 		model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent,

@@ -19,7 +19,7 @@ func TestAutomationPolicyPostgresIntegration(t *testing.T) {
 		t.Skip("set FUGUE_TEST_DATABASE_URL to run automation policy Postgres integration test")
 	}
 
-	stateStore := New("", databaseURL)
+	stateStore := New(databaseURL)
 	if err := stateStore.Init(); err != nil {
 		t.Fatal(err)
 	}

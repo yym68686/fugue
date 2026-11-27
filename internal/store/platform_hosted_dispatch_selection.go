@@ -66,9 +66,7 @@ func (s *Store) ValidateHostedDispatchSelections(ctx context.Context, pins []Hos
 		}
 		return ctx.Err()
 	}
-	if s.db == nil {
-		return s.withLockedState(false, func(v *model.State) error { return check(stateDNSRouteSourceReader(v)) })
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})

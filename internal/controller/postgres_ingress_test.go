@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,12 +12,13 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
+
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
 func livePostgresFixture(t *testing.T) (*store.Store, model.App) {
 	t.Helper()
-	state := store.New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

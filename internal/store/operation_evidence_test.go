@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +31,7 @@ func TestOperationStartedTimelineDoesNotBackdateLaterProgress(t *testing.T) {
 
 func setupOperationEvidenceStore(t *testing.T) (*Store, model.Tenant, model.Project, model.App, model.Operation) {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

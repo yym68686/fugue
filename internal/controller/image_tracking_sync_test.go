@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -392,7 +391,7 @@ func TestRecordAppImageTrackingDecisionAcceptsKnownDecisionValues(t *testing.T) 
 func newImageTrackingSyncTestStore(t *testing.T) (*store.Store, model.Tenant, model.Project, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

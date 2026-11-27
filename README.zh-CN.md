@@ -230,7 +230,17 @@ make generate-openapi
 
 `make test` 已经包含 OpenAPI 生成物漂移检查。
 
-为了快速本地运行，在未设置 `FUGUE_DATABASE_URL` 时，二进制会回退到 `./data/store.json`。
+API 和 controller 必须使用 PostgreSQL。先创建本地开发数据库，再初始化 schema：
+
+```bash
+export FUGUE_DATABASE_URL='postgres://localhost/fugue_dev?sslmode=disable'
+make setup-store
+```
+
+在两个终端中设置相同的数据库连接地址。工作区本地 blob 默认存放在
+`./data/data-blobs`，可以通过 `FUGUE_DATA_BLOB_DIR` 指定其他目录。
+新版本不会读取或自动导入旧 `store.json`。升级仍使用文件库的旧安装前，请先保留其中仍需要的数据。
+现有数据文件可以留在原地，用 `FUGUE_DATA_BLOB_DIR` 指向原目录即可。
 
 在两个终端里分别运行 API 和 controller：
 

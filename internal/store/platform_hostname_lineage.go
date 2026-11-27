@@ -18,14 +18,13 @@ func (s *Store) ListPlatformHostnameArtifacts(ctx context.Context, kind, hostnam
 	if hostname == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		columns := "NULL::jsonb"
-		if includeContent {
-			columns = "fugue_platform_artifact_body(content_hash,content_json)"
-		}
-		query := `WITH candidates AS MATERIALIZED (
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	columns := "NULL::jsonb"
+	if includeContent {
+		columns = "fugue_platform_artifact_body(content_hash,content_json)"
+	}
+	query := `WITH candidates AS MATERIALIZED (
 SELECT * FROM fugue_platform_artifacts WHERE artifact_kind=$1 AND status=$2
 ORDER BY updated_at DESC,id ASC LIMIT $3
 )
@@ -37,39 +36,20 @@ WHERE EXISTS (
  WHERE btrim(btrim(lower(value #>> '{}'), E' \t\n\r\f\v'), '.')=$4
 )
 ORDER BY updated_at DESC,id ASC`
-		rows, err := s.db.QueryContext(ctx, query, kind, model.PlatformArtifactStatusValidated, limit, hostname)
-		if err != nil {
-			return nil, mapDBErr(err)
-		}
-		defer rows.Close()
-		out := []model.PlatformArtifact{}
-		for rows.Next() {
-			artifact, err := scanPlatformArtifact(rows)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, artifact)
-		}
-		return out, rows.Err()
-	}
-	artifacts, err := s.ListPlatformArtifacts(model.PlatformArtifactFilter{ArtifactKind: kind, Status: model.PlatformArtifactStatusValidated, Limit: limit})
+	rows, err := s.db.QueryContext(ctx, query, kind, model.PlatformArtifactStatusValidated, limit, hostname)
 	if err != nil {
-		return nil, err
+		return nil, mapDBErr(err)
 	}
+	defer rows.Close()
 	out := []model.PlatformArtifact{}
-	for _, artifact := range artifacts {
-		if err := ctx.Err(); err != nil {
+	for rows.Next() {
+		artifact, err := scanPlatformArtifact(rows)
+		if err != nil {
 			return nil, err
-		}
-		if !platformContentHasHostname(artifact.Content, hostname) {
-			continue
-		}
-		if !includeContent {
-			artifact.Content = nil
 		}
 		out = append(out, artifact)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func platformContentHasHostname(value any, hostname string) bool {

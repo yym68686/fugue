@@ -25,51 +25,7 @@ func (s *Store) GetActiveManagedPostgresLifecycleOperation(
 	if tenantID == "" || appID == "" || serviceID == "" || !isManagedPostgresLifecycleOperationType(operationType) {
 		return model.Operation{}, false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetActiveManagedPostgresLifecycleOperation(tenantID, appID, serviceID, operationType)
-	}
-
-	var (
-		existing model.Operation
-		found    bool
-	)
-	err := s.withLockedState(false, func(state *model.State) error {
-		appIndex := findApp(state, appID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		app := state.Apps[appIndex]
-		if strings.TrimSpace(app.TenantID) != tenantID {
-			return ErrNotFound
-		}
-		hydrateAppBackingServices(state, &app)
-		if err := validateManagedPostgresLifecycleTargetState(state, app, serviceID); err != nil {
-			return err
-		}
-		active := activeOperationsForLifecycleTarget(state.Operations, appID, serviceID)
-		if len(active) == 0 {
-			return nil
-		}
-		candidate := model.Operation{
-			TenantID:  tenantID,
-			AppID:     appID,
-			ServiceID: serviceID,
-			Type:      operationType,
-		}
-		if err := prepareManagedPostgresLifecycleOperation(app, &candidate, operationType == model.OperationTypeDatabaseSuspend); err != nil {
-			return err
-		}
-		if len(active) != 1 || !managedPostgresLifecycleRetryMatches(active[0], candidate) {
-			return ErrConflict
-		}
-		existing = cloneOperation(active[0])
-		found = true
-		return nil
-	})
-	if err != nil {
-		return model.Operation{}, false, err
-	}
-	return existing, found, nil
+	return s.pgGetActiveManagedPostgresLifecycleOperation(tenantID, appID, serviceID, operationType)
 }
 
 func (s *Store) pgGetActiveManagedPostgresLifecycleOperation(

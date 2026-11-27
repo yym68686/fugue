@@ -39,52 +39,6 @@ func membershipInput(t *testing.T, s *Store, kind, scope string, value any) mode
 	return a
 }
 
-func seedMembershipGray(t *testing.T, f reconfigurationFixture, failed, frozen bool) {
-	t.Helper()
-	r, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.ID = model.NewID("operator-gray")
-	r.ReleaseChannel = "gray"
-	r.LaneKey = platformsafety.ReleaseLaneKey(r.ArtifactKind, r.ScopeKey, "gray")
-	r.ReleasedAt = time.Now().UTC()
-	r.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
-	if failed {
-		r.VerificationState = model.PlatformArtifactVerificationStateFailed
-	}
-	r.FencingToken = 1
-	if f.s.db == nil {
-		err = f.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
-			state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: "gray", FencingToken: 1, Version: 1, ActiveReleaseID: r.ID, Frozen: frozen, UpdatedAt: r.ReleasedAt})
-			return nil
-		})
-	} else {
-		ctx := context.Background()
-		tx, e := f.s.db.BeginTx(ctx, nil)
-		if e != nil {
-			t.Fatal(e)
-		}
-		defer tx.Rollback()
-		if _, err = pgNextPlatformReleaseLane(ctx, tx, r.ArtifactKind, r.ScopeKey, "gray", r.ReleasedAt); err == nil {
-			_, err = pgInsertPlatformArtifactRelease(ctx, tx, r)
-		}
-		if err == nil {
-			err = pgSetPlatformReleaseLaneActive(ctx, tx, r.LaneKey, r.ID, r.FencingToken, r.ReleasedAt)
-		}
-		if err == nil && frozen {
-			_, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, r.LaneKey)
-		}
-		if err == nil {
-			err = tx.Commit()
-		}
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func membershipFixture(t *testing.T, address string) reconfigurationFixture {
 	t.Helper()
 	f := refreshFixture(t, address)
@@ -265,7 +219,6 @@ func testProducerMembershipExpansion(t *testing.T, address string) {
 	}
 }
 
-func TestProducerMembershipExpansion(t *testing.T) { testProducerMembershipExpansion(t, "") }
 func TestProducerMembershipExpansionPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -276,4 +229,44 @@ func TestProducerMembershipExpansionPostgres(t *testing.T) {
 		t.Fatal("requires disposable loopback database")
 	}
 	testProducerMembershipExpansion(t, address)
+}
+
+func seedMembershipGray(t *testing.T, f reconfigurationFixture, failed, frozen bool) {
+	t.Helper()
+	r, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ID = model.NewID("operator-gray")
+	r.ReleaseChannel = "gray"
+	r.LaneKey = platformsafety.ReleaseLaneKey(r.ArtifactKind, r.ScopeKey, "gray")
+	r.ReleasedAt = time.Now().UTC()
+	r.VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+	if failed {
+		r.VerificationState = model.PlatformArtifactVerificationStateFailed
+	}
+	r.FencingToken = 1
+
+	ctx := context.Background()
+	tx, e := f.s.db.BeginTx(ctx, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer tx.Rollback()
+	if _, err = pgNextPlatformReleaseLane(ctx, tx, r.ArtifactKind, r.ScopeKey, "gray", r.ReleasedAt); err == nil {
+		_, err = pgInsertPlatformArtifactRelease(ctx, tx, r)
+	}
+	if err == nil {
+		err = pgSetPlatformReleaseLaneActive(ctx, tx, r.LaneKey, r.ID, r.FencingToken, r.ReleasedAt)
+	}
+	if err == nil && frozen {
+		_, err = tx.Exec(`UPDATE fugue_platform_release_lanes SET frozen=true WHERE lane_key=$1`, r.LaneKey)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }

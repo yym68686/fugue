@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,7 +216,7 @@ func TestExpiredBackupCoordinationHolderRequiresExactStoreProof(t *testing.T) {
 
 func newBackupCoordinationProofStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -2,10 +2,11 @@ package store
 
 import (
 	"fugue/internal/model"
-	"github.com/DATA-DOG/go-sqlmock"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestRestoreLostImageAvailabilityPostgresOnlyUpdatesMatchingLostIdentity(t *testing.T) {

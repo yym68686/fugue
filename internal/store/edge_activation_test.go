@@ -18,8 +18,8 @@ const (
 
 func TestEdgeActivationPhasedCutoverAndCrashReplay(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestEdgeActivationPhasedCutoverAndCrashReplay(t *testing.T) {
 		t.Fatalf("cutover receipt state drifted: %+v", state)
 	}
 
-	reopened := New(path)
+	reopened := newStoreTestDatabase(t, path)
 	if err := reopened.Init(); err != nil {
 		t.Fatalf("reopen after cutover: %v", err)
 	}
@@ -62,12 +62,17 @@ func TestEdgeActivationPhasedCutoverAndCrashReplay(t *testing.T) {
 		t.Fatalf("durable activation replay drifted: state=%+v err=%v", replayed, err)
 	}
 	state = advanceEdgeActivationTest(t, reopened, replayed, model.EdgeActivationPhaseEnforced, expected, nil, "api-generation-7")
-	if _, _, err := reopened.UpdateEdgeHeartbeat(legacy); !errors.Is(err, ErrConflict) {
+	if _, _, err := reopened.UpdateEdgeHeartbeat(legacy); !isEdgeFlatWriteFence(err) {
 		t.Fatalf("phase4 must fence legacy route-health writes, got %v", err)
 	}
 	if state.Phase != model.EdgeActivationPhaseEnforced || len(state.Receipts) != 4 {
 		t.Fatalf("enforced state drifted: %+v", state)
 	}
+}
+
+func isEdgeFlatWriteFence(err error) bool {
+	var rejected interface{ SQLState() string }
+	return errors.As(err, &rejected) && rejected.SQLState() == "55000"
 }
 
 func TestEdgeActivationRejectsSkippedOrUnhealthyFence(t *testing.T) {

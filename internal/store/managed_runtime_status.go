@@ -20,28 +20,7 @@ func (s *Store) SyncManagedAppRuntimeStatus(appID string, currentReleaseStartedA
 	if strings.TrimSpace(appID) == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgSyncManagedAppRuntimeStatus(appID, currentReleaseStartedAt, currentReleaseReadyAt, services)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		appIndex := findApp(state, appID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		syncAppReleaseRuntimeStatus(&state.Apps[appIndex], currentReleaseStartedAt, currentReleaseReadyAt, now)
-		for _, serviceStatus := range services {
-			if strings.TrimSpace(serviceStatus.ServiceID) == "" {
-				continue
-			}
-			serviceIndex := findBackingService(state, serviceStatus.ServiceID)
-			if serviceIndex < 0 {
-				continue
-			}
-			syncBackingServiceRuntimeStatus(&state.BackingServices[serviceIndex], serviceStatus.CurrentRuntimeStartedAt, serviceStatus.CurrentRuntimeReadyAt, now)
-		}
-		return nil
-	})
+	return s.pgSyncManagedAppRuntimeStatus(appID, currentReleaseStartedAt, currentReleaseReadyAt, services)
 }
 
 // SyncManagedAppObservedStatus publishes the Kubernetes-observed phase and
@@ -83,47 +62,28 @@ func (s *Store) SyncManagedAppObservedStatus(appID, phase string, replicas int, 
 }
 
 func (s *Store) updateManagedAppObservedStatus(appID, phase string, replicas int, message string) error {
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		app, err := s.pgGetApp(appID)
-		if err != nil {
-			return err
-		}
-		changed := app.Status.Phase != phase || app.Status.CurrentReplicas != replicas || app.Status.LastMessage != strings.TrimSpace(message)
-		if !changed {
-			return nil
-		}
-		app.Status.Phase = phase
-		app.Status.CurrentReplicas = replicas
-		app.Status.LastMessage = strings.TrimSpace(message)
-		now := time.Now().UTC()
-		app.Status.ObservedAt = &now
-		app.Status.UpdatedAt = now
-		statusJSON, err := marshalJSON(app.Status)
-		if err != nil {
-			return err
-		}
-		_, err = s.db.ExecContext(ctx, `UPDATE fugue_apps SET status_json = $2, updated_at = $3 WHERE id = $1`, app.ID, statusJSON, app.UpdatedAt)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	app, err := s.pgGetApp(appID)
+	if err != nil {
 		return err
 	}
-	return s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app := &state.Apps[index]
-		if app.Status.Phase == phase && app.Status.CurrentReplicas == replicas && app.Status.LastMessage == strings.TrimSpace(message) {
-			return nil
-		}
-		app.Status.Phase = phase
-		app.Status.CurrentReplicas = replicas
-		app.Status.LastMessage = strings.TrimSpace(message)
-		now := time.Now().UTC()
-		app.Status.ObservedAt = &now
-		app.Status.UpdatedAt = now
+	changed := app.Status.Phase != phase || app.Status.CurrentReplicas != replicas || app.Status.LastMessage != strings.TrimSpace(message)
+	if !changed {
 		return nil
-	})
+	}
+	app.Status.Phase = phase
+	app.Status.CurrentReplicas = replicas
+	app.Status.LastMessage = strings.TrimSpace(message)
+	now := time.Now().UTC()
+	app.Status.ObservedAt = &now
+	app.Status.UpdatedAt = now
+	statusJSON, err := marshalJSON(app.Status)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE fugue_apps SET status_json = $2, updated_at = $3 WHERE id = $1`, app.ID, statusJSON, app.UpdatedAt)
+	return err
 }
 
 func (s *Store) pgSyncManagedAppRuntimeStatus(appID string, currentReleaseStartedAt, currentReleaseReadyAt *time.Time, services []ManagedBackingServiceRuntimeStatus) error {

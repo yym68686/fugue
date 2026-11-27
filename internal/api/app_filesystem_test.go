@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -633,7 +632,7 @@ func TestAppFilesystemReadsPersistentStorageFileMountViaSidecar(t *testing.T) {
 func TestCreateAppRejectsDirectSharedPersistentStorage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -677,7 +676,7 @@ func setupAppFilesystemTestServer(t *testing.T, withWorkspace bool) (*store.Stor
 func setupAppFilesystemPersistentStorageTestServer(t *testing.T) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -724,7 +723,7 @@ func setupAppFilesystemPersistentStorageTestServer(t *testing.T) (*store.Store, 
 func setupAppFilesystemTestServerForRuntime(t *testing.T, withWorkspace bool, runtimeID string) (*store.Store, *Server, string, model.App) {
 	t.Helper()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -109,7 +108,7 @@ func TestBackupObjectUploadTransactionCleansAttemptedPutAfterFailure(t *testing.
 	fake := newFailedUploadS3(t)
 	backend := newTestDataObjectBackend(t, fake.URL)
 	backend.backend.Prefix = "backup-root"
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -137,7 +136,7 @@ func TestBackupObjectUploadTransactionCleansAmbiguousFailedPut(t *testing.T) {
 	fake := newFailedUploadS3(t)
 	fake.setFailPutsAfterStore(true)
 	backend := newTestDataObjectBackend(t, fake.URL)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -163,11 +162,14 @@ func TestBackupObjectUploadTransactionCleansAmbiguousFailedPut(t *testing.T) {
 func TestBackupObjectUploadTransactionPreservesCommittedArtifact(t *testing.T) {
 	fake := newFailedUploadS3(t)
 	backend := newTestDataObjectBackend(t, fake.URL)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	run := model.BackupRun{ID: "backup_run_committed", Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}}
+	run, err := stateStore.CreateBackupRun(model.BackupRun{ID: "backup_run_committed", Target: model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	key := "control-plane/2026/07/29/21/backup_run_committed/control-plane.dump"
 	tx := newBackupObjectUploadTransaction(&Server{store: stateStore}, run, backend)
 	if err := tx.putObject(context.Background(), key, bytes.NewReader([]byte("dump")), 4); err != nil {
@@ -243,7 +245,7 @@ func TestControlPlaneBackupLeaseConflictDeletesDumpAndManifest(t *testing.T) {
 func TestAppDatabaseBackupVerificationFailureDeletesUploadedDump(t *testing.T) {
 	fake := newFailedUploadS3(t)
 	fake.setCorruptGets(true)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -313,7 +315,7 @@ func TestAppDatabaseBackupVerificationFailureDeletesUploadedDump(t *testing.T) {
 
 func TestSweepFailedBackupRunObjectsDeletesOnlyExactUnreferencedRunObjects(t *testing.T) {
 	fake := newFailedUploadS3(t)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -390,45 +392,6 @@ func TestSweepFailedBackupRunObjectsDeletesOnlyExactUnreferencedRunObjects(t *te
 	}
 	if len(candidates) != 0 {
 		t.Fatalf("expected durable cleanup marker to suppress retry, got %+v", candidates)
-	}
-}
-
-func TestSweepFailedBackupRunObjectsCompletesProvenBackendMissingRun(t *testing.T) {
-	finishedAt := time.Now().UTC().Add(-2 * time.Hour)
-	legacyRun := model.BackupRun{
-		ID:            "backup_run_backend_missing",
-		Target:        model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
-		Status:        model.BackupRunStatusFailed,
-		ErrorCode:     "backup_backend_missing",
-		ErrorMessage:  "backup_backend_missing: backup backend is not configured",
-		FinishedAt:    &finishedAt,
-		BytesWritten:  0,
-		ArtifactCount: 0,
-	}
-	stateBytes, err := json.Marshal(model.State{BackupRuns: []model.BackupRun{legacyRun}})
-	if err != nil {
-		t.Fatalf("marshal legacy backup state: %v", err)
-	}
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	if err := os.WriteFile(storePath, stateBytes, 0o600); err != nil {
-		t.Fatalf("write legacy backup state: %v", err)
-	}
-	stateStore := store.New(storePath)
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	server := &Server{store: stateStore}
-	server.sweepFailedBackupRunObjects(context.Background())
-	candidates, err := stateStore.ListFailedBackupRunObjectCleanupCandidates(store.BackupRunObjectCleanupFilter{
-		Before: time.Now().UTC(),
-		Limit:  10,
-	})
-	if err != nil {
-		t.Fatalf("list cleanup candidates: %v", err)
-	}
-	if len(candidates) != 0 {
-		t.Fatalf("proven backend-missing run remained a cleanup candidate: %+v", candidates)
 	}
 }
 
@@ -611,7 +574,7 @@ func (f *failedUploadS3) setFailPutsAfterStore(fail bool) {
 
 func newFailedUploadBackupStore(t *testing.T, endpoint, tenantID string) (*store.Store, model.BackupBackend) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

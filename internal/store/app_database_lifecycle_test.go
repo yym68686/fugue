@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,49 +71,6 @@ func TestAppDatabaseImportRejectsSuspendedOrSuspendingManagedPostgres(t *testing
 	}
 }
 
-func TestAppDatabaseImportClaimAtomicallyFailsQueuedJobWhenDatabaseBecomesSuspended(t *testing.T) {
-	t.Parallel()
-
-	stateStore, app, service, upload := appDatabaseImportLifecycleFixture(t)
-	job, err := stateStore.CreateAppDatabaseImportJob(appDatabaseImportLifecycleJob(app, upload))
-	if err != nil {
-		t.Fatalf("create database import job: %v", err)
-	}
-	// Simulate a legacy/race state that predates mutual exclusion. Claim must
-	// consume this queued job into a terminal state instead of retrying forever.
-	if err := stateStore.withLockedState(true, func(state *model.State) error {
-		index := findBackingService(state, service.ID)
-		if index < 0 || state.BackingServices[index].Spec.Postgres == nil {
-			return ErrNotFound
-		}
-		state.BackingServices[index].Spec.Postgres.Suspended = true
-		return nil
-	}); err != nil {
-		t.Fatalf("prepare suspended race state: %v", err)
-	}
-
-	if _, err := stateStore.ClaimAppDatabaseImportJob(job.ID); !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
-		t.Fatalf("ClaimAppDatabaseImportJob error = %v, want managed postgres import conflict", err)
-	}
-	stored, err := stateStore.GetAppDatabaseImportJob(app.ID, job.ID)
-	if err != nil {
-		t.Fatalf("get terminal database import job: %v", err)
-	}
-	if stored.Status != model.OperationStatusFailed || stored.CompletedAt == nil || stored.StartedAt != nil {
-		t.Fatalf("blocked claim did not become a clean terminal failure: %+v", stored)
-	}
-	if stored.ErrorMessage != ManagedPostgresDatabaseImportConflictMessage {
-		t.Fatalf("blocked claim error_message = %q, want %q", stored.ErrorMessage, ManagedPostgresDatabaseImportConflictMessage)
-	}
-	pending, err := stateStore.ListPendingAppDatabaseImportJobs(10)
-	if err != nil {
-		t.Fatalf("list pending database import jobs: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Fatalf("terminally failed job remained pending: %+v", pending)
-	}
-}
-
 func TestManagedPostgresSuspendReturnsActionableConflictForActiveDatabaseImport(t *testing.T) {
 	t.Parallel()
 
@@ -153,7 +109,7 @@ func TestManagedPostgresSuspendReturnsActionableConflictForActiveDatabaseImport(
 
 func appDatabaseImportLifecycleFixture(t *testing.T) (*Store, model.App, model.BackingService, model.SourceUpload) {
 	t.Helper()
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

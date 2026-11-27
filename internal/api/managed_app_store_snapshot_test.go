@@ -2,17 +2,15 @@ package api
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +80,7 @@ func TestManagedAppStoreSnapshotMatchesPointReads(t *testing.T) {
 }
 
 func TestServingReleaseTrafficTargetAcceptsReadyStableBaseline(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +144,7 @@ func TestManagedAppStoreSnapshotImageEvidenceRetainsIdentityAndPrecedence(t *tes
 				rows = append(rows, row)
 			}
 			snapshot := &managedAppStoreSnapshot{locations: map[string][]model.ImageLocation{app.ID: rows}}
-			s := &Server{store: store.New(filepath.Join(t.TempDir(), "unused.json"))}
+			s := &Server{store: newStoreTestDatabase(t, "")}
 			present, observation, err := s.currentManagedImagePresenceWithStoreSnapshot(app, app.Spec.Image, "target", snapshot)
 			if err != nil || !reflect.DeepEqual(present, test.present) || observation.status != test.status {
 				t.Fatalf("got present=%v observation=%+v err=%v", present, observation, err)
@@ -158,13 +156,17 @@ func TestManagedAppStoreSnapshotImageEvidenceRetainsIdentityAndPrecedence(t *tes
 func boolForSnapshotTest(value bool) *bool { return &value }
 
 func TestManagedAppStoreSnapshotLoadsNegativeAndPendingLocations(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := state.CreateTenant("snapshot-image-locations")
+	if err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{store: state}
 	for _, status := range []string{model.ImageLocationStatusPresent, model.ImageLocationStatusPulling, model.ImageLocationStatusMissing, model.ImageLocationStatusFailed} {
-		app := model.App{ID: "app_" + status, TenantID: "tenant", Spec: model.AppSpec{Image: "registry.example/demo:" + status}}
+		app := model.App{ID: "app_" + status, TenantID: tenant.ID, Spec: model.AppSpec{Image: "registry.example/demo:" + status}}
 		_, err := state.UpsertImageLocation(model.ImageLocation{TenantID: app.TenantID, AppID: app.ID, ImageRef: app.Spec.Image, RuntimeID: "target", Status: status})
 		if err != nil {
 			t.Fatal(err)

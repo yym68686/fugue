@@ -27,7 +27,7 @@ func TestAppSSHIdentityPostgresIntegration(test *testing.T) {
 	if err != nil || parsed.Hostname() != "127.0.0.1" || !strings.Contains(parsed.Path, "fugue_test") {
 		test.Fatal("requires disposable loopback fugue_test database")
 	}
-	stateStore := New("", address)
+	stateStore := New(address)
 	database, err := sql.Open("pgx", address)
 	if err != nil {
 		test.Fatal(err)

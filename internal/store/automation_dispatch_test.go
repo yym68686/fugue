@@ -2,18 +2,17 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
 
-func TestAutomationActionDispatchJSONIsIdempotentAndFenced(t *testing.T) {
+func TestAutomationActionDispatchPostgresIsIdempotentAndFenced(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, project, app, policy := createAutomationIntentParents(t, stateStore, "Dispatch")
 	intent := testObservedAutomationIntent(t, policy, app, now)
 	intent, _, err := stateStore.CreateAutomationActionIntent(intent)
@@ -40,6 +39,9 @@ func TestAutomationActionDispatchJSONIsIdempotentAndFenced(t *testing.T) {
 		t.Fatalf("dispatch was not idempotently reused: first=%+v second=%+v created=%t", created, reused, wasCreated)
 	}
 
+	// Database provisioning and test scheduling take real time. Anchor the
+	// simulated execution clock on the created record, not the input fixture.
+	now = created.CreatedAt
 	claimed, didClaim, err := stateStore.ClaimAutomationActionDispatch(
 		created.ID,
 		"executor-a",
@@ -122,12 +124,12 @@ func TestAutomationActionDispatchJSONIsIdempotentAndFenced(t *testing.T) {
 	}
 }
 
-func TestAutomationActionDispatchJSONRejectsStaleIntentAndExpires(t *testing.T) {
+func TestAutomationActionDispatchPostgresRejectsStaleIntentAndExpires(t *testing.T) {
 	t.Parallel()
 
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	_, _, app, policy := createAutomationIntentParents(t, stateStore, "DispatchReject")
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	intent := testObservedAutomationIntent(t, policy, app, now)
 	intent, _, err := stateStore.CreateAutomationActionIntent(intent)
 	if err != nil {
@@ -140,15 +142,16 @@ func TestAutomationActionDispatchJSONRejectsStaleIntentAndExpires(t *testing.T) 
 	}
 
 	dispatch = testAutomationActionDispatch(intent, now)
-	dispatch.ExpiresAt = now.Add(2 * time.Second)
+	dispatch.ExpiresAt = now.Add(30 * time.Second)
 	created, _, err := stateStore.CreateAutomationActionDispatch(dispatch)
 	if err != nil {
 		t.Fatalf("create expired dispatch: %v", err)
 	}
+	expiryCheck := created.ExpiresAt.Add(time.Second)
 	if _, didClaim, err := stateStore.ClaimAutomationActionDispatch(
 		created.ID,
 		"executor",
-		now.Add(3*time.Second),
+		expiryCheck,
 		10*time.Second,
 	); err != nil {
 		t.Fatalf("claim expired dispatch: %v", err)
@@ -161,7 +164,7 @@ func TestAutomationActionDispatchJSONRejectsStaleIntentAndExpires(t *testing.T) 
 	}
 	if got.Status != model.AutomationActionDispatchStatusExpired ||
 		got.CompletedAt == nil ||
-		!got.CompletedAt.Equal(now.Add(3*time.Second)) {
+		!got.CompletedAt.Equal(expiryCheck) {
 		t.Fatalf("expired dispatch state=%+v, want terminal timestamp", got)
 	}
 }
@@ -170,7 +173,7 @@ func TestAutomationActionDispatchCreateRejectsUnsafeReadyOverrideAndKeepsFirstDe
 	t.Parallel()
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	_, _, app, policy := createAutomationIntentParents(t, stateStore, "DispatchStatus")
 	intent := testObservedAutomationIntent(t, policy, app, now)
 	intent, _, err := stateStore.CreateAutomationActionIntent(intent)
@@ -209,7 +212,7 @@ func TestAutomationActionDispatchCreateRejectsUnknownStateAndUnboundedSafetyTTL(
 	t.Parallel()
 
 	now := time.Now().UTC().Truncate(time.Microsecond)
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	_, _, app, policy := createAutomationIntentParents(t, stateStore, "DispatchValidation")
 	intent := testObservedAutomationIntent(t, policy, app, now)
 	intent, _, err := stateStore.CreateAutomationActionIntent(intent)

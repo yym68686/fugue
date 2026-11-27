@@ -74,7 +74,11 @@ func TestProjectHostRoutePlanRejectsStaleAndKeepsOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := "customer.example.net"
-	claim, err := st.PutAppDomain(model.AppDomain{Hostname: host, AppID: owner.ID, TenantID: owner.TenantID, Status: model.AppDomainStatusVerified, DNSStatus: model.AppDomainDNSStatusReady, TLSStatus: model.AppDomainTLSStatusReady})
+	_, err = st.PutAppDomain(model.AppDomain{Hostname: host, AppID: owner.ID, TenantID: owner.TenantID, Status: model.AppDomainStatusVerified, DNSStatus: model.AppDomainDNSStatusReady, TLSStatus: model.AppDomainTLSStatusReady})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := st.GetAppDomain(host)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +251,7 @@ func TestProjectHostRoutePostgresSerializesPlans(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires a disposable loopback fugue_test database")
 	}
-	st := store.New("", address)
+	st := store.New(address)
 	ctx := context.Background()
 	if err = schemamigrate.MigrateEdgeInstanceFencing(ctx, address); err != nil {
 		t.Fatal(err)

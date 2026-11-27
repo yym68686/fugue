@@ -16,41 +16,12 @@ func (s *Store) GetProjectRouteTable(projectID string) (model.ProjectRouteTable,
 	if projectID == "" {
 		return model.ProjectRouteTable{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetProjectRouteTable(projectID)
-	}
-	var table model.ProjectRouteTable
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, candidate := range state.ProjectRouteTables {
-			if strings.TrimSpace(candidate.ProjectID) == projectID {
-				table = cloneProjectRouteTable(candidate)
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return table, err
+	return s.pgGetProjectRouteTable(projectID)
 }
 
 func (s *Store) ListProjectRouteTables(tenantID string, platformAdmin bool) ([]model.ProjectRouteTable, error) {
 	tenantID = strings.TrimSpace(tenantID)
-	if s.usingDatabase() {
-		return s.pgListProjectRouteTables(tenantID, platformAdmin)
-	}
-	var tables []model.ProjectRouteTable
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, table := range state.ProjectRouteTables {
-			if !platformAdmin && strings.TrimSpace(table.TenantID) != tenantID {
-				continue
-			}
-			if platformAdmin || tenantID == "" || strings.TrimSpace(table.TenantID) == tenantID {
-				tables = append(tables, cloneProjectRouteTable(table))
-			}
-		}
-		sortProjectRouteTables(tables)
-		return nil
-	})
-	return tables, err
+	return s.pgListProjectRouteTables(tenantID, platformAdmin)
 }
 
 func (s *Store) PutProjectRouteTable(projectID string, table model.ProjectRouteTable) (model.ProjectRouteTable, error) {
@@ -60,44 +31,7 @@ func (s *Store) PutProjectRouteTable(projectID string, table model.ProjectRouteT
 	}
 	table.ProjectID = projectID
 	table = model.NormalizeProjectRouteTable(table)
-	if s.usingDatabase() {
-		return s.pgPutProjectRouteTable(projectID, table)
-	}
-
-	var saved model.ProjectRouteTable
-	err := s.withLockedState(true, func(state *model.State) error {
-		projectIndex := findProject(state, projectID)
-		if projectIndex < 0 {
-			return ErrNotFound
-		}
-		project := state.Projects[projectIndex]
-		if strings.TrimSpace(table.TenantID) != "" && strings.TrimSpace(table.TenantID) != project.TenantID {
-			return ErrInvalidInput
-		}
-		table.TenantID = project.TenantID
-		apps := projectRouteAppsForProject(state.Apps, projectID)
-		bindings, err := CompileProjectRouteTableBindings(table, apps)
-		if err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		index := findProjectRouteTable(state.ProjectRouteTables, projectID)
-		if index >= 0 {
-			table.CreatedAt = state.ProjectRouteTables[index].CreatedAt
-		} else {
-			table.CreatedAt = now
-		}
-		table.UpdatedAt = now
-		if index >= 0 {
-			state.ProjectRouteTables[index] = cloneProjectRouteTable(table)
-		} else {
-			state.ProjectRouteTables = append(state.ProjectRouteTables, cloneProjectRouteTable(table))
-		}
-		saved = cloneProjectRouteTable(table)
-		saved.Bindings = bindings
-		return nil
-	})
-	return saved, err
+	return s.pgPutProjectRouteTable(projectID, table)
 }
 
 func (s *Store) DeleteProjectRouteTable(projectID string) (model.ProjectRouteTable, error) {
@@ -105,20 +39,7 @@ func (s *Store) DeleteProjectRouteTable(projectID string) (model.ProjectRouteTab
 	if projectID == "" {
 		return model.ProjectRouteTable{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteProjectRouteTable(projectID)
-	}
-	var deleted model.ProjectRouteTable
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findProjectRouteTable(state.ProjectRouteTables, projectID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		deleted = cloneProjectRouteTable(state.ProjectRouteTables[index])
-		state.ProjectRouteTables = append(state.ProjectRouteTables[:index], state.ProjectRouteTables[index+1:]...)
-		return nil
-	})
-	return deleted, err
+	return s.pgDeleteProjectRouteTable(projectID)
 }
 
 func CompileProjectRouteTableBindings(table model.ProjectRouteTable, apps []model.App) ([]model.ProjectRouteBinding, error) {
@@ -288,17 +209,6 @@ func projectRouteAppServiceKeys(app model.App) []string {
 	return keys
 }
 
-func projectRouteAppsForProject(apps []model.App, projectID string) []model.App {
-	out := make([]model.App, 0)
-	for _, app := range apps {
-		if isDeletedApp(app) || strings.TrimSpace(app.ProjectID) != strings.TrimSpace(projectID) {
-			continue
-		}
-		out = append(out, app)
-	}
-	return out
-}
-
 func findAppByProjectRouteTables(apps []model.App, tables []model.ProjectRouteTable, hostname, requestPath string, exact bool) (model.App, bool) {
 	hostname = normalizeAppDomainHostname(hostname)
 	requestPath = model.NormalizeAppRoutePathPrefix(requestPath)
@@ -357,35 +267,6 @@ func (s *Store) pgGetAppByProjectRoute(hostname, requestPath string, exact bool)
 		return model.App{}, ErrNotFound
 	}
 	return s.pgGetApp(app.ID)
-}
-
-func cloneProjectRouteTable(in model.ProjectRouteTable) model.ProjectRouteTable {
-	out := in
-	if len(in.Domains) > 0 {
-		out.Domains = append([]model.ProjectRouteDomain(nil), in.Domains...)
-	}
-	if len(in.Entrypoints) > 0 {
-		out.Entrypoints = make([]model.ProjectRouteEntrypoint, len(in.Entrypoints))
-		for index, entrypoint := range in.Entrypoints {
-			out.Entrypoints[index] = entrypoint
-			if len(entrypoint.Routes) > 0 {
-				out.Entrypoints[index].Routes = append([]model.ProjectRouteEntrypointRoute(nil), entrypoint.Routes...)
-			}
-		}
-	}
-	if len(in.Bindings) > 0 {
-		out.Bindings = append([]model.ProjectRouteBinding(nil), in.Bindings...)
-	}
-	return out
-}
-
-func findProjectRouteTable(tables []model.ProjectRouteTable, projectID string) int {
-	for index, table := range tables {
-		if strings.TrimSpace(table.ProjectID) == strings.TrimSpace(projectID) {
-			return index
-		}
-	}
-	return -1
 }
 
 func sortProjectRouteTables(tables []model.ProjectRouteTable) {

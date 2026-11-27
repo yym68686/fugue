@@ -2,9 +2,7 @@ package store
 
 import (
 	"fmt"
-	"sort"
 	"strings"
-	"time"
 
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
@@ -29,23 +27,7 @@ type AppSSHRouteOptions struct {
 }
 
 func (s *Store) ListSSHKeys(tenantID string, platformAdmin bool) ([]model.SSHKey, error) {
-	if s.usingDatabase() {
-		return s.pgListSSHKeys(tenantID, platformAdmin)
-	}
-	var keys []model.SSHKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, key := range state.SSHKeys {
-			if !platformAdmin && key.TenantID != tenantID {
-				continue
-			}
-			keys = append(keys, key)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			return keys[i].CreatedAt.Before(keys[j].CreatedAt)
-		})
-		return nil
-	})
-	return keys, err
+	return s.pgListSSHKeys(tenantID, platformAdmin)
 }
 
 func (s *Store) GetSSHKey(id string) (model.SSHKey, error) {
@@ -53,19 +35,7 @@ func (s *Store) GetSSHKey(id string) (model.SSHKey, error) {
 	if id == "" {
 		return model.SSHKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetSSHKey(id)
-	}
-	var key model.SSHKey
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findSSHKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key = state.SSHKeys[index]
-		return nil
-	})
-	return key, err
+	return s.pgGetSSHKey(id)
 }
 
 func (s *Store) CreateSSHKey(tenantID, label, publicKey string) (model.SSHKey, error) {
@@ -85,35 +55,7 @@ func (s *Store) CreateSSHKey(tenantID, label, publicKey string) (model.SSHKey, e
 	if tenantID == "" {
 		return model.SSHKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateSSHKey(tenantID, label, normalizedKey, fingerprint)
-	}
-	var key model.SSHKey
-	err = s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		for _, existing := range state.SSHKeys {
-			if existing.TenantID == tenantID && existing.Fingerprint == fingerprint && existing.Status == model.SSHKeyStatusActive {
-				return ErrConflict
-			}
-		}
-		now := time.Now().UTC()
-		key = model.SSHKey{
-			ID:          model.NewID("sshkey"),
-			TenantID:    tenantID,
-			Label:       label,
-			PublicKey:   normalizedKey,
-			Fingerprint: fingerprint,
-			Status:      model.SSHKeyStatusActive,
-			Comment:     sshPublicKeyComment(normalizedKey),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		state.SSHKeys = append(state.SSHKeys, key)
-		return nil
-	})
-	return key, err
+	return s.pgCreateSSHKey(tenantID, label, normalizedKey, fingerprint)
 }
 
 func (s *Store) DeleteSSHKey(id string) (model.SSHKey, error) {
@@ -121,27 +63,7 @@ func (s *Store) DeleteSSHKey(id string) (model.SSHKey, error) {
 	if id == "" {
 		return model.SSHKey{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteSSHKey(id)
-	}
-	var key model.SSHKey
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findSSHKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key = state.SSHKeys[index]
-		state.SSHKeys = append(state.SSHKeys[:index], state.SSHKeys[index+1:]...)
-		for appIndex := range state.Apps {
-			if state.Apps[appIndex].Spec.SSH == nil {
-				continue
-			}
-			state.Apps[appIndex].Spec.SSH.AuthorizedKeyIDs = removeStringValue(state.Apps[appIndex].Spec.SSH.AuthorizedKeyIDs, id)
-			state.Apps[appIndex].Spec.SSH = model.NormalizeAppSSHSpec(state.Apps[appIndex].Spec.SSH)
-		}
-		return nil
-	})
-	return key, err
+	return s.pgDeleteSSHKey(id)
 }
 
 func (s *Store) GetAppSSHEndpoint(appID string) (model.AppSSHEndpoint, error) {
@@ -149,19 +71,7 @@ func (s *Store) GetAppSSHEndpoint(appID string) (model.AppSSHEndpoint, error) {
 	if appID == "" {
 		return model.AppSSHEndpoint{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAppSSHEndpoint(appID)
-	}
-	var endpoint model.AppSSHEndpoint
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findAppSSHEndpointByApp(state, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		endpoint = normalizeAppSSHEndpointForRead(state.AppSSHEndpoints[index])
-		return nil
-	})
-	return endpoint, err
+	return s.pgGetAppSSHEndpoint(appID)
 }
 
 func (s *Store) UpsertAppSSHConfig(appID string, update AppSSHUpdate) (model.App, model.AppSSHEndpoint, error) {
@@ -173,101 +83,7 @@ func (s *Store) UpsertAppSSHConfig(appID string, update AppSSHUpdate) (model.App
 	if !update.Enabled {
 		return s.DisableAppSSH(appID)
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertAppSSHConfig(appID, update)
-	}
-	var (
-		app      model.App
-		endpoint model.AppSSHEndpoint
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		if err := validateAppSSHKeysState(state, app.TenantID, update.AuthorizedKeyIDs); err != nil {
-			return err
-		}
-		authorizedKeys, err := resolveAppSSHAuthorizedKeysState(state, app.TenantID, update.AuthorizedKeyIDs, update.AuthorizedKeys)
-		if err != nil {
-			return err
-		}
-		runtimeObj, runtimeFound := runtimeByID(state, app.Spec.RuntimeID)
-		status := model.AppSSHEndpointStatusPending
-		statusReason := ""
-		runtimeType := ""
-		edgeGroupID := ""
-		if runtimeFound {
-			runtimeType = runtimeObj.Type
-			edgeGroupID = edgeGroupIDForRuntime(runtimeObj)
-			if runtimeObj.Type == model.RuntimeTypeExternalOwned {
-				status = model.AppSSHEndpointStatusUnsupported
-				statusReason = "external-owned runtimes do not support native ssh routes yet"
-			}
-		} else {
-			status = model.AppSSHEndpointStatusUnavailable
-			statusReason = "runtime is missing"
-		}
-		ssh := &model.AppSSHSpec{
-			Enabled:            true,
-			TargetPort:         update.TargetPort,
-			User:               update.User,
-			AuthorizedKeyIDs:   append([]string(nil), update.AuthorizedKeyIDs...),
-			AuthorizedKeys:     authorizedKeys,
-			AllowTCPForwarding: update.AllowTCPForwarding,
-		}
-		app.Spec.SSH = model.NormalizeAppSSHSpec(ssh)
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-
-		endpointIndex := findAppSSHEndpointByApp(state, appID)
-		if endpointIndex >= 0 {
-			endpoint = state.AppSSHEndpoints[endpointIndex]
-		} else {
-			port, err := s.allocateSSHPortWithManagedBindings(state, update.PublicPortStart, update.PublicPortEnd, 0)
-			if err != nil {
-				return err
-			}
-			now := time.Now().UTC()
-			endpoint = model.AppSSHEndpoint{
-				ID:         model.NewID("sshend"),
-				TenantID:   app.TenantID,
-				ProjectID:  app.ProjectID,
-				AppID:      app.ID,
-				PublicPort: port,
-				CreatedAt:  now,
-			}
-			state.AppSSHEndpoints = append(state.AppSSHEndpoints, endpoint)
-			endpointIndex = len(state.AppSSHEndpoints) - 1
-		}
-		endpoint.TenantID = app.TenantID
-		endpoint.ProjectID = app.ProjectID
-		endpoint.RuntimeID = app.Spec.RuntimeID
-		endpoint.RuntimeType = runtimeType
-		endpoint.EdgeGroupID = edgeGroupID
-		endpoint.Hostname = strings.TrimSpace(update.Hostname)
-		endpoint.TargetNamespace = runtimepkg.NamespaceForTenant(app.TenantID)
-		endpoint.TargetService = runtimepkg.RuntimeAppServiceName(app)
-		endpoint.TargetHost = endpoint.TargetService + "." + endpoint.TargetNamespace + ".svc.cluster.local"
-		endpoint.TargetPort = app.Spec.SSH.TargetPort
-		endpoint.User = app.Spec.SSH.User
-		endpoint.Status = status
-		endpoint.StatusReason = statusReason
-		endpoint.ReleasedAt = nil
-		endpoint.UpdatedAt = time.Now().UTC()
-		if err := s.validateManagedSSHNativePort(endpoint); err != nil {
-			return err
-		}
-		state.AppSSHEndpoints[endpointIndex] = endpoint
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, normalizeAppSSHEndpointForRead(endpoint), err
+	return s.pgUpsertAppSSHConfig(appID, update)
 }
 
 func (s *Store) DisableAppSSH(appID string) (model.App, model.AppSSHEndpoint, error) {
@@ -275,40 +91,7 @@ func (s *Store) DisableAppSSH(appID string) (model.App, model.AppSSHEndpoint, er
 	if appID == "" {
 		return model.App{}, model.AppSSHEndpoint{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDisableAppSSH(appID)
-	}
-	var (
-		app      model.App
-		endpoint model.AppSSHEndpoint
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findApp(state, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		app = state.Apps[index]
-		if isDeletedApp(app) {
-			return ErrNotFound
-		}
-		app.Spec.SSH = nil
-		app.UpdatedAt = time.Now().UTC()
-		state.Apps[index] = app
-		endpointIndex := findAppSSHEndpointByApp(state, appID)
-		if endpointIndex >= 0 {
-			now := time.Now().UTC()
-			endpoint = state.AppSSHEndpoints[endpointIndex]
-			endpoint.Status = model.AppSSHEndpointStatusDisabled
-			endpoint.StatusReason = "ssh disabled"
-			endpoint.ReleasedAt = &now
-			endpoint.UpdatedAt = now
-			state.AppSSHEndpoints[endpointIndex] = endpoint
-		}
-		normalizeAppStatusForRead(&app)
-		hydrateAppBackingServices(state, &app)
-		return nil
-	})
-	return app, normalizeAppSSHEndpointForRead(endpoint), err
+	return s.pgDisableAppSSH(appID)
 }
 
 func (s *Store) RotateAppSSHPort(appID string, start, end int) (model.AppSSHEndpoint, error) {
@@ -317,50 +100,11 @@ func (s *Store) RotateAppSSHPort(appID string, start, end int) (model.AppSSHEndp
 		return model.AppSSHEndpoint{}, ErrInvalidInput
 	}
 	start, end = normalizeAppSSHPortRange(start, end)
-	if s.usingDatabase() {
-		return s.pgRotateAppSSHPort(appID, start, end)
-	}
-	var endpoint model.AppSSHEndpoint
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppSSHEndpointByApp(state, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		current := state.AppSSHEndpoints[index]
-		port, err := s.allocateSSHPortWithManagedBindings(state, start, end, current.PublicPort)
-		if err != nil {
-			return err
-		}
-		current.PublicPort = port
-		if err := s.validateManagedSSHNativePort(current); err != nil {
-			return err
-		}
-		current.UpdatedAt = time.Now().UTC()
-		state.AppSSHEndpoints[index] = current
-		endpoint = current
-		return nil
-	})
-	return normalizeAppSSHEndpointForRead(endpoint), err
+	return s.pgRotateAppSSHPort(appID, start, end)
 }
 
 func (s *Store) ListEdgeSSHRoutes(options AppSSHRouteOptions) ([]model.EdgeSSHRoute, error) {
-	if s.usingDatabase() {
-		return s.pgListEdgeSSHRoutes(options)
-	}
-	var routes []model.EdgeSSHRoute
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, endpoint := range state.AppSSHEndpoints {
-			route, ok := edgeSSHRouteFromEndpoint(endpoint, options)
-			if ok {
-				routes = append(routes, route)
-			}
-		}
-		sort.Slice(routes, func(i, j int) bool {
-			return routes[i].PublicPort < routes[j].PublicPort
-		})
-		return nil
-	})
-	return routes, err
+	return s.pgListEdgeSSHRoutes(options)
 }
 
 func normalizeAppSSHUpdate(update AppSSHUpdate) AppSSHUpdate {
@@ -399,69 +143,6 @@ func normalizePort(port int, fallback int) int {
 		return fallback
 	}
 	return port
-}
-
-func validateAppSSHKeysState(state *model.State, tenantID string, keyIDs []string) error {
-	for _, id := range keyIDs {
-		index := findSSHKey(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		key := state.SSHKeys[index]
-		if key.TenantID != tenantID || key.Status != model.SSHKeyStatusActive {
-			return ErrNotFound
-		}
-	}
-	return nil
-}
-
-func resolveAppSSHAuthorizedKeysState(state *model.State, tenantID string, keyIDs, inlineKeys []string) ([]string, error) {
-	keys := make([]string, 0, len(keyIDs)+len(inlineKeys))
-	for _, id := range keyIDs {
-		index := findSSHKey(state, id)
-		if index < 0 {
-			return nil, ErrNotFound
-		}
-		key := state.SSHKeys[index]
-		if key.TenantID != tenantID || key.Status != model.SSHKeyStatusActive {
-			return nil, ErrNotFound
-		}
-		keys = append(keys, key.PublicKey)
-	}
-	keys = append(keys, inlineKeys...)
-	return model.NormalizeSSHPublicKeys(keys), nil
-}
-
-func allocateAppSSHPublicPortState(state *model.State, start, end, exclude int, reserved ...int) (int, error) {
-	start, end = normalizeAppSSHPortRange(start, end)
-	used := map[int]struct{}{}
-	for _, port := range reserved {
-		used[port] = struct{}{}
-	}
-	for _, endpoint := range state.AppSSHEndpoints {
-		if endpoint.PublicPort == exclude {
-			continue
-		}
-		if endpoint.PublicPort <= 0 {
-			continue
-		}
-		switch model.NormalizeAppSSHEndpointStatus(endpoint.Status) {
-		case model.AppSSHEndpointStatusReleased:
-			if endpoint.ReleasedAt != nil && time.Since(*endpoint.ReleasedAt) > time.Hour {
-				continue
-			}
-		}
-		used[endpoint.PublicPort] = struct{}{}
-	}
-	for port := start; port <= end; port++ {
-		if port == exclude {
-			continue
-		}
-		if _, ok := used[port]; !ok {
-			return port, nil
-		}
-	}
-	return 0, ErrConflict
 }
 
 func edgeSSHRouteFromEndpoint(endpoint model.AppSSHEndpoint, options AppSSHRouteOptions) (model.EdgeSSHRoute, bool) {
@@ -515,57 +196,6 @@ func normalizeAppSSHEndpointForRead(endpoint model.AppSSHEndpoint) model.AppSSHE
 	return endpoint
 }
 
-func findSSHKey(state *model.State, id string) int {
-	for idx, key := range state.SSHKeys {
-		if key.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findAppSSHEndpointByApp(state *model.State, appID string) int {
-	for idx, endpoint := range state.AppSSHEndpoints {
-		if endpoint.AppID == appID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func deleteSSHKeysByTenant(keys []model.SSHKey, tenantID string) []model.SSHKey {
-	filtered := keys[:0]
-	for _, key := range keys {
-		if key.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, key)
-	}
-	return filtered
-}
-
-func deleteAppSSHEndpointsByTenant(endpoints []model.AppSSHEndpoint, tenantID string) []model.AppSSHEndpoint {
-	filtered := endpoints[:0]
-	for _, endpoint := range endpoints {
-		if endpoint.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, endpoint)
-	}
-	return filtered
-}
-
-func deleteAppSSHEndpointsByApp(endpoints []model.AppSSHEndpoint, appID string) []model.AppSSHEndpoint {
-	filtered := endpoints[:0]
-	for _, endpoint := range endpoints {
-		if endpoint.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, endpoint)
-	}
-	return filtered
-}
-
 func removeStringValue(values []string, removed string) []string {
 	out := values[:0]
 	for _, value := range values {
@@ -609,14 +239,6 @@ func sshPublicKeyComment(publicKey string) string {
 		return ""
 	}
 	return strings.Join(fields[2:], " ")
-}
-
-func runtimeByID(state *model.State, id string) (model.Runtime, bool) {
-	index := findRuntime(state, id)
-	if index < 0 {
-		return model.Runtime{}, false
-	}
-	return state.Runtimes[index], true
 }
 
 func edgeGroupIDForRuntime(runtimeObj model.Runtime) string {

@@ -11,6 +11,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformsafety"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 

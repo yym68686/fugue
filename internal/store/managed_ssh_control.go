@@ -6,44 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"os"
 	"reflect"
-	"strconv"
-	"syscall"
 	"time"
 
 	"fugue/internal/managedssh"
-	"fugue/internal/model"
 )
-
-type managedSSHControlFile struct {
-	States    map[string]managedssh.ControlState `json:"states"`
-	Artifacts map[string]managedssh.Artifact     `json:"artifacts"`
-}
 
 func (stateStore *Store) GetManagedSSHControl(tenantID, appID string) (managedssh.ControlState, error) {
 	if _, err := stateStore.GetManagedSSHIntent(tenantID, appID); err != nil {
 		return managedssh.ControlState{}, err
 	}
-	if stateStore.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var raw []byte
-		if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_managed_ssh_control WHERE tenant_id=$1 AND app_id=$2`, tenantID, appID).Scan(&raw); err != nil {
-			return managedssh.ControlState{}, mapDBErr(err)
-		}
-		return decodeManagedSSHControl(raw, tenantID, appID)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var raw []byte
+	if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_managed_ssh_control WHERE tenant_id=$1 AND app_id=$2`, tenantID, appID).Scan(&raw); err != nil {
+		return managedssh.ControlState{}, mapDBErr(err)
 	}
-	var result managedssh.ControlState
-	err := stateStore.withManagedSSHControlFile(false, func(records *managedSSHControlFile) error {
-		state, exists := records.States[appID]
-		if !exists || state.TenantID != tenantID {
-			return ErrNotFound
-		}
-		result = state
-		return nil
-	})
-	return result, err
+	return decodeManagedSSHControl(raw, tenantID, appID)
 }
 
 func (stateStore *Store) SaveManagedSSHControl(expected uint64, state managedssh.ControlState) error {
@@ -62,30 +41,7 @@ func (stateStore *Store) SaveManagedSSHControl(expected uint64, state managedssh
 			return ErrConflict
 		}
 	}
-	if stateStore.usingDatabase() {
-		return stateStore.pgSaveManagedSSHControl(expected, state)
-	}
-	return stateStore.withManagedSSHIntentFile(false, func(intents map[string]model.ManagedSSHIntent) error {
-		intent, exists := intents[state.AppID]
-		if !exists || intent.TenantID != state.TenantID || intent.Generation != state.IntentGeneration || intent.Spec.IdentityID != state.IdentityID {
-			return ErrConflict
-		}
-		return stateStore.withManagedSSHControlFile(true, func(records *managedSSHControlFile) error {
-			previous, exists := records.States[state.AppID]
-			if err := validateManagedSSHControlChange(expected, previous, exists, state); err != nil {
-				return err
-			}
-			for _, slot := range state.Slots() {
-				key := state.AppID + ":" + strconv.FormatUint(slot.Artifact.Configuration.Generation, 10)
-				if artifact, exists := records.Artifacts[key]; exists && !reflect.DeepEqual(artifact, slot.Artifact) {
-					return ErrConflict
-				}
-				records.Artifacts[key] = slot.Artifact
-			}
-			records.States[state.AppID] = state
-			return nil
-		})
-	})
+	return stateStore.pgSaveManagedSSHControl(expected, state)
 }
 
 func validateManagedSSHControlChange(expected uint64, previous managedssh.ControlState, exists bool, next managedssh.ControlState) error {
@@ -302,52 +258,4 @@ func decodeManagedSSHControl(raw []byte, tenantID, appID string) (managedssh.Con
 		return managedssh.ControlState{}, ErrConflict
 	}
 	return state, nil
-}
-
-func (stateStore *Store) withManagedSSHControlFile(write bool, callback func(*managedSSHControlFile) error) error {
-	path := stateStore.path + ".managed-ssh-control.json"
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	records := managedSSHControlFile{States: map[string]managedssh.ControlState{}, Artifacts: map[string]managedssh.Artifact{}}
-	raw, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err == nil {
-		if err := json.Unmarshal(raw, &records); err != nil {
-			return err
-		}
-		if records.States == nil || records.Artifacts == nil {
-			return ErrConflict
-		}
-		for appID, state := range records.States {
-			if state.AppID != appID || state.Validate() != nil {
-				return ErrConflict
-			}
-			for _, slot := range state.Slots() {
-				key := appID + ":" + strconv.FormatUint(slot.Artifact.Configuration.Generation, 10)
-				if artifact, exists := records.Artifacts[key]; !exists || !reflect.DeepEqual(artifact, slot.Artifact) {
-					return ErrConflict
-				}
-			}
-		}
-	}
-	if err := callback(&records); err != nil {
-		return err
-	}
-	if !write {
-		return nil
-	}
-	raw, err = json.Marshal(records)
-	if err != nil {
-		return err
-	}
-	return writeSSHIdentityFile(path, raw)
 }

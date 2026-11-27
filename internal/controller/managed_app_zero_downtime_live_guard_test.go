@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestManagedAppLiveGuardAllowsInitialDeploymentOnlyWhenDeploymentIsAbsent(t *testing.T) {
@@ -330,7 +328,7 @@ func TestManagedAppLiveGuardRefusesUnknownReleaseIdentity(t *testing.T) {
 }
 
 func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -490,7 +488,7 @@ func TestManagedAppLiveGuardRecoversControllerAuthoredPendingDeploySnapshot(t *t
 }
 
 func TestManagedAppLiveGuardRecoversPromotedServingSnapshotDuringBackgroundReconcile(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -618,7 +616,7 @@ func TestManagedAppLiveGuardReplacesFailedCandidateWhileExactLKGServes(t *testin
 }
 
 func testManagedAppFailedCandidateRecovery(t *testing.T, managedSpecIsCandidate bool) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -763,7 +761,7 @@ func TestManagedAppFailedCandidateReplacementRemainsFailClosed(t *testing.T) {
 }
 
 func TestManagedAppLiveGuardRecoversFailedRuntimeMoveUsingTargetScheduling(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

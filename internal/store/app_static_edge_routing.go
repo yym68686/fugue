@@ -25,38 +25,22 @@ func (s *Store) SetAppStaticEdgeRouting(id, revision string, routing *model.AppS
 		app.UpdatedAt = time.Now().UTC()
 		return nil
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return model.App{}, err
-		}
-		defer tx.Rollback()
-		app, err := s.pgGetAppTx(ctx, tx, id, true)
-		if err != nil {
-			return app, mapDBErr(err)
-		}
-		if err = update(&app); err != nil {
-			return model.App{}, err
-		}
-		if err = s.pgUpdateAppTx(ctx, tx, app); err != nil {
-			return model.App{}, mapDBErr(err)
-		}
-		return app, tx.Commit()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.App{}, err
 	}
-	var out model.App
-	err := s.withLockedState(true, func(state *model.State) error {
-		i := findApp(state, id)
-		if i < 0 {
-			return ErrNotFound
-		}
-		out = state.Apps[i]
-		if err := update(&out); err != nil {
-			return err
-		}
-		state.Apps[i] = out
-		return nil
-	})
-	return out, err
+	defer tx.Rollback()
+	app, err := s.pgGetAppTx(ctx, tx, id, true)
+	if err != nil {
+		return app, mapDBErr(err)
+	}
+	if err = update(&app); err != nil {
+		return model.App{}, err
+	}
+	if err = s.pgUpdateAppTx(ctx, tx, app); err != nil {
+		return model.App{}, mapDBErr(err)
+	}
+	return app, tx.Commit()
 }

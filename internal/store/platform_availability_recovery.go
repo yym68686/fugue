@@ -10,7 +10,7 @@ import (
 // A rollback's new fence is not a new positive verification. Configuration
 // recovery may use the exact original signed LKG, but must not promote that
 // rollback, reset consumer evidence or change the serving lane as a side effect.
-func availabilityVerifiedRollbackBaseline(state *model.State, parent model.PlatformArtifact, current model.PlatformArtifactRelease, keys bundleauth.Keyring, now time.Time) bool {
+func availabilityVerifiedRollbackBaseline(state *storeProjection, parent model.PlatformArtifact, current model.PlatformArtifactRelease, keys bundleauth.Keyring, now time.Time) bool {
 	lkg := verifiedPlatformLKGSnapshotFromState(state, model.PlatformArtifactKindReleaseSet, parent.ScopeKey, now, keys)
 	if lkg == nil || lkg.ArtifactID != parent.ID || lkg.ContentHash != parent.ContentHash || lkg.Generation != parent.Generation ||
 		current.VerificationState != model.PlatformArtifactVerificationStateServingUnverified || current.PinnedRollbackGeneration != parent.Generation || current.RollbackTargetGeneration != parent.Generation || current.VerifiedLKGGeneration != parent.Generation ||

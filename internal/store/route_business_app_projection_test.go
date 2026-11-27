@@ -1,11 +1,8 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,48 +32,6 @@ func assertRouteExecutionProjection(t *testing.T, got, full model.App) {
 	}
 	if got.Spec.Env[model.AppEdgeRequestBodyPoliciesEnv] != full.Spec.Env[model.AppEdgeRequestBodyPoliciesEnv] {
 		t.Fatal("route request-body constraint was omitted")
-	}
-}
-
-func TestRouteBusinessSnapshotFileOmitsExecutionPayloadWithoutChangingConfiguration(t *testing.T) {
-	stateFile := filepath.Join(t.TempDir(), "state.json")
-	s := New(stateFile)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	app := routeBusinessExecutionFixture()
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.Apps = []model.App{app}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	full, err := s.GetApp(app.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(stateFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := s.CaptureRouteBusinessSnapshot(context.Background())
-	if err != nil || len(first.Apps) != 1 {
-		t.Fatal("capture", err)
-	}
-	assertRouteExecutionProjection(t, first.Apps[0], full)
-	first.Apps[0].Spec.Env["CONFIG"] = "caller mutation"
-	second, err := s.CaptureRouteBusinessSnapshot(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertRouteExecutionProjection(t, second.Apps[0], full)
-	after, err := os.ReadFile(stateFile)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("durable configuration changed", err)
-	}
-	retained, err := s.GetApp(app.ID)
-	if err != nil || !reflect.DeepEqual(retained.Spec, full.Spec) {
-		t.Fatal(err)
 	}
 }
 

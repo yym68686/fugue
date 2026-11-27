@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -49,15 +47,13 @@ type EdgeQualityPercentileWindow struct {
 // percentile scratch data, rollup writes, and watermarks isolated from the
 // last-known-good rollups until Commit succeeds.
 type EdgeQualityRollupBuildSession struct {
-	store *Store
-	ctx   context.Context
+	ctx context.Context
 
 	readTx  *sql.Tx
 	writeTx *sql.Tx
 
-	filePercentileWeights map[EdgeQualityPercentileValueKey]int64
-	percentileWindows     []EdgeQualityPercentileWindow
-	closed                bool
+	percentileWindows []EdgeQualityPercentileWindow
+	closed            bool
 }
 
 func (s *Store) BeginEdgeQualityRollupBuild(ctx context.Context) (*EdgeQualityRollupBuildSession, error) {
@@ -68,13 +64,9 @@ func (s *Store) BeginEdgeQualityRollupBuild(ctx context.Context) (*EdgeQualityRo
 		ctx = context.Background()
 	}
 	session := &EdgeQualityRollupBuildSession{
-		store: s,
-		ctx:   ctx,
+		ctx: ctx,
 	}
-	if !s.usingDatabase() {
-		session.filePercentileWeights = map[EdgeQualityPercentileValueKey]int64{}
-		return session, nil
-	}
+
 	if err := s.ensureDatabaseReady(); err != nil {
 		return nil, err
 	}
@@ -99,10 +91,6 @@ func (b *EdgeQualityRollupBuildSession) SetPercentileWindows(windows []EdgeQuali
 	b.percentileWindows = append(b.percentileWindows[:0], windows...)
 }
 
-func (b *EdgeQualityRollupBuildSession) NeedsPercentileWeights() bool {
-	return b != nil && !b.closed && b.writeTx == nil
-}
-
 func (b *EdgeQualityRollupBuildSession) Rollback() {
 	if b == nil || b.closed {
 		return
@@ -123,38 +111,23 @@ func (b *EdgeQualityRollupBuildSession) Watermarks() (map[string]time.Time, erro
 		return nil, fmt.Errorf("edge quality rollup build session is closed")
 	}
 	watermarks := map[string]time.Time{}
-	if b.writeTx != nil {
-		rows, err := b.writeTx.QueryContext(b.ctx, `SELECT window_name, window_ended_at FROM fugue_edge_quality_rollup_watermarks`)
-		if err != nil {
-			return nil, fmt.Errorf("list edge quality rollup watermarks: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var window string
-			var endedAt time.Time
-			if err := rows.Scan(&window, &endedAt); err != nil {
-				return nil, fmt.Errorf("scan edge quality rollup watermark: %w", err)
-			}
-			watermarks[strings.TrimSpace(strings.ToLower(window))] = endedAt.UTC()
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("iterate edge quality rollup watermarks: %w", err)
-		}
-		return watermarks, nil
+	rows, err := b.writeTx.QueryContext(b.ctx, `SELECT window_name, window_ended_at FROM fugue_edge_quality_rollup_watermarks`)
+	if err != nil {
+		return nil, fmt.Errorf("list edge quality rollup watermarks: %w", err)
 	}
-	err := b.store.withLockedState(false, func(state *model.State) error {
-		for window, endedAt := range state.EdgeQualityWatermarks {
-			watermarks[strings.TrimSpace(strings.ToLower(window))] = endedAt.UTC()
+	defer rows.Close()
+	for rows.Next() {
+		var window string
+		var endedAt time.Time
+		if err := rows.Scan(&window, &endedAt); err != nil {
+			return nil, fmt.Errorf("scan edge quality rollup watermark: %w", err)
 		}
-		for _, rollup := range state.EdgeQualityRollups {
-			window := strings.TrimSpace(strings.ToLower(rollup.Window))
-			if window != "" && watermarks[window].Before(rollup.WindowEndedAt) {
-				watermarks[window] = rollup.WindowEndedAt.UTC()
-			}
-		}
-		return nil
-	})
-	return watermarks, err
+		watermarks[strings.TrimSpace(strings.ToLower(window))] = endedAt.UTC()
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate edge quality rollup watermarks: %w", err)
+	}
+	return watermarks, nil
 }
 
 func (b *EdgeQualityRollupBuildSession) ForEachSampleChunk(since, before time.Time, chunkSize int, fn func([]model.EdgePerformanceSample) error) error {
@@ -170,27 +143,7 @@ func (b *EdgeQualityRollupBuildSession) ForEachSampleChunk(since, before time.Ti
 	if fn == nil {
 		fn = func([]model.EdgePerformanceSample) error { return nil }
 	}
-	if b.readTx == nil {
-		return b.store.withLockedState(false, func(state *model.State) error {
-			chunk := make([]model.EdgePerformanceSample, 0, chunkSize)
-			for _, sample := range state.EdgePerformanceSamples {
-				if sample.SampledAt.Before(since) || !sample.SampledAt.Before(before) {
-					continue
-				}
-				chunk = append(chunk, sample)
-				if len(chunk) == chunkSize {
-					if err := fn(chunk); err != nil {
-						return err
-					}
-					chunk = chunk[:0]
-				}
-			}
-			if len(chunk) > 0 {
-				return fn(chunk)
-			}
-			return nil
-		})
-	}
+
 	rows, err := b.readTx.QueryContext(b.ctx, pgEdgeQualityRollupSampleQuery, since.UTC(), before.UTC())
 	if err != nil {
 		return fmt.Errorf("query edge performance rollup samples: %w", err)
@@ -237,38 +190,15 @@ func (b *EdgeQualityRollupBuildSession) finishRead() error {
 	return nil
 }
 
-func (b *EdgeQualityRollupBuildSession) AddPercentileWeights(weights map[EdgeQualityPercentileValueKey]int) error {
-	if b == nil || b.closed {
-		return fmt.Errorf("edge quality rollup build session is closed")
-	}
-	if len(weights) == 0 {
-		return nil
-	}
-	if b.writeTx == nil {
-		for key, weight := range weights {
-			if strings.TrimSpace(key.BucketKey) == "" || key.Metric <= 0 || key.Value <= 0 || weight <= 0 {
-				continue
-			}
-			b.filePercentileWeights[key] += int64(weight)
-		}
-		return nil
-	}
-	return nil
-}
-
 func (b *EdgeQualityRollupBuildSession) Percentiles() (map[string]EdgeQualityPercentileSet, error) {
 	if b == nil || b.closed {
 		return nil, fmt.Errorf("edge quality rollup build session is closed")
 	}
-	if b.writeTx == nil {
-		return groupedEdgeQualityPercentiles(b.filePercentileWeights), nil
-	}
+
 	if len(b.percentileWindows) == 0 {
 		return nil, nil
 	}
-	if b.readTx == nil {
-		return nil, fmt.Errorf("edge quality rollup read transaction is closed")
-	}
+
 	query, args := pgEdgeQualityPercentilesQueryForWindows(b.percentileWindows)
 	rows, err := b.readTx.QueryContext(b.ctx, query, args...)
 	if err != nil {
@@ -328,26 +258,7 @@ func (b *EdgeQualityRollupBuildSession) Commit(rollups []model.EdgeQualityRollup
 		return err
 	}
 	now := time.Now().UTC()
-	if b.writeTx == nil {
-		err := b.store.withLockedState(true, func(state *model.State) error {
-			applyEdgeQualityRollupsToState(state, rollups, retentionBefore, now)
-			for window, endedAt := range watermarks {
-				window = strings.TrimSpace(strings.ToLower(window))
-				if window == "" || endedAt.IsZero() {
-					continue
-				}
-				if current := state.EdgeQualityWatermarks[window]; current.Before(endedAt) {
-					state.EdgeQualityWatermarks[window] = endedAt.UTC()
-				}
-			}
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		b.closed = true
-		return nil
-	}
+
 	if err := pgApplyEdgeQualityRollups(b.ctx, b.writeTx, rollups, retentionBefore, now); err != nil {
 		return err
 	}
@@ -609,63 +520,4 @@ ORDER BY target_id, hostname, traffic_class, method, path_prefix_bucket,
 		EdgeQualityPercentileResponseWrite,
 	)
 	return query, args
-}
-
-func groupedEdgeQualityPercentiles(weights map[EdgeQualityPercentileValueKey]int64) map[string]EdgeQualityPercentileSet {
-	type groupKey struct {
-		BucketKey string
-		Metric    EdgeQualityPercentileMetric
-	}
-	grouped := map[groupKey]map[int64]int64{}
-	for key, weight := range weights {
-		if key.Value <= 0 || weight <= 0 {
-			continue
-		}
-		group := groupKey{BucketKey: key.BucketKey, Metric: key.Metric}
-		values := grouped[group]
-		if values == nil {
-			values = map[int64]int64{}
-			grouped[group] = values
-		}
-		values[key.Value] += weight
-	}
-	results := map[string]EdgeQualityPercentileSet{}
-	for group, values := range grouped {
-		byMetric := results[group.BucketKey]
-		byMetric[group.Metric] = EdgeQualityPercentiles{
-			P10: groupedWeightedQuantile(values, 0.10),
-			P50: groupedWeightedQuantile(values, 0.50),
-			P95: groupedWeightedQuantile(values, 0.95),
-			P99: groupedWeightedQuantile(values, 0.99),
-		}
-		results[group.BucketKey] = byMetric
-	}
-	return results
-}
-
-func groupedWeightedQuantile(weights map[int64]int64, q float64) float64 {
-	values := make([]int64, 0, len(weights))
-	var total int64
-	for value, weight := range weights {
-		if value > 0 && weight > 0 {
-			values = append(values, value)
-			total += weight
-		}
-	}
-	if total <= 0 {
-		return 0
-	}
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	target := int64(math.Ceil(q * float64(total)))
-	if target <= 0 {
-		target = 1
-	}
-	var seen int64
-	for _, value := range values {
-		seen += weights[value]
-		if seen >= target {
-			return float64(value)
-		}
-	}
-	return float64(values[len(values)-1])
 }

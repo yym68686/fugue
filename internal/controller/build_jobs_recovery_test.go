@@ -10,12 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"fugue/internal/store"
 )
 
 func TestCleanupZombieBuildJobsRecoversReservationsAfterPodsStop(t *testing.T) {
-	state := store.New(t.TempDir() + "/state.json")
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

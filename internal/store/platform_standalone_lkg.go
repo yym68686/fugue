@@ -21,10 +21,9 @@ func (s *Store) GetStandalonePlatformLKG(kind, scopeKey string) (*model.Platform
 	if kind == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		snapshot, err := scanPlatformLKGSnapshot(s.db.QueryRowContext(ctx, `
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	snapshot, err := scanPlatformLKGSnapshot(s.db.QueryRowContext(ctx, `
 SELECT h.id, h.artifact_id, h.artifact_kind, h.scope_key, h.scope_json, h.schema_version,
  h.generation, h.generation_sequence, h.content_hash, h.artifact_provenance_json,
  h.verified_by_release_id, h.verification_evidence_hash, h.snapshot_provenance_json,
@@ -37,31 +36,11 @@ FROM (
 WHERE r.artifact_kind=h.artifact_kind AND r.artifact_id=h.artifact_id AND r.scope_key=h.scope_key
 ORDER BY h.updated_at DESC, h.created_at DESC, h.generation_sequence DESC, h.id DESC
 LIMIT 1`, kind, scopeKey))
-		if mapDBErr(err) == ErrNotFound {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, mapDBErr(err)
-		}
-		return &snapshot, nil
+	if mapDBErr(err) == ErrNotFound {
+		return nil, nil
 	}
-	var out *model.PlatformLKGSnapshot
-	err := s.withLockedState(false, func(state *model.State) error {
-		releases := make(map[string]model.PlatformArtifactRelease, len(state.PlatformArtifactReleases))
-		for _, r := range state.PlatformArtifactReleases {
-			releases[r.ID] = r
-		}
-		for _, snapshot := range state.PlatformLKGSnapshots {
-			r, found := releases[snapshot.VerifiedByReleaseID]
-			if !found || snapshot.ArtifactKind != kind || snapshot.ScopeKey != scopeKey || r.ArtifactKind != kind || r.ScopeKey != scopeKey || r.ArtifactID != snapshot.ArtifactID {
-				continue
-			}
-			if out == nil || platformLKGSnapshotIsNewer(snapshot, *out) {
-				copy := snapshot
-				out = &copy
-			}
-		}
-		return nil
-	})
-	return out, err
+	if err != nil {
+		return nil, mapDBErr(err)
+	}
+	return &snapshot, nil
 }

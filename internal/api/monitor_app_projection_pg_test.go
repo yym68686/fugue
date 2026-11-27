@@ -29,7 +29,7 @@ func TestMonitoringReadsOnlyAppIdentityPostgres(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("requires disposable loopback fugue_test database")
 	}
-	state := store.New("", address)
+	state := store.New(address)
 	// Bootstrap the disposable base tables before running the independent
 	// schema lane. A fresh database has no edge-instance marker yet.
 	if err := state.Init(); err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -11,11 +11,11 @@ import (
 	"fugue/internal/model"
 )
 
-func TestAutomationActionIntentJSONStoreIsAppendOnlyIdempotentAndIsolated(t *testing.T) {
+func TestAutomationActionIntentPostgresIsAppendOnlyIdempotentAndIsolated(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 	tenant, project, app, policy := createAutomationIntentParents(t, stateStore, "Primary")
 	otherTenant, err := stateStore.CreateTenant("Other Automation Tenant")
 	if err != nil {
@@ -84,7 +84,7 @@ func TestAutomationActionIntentJSONStoreIsAppendOnlyIdempotentAndIsolated(t *tes
 		t.Fatal("mutating a returned intent changed persisted evidence")
 	}
 
-	reopened := New(storePath)
+	reopened := newStoreTestDatabase(t, storePath)
 	persisted, err := reopened.GetAutomationActionIntent(created.ID, tenant.ID, false)
 	if err != nil {
 		t.Fatalf("reload intent: %v", err)
@@ -98,7 +98,7 @@ func TestAutomationActionIntentJSONStoreIsAppendOnlyIdempotentAndIsolated(t *tes
 func TestAutomationActionIntentSurvivesPolicyDeletionButCascadesTenantDeletion(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, _, app, policy := createAutomationIntentParents(t, stateStore, "History")
 	intent := testObservedAutomationIntent(t, policy, app, time.Now().UTC())
 	created, _, err := stateStore.CreateAutomationActionIntent(intent)
@@ -130,7 +130,7 @@ func TestAutomationActionIntentSurvivesPolicyDeletionButCascadesTenantDeletion(t
 func TestAutomationActionIntentRejectsStalePolicyAndExecutableMutation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, _, app, policy := createAutomationIntentParents(t, stateStore, "Reject")
 	intent := testObservedAutomationIntent(t, policy, app, time.Now().UTC())
 
@@ -157,7 +157,7 @@ func TestAutomationActionIntentRejectsStalePolicyAndExecutableMutation(t *testin
 func TestAutomationActionIntentListRejectsUnknownFiltersAndLimits(t *testing.T) {
 	t.Parallel()
 
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	for _, filter := range []AutomationActionIntentFilter{
 		{PlatformAdmin: true, Source: "unknown"},
 		{PlatformAdmin: true, Status: "pending"},

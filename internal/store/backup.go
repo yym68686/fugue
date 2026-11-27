@@ -8,13 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	"fugue/internal/backupschedule"
 	"fugue/internal/model"
-	"fugue/internal/pgimage"
 )
 
 const (
@@ -156,49 +154,6 @@ type BackupRunFinish struct {
 	FinishedAt    time.Time
 }
 
-func ensureBackupDefaults(state *model.State) {
-	if state.BackupBackends == nil {
-		state.BackupBackends = []model.BackupBackend{}
-	}
-	if state.BackupBackendSecrets == nil {
-		state.BackupBackendSecrets = []model.BackupBackendSecret{}
-	}
-	if state.BackupPolicies == nil {
-		state.BackupPolicies = []model.BackupPolicy{}
-	}
-	if state.BackupRuns == nil {
-		state.BackupRuns = []model.BackupRun{}
-	}
-	if state.BackupArtifacts == nil {
-		state.BackupArtifacts = []model.BackupArtifact{}
-	}
-	if state.BackupRestorePlans == nil {
-		state.BackupRestorePlans = []model.BackupRestorePlan{}
-	}
-	if state.BackupRestoreRuns == nil {
-		state.BackupRestoreRuns = []model.BackupRestoreRun{}
-	}
-	for idx := range state.BackupBackends {
-		state.BackupBackends[idx] = model.NormalizeBackupBackend(state.BackupBackends[idx])
-	}
-	for idx := range state.BackupPolicies {
-		state.BackupPolicies[idx] = model.NormalizeBackupPolicy(state.BackupPolicies[idx])
-	}
-	for idx := range state.BackupRuns {
-		state.BackupRuns[idx] = model.NormalizeBackupRun(state.BackupRuns[idx])
-	}
-	for idx := range state.BackupArtifacts {
-		state.BackupArtifacts[idx] = model.NormalizeBackupArtifact(state.BackupArtifacts[idx])
-	}
-	for idx := range state.BackupRestorePlans {
-		state.BackupRestorePlans[idx] = model.NormalizeBackupRestorePlan(state.BackupRestorePlans[idx])
-	}
-	for idx := range state.BackupRestoreRuns {
-		state.BackupRestoreRuns[idx] = model.NormalizeBackupRestoreRun(state.BackupRestoreRuns[idx])
-	}
-	ensureDefaultBackupPolicyInState(state)
-}
-
 func (s *Store) DefaultBackupBackendID() string {
 	return defaultBackupBackendID
 }
@@ -211,48 +166,21 @@ func (s *Store) SeedDefaultBackupBackendFromEnv() error {
 	if s == nil {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgSeedDefaultBackupBackendFromEnv()
-	}
-	return s.withLockedState(true, seedDefaultBackupBackendFromEnvInState)
+	return s.pgSeedDefaultBackupBackendFromEnv()
 }
 
 func (s *Store) EnsureDefaultBackupPolicy() error {
 	if s == nil {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgEnsureDefaultBackupPolicy()
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		ensureDefaultBackupPolicyInState(state)
-		return nil
-	})
+	return s.pgEnsureDefaultBackupPolicy()
 }
 
 func (s *Store) repairBackupPolicySchedules() error {
 	if s == nil {
 		return nil
 	}
-	if s.usingDatabase() {
-		return s.pgRepairBackupPolicySchedules()
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		repairBackupPolicySchedulesInState(state, time.Now().UTC())
-		return nil
-	})
-}
-
-func repairBackupPolicySchedulesInState(state *model.State, now time.Time) {
-	if state == nil {
-		return
-	}
-	for idx := range state.BackupPolicies {
-		policy, changed := repairBackupPolicySchedule(state.BackupPolicies[idx], now)
-		if changed {
-			state.BackupPolicies[idx] = policy
-		}
-	}
+	return s.pgRepairBackupPolicySchedules()
 }
 
 func repairBackupPolicySchedule(policy model.BackupPolicy, now time.Time) (model.BackupPolicy, bool) {
@@ -297,64 +225,6 @@ func repairBackupPolicySchedule(policy model.BackupPolicy, now time.Time) (model
 	return model.NormalizeBackupPolicy(policy), changed
 }
 
-func seedDefaultBackupBackendFromEnvInState(state *model.State) error {
-	backend, credentials, ok := defaultBackupBackendConfigFromEnv()
-	if !ok {
-		ensureDefaultBackupPolicyInState(state)
-		return nil
-	}
-	index := findBackupBackend(state, defaultBackupBackendID)
-	if index < 0 {
-		state.BackupBackends = append(state.BackupBackends, backend)
-		index = len(state.BackupBackends) - 1
-	} else {
-		existing := state.BackupBackends[index]
-		if existing.CreatedAt.IsZero() {
-			existing.CreatedAt = backend.CreatedAt
-		}
-		existing.Name = backend.Name
-		existing.Slug = backend.Slug
-		existing.Provider = backend.Provider
-		existing.Bucket = backend.Bucket
-		existing.Region = backend.Region
-		existing.Endpoint = backend.Endpoint
-		existing.BaseURL = backend.BaseURL
-		existing.Prefix = backend.Prefix
-		existing.Status = backend.Status
-		existing.Capabilities = backend.Capabilities
-		existing.Credentials = redactAccessKeyOnly(credentials)
-		existing.FugueManaged = backend.FugueManaged
-		existing.Billable = backend.Billable
-		existing.UpdatedAt = backend.UpdatedAt
-		backend = existing
-	}
-	if dataBackendCredentialsPresent(credentials) {
-		secretID := backend.CredentialSecretID
-		secretIndex := findBackupBackendSecret(state, secretID, backend.ID)
-		secret := model.BackupBackendSecret{
-			ID:        secretID,
-			TenantID:  backend.TenantID,
-			BackendID: backend.ID,
-		}
-		if secretIndex >= 0 {
-			secret = state.BackupBackendSecrets[secretIndex]
-		}
-		encrypted, err := encryptBackupBackendSecret(secret, credentials)
-		if err != nil {
-			return err
-		}
-		backend.CredentialSecretID = encrypted.ID
-		if secretIndex >= 0 {
-			state.BackupBackendSecrets[secretIndex] = encrypted
-		} else {
-			state.BackupBackendSecrets = append(state.BackupBackendSecrets, encrypted)
-		}
-	}
-	state.BackupBackends[index] = model.NormalizeBackupBackend(backend)
-	ensureDefaultBackupPolicyInState(state)
-	return nil
-}
-
 func defaultBackupBackendConfigFromEnv() (model.BackupBackend, model.DataBackendCredentials, bool) {
 	dataBackend, credentials, ok := defaultDataBackendConfigFromEnv()
 	if !ok {
@@ -393,114 +263,8 @@ func backupPrefix(prefix string) string {
 	return strings.Trim(prefix+"/backups", "/")
 }
 
-func ensureDefaultBackupPolicyInState(state *model.State) {
-	now := time.Now().UTC()
-	status := model.BackupPolicyStatusBlockedNoBackend
-	disabledReason := "platform R2 backup backend is not configured"
-	backendID := ""
-	if idx := findBackupBackend(state, defaultBackupBackendID); idx >= 0 {
-		backend := model.NormalizeBackupBackend(state.BackupBackends[idx])
-		if strings.EqualFold(backend.Status, "active") {
-			backendID = backend.ID
-			status = model.BackupPolicyStatusActive
-			disabledReason = ""
-		}
-	}
-	policy := model.NormalizeBackupPolicy(model.BackupPolicy{
-		ID:             defaultControlPlaneBackupPolicyID,
-		Name:           "control-plane-database-hourly",
-		Slug:           "control-plane-database-hourly",
-		Scope:          model.BackupScopePlatform,
-		Target:         model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase, Component: "control-plane-postgres"},
-		BackendID:      backendID,
-		Enabled:        true,
-		Status:         status,
-		DisabledReason: disabledReason,
-		Schedule:       model.BackupDefaultSchedule,
-		RetainCount:    model.BackupDefaultRetainCount,
-		Retention: model.BackupRetentionPolicy{
-			RetainCount:   model.BackupDefaultRetainCount,
-			ProtectLatest: model.BackupDefaultRetainCount,
-		},
-		CreatedBy: "system",
-		CreatedAt: now,
-		UpdatedAt: now,
-	})
-	index := findBackupPolicy(state, policy.ID)
-	if index < 0 {
-		if next, err := nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour)); err == nil {
-			policy.NextRunAt = next
-		} else {
-			policy.Status = model.BackupPolicyStatusError
-			policy.DisabledReason = "invalid backup schedule: " + err.Error()
-		}
-		state.BackupPolicies = append(state.BackupPolicies, policy)
-		return
-	}
-	existing := model.NormalizeBackupPolicy(state.BackupPolicies[index])
-	explicitlyDisabled := !existing.Enabled || existing.Status == model.BackupPolicyStatusDisabled
-	existing.Name = policy.Name
-	existing.Slug = policy.Slug
-	existing.Scope = policy.Scope
-	existing.Target = policy.Target
-	if existing.BackendID == "" || existing.BackendID == defaultBackupBackendID || backendID == "" {
-		existing.BackendID = backendID
-	}
-	if explicitlyDisabled {
-		existing.Enabled = false
-		existing.Status = model.BackupPolicyStatusDisabled
-		existing.NextRunAt = nil
-	} else if backendID == "" {
-		existing.Enabled = true
-		existing.Status = model.BackupPolicyStatusBlockedNoBackend
-		existing.DisabledReason = disabledReason
-	} else {
-		existing.Enabled = true
-		if existing.Status == "" || existing.Status == model.BackupPolicyStatusBlockedNoBackend {
-			existing.Status = model.BackupPolicyStatusActive
-			existing.DisabledReason = ""
-		}
-	}
-	if existing.Schedule == "" {
-		existing.Schedule = model.BackupDefaultSchedule
-	}
-	if existing.RetainCount <= 0 {
-		existing.RetainCount = model.BackupDefaultRetainCount
-	}
-	if existing.Retention.RetainCount <= 0 {
-		existing.Retention.RetainCount = existing.RetainCount
-	}
-	if existing.Retention.ProtectLatest <= 0 {
-		existing.Retention.ProtectLatest = existing.RetainCount
-	}
-	if !explicitlyDisabled && existing.NextRunAt == nil {
-		if next, err := nextBackupRunAfter(existing.Schedule, now.Add(-time.Hour)); err == nil {
-			existing.NextRunAt = next
-		} else {
-			existing.Status = model.BackupPolicyStatusError
-			existing.DisabledReason = "invalid backup schedule: " + err.Error()
-		}
-	}
-	existing.UpdatedAt = now
-	state.BackupPolicies[index] = model.NormalizeBackupPolicy(existing)
-}
-
 func (s *Store) ListBackupBackends(tenantID string, platformAdmin bool) ([]model.BackupBackend, error) {
-	if s.usingDatabase() {
-		return s.pgListBackupBackends(tenantID, platformAdmin)
-	}
-	backends := []model.BackupBackend{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, backend := range state.BackupBackends {
-			backend = model.NormalizeBackupBackend(backend)
-			if platformAdmin || backend.TenantID == "" || backend.TenantID == tenantID {
-				backends = append(backends, model.RedactBackupBackendCredentials(backend))
-			}
-		}
-		sort.Slice(backends, func(i, j int) bool { return backends[i].Name < backends[j].Name })
-		return nil
-	})
-	return backends, err
+	return s.pgListBackupBackends(tenantID, platformAdmin)
 }
 
 func (s *Store) GetBackupBackend(idOrName, tenantID string, platformAdmin bool) (model.BackupBackend, error) {
@@ -516,31 +280,7 @@ func (s *Store) getBackupBackend(idOrName, tenantID string, platformAdmin bool, 
 	if idOrName == "" {
 		return model.BackupBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetBackupBackend(idOrName, tenantID, platformAdmin, redact)
-	}
-	var backend model.BackupBackend
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		backend = model.NormalizeBackupBackend(state.BackupBackends[index])
-		if !redact {
-			secretIndex := findBackupBackendSecret(state, backend.CredentialSecretID, backend.ID)
-			if secretIndex >= 0 {
-				credentials, err := decryptBackupBackendSecret(state.BackupBackendSecrets[secretIndex])
-				if err != nil {
-					return err
-				}
-				backend.Credentials = credentials
-			}
-		} else {
-			backend = model.RedactBackupBackendCredentials(backend)
-		}
-		return nil
-	})
-	return backend, err
+	return s.pgGetBackupBackend(idOrName, tenantID, platformAdmin, redact)
 }
 
 func (s *Store) CreateBackupBackend(backend model.BackupBackend) (model.BackupBackend, error) {
@@ -551,43 +291,7 @@ func (s *Store) CreateBackupBackend(backend model.BackupBackend) (model.BackupBa
 	if err := validateBackupBackend(backend); err != nil {
 		return model.BackupBackend{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackupBackend(backend)
-	}
-	credentials := backend.Credentials
-	backend.Credentials = redactAccessKeyOnly(credentials)
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findBackupBackendBySlug(state, backend.TenantID, backend.Slug) >= 0 {
-			return ErrConflict
-		}
-		if backend.ID == "" {
-			backend.ID = model.NewID("backup_backend")
-		}
-		now := time.Now().UTC()
-		if backend.CreatedAt.IsZero() {
-			backend.CreatedAt = now
-		}
-		backend.UpdatedAt = now
-		if dataBackendCredentialsPresent(credentials) {
-			secret, err := encryptBackupBackendSecret(model.BackupBackendSecret{
-				ID:        model.NewID("backup_backend_secret"),
-				TenantID:  backend.TenantID,
-				BackendID: backend.ID,
-			}, credentials)
-			if err != nil {
-				return err
-			}
-			backend.CredentialSecretID = secret.ID
-			state.BackupBackendSecrets = append(state.BackupBackendSecrets, secret)
-		}
-		state.BackupBackends = append(state.BackupBackends, backend)
-		ensureDefaultBackupPolicyInState(state)
-		return nil
-	})
-	if err != nil {
-		return model.BackupBackend{}, err
-	}
-	return model.RedactBackupBackendCredentials(backend), nil
+	return s.pgCreateBackupBackend(backend)
 }
 
 func validateBackupBackend(backend model.BackupBackend) error {
@@ -607,44 +311,7 @@ func (s *Store) RotateBackupBackendCredentials(idOrName, tenantID string, platfo
 	if idOrName == "" || !dataBackendCredentialsPresent(credentials) {
 		return model.BackupBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRotateBackupBackendCredentials(idOrName, tenantID, platformAdmin, credentials)
-	}
-	var rotated model.BackupBackend
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		backend := model.NormalizeBackupBackend(state.BackupBackends[index])
-		secretIndex := findBackupBackendSecret(state, backend.CredentialSecretID, backend.ID)
-		secret := model.BackupBackendSecret{
-			ID:        model.NewID("backup_backend_secret"),
-			TenantID:  backend.TenantID,
-			BackendID: backend.ID,
-			CreatedAt: now,
-		}
-		if secretIndex >= 0 {
-			secret = state.BackupBackendSecrets[secretIndex]
-		}
-		encrypted, err := encryptBackupBackendSecret(secret, credentials)
-		if err != nil {
-			return err
-		}
-		backend.CredentialSecretID = encrypted.ID
-		backend.Credentials = redactAccessKeyOnly(credentials)
-		backend.UpdatedAt = now
-		if secretIndex >= 0 {
-			state.BackupBackendSecrets[secretIndex] = encrypted
-		} else {
-			state.BackupBackendSecrets = append(state.BackupBackendSecrets, encrypted)
-		}
-		state.BackupBackends[index] = backend
-		rotated = model.RedactBackupBackendCredentials(backend)
-		return nil
-	})
-	return rotated, err
+	return s.pgRotateBackupBackendCredentials(idOrName, tenantID, platformAdmin, credentials)
 }
 
 func (s *Store) DeleteBackupBackend(idOrName, tenantID string, platformAdmin bool) (model.BackupBackend, error) {
@@ -652,91 +319,16 @@ func (s *Store) DeleteBackupBackend(idOrName, tenantID string, platformAdmin boo
 	if idOrName == "" || idOrName == defaultBackupBackendID || strings.EqualFold(idOrName, "fugue-default-r2") {
 		return model.BackupBackend{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteBackupBackend(idOrName, tenantID, platformAdmin)
-	}
-	var deleted model.BackupBackend
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		for _, policy := range state.BackupPolicies {
-			if policy.BackendID == state.BackupBackends[index].ID {
-				return ErrConflict
-			}
-		}
-		deleted = state.BackupBackends[index]
-		state.BackupBackends = append(state.BackupBackends[:index], state.BackupBackends[index+1:]...)
-		state.BackupBackendSecrets = deleteBackupBackendSecretsByBackend(state.BackupBackendSecrets, deleted.ID)
-		ensureDefaultBackupPolicyInState(state)
-		return nil
-	})
-	if err != nil {
-		return model.BackupBackend{}, err
-	}
-	return model.RedactBackupBackendCredentials(deleted), nil
+	return s.pgDeleteBackupBackend(idOrName, tenantID, platformAdmin)
 }
 
 func (s *Store) RecordBackupBackendTest(idOrName, tenantID string, platformAdmin bool, success bool, message string) (model.BackupBackend, error) {
-	if s.usingDatabase() {
-		return s.pgRecordBackupBackendTest(idOrName, tenantID, platformAdmin, success, message)
-	}
-	var updated model.BackupBackend
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findOwnedBackupBackendByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		backend := model.NormalizeBackupBackend(state.BackupBackends[index])
-		backend.LastTestedAt = &now
-		if success {
-			backend.LastTestResult = "ok"
-			backend.ErrorMessage = ""
-		} else {
-			backend.LastTestResult = "failed"
-			backend.ErrorMessage = strings.TrimSpace(message)
-		}
-		backend.UpdatedAt = now
-		state.BackupBackends[index] = backend
-		updated = model.RedactBackupBackendCredentials(backend)
-		return nil
-	})
-	return updated, err
+	return s.pgRecordBackupBackendTest(idOrName, tenantID, platformAdmin, success, message)
 }
 
 func (s *Store) ListBackupPolicies(filter BackupPolicyFilter) ([]model.BackupPolicy, error) {
 	filter.TargetType = normalizeBackupTargetTypeFilter(filter.TargetType)
-	if s.usingDatabase() {
-		return s.pgListBackupPolicies(filter)
-	}
-	policies := []model.BackupPolicy{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, policy := range state.BackupPolicies {
-			policy = model.NormalizeBackupPolicy(policy)
-			if !backupPolicyVisible(policy, filter.TenantID, filter.PlatformAdmin) {
-				continue
-			}
-			if !filter.IncludeDisabled && (!policy.Enabled || policy.Status == model.BackupPolicyStatusDisabled) {
-				continue
-			}
-			if filter.ProjectID != "" && policy.ProjectID != filter.ProjectID && policy.Target.ProjectID != filter.ProjectID {
-				continue
-			}
-			if filter.AppID != "" && policy.AppID != filter.AppID && policy.Target.AppID != filter.AppID {
-				continue
-			}
-			if filter.TargetType != "" && policy.Target.Type != filter.TargetType {
-				continue
-			}
-			policies = append(policies, policy)
-		}
-		sortBackupPolicies(policies)
-		policies = limitBackupPolicies(policies, filter.Limit)
-		return nil
-	})
-	return policies, err
+	return s.pgListBackupPolicies(filter)
 }
 
 func (s *Store) GetBackupPolicy(idOrName, tenantID string, platformAdmin bool) (model.BackupPolicy, error) {
@@ -744,19 +336,7 @@ func (s *Store) GetBackupPolicy(idOrName, tenantID string, platformAdmin bool) (
 	if idOrName == "" {
 		return model.BackupPolicy{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetBackupPolicy(idOrName, tenantID, platformAdmin)
-	}
-	var policy model.BackupPolicy
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupPolicyByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		policy = model.NormalizeBackupPolicy(state.BackupPolicies[index])
-		return nil
-	})
-	return policy, err
+	return s.pgGetBackupPolicy(idOrName, tenantID, platformAdmin)
 }
 
 func (s *Store) UpsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolicy, error) {
@@ -784,111 +364,11 @@ func (s *Store) upsertBackupPolicy(policy model.BackupPolicy) (model.BackupPolic
 			return model.BackupPolicy{}, fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
 		}
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertBackupPolicy(policy)
-	}
-	var saved model.BackupPolicy
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		if policy.ID == "" {
-			policy.ID = model.NewID("backup_policy")
-		}
-		if policy.CreatedAt.IsZero() {
-			policy.CreatedAt = now
-		}
-		policy.UpdatedAt = now
-		if policy.BackendID != "" && findBackupBackend(state, policy.BackendID) < 0 {
-			return ErrNotFound
-		}
-		index := findBackupPolicy(state, policy.ID)
-		if index >= 0 && state.BackupPolicies[index].Schedule != policy.Schedule {
-			policy.NextRunAt = nil
-		}
-		if policy.Enabled && policy.NextRunAt == nil {
-			next, err := nextBackupRunAfter(policy.Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policy.NextRunAt = next
-		} else if !policy.Enabled {
-			policy.NextRunAt = nil
-		}
-		if index < 0 {
-			if findBackupPolicyBySlug(state, policy.TenantID, policy.ProjectID, policy.AppID, policy.Slug) >= 0 {
-				return ErrConflict
-			}
-			state.BackupPolicies = append(state.BackupPolicies, policy)
-		} else {
-			existing := state.BackupPolicies[index]
-			if existing.ID == defaultControlPlaneBackupPolicyID && policy.Target.Type != model.BackupTargetControlPlaneDatabase {
-				return ErrInvalidInput
-			}
-			policy.CreatedAt = existing.CreatedAt
-			state.BackupPolicies[index] = policy
-		}
-		saved = policy
-		return nil
-	})
-	return saved, err
+	return s.pgUpsertBackupPolicy(policy)
 }
 
 func (s *Store) SetBackupPolicyEnabled(idOrName, tenantID string, platformAdmin bool, enabled bool, reason string) (model.BackupPolicy, error) {
-	if s.usingDatabase() {
-		return s.pgSetBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
-	}
-	if enabled {
-		return dataReferenceMutation(s, func() (model.BackupPolicy, error) {
-			return s.setBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
-		})
-	}
-	return s.setBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
-}
-
-func (s *Store) setBackupPolicyEnabled(idOrName, tenantID string, platformAdmin bool, enabled bool, reason string) (model.BackupPolicy, error) {
-	if s.usingDatabase() {
-		return s.pgSetBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
-	}
-	var updated model.BackupPolicy
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupPolicyByIDNameOrSlug(state, idOrName, tenantID, platformAdmin)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
-		policy.Enabled = enabled
-		if enabled {
-			if policy.Target.Type == model.BackupTargetDataWorkspace {
-				if err := checkDataBackupTargetActiveState(state, policy.Target, policy.TenantID); err != nil {
-					return err
-				}
-			}
-			if err := backupschedule.Validate(policy.Schedule); err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			if policy.BackendID == "" {
-				policy.Status = model.BackupPolicyStatusBlockedNoBackend
-				policy.DisabledReason = "backup backend is not configured"
-			} else {
-				policy.Status = model.BackupPolicyStatusActive
-				policy.DisabledReason = ""
-			}
-			next, err := nextBackupRunAfter(policy.Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policy.NextRunAt = next
-		} else {
-			policy.Status = model.BackupPolicyStatusDisabled
-			policy.DisabledReason = strings.TrimSpace(reason)
-			policy.NextRunAt = nil
-		}
-		policy.UpdatedAt = now
-		state.BackupPolicies[index] = model.NormalizeBackupPolicy(policy)
-		updated = state.BackupPolicies[index]
-		return nil
-	})
-	return updated, err
+	return s.pgSetBackupPolicyEnabled(idOrName, tenantID, platformAdmin, enabled, reason)
 }
 
 func (s *Store) ListDueBackupPolicies(now time.Time, limit int) ([]model.BackupPolicy, error) {
@@ -898,43 +378,7 @@ func (s *Store) ListDueBackupPolicies(now time.Time, limit int) ([]model.BackupP
 	if limit <= 0 {
 		limit = defaultBackupDueScannerLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListDueBackupPolicies(now, limit)
-	}
-	policies := []model.BackupPolicy{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, policy := range state.BackupPolicies {
-			policy = model.NormalizeBackupPolicy(policy)
-			if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
-				continue
-			}
-			dueAt := policy.NextRunAt
-			if dueAt == nil {
-				var err error
-				dueAt, err = nextBackupRunAfter(policy.Schedule, now.Add(-time.Hour))
-				if err != nil {
-					continue
-				}
-			}
-			if dueAt == nil || dueAt.After(now) {
-				continue
-			}
-			policies = append(policies, policy)
-		}
-		sort.Slice(policies, func(i, j int) bool {
-			left, right := policies[i].NextRunAt, policies[j].NextRunAt
-			if left == nil {
-				return true
-			}
-			if right == nil {
-				return false
-			}
-			return left.Before(*right)
-		})
-		policies = limitBackupPolicies(policies, limit)
-		return nil
-	})
-	return policies, err
+	return s.pgListDueBackupPolicies(now, limit)
 }
 
 func (s *Store) CreateBackupRun(run model.BackupRun) (model.BackupRun, error) {
@@ -969,100 +413,7 @@ func (s *Store) createBackupRunUnchecked(run model.BackupRun, retryOf string) (m
 	if run.Target.Type == "" {
 		return model.BackupRun{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackupRun(run, retryOf)
-	}
-	var created model.BackupRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		policyTargetChanged := false
-		if run.PolicyID != "" {
-			index := findBackupPolicy(state, run.PolicyID)
-			if index < 0 {
-				return ErrNotFound
-			}
-			policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
-			if retryOf != "" && policy.LastRunID != retryOf {
-				return ErrConflict
-			}
-			if !policy.Enabled || policy.Status != model.BackupPolicyStatusActive {
-				return ErrConflict
-			}
-			if err := validateScheduledBackupPolicyDue(run, policy, now); err != nil {
-				return err
-			}
-			if run.TenantID == "" {
-				run.TenantID = policy.TenantID
-			}
-			if run.ProjectID == "" {
-				run.ProjectID = policy.ProjectID
-			}
-			if run.AppID == "" {
-				run.AppID = policy.AppID
-			}
-			if run.BackendID == "" {
-				run.BackendID = policy.BackendID
-			}
-			run.Target, policyTargetChanged = backupRunTargetForPolicy(policy, run)
-			if run.Version == "" {
-				run.Version = policy.Version
-			}
-		}
-		if err := validateManagedPostgresBackupRunIdentity(run); err != nil {
-			return err
-		}
-		if run.BackendID == "" {
-			run.Status = model.BackupRunStatusBlocked
-			run.ErrorCode = "backup_backend_missing"
-			run.ErrorMessage = "backup backend is not configured"
-		} else if findBackupBackend(state, run.BackendID) < 0 {
-			return ErrNotFound
-		}
-		if backupTargetHasActiveRun(state.BackupRuns, run.Target) {
-			return ErrConflict
-		}
-		if operationType, active := activeManagedPostgresExclusiveMutationForBackupRun(state, run); active {
-			_, _, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
-			return conflictErr
-		}
-		if run.ID == "" {
-			run.ID = model.NewID("backup_run")
-		}
-		if run.CreatedAt.IsZero() {
-			run.CreatedAt = now
-		}
-		var policyNextRunAt *time.Time
-		if run.PolicyID != "" {
-			index := findBackupPolicy(state, run.PolicyID)
-			if index < 0 {
-				return ErrNotFound
-			}
-			next, err := nextBackupRunAfter(state.BackupPolicies[index].Schedule, now)
-			if err != nil {
-				return fmt.Errorf("%w: invalid backup schedule: %v", ErrInvalidInput, err)
-			}
-			policyNextRunAt = next
-		}
-		run.UpdatedAt = now
-		run = model.NormalizeBackupRun(run)
-		state.BackupRuns = append(state.BackupRuns, run)
-		if run.PolicyID != "" {
-			if index := findBackupPolicy(state, run.PolicyID); index >= 0 {
-				policy := model.NormalizeBackupPolicy(state.BackupPolicies[index])
-				if policyTargetChanged {
-					policy.Target = run.Target
-				}
-				policy.LastRunID = run.ID
-				policy.LastRunAt = &now
-				policy.NextRunAt = policyNextRunAt
-				policy.UpdatedAt = now
-				state.BackupPolicies[index] = policy
-			}
-		}
-		created = run
-		return nil
-	})
-	return created, err
+	return s.pgCreateBackupRun(run, retryOf)
 }
 
 func (s *Store) ClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
@@ -1076,55 +427,7 @@ func (s *Store) ClaimBackupRun(id, leaseOwner string, now time.Time, leaseTTL ti
 	} else {
 		now = now.UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgClaimBackupRun(id, leaseOwner, now, leaseTTL)
-	}
-	var (
-		claimed  model.BackupRun
-		claimErr error
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupRun(state, id)
-		if index < 0 {
-			return ErrConflict
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		if run.Status != model.BackupRunStatusPending || run.NextRetryAt != nil && run.NextRetryAt.After(now) {
-			return ErrConflict
-		}
-		if err := validateManagedPostgresBackupRunIdentity(run); err != nil {
-			return ErrConflict
-		}
-		if operationType, active := activeManagedPostgresExclusiveMutationForBackupRun(state, run); active {
-			conflictCode, conflictMessage, conflictErr := managedPostgresBackupConflictForOperationType(operationType)
-			run.Status = model.BackupRunStatusFailed
-			run.ErrorCode = conflictCode
-			run.ErrorMessage = conflictMessage
-			run.LeaseOwner = ""
-			run.LockedUntil = nil
-			run.HeartbeatAt = nil
-			run.FinishedAt = &now
-			run.UpdatedAt = now
-			state.BackupRuns[index] = model.NormalizeBackupRun(run)
-			claimed = state.BackupRuns[index]
-			claimErr = conflictErr
-			return nil
-		}
-		lockedUntil := now.Add(leaseTTL)
-		run.Status = model.BackupRunStatusRunning
-		run.LeaseOwner = leaseOwner
-		run.LockedUntil = &lockedUntil
-		run.HeartbeatAt = &now
-		run.StartedAt = &now
-		run.UpdatedAt = now
-		state.BackupRuns[index] = model.NormalizeBackupRun(run)
-		claimed = state.BackupRuns[index]
-		return nil
-	})
-	if err == nil && claimErr != nil {
-		return claimed, claimErr
-	}
-	return claimed, err
+	return s.pgClaimBackupRun(id, leaseOwner, now, leaseTTL)
 }
 
 func (s *Store) HeartbeatBackupRun(id, leaseOwner string, now time.Time, leaseTTL time.Duration) (model.BackupRun, error) {
@@ -1138,28 +441,7 @@ func (s *Store) HeartbeatBackupRun(id, leaseOwner string, now time.Time, leaseTT
 	} else {
 		now = now.UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgHeartbeatBackupRun(id, leaseOwner, now, leaseTTL)
-	}
-	var heartbeat model.BackupRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupRun(state, id)
-		if index < 0 {
-			return ErrConflict
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(now) {
-			return ErrConflict
-		}
-		lockedUntil := now.Add(leaseTTL)
-		run.LockedUntil = &lockedUntil
-		run.HeartbeatAt = &now
-		run.UpdatedAt = now
-		state.BackupRuns[index] = model.NormalizeBackupRun(run)
-		heartbeat = state.BackupRuns[index]
-		return nil
-	})
-	return heartbeat, err
+	return s.pgHeartbeatBackupRun(id, leaseOwner, now, leaseTTL)
 }
 
 // BackupRunIsStale reports whether an active backup run has exceeded its
@@ -1223,65 +505,7 @@ func (s *Store) RecoverStaleBackupRun(observed model.BackupRun, now time.Time, l
 	if !BackupRunIsStale(observed, now, leaseTTL) {
 		return model.BackupRun{}, ErrConflict
 	}
-	if s.usingDatabase() {
-		return s.pgRecoverStaleBackupRun(observed, now)
-	}
-	var recovered model.BackupRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupRun(state, observed.ID)
-		if index < 0 {
-			return ErrConflict
-		}
-		current := model.NormalizeBackupRun(state.BackupRuns[index])
-		if !backupRunRecoveryObservationMatches(current, observed) || !BackupRunIsStale(current, now, leaseTTL) {
-			return ErrConflict
-		}
-		if model.NormalizeBackupTarget(observed.Target).Engine == model.BackupEngineLonghornSnapshot {
-			// Longhorn owns the remote upload and it can outlive an API worker.
-			// Requeue the durable run so a successor worker can observe the
-			// existing Longhorn Backup CR and continue it by run label.
-			current.Status = model.BackupRunStatusPending
-			current.LeaseOwner = ""
-			current.LockedUntil = nil
-			current.ErrorCode = ""
-			current.ErrorMessage = ""
-			current.NextRetryAt = &now
-		} else {
-			current.Status = model.BackupRunStatusFailed
-		}
-		current.LockedUntil = nil
-		current.HeartbeatAt = &now
-		if current.Status == model.BackupRunStatusPending {
-			current.ErrorCode = ""
-			current.ErrorMessage = ""
-			current.FinishedAt = nil
-		} else {
-			current.ErrorCode = backupRunLostErrorCode
-			current.ErrorMessage = backupRunLostErrorMessage
-			current.FinishedAt = &now
-		}
-		current.UpdatedAt = now
-		state.BackupRuns[index] = model.NormalizeBackupRun(current)
-		recovered = state.BackupRuns[index]
-		return nil
-	})
-	return recovered, err
-}
-
-func backupRunRecoveryObservationMatches(current, observed model.BackupRun) bool {
-	return current.Status == observed.Status &&
-		current.LeaseOwner == observed.LeaseOwner &&
-		current.UpdatedAt.Equal(observed.UpdatedAt) &&
-		backupOptionalTimeEqual(current.LockedUntil, observed.LockedUntil) &&
-		backupOptionalTimeEqual(current.HeartbeatAt, observed.HeartbeatAt) &&
-		backupOptionalTimeEqual(current.NextRetryAt, observed.NextRetryAt)
-}
-
-func backupOptionalTimeEqual(left, right *time.Time) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return left.Equal(*right)
+	return s.pgRecoverStaleBackupRun(observed, now)
 }
 
 func (s *Store) FinishBackupRun(id, leaseOwner string, finish BackupRunFinish) (model.BackupRun, error) {
@@ -1298,43 +522,7 @@ func (s *Store) FinishBackupRun(id, leaseOwner string, finish BackupRunFinish) (
 	} else {
 		finish.FinishedAt = finish.FinishedAt.UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgFinishBackupRun(id, leaseOwner, finish)
-	}
-	var finished model.BackupRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupRun(state, id)
-		if index < 0 {
-			return ErrConflict
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(finish.FinishedAt) {
-			return ErrConflict
-		}
-		run.Status = finish.Status
-		run.LockedUntil = nil
-		run.HeartbeatAt = &finish.FinishedAt
-		run.BytesWritten = finish.BytesWritten
-		run.ArtifactCount = finish.ArtifactCount
-		run.ErrorCode = finish.ErrorCode
-		run.ErrorMessage = finish.ErrorMessage
-		run.FinishedAt = &finish.FinishedAt
-		run.UpdatedAt = finish.FinishedAt
-		state.BackupRuns[index] = model.NormalizeBackupRun(run)
-		finished = state.BackupRuns[index]
-		if finished.Status == model.BackupRunStatusSucceeded && finished.PolicyID != "" {
-			if policyIndex := findBackupPolicy(state, finished.PolicyID); policyIndex >= 0 {
-				policy := model.NormalizeBackupPolicy(state.BackupPolicies[policyIndex])
-				policy.LastSuccessfulRunID = finished.ID
-				policy.LastSuccessfulAt = &finish.FinishedAt
-				policy.UpdatedAt = finish.FinishedAt
-				state.BackupPolicies[policyIndex] = policy
-			}
-			applyBackupRetentionInState(state, finished.PolicyID)
-		}
-		return nil
-	})
-	return finished, err
+	return s.pgFinishBackupRun(id, leaseOwner, finish)
 }
 
 func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error) {
@@ -1344,41 +532,7 @@ func (s *Store) ListBackupRuns(filter BackupRunFilter) ([]model.BackupRun, error
 		return nil, err
 	}
 	filter.Cursor = cursor
-	if s.usingDatabase() {
-		return s.pgListBackupRuns(filter)
-	}
-	runs := []model.BackupRun{}
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRuns {
-			run = model.NormalizeBackupRun(run)
-			if !backupRunVisible(run, filter.TenantID, filter.PlatformAdmin) {
-				continue
-			}
-			if filter.ProjectID != "" && run.ProjectID != filter.ProjectID && run.Target.ProjectID != filter.ProjectID {
-				continue
-			}
-			if filter.AppID != "" && run.AppID != filter.AppID && run.Target.AppID != filter.AppID {
-				continue
-			}
-			if filter.PolicyID != "" && run.PolicyID != filter.PolicyID {
-				continue
-			}
-			if filter.TargetType != "" && run.Target.Type != filter.TargetType {
-				continue
-			}
-			if filter.Status != "" && run.Status != filter.Status {
-				continue
-			}
-			if !backupListItemAfterCursor(run.CreatedAt, run.ID, filter.Cursor) {
-				continue
-			}
-			runs = append(runs, run)
-		}
-		sortBackupRuns(runs)
-		runs = limitBackupRuns(runs, filter.Limit)
-		return nil
-	})
-	return runs, err
+	return s.pgListBackupRuns(filter)
 }
 
 // ListPendingCoordinatedBackupRuns resumes manual/scheduled runs whose initial
@@ -1394,31 +548,7 @@ func (s *Store) ListPendingCoordinatedBackupRuns(now time.Time, limit int) ([]mo
 	if limit <= 0 {
 		limit = defaultBackupDueScannerLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListPendingCoordinatedBackupRuns(now, limit)
-	}
-	runs := []model.BackupRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRuns {
-			run = model.NormalizeBackupRun(run)
-			if run.Status != model.BackupRunStatusPending || run.Trigger == model.BackupRunTriggerRetry ||
-				!model.BackupRunNeedsCoordinationLease(run) || run.NextRetryAt != nil && run.NextRetryAt.After(now) {
-				continue
-			}
-			runs = append(runs, run)
-		}
-		sort.Slice(runs, func(i, j int) bool {
-			if !runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
-				return runs[i].CreatedAt.Before(runs[j].CreatedAt)
-			}
-			return runs[i].ID < runs[j].ID
-		})
-		if len(runs) > limit {
-			runs = runs[:limit]
-		}
-		return nil
-	})
-	return runs, err
+	return s.pgListPendingCoordinatedBackupRuns(now, limit)
 }
 
 // ListDueBackupRetryRuns filters and orders due retries before applying the
@@ -1432,30 +562,7 @@ func (s *Store) ListDueBackupRetryRuns(now time.Time, limit int) ([]model.Backup
 	if limit <= 0 {
 		limit = defaultBackupDueScannerLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListDueBackupRetryRuns(now, limit)
-	}
-	runs := []model.BackupRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRuns {
-			run = model.NormalizeBackupRun(run)
-			if run.Status != model.BackupRunStatusPending || run.Trigger != model.BackupRunTriggerRetry || run.NextRetryAt == nil || run.NextRetryAt.After(now) {
-				continue
-			}
-			runs = append(runs, run)
-		}
-		sort.Slice(runs, func(i, j int) bool {
-			if !runs[i].NextRetryAt.Equal(*runs[j].NextRetryAt) {
-				return runs[i].NextRetryAt.Before(*runs[j].NextRetryAt)
-			}
-			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
-		})
-		if len(runs) > limit {
-			runs = runs[:limit]
-		}
-		return nil
-	})
-	return runs, err
+	return s.pgListDueBackupRetryRuns(now, limit)
 }
 
 // ListStaleBackupRuns filters and orders expired observations before applying
@@ -1472,31 +579,7 @@ func (s *Store) ListStaleBackupRuns(now time.Time, leaseTTL time.Duration, limit
 	if limit <= 0 {
 		limit = defaultBackupDueScannerLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListStaleBackupRuns(now, leaseTTL, limit)
-	}
-	runs := []model.BackupRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRuns {
-			run = model.NormalizeBackupRun(run)
-			if BackupRunIsStale(run, now, leaseTTL) {
-				runs = append(runs, run)
-			}
-		}
-		sort.Slice(runs, func(i, j int) bool {
-			left, _ := backupRunStaleDeadline(runs[i], leaseTTL)
-			right, _ := backupRunStaleDeadline(runs[j], leaseTTL)
-			if !left.Equal(right) {
-				return left.Before(right)
-			}
-			return runs[i].CreatedAt.Before(runs[j].CreatedAt)
-		})
-		if len(runs) > limit {
-			runs = runs[:limit]
-		}
-		return nil
-	})
-	return runs, err
+	return s.pgListStaleBackupRuns(now, leaseTTL, limit)
 }
 
 func (s *Store) GetBackupRun(id string, tenantID string, platformAdmin bool) (model.BackupRun, error) {
@@ -1504,23 +587,7 @@ func (s *Store) GetBackupRun(id string, tenantID string, platformAdmin bool) (mo
 	if id == "" {
 		return model.BackupRun{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetBackupRun(id, tenantID, platformAdmin)
-	}
-	var run model.BackupRun
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupRun(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		candidate := model.NormalizeBackupRun(state.BackupRuns[index])
-		if !backupRunVisible(candidate, tenantID, platformAdmin) {
-			return ErrNotFound
-		}
-		run = candidate
-		return nil
-	})
-	return run, err
+	return s.pgGetBackupRun(id, tenantID, platformAdmin)
 }
 
 func (s *Store) UpdateBackupRun(id string, update BackupRunUpdate) (model.BackupRun, error) {
@@ -1528,23 +595,7 @@ func (s *Store) UpdateBackupRun(id string, update BackupRunUpdate) (model.Backup
 	if id == "" {
 		return model.BackupRun{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateBackupRun(id, update)
-	}
-	var updated model.BackupRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupRun(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		applyBackupRunUpdate(&run, update)
-		run.UpdatedAt = time.Now().UTC()
-		state.BackupRuns[index] = model.NormalizeBackupRun(run)
-		updated = state.BackupRuns[index]
-		return nil
-	})
-	return updated, err
+	return s.pgUpdateBackupRun(id, update)
 }
 
 func (s *Store) CreateBackupArtifact(artifact model.BackupArtifact) (model.BackupArtifact, error) {
@@ -1596,23 +647,10 @@ func (s *Store) BackupArtifactExistsForLonghornURL(backupURL string) (bool, erro
 	if backupURL == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var exists bool
-		err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE kind = 'longhorn-snapshot' AND manifest_json->'metadata'->>'longhorn_backup_url' = $1)`, backupURL).Scan(&exists)
-		return exists, err
-	}
-	exists := false
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			if artifact.Kind == model.BackupArtifactKindLonghornSnapshot && artifact.Manifest.Metadata["longhorn_backup_url"] == backupURL {
-				exists = true
-				break
-			}
-		}
-		return nil
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE kind = 'longhorn-snapshot' AND manifest_json->'metadata'->>'longhorn_backup_url' = $1)`, backupURL).Scan(&exists)
 	return exists, err
 }
 
@@ -1640,76 +678,7 @@ func (s *Store) createBackupArtifactUnchecked(artifact model.BackupArtifact, lea
 	if artifact.Kind == "" || artifact.Target.Type == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackupArtifact(artifact, leaseOwner, observedRun)
-	}
-	var created model.BackupArtifact
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		if observedRun != nil {
-			runIndex := findBackupRun(state, artifact.RunID)
-			if runIndex < 0 || validateBackupAdoptionRun(state.BackupRuns[runIndex], *observedRun, now) != nil {
-				return ErrConflict
-			}
-			for _, existing := range state.BackupArtifacts {
-				if existing.RunID == artifact.RunID {
-					return ErrConflict
-				}
-			}
-		}
-		if leaseOwner != "" {
-			runIndex := findBackupRun(state, artifact.RunID)
-			if runIndex < 0 {
-				return ErrConflict
-			}
-			run := model.NormalizeBackupRun(state.BackupRuns[runIndex])
-			if run.Status != model.BackupRunStatusRunning || run.LeaseOwner != leaseOwner || run.LockedUntil == nil || run.LockedUntil.Before(now) {
-				return ErrConflict
-			}
-			if artifact.PolicyID == "" {
-				artifact.PolicyID = run.PolicyID
-			} else if artifact.PolicyID != run.PolicyID {
-				return ErrConflict
-			}
-		}
-		if artifact.ID == "" {
-			artifact.ID = model.NewID("backup_artifact")
-		}
-		if artifact.CreatedAt.IsZero() {
-			artifact.CreatedAt = now
-		}
-		artifact.Manifest.ArtifactID = artifact.ID
-		artifact.Manifest.RunID = artifact.RunID
-		artifact.Manifest.PolicyID = artifact.PolicyID
-		artifact.Manifest.Target = artifact.Target
-		artifact.Manifest.Kind = artifact.Kind
-		artifact.Manifest.Version = artifact.Version
-		artifact.Manifest.ObjectKey = artifact.ObjectKey
-		artifact.Manifest.ManifestObjectKey = artifact.ManifestObjectKey
-		artifact.Manifest.SizeBytes = artifact.SizeBytes
-		artifact.Manifest.LogicalBytes = artifact.LogicalBytes
-		artifact.Manifest.SHA256 = artifact.SHA256
-		if artifact.Manifest.CreatedAt.IsZero() {
-			artifact.Manifest.CreatedAt = artifact.CreatedAt
-		}
-		artifact.Manifest = model.NormalizeBackupManifest(artifact.Manifest)
-		artifact.ManifestDigest = digestBackupManifest(artifact.Manifest)
-		artifact = model.NormalizeBackupArtifact(artifact)
-		state.BackupArtifacts = append(state.BackupArtifacts, artifact)
-		if artifact.RunID != "" {
-			if index := findBackupRun(state, artifact.RunID); index >= 0 {
-				run := model.NormalizeBackupRun(state.BackupRuns[index])
-				run.ArtifactCount++
-				run.BytesWritten += artifact.SizeBytes
-				run.LogicalBytes += artifact.LogicalBytes
-				run.UpdatedAt = now
-				state.BackupRuns[index] = run
-			}
-		}
-		created = artifact
-		return nil
-	})
-	return created, err
+	return s.pgCreateBackupArtifact(artifact, leaseOwner, observedRun)
 }
 
 func (s *Store) ListBackupArtifacts(filter BackupArtifactFilter) ([]model.BackupArtifact, error) {
@@ -1719,44 +688,7 @@ func (s *Store) ListBackupArtifacts(filter BackupArtifactFilter) ([]model.Backup
 		return nil, err
 	}
 	filter.Cursor = cursor
-	if s.usingDatabase() {
-		return s.pgListBackupArtifacts(filter)
-	}
-	artifacts := []model.BackupArtifact{}
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			artifact = model.NormalizeBackupArtifact(artifact)
-			if !backupArtifactVisible(artifact, filter.TenantID, filter.PlatformAdmin) {
-				continue
-			}
-			if filter.ActiveOnly && artifact.Status != model.BackupArtifactStatusActive {
-				continue
-			}
-			if filter.ProjectID != "" && artifact.ProjectID != filter.ProjectID && artifact.Target.ProjectID != filter.ProjectID {
-				continue
-			}
-			if filter.AppID != "" && artifact.AppID != filter.AppID && artifact.Target.AppID != filter.AppID {
-				continue
-			}
-			if filter.PolicyID != "" && artifact.PolicyID != filter.PolicyID {
-				continue
-			}
-			if filter.RunID != "" && artifact.RunID != filter.RunID {
-				continue
-			}
-			if filter.TargetType != "" && artifact.Target.Type != filter.TargetType {
-				continue
-			}
-			if !backupListItemAfterCursor(artifact.CreatedAt, artifact.ID, filter.Cursor) {
-				continue
-			}
-			artifacts = append(artifacts, artifact)
-		}
-		sortBackupArtifacts(artifacts)
-		artifacts = limitBackupArtifacts(artifacts, filter.Limit)
-		return nil
-	})
-	return artifacts, err
+	return s.pgListBackupArtifacts(filter)
 }
 
 func (s *Store) GetBackupArtifact(id string, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
@@ -1764,23 +696,7 @@ func (s *Store) GetBackupArtifact(id string, tenantID string, platformAdmin bool
 	if id == "" {
 		return model.BackupArtifact{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetBackupArtifact(id, tenantID, platformAdmin)
-	}
-	var artifact model.BackupArtifact
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupArtifact(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		candidate := model.NormalizeBackupArtifact(state.BackupArtifacts[index])
-		if !backupArtifactVisible(candidate, tenantID, platformAdmin) {
-			return ErrNotFound
-		}
-		artifact = candidate
-		return nil
-	})
-	return artifact, err
+	return s.pgGetBackupArtifact(id, tenantID, platformAdmin)
 }
 
 func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin bool) (model.BackupArtifact, error) {
@@ -1792,40 +708,7 @@ func (s *Store) MarkBackupArtifactDeleted(id, tenantID string, platformAdmin boo
 	if !platformAdmin && tenantID == "" {
 		return model.BackupArtifact{}, ErrNotFound
 	}
-	if s.usingDatabase() {
-		return s.pgMarkBackupArtifactDeleted(id, tenantID, platformAdmin)
-	}
-	var deleted model.BackupArtifact
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackupArtifact(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		artifact := model.NormalizeBackupArtifact(state.BackupArtifacts[index])
-		if !platformAdmin && artifact.TenantID != tenantID {
-			return ErrNotFound
-		}
-		if artifact.Protected {
-			return ErrConflict
-		}
-		if artifact.Status == model.BackupArtifactStatusDeleted || artifact.Status == model.BackupArtifactStatusExpired {
-			deleted = artifact
-			return nil
-		}
-		if backupArtifactHasInFlightRestore(state, artifact.ID) {
-			return ErrConflict
-		}
-		if artifact.Status != model.BackupArtifactStatusActive {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		artifact.Status = model.BackupArtifactStatusDeleted
-		artifact.DeletedAt = &now
-		state.BackupArtifacts[index] = artifact
-		deleted = artifact
-		return nil
-	})
-	return deleted, err
+	return s.pgMarkBackupArtifactDeleted(id, tenantID, platformAdmin)
 }
 
 // BackupArtifactExistsForRun is the commit-ambiguity guard for failed upload
@@ -1836,15 +719,7 @@ func (s *Store) BackupArtifactExistsForRun(runID string) (bool, error) {
 	if runID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgBackupArtifactExistsForRun(runID)
-	}
-	exists := false
-	err := s.withLockedState(false, func(state *model.State) error {
-		exists = backupRunHasArtifact(state, runID)
-		return nil
-	})
-	return exists, err
+	return s.pgBackupArtifactExistsForRun(runID)
 }
 
 // ListFailedBackupRunObjectCleanupCandidates returns terminal failed/canceled
@@ -1859,68 +734,7 @@ func (s *Store) ListFailedBackupRunObjectCleanupCandidates(filter BackupRunObjec
 	if filter.Limit <= 0 {
 		filter.Limit = defaultBackupRunHistoryLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListFailedBackupRunObjectCleanupCandidates(filter)
-	}
-
-	s.backupRunObjectCleanupMu.Lock()
-	cleaned := make(map[string]struct{}, len(s.backupRunObjectCleanup))
-	for id := range s.backupRunObjectCleanup {
-		cleaned[id] = struct{}{}
-	}
-	attempted := make(map[string]time.Time, len(s.backupRunObjectCleanupAttempts))
-	for id, attemptedAt := range s.backupRunObjectCleanupAttempts {
-		attempted[id] = attemptedAt
-	}
-	s.backupRunObjectCleanupMu.Unlock()
-
-	runs := []model.BackupRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRuns {
-			run = model.NormalizeBackupRun(run)
-			if _, ok := cleaned[run.ID]; ok {
-				continue
-			}
-			if run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled {
-				continue
-			}
-			terminalAt := run.UpdatedAt
-			if run.FinishedAt != nil {
-				terminalAt = run.FinishedAt.UTC()
-			}
-			if terminalAt.IsZero() || terminalAt.After(filter.Before) || backupRunHasArtifact(state, run.ID) {
-				continue
-			}
-			runs = append(runs, run)
-		}
-		sort.Slice(runs, func(i, j int) bool {
-			iAttempted, iOK := attempted[runs[i].ID]
-			jAttempted, jOK := attempted[runs[j].ID]
-			if iOK != jOK {
-				return !iOK
-			}
-			if iOK && !iAttempted.Equal(jAttempted) {
-				return iAttempted.Before(jAttempted)
-			}
-			iTerminal := runs[i].UpdatedAt
-			if runs[i].FinishedAt != nil {
-				iTerminal = runs[i].FinishedAt.UTC()
-			}
-			jTerminal := runs[j].UpdatedAt
-			if runs[j].FinishedAt != nil {
-				jTerminal = runs[j].FinishedAt.UTC()
-			}
-			if !iTerminal.Equal(jTerminal) {
-				return iTerminal.Before(jTerminal)
-			}
-			return runs[i].ID < runs[j].ID
-		})
-		if len(runs) > filter.Limit {
-			runs = runs[:filter.Limit]
-		}
-		return nil
-	})
-	return runs, err
+	return s.pgListFailedBackupRunObjectCleanupCandidates(filter)
 }
 
 func (s *Store) MarkBackupRunObjectsCleaned(runID string, cleanedAt time.Time) error {
@@ -1933,34 +747,7 @@ func (s *Store) MarkBackupRunObjectsCleaned(runID string, cleanedAt time.Time) e
 	} else {
 		cleanedAt = cleanedAt.UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgMarkBackupRunObjectsCleaned(runID, cleanedAt)
-	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupRun(state, runID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		if (run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled) || backupRunHasArtifact(state, runID) {
-			return ErrConflict
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	s.backupRunObjectCleanupMu.Lock()
-	if s.backupRunObjectCleanup == nil {
-		s.backupRunObjectCleanup = map[string]time.Time{}
-	}
-	if s.backupRunObjectCleanupAttempts == nil {
-		s.backupRunObjectCleanupAttempts = map[string]time.Time{}
-	}
-	s.backupRunObjectCleanup[runID] = cleanedAt
-	s.backupRunObjectCleanupAttempts[runID] = cleanedAt
-	s.backupRunObjectCleanupMu.Unlock()
-	return nil
+	return s.pgMarkBackupRunObjectsCleaned(runID, cleanedAt)
 }
 
 func (s *Store) RecordBackupRunObjectCleanupFailure(runID string, attemptedAt time.Time, message string) error {
@@ -1977,30 +764,7 @@ func (s *Store) RecordBackupRunObjectCleanupFailure(runID string, attemptedAt ti
 	if runes := []rune(message); len(runes) > 2000 {
 		message = string(runes[:2000])
 	}
-	if s.usingDatabase() {
-		return s.pgRecordBackupRunObjectCleanupFailure(runID, attemptedAt, message)
-	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupRun(state, runID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		run := model.NormalizeBackupRun(state.BackupRuns[index])
-		if (run.Status != model.BackupRunStatusFailed && run.Status != model.BackupRunStatusCanceled) || backupRunHasArtifact(state, runID) {
-			return ErrConflict
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	s.backupRunObjectCleanupMu.Lock()
-	if s.backupRunObjectCleanupAttempts == nil {
-		s.backupRunObjectCleanupAttempts = map[string]time.Time{}
-	}
-	s.backupRunObjectCleanupAttempts[runID] = attemptedAt
-	s.backupRunObjectCleanupMu.Unlock()
-	return nil
+	return s.pgRecordBackupRunObjectCleanupFailure(runID, attemptedAt, message)
 }
 
 // ListBackupArtifactCleanupCandidates returns only terminal artifacts that are
@@ -2016,62 +780,7 @@ func (s *Store) ListBackupArtifactCleanupCandidates(filter BackupArtifactCleanup
 	if filter.Limit <= 0 {
 		filter.Limit = defaultBackupArtifactHistoryLimit
 	}
-	if s.usingDatabase() {
-		return s.pgListBackupArtifactCleanupCandidates(filter)
-	}
-
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	cleaned := make(map[string]struct{}, len(s.backupArtifactPhysicalCleanup))
-	for id := range s.backupArtifactPhysicalCleanup {
-		cleaned[id] = struct{}{}
-	}
-	attempted := make(map[string]time.Time, len(s.backupArtifactPhysicalAttempts))
-	for id, attemptedAt := range s.backupArtifactPhysicalAttempts {
-		attempted[id] = attemptedAt
-	}
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-
-	artifacts := []model.BackupArtifact{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			artifact = model.NormalizeBackupArtifact(artifact)
-			if _, ok := cleaned[artifact.ID]; ok && !backupArtifactNeedsEngineCleanup(artifact) {
-				continue
-			}
-			if filter.Kind != "" && artifact.Kind != filter.Kind {
-				continue
-			}
-			if artifact.Protected || artifact.DeletedAt == nil || artifact.DeletedAt.After(filter.Before) {
-				continue
-			}
-			if artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired {
-				continue
-			}
-			if backupArtifactHasInFlightRestore(state, artifact.ID) {
-				continue
-			}
-			artifacts = append(artifacts, artifact)
-		}
-		sort.Slice(artifacts, func(i, j int) bool {
-			iAttempted, iOK := attempted[artifacts[i].ID]
-			jAttempted, jOK := attempted[artifacts[j].ID]
-			if iOK != jOK {
-				return !iOK
-			}
-			if iOK && !iAttempted.Equal(jAttempted) {
-				return iAttempted.Before(jAttempted)
-			}
-			if artifacts[i].DeletedAt != nil && artifacts[j].DeletedAt != nil && !artifacts[i].DeletedAt.Equal(*artifacts[j].DeletedAt) {
-				return artifacts[i].DeletedAt.Before(*artifacts[j].DeletedAt)
-			}
-			return artifacts[i].ID < artifacts[j].ID
-		})
-		if len(artifacts) > filter.Limit {
-			artifacts = artifacts[:filter.Limit]
-		}
-		return nil
-	})
-	return artifacts, err
+	return s.pgListBackupArtifactCleanupCandidates(filter)
 }
 
 // MarkBackupArtifactPhysicalDeleted records the successful, idempotent object
@@ -2087,43 +796,7 @@ func (s *Store) MarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time
 	} else {
 		deletedAt = deletedAt.UTC()
 	}
-	if s.usingDatabase() {
-		return s.pgMarkBackupArtifactPhysicalDeleted(id, deletedAt)
-	}
-	artifact, err := s.GetBackupArtifact(id, "", true)
-	if err != nil {
-		return err
-	}
-	if artifact.Protected || (artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired) {
-		return ErrConflict
-	}
-	if artifact.Kind == model.BackupArtifactKindLonghornSnapshot {
-		if err := s.withLockedState(true, func(state *model.State) error {
-			for i := range state.BackupArtifacts {
-				if state.BackupArtifacts[i].ID == id {
-					if state.BackupArtifacts[i].Manifest.Metadata == nil {
-						state.BackupArtifacts[i].Manifest.Metadata = map[string]string{}
-					}
-					state.BackupArtifacts[i].Manifest.Metadata[model.BackupLonghornCleanupVersionKey] = model.BackupLonghornCleanupVersion
-					return nil
-				}
-			}
-			return ErrNotFound
-		}); err != nil {
-			return err
-		}
-	}
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	if s.backupArtifactPhysicalCleanup == nil {
-		s.backupArtifactPhysicalCleanup = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalCleanup[id] = deletedAt
-	if s.backupArtifactPhysicalAttempts == nil {
-		s.backupArtifactPhysicalAttempts = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalAttempts[id] = deletedAt
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-	return nil
+	return s.pgMarkBackupArtifactPhysicalDeleted(id, deletedAt)
 }
 
 func (s *Store) RecordBackupArtifactPhysicalCleanupFailure(id string, attemptedAt time.Time, message string) error {
@@ -2140,64 +813,7 @@ func (s *Store) RecordBackupArtifactPhysicalCleanupFailure(id string, attemptedA
 	if runes := []rune(message); len(runes) > 2000 {
 		message = string(runes[:2000])
 	}
-	if s.usingDatabase() {
-		return s.pgRecordBackupArtifactPhysicalCleanupFailure(id, attemptedAt, message)
-	}
-	artifact, err := s.GetBackupArtifact(id, "", true)
-	if err != nil {
-		return err
-	}
-	if artifact.Protected || (artifact.Status != model.BackupArtifactStatusDeleted && artifact.Status != model.BackupArtifactStatusExpired) {
-		return ErrConflict
-	}
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	if s.backupArtifactPhysicalAttempts == nil {
-		s.backupArtifactPhysicalAttempts = map[string]time.Time{}
-	}
-	s.backupArtifactPhysicalAttempts[id] = attemptedAt
-	if backupArtifactNeedsEngineCleanup(artifact) {
-		delete(s.backupArtifactPhysicalCleanup, id)
-	}
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-	return nil
-}
-
-func backupArtifactNeedsEngineCleanup(artifact model.BackupArtifact) bool {
-	return artifact.Kind == model.BackupArtifactKindLonghornSnapshot && artifact.Manifest.Metadata[model.BackupLonghornCleanupVersionKey] != model.BackupLonghornCleanupVersion
-}
-
-func backupArtifactHasInFlightRestore(state *model.State, artifactID string) bool {
-	for _, plan := range state.BackupRestorePlans {
-		plan = model.NormalizeBackupRestorePlan(plan)
-		if plan.ArtifactID == artifactID && !backupRestoreStatusTerminal(plan.Status) {
-			return true
-		}
-	}
-	for _, run := range state.BackupRestoreRuns {
-		run = model.NormalizeBackupRestoreRun(run)
-		if run.ArtifactID == artifactID && !backupRestoreStatusTerminal(run.Status) {
-			return true
-		}
-	}
-	return false
-}
-
-func backupRunHasArtifact(state *model.State, runID string) bool {
-	for _, artifact := range state.BackupArtifacts {
-		if strings.TrimSpace(artifact.RunID) == runID {
-			return true
-		}
-	}
-	return false
-}
-
-func backupRestoreStatusTerminal(status string) bool {
-	switch strings.TrimSpace(strings.ToLower(status)) {
-	case model.BackupRestoreStatusSucceeded, model.BackupRestoreStatusFailed, model.BackupRestoreStatusCanceled:
-		return true
-	default:
-		return false
-	}
+	return s.pgRecordBackupArtifactPhysicalCleanupFailure(id, attemptedAt, message)
 }
 
 func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.BackupRestorePlan, error) {
@@ -2205,94 +821,15 @@ func (s *Store) CreateBackupRestorePlan(plan model.BackupRestorePlan) (model.Bac
 	if plan.ArtifactID == "" {
 		return model.BackupRestorePlan{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackupRestorePlan(plan)
-	}
-	var created model.BackupRestorePlan
-	err := s.withLockedState(true, func(state *model.State) error {
-		artifactIndex := findBackupArtifact(state, plan.ArtifactID)
-		if artifactIndex < 0 {
-			return ErrNotFound
-		}
-		artifact := model.NormalizeBackupArtifact(state.BackupArtifacts[artifactIndex])
-		if artifact.Status != model.BackupArtifactStatusActive {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		if plan.ID == "" {
-			plan.ID = model.NewID("backup_restore_plan")
-		}
-		if backupTargetIsEmpty(plan.Target) {
-			plan.Target = artifact.Target
-		} else if strings.TrimSpace(plan.Target.Type) == "" {
-			return ErrInvalidInput
-		}
-		if plan.TenantID == "" {
-			plan.TenantID = artifact.TenantID
-		}
-		if plan.ProjectID == "" {
-			plan.ProjectID = artifact.ProjectID
-		}
-		if plan.AppID == "" {
-			plan.AppID = artifact.AppID
-		}
-		if err := reconcileBackupRestorePlanTargetScope(&plan); err != nil {
-			return err
-		}
-		if plan.CreatedAt.IsZero() {
-			plan.CreatedAt = now
-		}
-		plan.UpdatedAt = now
-		plan.Mode = model.NormalizeBackupRestoreMode(plan.Mode)
-		if len(plan.Phases) == 0 {
-			plan.Phases = defaultRestorePlanPhases(plan)
-		}
-		plan = model.NormalizeBackupRestorePlan(plan)
-		state.BackupRestorePlans = append(state.BackupRestorePlans, plan)
-		created = plan
-		return nil
-	})
-	return created, err
+	return s.pgCreateBackupRestorePlan(plan)
 }
 
 func (s *Store) ListBackupRestorePlans(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestorePlan, error) {
-	if s.usingDatabase() {
-		return s.pgListBackupRestorePlans(tenantID, platformAdmin, limit)
-	}
-	plans := []model.BackupRestorePlan{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, plan := range state.BackupRestorePlans {
-			plan = model.NormalizeBackupRestorePlan(plan)
-			if !backupRestorePlanVisible(plan, tenantID, platformAdmin) {
-				continue
-			}
-			plans = append(plans, plan)
-		}
-		sort.Slice(plans, func(i, j int) bool { return plans[i].CreatedAt.After(plans[j].CreatedAt) })
-		plans = limitBackupRestorePlans(plans, limit)
-		return nil
-	})
-	return plans, err
+	return s.pgListBackupRestorePlans(tenantID, platformAdmin, limit)
 }
 
 func (s *Store) GetBackupRestorePlan(id string, tenantID string, platformAdmin bool) (model.BackupRestorePlan, error) {
-	if s.usingDatabase() {
-		return s.pgGetBackupRestorePlan(id, tenantID, platformAdmin)
-	}
-	var plan model.BackupRestorePlan
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackupRestorePlan(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		candidate := model.NormalizeBackupRestorePlan(state.BackupRestorePlans[index])
-		if !backupRestorePlanVisible(candidate, tenantID, platformAdmin) {
-			return ErrNotFound
-		}
-		plan = candidate
-		return nil
-	})
-	return plan, err
+	return s.pgGetBackupRestorePlan(id, tenantID, platformAdmin)
 }
 
 func (s *Store) CreateBackupRestoreRun(run model.BackupRestoreRun) (model.BackupRestoreRun, error) {
@@ -2300,34 +837,7 @@ func (s *Store) CreateBackupRestoreRun(run model.BackupRestoreRun) (model.Backup
 	if run.PlanID == "" {
 		return model.BackupRestoreRun{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackupRestoreRun(run)
-	}
-	var created model.BackupRestoreRun
-	err := s.withLockedState(true, func(state *model.State) error {
-		planIndex := findBackupRestorePlan(state, run.PlanID)
-		if planIndex < 0 {
-			return ErrNotFound
-		}
-		plan := model.NormalizeBackupRestorePlan(state.BackupRestorePlans[planIndex])
-		now := time.Now().UTC()
-		var err error
-		run, err = prepareBackupRestoreRunForPlan(run, plan, now)
-		if err != nil {
-			return err
-		}
-		if run.AppID != "" &&
-			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, run.AppID) {
-			return ErrManagedPostgresRestoreMutationConflict
-		}
-		state.BackupRestoreRuns = append(state.BackupRestoreRuns, run)
-		plan.Status = model.BackupRestoreStatusRunning
-		plan.UpdatedAt = now
-		state.BackupRestorePlans[planIndex] = plan
-		created = run
-		return nil
-	})
-	return created, err
+	return s.pgCreateBackupRestoreRun(run)
 }
 
 func prepareBackupRestoreRunForPlan(run model.BackupRestoreRun, plan model.BackupRestorePlan, now time.Time) (model.BackupRestoreRun, error) {
@@ -2408,23 +918,7 @@ func reconcileBackupRestorePlanTargetScope(plan *model.BackupRestorePlan) error 
 }
 
 func (s *Store) ListBackupRestoreRuns(tenantID string, platformAdmin bool, limit int) ([]model.BackupRestoreRun, error) {
-	if s.usingDatabase() {
-		return s.pgListBackupRestoreRuns(tenantID, platformAdmin, limit)
-	}
-	runs := []model.BackupRestoreRun{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, run := range state.BackupRestoreRuns {
-			run = model.NormalizeBackupRestoreRun(run)
-			if !backupRestoreRunVisible(run, tenantID, platformAdmin) {
-				continue
-			}
-			runs = append(runs, run)
-		}
-		sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
-		runs = limitBackupRestoreRuns(runs, limit)
-		return nil
-	})
-	return runs, err
+	return s.pgListBackupRestoreRuns(tenantID, platformAdmin, limit)
 }
 
 // ListBackupUsageArtifacts returns the complete, unpaginated artifact
@@ -2432,116 +926,11 @@ func (s *Store) ListBackupRestoreRuns(tenantID string, platformAdmin bool, limit
 // separate from the user-facing history list, whose limit must never truncate
 // accounting evidence.
 func (s *Store) ListBackupUsageArtifacts(tenantID string, platformAdmin bool) ([]BackupUsageArtifact, error) {
-	if s.usingDatabase() {
-		return s.pgListBackupUsageArtifacts(tenantID, platformAdmin)
-	}
-
-	s.backupArtifactPhysicalCleanupMu.Lock()
-	cleaned := make(map[string]time.Time, len(s.backupArtifactPhysicalCleanup))
-	for id, deletedAt := range s.backupArtifactPhysicalCleanup {
-		cleaned[id] = deletedAt
-	}
-	attempted := make(map[string]time.Time, len(s.backupArtifactPhysicalAttempts))
-	for id, attemptedAt := range s.backupArtifactPhysicalAttempts {
-		attempted[id] = attemptedAt
-	}
-	s.backupArtifactPhysicalCleanupMu.Unlock()
-
-	artifacts := []BackupUsageArtifact{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			artifact = model.NormalizeBackupArtifact(artifact)
-			if !platformAdmin && artifact.TenantID != tenantID {
-				continue
-			}
-			usageArtifact := BackupUsageArtifact{Artifact: artifact}
-			if deletedAt, ok := cleaned[artifact.ID]; ok {
-				deletedAt := deletedAt
-				usageArtifact.PhysicalDeletedAt = &deletedAt
-			}
-			if attemptedAt, ok := attempted[artifact.ID]; ok {
-				attemptedAt := attemptedAt
-				usageArtifact.PhysicalDeleteAttemptedAt = &attemptedAt
-			}
-			artifacts = append(artifacts, usageArtifact)
-		}
-		sort.Slice(artifacts, func(i, j int) bool {
-			if artifacts[i].Artifact.CreatedAt.Equal(artifacts[j].Artifact.CreatedAt) {
-				return artifacts[i].Artifact.ID < artifacts[j].Artifact.ID
-			}
-			return artifacts[i].Artifact.CreatedAt.Before(artifacts[j].Artifact.CreatedAt)
-		})
-		return nil
-	})
-	return artifacts, err
+	return s.pgListBackupUsageArtifacts(tenantID, platformAdmin)
 }
 
 func (s *Store) BackupUsage(tenantID string, platformAdmin bool) (model.BackupUsage, error) {
-	if s.usingDatabase() {
-		return s.pgBackupUsage(tenantID, platformAdmin)
-	}
-	usage := model.BackupUsage{
-		TenantID:              tenantID,
-		Provider:              model.DataBackendProviderCloudflareR2,
-		CloudflareR2PriceCode: backupUsageCloudflareR2PriceCode,
-		MarkupPercent:         model.BackupR2MarkupPercent,
-		EffectiveMultiplier:   1.05,
-		Currency:              "USD",
-		UpdatedAt:             time.Now().UTC(),
-	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, artifact := range state.BackupArtifacts {
-			artifact = model.NormalizeBackupArtifact(artifact)
-			if artifact.Status != model.BackupArtifactStatusActive || !artifact.Billable {
-				continue
-			}
-			if !platformAdmin && artifact.TenantID != tenantID {
-				continue
-			}
-			usage.BillableBytes += artifact.SizeBytes
-		}
-		usage = model.NormalizeBackupUsage(usage)
-		return nil
-	})
-	return usage, err
-}
-
-func applyBackupRetentionInState(state *model.State, policyID string) {
-	policyIndex := findBackupPolicy(state, policyID)
-	if policyIndex < 0 {
-		return
-	}
-	policy := model.NormalizeBackupPolicy(state.BackupPolicies[policyIndex])
-	retain := policy.RetainCount
-	if retain <= 0 {
-		retain = policy.Retention.RetainCount
-	}
-	if retain <= 0 && policy.Retention.RetainDays <= 0 {
-		return
-	}
-	var candidates []int
-	for idx, artifact := range state.BackupArtifacts {
-		artifact = model.NormalizeBackupArtifact(artifact)
-		if artifact.PolicyID != policyID || artifact.Status != model.BackupArtifactStatusActive || artifact.Protected || backupArtifactHasInFlightRestore(state, artifact.ID) {
-			continue
-		}
-		candidates = append(candidates, idx)
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		a, b := state.BackupArtifacts[candidates[i]], state.BackupArtifacts[candidates[j]]
-		if a.CreatedAt.Equal(b.CreatedAt) {
-			return a.ID > b.ID
-		}
-		return a.CreatedAt.After(b.CreatedAt)
-	})
-	now := time.Now().UTC()
-	for rank, idx := range candidates {
-		if !retentionExpired(policy, rank, state.BackupArtifacts[idx].CreatedAt, now) {
-			continue
-		}
-		state.BackupArtifacts[idx].Status = model.BackupArtifactStatusExpired
-		state.BackupArtifacts[idx].DeletedAt = &now
-	}
+	return s.pgBackupUsage(tenantID, platformAdmin)
 }
 
 func applyBackupRunUpdate(run *model.BackupRun, update BackupRunUpdate) {
@@ -2610,20 +999,6 @@ func nextBackupRunAfter(schedule string, after time.Time) (*time.Time, error) {
 	return &next, nil
 }
 
-func backupTargetHasActiveRun(runs []model.BackupRun, target model.BackupTarget) bool {
-	target = model.NormalizeBackupTarget(target)
-	for _, run := range runs {
-		run = model.NormalizeBackupRun(run)
-		if run.Status != model.BackupRunStatusPending && run.Status != model.BackupRunStatusRunning {
-			continue
-		}
-		if backupTargetsEqual(run.Target, target) {
-			return true
-		}
-	}
-	return false
-}
-
 // backupRunTargetForPolicy keeps a policy's stable authorization identity
 // authoritative while allowing the API scheduler to refresh the volatile
 // placement of an app-owned database. A caller cannot use a policy-backed run
@@ -2683,71 +1058,6 @@ func validateManagedPostgresBackupRunIdentity(run model.BackupRun) error {
 	return nil
 }
 
-func backupTargetMatchesManagedPostgresService(app model.App, target model.BackupTarget, serviceID string) bool {
-	target = model.NormalizeBackupTarget(target)
-	if target.Type != model.BackupTargetAppDatabase {
-		return false
-	}
-	serviceID = strings.TrimSpace(serviceID)
-	if serviceID == "" {
-		return true
-	}
-	targetServiceName := strings.TrimSpace(target.ServiceName)
-	for idx := range app.BackingServices {
-		service := app.BackingServices[idx]
-		if strings.TrimSpace(service.ID) != serviceID ||
-			service.Type != model.BackingServiceTypePostgres ||
-			service.Provisioner != model.BackingServiceProvisionerManaged ||
-			service.Spec.Postgres == nil {
-			continue
-		}
-		if targetServiceName == "" ||
-			targetServiceName == strings.TrimSpace(service.Name) ||
-			targetServiceName == strings.TrimSpace(service.Spec.Postgres.ServiceName) {
-			return true
-		}
-		return false
-	}
-	return false
-}
-
-func activeManagedPostgresExclusiveMutationForBackupRun(state *model.State, run model.BackupRun) (string, bool) {
-	if state == nil {
-		return "", false
-	}
-	appID := managedPostgresBackupRunAppID(run)
-	if appID == "" {
-		return "", false
-	}
-	appIndex := findApp(state, appID)
-	if appIndex < 0 {
-		return "", false
-	}
-	app := state.Apps[appIndex]
-	hydrateAppBackingServices(state, &app)
-	// Preserve the established suspend conflict when malformed legacy state
-	// contains more than one active database mutation; resume and resize follow.
-	for _, operationType := range []string{
-		model.OperationTypeDatabaseSourceRetire,
-		model.OperationTypeDatabaseReplicaRetire,
-		pgimage.OperationType,
-		model.OperationTypeDatabaseSuspend,
-		model.OperationTypeDatabaseResume,
-		model.OperationTypeDatabaseResize,
-	} {
-		for _, op := range state.Operations {
-			if strings.TrimSpace(op.AppID) != appID || op.Type != operationType ||
-				!isActiveOperationStatus(op.Status) {
-				continue
-			}
-			if backupTargetMatchesManagedPostgresService(app, run.Target, op.ServiceID) {
-				return operationType, true
-			}
-		}
-	}
-	return "", false
-}
-
 func managedPostgresBackupConflictForOperationType(operationType string) (string, string, error) {
 	switch operationType {
 	case model.OperationTypeDatabaseSuspend:
@@ -2767,25 +1077,6 @@ func managedPostgresBackupConflictForOperationType(operationType string) (string
 			"managed_postgres_mutation_in_progress: wait for the active database mutation to finish before starting backup",
 			ErrConflict
 	}
-}
-
-func hasActiveAppDatabaseBackupRunForManagedPostgres(state *model.State, app model.App, serviceID string) bool {
-	if state == nil || strings.TrimSpace(app.ID) == "" {
-		return false
-	}
-	for _, run := range state.BackupRuns {
-		run = model.NormalizeBackupRun(run)
-		if run.Status != model.BackupRunStatusPending && run.Status != model.BackupRunStatusRunning {
-			continue
-		}
-		if managedPostgresBackupRunAppID(run) != strings.TrimSpace(app.ID) {
-			continue
-		}
-		if backupTargetMatchesManagedPostgresService(app, run.Target, serviceID) {
-			return true
-		}
-	}
-	return false
 }
 
 func managedPostgresServiceNames(app model.App, serviceID string) (string, string) {
@@ -3014,68 +1305,6 @@ func decryptBackupBackendSecret(secret model.BackupBackendSecret) (model.DataBac
 	})
 }
 
-func backupPolicyVisible(policy model.BackupPolicy, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	return tenantID != "" && policy.TenantID == tenantID
-}
-
-func backupRunVisible(run model.BackupRun, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	return tenantID != "" && run.TenantID == tenantID
-}
-
-func backupArtifactVisible(artifact model.BackupArtifact, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	return tenantID != "" && artifact.TenantID == tenantID
-}
-
-func backupRestorePlanVisible(plan model.BackupRestorePlan, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	return tenantID != "" && plan.TenantID == tenantID
-}
-
-func backupRestoreRunVisible(run model.BackupRestoreRun, tenantID string, platformAdmin bool) bool {
-	if platformAdmin {
-		return true
-	}
-	return tenantID != "" && run.TenantID == tenantID
-}
-
-func sortBackupPolicies(policies []model.BackupPolicy) {
-	sort.Slice(policies, func(i, j int) bool {
-		if policies[i].Scope != policies[j].Scope {
-			return policies[i].Scope < policies[j].Scope
-		}
-		return policies[i].Name < policies[j].Name
-	})
-}
-
-func sortBackupRuns(runs []model.BackupRun) {
-	sort.Slice(runs, func(i, j int) bool {
-		if runs[i].CreatedAt.Equal(runs[j].CreatedAt) {
-			return runs[i].ID > runs[j].ID
-		}
-		return runs[i].CreatedAt.After(runs[j].CreatedAt)
-	})
-}
-
-func sortBackupArtifacts(artifacts []model.BackupArtifact) {
-	sort.Slice(artifacts, func(i, j int) bool {
-		if artifacts[i].CreatedAt.Equal(artifacts[j].CreatedAt) {
-			return artifacts[i].ID > artifacts[j].ID
-		}
-		return artifacts[i].CreatedAt.After(artifacts[j].CreatedAt)
-	})
-}
-
 func normalizeBackupListCursor(cursor *BackupListCursor) (*BackupListCursor, error) {
 	if cursor == nil {
 		return nil, nil
@@ -3087,336 +1316,6 @@ func normalizeBackupListCursor(cursor *BackupListCursor) (*BackupListCursor, err
 	}
 	normalized.CreatedAt = normalized.CreatedAt.UTC()
 	return &normalized, nil
-}
-
-func backupListItemAfterCursor(createdAt time.Time, id string, cursor *BackupListCursor) bool {
-	if cursor == nil {
-		return true
-	}
-	if createdAt.Before(cursor.CreatedAt) {
-		return true
-	}
-	return createdAt.Equal(cursor.CreatedAt) && id < cursor.ID
-}
-
-func limitBackupPolicies(policies []model.BackupPolicy, limit int) []model.BackupPolicy {
-	if limit <= 0 || limit > len(policies) {
-		return policies
-	}
-	return policies[:limit]
-}
-
-func limitBackupRuns(runs []model.BackupRun, limit int) []model.BackupRun {
-	if limit <= 0 {
-		limit = defaultBackupRunHistoryLimit
-	}
-	if limit > len(runs) {
-		return runs
-	}
-	return runs[:limit]
-}
-
-func limitBackupArtifacts(artifacts []model.BackupArtifact, limit int) []model.BackupArtifact {
-	if limit <= 0 {
-		limit = defaultBackupArtifactHistoryLimit
-	}
-	if limit > len(artifacts) {
-		return artifacts
-	}
-	return artifacts[:limit]
-}
-
-func limitBackupRestorePlans(plans []model.BackupRestorePlan, limit int) []model.BackupRestorePlan {
-	if limit <= 0 {
-		limit = defaultBackupRestorePlanListLimit
-	}
-	if limit > len(plans) {
-		return plans
-	}
-	return plans[:limit]
-}
-
-func limitBackupRestoreRuns(runs []model.BackupRestoreRun, limit int) []model.BackupRestoreRun {
-	if limit <= 0 {
-		limit = defaultBackupRestoreRunListLimit
-	}
-	if limit > len(runs) {
-		return runs
-	}
-	return runs[:limit]
-}
-
-func findBackupBackend(state *model.State, id string) int {
-	for idx, backend := range state.BackupBackends {
-		if backend.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupBackendBySlug(state *model.State, tenantID, slug string) int {
-	slug = model.Slugify(slug)
-	for idx, backend := range state.BackupBackends {
-		if backend.TenantID == tenantID && backend.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupBackendByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
-	value = strings.TrimSpace(value)
-	slug := model.Slugify(value)
-	for idx, backend := range state.BackupBackends {
-		backend = model.NormalizeBackupBackend(backend)
-		if !platformAdmin && backend.TenantID != "" && backend.TenantID != tenantID {
-			continue
-		}
-		if backend.ID == value || backend.Name == value || backend.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findOwnedBackupBackendByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
-	if platformAdmin {
-		return findBackupBackendByIDNameOrSlug(state, value, tenantID, true)
-	}
-	value = strings.TrimSpace(value)
-	tenantID = strings.TrimSpace(tenantID)
-	if value == "" || tenantID == "" {
-		return -1
-	}
-	slug := model.Slugify(value)
-	for idx, candidate := range state.BackupBackends {
-		backend := model.NormalizeBackupBackend(candidate)
-		if backend.TenantID != tenantID {
-			continue
-		}
-		if backend.ID == value || backend.Name == value || backend.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupBackendSecret(state *model.State, id, backendID string) int {
-	for idx, secret := range state.BackupBackendSecrets {
-		if id != "" && secret.ID == id {
-			return idx
-		}
-		if backendID != "" && secret.BackendID == backendID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func deleteBackupBackendSecretsByBackend(secrets []model.BackupBackendSecret, backendID string) []model.BackupBackendSecret {
-	filtered := secrets[:0]
-	for _, secret := range secrets {
-		if secret.BackendID == backendID {
-			continue
-		}
-		filtered = append(filtered, secret)
-	}
-	return filtered
-}
-
-func deleteBackupStateByTenant(state *model.State, tenantID string) {
-	state.BackupBackends = filterBackupBackends(state.BackupBackends, func(backend model.BackupBackend) bool {
-		return backend.TenantID != tenantID
-	})
-	state.BackupBackendSecrets = filterBackupBackendSecrets(state.BackupBackendSecrets, func(secret model.BackupBackendSecret) bool {
-		return secret.TenantID != tenantID
-	})
-	state.BackupPolicies = filterBackupPolicies(state.BackupPolicies, func(policy model.BackupPolicy) bool {
-		return policy.TenantID != tenantID
-	})
-	state.BackupRuns = filterBackupRuns(state.BackupRuns, func(run model.BackupRun) bool {
-		return run.TenantID != tenantID
-	})
-	state.BackupArtifacts = filterBackupArtifacts(state.BackupArtifacts, func(artifact model.BackupArtifact) bool {
-		return artifact.TenantID != tenantID
-	})
-	state.BackupRestorePlans = filterBackupRestorePlans(state.BackupRestorePlans, func(plan model.BackupRestorePlan) bool {
-		return plan.TenantID != tenantID
-	})
-	state.BackupRestoreRuns = filterBackupRestoreRuns(state.BackupRestoreRuns, func(run model.BackupRestoreRun) bool {
-		return run.TenantID != tenantID
-	})
-	ensureDefaultBackupPolicyInState(state)
-}
-
-func deleteBackupStateByProject(state *model.State, projectID string, appIDs []string) {
-	appIDSet := map[string]struct{}{}
-	for _, appID := range appIDs {
-		appID = strings.TrimSpace(appID)
-		if appID != "" {
-			appIDSet[appID] = struct{}{}
-		}
-	}
-	state.BackupPolicies = filterBackupPolicies(state.BackupPolicies, func(policy model.BackupPolicy) bool {
-		return policy.ProjectID != projectID && policy.Target.ProjectID != projectID && !backupAppIDInSet(policy.AppID, policy.Target.AppID, appIDSet)
-	})
-	state.BackupRuns = filterBackupRuns(state.BackupRuns, func(run model.BackupRun) bool {
-		return run.ProjectID != projectID && run.Target.ProjectID != projectID && !backupAppIDInSet(run.AppID, run.Target.AppID, appIDSet)
-	})
-	state.BackupArtifacts = filterBackupArtifacts(state.BackupArtifacts, func(artifact model.BackupArtifact) bool {
-		return artifact.ProjectID != projectID && artifact.Target.ProjectID != projectID && !backupAppIDInSet(artifact.AppID, artifact.Target.AppID, appIDSet)
-	})
-	state.BackupRestorePlans = filterBackupRestorePlans(state.BackupRestorePlans, func(plan model.BackupRestorePlan) bool {
-		return plan.ProjectID != projectID && plan.Target.ProjectID != projectID && !backupAppIDInSet(plan.AppID, plan.Target.AppID, appIDSet)
-	})
-	state.BackupRestoreRuns = filterBackupRestoreRuns(state.BackupRestoreRuns, func(run model.BackupRestoreRun) bool {
-		return run.ProjectID != projectID && !backupAppIDInSet(run.AppID, "", appIDSet)
-	})
-}
-
-func backupAppIDInSet(primary, target string, appIDs map[string]struct{}) bool {
-	if len(appIDs) == 0 {
-		return false
-	}
-	if _, ok := appIDs[strings.TrimSpace(primary)]; ok {
-		return true
-	}
-	if _, ok := appIDs[strings.TrimSpace(target)]; ok {
-		return true
-	}
-	return false
-}
-
-func filterBackupBackends(items []model.BackupBackend, keep func(model.BackupBackend) bool) []model.BackupBackend {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupBackend(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupBackendSecrets(items []model.BackupBackendSecret, keep func(model.BackupBackendSecret) bool) []model.BackupBackendSecret {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(item) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupPolicies(items []model.BackupPolicy, keep func(model.BackupPolicy) bool) []model.BackupPolicy {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupPolicy(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupRuns(items []model.BackupRun, keep func(model.BackupRun) bool) []model.BackupRun {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupRun(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupArtifacts(items []model.BackupArtifact, keep func(model.BackupArtifact) bool) []model.BackupArtifact {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupArtifact(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupRestorePlans(items []model.BackupRestorePlan, keep func(model.BackupRestorePlan) bool) []model.BackupRestorePlan {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupRestorePlan(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func filterBackupRestoreRuns(items []model.BackupRestoreRun, keep func(model.BackupRestoreRun) bool) []model.BackupRestoreRun {
-	filtered := items[:0]
-	for _, item := range items {
-		if keep(model.NormalizeBackupRestoreRun(item)) {
-			filtered = append(filtered, item)
-		}
-	}
-	return filtered
-}
-
-func findBackupPolicy(state *model.State, id string) int {
-	for idx, policy := range state.BackupPolicies {
-		if policy.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupPolicyBySlug(state *model.State, tenantID, projectID, appID, slug string) int {
-	slug = model.Slugify(slug)
-	for idx, policy := range state.BackupPolicies {
-		if policy.TenantID == tenantID && policy.ProjectID == projectID && policy.AppID == appID && policy.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupPolicyByIDNameOrSlug(state *model.State, value, tenantID string, platformAdmin bool) int {
-	value = strings.TrimSpace(value)
-	slug := model.Slugify(value)
-	for idx, policy := range state.BackupPolicies {
-		policy = model.NormalizeBackupPolicy(policy)
-		if !backupPolicyVisible(policy, tenantID, platformAdmin) {
-			continue
-		}
-		if policy.ID == value || policy.Name == value || policy.Slug == slug {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupRun(state *model.State, id string) int {
-	for idx, run := range state.BackupRuns {
-		if run.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupArtifact(state *model.State, id string) int {
-	for idx, artifact := range state.BackupArtifacts {
-		if artifact.ID == id {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findBackupRestorePlan(state *model.State, id string) int {
-	for idx, plan := range state.BackupRestorePlans {
-		if plan.ID == id {
-			return idx
-		}
-	}
-	return -1
 }
 
 func scanBackupBackend(scanner sqlRowScanner) (model.BackupBackend, error) {
@@ -5181,17 +3080,20 @@ func (s *Store) pgListBackupArtifactCleanupCandidates(filter BackupArtifactClean
 func (s *Store) pgMarkBackupArtifactPhysicalDeleted(id string, deletedAt time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	result, err := s.db.ExecContext(ctx, `UPDATE fugue_backup_artifacts SET physical_deleted_at = $2, physical_delete_attempted_at = $2, physical_delete_error = '',
+	var marked, exists bool
+	err := s.db.QueryRowContext(ctx, `WITH marked AS (
+		UPDATE fugue_backup_artifacts SET physical_deleted_at = $2, physical_delete_attempted_at = $2, physical_delete_error = '',
 		manifest_json = CASE WHEN kind = 'longhorn-snapshot' THEN jsonb_set(manifest_json::jsonb, '{metadata}', (CASE WHEN jsonb_typeof(manifest_json::jsonb->'metadata') = 'object' THEN manifest_json::jsonb->'metadata' ELSE '{}'::jsonb END) || '{"longhorn_cleanup_version":"1"}'::jsonb) ELSE manifest_json::jsonb END
-		WHERE id = $1 AND status IN ('deleted', 'expired') AND protected = FALSE`, id, deletedAt)
+		WHERE id = $1 AND status IN ('deleted', 'expired') AND protected = FALSE
+		RETURNING id
+	) SELECT EXISTS (SELECT 1 FROM marked), EXISTS (SELECT 1 FROM fugue_backup_artifacts WHERE id = $1)`, id, deletedAt).Scan(&marked, &exists)
 	if err != nil {
 		return mapDBErr(err)
 	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
+	if !exists {
+		return ErrNotFound
 	}
-	if rows != 1 {
+	if !marked {
 		return ErrConflict
 	}
 	return nil

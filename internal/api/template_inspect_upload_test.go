@@ -3,17 +3,15 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
-	"fugue/internal/store"
 )
 
 func TestInspectUploadTemplateReturnsComposeInspection(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -120,7 +118,7 @@ services:
 func TestInspectUploadTemplateReturnsComposeInspectionFromZipArchive(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

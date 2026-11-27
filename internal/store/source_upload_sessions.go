@@ -7,8 +7,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -41,27 +39,7 @@ func (s *Store) CreateSourceUploadSession(v model.SourceUploadSession) (model.So
 		v = old
 		return nil
 	}
-	if !s.usingDatabase() {
-		err := s.withLockedState(true, func(st *model.State) error {
-			active := 0
-			for _, old := range st.SourceUploadSessions {
-				if old.TenantID == v.TenantID {
-					if old.RequestID == v.RequestID {
-						return same(old)
-					}
-					if old.State == "uploading" && old.ExpiresAt.After(v.CreatedAt) {
-						active++
-					}
-				}
-			}
-			if active >= 4 {
-				return fmt.Errorf("at most four active upload sessions per tenant: %w", ErrConflict)
-			}
-			st.SourceUploadSessions = append(st.SourceUploadSessions, v)
-			return nil
-		})
-		return v, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -102,32 +80,14 @@ func (s *Store) CreateSourceUploadSession(v model.SourceUploadSession) (model.So
 	return v, tx.Commit()
 }
 
-// withSourceSession holds an exclusive row/file-state lock. Callback must not
-// call another file-state transaction. Archive/chunk writes use the same lock.
+// withSourceSession holds a row lock for writes. Archive and chunk writes use
+// the same transaction as the session update.
 func (s *Store) withSourceSession(id string, write bool, fn func(*model.SourceUploadSession, *sql.Tx) error) (model.SourceUploadSession, error) {
 	var v model.SourceUploadSession
 	if !sourceRequestIDPattern.MatchString(id) {
 		return v, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		err := s.withLockedState(write, func(st *model.State) error {
-			for i := range st.SourceUploadSessions {
-				if st.SourceUploadSessions[i].ID == id {
-					v = st.SourceUploadSessions[i]
-					if err := fn(&v, nil); err != nil {
-						return err
-					}
-					if write {
-						v.UpdatedAt = time.Now().UTC()
-						st.SourceUploadSessions[i] = v
-					}
-					return nil
-				}
-			}
-			return ErrNotFound
-		})
-		return v, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -166,18 +126,7 @@ func (s *Store) GetSourceUploadSession(id string) (model.SourceUploadSession, er
 }
 func (s *Store) GetSourceUploadRequest(tenantID, requestID string) (model.SourceUploadSession, error) {
 	var v model.SourceUploadSession
-	if !s.usingDatabase() {
-		err := s.withLockedState(false, func(st *model.State) error {
-			for _, row := range st.SourceUploadSessions {
-				if row.TenantID == tenantID && row.RequestID == requestID {
-					v = row
-					return nil
-				}
-			}
-			return ErrNotFound
-		})
-		return v, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var raw []byte
@@ -187,9 +136,6 @@ func (s *Store) GetSourceUploadRequest(tenantID, requestID string) (model.Source
 	}
 	err = json.Unmarshal(raw, &v)
 	return v, err
-}
-func (s *Store) sourceChunkPath(id string, index int) string {
-	return filepath.Join(s.sourceUploadDir(), "sessions", fmt.Sprintf("%s.%d.chunk", id, index))
 }
 func (s *Store) PutSourceUploadChunk(id string, index int, digest string, data []byte) (model.SourceUploadSession, error) {
 	sum := sha256.Sum256(data)
@@ -210,17 +156,8 @@ func (s *Store) PutSourceUploadChunk(id string, index int, digest string, data [
 			}
 			return nil
 		}
-		if tx == nil {
-			if err := os.MkdirAll(filepath.Dir(s.sourceChunkPath(id, index)), 0700); err != nil {
-				return err
-			}
-			if err := writeAtomicFile(s.sourceChunkPath(id, index), data, 0600); err != nil {
-				return err
-			}
-		} else {
-			if _, err := tx.Exec(`INSERT INTO fugue_source_upload_chunks (session_id,chunk_index,data) VALUES ($1,$2,$3) ON CONFLICT (session_id,chunk_index) DO UPDATE SET data=EXCLUDED.data`, id, index, data); err != nil {
-				return err
-			}
+		if _, err := tx.Exec(`INSERT INTO fugue_source_upload_chunks (session_id,chunk_index,data) VALUES ($1,$2,$3) ON CONFLICT (session_id,chunk_index) DO UPDATE SET data=EXCLUDED.data`, id, index, data); err != nil {
+			return err
 		}
 		if v.Chunks == nil {
 			v.Chunks = map[int]string{}
@@ -244,13 +181,7 @@ func (s *Store) CompleteSourceUploadSession(id string) (model.SourceUploadSessio
 		archive := bytes.NewBuffer(make([]byte, 0, v.SizeBytes))
 		for i := 0; i < n; i++ {
 			var data []byte
-			var err error
-			if tx == nil {
-				data, err = os.ReadFile(s.sourceChunkPath(id, i))
-			} else {
-				err = tx.QueryRow(`SELECT data FROM fugue_source_upload_chunks WHERE session_id=$1 AND chunk_index=$2`, id, i).Scan(&data)
-			}
-			if err != nil {
+			if err := tx.QueryRow(`SELECT data FROM fugue_source_upload_chunks WHERE session_id=$1 AND chunk_index=$2`, id, i).Scan(&data); err != nil {
 				return err
 			}
 			sum := sha256.Sum256(data)
@@ -265,14 +196,8 @@ func (s *Store) CompleteSourceUploadSession(id string) (model.SourceUploadSessio
 		}
 		now := time.Now().UTC()
 		u := model.SourceUpload{ID: model.NewID("upload"), TenantID: v.TenantID, Filename: v.Filename, ContentType: "application/gzip", SHA256: v.SHA256, SizeBytes: v.SizeBytes, DownloadToken: model.NewSecret("fugue_upload"), CreatedAt: now, UpdatedAt: now}
-		if tx == nil {
-			if err := s.writeFileSourceUpload(u, archive.Bytes()); err != nil {
-				return err
-			}
-		} else {
-			if _, err := tx.Exec(`INSERT INTO fugue_source_uploads (id,tenant_id,filename,content_type,sha256,size_bytes,download_token,archive_bytes,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, u.ID, u.TenantID, u.Filename, u.ContentType, u.SHA256, u.SizeBytes, u.DownloadToken, archive.Bytes(), u.CreatedAt, u.UpdatedAt); err != nil {
-				return err
-			}
+		if _, err := tx.Exec(`INSERT INTO fugue_source_uploads (id,tenant_id,filename,content_type,sha256,size_bytes,download_token,archive_bytes,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, u.ID, u.TenantID, u.Filename, u.ContentType, u.SHA256, u.SizeBytes, u.DownloadToken, archive.Bytes(), u.CreatedAt, u.UpdatedAt); err != nil {
+			return err
 		}
 		v.UploadID = u.ID
 		v.State = "ready"
@@ -347,31 +272,6 @@ func (s *Store) CreateSourceSessionOperation(op model.Operation, sessionID strin
 // Expired incomplete chunks and assembled chunks are disposable. Receipts and
 // referenced immutable archives are kept for recovery; this never removes them.
 func (s *Store) CleanupSourceUploadChunks() error {
-	now := time.Now().UTC()
-	if !s.usingDatabase() {
-		return s.withLockedState(true, func(st *model.State) error {
-			for i := range st.SourceUploadSessions {
-				v := &st.SourceUploadSessions[i]
-				if v.UploadID == "" && v.ExpiresAt.After(now) {
-					continue
-				}
-				if !sourceRequestIDPattern.MatchString(v.ID) {
-					return ErrInvalidInput
-				}
-				for index := range v.Chunks {
-					if err := os.Remove(s.sourceChunkPath(v.ID, index)); err != nil && !os.IsNotExist(err) {
-						return err
-					}
-				}
-				if v.UploadID == "" {
-					v.State = "expired"
-					v.Chunks = nil
-					v.UpdatedAt = now
-				}
-			}
-			return nil
-		})
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)

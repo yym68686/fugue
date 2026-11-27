@@ -26,9 +26,7 @@ func (stateStore *Store) RollbackManagedSSH(tenantID, appID string, revision, in
 }
 
 func (stateStore *Store) publishManagedSSHSlot(tenantID, appID string, revision, intentGeneration uint64, digest, fingerprint, bindingID, legacyRouteDigest, actor, rollbackSlot string) (managedssh.ControlState, error) {
-	if !stateStore.usingDatabase() {
-		return managedssh.ControlState{}, ErrManagedSSHPublicationUnsupported
-	}
+
 	intent, err := stateStore.GetManagedSSHIntent(tenantID, appID)
 	if err != nil {
 		return managedssh.ControlState{}, err

@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,7 +16,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestPostgresNodeMatchesAnyPlacement(t *testing.T) {
@@ -63,7 +61,7 @@ func TestPostgresMigrationPreflightAndRollbackRequireLiveService(t *testing.T) {
 		{name: "sql shutting down", endpoint: true, sqlErr: errors.New("database shutting down"), want: "not serving verified read-write SQL"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

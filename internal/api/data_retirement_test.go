@@ -10,7 +10,6 @@ import (
 	"fugue/internal/store"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +19,7 @@ import (
 func retirementAPIFixture(t *testing.T) (*Server, *store.Store, model.DataWorkspace, string) {
 	t.Helper()
 	clearDefaultDataBackendEnv(t)
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

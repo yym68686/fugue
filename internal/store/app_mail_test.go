@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/url"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +16,7 @@ import (
 func mailTestStore(t *testing.T, postgres bool) *Store {
 	t.Helper()
 	if !postgres {
-		s := New(filepath.Join(t.TempDir(), "state.json"))
+		s := newStoreTestDatabase(t, "")
 		if err := s.Init(); err != nil {
 			t.Fatal(err)
 		}
@@ -125,25 +124,6 @@ func TestAppMailStoreCASOwnershipAndPlatformInterlock(t *testing.T) {
 				t.Fatal("mail omitted from frozen snapshot", err)
 			}
 		})
-	}
-}
-
-func TestAppMailPlatformInterlockInspectsBindingsBeyondFirstPage(t *testing.T) {
-	s := mailTestStore(t, false)
-	if err := s.SaveMailPlatformConfig(model.MailPlatformConfig{MailflareAppID: "provider", Enabled: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(true, func(st *model.State) error {
-		for i := 0; i < 101; i++ {
-			st.AppMailBindings = append(st.AppMailBindings, model.AppMailBinding{AppID: model.NewID("app"), State: "revoked"})
-		}
-		st.AppMailBindings = append(st.AppMailBindings, model.AppMailBinding{AppID: "zzz-live", State: "active"})
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveMailPlatformConfig(model.MailPlatformConfig{MailflareAppID: "provider", Enabled: false}); !errors.Is(err, ErrConflict) {
-		t.Fatal("missed binding beyond page", err)
 	}
 }
 

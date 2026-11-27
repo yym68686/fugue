@@ -14,7 +14,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 
 	"k8s.io/apimachinery/pkg/labels"
 )
@@ -94,7 +93,7 @@ func testAppRequestResizeExecutor(t *testing.T, dimension string) {
 	for _, scenario := range []string{"normal", "legacy", "lost-response", "legacy-lost-response", "restart-compensation", "deadline-compensation", "disable-after-acceptance"} {
 		t.Run(scenario, func(t *testing.T) {
 			lostResponse := strings.Contains(scenario, "lost-response") || strings.HasSuffix(scenario, "compensation") || scenario == "disable-after-acceptance"
-			s := store.New(t.TempDir() + "/state.json")
+			s := newStoreTestDatabase(t, "")
 			if err := s.Init(); err != nil {
 				t.Fatal(err)
 			}

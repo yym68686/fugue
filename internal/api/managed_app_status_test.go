@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -18,7 +17,6 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
@@ -80,7 +78,7 @@ func TestOverlayManagedAppStatusesUsesKubernetesObservedState(t *testing.T) {
 func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -192,7 +190,7 @@ func TestOverlayManagedAppStatusesObservesImplicitCanonicalStableRelease(t *test
 
 func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -417,7 +415,7 @@ func assertManagedAppFullRefreshSequence(t *testing.T, sequence managedAppObserv
 func TestOverlayManagedAppStatusesUsesEndpointSlicesWhenLegacyEndpointsAreUnavailable(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -479,7 +477,7 @@ func TestOverlayManagedAppStatusesUsesEndpointSlicesWhenLegacyEndpointsAreUnavai
 func TestManagedAppEvidenceDoesNotORStaleLegacyEndpointsWithEmptyEndpointSlices(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -517,7 +515,7 @@ func TestManagedAppEvidenceTreatsConfiguredRegistryPushAndPullRefsAsSameImage(t 
 		pullBase  = "registry.fugue.internal:5000"
 		imagePath = "/fugue-apps/demo:image-abc123"
 	)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -810,13 +808,17 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 func TestManagedAppEvidenceDoesNotOverrideFreshImageLocationFailure(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
 	imageRef := "registry.fugue.internal:5000/fugue-apps/image-location@sha256:" + strings.Repeat("d", 64)
+	tenant, err := stateStore.CreateTenant("Image Location Failure")
+	if err != nil {
+		t.Fatal(err)
+	}
 	app := model.App{
-		ID: "app_image_location_failure", TenantID: "tenant_image_location_failure", Name: "image-location-failure",
+		ID: "app_image_location_failure", TenantID: tenant.ID, Name: "image-location-failure",
 		Spec:   model.AppSpec{Image: imageRef, Replicas: 1, RuntimeID: model.DefaultManagedRuntimeID},
 		Status: model.AppStatus{Phase: "deployed", CurrentReplicas: 1},
 	}
@@ -868,7 +870,7 @@ func TestManagedAppEvidenceDoesNotOverrideFreshImageLocationFailure(t *testing.T
 func TestOverlayManagedAppStatusesTreatsChildQueryFailureAsUnknown(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -918,11 +920,15 @@ func TestAppMayUseManagedRuntimeChecksDesiredAndCurrentRuntimeDuringMigration(t 
 func TestCurrentManagedImagePresenceRequiresFreshExplicitEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	app := model.App{ID: "app_image_evidence", TenantID: "tenant_demo"}
+	tenant, err := stateStore.CreateTenant("Image Evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := model.App{ID: "app_image_evidence", TenantID: tenant.ID}
 	imageRef := "registry.fugue.internal:5000/fugue-apps/demo@sha256:" + strings.Repeat("a", 64)
 	apiServer := &Server{store: stateStore}
 
@@ -973,11 +979,15 @@ func TestCurrentManagedImagePresenceRequiresFreshExplicitEvidence(t *testing.T) 
 func TestCurrentManagedImagePresenceDoesNotUseSourceRuntimeEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	app := model.App{ID: "app_image_migration", TenantID: "tenant_demo", Spec: model.AppSpec{RuntimeID: "runtime-target"}}
+	tenant, err := stateStore.CreateTenant("Image Migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := model.App{ID: "app_image_migration", TenantID: tenant.ID, Spec: model.AppSpec{RuntimeID: "runtime-target"}}
 	imageRef := "registry.fugue.internal:5000/fugue-apps/demo@sha256:" + strings.Repeat("b", 64)
 	if _, err := stateStore.UpsertImageLocation(model.ImageLocation{
 		TenantID: app.TenantID, AppID: app.ID, ImageRef: imageRef,
@@ -998,7 +1008,7 @@ func TestCurrentManagedImagePresenceDoesNotUseSourceRuntimeEvidence(t *testing.T
 func TestManagedAppRuntimeEvidenceRejectsUnobservedDeploymentGeneration(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1073,7 +1083,7 @@ func TestManagedAppRuntimeEvidenceRejectsUnobservedDeploymentGeneration(t *testi
 func TestManagedAppRuntimeEvidenceRejectsForeignManagedAppIdentity(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1423,7 +1433,7 @@ func TestOverlayManagedAppStatusUsesSingleObjectLookup(t *testing.T) {
 func TestLoadConsoleAppsUsesManagedAppOverlay(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -240,13 +240,13 @@ func compactOnlyStoreFixture(t *testing.T, s *Store) (platformconfig.CompileResu
 }
 
 func TestCompactOnlyColdFileReadsAndRetentionNeedNoOriginal(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
 	c, parent := compactOnlyStoreFixture(t, s)
-	s = New(path)
+	s = newStoreTestDatabase(t, path)
 	s.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring("synthetic-compact-key", "compact", "", "", nil))
 	if _, err := s.GetPlatformCompilerInput(c.Lineage.InputSnapshotDigest); !errors.Is(err, ErrNotFound) {
 		t.Fatal("complete input persisted", err)
@@ -269,53 +269,6 @@ func TestCompactOnlyColdFileReadsAndRetentionNeedNoOriginal(t *testing.T) {
 	}
 	if _, err := s.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatal("empty quality history was fabricated", err)
-	}
-}
-
-func TestQualityEvidenceIndependentPoolOwnsBytesChecksSignatureAndExpires(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json")
-	s := New(path)
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	_, parent := compactOnlyStoreFixture(t, s)
-	at := time.Now().UTC().Add(-time.Hour)
-	quality := platformconfig.RuntimeSnapshot{IntentGeneration: "intent", PolicyGeneration: "policy", CapturedAt: &at,
-		DNSSelections: []platformconfig.DNSSelectionObservation{{NodeID: "dns-a", Hostname: "app.example.test", ObservedAt: at, PhysicalEvidence: json.RawMessage(`{"receipt":{"at":"original"}}`)}}}
-	digest, _ := platformconfig.RuntimeSnapshotDigest(quality)
-	if err := s.ensurePlatformQualityEvidence(t.Context(), quality, digest, time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	parent.Metadata[platformconfig.QualityEvidenceDigestMetadata] = digest
-	parent, err := platformsafety.SignPlatformArtifact(parent, s.platformArtifactSigningKeyring())
-	if err != nil {
-		t.Fatal(err)
-	}
-	s = New(path)
-	s.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring("synthetic-compact-key", "compact", "", "", nil))
-	got, err := s.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil)
-	gotDigest, _ := platformconfig.RuntimeSnapshotDigest(platformconfig.RuntimeSnapshot{IntentGeneration: got.IntentGeneration, PolicyGeneration: got.PolicyGeneration, CapturedAt: quality.CapturedAt, DNSSelections: got.DNSSelections})
-	if err != nil || gotDigest != digest {
-		t.Fatal("cold pool read changed evidence", got.IntentGeneration, got.PolicyGeneration, gotDigest, digest, err)
-	}
-	got.DNSSelections[0].PhysicalEvidence[0] = '!'
-	if _, err := s.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil); err != nil {
-		t.Fatal("caller mutated persisted evidence", err)
-	}
-	parent.Metadata[platformconfig.QualityEvidenceDigestMetadata] = "sha256:" + strings.Repeat("a", 64)
-	if _, err := s.GetPlatformArtifactQualityInputContext(t.Context(), parent, nil); !errors.Is(err, ErrConflict) {
-		t.Fatal("unsigned binding changed", err)
-	}
-	if err := s.maintainPlatformQualityEvidence(t.Context(), nil, at.Add(QualityEvidenceRetention+time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.withLockedState(false, func(st *model.State) error {
-		if len(st.PlatformQualityEvidence) != 0 {
-			t.Fatal("expired pool retained")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
 	}
 }
 

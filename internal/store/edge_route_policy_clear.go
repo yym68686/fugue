@@ -92,16 +92,6 @@ func removedEdgeExclusionIDs(before, after []string, group bool) []string {
 	return removed
 }
 
-func validateFileEdgeExclusionClearState(state *model.State, edgeIDs, edgeGroupIDs []string, now time.Time) error {
-	if state == nil || state.EdgeActivation == nil {
-		return fmt.Errorf("%w: edge exclusion clear activation state is missing", ErrConflict)
-	}
-	if err := verifyEdgeActivationReadiness(state); err != nil {
-		return err
-	}
-	return validateEdgeExclusionClearMaterial(*state.EdgeActivation, state.EdgeNodeInstances, state.EdgeActiveEpochs, edgeIDs, edgeGroupIDs, now)
-}
-
 // CheckEdgeRoutePolicyClearEvidence returns a point-in-time read-only view. The
 // mutation paths repeat this check under the same durable transaction as CAS.
 func (s *Store) CheckEdgeRoutePolicyClearEvidence(hostname string, edgeIDs, edgeGroupIDs []string) error {
@@ -109,13 +99,5 @@ func (s *Store) CheckEdgeRoutePolicyClearEvidence(hostname string, edgeIDs, edge
 	if hostname == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCheckEdgeRoutePolicyClearEvidence(hostname, edgeIDs, edgeGroupIDs)
-	}
-	return s.withLockedState(false, func(state *model.State) error {
-		if findEdgeRoutePolicy(state, hostname) < 0 {
-			return ErrNotFound
-		}
-		return validateFileEdgeExclusionClearState(state, edgeIDs, edgeGroupIDs, time.Now().UTC())
-	})
+	return s.pgCheckEdgeRoutePolicyClearEvidence(hostname, edgeIDs, edgeGroupIDs)
 }

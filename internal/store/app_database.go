@@ -1,10 +1,7 @@
 package store
 
 import (
-	"crypto/subtle"
-	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -42,36 +39,7 @@ func (s *Store) CreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (mode
 	if job.Format == "" {
 		job.Format = model.AppDatabaseImportFormatAuto
 	}
-	if s.usingDatabase() {
-		return s.pgCreateAppDatabaseImportJob(job)
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		appIndex := findApp(state, job.AppID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.Apps[appIndex].TenantID) != job.TenantID {
-			return ErrNotFound
-		}
-		if err := validateAppDatabaseImportRunnableState(state, job.AppID); err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		if strings.TrimSpace(job.ID) == "" {
-			job.ID = model.NewID("dbimport")
-		}
-		if job.CreatedAt.IsZero() {
-			job.CreatedAt = now
-		}
-		job.UpdatedAt = now
-		state.AppDatabaseImportJobs = append(state.AppDatabaseImportJobs, job)
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseImportJob{}, err
-	}
-	return redactAppDatabaseImportJob(job), nil
+	return s.pgCreateAppDatabaseImportJob(job)
 }
 
 func (s *Store) ListAppDatabaseImportJobs(appID string) ([]model.AppDatabaseImportJob, error) {
@@ -79,32 +47,7 @@ func (s *Store) ListAppDatabaseImportJobs(appID string) ([]model.AppDatabaseImpo
 	if appID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListAppDatabaseImportJobs(appID)
-	}
-
-	jobs := []model.AppDatabaseImportJob{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findApp(state, appID) < 0 {
-			return ErrNotFound
-		}
-		for _, job := range state.AppDatabaseImportJobs {
-			if strings.TrimSpace(job.AppID) == appID {
-				jobs = append(jobs, redactAppDatabaseImportJob(job))
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(jobs, func(i, j int) bool {
-		if !jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
-			return jobs[i].CreatedAt.After(jobs[j].CreatedAt)
-		}
-		return jobs[i].ID > jobs[j].ID
-	})
-	return jobs, nil
+	return s.pgListAppDatabaseImportJobs(appID)
 }
 
 func (s *Store) GetAppDatabaseImportJob(appID, jobID string) (model.AppDatabaseImportJob, error) {
@@ -113,56 +56,14 @@ func (s *Store) GetAppDatabaseImportJob(appID, jobID string) (model.AppDatabaseI
 	if appID == "" || jobID == "" {
 		return model.AppDatabaseImportJob{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAppDatabaseImportJob(appID, jobID)
-	}
-
-	var job model.AppDatabaseImportJob
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findAppDatabaseImportJob(state, jobID)
-		if index < 0 || strings.TrimSpace(state.AppDatabaseImportJobs[index].AppID) != appID {
-			return ErrNotFound
-		}
-		job = state.AppDatabaseImportJobs[index]
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseImportJob{}, err
-	}
-	return redactAppDatabaseImportJob(job), nil
+	return s.pgGetAppDatabaseImportJob(appID, jobID)
 }
 
 func (s *Store) ListPendingAppDatabaseImportJobs(limit int) ([]model.AppDatabaseImportJob, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	if s.usingDatabase() {
-		return s.pgListPendingAppDatabaseImportJobs(limit)
-	}
-
-	jobs := []model.AppDatabaseImportJob{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, job := range state.AppDatabaseImportJobs {
-			if strings.TrimSpace(job.Status) != model.OperationStatusPending {
-				continue
-			}
-			jobs = append(jobs, redactAppDatabaseImportJob(job))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(jobs, func(i, j int) bool {
-		if !jobs[i].CreatedAt.Equal(jobs[j].CreatedAt) {
-			return jobs[i].CreatedAt.Before(jobs[j].CreatedAt)
-		}
-		return jobs[i].ID < jobs[j].ID
-	})
-	if len(jobs) > limit {
-		jobs = jobs[:limit]
-	}
-	return jobs, nil
+	return s.pgListPendingAppDatabaseImportJobs(limit)
 }
 
 func (s *Store) ClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImportJob, error) {
@@ -170,48 +71,7 @@ func (s *Store) ClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImport
 	if jobID == "" {
 		return model.AppDatabaseImportJob{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgClaimAppDatabaseImportJob(jobID)
-	}
-
-	var (
-		job     model.AppDatabaseImportJob
-		blocked bool
-	)
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppDatabaseImportJob(state, jobID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.AppDatabaseImportJobs[index].Status != model.OperationStatusPending {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		if err := validateAppDatabaseImportRunnableState(state, state.AppDatabaseImportJobs[index].AppID); err != nil {
-			if !errors.Is(err, ErrManagedPostgresDatabaseImportConflict) {
-				return err
-			}
-			state.AppDatabaseImportJobs[index].Status = model.OperationStatusFailed
-			state.AppDatabaseImportJobs[index].ErrorMessage = ManagedPostgresDatabaseImportConflictMessage
-			state.AppDatabaseImportJobs[index].CompletedAt = &now
-			state.AppDatabaseImportJobs[index].UpdatedAt = now
-			job = state.AppDatabaseImportJobs[index]
-			blocked = true
-			return nil
-		}
-		state.AppDatabaseImportJobs[index].Status = model.OperationStatusRunning
-		state.AppDatabaseImportJobs[index].StartedAt = &now
-		state.AppDatabaseImportJobs[index].UpdatedAt = now
-		job = state.AppDatabaseImportJobs[index]
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseImportJob{}, err
-	}
-	if blocked {
-		return model.AppDatabaseImportJob{}, ErrManagedPostgresDatabaseImportConflict
-	}
-	return redactAppDatabaseImportJob(job), nil
+	return s.pgClaimAppDatabaseImportJob(jobID)
 }
 
 // ValidateAppDatabaseImportRunnable is a defense-in-depth check used immediately
@@ -222,48 +82,7 @@ func (s *Store) ValidateAppDatabaseImportRunnable(appID string) error {
 	if appID == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgValidateAppDatabaseImportRunnable(appID)
-	}
-	return s.withLockedState(false, func(state *model.State) error {
-		return validateAppDatabaseImportRunnableState(state, appID)
-	})
-}
-
-func validateAppDatabaseImportRunnableState(state *model.State, appID string) error {
-	if state == nil {
-		return ErrInvalidInput
-	}
-	appID = strings.TrimSpace(appID)
-	appIndex := findApp(state, appID)
-	if appID == "" || appIndex < 0 || isDeletedApp(state.Apps[appIndex]) {
-		return ErrNotFound
-	}
-	app := state.Apps[appIndex]
-	hydrateAppBackingServices(state, &app)
-	if appHasSuspendedManagedPostgres(app) ||
-		hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, appID) {
-		return ErrManagedPostgresDatabaseImportConflict
-	}
-	return nil
-}
-
-// hasActiveAppDatabaseImportJobForManagedPostgres deliberately uses app-level
-// matching. AppDatabaseImportJob predates backing-service IDs and stores only
-// AppID, so narrowing by service would create a false safety proof.
-func hasActiveAppDatabaseImportJobForManagedPostgres(state *model.State, app model.App, _ string) bool {
-	if state == nil || strings.TrimSpace(app.ID) == "" {
-		return false
-	}
-	for _, job := range state.AppDatabaseImportJobs {
-		if strings.TrimSpace(job.AppID) != strings.TrimSpace(app.ID) {
-			continue
-		}
-		if job.Status == model.OperationStatusPending || job.Status == model.OperationStatusRunning {
-			return true
-		}
-	}
-	return false
+	return s.pgValidateAppDatabaseImportRunnable(appID)
 }
 
 func (s *Store) AppendAppDatabaseImportJobLog(jobID, message string) (model.AppDatabaseImportJob, error) {
@@ -272,31 +91,7 @@ func (s *Store) AppendAppDatabaseImportJobLog(jobID, message string) (model.AppD
 	if jobID == "" {
 		return model.AppDatabaseImportJob{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAppendAppDatabaseImportJobLog(jobID, message)
-	}
-
-	var job model.AppDatabaseImportJob
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppDatabaseImportJob(state, jobID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		if message != "" {
-			state.AppDatabaseImportJobs[index].Logs = append(state.AppDatabaseImportJobs[index].Logs, model.AppDatabaseImportJobLog{
-				At:      now,
-				Message: message,
-			})
-		}
-		state.AppDatabaseImportJobs[index].UpdatedAt = now
-		job = state.AppDatabaseImportJobs[index]
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseImportJob{}, err
-	}
-	return redactAppDatabaseImportJob(job), nil
+	return s.pgAppendAppDatabaseImportJobLog(jobID, message)
 }
 
 func (s *Store) CompleteAppDatabaseImportJob(jobID, status, message, errorMessage string) (model.AppDatabaseImportJob, error) {
@@ -305,32 +100,7 @@ func (s *Store) CompleteAppDatabaseImportJob(jobID, status, message, errorMessag
 	if jobID == "" || status == "" {
 		return model.AppDatabaseImportJob{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCompleteAppDatabaseImportJob(jobID, status, message, errorMessage)
-	}
-
-	var job model.AppDatabaseImportJob
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppDatabaseImportJob(state, jobID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		if state.AppDatabaseImportJobs[index].Status != model.OperationStatusRunning {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		state.AppDatabaseImportJobs[index].Status = status
-		state.AppDatabaseImportJobs[index].ResultMessage = strings.TrimSpace(message)
-		state.AppDatabaseImportJobs[index].ErrorMessage = strings.TrimSpace(errorMessage)
-		state.AppDatabaseImportJobs[index].CompletedAt = &now
-		state.AppDatabaseImportJobs[index].UpdatedAt = now
-		job = state.AppDatabaseImportJobs[index]
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseImportJob{}, err
-	}
-	return redactAppDatabaseImportJob(job), nil
+	return s.pgCompleteAppDatabaseImportJob(jobID, status, message, errorMessage)
 }
 
 func (s *Store) ListAppDatabaseAccessGrants(appID string) ([]model.AppDatabaseAccessGrant, error) {
@@ -338,34 +108,7 @@ func (s *Store) ListAppDatabaseAccessGrants(appID string) ([]model.AppDatabaseAc
 	if appID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListAppDatabaseAccessGrants(appID)
-	}
-
-	grants := []model.AppDatabaseAccessGrant{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findApp(state, appID) < 0 {
-			return ErrNotFound
-		}
-		for _, grant := range state.AppDatabaseAccessGrants {
-			if strings.TrimSpace(grant.AppID) != appID {
-				continue
-			}
-			normalizeAppDatabaseAccessGrantForRead(&grant)
-			grants = append(grants, redactAppDatabaseAccessGrant(grant))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(grants, func(i, j int) bool {
-		if !grants[i].CreatedAt.Equal(grants[j].CreatedAt) {
-			return grants[i].CreatedAt.After(grants[j].CreatedAt)
-		}
-		return grants[i].ID > grants[j].ID
-	})
-	return grants, nil
+	return s.pgListAppDatabaseAccessGrants(appID)
 }
 
 func (s *Store) CreateAppDatabaseAccessGrant(grant model.AppDatabaseAccessGrant) (model.AppDatabaseAccessGrant, string, error) {
@@ -382,35 +125,7 @@ func (s *Store) CreateAppDatabaseAccessGrant(grant model.AppDatabaseAccessGrant)
 	grant.TokenPrefix = model.SecretPrefix(secret)
 	grant.TokenHash = model.HashSecret(secret)
 	grant.Status = model.AppDatabaseAccessGrantStatusActive
-	if s.usingDatabase() {
-		return s.pgCreateAppDatabaseAccessGrant(grant, secret)
-	}
-
-	err := s.withLockedState(true, func(state *model.State) error {
-		appIndex := findApp(state, grant.AppID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		if strings.TrimSpace(state.Apps[appIndex].TenantID) != grant.TenantID {
-			return ErrNotFound
-		}
-		now := time.Now().UTC()
-		if strings.TrimSpace(grant.ID) == "" {
-			grant.ID = model.NewID("dbaccess")
-		}
-		if grant.Label == "" {
-			grant.Label = "database tunnel"
-		}
-		grant.CreatedAt = now
-		grant.UpdatedAt = now
-		state.AppDatabaseAccessGrants = append(state.AppDatabaseAccessGrants, grant)
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseAccessGrant{}, "", err
-	}
-	normalizeAppDatabaseAccessGrantForRead(&grant)
-	return redactAppDatabaseAccessGrant(grant), secret, nil
+	return s.pgCreateAppDatabaseAccessGrant(grant, secret)
 }
 
 func (s *Store) RevokeAppDatabaseAccessGrant(appID, grantID string) (bool, error) {
@@ -419,26 +134,7 @@ func (s *Store) RevokeAppDatabaseAccessGrant(appID, grantID string) (bool, error
 	if appID == "" || grantID == "" {
 		return false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRevokeAppDatabaseAccessGrant(appID, grantID)
-	}
-
-	var removed bool
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppDatabaseAccessGrant(state, appID, grantID)
-		if index < 0 {
-			return nil
-		}
-		now := time.Now().UTC()
-		if state.AppDatabaseAccessGrants[index].RevokedAt == nil {
-			state.AppDatabaseAccessGrants[index].RevokedAt = &now
-			state.AppDatabaseAccessGrants[index].Status = model.AppDatabaseAccessGrantStatusRevoked
-			state.AppDatabaseAccessGrants[index].UpdatedAt = now
-		}
-		removed = true
-		return nil
-	})
-	return removed, err
+	return s.pgRevokeAppDatabaseAccessGrant(appID, grantID)
 }
 
 func (s *Store) AuthenticateAppDatabaseAccessGrant(appID, grantID, secret string) (model.AppDatabaseAccessGrant, error) {
@@ -448,35 +144,7 @@ func (s *Store) AuthenticateAppDatabaseAccessGrant(appID, grantID, secret string
 	if appID == "" || grantID == "" || secret == "" {
 		return model.AppDatabaseAccessGrant{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAuthenticateAppDatabaseAccessGrant(appID, grantID, secret)
-	}
-
-	var grant model.AppDatabaseAccessGrant
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findAppDatabaseAccessGrant(state, appID, grantID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		current := state.AppDatabaseAccessGrants[index]
-		if subtle.ConstantTimeCompare([]byte(current.TokenHash), []byte(model.HashSecret(secret))) != 1 {
-			return ErrNotFound
-		}
-		normalizeAppDatabaseAccessGrantForRead(&current)
-		if current.Status != model.AppDatabaseAccessGrantStatusActive {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		current.LastUsedAt = &now
-		current.UpdatedAt = now
-		state.AppDatabaseAccessGrants[index] = current
-		grant = current
-		return nil
-	})
-	if err != nil {
-		return model.AppDatabaseAccessGrant{}, err
-	}
-	return redactAppDatabaseAccessGrant(grant), nil
+	return s.pgAuthenticateAppDatabaseAccessGrant(appID, grantID, secret)
 }
 
 func normalizeAppDatabaseImportFormat(raw string) string {
@@ -558,110 +226,4 @@ func redactAppDatabaseImportJob(job model.AppDatabaseImportJob) model.AppDatabas
 	job.Status = normalizeAppDatabaseImportStatus(job.Status)
 	job.Logs = append([]model.AppDatabaseImportJobLog(nil), job.Logs...)
 	return job
-}
-
-func findAppDatabaseImportJob(state *model.State, jobID string) int {
-	jobID = strings.TrimSpace(jobID)
-	if state == nil || jobID == "" {
-		return -1
-	}
-	for idx := range state.AppDatabaseImportJobs {
-		if strings.TrimSpace(state.AppDatabaseImportJobs[idx].ID) == jobID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findAppDatabaseAccessGrant(state *model.State, appID, grantID string) int {
-	appID = strings.TrimSpace(appID)
-	grantID = strings.TrimSpace(grantID)
-	if state == nil || appID == "" || grantID == "" {
-		return -1
-	}
-	for idx := range state.AppDatabaseAccessGrants {
-		grant := state.AppDatabaseAccessGrants[idx]
-		if strings.TrimSpace(grant.AppID) == appID && strings.TrimSpace(grant.ID) == grantID {
-			return idx
-		}
-	}
-	return -1
-}
-
-func deleteAppDatabaseImportJobsByTenant(jobs []model.AppDatabaseImportJob, tenantID string) []model.AppDatabaseImportJob {
-	tenantID = strings.TrimSpace(tenantID)
-	out := jobs[:0]
-	for _, job := range jobs {
-		if strings.TrimSpace(job.TenantID) == tenantID {
-			continue
-		}
-		out = append(out, job)
-	}
-	return out
-}
-
-func deleteAppDatabaseImportJobsByApp(jobs []model.AppDatabaseImportJob, appID string) []model.AppDatabaseImportJob {
-	appID = strings.TrimSpace(appID)
-	out := jobs[:0]
-	for _, job := range jobs {
-		if strings.TrimSpace(job.AppID) == appID {
-			continue
-		}
-		out = append(out, job)
-	}
-	return out
-}
-
-func deleteAppDatabaseImportJobsByAppIDs(jobs []model.AppDatabaseImportJob, appIDs []string) []model.AppDatabaseImportJob {
-	remove := trimmedStringSet(appIDs)
-	if len(remove) == 0 {
-		return jobs
-	}
-	out := jobs[:0]
-	for _, job := range jobs {
-		if _, ok := remove[strings.TrimSpace(job.AppID)]; ok {
-			continue
-		}
-		out = append(out, job)
-	}
-	return out
-}
-
-func deleteAppDatabaseAccessGrantsByTenant(grants []model.AppDatabaseAccessGrant, tenantID string) []model.AppDatabaseAccessGrant {
-	tenantID = strings.TrimSpace(tenantID)
-	out := grants[:0]
-	for _, grant := range grants {
-		if strings.TrimSpace(grant.TenantID) == tenantID {
-			continue
-		}
-		out = append(out, grant)
-	}
-	return out
-}
-
-func deleteAppDatabaseAccessGrantsByApp(grants []model.AppDatabaseAccessGrant, appID string) []model.AppDatabaseAccessGrant {
-	appID = strings.TrimSpace(appID)
-	out := grants[:0]
-	for _, grant := range grants {
-		if strings.TrimSpace(grant.AppID) == appID {
-			continue
-		}
-		out = append(out, grant)
-	}
-	return out
-}
-
-func deleteAppDatabaseAccessGrantsByAppIDs(grants []model.AppDatabaseAccessGrant, appIDs []string) []model.AppDatabaseAccessGrant {
-	remove := trimmedStringSet(appIDs)
-	if len(remove) == 0 {
-		return grants
-	}
-	out := grants[:0]
-	for _, grant := range grants {
-		if _, ok := remove[strings.TrimSpace(grant.AppID)]; ok {
-			continue
-		}
-		out = append(out, grant)
-	}
-	return out
 }

@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -19,7 +17,7 @@ import (
 )
 
 func TestClusterResourceReportAdminAPIRecommendationsAndMetricsFailure(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

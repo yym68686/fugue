@@ -32,7 +32,7 @@ func TestBackupArtifactRestoreDeleteInterlockPostgres(t *testing.T) {
 	query.Set("application_name", applicationName)
 	parsedURL.RawQuery = query.Encode()
 
-	stateStore := New("", parsedURL.String())
+	stateStore := New(parsedURL.String())
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init postgres store: %v", err)
 	}

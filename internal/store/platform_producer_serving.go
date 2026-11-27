@@ -38,7 +38,7 @@ func (s *Store) RollbackProducedTraffic(id, failedReleaseID, policyReleaseID, pr
 	return s.rollbackPlatformArtifact(id, req, principal, guard)
 }
 
-func producerActivePublication(state *model.State, scope, channel string) (model.PlatformArtifactRelease, bool) {
+func producerActivePublication(state *storeProjection, scope, channel string) (model.PlatformArtifactRelease, bool) {
 	lane, ok := platformReleaseLaneByKey(state.PlatformReleaseLanes, platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, scope, channel))
 	if !ok || lane.Frozen || lane.ActiveReleaseID == "" {
 		return model.PlatformArtifactRelease{}, false
@@ -55,7 +55,7 @@ func producerOwnsPublication(r model.PlatformArtifactRelease) bool {
 	return r.ReleasedByType == model.ActorTypeBootstrap && r.ReleasedByID == platformproducer.Actor
 }
 
-func validateProducerServingPhase(state *model.State, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, policy platformproducer.Policy, keys bundleauth.Keyring, guard *platformProducerReleaseGuard) error {
+func validateProducerServingPhase(state *storeProjection, parent model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, policy platformproducer.Policy, keys bundleauth.Keyring, guard *platformProducerReleaseGuard) error {
 	fail := func(reason string) error {
 		return fmt.Errorf("%w: automatic traffic publication: %s", ErrConflict, reason)
 	}

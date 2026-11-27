@@ -15,7 +15,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/releaseproof"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func trafficReadinessFixture(t *testing.T, stored ...model.App) (model.App, map[string]any) {
@@ -88,7 +87,7 @@ func trafficReadinessFixture(t *testing.T, stored ...model.App) (model.App, map[
 func TestOrdinaryRolloutWaitsForTrafficProofBeforeCompleting(t *testing.T) {
 	for _, scenario := range []string{"endpoint becomes ready", "endpoint observation remains denied"} {
 		t.Run(scenario, func(t *testing.T) {
-			st := store.New(t.TempDir() + "/state.json")
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

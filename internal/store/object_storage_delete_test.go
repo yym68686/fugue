@@ -3,19 +3,20 @@ package store
 import (
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"regexp"
 	"testing"
 
 	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestDeleteObjectStoreRetainsOtherStoresAndRequiresRevokedGrants(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}
+	seedStoreTestIdentity(t, s, "tenant", "project", "")
 	for _, id := range []string{"one", "two"} {
 		if err := s.SaveObjectStore(model.ObjectStore{ID: id, TenantID: "tenant", ProjectID: "project", Name: id, Status: "active"}); err != nil {
 			t.Fatal(err)

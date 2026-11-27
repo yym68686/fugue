@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"time"
 
@@ -17,27 +16,7 @@ func (s *Store) CreateAppRelease(release model.AppRelease) (model.AppRelease, er
 	if err != nil {
 		return model.AppRelease{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreateAppRelease(release)
-	}
-	var out model.AppRelease
-	err = s.withLockedState(true, func(state *model.State) error {
-		if activeRecovery(state.AppRecoveries, release.AppID) {
-			return ErrConflict
-		}
-		for _, existing := range state.AppReleases {
-			if existing.ID == release.ID {
-				return ErrConflict
-			}
-		}
-		if err := guardReleaseRetirement(state, model.AppRelease{}, release); err != nil {
-			return err
-		}
-		state.AppReleases = append(state.AppReleases, release)
-		out = release
-		return nil
-	})
-	return out, err
+	return s.pgCreateAppRelease(release)
 }
 
 func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, error) {
@@ -45,30 +24,7 @@ func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, er
 	if err != nil {
 		return model.AppRelease{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateAppRelease(release)
-	}
-	var out model.AppRelease
-	err = s.withLockedState(true, func(state *model.State) error {
-		if activeRecovery(state.AppRecoveries, release.AppID) {
-			return ErrConflict
-		}
-		index := findAppReleaseByID(state.AppReleases, release.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		current := state.AppReleases[index]
-		if err := guardReleaseRetirement(state, current, release); err != nil {
-			return err
-		}
-		if err := preserveReleaseWorkload(current, &release); err != nil {
-			return err
-		}
-		state.AppReleases[index] = release
-		out = release
-		return nil
-	})
-	return out, err
+	return s.pgUpdateAppRelease(release)
 }
 
 func (s *Store) GetAppRelease(tenantID string, platformAdmin bool, releaseID string) (model.AppRelease, error) {
@@ -76,59 +32,19 @@ func (s *Store) GetAppRelease(tenantID string, platformAdmin bool, releaseID str
 	if releaseID == "" {
 		return model.AppRelease{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAppRelease(tenantID, platformAdmin, releaseID)
-	}
-	var out model.AppRelease
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findAppReleaseByID(state.AppReleases, releaseID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		release := state.AppReleases[index]
-		if !platformAdmin && strings.TrimSpace(release.TenantID) != strings.TrimSpace(tenantID) {
-			return ErrNotFound
-		}
-		out = release
-		return nil
-	})
-	return out, err
+	return s.pgGetAppRelease(tenantID, platformAdmin, releaseID)
 }
 
 func (s *Store) ListAppReleases(filter model.AppReleaseFilter) ([]model.AppRelease, error) {
 	filter = normalizeAppReleaseFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListAppReleases(filter)
-	}
-	out := []model.AppRelease{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, release := range state.AppReleases {
-			if !appReleaseMatchesFilter(release, filter) {
-				continue
-			}
-			out = append(out, release)
-		}
-		sortAppReleases(out)
-		return nil
-	})
-	return out, err
+	return s.pgListAppReleases(filter)
 }
 
 // ListAppReleaseMetadata is for runtime evidence readers that never consume
 // executable config snapshots. Full release reads remain available for rollback.
 func (s *Store) ListAppReleaseMetadata(filter model.AppReleaseFilter) ([]model.AppRelease, error) {
 	filter = normalizeAppReleaseFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListAppReleaseView(filter, false)
-	}
-	releases, err := s.ListAppReleases(filter)
-	if err != nil {
-		return nil, err
-	}
-	for i := range releases {
-		releases[i].SpecSnapshot = nil
-	}
-	return releases, nil
+	return s.pgListAppReleaseView(filter, false)
 }
 
 // ListAppReleaseRetirementState preserves all matching release facts and only
@@ -140,22 +56,7 @@ func (s *Store) ListAppReleaseRetirementState(ctx context.Context, filter model.
 		return nil, err
 	}
 	filter = normalizeAppReleaseFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListAppReleaseProjectionContext(ctx, filter, appReleaseDrainSpec)
-	}
-	releases, err := s.ListAppReleases(filter)
-	if err != nil {
-		return nil, err
-	}
-	for i := range releases {
-		if !AppReleaseAwaitingDrain(releases[i]) {
-			releases[i].SpecSnapshot = nil
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return releases, nil
+	return s.pgListAppReleaseProjectionContext(ctx, filter, appReleaseDrainSpec)
 }
 
 func (s *Store) GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID string) (model.AppTrafficPolicy, error) {
@@ -163,47 +64,12 @@ func (s *Store) GetAppTrafficPolicy(tenantID string, platformAdmin bool, appID s
 	if appID == "" {
 		return model.AppTrafficPolicy{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetAppTrafficPolicy(tenantID, platformAdmin, appID)
-	}
-	var out model.AppTrafficPolicy
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findAppTrafficPolicyByApp(state.AppTrafficPolicies, appID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		policy := state.AppTrafficPolicies[index]
-		if !platformAdmin && strings.TrimSpace(policy.TenantID) != strings.TrimSpace(tenantID) {
-			return ErrNotFound
-		}
-		out = policy
-		return nil
-	})
-	return out, err
+	return s.pgGetAppTrafficPolicy(tenantID, platformAdmin, appID)
 }
 
 func (s *Store) ListAppTrafficPolicies(tenantID string, platformAdmin bool) ([]model.AppTrafficPolicy, error) {
 	tenantID = strings.TrimSpace(tenantID)
-	if s.usingDatabase() {
-		return s.pgListAppTrafficPolicies(tenantID, platformAdmin)
-	}
-	out := []model.AppTrafficPolicy{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, policy := range state.AppTrafficPolicies {
-			if !platformAdmin && strings.TrimSpace(policy.TenantID) != tenantID {
-				continue
-			}
-			out = append(out, policy)
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if out[i].AppID != out[j].AppID {
-				return out[i].AppID < out[j].AppID
-			}
-			return out[i].UpdatedAt.After(out[j].UpdatedAt)
-		})
-		return nil
-	})
-	return out, err
+	return s.pgListAppTrafficPolicies(tenantID, platformAdmin)
 }
 
 func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.AppTrafficPolicy, error) {
@@ -211,70 +77,11 @@ func (s *Store) UpsertAppTrafficPolicy(policy model.AppTrafficPolicy) (model.App
 	if err != nil {
 		return model.AppTrafficPolicy{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertAppTrafficPolicy(policy)
-	}
-	var out model.AppTrafficPolicy
-	err = s.withLockedState(true, func(state *model.State) error {
-		if activeRecovery(state.AppRecoveries, policy.AppID) {
-			return ErrConflict
-		}
-		for _, release := range state.AppReleases {
-			if (release.ID == policy.StableReleaseID || release.ID == policy.CandidateReleaseID) && AppReleaseIsRetired(release) {
-				return ErrConflict
-			}
-		}
-		index := findAppTrafficPolicyByApp(state.AppTrafficPolicies, policy.AppID)
-		if index >= 0 {
-			current := state.AppTrafficPolicies[index]
-			// A reconcile/abort retry is not a new traffic withdrawal. Preserve
-			// its version and audit actor so it cannot renew retirement grace or
-			// invalidate a drain proof that observed identical routing intent.
-			if appTrafficPolicyIntentEqual(current, policy) {
-				out = current
-				return nil
-			}
-			// Match PostgreSQL's app_id upsert: normalization may have generated
-			// a fresh ID/creation time, but this is still the same policy row.
-			policy.ID = current.ID
-			policy.CreatedAt = current.CreatedAt
-			state.AppTrafficPolicies[index] = policy
-		} else {
-			state.AppTrafficPolicies = append(state.AppTrafficPolicies, policy)
-		}
-		out = policy
-		return nil
-	})
-	return out, err
-}
-
-func appTrafficPolicyIntentEqual(a, b model.AppTrafficPolicy) bool {
-	return a.TenantID == b.TenantID && a.AppID == b.AppID && a.Mode == b.Mode &&
-		a.StableReleaseID == b.StableReleaseID && a.CandidateReleaseID == b.CandidateReleaseID &&
-		a.StableWeight == b.StableWeight && a.CandidateWeight == b.CandidateWeight &&
-		a.StickyHeader == b.StickyHeader && a.StickyCookie == b.StickyCookie
+	return s.pgUpsertAppTrafficPolicy(policy)
 }
 
 func AppReleaseIsRetired(release model.AppRelease) bool {
 	return release.Status == model.AppReleaseStatusRetired || release.Role == model.AppReleaseRoleRetired
-}
-
-func guardReleaseRetirement(state *model.State, current, desired model.AppRelease) error {
-	if AppReleaseIsRetired(current) {
-		return ErrConflict
-	}
-	if !AppReleaseIsRetired(desired) {
-		return nil
-	}
-	if desired.Status != model.AppReleaseStatusRetired || desired.Role != model.AppReleaseRoleRetired {
-		return ErrConflict
-	}
-	for _, policy := range state.AppTrafficPolicies {
-		if policy.StableReleaseID == desired.ID || policy.CandidateReleaseID == desired.ID {
-			return ErrConflict
-		}
-	}
-	return nil
 }
 
 func normalizeAppReleaseForStore(release model.AppRelease) (model.AppRelease, error) {
@@ -396,54 +203,6 @@ func NormalizeAppTrafficMode(mode string) string {
 	}
 }
 
-func appReleaseMatchesFilter(release model.AppRelease, filter model.AppReleaseFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(release.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.PlatformAdmin && filter.TenantID != "" && strings.TrimSpace(release.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(release.AppID) != filter.AppID {
-		return false
-	}
-	if filter.Role != "" && strings.TrimSpace(release.Role) != filter.Role {
-		return false
-	}
-	if !filter.IncludeRetired && strings.TrimSpace(release.Role) == model.AppReleaseRoleRetired {
-		return false
-	}
-	if filter.ActiveOnly && !appReleaseIsActiveForRouting(release) {
-		return false
-	}
-	return true
-}
-
-func appReleaseIsActiveForRouting(release model.AppRelease) bool {
-	switch strings.TrimSpace(release.Role) {
-	case model.AppReleaseRoleStable, model.AppReleaseRoleCandidate, model.AppReleaseRolePrevious:
-	default:
-		return false
-	}
-	switch strings.TrimSpace(release.Status) {
-	case model.AppReleaseStatusReady, model.AppReleaseStatusServing, model.AppReleaseStatusDraining:
-		return true
-	default:
-		return false
-	}
-}
-
-func sortAppReleases(releases []model.AppRelease) {
-	sort.Slice(releases, func(i, j int) bool {
-		if releases[i].AppID != releases[j].AppID {
-			return releases[i].AppID < releases[j].AppID
-		}
-		if releases[i].Role != releases[j].Role {
-			return releases[i].Role < releases[j].Role
-		}
-		return releases[i].CreatedAt.After(releases[j].CreatedAt)
-	})
-}
-
 func findAppReleaseByID(releases []model.AppRelease, id string) int {
 	id = strings.TrimSpace(id)
 	for idx, release := range releases {
@@ -469,25 +228,11 @@ func (s *Store) ListAppReleaseMetadataContext(ctx context.Context, filter model.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		return s.pgListAppReleaseViewContext(ctx, normalizeAppReleaseFilter(filter), false)
-	}
-	result, err := s.ListAppReleaseMetadata(filter)
-	if err == nil {
-		err = ctx.Err()
-	}
-	return result, err
+	return s.pgListAppReleaseViewContext(ctx, normalizeAppReleaseFilter(filter), false)
 }
 func (s *Store) ListAppTrafficPoliciesContext(ctx context.Context, tenantID string, platformAdmin bool) ([]model.AppTrafficPolicy, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		return s.pgListAppTrafficPoliciesContext(ctx, strings.TrimSpace(tenantID), platformAdmin)
-	}
-	result, err := s.ListAppTrafficPolicies(tenantID, platformAdmin)
-	if err == nil {
-		err = ctx.Err()
-	}
-	return result, err
+	return s.pgListAppTrafficPoliciesContext(ctx, strings.TrimSpace(tenantID), platformAdmin)
 }

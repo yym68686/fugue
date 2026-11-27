@@ -12,7 +12,7 @@ import (
 )
 
 func TestManagedHandoffAfterAutomaticStableSyncRetainsVerifiedPath(t *testing.T) {
-	s, p, b, path := handoffPartitionFixture(t)
+	s, p, b, db := handoffPartitionFixture(t)
 	// A second deploy starts before the first completed deploy's automatic
 	// stable selection reaches a verified full traffic publication. The last
 	// verified route still names release-a under deploy-old.
@@ -21,7 +21,7 @@ func TestManagedHandoffAfterAutomaticStableSyncRetainsVerifiedPath(t *testing.T)
 	b.TrafficPolicies[0].StableReleaseID = "release-between"
 	b.TrafficPolicies[0].UpdatedByType = model.ActorTypeSystem
 	b.TrafficPolicies[0].UpdatedByID = "stable-release-sync"
-	persistHandoffBusiness(t, path, b)
+	persistHandoffBusiness(t, db, b)
 	ctx := context.Background()
 	source, err := s.readRetainedTrafficSource(ctx, p.Intent.Scope)
 	if err != nil {
@@ -76,12 +76,12 @@ func TestManagedHandoffAfterAutomaticStableSyncRetainsVerifiedPath(t *testing.T)
 	// Automatic selection is a durable admission condition, not trust in the
 	// capture's claimed handoff. A later operator edit revokes this exception.
 	b.TrafficPolicies[0].UpdatedByType = "user"
-	persistHandoffBusiness(t, path, b)
+	persistHandoffBusiness(t, db, b)
 	if err = s.validateRetainedTrafficCompilation(ctx, compiled); err == nil {
 		t.Fatal("operator edit after capture retained automatic selection authority")
 	}
 	b.TrafficPolicies[0].UpdatedByType = model.ActorTypeSystem
-	persistHandoffBusiness(t, path, b)
+	persistHandoffBusiness(t, db, b)
 	// Retention itself can become the next verified full publication. Its
 	// policy names the intermediate stable while its exact route still names
 	// the earlier release; another capture must preserve that provenance.

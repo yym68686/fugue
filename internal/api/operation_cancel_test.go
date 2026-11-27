@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
@@ -12,7 +11,7 @@ import (
 )
 
 func TestCancelOperationRequiresConfirmationAtAPIAndCancelsPending(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

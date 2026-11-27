@@ -4,19 +4,17 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 // Exercise the full reconciliation entrypoint: the selection helper alone does
 // not prove that its recovered backing-service snapshot reaches credential apply.
 func TestReconcileManagedAppRecoveryUsesPersistedCredentialIdentity(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

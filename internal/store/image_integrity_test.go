@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -13,12 +12,16 @@ const testCanonicalImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 func TestImageStoreDoesNotAdvertiseAvailableWithoutCanonicalDigest(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := s.CreateTenant("image-integrity")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.UpsertImage(model.Image{
-		TenantID:        "tenant",
+		TenantID:        tenant.ID,
 		ImageRef:        "registry.example/app:tag",
 		CanonicalDigest: "",
 		LifecycleState:  model.ImageLifecycleAvailable,
@@ -26,7 +29,7 @@ func TestImageStoreDoesNotAdvertiseAvailableWithoutCanonicalDigest(t *testing.T)
 		t.Fatalf("expected canonical digest validation error, got %v", err)
 	}
 	image, err := s.UpsertImage(model.Image{
-		TenantID: "tenant",
+		TenantID: tenant.ID,
 		ImageRef: "registry.example/app:tag",
 	})
 	if err != nil {
@@ -40,12 +43,16 @@ func TestImageStoreDoesNotAdvertiseAvailableWithoutCanonicalDigest(t *testing.T)
 func TestImageStorePresentReplicaRequiresCanonicalDigest(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := s.CreateTenant("image-integrity")
+	if err != nil {
+		t.Fatal(err)
+	}
 	image, err := s.UpsertImage(model.Image{
-		TenantID:        "tenant",
+		TenantID:        tenant.ID,
 		ImageRef:        "registry.example/app:tag",
 		CanonicalDigest: testCanonicalImageDigest,
 		LifecycleState:  model.ImageLifecycleAvailable,

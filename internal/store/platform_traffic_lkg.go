@@ -17,7 +17,7 @@ import (
 
 // This is one transaction's recovery result, not a parallel release machine.
 // All references keep the same verification release and evidence hash.
-func trafficLKGMembers(state *model.State, parent model.PlatformArtifact, release model.PlatformArtifactRelease, keys bundleauth.Keyring, now time.Time) ([]model.PlatformArtifact, error) {
+func trafficLKGMembers(state *storeProjection, parent model.PlatformArtifact, release model.PlatformArtifactRelease, keys bundleauth.Keyring, now time.Time) ([]model.PlatformArtifact, error) {
 	if parent.ArtifactKind != model.PlatformArtifactKindReleaseSet {
 		return nil, nil
 	}

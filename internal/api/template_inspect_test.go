@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"fugue/internal/auth"
-	"fugue/internal/store"
 )
 
 func TestInspectGitHubTemplateReturnsTemplateMetadata(t *testing.T) {
@@ -41,7 +40,7 @@ services:
 		"Dockerfile": "FROM scratch\nEXPOSE 3000\n",
 	})
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -154,7 +153,7 @@ func TestInspectGitHubTemplateReturnsComposeInspection(t *testing.T) {
 		"Dockerfile": "FROM scratch\nEXPOSE 3000\n",
 	})
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

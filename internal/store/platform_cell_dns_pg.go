@@ -13,7 +13,7 @@ import (
 	"fugue/internal/platformproducer"
 )
 
-func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, state *model.State) error {
+func (s *Store) pgLoadCellDNSReferences(ctx context.Context, tx *sql.Tx, parent model.PlatformArtifact, state *storeProjection) error {
 	if parent.Content["publication_role"] != platformconfig.PublicationRoleCellDNS {
 		return nil
 	}

@@ -4,17 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fugue/internal/auth"
-	"fugue/internal/store"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestAdminStorageRequiresPlatformAdminAndReportsUnknowns(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +44,7 @@ func TestAdminStorageRequiresPlatformAdminAndReportsUnknowns(t *testing.T) {
 }
 
 func TestAdminStorageObservesUntrackedRemoteWithoutDeleting(t *testing.T) {
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

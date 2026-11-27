@@ -21,7 +21,7 @@ func TestDemoteLegacyImagePostgresIntegration(t *testing.T) {
 		t.Fatalf("refusing to run image demotion integration test against non-test database URL %q", databaseURL)
 	}
 
-	stateStore := New("", databaseURL)
+	stateStore := New(databaseURL)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init Postgres store: %v", err)
 	}
@@ -230,7 +230,7 @@ func newPostgresIntegrationStoreWithApplicationName(
 	query := parsed.Query()
 	query.Set("application_name", applicationName)
 	parsed.RawQuery = query.Encode()
-	stateStore := New("", parsed.String())
+	stateStore := New(parsed.String())
 	if err := stateStore.ensureDatabaseReady(); err != nil {
 		t.Fatalf("initialize Postgres test connection %q: %v", applicationName, err)
 	}

@@ -39,7 +39,7 @@ func TestConfiguredDataTransferBlobPageLimit(t *testing.T) {
 }
 
 func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestDataWorkspacePushPullAndConflictPreflight(t *testing.T) {
 }
 
 func TestDataWorkspaceShowRendersLatestAssetSizes(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestDataWorkspaceShowRendersLatestAssetSizes(t *testing.T) {
 }
 
 func TestDataEvictFreesAndRestoresTrackedAssets(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestDataEvictFreesAndRestoresTrackedAssets(t *testing.T) {
 }
 
 func TestDataPullAcceptsPositionalAssetSelectors(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestDataAssetSelectorsMatchPathAndReportAmbiguity(t *testing.T) {
 }
 
 func TestDataStatusWithoutLocalBindingShowsAccountOverview(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestS3CompatibleDataWorkspacePushPullIntegration(t *testing.T) {
 			}))
 			defer objectServer.Close()
 
-			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			stateStore := newStoreTestDatabase(t, "")
 			if err := stateStore.Init(); err != nil {
 				t.Fatalf("init store: %v", err)
 			}
@@ -562,7 +562,7 @@ func TestDataPullRefreshesExpiredPresignedURL(t *testing.T) {
 		}
 	}))
 	defer objectServer.Close()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

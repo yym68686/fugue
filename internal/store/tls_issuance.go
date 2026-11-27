@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"syscall"
 
 	"fugue/internal/tlsissuance"
 )
@@ -87,111 +84,47 @@ func (s *Store) UpdateTLSIssuanceState(ctx context.Context, issuer, directory, h
 // These are private issuance records, separate from serving configuration,
 // positive LKG, diagnostic observations and their retention/compaction rules.
 func (s *Store) readTLSIssuanceRecord(ctx context.Context, key string) ([]byte, error) {
-	if s.usingDatabase() {
-		var value string
-		err := s.db.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, key).Scan(&value)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return []byte(value), err
-	}
-	b, err := os.ReadFile(s.tlsIssuanceRecordPath(key))
-	if errors.Is(err, os.ErrNotExist) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	return b, err
-}
-
-func (s *Store) tlsIssuanceRecordPath(key string) string {
-	return filepath.Join(s.path+".tls-issuance", fmt.Sprintf("%x.json", sha256.Sum256([]byte(key))))
+	return []byte(value), err
 }
 
 func (s *Store) updateTLSIssuanceRecord(ctx context.Context, key string, fn func([]byte) ([]byte, error)) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.usingDatabase() {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		var locked bool
-		if err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&locked); err != nil {
-			return err
-		}
-		if !locked {
-			return ErrConflict
-		}
-		var value string
-		err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, key).Scan(&value)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		next, err := fn([]byte(value))
-		if err != nil {
-			return err
-		}
-		if len(next) > 1<<20 {
-			return ErrInvalidInput
-		}
-		if next != nil {
-			_, err = tx.ExecContext(ctx, `INSERT INTO fugue_meta(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, key, string(next))
-			if err != nil {
-				return err
-			}
-		}
-		return tx.Commit()
-	}
-	path := s.tlsIssuanceRecordPath(key)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return ErrConflict
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	raw, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	defer tx.Rollback()
+	var locked bool
+	if err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&locked); err != nil {
 		return err
 	}
-	next, err := fn(raw)
-	if err != nil || next == nil {
+	if !locked {
+		return ErrConflict
+	}
+	var value string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, key).Scan(&value)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	next, err := fn([]byte(value))
+	if err != nil {
 		return err
 	}
 	if len(next) > 1<<20 {
 		return ErrInvalidInput
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), "record-")
-	if err != nil {
-		return err
+	if next != nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO fugue_meta(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()`, key, string(next))
+		if err != nil {
+			return err
+		}
 	}
-	defer os.Remove(file.Name())
-	if _, err = file.Write(next); err == nil {
-		err = file.Sync()
-	}
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	if err = os.Rename(file.Name(), path); err != nil {
-		return err
-	}
-	directory, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return tx.Commit()
 }

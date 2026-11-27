@@ -12,7 +12,7 @@ import (
 // deploy acceptance, without creating an operation or changing billing records.
 // Acceptance still rechecks under its normal transaction after a long build.
 func (s *Store) CheckDeployBilling(ctx context.Context, appID string, spec model.AppSpec) error {
-	check := func(state *model.State) error {
+	check := func(state *storeProjection) error {
 		i := findApp(state, appID)
 		if i < 0 || isDeletedApp(state.Apps[i]) {
 			return ErrNotFound
@@ -36,9 +36,7 @@ func (s *Store) CheckDeployBilling(ctx context.Context, appID string, spec model
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !s.usingDatabase() {
-		return s.withLockedState(false, check)
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})

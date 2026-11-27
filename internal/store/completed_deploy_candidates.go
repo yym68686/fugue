@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"fugue/internal/model"
@@ -27,31 +26,7 @@ func (s *Store) ListCompletedDeployCandidates(ctx context.Context, tenantID, app
 	if tenantID == "" || appID == "" || after.IsZero() {
 		return nil, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		var ops []model.Operation
-		err := s.withLockedState(false, func(state *model.State) error {
-			for _, op := range state.Operations {
-				if op.TenantID != tenantID || op.AppID != appID || op.Type != model.OperationTypeDeploy || op.Status != model.OperationStatusCompleted || op.CompletedAt == nil || !op.CompletedAt.After(after) {
-					continue
-				}
-				if cursor != nil && (op.CompletedAt.After(cursor.CompletedAt) || (op.CompletedAt.Equal(cursor.CompletedAt) && op.ID >= cursor.ID)) {
-					continue
-				}
-				ops = append(ops, op)
-			}
-			sort.Slice(ops, func(i, j int) bool {
-				if ops[i].CompletedAt.Equal(*ops[j].CompletedAt) {
-					return ops[i].ID > ops[j].ID
-				}
-				return ops[i].CompletedAt.After(*ops[j].CompletedAt)
-			})
-			if len(ops) > CompletedDeployCandidatePageSize {
-				ops = ops[:CompletedDeployCandidatePageSize]
-			}
-			return ctx.Err()
-		})
-		return ops, err
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	query := `SELECT id, desired_spec_json, desired_source_json - 'config_base_spec', completed_at

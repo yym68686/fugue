@@ -2,18 +2,16 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestImportGitHubStoresRequestedEnvStartupCommandAndPersistentStorageOnCreatedApp(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -126,7 +124,7 @@ func TestImportGitHubStoresRequestedEnvStartupCommandAndPersistentStorageOnCreat
 func TestImportGitHubBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -195,7 +193,7 @@ func TestImportGitHubBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
 func TestImportGitHubInternalModeSkipsRouteButExposesInternalService(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

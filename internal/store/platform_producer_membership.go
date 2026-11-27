@@ -13,7 +13,7 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-func validateProducerMembershipInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring, operation string) error {
+func validateProducerMembershipInputs(state *storeProjection, previous, next platformproducer.Policy, keys bundleauth.Keyring, operation string) error {
 	inputs := make([]model.PlatformArtifact, 0, 4)
 	for _, p := range []platformproducer.Policy{previous, next} {
 		for _, ref := range []struct{ id, digest, kind string }{
@@ -41,7 +41,7 @@ func validateProducerMembershipInputs(state *model.State, previous, next platfor
 	return nil
 }
 
-func validateMembershipBaseline(state *model.State, policy platformproducer.Policy, full model.PlatformArtifact, release model.PlatformArtifactRelease) error {
+func validateMembershipBaseline(state *storeProjection, policy platformproducer.Policy, full model.PlatformArtifact, release model.PlatformArtifactRelease) error {
 	index := platformArtifactIndex(state.PlatformArtifacts, policy.StaticIntentArtifactID)
 	if index < 0 {
 		return ErrConflict
@@ -74,7 +74,7 @@ func validateMembershipBaseline(state *model.State, policy platformproducer.Poli
 	return nil
 }
 
-func pgLoadProducerMembershipInputs(ctx context.Context, tx *sql.Tx, state *model.State, previous, next platformproducer.Policy) error {
+func pgLoadProducerMembershipInputs(ctx context.Context, tx *sql.Tx, state *storeProjection, previous, next platformproducer.Policy) error {
 	ids := []string{previous.StaticIntentArtifactID, previous.DNSPolicyArtifactID, next.StaticIntentArtifactID, next.DNSPolicyArtifactID}
 	sort.Strings(ids)
 	for _, id := range ids {

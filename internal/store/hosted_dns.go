@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"fugue/internal/model"
 )
@@ -20,25 +19,7 @@ const (
 
 func (s *Store) ListHostedZones(tenantID string, platformAdmin bool) ([]model.HostedZone, error) {
 	tenantID = strings.TrimSpace(tenantID)
-	if s.usingDatabase() {
-		return s.pgListHostedZones(tenantID, platformAdmin)
-	}
-	zones := []model.HostedZone{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, zone := range state.HostedZones {
-			zone = normalizeHostedZoneForRead(zone)
-			if zone.Status == model.HostedZoneStatusDeleted {
-				continue
-			}
-			if !platformAdmin && (tenantID == "" || zone.TenantID != tenantID) {
-				continue
-			}
-			zones = append(zones, zone)
-		}
-		sortHostedZones(zones)
-		return nil
-	})
-	return zones, err
+	return s.pgListHostedZones(tenantID, platformAdmin)
 }
 
 func (s *Store) GetHostedZoneByName(zoneName string) (model.HostedZone, error) {
@@ -46,22 +27,7 @@ func (s *Store) GetHostedZoneByName(zoneName string) (model.HostedZone, error) {
 	if zoneName == "" {
 		return model.HostedZone{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetHostedZoneByName(zoneName)
-	}
-	var zone model.HostedZone
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findHostedZoneByName(state, zoneName)
-		if index < 0 {
-			return ErrNotFound
-		}
-		zone = normalizeHostedZoneForRead(state.HostedZones[index])
-		if zone.Status == model.HostedZoneStatusDeleted {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return zone, err
+	return s.pgGetHostedZoneByName(zoneName)
 }
 
 // PutHostedZone registers a new zone. Repeated registration cannot update its owner or state.
@@ -73,54 +39,12 @@ func (s *Store) PutHostedZone(zone model.HostedZone, actors ...model.Principal) 
 	if err != nil {
 		return model.HostedZone{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgPutHostedZone(zone, actors)
-	}
-	err = s.withLockedState(true, func(state *model.State) error {
-		if i := findHostedZoneByName(state, zone.ZoneName); i >= 0 {
-			existing := state.HostedZones[i]
-			if existing.TenantID != zone.TenantID || existing.ProjectID != zone.ProjectID {
-				return ErrConflict
-			}
-			zone = existing
-			return nil
-		}
-		if findHostedZoneByID(state, zone.ID) >= 0 {
-			return ErrConflict
-		}
-		zone.UpdatedAt = time.Now().UTC()
-		if zone.CreatedAt.IsZero() {
-			zone.CreatedAt = zone.UpdatedAt
-		}
-		state.HostedZones = append(state.HostedZones, zone)
-		recordMutation(state, mutationEvent(actors, "dns.zone.create", "dns_zone", zone.ID, zone.TenantID))
-		return nil
-	})
-	return zone, err
+	return s.pgPutHostedZone(zone, actors)
 }
 
 // UpdateHostedZoneStatus only updates the live instance observed by the caller.
 func (s *Store) UpdateHostedZoneStatus(zone model.HostedZone) (model.HostedZone, error) {
-	if s.usingDatabase() {
-		return s.pgUpdateHostedZoneStatus(zone)
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		i := findHostedZoneByName(state, zone.ZoneName)
-		if i < 0 {
-			return ErrNotFound
-		}
-		current := &state.HostedZones[i]
-		if current.ID != zone.ID || current.TenantID != zone.TenantID || current.ProjectID != zone.ProjectID || !current.UpdatedAt.Equal(zone.UpdatedAt) {
-			return ErrConflict
-		}
-		current.Status, current.DelegationStatus = zone.Status, zone.DelegationStatus
-		current.ParentNameservers, current.ExpectedNameservers = zone.ParentNameservers, zone.ExpectedNameservers
-		current.LastMessage, current.LastCheckedAt = zone.LastMessage, zone.LastCheckedAt
-		current.UpdatedAt = time.Now().UTC()
-		zone = *current
-		return nil
-	})
-	return zone, err
+	return s.pgUpdateHostedZoneStatus(zone)
 }
 
 func (s *Store) DeleteHostedZone(zone model.HostedZone, actors ...model.Principal) (model.HostedZone, error) {
@@ -128,25 +52,7 @@ func (s *Store) DeleteHostedZone(zone model.HostedZone, actors ...model.Principa
 	if zoneName == "" {
 		return model.HostedZone{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteHostedZone(zone, actors)
-	}
-	var removed model.HostedZone
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findHostedZoneByName(state, zoneName)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = normalizeHostedZoneForRead(state.HostedZones[index])
-		if removed.ID != zone.ID || removed.TenantID != zone.TenantID || removed.ProjectID != zone.ProjectID || removed.Status == model.HostedZoneStatusDeleted {
-			return ErrNotFound
-		}
-		state.HostedZones[index].Status = model.HostedZoneStatusDeleted
-		recordMutation(state, mutationEvent(actors, "dns.zone.delete", "dns_zone", zone.ID, zone.TenantID))
-		state.HostedZones[index].UpdatedAt = time.Now().UTC()
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteHostedZone(zone, actors)
 }
 
 func (s *Store) FindHostedZoneForHostname(tenantID, hostname string, platformAdmin bool) (model.HostedZone, error) {
@@ -180,25 +86,7 @@ func (s *Store) ListDNSRecords(zoneID string) ([]model.DNSRecord, error) {
 	if zoneID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListDNSRecords(zoneID)
-	}
-	records := []model.DNSRecord{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findHostedZoneByID(state, zoneID) < 0 {
-			return ErrNotFound
-		}
-		for _, record := range state.DNSRecords {
-			record = normalizeDNSRecordForRead(record)
-			if record.ZoneID != zoneID || record.Status == model.DNSRecordStatusDisabled {
-				continue
-			}
-			records = append(records, record)
-		}
-		sortDNSRecords(records)
-		return nil
-	})
-	return records, err
+	return s.pgListDNSRecords(zoneID)
 }
 
 func (s *Store) GetDNSRecord(zoneID, recordID string) (model.DNSRecord, error) {
@@ -207,19 +95,7 @@ func (s *Store) GetDNSRecord(zoneID, recordID string) (model.DNSRecord, error) {
 	if zoneID == "" || recordID == "" {
 		return model.DNSRecord{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetDNSRecord(zoneID, recordID)
-	}
-	var record model.DNSRecord
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findDNSRecord(state, zoneID, recordID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		record = normalizeDNSRecordForRead(state.DNSRecords[index])
-		return nil
-	})
-	return record, err
+	return s.pgGetDNSRecord(zoneID, recordID)
 }
 
 func (s *Store) PutDNSRecord(zone model.HostedZone, record model.DNSRecord, overwrite bool) (model.DNSRecord, error) {
@@ -228,47 +104,7 @@ func (s *Store) PutDNSRecord(zone model.HostedZone, record model.DNSRecord, over
 	if err != nil {
 		return model.DNSRecord{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgPutDNSRecord(zone, record, overwrite)
-	}
-	var out model.DNSRecord
-	err = s.withLockedState(true, func(state *model.State) error {
-		zoneIndex := findHostedZoneByID(state, zone.ID)
-		if zoneIndex < 0 || state.HostedZones[zoneIndex].Status == model.HostedZoneStatusDeleted || state.HostedZones[zoneIndex].Status == model.HostedZoneStatusPendingOwnership {
-			return ErrNotFound
-		}
-		existingRecords := make([]model.DNSRecord, 0, len(state.DNSRecords))
-		for _, existing := range state.DNSRecords {
-			existing = normalizeDNSRecordForRead(existing)
-			if existing.ZoneID == zone.ID && existing.Status != model.DNSRecordStatusDisabled {
-				existingRecords = append(existingRecords, existing)
-			}
-		}
-		index := findDNSRecord(state, zone.ID, record.ID)
-		if index >= 0 && record.CreatedAt.IsZero() {
-			record.CreatedAt = state.DNSRecords[index].CreatedAt
-		}
-		if err := validateDNSRecordConflicts(record, existingRecords, overwrite); err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		if record.ID == "" {
-			record.ID = dnsRecordID(zone.ID, record.FQDN, record.Type, record.Source, record.SourceRefType, record.SourceRefID)
-		}
-		if record.CreatedAt.IsZero() {
-			record.CreatedAt = now
-		}
-		record.UpdatedAt = now
-		index = findDNSRecord(state, zone.ID, record.ID)
-		if index >= 0 {
-			state.DNSRecords[index] = record
-		} else {
-			state.DNSRecords = append(state.DNSRecords, record)
-		}
-		out = normalizeDNSRecordForRead(record)
-		return nil
-	})
-	return out, err
+	return s.pgPutDNSRecord(zone, record, overwrite)
 }
 
 func (s *Store) PatchDNSRecord(zone model.HostedZone, recordID string, patch model.DNSRecordPatch, overwrite bool) (model.DNSRecord, error) {
@@ -312,20 +148,7 @@ func (s *Store) DeleteDNSRecord(zoneID, recordID string) (model.DNSRecord, error
 	if zoneID == "" || recordID == "" {
 		return model.DNSRecord{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteDNSRecord(zoneID, recordID)
-	}
-	var removed model.DNSRecord
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDNSRecord(state, zoneID, recordID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = normalizeDNSRecordForRead(state.DNSRecords[index])
-		state.DNSRecords = append(state.DNSRecords[:index], state.DNSRecords[index+1:]...)
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteDNSRecord(zoneID, recordID)
 }
 
 func (s *Store) DeleteDNSRecordsBySourceRef(zoneID, source, sourceRefType, sourceRefID string) ([]model.DNSRecord, error) {
@@ -336,27 +159,7 @@ func (s *Store) DeleteDNSRecordsBySourceRef(zoneID, source, sourceRefType, sourc
 	if zoneID == "" || source == "" || sourceRefID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteDNSRecordsBySourceRef(zoneID, source, sourceRefType, sourceRefID)
-	}
-	removed := []model.DNSRecord{}
-	err := s.withLockedState(true, func(state *model.State) error {
-		kept := state.DNSRecords[:0]
-		for _, record := range state.DNSRecords {
-			normalized := normalizeDNSRecordForRead(record)
-			if normalized.ZoneID == zoneID &&
-				normalized.Source == source &&
-				normalized.SourceRefType == sourceRefType &&
-				normalized.SourceRefID == sourceRefID {
-				removed = append(removed, normalized)
-				continue
-			}
-			kept = append(kept, record)
-		}
-		state.DNSRecords = kept
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteDNSRecordsBySourceRef(zoneID, source, sourceRefType, sourceRefID)
 }
 
 func normalizeHostedZoneForStore(zone model.HostedZone) (model.HostedZone, error) {
@@ -684,46 +487,6 @@ func hostedDNSRecordPublishesApexAddress(record model.DNSRecord) bool {
 	}
 }
 
-func findHostedZoneByName(state *model.State, zoneName string) int {
-	if state == nil {
-		return -1
-	}
-	zoneName = normalizeDNSZone(zoneName)
-	for index, zone := range state.HostedZones {
-		if zone.Status != model.HostedZoneStatusDeleted && normalizeDNSZone(zone.ZoneName) == zoneName {
-			return index
-		}
-	}
-	return -1
-}
-
-func findHostedZoneByID(state *model.State, id string) int {
-	if state == nil {
-		return -1
-	}
-	id = strings.TrimSpace(id)
-	for index, zone := range state.HostedZones {
-		if strings.TrimSpace(zone.ID) == id {
-			return index
-		}
-	}
-	return -1
-}
-
-func findDNSRecord(state *model.State, zoneID, recordID string) int {
-	if state == nil {
-		return -1
-	}
-	zoneID = strings.TrimSpace(zoneID)
-	recordID = strings.TrimSpace(recordID)
-	for index, record := range state.DNSRecords {
-		if strings.TrimSpace(record.ZoneID) == zoneID && strings.TrimSpace(record.ID) == recordID {
-			return index
-		}
-	}
-	return -1
-}
-
 func dnsRecordID(zoneID, fqdn, recordType, source, sourceRefType, sourceRefID string) string {
 	material := strings.Join([]string{
 		strings.TrimSpace(zoneID),
@@ -754,24 +517,6 @@ func normalizeNameserverList(values []string) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-func sortHostedZones(zones []model.HostedZone) {
-	sort.Slice(zones, func(i, j int) bool {
-		return zones[i].ZoneName < zones[j].ZoneName
-	})
-}
-
-func sortDNSRecords(records []model.DNSRecord) {
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].FQDN != records[j].FQDN {
-			return records[i].FQDN < records[j].FQDN
-		}
-		if records[i].Type != records[j].Type {
-			return records[i].Type < records[j].Type
-		}
-		return records[i].ID < records[j].ID
-	})
 }
 
 func parseSRVValue(value string) bool {

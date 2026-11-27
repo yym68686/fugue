@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +19,7 @@ import (
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
+
 	"github.com/jackc/pgx/v5"
 )
 
@@ -39,7 +39,7 @@ func (r storageSQLRow) Scan(dest ...any) error {
 func TestStorageGrowthOnlyMutatesCapacityAndPreservesLegacyAffinity(t *testing.T) {
 	for _, scenario := range []string{"growth", "partial-retry", "pod-replaced", "postmaster-restarted", "sql-unavailable", "cluster-conflict", "affinity-changed", "late-replacement"} {
 		t.Run(scenario, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

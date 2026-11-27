@@ -1,22 +1,18 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
+	"fugue/internal/model"
+	"fugue/internal/platformconfig"
+	"fugue/internal/platformproducer"
+	"fugue/internal/testfixture/celldns"
 	"net/url"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
-
-	"fugue/internal/model"
-	"fugue/internal/platformconfig"
-	"fugue/internal/platformproducer"
-	"fugue/internal/testfixture/celldns"
 )
-
-func TestDNSProducerPublicationGuard(t *testing.T) { testDNSProducerPublicationGuard(t, "") }
 
 func TestDNSProducerPublicationGuardPostgres(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
@@ -104,105 +100,46 @@ func testDNSProducerPublicationGuard(t *testing.T, dsn string) {
 			parent.Metadata[platformproducer.SourceDigestMetadata] = "sha256:" + strings.Repeat("a", 64)
 			parent = save(parent)
 			if scenario == "source frozen" || scenario == "wrong source fence" {
-				if s.db != nil {
-					query := `UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`
-					if scenario == "wrong source fence" {
-						query = `UPDATE fugue_platform_release_lanes SET fencing_token=fencing_token+1 WHERE scope_key=$1`
-					}
-					if _, err := s.db.Exec(query, platformproducer.Scope); err != nil {
-						t.Fatal(err)
-					}
-				} else if err := s.withLockedState(true, func(state *model.State) error {
-					for i := range state.PlatformReleaseLanes {
-						l := &state.PlatformReleaseLanes[i]
-						if l.ScopeKey == platformproducer.Scope {
-							if scenario == "source frozen" {
-								l.Frozen = true
-							} else {
-								l.FencingToken++
-							}
-						}
-					}
-					return nil
-				}); err != nil {
+
+				query := `UPDATE fugue_platform_release_lanes SET frozen=true WHERE scope_key=$1`
+				if scenario == "wrong source fence" {
+					query = `UPDATE fugue_platform_release_lanes SET fencing_token=fencing_token+1 WHERE scope_key=$1`
+				}
+				if _, err := s.db.Exec(query, platformproducer.Scope); err != nil {
 					t.Fatal(err)
 				}
+
 			}
 			actor := model.Principal{ActorType: model.ActorTypeBootstrap, ActorID: platformproducer.Actor, Scopes: map[string]struct{}{"platform.admin": {}}}
 			if scenario == "wrong actor" {
 				actor.ActorID = "foreign"
 			}
-			if s.db == nil {
-				if err := s.withLockedState(false, func(state *model.State) error {
-					req, guard := producedShadowIntent(parent.ID, authority.ID, "")
-					before, err := json.Marshal(state)
-					if err != nil {
-						t.Fatal(err)
-					}
-					want := validateProducerReleaseGuard(state, parent, req, actor, s.platformArtifactSigningKeyring(), guard)
-					ctx, mutation := startPlatformMutationTrace(context.Background(), "platform-release")
-					trace := beginPlatformProducerGuardTrace(ctx)
-					got := validateProducerReleaseGuardWithTrace(state, parent, req, actor, s.platformArtifactSigningKeyring(), guard, trace)
-					trace.finish()
-					if want != got {
-						t.Fatal("observation changed original guard error identity", want, got)
-					}
-					if (scenario == "complete" || scenario == "retry") != (got == nil) {
-						t.Fatal("comparison did not exercise expected guard decision", got)
-					}
-					after, err := json.Marshal(state)
-					if err != nil || string(before) != string(after) {
-						t.Fatal("observation modified source state", err)
-					}
-					last := "lane"
-					switch scenario {
-					case "wrong actor":
-						last = "parent_integrity"
-					case "paused":
-						last = "policy_authority"
-					case "source frozen", "wrong source fence":
-						last = "source_authority"
-					case "changed TTL", "foreign topology":
-						last = "dns_output"
-					}
-					observation := mutation.producerGuardObservation()
-					if observation == nil || observation.FinalPhase != last || len(observation.Stages) > int(producerGuardPhaseCount) {
-						t.Fatal("guard rejection did not retain its original phase", observation)
-					}
-					encoded, err := json.Marshal(observation)
-					if err != nil || strings.Contains(string(encoded), parent.ID) || strings.Contains(string(encoded), authority.ID) || len(encoded) > 2048 {
-						t.Fatal("guard observation retained input or exceeded budget", err)
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			_, r, _, _, err := s.ReleaseProducedPlatformArtifact(parent.ID, authority.ID, "", actor)
-			if s.db != nil {
-				var observation *platformProducerGuardObservation
-				for _, receipt := range platformMutationObservations.snapshot()["receipts"].([]platformMutationReceipt) {
-					if receipt.Operation.Name == "platform-release" && receipt.ProducerGuard != nil {
-						observation = receipt.ProducerGuard
-					}
-				}
-				if observation == nil {
-					t.Fatal("actual PostgreSQL producer guard omitted its phase receipt")
-				}
-				seen := map[string]bool{}
-				for _, stage := range observation.Stages {
-					seen[stage.Stage] = true
-				}
-				phases := []string{"read_lanes", "read_policy", "read_members", "read_dns_references", "parent_integrity"}
-				if scenario != "wrong actor" {
-					phases = append(phases, "policy_authority")
-				}
-				for _, phase := range phases {
-					if !seen[phase] {
-						t.Fatal("actual PostgreSQL guard omitted a reached phase", phase, observation)
-					}
+
+			var observation *platformProducerGuardObservation
+			for _, receipt := range platformMutationObservations.snapshot()["receipts"].([]platformMutationReceipt) {
+				if receipt.Operation.Name == "platform-release" && receipt.ProducerGuard != nil {
+					observation = receipt.ProducerGuard
 				}
 			}
+			if observation == nil {
+				t.Fatal("actual PostgreSQL producer guard omitted its phase receipt")
+			}
+			seen := map[string]bool{}
+			for _, stage := range observation.Stages {
+				seen[stage.Stage] = true
+			}
+			phases := []string{"read_lanes", "read_policy", "read_members", "read_dns_references", "parent_integrity"}
+			if scenario != "wrong actor" {
+				phases = append(phases, "policy_authority")
+			}
+			for _, phase := range phases {
+				if !seen[phase] {
+					t.Fatal("actual PostgreSQL guard omitted a reached phase", phase, observation)
+				}
+			}
+
 			if scenario != "complete" && scenario != "retry" {
 				if !errors.Is(err, ErrConflict) {
 					t.Fatal("unsafe DNS publication accepted", err)

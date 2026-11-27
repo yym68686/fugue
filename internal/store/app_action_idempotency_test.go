@@ -11,9 +11,9 @@ import (
 )
 
 func TestAppActionConcurrentRetryCreatesOneOperation(t *testing.T) {
-	s := New(t.TempDir() + "/store.json")
+	s := newStoreTestDatabase(t, "")
 	if os.Getenv("FUGUE_TEST_ACTION_DATABASE_URL") != "" {
-		s = New("", os.Getenv("FUGUE_TEST_ACTION_DATABASE_URL"))
+		s = New(os.Getenv("FUGUE_TEST_ACTION_DATABASE_URL"))
 	}
 	if err := s.Init(); err != nil {
 		if os.Getenv("FUGUE_TEST_ACTION_DATABASE_URL") == "" {
@@ -26,9 +26,8 @@ func TestAppActionConcurrentRetryCreatesOneOperation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if s.usingDatabase() {
-		defer s.db.Close()
-	}
+	defer s.db.Close()
+
 	tenant, _ := s.CreateTenant("Sample tenant")
 	project, _ := s.CreateProject(tenant.ID, "apps", "")
 	rt, _, _ := s.CreateRuntime(tenant.ID, "runtime", model.RuntimeTypeManagedOwned, "", nil)

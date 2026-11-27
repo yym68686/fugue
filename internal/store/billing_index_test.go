@@ -96,7 +96,7 @@ func TestTenantBillingSummaryUsesIndexedRelationships(t *testing.T) {
 		CreatedAt: now,
 	}
 
-	state := &model.State{
+	state := &storeProjection{
 		Runtimes:        []model.Runtime{managedRuntime, publicRuntime},
 		Apps:            []model.App{publicApp, managedApp},
 		BackingServices: []model.BackingService{service},

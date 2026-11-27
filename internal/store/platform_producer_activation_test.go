@@ -35,30 +35,6 @@ func activationFixture(t *testing.T, address string) reconfigurationFixture {
 	return f
 }
 
-// Seed only the local test ledger; actual probe verification is exercised in API tests.
-func (f reconfigurationFixture) setBaselineVerification(t *testing.T, verified bool) {
-	t.Helper()
-	r, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.VerificationState, r.VerifiedLKGGeneration = "", ""
-	if verified {
-		r.VerificationState, r.VerifiedLKGGeneration = model.PlatformArtifactVerificationStateVerified, r.Generation
-	}
-	if f.s.db != nil {
-		_, err = pgUpdatePlatformArtifactReleaseVerification(context.Background(), f.s.db, r)
-	} else {
-		err = f.s.withLockedState(true, func(st *model.State) error {
-			st.PlatformArtifactReleases[platformArtifactReleaseIndex(st.PlatformArtifactReleases, r.ID)] = r
-			return nil
-		})
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func testProducerServingActivation(t *testing.T, address string) {
 	for _, scenario := range []string{"success", "implicit", "unknown", "continuous", "constraint", "source", "schedule", "cohort", "unverified", "frozen", "stale"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -118,7 +94,6 @@ func testProducerServingActivation(t *testing.T, address string) {
 	}
 }
 
-func TestProducerServingActivation(t *testing.T) { testProducerServingActivation(t, "") }
 func TestProducerServingActivationPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -129,4 +104,22 @@ func TestProducerServingActivationPostgres(t *testing.T) {
 		t.Fatal("requires disposable loopback database")
 	}
 	testProducerServingActivation(t, address)
+}
+
+func (f reconfigurationFixture) setBaselineVerification(t *testing.T, verified bool) {
+	t.Helper()
+	r, err := f.s.GetPlatformArtifactRelease(f.lkg.VerifiedByReleaseID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.VerificationState, r.VerifiedLKGGeneration = "", ""
+	if verified {
+		r.VerificationState, r.VerifiedLKGGeneration = model.PlatformArtifactVerificationStateVerified, r.Generation
+	}
+
+	_, err = pgUpdatePlatformArtifactReleaseVerification(context.Background(), f.s.db, r)
+
+	if err != nil {
+		t.Fatal(err)
+	}
 }

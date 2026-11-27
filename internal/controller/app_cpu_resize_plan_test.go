@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,11 +11,10 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestAppCPUResizeOutageDoesNotCreateOperationsAndPendingReplacementRecovers(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -132,24 +130,25 @@ func TestAppCPUResizeOutageDoesNotCreateOperationsAndPendingReplacementRecovers(
 }
 
 func TestAppCPUResizeRetryBudgetPersistsAcrossLeadersAndBoundsFailures(t *testing.T) {
-	path := t.TempDir() + "/state.json"
-	st := store.New(path)
-	if err := st.Init(); err != nil {
-		t.Fatal(err)
-	}
+	const fixture = "cpu-resize-retry-budget"
 	app := model.App{ID: "app_example", TenantID: "tenant_example"}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	newLeader := func() *Service { return &Service{Store: store.New(path), now: func() time.Time { return now }} }
+	newLeader := func() *Service {
+		return &Service{Store: newStoreTestDatabase(t, fixture), now: func() time.Time { return now }}
+	}
+	leaders := [2]*Service{newLeader(), newLeader()}
 	admissions := 0
-	for n := 0; n < 9*60*60; n++ {
-		ok, err := newLeader().admitAppCPUResizeReconcile(context.Background(), app, "same-pod-and-intent")
+	// Independent pools mimic leadership changes. Every possible retry
+	// deadline is a multiple of five seconds; probe each such deadline.
+	for n := 0; n < 9*60*12; n++ {
+		ok, err := leaders[n%len(leaders)].admitAppCPUResizeReconcile(t.Context(), app, "same-pod-and-intent")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if ok {
 			admissions++
 		}
-		now = now.Add(time.Second)
+		now = now.Add(5 * time.Second)
 	}
 	if admissions > 120 || admissions < 100 {
 		t.Fatalf("unbounded or permanently stalled retries: %d", admissions)

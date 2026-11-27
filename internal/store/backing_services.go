@@ -18,44 +18,11 @@ const (
 )
 
 func (s *Store) ListBackingServices(tenantID string, platformAdmin bool) ([]model.BackingService, error) {
-	if s.usingDatabase() {
-		return s.pgListBackingServices(tenantID, platformAdmin)
-	}
-	var services []model.BackingService
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, service := range state.BackingServices {
-			if isDeletedBackingService(service) {
-				continue
-			}
-			if platformAdmin || service.TenantID == tenantID {
-				services = append(services, cloneBackingService(service))
-			}
-		}
-		sort.Slice(services, func(i, j int) bool {
-			return services[i].CreatedAt.Before(services[j].CreatedAt)
-		})
-		return nil
-	})
-	return services, err
+	return s.pgListBackingServices(tenantID, platformAdmin)
 }
 
 func (s *Store) GetBackingService(id string) (model.BackingService, error) {
-	if s.usingDatabase() {
-		return s.pgGetBackingService(id)
-	}
-	var service model.BackingService
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findBackingService(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		service = cloneBackingService(state.BackingServices[index])
-		if isDeletedBackingService(service) {
-			return ErrNotFound
-		}
-		return nil
-	})
-	return service, err
+	return s.pgGetBackingService(id)
 }
 
 func (s *Store) CreateBackingService(tenantID, projectID, name, description string, spec model.BackingServiceSpec) (model.BackingService, error) {
@@ -68,84 +35,11 @@ func (s *Store) CreateBackingService(tenantID, projectID, name, description stri
 	if spec.Postgres != nil && spec.Postgres.Suspended {
 		return model.BackingService{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateBackingService(tenantID, projectID, name, description, spec)
-	}
-	var service model.BackingService
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, tenantID) < 0 {
-			return ErrNotFound
-		}
-		projectIndex := findProject(state, projectID)
-		if projectIndex < 0 || state.Projects[projectIndex].TenantID != tenantID {
-			return ErrNotFound
-		}
-		if projectDeleteRequested(state, projectID) {
-			return ErrConflict
-		}
-		spec = defaultBackingServiceRuntimeForProject(spec, state.Projects[projectIndex])
-		now := time.Now().UTC()
-		billing := accrueTenantBillingLedger(state, tenantID, now)
-		if billing == nil {
-			return ErrNotFound
-		}
-		service = model.BackingService{
-			ID:          model.NewID("service"),
-			TenantID:    tenantID,
-			ProjectID:   projectID,
-			Name:        nextAvailableBackingServiceName(state, tenantID, projectID, name),
-			Description: strings.TrimSpace(description),
-			Type:        backingServiceTypeFromSpec(spec),
-			Provisioner: model.BackingServiceProvisionerManaged,
-			Status:      model.BackingServiceStatusActive,
-			Spec:        cloneBackingServiceSpec(spec),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := normalizeBackingServiceForPersist(&service, nil); err != nil {
-			return err
-		}
-		if err := validateBackingServiceSpecRuntimeReservationsState(state, projectID, service.Spec); err != nil {
-			return err
-		}
-		if backingServiceNameExists(state, tenantID, projectID, service.Name, "") {
-			return ErrConflict
-		}
-		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
-			projection.BackingServices = append(projection.BackingServices, cloneBackingService(service))
-		}); err != nil {
-			return err
-		}
-		state.BackingServices = append(state.BackingServices, service)
-		return nil
-	})
-	return service, err
+	return s.pgCreateBackingService(tenantID, projectID, name, description, spec)
 }
 
 func (s *Store) DeleteBackingService(id string) (model.BackingService, error) {
-	if s.usingDatabase() {
-		return s.pgDeleteBackingService(id)
-	}
-	var service model.BackingService
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackingService(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		service = cloneBackingService(state.BackingServices[index])
-		if isDeletedBackingService(service) {
-			return ErrNotFound
-		}
-		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, id) {
-			return ErrConflict
-		}
-		if hasServiceBindings(state, id) {
-			return ErrConflict
-		}
-		state.BackingServices = append(state.BackingServices[:index], state.BackingServices[index+1:]...)
-		return maybeFinalizeRequestedProjectDelete(state, service.ProjectID)
-	})
-	return service, err
+	return s.pgDeleteBackingService(id)
 }
 
 func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpec) (model.BackingService, error) {
@@ -153,171 +47,35 @@ func (s *Store) UpdateBackingServiceSpec(id string, spec model.BackingServiceSpe
 	if id == "" {
 		return model.BackingService{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateBackingServiceSpec(id, spec)
-	}
-	var service model.BackingService
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackingService(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		next := cloneBackingService(state.BackingServices[index])
-		if isDeletedBackingService(next) {
-			return ErrNotFound
-		}
-		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, id) {
-			return ErrConflict
-		}
-		beforeRuntimeID := backingServiceSpecRuntimeID(next)
-		if err := validateManagedPostgresSuspensionTransition(spec.Postgres, next.Spec.Postgres); err != nil {
-			return err
-		}
-		if err := reconcileManagedPostgresRuntimeResources(spec.Postgres, next.Spec.Postgres); err != nil {
-			return err
-		}
-		next.Spec = cloneBackingServiceSpec(spec)
-		next.UpdatedAt = time.Now().UTC()
-		if err := normalizeBackingServiceForPersist(&next, nil); err != nil {
-			return err
-		}
-		if err := validateBackingServiceSpecRuntimeReservationsState(state, next.ProjectID, next.Spec); err != nil {
-			return err
-		}
-		if backingServiceSpecRuntimeID(next) != beforeRuntimeID {
-			next.CurrentRuntimeStartedAt = nil
-			next.CurrentRuntimeReadyAt = nil
-		}
-		state.BackingServices[index] = next
-		service = cloneBackingService(next)
-		return nil
-	})
-	return service, err
+	return s.pgUpdateBackingServiceSpec(id, spec)
 }
 
 func (s *Store) ListServiceBindings(appID string) ([]model.ServiceBinding, error) {
 	if strings.TrimSpace(appID) == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListServiceBindings(appID)
-	}
-	var bindings []model.ServiceBinding
-	err := s.withLockedState(false, func(state *model.State) error {
-		if findApp(state, appID) < 0 {
-			return ErrNotFound
-		}
-		for _, binding := range state.ServiceBindings {
-			if binding.AppID != appID {
-				continue
-			}
-			bindings = append(bindings, cloneServiceBinding(binding))
-		}
-		sortServiceBindings(bindings)
-		return nil
-	})
-	return bindings, err
+	return s.pgListServiceBindings(appID)
 }
 
 func (s *Store) BindBackingService(tenantID, appID, serviceID, alias string, env map[string]string) (model.ServiceBinding, error) {
 	if tenantID == "" || appID == "" || serviceID == "" {
 		return model.ServiceBinding{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgBindBackingService(tenantID, appID, serviceID, alias, env)
-	}
-	var binding model.ServiceBinding
-	err := s.withLockedState(true, func(state *model.State) error {
-		appIndex := findApp(state, appID)
-		if appIndex < 0 {
-			return ErrNotFound
-		}
-		app := state.Apps[appIndex]
-		if app.TenantID != tenantID || isDeletedApp(app) {
-			return ErrNotFound
-		}
-		serviceIndex := findBackingService(state, serviceID)
-		if serviceIndex < 0 {
-			return ErrNotFound
-		}
-		service := state.BackingServices[serviceIndex]
-		if isDeletedBackingService(service) || service.TenantID != tenantID {
-			return ErrNotFound
-		}
-		if managedPostgresServiceIsSuspended(service) {
-			return ErrConflict
-		}
-		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, serviceID) ||
-			hasInFlightManagedPostgresExclusiveMutationForApp(state.Operations, appID) {
-			return ErrConflict
-		}
-		if findServiceBindingByAppAndService(state, appID, serviceID) >= 0 {
-			return ErrConflict
-		}
-		if requiresExclusiveBinding(service) && hasBindingsOnOtherApps(state.ServiceBindings, serviceID, appID) {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		binding = model.ServiceBinding{
-			ID:        model.NewID("binding"),
-			TenantID:  tenantID,
-			AppID:     appID,
-			ServiceID: serviceID,
-			Alias:     defaultServiceBindingAlias(alias, service),
-			Env:       cloneMap(env),
-			CreatedAt: now,
-			UpdatedAt: now,
-		}
-		if err := normalizeBindingForPersist(&binding, service); err != nil {
-			return err
-		}
-		billing := accrueTenantBillingLedger(state, tenantID, now)
-		if billing == nil {
-			return ErrNotFound
-		}
-		if err := validateTenantManagedCapacityProjection(state, *billing, func(projection *model.State) {
-			projection.ServiceBindings = append(projection.ServiceBindings, cloneServiceBinding(binding))
-		}); err != nil {
-			return err
-		}
-		state.ServiceBindings = append(state.ServiceBindings, binding)
-		return nil
-	})
-	return binding, err
+	return s.pgBindBackingService(tenantID, appID, serviceID, alias, env)
 }
 
 func (s *Store) UnbindBackingService(bindingID string) (model.ServiceBinding, error) {
 	if strings.TrimSpace(bindingID) == "" {
 		return model.ServiceBinding{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUnbindBackingService(bindingID)
-	}
-	var binding model.ServiceBinding
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findServiceBinding(state, bindingID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		binding = cloneServiceBinding(state.ServiceBindings[index])
-		if hasInFlightManagedPostgresExclusiveMutationForService(state.Operations, binding.ServiceID) {
-			return ErrConflict
-		}
-		serviceIndex := findBackingService(state, binding.ServiceID)
-		if serviceIndex >= 0 && managedPostgresServiceIsSuspended(state.BackingServices[serviceIndex]) {
-			return ErrConflict
-		}
-		state.ServiceBindings = append(state.ServiceBindings[:index], state.ServiceBindings[index+1:]...)
-		return nil
-	})
-	return binding, err
+	return s.pgUnbindBackingService(bindingID)
 }
 
-func hydrateAppBackingServices(state *model.State, app *model.App) {
+func hydrateAppBackingServices(state *storeProjection, app *model.App) {
 	hydrateAppBackingServicesWithIndex(newAppBackingServiceIndex(state), app)
 }
 
-func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, desiredSpec *model.AppSpec) error {
+func applyDesiredSpecBackingServicesState(state *storeProjection, app *model.App, desiredSpec *model.AppSpec) error {
 	if state == nil || app == nil || desiredSpec == nil || desiredSpec.Postgres == nil {
 		return nil
 	}
@@ -378,7 +136,7 @@ func applyDesiredSpecBackingServicesState(state *model.State, app *model.App, de
 	return nil
 }
 
-func applyManagedPostgresLifecycleState(state *model.State, app *model.App, op *model.Operation) error {
+func applyManagedPostgresLifecycleState(state *storeProjection, app *model.App, op *model.Operation) error {
 	if state == nil || app == nil || op == nil || op.DesiredSpec == nil || op.DesiredSpec.Postgres == nil {
 		return ErrInvalidInput
 	}
@@ -909,39 +667,6 @@ func validateManagedPostgresSuspensionForOperation(operationType string, desired
 	return validateManagedPostgresSuspensionTransition(desired, current)
 }
 
-func validateManagedPostgresLifecycleTargetState(state *model.State, app model.App, serviceID string) error {
-	if state == nil {
-		return ErrInvalidInput
-	}
-	serviceID = strings.TrimSpace(serviceID)
-	serviceIndex := findBackingService(state, serviceID)
-	if serviceID == "" || serviceIndex < 0 {
-		return ErrInvalidInput
-	}
-	service := state.BackingServices[serviceIndex]
-	if service.TenantID != app.TenantID || service.ProjectID != app.ProjectID || !isManagedPostgresService(service) || service.Spec.Postgres == nil {
-		return ErrInvalidInput
-	}
-	ownerAppID := strings.TrimSpace(service.OwnerAppID)
-	if ownerAppID != "" && ownerAppID != strings.TrimSpace(app.ID) {
-		return ErrConflict
-	}
-	bindingCount := 0
-	for _, binding := range state.ServiceBindings {
-		if strings.TrimSpace(binding.ServiceID) != serviceID {
-			continue
-		}
-		bindingCount++
-		if strings.TrimSpace(binding.AppID) != strings.TrimSpace(app.ID) || binding.TenantID != app.TenantID {
-			return ErrConflict
-		}
-	}
-	if bindingCount != 1 {
-		return ErrConflict
-	}
-	return nil
-}
-
 func managedPostgresServiceIsSuspended(service model.BackingService) bool {
 	return isManagedPostgresService(service) && service.Spec.Postgres != nil && service.Spec.Postgres.Suspended
 }
@@ -1187,7 +912,7 @@ func sortServiceBindings(bindings []model.ServiceBinding) {
 	})
 }
 
-func backingServiceNameExists(state *model.State, tenantID, projectID, name, exceptID string) bool {
+func backingServiceNameExists(state *storeProjection, tenantID, projectID, name, exceptID string) bool {
 	for _, service := range state.BackingServices {
 		if service.ID == exceptID || isDeletedBackingService(service) {
 			continue
@@ -1199,7 +924,7 @@ func backingServiceNameExists(state *model.State, tenantID, projectID, name, exc
 	return false
 }
 
-func nextAvailableBackingServiceName(state *model.State, tenantID, projectID, base string) string {
+func nextAvailableBackingServiceName(state *storeProjection, tenantID, projectID, base string) string {
 	base = model.Slugify(base)
 	if base == "" {
 		base = "service"
@@ -1211,7 +936,7 @@ func nextAvailableBackingServiceName(state *model.State, tenantID, projectID, ba
 	return candidate
 }
 
-func hasServiceBindings(state *model.State, serviceID string) bool {
+func hasServiceBindings(state *storeProjection, serviceID string) bool {
 	for _, binding := range state.ServiceBindings {
 		if binding.ServiceID == serviceID {
 			return true
@@ -1220,7 +945,7 @@ func hasServiceBindings(state *model.State, serviceID string) bool {
 	return false
 }
 
-func appHasBindingToServiceType(state *model.State, appID, serviceType string) bool {
+func appHasBindingToServiceType(state *storeProjection, appID, serviceType string) bool {
 	for _, binding := range state.ServiceBindings {
 		if binding.AppID != appID {
 			continue
@@ -1236,7 +961,7 @@ func appHasBindingToServiceType(state *model.State, appID, serviceType string) b
 	return false
 }
 
-func ensureAppServiceBindingState(state *model.State, app model.App, service model.BackingService, env map[string]string, now time.Time) {
+func ensureAppServiceBindingState(state *storeProjection, app model.App, service model.BackingService, env map[string]string, now time.Time) {
 	index := findServiceBindingByAppAndService(state, app.ID, service.ID)
 	if index >= 0 {
 		state.ServiceBindings[index].Alias = defaultServiceBindingAlias(state.ServiceBindings[index].Alias, service)
@@ -1257,75 +982,10 @@ func ensureAppServiceBindingState(state *model.State, app model.App, service mod
 	})
 }
 
-func deleteBackingServicesByTenant(services []model.BackingService, tenantID string) []model.BackingService {
-	filtered := services[:0]
-	for _, service := range services {
-		if service.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, service)
-	}
-	return filtered
-}
-
-func deleteBackingServicesByProject(services []model.BackingService, projectID string) []model.BackingService {
-	filtered := services[:0]
-	for _, service := range services {
-		if service.ProjectID == projectID {
-			continue
-		}
-		filtered = append(filtered, service)
-	}
-	return filtered
-}
-
-func deleteUnboundBackingServicesByProject(state *model.State, projectID string) {
-	filtered := state.BackingServices[:0]
-	for _, service := range state.BackingServices {
-		if service.ProjectID == projectID && !hasServiceBindings(state, service.ID) {
-			continue
-		}
-		filtered = append(filtered, service)
-	}
-	state.BackingServices = filtered
-}
-
-func deleteServiceBindingsByTenant(bindings []model.ServiceBinding, tenantID string) []model.ServiceBinding {
-	filtered := bindings[:0]
-	for _, binding := range bindings {
-		if binding.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, binding)
-	}
-	return filtered
-}
-
 func deleteServiceBindingsByApp(bindings []model.ServiceBinding, appID string) []model.ServiceBinding {
 	filtered := bindings[:0]
 	for _, binding := range bindings {
 		if binding.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, binding)
-	}
-	return filtered
-}
-
-func deleteServiceBindingsByAppIDs(bindings []model.ServiceBinding, appIDs []string) []model.ServiceBinding {
-	if len(appIDs) == 0 {
-		return bindings
-	}
-	remove := make(map[string]struct{}, len(appIDs))
-	for _, appID := range appIDs {
-		if strings.TrimSpace(appID) == "" {
-			continue
-		}
-		remove[appID] = struct{}{}
-	}
-	filtered := bindings[:0]
-	for _, binding := range bindings {
-		if _, ok := remove[binding.AppID]; ok {
 			continue
 		}
 		filtered = append(filtered, binding)
@@ -1344,7 +1004,7 @@ func deleteOwnedBackingServicesByApp(services []model.BackingService, appID stri
 	return filtered
 }
 
-func findBackingService(state *model.State, id string) int {
+func findBackingService(state *storeProjection, id string) int {
 	for index, service := range state.BackingServices {
 		if service.ID == id {
 			return index
@@ -1353,7 +1013,7 @@ func findBackingService(state *model.State, id string) int {
 	return -1
 }
 
-func findOwnedBackingServiceByAppAndType(state *model.State, appID, serviceType string) int {
+func findOwnedBackingServiceByAppAndType(state *storeProjection, appID, serviceType string) int {
 	for index, service := range state.BackingServices {
 		if service.OwnerAppID != appID {
 			continue
@@ -1372,7 +1032,7 @@ func findOwnedBackingServiceByAppAndType(state *model.State, appID, serviceType 
 // for legacy rows that predate owner_app_id. The binding is the relationship
 // of record for those rows; silently discarding a desired update would leave
 // the app and its backing service permanently divergent.
-func findManagedBackingServiceByAppAndType(state *model.State, appID, serviceType string) int {
+func findManagedBackingServiceByAppAndType(state *storeProjection, appID, serviceType string) int {
 	if index := findOwnedBackingServiceByAppAndType(state, appID, serviceType); index >= 0 {
 		return index
 	}
@@ -1393,7 +1053,7 @@ func findManagedBackingServiceByAppAndType(state *model.State, appID, serviceTyp
 	return -1
 }
 
-func findServiceBinding(state *model.State, id string) int {
+func findServiceBinding(state *storeProjection, id string) int {
 	for index, binding := range state.ServiceBindings {
 		if binding.ID == id {
 			return index
@@ -1402,22 +1062,13 @@ func findServiceBinding(state *model.State, id string) int {
 	return -1
 }
 
-func findServiceBindingByAppAndService(state *model.State, appID, serviceID string) int {
+func findServiceBindingByAppAndService(state *storeProjection, appID, serviceID string) int {
 	for index, binding := range state.ServiceBindings {
 		if binding.AppID == appID && binding.ServiceID == serviceID {
 			return index
 		}
 	}
 	return -1
-}
-
-func hasBindingsOnOtherApps(bindings []model.ServiceBinding, serviceID, appID string) bool {
-	for _, binding := range bindings {
-		if binding.ServiceID == serviceID && binding.AppID != appID {
-			return true
-		}
-	}
-	return false
 }
 
 func requiresExclusiveBinding(service model.BackingService) bool {

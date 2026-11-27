@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"fugue/internal/dataprewarm"
 	"fugue/internal/model"
-	"fugue/internal/store"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +14,7 @@ import (
 )
 
 func TestPrewarmCompletionRequiresOwnedSuccessfulPodAndExactReceipt(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +85,7 @@ func TestPrewarmCleanupRefusesUnrelatedResources(t *testing.T) {
 }
 
 func TestCanceledPrewarmCanCleanUpAfterRuntimeDisappears(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

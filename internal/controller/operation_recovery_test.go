@@ -7,18 +7,16 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func recoveryFixture(t *testing.T) (*Service, model.App, model.Operation) {
 	t.Helper()
-	state := store.New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

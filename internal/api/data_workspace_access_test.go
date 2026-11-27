@@ -2,18 +2,16 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestDataWorkspaceTenantAccessGrantExposesGlobalWorkspace(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -109,7 +107,7 @@ func TestDataWorkspaceTenantAccessGrantExposesGlobalWorkspace(t *testing.T) {
 func TestDataWorkspaceAPIKeyAccessGrantIsTokenScoped(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -111,7 +111,6 @@ func testProducerContinuousServing(t *testing.T, address string) {
 	}
 }
 
-func TestProducerContinuousServing(t *testing.T) { testProducerContinuousServing(t, "") }
 func TestProducerContinuousServingPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {

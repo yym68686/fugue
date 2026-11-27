@@ -3,8 +3,9 @@ package store
 import (
 	"database/sql"
 	"errors"
-	"github.com/DATA-DOG/go-sqlmock"
 	"testing"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestRetiredExternalRegistryReaderDoesNotIgnoreUnknownOrPartialState(t *testing.T) {

@@ -12,7 +12,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestAppCPUResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
@@ -26,7 +25,7 @@ func TestAppMemoryResizeIncludesVerifiedRevisionsAndRecovers(t *testing.T) {
 func testAppRequestResizeRevisions(t *testing.T, dimension string) {
 	for _, scenario := range []string{"ready", "not-ready", "unstable", "pending", "pending-scheduled", "pending-running", "lost-response", "retired", "replacement", "restart-compensation", "foreign-owner", "policy-blocked", "actual-missing"} {
 		t.Run(scenario, func(t *testing.T) {
-			st := store.New(t.TempDir() + "/state.json")
+			st := newStoreTestDatabase(t, "")
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}

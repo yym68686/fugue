@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,14 +13,13 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
-	"fugue/internal/store"
 )
 
 func TestGitHubSyncReusesVerifiedBuildAfterDeployAdmissionFailure(t *testing.T) {
 	for _, scenario := range []string{"verified", "billing-restored", "missing-blob", "digest-changed", "inputs-changed"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx := context.Background()
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -207,7 +205,7 @@ func TestBuildResultHashBindsConfigurationAndIgnoresProgress(t *testing.T) {
 }
 
 func TestGitHubReleaseDecisionDeduplicatesPolling(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "state.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

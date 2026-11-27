@@ -2,10 +2,8 @@ package store
 
 import (
 	"strings"
-	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/tlscertificate"
 )
 
 func (s *Store) GetEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate, error) {
@@ -13,20 +11,7 @@ func (s *Store) GetEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate
 	if hostname == "" {
 		return model.EdgeTLSCertificate{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetEdgeTLSCertificate(hostname)
-	}
-
-	var cert model.EdgeTLSCertificate
-	err := s.withLockedState(false, func(state *model.State) error {
-		index := findEdgeTLSCertificate(state, hostname)
-		if index < 0 {
-			return ErrNotFound
-		}
-		cert = cloneEdgeTLSCertificate(state.EdgeTLSCertificates[index])
-		return nil
-	})
-	return cert, err
+	return s.pgGetEdgeTLSCertificate(hostname)
 }
 
 func (s *Store) PutEdgeTLSCertificate(cert model.EdgeTLSCertificate) (model.EdgeTLSCertificate, error) {
@@ -34,50 +19,7 @@ func (s *Store) PutEdgeTLSCertificate(cert model.EdgeTLSCertificate) (model.Edge
 	if err != nil {
 		return model.EdgeTLSCertificate{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgPutEdgeTLSCertificate(cert)
-	}
-
-	var out model.EdgeTLSCertificate
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findEdgeTLSCertificate(state, cert.Hostname)
-		if index >= 0 {
-			existing := state.EdgeTLSCertificates[index]
-			if retainCurrentTLSCertificate(existing, cert, now) {
-				out = cloneEdgeTLSCertificate(existing)
-				return nil
-			}
-			if cert.CreatedAt.IsZero() {
-				cert.CreatedAt = existing.CreatedAt
-			}
-		} else if cert.CreatedAt.IsZero() {
-			cert.CreatedAt = now
-		}
-		cert.UpdatedAt = now
-		if index >= 0 {
-			state.EdgeTLSCertificates[index] = cloneEdgeTLSCertificate(cert)
-		} else {
-			state.EdgeTLSCertificates = append(state.EdgeTLSCertificates, cloneEdgeTLSCertificate(cert))
-		}
-		out = cloneEdgeTLSCertificate(cert)
-		return nil
-	})
-	return out, err
-}
-
-// Older edge observations must not replace a still-valid newer certificate.
-func retainCurrentTLSCertificate(current, incoming model.EdgeTLSCertificate, now time.Time) bool {
-	if current.NotAfter == nil || !current.NotAfter.After(now) {
-		return false
-	}
-	if current.IssuerStorage == tlscertificate.ImportedIssuerStorage {
-		return true
-	}
-	if incoming.CertificateSHA256 != "" && incoming.CertificateSHA256 == current.CertificateSHA256 {
-		return false
-	}
-	return incoming.NotAfter == nil || !incoming.NotAfter.After(*current.NotAfter)
+	return s.pgPutEdgeTLSCertificate(cert)
 }
 
 func (s *Store) DeleteEdgeTLSCertificate(hostname string) (model.EdgeTLSCertificate, error) {
@@ -85,21 +27,7 @@ func (s *Store) DeleteEdgeTLSCertificate(hostname string) (model.EdgeTLSCertific
 	if hostname == "" {
 		return model.EdgeTLSCertificate{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteEdgeTLSCertificate(hostname)
-	}
-
-	var removed model.EdgeTLSCertificate
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findEdgeTLSCertificate(state, hostname)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = cloneEdgeTLSCertificate(state.EdgeTLSCertificates[index])
-		state.EdgeTLSCertificates = append(state.EdgeTLSCertificates[:index], state.EdgeTLSCertificates[index+1:]...)
-		return nil
-	})
-	return removed, err
+	return s.pgDeleteEdgeTLSCertificate(hostname)
 }
 
 func normalizeEdgeTLSCertificateForStore(cert model.EdgeTLSCertificate) (model.EdgeTLSCertificate, error) {
@@ -121,27 +49,6 @@ func normalizeEdgeTLSCertificateForStore(cert model.EdgeTLSCertificate) (model.E
 		cert.NotAfter = &notAfter
 	}
 	return cert, nil
-}
-
-func findEdgeTLSCertificate(state *model.State, hostname string) int {
-	if state == nil {
-		return -1
-	}
-	hostname = normalizeAppDomainHostname(hostname)
-	for index, cert := range state.EdgeTLSCertificates {
-		if strings.EqualFold(cert.Hostname, hostname) {
-			return index
-		}
-	}
-	return -1
-}
-
-func deleteEdgeTLSCertificateInState(state *model.State, hostname string) {
-	index := findEdgeTLSCertificate(state, hostname)
-	if index < 0 {
-		return
-	}
-	state.EdgeTLSCertificates = append(state.EdgeTLSCertificates[:index], state.EdgeTLSCertificates[index+1:]...)
 }
 
 func cloneEdgeTLSCertificate(in model.EdgeTLSCertificate) model.EdgeTLSCertificate {

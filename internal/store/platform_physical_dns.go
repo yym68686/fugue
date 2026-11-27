@@ -7,11 +7,11 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-func validateProducerPhysicalDNSInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring) error {
+func validateProducerPhysicalDNSInputs(state *storeProjection, previous, next platformproducer.Policy, keys bundleauth.Keyring) error {
 	return validateProducerQualityInputs(state, previous, next, keys, false)
 }
 
-func validateProducerQualityInputs(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring, dynamic bool) error {
+func validateProducerQualityInputs(state *storeProjection, previous, next platformproducer.Policy, keys bundleauth.Keyring, dynamic bool) error {
 	validate := platformproducer.ValidatePhysicalDNSOptIn
 	if dynamic {
 		validate = platformproducer.ValidateDynamicQualityUpdate
@@ -19,7 +19,7 @@ func validateProducerQualityInputs(state *model.State, previous, next platformpr
 	return validateProducerDNSInputChange(state, previous, next, keys, validate)
 }
 
-func validateProducerDNSInputChange(state *model.State, previous, next platformproducer.Policy, keys bundleauth.Keyring, validate func(platformproducer.Policy, platformproducer.Policy, model.PlatformArtifact, model.PlatformArtifact, model.PlatformArtifact) error) error {
+func validateProducerDNSInputChange(state *storeProjection, previous, next platformproducer.Policy, keys bundleauth.Keyring, validate func(platformproducer.Policy, platformproducer.Policy, model.PlatformArtifact, model.PlatformArtifact, model.PlatformArtifact) error) error {
 	inputs := make([]model.PlatformArtifact, 0, 3)
 	for _, reference := range []struct{ id, digest, kind string }{
 		{previous.StaticIntentArtifactID, previous.StaticIntentDigest, model.PlatformArtifactKindPlatformIntent},
@@ -42,7 +42,7 @@ func validateProducerDNSInputChange(state *model.State, previous, next platformp
 	return nil
 }
 
-func validatePhysicalDNSGrayBaseline(state *model.State, policy platformproducer.Policy, full model.PlatformArtifactRelease) error {
+func validatePhysicalDNSGrayBaseline(state *storeProjection, policy platformproducer.Policy, full model.PlatformArtifactRelease) error {
 	laneKey := platformsafety.ReleaseLaneKey(model.PlatformArtifactKindReleaseSet, policy.TargetScope, "gray")
 	lane, found := platformReleaseLaneByKey(state.PlatformReleaseLanes, laneKey)
 	if !found {

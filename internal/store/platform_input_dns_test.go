@@ -148,7 +148,7 @@ func TestCompilerDNSCacheBounds(t *testing.T) {
 	}
 }
 func TestCompilerDNSInputFileCompatibility(t *testing.T) {
-	state := New(t.TempDir() + "/state.json")
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

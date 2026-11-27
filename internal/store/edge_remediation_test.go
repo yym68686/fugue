@@ -11,8 +11,8 @@ import (
 
 func TestEdgeRemediationIsDurableCASAndCannotExpandOnActiveFailure(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, path)
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

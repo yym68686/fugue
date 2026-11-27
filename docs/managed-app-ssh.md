@@ -150,11 +150,8 @@ PostgreSQL stores identities in the independently migrated
 `fugue_app_ssh_identity_anchors`. A missing encrypted row with an existing
 ownership record requires restoration and cannot trigger key regeneration.
 The schema migration is additive and does not cascade identity deletion from
-compute deletion. The file backend stores identities in a separately locked,
-atomically replaced `<store>.ssh-identities.json` file and public ownership in
-its `.anchors` companion. An older release rewriting ordinary application
-state cannot discard them. Restore both files together; losing both ownership
-and encrypted records requires recovery from the independent backup.
+compute deletion. Losing both ownership and encrypted records requires
+recovery from the independent backup.
 Retained records are inaccessible through app APIs after compute deletion.
 The explicit retention policy keeps encrypted identities, ownership anchors,
 and backup keys until separately reviewed decommission; see
@@ -171,8 +168,8 @@ is available through the independent, exact-plan maintenance CLI and CI lane.
 
 Validation completed for this foundation: encryption roundtrip and metadata
 tampering, missing keys, stable identity under encryption-key rotation,
-cross-instance file-store concurrency, unchanged workload state, tenant
-isolation, corruption/restoration, PostgreSQL concurrent preparation and
+unchanged workload state, tenant isolation, corruption/restoration,
+PostgreSQL concurrent preparation and
 independent schema retry, API scope checks, CLI method selection, and bounded
 SSH key-exchange probing without user authentication. Tests use synthetic
 workloads and a disposable loopback PostgreSQL database.
@@ -345,8 +342,7 @@ allocate or switch a public route, or update client trust. The CLI provides
 `app ssh managed show` and `managed apply --file ... --expected-generation ...`.
 
 Intent, control state, and immutable signed artifacts have separate PostgreSQL
-tables, outside the general application state writer. The file backend likewise
-uses independently locked, atomic files. Publication checks both the intent
+tables, outside the general application state writer. Publication checks both the intent
 generation and control revision. Reusing an artifact generation with different
 contents fails without changing the previous state. Identity replacement and
 cross-tenant publication fail. The controller persists artifacts before applying
@@ -415,9 +411,8 @@ allocates a separate address for a new managed endpoint without enabling app SSH
 Application spec changes and legacy disable cannot destroy that reservation.
 The PostgreSQL migration installs a bounded port-reservation guard that rejects
 an older writer stealing a managed port or rotating its owner through the legacy
-table. New native and managed allocators share the same transaction-scoped lock;
-the file backend locks ordinary state before independent bindings. Concurrent
-mixed allocation passed on both backends with no overlaps.
+table. New native and managed allocators share the same transaction-scoped lock.
+Concurrent mixed allocation is covered on PostgreSQL.
 
 `managed/status`, `managed/binding`, `managed/activate`, and `managed/rollback`
 expose review and mutation as distinct authenticated API operations. The CLI
@@ -435,9 +430,6 @@ Triggers preserve the managed target and fingerprint across old application
 updates, disable operations, and live-resource cleanup. Tests exercise old SQL
 writes and the unchanged legacy bundle producer after activation. Public port
 allocation and route projection remain independent from the application spec.
-The file backend supports local identity/intent/candidate testing, but public
-activation fails closed because an older file-backend binary cannot enforce
-this projection ownership.
 
 Rollback selects a retained, freshly verified slot and revalidates current
 authorization; it does not restore revoked keys or expired grants. It retains

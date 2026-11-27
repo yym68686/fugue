@@ -33,7 +33,7 @@ func TestReleaseConvergencePostgresIntegration(t *testing.T) {
 func testReleaseConvergenceBinding(t *testing.T, address string) {
 	state, server, _, admin, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	if address != "" {
-		state = store.New("", address)
+		state = store.New(address)
 		if err := state.Init(); err != nil {
 			t.Fatal(err)
 		}

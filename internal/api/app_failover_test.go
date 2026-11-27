@@ -2,19 +2,17 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestFailoverAppAllowsStatefulAppsWithConfiguredTarget(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -65,7 +63,7 @@ func TestFailoverAppAllowsStatefulAppsWithConfiguredTarget(t *testing.T) {
 func TestFailoverAppRejectsStatefulAppWithoutVolumeReplication(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -9,7 +9,6 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
-	"fugue/internal/store"
 )
 
 func TestCompilePlatformConfigPersistsLineageAndReleaseSet(t *testing.T) {
@@ -87,7 +86,7 @@ func TestReleaseSetInvariantRequiresTrafficArtifactGroup(t *testing.T) {
 }
 
 func TestReleaseSetReferenceValidationRequiresExistingValidatedChildren(t *testing.T) {
-	s := store.New(t.TempDir() + "/store.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -354,7 +353,7 @@ func TestPlatformIntentArtifactValidationUsesTypedIntentSchema(t *testing.T) {
 }
 
 func TestReleaseSetConvergenceBlocksRequiredConsumers(t *testing.T) {
-	s := store.New(t.TempDir() + "/store.json")
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

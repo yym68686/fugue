@@ -201,7 +201,7 @@ func TestPlatformAdmissionObservationIsBoundedAndRedacted(t *testing.T) {
 	ctx, trace := startPlatformMutationTrace(context.Background(), "platform-release")
 	at := trace.started
 	trace.now = func() time.Time { return at }
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{{ID: "private-artifact-marker"}},
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{{ID: "private-artifact-marker"}},
 		ExpectedConsumerSets:      []model.PlatformExpectedConsumerSet{{ID: "private-expectation-marker"}},
 		PlatformConsumerInstances: []model.PlatformConsumerInstance{{ConsumerID: "private-consumer-marker"}}}
 	for i := 0; i < platformAdmissionObservationLimit+1; i++ {

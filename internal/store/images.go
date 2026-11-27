@@ -2,8 +2,6 @@ package store
 
 import (
 	"errors"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,42 +19,7 @@ func (s *Store) UpsertImage(image model.Image) (model.Image, error) {
 	if err := validateAvailableImage(image); err != nil {
 		return model.Image{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImage(image)
-	}
-	var out model.Image
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-
-		index := findImage(state.Images, image)
-		if index >= 0 {
-			current := state.Images[index]
-			image.ID = current.ID
-			image.CreatedAt = current.CreatedAt
-			if image.TenantID == "" {
-				image.TenantID = current.TenantID
-			}
-			if image.AppID == "" {
-				image.AppID = current.AppID
-			}
-			if image.SourceOperationID == "" {
-				image.SourceOperationID = current.SourceOperationID
-			}
-			image.UpdatedAt = now
-			retainImageRetirement(state, image)
-			state.Images[index] = image
-			out = image
-			return nil
-		}
-		image.ID = firstNonEmptyImageString(image.ID, model.NewID("img"))
-		image.CreatedAt = now
-		image.UpdatedAt = now
-		retainImageRetirement(state, image)
-		state.Images = append(state.Images, image)
-		out = image
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImage(image)
 }
 
 func (s *Store) DemoteLegacyImageIfAvailableCanonicalPeer(
@@ -72,40 +35,7 @@ func (s *Store) DemoteLegacyImageIfAvailableCanonicalPeer(
 	if legacyID == "" || imageRef == "" || canonicalDigest == "" {
 		return model.Image{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDemoteLegacyImageIfAvailableCanonicalPeer(legacyID, tenantID, imageRef, canonicalDigest)
-	}
-	var out model.Image
-	err := s.withLockedState(true, func(state *model.State) error {
-		legacyIndex := -1
-		peerAvailable := false
-		for index, image := range state.Images {
-			if image.ID == legacyID {
-				legacyIndex = index
-				continue
-			}
-			if strings.TrimSpace(image.TenantID) == tenantID && strings.TrimSpace(image.ImageRef) == imageRef &&
-				CanonicalImageDigest(image.CanonicalDigest) == canonicalDigest &&
-				strings.EqualFold(strings.TrimSpace(image.LifecycleState), model.ImageLifecycleAvailable) {
-				peerAvailable = true
-			}
-		}
-		if legacyIndex < 0 {
-			return ErrNotFound
-		}
-		legacy := state.Images[legacyIndex]
-		if strings.TrimSpace(legacy.TenantID) != tenantID || strings.TrimSpace(legacy.ImageRef) != imageRef ||
-			CanonicalImageDigest(legacy.CanonicalDigest) != "" ||
-			!strings.EqualFold(strings.TrimSpace(legacy.LifecycleState), model.ImageLifecycleAvailable) || !peerAvailable {
-			return ErrConflict
-		}
-		legacy.LifecycleState = model.ImageLifecycleLost
-		legacy.UpdatedAt = time.Now().UTC()
-		state.Images[legacyIndex] = legacy
-		out = legacy
-		return nil
-	})
-	return out, err
+	return s.pgDemoteLegacyImageIfAvailableCanonicalPeer(legacyID, tenantID, imageRef, canonicalDigest)
 }
 
 func (s *Store) GetImage(id, tenantID string, platformAdmin bool) (model.Image, error) {
@@ -113,58 +43,12 @@ func (s *Store) GetImage(id, tenantID string, platformAdmin bool) (model.Image, 
 	if id == "" {
 		return model.Image{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetImage(id, tenantID, platformAdmin)
-	}
-	var out model.Image
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, image := range state.Images {
-			if image.ID != id {
-				continue
-			}
-			if !platformAdmin && strings.TrimSpace(image.TenantID) != strings.TrimSpace(tenantID) {
-				return ErrNotFound
-			}
-			out = image
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetImage(id, tenantID, platformAdmin)
 }
 
 func (s *Store) ListImages(filter model.ImageFilter) ([]model.Image, error) {
 	filter = normalizeImageFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImages(filter)
-	}
-	out := []model.Image{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		projectApps := map[string]bool{}
-		if filter.ProjectID != "" {
-			for _, app := range state.Apps {
-				if app.ProjectID == filter.ProjectID {
-					projectApps[app.ID] = true
-				}
-			}
-		}
-		for _, image := range state.Images {
-			if filter.ProjectID != "" && !projectApps[image.AppID] {
-				continue
-			}
-			if imageMatchesFilter(image, filter) {
-				out = append(out, image)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImages(filter)
 }
 
 func (s *Store) UpsertImageAlias(alias model.ImageAlias) (model.ImageAlias, error) {
@@ -172,56 +56,12 @@ func (s *Store) UpsertImageAlias(alias model.ImageAlias) (model.ImageAlias, erro
 	if alias.ImageID == "" || alias.AliasRef == "" {
 		return model.ImageAlias{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageAlias(alias)
-	}
-	var out model.ImageAlias
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageAlias(state.ImageAliases, alias)
-		if index >= 0 {
-			current := state.ImageAliases[index]
-			alias.ID = current.ID
-			alias.CreatedAt = current.CreatedAt
-			if alias.TenantID == "" {
-				alias.TenantID = current.TenantID
-			}
-			alias.UpdatedAt = now
-			state.ImageAliases[index] = alias
-			out = alias
-			return nil
-		}
-		alias.ID = firstNonEmptyImageString(alias.ID, model.NewID("imgalias"))
-		alias.CreatedAt = now
-		alias.UpdatedAt = now
-		state.ImageAliases = append(state.ImageAliases, alias)
-		out = alias
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImageAlias(alias)
 }
 
 func (s *Store) ListImageAliases(filter model.ImageAliasFilter) ([]model.ImageAlias, error) {
 	filter = normalizeImageAliasFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageAliases(filter)
-	}
-	out := []model.ImageAlias{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, alias := range state.ImageAliases {
-			if imageAliasMatchesFilter(alias, filter) {
-				out = append(out, alias)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImageAliases(filter)
 }
 
 func (s *Store) UpsertImageReplica(replica model.ImageReplica) (model.ImageReplica, error) {
@@ -254,105 +94,19 @@ func (s *Store) UpsertImageReplica(replica model.ImageReplica) (model.ImageRepli
 	if err := validatePresentImageReplica(replica); err != nil {
 		return model.ImageReplica{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageReplica(replica)
-	}
-	var out model.ImageReplica
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageReplica(state.ImageReplicas, replica)
-		if index >= 0 {
-			current := state.ImageReplicas[index]
-			replica.ID = current.ID
-			replica.CreatedAt = current.CreatedAt
-			if replica.TenantID == "" {
-				replica.TenantID = current.TenantID
-			}
-			if replica.AppID == "" {
-				replica.AppID = current.AppID
-			}
-			if replica.Digest == "" {
-				replica.Digest = current.Digest
-			}
-			if replica.CacheEndpoint == "" {
-				replica.CacheEndpoint = current.CacheEndpoint
-			}
-			replica.UpdatedAt = now
-			state.ImageReplicas[index] = replica
-			out = replica
-			return nil
-		}
-		replica.ID = firstNonEmptyImageString(replica.ID, model.NewID("imgrep"))
-		replica.CreatedAt = now
-		replica.UpdatedAt = now
-		state.ImageReplicas = append(state.ImageReplicas, replica)
-		out = replica
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImageReplica(replica)
 }
 
 func (s *Store) ListImageReplicas(filter model.ImageReplicaFilter) ([]model.ImageReplica, error) {
 	filter = normalizeImageReplicaFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageReplicas(filter)
-	}
-	out := []model.ImageReplica{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, replica := range state.ImageReplicas {
-			if imageReplicaMatchesFilter(replica, filter) {
-				out = append(out, replica)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		left := imageReplicaSeenAt(out[i])
-		right := imageReplicaSeenAt(out[j])
-		if !left.Equal(right) {
-			return left.After(right)
-		}
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImageReplicas(filter)
 }
 
 // MarkStaleImageReplicas expires leased replicas only after their lease ends.
 // The cutoff remains a compatibility fallback for historical replicas that do
 // not have lease metadata.
 func (s *Store) MarkStaleImageReplicas(now, unleasedCutoff time.Time) (int, error) {
-	if s.usingDatabase() {
-		return s.pgMarkStaleImageReplicas(now, unleasedCutoff)
-	}
-	count := 0
-	err := s.withLockedState(true, func(state *model.State) error {
-		now = now.UTC()
-		unleasedCutoff = unleasedCutoff.UTC()
-		for idx := range state.ImageReplicas {
-			replica := &state.ImageReplicas[idx]
-			if replica.Status != model.ImageReplicaStatusPresent {
-				continue
-			}
-			if replica.LeaseExpiresAt != nil {
-				if !replica.LeaseExpiresAt.Before(now) {
-					continue
-				}
-			} else {
-				seen := imageReplicaSeenAt(*replica)
-				if seen.IsZero() || !seen.Before(unleasedCutoff) {
-					continue
-				}
-			}
-			replica.Status = model.ImageReplicaStatusStale
-			replica.UpdatedAt = now
-			count++
-		}
-		return nil
-	})
-	return count, err
+	return s.pgMarkStaleImageReplicas(now, unleasedCutoff)
 }
 
 func (s *Store) UpsertImagePin(pin model.ImagePin) (model.ImagePin, error) {
@@ -360,36 +114,7 @@ func (s *Store) UpsertImagePin(pin model.ImagePin) (model.ImagePin, error) {
 	if pin.ImageID == "" || pin.Reason == "" {
 		return model.ImagePin{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImagePin(pin)
-	}
-	var out model.ImagePin
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImagePin(state.ImagePins, pin)
-		if index >= 0 {
-			current := state.ImagePins[index]
-			pin.ID = current.ID
-			pin.CreatedAt = current.CreatedAt
-			if pin.TenantID == "" {
-				pin.TenantID = current.TenantID
-			}
-			if pin.AppID == "" {
-				pin.AppID = current.AppID
-			}
-			pin.UpdatedAt = now
-			state.ImagePins[index] = pin
-			out = pin
-			return nil
-		}
-		pin.ID = firstNonEmptyImageString(pin.ID, model.NewID("imgpin"))
-		pin.CreatedAt = now
-		pin.UpdatedAt = now
-		state.ImagePins = append(state.ImagePins, pin)
-		out = pin
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImagePin(pin)
 }
 
 func (s *Store) DeleteImagePin(id, tenantID string, platformAdmin bool) error {
@@ -397,45 +122,12 @@ func (s *Store) DeleteImagePin(id, tenantID string, platformAdmin bool) error {
 	if id == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteImagePin(id, tenantID, platformAdmin)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		for idx, pin := range state.ImagePins {
-			if pin.ID != id {
-				continue
-			}
-			if !platformAdmin && strings.TrimSpace(pin.TenantID) != strings.TrimSpace(tenantID) {
-				return ErrNotFound
-			}
-			state.ImagePins = append(state.ImagePins[:idx], state.ImagePins[idx+1:]...)
-			return nil
-		}
-		return ErrNotFound
-	})
+	return s.pgDeleteImagePin(id, tenantID, platformAdmin)
 }
 
 func (s *Store) ListImagePins(filter model.ImagePinFilter) ([]model.ImagePin, error) {
 	filter = normalizeImagePinFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImagePins(filter)
-	}
-	out := []model.ImagePin{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, pin := range state.ImagePins {
-			if imagePinMatchesFilter(pin, filter) {
-				out = append(out, pin)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImagePins(filter)
 }
 
 func (s *Store) UpsertImageReplicationTask(task model.ImageReplicationTask) (model.ImageReplicationTask, error) {
@@ -443,70 +135,12 @@ func (s *Store) UpsertImageReplicationTask(task model.ImageReplicationTask) (mod
 	if task.ImageID == "" || task.Status == "" || task.Priority == "" {
 		return model.ImageReplicationTask{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageReplicationTask(task)
-	}
-	var out model.ImageReplicationTask
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageReplicationTask(state.ImageReplicationTasks, task)
-		if index >= 0 {
-			current := state.ImageReplicationTasks[index]
-			task.ID = current.ID
-			task.CreatedAt = current.CreatedAt
-			if task.TenantID == "" {
-				task.TenantID = current.TenantID
-			}
-			if task.AppID == "" {
-				task.AppID = current.AppID
-			}
-			task.UpdatedAt = now
-			state.ImageReplicationTasks[index] = task
-			out = task
-			return nil
-		}
-		task.ID = firstNonEmptyImageString(task.ID, model.NewID("imgtask"))
-		task.CreatedAt = now
-		task.UpdatedAt = now
-		state.ImageReplicationTasks = append(state.ImageReplicationTasks, task)
-		out = task
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImageReplicationTask(task)
 }
 
 func (s *Store) ListImageReplicationTasks(filter model.ImageReplicationTaskFilter) ([]model.ImageReplicationTask, error) {
 	filter = normalizeImageReplicationTaskFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageReplicationTasks(filter)
-	}
-	out := []model.ImageReplicationTask{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		projectApps := map[string]bool{}
-		if filter.ProjectID != "" {
-			for _, app := range state.Apps {
-				if app.ProjectID == filter.ProjectID {
-					projectApps[app.ID] = true
-				}
-			}
-		}
-		for _, task := range state.ImageReplicationTasks {
-			if filter.ProjectID != "" && !projectApps[task.AppID] {
-				continue
-			}
-			if imageReplicationTaskMatchesFilter(task, filter) {
-				out = append(out, task)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImageReplicationTasks(filter)
 }
 
 func normalizeImage(image model.Image) model.Image {
@@ -850,231 +484,6 @@ func normalizeImageReplicationPriorityFilter(raw string) string {
 		return ""
 	}
 	return normalizeImageReplicationPriority(raw)
-}
-
-func findImage(images []model.Image, image model.Image) int {
-	if image.ID != "" {
-		for idx, existing := range images {
-			if existing.ID == image.ID {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range images {
-		if strings.TrimSpace(existing.TenantID) != image.TenantID {
-			continue
-		}
-		if strings.TrimSpace(existing.ImageRef) == image.ImageRef && normalizeImageDigest(existing.CanonicalDigest) == image.CanonicalDigest {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findImageAlias(aliases []model.ImageAlias, alias model.ImageAlias) int {
-	if alias.ID != "" {
-		for idx, existing := range aliases {
-			if existing.ID == alias.ID {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range aliases {
-		if existing.ImageID == alias.ImageID && existing.AliasRef == alias.AliasRef {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findImageReplica(replicas []model.ImageReplica, replica model.ImageReplica) int {
-	if replica.ID != "" {
-		for idx, existing := range replicas {
-			if existing.ID == replica.ID {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range replicas {
-		if existing.ImageID != replica.ImageID {
-			continue
-		}
-		if strings.TrimSpace(existing.NodeID) != replica.NodeID {
-			continue
-		}
-		if strings.TrimSpace(existing.RuntimeID) != replica.RuntimeID {
-			continue
-		}
-		if strings.TrimSpace(existing.ClusterNodeName) != replica.ClusterNodeName {
-			continue
-		}
-		return idx
-	}
-	return -1
-}
-
-func findImagePin(pins []model.ImagePin, pin model.ImagePin) int {
-	if pin.ID != "" {
-		for idx, existing := range pins {
-			if existing.ID == pin.ID {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range pins {
-		if existing.ImageID == pin.ImageID &&
-			strings.TrimSpace(existing.AppID) == pin.AppID &&
-			strings.TrimSpace(existing.OperationID) == pin.OperationID &&
-			strings.TrimSpace(existing.Reason) == pin.Reason {
-			return idx
-		}
-	}
-	return -1
-}
-
-func findImageReplicationTask(tasks []model.ImageReplicationTask, task model.ImageReplicationTask) int {
-	if task.ID != "" {
-		for idx, existing := range tasks {
-			if existing.ID == task.ID {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range tasks {
-		if existing.ImageID == task.ImageID &&
-			strings.TrimSpace(existing.SourceReplicaID) == task.SourceReplicaID &&
-			strings.TrimSpace(existing.TargetNodeID) == task.TargetNodeID &&
-			strings.TrimSpace(existing.TargetRuntimeID) == task.TargetRuntimeID &&
-			strings.TrimSpace(existing.TargetClusterNodeName) == task.TargetClusterNodeName &&
-			strings.TrimSpace(existing.Priority) == task.Priority &&
-			(existing.Status == model.ImageReplicationTaskStatusPending || existing.Status == model.ImageReplicationTaskStatusRunning) {
-			return idx
-		}
-	}
-	return -1
-}
-
-func imageMatchesFilter(image model.Image, filter model.ImageFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(image.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(image.AppID) != filter.AppID {
-		return false
-	}
-	if len(filter.AppIDs) > 0 && !slices.Contains(filter.AppIDs, strings.TrimSpace(image.AppID)) {
-		return false
-	}
-	if filter.ImageRef != "" && strings.TrimSpace(image.ImageRef) != filter.ImageRef {
-		return false
-	}
-	if filter.CanonicalDigest != "" && normalizeImageDigest(image.CanonicalDigest) != filter.CanonicalDigest {
-		return false
-	}
-	if filter.LifecycleState != "" && strings.TrimSpace(image.LifecycleState) != filter.LifecycleState {
-		return false
-	}
-	return true
-}
-
-func imageAliasMatchesFilter(alias model.ImageAlias, filter model.ImageAliasFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(alias.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.ImageID != "" && strings.TrimSpace(alias.ImageID) != filter.ImageID {
-		return false
-	}
-	if filter.AliasRef != "" && strings.TrimSpace(alias.AliasRef) != filter.AliasRef {
-		return false
-	}
-	if filter.Digest != "" && normalizeImageDigest(alias.Digest) != filter.Digest {
-		return false
-	}
-	return true
-}
-
-func imageReplicaMatchesFilter(replica model.ImageReplica, filter model.ImageReplicaFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(replica.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.ImageID != "" && strings.TrimSpace(replica.ImageID) != filter.ImageID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(replica.AppID) != filter.AppID {
-		return false
-	}
-	if filter.Digest != "" && normalizeImageDigest(replica.Digest) != filter.Digest {
-		return false
-	}
-	if filter.NodeID != "" && strings.TrimSpace(replica.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(replica.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(replica.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	if filter.Status != "" && strings.TrimSpace(replica.Status) != filter.Status {
-		return false
-	}
-	return true
-}
-
-func imagePinMatchesFilter(pin model.ImagePin, filter model.ImagePinFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(pin.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.ImageID != "" && strings.TrimSpace(pin.ImageID) != filter.ImageID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(pin.AppID) != filter.AppID {
-		return false
-	}
-	if filter.OperationID != "" && strings.TrimSpace(pin.OperationID) != filter.OperationID {
-		return false
-	}
-	if filter.Reason != "" && strings.TrimSpace(pin.Reason) != filter.Reason {
-		return false
-	}
-	return true
-}
-
-func imageReplicationTaskMatchesFilter(task model.ImageReplicationTask, filter model.ImageReplicationTaskFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(task.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.ImageID != "" && strings.TrimSpace(task.ImageID) != filter.ImageID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(task.AppID) != filter.AppID {
-		return false
-	}
-	if filter.SourceReplicaID != "" && strings.TrimSpace(task.SourceReplicaID) != filter.SourceReplicaID {
-		return false
-	}
-	if filter.TargetNodeID != "" && strings.TrimSpace(task.TargetNodeID) != filter.TargetNodeID {
-		return false
-	}
-	if filter.TargetRuntimeID != "" && strings.TrimSpace(task.TargetRuntimeID) != filter.TargetRuntimeID {
-		return false
-	}
-	if filter.TargetClusterNodeName != "" && strings.TrimSpace(task.TargetClusterNodeName) != filter.TargetClusterNodeName {
-		return false
-	}
-	if filter.Priority != "" && strings.TrimSpace(task.Priority) != filter.Priority {
-		return false
-	}
-	if filter.Status != "" && strings.TrimSpace(task.Status) != filter.Status {
-		return false
-	}
-	return true
-}
-
-func imageReplicaSeenAt(replica model.ImageReplica) time.Time {
-	if replica.LastVerifiedAt != nil {
-		return *replica.LastVerifiedAt
-	}
-	return replica.UpdatedAt
 }
 
 func firstNonEmptyImageString(values ...string) string {

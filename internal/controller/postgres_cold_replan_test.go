@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -88,7 +87,7 @@ func TestColdStorageRetryFencesOnlyOwnedUnpublishedTargetAndRetainsClaims(t *tes
 	for _, scenario := range []string{"primary", "join", "foreign-cluster", "foreign-pod", "foreign-job", "unhealthy-node", "inactive"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

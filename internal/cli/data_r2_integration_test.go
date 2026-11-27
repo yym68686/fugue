@@ -14,7 +14,6 @@ import (
 	"fugue/internal/api"
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -29,7 +28,7 @@ func TestCloudflareR2DataWorkspacePushPullIntegration(t *testing.T) {
 	}
 	defer cleanupR2IntegrationPrefix(t, cfg)
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

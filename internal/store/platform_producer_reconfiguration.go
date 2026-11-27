@@ -97,7 +97,7 @@ func validateProducerReconfigurationRequest(a model.PlatformArtifact, req model.
 	return p, nil
 }
 
-func exactPublication(state *model.State, ref model.PlatformPublicationPrecondition, kind, scope, channel string, keys bundleauth.Keyring, current bool) (model.PlatformArtifact, model.PlatformArtifactRelease, error) {
+func exactPublication(state *storeProjection, ref model.PlatformPublicationPrecondition, kind, scope, channel string, keys bundleauth.Keyring, current bool) (model.PlatformArtifact, model.PlatformArtifactRelease, error) {
 	ai, ri := platformArtifactIndex(state.PlatformArtifacts, ref.ArtifactID), platformArtifactReleaseIndex(state.PlatformArtifactReleases, ref.ReleaseID)
 	if ai < 0 || ri < 0 {
 		return model.PlatformArtifact{}, model.PlatformArtifactRelease{}, ErrConflict
@@ -116,7 +116,7 @@ func exactPublication(state *model.State, ref model.PlatformPublicationPrecondit
 	return a, r, nil
 }
 
-func validateProducerReconfiguration(state *model.State, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, now time.Time) error {
+func validateProducerReconfiguration(state *storeProjection, a model.PlatformArtifact, req model.PlatformArtifactReleaseRequest, keys bundleauth.Keyring, now time.Time) error {
 	if req.ProducerReconfiguration == nil {
 		return nil
 	}
@@ -329,7 +329,7 @@ func (s *Store) pgProducerReconfiguration(ctx context.Context, tx *sql.Tx, a mod
 	if err != nil {
 		return err
 	}
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{a}}
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{a}}
 	r := req.ProducerReconfiguration
 	for _, ref := range []model.PlatformPublicationPrecondition{r.PreviousPolicy, r.ServingFull} {
 		artifact, err := pgGetPlatformArtifactForUpdate(ctx, tx, ref.ArtifactID, true)

@@ -2,7 +2,6 @@ package store
 
 import (
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -17,11 +16,11 @@ import (
 func TestAcceptTrustedPlatformConsumerHeartbeatWithAuditIsAtomicAndChained(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	now := time.Date(2026, 7, 11, 6, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Add(-2 * time.Second).Truncate(time.Microsecond)
 	set := trustedHeartbeatExpectedSet(t, now)
 	if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
 		t.Fatalf("create expected consumer set: %v", err)
@@ -77,11 +76,11 @@ func TestAcceptTrustedPlatformConsumerHeartbeatWithAuditIsAtomicAndChained(t *te
 func TestAcceptTrustedPlatformConsumerHeartbeatWithAuditRollsBackWhenSigningFails(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
-	now := time.Date(2026, 7, 11, 6, 15, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	set := trustedHeartbeatExpectedSet(t, now)
 	if _, err := s.CreatePlatformExpectedConsumerSet(set); err != nil {
 		t.Fatalf("create expected consumer set: %v", err)

@@ -2,14 +2,12 @@ package api
 
 import (
 	"fugue/internal/auth"
-	"fugue/internal/store"
 	"net/http"
-	"path/filepath"
 	"testing"
 )
 
 func TestImageOrphanPolicyAdminScopeCASAndValidation(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

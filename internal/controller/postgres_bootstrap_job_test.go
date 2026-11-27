@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,7 +14,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/pgretire"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
+
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 )
 
@@ -346,7 +345,7 @@ func TestPostgresPlacementRollbackSettlesJoinBeforeReportingSuccess(t *testing.T
 
 func postgresRollbackTestOperation(t *testing.T) (*Service, model.Operation, string) {
 	t.Helper()
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

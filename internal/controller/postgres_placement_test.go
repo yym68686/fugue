@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -119,7 +118,7 @@ func TestManagedReadyAppNodesByNodeKeepsOnlyServingPods(t *testing.T) {
 func TestManagedPostgresPlacementsCanonicalizesMixedCaseServiceName(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -251,7 +250,7 @@ func TestManagedPostgresPlacementsCanonicalizesMixedCaseServiceName(t *testing.T
 func TestManagedPostgresPlacementsChoosesNonOverlappingSharedSourceNode(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -416,7 +415,7 @@ func TestManagedPostgresPlacementsChoosesNonOverlappingSharedSourceNode(t *testi
 func TestManagedPostgresPlacementsPinsSharedPrimaryToLegacyPVCNode(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -635,7 +634,7 @@ func TestManagedPostgresPlacementsPinsSharedPrimaryToLegacyPVCNode(t *testing.T)
 func TestManagedPostgresPlacementsChoosesHealthiestSharedSourceNodeWithoutFailoverTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -834,7 +833,7 @@ func TestManagedPostgresPlacementsChoosesHealthiestSharedSourceNodeWithoutFailov
 func TestManagedPostgresPlacementsAvoidsSharedNodeWithoutRequestHeadroom(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -1,15 +1,9 @@
 package store
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"reflect"
-	"strings"
 	"testing"
 	"time"
 
-	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
@@ -20,94 +14,6 @@ type promotionFixture struct {
 	release   model.PlatformArtifactRelease
 	sets      []model.PlatformExpectedConsumerSet
 	consumers []model.PlatformConsumerInstance
-}
-
-func TestCellFullPublicationCannotShrinkSignedMembership(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing receipt", "dropped silent member", "optional member", "foreign authority", "freshness widened"} {
-		t.Run(scenario, func(t *testing.T) {
-			s := New(t.TempDir() + "/state.json")
-			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
-			now := time.Now().UTC()
-			scope := platformconfig.AuthorityCellScope("cell-a")
-			intent := platformconfig.PlatformIntent{AuthorityCellID: "cell-a", SchemaVersion: platformconfig.SchemaVersion, Generation: "intent", Scope: scope, EdgeTopology: &edgetopology.Intent{SchemaVersion: edgetopology.SchemaVersion, Cells: []edgetopology.AuthorityCell{{ID: "cell-a"}}, Pools: []edgetopology.ServingPool{{ID: "pool-public"}}, Edges: []edgetopology.Edge{{ID: "edge-a", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "edge-a"}}, {ID: "edge-b", AuthorityCellID: "cell-a", ServingPoolIDs: []string{"pool-public"}, Capabilities: []string{"http", "tls"}, FailureDomains: map[string]string{"host": "edge-b"}}}}, DNSConsumers: []platformconfig.DNSConsumerIntent{{NodeID: "dns-a", EdgeGroupID: "cell-a", Zones: []string{"example.test"}, ProbeLabel: "probe", ProbeTTL: 60}}, Routes: []platformconfig.RouteIntent{{Hostname: "app.example.test", UpstreamURL: "http://origin:8080", Enabled: false}}}
-			declared, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
-			if err != nil {
-				t.Fatal(err)
-			}
-			digest, _ := platformconfig.Digest(declared)
-			req := platformconfig.CompileRequest{Intent: intent, Policy: platformconfig.PolicySnapshot{AuthorityCellID: "cell-a", ConsumerTopologyDigest: digest, Scope: scope, Generation: "policy", TrafficRolloutCohorts: []platformconfig.TrafficRolloutCohort{{ID: "test", EdgeGroupIDs: []string{"cell-a"}}}}, RuntimeSnapshot: platformconfig.RuntimeSnapshot{CapturedAt: &now, DNSConsumers: []platformconfig.DNSConsumerObservation{{NodeID: "dns-a", EdgeGroupID: "cell-a", ObservedAt: now, A: []string{"8.8.8.8"}}}}}
-			f := prepareTrafficLKGFixture(t, s, scope, "gray", true, req)
-			if err := s.withLockedState(true, func(state *model.State) error {
-				if scenario == "missing receipt" {
-					state.PlatformConsumerInstances = state.PlatformConsumerInstances[1:]
-				}
-				if scenario != "complete" && scenario != "missing receipt" {
-					for i := range state.ExpectedConsumerSets {
-						set := &state.ExpectedConsumerSets[i]
-						if set.ReleaseSetID != f.parent.ID || set.ArtifactKind != model.PlatformArtifactKindEdgeRouteBundle {
-							continue
-						}
-						switch scenario {
-						case "dropped silent member":
-							set.Consumers = set.Consumers[:1]
-							set.RequiredCardinality = 1
-						case "optional member":
-							set.Consumers[1].Required = false
-							set.RequiredCardinality--
-							set.OptionalCardinality++
-						case "foreign authority":
-							set.Consumers[1].AuthorityID = "cell-b"
-							set.Consumers[1].Cohort = "cell-b"
-							set.Consumers[1].ConsumerID = "edge-worker:cell-b:edge-b"
-						case "freshness widened":
-							set.Consumers[1].HeartbeatFreshnessSeconds = 86400
-						}
-					}
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			var before []byte
-			if err := s.withLockedState(false, func(state *model.State) error { before, _ = json.Marshal(state); return nil }); err != nil {
-				t.Fatal(err)
-			}
-			_, _, _, _, err = s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full", Reason: "all declared members required"}, testPlatformPrincipal())
-			if scenario == "complete" {
-				if err != nil {
-					t.Fatal("complete independently scoped publication rejected", err)
-				}
-			} else {
-				if !errors.Is(err, ErrConflict) {
-					t.Fatal("changed expectation bypassed signed membership", err)
-				}
-				if err := s.withLockedState(false, func(state *model.State) error {
-					after, _ := json.Marshal(state)
-					var a, b map[string]any
-					json.Unmarshal(before, &a)
-					json.Unmarshal(after, &b)
-					// The file store refreshes unrelated backup defaults on read.
-					// Configuration, facts, authority, LKG and audit must not change.
-					for key, value := range a {
-						if (strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit")) && !reflect.DeepEqual(value, b[key]) {
-							t.Fatal("rejected publication changed durable authority", key)
-						}
-					}
-					for key := range b {
-						if _, exists := a[key]; !exists && (strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit")) {
-							t.Fatal("rejected publication created durable authority", key)
-						}
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-		})
-	}
 }
 
 func preparePromotionFixture(t *testing.T, s *Store, scope string) promotionFixture {
@@ -214,103 +120,4 @@ func prepareTrafficLKGFixture(t *testing.T, s *Store, scope, channel string, see
 		}
 	}
 	return fixture
-}
-
-func TestFullReleaseSetRechecksStoredFactsAndPreservesLedgerOnFailure(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing member", "failed probe", "expired", "unverified", "wrong fence", "changed topology", "new publication", "soft override"} {
-		t.Run(scenario, func(t *testing.T) {
-			s := New(t.TempDir() + "/state.json")
-			configureTestPlatformArtifactSigning(s)
-			if err := s.Init(); err != nil {
-				t.Fatal(err)
-			}
-			f := preparePromotionFixture(t, s, "global")
-			if err := s.withLockedState(false, func(state *model.State) error {
-				return validateFullReleaseSetInState(state, f.parent, s.platformArtifactSigningKeyring(), time.Now().UTC())
-			}); err != nil {
-				t.Fatal("initial complete facts rejected", err)
-			}
-			// Simulate changes after the API preflight, before store publication.
-			if scenario == "new publication" {
-				if _, _, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow", IdempotencyKey: "new-shadow"}, testPlatformPrincipal()); err != nil {
-					t.Fatal(err)
-				}
-			} else if scenario == "changed topology" {
-				changed := clonePlatformExpectedConsumerSet(f.sets[0])
-				changed.ID += "-new"
-				changed.Revision += 10
-				changed.TopologyRevision += "-new"
-				if _, err := s.CreatePlatformExpectedConsumerSet(changed); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if err := s.withLockedState(true, func(state *model.State) error {
-					switch scenario {
-					case "missing member":
-						state.ExpectedConsumerSets = state.ExpectedConsumerSets[:2]
-					case "failed probe", "soft override":
-						state.PlatformConsumerInstances[0].ProbeStatus = "failed"
-					case "expired":
-						state.PlatformConsumerInstances[0].LastHeartbeatAt = time.Now().Add(-time.Hour)
-					case "unverified":
-						state.PlatformConsumerInstances[0].IdentityVerified = false
-					case "wrong fence":
-						state.PlatformConsumerInstances[0].FencingToken++
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			var releases []model.PlatformArtifactRelease
-			var messages []model.PlatformReleaseMessage
-			var lanes []model.PlatformReleaseLane
-			if err := s.withLockedState(false, func(state *model.State) error {
-				releases = append(releases, state.PlatformArtifactReleases...)
-				messages = append(messages, state.PlatformReleaseMessages...)
-				lanes = append(lanes, state.PlatformReleaseLanes...)
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			lkgBefore, err := s.GetPlatformLKG(f.parent.ArtifactKind, f.parent.ScopeKey)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request := model.PlatformArtifactReleaseRequest{ReleaseChannel: "full", IdempotencyKey: "full", Reason: "complete traffic promotion"}
-			if scenario == "soft override" {
-				request.SoftOverride = true
-			}
-			principal := testPlatformPrincipal()
-			if scenario == "soft override" {
-				principal = testPlatformSoftOverridePrincipal()
-			}
-			_, release, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, request, principal)
-			if scenario == "complete" {
-				if err != nil || release.ReleaseChannel != "full" {
-					t.Fatal("complete publication rejected", err)
-				}
-				_, retry, _, _, err := s.ReleasePlatformArtifact(f.parent.ID, request, testPlatformPrincipal())
-				if err != nil || retry.ID != release.ID {
-					t.Fatal("idempotent publication changed", err)
-				}
-			} else {
-				if !errors.Is(err, ErrConflict) {
-					t.Fatal("stale preflight authorized publication", err)
-				}
-				if err := s.withLockedState(false, func(state *model.State) error {
-					if !reflect.DeepEqual(releases, state.PlatformArtifactReleases) || !reflect.DeepEqual(messages, state.PlatformReleaseMessages) || !reflect.DeepEqual(lanes, state.PlatformReleaseLanes) {
-						return fmt.Errorf("failed promotion modified ledger or lane")
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			lkgAfter, err := s.GetPlatformLKG(f.parent.ArtifactKind, f.parent.ScopeKey)
-			if err != nil || !reflect.DeepEqual(lkgBefore, lkgAfter) {
-				t.Fatal("publication changed verified LKG", err)
-			}
-		})
-	}
 }

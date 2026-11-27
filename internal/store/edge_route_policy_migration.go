@@ -12,7 +12,7 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-func (s *Store) validateRoutePolicyMigration(state *model.State, hostname string, next *model.EdgeRoutePolicy) error {
+func (s *Store) validateRoutePolicyMigration(state *storeProjection, hostname string, next *model.EdgeRoutePolicy) error {
 	var constraint *platformconfig.RoutePolicyConstraint
 	if next != nil {
 		base := platformconfig.PolicySnapshot{SchemaVersion: platformconfig.SchemaVersion, Scope: "global", MinimumHealthyEdges: 1, MaxStaleSeconds: 60}
@@ -54,7 +54,7 @@ func (s *Store) pgGuardRoutePolicyMigration(ctx context.Context, tx *sql.Tx, hos
 	if err != nil {
 		return err
 	}
-	state := &model.State{}
+	state := &storeProjection{}
 	for rows.Next() {
 		lane, err := scanPlatformReleaseLane(rows)
 		if err != nil {

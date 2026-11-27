@@ -2,17 +2,15 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestDataGrantScopeAndCredentialBoundary(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -63,7 +61,7 @@ func TestDataGrantScopeAndCredentialBoundary(t *testing.T) {
 }
 
 func TestDataTransferCheckpointPersistsServerSideState(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

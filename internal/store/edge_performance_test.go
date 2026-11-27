@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -14,7 +13,7 @@ import (
 func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -134,7 +133,7 @@ func TestRecordEdgePerformanceSamplesPrunesAndListsByHostname(t *testing.T) {
 func TestUpsertEdgeQualityRollupsPrunesAndListsByHostname(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

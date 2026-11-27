@@ -3,7 +3,6 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,27 +17,7 @@ const (
 
 func (s *Store) ListDNSACMEChallenges(zone string, includeExpired bool) ([]model.DNSACMEChallenge, error) {
 	zone = normalizeDNSZone(zone)
-	if s.usingDatabase() {
-		return s.pgListDNSACMEChallenges(zone, includeExpired)
-	}
-
-	now := time.Now().UTC()
-	var challenges []model.DNSACMEChallenge
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, challenge := range state.DNSACMEChallenges {
-			normalizeDNSACMEChallengeForRead(&challenge)
-			if zone != "" && !strings.EqualFold(challenge.Zone, zone) {
-				continue
-			}
-			if !includeExpired && !challenge.ExpiresAt.After(now) {
-				continue
-			}
-			challenges = append(challenges, challenge)
-		}
-		sortDNSACMEChallenges(challenges)
-		return nil
-	})
-	return challenges, err
+	return s.pgListDNSACMEChallenges(zone, includeExpired)
 }
 
 func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge, actors ...model.Principal) (model.DNSACMEChallenge, error) {
@@ -46,40 +25,7 @@ func (s *Store) UpsertDNSACMEChallenge(challenge model.DNSACMEChallenge, actors 
 	if err != nil {
 		return model.DNSACMEChallenge{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertDNSACMEChallenge(challenge, actors)
-	}
-
-	var out model.DNSACMEChallenge
-	err = s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findDNSACMEChallenge(state, challenge.ID)
-		if index >= 0 {
-			existing := state.DNSACMEChallenges[index]
-			if len(actors) > 0 && !actors[0].IsPlatformAdmin() && existing.CreatedBy != challenge.CreatedBy {
-				return ErrNotFound
-			}
-			if challenge.CreatedAt.IsZero() {
-				challenge.CreatedAt = existing.CreatedAt
-			}
-		} else if challenge.CreatedAt.IsZero() {
-			challenge.CreatedAt = now
-		}
-		challenge.UpdatedAt = now
-		if index >= 0 {
-			state.DNSACMEChallenges[index] = challenge
-		} else {
-			state.DNSACMEChallenges = append(state.DNSACMEChallenges, challenge)
-		}
-		out = challenge
-		recordMutation(state, mutationEvent(actors, "dns_acme_challenge.upsert", "dns_acme_challenge", challenge.ID, ""))
-		return nil
-	})
-	if err != nil {
-		return model.DNSACMEChallenge{}, err
-	}
-	normalizeDNSACMEChallengeForRead(&out)
-	return out, nil
+	return s.pgUpsertDNSACMEChallenge(challenge, actors)
 }
 
 func (s *Store) DeleteDNSACMEChallenge(id string) (model.DNSACMEChallenge, error) {
@@ -95,29 +41,7 @@ func (s *Store) deleteDNSACMEChallenge(id string, domains []string, actors []mod
 	if id == "" {
 		return model.DNSACMEChallenge{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDeleteDNSACMEChallenge(id, domains, actors)
-	}
-
-	var removed model.DNSACMEChallenge
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := findDNSACMEChallenge(state, id)
-		if index < 0 {
-			return ErrNotFound
-		}
-		removed = state.DNSACMEChallenges[index]
-		if len(actors) > 0 && !actors[0].IsPlatformAdmin() && (!slices.Contains(domains, removed.Zone) || removed.Name != "_acme-challenge."+removed.Zone || removed.CreatedBy != actors[0].ActorType+":"+actors[0].ActorID) {
-			return ErrNotFound
-		}
-		recordMutation(state, mutationEvent(actors, "dns_acme_challenge.delete", "dns_acme_challenge", removed.ID, ""))
-		state.DNSACMEChallenges = append(state.DNSACMEChallenges[:index], state.DNSACMEChallenges[index+1:]...)
-		return nil
-	})
-	if err != nil {
-		return model.DNSACMEChallenge{}, err
-	}
-	normalizeDNSACMEChallengeForRead(&removed)
-	return removed, nil
+	return s.pgDeleteDNSACMEChallenge(id, domains, actors)
 }
 
 func normalizeDNSACMEChallengeForStore(challenge model.DNSACMEChallenge) (model.DNSACMEChallenge, error) {
@@ -168,19 +92,6 @@ func normalizeDNSACMEChallengeForRead(challenge *model.DNSACMEChallenge) {
 	if challenge.TTL <= 0 {
 		challenge.TTL = defaultDNSACMEChallengeTTL
 	}
-}
-
-func findDNSACMEChallenge(state *model.State, id string) int {
-	if state == nil {
-		return -1
-	}
-	id = normalizeDNSACMEChallengeID(id)
-	for index, challenge := range state.DNSACMEChallenges {
-		if strings.EqualFold(challenge.ID, id) {
-			return index
-		}
-	}
-	return -1
 }
 
 func sortDNSACMEChallenges(challenges []model.DNSACMEChallenge) {

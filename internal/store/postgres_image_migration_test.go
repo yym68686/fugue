@@ -74,9 +74,9 @@ func testPostgresImageMigrationCompletion(t *testing.T, independent, resized boo
 		f = newManagedPostgresResizeFixture(t)
 	}
 	if resized {
-		mutateResizeFixtureState(t, f.store, func(state *model.State) {
+		mutatePostgresResizeService(t, f, func(service *model.BackingService) {
 			target := managedPostgresResizeTarget()
-			state.BackingServices[findBackingService(state, f.service.ID)].Spec.Postgres.RuntimeResources = &target
+			service.Spec.Postgres.RuntimeResources = &target
 		})
 	}
 	before, err := f.store.GetApp(f.app.ID)
@@ -92,15 +92,8 @@ func testPostgresImageMigrationCompletion(t *testing.T, independent, resized boo
 	if err := preparePostgresImageMigration(before, &local); err != nil {
 		t.Fatalf("local prepare: %v target=%+v", err, before.BackingServices)
 	}
-	if err := f.store.withLockedState(false, func(state *model.State) error {
-		stored := state.Apps[findApp(state, before.ID)]
-		hydrateAppBackingServices(state, &stored)
-		if PostgresImageMigrationConfigHash(stored, state.BackingServices[findBackingService(state, f.service.ID)], local.DesiredSpec.Postgres.Image) != request.DesiredSpec.Postgres.ImageMigrationConfigHash {
-			t.Fatal("public-read defaults changed the config fingerprint")
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	if PostgresImageMigrationConfigHash(before, serviceBefore, local.DesiredSpec.Postgres.Image) != request.DesiredSpec.Postgres.ImageMigrationConfigHash {
+		t.Fatal("public-read defaults changed the config fingerprint")
 	}
 	op, _, err := f.store.CreateOperationWithResult(request)
 	if err != nil {
@@ -205,27 +198,35 @@ func TestIndependentImageMigrationRejectsBindingAndIdentityDrift(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			f := independentImageMigrationStoreFixture(t)
 			request := imageMigrationOperation(t, f)
-			mutateResizeFixtureState(t, f.store, func(state *model.State) {
-				i := findBackingService(state, f.service.ID)
-				switch scenario {
-				case "unbound":
-					state.ServiceBindings = deleteServiceBindingsByApp(state.ServiceBindings, f.app.ID)
-				case "shared":
-					state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{ID: "another-binding", TenantID: f.tenant.ID, AppID: "another-app", ServiceID: f.service.ID})
-				case "foreign-owner":
-					state.BackingServices[i].OwnerAppID = "another-app"
-				case "cross-project":
-					state.BackingServices[i].ProjectID = "another-project"
-				case "foreign-tenant":
-					state.BackingServices[i].TenantID = "another-tenant"
-				case "binding-replaced":
-					for i := range state.ServiceBindings {
-						if state.ServiceBindings[i].ServiceID == f.service.ID {
-							state.ServiceBindings[i].ID = "replacement-binding"
-						}
-					}
+			exec := func(query string, args ...any) {
+				t.Helper()
+				if _, err := f.store.db.ExecContext(t.Context(), query, args...); err != nil {
+					t.Fatal(err)
 				}
-			})
+			}
+			switch scenario {
+			case "unbound":
+				exec(`DELETE FROM fugue_service_bindings WHERE app_id=$1 AND service_id=$2`, f.app.ID, f.service.ID)
+			case "shared":
+				addPostgresResizeBinding(t, f)
+			case "foreign-owner":
+				other := createPostgresResizePeer(t, f)
+				mutatePostgresResizeService(t, f, func(svc *model.BackingService) { svc.OwnerAppID = other.ID })
+			case "cross-project":
+				project, err := f.store.CreateProject(f.tenant.ID, "another-project", "")
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec(`UPDATE fugue_backing_services SET project_id=$2 WHERE id=$1`, f.service.ID, project.ID)
+			case "foreign-tenant":
+				tenant, err := f.store.CreateTenant("another-tenant")
+				if err != nil {
+					t.Fatal(err)
+				}
+				exec(`UPDATE fugue_backing_services SET tenant_id=$2 WHERE id=$1`, f.service.ID, tenant.ID)
+			case "binding-replaced":
+				exec(`UPDATE fugue_service_bindings SET id='replacement-binding' WHERE service_id=$1`, f.service.ID)
+			}
 			if _, _, err := f.store.CreateOperationWithResult(request); err == nil {
 				t.Fatalf("unsafe %s target accepted", scenario)
 			}

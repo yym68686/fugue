@@ -15,11 +15,11 @@ import (
 
 // Called while the publication transaction holds its authority locks. A DNS
 // publication cannot endorse a stale Cell fence read before that transaction.
-func validateCellDNSReferencesInState(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
+func validateCellDNSReferencesInState(state *storeProjection, child model.PlatformArtifact, keys bundleauth.Keyring) error {
 	return validateCellDNSReferencesInStateWithTrace(state, child, keys, nil)
 }
 
-func validateCellDNSReferencesInStateWithTrace(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring, admission *platformAdmissionTrace) error {
+func validateCellDNSReferencesInStateWithTrace(state *storeProjection, child model.PlatformArtifact, keys bundleauth.Keyring, admission *platformAdmissionTrace) error {
 	trace := beginPlatformDNSReferenceTrace(admission)
 	defer trace.finish()
 	_, err := cellpublication.VerifyDNSArtifact(child, keys)
@@ -117,7 +117,7 @@ func validateCellDNSReferencesInStateWithTrace(state *model.State, child model.P
 // The baseline proves the signed DNS configuration's provenance, not current
 // routing selection. Dynamic serving authority is independently observed above.
 // Failed/rolled-back history must never become valid through a newer producer.
-func dnsHistoricalSourceBinding(state *model.State, dependency platformconfig.DNSRouteDependency, now time.Time) bool {
+func dnsHistoricalSourceBinding(state *storeProjection, dependency platformconfig.DNSRouteDependency, now time.Time) bool {
 	index := platformArtifactReleaseIndex(state.PlatformArtifactReleases, dependency.ReleaseID)
 	if index < 0 {
 		return false
@@ -129,7 +129,7 @@ func dnsHistoricalSourceBinding(state *model.State, dependency platformconfig.DN
 	return !dependency.RequireVerified || (r.VerificationState == model.PlatformArtifactVerificationStateVerified && r.VerifiedLKGGeneration == dependency.Parent.Generation)
 }
 
-func validateDNSRouteProducerBindings(state *model.State, child model.PlatformArtifact, keys bundleauth.Keyring) error {
+func validateDNSRouteProducerBindings(state *storeProjection, child model.PlatformArtifact, keys bundleauth.Keyring) error {
 	sources, err := platformconfig.DNSRouteSourceAuthorizations(child)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrConflict, err)
@@ -204,9 +204,7 @@ func (s *Store) ValidateDNSPublicationReferences(child model.PlatformArtifact) e
 		return nil
 	}
 	keys := s.platformArtifactSigningKeyring()
-	if s.db == nil {
-		return s.withLockedState(false, func(state *model.State) error { return validateCellDNSReferencesInState(state, child, keys) })
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -214,7 +212,7 @@ func (s *Store) ValidateDNSPublicationReferences(child model.PlatformArtifact) e
 		return err
 	}
 	defer tx.Rollback()
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{child}}
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{child}}
 	parent := model.PlatformArtifact{ScopeKey: child.ScopeKey, Content: map[string]any{"publication_role": platformconfig.PublicationRoleCellDNS}}
 	if err := s.pgLoadCellDNSReferences(ctx, tx, parent, state); err != nil {
 		return err

@@ -11,12 +11,11 @@ import (
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestBuildMemoryHistorySurvivesRestartAndConcurrentWrites(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := &Service{Store: store.New(path)}
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := &Service{Store: newStoreTestDatabase(t, path)}
 	if err := s.Store.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +37,7 @@ func TestBuildMemoryHistorySurvivesRestartAndConcurrentWrites(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	s = &Service{Store: store.New(path)}
+	s = &Service{Store: newStoreTestDatabase(t, path)}
 	target, err := s.readBuildMemoryTarget(t.Context(), key, profile)
 	if err != nil || target != 139<<20 {
 		t.Fatal(target, err)
@@ -77,7 +76,7 @@ func TestBuildMemoryHistoryExpiresAndRemainsBounded(t *testing.T) {
 	if err != nil || len(ledger.Profiles) != 0 {
 		t.Fatal("expired history learned", ledger, err)
 	}
-	s := &Service{Store: store.New(filepath.Join(t.TempDir(), "store.json"))}
+	s := &Service{Store: newStoreTestDatabase(t, "")}
 	if err := s.Store.Init(); err != nil {
 		t.Fatal(err)
 	}

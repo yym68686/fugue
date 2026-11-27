@@ -7,12 +7,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
-	"fugue/internal/platformsafety"
 	"fugue/internal/testfixture/celldns"
 )
 
@@ -111,118 +109,6 @@ func runtimeInputSuccessor(t *testing.T, f reconfigurationFixture) reconfigurati
 	f.request.ProducerReconfiguration.Operation = "runtime_input"
 	f.bindKey(t)
 	return f
-}
-
-func TestRuntimeInputReconfigurationPreservesServingAndHistoricalInputs(t *testing.T) {
-	for _, fixture := range []struct {
-		name string
-		make func(*testing.T, string) reconfigurationFixture
-	}{{"global", runtimeInputFixture}, {"cell", cellRuntimeInputFixture}} {
-		t.Run(fixture.name, func(t *testing.T) {
-			testRuntimeInputReconfiguration(t, fixture.make)
-		})
-	}
-}
-
-func testRuntimeInputReconfiguration(t *testing.T, fixture func(*testing.T, string) reconfigurationFixture) {
-	t.Helper()
-	t.Run("simultaneous", func(t *testing.T) { testSimultaneousProducerReconfiguration(t, "", fixture) })
-	for _, scenario := range []string{"success", "stale-policy", "stale-full", "wrong-evidence", "unverified", "frozen", "schedule", "static-source", "operational-policy", "missing-opt-in", "cross-scope", "tampered-source", "pending-gray", "wrong-operation"} {
-		t.Run(scenario, func(t *testing.T) {
-			f := fixture(t, "")
-			previous, err := f.s.GetPlatformArtifact(f.old.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch scenario {
-			case "stale-policy":
-				f.request.ProducerReconfiguration.PreviousPolicy.FencingToken++
-			case "stale-full":
-				f.request.ProducerReconfiguration.ServingFull.FencingToken++
-			case "wrong-evidence":
-				f.request.ProducerReconfiguration.VerificationEvidenceHash = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
-			case "unverified":
-				f.setBaselineVerification(t, false)
-			case "frozen":
-				f.freeze(t, f.policy.TargetScope)
-			case "schedule", "static-source":
-				if scenario == "schedule" {
-					f.policy.RefreshSeconds++
-				} else {
-					f.policy.StaticIntentArtifactID = "foreign"
-				}
-				f.policy.Generation += "-changed"
-				f.next = savePhysicalDNSTestArtifact(t, f.s, model.PlatformArtifactKindPolicySnapshot, f.old.ScopeKey, f.policy.Generation, f.policy)
-			case "operational-policy", "missing-opt-in", "cross-scope":
-				source, err := f.s.GetPlatformArtifact(f.policy.DNSPolicyArtifactID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				source.Content["generation"] = "runtime-changed"
-				if scenario == "missing-opt-in" {
-					delete(source.Content, "runtime_input_mode")
-				} else if scenario == "operational-policy" {
-					source.Content["minimum_healthy_edges"] = float64(3)
-				}
-				if scenario == "cross-scope" {
-					source.ScopeKey = "foreign-scope"
-				}
-				source = savePhysicalDNSTestArtifact(t, f.s, source.ArtifactKind, source.ScopeKey, "runtime-changed", source.Content)
-				f.policy.Generation += "-changed"
-				f.policy.DNSPolicyArtifactID, f.policy.DNSPolicyDigest = source.ID, source.ContentHash
-				f.next = savePhysicalDNSTestArtifact(t, f.s, model.PlatformArtifactKindPolicySnapshot, f.old.ScopeKey, f.policy.Generation, f.policy)
-			case "tampered-source", "pending-gray":
-				if err := f.s.withLockedState(true, func(s *model.State) error {
-					if scenario == "tampered-source" {
-						s.PlatformArtifacts[platformArtifactIndex(s.PlatformArtifacts, f.policy.DNSPolicyArtifactID)].Content["generation"] = "unsigned"
-					} else {
-						full := s.PlatformArtifactReleases[platformArtifactReleaseIndex(s.PlatformArtifactReleases, f.request.ProducerReconfiguration.ServingFull.ReleaseID)]
-						full.ID, full.ReleaseChannel, full.ReleasedAt = "pending-runtime-gray", "gray", time.Now().UTC().Add(time.Second)
-						full.LaneKey = platformsafety.ReleaseLaneKey(full.ArtifactKind, full.ScopeKey, "gray")
-						full.VerificationState = ""
-						s.PlatformArtifactReleases = append(s.PlatformArtifactReleases, full)
-						s.PlatformReleaseLanes = append(s.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: full.LaneKey, ArtifactKind: full.ArtifactKind, ScopeKey: full.ScopeKey, ReleaseChannel: "gray", FencingToken: full.FencingToken, ActiveReleaseID: full.ID})
-					}
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-			case "wrong-operation":
-				f.request.ProducerReconfiguration.Operation = "physical_dns"
-			}
-			f.bindKey(t)
-			release, err := f.release()
-			if (scenario == "success") != (err == nil) {
-				t.Fatalf("%s: %v", scenario, err)
-			}
-			if scenario == "success" {
-				again, err := f.release()
-				if err != nil || again.ID != release.ID {
-					t.Fatal("idempotent retry changed authority", err)
-				}
-			}
-			selected, _, found, err := f.s.GetActivePlatformArtifact(model.PlatformArtifactKindPolicySnapshot, f.old.ScopeKey, "shadow")
-			want := f.old.ID
-			if scenario == "success" {
-				want = f.next.ID
-			}
-			if err != nil || !found || selected.ID != want {
-				t.Fatal("rejected transition changed policy", err)
-			}
-			lkg, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, f.policy.TargetScope)
-			if err != nil || !reflect.DeepEqual(lkg, &f.lkg) {
-				t.Fatal("representation transition changed positive LKG", err)
-			}
-			_, full, found, err := f.s.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, f.policy.TargetScope, "full")
-			if err != nil || !found || full.ID != f.request.ProducerReconfiguration.ServingFull.ReleaseID {
-				t.Fatal("transition changed serving publication", err)
-			}
-			after, err := f.s.GetPlatformArtifact(f.old.ID)
-			if err != nil || !reflect.DeepEqual(after, previous) {
-				t.Fatal("transition rewrote historical producer", err)
-			}
-		})
-	}
 }
 
 func TestRuntimeInputReconfigurationPostgres(t *testing.T) {

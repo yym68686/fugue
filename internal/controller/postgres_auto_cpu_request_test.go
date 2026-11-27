@@ -11,11 +11,10 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestReconcileManagedPostgresAutoCPUQueuesGuardedOperation(t *testing.T) {
-	st := store.New(t.TempDir() + "/state.json")
+	st := newStoreTestDatabase(t, "")
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -23,7 +22,7 @@ import (
 func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -159,7 +158,7 @@ func TestImportUploadAppQueuesPendingImportWithPersistentStorage(t *testing.T) {
 func TestImportUploadAppPreservesManagedPostgresStorageOverride(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -229,7 +228,7 @@ func TestImportUploadAppPreservesManagedPostgresStorageOverride(t *testing.T) {
 func TestImportUploadAppDerivesNameFromArchiveWhenRequestNameBlank(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -283,7 +282,7 @@ func TestImportUploadAppDerivesNameFromArchiveWhenRequestNameBlank(t *testing.T)
 func TestImportUploadAppAcceptsZipArchive(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -359,7 +358,7 @@ func TestImportUploadAppAcceptsZipArchive(t *testing.T) {
 func TestImportUploadBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -439,7 +438,7 @@ func TestImportUploadBackgroundModeSkipsRouteAndServicePort(t *testing.T) {
 func TestImportUploadInternalModeSkipsRouteButExposesInternalService(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -524,7 +523,7 @@ func TestImportUploadInternalModeSkipsRouteButExposesInternalService(t *testing.
 func TestImportUploadAppImportsComposeTopology(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -714,7 +713,7 @@ services:
 func TestImportUploadAppRejectsStartupCommandForTopologyImport(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -772,7 +771,7 @@ services:
 func TestImportUploadAppRejectsPersistentStorageForTopologyImport(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -836,7 +835,7 @@ services:
 func TestGetSourceUploadArchiveRequiresDownloadToken(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -922,7 +921,7 @@ func TestImportUploadExistingAppOriginOwnershipModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := store.New(filepath.Join(t.TempDir(), "store.json"))
+			s := newStoreTestDatabase(t, "")
 			if err := s.Init(); err != nil {
 				t.Fatalf("init store: %v", err)
 			}
@@ -1078,7 +1077,7 @@ func TestImportUploadExistingAppCanReplaceDeclarativeFiles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			s := store.New(filepath.Join(t.TempDir(), "store.json"))
+			s := newStoreTestDatabase(t, "")
 			if err := s.Init(); err != nil {
 				t.Fatalf("init store: %v", err)
 			}

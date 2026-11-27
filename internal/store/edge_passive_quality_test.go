@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +9,7 @@ import (
 )
 
 func TestPassiveEdgeNetworkReadIsCrossHostAndEdgeBounded(t *testing.T) {
-	store := New(filepath.Join(t.TempDir(), "state.json"))
+	store := newStoreTestDatabase(t, "")
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
 	}

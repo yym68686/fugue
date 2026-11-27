@@ -56,7 +56,8 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	store := store.New(cfg.StorePath, cfg.DatabaseURL)
+	store := store.New(cfg.DatabaseURL)
+	store.ConfigureDataBlobDir(os.Getenv("FUGUE_DATA_BLOB_DIR"))
 	if err := store.Init(); err != nil {
 		logger.Fatalf("init store: %v", err)
 	}

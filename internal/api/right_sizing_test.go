@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -119,18 +118,22 @@ func TestBuildRightSizingRecommendationPreservesUnobservedResourceDimensions(t *
 func TestAppResourceRecommendationIgnoresLegacyAggregateSamples(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Right Sizing Samples")
+	if err != nil {
+		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	legacyCPU := int64(800)
 	perReplicaCPUOne := int64(40)
 	perReplicaCPUTwo := int64(50)
 	if err := stateStore.RecordResourceUsageSamples([]model.ResourceUsageSample{
-		{TenantID: "tenant_a", TargetKind: model.ClusterNodeWorkloadKindApp, TargetID: "app_a", ObservedAt: now.Add(-3 * time.Minute), CPUMilliCores: &legacyCPU},
-		{TenantID: "tenant_a", TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-2 * time.Minute), CPUMilliCores: &perReplicaCPUOne},
-		{TenantID: "tenant_a", TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-time.Minute), CPUMilliCores: &perReplicaCPUTwo},
+		{TenantID: tenant.ID, TargetKind: model.ClusterNodeWorkloadKindApp, TargetID: "app_a", ObservedAt: now.Add(-3 * time.Minute), CPUMilliCores: &legacyCPU},
+		{TenantID: tenant.ID, TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-2 * time.Minute), CPUMilliCores: &perReplicaCPUOne},
+		{TenantID: tenant.ID, TargetKind: rightSizingSampleTargetKindAppV1, TargetID: "app_a", ObservedAt: now.Add(-time.Minute), CPUMilliCores: &perReplicaCPUTwo},
 	}, time.Time{}); err != nil {
 		t.Fatalf("record samples: %v", err)
 	}
@@ -138,7 +141,7 @@ func TestAppResourceRecommendationIgnoresLegacyAggregateSamples(t *testing.T) {
 	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
 	recommendation, err := server.appResourceRecommendation(model.App{
 		ID:       "app_a",
-		TenantID: "tenant_a",
+		TenantID: tenant.ID,
 		Name:     "demo",
 		Spec: model.AppSpec{
 			Resources: &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 128},
@@ -228,7 +231,7 @@ func TestBuildRightSizingRecommendationUsesOneMilliCPUFloor(t *testing.T) {
 func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -315,7 +318,7 @@ func TestApplyAppRightSizingRecommendationQueuesDeployForAppAndPostgres(t *testi
 func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -408,7 +411,7 @@ func TestAutoRightSizingQueuesSafeDownscaleWithoutPostgres(t *testing.T) {
 func TestAutoRightSizingActiveDeployReturnsBenignSkip(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -481,7 +484,7 @@ func TestAutoRightSizingActiveDeployReturnsBenignSkip(t *testing.T) {
 func TestAutoRightSizingAlreadyCurrentReturnsBenignSkipWithoutOperation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -558,7 +561,7 @@ func TestAutoRightSizingAlreadyCurrentReturnsBenignSkipWithoutOperation(t *testi
 func TestAutoRightSizingRecentOOMPreservesMemoryButAllowsCPURequestDownscale(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -637,7 +640,7 @@ func TestAutoRightSizingRecentOOMPreservesMemoryButAllowsCPURequestDownscale(t *
 func TestAutoRightSizingQueuesMaterialAppIncreaseWithoutPostgres(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -865,7 +868,7 @@ func TestAutoRightSizingAdmissionBlocksInsufficientMemory(t *testing.T) {
 }
 
 func TestAutoRightSizingFailureBackoffMatchesTargetResources(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1176,7 +1179,7 @@ func TestAutoRightSizingQueuesMemoryOnlyDownscaleBelowCreationDefault(t *testing
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			stateStore := newStoreTestDatabase(t, "")
 			if err := stateStore.Init(); err != nil {
 				t.Fatal(err)
 			}

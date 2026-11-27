@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/platformcontrol"
+
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/jackc/pgx/v5/pgconn"
 )

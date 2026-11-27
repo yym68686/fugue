@@ -3,11 +3,10 @@ package store
 import (
 	"database/sql/driver"
 	"encoding/json"
-	"fugue/internal/model"
-	"github.com/DATA-DOG/go-sqlmock"
-	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestReleaseMetricsSnapshotUsesTwoQueriesAndNarrowProjection(t *testing.T) {
@@ -31,38 +30,6 @@ func TestReleaseMetricsSnapshotUsesTwoQueriesAndNarrowProjection(t *testing.T) {
 	}
 	if err = mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestImageLocationObservationScopeKeepsNegativeEvidence(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	err := s.withLockedState(true, func(state *model.State) error {
-		for i, status := range []string{"present", "missing", "pulling", "failed"} {
-			state.ImageLocations = append(state.ImageLocations, model.ImageLocation{ID: string(rune('a' + i)), TenantID: "tenant", AppID: "app", RuntimeID: "target", ImageRef: "image:v1", Status: status, UpdatedAt: now})
-		}
-		state.ImageLocations = append(state.ImageLocations, model.ImageLocation{TenantID: "other", AppID: "app", RuntimeID: "target", ImageRef: "image:v1", Status: "present"}, model.ImageLocation{TenantID: "tenant", AppID: "app", RuntimeID: "source", ImageRef: "image:v1", Status: "present"}, model.ImageLocation{TenantID: "tenant", AppID: "app", RuntimeID: "target", ImageRef: "image:old", Status: "present"})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	scope := ImageLocationScope{TenantID: "tenant", AppID: "app", RuntimeID: "target", ImageRef: "image:v1"}
-	rows, err := s.ListImageLocationObservations(t.Context(), []ImageLocationScope{scope, scope})
-	if err != nil || len(rows) != 4 {
-		t.Fatalf("scope or duplicates: %d %v", len(rows), err)
-	}
-	for _, row := range rows {
-		if !row.UpdatedAt.Equal(now) {
-			t.Fatal("observation timestamp changed")
-		}
-	}
-	rows, err = s.ListImageLocationObservations(t.Context(), nil)
-	if err != nil || len(rows) != 0 {
-		t.Fatal("empty scope became full inventory")
 	}
 }
 

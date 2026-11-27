@@ -19,10 +19,494 @@ import (
 	"fugue/internal/store"
 )
 
+func TestTenantCannotCreateOrRunPlatformBackupTargets(t *testing.T) {
+	t.Parallel()
+
+	stateStore := newStoreTestDatabase(t, "")
+	if err := stateStore.Init(); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := stateStore.CreateTenant("Backup Tenant")
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	_, apiKey, err := stateStore.CreateAPIKey(tenant.ID, "backup-writer", []string{"backup.write"})
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
+	for _, request := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/v1/backups/policies", body: map[string]any{"target": map[string]any{"type": model.BackupTargetControlPlaneDatabase}}},
+		{path: "/v1/backups/runs", body: map[string]any{"target": map[string]any{"type": model.BackupTargetControlPlaneDatabase}}},
+	} {
+		recorder := performJSONRequest(t, server, http.MethodPost, request.path, apiKey, request.body)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("expected tenant request %s to be forbidden, code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	defaultPolicy := stateStore.DefaultControlPlaneBackupPolicyID()
+	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backups/runs", apiKey, map[string]any{"policy_id": defaultPolicy})
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected platform policy to be hidden from tenant, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	before, err := stateStore.GetBackupPolicy(defaultPolicy, "", true)
+	if err != nil {
+		t.Fatalf("get default control-plane policy: %v", err)
+	}
+	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/backups/policies/"+defaultPolicy, apiKey, map[string]any{"enabled": !before.Enabled})
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected platform policy patch to be hidden from tenant, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	after, err := stateStore.GetBackupPolicy(defaultPolicy, "", true)
+	if err != nil {
+		t.Fatalf("get default control-plane policy after forbidden patch: %v", err)
+	}
+	if after.Enabled != before.Enabled {
+		t.Fatalf("expected forbidden patch to leave platform policy enabled=%t, got %t", before.Enabled, after.Enabled)
+	}
+}
+func TestTenantCannotTargetAnotherTenantsAppOrWorkspaceForBackup(t *testing.T) {
+	t.Parallel()
+
+	fixture := newBackupAuthorizationFixture(t)
+	requests := []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{
+			name: "app policy",
+			path: "/v1/backups/policies",
+			body: map[string]any{"app_id": fixture.victimApp.ID, "target": map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.victimApp.ID}},
+		},
+		{
+			name: "app run",
+			path: "/v1/backups/runs",
+			body: map[string]any{"target": map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.victimApp.ID}},
+		},
+		{
+			name: "workspace policy",
+			path: "/v1/backups/policies",
+			body: map[string]any{"target": map[string]any{"type": model.BackupTargetDataWorkspace, "workspace_id": fixture.victimWorkspace.ID}},
+		},
+		{
+			name: "workspace run",
+			path: "/v1/backups/runs",
+			body: map[string]any{"target": map[string]any{"type": model.BackupTargetDataWorkspace, "workspace_id": fixture.victimWorkspace.ID}},
+		},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("expected cross-tenant backup target to be forbidden, code=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+func TestBackupPolicyIDRequiresAuthorizationAndCannotOverwriteExistingPolicy(t *testing.T) {
+	t.Parallel()
+
+	fixture := newBackupAuthorizationFixture(t)
+	victimPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.victimApp, fixture.victimBackend, "victim-policy")
+	defaultPolicyID := fixture.stateStore.DefaultControlPlaneBackupPolicyID()
+	defaultBefore, err := fixture.stateStore.GetBackupPolicy(defaultPolicyID, "", true)
+	if err != nil {
+		t.Fatalf("get default policy before overwrite attempts: %v", err)
+	}
+
+	requests := []struct {
+		name string
+		path string
+		id   string
+	}{
+		{name: "generic victim policy", path: "/v1/backups/policies", id: victimPolicy.ID},
+		{name: "app victim policy", path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/policies", id: victimPolicy.ID},
+		{name: "generic platform policy", path: "/v1/backups/policies", id: defaultPolicyID},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, map[string]any{
+				"id":         request.id,
+				"name":       "overwrite-attempt",
+				"backend_id": fixture.attackerBackend.ID,
+				"target": map[string]any{
+					"type":   model.BackupTargetAppDatabase,
+					"app_id": fixture.attackerApp.ID,
+				},
+			})
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("expected unauthorized supplied policy id to be hidden, code=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	attackerPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "attacker-policy")
+	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/policies", fixture.attackerKey, map[string]any{
+		"id":         attackerPolicy.ID,
+		"name":       "attacker-policy-updated",
+		"backend_id": fixture.attackerBackend.ID,
+		"target": map[string]any{
+			"type":   model.BackupTargetAppDatabase,
+			"app_id": fixture.attackerApp.ID,
+		},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected authorized policy id upsert to succeed, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var upsertResponse struct {
+		Policy model.BackupPolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, recorder, &upsertResponse)
+	if upsertResponse.Policy.ID != attackerPolicy.ID || upsertResponse.Policy.Name != "attacker-policy-updated" {
+		t.Fatalf("expected authorized upsert to retain policy identity, got %+v", upsertResponse.Policy)
+	}
+
+	recorder = performJSONRequest(t, fixture.server, http.MethodPatch, "/v1/backups/policies/"+attackerPolicy.ID, fixture.attackerKey, map[string]any{
+		"id":      victimPolicy.ID,
+		"enabled": false,
+	})
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "id is read-only") {
+		t.Fatalf("expected policy id in PATCH body to be rejected, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	attackerAfter, err := fixture.stateStore.GetBackupPolicy(attackerPolicy.ID, fixture.attacker.ID, false)
+	if err != nil {
+		t.Fatalf("get attacker policy after rejected PATCH: %v", err)
+	}
+	if !attackerAfter.Enabled {
+		t.Fatalf("attacker policy was disabled despite rejected PATCH: %+v", attackerAfter)
+	}
+
+	victimAfter, err := fixture.stateStore.GetBackupPolicy(victimPolicy.ID, "", true)
+	if err != nil {
+		t.Fatalf("get victim policy after overwrite attempts: %v", err)
+	}
+	if victimAfter.TenantID != victimPolicy.TenantID || victimAfter.AppID != victimPolicy.AppID || victimAfter.Target.AppID != victimPolicy.Target.AppID {
+		t.Fatalf("victim policy changed after rejected overwrite: before=%+v after=%+v", victimPolicy, victimAfter)
+	}
+	defaultAfter, err := fixture.stateStore.GetBackupPolicy(defaultPolicyID, "", true)
+	if err != nil {
+		t.Fatalf("get default policy after overwrite attempts: %v", err)
+	}
+	if defaultAfter.TenantID != defaultBefore.TenantID || defaultAfter.Target.Type != defaultBefore.Target.Type {
+		t.Fatalf("platform policy changed after rejected overwrite: before=%+v after=%+v", defaultBefore, defaultAfter)
+	}
+}
+func TestManualAppDatabaseBackupRejectsActiveSuspendOperation(t *testing.T) {
+	fixture := newBackupAuthorizationFixture(t)
+	policy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "suspending-postgres")
+	_, suspend := beginManagedPostgresSuspendForBackupTest(t, fixture.stateStore, fixture.attackerApp)
+
+	workerCalled := false
+	fixture.server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
+		workerCalled = true
+		return nil, nil
+	}
+	for _, request := range []struct {
+		path string
+		body map[string]any
+	}{
+		{path: "/v1/backups/runs", body: map[string]any{"policy_id": policy.ID, "wait": true}},
+		{path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs", body: map[string]any{"policy_id": policy.ID}},
+	} {
+		recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("expected active suspend conflict from %s, code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
+		}
+		var response struct {
+			Error string `json:"error"`
+		}
+		mustDecodeJSON(t, recorder, &response)
+		if response.Error != store.ManagedPostgresSuspendBackupConflictMessage {
+			t.Fatalf("expected deterministic suspend-in-progress message, got %+v", response)
+		}
+	}
+	if workerCalled {
+		t.Fatal("active suspend rejection must not invoke backup worker")
+	}
+	runs, err := fixture.stateStore.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true})
+	if err != nil {
+		t.Fatalf("list backup runs: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("active suspend rejection must not create backup runs, got %+v", runs)
+	}
+	storedSuspend, err := fixture.stateStore.GetOperation(suspend.ID)
+	if err != nil {
+		t.Fatalf("get suspend operation after rejected backup: %v", err)
+	}
+	if storedSuspend.Status != model.OperationStatusPending {
+		t.Fatalf("backup rejection changed suspend operation: %+v", storedSuspend)
+	}
+}
+func TestTenantCannotUseAnotherTenantsBackupBackend(t *testing.T) {
+	t.Parallel()
+
+	fixture := newBackupAuthorizationFixture(t)
+	requests := []struct {
+		name string
+		path string
+		body map[string]any
+	}{
+		{
+			name: "policy",
+			path: "/v1/backups/policies",
+			body: map[string]any{
+				"name":       "victim-backend-policy",
+				"backend_id": fixture.victimBackend.ID,
+				"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
+			},
+		},
+		{
+			name: "direct run",
+			path: "/v1/backups/runs",
+			body: map[string]any{
+				"backend_id": fixture.victimBackend.ID,
+				"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
+			},
+		},
+	}
+	for _, request := range requests {
+		t.Run(request.name, func(t *testing.T) {
+			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("expected victim backend to be forbidden, code=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	legacyPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.victimBackend, "legacy-victim-backend")
+	for _, path := range []string{"/v1/backups/runs", "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs"} {
+		recorder := performJSONRequest(t, fixture.server, http.MethodPost, path, fixture.attackerKey, map[string]any{"policy_id": legacyPolicy.ID})
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("expected legacy victim backend policy on %s to be forbidden, code=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+	safePolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "safe-backend-policy")
+	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/apps/"+fixture.attackerApp.ID+"/backups/runs", fixture.attackerKey, map[string]any{
+		"policy_id":  safePolicy.ID,
+		"backend_id": fixture.victimBackend.ID,
+	})
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("expected app run backend override to reject victim backend, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	_, err := fixture.server.runBackup(context.Background(), model.BackupRun{
+		TenantID:  fixture.attacker.ID,
+		ProjectID: fixture.attackerApp.ProjectID,
+		AppID:     fixture.attackerApp.ID,
+		Target: model.BackupTarget{
+			Type:      model.BackupTargetAppDatabase,
+			TenantID:  fixture.attacker.ID,
+			ProjectID: fixture.attackerApp.ProjectID,
+			AppID:     fixture.attackerApp.ID,
+		},
+		BackendID: fixture.victimBackend.ID,
+	})
+	if !errors.Is(err, errBackupBackendNotAuthorized) {
+		t.Fatalf("expected worker boundary to reject victim backend, got %v", err)
+	}
+
+	globalBackend, err := fixture.stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "shared-r2",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "shared-bucket",
+		Endpoint: "https://shared.example.r2.cloudflarestorage.com",
+	})
+	if err != nil {
+		t.Fatalf("create shared backend: %v", err)
+	}
+	recorder = performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/policies", fixture.attackerKey, map[string]any{
+		"name":       "shared-backend-policy",
+		"backend_id": globalBackend.Name,
+		"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected platform-shared backend to remain available, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Policy model.BackupPolicy `json:"policy"`
+	}
+	mustDecodeJSON(t, recorder, &response)
+	if response.Policy.BackendID != globalBackend.ID {
+		t.Fatalf("expected shared backend to be canonicalized to %q, got %+v", globalBackend.ID, response.Policy)
+	}
+
+	adminServer := NewServer(fixture.stateStore, auth.New(fixture.stateStore, "bootstrap-secret"), nil, ServerConfig{})
+	for _, request := range []struct {
+		path string
+		body map[string]any
+	}{
+		{
+			path: "/v1/apps/" + fixture.victimApp.ID + "/backups/policies",
+			body: map[string]any{
+				"backend_id": fixture.attackerBackend.ID,
+				"target":     map[string]any{"type": model.BackupTargetAppDatabase},
+			},
+		},
+		{
+			path: "/v1/backups/runs",
+			body: map[string]any{
+				"backend_id": fixture.attackerBackend.ID,
+				"target": map[string]any{
+					"type":       model.BackupTargetAppDatabase,
+					"tenant_id":  fixture.victimApp.TenantID,
+					"project_id": fixture.victimApp.ProjectID,
+					"app_id":     fixture.victimApp.ID,
+				},
+			},
+		},
+	} {
+		recorder := performJSONRequest(t, adminServer, http.MethodPost, request.path, "bootstrap-secret", request.body)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("expected platform admin cross-tenant backend selection to fail fast, path=%s code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+func TestTenantCannotMutatePlatformBackupBackend(t *testing.T) {
+	t.Parallel()
+
+	fixture := newBackupAuthorizationFixture(t)
+	globalBackend, err := fixture.stateStore.CreateBackupBackend(model.BackupBackend{
+		Name:     "platform-shared-mutation-test",
+		Provider: model.DataBackendProviderCloudflareR2,
+		Bucket:   "platform-bucket",
+		Endpoint: "https://platform.example.r2.cloudflarestorage.com",
+		Credentials: model.DataBackendCredentials{
+			AccessKeyID:     "platform-access-key",
+			SecretAccessKey: "platform-secret-key",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create platform backup backend: %v", err)
+	}
+	before, err := fixture.stateStore.GetBackupBackendForUse(globalBackend.ID, "", true)
+	if err != nil {
+		t.Fatalf("get platform backend before mutation attempts: %v", err)
+	}
+
+	requests := []struct {
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{
+			method: http.MethodPost,
+			path:   "/v1/backups/backends",
+			body: map[string]any{
+				"name":        globalBackend.ID,
+				"rotate_only": true,
+				"credentials": map[string]any{"access_key_id": "attacker-key", "secret_access_key": "attacker-secret"},
+			},
+		},
+		{method: http.MethodPost, path: "/v1/backups/backends/" + globalBackend.ID + "/test"},
+		{method: http.MethodDelete, path: "/v1/backups/backends/" + globalBackend.ID},
+	}
+	for _, request := range requests {
+		recorder := performJSONRequest(t, fixture.server, request.method, request.path, fixture.attackerKey, request.body)
+		if recorder.Code != http.StatusForbidden {
+			t.Fatalf("expected platform backend mutation to be forbidden, method=%s path=%s code=%d body=%s", request.method, request.path, recorder.Code, recorder.Body.String())
+		}
+	}
+	if _, err := fixture.stateStore.RotateBackupBackendCredentials(globalBackend.ID, fixture.attacker.ID, false, model.DataBackendCredentials{AccessKeyID: "x", SecretAccessKey: "y"}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("store must reject tenant rotation of platform backend, got %v", err)
+	}
+	if _, err := fixture.stateStore.RecordBackupBackendTest(globalBackend.ID, fixture.attacker.ID, false, false, "attacker"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("store must reject tenant test mutation of platform backend, got %v", err)
+	}
+	if _, err := fixture.stateStore.DeleteBackupBackend(globalBackend.ID, fixture.attacker.ID, false); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("store must reject tenant deletion of platform backend, got %v", err)
+	}
+	after, err := fixture.stateStore.GetBackupBackendForUse(globalBackend.ID, "", true)
+	if err != nil {
+		t.Fatalf("platform backend disappeared after rejected mutation: %v", err)
+	}
+	if after.Credentials.AccessKeyID != before.Credentials.AccessKeyID || after.Credentials.SecretAccessKey != before.Credentials.SecretAccessKey || after.LastTestedAt != nil {
+		t.Fatalf("platform backend changed after rejected tenant mutation: before=%+v after=%+v", before, after)
+	}
+}
+func TestTenantCannotReadOrTriggerPlatformBackupResources(t *testing.T) {
+	t.Parallel()
+
+	fixture := newBackupAuthorizationFixture(t)
+	platformRun, err := fixture.stateStore.CreateBackupRun(model.BackupRun{
+		Target:  model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
+		Trigger: model.BackupRunTriggerManual,
+		Status:  model.BackupRunStatusFailed,
+	})
+	if err != nil {
+		t.Fatalf("create platform backup run: %v", err)
+	}
+	platformArtifact, err := fixture.stateStore.CreateBackupArtifact(model.BackupArtifact{
+		RunID:     platformRun.ID,
+		Target:    platformRun.Target,
+		Kind:      model.BackupArtifactKindControlPlanePGDump,
+		ObjectKey: "platform/control-plane.dump",
+		Status:    model.BackupArtifactStatusActive,
+	})
+	if err != nil {
+		t.Fatalf("create platform backup artifact: %v", err)
+	}
+	platformPlan, err := fixture.stateStore.CreateBackupRestorePlan(model.BackupRestorePlan{
+		ArtifactID: platformArtifact.ID,
+		Target:     platformArtifact.Target,
+		Status:     model.BackupRestoreStatusPlanned,
+	})
+	if err != nil {
+		t.Fatalf("create platform restore plan: %v", err)
+	}
+	platformRestoreRun, err := fixture.stateStore.CreateBackupRestoreRun(model.BackupRestoreRun{
+		PlanID: platformPlan.ID,
+		Status: model.BackupRestoreStatusPlanned,
+	})
+	if err != nil {
+		t.Fatalf("create platform restore run: %v", err)
+	}
+
+	for _, path := range []string{
+		"/v1/backups/policies/" + fixture.stateStore.DefaultControlPlaneBackupPolicyID(),
+		"/v1/backups/runs/" + platformRun.ID,
+		"/v1/backups/artifacts/" + platformArtifact.ID,
+	} {
+		recorder := performJSONRequest(t, fixture.server, http.MethodGet, path, fixture.attackerKey, nil)
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("expected platform resource %s to be hidden, code=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+
+	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/restore-runs", fixture.attackerKey, map[string]any{"plan_id": platformPlan.ID})
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected platform restore plan trigger to be hidden, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	for _, listing := range []struct {
+		path string
+		key  string
+		id   string
+	}{
+		{path: "/v1/backups/policies?include_disabled=true", key: "policies", id: fixture.stateStore.DefaultControlPlaneBackupPolicyID()},
+		{path: "/v1/backups/runs", key: "runs", id: platformRun.ID},
+		{path: "/v1/backups/artifacts?include_deleted=true", key: "artifacts", id: platformArtifact.ID},
+		{path: "/v1/backups/restore-plans", key: "plans", id: platformPlan.ID},
+		{path: "/v1/backups/restore-runs", key: "runs", id: platformRestoreRun.ID},
+	} {
+		recorder := performJSONRequest(t, fixture.server, http.MethodGet, listing.path, fixture.attackerKey, nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("list tenant backup resources %s, code=%d body=%s", listing.path, recorder.Code, recorder.Body.String())
+		}
+		if strings.Contains(recorder.Body.String(), listing.id) {
+			t.Fatalf("platform resource %q leaked through %s response=%s", listing.id, listing.path, recorder.Body.String())
+		}
+	}
+}
+
 func TestAppBackupStatusReportsDisabledByDefault(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -185,102 +669,10 @@ func TestBackupPolicyFromRequestValidatesSnapshotEngine(t *testing.T) {
 	}
 }
 
-func TestTenantCannotCreateOrRunPlatformBackupTargets(t *testing.T) {
-	t.Parallel()
-
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	tenant, err := stateStore.CreateTenant("Backup Tenant")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	_, apiKey, err := stateStore.CreateAPIKey(tenant.ID, "backup-writer", []string{"backup.write"})
-	if err != nil {
-		t.Fatalf("create api key: %v", err)
-	}
-	server := NewServer(stateStore, auth.New(stateStore, ""), nil, ServerConfig{})
-	for _, request := range []struct {
-		path string
-		body map[string]any
-	}{
-		{path: "/v1/backups/policies", body: map[string]any{"target": map[string]any{"type": model.BackupTargetControlPlaneDatabase}}},
-		{path: "/v1/backups/runs", body: map[string]any{"target": map[string]any{"type": model.BackupTargetControlPlaneDatabase}}},
-	} {
-		recorder := performJSONRequest(t, server, http.MethodPost, request.path, apiKey, request.body)
-		if recorder.Code != http.StatusForbidden {
-			t.Fatalf("expected tenant request %s to be forbidden, code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
-		}
-	}
-
-	defaultPolicy := stateStore.DefaultControlPlaneBackupPolicyID()
-	recorder := performJSONRequest(t, server, http.MethodPost, "/v1/backups/runs", apiKey, map[string]any{"policy_id": defaultPolicy})
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("expected platform policy to be hidden from tenant, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-
-	before, err := stateStore.GetBackupPolicy(defaultPolicy, "", true)
-	if err != nil {
-		t.Fatalf("get default control-plane policy: %v", err)
-	}
-	recorder = performJSONRequest(t, server, http.MethodPatch, "/v1/backups/policies/"+defaultPolicy, apiKey, map[string]any{"enabled": !before.Enabled})
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("expected platform policy patch to be hidden from tenant, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	after, err := stateStore.GetBackupPolicy(defaultPolicy, "", true)
-	if err != nil {
-		t.Fatalf("get default control-plane policy after forbidden patch: %v", err)
-	}
-	if after.Enabled != before.Enabled {
-		t.Fatalf("expected forbidden patch to leave platform policy enabled=%t, got %t", before.Enabled, after.Enabled)
-	}
-}
-
-func TestTenantCannotTargetAnotherTenantsAppOrWorkspaceForBackup(t *testing.T) {
-	t.Parallel()
-
-	fixture := newBackupAuthorizationFixture(t)
-	requests := []struct {
-		name string
-		path string
-		body map[string]any
-	}{
-		{
-			name: "app policy",
-			path: "/v1/backups/policies",
-			body: map[string]any{"app_id": fixture.victimApp.ID, "target": map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.victimApp.ID}},
-		},
-		{
-			name: "app run",
-			path: "/v1/backups/runs",
-			body: map[string]any{"target": map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.victimApp.ID}},
-		},
-		{
-			name: "workspace policy",
-			path: "/v1/backups/policies",
-			body: map[string]any{"target": map[string]any{"type": model.BackupTargetDataWorkspace, "workspace_id": fixture.victimWorkspace.ID}},
-		},
-		{
-			name: "workspace run",
-			path: "/v1/backups/runs",
-			body: map[string]any{"target": map[string]any{"type": model.BackupTargetDataWorkspace, "workspace_id": fixture.victimWorkspace.ID}},
-		},
-	}
-	for _, request := range requests {
-		t.Run(request.name, func(t *testing.T) {
-			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
-			if recorder.Code != http.StatusForbidden {
-				t.Fatalf("expected cross-tenant backup target to be forbidden, code=%d body=%s", recorder.Code, recorder.Body.String())
-			}
-		})
-	}
-}
-
 func TestTenantBackupAllowsRuntimeAlreadyReferencedByAuthorizedApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -576,94 +968,6 @@ func TestTenantCannotRunLegacyPolicyPointingAtAnotherTenant(t *testing.T) {
 	}
 }
 
-func TestBackupPolicyIDRequiresAuthorizationAndCannotOverwriteExistingPolicy(t *testing.T) {
-	t.Parallel()
-
-	fixture := newBackupAuthorizationFixture(t)
-	victimPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.victimApp, fixture.victimBackend, "victim-policy")
-	defaultPolicyID := fixture.stateStore.DefaultControlPlaneBackupPolicyID()
-	defaultBefore, err := fixture.stateStore.GetBackupPolicy(defaultPolicyID, "", true)
-	if err != nil {
-		t.Fatalf("get default policy before overwrite attempts: %v", err)
-	}
-
-	requests := []struct {
-		name string
-		path string
-		id   string
-	}{
-		{name: "generic victim policy", path: "/v1/backups/policies", id: victimPolicy.ID},
-		{name: "app victim policy", path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/policies", id: victimPolicy.ID},
-		{name: "generic platform policy", path: "/v1/backups/policies", id: defaultPolicyID},
-	}
-	for _, request := range requests {
-		t.Run(request.name, func(t *testing.T) {
-			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, map[string]any{
-				"id":         request.id,
-				"name":       "overwrite-attempt",
-				"backend_id": fixture.attackerBackend.ID,
-				"target": map[string]any{
-					"type":   model.BackupTargetAppDatabase,
-					"app_id": fixture.attackerApp.ID,
-				},
-			})
-			if recorder.Code != http.StatusNotFound {
-				t.Fatalf("expected unauthorized supplied policy id to be hidden, code=%d body=%s", recorder.Code, recorder.Body.String())
-			}
-		})
-	}
-	attackerPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "attacker-policy")
-	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/policies", fixture.attackerKey, map[string]any{
-		"id":         attackerPolicy.ID,
-		"name":       "attacker-policy-updated",
-		"backend_id": fixture.attackerBackend.ID,
-		"target": map[string]any{
-			"type":   model.BackupTargetAppDatabase,
-			"app_id": fixture.attackerApp.ID,
-		},
-	})
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected authorized policy id upsert to succeed, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	var upsertResponse struct {
-		Policy model.BackupPolicy `json:"policy"`
-	}
-	mustDecodeJSON(t, recorder, &upsertResponse)
-	if upsertResponse.Policy.ID != attackerPolicy.ID || upsertResponse.Policy.Name != "attacker-policy-updated" {
-		t.Fatalf("expected authorized upsert to retain policy identity, got %+v", upsertResponse.Policy)
-	}
-
-	recorder = performJSONRequest(t, fixture.server, http.MethodPatch, "/v1/backups/policies/"+attackerPolicy.ID, fixture.attackerKey, map[string]any{
-		"id":      victimPolicy.ID,
-		"enabled": false,
-	})
-	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "id is read-only") {
-		t.Fatalf("expected policy id in PATCH body to be rejected, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	attackerAfter, err := fixture.stateStore.GetBackupPolicy(attackerPolicy.ID, fixture.attacker.ID, false)
-	if err != nil {
-		t.Fatalf("get attacker policy after rejected PATCH: %v", err)
-	}
-	if !attackerAfter.Enabled {
-		t.Fatalf("attacker policy was disabled despite rejected PATCH: %+v", attackerAfter)
-	}
-
-	victimAfter, err := fixture.stateStore.GetBackupPolicy(victimPolicy.ID, "", true)
-	if err != nil {
-		t.Fatalf("get victim policy after overwrite attempts: %v", err)
-	}
-	if victimAfter.TenantID != victimPolicy.TenantID || victimAfter.AppID != victimPolicy.AppID || victimAfter.Target.AppID != victimPolicy.Target.AppID {
-		t.Fatalf("victim policy changed after rejected overwrite: before=%+v after=%+v", victimPolicy, victimAfter)
-	}
-	defaultAfter, err := fixture.stateStore.GetBackupPolicy(defaultPolicyID, "", true)
-	if err != nil {
-		t.Fatalf("get default policy after overwrite attempts: %v", err)
-	}
-	if defaultAfter.TenantID != defaultBefore.TenantID || defaultAfter.Target.Type != defaultBefore.Target.Type {
-		t.Fatalf("platform policy changed after rejected overwrite: before=%+v after=%+v", defaultBefore, defaultAfter)
-	}
-}
-
 func TestAppBackupPolicyUpsertIsIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -708,7 +1012,7 @@ func TestAppBackupPolicyUpsertIsIdempotent(t *testing.T) {
 func TestAdminBackupPolicyUpsertUpdatesDefaultPolicy(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -856,54 +1160,6 @@ func TestManualAppDatabaseBackupRejectsSuspendedManagedPostgresBeforeCreatingRun
 	}
 	if len(runs) != 0 {
 		t.Fatalf("manual suspended postgres rejection must not create backup runs, got %+v", runs)
-	}
-}
-
-func TestManualAppDatabaseBackupRejectsActiveSuspendOperation(t *testing.T) {
-	fixture := newBackupAuthorizationFixture(t)
-	policy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "suspending-postgres")
-	_, suspend := beginManagedPostgresSuspendForBackupTest(t, fixture.stateStore, fixture.attackerApp)
-
-	workerCalled := false
-	fixture.server.backupRunner = func(context.Context, model.BackupRun) ([]model.BackupArtifact, error) {
-		workerCalled = true
-		return nil, nil
-	}
-	for _, request := range []struct {
-		path string
-		body map[string]any
-	}{
-		{path: "/v1/backups/runs", body: map[string]any{"policy_id": policy.ID, "wait": true}},
-		{path: "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs", body: map[string]any{"policy_id": policy.ID}},
-	} {
-		recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
-		if recorder.Code != http.StatusConflict {
-			t.Fatalf("expected active suspend conflict from %s, code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
-		}
-		var response struct {
-			Error string `json:"error"`
-		}
-		mustDecodeJSON(t, recorder, &response)
-		if response.Error != store.ManagedPostgresSuspendBackupConflictMessage {
-			t.Fatalf("expected deterministic suspend-in-progress message, got %+v", response)
-		}
-	}
-	if workerCalled {
-		t.Fatal("active suspend rejection must not invoke backup worker")
-	}
-	runs, err := fixture.stateStore.ListBackupRuns(store.BackupRunFilter{PlatformAdmin: true})
-	if err != nil {
-		t.Fatalf("list backup runs: %v", err)
-	}
-	if len(runs) != 0 {
-		t.Fatalf("active suspend rejection must not create backup runs, got %+v", runs)
-	}
-	storedSuspend, err := fixture.stateStore.GetOperation(suspend.ID)
-	if err != nil {
-		t.Fatalf("get suspend operation after rejected backup: %v", err)
-	}
-	if storedSuspend.Status != model.OperationStatusPending {
-		t.Fatalf("backup rejection changed suspend operation: %+v", storedSuspend)
 	}
 }
 
@@ -1112,193 +1368,6 @@ func TestAppBackupRunSelectsRequestedTargetPolicy(t *testing.T) {
 	}
 }
 
-func TestTenantCannotUseAnotherTenantsBackupBackend(t *testing.T) {
-	t.Parallel()
-
-	fixture := newBackupAuthorizationFixture(t)
-	requests := []struct {
-		name string
-		path string
-		body map[string]any
-	}{
-		{
-			name: "policy",
-			path: "/v1/backups/policies",
-			body: map[string]any{
-				"name":       "victim-backend-policy",
-				"backend_id": fixture.victimBackend.ID,
-				"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
-			},
-		},
-		{
-			name: "direct run",
-			path: "/v1/backups/runs",
-			body: map[string]any{
-				"backend_id": fixture.victimBackend.ID,
-				"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
-			},
-		},
-	}
-	for _, request := range requests {
-		t.Run(request.name, func(t *testing.T) {
-			recorder := performJSONRequest(t, fixture.server, http.MethodPost, request.path, fixture.attackerKey, request.body)
-			if recorder.Code != http.StatusForbidden {
-				t.Fatalf("expected victim backend to be forbidden, code=%d body=%s", recorder.Code, recorder.Body.String())
-			}
-		})
-	}
-
-	legacyPolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.victimBackend, "legacy-victim-backend")
-	for _, path := range []string{"/v1/backups/runs", "/v1/apps/" + fixture.attackerApp.ID + "/backups/runs"} {
-		recorder := performJSONRequest(t, fixture.server, http.MethodPost, path, fixture.attackerKey, map[string]any{"policy_id": legacyPolicy.ID})
-		if recorder.Code != http.StatusForbidden {
-			t.Fatalf("expected legacy victim backend policy on %s to be forbidden, code=%d body=%s", path, recorder.Code, recorder.Body.String())
-		}
-	}
-	safePolicy := createBackupAuthorizationPolicy(t, fixture.stateStore, fixture.attackerApp, fixture.attackerBackend, "safe-backend-policy")
-	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/apps/"+fixture.attackerApp.ID+"/backups/runs", fixture.attackerKey, map[string]any{
-		"policy_id":  safePolicy.ID,
-		"backend_id": fixture.victimBackend.ID,
-	})
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("expected app run backend override to reject victim backend, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	_, err := fixture.server.runBackup(context.Background(), model.BackupRun{
-		TenantID:  fixture.attacker.ID,
-		ProjectID: fixture.attackerApp.ProjectID,
-		AppID:     fixture.attackerApp.ID,
-		Target: model.BackupTarget{
-			Type:      model.BackupTargetAppDatabase,
-			TenantID:  fixture.attacker.ID,
-			ProjectID: fixture.attackerApp.ProjectID,
-			AppID:     fixture.attackerApp.ID,
-		},
-		BackendID: fixture.victimBackend.ID,
-	})
-	if !errors.Is(err, errBackupBackendNotAuthorized) {
-		t.Fatalf("expected worker boundary to reject victim backend, got %v", err)
-	}
-
-	globalBackend, err := fixture.stateStore.CreateBackupBackend(model.BackupBackend{
-		Name:     "shared-r2",
-		Provider: model.DataBackendProviderCloudflareR2,
-		Bucket:   "shared-bucket",
-		Endpoint: "https://shared.example.r2.cloudflarestorage.com",
-	})
-	if err != nil {
-		t.Fatalf("create shared backend: %v", err)
-	}
-	recorder = performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/policies", fixture.attackerKey, map[string]any{
-		"name":       "shared-backend-policy",
-		"backend_id": globalBackend.Name,
-		"target":     map[string]any{"type": model.BackupTargetAppDatabase, "app_id": fixture.attackerApp.ID},
-	})
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("expected platform-shared backend to remain available, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	var response struct {
-		Policy model.BackupPolicy `json:"policy"`
-	}
-	mustDecodeJSON(t, recorder, &response)
-	if response.Policy.BackendID != globalBackend.ID {
-		t.Fatalf("expected shared backend to be canonicalized to %q, got %+v", globalBackend.ID, response.Policy)
-	}
-
-	adminServer := NewServer(fixture.stateStore, auth.New(fixture.stateStore, "bootstrap-secret"), nil, ServerConfig{})
-	for _, request := range []struct {
-		path string
-		body map[string]any
-	}{
-		{
-			path: "/v1/apps/" + fixture.victimApp.ID + "/backups/policies",
-			body: map[string]any{
-				"backend_id": fixture.attackerBackend.ID,
-				"target":     map[string]any{"type": model.BackupTargetAppDatabase},
-			},
-		},
-		{
-			path: "/v1/backups/runs",
-			body: map[string]any{
-				"backend_id": fixture.attackerBackend.ID,
-				"target": map[string]any{
-					"type":       model.BackupTargetAppDatabase,
-					"tenant_id":  fixture.victimApp.TenantID,
-					"project_id": fixture.victimApp.ProjectID,
-					"app_id":     fixture.victimApp.ID,
-				},
-			},
-		},
-	} {
-		recorder := performJSONRequest(t, adminServer, http.MethodPost, request.path, "bootstrap-secret", request.body)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("expected platform admin cross-tenant backend selection to fail fast, path=%s code=%d body=%s", request.path, recorder.Code, recorder.Body.String())
-		}
-	}
-}
-
-func TestTenantCannotMutatePlatformBackupBackend(t *testing.T) {
-	t.Parallel()
-
-	fixture := newBackupAuthorizationFixture(t)
-	globalBackend, err := fixture.stateStore.CreateBackupBackend(model.BackupBackend{
-		Name:     "platform-shared-mutation-test",
-		Provider: model.DataBackendProviderCloudflareR2,
-		Bucket:   "platform-bucket",
-		Endpoint: "https://platform.example.r2.cloudflarestorage.com",
-		Credentials: model.DataBackendCredentials{
-			AccessKeyID:     "platform-access-key",
-			SecretAccessKey: "platform-secret-key",
-		},
-	})
-	if err != nil {
-		t.Fatalf("create platform backup backend: %v", err)
-	}
-	before, err := fixture.stateStore.GetBackupBackendForUse(globalBackend.ID, "", true)
-	if err != nil {
-		t.Fatalf("get platform backend before mutation attempts: %v", err)
-	}
-
-	requests := []struct {
-		method string
-		path   string
-		body   map[string]any
-	}{
-		{
-			method: http.MethodPost,
-			path:   "/v1/backups/backends",
-			body: map[string]any{
-				"name":        globalBackend.ID,
-				"rotate_only": true,
-				"credentials": map[string]any{"access_key_id": "attacker-key", "secret_access_key": "attacker-secret"},
-			},
-		},
-		{method: http.MethodPost, path: "/v1/backups/backends/" + globalBackend.ID + "/test"},
-		{method: http.MethodDelete, path: "/v1/backups/backends/" + globalBackend.ID},
-	}
-	for _, request := range requests {
-		recorder := performJSONRequest(t, fixture.server, request.method, request.path, fixture.attackerKey, request.body)
-		if recorder.Code != http.StatusForbidden {
-			t.Fatalf("expected platform backend mutation to be forbidden, method=%s path=%s code=%d body=%s", request.method, request.path, recorder.Code, recorder.Body.String())
-		}
-	}
-	if _, err := fixture.stateStore.RotateBackupBackendCredentials(globalBackend.ID, fixture.attacker.ID, false, model.DataBackendCredentials{AccessKeyID: "x", SecretAccessKey: "y"}); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("store must reject tenant rotation of platform backend, got %v", err)
-	}
-	if _, err := fixture.stateStore.RecordBackupBackendTest(globalBackend.ID, fixture.attacker.ID, false, false, "attacker"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("store must reject tenant test mutation of platform backend, got %v", err)
-	}
-	if _, err := fixture.stateStore.DeleteBackupBackend(globalBackend.ID, fixture.attacker.ID, false); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("store must reject tenant deletion of platform backend, got %v", err)
-	}
-	after, err := fixture.stateStore.GetBackupBackendForUse(globalBackend.ID, "", true)
-	if err != nil {
-		t.Fatalf("platform backend disappeared after rejected mutation: %v", err)
-	}
-	if after.Credentials.AccessKeyID != before.Credentials.AccessKeyID || after.Credentials.SecretAccessKey != before.Credentials.SecretAccessKey || after.LastTestedAt != nil {
-		t.Fatalf("platform backend changed after rejected tenant mutation: before=%+v after=%+v", before, after)
-	}
-}
-
 func TestTenantCannotDeleteAnotherTenantsOrPlatformBackupArtifact(t *testing.T) {
 	t.Parallel()
 
@@ -1466,81 +1535,6 @@ func TestTenantCannotPersistCrossTenantBackupRestoreTarget(t *testing.T) {
 	}
 }
 
-func TestTenantCannotReadOrTriggerPlatformBackupResources(t *testing.T) {
-	t.Parallel()
-
-	fixture := newBackupAuthorizationFixture(t)
-	platformRun, err := fixture.stateStore.CreateBackupRun(model.BackupRun{
-		Target:  model.BackupTarget{Type: model.BackupTargetControlPlaneDatabase},
-		Trigger: model.BackupRunTriggerManual,
-		Status:  model.BackupRunStatusFailed,
-	})
-	if err != nil {
-		t.Fatalf("create platform backup run: %v", err)
-	}
-	platformArtifact, err := fixture.stateStore.CreateBackupArtifact(model.BackupArtifact{
-		RunID:     platformRun.ID,
-		Target:    platformRun.Target,
-		Kind:      model.BackupArtifactKindControlPlanePGDump,
-		ObjectKey: "platform/control-plane.dump",
-		Status:    model.BackupArtifactStatusActive,
-	})
-	if err != nil {
-		t.Fatalf("create platform backup artifact: %v", err)
-	}
-	platformPlan, err := fixture.stateStore.CreateBackupRestorePlan(model.BackupRestorePlan{
-		ArtifactID: platformArtifact.ID,
-		Target:     platformArtifact.Target,
-		Status:     model.BackupRestoreStatusPlanned,
-	})
-	if err != nil {
-		t.Fatalf("create platform restore plan: %v", err)
-	}
-	platformRestoreRun, err := fixture.stateStore.CreateBackupRestoreRun(model.BackupRestoreRun{
-		PlanID: platformPlan.ID,
-		Status: model.BackupRestoreStatusPlanned,
-	})
-	if err != nil {
-		t.Fatalf("create platform restore run: %v", err)
-	}
-
-	for _, path := range []string{
-		"/v1/backups/policies/" + fixture.stateStore.DefaultControlPlaneBackupPolicyID(),
-		"/v1/backups/runs/" + platformRun.ID,
-		"/v1/backups/artifacts/" + platformArtifact.ID,
-	} {
-		recorder := performJSONRequest(t, fixture.server, http.MethodGet, path, fixture.attackerKey, nil)
-		if recorder.Code != http.StatusNotFound {
-			t.Fatalf("expected platform resource %s to be hidden, code=%d body=%s", path, recorder.Code, recorder.Body.String())
-		}
-	}
-
-	recorder := performJSONRequest(t, fixture.server, http.MethodPost, "/v1/backups/restore-runs", fixture.attackerKey, map[string]any{"plan_id": platformPlan.ID})
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("expected platform restore plan trigger to be hidden, code=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-
-	for _, listing := range []struct {
-		path string
-		key  string
-		id   string
-	}{
-		{path: "/v1/backups/policies?include_disabled=true", key: "policies", id: fixture.stateStore.DefaultControlPlaneBackupPolicyID()},
-		{path: "/v1/backups/runs", key: "runs", id: platformRun.ID},
-		{path: "/v1/backups/artifacts?include_deleted=true", key: "artifacts", id: platformArtifact.ID},
-		{path: "/v1/backups/restore-plans", key: "plans", id: platformPlan.ID},
-		{path: "/v1/backups/restore-runs", key: "runs", id: platformRestoreRun.ID},
-	} {
-		recorder := performJSONRequest(t, fixture.server, http.MethodGet, listing.path, fixture.attackerKey, nil)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("list tenant backup resources %s, code=%d body=%s", listing.path, recorder.Code, recorder.Body.String())
-		}
-		if strings.Contains(recorder.Body.String(), listing.id) {
-			t.Fatalf("platform resource %q leaked through %s response=%s", listing.id, listing.path, recorder.Body.String())
-		}
-	}
-}
-
 type backupAuthorizationFixture struct {
 	stateStore      *store.Store
 	server          *Server
@@ -1622,7 +1616,7 @@ func beginManagedPostgresSuspendForBackupTest(t *testing.T, stateStore *store.St
 func newBackupAuthorizationFixture(t *testing.T) backupAuthorizationFixture {
 	t.Helper()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1787,7 +1781,7 @@ func TestAppBackupPosturePrefersOperationalPolicyAndUsesPolicyMessage(t *testing
 func TestPersistentStoragePostureDoesNotReportUnsupportedRuntimeActive(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1822,7 +1816,7 @@ func TestPersistentStoragePostureDoesNotReportUnsupportedRuntimeActive(t *testin
 func TestCreateAppBackupPolicyResolvesManagedPostgresTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1882,7 +1876,7 @@ func TestCreateAppBackupPolicyResolvesManagedPostgresTarget(t *testing.T) {
 func TestCreateAppBackupPolicyRejectsAppWithoutManagedPostgres(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1923,7 +1917,7 @@ func TestCreateAppBackupPolicyRejectsAppWithoutManagedPostgres(t *testing.T) {
 func TestControlPlaneBackupRunCreatesRestorePlan(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2022,7 +2016,7 @@ func TestControlPlaneBackupRunCreatesRestorePlan(t *testing.T) {
 func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2082,7 +2076,7 @@ func TestAdminBackupRunUsesDefaultControlPlanePolicy(t *testing.T) {
 func TestBlockedBackupRunDoesNotStartWorker(t *testing.T) {
 	clearDefaultDataBackendEnv(t)
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2116,7 +2110,7 @@ func TestBlockedBackupRunDoesNotStartWorker(t *testing.T) {
 func TestAppDatabaseBackupRunCreatesCloneRestorePlan(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2265,7 +2259,7 @@ func TestPersistentStorageBackupWorkerArchivesMountedRoot(t *testing.T) {
 	}
 	t.Setenv("FUGUE_BACKUP_PERSISTENT_STORAGE_ROOT", sourceRoot)
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2372,7 +2366,7 @@ func TestDataWorkspaceBackupWorkerCreatesSnapshotArtifact(t *testing.T) {
 	t.Parallel()
 
 	s3URL, stored := newBackupFakeS3(t)
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2462,7 +2456,7 @@ func TestDataWorkspaceBackupWorkerCreatesSnapshotArtifact(t *testing.T) {
 func TestReplaceRestoreRunQueuesProtectiveBackup(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2542,7 +2536,7 @@ func TestReplaceRestoreRunQueuesProtectiveBackup(t *testing.T) {
 func TestPlatformBackupPostureReportsCNPGAndExternalizedComponents(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2583,13 +2577,17 @@ func TestPlatformBackupPostureReportsCNPGAndExternalizedComponents(t *testing.T)
 func TestBackupMetricsExposePolicyAndBillableStorage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := stateStore.CreateTenant("Billable Backup Metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := stateStore.CreateBackupArtifact(model.BackupArtifact{
-		TenantID:  "tenant_a",
-		Target:    model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_a", AppID: "app_a"},
+		TenantID:  tenant.ID,
+		Target:    model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: tenant.ID, AppID: "app_a"},
 		Kind:      model.BackupArtifactKindAppPGDump,
 		SizeBytes: 123,
 		Status:    model.BackupArtifactStatusActive,
@@ -2621,7 +2619,7 @@ func TestBackupMetricsExposePolicyAndBillableStorage(t *testing.T) {
 func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2689,7 +2687,7 @@ func TestScheduleBackupRetryCreatesPendingRetryRun(t *testing.T) {
 func TestRecoverableLonghornLockFailureGetsDurableRetryAfterRollout(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2740,7 +2738,7 @@ func TestRecoverableLonghornLockFailureGetsDurableRetryAfterRollout(t *testing.T
 func TestScheduleBackupRetryRebindsManagedPostgresPolicyTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2846,7 +2844,7 @@ func TestScheduleBackupRetryRebindsManagedPostgresPolicyTarget(t *testing.T) {
 func TestExecuteControlPlaneBackupRunFailsClosedWithoutLeaseConfiguration(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2891,7 +2889,7 @@ func TestExecuteControlPlaneBackupRunFailsClosedWithoutLeaseConfiguration(t *tes
 func TestPendingControlPlaneBackupRunRetriesAfterCoordinationLeaseBecomesAvailable(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2962,7 +2960,7 @@ func TestPendingControlPlaneBackupRunRetriesAfterCoordinationLeaseBecomesAvailab
 func TestControlPlaneBackupCoordinationLeaseCoversRetryCreation(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3038,7 +3036,7 @@ func TestControlPlaneBackupCoordinationLeaseCoversRetryCreation(t *testing.T) {
 func TestControlPlaneBackupCancelsWhenCoordinationLeaseRenewalIsLost(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3082,7 +3080,7 @@ func TestControlPlaneBackupCancelsWhenCoordinationLeaseRenewalIsLost(t *testing.
 func TestControlPlaneBackupDoesNotFinalizeWhenFinalLeaseVerificationFails(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3123,7 +3121,7 @@ func TestControlPlaneBackupDoesNotFinalizeWhenFinalLeaseVerificationFails(t *tes
 }
 
 func TestControlPlaneBackupReverifiesFencingTokenAfterClaimBeforeRunner(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3242,8 +3240,8 @@ func TestControlPlaneBackupReverifiesFencingTokenAfterClaimBeforeRunner(t *testi
 func TestExecuteBackupRunClaimsPendingRunOnceAcrossReplicas(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	primaryStore := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	primaryStore := newStoreTestDatabase(t, storePath)
 	if err := primaryStore.Init(); err != nil {
 		t.Fatalf("init primary store: %v", err)
 	}
@@ -3278,7 +3276,7 @@ func TestExecuteBackupRunClaimsPendingRunOnceAcrossReplicas(t *testing.T) {
 		t.Fatalf("create pending backup run: %v", err)
 	}
 
-	replicaStore := store.New(storePath)
+	replicaStore := newStoreTestDatabase(t, storePath)
 	if err := replicaStore.Init(); err != nil {
 		t.Fatalf("init replica store: %v", err)
 	}
@@ -3355,7 +3353,7 @@ func TestExecuteBackupRunClaimsPendingRunOnceAcrossReplicas(t *testing.T) {
 func TestExecuteBackupRunLostLeaseCannotFinalizeOrScheduleRetry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3435,7 +3433,7 @@ func TestExecuteBackupRunLostLeaseCannotFinalizeOrScheduleRetry(t *testing.T) {
 func TestRecoverStaleBackupRunMarksFailedAndSchedulesRetry(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,47 +25,6 @@ var producerRuntimeActions = []string{
 	"platform_config.serving_rolled_back",
 }
 
-func producerRuntimeFact(event model.AuditEvent) bool {
-	if event.TargetType != "platform_release_set" {
-		return false
-	}
-	for _, action := range producerRuntimeActions {
-		if event.Action == action {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesPlatformRuntimeFact(event model.AuditEvent, filter PlatformRuntimeFactFilter, consumers map[string]string) bool {
-	producer := producerRuntimeFact(event)
-	if event.Action != "platform_consumer.heartbeat_accepted" && !strings.HasPrefix(event.Action, "platform_artifact.") && !producer {
-		return false
-	}
-	if filter.ConsumerID != "" && event.Metadata["consumer_id"] != filter.ConsumerID &&
-		!(event.TargetType == "platform_consumer" && (event.TargetID == filter.ConsumerID || consumers[event.TargetID] == filter.ConsumerID)) {
-		return false
-	}
-	kind := event.Metadata["artifact_kind"]
-	if producer {
-		kind = model.PlatformArtifactKindReleaseSet
-	}
-	if filter.ArtifactKind != "" && kind != filter.ArtifactKind {
-		return false
-	}
-	if filter.ReleaseSetID != "" && event.Metadata["release_set_id"] != filter.ReleaseSetID {
-		if kind != model.PlatformArtifactKindReleaseSet {
-			return false
-		}
-		target := (event.TargetType == "platform_release_set" || event.TargetType == "platform_artifact") && event.TargetID == filter.ReleaseSetID
-		reference := event.Metadata["artifact_id"] == filter.ReleaseSetID || producer && event.Action == "platform_config.serving_rolled_back" && event.Metadata["lkg_artifact_id"] == filter.ReleaseSetID
-		if !target && !reference {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *Store) ListPlatformRuntimeFacts(ctx context.Context, filter PlatformRuntimeFactFilter) ([]model.AuditEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -78,37 +36,7 @@ func (s *Store) ListPlatformRuntimeFacts(ctx context.Context, filter PlatformRun
 	if filter.Limit < 1 || filter.Limit > 1000 {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListPlatformRuntimeFacts(ctx, filter)
-	}
-	events := []model.AuditEvent{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		identities := map[string]string{}
-		if filter.ConsumerID != "" {
-			for _, c := range state.PlatformConsumerInstances {
-				identities[c.ID] = c.ConsumerID
-			}
-		}
-		for _, event := range state.AuditEvents {
-			if matchesPlatformRuntimeFact(event, filter, identities) {
-				events = append(events, event)
-			}
-		}
-		sort.Slice(events, func(i, j int) bool {
-			if events[i].CreatedAt.Equal(events[j].CreatedAt) {
-				return events[i].ID > events[j].ID
-			}
-			return events[i].CreatedAt.After(events[j].CreatedAt)
-		})
-		if len(events) > filter.Limit {
-			events = events[:filter.Limit]
-		}
-		return ctx.Err()
-	})
-	return events, err
+	return s.pgListPlatformRuntimeFacts(ctx, filter)
 }
 
 func (s *Store) pgListPlatformRuntimeFacts(ctx context.Context, filter PlatformRuntimeFactFilter) ([]model.AuditEvent, error) {

@@ -2,50 +2,11 @@ package store
 
 import (
 	"encoding/json"
-	"fugue/internal/model"
-	"github.com/DATA-DOG/go-sqlmock"
-	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
-	"time"
-)
 
-func TestNodeUpdateTaskSummaryAndExactLookupPreserveTenantIsolation(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	if err := s.withLockedState(true, func(state *model.State) error {
-		for _, id := range []string{"a", "b", "c"} {
-			tenant := "tenant-a"
-			if id == "c" {
-				tenant = "tenant-b"
-			}
-			state.NodeUpdateTasks = append(state.NodeUpdateTasks, model.NodeUpdateTask{ID: id, TenantID: tenant, NodeUpdaterID: "worker", Status: model.NodeUpdateTaskStatusCompleted, CreatedAt: now, Payload: map[string]string{"data": strings.Repeat("large", 10000)}, Logs: []model.NodeUpdateTaskLog{{Message: strings.Repeat("log", 10000)}}})
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	items, err := s.ListNodeUpdateTasksWithOptions("tenant-a", false, "worker", "completed", NodeUpdateTaskListOptions{Summary: true, Limit: 1})
-	if err != nil || len(items) != 1 || items[0].ID != "b" || items[0].Payload != nil || items[0].Logs != nil {
-		t.Fatalf("summary=%+v err=%v", items, err)
-	}
-	raw, _ := json.Marshal(items)
-	if len(raw) > 2048 {
-		t.Fatalf("summary response retained large details: %d bytes", len(raw))
-	}
-	items, err = s.ListNodeUpdateTasksWithOptions("tenant-a", false, "", "", NodeUpdateTaskListOptions{TaskID: "c", Limit: 1})
-	if err != nil || len(items) != 0 {
-		t.Fatalf("cross-tenant exact lookup leaked data: %+v %v", items, err)
-	}
-	items, err = s.ListNodeUpdateTasksWithOptions("tenant-a", false, "", "", NodeUpdateTaskListOptions{TaskID: "a", Limit: 1})
-	if err != nil || len(items) != 1 || len(items[0].Payload) == 0 || len(items[0].Logs) == 0 {
-		t.Fatalf("exact details missing: %+v %v", items, err)
-	}
-}
+	"github.com/DATA-DOG/go-sqlmock"
+)
 
 func TestPostgresNodeUpdateTaskSummaryProjectsOutLargeFields(t *testing.T) {
 	db, mock, err := sqlmock.New()

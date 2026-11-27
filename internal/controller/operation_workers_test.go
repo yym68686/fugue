@@ -167,7 +167,7 @@ func (f *fakeBuilderJobClient) deleteJob(_ context.Context, _, name string) erro
 func TestBackgroundGitHubSyncImportDoesNotBlockForegroundOperations(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestBackgroundGitHubSyncImportDoesNotBlockForegroundOperations(t *testing.T
 func TestBackgroundGitHubSyncImportDoesNotBlockGitHubSyncDeploysForOtherApps(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestBackgroundGitHubSyncImportDoesNotBlockGitHubSyncDeploysForOtherApps(t *
 func TestBackgroundGitHubSyncImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -572,7 +572,7 @@ func TestBackgroundGitHubSyncImportWorkersProcessDifferentAppsInParallel(t *test
 func TestBackgroundGitHubSyncImportWorkersSerializeOperationsForSameApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -674,7 +674,7 @@ func TestBackgroundGitHubSyncImportWorkersSerializeOperationsForSameApp(t *testi
 func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -798,7 +798,7 @@ func TestUnboundedPendingOperationWorkersProcessDifferentAppsInParallel(t *testi
 func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -922,7 +922,7 @@ func TestGitHubSyncActivateWorkersProcessDifferentAppsInParallel(t *testing.T) {
 func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1020,7 +1020,7 @@ func TestUnboundedPendingOperationWorkersSerializeOperationsForSameApp(t *testin
 func TestForegroundImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1141,7 +1141,7 @@ func TestForegroundImportWorkersProcessDifferentAppsInParallel(t *testing.T) {
 func TestForegroundImportWorkersSerializeOperationsForSameApp(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1242,7 +1242,7 @@ func TestForegroundImportWorkersSerializeOperationsForSameApp(t *testing.T) {
 func TestCleanupZombieBuildJobsDeletesOrphanedActiveJobs(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

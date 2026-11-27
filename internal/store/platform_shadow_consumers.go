@@ -16,7 +16,7 @@ import (
 	"fugue/internal/runtimeobservation"
 )
 
-func validateShadowObservation(state *model.State, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) error {
+func validateShadowObservation(state *storeProjection, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, keys bundleauth.Keyring) error {
 	edge := h.Component == model.PlatformConsumerComponentEdgeWorker && (h.ArtifactKind == model.PlatformArtifactKindEdgeRouteBundle || h.ArtifactKind == model.PlatformArtifactKindCaddyRouteConfig)
 	dns := h.Component == model.PlatformConsumerComponentDNSServer && h.ArtifactKind == model.PlatformArtifactKindDNSAnswerBundle && strings.HasPrefix(h.ScopeKey, "authority-cell:cell-")
 	if (!edge && !dns) || h.ApplyStatus != "staged" || h.ProbeStatus != "shadow_validated" || h.LastError != "" || set.ArtifactReleaseID == "" {
@@ -90,7 +90,7 @@ func shadowObservationMember(parent model.PlatformArtifact, kind string) (string
 	return "", ErrConflict
 }
 
-func acceptShadowObservation(state *model.State, claims platformcontrol.PlatformComponentIdentityClaims, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, keys bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
+func acceptShadowObservation(state *storeProjection, claims platformcontrol.PlatformComponentIdentityClaims, set model.PlatformExpectedConsumerSet, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, keys bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
 	if err := validateShadowObservation(state, set, h, keys); err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
@@ -132,66 +132,30 @@ func (s *Store) AcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.Pla
 }
 
 func (s *Store) AcceptPlatformShadowConsumerHeartbeatObserved(observation context.Context, claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring) (model.PlatformConsumerInstance, error) {
-	if s.db != nil {
-		return s.pgAcceptPlatformShadowConsumerHeartbeat(claims, h, at, audit, observation)
-	}
-	var out model.PlatformConsumerInstance
-	err := s.withLockedState(true, func(state *model.State) error {
-		var set model.PlatformExpectedConsumerSet
-		for _, v := range state.ExpectedConsumerSets {
-			if v.ID == h.ExpectedConsumerSetID {
-				set = v
-				break
-			}
-		}
-		if set.ID == "" {
-			return ErrNotFound
-		}
-		var err error
-		out, err = acceptShadowObservation(state, claims, set, h, at, s.platformArtifactSigningKeyring())
-		if err != nil {
-			return err
-		}
-		if err = appendPlatformConsumerHeartbeatAuditEventToState(state, out, audit); err != nil {
-			return err
-		}
-		return validateShadowObservation(state, set, h, s.platformArtifactSigningKeyring())
-	})
-	return out, err
+	return s.pgAcceptPlatformShadowConsumerHeartbeat(claims, h, at, audit, observation)
 }
 
 func (s *Store) ListPlatformShadowConsumers(kind, scope string) ([]model.PlatformConsumerInstance, error) {
 	out := []model.PlatformConsumerInstance{}
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		rows, err := s.db.QueryContext(ctx, `SELECT body FROM fugue_platform_shadow_consumers WHERE artifact_kind=$1 AND scope_key=$2 ORDER BY consumer_id`, kind, scope)
-		if err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT body FROM fugue_platform_shadow_consumers WHERE artifact_kind=$1 AND scope_key=$2 ORDER BY consumer_id`, kind, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var v model.PlatformConsumerInstance
+		if err = rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw []byte
-			var v model.PlatformConsumerInstance
-			if err = rows.Scan(&raw); err != nil {
-				return nil, err
-			}
-			if len(raw) > 65536 || json.Unmarshal(raw, &v) != nil {
-				return nil, ErrConflict
-			}
-			out = append(out, v)
+		if len(raw) > 65536 || json.Unmarshal(raw, &v) != nil {
+			return nil, ErrConflict
 		}
-		return out, rows.Err()
+		out = append(out, v)
 	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, v := range state.PlatformShadowConsumers {
-			if v.ArtifactKind == kind && v.ScopeKey == scope {
-				out = append(out, v)
-			}
-		}
-		return nil
-	})
-	return out, err
+	return out, rows.Err()
 }
 
 func (s *Store) pgAcceptPlatformShadowConsumerHeartbeat(claims platformcontrol.PlatformComponentIdentityClaims, h platformcontrol.PlatformConsumerHeartbeatEnvelope, at time.Time, audit bundleauth.Keyring, observation ...context.Context) (model.PlatformConsumerInstance, error) {
@@ -255,7 +219,7 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
 	}
-	state := &model.State{PlatformArtifacts: []model.PlatformArtifact{parent}, PlatformArtifactReleases: []model.PlatformArtifactRelease{release}, PlatformReleaseLanes: []model.PlatformReleaseLane{lane}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}}
+	state := &storeProjection{PlatformArtifacts: []model.PlatformArtifact{parent}, PlatformArtifactReleases: []model.PlatformArtifactRelease{release}, PlatformReleaseLanes: []model.PlatformReleaseLane{lane}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}}
 	childID, err := shadowObservationMember(parent, set.ArtifactKind)
 	if err != nil {
 		return model.PlatformConsumerInstance{}, err
@@ -306,7 +270,7 @@ func (s *Store) pgAcceptPlatformShadowConsumerHeartbeatInTransaction(ctx context
 
 // A shadow record can supply executable capability only for the exact selected
 // candidate. It is never appended to serving convergence or LKG inputs.
-func trafficCapabilityObservations(state *model.State, parent, child model.PlatformArtifact, set model.PlatformExpectedConsumerSet, now time.Time) []model.PlatformConsumerInstance {
+func trafficCapabilityObservations(state *storeProjection, parent, child model.PlatformArtifact, set model.PlatformExpectedConsumerSet, now time.Time) []model.PlatformConsumerInstance {
 	if id, err := shadowObservationMember(parent, child.ArtifactKind); err != nil || id != child.ID {
 		return state.PlatformConsumerInstances
 	}

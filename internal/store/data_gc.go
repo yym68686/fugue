@@ -88,32 +88,19 @@ type DataGCReference struct {
 // GC needs identities, never potentially enormous transfer plans.
 func (s *Store) ListDataMigrationSourceIDs(ctx context.Context, workspaceID string) ([]string, error) {
 	out := []string{}
-	if s.usingDatabase() {
-		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT source FROM fugue_data_transfers WHERE workspace_id=$1 AND direction='migrate' AND status='completed' AND source<>''`, workspaceID)
-		if err != nil {
-			return nil, mapDBErr(err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return nil, err
-			}
-			out = append(out, id)
-		}
-		return out, mapDBErr(rows.Err())
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT source FROM fugue_data_transfers WHERE workspace_id=$1 AND direction='migrate' AND status='completed' AND source<>''`, workspaceID)
+	if err != nil {
+		return nil, mapDBErr(err)
 	}
-	err := s.withLockedState(false, func(st *model.State) error {
-		seen := map[string]bool{}
-		for _, t := range st.DataTransfers {
-			if t.WorkspaceID == workspaceID && t.Direction == "migrate" && t.Status == "completed" && t.Source != "" && !seen[t.Source] {
-				seen[t.Source] = true
-				out = append(out, t.Source)
-			}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
 		}
-		return nil
-	})
-	return out, err
+		out = append(out, id)
+	}
+	return out, mapDBErr(rows.Err())
 }
 
 // ListDataGCReferences projects references across ALL tenants and workspaces,
@@ -121,8 +108,7 @@ func (s *Store) ListDataMigrationSourceIDs(ctx context.Context, workspaceID stri
 // it is not a transfer lifecycle deadline. Completed migrations keep source
 // copies of live snapshots until an explicit migration retirement is supported.
 func (s *Store) ListDataGCReferences(ctx context.Context) ([]DataGCReference, error) {
-	if s.usingDatabase() {
-		rows, err := s.db.QueryContext(ctx, `WITH refs AS (
+	rows, err := s.db.QueryContext(ctx, `WITH refs AS (
 		 SELECT w.storage_backend_id backend_id,w.id workspace_id, e FROM fugue_data_snapshots s
 		 JOIN fugue_data_workspaces w ON w.id=s.workspace_id
 		 CROSS JOIN LATERAL jsonb_array_elements(s.manifest_json->'entries') e WHERE s.deleted_at IS NULL OR s.deleted_at>now()-interval '7 days' OR EXISTS(SELECT 1 FROM fugue_storage_maintenance_jobs j WHERE j.kind='workspace-retire' AND j.scope_id=w.id AND j.body->>'execute'='true')
@@ -137,57 +123,17 @@ func (s *Store) ListDataGCReferences(ctx context.Context) ([]DataGCReference, er
 		 WHERE t.direction='migrate' AND t.status='completed' AND (s.deleted_at IS NULL OR s.deleted_at>now()-interval '7 days' OR EXISTS(SELECT 1 FROM fugue_storage_maintenance_jobs j WHERE j.kind='workspace-retire' AND j.scope_id=t.workspace_id AND j.body->>'execute'='true'))
 		 ) SELECT DISTINCT backend_id, e->>'sha256', COALESCE(e->>'object_key',''),workspace_id,COALESCE((e->>'size')::bigint,0) FROM refs
 		 WHERE e->>'kind'='file' AND COALESCE(e->>'sha256','')<>''`)
-		if err != nil {
-			return nil, mapDBErr(err)
-		}
-		defer rows.Close()
-		out := []DataGCReference{}
-		for rows.Next() {
-			var v DataGCReference
-			if err := rows.Scan(&v.BackendID, &v.SHA256, &v.ObjectKey, &v.WorkspaceID, &v.Size); err != nil {
-				return nil, err
-			}
-			out = append(out, v)
-		}
-		return out, mapDBErr(rows.Err())
+	if err != nil {
+		return nil, mapDBErr(err)
 	}
+	defer rows.Close()
 	out := []DataGCReference{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		workspaces := map[string]model.DataWorkspace{}
-		for _, w := range state.DataWorkspaces {
-			workspaces[w.ID] = w
+	for rows.Next() {
+		var v DataGCReference
+		if err := rows.Scan(&v.BackendID, &v.SHA256, &v.ObjectKey, &v.WorkspaceID, &v.Size); err != nil {
+			return nil, err
 		}
-		add := func(backend, workspace string, manifest model.DataManifest) {
-			for _, e := range manifest.Entries {
-				if e.Kind == model.DataManifestEntryKindFile && e.SHA256 != "" {
-					out = append(out, DataGCReference{BackendID: backend, SHA256: e.SHA256, ObjectKey: e.ObjectKey, WorkspaceID: workspace, Size: e.Size})
-				}
-			}
-		}
-		for _, v := range state.DataSnapshots {
-			if v.DeletedAt == nil || v.DeletedAt.After(time.Now().Add(-DataRetirementGrace)) || dataRetirementJobState(state, v.WorkspaceID) != nil {
-				add(workspaces[v.WorkspaceID].StorageBackendID, v.WorkspaceID, v.Manifest)
-			}
-		}
-		for _, t := range state.DataTransfers {
-			if t.Status != model.DataTransferStatusCompleted && t.Status != model.DataTransferStatusFailed && t.Status != model.DataTransferStatusCanceled || t.UpdatedAt.After(time.Now().Add(-DataRetirementGrace)) || dataRetirementJobState(state, t.WorkspaceID) != nil {
-				ids := []string{workspaces[t.WorkspaceID].StorageBackendID}
-				if t.Direction == model.DataTransferDirectionMigrate {
-					ids = append(ids, t.Source, t.Target)
-				}
-				for _, backend := range ids {
-					add(backend, t.WorkspaceID, t.Manifest)
-				}
-			}
-			if t.Direction == model.DataTransferDirectionMigrate && t.Status == model.DataTransferStatusCompleted {
-				for _, v := range state.DataSnapshots {
-					if v.WorkspaceID == t.WorkspaceID && (v.DeletedAt == nil || v.DeletedAt.After(time.Now().Add(-DataRetirementGrace)) || dataRetirementJobState(state, t.WorkspaceID) != nil) {
-						add(t.Source, t.WorkspaceID, v.Manifest)
-					}
-				}
-			}
-		}
-		return nil
-	})
-	return out, err
+		out = append(out, v)
+	}
+	return out, mapDBErr(rows.Err())
 }

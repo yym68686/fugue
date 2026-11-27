@@ -13,31 +13,8 @@ import (
 
 const edgeFlatWriteFenceMetaKey = "edge_instance_flat_write_fence"
 
-func defaultEdgeActivationState(now time.Time) model.EdgeActivationState {
-	return model.EdgeActivationState{
-		Schema:         model.EdgeActivationSchemaV1,
-		Phase:          model.EdgeActivationPhaseLegacyAuthoritative,
-		RouteAuthority: model.EdgeRouteAuthorityLegacy,
-		Generation:     1,
-		CreatedAt:      now.UTC(),
-		UpdatedAt:      now.UTC(),
-	}
-}
-
 func (s *Store) GetEdgeActivationState() (model.EdgeActivationState, error) {
-	if s.usingDatabase() {
-		return s.pgGetEdgeActivationState()
-	}
-	var out model.EdgeActivationState
-	err := s.withLockedState(false, func(state *model.State) error {
-		if state.EdgeActivation == nil {
-			return ErrEdgeInstanceFencingNotReady
-		}
-		var err error
-		out, err = normalizeStoredEdgeActivation(*state.EdgeActivation)
-		return err
-	})
-	return out, err
+	return s.pgGetEdgeActivationState()
 }
 
 func (s *Store) AdvanceEdgeActivation(advance model.EdgeActivationAdvance) (model.EdgeActivationState, error) {
@@ -45,38 +22,7 @@ func (s *Store) AdvanceEdgeActivation(advance model.EdgeActivationAdvance) (mode
 	if err != nil {
 		return model.EdgeActivationState{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgAdvanceEdgeActivation(advance)
-	}
-	var out model.EdgeActivationState
-	err = s.withLockedState(true, func(state *model.State) error {
-		if state.EdgeActivation == nil {
-			return ErrEdgeInstanceFencingNotReady
-		}
-		current, err := normalizeStoredEdgeActivation(*state.EdgeActivation)
-		if err != nil {
-			return err
-		}
-		if current.Generation != advance.ExpectedGeneration {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		next, err := buildNextEdgeActivation(current, advance, state.EdgeNodeInstances, state.EdgeActiveEpochs, now)
-		if err != nil {
-			return err
-		}
-		if advance.ToPhase == model.EdgeActivationPhaseActive {
-			next.PreviousActiveEpochs = append([]model.EdgeActiveEpoch(nil), state.EdgeActiveEpochs...)
-			state.EdgeActiveEpochs = append([]model.EdgeActiveEpoch(nil), current.CandidateEpochs...)
-		}
-		if advance.ToPhase == model.EdgeActivationActionRollback && current.Rollback != nil {
-			state.EdgeActiveEpochs = append([]model.EdgeActiveEpoch(nil), current.Rollback.ActiveEpochs...)
-		}
-		state.EdgeActivation = &next
-		out = next
-		return nil
-	})
-	return out, err
+	return s.pgAdvanceEdgeActivation(advance)
 }
 
 func buildNextEdgeActivation(current model.EdgeActivationState, advance model.EdgeActivationAdvance, instances []model.EdgeNodeInstance, currentEpochs []model.EdgeActiveEpoch, now time.Time) (model.EdgeActivationState, error) {

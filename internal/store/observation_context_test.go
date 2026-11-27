@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 

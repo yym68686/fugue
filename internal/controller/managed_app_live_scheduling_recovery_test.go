@@ -2,13 +2,11 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestManagedAppLiveGuardRecoversVerifiedServingScheduling(t *testing.T) {
@@ -70,7 +68,7 @@ func TestManagedAppLiveGuardRecoversVerifiedServingScheduling(t *testing.T) {
 }
 
 func TestManagedAppLiveGuardRecoversCommittedSpecAfterPreApplyFailure(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}

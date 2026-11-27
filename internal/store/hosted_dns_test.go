@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -13,10 +12,12 @@ func TestHostedDNSZonesAreTenantScoped(t *testing.T) {
 	t.Parallel()
 
 	s := newHostedDNSTestStore(t)
-	putHostedDNSTestZone(t, s, "tenant-a", "example.com")
-	putHostedDNSTestZone(t, s, "tenant-b", "example.net")
+	a := createHostedDNSTestTenant(t, s, "tenant-a")
+	b := createHostedDNSTestTenant(t, s, "tenant-b")
+	putHostedDNSTestZone(t, s, a, "example.com")
+	putHostedDNSTestZone(t, s, b, "example.net")
 
-	zones, err := s.ListHostedZones("tenant-a", false)
+	zones, err := s.ListHostedZones(a, false)
 	if err != nil {
 		t.Fatalf("list tenant hosted zones: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestHostedDNSRecordConflictsProtectSystemRecords(t *testing.T) {
 	t.Parallel()
 
 	s := newHostedDNSTestStore(t)
-	zone := putHostedDNSTestZone(t, s, "tenant-a", "example.com")
+	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "tenant-a"), "example.com")
 	putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
 		Name:   "@",
 		Type:   model.DNSRecordTypeNS,
@@ -62,7 +63,7 @@ func TestHostedDNSRecordConflictsRejectApexAddressPublishers(t *testing.T) {
 	t.Parallel()
 
 	s := newHostedDNSTestStore(t)
-	zone := putHostedDNSTestZone(t, s, "tenant-a", "example.com")
+	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "tenant-a"), "example.com")
 	putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
 		Name:   "@",
 		Type:   model.DNSRecordTypeA,
@@ -87,7 +88,7 @@ func TestHostedDNSRecordsDeleteBySourceRef(t *testing.T) {
 	t.Parallel()
 
 	s := newHostedDNSTestStore(t)
-	zone := putHostedDNSTestZone(t, s, "tenant-a", "example.com")
+	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "tenant-a"), "example.com")
 	managed := putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
 		Name:          "@",
 		Type:          model.DNSRecordTypeFUGUEAPP,
@@ -117,9 +118,18 @@ func TestHostedDNSRecordsDeleteBySourceRef(t *testing.T) {
 	}
 }
 
+func createHostedDNSTestTenant(t *testing.T, s *Store, name string) string {
+	t.Helper()
+	tenant, err := s.CreateTenant(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tenant.ID
+}
+
 func newHostedDNSTestStore(t *testing.T) *Store {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

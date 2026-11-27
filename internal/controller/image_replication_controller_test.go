@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,7 +9,6 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestNodeEligibleForAppImageReplicationSkipsEdgeDNSOfflineAndPressure(t *testing.T) {
@@ -108,7 +106,7 @@ func TestImageReplicaLeaseTTLUsesInventoryEvidenceHorizon(t *testing.T) {
 }
 
 func TestCancelObsoletePendingNodeImageUpdateTasksSkipsEdgeBacklog(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -197,7 +195,7 @@ func TestCancelObsoletePendingNodeImageUpdateTasksSkipsEdgeBacklog(t *testing.T)
 }
 
 func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -219,9 +217,13 @@ func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(
 	if err != nil {
 		t.Fatalf("enroll app updater: %v", err)
 	}
+	tenant, err := stateStore.CreateTenant("orphan-replication")
+	if err != nil {
+		t.Fatal(err)
+	}
 	image, err := stateStore.UpsertImage(model.Image{
 		ID:              "img_keep",
-		TenantID:        "tenant",
+		TenantID:        tenant.ID,
 		AppID:           "app",
 		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:current",
 		CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -316,7 +318,7 @@ func TestCancelObsoletePendingNodeImageUpdateTasksCancelsOrphanReplicationLinks(
 func TestLostImageRepairWaitsForVerifiedSource(t *testing.T) {
 	for _, mode := range []string{"distributed", "distributed-with-registry-fallback"} {
 		t.Run(mode, func(t *testing.T) {
-			stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+			stateStore := newStoreTestDatabase(t, "")
 			if err := stateStore.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -328,7 +330,11 @@ func TestLostImageRepairWaitsForVerifiedSource(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			image, err := stateStore.UpsertImage(model.Image{TenantID: "tenant_fixture", AppID: "app_fixture", ImageRef: "registry.example/project:v1", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 3})
+			tenant, err := stateStore.CreateTenant("replica-repair")
+			if err != nil {
+				t.Fatal(err)
+			}
+			image, err := stateStore.UpsertImage(model.Image{TenantID: tenant.ID, AppID: "app_fixture", ImageRef: "registry.example/project:v1", CanonicalDigest: "sha256:" + strings.Repeat("a", 64), LifecycleState: model.ImageLifecycleLost, RequiredReplicaCount: 3})
 			if err != nil {
 				t.Fatal(err)
 			}

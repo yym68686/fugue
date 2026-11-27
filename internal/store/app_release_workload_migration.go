@@ -15,22 +15,13 @@ func (s *Store) FindAppReleaseWorkloadSource(ctx context.Context, release model.
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	if s.usingDatabase() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		events, err := pgReleaseWorkloadSourceEvents(ctx, s.db, release)
-		if err != nil {
-			return "", err
-		}
-		return releaseWorkloadSource(release, events)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	events, err := pgReleaseWorkloadSourceEvents(ctx, s.db, release)
+	if err != nil {
+		return "", err
 	}
-	var id string
-	err := s.withLockedState(false, func(state *model.State) error {
-		var err error
-		id, err = releaseWorkloadSource(release, state.AuditEvents)
-		return err
-	})
-	return id, err
+	return releaseWorkloadSource(release, events)
 }
 
 func releaseWorkloadSource(release model.AppRelease, events []model.AuditEvent) (string, error) {

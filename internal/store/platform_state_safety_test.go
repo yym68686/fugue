@@ -3,7 +3,6 @@ package store
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"testing/quick"
 	"time"
@@ -59,7 +58,7 @@ func TestShadowAndGrayLedgerEntriesNeverClaimProductionServingProperty(t *testin
 }
 
 func TestGrayReleaseCannotEscapeBoundedCanaryScope(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -89,134 +88,8 @@ func TestGrayReleaseCannotEscapeBoundedCanaryScope(t *testing.T) {
 	}
 }
 
-func TestPlatformOverridesAreOperationScopedAndAudited(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	configureTestPlatformArtifactSigning(s)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	softArtifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
-		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
-		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
-		Generation:   "soft-override-draft",
-		Content:      map[string]any{"routes": []any{"soft"}},
-	})
-	if err != nil {
-		t.Fatalf("create soft override artifact: %v", err)
-	}
-	_, softRelease, _, _, err := s.ReleasePlatformArtifact(softArtifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelShadow,
-		SoftOverride:   true,
-		Reason:         "test bounded validation exception",
-	}, testPlatformSoftOverridePrincipal())
-	if err != nil {
-		t.Fatalf("release soft override artifact: %v", err)
-	}
-	if softRelease.OverrideMode != model.PlatformArtifactOverrideModeSoft ||
-		softRelease.OverrideExpiresAt != nil ||
-		len(softRelease.BypassedInvariants) != 1 ||
-		softRelease.BypassedInvariants[0] != platformsafety.InvariantArtifactValidated {
-		t.Fatalf("unexpected soft override release ledger: %+v", softRelease)
-	}
-
-	kernelArtifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
-		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
-		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
-		Generation:   "kernel-break-glass-draft",
-		Content:      map[string]any{"routes": []any{"kernel"}},
-	})
-	if err != nil {
-		t.Fatalf("create kernel break-glass artifact: %v", err)
-	}
-	expiresAt := time.Now().UTC().Add(5 * time.Minute)
-	_, kernelRelease, _, _, err := s.ReleasePlatformArtifact(kernelArtifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
-		KernelBreakGlass: &model.PlatformKernelBreakGlassRequest{
-			ExpiresAt:          expiresAt,
-			Confirmation:       platformsafety.KernelBreakGlassConfirmation,
-			TargetConfirmation: kernelArtifact.ID,
-		},
-		Reason: "test emergency initial full release",
-	}, testPlatformKernelBreakGlassPrincipal())
-	if err != nil {
-		t.Fatalf("release kernel break-glass artifact: %v", err)
-	}
-	if kernelRelease.OverrideMode != model.PlatformArtifactOverrideModeKernelBreakGlass ||
-		kernelRelease.OverrideExpiresAt == nil ||
-		!kernelRelease.OverrideExpiresAt.Equal(expiresAt) ||
-		!stringSliceContains(kernelRelease.BypassedInvariants, platformsafety.InvariantArtifactValidated) ||
-		!stringSliceContains(kernelRelease.BypassedInvariants, platformsafety.InvariantFullPinnedRollback) {
-		t.Fatalf("unexpected kernel break-glass release ledger: %+v", kernelRelease)
-	}
-
-	if _, _, _, _, err := s.ReleasePlatformArtifact(kernelArtifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelGray,
-		CanaryRuleRef:  "edge=test",
-		KernelBreakGlass: &model.PlatformKernelBreakGlassRequest{
-			ExpiresAt:          time.Now().UTC().Add(-time.Second),
-			Confirmation:       platformsafety.KernelBreakGlassConfirmation,
-			TargetConfirmation: kernelArtifact.ID,
-		},
-		Reason: "expired emergency authorization",
-	}, testPlatformKernelBreakGlassPrincipal()); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expired kernel break-glass authorization must fail, got %v", err)
-	}
-
-	protectedArtifact, err := s.CreatePlatformArtifact(model.PlatformArtifact{
-		ArtifactKind: model.PlatformArtifactKindEdgeRouteBundle,
-		Scope:        model.PlatformArtifactScope{ScopeType: "global"},
-		Generation:   "normal-protection-restored",
-		Content:      map[string]any{"routes": []any{"protected"}},
-	})
-	if err != nil {
-		t.Fatalf("create protected artifact: %v", err)
-	}
-	if _, _, _, _, err := s.ReleasePlatformArtifact(protectedArtifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelFull,
-	}, testPlatformPrincipal()); !errors.Is(err, ErrConflict) {
-		t.Fatalf("normal release after break-glass must restore default protection, got %v", err)
-	}
-
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := platformArtifactIndex(state.PlatformArtifacts, protectedArtifact.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		state.PlatformArtifacts[index].Content = map[string]any{"routes": []any{"tampered"}}
-		return nil
-	}); err != nil {
-		t.Fatalf("tamper protected artifact for boundary test: %v", err)
-	}
-	if _, _, _, _, err := s.ReleasePlatformArtifact(protectedArtifact.ID, model.PlatformArtifactReleaseRequest{
-		ReleaseChannel: model.PlatformArtifactReleaseChannelGray,
-		CanaryRuleRef:  "edge=test",
-		SoftOverride:   true,
-		Reason:         "soft override must not bypass content integrity",
-	}, testPlatformSoftOverridePrincipal()); !errors.Is(err, ErrConflict) {
-		t.Fatalf("soft override bypassed content integrity, got %v", err)
-	}
-
-	events, err := s.ListAuditEvents("", true, 0)
-	if err != nil {
-		t.Fatalf("list audit events: %v", err)
-	}
-	if len(events) != 2 ||
-		events[0].ChainSequence != 2 ||
-		events[1].ChainSequence != 1 {
-		t.Fatalf("expected two reverse-chronological platform safety audit events, got %+v", events)
-	}
-	if err := platformsafety.VerifyTamperEvidentAuditChain(
-		events,
-		platformsafety.PlatformSafetyAuditChainID,
-		s.platformArtifactSigningKeyring(),
-	); err != nil {
-		t.Fatalf("persisted platform safety audit chain did not verify: %v", err)
-	}
-}
-
 func TestPlatformOverrideAuditFailureAbortsReleaseTransaction(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -264,7 +137,7 @@ func TestPlatformOverrideAuditFailureAbortsReleaseTransaction(t *testing.T) {
 }
 
 func TestPlatformOverrideAuthorizationIsEnforcedAtStoreBoundary(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	configureTestPlatformArtifactSigning(s)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
@@ -299,7 +172,7 @@ func TestPlatformOverrideAuthorizationIsEnforcedAtStoreBoundary(t *testing.T) {
 }
 
 func TestOrdinaryAuditAppendCannotInjectPlatformSafetyChain(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -15,7 +15,7 @@ backfill, and legacy sources against the existing narrow operation reader.
 Candidate folding keeps the first input, the first greatest observation time,
 and the last completed operation for each source/image pair. The latter retains
 historical immutable-image provenance even when newer attempts are incomplete.
-SQL and file-store folding agree; randomized API tests preserve candidate
+Randomized API tests preserve candidate
 output across interleaved source, image, time and status combinations.
 
 API, Controller and SSH Control all initialize this schema. Their release

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fugue/internal/model"
-	"sort"
 	"time"
 )
 
@@ -14,28 +13,7 @@ func (s *Store) ListLonghornReconciliationArtifacts(limit int) ([]BackupUsageArt
 	if limit < 1 || limit > 501 {
 		return nil, ErrInvalidInput
 	}
-	if !s.usingDatabase() {
-		items, err := s.ListBackupUsageArtifacts("", true)
-		if err != nil {
-			return nil, err
-		}
-		out := []BackupUsageArtifact{}
-		for _, v := range items {
-			if v.Artifact.Kind == model.BackupArtifactKindLonghornSnapshot {
-				out = append(out, v)
-			}
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if !out[i].Artifact.CreatedAt.Equal(out[j].Artifact.CreatedAt) {
-				return out[i].Artifact.CreatedAt.After(out[j].Artifact.CreatedAt)
-			}
-			return out[i].Artifact.ID > out[j].Artifact.ID
-		})
-		if len(out) > limit {
-			out = out[:limit]
-		}
-		return out, nil
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT id, run_id, backend_id, tenant_id, status, protected, deleted_at, physical_deleted_at, physical_delete_attempted_at, physical_delete_error,

@@ -1,54 +1,14 @@
 package store
 
 import (
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
-
-func TestImageOperationProjectionPreservesCandidateInputs(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "store.json"))
-	if err := s.Init(); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC()
-	op := model.Operation{ID: "operation", TenantID: "tenant", AppID: "app", CreatedAt: now, UpdatedAt: now, StartedAt: &now, CompletedAt: &now,
-		DesiredSpec:    &model.AppSpec{Image: "registry.example/demo:v1", Env: map[string]string{"SECRET": "hidden"}},
-		ConfigBaseSpec: &model.AppSpec{Env: map[string]string{"SECRET": "baseline"}},
-		DesiredSource:  &model.AppSource{Type: model.AppSourceTypeGitHubPublic, RepoURL: "https://github.com/example/demo", CommitSHA: "abc", ResolvedImageRef: "registry.example/demo:v1"}}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		state.Operations = []model.Operation{op}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.ListImageOperationsByApps("tenant", false, []string{" app ", "app"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	baseline, err := s.ListOperationsWithDesiredSourceByApps("tenant", false, []string{"app"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := baseline[op.AppID][0]
-	want.DesiredSpec = &model.AppSpec{Image: op.DesiredSpec.Image}
-	want.ConfigBaseSpec = nil
-	if !reflect.DeepEqual(got[op.AppID], []model.Operation{want}) {
-		t.Fatalf("projection changed inputs: %+v", got)
-	}
-	foreign, err := s.ListImageOperationsByApps("foreign", false, []string{"app"})
-	if err != nil || len(foreign) != 0 {
-		t.Fatalf("tenant filter lost: %v %v", foreign, err)
-	}
-	full, err := s.ListOperationsWithDesiredSourceByApps("tenant", false, []string{"app"})
-	if err != nil || full[op.AppID][0].DesiredSpec.Env["SECRET"] != "hidden" {
-		t.Fatal("projection mutated stored configuration")
-	}
-}
 
 func TestPostgresImageOperationProjectionUsesOneScopedQuery(t *testing.T) {
 	db, mock, err := sqlmock.New()

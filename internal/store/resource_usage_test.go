@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,9 +11,13 @@ import (
 func TestRecordResourceUsageSamplesPrunesAndListsByTarget(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
+	}
+	tenant, err := s.CreateTenant("resource-samples")
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	now := time.Date(2026, 4, 29, 12, 0, 0, 0, time.UTC)
@@ -23,21 +26,21 @@ func TestRecordResourceUsageSamplesPrunesAndListsByTarget(t *testing.T) {
 	otherCPU := int64(90)
 	if err := s.RecordResourceUsageSamples([]model.ResourceUsageSample{
 		{
-			TenantID:      "tenant_a",
+			TenantID:      tenant.ID,
 			TargetKind:    model.ClusterNodeWorkloadKindApp,
 			TargetID:      "app_a",
 			ObservedAt:    now.Add(-3 * time.Hour),
 			CPUMilliCores: &oldCPU,
 		},
 		{
-			TenantID:      "tenant_a",
+			TenantID:      tenant.ID,
 			TargetKind:    model.ClusterNodeWorkloadKindApp,
 			TargetID:      "app_a",
 			ObservedAt:    now.Add(-1 * time.Hour),
 			CPUMilliCores: &recentCPU,
 		},
 		{
-			TenantID:      "tenant_a",
+			TenantID:      tenant.ID,
 			TargetKind:    model.ClusterNodeWorkloadKindBackingService,
 			TargetID:      "app_a",
 			ObservedAt:    now.Add(-30 * time.Minute),
@@ -50,7 +53,7 @@ func TestRecordResourceUsageSamplesPrunesAndListsByTarget(t *testing.T) {
 		t.Fatalf("prune samples: %v", err)
 	}
 
-	samples, err := s.ListResourceUsageSamples("tenant_a", model.ClusterNodeWorkloadKindApp, "app_a", time.Time{})
+	samples, err := s.ListResourceUsageSamples(tenant.ID, model.ClusterNodeWorkloadKindApp, "app_a", time.Time{})
 	if err != nil {
 		t.Fatalf("list samples: %v", err)
 	}
@@ -65,7 +68,7 @@ func TestRecordResourceUsageSamplesPrunesAndListsByTarget(t *testing.T) {
 func TestCreateAppRejectsInvalidResourcePolicyFields(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

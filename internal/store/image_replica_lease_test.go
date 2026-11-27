@@ -1,7 +1,6 @@
 package store
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,12 +10,16 @@ import (
 func TestMarkStaleImageReplicasHonorsLeaseBeforeVerifyFallback(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
+	tenant, err := s.CreateTenant("image-replica-lease")
+	if err != nil {
+		t.Fatal(err)
+	}
 	image, err := s.UpsertImage(model.Image{
-		TenantID:        "tenant_lease",
+		TenantID:        tenant.ID,
 		AppID:           "app_lease",
 		ImageRef:        "registry.example/fugue-apps/lease:current",
 		CanonicalDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

@@ -15,12 +15,11 @@ import (
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
-	"fugue/internal/store"
 )
 
 func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := &Service{Store: store.New(path)}
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := &Service{Store: newStoreTestDatabase(t, path)}
 	if err := s.Store.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +38,7 @@ func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
 		}(limit)
 	}
 	wg.Wait()
-	s = &Service{Store: store.New(path)}
+	s = &Service{Store: newStoreTestDatabase(t, path)}
 	history, err := s.readBuildOOMHistory(context.Background(), app, fp)
 	if err != nil || history.MemoryLimitBytes != 7<<30 {
 		t.Fatal(history, err)
@@ -63,7 +62,7 @@ func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
 func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.T) {
 	for _, canceled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "released", true: "canceled"}[canceled], func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +119,7 @@ func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.
 }
 
 func TestOOMHistorySeedsOnlyExecutedOOMForMatchingInputs(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +176,7 @@ func TestOOMHistorySeedsOnlyExecutedOOMForMatchingInputs(t *testing.T) {
 }
 
 func TestGitHubOOMAdmissionStopsRepeatedOperationsAndResumes(t *testing.T) {
-	state := store.New(filepath.Join(t.TempDir(), "store.json"))
+	state := newStoreTestDatabase(t, "")
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +249,7 @@ func TestGitHubOOMAdmissionStopsRepeatedOperationsAndResumes(t *testing.T) {
 func TestAutoOOMAdmissionUsesResolvedProfile(t *testing.T) {
 	for _, profile := range []string{"heavy", "light"} {
 		t.Run(profile, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

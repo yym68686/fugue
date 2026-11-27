@@ -49,13 +49,9 @@ func prepareAuthorizedCellDNSPublication(t *testing.T, s *Store, transition bool
 
 // Persist exactly the normalized compiler input, using the real separated
 // writer and full-readback pin protocol. Never synthesize verified pin rows or
-// remove lineage to make a release admissible. File-store compatibility tests
-// keep their existing, separate persistence contract.
+// remove lineage to make a release admissible.
 func prepareCompiledInputPin(t *testing.T, s *Store, compiled platformconfig.CompileResult) {
 	t.Helper()
-	if s.db == nil {
-		return
-	}
 	prepareCompilerInputTestSchema(t, s)
 	t.Setenv("FUGUE_COMPILER_INPUT_ARCHIVE_MIGRATION_ENABLED", "true")
 	s.storagePolicy.mu.Lock()

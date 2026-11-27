@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,7 +13,6 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 type credentialKubeFixture struct {
@@ -196,7 +194,7 @@ func TestCredentialSecretDeletionRetainsBootstrapAndForeignRoleReferences(t *tes
 func TestCredentialMigrationFromSharedSecretPersistsAndKeepsDatabases(t *testing.T) {
 	f, c := newCredentialKube(t)
 	ctx := context.Background()
-	s := store.New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

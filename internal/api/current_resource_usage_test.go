@@ -5,20 +5,18 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestCurrentResourceUsageIsAggregatedAcrossNodesForAppsAndBackingServices(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -396,7 +394,7 @@ func assertResourceUsage(t *testing.T, usage *model.ResourceUsage, cpuMilliCores
 func TestListAppsAllowsSkippingOptionalOverlays(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -479,7 +477,7 @@ func TestListAppsAllowsSkippingOptionalOverlays(t *testing.T) {
 func TestListAppsSkipsLiveStatusOverlayByDefault(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

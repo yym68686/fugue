@@ -67,10 +67,7 @@ func (s *Store) CheckPlatformInputRead(ctx context.Context, selections []Platfor
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	if !s.usingDatabase() {
-		phase = "file_read"
-		return s.checkFilePlatformInputRead(ctx, reads)
-	}
+
 	phase = "prepare"
 	proof, err := s.prepareOrdinaryCompilerInputProof(ctx, nil, nil, nil, nil, reads)
 	if err != nil {

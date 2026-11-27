@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -48,7 +47,7 @@ func TestBestMatchingManagedSharedRuntimeIDPrefersMostSpecificSelector(t *testin
 func TestManagedPostgresPlacementMutationRejectsPVCOnlyEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -231,7 +230,7 @@ func TestManagedPostgresPlacementMutationRejectsPVCOnlyEvidence(t *testing.T) {
 func TestObservedManagedPostgresDesiredAppConsumesOfflineFailoverTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -528,7 +527,7 @@ func newBoundManagedPostgresPlacementControllerFixture(
 	t *testing.T,
 ) (*store.Store, model.App, model.BackingService, model.Runtime) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init bound placement store: %v", err)
 	}
@@ -626,7 +625,7 @@ func managedPostgresPlacementControllerService(
 func TestExecuteManagedOperationDeployDoesNotConsumeLivePostgresPlacement(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

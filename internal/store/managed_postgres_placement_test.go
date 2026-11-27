@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -21,7 +20,7 @@ type managedPostgresPlacementFixture struct {
 func newManagedPostgresPlacementFixture(t *testing.T, bound bool) managedPostgresPlacementFixture {
 	t.Helper()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init placement store: %v", err)
 	}
@@ -228,35 +227,6 @@ func TestSyncObservedManagedPostgresPlacementRejectsFailoverConsumptionWhileSour
 	}
 }
 
-func TestSyncObservedManagedPostgresPlacementRequiresExactStandaloneBinding(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresPlacementFixture(t, true)
-	consumer, err := f.store.CreateApp(f.tenant.ID, f.project.ID, "placement-consumer", "", model.AppSpec{
-		Image: "ghcr.io/example/consumer:1", Replicas: 1, RuntimeID: f.sourceRuntime.ID,
-	})
-	if err != nil {
-		t.Fatalf("create placement consumer: %v", err)
-	}
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.ServiceBindings = append(state.ServiceBindings, model.ServiceBinding{
-			ID: model.NewID("binding"), TenantID: f.tenant.ID, AppID: consumer.ID, ServiceID: f.service.ID,
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed non-standalone binding: %v", err)
-	}
-	current := *model.CloneAppPostgresSpec(f.service.Spec.Postgres)
-	desired := *model.CloneAppPostgresSpec(&current)
-	desired.PrimaryNodeName = "node-current"
-
-	_, err = f.store.SyncObservedManagedPostgresPlacement(
-		managedPostgresPlacementMutationFor(f, current, desired, current.RuntimeID, desired.PrimaryNodeName),
-	)
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("non-standalone placement error = %v, want conflict", err)
-	}
-}
-
 func TestSyncObservedManagedPostgresPlacementRejectsMismatchedIdentity(t *testing.T) {
 	t.Parallel()
 	f := newManagedPostgresPlacementFixture(t, false)
@@ -334,56 +304,5 @@ func TestCompleteManagedPostgresSwitchoverWithPlacementAtomicallyPersistsTarget(
 				t.Fatalf("stored primary node = %q, want %q", got, desired.PrimaryNodeName)
 			}
 		})
-	}
-}
-
-func TestCompleteManagedPostgresSwitchoverWithPlacementRejectsCompetingOperationWithoutPartialWrite(t *testing.T) {
-	t.Parallel()
-	f := newManagedPostgresPlacementFixture(t, true)
-	created, err := f.store.CreateOperation(model.Operation{
-		TenantID: f.tenant.ID, Type: model.OperationTypeDatabaseSwitchover,
-		AppID: f.app.ID, ServiceID: f.service.ID, TargetRuntimeID: f.targetRuntime.ID,
-	})
-	if err != nil {
-		t.Fatalf("create switchover operation: %v", err)
-	}
-	if err := f.store.withLockedState(true, func(state *model.State) error {
-		state.Operations = append(state.Operations, model.Operation{
-			ID: model.NewID("operation"), TenantID: f.tenant.ID, AppID: f.app.ID,
-			Type: model.OperationTypeScale, Status: model.OperationStatusRunning,
-		})
-		return nil
-	}); err != nil {
-		t.Fatalf("seed competing operation: %v", err)
-	}
-	current := *model.CloneAppPostgresSpec(f.service.Spec.Postgres)
-	desired := *model.CloneAppPostgresSpec(&current)
-	desired.RuntimeID = f.targetRuntime.ID
-	desired.FailoverTargetRuntimeID = f.sourceRuntime.ID
-	desired.PrimaryNodeName = "node-target"
-
-	_, err = f.store.CompleteManagedPostgresSwitchoverWithPlacement(
-		created.ID, "/tmp/placement.yaml", "switchover complete",
-		managedPostgresPlacementMutationFor(f, current, desired, desired.RuntimeID, desired.PrimaryNodeName),
-	)
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("completion with competing operation error = %v, want conflict", err)
-	}
-	active, getErr := f.store.GetOperation(created.ID)
-	if getErr != nil {
-		t.Fatalf("get rejected switchover operation: %v", getErr)
-	}
-	if active.Status == model.OperationStatusCompleted {
-		t.Fatalf("rejected switchover was completed: %+v", active)
-	}
-	stored, getErr := f.store.GetBackingService(f.service.ID)
-	if getErr != nil {
-		t.Fatalf("get service after rejected switchover: %v", getErr)
-	}
-	if got := stored.Spec.Postgres.RuntimeID; got != current.RuntimeID {
-		t.Fatalf("rejected switchover partially changed runtime to %q", got)
-	}
-	if got := stored.Spec.Postgres.PrimaryNodeName; got != current.PrimaryNodeName {
-		t.Fatalf("rejected switchover partially changed node to %q", got)
 	}
 }

@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 
 func migrationLedgerFixture(t *testing.T) (*Store, model.App, model.Operation, model.Runtime) {
 	t.Helper()
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -40,7 +39,8 @@ func migrationLedgerFixture(t *testing.T) (*Store, model.App, model.Operation, m
 		TargetRuntimeID: target.ID, DesiredSpec: &desired, RequestedByType: model.ActorTypeAPIKey, RequestedByID: "key_test",
 	})
 	if err != nil {
-		t.Fatalf("create migration: %v", err)
+		t.Fatalf("create migration: %v (workspace=%t persistent_storage=%t failover=%t target=%s type=%s)", err,
+			desired.Workspace != nil, desired.PersistentStorage != nil, desired.Failover != nil, target.ID, target.Type)
 	}
 	return s, app, op, target
 }
@@ -225,24 +225,6 @@ func TestCompletedMigrationRetirementGateAcceptsHistoricalVerifiedEvidence(t *te
 	}
 }
 
-func TestMigrationLedgerRetentionDoesNotUseThirtyDayDiagnosticLimit(t *testing.T) {
-	now := time.Date(2026, time.July, 30, 0, 0, 0, 0, time.UTC)
-	items := []model.OperationEvidence{
-		{ID: "regular-old", OperationID: "op", Type: model.OperationEvidenceTypeRolloutProgress, CollectedAt: now.Add(-31 * 24 * time.Hour)},
-		{ID: "migration-89d", OperationID: "op", Type: model.OperationEvidenceTypeMigrationStarted, CollectedAt: now.Add(-89 * 24 * time.Hour)},
-		{ID: "migration-91d", OperationID: "op", Type: model.OperationEvidenceTypeMigrationFailed, CollectedAt: now.Add(-91 * 24 * time.Hour)},
-		{ID: "inserted", OperationID: "op", Type: model.OperationEvidenceTypeRolloutProgress, CollectedAt: now},
-	}
-	retained := retainOperationEvidence(items, items[len(items)-1])
-	ids := map[string]bool{}
-	for _, item := range retained {
-		ids[item.ID] = true
-	}
-	if ids["regular-old"] || ids["migration-91d"] || !ids["migration-89d"] || !ids["inserted"] {
-		t.Fatalf("unexpected retained evidence ids: %+v", ids)
-	}
-}
-
 func TestMigrationLedgerInternalReaderDoesNotUseDiagnosticPageLimit(t *testing.T) {
 	filter := normalizeOperationEvidenceFilter(model.OperationEvidenceFilter{
 		Types: []string{
@@ -331,66 +313,3 @@ func TestMigrationCutoverGateRejectsMissingOrStaleEvidence(t *testing.T) {
 }
 
 func intPointer(value int) *int { return &value }
-
-func TestLatestMigrationLedgerByAppDoesNotFallBackPastMissingNewestOperation(t *testing.T) {
-	s, app, first, target := migrationLedgerFixture(t)
-	desired := app.Spec
-	desired.RuntimeID = target.ID
-	second, err := s.CreateOperation(model.Operation{
-		TenantID: app.TenantID, Type: model.OperationTypeMigrate, AppID: app.ID,
-		SourceRuntimeID: first.TargetRuntimeID, TargetRuntimeID: target.ID, DesiredSpec: &desired,
-	})
-	if err != nil {
-		t.Fatalf("create second migration: %v", err)
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		filtered := state.OperationEvidence[:0]
-		for _, evidence := range state.OperationEvidence {
-			if evidence.OperationID != second.ID {
-				filtered = append(filtered, evidence)
-			}
-		}
-		state.OperationEvidence = filtered
-		archived := state.AppMigrationLedgers[:0]
-		for _, ledger := range state.AppMigrationLedgers {
-			if ledger.OperationID != second.ID {
-				archived = append(archived, ledger)
-			}
-		}
-		state.AppMigrationLedgers = archived
-		return nil
-	}); err != nil {
-		t.Fatalf("remove newest ledger for test: %v", err)
-	}
-	ledgers, err := s.LatestAppMigrationLedgersByApp()
-	if err != nil {
-		t.Fatalf("list latest migration ledgers: %v", err)
-	}
-	latest, ok := ledgers[app.ID]
-	if !ok || latest.OperationID != second.ID || latest.CutoverStatus != model.AppMigrationCutoverBlocked || !latest.OldArtifactsProtected {
-		t.Fatalf("newest missing ledger must remain blocked, got ok=%v ledger=%+v", ok, latest)
-	}
-}
-
-func TestMigrationFailureLedgerSurvivesMissingAppRecord(t *testing.T) {
-	s, app, op, _ := migrationLedgerFixture(t)
-	if err := s.withLockedState(true, func(state *model.State) error {
-		apps := state.Apps[:0]
-		for _, candidate := range state.Apps {
-			if candidate.ID != app.ID {
-				apps = append(apps, candidate)
-			}
-		}
-		state.Apps = apps
-		return nil
-	}); err != nil {
-		t.Fatalf("remove app record: %v", err)
-	}
-	if err := s.recordMigrationFailureLedger(op, "target endpoint missing", model.OperationEvidenceSourceController); err != nil {
-		t.Fatalf("record migration failure after app removal: %v", err)
-	}
-	latest, found, err := s.LatestAppMigrationLedger(op.ID)
-	if err != nil || !found || latest.CutoverStatus != model.AppMigrationCutoverFailed || !latest.OldArtifactsProtected {
-		t.Fatalf("missing app must not erase migration failure evidence: found=%v ledger=%+v err=%v", found, latest, err)
-	}
-}

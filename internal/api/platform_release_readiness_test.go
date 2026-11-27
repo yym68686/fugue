@@ -8,7 +8,6 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -425,30 +424,15 @@ func testCaptureReleaseRuntimeReadiness(t *testing.T, draining bool) {
 				if advanceDesired {
 					desired.Spec.Image = candidate.ResolvedImageRef
 				}
-				path := t.TempDir() + "/state.json"
-				state := store.New(path)
+				fixture := fmt.Sprintf("canary-readiness-%t", advanceDesired)
+				state := newStoreTestDatabase(t, fixture)
 				if err := state.Init(); err != nil {
 					t.Fatal(err)
 				}
-				raw, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var persistent model.State
-				if err = json.Unmarshal(raw, &persistent); err != nil {
-					t.Fatal(err)
-				}
-				persistent.Apps = []model.App{desired}
-				persistent.AppReleases = []model.AppRelease{stable, candidate}
-				persistent.AppTrafficPolicies = []model.AppTrafficPolicy{traffic}
-				persistent.Runtimes = []model.Runtime{{ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared}}
-				raw, err = json.Marshal(persistent)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err = os.WriteFile(path, raw, 0600); err != nil {
-					t.Fatal(err)
-				}
+				persistHandoffBusiness(t, openStoreTestSQL(t, fixture), store.RouteBusinessSnapshot{
+					Apps: []model.App{desired}, Releases: []model.AppRelease{stable, candidate},
+					TrafficPolicies: []model.AppTrafficPolicy{traffic},
+				})
 				fullServer := NewServer(state, auth.New(state, ""), nil, ServerConfig{AppBaseDomain: "example.test"})
 				fullServer.dnsResolver = fakeServiceResolver{}
 				fullServer.newManagedAppStatusClient = server.newManagedAppStatusClient

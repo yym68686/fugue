@@ -8,13 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
@@ -42,7 +40,7 @@ func TestDataWorkspaceS3MultipartPlanRefreshAndComplete(t *testing.T) {
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -183,7 +181,7 @@ func TestDataWorkspaceS3DownloadPlanPaginatesAuthorization(t *testing.T) {
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -304,7 +302,7 @@ func TestDataWorkspaceS3DownloadPlanPaginatesAuthorization(t *testing.T) {
 }
 
 func TestDataWorkspaceIncompleteDirectBackendDoesNotFallbackToManagedBlobAPI(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -354,7 +352,7 @@ func TestDataWorkspaceIncompleteDirectBackendDoesNotFallbackToManagedBlobAPI(t *
 }
 
 func TestRefreshDataTransferAuthorizationRejectsFinishedTransfers(t *testing.T) {
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -416,7 +414,7 @@ func TestDataWorkspaceS3UploadPlanUsesSnapshotIndexWithoutHEAD(t *testing.T) {
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -499,7 +497,7 @@ func TestDataWorkspaceS3UploadPlanPagesBlobs(t *testing.T) {
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -628,7 +626,7 @@ func TestDataWorkspaceS3MultipartAbort(t *testing.T) {
 	}))
 	defer s3Server.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -752,7 +750,7 @@ func TestMigrateDataWorkspaceBackendCopiesAndCutsOver(t *testing.T) {
 	}))
 	defer targetServer.Close()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

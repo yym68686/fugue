@@ -41,9 +41,7 @@ func (s *Store) NewPlatformArtifactReadSessionContext(ctx context.Context) func(
 		if err := ctx.Err(); err != nil {
 			return model.PlatformArtifact{}, err
 		}
-		if !s.usingDatabase() {
-			return s.GetPlatformArtifactContext(ctx, id)
-		}
+
 		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 		artifact, err := s.pgReadPlatformArtifactSession(ctx, id, bodies)

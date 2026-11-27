@@ -18,6 +18,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/sshidentity"
 	"fugue/internal/store"
+
 	"golang.org/x/crypto/ssh"
 )
 
@@ -94,7 +95,7 @@ func (runtime *testRuntime) Observe(ctx context.Context, slot managedssh.Serving
 
 func TestReconcileStagesCandidateAndRevokesDespiteFailedTarget(test *testing.T) {
 	ctx := context.Background()
-	stateStore := store.New(filepath.Join(test.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(test, "")
 	if err := stateStore.Init(); err != nil {
 		test.Fatal(err)
 	}

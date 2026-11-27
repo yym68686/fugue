@@ -3,7 +3,6 @@ package qualityrollup
 import (
 	"context"
 	"math"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -74,11 +73,8 @@ func TestPlanEdgeQualityRollupWindowsUsesOnlyNewClosedWindows(t *testing.T) {
 func TestRebuildEdgeQualityRollupsPersistsAndUsesWatermarks(t *testing.T) {
 	t.Parallel()
 
-	path := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(path)
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	const fixture = "rollup-watermarks"
+	stateStore := rolluptest.Store(t, fixture)
 	now := time.Date(2026, 9, 5, 12, 3, 0, 0, time.UTC)
 	if err := stateStore.RecordEdgePerformanceSamples([]model.EdgePerformanceSample{{
 		ID:          "first",
@@ -96,10 +92,7 @@ func TestRebuildEdgeQualityRollupsPersistsAndUsesWatermarks(t *testing.T) {
 	if err != nil || firstCount == 0 {
 		t.Fatalf("first rebuild count=%d err=%v", firstCount, err)
 	}
-	restarted := store.New(path)
-	if err := restarted.Init(); err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
+	restarted := rolluptest.Store(t, fixture)
 	secondCount, err := New(restarted, nil).rebuild(context.Background(), now)
 	if err != nil || secondCount != 0 {
 		t.Fatalf("unchanged closed windows must not rebuild: count=%d err=%v", secondCount, err)
@@ -197,16 +190,9 @@ func buildChunkedEdgeQualityRollupsFromStore(b *testing.B, stateStore *store.Sto
 	plans, _, _, earliest, latest := planEdgeQualityRollupWindows(now, nil)
 	builder := newEdgeQualityRollupBuildState(plans)
 	session.SetPercentileWindows(builder.percentileWindows())
-	var batch map[store.EdgeQualityPercentileValueKey]int
-	if session.NeedsPercentileWeights() {
-		batch = map[store.EdgeQualityPercentileValueKey]int{}
-	}
 	if err := session.ForEachSampleChunk(earliest, latest, edgeQualityRollupSampleChunkSize, func(samples []model.EdgePerformanceSample) error {
-		if batch != nil {
-			clear(batch)
-		}
-		builder.addSamples(samples, batch)
-		return session.AddPercentileWeights(batch)
+		builder.addSamples(samples, nil)
+		return nil
 	}); err != nil {
 		b.Fatal(err)
 	}

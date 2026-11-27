@@ -5,9 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"os"
-	"sort"
-	"syscall"
 	"time"
 
 	"fugue/internal/managedssh"
@@ -22,29 +19,17 @@ func (stateStore *Store) GetManagedSSHIntent(tenantID, appID string) (model.Mana
 	if app.TenantID != tenantID || isDeletedApp(app) {
 		return model.ManagedSSHIntent{}, ErrNotFound
 	}
-	if stateStore.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var raw []byte
-		if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_managed_ssh_intents WHERE tenant_id=$1 AND app_id=$2`, tenantID, appID).Scan(&raw); err != nil {
-			return model.ManagedSSHIntent{}, mapDBErr(err)
-		}
-		intent, err := decodeManagedSSHIntent(raw)
-		if err == nil && (intent.AppID != appID || intent.TenantID != tenantID) {
-			err = ErrConflict
-		}
-		return intent, err
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var raw []byte
+	if err := stateStore.db.QueryRowContext(ctx, `SELECT body FROM fugue_managed_ssh_intents WHERE tenant_id=$1 AND app_id=$2`, tenantID, appID).Scan(&raw); err != nil {
+		return model.ManagedSSHIntent{}, mapDBErr(err)
 	}
-	var result model.ManagedSSHIntent
-	err = stateStore.withManagedSSHIntentFile(false, func(intents map[string]model.ManagedSSHIntent) error {
-		intent, exists := intents[appID]
-		if !exists || intent.TenantID != tenantID {
-			return ErrNotFound
-		}
-		result = intent
-		return nil
-	})
-	return result, err
+	intent, err := decodeManagedSSHIntent(raw)
+	if err == nil && (intent.AppID != appID || intent.TenantID != tenantID) {
+		err = ErrConflict
+	}
+	return intent, err
 }
 
 func (stateStore *Store) PutManagedSSHIntent(tenantID, appID string, expected uint64, spec model.ManagedSSHIntentSpec) (model.ManagedSSHIntent, error) {
@@ -78,56 +63,30 @@ func (stateStore *Store) PutManagedSSHIntent(tenantID, appID string, expected ui
 	}
 	now := time.Now().UTC()
 	intent := model.ManagedSSHIntent{TenantID: tenantID, AppID: appID, Generation: expected + 1, Spec: spec, CreatedAt: now, UpdatedAt: now}
-	if stateStore.usingDatabase() {
-		return stateStore.pgPutManagedSSHIntent(intent, expected)
-	}
-	err = stateStore.withManagedSSHIntentFile(true, func(intents map[string]model.ManagedSSHIntent) error {
-		current, exists := intents[appID]
-		if exists {
-			if current.Generation != expected || current.TenantID != tenantID || current.Spec.IdentityID != spec.IdentityID {
-				return ErrConflict
-			}
-			intent.CreatedAt = current.CreatedAt
-		} else if expected != 0 {
-			return ErrConflict
-		}
-		intents[appID] = intent
-		return nil
-	})
-	return intent, err
+	return stateStore.pgPutManagedSSHIntent(intent, expected)
 }
 
 func (stateStore *Store) ListManagedSSHIntents() ([]model.ManagedSSHIntent, error) {
 	intents := []model.ManagedSSHIntent{}
-	if stateStore.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		rows, err := stateStore.db.QueryContext(ctx, `SELECT body FROM fugue_managed_ssh_intents ORDER BY app_id`)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	rows, err := stateStore.db.QueryContext(ctx, `SELECT body FROM fugue_managed_ssh_intents ORDER BY app_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		intent, err := decodeManagedSSHIntent(raw)
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
-				return nil, err
-			}
-			intent, err := decodeManagedSSHIntent(raw)
-			if err != nil {
-				return nil, err
-			}
-			intents = append(intents, intent)
-		}
-		return intents, rows.Err()
+		intents = append(intents, intent)
 	}
-	err := stateStore.withManagedSSHIntentFile(false, func(records map[string]model.ManagedSSHIntent) error {
-		for _, intent := range records {
-			intents = append(intents, intent)
-		}
-		return nil
-	})
-	sort.Slice(intents, func(first, second int) bool { return intents[first].AppID < intents[second].AppID })
-	return intents, err
+	return intents, rows.Err()
 }
 
 func (stateStore *Store) pgPutManagedSSHIntent(intent model.ManagedSSHIntent, expected uint64) (model.ManagedSSHIntent, error) {
@@ -161,52 +120,4 @@ func decodeManagedSSHIntent(raw []byte) (model.ManagedSSHIntent, error) {
 		return model.ManagedSSHIntent{}, ErrConflict
 	}
 	return intent, nil
-}
-
-func (stateStore *Store) withManagedSSHIntentFile(write bool, callback func(map[string]model.ManagedSSHIntent) error) error {
-	path := stateStore.path + ".managed-ssh-intents.json"
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	intents := map[string]model.ManagedSSHIntent{}
-	raw, err := os.ReadFile(path)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err == nil {
-		var encoded map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &encoded); err != nil {
-			return err
-		}
-		if encoded == nil {
-			return ErrConflict
-		}
-		for appID, body := range encoded {
-			intent, err := decodeManagedSSHIntent(body)
-			if err != nil {
-				return err
-			}
-			if intent.AppID != appID {
-				return ErrConflict
-			}
-			intents[appID] = intent
-		}
-	}
-	if err := callback(intents); err != nil {
-		return err
-	}
-	if !write {
-		return nil
-	}
-	raw, err = json.Marshal(intents)
-	if err != nil {
-		return err
-	}
-	return writeSSHIdentityFile(path, raw)
 }

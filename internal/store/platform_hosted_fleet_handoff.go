@@ -12,7 +12,7 @@ import (
 	"fugue/internal/platformsafety"
 )
 
-func pgLoadHostedFleetHandoff(ctx context.Context, tx *sql.Tx, state *model.State, baselineID string) error {
+func pgLoadHostedFleetHandoff(ctx context.Context, tx *sql.Tx, state *storeProjection, baselineID string) error {
 	i := platformArtifactIndex(state.PlatformArtifacts, baselineID)
 	if i < 0 {
 		return ErrConflict
@@ -78,7 +78,7 @@ func validateHostedFleetHandoff(read dnsRouteSourceReader, activeID string, prio
 	if err != nil || key != active.IdempotencyKey {
 		return ErrConflict
 	}
-	inputs := &model.State{}
+	inputs := &storeProjection{}
 	for _, id := range []string{b.StaticIntentArtifactID, b.DNSPolicyArtifactID, a.DNSPolicyArtifactID} {
 		input, err := read.artifact(id)
 		if err != nil {

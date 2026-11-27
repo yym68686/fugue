@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -16,7 +15,7 @@ import (
 
 func migrationArtifactGuardFixture(t *testing.T) (*store.Store, model.App, model.Operation) {
 	t.Helper()
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

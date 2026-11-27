@@ -4,19 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestOperationReadSecurityConfinesProjectsAndDeepRedactsDesiredState(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -183,7 +181,7 @@ func TestOperationReadSecurityConfinesProjectsAndDeepRedactsDesiredState(t *test
 func TestListOperationsReturnsSummariesAndGetOperationReturnsDesiredState(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -296,7 +294,7 @@ func TestListOperationsReturnsSummariesAndGetOperationReturnsDesiredState(t *tes
 func TestListOperationsAppliesServerSideFilters(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

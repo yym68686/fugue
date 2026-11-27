@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +68,7 @@ func TestGetOperationDiagnosisExplainsMissingManagedImage(t *testing.T) {
 
 func TestDiagnosePendingImageReplicationDoesNotReportQueueETA(t *testing.T) {
 	t.Parallel()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -167,7 +166,7 @@ func TestDiagnoseFailedOperationExplainsMissingManifest(t *testing.T) {
 func TestOperationDiagnosisIncludesControllerLaneOccupants(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -363,7 +362,7 @@ func TestLegacyBuilderAdmissionDiagnosisDoesNotGuessAutoProfile(t *testing.T) {
 func TestOperationDiagnosisIncludesFailedBackupHint(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

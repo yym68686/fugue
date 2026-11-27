@@ -2,20 +2,18 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestControllerImageCachePruneProtectsActiveImageDigestBlob(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

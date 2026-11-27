@@ -2,13 +2,11 @@ package controller
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/config"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestScheduleDistributedImagePruneUsesDiskLimitDeletePayloadWhenEnabled(t *testing.T) {
@@ -47,7 +45,7 @@ func TestScheduleDistributedImagePruneKeepsDryRunWhenDisabled(t *testing.T) {
 func TestApplyDistributedImageRetentionPlanSchedulesSingleReplicaAfterDeletingTransition(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -140,7 +138,7 @@ func TestApplyDistributedImageRetentionPlanSchedulesSingleReplicaAfterDeletingTr
 func scheduleDistributedImagePruneTestPayload(t *testing.T, pruneEnabled bool) map[string]string {
 	t.Helper()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -223,7 +221,9 @@ func scheduleDistributedImagePruneTestPayload(t *testing.T, pruneEnabled bool) m
 func TestCleanupDeletedAppDistributedImagesRetiresUnreferencedImage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_deleted_app")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -286,7 +286,9 @@ func TestCleanupDeletedAppDistributedImagesRetiresUnreferencedImage(t *testing.T
 func TestCleanupDeletedAppDistributedImagesPreservesSharedPinnedImage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "image-evidence"
+	stateStore := newStoreTestDatabase(t, fixture)
+	seedControllerStoreTenant(t, fixture, "tenant_shared_app")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -333,7 +335,7 @@ func TestCleanupDeletedAppDistributedImagesPreservesSharedPinnedImage(t *testing
 func TestDistributedImageRetentionSweepReplaysDeletedAppCleanup(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -173,39 +172,6 @@ func TestTaskCreatePostgresMaintenanceAndBootstrapCompatibility(t *testing.T) {
 	s = taskCreateFixture(t)
 	if task, err := s.CreateNodeUpdateTask(taskCreateAdmin(), "create-updater", "", "", model.NodeUpdateTaskTypeRefreshDesiredState, nil); err != nil || task.Status != "pending" {
 		t.Fatal("empty initial installation cannot bootstrap", task, err)
-	}
-}
-
-func TestTaskCreateFileStoreCannotAddDependentRoot(t *testing.T) {
-	for _, mode := range []string{"explicit", "implicit", "bootstrap", "maintenance"} {
-		t.Run(mode, func(t *testing.T) {
-			s := New(filepath.Join(t.TempDir(), "state.json"))
-			if err := s.withLockedState(true, func(state *model.State) error {
-				state.NodeUpdaters = append(state.NodeUpdaters, model.NodeUpdater{ID: "create-updater", Capabilities: []string{model.NodeUpdateTaskTypeRefreshDesiredState, model.NodeUpdateTaskTypeDiagnoseNode}})
-				if mode == "implicit" {
-					state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, model.PlatformLKGSnapshot{ArtifactKind: "release_set", ScopeKey: "global"})
-				}
-				return nil
-			}); err != nil {
-				t.Fatal(err)
-			}
-			taskType, payload := model.NodeUpdateTaskTypeRefreshDesiredState, map[string]string{}
-			if mode == "explicit" {
-				payload["artifact_id"] = "neutral-artifact"
-			} else if mode == "maintenance" {
-				taskType, payload = model.NodeUpdateTaskTypeDiagnoseNode, map[string]string{"targets_json": `[]`}
-			}
-			task, err := s.CreateNodeUpdateTask(taskCreateAdmin(), "create-updater", "", "", taskType, payload)
-			if mode == "explicit" || mode == "implicit" {
-				if !errors.Is(err, ErrConflict) || task.ID != "" {
-					t.Fatal("file create bypassed durable admission", task, err)
-				}
-				return
-			}
-			if err != nil || task.Status != "pending" {
-				t.Fatal(task, err)
-			}
-		})
 	}
 }
 

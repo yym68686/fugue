@@ -5,20 +5,13 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"fugue/internal/model"
 )
-
-type sourceUploadFileEnvelope struct {
-	Upload        model.SourceUpload `json:"upload"`
-	DownloadToken string             `json:"download_token"`
-}
 
 func isQueuedImportSourceType(sourceType string) bool {
 	switch strings.TrimSpace(sourceType) {
@@ -48,13 +41,7 @@ func (s *Store) CreateSourceUpload(tenantID, filename, contentType string, archi
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}
-	if s.usingDatabase() {
-		return s.pgCreateSourceUpload(upload, archive)
-	}
-	if err := s.writeFileSourceUpload(upload, archive); err != nil {
-		return model.SourceUpload{}, err
-	}
-	return upload, nil
+	return s.pgCreateSourceUpload(upload, archive)
 }
 
 // DiscardNewSourceUpload is intentionally narrow: it only accepts the complete
@@ -67,79 +54,7 @@ func (s *Store) DiscardNewSourceUpload(upload model.SourceUpload) error {
 		filepath.Base(upload.ID) != upload.ID || strings.ContainsAny(upload.ID, `/\`) {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgDiscardNewSourceUpload(upload)
-	}
-
-	// withFileLockedState uses an exclusive process/file lock even for read-only
-	// state access. Holding it across reference validation and deletion prevents
-	// a job/operation writer from publishing this upload between the two steps.
-	return s.withLockedState(false, func(state *model.State) error {
-		metadataPath := s.sourceUploadMetadataPath(upload.ID)
-		metadataBytes, err := os.ReadFile(metadataPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return ErrNotFound
-			}
-			return fmt.Errorf("read new source upload metadata for discard: %w", err)
-		}
-		var envelope sourceUploadFileEnvelope
-		if err := json.Unmarshal(metadataBytes, &envelope); err != nil {
-			return fmt.Errorf("unmarshal new source upload metadata for discard: %w", err)
-		}
-		storedTokenHash := sha256.Sum256([]byte(envelope.DownloadToken))
-		providedTokenHash := sha256.Sum256([]byte(upload.DownloadToken))
-		tokenMatches := subtle.ConstantTimeCompare(storedTokenHash[:], providedTokenHash[:])
-		if envelope.Upload.ID != upload.ID ||
-			envelope.Upload.TenantID != upload.TenantID ||
-			tokenMatches != 1 {
-			return ErrNotFound
-		}
-		if sourceUploadReferencedInState(state, upload.ID) {
-			return ErrConflict
-		}
-
-		// Remove the sensitive archive first. If metadata removal then fails, the
-		// remaining record contains no dump and the error makes the partial cleanup
-		// observable for a later repair.
-		if err := os.Remove(s.sourceUploadArchivePath(upload.ID)); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove new source upload archive: %w", err)
-		}
-		if err := os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove new source upload metadata after archive removal: %w", err)
-		}
-		return nil
-	})
-}
-
-func sourceUploadReferencedInState(state *model.State, uploadID string) bool {
-	if state == nil || strings.TrimSpace(uploadID) == "" {
-		return false
-	}
-	uploadID = strings.TrimSpace(uploadID)
-	for _, job := range state.AppDatabaseImportJobs {
-		if strings.TrimSpace(job.SourceUploadID) == uploadID {
-			return true
-		}
-	}
-	for _, app := range state.Apps {
-		if appSourceReferencesUpload(app.Source, uploadID) ||
-			appSourceReferencesUpload(app.OriginSource, uploadID) ||
-			appSourceReferencesUpload(app.BuildSource, uploadID) {
-			return true
-		}
-	}
-	for _, operation := range state.Operations {
-		if appSourceReferencesUpload(operation.DesiredSource, uploadID) ||
-			appSourceReferencesUpload(operation.DesiredOriginSource, uploadID) {
-			return true
-		}
-	}
-	return false
-}
-
-func appSourceReferencesUpload(source *model.AppSource, uploadID string) bool {
-	return source != nil && strings.TrimSpace(source.UploadID) == strings.TrimSpace(uploadID)
+	return s.pgDiscardNewSourceUpload(upload)
 }
 
 func (s *Store) GetSourceUpload(id string) (model.SourceUpload, error) {
@@ -147,11 +62,7 @@ func (s *Store) GetSourceUpload(id string) (model.SourceUpload, error) {
 	if id == "" {
 		return model.SourceUpload{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetSourceUpload(id)
-	}
-	upload, _, err := s.readFileSourceUpload(id)
-	return upload, err
+	return s.pgGetSourceUpload(id)
 }
 
 func (s *Store) GetSourceUploadArchive(id string) (model.SourceUpload, []byte, error) {
@@ -159,10 +70,7 @@ func (s *Store) GetSourceUploadArchive(id string) (model.SourceUpload, []byte, e
 	if id == "" {
 		return model.SourceUpload{}, nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetSourceUploadArchive(id)
-	}
-	return s.readFileSourceUpload(id)
+	return s.pgGetSourceUploadArchive(id)
 }
 
 func (s *Store) GetSourceUploadArchiveByToken(id, token string) (model.SourceUpload, []byte, error) {
@@ -179,95 +87,6 @@ func (s *Store) GetSourceUploadArchiveByToken(id, token string) (model.SourceUpl
 		return model.SourceUpload{}, nil, ErrNotFound
 	}
 	return upload, archive, nil
-}
-
-func (s *Store) sourceUploadDir() string {
-	baseDir := filepath.Dir(strings.TrimSpace(s.path))
-	if baseDir == "" || baseDir == "." {
-		baseDir = "."
-	}
-	return filepath.Join(baseDir, "source-uploads")
-}
-
-func (s *Store) sourceUploadMetadataPath(id string) string {
-	return filepath.Join(s.sourceUploadDir(), id+".json")
-}
-
-func (s *Store) sourceUploadArchivePath(id string) string {
-	return filepath.Join(s.sourceUploadDir(), id+".tgz")
-}
-
-func (s *Store) writeFileSourceUpload(upload model.SourceUpload, archive []byte) error {
-	if err := os.MkdirAll(s.sourceUploadDir(), 0o755); err != nil {
-		return fmt.Errorf("create source upload directory: %w", err)
-	}
-
-	envelope := sourceUploadFileEnvelope{
-		Upload:        upload,
-		DownloadToken: upload.DownloadToken,
-	}
-	metadataBytes, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("marshal source upload metadata: %w", err)
-	}
-
-	metadataPath := s.sourceUploadMetadataPath(upload.ID)
-	archivePath := s.sourceUploadArchivePath(upload.ID)
-	if err := writeAtomicFile(metadataPath, metadataBytes, 0o600); err != nil {
-		return fmt.Errorf("write source upload metadata: %w", err)
-	}
-	if err := writeAtomicFile(archivePath, archive, 0o600); err != nil {
-		return fmt.Errorf("write source upload archive: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) readFileSourceUpload(id string) (model.SourceUpload, []byte, error) {
-	metadataBytes, err := os.ReadFile(s.sourceUploadMetadataPath(id))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return model.SourceUpload{}, nil, ErrNotFound
-		}
-		return model.SourceUpload{}, nil, fmt.Errorf("read source upload metadata: %w", err)
-	}
-	var envelope sourceUploadFileEnvelope
-	if err := json.Unmarshal(metadataBytes, &envelope); err != nil {
-		return model.SourceUpload{}, nil, fmt.Errorf("unmarshal source upload metadata: %w", err)
-	}
-	envelope.Upload.DownloadToken = strings.TrimSpace(envelope.DownloadToken)
-	archiveBytes, err := os.ReadFile(s.sourceUploadArchivePath(id))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return model.SourceUpload{}, nil, ErrNotFound
-		}
-		return model.SourceUpload{}, nil, fmt.Errorf("read source upload archive: %w", err)
-	}
-	return envelope.Upload, archiveBytes, nil
-}
-
-func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tempFile, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempPath := tempFile.Name()
-	defer os.Remove(tempPath)
-	if _, err := tempFile.Write(data); err != nil {
-		tempFile.Close()
-		return err
-	}
-	if err := tempFile.Chmod(mode); err != nil {
-		tempFile.Close()
-		return err
-	}
-	if err := tempFile.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tempPath, path)
 }
 
 func (s *Store) pgCreateSourceUpload(upload model.SourceUpload, archive []byte) (model.SourceUpload, error) {

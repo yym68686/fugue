@@ -10,7 +10,7 @@ import (
 
 // The verified publication ledger is durable across restarts, LKG expiry and
 // later operator publications. A changed current baseline cannot reset a bound.
-func hasVerifiedProducerPublication(state *model.State, scope, policyRelease string) bool {
+func hasVerifiedProducerPublication(state *storeProjection, scope, policyRelease string) bool {
 	parents := map[string]bool{}
 	for _, a := range state.PlatformArtifacts {
 		if a.ArtifactKind == model.PlatformArtifactKindReleaseSet && a.ScopeKey == scope && a.Metadata[platformproducer.PolicyReleaseMetadata] == policyRelease {
@@ -40,15 +40,7 @@ func (s *Store) HasVerifiedProducerPublication(scope, policyRelease string) (boo
 	if scope == "" || policyRelease == "" {
 		return false, ErrInvalidInput
 	}
-	if s.db != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return pgHasVerifiedProducerPublication(ctx, s.db, scope, policyRelease)
-	}
-	var found bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		found = hasVerifiedProducerPublication(state, scope, policyRelease)
-		return nil
-	})
-	return found, err
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return pgHasVerifiedProducerPublication(ctx, s.db, scope, policyRelease)
 }

@@ -3,18 +3,16 @@ package controller
 import (
 	"io"
 	"log"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestReleaseAttemptTracksImportDeployRolloutLifecycle(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

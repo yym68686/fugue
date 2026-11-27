@@ -22,39 +22,14 @@ func (s *Store) recordAppMigrationLedgerArchive(ledger model.AppMigrationLedger)
 	if s == nil || strings.TrimSpace(ledger.ID) == "" {
 		return ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecordAppMigrationLedgerArchive(ledger)
-	}
-	return s.withLockedState(true, func(state *model.State) error {
-		for _, existing := range state.AppMigrationLedgers {
-			if strings.TrimSpace(existing.ID) == strings.TrimSpace(ledger.ID) {
-				return nil
-			}
-		}
-		state.AppMigrationLedgers = append(state.AppMigrationLedgers, cloneAppMigrationLedger(ledger))
-		state.AppMigrationLedgers = retainAppMigrationLedgerArchive(state.AppMigrationLedgers, time.Now().UTC())
-		return nil
-	})
+	return s.pgRecordAppMigrationLedgerArchive(ledger)
 }
 
 func (s *Store) listAppMigrationLedgerArchive(filter model.OperationEvidenceFilter) ([]model.AppMigrationLedger, error) {
 	if s == nil {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListAppMigrationLedgerArchive(filter)
-	}
-	out := []model.AppMigrationLedger{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, ledger := range state.AppMigrationLedgers {
-			if !appMigrationLedgerMatchesFilter(ledger, filter) {
-				continue
-			}
-			out = append(out, cloneAppMigrationLedger(ledger))
-		}
-		return nil
-	})
-	return out, err
+	return s.pgListAppMigrationLedgerArchive(filter)
 }
 
 // latestAppMigrationLedgerArchiveByOperation is the bounded read used by
@@ -64,30 +39,7 @@ func (s *Store) latestAppMigrationLedgerArchiveByOperation() (map[string]latestA
 	if s == nil {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgLatestAppMigrationLedgerArchiveByOperation()
-	}
-	ledgers, err := s.listAppMigrationLedgerArchive(model.OperationEvidenceFilter{PlatformAdmin: true})
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]latestAppMigrationLedgerArchive, len(ledgers))
-	for _, ledger := range ledgers {
-		opID := strings.TrimSpace(ledger.OperationID)
-		if opID == "" {
-			continue
-		}
-		current, exists := out[opID]
-		if !exists || ledger.UpdatedAt.After(current.ledger.UpdatedAt) ||
-			(ledger.UpdatedAt.Equal(current.ledger.UpdatedAt) && ledger.ID > current.ledger.ID) {
-			current.ledger = ledger
-		}
-		if current.createdAt.IsZero() || (!ledger.CreatedAt.IsZero() && ledger.CreatedAt.Before(current.createdAt)) {
-			current.createdAt = ledger.CreatedAt
-		}
-		out[opID] = current
-	}
-	return out, nil
+	return s.pgLatestAppMigrationLedgerArchiveByOperation()
 }
 
 func (s *Store) pgRecordAppMigrationLedgerArchive(ledger model.AppMigrationLedger) error {
@@ -277,86 +229,4 @@ ORDER BY latest.collected_at DESC, latest.operation_id DESC
 		return nil, mapDBErr(err)
 	}
 	return out, nil
-}
-
-func appMigrationLedgerMatchesFilter(ledger model.AppMigrationLedger, filter model.OperationEvidenceFilter) bool {
-	if (!filter.PlatformAdmin || strings.TrimSpace(filter.TenantID) != "") &&
-		strings.TrimSpace(ledger.TenantID) != strings.TrimSpace(filter.TenantID) {
-		return false
-	}
-	if value := strings.TrimSpace(filter.OperationID); value != "" && strings.TrimSpace(ledger.OperationID) != value {
-		return false
-	}
-	if value := strings.TrimSpace(filter.AppID); value != "" && strings.TrimSpace(ledger.AppID) != value {
-		return false
-	}
-	if filter.Since != nil && ledger.UpdatedAt.Before(filter.Since.UTC()) {
-		return false
-	}
-	return true
-}
-
-func cloneAppMigrationLedger(in model.AppMigrationLedger) model.AppMigrationLedger {
-	out := in
-	if in.EndpointReady != nil {
-		value := *in.EndpointReady
-		out.EndpointReady = &value
-	}
-	if in.PhysicalReplicas != nil {
-		value := *in.PhysicalReplicas
-		out.PhysicalReplicas = &value
-	}
-	out.InvariantViolations = append([]string(nil), in.InvariantViolations...)
-	return out
-}
-
-func retainAppMigrationLedgerArchive(items []model.AppMigrationLedger, now time.Time) []model.AppMigrationLedger {
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	latestByOperation := make(map[string]model.AppMigrationLedger, len(items))
-	for _, ledger := range items {
-		opID := strings.TrimSpace(ledger.OperationID)
-		latest, exists := latestByOperation[opID]
-		if !exists || ledger.UpdatedAt.After(latest.UpdatedAt) ||
-			(ledger.UpdatedAt.Equal(latest.UpdatedAt) && ledger.ID > latest.ID) {
-			latestByOperation[opID] = ledger
-		}
-	}
-	out := items[:0]
-	for _, ledger := range items {
-		ledger = model.NormalizeAppMigrationLedger(ledger, now)
-		latest := latestByOperation[strings.TrimSpace(ledger.OperationID)]
-		isLatest := strings.TrimSpace(latest.ID) == strings.TrimSpace(ledger.ID)
-		if !isLatest && !ledger.RetainUntil.IsZero() && now.After(ledger.RetainUntil) {
-			continue
-		}
-		out = append(out, ledger)
-	}
-	return out
-}
-
-func backfillMigrationLedgerArchiveInState(state *model.State, now time.Time) {
-	if state == nil {
-		return
-	}
-	seen := make(map[string]struct{}, len(state.AppMigrationLedgers))
-	for _, ledger := range state.AppMigrationLedgers {
-		seen[strings.TrimSpace(ledger.ID)] = struct{}{}
-	}
-	for _, evidence := range state.OperationEvidence {
-		if !isLongLivedMigrationEvidenceType(evidence.Type) {
-			continue
-		}
-		ledger, err := migrationLedgerFromEvidence(evidence)
-		if err != nil {
-			continue
-		}
-		if _, exists := seen[strings.TrimSpace(ledger.ID)]; exists {
-			continue
-		}
-		state.AppMigrationLedgers = append(state.AppMigrationLedgers, ledger)
-		seen[strings.TrimSpace(ledger.ID)] = struct{}{}
-	}
-	state.AppMigrationLedgers = retainAppMigrationLedgerArchive(state.AppMigrationLedgers, now)
 }

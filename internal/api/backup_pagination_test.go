@@ -5,19 +5,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 func TestBackupRunListCursorPaginationIsStableAndFilterBound(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -100,7 +98,7 @@ func TestBackupRunListCursorPaginationIsStableAndFilterBound(t *testing.T) {
 func TestBackupListsRejectOversizedServerPageInsteadOfSilentlyTruncating(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -119,7 +117,7 @@ func TestBackupListsRejectOversizedServerPageInsteadOfSilentlyTruncating(t *test
 func TestBackupArtifactListCursorPaginationReturnsEveryArtifact(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -152,7 +150,7 @@ func TestBackupArtifactListCursorPaginationReturnsEveryArtifact(t *testing.T) {
 		}
 		var payload struct {
 			Artifacts []model.BackupArtifact `json:"artifacts"`
-			PageInfo struct {
+			PageInfo  struct {
 				HasNextPage bool   `json:"has_next_page"`
 				NextCursor  string `json:"next_cursor"`
 			} `json:"page_info"`

@@ -209,15 +209,17 @@ func (s *Store) pgSetTenantBillingBalance(tenantID string, balanceCents int64, m
 		return model.TenantBillingSummary{}, err
 	}
 	if previousBalanceMicroCents != targetBalanceMicroCents {
-		if err := s.pgInsertTenantBillingEventTx(ctx, tx, newTenantBillingBalanceAdjustedEvent(
+		event := newTenantBillingBalanceAdjustedEvent(
 			tenantID,
 			targetBalanceMicroCents-previousBalanceMicroCents,
 			record.BalanceMicroCents,
 			now,
 			metadata,
-		)); err != nil {
+		)
+		if err := s.pgInsertTenantBillingEventTx(ctx, tx, event); err != nil {
 			return model.TenantBillingSummary{}, err
 		}
+		state.BillingEvents = append(state.BillingEvents, event)
 	}
 
 	summary := buildTenantBillingSummaryWithIndex(&state, index, record)
@@ -290,11 +292,11 @@ WHERE b.tenant_id IS NULL
 	return nil
 }
 
-func (s *Store) pgLoadTenantBillingStateTx(ctx context.Context, tx *sql.Tx, tenantID string) (model.State, error) {
+func (s *Store) pgLoadTenantBillingStateTx(ctx context.Context, tx *sql.Tx, tenantID string) (storeProjection, error) {
 	return s.pgLoadBillingStateTx(ctx, tx, []string{tenantID})
 }
 
-func (s *Store) pgLoadBillingStateTx(ctx context.Context, tx *sql.Tx, tenantIDs []string) (model.State, error) {
+func (s *Store) pgLoadBillingStateTx(ctx context.Context, tx *sql.Tx, tenantIDs []string) (storeProjection, error) {
 	predicate := "tenant_id = ANY($1::text[])"
 	var tenantArg any = tenantIDs
 	if len(tenantIDs) == 1 {
@@ -309,7 +311,7 @@ WHERE `+predicate+`
 ORDER BY created_at ASC
 `, tenantArg)
 	if err != nil {
-		return model.State{}, fmt.Errorf("list billing apps: %w", err)
+		return storeProjection{}, fmt.Errorf("list billing apps: %w", err)
 	}
 	defer appRows.Close()
 
@@ -317,12 +319,12 @@ ORDER BY created_at ASC
 	for appRows.Next() {
 		app, err := scanApp(appRows)
 		if err != nil {
-			return model.State{}, err
+			return storeProjection{}, err
 		}
 		apps = append(apps, app)
 	}
 	if err := appRows.Err(); err != nil {
-		return model.State{}, fmt.Errorf("iterate billing apps: %w", err)
+		return storeProjection{}, fmt.Errorf("iterate billing apps: %w", err)
 	}
 
 	serviceRows, err := tx.QueryContext(ctx, `
@@ -332,7 +334,7 @@ WHERE `+predicate+`
 ORDER BY created_at ASC
 `, tenantArg)
 	if err != nil {
-		return model.State{}, fmt.Errorf("list billing services: %w", err)
+		return storeProjection{}, fmt.Errorf("list billing services: %w", err)
 	}
 	defer serviceRows.Close()
 
@@ -340,12 +342,12 @@ ORDER BY created_at ASC
 	for serviceRows.Next() {
 		service, err := scanBackingService(serviceRows)
 		if err != nil {
-			return model.State{}, err
+			return storeProjection{}, err
 		}
 		services = append(services, service)
 	}
 	if err := serviceRows.Err(); err != nil {
-		return model.State{}, fmt.Errorf("iterate billing services: %w", err)
+		return storeProjection{}, fmt.Errorf("iterate billing services: %w", err)
 	}
 
 	bindingRows, err := tx.QueryContext(ctx, `
@@ -355,7 +357,7 @@ WHERE `+predicate+`
 ORDER BY created_at ASC
 `, tenantArg)
 	if err != nil {
-		return model.State{}, fmt.Errorf("list billing bindings: %w", err)
+		return storeProjection{}, fmt.Errorf("list billing bindings: %w", err)
 	}
 	defer bindingRows.Close()
 
@@ -363,12 +365,12 @@ ORDER BY created_at ASC
 	for bindingRows.Next() {
 		binding, err := scanServiceBinding(bindingRows)
 		if err != nil {
-			return model.State{}, err
+			return storeProjection{}, err
 		}
 		bindings = append(bindings, binding)
 	}
 	if err := bindingRows.Err(); err != nil {
-		return model.State{}, fmt.Errorf("iterate billing bindings: %w", err)
+		return storeProjection{}, fmt.Errorf("iterate billing bindings: %w", err)
 	}
 
 	runtimeRows, err := tx.QueryContext(ctx, `
@@ -377,7 +379,7 @@ FROM fugue_runtimes
 ORDER BY created_at ASC
 `)
 	if err != nil {
-		return model.State{}, fmt.Errorf("list billing runtimes: %w", err)
+		return storeProjection{}, fmt.Errorf("list billing runtimes: %w", err)
 	}
 	defer runtimeRows.Close()
 
@@ -385,19 +387,19 @@ ORDER BY created_at ASC
 	for runtimeRows.Next() {
 		runtime, err := scanRuntime(runtimeRows)
 		if err != nil {
-			return model.State{}, err
+			return storeProjection{}, err
 		}
 		runtimes = append(runtimes, runtime)
 	}
 	if err := runtimeRows.Err(); err != nil {
-		return model.State{}, fmt.Errorf("iterate billing runtimes: %w", err)
+		return storeProjection{}, fmt.Errorf("iterate billing runtimes: %w", err)
 	}
 
 	events, err := s.pgLoadBillingEventsTx(ctx, tx, tenantIDs)
 	if err != nil {
-		return model.State{}, err
+		return storeProjection{}, err
 	}
-	return model.State{
+	return storeProjection{
 		Apps:            apps,
 		BackingServices: services,
 		ServiceBindings: bindings,
@@ -449,14 +451,14 @@ LIMIT $2
 	return events, nil
 }
 
-func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (model.TenantBilling, model.State, billingStateIndex, error) {
+func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantID string, now time.Time) (model.TenantBilling, storeProjection, billingStateIndex, error) {
 	record, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, tenantID, true, now)
 	if err != nil {
-		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+		return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 	}
 	state, err := s.pgLoadTenantBillingStateTx(ctx, tx, tenantID)
 	if err != nil {
-		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+		return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 	}
 	index := newBillingStateIndex(&state)
 
@@ -464,7 +466,7 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 	committed := tenantManagedCommittedResourcesForBillingWithIndex(&state, index, record)
 	accrueTenantBillingWithCommittedResources(&record, committed, now)
 	if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-		return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+		return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 	}
 	if !now.After(lastAccruedAt) {
 		return record, state, index, nil
@@ -487,7 +489,7 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 		record.BalanceMicroCents -= amountMicroCents
 		record.UpdatedAt = now
 		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, record); err != nil {
-			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+			return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 		}
 		debitEvent := newTenantBillingPublicRuntimeEvent(
 			tenantID,
@@ -502,18 +504,18 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 			},
 		)
 		if err := s.pgInsertTenantBillingEventTx(ctx, tx, debitEvent); err != nil {
-			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+			return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 		}
 		state.BillingEvents = append(state.BillingEvents, debitEvent)
 
 		ownerRecord, err := s.pgEnsureTenantBillingRecordTx(ctx, tx, component.OwnerTenantID, true, now)
 		if err != nil {
-			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+			return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 		}
 		ownerRecord.BalanceMicroCents += amountMicroCents
 		ownerRecord.UpdatedAt = now
 		if err := s.pgUpdateTenantBillingRecordTx(ctx, tx, ownerRecord); err != nil {
-			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+			return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 		}
 		creditEvent := newTenantBillingPublicRuntimeEvent(
 			component.OwnerTenantID,
@@ -528,7 +530,7 @@ func (s *Store) pgAccrueTenantBillingTx(ctx context.Context, tx *sql.Tx, tenantI
 			},
 		)
 		if err := s.pgInsertTenantBillingEventTx(ctx, tx, creditEvent); err != nil {
-			return model.TenantBilling{}, model.State{}, billingStateIndex{}, err
+			return model.TenantBilling{}, storeProjection{}, billingStateIndex{}, err
 		}
 	}
 

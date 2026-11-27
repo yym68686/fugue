@@ -209,33 +209,7 @@ func (s *Store) maintainPlatformQualityEvidenceForAPI(ctx context.Context, incom
 		}
 		s.qualityEvidenceMetrics.failed.Store(failed)
 	}()
-	if !s.usingDatabase() {
-		return s.withLockedState(true, func(st *model.State) error {
-			for _, row := range st.PlatformQualityEvidence {
-				if incoming != nil && row.ContentHash == incoming.ContentHash {
-					incoming = nil // immutable insertion clock, including replays
-					break
-				}
-			}
-			victims := qualityEvidenceVictims(st.PlatformQualityEvidence, incoming, now)
-			s.observeQualityPool(st.PlatformQualityEvidence, incoming, victims)
-			drop := map[string]bool{}
-			for _, digest := range victims {
-				drop[digest] = true
-			}
-			kept := st.PlatformQualityEvidence[:0]
-			for _, row := range st.PlatformQualityEvidence {
-				if !drop[row.ContentHash] {
-					kept = append(kept, row)
-				}
-			}
-			st.PlatformQualityEvidence = kept
-			if incoming != nil {
-				st.PlatformQualityEvidence = append(st.PlatformQualityEvidence, *incoming)
-			}
-			return nil
-		})
-	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -321,9 +295,7 @@ func (s *Store) maintainPlatformQualityEvidenceForAPI(ctx context.Context, incom
 // RunPlatformQualityEvidenceRetention performs only the independent pool's
 // expiry cleanup. FIFO capacity is enforced transactionally on every insert.
 func (s *Store) RunPlatformQualityEvidenceRetention(ctx context.Context) {
-	if !s.usingDatabase() {
-		return
-	}
+
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 	for {
@@ -354,24 +326,15 @@ func (s *Store) GetPlatformArtifactQualityInputContext(ctx context.Context, a mo
 	}
 	digest := a.Metadata[platformconfig.QualityEvidenceDigestMetadata]
 	var raw []byte
-	if s.usingDatabase() {
+	{
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		err = s.db.QueryRowContext(ctx, `SELECT evidence FROM fugue_platform_quality_evidence WHERE content_hash=$1 AND expires_at>now() AND size_bytes<=$2`, digest, QualityEvidenceMaxObjectBytes).Scan(&raw)
 		if errors.Is(err, sql.ErrNoRows) {
 			err = ErrNotFound
 		}
-	} else {
-		err = s.withLockedState(false, func(st *model.State) error {
-			for _, row := range st.PlatformQualityEvidence {
-				if row.ContentHash == digest && row.ExpiresAt.After(time.Now()) && row.SizeBytes <= QualityEvidenceMaxObjectBytes {
-					raw = append([]byte(nil), row.Evidence...)
-					return nil
-				}
-			}
-			return ErrNotFound
-		})
 	}
+
 	if err != nil {
 		return CompilerInputDNSSelections{}, err
 	}

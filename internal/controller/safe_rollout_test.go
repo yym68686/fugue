@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -301,19 +300,20 @@ func TestCleanupSafeRolloutRetiredResourcesDeletesOnlyRevisionObjects(t *testing
 func TestReconcileServingReleaseCanonicalTargetAfterStableAlignment(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
-	if err := stateStore.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
+	stateStore := newStoreTestDatabase(t, "")
+	tenant, err := stateStore.CreateTenant("Alignment fixture")
+	if err != nil {
+		t.Fatal(err)
 	}
-	app := model.App{
-		ID:       "app_demo",
-		TenantID: "tenant_demo",
-		Name:     "demo",
-		Spec: model.AppSpec{
-			Image:    "registry.example/demo:v2",
-			Ports:    []int{8080},
-			Replicas: 1,
-		},
+	project, err := stateStore.CreateProject(tenant.ID, "alignment", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := stateStore.CreateApp(tenant.ID, project.ID, "demo", "", model.AppSpec{
+		Image: "registry.example/demo:v2", Ports: []int{8080}, Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	release, err := stateStore.CreateAppRelease(model.AppRelease{
 		TenantID:         app.TenantID,
@@ -1510,7 +1510,7 @@ func newSafeRolloutIntegrationService(stateStore *store.Store, upstreamURL strin
 
 func newSafeRolloutTestState(t *testing.T) (*store.Store, model.App, model.App, model.Operation) {
 	t.Helper()
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

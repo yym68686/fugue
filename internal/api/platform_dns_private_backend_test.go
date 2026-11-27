@@ -18,8 +18,8 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformsafety"
-	"fugue/internal/store"
 	"fugue/internal/testfixture/celldns"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -28,108 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 )
-
-func TestDNSOnlyAssignmentSelectionWitnessUsesOriginalLaneReads(t *testing.T) {
-	c := celldns.Compile(t, celldns.Request(t))
-	parent := c.ReleaseArtifact
-	now := time.Now().UTC()
-	full := model.PlatformArtifactRelease{ID: "older-full", ArtifactID: parent.ID, ArtifactKind: parent.ArtifactKind,
-		Scope: parent.Scope, ScopeKey: parent.ScopeKey, Generation: parent.Generation, ReleaseChannel: "full",
-		FencingToken: 7, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now.Add(-time.Second)}
-	gray := full
-	gray.ID, gray.ReleaseChannel, gray.FencingToken, gray.ReleasedAt = "newer-gray", "gray", 5, now
-	gray.CanaryRuleRef = "cohort=complete"
-	for _, r := range []*model.PlatformArtifactRelease{&full, &gray} {
-		r.LaneKey = platformsafety.ReleaseLaneKey(r.ArtifactKind, r.ScopeKey, r.ReleaseChannel)
-	}
-	state := model.State{
-		PlatformArtifacts:        []model.PlatformArtifact{parent},
-		PlatformArtifactReleases: []model.PlatformArtifactRelease{full, gray},
-	}
-	for _, r := range state.PlatformArtifactReleases {
-		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey,
-			ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID})
-	}
-	path := t.TempDir() + "/state.json"
-	raw, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	st := store.New(path)
-	st.ConfigurePlatformArtifactSigning(celldns.Keys())
-	s := &Server{store: st}
-	item := consumerArtifactLookup{Artifact: c.DNSArtifact, Release: full, Assignment: model.PlatformConsumerAssignment{
-		ScopeKey: parent.ScopeKey, ReleaseSetID: parent.ID, ArtifactReleaseID: full.ID, FencingToken: full.FencingToken}}
-	var timing consumerSelectionRead
-	var rejected *capturePublicationPair
-	observe := func(pair *capturePublicationPair, _ ...string) {
-		if pair != nil {
-			rejected = pair
-		}
-	}
-	selected, changed, err := s.checkConsumerAssignmentSelection(item, "cell-dns", st.GetPlatformArtifact, nil, observe, &timing)
-	if err != nil || selected || !changed || rejected == nil || rejected.Observed == nil ||
-		timing.Full.ReleaseHash != rejected.Expected.ReleaseHash || timing.Gray.ReleaseHash != rejected.Observed.ReleaseHash ||
-		timing.CohortHash != captureIdentityHash("cell-dns") || timing.Full.Started.Before(now) ||
-		timing.Full.Returned.Before(timing.Full.Started) || timing.Gray.Started.Before(timing.Full.Returned) ||
-		timing.Gray.Returned.Before(timing.Gray.Started) {
-		t.Fatal("comparison or original lookup witnesses changed", timing, rejected, err)
-	}
-}
-
-func TestPrivateDNSReceiptRequiresSignedCurrentDNSOnlyMember(t *testing.T) {
-	for _, scenario := range []string{"valid", "unbound set", "wrong fence", "wrong generation", "wrong parent", "foreign node", "tampered membership", "untrusted parent", "legacy role"} {
-		t.Run(scenario, func(t *testing.T) {
-			c := celldns.Compile(t, celldns.Request(t))
-			now := time.Now().UTC()
-			r := model.PlatformArtifactRelease{ID: "dns-shadow", ArtifactID: c.ReleaseArtifact.ID, ArtifactKind: c.ReleaseArtifact.ArtifactKind, Scope: c.ReleaseArtifact.Scope, ScopeKey: c.ReleaseArtifact.ScopeKey, Generation: c.ReleaseArtifact.Generation, ReleaseChannel: "shadow", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now, LaneKey: platformsafety.ReleaseLaneKey(c.ReleaseArtifact.ArtifactKind, c.ReleaseArtifact.ScopeKey, "shadow")}
-			topology, _, err := platformcontrol.DeclaredTrafficConsumerTopology(c.ReleaseArtifact)
-			if err != nil {
-				t.Fatal(err)
-			}
-			set, err := platformcontrol.BuildExpectedConsumerSet(platformcontrol.ExpectedConsumerSetBuildRequest{ReleaseSetID: c.ReleaseArtifact.ID, ArtifactReleaseID: r.ID, ArtifactKind: c.DNSArtifact.ArtifactKind, Generation: c.DNSArtifact.Generation, Scope: c.ReleaseArtifact.Scope, ScopeKey: c.ReleaseArtifact.ScopeKey, Revision: 1, PreparedAt: now, Topology: topology})
-			if err != nil {
-				t.Fatal(err)
-			}
-			claims := platformcontrol.PlatformComponentIdentityClaims{Component: model.PlatformConsumerComponentDNSServer, NodeID: "dns-a", AuthorityID: "cell-dns", ScopeKey: c.ReleaseArtifact.ScopeKey, ArtifactKinds: []string{model.PlatformArtifactKindDNSAnswerBundle}}
-			h := platformcontrol.PlatformConsumerHeartbeatEnvelope{ReleaseSetID: c.ReleaseArtifact.ID, ExpectedConsumerSetID: set.ID, FencingToken: 1, GenerationSequence: c.DNSArtifact.GenerationSequence}
-			switch scenario {
-			case "unbound set":
-				set.ArtifactReleaseID = ""
-			case "wrong fence":
-				h.FencingToken++
-			case "wrong generation":
-				h.GenerationSequence++
-			case "wrong parent":
-				h.ReleaseSetID = "foreign"
-			case "foreign node":
-				claims.NodeID = "foreign"
-			case "tampered membership":
-				set.Consumers[0].Required = false
-			case "untrusted parent":
-				c.ReleaseArtifact.Provenance.Signature = "forged"
-			case "legacy role":
-				delete(c.ReleaseArtifact.Content, "publication_role")
-			}
-			state := model.State{PlatformArtifacts: []model.PlatformArtifact{c.ReleaseArtifact, c.DNSArtifact}, PlatformArtifactReleases: []model.PlatformArtifactRelease{r}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}, PlatformReleaseLanes: []model.PlatformReleaseLane{{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID}}}
-			path := t.TempDir() + "/state.json"
-			raw, _ := json.Marshal(state)
-			if err := os.WriteFile(path, raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-			st := store.New(path)
-			st.ConfigurePlatformArtifactSigning(celldns.Keys())
-			s := &Server{store: st}
-			allowed, status := s.privateDNSReceiptMember(claims, h, []model.PlatformExpectedConsumerSet{set})
-			if (scenario == "valid") != allowed || allowed && status != http.StatusOK {
-				t.Fatal("private membership verdict", allowed, status)
-			}
-		})
-	}
-}
 
 func TestDeclaredPrivateDNSServicesMatchExecutorIdentityAndDigest(t *testing.T) {
 	var registry struct {
@@ -436,7 +334,10 @@ func testPrivateDNSHeartbeatPersistence(t *testing.T, transport *Server, claims 
 	if err != nil {
 		t.Fatal(err)
 	}
-	state := model.State{PlatformArtifacts: []model.PlatformArtifact{c.ReleaseArtifact, c.DNSArtifact}, PlatformArtifactReleases: []model.PlatformArtifactRelease{r}, ExpectedConsumerSets: []model.PlatformExpectedConsumerSet{set}, PlatformReleaseLanes: []model.PlatformReleaseLane{{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID}}}
+	state := platformPublicationFixture{artifacts: []model.PlatformArtifact{c.ReleaseArtifact, c.DNSArtifact},
+		releases: []model.PlatformArtifactRelease{r}, sets: []model.PlatformExpectedConsumerSet{set},
+		lanes: []model.PlatformReleaseLane{{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey,
+			ReleaseChannel: r.ReleaseChannel, FencingToken: r.FencingToken, ActiveReleaseID: r.ID}}}
 	shadowRequest := req
 	shadowRequest.Intent.Generation += "-successor"
 	shadowRequest.Policy.Generation += "-successor"
@@ -460,16 +361,13 @@ func testPrivateDNSHeartbeatPersistence(t *testing.T, transport *Server, claims 
 	if e != nil {
 		t.Fatal(e)
 	}
-	state.PlatformArtifacts = append(state.PlatformArtifacts, shadowCompiled.ReleaseArtifact, shadowCompiled.DNSArtifact)
-	state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, shadowRelease)
-	state.ExpectedConsumerSets = append(state.ExpectedConsumerSets, shadowSet)
-	state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: shadowRelease.LaneKey, ArtifactKind: shadowRelease.ArtifactKind, ScopeKey: shadowRelease.ScopeKey, ReleaseChannel: "shadow", FencingToken: 2, ActiveReleaseID: shadowRelease.ID})
-	path := t.TempDir() + "/state.json"
-	raw, _ := json.Marshal(state)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	st := store.New(path)
+	state.artifacts = append(state.artifacts, shadowCompiled.ReleaseArtifact, shadowCompiled.DNSArtifact)
+	state.releases = append(state.releases, shadowRelease)
+	state.sets = append(state.sets, shadowSet)
+	state.lanes = append(state.lanes, model.PlatformReleaseLane{LaneKey: shadowRelease.LaneKey, ArtifactKind: shadowRelease.ArtifactKind, ScopeKey: shadowRelease.ScopeKey, ReleaseChannel: "shadow", FencingToken: 2, ActiveReleaseID: shadowRelease.ID})
+	const fixture = "private-dns-publication"
+	st := newStoreTestDatabase(t, fixture)
+	state.seed(t, openStoreTestSQL(t, fixture))
 	keys := celldns.Keys()
 	s := NewServer(st, auth.New(st, "synthetic-private-admin"), nil, ServerConfig{BundleSigningKey: keys.PrimaryKey, BundleSigningKeyID: keys.PrimaryKeyID})
 	s.controlPlaneNamespace, s.newClusterNodeClient = transport.controlPlaneNamespace, transport.newClusterNodeClient

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,26 +24,7 @@ func (s *Store) ListStaticEdgeRegistrations(filter StaticEdgeRegistrationFilter)
 	if !filter.PlatformAdmin && filter.TenantID == "" {
 		return nil, fmt.Errorf("%w: tenant ID is required", ErrInvalidInput)
 	}
-	if s.usingDatabase() {
-		return s.pgListStaticEdgeRegistrations(filter)
-	}
-	out := []model.StaticEdgeRegistration{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, registration := range state.StaticEdgeRegistrations {
-			if !staticEdgeVisible(registration, filter) {
-				continue
-			}
-			out = append(out, cloneStaticEdgeRegistration(registration))
-		}
-		sort.Slice(out, func(i, j int) bool {
-			if out[i].ProjectID == out[j].ProjectID {
-				return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
-			}
-			return out[i].ProjectID < out[j].ProjectID
-		})
-		return nil
-	})
-	return out, err
+	return s.pgListStaticEdgeRegistrations(filter)
 }
 
 func (s *Store) GetStaticEdgeRegistration(id, tenantID string, platformAdmin bool) (model.StaticEdgeRegistration, error) {
@@ -53,21 +33,7 @@ func (s *Store) GetStaticEdgeRegistration(id, tenantID string, platformAdmin boo
 	if id == "" || (!platformAdmin && tenantID == "") {
 		return model.StaticEdgeRegistration{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetStaticEdgeRegistration(id, tenantID, platformAdmin)
-	}
-	var out model.StaticEdgeRegistration
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, registration := range state.StaticEdgeRegistrations {
-			if registration.ID != id || (!platformAdmin && registration.TenantID != tenantID) {
-				continue
-			}
-			out = cloneStaticEdgeRegistration(registration)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetStaticEdgeRegistration(id, tenantID, platformAdmin)
 }
 
 func (s *Store) CreateStaticEdgeRegistration(registration model.StaticEdgeRegistration) (model.StaticEdgeRegistration, error) {
@@ -75,32 +41,7 @@ func (s *Store) CreateStaticEdgeRegistration(registration model.StaticEdgeRegist
 	if err != nil {
 		return model.StaticEdgeRegistration{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgCreateStaticEdgeRegistration(registration)
-	}
-	var out model.StaticEdgeRegistration
-	err = s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, registration.TenantID) < 0 || findProject(state, registration.ProjectID) < 0 {
-			return ErrNotFound
-		}
-		project := state.Projects[findProject(state, registration.ProjectID)]
-		if project.TenantID != registration.TenantID {
-			return ErrNotFound
-		}
-		for _, existing := range state.StaticEdgeRegistrations {
-			if existing.TenantID == registration.TenantID && existing.ProjectID == registration.ProjectID &&
-				(strings.EqualFold(existing.Name, registration.Name) || existing.EdgeID == registration.EdgeID) {
-				return ErrConflict
-			}
-		}
-		now := time.Now().UTC()
-		registration.ID = model.NewID("static_edge")
-		registration.CreatedAt, registration.UpdatedAt = now, now
-		state.StaticEdgeRegistrations = append(state.StaticEdgeRegistrations, cloneStaticEdgeRegistration(registration))
-		out = cloneStaticEdgeRegistration(registration)
-		return nil
-	})
-	return out, err
+	return s.pgCreateStaticEdgeRegistration(registration)
 }
 
 func (s *Store) UpdateStaticEdgeRegistrationProof(id, tenantID, digest, signingKeyID string, ready bool) (model.StaticEdgeRegistration, error) {
@@ -111,34 +52,7 @@ func (s *Store) UpdateStaticEdgeRegistrationProof(id, tenantID, digest, signingK
 	if err := validateStaticEdgeProof(digest, signingKeyID); err != nil {
 		return model.StaticEdgeRegistration{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateStaticEdgeRegistrationProof(id, tenantID, digest, signingKeyID, ready)
-	}
-	var out model.StaticEdgeRegistration
-	err := s.withLockedState(true, func(state *model.State) error {
-		for index := range state.StaticEdgeRegistrations {
-			if state.StaticEdgeRegistrations[index].ID != id || state.StaticEdgeRegistrations[index].TenantID != tenantID {
-				continue
-			}
-			registration := state.StaticEdgeRegistrations[index]
-			if registration.Status == model.StaticEdgeStatusRevoked {
-				return ErrConflict
-			}
-			registration.PossessionProofDigest = digest
-			registration.SigningKeyID = signingKeyID
-			registration.Status = model.StaticEdgeStatusPending
-			if ready {
-				registration.Status = model.StaticEdgeStatusReady
-			}
-			now := time.Now().UTC()
-			registration.LastProofAt, registration.UpdatedAt = &now, now
-			state.StaticEdgeRegistrations[index] = cloneStaticEdgeRegistration(registration)
-			out = cloneStaticEdgeRegistration(registration)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgUpdateStaticEdgeRegistrationProof(id, tenantID, digest, signingKeyID, ready)
 }
 
 func (s *Store) RevokeStaticEdgeRegistration(id, tenantID string, platformAdmin bool) (model.StaticEdgeRegistration, error) {
@@ -146,28 +60,7 @@ func (s *Store) RevokeStaticEdgeRegistration(id, tenantID string, platformAdmin 
 	if err != nil {
 		return model.StaticEdgeRegistration{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgRevokeStaticEdgeRegistration(registration.ID, tenantID, platformAdmin)
-	}
-	err = s.withLockedState(true, func(state *model.State) error {
-		for index := range state.StaticEdgeRegistrations {
-			if state.StaticEdgeRegistrations[index].ID != registration.ID {
-				continue
-			}
-			registration = cloneStaticEdgeRegistration(state.StaticEdgeRegistrations[index])
-			registration.Status = model.StaticEdgeStatusRevoked
-			registration.UpdatedAt = time.Now().UTC()
-			state.StaticEdgeRegistrations[index] = cloneStaticEdgeRegistration(registration)
-			return nil
-		}
-		return ErrNotFound
-	})
-	return registration, err
-}
-
-func staticEdgeVisible(registration model.StaticEdgeRegistration, filter StaticEdgeRegistrationFilter) bool {
-	return (filter.TenantID == "" || registration.TenantID == filter.TenantID) &&
-		(filter.ProjectID == "" || registration.ProjectID == filter.ProjectID)
+	return s.pgRevokeStaticEdgeRegistration(registration.ID, tenantID, platformAdmin)
 }
 
 func normalizeStaticEdgeRegistration(in model.StaticEdgeRegistration) (model.StaticEdgeRegistration, error) {

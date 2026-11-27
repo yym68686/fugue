@@ -4,15 +4,13 @@ import (
 	"context"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 	"io"
 	"log"
-	"path/filepath"
 	"testing"
 )
 
 func TestQueuedBuildExecutionPreservesScaleAfterEnqueue(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if e := st.Init(); e != nil {
 		t.Fatal(e)
 	}
@@ -58,7 +56,7 @@ func TestQueuedBuildExecutionPreservesScaleAfterEnqueue(t *testing.T) {
 }
 
 func TestQueuedConfigurationEditSurvivesEarlierDeployCompletingLater(t *testing.T) {
-	st := store.New(filepath.Join(t.TempDir(), "state.json"))
+	st := newStoreTestDatabase(t, "")
 	if e := st.Init(); e != nil {
 		t.Fatal(e)
 	}

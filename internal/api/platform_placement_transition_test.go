@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"fugue/internal/model"
@@ -15,7 +16,7 @@ import (
 func TestCellProducerPlacementTransitionCapturesAndGuardsExactSource(t *testing.T) {
 	st, s, tenantKey, adminKey, app, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	p := cellProducerRoleFixture(t, s, "cell-a", platformconfig.PublicationRoleCellRoutes)
-	legacy, err := st.PutEdgeRoutePolicy(model.EdgeRoutePolicy{ID: "source-policy", Hostname: app.Name + ".example.test", AppID: app.ID, TenantID: app.TenantID, EdgeGroupID: "edge-group-original", ExcludedEdgeIDs: []string{"edge-denied"}, RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, MinHealthyEdgeNodes: 2})
+	legacy, err := st.PutEdgeRoutePolicyCAS(model.EdgeRoutePolicy{ID: "source-policy", Hostname: app.Name + ".example.test", AppID: app.ID, TenantID: app.TenantID, EdgeGroupID: "edge-group-original", ExcludedEdgeIDs: []string{"edge-denied"}, ExclusionReason: "fixture placement", ExclusionOwnerDigest: "sha256:" + strings.Repeat("a", 64), RoutePolicy: model.EdgeRoutePolicyEnabled, Enabled: true, MinHealthyEdgeNodes: 2}, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

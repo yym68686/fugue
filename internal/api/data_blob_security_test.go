@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -299,7 +298,7 @@ func TestGetDataBlobImplementsConditionalAndSingleRangeContract(t *testing.T) {
 func setupDataBlobSecurityServer(t *testing.T) (*store.Store, *Server, string, string, model.DataWorkspace) {
 	t.Helper()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -28,7 +28,7 @@ func testPromotedTerminalReleaseRetirement(t *testing.T, terminalStatus string) 
 			}
 			// Promotion succeeded before a later canonical-alignment failure.
 			// A subsequent release has superseded this serving revision.
-			promoted := op.CompletedAt.Add(-time.Nanosecond)
+			promoted := op.CompletedAt.Add(-time.Microsecond)
 			previous.Role, previous.Status = model.AppReleaseRolePrevious, model.AppReleaseStatusDraining
 			previous.PromotedAt = &promoted
 			previous.StatusReason = "superseded by current release"
@@ -44,7 +44,7 @@ func testPromotedTerminalReleaseRetirement(t *testing.T, terminalStatus string) 
 				before := previous.CreatedAt.Add(-time.Second)
 				previous.PromotedAt = &before
 			case "promotion_after_completion":
-				after := op.CompletedAt.Add(time.Nanosecond)
+				after := op.CompletedAt.Add(time.Microsecond)
 				previous.PromotedAt = &after
 			case "retention":
 				future := time.Now().Add(time.Hour)

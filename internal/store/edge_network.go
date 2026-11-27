@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,70 +30,41 @@ func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 			return err
 		}
 	}
-	if s.usingDatabase() {
-		// A heartbeat may carry 128 observations. Send one bounded INSERT so
-		// the caller's deadline does not pay one database round trip per row.
-		// Keep retention and insertion atomic and preserve first-write wins.
-		var query strings.Builder
-		query.WriteString("INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ")
-		args := make([]any, 0, len(samples)*5)
-		for i, sample := range samples {
-			raw, err := json.Marshal(sample)
-			if err != nil {
-				return err
-			}
-			if i > 0 {
-				query.WriteString(", ")
-			}
-			base := len(args)
-			fmt.Fprintf(&query, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
-			args = append(args, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw)
-		}
-		query.WriteString(" ON CONFLICT (edge_id, id) DO NOTHING")
-		transaction, err := s.db.BeginTx(ctx, nil)
+	// A heartbeat may carry 128 observations. Send one bounded INSERT so
+	// the caller's deadline does not pay one database round trip per row.
+	// Keep retention and insertion atomic and preserve first-write wins.
+	var query strings.Builder
+	query.WriteString("INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ")
+	args := make([]any, 0, len(samples)*5)
+	for i, sample := range samples {
+		raw, err := json.Marshal(sample)
 		if err != nil {
 			return err
 		}
-		defer transaction.Rollback()
-		if !pruneBefore.IsZero() {
-			if _, err := transaction.ExecContext(ctx, `DELETE FROM fugue_edge_network_samples WHERE observed_at < $1`, pruneBefore); err != nil {
-				return err
-			}
+		if i > 0 {
+			query.WriteString(", ")
 		}
-		if len(samples) > 0 {
-			if _, err := transaction.ExecContext(ctx, query.String(), args...); err != nil {
-				return err
-			}
-		}
-		return transaction.Commit()
+		base := len(args)
+		fmt.Fprintf(&query, "($%d, $%d, $%d, $%d, $%d)", base+1, base+2, base+3, base+4, base+5)
+		args = append(args, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw)
 	}
-	return s.withLockedState(true, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
+	query.WriteString(" ON CONFLICT (edge_id, id) DO NOTHING")
+	transaction, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer transaction.Rollback()
+	if !pruneBefore.IsZero() {
+		if _, err := transaction.ExecContext(ctx, `DELETE FROM fugue_edge_network_samples WHERE observed_at < $1`, pruneBefore); err != nil {
 			return err
 		}
-		retained := []model.EdgeNetworkSample{}
-		seen := map[string]bool{}
-		collection := &state.EdgeNetworkSamples
-		if witnesses {
-			collection = &state.EdgeNetworkRouteWitnesses
+	}
+	if len(samples) > 0 {
+		if _, err := transaction.ExecContext(ctx, query.String(), args...); err != nil {
+			return err
 		}
-		for _, sample := range *collection {
-			if !pruneBefore.IsZero() && sample.ObservedAt.Before(pruneBefore) {
-				continue
-			}
-			retained = append(retained, sample)
-			seen[sample.EdgeID+"\x00"+sample.ID] = true
-		}
-		for _, sample := range samples {
-			key := sample.EdgeID + "\x00" + sample.ID
-			if !seen[key] {
-				retained = append(retained, sample)
-				seen[key] = true
-			}
-		}
-		*collection = retained
-		return nil
-	})
+	}
+	return transaction.Commit()
 }
 
 func (s *Store) ListEdgeNetworkSamples(ctx context.Context, hostname string, since time.Time, limit int) ([]model.EdgeNetworkSample, error) {
@@ -117,51 +87,21 @@ func (s *Store) listEdgeNetworkSamples(ctx context.Context, hostname string, sin
 		return nil, fmt.Errorf("bounded hostname network observation query required")
 	}
 	samples := []model.EdgeNetworkSample{}
-	if s.usingDatabase() {
-		rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM fugue_edge_network_samples WHERE hostname = $1 AND observed_at >= $2 ORDER BY observed_at DESC, edge_id, id LIMIT $3`, networkObservationHostnameKey(hostname, witnesses), since, limit)
-		if err != nil {
+	rows, err := s.db.QueryContext(ctx, `SELECT sample_json FROM fugue_edge_network_samples WHERE hostname = $1 AND observed_at >= $2 ORDER BY observed_at DESC, edge_id, id LIMIT $3`, networkObservationHostnameKey(hostname, witnesses), since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var sample model.EdgeNetworkSample
+		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var raw []byte
-			var sample model.EdgeNetworkSample
-			if err := rows.Scan(&raw); err != nil {
-				return nil, err
-			}
-			if err := json.Unmarshal(raw, &sample); err != nil {
-				return nil, err
-			}
-			samples = append(samples, sample)
+		if err := json.Unmarshal(raw, &sample); err != nil {
+			return nil, err
 		}
-		return samples, rows.Err()
+		samples = append(samples, sample)
 	}
-	err := s.withLockedState(false, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		collection := state.EdgeNetworkSamples
-		if witnesses {
-			collection = state.EdgeNetworkRouteWitnesses
-		}
-		for _, sample := range collection {
-			if sample.Hostname == hostname && !sample.ObservedAt.Before(since) {
-				samples = append(samples, sample)
-			}
-		}
-		return nil
-	})
-	sort.Slice(samples, func(left, right int) bool {
-		if !samples[left].ObservedAt.Equal(samples[right].ObservedAt) {
-			return samples[left].ObservedAt.After(samples[right].ObservedAt)
-		}
-		if samples[left].EdgeID != samples[right].EdgeID {
-			return samples[left].EdgeID < samples[right].EdgeID
-		}
-		return samples[left].ID < samples[right].ID
-	})
-	if len(samples) > limit {
-		samples = samples[:limit]
-	}
-	return samples, err
+	return samples, rows.Err()
 }

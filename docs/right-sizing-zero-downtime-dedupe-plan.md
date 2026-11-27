@@ -155,9 +155,7 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
    - 如果有 active deploy，返回 benign decision：`active_deploy_exists`，不创建新 operation。
    - 在事务里比较 desired spec/source 与当前 app spec/source；如果已经一致，返回 benign decision：`already_current`，不创建新 operation。
    - 只有确认没有 active deploy 且 desired state 不等于 current app，才插入 operation。
-2. 对 file store：
-   - 复用 `withLockedState(true, ...)`，在同一个锁内执行 active/no-op 检查和 append operation。
-3. 对自动 right-sizing 调用方：
+2. 对自动 right-sizing 调用方：
    - `active_deploy_exists` 和 `already_current` 都视为 `alreadyCurrent=true`，不报错，不制造 operation。
    - 记录 structured log：`right_sizing_auto_apply_skipped app_id=... reason=active_deploy_exists|already_current existing_operation_id=...`。
 
@@ -241,8 +239,6 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
   - 使用新的原子创建路径。
   - 对 benign decision 做 skip 处理。
   - 增加 structured log / telemetry。
-- `internal/store/store.go`
-  - file store 版原子 create-with-policy。
 - `internal/store/postgres_store.go`
   - Postgres 版事务内 app row lock + active deploy check + no-op check。
 - `internal/controller/controller.go` 或 `internal/controller/stale_deploy_guard.go`
@@ -304,7 +300,6 @@ CreateAutoscalingDeployOperation(op model.Operation) (model.Operation, Autoscali
 
 - [x] 设计并实现 `CreateOperationWithPolicy` 或 `CreateAutoscalingDeployOperation`。
 - [x] Postgres store 在同一事务中锁 app 行、检查 active deploy、检查 no-op、创建 operation。
-- [x] file store 在同一 `withLockedState` 中完成相同语义。
 - [x] 自动 right-sizing 改用新的原子创建路径。
 - [x] active/no-op skip 返回明确 decision，而不是模糊 error。
 

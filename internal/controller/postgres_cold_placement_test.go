@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestColdRecoveryPreflightsActualVolumeAndPreservesRetryIntent(t *testing.T) {
@@ -48,7 +46,7 @@ func TestColdRecoveryPreflightsActualVolumeAndPreservesRetryIntent(t *testing.T)
 func TestColdRecoveryPreflightsReplicaStorageBeforeAnyMutation(t *testing.T) {
 	for _, scenario := range []string{"ready", "csi-only-replica", "unready-replica", "same-node", "capacity", "local-storage"} {
 		t.Run(scenario, func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "state.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}

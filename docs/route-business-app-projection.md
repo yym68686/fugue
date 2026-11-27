@@ -8,8 +8,8 @@ including 1,382,387 bytes of mounted files; excluding these four fields leaves
 344,047 bytes. This measures one read family, not total database traffic.
 
 PostgreSQL now excludes those fields in the SELECT projection, before network
-transfer and JSON decoding. The file store excludes them before detaching its
-compiler view. Both retain all other spec fields, especially `Env`, which holds
+transfer and JSON decoding. The projection retains all other spec fields,
+especially `Env`, which holds
 app-scoped request-body constraints. No stored application or release config is
 updated. This is a reduction in transferred and decoded bytes, with the same
 linear scan of visible application rows.

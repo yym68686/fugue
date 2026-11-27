@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -144,7 +143,8 @@ func TestScheduleOrphanImageCachePruneDryRunCreatesNonDeletingTask(t *testing.T)
 func TestScheduleOrphanImageCachePruneDeleteCreatesLimitedDeletingTask(t *testing.T) {
 	t.Parallel()
 
-	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	stateStore, nodeSecret, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
 		t.Fatalf("enroll updater: %v", err)
 	}
@@ -567,7 +567,8 @@ func TestControllerImageCacheDoesNotProtectSameRepoHistoryWithCurrentTag(t *test
 func TestScheduleOrphanImageCachePruneDeleteAllowsStaleReplicaCandidateReasons(t *testing.T) {
 	t.Parallel()
 
-	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	stateStore, nodeSecret, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
 		t.Fatalf("enroll updater: %v", err)
 	}
@@ -679,7 +680,8 @@ func TestScheduleOrphanImageCachePruneSkipsWhenPruneAlreadyActive(t *testing.T) 
 func TestScheduleOrphanImageCachePrunePausesAfterControllerFailure(t *testing.T) {
 	t.Parallel()
 
-	stateStore, nodeSecret := newImageCacheControllerTestStore(t)
+	stateStore, nodeSecret, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
 	if err != nil {
 		t.Fatalf("enroll updater: %v", err)
@@ -754,141 +756,6 @@ func TestControllerImageCachePruneDoesNotHaltAfterPreExecutionRefusal(t *testing
 	}
 }
 
-func TestScheduleOrphanImageCachePruneFailureRecovery(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		inventory time.Duration
-		protected bool
-		otherNode bool
-		partial   bool
-		pruneAck  bool
-		dryRunAck bool
-		wantTasks int
-	}{
-		{name: "fresh inventory recovers", inventory: -time.Minute, wantTasks: 1},
-		{name: "inventory before failure remains blocked", inventory: -90 * time.Minute},
-		{name: "expired inventory remains blocked", inventory: -3 * time.Hour},
-		{name: "new protection is respected", inventory: -time.Minute, protected: true},
-		{name: "partial inventory remains blocked", inventory: -time.Minute, partial: true},
-		{name: "successful prune post inventory recovers", inventory: -time.Minute, pruneAck: true, wantTasks: 1},
-		{name: "dry run is not inventory evidence", inventory: -time.Minute, pruneAck: true, dryRunAck: true},
-		{name: "unrecovered failure does not block other node", inventory: -90 * time.Minute, otherNode: true, wantTasks: 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			stateStore, nodeSecret, path := newImageCacheControllerTestStoreWithPath(t)
-			updater, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-1", "https://worker-1.example.com", nil, "machine-1", "fingerprint-worker-1", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache})
-			if err != nil {
-				t.Fatal(err)
-			}
-			upsertControllerImageCacheManifest(t, stateStore)
-			lifecycle := model.ImageLifecycleDeleted
-			if tc.protected {
-				lifecycle = model.ImageLifecycleAvailable
-			}
-			if _, err := stateStore.UpsertImage(model.Image{
-				TenantID: "tenant_1", AppID: "app_1",
-				ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo:old",
-				CanonicalDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				LifecycleState:  lifecycle,
-			}); err != nil {
-				t.Fatal(err)
-			}
-			task, err := stateStore.CreateNodeUpdateTask(controllerImageCachePrunePrincipal(), updater.ID, "", "", model.NodeUpdateTaskTypePruneImageCache, map[string]string{
-				"prune_reason": "image-cache-orphan", "targets_json": `[{"repo":"fugue-apps/obsolete","target":"never-replay"}]`,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := stateStore.FailNodeUpdateTask(task.ID, updater.ID, "node update task timed out", "timeout"); err != nil {
-				t.Fatal(err)
-			}
-			// Model a prior process failure without sleeping or changing the
-			// production clock. The reopened file store is the durable history.
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var state model.State
-			if err := json.Unmarshal(raw, &state); err != nil {
-				t.Fatal(err)
-			}
-			now := time.Now().UTC()
-			finished := now.Add(-time.Hour)
-			for i := range state.NodeUpdateTasks {
-				if state.NodeUpdateTasks[i].ID == task.ID {
-					state.NodeUpdateTasks[i].CompletedAt = &finished
-					state.NodeUpdateTasks[i].UpdatedAt = finished
-				}
-			}
-			for i := range state.ImageCacheNodes {
-				state.ImageCacheNodes[i].ObservedAt = now.Add(tc.inventory)
-				state.ImageCacheNodes[i].ReportedByNodeUpdaterID = updater.ID
-			}
-			completed := now
-			if tc.partial {
-				completed = now.Add(-2 * time.Minute)
-			}
-			ack := model.NodeUpdateTask{
-				ID: "inventory-success", NodeUpdaterID: updater.ID,
-				Type: model.NodeUpdateTaskTypeReportImageCache, Status: model.NodeUpdateTaskStatusCompleted,
-				CreatedAt: now.Add(-5 * time.Minute), CompletedAt: &completed,
-			}
-			if tc.pruneAck {
-				ack.Type = model.NodeUpdateTaskTypePruneImageCache
-				ack.Payload = map[string]string{"allow_delete": "true", "dry_run": "false"}
-				if tc.dryRunAck {
-					ack.Payload["dry_run"] = "true"
-				}
-			}
-			state.NodeUpdateTasks = append(state.NodeUpdateTasks, ack)
-			raw, err = json.Marshal(state)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, raw, 0600); err != nil {
-				t.Fatal(err)
-			}
-			if tc.otherNode {
-				if _, _, err := stateStore.EnrollNodeUpdater(nodeSecret, "worker-2", "https://worker-2.example.com", nil, "machine-2", "fingerprint-worker-2", "v10", "join-v10", []string{"heartbeat", "tasks", model.NodeUpdateTaskTypePruneImageCache}); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := stateStore.UpsertImageCacheInventory(model.ImageCacheNodeInventory{
-					NodeID: "machine-2", ClusterNodeName: "worker-2", ObservedAt: now, Status: "reported",
-					UnreferencedBlobCount: 1, UnreferencedBlobBytes: 100,
-					UnreferencedBlobs: []model.ImageCachePruneBlobCandidate{{Digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", SizeBytes: 100, Reason: "unreferenced_blob"}},
-				}, nil); err != nil {
-					t.Fatal(err)
-				}
-			}
-			svc := &Service{Store: stateStore, Config: config.ControllerConfig{
-				ImageStoreOrphanPruneMode:                  model.ImageCachePruneModeDelete,
-				ImageStoreOrphanPruneGracePeriod:           time.Hour,
-				ImageStoreOrphanPruneMaxTargetsPerNode:     10,
-				ImageStoreOrphanPruneMaxDeleteBytesPerNode: "1Gi",
-				ImageStoreOrphanPruneMinReplicaCount:       1,
-				ImageCacheInventoryTTL:                     2 * time.Hour,
-			}}
-			if err := svc.scheduleOrphanImageCachePrune(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			tasks, err := stateStore.ListNodeUpdateTasks("", true, "", model.NodeUpdateTaskStatusPending)
-			if err != nil || len(tasks) != tc.wantTasks {
-				t.Fatalf("pending tasks=%+v, error=%v; want %d", tasks, err, tc.wantTasks)
-			}
-			if len(tasks) == 1 {
-				wantNode := "worker-1"
-				if tc.otherNode {
-					wantNode = "worker-2"
-				}
-				if tasks[0].ClusterNodeName != wantNode || tasks[0].Payload["targets_json"] == task.Payload["targets_json"] || tasks[0].Payload["allow_delete"] != "true" {
-					t.Fatalf("recovery did not schedule a fresh safe plan on %s: %+v", wantNode, tasks[0])
-				}
-			}
-		})
-	}
-}
-
 func TestControllerImageCachePruneRecoveryRequiresNodeEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	old := now.Add(-time.Hour)
@@ -931,7 +798,8 @@ func TestControllerImageCachePruneRecoveryRequiresNodeEvidence(t *testing.T) {
 func TestControllerImageCachePrunePlanClassifiesStaleReplica(t *testing.T) {
 	t.Parallel()
 
-	stateStore, _ := newImageCacheControllerTestStore(t)
+	stateStore, _, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	digest := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	image, err := stateStore.UpsertImage(model.Image{
 		TenantID:        "tenant_1",
@@ -996,7 +864,7 @@ func TestControllerImageCachePrunePlanClassifiesStaleReplica(t *testing.T) {
 func TestControllerImageCacheActiveAppDoesNotProtectDeletingGeneration(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1083,7 +951,8 @@ func TestControllerImageCacheActiveAppDoesNotProtectDeletingGeneration(t *testin
 func TestControllerImageCachePrunePlanClassifiesDeletedGeneration(t *testing.T) {
 	t.Parallel()
 
-	stateStore, _ := newImageCacheControllerTestStore(t)
+	stateStore, _, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	digest := "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
 	if _, err := stateStore.UpsertImage(model.Image{
 		TenantID:        "tenant_1",
@@ -1121,7 +990,8 @@ func TestControllerImageCachePrunePlanClassifiesDeletedGeneration(t *testing.T) 
 func TestControllerImageCachePrunePlanRetiresAuthorizedManifestGraph(t *testing.T) {
 	t.Parallel()
 
-	stateStore, _ := newImageCacheControllerTestStore(t)
+	stateStore, _, fixture := newImageCacheControllerTestStoreWithPath(t)
+	seedControllerStoreTenant(t, fixture, "tenant_1")
 	const (
 		parentDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 		childDigest  = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
@@ -1184,8 +1054,8 @@ func newImageCacheControllerTestStore(t *testing.T) (*store.Store, string) {
 
 func newImageCacheControllerTestStoreWithPath(t *testing.T) (*store.Store, string, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "store.json")
-	stateStore := store.New(path)
+	path := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, path)
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

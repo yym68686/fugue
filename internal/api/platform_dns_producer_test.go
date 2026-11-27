@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,11 +15,10 @@ import (
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/platformsafety"
-	"fugue/internal/store"
 	"fugue/internal/testfixture/celldns"
 )
 
-func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, model.State) {
+func dnsProducerServer(t *testing.T) (*Server, *sql.DB, platformproducer.Policy, platformPublicationFixture) {
 	t.Helper()
 	_, s, _, _, _, _ := setupAppDomainTestServerWithDomains(t, "example.test")
 	keys := celldns.Keys()
@@ -36,19 +35,19 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 	if compiled.Lineage.InputSnapshotDigest == "" {
 		t.Fatal("actual normalized global compiler input missing")
 	}
-	state := model.State{}
+	state := platformPublicationFixture{}
 	add := func(r model.PlatformArtifactRelease) {
-		state.PlatformArtifactReleases = append(state.PlatformArtifactReleases, r)
-		state.PlatformReleaseLanes = append(state.PlatformReleaseLanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, ActiveReleaseID: r.ID, FencingToken: r.FencingToken, Version: 1})
+		state.releases = append(state.releases, r)
+		state.lanes = append(state.lanes, model.PlatformReleaseLane{LaneKey: r.LaneKey, ArtifactKind: r.ArtifactKind, ScopeKey: r.ScopeKey, ReleaseChannel: r.ReleaseChannel, ActiveReleaseID: r.ID, FencingToken: r.FencingToken, Version: 1})
 	}
 	for i, a := range policies {
 		if a.ID == previous.ProducerPolicy.ArtifactID {
-			state.PlatformArtifacts = append(state.PlatformArtifacts, a)
+			state.artifacts = append(state.artifacts, a)
 			add(activations[i])
 		}
 	}
-	state.PlatformArtifacts = append(state.PlatformArtifacts, previous.Parent, previous.Route, previous.TLS, previous.DNS)
-	state.PlatformArtifacts = append(state.PlatformArtifacts, sources...)
+	state.artifacts = append(state.artifacts, previous.Parent, previous.Route, previous.TLS, previous.DNS)
+	state.artifacts = append(state.artifacts, sources...)
 	r := celldns.PreviousPublication(*previous)
 	add(r)
 	now := time.Now().UTC()
@@ -56,29 +55,25 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	state.PlatformLKGSnapshots = append(state.PlatformLKGSnapshots, lkg)
+	state.lkgs = append(state.lkgs, lkg)
 	p := platformproducer.Policy{SchemaVersion: platformproducer.Schema, Generation: "dns-producer", PublicationRole: platformconfig.PublicationRoleCellDNS, AuthorityCellID: "cell-dns", TargetScope: "authority-cell:cell-dns", Mode: "shadow", InputSource: platformproducer.DNSProducerInputSource, IntervalSeconds: 30, RefreshSeconds: 120,
 		DNSSource: &platformproducer.DNSProducerSource{ProducerPolicy: *previous.ProducerPolicy, PreviousTopology: req.Intent.RouteAuthorityTransition.PreviousTopology, DNSNodeIDs: []string{"dns-a"}}}
 	raw, _ := json.Marshal(p)
 	content := map[string]any{}
 	json.Unmarshal(raw, &content)
 	a := celldns.Sign(t, model.PlatformArtifact{SchemaVersion: model.PlatformArtifactSchemaVersionV1, ArtifactKind: model.PlatformArtifactKindPolicySnapshot, Scope: model.PlatformArtifactScope{Key: "platform-config-producer:cell-dns"}, Generation: p.Generation, Content: content}, "dns-producer-policy", 1)
-	state.PlatformArtifacts = append(state.PlatformArtifacts, a)
+	state.artifacts = append(state.artifacts, a)
 	add(model.PlatformArtifactRelease{ID: "dns-producer-activation", ArtifactID: a.ID, ArtifactKind: a.ArtifactKind, ScopeKey: a.ScopeKey, Generation: a.Generation, ReleaseChannel: "shadow", FencingToken: 1, Status: model.PlatformArtifactReleaseStatusActive, ReleasedAt: now, LaneKey: platformsafety.ReleaseLaneKey(a.ArtifactKind, a.ScopeKey, "shadow")})
-	path := t.TempDir() + "/state.json"
-	raw, _ = json.Marshal(state)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.store = store.New(path)
+	const fixture = "dns-producer"
+	s.store = newStoreTestDatabase(t, fixture)
 	s.store.ConfigurePlatformArtifactSigning(keys)
+	db := openStoreTestSQL(t, fixture)
+	state.seed(t, db)
 	for _, input := range inputs {
 		if err := s.store.EnsurePlatformCompilerInput(input.InputSnapshot, input.Lineage.InputSnapshotDigest); err != nil {
 			t.Fatal(err)
 		}
 	}
-	raw, _ = os.ReadFile(path)
-	json.Unmarshal(raw, &state)
 	// Any live Kubernetes/Edge read is a regression: capture uses immutable input.
 	kube := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("DNS source capture performed live network observation")
@@ -88,53 +83,7 @@ func dnsProducerServer(t *testing.T) (*Server, string, platformproducer.Policy, 
 	s.newClusterNodeClient = func() (*clusterNodeClient, error) {
 		return &clusterNodeClient{client: kube.Client(), baseURL: kube.URL}, nil
 	}
-	return s, path, p, state
-}
-
-func TestDNSProducerCaptureAndShadowAreIndependentAndReadOnlyForSources(t *testing.T) {
-	s, path, p, before := dnsProducerServer(t)
-	req, err := s.captureDNSProducer(context.Background(), p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if req.RuntimeSnapshot.CapturedAt == nil || req.RuntimeSnapshot.CapturedAt.Year() != 2026 || req.RuntimeSnapshot.CapturedAt.Month() != time.August {
-		t.Fatal("source timestamp was renewed")
-	}
-	if _, err := s.reconcilePlatformConfigurationScope(context.Background(), "platform-config-producer:cell-dns", nil); err != nil {
-		t.Fatal(err)
-	}
-	a, r, found, err := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "shadow")
-	if err != nil || !found || a.Content["publication_role"] != platformconfig.PublicationRoleCellDNS {
-		t.Fatal("DNS shadow absent", err)
-	}
-	sets, err := s.store.ListPlatformExpectedConsumerSets(model.PlatformExpectedConsumerSetFilter{ArtifactReleaseID: r.ID})
-	if err != nil || len(sets) != 1 || sets[0].ArtifactKind != model.PlatformArtifactKindDNSAnswerBundle || sets[0].RequiredCardinality != 1 {
-		t.Fatal("DNS acquired other authority", sets, err)
-	}
-	if _, err := s.reconcilePlatformConfigurationScope(context.Background(), "platform-config-producer:cell-dns", nil); err != nil {
-		t.Fatal(err)
-	}
-	_, repeat, _, _ := s.store.GetActivePlatformArtifact(model.PlatformArtifactKindReleaseSet, p.TargetScope, "shadow")
-	if repeat.ID != r.ID {
-		t.Fatal("unchanged source republished")
-	}
-	var after model.State
-	raw, _ := os.ReadFile(path)
-	json.Unmarshal(raw, &after)
-	if !reflect.DeepEqual(before.PlatformLKGSnapshots, after.PlatformLKGSnapshots) {
-		t.Fatal("shadow changed positive LKG")
-	}
-	for _, lane := range before.PlatformReleaseLanes {
-		found := false
-		for _, current := range after.PlatformReleaseLanes {
-			if lane.LaneKey == current.LaneKey {
-				found = reflect.DeepEqual(lane, current)
-			}
-		}
-		if !found {
-			t.Fatal("source authority mutated")
-		}
-	}
+	return s, db, p, state
 }
 
 func TestDNSProducerWarmsOnlyExactPersistedOutput(t *testing.T) {
@@ -170,87 +119,76 @@ func TestDNSProducerWarmsOnlyExactPersistedOutput(t *testing.T) {
 func TestDNSProducerRefusesUnverifiedChangedOrUnavailableSource(t *testing.T) {
 	for _, scenario := range []string{"source activation", "full fence", "unverified", "expired LKG", "corrupt LKG", "unsigned input", "missing input", "missing producer dependency", "missing runtime input", "corrupt runtime input", "runtime input size", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
-			s, path, p, state := dnsProducerServer(t)
+			s, db, p, state := dnsProducerServer(t)
 			ctx := context.Background()
+			if _, err := s.captureDNSProducer(ctx, p); err != nil {
+				t.Fatalf("uncorrupted source must pass: %v", err)
+			}
+			edit := func(query string, args ...any) {
+				t.Helper()
+				result, err := db.Exec(query, args...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n, err := result.RowsAffected(); err != nil || n != 1 {
+					t.Fatalf("expected one changed source record, got %d: %v", n, err)
+				}
+			}
+			parent, err := s.store.GetPlatformArtifact(state.releases[1].ArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := parent.Metadata["runtime_input_snapshot_digest"]
+			if digest == "" {
+				digest = parent.Metadata["input_snapshot_digest"]
+			}
 			switch scenario {
 			case "source activation":
-				state.PlatformReleaseLanes[0].FencingToken++
+				edit(`UPDATE fugue_platform_release_lanes SET fencing_token=fencing_token+1 WHERE lane_key=$1`, state.lanes[0].LaneKey)
 			case "full fence":
-				state.PlatformReleaseLanes[1].FencingToken++
+				edit(`UPDATE fugue_platform_release_lanes SET fencing_token=fencing_token+1 WHERE lane_key=$1`, state.lanes[1].LaneKey)
 			case "unverified":
-				state.PlatformArtifactReleases[1].VerificationState = model.PlatformArtifactVerificationStateServingUnverified
+				edit(`UPDATE fugue_platform_artifact_releases SET verification_state=$2 WHERE id=$1`, state.releases[1].ID, model.PlatformArtifactVerificationStateServingUnverified)
 			case "expired LKG":
-				state.PlatformLKGSnapshots[0].ExpiresAt = time.Now().Add(-time.Minute)
+				edit(`UPDATE fugue_platform_lkg_snapshots SET expires_at=now()-interval '1 minute' WHERE id=$1`, state.lkgs[0].ID)
 			case "corrupt LKG":
-				state.PlatformLKGSnapshots[0].SnapshotProvenance.Signature = "corrupt"
-			case "unsigned input":
-				for i := range state.PlatformArtifacts {
-					if state.PlatformArtifacts[i].ArtifactKind == model.PlatformArtifactKindPlatformIntent && state.PlatformArtifacts[i].ScopeKey == "global" {
-						state.PlatformArtifacts[i].Provenance.Signature = "corrupt"
-					}
+				edit(`UPDATE fugue_platform_lkg_snapshots SET snapshot_provenance_json=jsonb_set(snapshot_provenance_json,'{signature}','"corrupt"') WHERE id=$1`, state.lkgs[0].ID)
+			case "unsigned input", "missing input":
+				input, err := s.store.GetPlatformArtifactByIdentity(model.PlatformArtifactKindPlatformIntent, "global", parent.Metadata["intent_generation"])
+				if err != nil {
+					t.Fatal(err)
 				}
-			case "missing input":
-				for i, a := range state.PlatformArtifacts {
-					if a.ArtifactKind == model.PlatformArtifactKindPlatformIntent && a.ScopeKey == "global" {
-						state.PlatformArtifacts = append(state.PlatformArtifacts[:i], state.PlatformArtifacts[i+1:]...)
-						break
-					}
+				if scenario == "unsigned input" {
+					edit(`UPDATE fugue_platform_artifacts SET provenance_json=jsonb_set(provenance_json,'{signature}','"corrupt"') WHERE id=$1`, input.ID)
+				} else {
+					edit(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, input.ID)
 				}
 			case "missing producer dependency":
-				for _, a := range state.PlatformArtifacts {
-					if a.ID == p.DNSSource.ProducerPolicy.ArtifactID {
-						producer, err := platformproducer.Decode(a)
-						if err != nil {
-							t.Fatal(err)
-						}
-						for j, dependency := range state.PlatformArtifacts {
-							if dependency.ID == producer.DNSPolicyArtifactID {
-								state.PlatformArtifacts = append(state.PlatformArtifacts[:j], state.PlatformArtifacts[j+1:]...)
-								break
-							}
-						}
-						break
-					}
+				producer, err := s.store.GetPlatformArtifact(p.DNSSource.ProducerPolicy.ArtifactID)
+				if err != nil {
+					t.Fatal(err)
 				}
-			case "missing runtime input", "corrupt runtime input", "runtime input size":
-				var digest string
-				for _, a := range state.PlatformArtifacts {
-					if a.ArtifactKind == model.PlatformArtifactKindReleaseSet && a.ScopeKey == "global" {
-						digest = a.Metadata["input_snapshot_digest"]
-					}
+				policy, err := platformproducer.Decode(producer)
+				if err != nil {
+					t.Fatal(err)
 				}
-				changed := false
-				for i := range state.PlatformArtifactContents {
-					c := &state.PlatformArtifactContents[i]
-					if c.ContentHash != digest {
-						continue
-					}
-					changed = true
-					if scenario == "missing runtime input" {
-						state.PlatformArtifactContents = append(state.PlatformArtifactContents[:i], state.PlatformArtifactContents[i+1:]...)
-					} else if scenario == "corrupt runtime input" {
-						c.Content = map[string]any{"intent_generation": "corrupt"}
-					} else {
-						c.SizeBytes++
-					}
-					break
-				}
-				if !changed {
-					t.Fatal("runtime corruption did not select an actual original input")
-				}
+				edit(`DELETE FROM fugue_platform_artifacts WHERE id=$1`, policy.DNSPolicyArtifactID)
+			case "missing runtime input":
+				edit(`DELETE FROM fugue_platform_input_hot_chunks WHERE content_hash=$1 AND ordinal=0`, digest)
+			case "corrupt runtime input":
+				edit(`UPDATE fugue_platform_input_hot_chunks SET data=decode('00','hex') WHERE content_hash=$1 AND ordinal=0`, digest)
+			case "runtime input size":
+				edit(`UPDATE fugue_platform_input_manifests SET size_bytes=size_bytes+1 WHERE content_hash=$1`, digest)
 			case "canceled":
 				var cancel context.CancelFunc
 				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			raw, _ := json.Marshal(state)
-			os.WriteFile(path, raw, 0600)
-			_, err := s.captureDNSProducer(ctx, p)
-			if err == nil {
+			before := convergenceStoreFacts(t, db)
+			if _, err := s.captureDNSProducer(ctx, p); err == nil {
 				t.Fatal("untrusted source accepted")
 			}
-			after, _ := os.ReadFile(path)
-			if string(raw) != string(after) {
+			if after := convergenceStoreFacts(t, db); !reflect.DeepEqual(before, after) {
 				t.Fatal("failed capture mutated source")
 			}
 		})

@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -20,7 +19,6 @@ import (
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 
 	"github.com/jackc/pgx/v5"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -539,7 +537,7 @@ func TestValidateManagedPostgresPrimarySQL(t *testing.T) {
 func TestRollbackManagedPostgresStageRestoresThroughForcedApply(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -807,7 +805,7 @@ func TestManagedPostgresInPlaceStorageExpansionRequired(t *testing.T) {
 func TestDatabaseLocalizePreservesStorageIntentDuringAppOutage(t *testing.T) {
 	for _, bound := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
-			state := store.New(filepath.Join(t.TempDir(), "store.json"))
+			state := newStoreTestDatabase(t, "")
 			if err := state.Init(); err != nil {
 				t.Fatal(err)
 			}
@@ -1663,7 +1661,7 @@ func TestBindManagedPostgresPendingReplicaOnNodeBindsPVCOnTargetNode(t *testing.
 func TestSelectManagedPostgresSwitchoverTargetMatchesManagedSharedLocationNode(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

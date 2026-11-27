@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -18,7 +17,6 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
-	"fugue/internal/store"
 )
 
 type recordingImporter struct {
@@ -171,7 +169,7 @@ func mustRewriteImportedDigestRef(t *testing.T, imageRef, pushBase, pullBase, di
 func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -291,7 +289,7 @@ func TestExecuteManagedImportOperationImportsDockerImageSource(t *testing.T) {
 func TestExecuteManagedImportOperationImportsDockerImageSourceThroughRuntimeCacheWhenCentralRegistryUnavailable(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -460,7 +458,7 @@ func TestExecuteManagedImportOperationImportsDockerImageSourceThroughRuntimeCach
 func TestExecuteManagedImportOperationReusesManagedImageLocationForDockerImageSource(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -589,7 +587,7 @@ func TestExecuteManagedImportOperationReusesManagedImageLocationForDockerImageSo
 func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuilderRegistryFlag(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -747,7 +745,7 @@ func TestExecuteManagedImportOperationReusesDistributedImageLocationWithoutBuild
 func TestExecuteManagedImportOperationReusesManagedImageLocationWithoutResolvedTarget(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -859,7 +857,7 @@ func TestExecuteManagedImportOperationReusesManagedImageLocationWithoutResolvedT
 func TestExecuteManagedImportOperationImportsGitHubSourceThroughRuntimeCache(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -986,7 +984,7 @@ func TestExecuteManagedImportOperationImportsGitHubSourceThroughRuntimeCache(t *
 func TestExecuteManagedImportOperationImportsUploadSourceThroughRuntimeCache(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1106,7 +1104,7 @@ func TestExecuteManagedImportOperationImportsUploadSourceThroughRuntimeCache(t *
 func TestExecuteManagedImportOperationResolvesManagedSharedPersistentImageImportToSelectedNodeCache(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1317,7 +1315,7 @@ func TestControllerReachableImageCacheEndpointRejectsAbstractAndLoopbackHosts(t 
 func TestExecuteManagedImportOperationUsesPushBaseForPullBaseDockerImageSource(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1415,7 +1413,7 @@ func TestExecuteManagedImportOperationUsesPushBaseForPullBaseDockerImageSource(t
 func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1497,7 +1495,7 @@ func TestExecuteManagedImportOperationRefreshesExistingRestartToken(t *testing.T
 func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportResult(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1628,7 +1626,7 @@ func TestExecuteManagedImportOperationRecoversUploadManagedImageRefFromImportRes
 func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1841,7 +1839,7 @@ func TestExecuteManagedImportOperationPreservesGitHubSourceAfterUploadOverride(t
 func TestExecuteManagedImportOperationPropagatesUploadImporterErrors(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1926,7 +1924,7 @@ func TestExecuteManagedImportOperationPropagatesUploadImporterErrors(t *testing.
 func TestExecuteManagedImportOperationFailsWhenUploadBuildLacksBuilderEvidence(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2019,7 +2017,7 @@ func TestExecuteManagedImportOperationFailsWhenUploadBuildLacksBuilderEvidence(t
 func TestExecuteManagedImportOperationFailsWhenDirectManagedImageStaysMissing(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2102,7 +2100,7 @@ func TestExecuteManagedImportOperationFailsWhenDirectManagedImageStaysMissing(t 
 func TestExecuteManagedImportOperationFailsWhenUploadImportOmitsManagedImageRef(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2205,7 +2203,7 @@ func TestExecuteManagedImportOperationFailsWhenUploadImportOmitsManagedImageRef(
 func TestExecuteManagedImportOperationStopsAfterForceDelete(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2290,7 +2288,7 @@ func TestExecuteManagedImportOperationStopsAfterForceDelete(t *testing.T) {
 func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2372,7 +2370,7 @@ func TestExecuteManagedImportOperationSyncsBillingImageStorage(t *testing.T) {
 func TestExecuteManagedImportOperationPreservesExplicitPortsAndBuildPlacement(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2465,7 +2463,7 @@ func TestExecuteManagedImportOperationPreservesExplicitPortsAndBuildPlacement(t 
 func TestImportBuilderMemoryCeilingUsesPoolCapInsteadOfTenantQuota(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2497,7 +2495,7 @@ func TestImportBuilderMemoryCeilingUsesPoolCapInsteadOfTenantQuota(t *testing.T)
 func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCustomValues(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2649,7 +2647,7 @@ func TestExecuteManagedImportOperationRefreshesComposeEnvWithoutOverwritingCusto
 func TestExecuteManagedImportOperationAppliesSuggestedStartupCommandWhenMissing(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2759,7 +2757,7 @@ func TestExecuteManagedImportOperationAppliesSuggestedStartupCommandWhenMissing(
 func TestExecuteManagedImportOperationDoesNotOverrideExplicitStartupCommand(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2855,7 +2853,7 @@ func TestExecuteManagedImportOperationDoesNotOverrideExplicitStartupCommand(t *t
 func TestExecuteManagedImportOperationKeepsBackgroundAppsPortless(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2935,7 +2933,7 @@ func TestExecuteManagedImportOperationKeepsBackgroundAppsPortless(t *testing.T) 
 func TestExecuteManagedImportOperationAutoBackgroundsDockerImageWithoutPublicServiceSignal(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3030,7 +3028,7 @@ func TestExecuteManagedImportOperationAutoBackgroundsDockerImageWithoutPublicSer
 func TestExecuteManagedImportOperationAutoBackgroundsSingleAppWithoutPublicServiceSignal(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -3131,7 +3129,7 @@ func TestExecuteManagedImportOperationAutoBackgroundsSingleAppWithoutPublicServi
 func TestExecuteManagedImportOperationKeepsTopologyServicesPublicWithoutPublicServiceSignal(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

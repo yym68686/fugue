@@ -11,11 +11,7 @@ import (
 // archive has no foreign key to apps/images, so deleting metadata never erases
 // the positive retirement authority. Live rows take precedence when revived.
 func (s *Store) ListImageRetirements() ([]model.Image, error) {
-	if !s.usingDatabase() {
-		var out []model.Image
-		err := s.withLockedState(false, func(state *model.State) error { out = append(out, state.ImageRetirements...); return nil })
-		return out, err
-	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	rows, err := s.db.QueryContext(ctx, `SELECT image_json FROM fugue_image_retirements ORDER BY image_id,digest`)
@@ -56,17 +52,4 @@ func (s *Store) ListImagesWithRetirementAuthority() ([]model.Image, error) {
 		}
 	}
 	return images, nil
-}
-
-func retainImageRetirement(state *model.State, image model.Image) {
-	if (image.LifecycleState != model.ImageLifecycleDeleting && image.LifecycleState != model.ImageLifecycleDeleted) || CanonicalImageDigest(image.CanonicalDigest) == "" {
-		return
-	}
-	for _, old := range state.ImageRetirements {
-		if old.ID == image.ID && old.CanonicalDigest == image.CanonicalDigest {
-			return
-		}
-	}
-	image.ManifestJSON = ""
-	state.ImageRetirements = append(state.ImageRetirements, image)
 }

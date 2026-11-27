@@ -13,7 +13,7 @@ type billingStateIndex struct {
 	billableManagedServicesByAppID map[string][]model.BackingService
 }
 
-func newBillingStateIndex(state *model.State) billingStateIndex {
+func newBillingStateIndex(state *storeProjection) billingStateIndex {
 	index := billingStateIndex{
 		runtimesByID:                   map[string]model.Runtime{},
 		servicesByID:                   map[string]model.BackingService{},
@@ -88,7 +88,7 @@ func (index billingStateIndex) managedServicesForApp(appID string) []model.Backi
 	return index.billableManagedServicesByAppID[appID]
 }
 
-func tenantManagedCommittedResourcesWithIndex(state *model.State, index billingStateIndex, tenantID string) model.BillingResourceSpec {
+func tenantManagedCommittedResourcesWithIndex(state *storeProjection, index billingStateIndex, tenantID string) model.BillingResourceSpec {
 	total := model.BillingResourceSpec{}
 	if state == nil {
 		return total
@@ -121,7 +121,7 @@ func tenantManagedCommittedResourcesWithIndex(state *model.State, index billingS
 	return total
 }
 
-func tenantManagedCommittedResourcesForBillingWithIndex(state *model.State, index billingStateIndex, record model.TenantBilling) model.BillingResourceSpec {
+func tenantManagedCommittedResourcesForBillingWithIndex(state *storeProjection, index billingStateIndex, record model.TenantBilling) model.BillingResourceSpec {
 	return addManagedImageStorageCommitment(tenantManagedCommittedResourcesWithIndex(state, index, record.TenantID), record.ManagedImageStorageGibibytes)
 }
 
@@ -170,7 +170,7 @@ func publicRuntimeChargeComponentForResourcesWithIndex(index billingStateIndex, 
 	}, true
 }
 
-func tenantPublicRuntimeChargeComponentsWithIndex(state *model.State, index billingStateIndex, tenantID string) []publicRuntimeChargeComponent {
+func tenantPublicRuntimeChargeComponentsWithIndex(state *storeProjection, index billingStateIndex, tenantID string) []publicRuntimeChargeComponent {
 	if state == nil || strings.TrimSpace(tenantID) == "" {
 		return nil
 	}
@@ -209,7 +209,7 @@ func tenantPublicRuntimeChargeComponentsWithIndex(state *model.State, index bill
 	return components
 }
 
-func tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state *model.State, index billingStateIndex, tenantID string) int64 {
+func tenantPublicRuntimeOutgoingHourlyRateMicroCentsWithIndex(state *storeProjection, index billingStateIndex, tenantID string) int64 {
 	total := int64(0)
 	for _, component := range tenantPublicRuntimeChargeComponentsWithIndex(state, index, tenantID) {
 		total += component.HourlyRateMicroCents

@@ -9,10 +9,12 @@ import (
 	"fugue/internal/platformcontrol"
 )
 
-// The caller already owns the exclusive scope lock. Loading the same immutable
-// releases, members and expectations as the file store keeps rollback proof
-// independent of HTTP preflight and serializes it with configuration writers.
+// The caller already owns the exclusive scope lock. Load the immutable
+// releases, members and expectations independently of HTTP preflight.
 func (s *Store) pgConsumerTrafficRollbackCursor(ctx context.Context, tx *sql.Tx, previous model.PlatformConsumerInstance, cursor *platformcontrol.PlatformConsumerHeartbeatCursor, set model.PlatformExpectedConsumerSet, heartbeat platformcontrol.PlatformConsumerHeartbeatEnvelope) (*platformcontrol.PlatformConsumerHeartbeatCursor, error) {
+	if previous.ExpectedConsumerSetID == set.ID || set.ArtifactReleaseID == "" {
+		return nil, platformcontrol.ErrPlatformConsumerHeartbeatGenerationBack
+	}
 	parent, err := pgGetPlatformArtifactForUpdate(ctx, tx, set.ReleaseSetID, true)
 	if err != nil {
 		return nil, mapDBErr(err)

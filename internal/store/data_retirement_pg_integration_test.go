@@ -49,7 +49,7 @@ func TestWorkspaceRetirementPostgresIntegration(t *testing.T) {
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {
 		t.Fatal("disposable loopback fugue_test database required")
 	}
-	s := New("", address)
+	s := New(address)
 	db, err := sql.Open("pgx", address)
 	if err != nil {
 		t.Fatal(err)

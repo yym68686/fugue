@@ -21,6 +21,68 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		accept string
+		body   string
+	}{
+		{
+			name:   "post with billable side effects",
+			method: http.MethodPost,
+			path:   "/api/jobs",
+			body:   `{"model":"demo","input":"hello"}`,
+		},
+		{
+			name:   "patch with externally visible side effects",
+			method: http.MethodPatch,
+			path:   "/api/media",
+			body:   `{"model":"demo","prompt":"hello"}`,
+		},
+		{
+			name:   "sse accept",
+			method: http.MethodPut,
+			path:   "/api/streaming",
+			accept: "text/event-stream",
+			body:   `{"stream":true}`,
+		},
+		{
+			name:   "stream path",
+			method: http.MethodPut,
+			path:   "/events/stream",
+			body:   `{"stream":true}`,
+		},
+		{
+			name:   "large body",
+			method: http.MethodPut,
+			path:   "/api/resource",
+			body:   strings.Repeat("x", defaultAppProxyReplayBodyLimit+1),
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := httptest.NewRequest(tt.method, "http://app.example"+tt.path, strings.NewReader(tt.body))
+			if tt.accept != "" {
+				req.Header.Set("Accept", tt.accept)
+			}
+			if err := prepareAppProxyRequestForRetries(req); err != nil {
+				t.Fatalf("prepare request for retries: %v", err)
+			}
+			if req.GetBody != nil {
+				t.Fatal("expected request body to remain non-replayable")
+			}
+		})
+	}
+}
+
 type fakeServiceResolver struct {
 	ips map[string][]net.IPAddr
 }
@@ -676,68 +738,6 @@ func TestAppProxyRetriesTransientUpstreamErrorsWithReplayableBody(t *testing.T) 
 	}
 	if got := recorder.Body.String(); got != "ok" {
 		t.Fatalf("expected proxied response body %q, got %q", "ok", got)
-	}
-}
-
-func TestAppProxyDoesNotPrepareReplayBodyForHighRiskRequests(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		method string
-		path   string
-		accept string
-		body   string
-	}{
-		{
-			name:   "post with billable side effects",
-			method: http.MethodPost,
-			path:   "/api/jobs",
-			body:   `{"model":"demo","input":"hello"}`,
-		},
-		{
-			name:   "patch with externally visible side effects",
-			method: http.MethodPatch,
-			path:   "/api/media",
-			body:   `{"model":"demo","prompt":"hello"}`,
-		},
-		{
-			name:   "sse accept",
-			method: http.MethodPut,
-			path:   "/api/streaming",
-			accept: "text/event-stream",
-			body:   `{"stream":true}`,
-		},
-		{
-			name:   "stream path",
-			method: http.MethodPut,
-			path:   "/events/stream",
-			body:   `{"stream":true}`,
-		},
-		{
-			name:   "large body",
-			method: http.MethodPut,
-			path:   "/api/resource",
-			body:   strings.Repeat("x", defaultAppProxyReplayBodyLimit+1),
-		},
-	}
-
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			req := httptest.NewRequest(tt.method, "http://app.example"+tt.path, strings.NewReader(tt.body))
-			if tt.accept != "" {
-				req.Header.Set("Accept", tt.accept)
-			}
-			if err := prepareAppProxyRequestForRetries(req); err != nil {
-				t.Fatalf("prepare request for retries: %v", err)
-			}
-			if req.GetBody != nil {
-				t.Fatal("expected request body to remain non-replayable")
-			}
-		})
 	}
 }
 

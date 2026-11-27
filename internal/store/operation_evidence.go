@@ -64,143 +64,15 @@ const (
 )
 
 func (s *Store) CountOperationEvidenceMetricGroups() ([]OperationEvidenceRecordMetricCount, []OperationEvidenceCaptureMetricCount, []OperationEvidenceRolloutFailureMetricCount, error) {
-	if s.usingDatabase() {
-		return s.pgCountOperationEvidenceMetricGroups()
-	}
-	recordsByKey := map[string]OperationEvidenceRecordMetricCount{}
-	captureByResult := map[string]OperationEvidenceCaptureMetricCount{}
-	rolloutByKey := map[string]OperationEvidenceRolloutFailureMetricCount{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, evidence := range state.OperationEvidence {
-			recordKey := evidence.Type + "\x00" + evidence.Severity + "\x00" + evidence.Confidence
-			record := recordsByKey[recordKey]
-			record.Type = evidence.Type
-			record.Severity = evidence.Severity
-			record.Confidence = evidence.Confidence
-			record.Count++
-			recordsByKey[recordKey] = record
-
-			if isEvidenceCaptureMetricType(evidence.Type) {
-				result := evidenceCaptureMetricResult(evidence.Type)
-				capture := captureByResult[result]
-				capture.Result = result
-				capture.Count++
-				captureByResult[result] = capture
-			}
-
-			if reason := rolloutFailureMetricReason(evidence.Type); reason != "" {
-				key := reason + "\x00" + evidence.Confidence
-				rollout := rolloutByKey[key]
-				rollout.Reason = reason
-				rollout.Confidence = evidence.Confidence
-				rollout.Count++
-				rolloutByKey[key] = rollout
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	records := operationEvidenceRecordMetricCounts(recordsByKey)
-	captures := operationEvidenceCaptureMetricCounts(captureByResult)
-	rollouts := operationEvidenceRolloutMetricCounts(rolloutByKey)
-	return records, captures, rollouts, nil
+	return s.pgCountOperationEvidenceMetricGroups()
 }
 
 func (s *Store) CountReleaseAttemptMetricGroups() ([]ReleaseAttemptMetricCount, error) {
-	if s.usingDatabase() {
-		return s.pgCountReleaseAttemptMetricGroups()
-	}
-	byKey := map[string]ReleaseAttemptMetricCount{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, attempt := range state.ReleaseAttempts {
-			key := attempt.TriggerType + "\x00" + attempt.Status
-			count := byKey[key]
-			count.TriggerType = attempt.TriggerType
-			count.Status = attempt.Status
-			count.Count++
-			byKey[key] = count
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return releaseAttemptMetricCounts(byKey), nil
+	return s.pgCountReleaseAttemptMetricGroups()
 }
 
 func (s *Store) CountReleaseEvidenceResearchGroups() (ReleaseEvidenceResearchSummary, []MigrationEvidenceMetricCount, error) {
-	if s.usingDatabase() {
-		return s.pgCountReleaseEvidenceResearchGroups()
-	}
-	summary := ReleaseEvidenceResearchSummary{WindowSeconds: int64(releaseEvidenceResearchFollowupWindow.Seconds())}
-	migrationByKey := map[string]MigrationEvidenceMetricCount{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		trackingAttempts := []model.ReleaseAttempt{}
-		for _, attempt := range state.ReleaseAttempts {
-			switch strings.TrimSpace(attempt.TriggerType) {
-			case model.ReleaseAttemptTriggerEnvPatch:
-				summary.EnvPatchAttempts++
-			case model.ReleaseAttemptTriggerImageTrackingAuto, model.ReleaseAttemptTriggerImageTrackingManualSync:
-				summary.TrackingSyncAttempts++
-				trackingAttempts = append(trackingAttempts, attempt)
-			}
-		}
-		for _, envAttempt := range state.ReleaseAttempts {
-			if strings.TrimSpace(envAttempt.TriggerType) != model.ReleaseAttemptTriggerEnvPatch {
-				continue
-			}
-			if releaseAttemptHasFollowupTrackingSync(envAttempt, trackingAttempts, releaseEvidenceResearchFollowupWindow) {
-				summary.EnvPatchThenTrackingSyncAttempts++
-			}
-		}
-		for _, evidence := range state.OperationEvidence {
-			for _, signal := range migrationEvidenceSignals(evidence) {
-				key := signal + "\x00" + evidence.Confidence
-				item := migrationByKey[key]
-				item.Signal = signal
-				item.Confidence = evidence.Confidence
-				item.Count++
-				migrationByKey[key] = item
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return ReleaseEvidenceResearchSummary{}, nil, err
-	}
-	return summary, migrationEvidenceMetricCounts(migrationByKey), nil
-}
-
-func isEvidenceCaptureMetricType(evidenceType string) bool {
-	switch strings.TrimSpace(evidenceType) {
-	case model.OperationEvidenceTypeCollectorError,
-		model.OperationEvidenceTypeRolloutPodFailure,
-		model.OperationEvidenceTypeRolloutContainerTerminated,
-		model.OperationEvidenceTypeRolloutPreviousLogs,
-		model.OperationEvidenceTypeRolloutCurrentLogs,
-		model.OperationEvidenceTypeRolloutKubernetesEvent,
-		model.OperationEvidenceTypeRolloutDeploymentSnapshot,
-		model.OperationEvidenceTypeRolloutReplicaSetSnapshot,
-		model.OperationEvidenceTypeRolloutPodSnapshot,
-		model.OperationEvidenceTypeImagePullFailure,
-		model.OperationEvidenceTypeSchedulerFailure,
-		model.OperationEvidenceTypeVolumeMountFailure,
-		model.OperationEvidenceTypeReadinessProbeFailure,
-		model.OperationEvidenceTypeLivenessProbeFailure,
-		model.OperationEvidenceTypeStartupProbeFailure:
-		return true
-	default:
-		return false
-	}
-}
-
-func evidenceCaptureMetricResult(evidenceType string) string {
-	if strings.TrimSpace(evidenceType) == model.OperationEvidenceTypeCollectorError {
-		return "error"
-	}
-	return "success"
+	return s.pgCountReleaseEvidenceResearchGroups()
 }
 
 func rolloutFailureMetricReason(evidenceType string) string {
@@ -230,32 +102,6 @@ func rolloutFailureMetricReason(evidenceType string) string {
 	}
 }
 
-func operationEvidenceRecordMetricCounts(byKey map[string]OperationEvidenceRecordMetricCount) []OperationEvidenceRecordMetricCount {
-	items := make([]OperationEvidenceRecordMetricCount, 0, len(byKey))
-	for _, item := range byKey {
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Type != items[j].Type {
-			return items[i].Type < items[j].Type
-		}
-		if items[i].Severity != items[j].Severity {
-			return items[i].Severity < items[j].Severity
-		}
-		return items[i].Confidence < items[j].Confidence
-	})
-	return items
-}
-
-func operationEvidenceCaptureMetricCounts(byKey map[string]OperationEvidenceCaptureMetricCount) []OperationEvidenceCaptureMetricCount {
-	items := make([]OperationEvidenceCaptureMetricCount, 0, len(byKey))
-	for _, item := range byKey {
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Result < items[j].Result })
-	return items
-}
-
 func operationEvidenceRolloutMetricCounts(byKey map[string]OperationEvidenceRolloutFailureMetricCount) []OperationEvidenceRolloutFailureMetricCount {
 	items := make([]OperationEvidenceRolloutFailureMetricCount, 0, len(byKey))
 	for _, item := range byKey {
@@ -270,71 +116,6 @@ func operationEvidenceRolloutMetricCounts(byKey map[string]OperationEvidenceRoll
 	return items
 }
 
-func releaseAttemptMetricCounts(byKey map[string]ReleaseAttemptMetricCount) []ReleaseAttemptMetricCount {
-	items := make([]ReleaseAttemptMetricCount, 0, len(byKey))
-	for _, item := range byKey {
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].TriggerType != items[j].TriggerType {
-			return items[i].TriggerType < items[j].TriggerType
-		}
-		return items[i].Status < items[j].Status
-	})
-	return items
-}
-
-func migrationEvidenceMetricCounts(byKey map[string]MigrationEvidenceMetricCount) []MigrationEvidenceMetricCount {
-	items := make([]MigrationEvidenceMetricCount, 0, len(byKey))
-	for _, item := range byKey {
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Signal != items[j].Signal {
-			return items[i].Signal < items[j].Signal
-		}
-		return items[i].Confidence < items[j].Confidence
-	})
-	return items
-}
-
-func releaseAttemptHasFollowupTrackingSync(envAttempt model.ReleaseAttempt, trackingAttempts []model.ReleaseAttempt, window time.Duration) bool {
-	if strings.TrimSpace(envAttempt.AppID) == "" || envAttempt.StartedAt.IsZero() {
-		return false
-	}
-	start := envAttempt.StartedAt.UTC()
-	deadline := start.Add(window)
-	for _, trackingAttempt := range trackingAttempts {
-		if strings.TrimSpace(trackingAttempt.AppID) != strings.TrimSpace(envAttempt.AppID) {
-			continue
-		}
-		if trackingAttempt.StartedAt.Before(start) || trackingAttempt.StartedAt.After(deadline) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func migrationEvidenceSignals(evidence model.OperationEvidence) []string {
-	evidenceType := strings.TrimSpace(evidence.Type)
-	if evidenceType != model.OperationEvidenceTypeRolloutPreviousLogs && evidenceType != model.OperationEvidenceTypeRolloutCurrentLogs {
-		return nil
-	}
-	haystack := strings.ToLower(evidence.Summary + "\n" + evidence.Message + "\n" + payloadSearchText(evidence.Payload))
-	signals := []string{}
-	if strings.Contains(haystack, "migration") || strings.Contains(haystack, "schema") {
-		signals = append(signals, "schema_or_migration_log")
-	}
-	if strings.Contains(haystack, "sqlstate") {
-		signals = append(signals, "sqlstate_log")
-	}
-	if strings.Contains(haystack, "deadlock") {
-		signals = append(signals, "deadlock_log")
-	}
-	return signals
-}
-
 func firstNonEmptyOperationEvidenceString(values ...string) string {
 	for _, value := range values {
 		if strings.TrimSpace(value) != "" {
@@ -344,56 +125,17 @@ func firstNonEmptyOperationEvidenceString(values ...string) string {
 	return ""
 }
 
-func payloadSearchText(payload map[string]any) string {
-	if len(payload) == 0 {
-		return ""
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
 func (s *Store) RecordOperationEvidence(evidence model.OperationEvidence) (model.OperationEvidence, error) {
 	evidence = normalizeOperationEvidence(evidence)
 	if strings.TrimSpace(evidence.TenantID) == "" || strings.TrimSpace(evidence.OperationID) == "" || strings.TrimSpace(evidence.Type) == "" {
 		return model.OperationEvidence{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecordOperationEvidence(evidence)
-	}
-	var out model.OperationEvidence
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findOperation(state, evidence.OperationID) < 0 {
-			return ErrNotFound
-		}
-		state.OperationEvidence = append(state.OperationEvidence, evidence)
-		state.OperationEvidence = retainOperationEvidence(state.OperationEvidence, evidence)
-		out = evidence
-		return nil
-	})
-	return out, err
+	return s.pgRecordOperationEvidence(evidence)
 }
 
 func (s *Store) ListOperationEvidence(filter model.OperationEvidenceFilter) ([]model.OperationEvidence, error) {
 	filter = normalizeOperationEvidenceFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListOperationEvidence(filter)
-	}
-	var out []model.OperationEvidence
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, evidence := range state.OperationEvidence {
-			if !operationEvidenceMatchesFilter(evidence, filter) {
-				continue
-			}
-			out = append(out, cloneOperationEvidence(evidence))
-		}
-		sortOperationEvidenceOldestFirst(out)
-		out = limitOperationEvidenceToNewest(out, filter.Limit)
-		return nil
-	})
-	return out, err
+	return s.pgListOperationEvidence(filter)
 }
 
 func (s *Store) ListOperationTimeline(tenantID string, platformAdmin bool, operationID string, includePayload bool) ([]model.OperationTimelineEntry, error) {
@@ -505,19 +247,7 @@ func (s *Store) CreateReleaseAttempt(attempt model.ReleaseAttempt) (model.Releas
 	if strings.TrimSpace(attempt.TenantID) == "" || strings.TrimSpace(attempt.AppID) == "" || strings.TrimSpace(attempt.TriggerType) == "" {
 		return model.ReleaseAttempt{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgCreateReleaseAttempt(attempt)
-	}
-	var out model.ReleaseAttempt
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findApp(state, attempt.AppID) < 0 {
-			return ErrNotFound
-		}
-		state.ReleaseAttempts = append(state.ReleaseAttempts, attempt)
-		out = attempt
-		return nil
-	})
-	return out, err
+	return s.pgCreateReleaseAttempt(attempt)
 }
 
 func (s *Store) UpdateReleaseAttempt(attempt model.ReleaseAttempt) (model.ReleaseAttempt, error) {
@@ -525,20 +255,7 @@ func (s *Store) UpdateReleaseAttempt(attempt model.ReleaseAttempt) (model.Releas
 	if strings.TrimSpace(attempt.ID) == "" {
 		return model.ReleaseAttempt{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgUpdateReleaseAttempt(attempt)
-	}
-	var out model.ReleaseAttempt
-	err := s.withLockedState(true, func(state *model.State) error {
-		idx := findReleaseAttempt(state, attempt.ID)
-		if idx < 0 {
-			return ErrNotFound
-		}
-		state.ReleaseAttempts[idx] = attempt
-		out = attempt
-		return nil
-	})
-	return out, err
+	return s.pgUpdateReleaseAttempt(attempt)
 }
 
 func (s *Store) GetReleaseAttempt(id string) (model.ReleaseAttempt, error) {
@@ -546,41 +263,12 @@ func (s *Store) GetReleaseAttempt(id string) (model.ReleaseAttempt, error) {
 	if id == "" {
 		return model.ReleaseAttempt{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgGetReleaseAttempt(id)
-	}
-	var out model.ReleaseAttempt
-	err := s.withLockedState(false, func(state *model.State) error {
-		idx := findReleaseAttempt(state, id)
-		if idx < 0 {
-			return ErrNotFound
-		}
-		out = cloneReleaseAttempt(state.ReleaseAttempts[idx])
-		return nil
-	})
-	return out, err
+	return s.pgGetReleaseAttempt(id)
 }
 
 func (s *Store) ListReleaseAttempts(filter model.ReleaseAttemptFilter) ([]model.ReleaseAttempt, error) {
 	filter = normalizeReleaseAttemptFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListReleaseAttempts(filter)
-	}
-	var out []model.ReleaseAttempt
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, attempt := range state.ReleaseAttempts {
-			if !releaseAttemptMatchesFilter(attempt, filter) {
-				continue
-			}
-			out = append(out, cloneReleaseAttempt(attempt))
-		}
-		sortReleaseAttemptsNewestFirst(out)
-		if filter.Limit > 0 && len(out) > filter.Limit {
-			out = out[:filter.Limit]
-		}
-		return nil
-	})
-	return out, err
+	return s.pgListReleaseAttempts(filter)
 }
 
 func (s *Store) FindReleaseAttemptForOperation(operationID string) (model.ReleaseAttempt, bool, error) {
@@ -588,39 +276,7 @@ func (s *Store) FindReleaseAttemptForOperation(operationID string) (model.Releas
 	if operationID == "" {
 		return model.ReleaseAttempt{}, false, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgFindReleaseAttemptForOperation(operationID)
-	}
-	var out model.ReleaseAttempt
-	var found bool
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, attempt := range state.ReleaseAttempts {
-			if strings.TrimSpace(attempt.SourceOperationID) == operationID ||
-				strings.TrimSpace(attempt.RootOperationID) == operationID ||
-				strings.TrimSpace(attempt.FailureOperationID) == operationID {
-				if !found || attempt.StartedAt.After(out.StartedAt) {
-					out = cloneReleaseAttempt(attempt)
-					found = true
-				}
-			}
-		}
-		for _, step := range state.ReleaseSteps {
-			if strings.TrimSpace(step.OperationID) != operationID {
-				continue
-			}
-			idx := findReleaseAttempt(state, step.ReleaseAttemptID)
-			if idx < 0 {
-				continue
-			}
-			attempt := state.ReleaseAttempts[idx]
-			if !found || attempt.StartedAt.After(out.StartedAt) {
-				out = cloneReleaseAttempt(attempt)
-				found = true
-			}
-		}
-		return nil
-	})
-	return out, found, err
+	return s.pgFindReleaseAttemptForOperation(operationID)
 }
 
 func (s *Store) RecordReleaseStep(step model.ReleaseStep) (model.ReleaseStep, error) {
@@ -628,19 +284,7 @@ func (s *Store) RecordReleaseStep(step model.ReleaseStep) (model.ReleaseStep, er
 	if strings.TrimSpace(step.TenantID) == "" || strings.TrimSpace(step.ReleaseAttemptID) == "" || strings.TrimSpace(step.Type) == "" {
 		return model.ReleaseStep{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgRecordReleaseStep(step)
-	}
-	var out model.ReleaseStep
-	err := s.withLockedState(true, func(state *model.State) error {
-		if findReleaseAttempt(state, step.ReleaseAttemptID) < 0 {
-			return ErrNotFound
-		}
-		state.ReleaseSteps = append(state.ReleaseSteps, step)
-		out = step
-		return nil
-	})
-	return out, err
+	return s.pgRecordReleaseStep(step)
 }
 
 func (s *Store) ListReleaseSteps(tenantID string, platformAdmin bool, releaseAttemptID string) ([]model.ReleaseStep, error) {
@@ -648,27 +292,7 @@ func (s *Store) ListReleaseSteps(tenantID string, platformAdmin bool, releaseAtt
 	if releaseAttemptID == "" {
 		return nil, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgListReleaseSteps(tenantID, platformAdmin, releaseAttemptID)
-	}
-	var out []model.ReleaseStep
-	err := s.withLockedState(false, func(state *model.State) error {
-		attemptIdx := findReleaseAttempt(state, releaseAttemptID)
-		if attemptIdx < 0 {
-			return ErrNotFound
-		}
-		if !platformAdmin && strings.TrimSpace(state.ReleaseAttempts[attemptIdx].TenantID) != strings.TrimSpace(tenantID) {
-			return ErrNotFound
-		}
-		for _, step := range state.ReleaseSteps {
-			if strings.TrimSpace(step.ReleaseAttemptID) == releaseAttemptID {
-				out = append(out, cloneReleaseStep(step))
-			}
-		}
-		sortReleaseStepsOldestFirst(out)
-		return nil
-	})
-	return out, err
+	return s.pgListReleaseSteps(tenantID, platformAdmin, releaseAttemptID)
 }
 
 func (s *Store) ListReleaseTimeline(tenantID string, platformAdmin bool, releaseAttemptID string) ([]model.ReleaseTimelineEntry, error) {
@@ -855,37 +479,6 @@ func normalizeEvidenceRedactionStatus(raw string) string {
 	}
 }
 
-func operationEvidenceMatchesFilter(e model.OperationEvidence, filter model.OperationEvidenceFilter) bool {
-	if isLongLivedMigrationEvidenceType(e.Type) && !isPostgresMutationSafetyEvidence(e.Type) && !filter.IncludeMigrationLedger {
-		return false
-	}
-	if !filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {
-		return false
-	}
-	if filter.PlatformAdmin && strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(e.TenantID) != strings.TrimSpace(filter.TenantID) {
-		return false
-	}
-	if strings.TrimSpace(filter.OperationID) != "" && strings.TrimSpace(e.OperationID) != strings.TrimSpace(filter.OperationID) {
-		return false
-	}
-	if strings.TrimSpace(filter.AppID) != "" && strings.TrimSpace(e.AppID) != strings.TrimSpace(filter.AppID) {
-		return false
-	}
-	if strings.TrimSpace(filter.ReleaseAttemptID) != "" && strings.TrimSpace(e.ReleaseAttemptID) != strings.TrimSpace(filter.ReleaseAttemptID) {
-		return false
-	}
-	if !stringInNormalizedSet(e.Type, filter.Types) {
-		return false
-	}
-	if !stringInNormalizedSet(e.Severity, filter.Severities) {
-		return false
-	}
-	if filter.Since != nil && e.CollectedAt.Before(filter.Since.UTC()) {
-		return false
-	}
-	return true
-}
-
 func sortOperationEvidenceOldestFirst(items []model.OperationEvidence) {
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].CollectedAt.Equal(items[j].CollectedAt) {
@@ -893,91 +486,6 @@ func sortOperationEvidenceOldestFirst(items []model.OperationEvidence) {
 		}
 		return items[i].CollectedAt.Before(items[j].CollectedAt)
 	})
-}
-
-func limitOperationEvidenceToNewest(items []model.OperationEvidence, limit int) []model.OperationEvidence {
-	if limit <= 0 || len(items) <= limit {
-		return items
-	}
-	return append([]model.OperationEvidence(nil), items[len(items)-limit:]...)
-}
-
-func cloneOperationEvidence(in model.OperationEvidence) model.OperationEvidence {
-	in.Payload = clonePayloadMap(in.Payload)
-	return in
-}
-
-func retainOperationEvidence(items []model.OperationEvidence, inserted model.OperationEvidence) []model.OperationEvidence {
-	now := inserted.CollectedAt
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	out := retainOperationEvidenceScope(items, func(item model.OperationEvidence) bool {
-		return strings.TrimSpace(item.OperationID) == strings.TrimSpace(inserted.OperationID)
-	}, now, operationEvidenceRetentionLimitPerOperation)
-	if strings.TrimSpace(inserted.AppID) != "" {
-		out = retainOperationEvidenceScope(out, func(item model.OperationEvidence) bool {
-			return strings.TrimSpace(item.AppID) == strings.TrimSpace(inserted.AppID)
-		}, now, operationEvidenceRetentionLimitPerApp)
-		return out
-	}
-	if strings.TrimSpace(inserted.TenantID) != "" {
-		out = retainOperationEvidenceScope(out, func(item model.OperationEvidence) bool {
-			return strings.TrimSpace(item.TenantID) == strings.TrimSpace(inserted.TenantID) && strings.TrimSpace(item.AppID) == ""
-		}, now, operationEvidenceRetentionLimitPerTenant)
-	}
-	return out
-}
-
-func retainOperationEvidenceScope(items []model.OperationEvidence, inScope func(model.OperationEvidence) bool, now time.Time, limit int) []model.OperationEvidence {
-	if limit <= 0 || len(items) == 0 {
-		return items
-	}
-	cutoff := now.UTC().Add(-operationEvidenceRetentionWindow)
-	migrationCutoff := now.UTC().Add(-operationMigrationLedgerRetentionWindow)
-	out := items[:0]
-	scoped := []model.OperationEvidence{}
-	migration := []model.OperationEvidence{}
-	for _, item := range items {
-		if !inScope(item) {
-			out = append(out, item)
-			continue
-		}
-		if isLongLivedMigrationEvidenceType(item.Type) {
-			if !isPostgresMutationSafetyEvidence(item.Type) && !item.CollectedAt.IsZero() && item.CollectedAt.Before(migrationCutoff) {
-				continue
-			}
-			migration = append(migration, item)
-			continue
-		}
-		if !item.CollectedAt.IsZero() && item.CollectedAt.Before(cutoff) {
-			continue
-		}
-		scoped = append(scoped, item)
-	}
-	sort.SliceStable(scoped, func(i, j int) bool {
-		if scoped[i].CollectedAt.Equal(scoped[j].CollectedAt) {
-			return scoped[i].ID > scoped[j].ID
-		}
-		return scoped[i].CollectedAt.After(scoped[j].CollectedAt)
-	})
-	if len(scoped) > limit {
-		scoped = scoped[:limit]
-	}
-	sortOperationEvidenceOldestFirst(scoped)
-	// Migration ledgers are immutable audit snapshots. They are retained for
-	// the full 90-day window and are not evicted by the bounded diagnostic
-	// history limits used for ordinary evidence.
-	sort.SliceStable(migration, func(i, j int) bool {
-		if migration[i].CollectedAt.Equal(migration[j].CollectedAt) {
-			return migration[i].ID < migration[j].ID
-		}
-		return migration[i].CollectedAt.Before(migration[j].CollectedAt)
-	})
-	out = append(out, scoped...)
-	out = append(out, migration...)
-	sortOperationEvidenceOldestFirst(out)
-	return out
 }
 
 func isLongLivedMigrationEvidenceType(evidenceType string) bool {
@@ -1084,33 +592,6 @@ func normalizeReleaseAttemptFilter(in model.ReleaseAttemptFilter) model.ReleaseA
 	return in
 }
 
-func releaseAttemptMatchesFilter(attempt model.ReleaseAttempt, filter model.ReleaseAttemptFilter) bool {
-	if strings.TrimSpace(filter.TenantID) != "" && strings.TrimSpace(attempt.TenantID) != strings.TrimSpace(filter.TenantID) {
-		return false
-	}
-	if strings.TrimSpace(filter.AppID) != "" && strings.TrimSpace(attempt.AppID) != strings.TrimSpace(filter.AppID) {
-		return false
-	}
-	if strings.TrimSpace(filter.Status) != "" && !strings.EqualFold(strings.TrimSpace(attempt.Status), strings.TrimSpace(filter.Status)) {
-		return false
-	}
-	return true
-}
-
-func sortReleaseAttemptsNewestFirst(items []model.ReleaseAttempt) {
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].StartedAt.Equal(items[j].StartedAt) {
-			return items[i].ID > items[j].ID
-		}
-		return items[i].StartedAt.After(items[j].StartedAt)
-	})
-}
-
-func cloneReleaseAttempt(in model.ReleaseAttempt) model.ReleaseAttempt {
-	in.DesiredSource = clonePayloadMap(in.DesiredSource)
-	return in
-}
-
 func normalizeReleaseStep(in model.ReleaseStep) model.ReleaseStep {
 	now := time.Now().UTC()
 	in.ID = strings.TrimSpace(in.ID)
@@ -1153,29 +634,6 @@ func normalizeReleaseStepStatus(raw string) string {
 	default:
 		return model.ReleaseStepStatusPending
 	}
-}
-
-func sortReleaseStepsOldestFirst(items []model.ReleaseStep) {
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].StartedAt.Equal(items[j].StartedAt) {
-			return items[i].ID < items[j].ID
-		}
-		return items[i].StartedAt.Before(items[j].StartedAt)
-	})
-}
-
-func cloneReleaseStep(in model.ReleaseStep) model.ReleaseStep {
-	in.Payload = clonePayloadMap(in.Payload)
-	return in
-}
-
-func findReleaseAttempt(state *model.State, id string) int {
-	for idx, attempt := range state.ReleaseAttempts {
-		if strings.TrimSpace(attempt.ID) == strings.TrimSpace(id) {
-			return idx
-		}
-	}
-	return -1
 }
 
 func clonePayloadMap(in map[string]any) map[string]any {

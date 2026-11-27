@@ -2,9 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,13 +15,13 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/platformproducer"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
+
 	"k8s.io/utils/ptr"
 )
 
 func TestLiveDNSConvergenceRejectsHistoricalBackendWithoutChangingFacts(t *testing.T) {
-	path := t.TempDir() + "/state.json"
-	state := store.New(path)
+	const fixture = "live-dns-convergence"
+	state := newStoreTestDatabase(t, fixture)
 	if err := state.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +80,8 @@ func TestLiveDNSConvergenceRejectsHistoricalBackendWithoutChangingFacts(t *testi
 	if got := s.evaluateLiveConsumerConvergence(context.Background(), set, consumers, binding); !got.Pass {
 		t.Fatal(got)
 	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	db := openStoreTestSQL(t, fixture)
+	before := convergenceStoreFacts(t, db)
 	baseline := *f.slices.DeepCopy()
 	for _, scenario := range []string{"replaced", "unready", "unavailable", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -138,8 +135,11 @@ func TestLiveDNSConvergenceRejectsHistoricalBackendWithoutChangingFacts(t *testi
 					t.Fatal("LKG verification accepted historical backend", verify.Code, verify.Body.String())
 				}
 			}
-			after, _ := os.ReadFile(path)
-			assertConvergenceStateUnchanged(t, raw, after)
+			for table, after := range convergenceStoreFacts(t, db) {
+				if before[table] != after {
+					t.Fatal("convergence changed persistent facts in", table)
+				}
+			}
 		})
 	}
 	f.slices = baseline
@@ -181,44 +181,48 @@ func TestLiveDNSConvergenceRejectsHistoricalBackendWithoutChangingFacts(t *testi
 	}
 }
 
-func assertConvergenceStateUnchanged(t *testing.T, before, after []byte) {
+func convergenceStoreFacts(t *testing.T, db *sql.DB) map[string]string {
 	t.Helper()
-	var left, right map[string]any
-	if err := json.Unmarshal(before, &left); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(after, &right); err != nil {
-		t.Fatal(err)
-	}
-	// Topology lookup may initialize unrelated machine/backup defaults in the
-	// file-store fixture. All configuration, publication, consumer and audit
-	// records must remain byte-equivalent after decoding.
-	for key, value := range left {
-		if strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit") || key == "dns_nodes" {
-			if !reflect.DeepEqual(value, right[key]) {
-				t.Fatal("convergence changed persistent field", key)
-			}
+	facts := make(map[string]string)
+	for _, table := range []string{
+		"fugue_platform_artifacts", "fugue_platform_artifact_releases", "fugue_platform_release_lanes",
+		"fugue_platform_release_messages", "fugue_platform_lkg_snapshots", "fugue_platform_lkg_snapshot_history",
+		"fugue_platform_consumer_instances", "fugue_platform_expected_consumer_sets", "fugue_dns_nodes", "fugue_audit_events",
+		"fugue_platform_input_manifests", "fugue_platform_input_hot_chunks",
+	} {
+		var value string
+		if err := db.QueryRow(`SELECT coalesce(jsonb_agg(to_jsonb(f) ORDER BY to_jsonb(f)), '[]')::text FROM ` + table + ` f`).Scan(&value); err != nil {
+			t.Fatalf("read stored %s facts: %v", table, err)
 		}
+		facts[table] = value
 	}
-	for key := range right {
-		if _, found := left[key]; !found && (strings.HasPrefix(key, "platform_") || strings.Contains(key, "consumer") || strings.Contains(key, "audit")) {
-			t.Fatal("convergence created persistent field", key)
-		}
-	}
+	return facts
 }
 
 // Used in the actual producer state-machine regression, at gray->full and at
 // full->verified. Only a disposable fixture's credential is changed; original
 // artifact lineage, fresh apply/probe evidence and producer policy remain valid.
-func assertProducerRejectsRetiredDNSBackend(t *testing.T, s *Server, path string, policyAuthority model.PlatformArtifactRelease) {
+func assertProducerRejectsRetiredDNSBackend(t *testing.T, s *Server, fixture string, policyAuthority model.PlatformArtifactRelease) {
 	t.Helper()
-	raw, err := os.ReadFile(path)
+	db := openStoreTestSQL(t, fixture)
+	rows, err := db.Query(`SELECT id, credential_id FROM fugue_platform_consumer_instances WHERE component=$1`, model.PlatformConsumerComponentDNSServer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var before model.State
-	if err = json.Unmarshal(raw, &before); err != nil {
+	defer rows.Close()
+	credentials := make(map[string]string)
+	for rows.Next() {
+		var id, credential string
+		if err := rows.Scan(&id, &credential); err != nil {
+			t.Fatal(err)
+		}
+		credentials[id] = credential
+	}
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+	if len(credentials) == 0 {
+		t.Fatal("missing stored DNS consumer evidence")
 	}
 	f := newDNSBackendFixture(t)
 	f.claims.NodeID = "dns-a"
@@ -230,20 +234,16 @@ func assertProducerRejectsRetiredDNSBackend(t *testing.T, s *Server, path string
 	defer func() {
 		s.newClusterNodeClient = factory
 		s.controlPlaneNamespace = namespace
-		if err := os.WriteFile(path, raw, 0600); err != nil {
-			t.Fatal(err)
+		for id, credential := range credentials {
+			if _, err := db.Exec(`UPDATE fugue_platform_consumer_instances SET credential_id=$2 WHERE id=$1`, id, credential); err != nil {
+				t.Error(err)
+			}
 		}
 	}()
-	for i := range before.PlatformConsumerInstances {
-		c := &before.PlatformConsumerInstances[i]
-		if c.Component == model.PlatformConsumerComponentDNSServer {
-			c.CredentialID = f.claims.CredentialID
-		}
-	}
-	edited, _ := json.Marshal(before)
-	if err = os.WriteFile(path, edited, 0600); err != nil {
+	if _, err := db.Exec(`UPDATE fugue_platform_consumer_instances SET credential_id=$2 WHERE component=$1`, model.PlatformConsumerComponentDNSServer, f.claims.CredentialID); err != nil {
 		t.Fatal(err)
 	}
+	before := convergenceStoreFacts(t, db)
 	policyArtifact, err := s.store.GetPlatformArtifact(policyAuthority.ArtifactID)
 	if err != nil {
 		t.Fatal(err)
@@ -255,12 +255,9 @@ func assertProducerRejectsRetiredDNSBackend(t *testing.T, s *Server, path string
 	if handled, err := s.reconcilePendingProducedTraffic(context.Background(), policy, policyAuthority); err != nil || !handled {
 		t.Fatal(handled, err)
 	}
-	afterRaw, _ := os.ReadFile(path)
-	var after model.State
-	if err = json.Unmarshal(afterRaw, &after); err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(before.PlatformArtifactReleases, after.PlatformArtifactReleases) || !reflect.DeepEqual(before.PlatformLKGSnapshots, after.PlatformLKGSnapshots) {
+	after := convergenceStoreFacts(t, db)
+	if before["fugue_platform_artifact_releases"] != after["fugue_platform_artifact_releases"] ||
+		before["fugue_platform_lkg_snapshots"] != after["fugue_platform_lkg_snapshots"] {
 		t.Fatal("producer advanced with retired DNS backend")
 	}
 }

@@ -4,19 +4,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
-	"fugue/internal/store"
 )
 
 func TestManagedArchiveProvisioningIsolationResumeAndSecretRedaction(t *testing.T) {
 	t.Setenv("FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY", "synthetic-platform-archive-encryption-key")
-	db := store.New(filepath.Join(t.TempDir(), "state.json"))
+	db := newStoreTestDatabase(t, "")
 	if err := db.Init(); err != nil {
 		t.Fatal(err)
 	}

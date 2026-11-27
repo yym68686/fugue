@@ -28,67 +28,7 @@ func (s *Store) AdoptOrphanManagedApp(snapshot model.App) (model.App, bool, erro
 	if err != nil {
 		return model.App{}, false, err
 	}
-	if s.usingDatabase() {
-		return s.pgAdoptOrphanManagedApp(prepared)
-	}
-
-	var (
-		adopted model.App
-		already bool
-	)
-	err = s.withLockedState(true, func(state *model.State) error {
-		if findTenant(state, prepared.App.TenantID) < 0 ||
-			!projectBelongsToTenant(state, prepared.App.ProjectID, prepared.App.TenantID) {
-			return ErrNotFound
-		}
-		if projectDeleteRequested(state, prepared.App.ProjectID) {
-			return ErrConflict
-		}
-		if err := validateOrphanAdoptionRuntimeVisibilityState(state, prepared); err != nil {
-			return err
-		}
-		if hasInFlightOperationForApp(state.Operations, prepared.App.ID) {
-			return ErrConflict
-		}
-
-		appIndex := findApp(state, prepared.App.ID)
-		if appIndex >= 0 {
-			existing := state.Apps[appIndex]
-			hydrateAppBackingServices(state, &existing)
-			if !isDeletedApp(existing) {
-				if orphanAdoptionEquivalent(existing, prepared) {
-					adopted = cloneOrphanAdoptedApp(existing)
-					already = true
-					return nil
-				}
-				return ErrConflict
-			}
-			mergeOrphanTombstoneMetadata(&prepared.App, existing)
-		}
-
-		if orphanAdoptionConflictsInState(state, prepared) {
-			return ErrConflict
-		}
-		// Settle the pre-adoption interval before the retained database becomes
-		// part of committed resources, avoiding retroactive metering.
-		if billing := accrueTenantBillingLedger(state, prepared.App.TenantID, time.Now().UTC()); billing == nil {
-			return ErrNotFound
-		}
-		if appIndex >= 0 {
-			state.Apps[appIndex] = orphanAdoptionAppForPersist(prepared.App)
-		} else {
-			state.Apps = append(state.Apps, orphanAdoptionAppForPersist(prepared.App))
-		}
-		for _, service := range prepared.Services {
-			state.BackingServices = append(state.BackingServices, cloneBackingService(service))
-		}
-		for _, binding := range prepared.Bindings {
-			state.ServiceBindings = append(state.ServiceBindings, cloneServiceBinding(binding))
-		}
-		adopted = orphanAdoptionResult(prepared)
-		return nil
-	})
-	return adopted, already, err
+	return s.pgAdoptOrphanManagedApp(prepared)
 }
 
 // VerifyAdoptedOrphanManagedApp is a read-only idempotency check for callers
@@ -100,24 +40,7 @@ func (s *Store) VerifyAdoptedOrphanManagedApp(snapshot model.App) (model.App, er
 	if err != nil {
 		return model.App{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgVerifyAdoptedOrphanManagedApp(prepared)
-	}
-	var verified model.App
-	err = s.withLockedState(false, func(state *model.State) error {
-		index := findApp(state, prepared.App.ID)
-		if index < 0 || isDeletedApp(state.Apps[index]) {
-			return ErrConflict
-		}
-		existing := state.Apps[index]
-		hydrateAppBackingServices(state, &existing)
-		if !orphanAdoptionEquivalent(existing, prepared) {
-			return ErrConflict
-		}
-		verified = cloneOrphanAdoptedApp(existing)
-		return nil
-	})
-	return verified, err
+	return s.pgVerifyAdoptedOrphanManagedApp(prepared)
 }
 
 func prepareOrphanManagedAppAdoption(snapshot model.App, now time.Time) (orphanManagedAppAdoption, error) {
@@ -279,47 +202,6 @@ func prepareOrphanManagedAppAdoption(snapshot model.App, now time.Time) (orphanM
 	sort.Slice(services, func(i, j int) bool { return services[i].ID < services[j].ID })
 	sort.Slice(bindings, func(i, j int) bool { return bindings[i].ID < bindings[j].ID })
 	return orphanManagedAppAdoption{App: app, Services: services, Bindings: bindings}, nil
-}
-
-func validateOrphanAdoptionRuntimeVisibilityState(state *model.State, prepared orphanManagedAppAdoption) error {
-	runtimeIDs := map[string]struct{}{strings.TrimSpace(prepared.App.Spec.RuntimeID): {}}
-	for _, service := range prepared.Services {
-		for _, runtimeID := range managedPostgresReferencedRuntimeIDs(prepared.App.Spec.RuntimeID, *service.Spec.Postgres) {
-			runtimeIDs[strings.TrimSpace(runtimeID)] = struct{}{}
-		}
-	}
-	for runtimeID := range runtimeIDs {
-		if runtimeID == "" || !runtimeVisibleToTenant(state, runtimeID, prepared.App.TenantID) {
-			return ErrNotFound
-		}
-	}
-	return nil
-}
-
-func orphanAdoptionConflictsInState(state *model.State, prepared orphanManagedAppAdoption) bool {
-	for _, app := range state.Apps {
-		if app.ID == prepared.App.ID {
-			continue
-		}
-		if app.TenantID == prepared.App.TenantID &&
-			app.ProjectID == prepared.App.ProjectID &&
-			strings.EqualFold(app.Name, prepared.App.Name) {
-			return true
-		}
-	}
-	for _, desired := range prepared.Services {
-		if findBackingService(state, desired.ID) >= 0 ||
-			backingServiceNameExists(state, desired.TenantID, desired.ProjectID, desired.Name, "") {
-			return true
-		}
-	}
-	for _, desired := range prepared.Bindings {
-		if findServiceBinding(state, desired.ID) >= 0 ||
-			findServiceBindingByAppAndService(state, desired.AppID, desired.ServiceID) >= 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func mergeOrphanTombstoneMetadata(app *model.App, tombstone model.App) {

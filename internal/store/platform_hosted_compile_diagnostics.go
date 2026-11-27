@@ -52,9 +52,7 @@ func hostedExternalRefusals(err error) []*pc.HostedExternalCompileRefusal {
 // replaced row is a complete snapshot of the last capture, not a history or
 // a per-domain table. A slow reconcile cannot replace newer evidence.
 func (s *Store) rememberHostedExternalRefusals(ctx context.Context, src pc.HostedAddressSource, captured time.Time, refs []*pc.HostedExternalCompileRefusal) error {
-	if !s.usingDatabase() {
-		return nil
-	}
+
 	now := time.Now().UTC()
 	if len(refs) > 64 || captured.IsZero() || captured.After(now) || now.Sub(captured) > 5*time.Minute || !src.Authority.ExpiresAt.After(now) {
 		return ErrInvalidInput

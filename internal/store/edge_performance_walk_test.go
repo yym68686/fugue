@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -12,7 +11,7 @@ import (
 )
 
 func TestWalkEdgePerformanceSamplesPreservesRowsAndStopsOnError(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

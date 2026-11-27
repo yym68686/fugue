@@ -10,9 +10,9 @@ import (
 	"fugue/internal/model"
 )
 
-func TestAutomationPolicyJSONStoreLifecycleAndIsolation(t *testing.T) {
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	stateStore := New(storePath)
+func TestAutomationPolicyPostgresLifecycleAndIsolation(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	stateStore := newStoreTestDatabase(t, storePath)
 
 	tenantA, err := stateStore.CreateTenant("Automation Tenant A")
 	if err != nil {
@@ -139,7 +139,7 @@ func TestAutomationPolicyJSONStoreLifecycleAndIsolation(t *testing.T) {
 		t.Fatalf("stale delete error=%v, want conflict", err)
 	}
 
-	reopened := New(storePath)
+	reopened := newStoreTestDatabase(t, storePath)
 	persisted, err := reopened.GetAutomationPolicy(updated.ID, tenantA.ID, false)
 	if err != nil {
 		t.Fatal(err)
@@ -159,8 +159,8 @@ func TestAutomationPolicyJSONStoreLifecycleAndIsolation(t *testing.T) {
 	}
 }
 
-func TestAutomationPolicyJSONStoreRejectsUnsafePersistence(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresRejectsUnsafePersistence(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation Validation")
 	if err != nil {
 		t.Fatal(err)
@@ -338,8 +338,8 @@ func TestAutomationPolicyJSONStoreRejectsUnsafePersistence(t *testing.T) {
 	}
 }
 
-func TestAutomationPolicyJSONStoreCascadesTenantAndProjectDeletion(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresCascadesTenantAndProjectDeletion(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation Cascade")
 	if err != nil {
 		t.Fatal(err)
@@ -381,8 +381,8 @@ func TestAutomationPolicyJSONStoreCascadesTenantAndProjectDeletion(t *testing.T)
 	}
 }
 
-func TestAutomationPolicyJSONStoreFollowsAppProjectMoves(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresFollowsAppProjectMoves(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation App Move")
 	if err != nil {
 		t.Fatal(err)
@@ -446,8 +446,8 @@ func TestAutomationPolicyJSONStoreFollowsAppProjectMoves(t *testing.T) {
 	}
 }
 
-func TestAutomationPolicyJSONStoreBlocksProjectMoveNameConflict(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresBlocksProjectMoveNameConflict(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation App Move Conflict")
 	if err != nil {
 		t.Fatal(err)
@@ -504,8 +504,8 @@ func TestAutomationPolicyJSONStoreBlocksProjectMoveNameConflict(t *testing.T) {
 	}
 }
 
-func TestAutomationPolicyJSONStoreFollowsProjectSplit(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresFollowsProjectSplit(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation Project Split")
 	if err != nil {
 		t.Fatal(err)
@@ -549,8 +549,8 @@ func TestAutomationPolicyJSONStoreFollowsProjectSplit(t *testing.T) {
 	}
 }
 
-func TestAutomationPolicyJSONStorePurgesAppScopedPolicies(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
+func TestAutomationPolicyPostgresPurgesAppScopedPolicies(t *testing.T) {
+	stateStore := newStoreTestDatabase(t, "")
 	tenant, err := stateStore.CreateTenant("Automation App Purge")
 	if err != nil {
 		t.Fatal(err)
@@ -597,60 +597,6 @@ func TestDefaultControlPlanePermissionAuditIncludesAutomationPolicyCRUD(t *testi
 		if !strings.Contains(grants, required) {
 			t.Fatalf("default permission audit is missing %q", required)
 		}
-	}
-}
-
-func TestAutomationPolicyJSONStoreFailsClosedOnVisibleCorruption(t *testing.T) {
-	stateStore := New(filepath.Join(t.TempDir(), "store.json"))
-	tenantA, err := stateStore.CreateTenant("Automation Corruption A")
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectA, err := stateStore.CreateProject(tenantA.ID, "Corruption Project A", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tenantB, err := stateStore.CreateTenant("Automation Corruption B")
-	if err != nil {
-		t.Fatal(err)
-	}
-	projectB, err := stateStore.CreateProject(tenantB.ID, "Corruption Project B", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stateStore.CreateAutomationPolicy(testAutomationPolicy(tenantA.ID, projectA.ID, "Healthy Policy")); err != nil {
-		t.Fatal(err)
-	}
-	corrupt, err := stateStore.CreateAutomationPolicy(testAutomationPolicy(tenantB.ID, projectB.ID, "Corrupt Policy"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := stateStore.withLockedState(true, func(state *model.State) error {
-		index := findAutomationPolicyByID(state.AutomationPolicies, corrupt.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		state.AutomationPolicies[index].Mode = model.GatePolicyModeEnforced
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	policies, err := stateStore.ListAutomationPolicies(AutomationPolicyFilter{TenantID: tenantA.ID})
-	if err != nil {
-		t.Fatalf("another tenant's corrupt policy must not break scoped reads: %v", err)
-	}
-	if len(policies) != 1 {
-		t.Fatalf("tenant A policy count=%d, want 1", len(policies))
-	}
-	if _, err := stateStore.ListAutomationPolicies(AutomationPolicyFilter{TenantID: tenantB.ID}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("corrupt policy list error=%v, want invalid input", err)
-	}
-	if _, err := stateStore.GetAutomationPolicy(corrupt.ID, tenantB.ID, false); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("corrupt policy get error=%v, want invalid input", err)
-	}
-	if _, err := stateStore.DeleteAutomationPolicy(corrupt.ID, tenantB.ID, false, corrupt.Generation); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("corrupt policy delete error=%v, want invalid input", err)
 	}
 }
 

@@ -1,7 +1,6 @@
 package store
 
 import (
-	"sort"
 	"strings"
 	"time"
 
@@ -13,36 +12,11 @@ func (s *Store) AppendStorePromotion(promotion model.StorePromotion) (model.Stor
 	if promotion.SourceKind == "" || promotion.TargetStore == "" || promotion.Generation == "" {
 		return model.StorePromotion{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgAppendStorePromotion(promotion)
-	}
-	err := s.withLockedState(true, func(state *model.State) error {
-		state.StorePromotions = append(state.StorePromotions, promotion)
-		return nil
-	})
-	if err != nil {
-		return model.StorePromotion{}, err
-	}
-	return promotion, nil
+	return s.pgAppendStorePromotion(promotion)
 }
 
 func (s *Store) ListStorePromotions(limit int) ([]model.StorePromotion, error) {
-	if s.usingDatabase() {
-		return s.pgListStorePromotions(limit)
-	}
-	promotions := []model.StorePromotion{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		promotions = append(promotions, state.StorePromotions...)
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sortStorePromotions(promotions)
-	if limit > 0 && len(promotions) > limit {
-		promotions = promotions[:limit]
-	}
-	return promotions, nil
+	return s.pgListStorePromotions(limit)
 }
 
 func normalizeStorePromotion(promotion model.StorePromotion) model.StorePromotion {
@@ -78,13 +52,4 @@ func normalizeStorePromotion(promotion model.StorePromotion) model.StorePromotio
 		promotion.Metadata = map[string]string{}
 	}
 	return promotion
-}
-
-func sortStorePromotions(promotions []model.StorePromotion) {
-	sort.Slice(promotions, func(i, j int) bool {
-		if !promotions[i].UpdatedAt.Equal(promotions[j].UpdatedAt) {
-			return promotions[i].UpdatedAt.After(promotions[j].UpdatedAt)
-		}
-		return promotions[i].ID < promotions[j].ID
-	})
 }

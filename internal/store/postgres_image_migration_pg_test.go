@@ -8,6 +8,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/pgimage"
+
 	"github.com/DATA-DOG/go-sqlmock"
 )
 

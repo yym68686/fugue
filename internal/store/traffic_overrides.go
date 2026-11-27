@@ -43,16 +43,7 @@ func uniqueSortedTrafficOverrideStrings(values []string) []string {
 const trafficOverrideMaxLifetime = 24 * time.Hour
 
 func (s *Store) ListTrafficOverrides() ([]model.TrafficOverride, error) {
-	if s.usingDatabase() {
-		return s.pgListTrafficOverrides()
-	}
-	var out []model.TrafficOverride
-	err := s.withLockedState(false, func(state *model.State) error {
-		out = cloneTrafficOverrides(state.TrafficOverrides)
-		sort.Slice(out, func(i, j int) bool { return out[i].Hostname < out[j].Hostname })
-		return nil
-	})
-	return out, err
+	return s.pgListTrafficOverrides()
 }
 
 func (s *Store) GetTrafficOverride(hostname string) (model.TrafficOverride, error) {
@@ -60,20 +51,7 @@ func (s *Store) GetTrafficOverride(hostname string) (model.TrafficOverride, erro
 	if err != nil {
 		return model.TrafficOverride{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgGetTrafficOverride(hostname)
-	}
-	var out model.TrafficOverride
-	err = s.withLockedState(false, func(state *model.State) error {
-		for _, override := range state.TrafficOverrides {
-			if override.Hostname == hostname {
-				out = cloneTrafficOverride(override)
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return out, err
+	return s.pgGetTrafficOverride(hostname)
 }
 
 func (s *Store) PutTrafficOverrideCAS(candidate model.TrafficOverride, expectedGeneration uint64) (model.TrafficOverride, error) {
@@ -91,82 +69,22 @@ func (s *Store) PutTrafficOverrideCAS(candidate model.TrafficOverride, expectedG
 	if err := trafficoverride.VerifyWithKeyring(candidate, keyring); err != nil {
 		return model.TrafficOverride{}, ErrInvalidInput
 	}
-	if s.usingDatabase() {
-		return s.pgPutTrafficOverrideCAS(candidate, expectedGeneration)
-	}
-	var out model.TrafficOverride
-	err = s.withLockedState(true, func(state *model.State) error {
-		index := -1
-		for i := range state.TrafficOverrides {
-			if state.TrafficOverrides[i].Hostname == candidate.Hostname {
-				index = i
-				break
-			}
-		}
-		if index < 0 {
-			if expectedGeneration != 0 {
-				return ErrConflict
-			}
-			state.TrafficOverrides = append(state.TrafficOverrides, candidate)
-		} else {
-			current := state.TrafficOverrides[index]
-			if current.Generation != expectedGeneration {
-				return ErrConflict
-			}
-			candidate.CreatedAt = current.CreatedAt
-			state.TrafficOverrides[index] = candidate
-		}
-		out = cloneTrafficOverride(candidate)
-		return nil
-	})
-	return out, err
+	return s.pgPutTrafficOverrideCAS(candidate, expectedGeneration)
 }
 
 func (s *Store) GetTrafficOverrideSigningKeyring() (model.TrafficOverrideSigningKeyring, error) {
-	if s.usingDatabase() {
-		keyring, err := s.pgGetTrafficOverrideSigningKeyring()
-		if err == nil || !errors.Is(err, ErrNotFound) {
-			return keyring, err
-		}
-		if err := s.pgEnsureTrafficOverrideSigningKeyring(); err != nil {
-			return model.TrafficOverrideSigningKeyring{}, err
-		}
-		return s.pgGetTrafficOverrideSigningKeyring()
+	keyring, err := s.pgGetTrafficOverrideSigningKeyring()
+	if err == nil || !errors.Is(err, ErrNotFound) {
+		return keyring, err
 	}
-	var out model.TrafficOverrideSigningKeyring
-	err := s.withLockedState(true, func(state *model.State) error {
-		if state.TrafficOverrideSigning == nil {
-			keyring, err := newTrafficOverrideSigningKeyring(time.Now().UTC())
-			if err != nil {
-				return err
-			}
-			state.TrafficOverrideSigning = &keyring
-		}
-		out = *state.TrafficOverrideSigning
-		return nil
-	})
-	return out, err
+	if err := s.pgEnsureTrafficOverrideSigningKeyring(); err != nil {
+		return model.TrafficOverrideSigningKeyring{}, err
+	}
+	return s.pgGetTrafficOverrideSigningKeyring()
 }
 
 func (s *Store) RotateTrafficOverrideSigningKeyring(expectedGeneration uint64) (model.TrafficOverrideSigningKeyring, error) {
-	if s.usingDatabase() {
-		return s.pgRotateTrafficOverrideSigningKeyring(expectedGeneration)
-	}
-	var out model.TrafficOverrideSigningKeyring
-	err := s.withLockedState(true, func(state *model.State) error {
-		if state.TrafficOverrideSigning == nil || state.TrafficOverrideSigning.Generation != expectedGeneration {
-			return ErrConflict
-		}
-		now := time.Now().UTC()
-		next, err := rotateTrafficOverrideSigningKeyring(*state.TrafficOverrideSigning, now)
-		if err != nil {
-			return err
-		}
-		state.TrafficOverrideSigning = &next
-		out = next
-		return nil
-	})
-	return out, err
+	return s.pgRotateTrafficOverrideSigningKeyring(expectedGeneration)
 }
 
 func normalizeTrafficOverride(candidate model.TrafficOverride, now time.Time) (model.TrafficOverride, error) {
@@ -244,21 +162,6 @@ func validTrafficOverrideDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
 	return err == nil
-}
-
-func cloneTrafficOverride(override model.TrafficOverride) model.TrafficOverride {
-	out := override
-	out.Answers = append([]string{}, override.Answers...)
-	out.RequiredHostRoutes = append([]string{}, override.RequiredHostRoutes...)
-	return out
-}
-
-func cloneTrafficOverrides(values []model.TrafficOverride) []model.TrafficOverride {
-	out := make([]model.TrafficOverride, 0, len(values))
-	for _, value := range values {
-		out = append(out, cloneTrafficOverride(value))
-	}
-	return out
 }
 
 func newTrafficOverrideSigningKeyring(now time.Time) (model.TrafficOverrideSigningKeyring, error) {

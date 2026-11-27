@@ -16,87 +16,6 @@ import (
 	"fugue/internal/testfixture/celldns"
 )
 
-func shrinkFixture(t *testing.T, address string) reconfigurationFixture {
-	t.Helper()
-	f := membershipFixture(t, address)
-	p := f.policy
-	p.Generation, p.Mode = "shrink-predecessor", "serving"
-	p.Serving.SinglePublication = false
-	f.policy = p
-	f.old = f.save(t, p)
-	_, r, _, _, err := f.s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.request.ProducerReconfiguration.PreviousPolicy = model.PlatformPublicationPrecondition{ArtifactID: f.old.ID, ContentHash: f.old.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
-	f.seedCompletedPublication(t, r.ID, platformproducer.Actor)
-	a, _ := f.s.GetPlatformArtifact(p.StaticIntentArtifactID)
-	var intent platformconfig.PlatformIntent
-	raw, _ := json.Marshal(a.Content)
-	json.Unmarshal(raw, &intent)
-	topology, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Seed the two-member signed checkpoint. This fixture tests configuration
-	// transactions; end-to-end candidate evidence has separate admission tests.
-	parent, _ := f.s.GetPlatformArtifact(f.lkg.ArtifactID)
-	raw, _ = json.Marshal(topology)
-	var object map[string]any
-	json.Unmarshal(raw, &object)
-	parent.Content["consumer_topology"] = object
-	parent.ContentHash, _ = platformconfig.Digest(parent.Content)
-	parent.Metadata["consumer_topology_digest"], _ = platformconfig.Digest(topology)
-	parent, err = platformsafety.SignPlatformArtifact(parent, celldns.Keys())
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.lkg.ContentHash, f.lkg.ArtifactProvenance = parent.ContentHash, parent.Provenance
-	f.lkg, err = platformsafety.SignPlatformLKGSnapshot(f.lkg, celldns.Keys())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if f.s.db != nil {
-		content, _ := json.Marshal(parent.Content)
-		metadata, _ := json.Marshal(parent.Metadata)
-		provenance, _ := json.Marshal(parent.Provenance)
-		_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=$2::jsonb,content_hash=$3,metadata_json=$4::jsonb,provenance_json=$5::jsonb WHERE id=$1`, parent.ID, content, parent.ContentHash, metadata, provenance)
-		if err == nil {
-			_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, f.lkg)
-		}
-	} else {
-		err = f.s.withLockedState(true, func(state *model.State) error {
-			state.PlatformArtifacts[platformArtifactIndex(state.PlatformArtifacts, parent.ID)] = parent
-			state.PlatformLKGSnapshots = upsertPlatformLKGSnapshot(state.PlatformLKGSnapshots, f.lkg)
-			return nil
-		})
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
-	if err != nil || stored == nil {
-		t.Fatal("persisted checkpoint", err)
-	}
-	f.lkg = *stored
-	f.request.ProducerReconfiguration.ServingFull.ContentHash = parent.ContentHash
-	intent.Generation = "shrink-input"
-	intent.EdgeTopology.Edges = intent.EdgeTopology.Edges[:1]
-	a = membershipInput(t, f.s, model.PlatformArtifactKindPlatformIntent, p.TargetScope, intent)
-	f.policy.StaticIntentArtifactID, f.policy.StaticIntentDigest = a.ID, a.ContentHash
-	projection, _ := f.s.GetPlatformArtifact(p.DNSPolicyArtifactID)
-	topology, _ = platformconfig.TrafficConsumerTopologyFromIntent(intent)
-	projection.Content["generation"] = "shrink-projection"
-	projection.Content["consumer_topology_digest"], _ = platformconfig.Digest(topology)
-	a = membershipInput(t, f.s, model.PlatformArtifactKindPolicySnapshot, p.TargetScope, projection.Content)
-	f.policy.DNSPolicyArtifactID, f.policy.DNSPolicyDigest = a.ID, a.ContentHash
-	f.policy.Generation, f.policy.Mode = "shrink-successor", "shadow"
-	f.next = f.save(t, f.policy)
-	f.request.ProducerReconfiguration.Operation = "shrink_membership"
-	f.bindKey(t)
-	return f
-}
-
 func testProducerMembershipShrink(t *testing.T, address string) {
 	t.Run("simultaneous successors", func(t *testing.T) { testSimultaneousProducerReconfiguration(t, address, shrinkFixture) })
 	for _, scenario := range []string{"success", "failed gray", "pending gray", "frozen gray", "stale predecessor", "changed settings", "wrong operation", "wrong digest", "changed retained member", "removed every member", "floor", "changed route", "wrong lkg evidence"} {
@@ -165,7 +84,6 @@ func testProducerMembershipShrink(t *testing.T, address string) {
 		})
 	}
 }
-func TestProducerMembershipShrink(t *testing.T) { testProducerMembershipShrink(t, "") }
 func TestProducerMembershipShrinkPostgres(t *testing.T) {
 	address := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if address == "" {
@@ -176,4 +94,79 @@ func TestProducerMembershipShrinkPostgres(t *testing.T) {
 		t.Fatal("requires disposable loopback database")
 	}
 	testProducerMembershipShrink(t, address)
+}
+
+func shrinkFixture(t *testing.T, address string) reconfigurationFixture {
+	t.Helper()
+	f := membershipFixture(t, address)
+	p := f.policy
+	p.Generation, p.Mode = "shrink-predecessor", "serving"
+	p.Serving.SinglePublication = false
+	f.policy = p
+	f.old = f.save(t, p)
+	_, r, _, _, err := f.s.ReleasePlatformArtifact(f.old.ID, model.PlatformArtifactReleaseRequest{ReleaseChannel: "shadow"}, testPlatformPrincipal())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.request.ProducerReconfiguration.PreviousPolicy = model.PlatformPublicationPrecondition{ArtifactID: f.old.ID, ContentHash: f.old.ContentHash, ReleaseID: r.ID, FencingToken: r.FencingToken}
+	f.seedCompletedPublication(t, r.ID, platformproducer.Actor)
+	a, _ := f.s.GetPlatformArtifact(p.StaticIntentArtifactID)
+	var intent platformconfig.PlatformIntent
+	raw, _ := json.Marshal(a.Content)
+	json.Unmarshal(raw, &intent)
+	topology, err := platformconfig.TrafficConsumerTopologyFromIntent(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the two-member signed checkpoint. This fixture tests configuration
+	// transactions; end-to-end candidate evidence has separate admission tests.
+	parent, _ := f.s.GetPlatformArtifact(f.lkg.ArtifactID)
+	raw, _ = json.Marshal(topology)
+	var object map[string]any
+	json.Unmarshal(raw, &object)
+	parent.Content["consumer_topology"] = object
+	parent.ContentHash, _ = platformconfig.Digest(parent.Content)
+	parent.Metadata["consumer_topology_digest"], _ = platformconfig.Digest(topology)
+	parent, err = platformsafety.SignPlatformArtifact(parent, celldns.Keys())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.lkg.ContentHash, f.lkg.ArtifactProvenance = parent.ContentHash, parent.Provenance
+	f.lkg, err = platformsafety.SignPlatformLKGSnapshot(f.lkg, celldns.Keys())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	content, _ := json.Marshal(parent.Content)
+	metadata, _ := json.Marshal(parent.Metadata)
+	provenance, _ := json.Marshal(parent.Provenance)
+	_, err = f.s.db.Exec(`UPDATE fugue_platform_artifacts SET content_json=$2::jsonb,content_hash=$3,metadata_json=$4::jsonb,provenance_json=$5::jsonb WHERE id=$1`, parent.ID, content, parent.ContentHash, metadata, provenance)
+	if err == nil {
+		_, err = pgUpsertPlatformLKGSnapshot(context.Background(), f.s.db, f.lkg)
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := f.s.GetPlatformLKG(model.PlatformArtifactKindReleaseSet, p.TargetScope)
+	if err != nil || stored == nil {
+		t.Fatal("persisted checkpoint", err)
+	}
+	f.lkg = *stored
+	f.request.ProducerReconfiguration.ServingFull.ContentHash = parent.ContentHash
+	intent.Generation = "shrink-input"
+	intent.EdgeTopology.Edges = intent.EdgeTopology.Edges[:1]
+	a = membershipInput(t, f.s, model.PlatformArtifactKindPlatformIntent, p.TargetScope, intent)
+	f.policy.StaticIntentArtifactID, f.policy.StaticIntentDigest = a.ID, a.ContentHash
+	projection, _ := f.s.GetPlatformArtifact(p.DNSPolicyArtifactID)
+	topology, _ = platformconfig.TrafficConsumerTopologyFromIntent(intent)
+	projection.Content["generation"] = "shrink-projection"
+	projection.Content["consumer_topology_digest"], _ = platformconfig.Digest(topology)
+	a = membershipInput(t, f.s, model.PlatformArtifactKindPolicySnapshot, p.TargetScope, projection.Content)
+	f.policy.DNSPolicyArtifactID, f.policy.DNSPolicyDigest = a.ID, a.ContentHash
+	f.policy.Generation, f.policy.Mode = "shrink-successor", "shadow"
+	f.next = f.save(t, f.policy)
+	f.request.ProducerReconfiguration.Operation = "shrink_membership"
+	f.bindKey(t)
+	return f
 }

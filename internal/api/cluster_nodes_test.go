@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,11 +13,10 @@ import (
 	"fugue/internal/auth"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -352,7 +350,7 @@ func TestListClusterNodesIncludesMetricsConditionsAndWorkloads(t *testing.T) {
 func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -617,7 +615,7 @@ func TestListClusterNodesIncludesSharedNodesHostingTenantWorkloads(t *testing.T)
 func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -856,7 +854,7 @@ func TestListClusterNodesIncludesCNPGBackingServiceWorkloads(t *testing.T) {
 func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWorkloads(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -999,7 +997,7 @@ func TestListClusterNodesIncludesAggregatedSharedClusterWithoutVisibleTenantWork
 func TestListClusterNodesDoesNotAggregateForeignDedicatedNodesIntoSharedCluster(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1093,7 +1091,7 @@ func TestListClusterNodesDoesNotAggregateForeignDedicatedNodesIntoSharedCluster(
 func TestListRuntimesSyncsManagedSharedLocationTargetsFromClusterInventory(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1200,7 +1198,7 @@ func TestListRuntimesSyncsManagedSharedLocationTargetsFromClusterInventory(t *te
 func TestListClusterNodesCollapsesDuplicateManagedOwnedNodesForSameMachine(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1354,7 +1352,7 @@ func TestKubeNodePublicIPPrefersExplicitLabel(t *testing.T) {
 func TestListClusterNodesAllowsSkippingManagedLocationSync(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1560,7 +1558,7 @@ func TestBuildClusterNodeCapturesRuntimeImageFilesystemStats(t *testing.T) {
 func TestLoadClusterNodeInventoryReturnsStaleSnapshotWhileBackgroundRefreshUpdatesCache(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1615,7 +1613,7 @@ func TestLoadClusterNodeInventoryReturnsStaleSnapshotWhileBackgroundRefreshUpdat
 func TestStartBackgroundWarmersPreloadsClusterNodeInventory(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -1652,7 +1650,7 @@ func TestStartBackgroundWarmersPreloadsClusterNodeInventory(t *testing.T) {
 func TestFetchClusterNodeInventoryClosesIdleKubeConnections(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

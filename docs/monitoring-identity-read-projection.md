@@ -7,8 +7,7 @@ do not inspect source, routes, executable configuration, files, environment,
 backing-service bindings or response payloads.
 
 The monitoring paths now use `ListAppWorkloadIdentitiesWithTiming`. PostgreSQL
-projects only those identity and status fields in its `SELECT`; the file-backed
-store retains its existing metadata-read fallback. Existing attribution, tombstone
+projects only those identity and status fields in its `SELECT`. Existing attribution, tombstone
 filtering and tenant boundaries remain unchanged. The complete app read remains
 available to user-facing and configuration paths that need it.
 

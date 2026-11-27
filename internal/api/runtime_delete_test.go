@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +14,7 @@ import (
 func TestDeleteRuntimeRemovesOwnedOfflineRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -76,7 +75,7 @@ func TestDeleteRuntimeRemovesOwnedOfflineRuntime(t *testing.T) {
 func TestDeleteRuntimeRequiresOwner(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -115,7 +114,7 @@ func TestDeleteRuntimeRequiresOwner(t *testing.T) {
 func TestDeleteRuntimeReturnsConflictDetailsForReferencedOfflineRuntime(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

@@ -533,8 +533,8 @@ Both old and new input artifacts must have valid signatures; the static input,
 topology, constraints, schedules and rollout settings stay unchanged. The DNS
 policy may add exactly one `physical_routes` hostname without changing existing
 entries or any other query strategy. A stale fence, changed source, frozen lane or
-newer pending gray publication rejects the whole operation. File-store and isolated
-PostgreSQL tests verify that success, rejection and idempotent retry do not rewrite
+newer pending gray publication rejects the whole operation. Isolated PostgreSQL
+tests verify that success, rejection and idempotent retry do not rewrite
 the serving full publication or its LKG. Candidate publication remains subject to
 the independent evidence compiler and normal canary/readiness gates.
 

@@ -352,7 +352,7 @@ func TestPostgresSchemaAppliesToLiveTestDatabase(t *testing.T) {
 	if !strings.Contains(databaseURL, "fugue-pgtest") && !strings.Contains(databaseURL, "fugue_test") {
 		t.Fatalf("refusing to run schema integration test against non-test database URL %q", databaseURL)
 	}
-	s := New("", databaseURL)
+	s := New(databaseURL)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store against live test database: %v", err)
 	}

@@ -48,7 +48,15 @@ func TestSignedInputDeferralHTTPValidationAndPublication(t *testing.T) {
 			case "foreign kind":
 				kind = model.PlatformArtifactKindPlatformIntent
 			}
-			created := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: kind, Scope: model.PlatformArtifactScope{Key: scope}, Generation: p.Generation, Content: content})
+			// PostgreSQL enforces uniqueness per kind, scope and generation.
+			// Keep the unmodified signed identity for the positive publication;
+			// give each otherwise-equivalent malformed draft its own identity.
+			generation := p.Generation
+			if scenario == "string" || scenario == "fraction" || scenario == "overflow" || scenario == "extra token" {
+				generation += "-" + strings.ReplaceAll(scenario, " ", "-")
+				content["generation"] = generation
+			}
+			created := performJSONRequest(t, server, http.MethodPost, "/v1/admin/artifacts", admin, model.PlatformArtifactCreateRequest{ArtifactKind: kind, Scope: model.PlatformArtifactScope{Key: scope}, Generation: generation, Content: content})
 			if created.Code != http.StatusCreated {
 				t.Fatal("draft create", created.Code, created.Body.String())
 			}

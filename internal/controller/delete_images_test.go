@@ -4,20 +4,18 @@ import (
 	"context"
 	"io"
 	"log"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"fugue/internal/appimages"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func TestExecuteManagedDeleteOperationDeletesOnlyExclusiveManagedImages(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

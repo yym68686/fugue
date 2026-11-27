@@ -406,7 +406,7 @@ func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
 		t.Fatalf("PostgreSQL candidate release did not retain stable LKG: %+v", retainedLKG)
 	}
 
-	restarted := New("", databaseURL)
+	restarted := New(databaseURL)
 	t.Cleanup(func() { _ = restarted.db.Close() })
 	configureTestPlatformArtifactSigning(restarted)
 	if err := restarted.Init(); err != nil {
@@ -445,7 +445,7 @@ func TestPlatformServingUnverifiedCrashRecoveryPostgres(t *testing.T) {
 		t.Fatalf("PostgreSQL rollback replaced stable LKG before verification: %+v", rollbackLKG)
 	}
 
-	restartedAgain := New("", databaseURL)
+	restartedAgain := New(databaseURL)
 	t.Cleanup(func() { _ = restartedAgain.db.Close() })
 	configureTestPlatformArtifactSigning(restartedAgain)
 	if err := restartedAgain.Init(); err != nil {

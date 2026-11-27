@@ -42,43 +42,7 @@ func (stateStore *Store) PrepareAppSSHIdentity(tenantID, appID string) (model.Ap
 	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(appID) == "" {
 		return model.AppSSHIdentity{}, ErrInvalidInput
 	}
-	if stateStore.usingDatabase() {
-		return stateStore.pgPrepareAppSSHIdentity(tenantID, appID)
-	}
-	var identity model.AppSSHIdentity
-	app, err := stateStore.GetApp(appID)
-	if err != nil {
-		return identity, err
-	}
-	if app.TenantID != tenantID || isDeletedApp(app) {
-		return identity, ErrNotFound
-	}
-	keyring, err := stateStore.identityKeyring()
-	if err != nil {
-		return identity, err
-	}
-	err = stateStore.withSSHIdentityFile(true, func(records *[]model.AppSSHIdentityRecord) error {
-		for _, record := range *records {
-			if record.Identity.AppID == appID {
-				if err := validateStoredSSHIdentity(record, tenantID, appID); err != nil {
-					return err
-				}
-				if _, err := keyring.Signer(record); err != nil {
-					return err
-				}
-				identity = record.Identity
-				return nil
-			}
-		}
-		record, err := keyring.Create(tenantID, appID, time.Now().UTC())
-		if err != nil {
-			return err
-		}
-		*records = append(*records, record)
-		identity = record.Identity
-		return nil
-	})
-	return identity, err
+	return stateStore.pgPrepareAppSSHIdentity(tenantID, appID)
 }
 
 func (stateStore *Store) GetAppSSHIdentity(tenantID, appID string) (model.AppSSHIdentity, error) {
@@ -115,33 +79,17 @@ func (stateStore *Store) appSSHIdentityRecord(tenantID, appID string) (model.App
 	if app.TenantID != tenantID || isDeletedApp(app) {
 		return model.AppSSHIdentityRecord{}, ErrNotFound
 	}
-	if stateStore.usingDatabase() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var raw []byte
-		var publicRaw []byte
-		err := stateStore.db.QueryRowContext(ctx, `SELECT anchor.public_body, identity.body
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var raw []byte
+	var publicRaw []byte
+	err = stateStore.db.QueryRowContext(ctx, `SELECT anchor.public_body, identity.body
 FROM fugue_app_ssh_identity_anchors anchor LEFT JOIN fugue_app_ssh_identities identity ON identity.app_id=anchor.app_id
 WHERE anchor.app_id = $1 AND anchor.tenant_id = $2`, appID, tenantID).Scan(&publicRaw, &raw)
-		if err != nil {
-			return model.AppSSHIdentityRecord{}, mapDBErr(err)
-		}
-		return decodeAnchoredSSHIdentity(raw, publicRaw, tenantID, appID)
+	if err != nil {
+		return model.AppSSHIdentityRecord{}, mapDBErr(err)
 	}
-	var result model.AppSSHIdentityRecord
-	err = stateStore.withSSHIdentityFile(false, func(records *[]model.AppSSHIdentityRecord) error {
-		for _, record := range *records {
-			if record.Identity.AppID == appID {
-				if err := validateStoredSSHIdentity(record, tenantID, appID); err != nil {
-					return err
-				}
-				result = record
-				return nil
-			}
-		}
-		return ErrNotFound
-	})
-	return result, err
+	return decodeAnchoredSSHIdentity(raw, publicRaw, tenantID, appID)
 }
 
 func (stateStore *Store) pgPrepareAppSSHIdentity(tenantID, appID string) (model.AppSSHIdentity, error) {

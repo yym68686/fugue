@@ -19,13 +19,12 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		if err := s.ensureDatabaseReady(); err != nil {
-			return nil, err
-		}
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id, app_id FROM fugue_app_releases
+	if err := s.ensureDatabaseReady(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT tenant_id, app_id FROM fugue_app_releases
 			WHERE (role='candidate' AND status='failed') OR (role='previous' AND status='draining')
 			OR (status='retired' AND revision_workload_json IS NOT NULL)
 			OR (role='stable' AND status='serving' AND deployment_name<>'' AND service_name<>''
@@ -33,40 +32,19 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 				AND COALESCE(revision_workload_json->>'service_name','')<>''
 				AND deployment_name<>(revision_workload_json->>'deployment_name')
 				AND service_name<>(revision_workload_json->>'service_name')) ORDER BY tenant_id, app_id`)
-		if err != nil {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var targets []AppReleaseRetirementTarget
+	for rows.Next() {
+		var target AppReleaseRetirementTarget
+		if err := rows.Scan(&target.TenantID, &target.AppID); err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		var targets []AppReleaseRetirementTarget
-		for rows.Next() {
-			var target AppReleaseRetirementTarget
-			if err := rows.Scan(&target.TenantID, &target.AppID); err != nil {
-				return nil, err
-			}
-			targets = append(targets, target)
-		}
-		return targets, rows.Err()
+		targets = append(targets, target)
 	}
-	var targets []AppReleaseRetirementTarget
-	err := s.withLockedState(false, func(state *model.State) error {
-		seen := map[AppReleaseRetirementTarget]bool{}
-		for _, r := range state.AppReleases {
-			if AppReleaseAwaitingDrain(r) || AppReleaseHasAlignedRevision(r) || r.Status == model.AppReleaseStatusRetired && r.RevisionWorkload != nil {
-				seen[AppReleaseRetirementTarget{r.TenantID, r.AppID}] = true
-			}
-		}
-		for target := range seen {
-			targets = append(targets, target)
-		}
-		sort.Slice(targets, func(i, j int) bool {
-			if targets[i].TenantID != targets[j].TenantID {
-				return targets[i].TenantID < targets[j].TenantID
-			}
-			return targets[i].AppID < targets[j].AppID
-		})
-		return ctx.Err()
-	})
-	return targets, err
+	return targets, rows.Err()
 }
 
 // AppReleaseAwaitingDrain identifies withdrawn lifecycle states. It does not
@@ -115,45 +93,7 @@ func (s *Store) retireDrainedAppRelease(ctx context.Context, previous, stable mo
 	if err := ctx.Err(); err != nil {
 		return model.AppRelease{}, err
 	}
-	if s.usingDatabase() {
-		return s.pgRetireDrainedAppRelease(ctx, previous, stable, policy, source, workload)
-	}
-	var result model.AppRelease
-	err := s.withLockedState(true, func(state *model.State) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		pi, si, ti := findAppReleaseByID(state.AppReleases, previous.ID), findAppReleaseByID(state.AppReleases, stable.ID), findAppTrafficPolicyByApp(state.AppTrafficPolicies, policy.AppID)
-		if pi < 0 || si < 0 || ti < 0 {
-			return ErrNotFound
-		}
-		var err error
-		result, err = retireDrainedRelease(state.AppReleases[pi], state.AppReleases[si], state.AppTrafficPolicies[ti], previous, stable, policy, time.Now().UTC())
-		if err != nil {
-			return err
-		}
-		if source != nil {
-			var op model.Operation
-			for _, o := range state.Operations {
-				if o.ID == source.ID {
-					op = o
-					break
-				}
-			}
-			bound, err := migrateReleaseWorkload(state.AppReleases[pi], previous, op, *source, *workload, state.AuditEvents)
-			if err != nil {
-				return err
-			}
-			result.RevisionWorkload = bound.RevisionWorkload
-			result.StatusReason = "historical runtime verified stopped; original intent retained for audit"
-		}
-		if err = guardReleaseRetirement(state, state.AppReleases[pi], result); err != nil {
-			return err
-		}
-		state.AppReleases[pi] = result
-		return nil
-	})
-	return result, err
+	return s.pgRetireDrainedAppRelease(ctx, previous, stable, policy, source, workload)
 }
 
 func retireDrainedRelease(currentPrevious, currentStable model.AppRelease, currentPolicy model.AppTrafficPolicy, previous, stable model.AppRelease, policy model.AppTrafficPolicy, now time.Time) (model.AppRelease, error) {

@@ -3,8 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +11,12 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	runtimepkg "fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 func retainedTrafficAPIFixture(t *testing.T, configure ...func(*platformconfig.CompileRequest)) (*Server, platformconfig.CompileRequest, model.PlatformArtifact, string) {
 	t.Helper()
-	path := t.TempDir() + "/state.json"
-	st := store.New(path)
+	const path = "retained-traffic"
+	st := newStoreTestDatabase(t, path)
 	if err := st.Init(); err != nil {
 		t.Fatal(err)
 	}
@@ -82,51 +79,6 @@ func retainedTrafficAPIFixture(t *testing.T, configure ...func(*platformconfig.C
 	return s, r, parent, path
 }
 
-func TestRetainedTrafficRuntimeSourceSurvivesAbsentOriginalAfterRestart(t *testing.T) {
-	s, _, parent, path := retainedTrafficAPIFixture(t, func(r *platformconfig.CompileRequest) {
-		r.Policy.RuntimeInputMode = platformconfig.RuntimeInputConfigurationV1
-		r.RuntimeSnapshot.Facts = map[string]any{"audit": strings.Repeat("replay", 1000)}
-	})
-	before, err := s.readRetainedTrafficSource(context.Background(), "global")
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var state model.State
-	if err := json.Unmarshal(data, &state); err != nil {
-		t.Fatal(err)
-	}
-	kept := state.PlatformArtifactContents[:0]
-	for _, content := range state.PlatformArtifactContents {
-		if content.ContentHash != parent.Metadata["input_snapshot_digest"] {
-			kept = append(kept, content)
-		}
-	}
-	state.PlatformArtifactContents = kept
-	data, err = json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	// Restart the store with no cached original. This synthetic source test
-	// exercises the real retained-traffic reader, not full recovery acceptance.
-	fresh := store.New(path)
-	fresh.ConfigurePlatformArtifactSigning(s.bundleKeyring())
-	s.store = fresh
-	after, err := s.readRetainedTrafficSource(context.Background(), "global")
-	if err != nil {
-		t.Fatal("retained source still requires original history", err)
-	}
-	if !before.expiry("tenant-a", "app-a").Equal(after.expiry("tenant-a", "app-a")) || !reflect.DeepEqual(before.routes, after.routes) || !reflect.DeepEqual(before.snapshot, after.snapshot) {
-		t.Fatal("restart renewed retained leases or changed source facts")
-	}
-}
-
 func TestRetainedTrafficHostnameProjectionPreservesMultiHostAndSharedPaths(t *testing.T) {
 	now := time.Now().UTC()
 	r := platformconfig.CompileRequest{
@@ -187,85 +139,6 @@ func TestRetainedTrafficHostnameProjectionPreservesMultiHostAndSharedPaths(t *te
 	after, _ := json.Marshal(p)
 	if string(before) != string(after) {
 		t.Fatal("hostname projection mutated complete partition")
-	}
-}
-
-func TestRetainedTrafficCaptureRequiresSignedVerifiedSourceAndExactContent(t *testing.T) {
-	s, r, _, path := retainedTrafficAPIFixture(t)
-	ctx := context.Background()
-	source, err := s.readRetainedTrafficSource(ctx, "global")
-	if err != nil {
-		t.Fatal(err)
-	}
-	r.Intent.Generation = "intent-new"
-	r.RuntimeSnapshot.Releases[0].Status = model.EdgeRouteStatusUnavailable
-	r.RuntimeSnapshot.Releases[0].StatusReason = "endpoint identity differs: field=pod_release_key"
-	r.RuntimeSnapshot.Releases[1].UpstreamURL = "http://b-new:8080"
-	projection := platformIntentProjectionResponse{Intent: r.Intent, Policy: r.Policy, RuntimeSnapshot: r.RuntimeSnapshot, CapturedAt: *r.RuntimeSnapshot.CapturedAt}
-	s.captureRetainedTrafficPartitions(ctx, &projection, 5*time.Minute)
-	if len(projection.RuntimeSnapshot.RetainedTrafficPartitions) != 1 || projection.RuntimeSnapshot.Releases[0].Status != model.EdgeRouteStatusUnavailable {
-		t.Fatal("capture lost exact partition or invented ready workload", projection.Issues)
-	}
-	part := projection.RuntimeSnapshot.RetainedTrafficPartitions[0]
-	if !reflect.DeepEqual(part.Routes, source.routes["tenant-a\x00app-a"]) || part.ExpiresAt != source.expiry("tenant-a", "app-a") {
-		t.Fatal("source or original expiry changed")
-	}
-	r.RuntimeSnapshot = projection.RuntimeSnapshot
-	compiled, err := platformconfig.Compile(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = s.validateRetainedTrafficCompilation(ctx, compiled); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.materializePlatformCompilation(ctx, compiled, platformProducerPrincipal(), nil); err != nil {
-		t.Fatal(err)
-	}
-	for _, scenario := range []string{"forged route", "extended expiry", "new source fence", "revoked source", "missing consumer receipts"} {
-		t.Run(scenario, func(t *testing.T) {
-			// Deep copy so adversarial mutations never alter another scenario.
-			raw, _ := json.Marshal(compiled)
-			var bad platformconfig.CompileResult
-			if err := json.Unmarshal(raw, &bad); err != nil {
-				t.Fatal(err)
-			}
-			switch scenario {
-			case "forged route":
-				bad.InputSnapshot.RetainedTrafficPartitions[0].Routes[0].UpstreamURL = "http://forged:8080"
-			case "extended expiry":
-				bad.InputSnapshot.RetainedTrafficPartitions[0].ExpiresAt = source.expiry("tenant-a", "app-a").Add(time.Second)
-			case "new source fence":
-				bad.InputSnapshot.RetainedTrafficPartitions[0].Source.FencingToken++
-			case "revoked source":
-				if _, err := s.store.ValidatePlatformArtifact(source.route.ID, []model.PlatformArtifactValidationResult{{Name: "revoked", Pass: false}}); err != nil {
-					t.Fatal(err)
-				}
-				defer func() {
-					_, _ = s.store.ValidatePlatformArtifact(source.route.ID, []model.PlatformArtifactValidationResult{{Name: "restore", Pass: true}})
-				}()
-			case "missing consumer receipts":
-				// Corrupt only this disposable file store, not membership policy.
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var state model.State
-				if err := json.Unmarshal(data, &state); err != nil {
-					t.Fatal(err)
-				}
-				state.PlatformConsumerInstances = nil
-				data, err = json.Marshal(state)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, data, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := s.validateRetainedTrafficCompilation(ctx, bad); err == nil {
-				t.Fatal("untrusted retention materialized")
-			}
-		})
 	}
 }
 

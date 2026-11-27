@@ -4,13 +4,12 @@ import (
 	"context"
 	"errors"
 	"fugue/internal/model"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestDataGCReferencesFenceWritersAndPreserveExpiredAuthorization(t *testing.T) {
-	s := New(filepath.Join(t.TempDir(), "state.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatal(err)
 	}

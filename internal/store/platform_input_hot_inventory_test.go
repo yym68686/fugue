@@ -18,13 +18,16 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
 	"fugue/internal/testfixture/celldns"
+	"fugue/internal/testpostgres"
 )
 
 func hotInventoryTestDatabase(t *testing.T) (*sql.DB, string, string) {
 	t.Helper()
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("requires disposable local PostgreSQL")
+		// Tests formerly exercised only with the legacy integration harness
+		// also run with the disposable template used by make test-postgres.
+		dsn = testpostgres.Database(t, "")
 	}
 	u, err := url.Parse(dsn)
 	if err != nil || u.Hostname() != "127.0.0.1" || !strings.Contains(u.Path, "fugue_test") {

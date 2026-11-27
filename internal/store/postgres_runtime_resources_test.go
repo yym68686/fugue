@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"fugue/internal/model"
@@ -114,78 +113,10 @@ func TestCloneBackingServiceDetachesRuntimeResources(t *testing.T) {
 	}
 }
 
-func TestBackingServiceRuntimeResourcesPersistAndOrdinaryUpdateCannotChangeThem(t *testing.T) {
-	t.Parallel()
-
-	path := filepath.Join(t.TempDir(), "store.json")
-	s := New(path)
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-	tenant, err := s.CreateTenant("runtime-target")
-	if err != nil {
-		t.Fatalf("create tenant: %v", err)
-	}
-	project, err := s.CreateProject(tenant.ID, "runtime-target", "")
-	if err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	service, err := s.CreateBackingService(tenant.ID, project.ID, "runtime-db", "", model.BackingServiceSpec{
-		Postgres: &model.AppPostgresSpec{},
-	})
-	if err != nil {
-		t.Fatalf("create backing service: %v", err)
-	}
-	runtimeTarget := model.ResourceSpec{
-		CPUMilliCores:        150,
-		MemoryMebibytes:      640,
-		CPULimitMilliCores:   500,
-		MemoryLimitMebibytes: 1024,
-	}
-	if err := s.withLockedState(true, func(state *model.State) error {
-		index := findBackingService(state, service.ID)
-		if index < 0 {
-			return ErrNotFound
-		}
-		state.BackingServices[index].Spec.Postgres.RuntimeResources = model.CloneResourceSpec(&runtimeTarget)
-		return nil
-	}); err != nil {
-		t.Fatalf("seed server-owned runtime target: %v", err)
-	}
-
-	reopened := New(path)
-	if err := reopened.Init(); err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	persisted, err := reopened.GetBackingService(service.ID)
-	if err != nil {
-		t.Fatalf("get persisted backing service: %v", err)
-	}
-	if persisted.Spec.Postgres.RuntimeResources == nil || *persisted.Spec.Postgres.RuntimeResources != runtimeTarget {
-		t.Fatalf("runtime target did not survive persistence: %+v", persisted.Spec.Postgres.RuntimeResources)
-	}
-
-	ordinarySpec := cloneBackingServiceSpec(persisted.Spec)
-	ordinarySpec.Postgres.RuntimeResources = nil
-	updated, err := reopened.UpdateBackingServiceSpec(service.ID, ordinarySpec)
-	if err != nil {
-		t.Fatalf("ordinary update with omitted read-only target: %v", err)
-	}
-	if updated.Spec.Postgres.RuntimeResources == nil || *updated.Spec.Postgres.RuntimeResources != runtimeTarget {
-		t.Fatalf("ordinary update dropped runtime target: %+v", updated.Spec.Postgres.RuntimeResources)
-	}
-
-	changedSpec := cloneBackingServiceSpec(updated.Spec)
-	changedSpec.Postgres.RuntimeResources.CPUMilliCores++
-	if _, err := reopened.UpdateBackingServiceSpec(service.ID, changedSpec); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("expected ordinary runtime target change to fail closed, got %v", err)
-	}
-}
-
 func TestCreateManagedPostgresRejectsClientRuntimeResources(t *testing.T) {
 	t.Parallel()
 
-	s := New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

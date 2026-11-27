@@ -24,7 +24,7 @@ import (
 func TestNodeUpdaterAPILifecycle(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -203,8 +203,16 @@ func TestNodeUpdaterAPILifecycle(t *testing.T) {
 
 func TestNodeUpdaterTaskCreateConflictDoesNotQueueDependency(t *testing.T) {
 	t.Parallel()
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	const fixture = "task-admission"
+	s := newStoreTestDatabase(t, fixture)
 	if err := s.Init(); err != nil {
+		t.Fatal(err)
+	}
+	// Dependency checks are enforced only after history admission cutover.
+	// Exercise the real PostgreSQL contract in that phase.
+	db := openStoreTestSQL(t, fixture)
+	if _, err := db.ExecContext(t.Context(), `UPDATE fugue_platform_input_history_admission
+ SET phase='enforced', plan_sha256=repeat('a',64), enforced_at=now() WHERE singleton`); err != nil {
 		t.Fatal(err)
 	}
 	tenant, err := s.CreateTenant("Neutral Task Admission")
@@ -253,7 +261,7 @@ func TestNodeUpdaterTaskCreateConflictDoesNotQueueDependency(t *testing.T) {
 }
 
 func TestNodeUpdaterEdgeCredentialRequiresExplicitGroupIdentity(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -387,7 +395,7 @@ func TestNodeUpdaterEdgeCredentialRequiresExplicitGroupIdentity(t *testing.T) {
 }
 
 func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -480,7 +488,7 @@ func TestNodeUpdaterEdgeCredentialDefaultsLegacyDNSNodeToStatic(t *testing.T) {
 }
 
 func TestNodeUpdaterEdgeCredentialFailsClosedWhenIdentityIsMissing(t *testing.T) {
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -529,7 +537,7 @@ func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	digest := "sha256:570d3b2870631111111111111111111111111111111111111111111111111111"
 	reportImageCacheTestManifest(t, server, updaterToken, digest)
 	if _, err := stateStore.UpsertImage(model.Image{
-		TenantID:        "tenant_1",
+		TenantID:        updater.TenantID,
 		AppID:           "app_1",
 		ImageRef:        "registry.fugue.internal:5000/fugue-apps/demo@" + digest,
 		CanonicalDigest: digest,
@@ -548,7 +556,7 @@ func TestNodeUpdaterClaimRefusesProtectedImageCacheDeleteTask(t *testing.T) {
 	task, err := stateStore.CreateNodeUpdateTask(model.Principal{
 		ActorType: model.ActorTypeSystem,
 		ActorID:   "test",
-		TenantID:  "tenant_1",
+		TenantID:  updater.TenantID,
 		Scopes:    map[string]struct{}{"platform.admin": {}},
 	}, updater.ID, updater.ClusterNodeName, updater.RuntimeID, model.NodeUpdateTaskTypePruneImageCache, map[string]string{
 		"dry_run":          "false",
@@ -590,7 +598,7 @@ func TestImageCacheAutomaticDeleteRejectsMissingControlPlaneMetadata(t *testing.
 func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -662,7 +670,7 @@ func TestNodeUpdaterLocalPVDecommissionCompletionWritesAudit(t *testing.T) {
 func TestNodeRepairTaskGuardsUnsafeExecutionAndWritesAudit(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -783,8 +791,8 @@ func TestNodeRepairTaskGuardsUnsafeExecutionAndWritesAudit(t *testing.T) {
 func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
 	t.Parallel()
 
-	storePath := filepath.Join(t.TempDir(), "store.json")
-	s := store.New(storePath)
+	storePath := filepath.Join(t.TempDir(), "postgres-fixture")
+	s := newStoreTestDatabase(t, storePath)
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -830,7 +838,7 @@ func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
 	if _, err := s.ClaimNodeUpdateTask(staleTask.ID, updaterID); err != nil {
 		t.Fatalf("claim stale task: %v", err)
 	}
-	ageTaskInStoreFile(t, storePath, staleTask.ID, time.Now().UTC().Add(-staleNodeUpdateTaskTimeout-time.Minute))
+	ageNodeUpdateTask(t, storePath, staleTask.ID, time.Now().UTC().Add(-staleNodeUpdateTaskTimeout-time.Minute))
 
 	pollRecorder := performFormRequest(t, server, http.MethodGet, "/v1/node-updater/tasks?format=env&limit=1", updaterToken, nil)
 	if pollRecorder.Code != http.StatusOK {
@@ -859,7 +867,7 @@ func TestNodeUpdaterTaskPollExpiresStaleRunningTasks(t *testing.T) {
 func TestNodeUpdaterCanReportImageLocationForAppTenant(t *testing.T) {
 	t.Parallel()
 
-	s := store.New(filepath.Join(t.TempDir(), "store.json"))
+	s := newStoreTestDatabase(t, "")
 	if err := s.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2413,29 +2421,14 @@ run_once
 	}
 }
 
-func ageTaskInStoreFile(t *testing.T, storePath, taskID string, updatedAt time.Time) {
+func ageNodeUpdateTask(t *testing.T, fixture, taskID string, updatedAt time.Time) {
 	t.Helper()
-	raw, err := os.ReadFile(storePath)
+	result, err := openStoreTestSQL(t, fixture).Exec(`UPDATE fugue_node_update_tasks SET updated_at = $2, claimed_at = $2 WHERE id = $1`, taskID, updatedAt)
 	if err != nil {
-		t.Fatalf("read store: %v", err)
+		t.Fatalf("age node update task: %v", err)
 	}
-	var state model.State
-	if err := json.Unmarshal(raw, &state); err != nil {
-		t.Fatalf("decode store: %v", err)
-	}
-	for i := range state.NodeUpdateTasks {
-		if state.NodeUpdateTasks[i].ID == taskID {
-			state.NodeUpdateTasks[i].UpdatedAt = updatedAt
-			state.NodeUpdateTasks[i].ClaimedAt = &updatedAt
-		}
-	}
-	encoded, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		t.Fatalf("encode store: %v", err)
-	}
-	encoded = append(encoded, '\n')
-	if err := os.WriteFile(storePath, encoded, 0o600); err != nil {
-		t.Fatalf("write store: %v", err)
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		t.Fatalf("age node update task: updated %d records: %v", n, err)
 	}
 }
 
@@ -2762,7 +2755,7 @@ grep -q 'server: "https://cp.example:6443"' "${FUGUE_NODE_UPDATER_K3S_CONFIG_FIL
 func TestNodeUpdaterTaskEnvNormalizesLegacyManagedPrepullImageRefs(t *testing.T) {
 	t.Parallel()
 
-	stateStore := store.New(filepath.Join(t.TempDir(), "store.json"))
+	stateStore := newStoreTestDatabase(t, "")
 	if err := stateStore.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}

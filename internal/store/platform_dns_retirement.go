@@ -29,7 +29,7 @@ func dnsRetirementMember(full model.PlatformArtifact) (string, error) {
 	return "", ErrConflict
 }
 
-func validateProducerDNSRetirement(state *model.State, previous platformproducer.Policy, successor, full model.PlatformArtifact, keys bundleauth.Keyring) error {
+func validateProducerDNSRetirement(state *storeProjection, previous platformproducer.Policy, successor, full model.PlatformArtifact, keys bundleauth.Keyring) error {
 	next, err := platformproducer.Decode(successor)
 	if err != nil {
 		return ErrConflict
@@ -70,7 +70,7 @@ func validateProducerDNSRetirement(state *model.State, previous platformproducer
 	return nil
 }
 
-func pgLoadDNSRetirementBaseline(ctx context.Context, tx *sql.Tx, state *model.State, parentID string) error {
+func pgLoadDNSRetirementBaseline(ctx context.Context, tx *sql.Tx, state *storeProjection, parentID string) error {
 	index := platformArtifactIndex(state.PlatformArtifacts, parentID)
 	if index < 0 {
 		return ErrConflict

@@ -14,6 +14,7 @@ import (
 
 	"fugue/internal/inputarchive"
 	"fugue/internal/schemamigrate"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -32,7 +33,7 @@ func (s *Store) RetiredPlatformConsumerTargets(ctx context.Context, targets []Pl
 	if len(targets) > 128 {
 		return nil, ErrInvalidInput
 	}
-	if len(targets) == 0 || !s.usingDatabase() {
+	if len(targets) == 0 {
 		return nil, nil
 	}
 	data, err := json.Marshal(targets)

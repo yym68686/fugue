@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/schemamigrate"
+
 	"github.com/jackc/pgx/v5/pgconn"
 )
 

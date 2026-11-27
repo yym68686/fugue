@@ -2,8 +2,6 @@ package store
 
 import (
 	"context"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -29,58 +27,7 @@ func (s *Store) UpsertImageLocation(location model.ImageLocation) (model.ImageLo
 	if location.Status == "" {
 		location.Status = model.ImageLocationStatusPresent
 	}
-	if s.usingDatabase() {
-		return s.pgUpsertImageLocation(location)
-	}
-
-	var out model.ImageLocation
-	err := s.withLockedState(true, func(state *model.State) error {
-		now := time.Now().UTC()
-		index := findImageLocation(state, location)
-		if index >= 0 {
-			current := state.ImageLocations[index]
-			location.ID = current.ID
-			location.CreatedAt = current.CreatedAt
-			if location.TenantID == "" {
-				location.TenantID = current.TenantID
-			}
-			if location.AppID == "" {
-				location.AppID = current.AppID
-			}
-			if location.SourceOperationID == "" {
-				location.SourceOperationID = current.SourceOperationID
-			}
-			if location.NodeID == "" {
-				location.NodeID = current.NodeID
-			}
-			if location.RuntimeID == "" {
-				location.RuntimeID = current.RuntimeID
-			}
-			if location.ClusterNodeName == "" {
-				location.ClusterNodeName = current.ClusterNodeName
-			}
-			if location.CacheEndpoint == "" {
-				location.CacheEndpoint = current.CacheEndpoint
-			}
-			if location.LastSeenAt == nil {
-				location.LastSeenAt = current.LastSeenAt
-			}
-			location.UpdatedAt = now
-			state.ImageLocations[index] = location
-			out = location
-			return nil
-		}
-		location.ID = model.NewID("imgloc")
-		location.CreatedAt = now
-		location.UpdatedAt = now
-		if location.LastSeenAt == nil {
-			location.LastSeenAt = &now
-		}
-		state.ImageLocations = append(state.ImageLocations, location)
-		out = location
-		return nil
-	})
-	return out, err
+	return s.pgUpsertImageLocation(location)
 }
 
 // DemoteLegacyImageLocationIfUnchanged marks a historical distributed
@@ -106,44 +53,13 @@ func (s *Store) DemoteLegacyImageLocationIfUnchanged(
 	if minimum := expectedUpdatedAt.Add(time.Microsecond); updatedAt.Before(minimum) {
 		updatedAt = minimum
 	}
-	if s.usingDatabase() {
-		return s.pgDemoteLegacyImageLocationIfUnchanged(
-			id,
-			expectedUpdatedAt,
-			observedAt,
-			updatedAt,
-			lastError,
-		)
-	}
-
-	var out model.ImageLocation
-	err := s.withLockedState(true, func(state *model.State) error {
-		index := -1
-		for candidateIndex, candidate := range state.ImageLocations {
-			if strings.TrimSpace(candidate.ID) == id {
-				index = candidateIndex
-				break
-			}
-		}
-		if index < 0 {
-			return ErrConflict
-		}
-		current := state.ImageLocations[index]
-		if !current.UpdatedAt.Equal(expectedUpdatedAt) ||
-			!strings.EqualFold(strings.TrimSpace(current.Status), model.ImageLocationStatusPresent) ||
-			strings.TrimSpace(current.Digest) != "" ||
-			!ImageLocationIsDistributed(current) {
-			return ErrConflict
-		}
-		current.Status = model.ImageLocationStatusMissing
-		current.LastError = lastError
-		current.LastSeenAt = &observedAt
-		current.UpdatedAt = updatedAt
-		state.ImageLocations[index] = current
-		out = current
-		return nil
-	})
-	return out, err
+	return s.pgDemoteLegacyImageLocationIfUnchanged(
+		id,
+		expectedUpdatedAt,
+		observedAt,
+		updatedAt,
+		lastError,
+	)
 }
 
 // resolveImageLocationDigest bridges compatibility reports that identify an
@@ -196,29 +112,7 @@ func (s *Store) ResolveImageLocationDigest(location model.ImageLocation) (string
 
 func (s *Store) ListImageLocations(filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
 	filter = normalizeImageLocationFilter(filter)
-	if s.usingDatabase() {
-		return s.pgListImageLocations(filter)
-	}
-	out := []model.ImageLocation{}
-	err := s.withLockedState(false, func(state *model.State) error {
-		for _, location := range state.ImageLocations {
-			if imageLocationMatchesFilter(location, filter) {
-				out = append(out, location)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(out, func(i, j int) bool {
-		leftSeen, rightSeen := imageLocationSeenAt(out[i]), imageLocationSeenAt(out[j])
-		if !leftSeen.Equal(rightSeen) {
-			return leftSeen.After(rightSeen)
-		}
-		return out[i].UpdatedAt.After(out[j].UpdatedAt)
-	})
-	return out, nil
+	return s.pgListImageLocations(filter)
 }
 
 func normalizeImageLocation(location model.ImageLocation) model.ImageLocation {
@@ -296,83 +190,9 @@ func normalizeImageDigest(raw string) string {
 	return raw
 }
 
-func findImageLocation(state *model.State, location model.ImageLocation) int {
-	if strings.TrimSpace(location.ID) != "" {
-		for idx, existing := range state.ImageLocations {
-			if strings.TrimSpace(existing.ID) == strings.TrimSpace(location.ID) {
-				return idx
-			}
-		}
-	}
-	for idx, existing := range state.ImageLocations {
-		if strings.TrimSpace(existing.ImageRef) != location.ImageRef {
-			continue
-		}
-		if normalizeImageDigest(existing.Digest) != location.Digest {
-			continue
-		}
-		if strings.TrimSpace(existing.NodeID) != location.NodeID {
-			continue
-		}
-		if strings.TrimSpace(existing.RuntimeID) != location.RuntimeID {
-			continue
-		}
-		if strings.TrimSpace(existing.ClusterNodeName) != location.ClusterNodeName {
-			continue
-		}
-		return idx
-	}
-	return -1
-}
-
-func imageLocationMatchesFilter(location model.ImageLocation, filter model.ImageLocationFilter) bool {
-	if !filter.PlatformAdmin && strings.TrimSpace(location.TenantID) != filter.TenantID {
-		return false
-	}
-	if filter.AppID != "" && strings.TrimSpace(location.AppID) != filter.AppID {
-		return false
-	}
-	if len(filter.AppIDs) > 0 && !slices.Contains(filter.AppIDs, strings.TrimSpace(location.AppID)) {
-		return false
-	}
-	if filter.ImageRef != "" && strings.TrimSpace(location.ImageRef) != filter.ImageRef {
-		return false
-	}
-	if filter.Digest != "" && normalizeImageDigest(location.Digest) != filter.Digest {
-		return false
-	}
-	if filter.Status != "" && strings.TrimSpace(location.Status) != filter.Status {
-		return false
-	}
-	if filter.NodeID != "" && strings.TrimSpace(location.NodeID) != filter.NodeID {
-		return false
-	}
-	if filter.RuntimeID != "" && strings.TrimSpace(location.RuntimeID) != filter.RuntimeID {
-		return false
-	}
-	if filter.ClusterNodeName != "" && strings.TrimSpace(location.ClusterNodeName) != filter.ClusterNodeName {
-		return false
-	}
-	return true
-}
-
-func imageLocationSeenAt(location model.ImageLocation) time.Time {
-	if location.LastSeenAt != nil {
-		return *location.LastSeenAt
-	}
-	return location.UpdatedAt
-}
-
 func (s *Store) ListImageLocationsContext(ctx context.Context, filter model.ImageLocationFilter) ([]model.ImageLocation, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if s.usingDatabase() {
-		return s.pgListImageLocationsContext(ctx, normalizeImageLocationFilter(filter))
-	}
-	result, err := s.ListImageLocations(filter)
-	if err == nil {
-		err = ctx.Err()
-	}
-	return result, err
+	return s.pgListImageLocationsContext(ctx, normalizeImageLocationFilter(filter))
 }
