@@ -26,6 +26,20 @@ never changes the head. Do not put policy files or owner signing material back
 in the program image. The legacy policy remains in use until shadow parity
 and provider-side writer cutover have been demonstrated.
 
+`preview-participation JOURNAL_CONFIG NODE SNAPSHOT` uses the journal's
+read-only connection to load the current approved topology. The input JSON
+uses schema `fugue.participation-snapshot-replay/v1` with `cluster`, `topology`
+(the `version` object from `read-participation`), `observedAt` (RFC 3339),
+and `observations` (Node, inventory, retained workloads, verified-reader
+baseline count and transport projection). The preview reports the observed
+Node UID and resourceVersion plus any proposed hold annotation changes and
+the exact prior annotation map. A `review_recovery` result identifies the
+point at which legacy recovery begins its Front, Worker, and network checks.
+The snapshot comes from the caller. Treat each report with
+`kind=untrusted_snapshot_replay` and `executionEvidence=false` as a debugging
+record only. Production shadow validation requires independent live
+observations and comparison of the recovery and rollback preconditions.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`

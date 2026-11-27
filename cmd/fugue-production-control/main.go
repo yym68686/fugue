@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"fugue/internal/productioncontrol"
+	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -29,6 +30,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
+       fugue-production-control preview-participation JOURNAL_CONFIG NODE SNAPSHOT
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -90,7 +92,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				return errors.New("invalid participation topology generation")
 			}
 		}
-		return withJournal(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
 			var topology productioncontrol.VerifiedParticipationTopology
 			var err error
 			if generation == 0 {
@@ -102,6 +104,25 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				return err
 			}
 			return emit(topology)
+		})
+	case "preview-participation":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		raw, err := readFile(args[3], participation.MaxReplayBytes, false)
+		if err != nil {
+			return err
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			topology, err := j.ReadParticipationTopology(ctx, cluster)
+			if err != nil {
+				return err
+			}
+			report, err := participation.ReplayParticipation(cluster, args[2], topology, raw, now())
+			if err != nil {
+				return err
+			}
+			return emit(report)
 		})
 	case "migrate-journal":
 		if len(args) != 2 {
@@ -202,7 +223,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {
 	var entry productioncontrol.Recorded
-	err := withJournal(ctx, path, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+	err := withJournal(ctx, path, false, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
 		var err error
 		entry, err = fn(ctx, j, cluster)
 		return err
@@ -210,10 +231,16 @@ func record(ctx context.Context, path string, fn func(context.Context, *producti
 	return entry, err
 }
 
-func withJournal(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) error) error {
+func withJournal(ctx context.Context, path string, readOnly bool, fn func(context.Context, *productioncontrol.Journal, string) error) error {
 	cfg, keys, cluster, err := productioncontrol.LoadJournalEndpoint(path)
 	if err != nil {
 		return err
+	}
+	if readOnly {
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = make(map[string]string)
+		}
+		cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	}
 	db := stdlib.OpenDB(*cfg)
 	defer db.Close()
