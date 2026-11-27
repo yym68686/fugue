@@ -147,6 +147,26 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 		after.ObservedDigest != submission.Intent.TargetDigest {
 		t.Fatalf("independent target readback failed: %+v, %v", after, err)
 	}
+	closed, _, err := FreezeNodePolicy(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policies := admission.ValidatingAdmissionPolicies()
+	installed, err := policies.Get(ctx, closed.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed.Spec = closed.Spec
+	if _, err := policies.Update(ctx, installed, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := observer.ObserveOfflineHoldGuard(ctx, topology, submission, writer); err == nil {
+		t.Fatal("the observer treated the exact closed freeze as an open write guard")
+	}
+	freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, node)
+	if err != nil || freeze.Policy.UID != string(installed.UID) || freeze.Policy.ResourceVersion == installed.ResourceVersion {
+		t.Fatalf("independent read did not find the exact replacement freeze: %+v, %v", freeze, err)
+	}
 }
 
 func TestOfflineHoldWriteSendsOnlyOneExactPatch(t *testing.T) {

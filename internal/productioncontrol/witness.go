@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -108,12 +109,30 @@ type signedExecutionEvidence struct {
 	source WitnessReader
 	trust  map[string]TrustedWitness
 	now    func() time.Time
+	check  WitnessObservationCheck
 }
+
+// WitnessObservationCheck independently verifies the current provider facts
+// committed in a trusted witness. It is passed only authenticated witnesses.
+type WitnessObservationCheck func(context.Context, ExecutionWitness) error
 
 // NewWitnessedExecutionJournal enables baseline and terminal recording only
 // against provider attestations scoped to this resource. The verifier cannot
 // collect provider evidence or construct a witness to unblock a claim.
 func NewWitnessedExecutionJournal(journal *Journal, source WitnessReader, trusted map[string]TrustedWitness) (*ExecutionJournal, error) {
+	return newWitnessedExecutionJournal(journal, source, trusted, nil)
+}
+
+// NewObservedExecutionJournal requires both a signed witness and a matching
+// fresh provider observation before a new baseline or result can be written.
+func NewObservedExecutionJournal(journal *Journal, source WitnessReader, trusted map[string]TrustedWitness, check WitnessObservationCheck) (*ExecutionJournal, error) {
+	if check == nil {
+		return nil, errors.New("production execution requires an independent live observation")
+	}
+	return newWitnessedExecutionJournal(journal, source, trusted, check)
+}
+
+func newWitnessedExecutionJournal(journal *Journal, source WitnessReader, trusted map[string]TrustedWitness, check WitnessObservationCheck) (*ExecutionJournal, error) {
 	if journal == nil || source == nil || len(trusted) == 0 {
 		return nil, errors.New("production execution requires an independent witness source and trust")
 	}
@@ -122,13 +141,16 @@ func NewWitnessedExecutionJournal(journal *Journal, source WitnessReader, truste
 		if !tokenPattern.MatchString(id) || !key.Scope.valid() || len(key.PublicKey) != ed25519.PublicKeySize {
 			return nil, errors.New("invalid production execution witness trust")
 		}
+		if check == nil && strings.HasPrefix(key.Scope.ResourceID, ParticipationNodeResourcePrefix) {
+			return nil, errors.New("node participation witnesses require independent live readback")
+		}
 		if err := journal.VerifyIndependentObserverKey(key.PublicKey); err != nil {
 			return nil, err
 		}
 		key.PublicKey = bytes.Clone(key.PublicKey)
 		keys[id] = key
 	}
-	return NewExecutionJournal(journal, &signedExecutionEvidence{source, keys, journal.now})
+	return NewExecutionJournal(journal, &signedExecutionEvidence{source, keys, journal.now, check})
 }
 
 func (v *signedExecutionEvidence) VerifyBaseline(ctx context.Context, baseline Baseline) error {
@@ -139,7 +161,7 @@ func (v *signedExecutionEvidence) VerifyBaseline(ctx context.Context, baseline B
 	if w.Kind != BaselineWitness || w.version() != baseline.Verified {
 		return errors.New("production witness does not bind this baseline")
 	}
-	return nil
+	return v.verifyObservation(ctx, w)
 }
 
 func (v *signedExecutionEvidence) VerifyTerminal(ctx context.Context, claim Claim, intent Intent, result ExecutionResult) error {
@@ -155,7 +177,20 @@ func (v *signedExecutionEvidence) VerifyTerminal(ctx context.Context, claim Clai
 		w.ApprovalDigest != claim.ApprovalDigest || w.Fence != claim.Fence || w.Outcome != result.Outcome {
 		return errors.New("production witness does not bind this terminal execution")
 	}
-	return nil
+	return v.verifyObservation(ctx, w)
+}
+
+func (v *signedExecutionEvidence) verifyObservation(ctx context.Context, w ExecutionWitness) error {
+	if v.check != nil {
+		if err := v.check(ctx, w); err != nil {
+			return err
+		}
+	}
+	at := v.now().Unix()
+	if at < w.ObservedAt || at >= w.ExpiresAt {
+		return errors.New("production execution witness expired during verification")
+	}
+	return ctx.Err()
 }
 
 func (v *signedExecutionEvidence) read(ctx context.Context, evidenceDigest string, scope Scope) (ExecutionWitness, error) {

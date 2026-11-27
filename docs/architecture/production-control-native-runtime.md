@@ -236,6 +236,29 @@ writer gets SelfSubjectReview and the exact scoped Node patch permission,
 not policy management or other Node/Pod actions. No role or attestation is
 provisioned by running the command.
 
+For initial enrollment and recovery after a pending dispatch, use a
+dedicated API-independent bootstrap profile for the exact Node:
+
+- `participation-checkpoint [INTENT_DIGEST]` is read-only. It hashes the enrolled
+  physical Node state and closed, type-checked admission policy/binding
+  revisions (and, when supplied, the unresolved claim). It does not sign a
+  witness or establish that old or delayed writes have drained.
+- `participation-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST` requires the
+  independent signed baseline witness and a fresh matching closed checkpoint.
+  The ledger rejects a concurrent change of approved topology.
+- `participation-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
+  requires independent signed proof bound to the pending claim and matches
+  a fresh closed checkpoint. `applied` requires the exact target at the
+  next ledger generation. `not_applied` requires the exact predecessor
+  with the original generation and evidence that the claim cannot write.
+  Other observations leave the claim pending. Rollback is a separate,
+  explicitly approved operation and is not implemented for this hold.
+
+These profiles mount `mode`, `node`, `journalFile`, `actor`,
+`observerPublicKey` and `witnessDirectory`; they do not accept a Deployment
+cutover or registry credentials. Kubernetes access is read only. Use
+independent PostgreSQL roles for checkpoint, anchor and settlement.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`

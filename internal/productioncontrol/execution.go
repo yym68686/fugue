@@ -97,10 +97,34 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 	if !tokenPattern.MatchString(actor) || !baseline.Scope.valid() || !baseline.Verified.valid() || !digestPattern.MatchString(baseline.EvidenceDigest) {
 		return false, errors.New("invalid production resource baseline")
 	}
+	var topology VerifiedParticipationTopology
+	isNode := strings.HasPrefix(baseline.ResourceID, ParticipationNodeResourcePrefix)
+	if isNode {
+		var err error
+		topology, err = e.journal.ReadParticipationTopology(ctx, baseline.ClusterID)
+		if err != nil {
+			return false, err
+		}
+	}
 	if err := e.evidence.VerifyBaseline(ctx, baseline); err != nil {
 		return false, err
 	}
 	record, err := e.journal.record(ctx, baseline.EvidenceDigest, func(tx *sql.Tx) (bool, error) {
+		if isNode {
+			if err := lockResource(ctx, tx, Scope{baseline.ClusterID, ParticipationTopologyResource}); err != nil {
+				return false, err
+			}
+			var generation int64
+			var intent, approval string
+			if err := tx.QueryRowContext(ctx, `SELECT generation,intent_digest,approval_digest
+				FROM fugue_control.participation_topologies WHERE cluster_id=$1 ORDER BY generation DESC LIMIT 1`, baseline.ClusterID).
+				Scan(&generation, &intent, &approval); err != nil {
+				return false, err
+			}
+			if generation != topology.Version.Generation || intent != topology.IntentDigest || approval != topology.ApprovalDigest {
+				return false, ErrResourceDrift
+			}
+		}
 		result, err := tx.ExecContext(ctx, `INSERT INTO fugue_control.resource_baselines
 			(cluster_id,resource_id,generation,verified_digest,evidence_digest,actor)
 			VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (cluster_id,resource_id) DO NOTHING`,
