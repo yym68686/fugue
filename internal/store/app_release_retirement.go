@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 )
 
 type AppReleaseRetirementTarget struct{ TenantID, AppID string }
@@ -47,34 +48,10 @@ func (s *Store) ListAppReleaseRetirementTargets(ctx context.Context) ([]AppRelea
 	return targets, rows.Err()
 }
 
-// AppReleaseAwaitingDrain identifies withdrawn lifecycle states. It does not
-// authorize retirement: traffic, retention and runtime proof must still pass.
-func AppReleaseAwaitingDrain(release model.AppRelease) bool {
-	return release.Role == model.AppReleaseRolePrevious && release.Status == model.AppReleaseStatusDraining ||
-		release.Role == model.AppReleaseRoleCandidate && release.Status == model.AppReleaseStatusFailed
-}
-
-// AppReleaseHasAlignedRevision discovers an original immutable workload after
-// its serving release moved to a different target. The release itself remains
-// serving; only the redundant workload may be drained, never the stable target.
-func AppReleaseHasAlignedRevision(release model.AppRelease) bool {
-	b := release.RevisionWorkload
-	return release.Role == model.AppReleaseRoleStable && release.Status == model.AppReleaseStatusServing && b != nil &&
-		release.DeploymentName != "" && release.ServiceName != "" && b.DeploymentName != "" && b.ServiceName != "" &&
-		release.DeploymentName != b.DeploymentName && release.ServiceName != b.ServiceName
-}
-
-// RetireDrainedAppRelease commits against the exact release and policy versions
-// observed by the drain/traffic gates. It never overwrites a newer rollback,
-// retention decision or canonical target with the caller's stale snapshot.
-func (s *Store) RetireDrainedAppRelease(ctx context.Context, previous, stable model.AppRelease, policy model.AppTrafficPolicy) (model.AppRelease, error) {
-	return s.retireDrainedAppRelease(ctx, previous, stable, policy, nil, nil)
-}
-
-// RetireStoppedHistoricalAppRelease records observed resource identity only in
+// retireStoppedHistoricalAppRelease records observed resource identity only in
 // the same transaction that makes an unbound historical release a tombstone.
 // A damaged intent snapshot never gains a bound, reactivatable intermediate state.
-func (s *Store) RetireStoppedHistoricalAppRelease(ctx context.Context, previous, stable model.AppRelease, policy model.AppTrafficPolicy, op model.Operation, workload model.AppReleaseWorkload) (model.AppRelease, error) {
+func (s *Store) retireStoppedHistoricalAppRelease(ctx context.Context, previous, stable model.AppRelease, policy model.AppTrafficPolicy, op model.Operation, workload model.AppReleaseWorkload) (model.AppRelease, error) {
 	if previous.RevisionWorkload != nil || previous.Role != model.AppReleaseRolePrevious || previous.Status != model.AppReleaseStatusDraining || workload.DeploymentGeneration < 1 || !workload.BoundAt.IsZero() {
 		return model.AppRelease{}, ErrInvalidInput
 	}
@@ -86,6 +63,8 @@ func (s *Store) RetireStoppedHistoricalAppRelease(ctx context.Context, previous,
 	return s.retireDrainedAppRelease(ctx, previous, stable, policy, &op, &workload)
 }
 
+// Commit only against the exact release and policy versions that passed the
+// gates. Do not overwrite a newer rollback, retention or canonical target.
 func (s *Store) retireDrainedAppRelease(ctx context.Context, previous, stable model.AppRelease, policy model.AppTrafficPolicy, source *model.Operation, workload *model.AppReleaseWorkload) (model.AppRelease, error) {
 	if previous.ID == "" || stable.ID == "" || previous.ID == stable.ID || policy.AppID == "" {
 		return model.AppRelease{}, ErrInvalidInput
@@ -99,7 +78,7 @@ func (s *Store) retireDrainedAppRelease(ctx context.Context, previous, stable mo
 func retireDrainedRelease(currentPrevious, currentStable model.AppRelease, currentPolicy model.AppTrafficPolicy, previous, stable model.AppRelease, policy model.AppTrafficPolicy, now time.Time) (model.AppRelease, error) {
 	if !reflect.DeepEqual(currentPrevious, previous) || !reflect.DeepEqual(currentStable, stable) || !reflect.DeepEqual(currentPolicy, policy) ||
 		previous.AppID != policy.AppID || previous.TenantID != policy.TenantID || stable.AppID != policy.AppID || stable.TenantID != policy.TenantID ||
-		!AppReleaseAwaitingDrain(previous) ||
+		!retirement.AwaitingDrain(previous) ||
 		stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing ||
 		policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != stable.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 ||
 		previous.RetentionUntil != nil && now.Before(*previous.RetentionUntil) {

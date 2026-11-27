@@ -70,7 +70,7 @@ def prometheus_pods(provision, policy):
     return ready
 
 
-def scrape_observed(provision, prometheus, worker, owner):
+def scrape_observed(provision, prometheus, worker, owner, *, published=False):
     namespace = provision.config["namespace"]
     name, uid = worker
     if not all(matches(n, NAME) for n in (namespace, prometheus, name)) or not matches(uid, UID):
@@ -81,7 +81,16 @@ def scrape_observed(provision, prometheus, worker, owner):
                  f"(fugue_storage_audit_progress_available{labels} == 1)",
                  f"(fugue_storage_audit_executor_owner{labels} == {int(owner == 'worker')})"]
     if owner == "api":
+        if published:
+            raise ProvisionError("the standby API-owned audit cannot publish worker results")
         predicate.append(f"(fugue_storage_audit_committed_passes{labels} == 0)")
+    elif published:
+        predicate.extend((
+            f"(fugue_storage_audit_committed_passes{labels} > 0)",
+            f"(fugue_storage_lifecycle_sample_current_policy{labels} == 1)",
+            f"(fugue_storage_lifecycle_last_run_failed{labels} == 0)",
+            f"(count by (job,namespace,pod,pod_uid) (fugue_storage_lifecycle_free_percent_threshold{labels}) == 3)",
+        ))
     path = f"/api/v1/namespaces/{namespace}/pods/{prometheus}:9090/proxy/api/v1/query?"
     response = json.loads(provision.kube("get", "--raw", path + urlencode({"query": match.join(predicate)})))
     data = response.get("data", {})

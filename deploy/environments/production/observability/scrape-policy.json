@@ -102,6 +102,33 @@
       ]
     },
     {
+      "job_name": "fugue-observation-sample-retention",
+      "metrics_path": "/sample-retention/metrics",
+      "scrape_interval": "30s",
+      "scrape_timeout": "5s",
+      "sample_limit": 25,
+      "body_size_limit": "32KB",
+      "kubernetes_sd_configs": [
+        {"role": "pod", "namespaces": {"names": ["fugue-system"]}}
+      ],
+      "relabel_configs": [
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+            "__meta_kubernetes_pod_container_name",
+            "__meta_kubernetes_pod_container_port_name",
+            "__meta_kubernetes_pod_phase",
+            "__meta_kubernetes_pod_label_fugue_io_observation_sample_retention"
+          ],
+          "regex": "fugue-observation-worker;observation-worker;metrics;Running;true",
+          "action": "keep"
+        },
+        {"source_labels": ["__meta_kubernetes_pod_name"], "target_label": "pod"},
+        {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
+        {"target_label": "component", "replacement": "observation-worker"}
+      ]
+    },
+    {
       "job_name": "fugue-etcd",
       "scheme": "https",
       "scrape_interval": "30s",

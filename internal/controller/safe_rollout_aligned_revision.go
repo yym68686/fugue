@@ -10,8 +10,9 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/releaseretirement"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 const alignedRevisionQuiescedAnnotation = "fugue.pro/canonical-revision-quiesced"
@@ -22,7 +23,7 @@ const alignedRevisionQuiescedAnnotation = "fugue.pro/canonical-revision-quiesced
 // zero-replica Deployment/Service also makes recovery after a controller restart
 // idempotent and leaves normal superseded-release retirement in charge of GC.
 func (s *Service) quiesceAlignedReleaseRevision(ctx context.Context, app model.App, release model.AppRelease, policy model.AppTrafficPolicy) error {
-	if !s.Config.KubectlApply || !store.AppReleaseHasAlignedRevision(release) {
+	if !s.Config.KubectlApply || !retirement.HasAlignedRevision(release) {
 		return nil
 	}
 	b := release.RevisionWorkload
@@ -96,7 +97,7 @@ func (s *Service) quiesceAlignedReleaseRevision(ctx context.Context, app model.A
 	if err != nil {
 		return fmt.Errorf("quiesce aligned revision: %w", err)
 	}
-	noteRetirementProgress(ctx)
+	releaseretirement.NoteProgress(ctx)
 	s.appendSafeRolloutAuditEvent(app, "app.release.aligned_revision.quiesced", release.ID, map[string]string{
 		"operation_id": b.OperationID, "deployment_name": b.DeploymentName, "deployment_uid": b.DeploymentUID,
 		"canonical_deployment": release.DeploymentName, "reason": "canonical publication and original Pod drain verified; serving release retained",

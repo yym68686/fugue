@@ -205,6 +205,11 @@ func TestNetworkSamplesUseOneBoundedInsert(t *testing.T) {
 	second := sample
 	second.ID = "sample-b"
 	mock.ExpectBegin()
+	ownerKey := observationCheckpointKey(observationSampleRetentionOwnerKey)
+	mock.ExpectQuery(`SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0))`).WithArgs(ownerKey).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery(`SELECT value FROM fugue_meta WHERE key=$1`).WithArgs(ownerKey).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}))
 	mock.ExpectExec(`DELETE FROM fugue_edge_network_samples WHERE observed_at < $1`).WithArgs(now.Add(-time.Hour)).WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(`INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10) ON CONFLICT (edge_id, id) DO NOTHING`).WillReturnResult(sqlmock.NewResult(0, 2))
 	mock.ExpectCommit()

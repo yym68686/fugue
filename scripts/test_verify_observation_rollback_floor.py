@@ -8,14 +8,13 @@ from scripts.verify_observation_rollback_floor import checked_rollback, digest
 
 
 class ObservationRollbackFloorTest(unittest.TestCase):
-    def fixture(self):
-        component = "api"
+    def fixture(self, component="api"):
         workload = {
             "deployment": "example-api", "container": "api",
             "revision": "b" * 40, "image": "registry.example/platform/api@sha256:" + "b" * 64,
         }
-        state_name = "fugue-release-monitor-api"
-        record_name = "fugue-release-record-api-" + "c" * 16
+        state_name = f"fugue-release-monitor-{component}"
+        record_name = f"fugue-release-record-{component}-" + "c" * 16
         rollback_revision = "a" * 40
         rollback_image = "registry.example/platform/api@sha256:" + "a" * 64
         plan = {"component": component, "configSha": workload["revision"], "planDigest": "sha256:" + "e" * 64}
@@ -53,6 +52,25 @@ class ObservationRollbackFloorTest(unittest.TestCase):
     def test_returns_exact_lkg_for_the_current_workload(self):
         provision, component, workload, _, expected = self.fixture()
         self.assertEqual(checked_rollback(provision, component, workload), expected)
+
+    def test_initial_storage_audit_rollback_is_proven_absent(self):
+        provision, component, workload, objects, _ = self.fixture("storage-audit-worker")
+        data = next(value["data"] for value in objects.values() if value.get("immutable"))
+        plan = json.loads(data["execution-plan.json"])
+        record = json.loads(data["record.json"])
+        data["lkg.json"] = json.dumps({"apiVersion": "release.fugue.dev/v2", "kind": "ComponentResourceSet", "items": None})
+        record["lkgManifestDigest"] = digest(data["lkg.json"])
+        plan["lkg"] = {"configSha": "", "manifestSha": "", "imageRef": "", "ociRevision": "", "present": False,
+                       "manifestDigest": record["lkgManifestDigest"]}
+        data["execution-plan.json"] = json.dumps(plan)
+        data["record.json"] = json.dumps(record)
+        self.assertIsNone(checked_rollback(provision, component, workload, allow_absent=True))
+        with self.assertRaises(ProvisionError):
+            checked_rollback(provision, component, workload)
+        plan["lkg"]["imageRef"] = workload["image"]
+        data["execution-plan.json"] = json.dumps(plan)
+        with self.assertRaises(ProvisionError):
+            checked_rollback(provision, component, workload, allow_absent=True)
 
     def test_refuses_different_live_source_and_mutable_or_tampered_record(self):
         provision, component, workload, objects, _ = self.fixture()

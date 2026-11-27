@@ -36,6 +36,7 @@ LOCALPV_BOOT_SOURCES = {
 DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
     "./internal/declarativerelease",
+    "./internal/releasesourceaudit",
 }
 DECLARATIVE_DATA_TEST_PATTERN = (
     "^(TestProductionRegistryNamesEveryRuntimeLane|"
@@ -459,6 +460,7 @@ def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
         or name == "deploy/releases/edge-groups.json"
         or name.startswith("cmd/fugue-declarative-release/")
         or name.startswith("internal/declarativerelease/")
+        or name.startswith("internal/releasesourceaudit/")
         for name in paths
     )
     declarative_data_changed = any(
@@ -471,7 +473,7 @@ def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
 
 def declarative_test_command(engine: bool, data: bool) -> list[str] | None:
     if engine:
-        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"]
+        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release", "./internal/releasesourceaudit"]
     if data:
         return ["go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN]
     return None
@@ -518,9 +520,12 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
     non_go_tasks: dict[str, list[str] | None] = {}
     if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
                     "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
-                    "scripts/test_prepush_replay.py"} for name in paths):
+                    "scripts/test_prepush_replay.py", "scripts/prepush_shadow_fixture.py",
+                    "scripts/prepush_shadow_contract.py",
+                    "scripts/test_prepush_shadow_contract.py"} for name in paths):
         non_go_tasks["prepush-selection-tests"] = [sys.executable, "-m", "unittest",
-            "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay"]
+            "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay",
+            "scripts.test_prepush_shadow_contract"]
     if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
                     "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
                     "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):

@@ -146,7 +146,7 @@ class CanonicalReceiptTest(unittest.TestCase):
                 return 0, ""
             if command == [
                 "go", "test", "./internal/declarativerelease",
-                "./cmd/fugue-declarative-release",
+                "./cmd/fugue-declarative-release", "./internal/releasesourceaudit",
             ]:
                 order.append("test")
             return 0, ""
@@ -196,7 +196,7 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertNotIn("declarative-release-tests", receipt["checks"])
         self.assertNotIn(
-            ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"],
+            ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release", "./internal/releasesourceaudit"],
             commands,
         )
 
@@ -513,6 +513,7 @@ class CanonicalReceiptTest(unittest.TestCase):
             ["go", "test", "./cmd/fugue-declarative-release"],
             ["go", "test", "./internal/api", "-run", "^(TestOne)$"],
             ["go", "test", "./internal/declarativerelease"],
+            ["go", "test", "./internal/releasesourceaudit"],
             ["go", "test", "./internal/cli"],
         ]
         self.assertEqual(

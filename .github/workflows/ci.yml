@@ -1173,7 +1173,9 @@ jobs:
       observation_writer_handoff: ${{ steps.observation_writer_handoff.outputs.selected }}
       quality_evidence_rehearsed: ${{ steps.quality_evidence_rehearsal.outputs.verified }}
       quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
+      observation_sample_retention_handoff: ${{ steps.observation_sample_retention_handoff.outputs.selected }}
       storage_audit_worker_rehearsed: ${{ steps.storage_audit_worker_rehearsal.outputs.verified }}
+      storage_audit_activation: ${{ steps.storage_audit_activation.outputs.verified }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1218,7 +1220,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
-      - name: Rehearse quality evidence retention on the pinned PostgreSQL image
+      - name: Rehearse observation retention on the pinned PostgreSQL image
         id: quality_evidence_rehearsal
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
@@ -1229,7 +1231,7 @@ jobs:
           installer=internal/schemamigrate/platform_quality_evidence_retention.sql
           activation=internal/schemamigrate/platform_quality_evidence_retention_activate.sql
           git cat-file -e "${BASE_SHA}^{commit}"
-          if git diff --quiet "$BASE_SHA" HEAD -- deploy/releases/observation-worker/intent.json "$resource" "$installer" "$activation" scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py; then
+          if git diff --quiet "$BASE_SHA" HEAD -- deploy/releases/observation-worker/intent.json "$resource" "$installer" "$activation" scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py scripts/provision_observation_sample_retention.py scripts/test_provision_observation_sample_retention.py scripts/rehearse_observation_writer_fence.sh 'internal/schemamigrate/observation_sample_retention*.sql'; then
             exit 0
           fi
           pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
@@ -1248,6 +1250,24 @@ jobs:
           if ! git diff --quiet "$BASE_SHA" HEAD -- "$declaration" && [[ -f "$declaration" ]]; then
             test "$(git rev-parse HEAD^)" = "$BASE_SHA"
             python3 -m unittest scripts.test_apply_quality_evidence_retention_handoff scripts.test_verify_observation_rollback_floor
+            pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+            docker run --rm --network none --user 26:26 --entrypoint bash \
+              -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Admit only a declared observation sample retention handoff
+        id: observation_sample_retention_handoff
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/sample-retention-handoff.json
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then exit 0; fi
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "$declaration" && [[ -f "$declaration" ]]; then
+            test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+            test "$(git diff --name-only "$BASE_SHA" HEAD)" = "$declaration"
+            python3 -m unittest scripts.test_apply_observation_sample_retention_handoff scripts.test_verify_observation_rollback_floor
             pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
             docker run --rm --network none --user 26:26 --entrypoint bash \
               -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
@@ -1367,18 +1387,38 @@ jobs:
           go build -trimpath -o "${RELEASE_TOOL}" ./cmd/fugue-declarative-release
           "${RELEASE_TOOL}" plan deploy/releases/components.json "${base}" "${GITHUB_SHA}" "${CHANGED}" >"${PLAN}"
           "${RELEASE_TOOL}" emit-github-output "${PLAN}" "${GITHUB_OUTPUT}"
+      - name: Select the storage audit ownership declaration
+        id: storage_audit_activation_intent
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/storage-audit-worker/activation.json
+          git cat-file -e "${BASE_SHA}^{commit}"
+          if git diff --quiet "$BASE_SHA" HEAD -- "$declaration"; then
+            exit 0
+          fi
+          test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+          test "$(git diff --name-only "$BASE_SHA" HEAD)" = "$declaration"
+          test -f "$declaration"
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
       - name: Rehearse storage audit standby and restart on the pinned PostgreSQL image
         id: storage_audit_worker_rehearsal
-        if: ${{ contains(fromJSON(steps.release.outputs.release_components || '[]'), 'storage-audit-worker') }}
+        if: ${{ contains(fromJSON(steps.release.outputs.release_components || '[]'), 'storage-audit-worker') || steps.storage_audit_activation_intent.outputs.selected == 'true' }}
         timeout-minutes: 6
         run: |
           set -euo pipefail
           pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
           binary="$RUNNER_TEMP/fugue-storage-audit-rehearsal-worker"
           CGO_ENABLED=0 go build -trimpath -o "$binary" ./cmd/fugue-storage-audit-worker
-          python3 -m unittest scripts.test_verify_storage_audit_worker
+          python3 -m unittest scripts.test_verify_storage_audit_worker scripts.test_verify_storage_audit_activation scripts.test_verify_observation_rollback_floor
           python3 -m scripts.rehearse_storage_lifecycle_audit --worker "$binary" --postgres-image "$pg_image"
           echo 'verified=true' >> "$GITHUB_OUTPUT"
+      - name: Admit the verified storage audit activation declaration
+        id: storage_audit_activation
+        if: ${{ steps.storage_audit_activation_intent.outputs.selected == 'true' && steps.storage_audit_worker_rehearsal.outputs.verified == 'true' }}
+        run: echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Upload the immutable release plan
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -4034,17 +4074,26 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.before }}
         run: |
+          set -euo pipefail
+          policy=deploy/environments/production/storage-policy/policy.json
+          database=deploy/releases/storage-audit-worker/database.json
           if git diff --quiet "$BASE_SHA" HEAD -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/test_publish_storage_policy.py scripts/artifact_content_storage.py scripts/test_artifact_content_storage.py; then
             exit 0
           fi
           git fetch origin main
-          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/artifact_content_storage.py; then
+          if ! git diff --quiet HEAD origin/main -- deploy/environments/production/storage-policy scripts/publish_storage_policy.py scripts/artifact_content_storage.py "$database" scripts/publish_storage_audit_policy.py scripts/provision_storage_lifecycle_audit.py scripts/provision_observation_worker_database.py .github/workflows/ci.yml; then
             echo "A newer storage policy supersedes this run."
             exit 0
           fi
           python3 -m unittest scripts.test_publish_storage_policy scripts.test_artifact_content_storage scripts.test_compiler_input_storage scripts.test_compiler_input_history_compatibility
-          python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json
-          python3 scripts/publish_storage_policy.py deploy/environments/production/storage-policy/policy.json --apply
+          python3 scripts/publish_storage_policy.py "$policy"
+          prior_audit=$(git show "$BASE_SHA:$policy" | jq -cS '.storageLifecycle')
+          target_audit=$(jq -cS '.storageLifecycle' "$policy")
+          if [[ "$prior_audit" != "$target_audit" && -f "$database" ]]; then
+            python3 -m scripts.publish_storage_audit_policy "$database" "$policy"
+            python3 -m scripts.publish_storage_audit_policy "$database" "$policy" --apply
+          fi
+          python3 scripts/publish_storage_policy.py "$policy" --apply
 
   compiler_input_storage:
     needs: prepush
@@ -4659,8 +4708,8 @@ jobs:
         with: {component: telemetry, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
   deploy_observation_worker:
-    needs: [prepush, component-build, deploy_schema]
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'observation-worker') }}
+    needs: [prepush, component-build, deploy_schema, observability_configuration, storage_policy]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && needs.observability_configuration.result == 'success' && needs.storage_policy.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'observation-worker') }}
     timeout-minutes: 15
     runs-on: [self-hosted, linux, x64, fugue, control-plane]
     environment: production
@@ -4691,6 +4740,15 @@ jobs:
           git fetch origin main
           git diff --exit-code HEAD origin/main -- deploy/releases/observation-worker deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json scripts/provision_quality_evidence_retention.py scripts/test_provision_quality_evidence_retention.py scripts/rehearse_observation_writer_fence.sh scripts/provision_observation_worker_database.py "$installer" "$activation" .github/workflows/ci.yml
           python3 -m scripts.provision_quality_evidence_retention deploy/releases/observation-worker/database.json --apply
+      - name: Provision the rehearsed sample retention capability in standby
+        env:
+          OBSERVATION_RETENTION_REHEARSED: ${{ needs.prepush.outputs.quality_evidence_rehearsed }}
+        run: |
+          set -euo pipefail
+          test "$OBSERVATION_RETENTION_REHEARSED" = true
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/observation-worker deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json scripts/rehearse_observation_writer_fence.sh scripts/provision_observation_sample_retention.py scripts/test_provision_observation_sample_retention.py scripts/provision_observation_worker_database.py scripts/provision_quality_evidence_retention.py 'internal/schemamigrate/observation_sample_retention*.sql' .github/workflows/ci.yml
+          python3 -m scripts.provision_observation_sample_retention deploy/releases/observation-worker/database.json --apply
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
@@ -4746,6 +4804,41 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  storage_audit_activation:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.storage_audit_activation == 'true' }}
+    timeout-minutes: 12
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-storage-audit-worker, cancel-in-progress: false, queue: max}
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Verify current and rollback executors and transfer the durable owner
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/storage-audit-worker/activation.json
+          database=deploy/releases/storage-audit-worker/database.json
+          policy=deploy/environments/production/storage-policy/policy.json
+          metrics=deploy/environments/production/observability/scrape-policy.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/storage-audit-worker "$policy" "$metrics" internal/storageaudit internal/schemamigrate/storage_lifecycle_audit.sql scripts/apply_storage_audit_activation.py scripts/storage_audit_activation_transaction.py scripts/provision_storage_lifecycle_audit.py scripts/provision_observation_worker_database.py scripts/verify_storage_audit_activation.py scripts/verify_storage_audit_worker.py scripts/verify_observation_writer_handoff.py scripts/verify_observation_rollback_floor.py .github/workflows/ci.yml
+          api_floor=4c910fd3e15ff55cbca2848d7e508197ef21582e
+          worker_floor=c796aa03f1a82eeaafc1f5e6d9f9971e61d508de
+          python3 -m scripts.apply_storage_audit_activation "$database" "$declaration" "$policy" "$metrics" \
+            "$api_floor" "$worker_floor" --apply > "$RUNNER_TEMP/fugue-storage-audit-activation.json"
+      - name: Retain ownership and progress evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-storage-audit-activation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-storage-audit-activation.json
+          if-no-files-found: error
+          retention-days: 30
+
   observation_writer_handoff:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.observation_writer_handoff == 'true' }}
@@ -4797,6 +4890,39 @@ jobs:
           git fetch origin main
           git diff --exit-code HEAD origin/main -- "$declaration" "$metrics" "$database" .github/workflows/ci.yml scripts/apply_quality_evidence_retention_handoff.py scripts/apply_observation_writer_handoff.py scripts/verify_observation_rollback_floor.py scripts/provision_quality_evidence_retention.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py scripts/rehearse_observation_writer_fence.sh internal/schemamigrate/platform_quality_evidence_retention_activate.sql internal/schemamigrate/platform_quality_evidence_retention.sql deploy/environments/production/cnpg-controller/release.json
           python3 -m scripts.apply_quality_evidence_retention_handoff "$database" "$declaration" "$metrics" --apply
+
+  observation_sample_retention_handoff:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.observation_sample_retention_handoff == 'true' }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-observation-worker, cancel-in-progress: false, queue: max}
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Transfer sample retention and verify committed worker progress
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/sample-retention-handoff.json
+          metrics=deploy/environments/production/observability/scrape-policy.json
+          policy=deploy/environments/production/storage-policy/policy.json
+          database=deploy/releases/observation-worker/database.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/observation-worker "$metrics" "$policy" .github/workflows/ci.yml scripts/apply_observation_sample_retention_handoff.py scripts/test_apply_observation_sample_retention_handoff.py scripts/apply_quality_evidence_retention_handoff.py scripts/apply_observation_writer_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_sample_retention.py scripts/provision_quality_evidence_retention.py scripts/provision_observation_worker_database.py scripts/test_provision_observation_sample_retention.py scripts/publish_storage_policy.py scripts/rehearse_observation_writer_fence.sh 'internal/schemamigrate/observation_sample_retention*.sql' deploy/environments/production/cnpg-controller/release.json
+          python3 -m scripts.apply_observation_sample_retention_handoff "$database" "$declaration" "$metrics" "$policy" --apply \
+            > "$RUNNER_TEMP/fugue-observation-sample-retention.json"
+      - name: Retain ownership and progress evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-observation-sample-retention-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-observation-sample-retention.json
+          if-no-files-found: error
+          retention-days: 30
 
   deploy_runtime_agent:
     needs: [prepush, component-build, runtime_agent_identity]

@@ -32,7 +32,8 @@ func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 	}
 	// A heartbeat may carry 128 observations. Send one bounded INSERT so
 	// the caller's deadline does not pay one database round trip per row.
-	// Keep retention and insertion atomic and preserve first-write wins.
+	// Preserve first-write wins and keep legacy in-line retention atomic
+	// until the worker owns deletion.
 	var query strings.Builder
 	query.WriteString("INSERT INTO fugue_edge_network_samples (edge_id, id, hostname, observed_at, sample_json) VALUES ")
 	args := make([]any, 0, len(samples)*5)
@@ -49,14 +50,20 @@ func (s *Store) recordEdgeNetworkSamples(ctx context.Context, samples []model.Ed
 		args = append(args, sample.EdgeID, sample.ID, networkObservationHostnameKey(sample.Hostname, witnesses), sample.ObservedAt, raw)
 	}
 	query.WriteString(" ON CONFLICT (edge_id, id) DO NOTHING")
-	transaction, err := s.db.BeginTx(ctx, nil)
+	transaction, err := beginObservationSampleIngestion(ctx, s.db)
 	if err != nil {
 		return err
 	}
 	defer transaction.Rollback()
 	if !pruneBefore.IsZero() {
-		if _, err := transaction.ExecContext(ctx, `DELETE FROM fugue_edge_network_samples WHERE observed_at < $1`, pruneBefore); err != nil {
+		allowed, err := apiMayPruneDuringSampleIngestion(ctx, transaction, networkSampleRetention, pruneBefore)
+		if err != nil {
 			return err
+		}
+		if allowed {
+			if _, err := transaction.ExecContext(ctx, `DELETE FROM fugue_edge_network_samples WHERE observed_at < $1`, pruneBefore); err != nil {
+				return err
+			}
 		}
 	}
 	if len(samples) > 0 {

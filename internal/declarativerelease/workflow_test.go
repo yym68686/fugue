@@ -305,13 +305,14 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff", "quality_evidence_retention_handoff")
-	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker")
+	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff")
+	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker", "storage_audit_activation")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
-	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff"}
+	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff", "observation_sample_retention_handoff"}
 	for _, name := range observationJobs {
 		job := yamlMappingValue(t, jobs, name)
 		for _, required := range []string{"github.event_name == 'push' && github.ref == 'refs/heads/main'", "needs.prepush.result == 'success'", "needs.prepush.outputs." + name + " == 'true'"} {
@@ -339,10 +340,21 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 			t.Fatalf("storage audit release is missing its admission gate: %s", gate)
 		}
 	}
-	storageQueue := yamlMappingValue(t, storageAudit, "concurrency")
-	if yamlMappingValue(t, storageQueue, "group").Value != "fugue-production-storage-audit-worker" ||
-		yamlMappingValue(t, storageQueue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, storageQueue, "queue").Value != "max" {
-		t.Fatal("storage audit releases must use their own non-canceling queue")
+	storageActivation := yamlMappingValue(t, jobs, "storage_audit_activation")
+	for _, gate := range []string{
+		"github.event_name == 'push' && github.ref == 'refs/heads/main'",
+		"needs.prepush.result == 'success'", "needs.prepush.outputs.storage_audit_activation == 'true'",
+	} {
+		if !strings.Contains(yamlMappingValue(t, storageActivation, "if").Value, gate) {
+			t.Fatalf("storage audit activation is missing its admission gate: %s", gate)
+		}
+	}
+	for _, job := range []*yaml.Node{storageAudit, storageActivation} {
+		queue := yamlMappingValue(t, job, "concurrency")
+		if yamlMappingValue(t, queue, "group").Value != "fugue-production-storage-audit-worker" ||
+			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {
+			t.Fatal("storage audit deployment and activation must share a non-canceling queue")
+		}
 	}
 	nodeWorker := yamlMappingValue(t, jobs, "node_worker_handoff")
 	nodeWorkerWhen := yamlMappingValue(t, nodeWorker, "if").Value
@@ -1139,6 +1151,25 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	if got := yamlMappingKeys(t, on); !reflect.DeepEqual(got, []string{"schedule", "workflow_dispatch"}) {
 		t.Fatalf("daily audit triggers: %v", got)
 	}
+	choices := yamlMappingValue(t, yamlMappingValue(t, on, "workflow_dispatch"), "inputs")
+	shadowCases := yamlMappingValue(t, choices, "shadow_case")
+	options := yamlMappingValue(t, shadowCases, "options")
+	gotCases := make([]string, 0, len(options.Content))
+	for _, choice := range options.Content {
+		gotCases = append(gotCases, choice.Value)
+	}
+	wantCases := []string{
+		"none", "queue-runtime", "queue-test", "host-policy-test", "backup-runtime", "retirement-test", "cross-domain",
+		"contract-tracking-scope", "contract-generator-consumer", "contract-retirement-scope",
+	}
+	if !reflect.DeepEqual(gotCases, wantCases) {
+		t.Fatalf("daily audit shadow cases: %v", gotCases)
+	}
+	incremental := yamlMappingValue(t, choices, "shadow_incremental")
+	if yamlMappingValue(t, incremental, "type").Value != "boolean" ||
+		yamlMappingValue(t, incremental, "default").Value != "false" {
+		t.Fatal("incremental replay must require explicit manual selection")
+	}
 	schedule := yamlMappingValue(t, on, "schedule").Content
 	if len(schedule) != 1 || yamlMappingValue(t, schedule[0], "cron").Value != "23 18 * * *" {
 		t.Fatal("daily audit cadence changed")
@@ -1148,7 +1179,7 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 		t.Fatal("daily audit should have only repository read permission")
 	}
 	jobs := yamlMappingValue(t, root, "jobs")
-	if got := yamlMappingKeys(t, jobs); !reflect.DeepEqual(got, []string{"test"}) {
+	if got := yamlMappingKeys(t, jobs); !reflect.DeepEqual(got, []string{"shadow-replay", "test"}) {
 		t.Fatalf("daily audit jobs: %v", got)
 	}
 	test := yamlMappingValue(t, jobs, "test")
@@ -1156,7 +1187,22 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 		yamlMappingValue(t, test, "runs-on").Value != "ubuntu-latest" {
 		t.Fatal("daily audit must use only a bounded, hosted test job")
 	}
-	for _, s := range []string{"secrets.", "environment:", "self-hosted", "kubectl", "uses: ./", "deploy-declarative-component"} {
+	shadow := yamlMappingValue(t, jobs, "shadow-replay")
+	if got := yamlMappingKeys(t, shadow); !reflect.DeepEqual(got, []string{"env", "if", "runs-on", "steps", "timeout-minutes"}) ||
+		yamlMappingValue(t, shadow, "runs-on").Value != "ubuntu-latest" ||
+		yamlMappingValue(t, shadow, "if").Value != "github.event_name == 'workflow_dispatch' && inputs.shadow_case != 'none'" ||
+		yamlMappingValue(t, shadow, "timeout-minutes").Value != "120" {
+		t.Fatal("shadow audits must be manual, bounded, hosted and inherit repository-only read access")
+	}
+	for _, job := range []*yaml.Node{test, shadow} {
+		steps := yamlMappingValue(t, job, "steps")
+		if len(steps.Content) == 0 ||
+			yamlMappingValue(t, steps.Content[0], "uses").Value != "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0" ||
+			yamlMappingValue(t, yamlMappingValue(t, steps.Content[0], "with"), "persist-credentials").Value != "false" {
+			t.Fatal("daily audit jobs must check out without persisting credentials")
+		}
+	}
+	for _, s := range []string{"secrets.", "environment:", "self-hosted", "kubectl", "uses: ./", "deploy-declarative-component", "github.token", "id-token:"} {
 		if strings.Contains(string(raw), s) {
 			t.Fatalf("daily audit retained production access: %s", s)
 		}

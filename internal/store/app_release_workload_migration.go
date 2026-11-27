@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 )
 
 // FindAppReleaseWorkloadSource resolves persisted provenance, never a nearest
@@ -25,7 +26,7 @@ func (s *Store) FindAppReleaseWorkloadSource(ctx context.Context, release model.
 }
 
 func releaseWorkloadSource(release model.AppRelease, events []model.AuditEvent) (string, error) {
-	if !AppReleaseAwaitingDrain(release) || release.ID == "" || release.AppID == "" || release.TenantID == "" {
+	if !retirement.AwaitingDrain(release) || release.ID == "" || release.AppID == "" || release.TenantID == "" {
 		return "", ErrConflict
 	}
 	action := "app.release.promote"

@@ -7,7 +7,8 @@ import (
 	"reflect"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
+	"fugue/internal/releaseretirement"
+	retirement "fugue/internal/releaseretirement/contract"
 )
 
 // A never-scheduled Pod cannot supply a CRI receipt. Cancel its failed source
@@ -19,7 +20,7 @@ func (s *Service) captureUnstartedReleaseWorkload(ctx context.Context, client *k
 		// and scaled to zero after canonical alignment. Once superseded, allow
 		// its ordinary retirement to verify zero replicas and no owned Pods.
 		b := release.RevisionWorkload
-		if !store.AppReleaseAwaitingDrain(release) || b == nil {
+		if !retirement.AwaitingDrain(release) || b == nil {
 			return releaseDrainWorkload{}, fmt.Errorf("zero-replica observation requires a withdrawn release")
 		}
 		object, found, err := client.getRawObject(ctx, deploymentAPIPath(b.Namespace, b.DeploymentName))
@@ -106,6 +107,6 @@ func (s *Service) quiesceUnstartedRelease(ctx context.Context, client *kubeClien
 	if err != nil {
 		return fmt.Errorf("cancel unstarted release: %w", err)
 	}
-	noteRetirementProgress(ctx)
+	releaseretirement.NoteProgress(ctx)
 	return fmt.Errorf("unstarted release cancelled; awaiting observed zero replicas and Pod removal")
 }

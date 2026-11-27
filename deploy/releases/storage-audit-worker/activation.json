@@ -1,0 +1,23 @@
+{
+  "schema": "fugue.storage-audit-activation/v1",
+  "policyDigest": "48b46649ea715c1d5a9a1963b4529fdbab3c0d667d29d3f6a610ecd4cf4a9dd2",
+  "api": {
+    "deployment": "fugue-fugue-api",
+    "container": "api",
+    "replicas": 2,
+    "revision": "97845f1d338a5fa6388e24201a081704a9f77999",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:cbad8aad824bc674e3140fcc76c43738329a8c71882e01f4a632553e2f81d6c0"
+  },
+  "apiRollback": {
+    "revision": "6eb2390ddf0c749b70849f2a6a281148b0e5dd36",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:0f9af1a864b2c56258b453e6343ad1aafd7df0fbeefbc2c157820972dc288ed7"
+  },
+  "worker": {
+    "deployment": "fugue-storage-audit-worker",
+    "container": "storage-audit-worker",
+    "replicas": 1,
+    "revision": "c796aa03f1a82eeaafc1f5e6d9f9971e61d508de",
+    "image": "ghcr.io/yym68686/fugue-storage-audit-worker@sha256:18445eaf93fe0198a164683faa641b0cb40eef7124930cfb92d4c818250b8beb"
+  },
+  "workerRollback": null
+}

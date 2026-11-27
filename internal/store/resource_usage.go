@@ -31,15 +31,21 @@ func (s *Store) pgRecordResourceUsageSamples(samples []model.ResourceUsageSample
 		return err
 	}
 	ctx := context.Background()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginObservationSampleIngestion(ctx, s.db)
 	if err != nil {
 		return fmt.Errorf("begin resource usage sample transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	if !pruneBefore.IsZero() {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_resource_usage_samples WHERE observed_at < $1`, pruneBefore); err != nil {
+		allowed, err := apiMayPruneDuringSampleIngestion(ctx, tx, resourceUsageSampleRetention, pruneBefore)
+		if err != nil {
 			return fmt.Errorf("prune resource usage samples: %w", err)
+		}
+		if allowed {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_resource_usage_samples WHERE observed_at < $1`, pruneBefore); err != nil {
+				return fmt.Errorf("prune resource usage samples: %w", err)
+			}
 		}
 	}
 	for _, sample := range samples {

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/releaseretirement"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 
@@ -544,16 +546,16 @@ func (s *Service) retryDrainingAppReleaseRetirement(ctx context.Context, app mod
 }
 
 func (s *Service) scanDrainingAppReleaseRetirements(ctx context.Context, app model.App, eligible func(model.AppRelease, model.AppRelease) bool) error {
-	positions, finish, acquired := s.retirementScans.beginPrioritized(app)
+	sweep, acquired := s.releaseRetirement.Begin(app)
 	if !acquired {
 		return nil
 	}
-	defer func() { finish(positions) }()
+	defer sweep.Close()
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, backgroundReleaseRetirementKey{}, true)
 	ctx = withReleaseRetirementReadLimit(ctx)
-	releases, err := s.Store.ListAppReleaseRetirementState(ctx, model.AppReleaseFilter{TenantID: app.TenantID, AppID: app.ID, PlatformAdmin: true, IncludeRetired: true})
+	releases, err := s.Store.AppReleaseRetirement(app.TenantID, app.ID).List(ctx)
 	if err != nil {
 		return fmt.Errorf("list draining releases: %w", err)
 	}
@@ -574,17 +576,16 @@ func (s *Service) scanDrainingAppReleaseRetirements(ctx context.Context, app mod
 	if stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing {
 		return nil
 	}
-	intent := retirementIntentVersion(app, stable, policy)
+	intent := releaseretirement.IntentVersion(app, stable, policy)
 	ready := make([]model.AppRelease, 0, len(releases))
 	for _, release := range releases {
 		if eligible != nil && !eligible(release, stable) {
 			continue
 		}
-		if !store.AppReleaseAwaitingDrain(release) && !store.AppReleaseHasAlignedRevision(release) && !(release.Status == model.AppReleaseStatusRetired && release.RevisionWorkload != nil) {
+		if !retirement.Candidate(release) {
 			continue
 		}
-		key := retirementRetryKey{app.TenantID, app.ID, release.ID}
-		if s.retirementRetries.ready(key, retirementReleaseVersion(intent, release), s.rolloutObservationTime()) {
+		if sweep.Due(intent, release, s.rolloutObservationTime()) {
 			ready = append(ready, release)
 		}
 	}
@@ -606,7 +607,7 @@ func (s *Service) scanDrainingAppReleaseRetirements(ctx context.Context, app mod
 		}
 		for _, release := range releases {
 			if !kept[release.ID] {
-				s.retirementRetries.attempted(retirementRetryKey{app.TenantID, app.ID, release.ID}, retirementReleaseVersion(intent, release), s.rolloutObservationTime(), true)
+				sweep.Defer(intent, release, s.rolloutObservationTime(), true)
 			}
 		}
 		releases = filtered
@@ -625,25 +626,19 @@ func (s *Service) scanDrainingAppReleaseRetirements(ctx context.Context, app mod
 			return err
 		}
 	}
-	queue := prioritizeAppReleaseRetirement(releases, positions, inventory)
 	ctx = context.WithValue(ctx, releaseRetirementDiscoveryKey{}, inventory)
 	startedAt := time.Now()
-	err = runAppReleaseRetirementQueue(ctx, queue, &positions, func(attempt context.Context, item prioritizedReleaseRetirement) {
-		progress := &retirementProgress{}
-		attempt = context.WithValue(attempt, retirementProgressKey{}, progress)
-		s.retryOneAppReleaseRetirement(attempt, app, item.release, stable, policy)
-		if ctx.Err() == nil && !progress.Load() {
-			s.retirementRetries.attempted(retirementRetryKey{app.TenantID, app.ID, item.release.ID}, retirementReleaseVersion(intent, item.release), s.rolloutObservationTime(), item.release.RevisionWorkload != nil)
-		}
+	stats, err := sweep.Run(ctx, intent, releases, inventory.hasScheduledReleasePod, s.rolloutObservationTime, func(attempt context.Context, release model.AppRelease) {
+		s.retryOneAppReleaseRetirement(attempt, app, release, stable, policy)
 	})
-	if len(queue) > 0 && s.Logger != nil {
-		s.Logger.Printf("release retirement sweep app=%s queued=%d concurrency=%d duration_ms=%d error=%v", app.ID, len(queue), min(appReleaseRetirementConcurrency, len(queue)), time.Since(startedAt).Milliseconds(), err)
+	if stats.Queued > 0 && s.Logger != nil {
+		s.Logger.Printf("release retirement sweep app=%s queued=%d concurrency=%d duration_ms=%d error=%v", app.ID, stats.Queued, stats.Concurrency, time.Since(startedAt).Milliseconds(), err)
 	}
 	return err
 }
 
 func (s *Service) retryOneAppReleaseRetirement(ctx context.Context, app model.App, previous, stable model.AppRelease, policy model.AppTrafficPolicy) {
-	if store.AppReleaseHasAlignedRevision(previous) && previous.ID == stable.ID {
+	if retirement.HasAlignedRevision(previous) && previous.ID == stable.ID {
 		if err := s.quiesceAlignedReleaseRevision(ctx, app, stable, policy); err != nil && s.Logger != nil {
 			s.Logger.Printf("retain aligned release revision %s: %v", stable.ID, err)
 		}
@@ -657,7 +652,7 @@ func (s *Service) retryOneAppReleaseRetirement(ctx context.Context, app model.Ap
 		}
 		return
 	}
-	if !store.AppReleaseAwaitingDrain(previous) {
+	if !retirement.AwaitingDrain(previous) {
 		return
 	}
 	if previous.RevisionWorkload == nil {

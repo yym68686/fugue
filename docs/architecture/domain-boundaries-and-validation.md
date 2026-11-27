@@ -11,8 +11,9 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private PostgreSQL tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment joins the caller's existing transaction and deletions use foreign-key cascades. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
 | Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
 | Node host policy (installer side) | The host policy module owns the Journald and ZRAM shell fragments; API embeds them in the existing updater and join contracts. | Host-side staging, verification and rollback remain in the original shell transaction. No Controller desired-state or Store mutation was moved by this extraction. | Shell behavior is verified from the host policy package; a small API contract test proves the installer renders the exact payload. |
-| Managed PostgreSQL image migration | API authorizes, previews and submits the command; the image migration module owns the stated plan, durable witness, execution order, and settlement decision. Controller binds the module to one already claimed operation and provides Kubernetes and SQL observations and guarded mutations. | Store keeps admission, binding locks and JSON/PostgreSQL completion transactions. Completion uses the domain's evidence check and updates the backing service, not the consuming app. | Domain tests verify loss of the PATCH response and operation ownership without importing Controller or Store. API, Controller and Store retain their HTTP, live-platform and transaction contract tests. |
+| Managed PostgreSQL image migration | API authorizes, previews and submits the command; the image migration module owns the stated plan, durable witness, execution order, and settlement decision. Controller binds the module to one already claimed operation and provides Kubernetes and SQL observations and guarded mutations. | Store keeps admission, binding locks and the PostgreSQL completion transaction. Completion uses the domain's evidence check to update the backing service. | Domain tests verify loss of the PATCH response and operation ownership without importing Controller or Store. API, Controller and Store retain their HTTP, live-platform and transaction contract tests. |
 | Registry-backed image storage billing | One domain owns registry measurement, deduplication and the API's per-tenant refresh scheduling. API and Controller keep their respective triggers and provide registry adapters. | The Store port is bound to one tenant, exposes the two inventory reads, and commits only measured image storage through the existing accrual transaction. It cannot change balances, caps, or operations. | Domain tests exercise measurement, failure handling and coalescing. An HTTP contract covers scheduled storage updates and Store tests cover ledger accrual. |
+| Application release retirement | The retirement domain owns bounded per-app scheduling, cursor and retry state. Controller owns the leader lifecycle, verifies live traffic, runtime and workload evidence, and invokes guarded writes. | A tenant/app-scoped port serves the retirement projection and guarded writes. Store revalidates the same snapshots and keeps the retirement and historical binding changes in the existing transaction. | Domain tests independently verify fairness, exclusion, retry isolation and worker cancellation. A source audit limits acquisition of the write port to the Controller adapters. Controller and Store verify runtime evidence, tenant/app scope and concurrent transitions. |
 
 For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
@@ -47,10 +48,10 @@ diff. It is separate from `make prepush` and cannot authorize a push.
   dependency. In narrower scopes, the tracked-source business-coupling
   and retired release mode audits also run uncached for both runtime and
   test-only edits. They scan the tracked tree regardless of which packages
-  import the changed source. The image-tracking composition guard also runs
-  uncached for non-test Go files under `internal` and `cmd`: a package can
-  incorrectly acquire the tracking write capability without importing the
-  tracking implementation.
+  import the changed source. The image-tracking and release-retirement
+  composition guards also run uncached for non-test Go files under `internal`
+  and `cmd`. Acquiring a write port from Store need not import the owning
+  domain's implementation.
 - Compare the report to `legacyTestCommands`; a missing suite forces full Go
   scope and is recorded in `omittedLegacyPackagesBeforeFallback`. This is a
   package-level comparison, not measured regression coverage. Non-Go,
@@ -86,6 +87,26 @@ The report's `warmReplayCriteriaMet` covers only this run on its recorded
 host; `activationReadiness` remains `not-evaluated`. Target comparisons,
 mutations that fail the intended contracts, and independent cache profiles
 remain separate activation evidence.
+
+For incremental timing, use `--incremental --case queue-test --base HEAD` in a
+clean disposable checkout. Each policy starts with a separate baseline cache.
+Each pair shares an edit that changes a Go test name or a runtime literal, so
+the compiler sees a different input and the edit can propagate to importers.
+The report records every input hash, the uncached Go oracle, and the native
+and Linux artifact target plans for the first sample. The manual daily audit
+exposes this profile through `shadow_incremental`. It offers operation queue,
+backup usage, retirement, installer policy, and cross-domain edit cases.
+
+For a source-owned writer capability or generator with an implicit downstream
+consumer, use the manual `contract-tracking-scope`,
+`contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
+exact named consumer test to pass, applies one synthetic source regression,
+proves native and Linux artifact-target reports select that consumer uncached
+with no legacy omission, then requires the exact test and package to fail with
+the expected diagnostic. The temporary edit exists only in the disposable CI
+checkout; its evidence never authorizes a production release. A passing suite
+without this negative witness is not evidence that the contract edge is
+selected.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing
