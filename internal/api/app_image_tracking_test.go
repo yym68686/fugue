@@ -57,11 +57,11 @@ func TestGetAppImageTrackingHistoryReturnsRecordedChecks(t *testing.T) {
 	t.Parallel()
 
 	stateStore, server, apiKey, app, _ := setupAppImageSyncTestServer(t)
-	tracking, err := stateStore.GetAppImageTracking(app.TenantID, true, app.ID)
+	tracking, err := stateStore.ImageTracking().GetAppImageTracking(app.TenantID, true, app.ID)
 	if err != nil {
 		t.Fatalf("get tracking: %v", err)
 	}
-	recorded, err := stateStore.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
+	recorded, err := stateStore.ImageTracking().CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
 		TenantID:         app.TenantID,
 		AppID:            app.ID,
 		TrackingID:       tracking.ID,
@@ -147,7 +147,7 @@ func setupAppImageSyncTestServer(t *testing.T) (*store.Store, *Server, string, m
 	if err != nil {
 		t.Fatalf("create imported app: %v", err)
 	}
-	if _, err := stateStore.UpsertAppImageTracking(model.AppImageTracking{
+	if _, err := stateStore.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		TenantID: tenant.ID,
 		AppID:    app.ID,
 		ImageRef: imageRef,

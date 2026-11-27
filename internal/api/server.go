@@ -27,6 +27,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/operationview"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/runtime"
@@ -174,14 +175,6 @@ type Server struct {
 	logStreamTuning                        logStreamTuning
 	oomRightSizingMu                       sync.Mutex
 	oomRightSizingEvents                   map[string]time.Time
-	edgeQualityRollupMu                    sync.Mutex
-	edgeQualityRollupLastRun               time.Time
-	edgeQualityRollupLastSuccess           time.Time
-	edgeQualityRollupLastDuration          time.Duration
-	edgeQualityRollupLastCount             int
-	edgeQualityRollupRunCount              int64
-	edgeQualityRollupErrorCount            int64
-	edgeQualityRollupLastError             string
 	passiveASN                             passiveASNState
 	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
@@ -457,7 +450,7 @@ func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
 	}
 	s.writeRobustnessMetrics(ctx, w)
 	s.writeAutomationShadowLoopMetrics(w)
-	s.writeEdgeQualityRollupMetrics(w)
+	writeRetiredEdgeQualityRankingMetrics(w)
 	s.writeDNSObservationMetrics(w)
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)
@@ -1859,12 +1852,7 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	storeStartedAt := time.Now()
-	var ops []model.Operation
-	if includeDesired {
-		ops, err = s.store.ListOperationsFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
-	} else {
-		ops, err = s.store.ListOperationSummariesFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
-	}
+	ops, err := operationview.List(s.store.OperationViews(), principal, filter, includeDesired)
 	timings.Add("store_operations", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)

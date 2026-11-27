@@ -1,9 +1,9 @@
-package api
+package nodehostpolicy
 
-// hostJournaldPolicyShellLibrary is embedded in the privileged node updater.
+// JournaldShell is embedded in the privileged node updater.
 // It keeps the mutation transactional: a configuration that journald cannot
 // load is rolled back before the task reports failure.
-func hostJournaldPolicyShellLibrary() string {
+func JournaldShell() string {
 	return `
 FUGUE_JOURNALD_POLICY_FILE="${FUGUE_JOURNALD_POLICY_FILE:-/etc/systemd/journald.conf.d/90-fugue-retention.conf}"
 FUGUE_JOURNALD_POLICY_SERVICE="${FUGUE_JOURNALD_POLICY_SERVICE:-systemd-journald.service}"

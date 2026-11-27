@@ -12,6 +12,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/model/edgecohort"
+	"fugue/internal/nodehostpolicy"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -3006,5 +3007,5 @@ EOF
 `, strconv.Quote(apiBase))
 	script = strings.ReplaceAll(script, "__FUGUE_DISCOVERY_ENV_PYTHON__", discoveryEnvPythonPrelude)
 	script = strings.ReplaceAll(script, "__FUGUE_POD_CAPACITY_UID_PYTHON__", podCapacityUIDPython())
-	return strings.ReplaceAll(script, "__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", hostMemorySafetyShellLibrary())
+	return strings.ReplaceAll(script, "__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", nodehostpolicy.MemorySafetyShell())
 }

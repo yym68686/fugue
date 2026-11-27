@@ -1,0 +1,91 @@
+{
+  "apiVersion": "release.fugue.dev/v2",
+  "kind": "ComponentResourceSet",
+  "items": [
+    {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "metadata": {
+        "name": "fugue-observation-worker",
+        "namespace": "fugue-system"
+      },
+      "spec": {
+        "minReadySeconds": 5,
+        "progressDeadlineSeconds": 180,
+        "replicas": 1,
+        "revisionHistoryLimit": 3,
+        "selector": {
+          "matchLabels": {"app.kubernetes.io/name": "fugue-observation-worker"}
+        },
+        "strategy": {
+          "type": "RollingUpdate",
+          "rollingUpdate": {"maxUnavailable": 0, "maxSurge": 1}
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app.kubernetes.io/name": "fugue-observation-worker",
+              "app.kubernetes.io/component": "observation-worker"
+            }
+          },
+          "spec": {
+            "automountServiceAccountToken": false,
+            "terminationGracePeriodSeconds": 20,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "runAsUser": 65532,
+              "runAsGroup": 65532,
+              "seccompProfile": {"type": "RuntimeDefault"}
+            },
+            "containers": [
+              {
+                "name": "observation-worker",
+                "image": "placeholder",
+                "ports": [{"name": "metrics", "containerPort": 9090}],
+                "env": [
+                  {
+                    "name": "FUGUE_OBSERVATION_DATABASE_URL",
+                    "valueFrom": {
+                      "secretKeyRef": {
+                        "name": "fugue-observation-worker-database",
+                        "key": "database-url"
+                      }
+                    }
+                  },
+                  {
+                    "name": "GOMEMLIMIT",
+                    "value": "384MiB"
+                  }
+                ],
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "readOnlyRootFilesystem": true,
+                  "capabilities": {"drop": ["ALL"]}
+                },
+                "resources": {
+                  "requests": {"cpu": "100m", "memory": "128Mi"},
+                  "limits": {"cpu": "1", "memory": "512Mi"}
+                },
+                "startupProbe": {
+                  "httpGet": {"path": "/healthz", "port": "metrics"},
+                  "periodSeconds": 3,
+                  "failureThreshold": 14
+                },
+                "livenessProbe": {
+                  "httpGet": {"path": "/healthz", "port": "metrics"},
+                  "timeoutSeconds": 3,
+                  "periodSeconds": 15
+                },
+                "readinessProbe": {
+                  "httpGet": {"path": "/readyz", "port": "metrics"},
+                  "timeoutSeconds": 3,
+                  "periodSeconds": 10
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

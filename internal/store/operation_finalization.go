@@ -15,6 +15,7 @@ type operationFinalizationGuard struct {
 	App                  *model.App
 	AttemptOnly          bool
 	ConstraintPolicyOnly bool
+	PendingSnapshotOnly  bool
 }
 
 func validateOperationFinalization(op model.Operation, app model.App, guard *operationFinalizationGuard) error {
@@ -22,6 +23,14 @@ func validateOperationFinalization(op model.Operation, app model.App, guard *ope
 		return nil
 	}
 	expected := guard.Operation
+	if guard.PendingSnapshotOnly {
+		if op.ID != expected.ID || op.AppID != expected.AppID || op.TenantID != expected.TenantID || op.Type != expected.Type ||
+			expected.Status != model.OperationStatusPending || op.Status != model.OperationStatusPending ||
+			!op.UpdatedAt.Truncate(time.Microsecond).Equal(expected.UpdatedAt.Truncate(time.Microsecond)) {
+			return ErrConflict
+		}
+		return nil
+	}
 	if op.ID != expected.ID || op.AppID != expected.AppID || op.TenantID != expected.TenantID || op.Type != expected.Type ||
 		op.ExecutionMode != model.ExecutionModeManaged || op.Status != model.OperationStatusRunning ||
 		!sameOperationStartedAt(op.StartedAt, expected.StartedAt) {

@@ -1,0 +1,10 @@
+{
+  "schema": "fugue.observation-worker-database/v1",
+  "namespace": "fugue-system",
+  "cluster": "fugue-fugue-control-plane-postgres",
+  "clusterUID": "603cac0e-43a9-4480-bd25-d1364e6aecc2",
+  "systemID": "7639860969142538261",
+  "database": "fugue",
+  "role": "fugue_observation_rollup",
+  "secret": "fugue-observation-worker-database"
+}

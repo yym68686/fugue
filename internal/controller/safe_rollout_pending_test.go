@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/operationqueue"
 )
 
 type deadlineEdgeObserver struct{}
@@ -76,7 +77,7 @@ func TestSafeRolloutChildDeadlineRemainsPendingAndResumesSameRelease(t *testing.
 		t.Fatal(err)
 	}
 	pending, _ := st.GetOperation(op.ID)
-	if !model.OperationWaitingForTrafficConfirmation(pending) || pending.CompletedAt != nil || pendingOperationRetryReady(pending, pending.UpdatedAt) || !pendingOperationRetryReady(pending, pending.UpdatedAt.Add(30*time.Second)) {
+	if !model.OperationWaitingForTrafficConfirmation(pending) || pending.CompletedAt != nil || operationqueue.RetryReady(pending, pending.UpdatedAt) || !operationqueue.RetryReady(pending, pending.UpdatedAt.Add(30*time.Second)) {
 		t.Fatal("pending state/backoff lost", pending)
 	}
 	attempt, _, _ := st.FindReleaseAttemptForOperation(op.ID)
@@ -137,7 +138,7 @@ func TestSafeRolloutCanonicalWaitRemainsNonterminal(t *testing.T) {
 	}
 	pending, err := st.GetOperation(op.ID)
 	if err != nil || !model.OperationWaitingForCanonicalHandoff(pending) || pending.CompletedAt != nil ||
-		pendingOperationRetryReady(pending, pending.UpdatedAt) || !pendingOperationRetryReady(pending, pending.UpdatedAt.Add(30*time.Second)) {
+		operationqueue.RetryReady(pending, pending.UpdatedAt) || !operationqueue.RetryReady(pending, pending.UpdatedAt.Add(30*time.Second)) {
 		t.Fatal("canonical wait did not remain pending with backoff", pending, err)
 	}
 	attempt, _, _ := st.FindReleaseAttemptForOperation(op.ID)

@@ -748,15 +748,6 @@ func parseEdgeNodeQualitySince(raw string, now time.Time) (time.Time, error) {
 	return parsed.UTC(), nil
 }
 
-func normalizeEdgeTrafficClass(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "large_body_api", "small_api", "dynamic_api", "static_cacheable", "streaming", "sse", "websocket", "html_dynamic":
-		return strings.ToLower(strings.TrimSpace(value))
-	default:
-		return ""
-	}
-}
-
 type edgeNodeQualityAccumulator struct {
 	sampleRecordCount         int
 	requestCount              int

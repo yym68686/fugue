@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/imagetracking"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 )
@@ -15,7 +16,7 @@ func (s *Service) createImageTrackingReleaseAttemptBestEffort(app model.App, tra
 	}
 	actorID := strings.TrimSpace(s.Config.LeaderElectionIdentity)
 	if actorID == "" {
-		actorID = imageTrackingControllerPodName()
+		actorID = imagetracking.ControllerPodName()
 	}
 	attempt, err := s.Store.CreateReleaseAttempt(model.ReleaseAttempt{
 		TenantID:          app.TenantID,

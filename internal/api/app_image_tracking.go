@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/imagetracking"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -30,44 +30,14 @@ type appImageTrackingHistoryResponse struct {
 	Checks   []model.AppImageTrackingCheck `json:"checks"`
 }
 
-type appImageTrackingDiagnosis struct {
-	Category         string                        `json:"category"`
-	Summary          string                        `json:"summary"`
-	Hint             string                        `json:"hint,omitempty"`
-	AppID            string                        `json:"app_id"`
-	Tracking         *model.AppImageTracking       `json:"tracking,omitempty"`
-	LatestCheck      *model.AppImageTrackingCheck  `json:"latest_check,omitempty"`
-	RecentChecks     []model.AppImageTrackingCheck `json:"recent_checks"`
-	RemoteDigest     string                        `json:"remote_digest,omitempty"`
-	CurrentAppDigest string                        `json:"current_app_digest,omitempty"`
-	ActiveOperation  *model.Operation              `json:"active_operation,omitempty"`
-	Evidence         []string                      `json:"evidence"`
-	Warnings         []string                      `json:"warnings"`
-}
+type appImageTrackingDiagnosis = imagetracking.Diagnosis
 
 type appImageTrackingDiagnosisResponse struct {
 	AppID     string                    `json:"app_id"`
 	Diagnosis appImageTrackingDiagnosis `json:"diagnosis"`
 }
 
-type appImageSyncRequest struct {
-	ImageRef   *string `json:"image_ref,omitempty"`
-	Event      string  `json:"event,omitempty"`
-	DeliveryID string  `json:"delivery_id,omitempty"`
-}
-
-type appImageSyncResponse struct {
-	AppID          string                  `json:"app_id"`
-	Tracking       *model.AppImageTracking `json:"tracking,omitempty"`
-	Operation      *model.Operation        `json:"operation,omitempty"`
-	ReleaseAttempt *model.ReleaseAttempt   `json:"release_attempt,omitempty"`
-	Digest         string                  `json:"digest,omitempty"`
-	Changed        bool                    `json:"changed"`
-	AlreadyCurrent bool                    `json:"already_current"`
-	RolloutPending bool                    `json:"rollout_pending,omitempty"`
-	AppPhase       string                  `json:"app_phase,omitempty"`
-	Message        string                  `json:"message,omitempty"`
-}
+type appImageSyncResponse = imagetracking.SyncResult
 
 func (s *Server) handleGetAppImageTracking(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
@@ -75,7 +45,7 @@ func (s *Server) handleGetAppImageTracking(w http.ResponseWriter, r *http.Reques
 	if !allowed {
 		return
 	}
-	tracking, err := s.store.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	tracking, err := s.imageTrackingCommands().Get(principal, app.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			httpx.WriteJSON(w, http.StatusOK, appImageTrackingResponse{AppID: app.ID})
@@ -97,7 +67,7 @@ func (s *Server) handleGetAppImageTrackingHistory(w http.ResponseWriter, r *http
 		return
 	}
 	var trackingPtr *model.AppImageTracking
-	tracking, err := s.store.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	tracking, err := s.imageTrackingCommands().Get(principal, app.ID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
 			s.writeStoreError(w, err)
@@ -106,12 +76,7 @@ func (s *Server) handleGetAppImageTrackingHistory(w http.ResponseWriter, r *http
 	} else {
 		trackingPtr = &tracking
 	}
-	checks, err := s.store.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
-		TenantID:      principal.TenantID,
-		PlatformAdmin: principal.IsPlatformAdmin(),
-		AppID:         app.ID,
-		Limit:         parseLimitQuery(r, 50),
-	})
+	checks, err := s.imageTrackingCommands().History(principal, app.ID, parseLimitQuery(r, 50))
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -170,12 +135,7 @@ func (s *Server) handlePutAppImageTracking(w http.ResponseWriter, r *http.Reques
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	tracking, err := s.store.UpsertAppImageTracking(model.AppImageTracking{
-		TenantID: app.TenantID,
-		AppID:    app.ID,
-		ImageRef: imageRef,
-		Enabled:  enabled,
-	})
+	tracking, err := s.imageTrackingCommands().Configure(app, imageRef, enabled)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -201,268 +161,49 @@ func (s *Server) handleSyncAppImage(w http.ResponseWriter, r *http.Request) {
 	if !allowed {
 		return
 	}
-	var req appImageSyncRequest
+	var req imagetracking.SyncRequest
 	if r.ContentLength != 0 {
 		if err := httpx.DecodeJSON(r, &req); err != nil {
 			httpx.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 	}
-	tracking, err := s.store.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
+	result, err := s.imageTrackingCommands().Sync(r.Context(), principal, app, req)
 	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if !tracking.Enabled {
-		httpx.WriteError(w, http.StatusConflict, "image tracking is disabled")
-		return
-	}
-	if req.ImageRef != nil && strings.TrimSpace(*req.ImageRef) != "" && strings.TrimSpace(*req.ImageRef) != strings.TrimSpace(tracking.ImageRef) {
-		httpx.WriteError(w, http.StatusConflict, "requested image_ref does not match app image tracking")
-		return
-	}
-	startedAt := time.Now().UTC()
-
-	digest, err := s.resolveTrackedImageDigest(r, tracking.ImageRef)
-	if err != nil {
-		if updated, recordErr := s.store.RecordAppImageTrackingCheck(tracking.ID, "", req.DeliveryID, req.Event, err.Error()); recordErr == nil {
-			tracking = updated
-		}
-		s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
-			Decision:      model.AppImageTrackingDecisionResolverError,
-			SkipReason:    "image digest resolver failed",
-			ResolverError: err.Error(),
-			DeliveryID:    req.DeliveryID,
-			Event:         eventNameOrDefault(req.Event),
-			StartedAt:     startedAt,
-		})
-		httpx.WriteError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-
-	if model.ImageDigestsMatch(model.AppTrackedImageDigest(app, tracking.ImageRef), digest) {
-		if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, req.DeliveryID, eventNameOrDefault(req.Event), ""); err == nil {
-			tracking = updated
-		}
-		s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
-			ObservedDigest: digest,
-			Decision:       model.AppImageTrackingDecisionAlreadyDeployed,
-			SkipReason:     "tracked digest already matches app desired source",
-			DeliveryID:     req.DeliveryID,
-			Event:          eventNameOrDefault(req.Event),
-			StartedAt:      startedAt,
-		})
-
-		activeOp, err := s.latestActiveOperationForApp(app)
-		if err != nil {
+		var resolverErr *imagetracking.ResolverError
+		switch {
+		case errors.Is(err, imagetracking.ErrDisabled), errors.Is(err, imagetracking.ErrReferenceMismatch):
+			httpx.WriteError(w, http.StatusConflict, err.Error())
+		case errors.As(err, &resolverErr):
+			httpx.WriteError(w, http.StatusBadGateway, resolverErr.Error())
+		default:
 			s.writeStoreError(w, err)
-			return
 		}
-		rolloutPending := appImageSyncRolloutPending(app)
-		status := http.StatusOK
-		message := "tracked image digest already matches app desired source"
-		if activeOp != nil {
-			status = http.StatusAccepted
-			rolloutPending = true
-			message = "tracked image digest already matches app desired source; active operation is still in progress"
-		} else if rolloutPending {
-			status = http.StatusAccepted
-			message = "tracked image digest already matches app desired source; app rollout is still pending"
-		}
-
-		httpx.WriteJSON(w, status, appImageSyncResponse{
-			AppID:          app.ID,
-			Tracking:       &tracking,
-			Operation:      activeOp,
-			Digest:         digest,
-			AlreadyCurrent: true,
-			RolloutPending: rolloutPending,
-			AppPhase:       strings.TrimSpace(app.Status.Phase),
-			Message:        message,
+		return
+	}
+	if result.Changed {
+		s.appendAudit(principal, "app.image_tracking.sync", "operation", result.Operation.ID, app.TenantID, map[string]string{
+			"app_id": app.ID, "image_ref": result.Tracking.ImageRef, "digest": result.Digest,
+			"delivery_id": strings.TrimSpace(req.DeliveryID), "event": imagetracking.ManualEvent(req.Event),
 		})
-		return
 	}
-
-	activeOp, err := s.latestActiveOperationForApp(app)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
+	if result.Operation != nil {
+		operation := sanitizeOperationForAPI(*result.Operation)
+		result.Operation = &operation
 	}
-	if activeOp != nil {
-		if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, req.DeliveryID, eventNameOrDefault(req.Event), "app has an active operation"); err == nil {
-			tracking = updated
-		}
-		s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
-			ObservedDigest:    digest,
-			Decision:          model.AppImageTrackingDecisionActiveOperation,
-			SkipReason:        "app has an active operation",
-			ActiveOperationID: activeOp.ID,
-			DeliveryID:        req.DeliveryID,
-			Event:             eventNameOrDefault(req.Event),
-			StartedAt:         startedAt,
-		})
-		httpx.WriteJSON(w, http.StatusAccepted, appImageSyncResponse{
-			AppID:          app.ID,
-			Tracking:       &tracking,
-			Operation:      activeOp,
-			Digest:         digest,
-			RolloutPending: true,
-			AppPhase:       strings.TrimSpace(app.Status.Phase),
-			Message:        "app has an active operation; image sync was not queued",
-		})
-		return
+	status := http.StatusOK
+	if result.Changed || result.RolloutPending {
+		status = http.StatusAccepted
 	}
-
-	op, err := s.store.QueueAppImageTrackingImport(app, tracking, principal.ActorType, principal.ActorID)
-	if err != nil {
-		decision := model.AppImageTrackingDecisionQueueError
-		skipReason := "queue image tracking import failed"
-		if errors.Is(err, store.ErrConflict) {
-			decision = model.AppImageTrackingDecisionQueueConflict
-			skipReason = "app already has a conflicting pending operation"
-		}
-		s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
-			ObservedDigest: digest,
-			Decision:       decision,
-			SkipReason:     skipReason,
-			ResolverError:  err.Error(),
-			DeliveryID:     req.DeliveryID,
-			Event:          eventNameOrDefault(req.Event),
-			StartedAt:      startedAt,
-		})
-		s.writeStoreError(w, err)
-		return
-	}
-	tracking, err = s.store.RecordAppImageTrackingQueued(tracking.ID, digest, op.ID, req.DeliveryID, eventNameOrDefault(req.Event))
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	releaseAttempt := s.createImageTrackingReleaseAttemptBestEffort(app, tracking, op, principal, digest, model.ReleaseAttemptTriggerImageTrackingManualSync)
-	s.recordAppImageSyncDecision(app, tracking, appImageTrackingDecisionInputAPI{
-		ObservedDigest: digest,
-		Decision:       model.AppImageTrackingDecisionQueued,
-		OperationID:    op.ID,
-		DeliveryID:     req.DeliveryID,
-		Event:          eventNameOrDefault(req.Event),
-		StartedAt:      startedAt,
-	})
-	s.appendAudit(principal, "app.image_tracking.sync", "operation", op.ID, app.TenantID, map[string]string{
-		"app_id":      app.ID,
-		"image_ref":   tracking.ImageRef,
-		"digest":      digest,
-		"delivery_id": strings.TrimSpace(req.DeliveryID),
-		"event":       eventNameOrDefault(req.Event),
-	})
-	sanitized := sanitizeOperationForAPI(op)
-	httpx.WriteJSON(w, http.StatusAccepted, appImageSyncResponse{
-		AppID:          app.ID,
-		Tracking:       &tracking,
-		Operation:      &sanitized,
-		ReleaseAttempt: releaseAttempt,
-		Digest:         digest,
-		Changed:        true,
-		Message:        "tracked image digest changed; import queued",
-	})
+	httpx.WriteJSON(w, status, result)
 }
 
-func (s *Server) createImageTrackingReleaseAttemptBestEffort(app model.App, tracking model.AppImageTracking, op model.Operation, principal model.Principal, digest, triggerType string) *model.ReleaseAttempt {
-	attempt, err := s.store.CreateReleaseAttempt(model.ReleaseAttempt{
-		TenantID:          app.TenantID,
-		ProjectID:         app.ProjectID,
-		AppID:             app.ID,
-		TriggerType:       triggerType,
-		TriggerActorType:  principal.ActorType,
-		TriggerActorID:    principal.ActorID,
-		SourceOperationID: op.ID,
-		RootOperationID:   op.ID,
-		ImageRef:          tracking.ImageRef,
-		TargetDigest:      digest,
-		PreviousDigest:    tracking.LastDeployedDigest,
-		Status:            model.ReleaseAttemptStatusImporting,
-		Confidence:        model.OperationEvidenceConfidenceEvidenceBacked,
-		Summary:           "tracked image digest changed; import queued",
-	})
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("create image tracking release attempt failed app=%s op=%s: %v", app.ID, op.ID, err)
-		}
-		return nil
+func (s *Server) imageTrackingCommands() *imagetracking.Manual {
+	resolver := s.resolveRemoteImageDigest
+	if resolver == nil {
+		resolver = sourceimport.ResolveRemoteImageDigest
 	}
-	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
-		TenantID:         app.TenantID,
-		ReleaseAttemptID: attempt.ID,
-		OperationID:      op.ID,
-		Type:             model.ReleaseStepTypeTriggerReceived,
-		Status:           model.ReleaseStepStatusCompleted,
-		Summary:          "image tracking sync requested",
-	})
-	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
-		TenantID:         app.TenantID,
-		ReleaseAttemptID: attempt.ID,
-		OperationID:      op.ID,
-		Type:             model.ReleaseStepTypeImageTrackingCheck,
-		Status:           model.ReleaseStepStatusCompleted,
-		Summary:          "tracked digest changed",
-		Payload: map[string]any{
-			"image_ref":       tracking.ImageRef,
-			"observed_digest": digest,
-			"previous_digest": tracking.LastDeployedDigest,
-			"tracking_id":     tracking.ID,
-		},
-	})
-	_, _ = s.store.RecordReleaseStep(model.ReleaseStep{
-		TenantID:         app.TenantID,
-		ReleaseAttemptID: attempt.ID,
-		OperationID:      op.ID,
-		Type:             model.ReleaseStepTypeImageImport,
-		Status:           model.ReleaseStepStatusPending,
-		Summary:          "image import queued",
-	})
-	return &attempt
-}
-
-type appImageTrackingDecisionInputAPI struct {
-	ObservedDigest    string
-	Decision          string
-	SkipReason        string
-	OperationID       string
-	ActiveOperationID string
-	ResolverError     string
-	DeliveryID        string
-	Event             string
-	StartedAt         time.Time
-}
-
-func (s *Server) recordAppImageSyncDecision(app model.App, tracking model.AppImageTracking, input appImageTrackingDecisionInputAPI) {
-	checkedAt := time.Now().UTC()
-	startedAt := input.StartedAt
-	if startedAt.IsZero() {
-		startedAt = checkedAt
-	}
-	duration := checkedAt.Sub(startedAt)
-	if duration < 0 {
-		duration = 0
-	}
-	_, _ = s.store.CreateAppImageTrackingCheck(model.AppImageTrackingCheck{
-		TenantID:             tracking.TenantID,
-		AppID:                tracking.AppID,
-		TrackingID:           tracking.ID,
-		ImageRef:             tracking.ImageRef,
-		ObservedDigest:       input.ObservedDigest,
-		CurrentAppDigest:     model.AppTrackedImageDigest(app, tracking.ImageRef),
-		LastQueuedDigest:     tracking.LastQueuedDigest,
-		LastDeployedDigest:   tracking.LastDeployedDigest,
-		Decision:             strings.TrimSpace(input.Decision),
-		SkipReason:           strings.TrimSpace(input.SkipReason),
-		OperationID:          strings.TrimSpace(input.OperationID),
-		ActiveOperationID:    strings.TrimSpace(input.ActiveOperationID),
-		ResolverError:        strings.TrimSpace(input.ResolverError),
-		DeliveryID:           strings.TrimSpace(input.DeliveryID),
-		Event:                eventNameOrDefault(input.Event),
-		DurationMilliseconds: duration.Milliseconds(),
-		CheckedAt:            checkedAt,
-	})
+	return imagetracking.NewManual(s.store.ImageTracking(), s.store, s.log, resolver, s.latestActiveOperationForApp, store.ErrNotFound, store.ErrConflict)
 }
 
 func (s *Server) latestActiveOperationForApp(app model.App) (*model.Operation, error) {
@@ -481,194 +222,15 @@ func (s *Server) latestActiveOperationForApp(app model.App) (*model.Operation, e
 	if len(ops) == 0 {
 		return nil, nil
 	}
-	op := sanitizeOperationForAPI(ops[len(ops)-1])
+	op := ops[len(ops)-1]
 	return &op, nil
 }
 
 func (s *Server) buildAppImageTrackingDiagnosis(ctx context.Context, principal model.Principal, app model.App, resolveRemote bool) (appImageTrackingDiagnosis, error) {
-	diagnosis := appImageTrackingDiagnosis{
-		Category:     "not_configured",
-		Summary:      "image tracking is not configured",
-		Hint:         "Configure app release tracking before expecting automatic image updates.",
-		AppID:        app.ID,
-		RecentChecks: []model.AppImageTrackingCheck{},
-		Evidence:     []string{},
-		Warnings:     []string{},
+	diagnosis, err := s.imageTrackingCommands().Diagnose(ctx, principal, app, resolveRemote)
+	if diagnosis.ActiveOperation != nil {
+		operation := sanitizeOperationForAPI(*diagnosis.ActiveOperation)
+		diagnosis.ActiveOperation = &operation
 	}
-	tracking, err := s.store.GetAppImageTracking(principal.TenantID, principal.IsPlatformAdmin(), app.ID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return diagnosis, nil
-		}
-		return appImageTrackingDiagnosis{}, err
-	}
-	diagnosis.Tracking = &tracking
-	diagnosis.Category = "unknown"
-	diagnosis.Summary = "image tracking state is available"
-	diagnosis.Hint = ""
-	diagnosis.CurrentAppDigest = model.AppTrackedImageDigest(app, tracking.ImageRef)
-	diagnosis.Evidence = append(diagnosis.Evidence, fmt.Sprintf("tracking image_ref=%s enabled=%t", tracking.ImageRef, tracking.Enabled))
-	if diagnosis.CurrentAppDigest != "" {
-		diagnosis.Evidence = append(diagnosis.Evidence, "current app digest="+diagnosis.CurrentAppDigest)
-	}
-
-	checks, err := s.store.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{
-		TenantID:      principal.TenantID,
-		PlatformAdmin: principal.IsPlatformAdmin(),
-		AppID:         app.ID,
-		TrackingID:    tracking.ID,
-		Limit:         10,
-	})
-	if err != nil {
-		return appImageTrackingDiagnosis{}, err
-	}
-	diagnosis.RecentChecks = checks
-	if len(checks) > 0 {
-		latest := checks[0]
-		diagnosis.LatestCheck = &latest
-		diagnosis.Evidence = append(diagnosis.Evidence, fmt.Sprintf("latest check decision=%s at=%s", latest.Decision, latest.CheckedAt.Format(time.RFC3339)))
-		if strings.TrimSpace(latest.SkipReason) != "" {
-			diagnosis.Evidence = append(diagnosis.Evidence, "latest skip reason="+latest.SkipReason)
-		}
-	}
-
-	if !tracking.Enabled {
-		diagnosis.Category = "disabled"
-		diagnosis.Summary = "image tracking is disabled"
-		diagnosis.Hint = "Enable tracking before expecting automatic image imports."
-		return diagnosis, nil
-	}
-	if app.Spec.Replicas <= 0 {
-		diagnosis.Category = model.AppImageTrackingDecisionReplicasZero
-		diagnosis.Summary = "image tracking is skipped because app replicas are zero"
-		diagnosis.Hint = "Scale the app above zero before expecting automatic image imports."
-		return diagnosis, nil
-	}
-
-	activeOp, err := s.latestActiveOperationForApp(app)
-	if err != nil {
-		return appImageTrackingDiagnosis{}, err
-	}
-	if activeOp != nil {
-		diagnosis.ActiveOperation = activeOp
-		diagnosis.Evidence = append(diagnosis.Evidence, "active operation="+activeOp.ID)
-	}
-
-	if resolveRemote {
-		digest, err := s.resolveTrackedImageDigestContext(ctx, tracking.ImageRef)
-		if err != nil {
-			diagnosis.Category = model.AppImageTrackingDecisionResolverError
-			diagnosis.Summary = "image tracking could not resolve the remote digest"
-			diagnosis.Hint = "Check registry credentials, registry availability, and the tracked image reference."
-			diagnosis.Warnings = append(diagnosis.Warnings, err.Error())
-			return diagnosis, nil
-		}
-		diagnosis.RemoteDigest = digest
-		diagnosis.Evidence = append(diagnosis.Evidence, "remote digest="+digest)
-	}
-
-	if diagnosis.RemoteDigest != "" && model.ImageDigestsMatch(diagnosis.CurrentAppDigest, diagnosis.RemoteDigest) {
-		diagnosis.Category = model.AppImageTrackingDecisionAlreadyDeployed
-		diagnosis.Summary = "tracked image digest already matches the app desired source"
-		return diagnosis, nil
-	}
-	if activeOp != nil {
-		diagnosis.Category = model.AppImageTrackingDecisionActiveOperation
-		diagnosis.Summary = "image tracking is waiting for an active app operation to finish"
-		diagnosis.Hint = "Inspect the active operation before expecting image tracking to queue another import."
-		return diagnosis, nil
-	}
-	if diagnosis.RemoteDigest != "" && strings.TrimSpace(diagnosis.RemoteDigest) == strings.TrimSpace(tracking.LastQueuedDigest) && !imageTrackingRetryReadyForAPI(tracking, time.Now().UTC()) {
-		diagnosis.Category = model.AppImageTrackingDecisionRetrySuppressed
-		diagnosis.Summary = "image tracking saw the same queued digest and is waiting for retry delay"
-		return diagnosis, nil
-	}
-	if diagnosis.LatestCheck != nil {
-		diagnosis.Category = diagnosis.LatestCheck.Decision
-		diagnosis.Summary = imageTrackingDiagnosisSummaryForDecision(*diagnosis.LatestCheck)
-		return diagnosis, nil
-	}
-	if diagnosis.RemoteDigest != "" {
-		diagnosis.Category = "changed"
-		diagnosis.Summary = "remote digest differs from the app desired source and no blocking condition was found"
-		diagnosis.Hint = "The next controller poll should queue an image import."
-		return diagnosis, nil
-	}
-	diagnosis.Category = "waiting_for_check"
-	diagnosis.Summary = "image tracking is enabled but no check history is available yet"
-	return diagnosis, nil
-}
-
-func imageTrackingDiagnosisSummaryForDecision(check model.AppImageTrackingCheck) string {
-	switch strings.TrimSpace(check.Decision) {
-	case model.AppImageTrackingDecisionQueued:
-		return "latest image tracking check queued an import"
-	case model.AppImageTrackingDecisionAlreadyDeployed:
-		return "latest image tracking check found the app already on the tracked digest"
-	case model.AppImageTrackingDecisionReplicasZero:
-		return "latest image tracking check skipped because app replicas are zero"
-	case model.AppImageTrackingDecisionActiveOperation:
-		return "latest image tracking check skipped because an active app operation exists"
-	case model.AppImageTrackingDecisionRetrySuppressed:
-		return "latest image tracking check skipped because the same digest was already queued recently"
-	case model.AppImageTrackingDecisionResolverError:
-		return "latest image tracking check failed to resolve the remote digest"
-	case model.AppImageTrackingDecisionQueueConflict:
-		return "latest image tracking check could not queue because the app had a conflicting operation"
-	case model.AppImageTrackingDecisionQueueError:
-		return "latest image tracking check failed while queueing the import"
-	default:
-		if strings.TrimSpace(check.SkipReason) != "" {
-			return check.SkipReason
-		}
-		return "latest image tracking check did not identify a queueable update"
-	}
-}
-
-func appImageSyncRolloutPending(app model.App) bool {
-	if app.Spec.Replicas <= 0 {
-		return false
-	}
-	if app.Status.CurrentReplicas < app.Spec.Replicas {
-		return true
-	}
-	phase := strings.ToLower(strings.TrimSpace(app.Status.Phase))
-	return phase != "" && phase != "deployed"
-}
-
-func (s *Server) resolveTrackedImageDigest(r *http.Request, imageRef string) (string, error) {
-	return s.resolveTrackedImageDigestContext(r.Context(), imageRef)
-}
-
-func (s *Server) resolveTrackedImageDigestContext(ctx context.Context, imageRef string) (string, error) {
-	resolver := s.resolveRemoteImageDigest
-	if resolver == nil {
-		resolver = sourceimport.ResolveRemoteImageDigest
-	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	digest, err := resolver(ctx, imageRef)
-	if err != nil {
-		return "", err
-	}
-	digest = strings.TrimSpace(digest)
-	if digest == "" {
-		return "", fmt.Errorf("image digest resolver returned empty digest")
-	}
-	return digest, nil
-}
-
-func imageTrackingRetryReadyForAPI(tracking model.AppImageTracking, now time.Time) bool {
-	if tracking.LastTriggeredAt == nil {
-		return true
-	}
-	return !tracking.LastTriggeredAt.Add(5 * time.Minute).After(now)
-}
-
-func eventNameOrDefault(event string) string {
-	event = strings.TrimSpace(event)
-	if event == "" {
-		return "manual"
-	}
-	return event
+	return diagnosis, err
 }

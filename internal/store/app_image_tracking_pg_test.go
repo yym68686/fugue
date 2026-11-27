@@ -136,14 +136,14 @@ RETURNING id, tenant_id, app_id, image_ref, enabled, last_seen_digest, last_queu
 		))
 	mock.ExpectCommit()
 
-	tracking, err := s.pgUpsertAppImageTracking(model.AppImageTracking{
+	tracking, err := s.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{
 		TenantID: tenantID,
 		AppID:    appID,
 		ImageRef: imageRef,
 		Enabled:  true,
 	})
 	if err != nil {
-		t.Fatalf("pgUpsertAppImageTracking: %v", err)
+		t.Fatalf("UpsertAppImageTracking: %v", err)
 	}
 	if tracking.ID != "imgtrack_123" || tracking.ImageRef != imageRef {
 		t.Fatalf("unexpected tracking row: %+v", tracking)

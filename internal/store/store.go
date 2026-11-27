@@ -19,6 +19,7 @@ import (
 	"fugue/internal/edgetopology"
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/operationview/contract"
 	"fugue/internal/pgimage"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sshidentity"
@@ -374,8 +375,7 @@ func (s *Store) DeleteTenant(id string) (model.Tenant, error) {
 		state.ProjectRouteTables = deleteProjectRouteTablesByTenant(state.ProjectRouteTables, id)
 		state.Apps = deleteAppsByTenant(state.Apps, id)
 		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, id, "")
-		state.AppImageTrackings = deleteAppImageTrackingsByTenant(state.AppImageTrackings, id)
-		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByTenant(state.AppImageTrackingChecks, id)
+		deleteTenantImageTracking(state, id)
 		state.AppReleases = deleteAppReleasesByTenant(state.AppReleases, id)
 		state.ReleaseAttempts = deleteReleaseAttemptsByTenant(state.ReleaseAttempts, id)
 		state.ReleaseSteps = deleteReleaseStepsByTenant(state.ReleaseSteps, id)
@@ -2773,8 +2773,7 @@ func (s *Store) PurgeApp(id string) (model.App, error) {
 		state.AppRecoveries = deleteAppRecoveryHistory(state.AppRecoveries, "", id)
 		state.Idempotency = deleteIdempotencyRecordsByAppIDs(state.Idempotency, []string{id})
 		deleteAppDomainsByApp(state, id)
-		state.AppImageTrackings = deleteAppImageTrackingsByApp(state.AppImageTrackings, id)
-		state.AppImageTrackingChecks = deleteAppImageTrackingChecksByApp(state.AppImageTrackingChecks, id)
+		deleteAppImageTracking(state, id)
 		state.AppReleases = deleteAppReleasesByApp(state.AppReleases, id)
 		deletedReleaseAttemptIDs := releaseAttemptIDsByApp(state.ReleaseAttempts, id)
 		state.ReleaseAttempts = deleteReleaseAttemptsByApp(state.ReleaseAttempts, id)
@@ -3571,16 +3570,7 @@ func duplicateOOMRightSizingOperation(operations []model.Operation, candidate mo
 	return false
 }
 
-type OperationListFilter struct {
-	TenantID  string
-	AppID     string
-	ProjectID string
-	ServiceID string
-	ActorID   string
-	Types     []string
-	Statuses  []string
-	Limit     int
-}
+type OperationListFilter = contract.Filter
 
 func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
 	return s.ListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{})
@@ -4726,12 +4716,7 @@ func ensureDefaults(state *model.State) {
 	if state.ImageReplicationTasks == nil {
 		state.ImageReplicationTasks = []model.ImageReplicationTask{}
 	}
-	if state.AppImageTrackings == nil {
-		state.AppImageTrackings = []model.AppImageTracking{}
-	}
-	if state.AppImageTrackingChecks == nil {
-		state.AppImageTrackingChecks = []model.AppImageTrackingCheck{}
-	}
+	initializeImageTracking(state)
 	if state.AppReleases == nil {
 		state.AppReleases = []model.AppRelease{}
 	}
@@ -5895,50 +5880,6 @@ func deleteAppsByTenant(apps []model.App, tenantID string) []model.App {
 			continue
 		}
 		filtered = append(filtered, app)
-	}
-	return filtered
-}
-
-func deleteAppImageTrackingsByTenant(trackings []model.AppImageTracking, tenantID string) []model.AppImageTracking {
-	filtered := trackings[:0]
-	for _, tracking := range trackings {
-		if tracking.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, tracking)
-	}
-	return filtered
-}
-
-func deleteAppImageTrackingChecksByTenant(checks []model.AppImageTrackingCheck, tenantID string) []model.AppImageTrackingCheck {
-	filtered := checks[:0]
-	for _, check := range checks {
-		if check.TenantID == tenantID {
-			continue
-		}
-		filtered = append(filtered, check)
-	}
-	return filtered
-}
-
-func deleteAppImageTrackingsByApp(trackings []model.AppImageTracking, appID string) []model.AppImageTracking {
-	filtered := trackings[:0]
-	for _, tracking := range trackings {
-		if tracking.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, tracking)
-	}
-	return filtered
-}
-
-func deleteAppImageTrackingChecksByApp(checks []model.AppImageTrackingCheck, appID string) []model.AppImageTrackingCheck {
-	filtered := checks[:0]
-	for _, check := range checks {
-		if check.AppID == appID {
-			continue
-		}
-		filtered = append(filtered, check)
 	}
 	return filtered
 }

@@ -1,0 +1,72 @@
+import io
+import os
+import unittest
+from unittest import mock
+
+from scripts import prepush, prepush_replay
+
+
+class ReplayTest(unittest.TestCase):
+    def test_candidate_keeps_non_selection_checks_and_cannot_write_production_receipt(self):
+        results = []
+        seen = []
+
+        def command(args, _timeout):
+            seen.append(args)
+            return 0, ""
+
+        selection = {"goTests": [["go", "test", "./internal/api"]], "goBuilds": []}
+        with (
+            mock.patch.dict(os.environ, {"PREPUSH_TIMEOUT_SECONDS": "5"}),
+            mock.patch.object(prepush, "resolve_base", return_value="HEAD"),
+            mock.patch.object(prepush, "changed_files", return_value=["internal/api/backup_usage_test.go"]),
+            mock.patch.object(prepush, "diff_check", return_value=(0, "")),
+            mock.patch.object(prepush, "gofmt_check", return_value=(0, "")),
+            mock.patch.object(prepush, "shell_syntax_check", return_value=(0, "")),
+            mock.patch.object(prepush, "git_output", return_value=b"1" * 40 + b"\n"),
+            mock.patch.object(prepush, "run", side_effect=command),
+            mock.patch.object(prepush, "write_receipt", side_effect=AssertionError("shadow must never issue a receipt")),
+            mock.patch("sys.stderr", new=io.StringIO()),
+        ):
+            code = prepush._run_gate(shadow_select=lambda _: selection, shadow_result=results.append)
+        self.assertEqual(code, 0)
+        self.assertEqual([cmd for cmd in seen if cmd[:2] == ["go", "test"]], selection["goTests"])
+        self.assertTrue(any(cmd[:3] == ["go", "run", "./cmd/fugue-openapi-gen"] for cmd in seen))
+        self.assertIn(["go", "vet", "./internal/api"], seen)
+        self.assertFalse(any(cmd[:2] == ["go", "build"] for cmd in seen))
+        self.assertEqual(results[0]["checks"]["compile-all"]["status"], "skipped")
+        self.assertNotIn("kind", results[0])
+
+    def test_nearest_rank_and_failure_are_not_censored(self):
+        candidate = {"status": "pass", "elapsedMs": 12_000}
+        legacy = {"status": "pass", "elapsedMs": 30_000}
+        pairs = [{"candidate": candidate, "legacy": legacy}] * 19
+        selection = {"scope": "test-only", "omittedLegacyPackagesBeforeFallback": []}
+        oracle = {"status": "pass"}
+        self.assertFalse(prepush_replay.summarize(pairs, selection, oracle)["eligibleForReview"])
+        self.assertFalse(prepush_replay.summarize(pairs + [pairs[0]], selection, None)["eligibleForReview"])
+        self.assertTrue(prepush_replay.summarize(pairs + [pairs[0]], selection, oracle)["eligibleForReview"])
+        failed = {"status": "fail", "elapsedMs": 55_000}
+        report = prepush_replay.summarize(pairs + [{"candidate": failed, "legacy": legacy}], selection, oracle)
+        self.assertEqual(report["candidateP95Ms"], 12_000)
+        self.assertEqual(report["candidateFailedSamples"], 1)
+        self.assertFalse(report["eligibleForReview"])
+
+    def test_full_oracle_collects_failure_packages_and_timeout(self):
+        with mock.patch.object(prepush, "run", return_value=(
+            124, '\n'.join([
+                "unstructured output",
+                '{"Package":"sample/contract","Action":"run","Test":"TestProjection"}',
+                '{"Package":"sample/contract","Action":"fail","Test":"TestProjection"}',
+                '{"Package":"sample/contract","Action":"fail"}',
+            ]),
+        )):
+            result = prepush_replay.go_oracle(3)
+        self.assertEqual(result, {
+            "status": "fail", "failedPackages": ["sample/contract"],
+            "packagesWithExecutedTests": 1, "timedOut": True,
+        })
+
+
+if __name__ == "__main__":
+    unittest.main()

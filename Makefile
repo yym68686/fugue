@@ -43,6 +43,7 @@ test:
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby
+	python3 -m unittest scripts.test_provision_observation_worker_database
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity
@@ -54,6 +55,8 @@ test:
 	bash ./scripts/scan_hardcoded_production_facts.sh
 	python3 -m unittest scripts.test_reconcile_workload_memory scripts.test_publish_diagnostic_catalog
 	python3 -m scripts.test_prepush
+	python3 -m scripts.test_prepush_shadow
+	python3 -m scripts.test_prepush_replay
 	python3 -m unittest scripts.test_verify_k3s_transport
 	python3 ./scripts/test_verify_registry_image.py
 	env GOCACHE=$(GOCACHE) go test ./internal/declarativerelease ./cmd/fugue-declarative-release
@@ -78,6 +81,7 @@ test-scripts:
 	python3 -m unittest scripts.test_configure_edge_offline scripts.test_configure_edge_offline_recovery
 	python3 -m unittest scripts.test_run_ssh_identity_maintenance
 	python3 -m unittest scripts.test_observe_worker_standby
+	python3 -m unittest scripts.test_provision_observation_worker_database
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity
@@ -88,12 +92,17 @@ test-scripts:
 	python3 -m unittest scripts.test_reconcile_dns_transport scripts.test_recover_dns_transport scripts.test_inspect_dns_predecessor scripts.test_retire_dns_hostport
 	python3 -m unittest scripts.test_reconcile_workload_memory scripts.test_publish_diagnostic_catalog
 	python3 -m scripts.test_prepush
+	python3 -m scripts.test_prepush_shadow
 	python3 -m unittest scripts.test_verify_k3s_transport
 	python3 ./scripts/test_verify_registry_image.py
 	bash ./scripts/test_render_fugue_systemd_units.sh
 	bash ./scripts/test_probe_fugue_public_dns.sh
 	bash ./scripts/test_traffic_safety_stage0.sh
 	python3 ./scripts/test_validate_managed_app_crd_transition.py
+
+.PHONY: prepush-shadow
+prepush-shadow:
+	@python3 -m scripts.prepush_shadow
 
 prepush:
 	@python3 ./scripts/prepush.py

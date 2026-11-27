@@ -1,4 +1,4 @@
-package controller
+package imagetracking
 
 import (
 	"context"
@@ -10,20 +10,19 @@ import (
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
-func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
+func (s *Poller) Sync(ctx context.Context) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.markImageTrackingSyncStarted()
+	s.metrics.markImageTrackingSyncStarted()
 	defer func(startedAt time.Time) {
-		s.markImageTrackingSyncFinished(startedAt, err)
+		s.metrics.markImageTrackingSyncFinished(startedAt, err)
 	}(time.Now().UTC())
 
 	enabled := true
-	trackings, err := s.Store.ListAppImageTrackings(model.AppImageTrackingFilter{
+	trackings, err := s.store.ListAppImageTrackings(model.AppImageTrackingFilter{
 		PlatformAdmin: true,
 		Enabled:       &enabled,
 	})
@@ -35,16 +34,16 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		startedAt := s.currentTime()
-		app, err := s.Store.GetApp(tracking.AppID)
+		startedAt := s.now()
+		app, err := s.getApp(tracking.AppID)
 		if err != nil {
-			if !errors.Is(err, store.ErrNotFound) && s.Logger != nil {
-				s.Logger.Printf("image tracking load app failed app=%s: %v", tracking.AppID, err)
+			if !errors.Is(err, s.errNotFound) && s.logger != nil {
+				s.logger.Printf("image tracking load app failed app=%s: %v", tracking.AppID, err)
 			}
 			continue
 		}
 		if app.Spec.Replicas <= 0 {
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:        app,
 				Tracking:   tracking,
 				Decision:   model.AppImageTrackingDecisionReplicasZero,
@@ -56,13 +55,13 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 		}
 		activeOpID, err := s.latestImageTrackingActiveOperationID(app)
 		if err != nil {
-			if s.Logger != nil {
-				s.Logger.Printf("image tracking active operation check failed app=%s image=%s: %v", app.ID, tracking.ImageRef, err)
+			if s.logger != nil {
+				s.logger.Printf("image tracking active operation check failed app=%s image=%s: %v", app.ID, tracking.ImageRef, err)
 			}
 			continue
 		}
 		if activeOpID != "" {
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:               app,
 				Tracking:          tracking,
 				Decision:          model.AppImageTrackingDecisionActiveOperation,
@@ -79,15 +78,15 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			return ctx.Err()
 		}
 		if err != nil {
-			if updated, recordErr := s.Store.RecordAppImageTrackingCheck(tracking.ID, "", "", "poll", err.Error()); recordErr != nil && s.Logger != nil {
-				s.Logger.Printf("image tracking check record failed app=%s image=%s: %v", app.ID, tracking.ImageRef, recordErr)
+			if updated, recordErr := s.store.RecordAppImageTrackingCheck(tracking.ID, "", "", "poll", err.Error()); recordErr != nil && s.logger != nil {
+				s.logger.Printf("image tracking check record failed app=%s image=%s: %v", app.ID, tracking.ImageRef, recordErr)
 			} else {
 				tracking = updated
 			}
-			if s.Logger != nil {
-				s.Logger.Printf("image tracking digest check failed app=%s image=%s: %v", app.ID, tracking.ImageRef, err)
+			if s.logger != nil {
+				s.logger.Printf("image tracking digest check failed app=%s image=%s: %v", app.ID, tracking.ImageRef, err)
 			}
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:           app,
 				Tracking:      tracking,
 				Decision:      model.AppImageTrackingDecisionResolverError,
@@ -99,12 +98,12 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			continue
 		}
 		if model.ImageDigestsMatch(model.AppTrackedImageDigest(app, tracking.ImageRef), digest) {
-			if updated, err := s.Store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err != nil && s.Logger != nil {
-				s.Logger.Printf("image tracking no-op record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
+			if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err != nil && s.logger != nil {
+				s.logger.Printf("image tracking no-op record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
 			} else {
 				tracking = updated
 			}
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:            app,
 				Tracking:       tracking,
 				ObservedDigest: digest,
@@ -115,12 +114,12 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			})
 			continue
 		}
-		retryReason, err := s.imageTrackingRetrySuppression(ctx, app, tracking, digest)
+		retryReason, err := s.RetrySuppression(ctx, app, tracking, digest)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App: app, Tracking: tracking, ObservedDigest: digest,
 				Decision: model.AppImageTrackingDecisionRetrySuppressed, SkipReason: "retry state unavailable: " + err.Error(),
 				Event: "poll", StartedAt: startedAt,
@@ -128,12 +127,12 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			continue
 		}
 		if retryReason != "" {
-			if updated, err := s.Store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err == nil {
+			if updated, err := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", ""); err == nil {
 				tracking = updated
-			} else if s.Logger != nil {
-				s.Logger.Printf("image tracking retry-suppressed record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
+			} else if s.logger != nil {
+				s.logger.Printf("image tracking retry-suppressed record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
 			}
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:            app,
 				Tracking:       tracking,
 				ObservedDigest: digest,
@@ -145,10 +144,10 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			continue
 		}
 
-		op, err := s.Store.QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
+		op, err := s.store.QueueAppImageTrackingImport(app, tracking, model.ActorTypeBootstrap, model.OperationRequestedByImageTracking)
 		if err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			if errors.Is(err, s.errConflict) {
+				s.RecordDecision(DecisionInput{
 					App:            app,
 					Tracking:       tracking,
 					ObservedDigest: digest,
@@ -159,15 +158,15 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 				})
 				continue
 			}
-			if updated, recordErr := s.Store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", err.Error()); recordErr != nil && s.Logger != nil {
-				s.Logger.Printf("image tracking queue failure record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, recordErr)
+			if updated, recordErr := s.store.RecordAppImageTrackingCheck(tracking.ID, digest, "", "poll", err.Error()); recordErr != nil && s.logger != nil {
+				s.logger.Printf("image tracking queue failure record failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, recordErr)
 			} else {
 				tracking = updated
 			}
-			if s.Logger != nil {
-				s.Logger.Printf("image tracking queue failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
+			if s.logger != nil {
+				s.logger.Printf("image tracking queue failed app=%s image=%s digest=%s: %v", app.ID, tracking.ImageRef, digest, err)
 			}
-			s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+			s.RecordDecision(DecisionInput{
 				App:            app,
 				Tracking:       tracking,
 				ObservedDigest: digest,
@@ -179,13 +178,13 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			})
 			continue
 		}
-		if updated, err := s.Store.RecordAppImageTrackingQueued(tracking.ID, digest, op.ID, "", "poll"); err != nil && s.Logger != nil {
-			s.Logger.Printf("image tracking queued record failed app=%s image=%s digest=%s op=%s: %v", app.ID, tracking.ImageRef, digest, op.ID, err)
+		if updated, err := s.store.RecordAppImageTrackingQueued(tracking.ID, digest, op.ID, "", "poll"); err != nil && s.logger != nil {
+			s.logger.Printf("image tracking queued record failed app=%s image=%s digest=%s op=%s: %v", app.ID, tracking.ImageRef, digest, op.ID, err)
 		} else {
 			tracking = updated
 		}
-		s.createImageTrackingReleaseAttemptBestEffort(app, tracking, op, digest, model.ReleaseAttemptTriggerImageTrackingAuto, "image tracking poll queued import")
-		s.recordAppImageTrackingDecision(appImageTrackingDecisionInput{
+		s.recordRelease(app, tracking, op, digest, model.ReleaseAttemptTriggerImageTrackingAuto, "image tracking poll queued import")
+		s.RecordDecision(DecisionInput{
 			App:            app,
 			Tracking:       tracking,
 			ObservedDigest: digest,
@@ -194,14 +193,14 @@ func (s *Service) syncTrackedAppImages(ctx context.Context) (err error) {
 			Event:          "poll",
 			StartedAt:      startedAt,
 		})
-		if s.Logger != nil {
-			s.Logger.Printf("image tracking queued import app=%s image=%s old_digest=%s new_digest=%s op=%s", app.ID, tracking.ImageRef, tracking.LastDeployedDigest, digest, op.ID)
+		if s.logger != nil {
+			s.logger.Printf("image tracking queued import app=%s image=%s old_digest=%s new_digest=%s op=%s", app.ID, tracking.ImageRef, tracking.LastDeployedDigest, digest, op.ID)
 		}
 	}
 	return nil
 }
 
-type appImageTrackingDecisionInput struct {
+type DecisionInput struct {
 	App               model.App
 	Tracking          model.AppImageTracking
 	ObservedDigest    string
@@ -215,11 +214,11 @@ type appImageTrackingDecisionInput struct {
 	StartedAt         time.Time
 }
 
-func (s *Service) recordAppImageTrackingDecision(input appImageTrackingDecisionInput) {
-	if s == nil || s.Store == nil {
+func (s *Poller) RecordDecision(input DecisionInput) {
+	if s == nil || s.store == nil {
 		return
 	}
-	checkedAt := s.currentTime().UTC()
+	checkedAt := s.now().UTC()
 	startedAt := input.StartedAt
 	if startedAt.IsZero() {
 		startedAt = checkedAt
@@ -245,24 +244,24 @@ func (s *Service) recordAppImageTrackingDecision(input appImageTrackingDecisionI
 		DeliveryID:               strings.TrimSpace(input.DeliveryID),
 		Event:                    imageTrackingEventNameOrDefault(input.Event),
 		DurationMilliseconds:     duration.Milliseconds(),
-		ControllerPod:            imageTrackingControllerPodName(),
-		ControllerLeaderIdentity: strings.TrimSpace(s.Config.LeaderElectionIdentity),
+		ControllerPod:            ControllerPodName(),
+		ControllerLeaderIdentity: strings.TrimSpace(s.leaderIdentity),
 		CheckedAt:                checkedAt,
 	}
-	stored, err := s.Store.CreateAppImageTrackingCheck(check)
+	stored, err := s.store.CreateAppImageTrackingCheck(check)
 	if err != nil {
-		if s.Logger != nil {
-			s.Logger.Printf("image tracking decision record failed app=%s image=%s decision=%s: %v", input.Tracking.AppID, input.Tracking.ImageRef, input.Decision, err)
+		if s.logger != nil {
+			s.logger.Printf("image tracking decision record failed app=%s image=%s decision=%s: %v", input.Tracking.AppID, input.Tracking.ImageRef, input.Decision, err)
 		}
-		s.observeImageTrackingDecision(check)
+		s.metrics.observeImageTrackingDecision(check)
 		return
 	}
-	s.observeImageTrackingDecision(stored)
+	s.metrics.observeImageTrackingDecision(stored)
 	s.logImageTrackingDecision(stored)
 }
 
-func (s *Service) logImageTrackingDecision(check model.AppImageTrackingCheck) {
-	if s == nil || s.Logger == nil {
+func (s *Poller) logImageTrackingDecision(check model.AppImageTrackingCheck) {
+	if s == nil || s.logger == nil {
 		return
 	}
 	payload := map[string]any{
@@ -284,30 +283,15 @@ func (s *Service) logImageTrackingDecision(check model.AppImageTrackingCheck) {
 		"duration_ms":          check.DurationMilliseconds,
 	}
 	if encoded, err := json.Marshal(payload); err == nil {
-		s.Logger.Print(string(encoded))
+		s.logger.Print(string(encoded))
 	}
 }
 
-func (s *Service) latestImageTrackingActiveOperationID(app model.App) (string, error) {
-	ops, err := s.Store.ListOperationsFiltered(app.TenantID, true, store.OperationListFilter{
-		AppID: app.ID,
-		Statuses: []string{
-			model.OperationStatusPending,
-			model.OperationStatusRunning,
-			model.OperationStatusWaitingAgent,
-		},
-		Limit: 1,
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(ops) == 0 {
-		return "", nil
-	}
-	return strings.TrimSpace(ops[len(ops)-1].ID), nil
+func (s *Poller) latestImageTrackingActiveOperationID(app model.App) (string, error) {
+	return s.activeOperationID(app)
 }
 
-func imageTrackingControllerPodName() string {
+func ControllerPodName() string {
 	if value := strings.TrimSpace(os.Getenv("POD_NAME")); value != "" {
 		return value
 	}
@@ -328,12 +312,12 @@ func imageTrackingEventNameOrDefault(event string) string {
 	return "poll"
 }
 
-func (s *Service) resolveTrackedImageDigest(ctx context.Context, imageRef string) (string, error) {
-	resolver := s.resolveRemoteImageDigest
+func (s *Poller) resolveTrackedImageDigest(ctx context.Context, imageRef string) (string, error) {
+	resolver := s.resolveDigest
 	if resolver == nil {
 		return "", fmt.Errorf("image digest resolver is not configured")
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, s.Config.ImageTrackingTimeout)
+	checkCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	digest, err := resolver(checkCtx, imageRef)
 	if err != nil {
@@ -344,11 +328,4 @@ func (s *Service) resolveTrackedImageDigest(ctx context.Context, imageRef string
 		return "", fmt.Errorf("image digest resolver returned empty digest")
 	}
 	return digest, nil
-}
-
-func (s *Service) currentTime() time.Time {
-	if s.now != nil {
-		return s.now()
-	}
-	return time.Now()
 }

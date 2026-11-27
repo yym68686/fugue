@@ -98,6 +98,9 @@ func testPostgresImageMigrationExecutor(t *testing.T, independent bool) {
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
+			// Each case owns its own Store, fake Kubernetes API, and Controller.
+			// Keep the real polling path without adding up every case's delay.
+			t.Parallel()
 			statePath := filepath.Join(t.TempDir(), "state.json")
 			state := store.New(statePath)
 			if err := state.Init(); err != nil {

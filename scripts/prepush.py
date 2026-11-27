@@ -272,6 +272,8 @@ def run_test_commands(
     commands: list[list[str]],
     deadline: float,
     go_slots: threading.BoundedSemaphore | None = None,
+    *,
+    prioritized: bool = True,
 ) -> tuple[int, str]:
     if not commands:
         return 0, ""
@@ -291,7 +293,9 @@ def run_test_commands(
         max_workers=min(len(commands), GO_TASK_CONCURRENCY)
     ) as executor:
         # Prioritize execution, but keep the original order for failure reporting.
-        indexed_commands = sorted(enumerate(commands), key=lambda pair: test_command_priority(pair[1]))
+        indexed_commands = list(enumerate(commands))
+        if prioritized:
+            indexed_commands.sort(key=lambda pair: test_command_priority(pair[1]))
         futures = [executor.submit(execute, index, command) for index, command in indexed_commands]
         for future in concurrent.futures.as_completed(futures):
             index, status, output = future.result()
@@ -447,18 +451,7 @@ def exact_json_types_equal(left: object, right: object) -> bool:
     return left == right
 
 
-def main() -> int:
-    started = time.monotonic()
-    timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
-    if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
-        raise SystemExit(
-            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 360"
-        )
-    deadline = started + timeout_seconds
-    base = resolve_base()
-    paths = changed_files(base)
-    packages = affected_packages(paths)
-    test_commands = affected_test_commands(base, paths)
+def declarative_changes(paths: list[str]) -> tuple[bool, bool]:
     declarative_engine_changed = any(
         name == ".github/workflows/ci.yml"
         or name.startswith(".github/actions/deploy-declarative-component/")
@@ -473,6 +466,35 @@ def main() -> int:
         and name not in {"deploy/releases/components.json", "deploy/releases/edge-groups.json"}
         for name in paths
     )
+    return declarative_engine_changed, declarative_data_changed
+
+
+def declarative_test_command(engine: bool, data: bool) -> list[str] | None:
+    if engine:
+        return ["go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release"]
+    if data:
+        return ["go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN]
+    return None
+
+
+def main() -> int:
+    # The only receipt-producing entrypoint always uses the production policy.
+    return _run_gate()
+
+
+def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
+    started = time.monotonic()
+    timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
+    if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
+        raise SystemExit(
+            "PREPUSH_TIMEOUT_SECONDS must be greater than zero and at most 360"
+        )
+    deadline = started + timeout_seconds
+    base = resolve_base()
+    paths = changed_files(base)
+    packages = affected_packages(paths)
+    test_commands = affected_test_commands(base, paths)
+    declarative_engine_changed, declarative_data_changed = declarative_changes(paths)
     if declarative_engine_changed:
         test_commands = without_dedicated_declarative_tests(test_commands)
     checks: dict[str, dict[str, object]] = {}
@@ -481,6 +503,12 @@ def main() -> int:
     declarative_vet_finished = threading.Event()
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
+    if shadow_select is not None:
+        if shadow_result is None:
+            raise ValueError("shadow replay must use a non-production result collector")
+        selection = shadow_select(base)
+        test_commands = selection["goTests"]
+        compile_task = ("compile-all", selection["goBuilds"][0] if selection["goBuilds"] else None)
     go_dependent_tasks: dict[str, list[str] | None] = {
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
@@ -488,6 +516,11 @@ def main() -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
+                    "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
+                    "scripts/test_prepush_replay.py"} for name in paths):
+        non_go_tasks["prepush-selection-tests"] = [sys.executable, "-m", "unittest",
+            "scripts.test_prepush", "scripts.test_prepush_shadow", "scripts.test_prepush_replay"]
     if any(name in {".github/workflows/ci.yml", "scripts/select_production_maintenance.py",
                     "scripts/test_select_production_maintenance.py", "scripts/select_dns_configuration.py",
                     "scripts/test_select_dns_configuration.py"} or name.startswith("deploy/environments/production/local-snapshot-review/") for name in paths):
@@ -602,14 +635,9 @@ def main() -> int:
            or name.startswith("deploy/environments/production/storage-policy/") for name in paths):
         non_go_tasks["storage-policy-tests"] = ["python3", "-m", "unittest", "scripts.test_publish_storage_policy"]
 
-    if declarative_engine_changed:
-        non_go_tasks["declarative-release-tests"] = [
-            "go", "test", "./internal/declarativerelease", "./cmd/fugue-declarative-release",
-        ]
-    elif declarative_data_changed:
-        non_go_tasks["declarative-release-tests"] = [
-            "go", "test", "./internal/declarativerelease", "-run", DECLARATIVE_DATA_TEST_PATTERN,
-        ]
+    declarative_tests = declarative_test_command(declarative_engine_changed, declarative_data_changed)
+    if declarative_tests:
+        non_go_tasks["declarative-release-tests"] = declarative_tests
 
     local_checks = {
         "diff-check": lambda remaining: diff_check(base, paths, remaining),
@@ -649,7 +677,7 @@ def main() -> int:
             if remaining <= 0 or not declarative_vet_finished.wait(remaining):
                 return 124, "pre-push deadline exceeded before declarative vet completed", before
         if name == "affected-tests":
-            status, output = run_test_commands(test_commands, deadline, go_slots)
+            status, output = run_test_commands(test_commands, deadline, go_slots, prioritized=shadow_select is None)
         elif name == "helm-lint-render":
             status, output = helm_check(deadline - before)
         elif command is None:
@@ -670,7 +698,7 @@ def main() -> int:
             declarative_compile_finished.set()
         return status, output, before
 
-    warm_affected = warm_affected_tests_before_compile(test_commands)
+    warm_affected = shadow_select is None and warm_affected_tests_before_compile(test_commands)
     if warm_affected:
         # Serialize only cold test compilation, not the entire API suite. The
         # full, unchanged test commands still run below alongside compilation.
@@ -684,7 +712,7 @@ def main() -> int:
     phase_one_workers = 1 + len(non_go_tasks) + (1 if test_commands else 0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=phase_one_workers) as phase_one:
         compile_name, compile_command = compile_task
-        compile_future = phase_one.submit(execute, compile_name, compile_command)
+        compile_future = phase_one.submit(execute, compile_name, compile_command) if compile_command else None
         affected_futures = {}
         if test_commands:
             affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
@@ -702,8 +730,11 @@ def main() -> int:
             status, output = check(remaining)
             record(name, before, status, output)
 
-        compile_status, compile_output, compile_before = compile_future.result()
-        record(compile_name, compile_before, compile_status, compile_output)
+        if compile_future is None:
+            checks[compile_name] = {"durationMs": 0, "status": "skipped"}
+        else:
+            compile_status, compile_output, compile_before = compile_future.result()
+            record(compile_name, compile_before, compile_status, compile_output)
 
         if not failures:
             with concurrent.futures.ThreadPoolExecutor(
@@ -745,8 +776,16 @@ def main() -> int:
         "sourceCommit": source_commit,
         "status": "fail" if failures else "pass",
     }
-    encoded = write_receipt(receipt)
-    sys.stdout.buffer.write(encoded)
+    if shadow_select is not None:
+        shadow_result({
+            "elapsedMs": elapsed_ms,
+            "checks": receipt["checks"],
+            "status": "fail" if failures or elapsed_timeout_exceeded(set(checks), elapsed_ms) else "pass",
+            "selection": selection,
+        })
+    else:
+        encoded = write_receipt(receipt)
+        sys.stdout.buffer.write(encoded)
     if failures:
         for name, output in failures:
             print(f"prepush {name} failed", file=sys.stderr)

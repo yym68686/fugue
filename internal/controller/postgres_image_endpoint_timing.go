@@ -27,7 +27,7 @@ type postgresImageEndpointSampler struct {
 	baseline func()
 }
 
-func (s *postgresImageEndpointSampler) markCutover() {
+func (s *postgresImageEndpointSampler) MarkCutover() {
 	s.start.Do(func() {
 		if s.baseline != nil {
 			s.baseline()
@@ -60,7 +60,7 @@ func (t *postgresImageEndpointTiming) add(at time.Time, success bool) {
 	}
 }
 
-func (s *postgresImageEndpointSampler) stopAndRecord() {
+func (s *postgresImageEndpointSampler) StopAndRecord() {
 	s.once.Do(func() {
 		s.cancel()
 		<-s.done

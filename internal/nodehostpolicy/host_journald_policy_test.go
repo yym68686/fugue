@@ -1,4 +1,4 @@
-package api
+package nodehostpolicy
 
 import (
 	"os"
@@ -178,7 +178,7 @@ func (fixture hostJournaldPolicyShellFixture) writeCommand(name, body string) {
 
 func (fixture hostJournaldPolicyShellFixture) run(overrides map[string]string) (string, error) {
 	fixture.t.Helper()
-	script := "set -uo pipefail\n" + hostJournaldPolicyShellLibrary() + `
+	script := "set -uo pipefail\n" + JournaldShell() + `
 fugue_journald_policy_reconcile
 rc=$?
 printf 'state=%s\nreason=%s\nchanged=%s\nbefore=%s\nafter=%s\n' \

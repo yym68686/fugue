@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -100,16 +101,58 @@ func TestManagedAppLiveGuardResumesVerifiedCanonicalHandoffAfterPromotion(t *tes
 	}
 }
 
+type canonicalHandoffTestEdgeObserver func(since time.Time) safeRolloutEdgeBundleObservation
+
+func (observe canonicalHandoffTestEdgeObserver) WaitForSafeRolloutEdgeRouteBundle(_ context.Context, _ model.App, _ model.AppRelease, _ int, since time.Time) (safeRolloutEdgeBundleObservation, error) {
+	return observe(since), nil
+}
+
 func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 	for _, scenario := range []string{"idle", "legacy_source_selector", "legacy_source_selector_busy", "legacy_source_selector_mismatch", "legacy_source_selector_broad", "retired_source", "retired_logical_source", "busy", "stale_endpoints", "observer_failure", "changed_original", "wrong_selector", "candidate_unhealthy", "resume", "restore_ready", "restore_unready", "restore_stale_endpoints", "restore_wrong_selector", "restore_patch_failure", "restore_wrong_image", "advance_busy", "advance_generation_lag_busy", "advance_interrupted_predecessor_busy", "advance_interrupted_wrong_service_uid", "advance_interrupted_wrong_lineage", "advance_generation_stuck", "advance_resume_busy", "advance_after_replacement_busy", "advance_marker_conflict", "advance_service_conflict", "advance_wrong_predecessor", "advance_wrong_service_uid", "advance_wrong_selector",
 		"deadline", "deadline_terminating", "deadline_stale_endpoints", "deadline_unhealthy", "deadline_wrong_pod", "advance_deadline", "deadline_source_rerouted", "missing_hook",
-		"deadline_worker_pending", "deadline_worker_other_operation", "deadline_worker_source_rerouted", "deadline_slow_observer"} {
+		"deadline_worker_pending", "deadline_worker_slow_traffic", "deadline_worker_failed_probe", "deadline_worker_unconfirmed_edge", "deadline_worker_stale_endpoints",
+		"deadline_worker_other_operation", "deadline_worker_source_rerouted", "deadline_slow_observer", "deadline_regular_slow_traffic"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Parallel()
 			s, app, candidate, f := newDrainWorkloadFixtureWithSnapshot(t, false, true)
 			app.Spec.Replicas = 2
 			app.Spec.RuntimeID = candidate.RuntimeID
 			candidate.Role, candidate.Status = model.AppReleaseRoleStable, model.AppReleaseStatusServing
+			if scenario == "deadline_worker_slow_traffic" {
+				promoted := time.Now().UTC().Add(-25 * time.Second)
+				candidate.PromotedAt = &promoted
+				heartbeat := promoted.Add(5 * time.Second)
+				s.safeRolloutEdgeBundleObserver = canonicalHandoffTestEdgeObserver(func(since time.Time) safeRolloutEdgeBundleObservation {
+					if !since.Equal(promoted) {
+						t.Errorf("edge heartbeat floor = %s; want the later promotion time %s", since, promoted)
+					}
+					return safeRolloutEdgeBundleObservation{Ready: !heartbeat.Before(since)}
+				})
+			}
+			switch scenario {
+			case "deadline_worker_slow_traffic", "deadline_worker_failed_probe", "deadline_regular_slow_traffic":
+				probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/ready" {
+						t.Errorf("unexpected probe path: %s", r.URL.Path)
+					}
+					if scenario == "deadline_worker_failed_probe" {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+				}))
+				t.Cleanup(probe.Close)
+				candidate.UpstreamURL = probe.URL
+				app.Spec.Continuity.ZeroDowntime.Gate = &model.AppReleaseGatePolicy{
+					MaxP95TTFBMilliseconds: 60000,
+					Probes:                 []model.AppReleaseProbe{{Path: "/ready"}},
+				}
+				s.releaseGateMetricsQuerier = releaseMetricsByIDQuerier{metrics: map[string]map[string]any{
+					candidate.ID: {"request_count": 100, "p95_ttfb_ms": 350967},
+				}}
+			case "deadline_worker_unconfirmed_edge":
+				s.safeRolloutEdgeBundleObserver = staticSafeRolloutEdgeObserver{}
+			}
 			var err error
 			candidate, err = s.Store.UpdateAppRelease(candidate)
 			if err != nil {
@@ -360,7 +403,8 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 				objectMapField(objectMapField(sourcePods[0], "metadata"), "annotations")[runtime.FugueAnnotationReleaseKey] = "unexpected-executable"
 			}
 			normalStop := scenario == "idle" || scenario == "legacy_source_selector" || scenario == "retired_source" || scenario == "retired_logical_source" || scenario == "resume"
-			expiredStop := scenario == "deadline" || scenario == "advance_deadline" || scenario == "deadline_terminating" || scenario == "deadline_worker_pending" || scenario == "deadline_slow_observer"
+			workerShouldStop := scenario == "deadline_worker_pending" || scenario == "deadline_worker_slow_traffic"
+			expiredStop := scenario == "deadline" || scenario == "advance_deadline" || scenario == "deadline_terminating" || workerShouldStop || scenario == "deadline_slow_observer"
 			waitForBusy := scenario == "busy" || strings.HasSuffix(scenario, "_busy") || scenario == "deadline_source_rerouted" || scenario == "observer_failure"
 			busyObservation := make(chan struct{})
 			sourceReads, sourceProbes, servicePatches, templateWrites := 0, 0, 0, 0
@@ -479,7 +523,7 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 					if strings.HasPrefix(scenario, "restore_") && scenario != "restore_stale_endpoints" && objectStringMapValue(nestedObjectValue(canonicalService, "spec", "selector"))[runtime.FugueLabelAppWorkload] == name {
 						addresses = []string{"10.0.1.10", "10.0.1.11"}
 					}
-					if scenario == "stale_endpoints" || scenario == "deadline_stale_endpoints" {
+					if scenario == "stale_endpoints" || scenario == "deadline_stale_endpoints" || scenario == "deadline_worker_stale_endpoints" {
 						addresses = append(addresses, "10.0.0.99")
 					}
 					_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{"endpoints": []any{map[string]any{"addresses": addresses, "conditions": map[string]bool{"ready": true}}}}}})
@@ -531,9 +575,9 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 				if err := s.reconcileCanonicalDrainDeadlines(ctx); err != nil {
 					t.Fatal(err)
 				}
-				if scenario == "deadline_worker_pending" {
+				if workerShouldStop {
 					if scales != 1 || podStops != len(sourcePods) {
-						t.Fatalf("queued alignment blocked the deadline worker: scales=%d stops=%d", scales, podStops)
+						t.Fatalf("verified deadline worker did not stop old Pods: scales=%d stops=%d", scales, podStops)
 					}
 				} else if scales != 0 || podStops != 0 {
 					t.Fatalf("deadline worker bypassed an unsafe state: scales=%d stops=%d", scales, podStops)
@@ -544,6 +588,9 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 				return
 			}
 			got, err := call(ctx)
+			if scenario == "deadline_regular_slow_traffic" && (err == nil || !strings.Contains(err.Error(), "promoted release health gate failed")) {
+				t.Fatalf("ordinary alignment bypassed release performance gate: %v", err)
+			}
 			if normalStop || expiredStop {
 				if !errors.Is(err, errSafeCanonicalHandoffPending) || !strings.Contains(err.Error(), "canonical_drain_terminating") || scales != 1 || podStops != len(sourcePods) {
 					t.Fatalf("expected the old cohort to enter bounded termination: err=%v scales=%d stops=%d", err, scales, podStops)

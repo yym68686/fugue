@@ -13,9 +13,11 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/config"
+	"fugue/internal/imagetracking"
 	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 	"fugue/internal/observability"
+	"fugue/internal/operationqueue"
 	"fugue/internal/pgimage"
 	"fugue/internal/releaseflow"
 	"fugue/internal/runtime"
@@ -24,71 +26,59 @@ import (
 )
 
 type Service struct {
-	operationClaimMu                sync.Mutex
-	runningManagedOperations        sync.Map
-	Store                           *store.Store
-	Config                          config.ControllerConfig
-	Renderer                        runtime.Renderer
-	Logger                          *log.Logger
-	importer                        sourceImporter
-	registryPushBase                string
-	registryPullBase                string
-	builderRegistryPushBase         string
-	inspectManagedImage             appimages.InspectFunc
-	inspectManagedImageConfig       imageConfigInspector
-	deleteManagedImage              func(context.Context, string) (appimages.DeleteResult, error)
-	requestRegistryGC               func(context.Context, string) error
-	readRegistryMaintenance         func(context.Context) registryMaintenanceStatus
-	resolveManagedImageDigestRef    func(context.Context, string) (string, error)
-	resolveRemoteImageDigest        func(context.Context, string) (string, error)
-	verifyDestinationImageCache     destinationImageCacheVerifyFunc
-	managedPostgresPrimarySQLProbe  managedPostgresPrimarySQLProbeFunc
-	postgresPrimarySQLConnect       managedPostgresPrimarySQLConnectFunc
-	releaseGateMetricsQuerier       releaseflow.ReleaseGateMetricsQuerier
-	releaseGateHTTPClient           releaseflow.HTTPDoer
-	safeRolloutEdgeBundleObserver   safeRolloutEdgeBundleObserver
-	safeRolloutDrainMetricsQuerier  safeRolloutDrainMetricsQuerier
-	safeRolloutSleep                func(context.Context, time.Duration) error
-	restoreSafeRolloutPreviousSpec  func(context.Context, model.Operation, *safeRolloutState, string) error
-	restoreFailedManagedAppSpec     func(context.Context, model.Operation, model.App, runtime.SchedulingConstraints, error) error
-	serviceURLForApp                func(context.Context, model.App) string
-	syncBillingImageStorage         bool
-	latestGitHubCommit              func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
-	inspectBuilderOOMPlacement      func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
-	newKubeClient                   func(namespace string) (*kubeClient, error)
-	postgresImageMigrationProbe     func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
-	postgresImageDrainProbe         func(context.Context, *kubeClient, postgresImageWitness) pgimage.DrainObservation
-	postgresSourceRetirementProbe   func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
-	kubeClientMu                    sync.Mutex
-	kubeClients                     map[string]*kubeClient
-	managedRolloutCapacityLocks     sync.Map
-	retirementScans                 appReleaseRetirementScans
-	retirementRetries               retirementRetries
-	retirementWorkerRunning         atomic.Bool
-	managedPostgresStorageNoticeMu  sync.Mutex
-	managedPostgresStorageNotices   map[string]struct{}
-	importImageInspectRetryDelay    time.Duration
-	importImageInspectMaxAttempts   int
-	now                             func() time.Time
-	metricsStartedAt                time.Time
-	metricsSnapshot                 observability.MetricSnapshot
-	controllerHealthMu              sync.RWMutex
-	activeLoopRunning               bool
-	activeLoopStartedAt             time.Time
-	leaderActive                    bool
-	leaderIdentity                  string
-	imageTrackingMetricsMu          sync.RWMutex
-	imageTrackingDecisionCounts     map[string]int64
-	imageTrackingLastCheckAt        time.Time
-	imageTrackingLastQueuedAt       time.Time
-	imageTrackingLastErrorAt        time.Time
-	imageTrackingLastError          string
-	imageTrackingSyncRunning        bool
-	imageTrackingLastSyncStartedAt  time.Time
-	imageTrackingLastSyncFinishedAt time.Time
-	imageTrackingLastSyncDuration   time.Duration
-	imageTrackingLastSyncErrorAt    time.Time
-	imageTrackingLastSyncError      string
+	operationQueue                 operationqueue.Queue
+	Store                          *store.Store
+	Config                         config.ControllerConfig
+	Renderer                       runtime.Renderer
+	Logger                         *log.Logger
+	importer                       sourceImporter
+	registryPushBase               string
+	registryPullBase               string
+	builderRegistryPushBase        string
+	inspectManagedImage            appimages.InspectFunc
+	inspectManagedImageConfig      imageConfigInspector
+	deleteManagedImage             func(context.Context, string) (appimages.DeleteResult, error)
+	requestRegistryGC              func(context.Context, string) error
+	readRegistryMaintenance        func(context.Context) registryMaintenanceStatus
+	resolveManagedImageDigestRef   func(context.Context, string) (string, error)
+	resolveRemoteImageDigest       func(context.Context, string) (string, error)
+	verifyDestinationImageCache    destinationImageCacheVerifyFunc
+	managedPostgresPrimarySQLProbe managedPostgresPrimarySQLProbeFunc
+	postgresPrimarySQLConnect      managedPostgresPrimarySQLConnectFunc
+	releaseGateMetricsQuerier      releaseflow.ReleaseGateMetricsQuerier
+	releaseGateHTTPClient          releaseflow.HTTPDoer
+	safeRolloutEdgeBundleObserver  safeRolloutEdgeBundleObserver
+	safeRolloutDrainMetricsQuerier safeRolloutDrainMetricsQuerier
+	safeRolloutSleep               func(context.Context, time.Duration) error
+	restoreSafeRolloutPreviousSpec func(context.Context, model.Operation, *safeRolloutState, string) error
+	restoreFailedManagedAppSpec    func(context.Context, model.Operation, model.App, runtime.SchedulingConstraints, error) error
+	serviceURLForApp               func(context.Context, model.App) string
+	syncBillingImageStorage        bool
+	latestGitHubCommit             func(ctx context.Context, repoURL, repoAuthToken, branch string) (string, string, error)
+	inspectBuilderOOMPlacement     func(context.Context, string, sourceimport.BuilderPodPolicy, string, bool, map[string]string, int64) (model.BuilderPlacementInspection, error)
+	newKubeClient                  func(namespace string) (*kubeClient, error)
+	postgresImageMigrationProbe    func(context.Context, *kubeClient, string, model.AppPostgresSpec, managedPostgresResizeSnapshot, map[string]any) error
+	postgresImageDrainProbe        func(context.Context, *kubeClient, postgresImageWitness) pgimage.DrainObservation
+	postgresSourceRetirementProbe  func(context.Context, *kubeClient, model.PostgresSourceRetirementPlan, model.PostgresSourceRetirementPod) error
+	kubeClientMu                   sync.Mutex
+	kubeClients                    map[string]*kubeClient
+	managedRolloutCapacityLocks    sync.Map
+	retirementScans                appReleaseRetirementScans
+	retirementRetries              retirementRetries
+	retirementWorkerRunning        atomic.Bool
+	managedPostgresStorageNoticeMu sync.Mutex
+	managedPostgresStorageNotices  map[string]struct{}
+	importImageInspectRetryDelay   time.Duration
+	importImageInspectMaxAttempts  int
+	now                            func() time.Time
+	metricsStartedAt               time.Time
+	metricsSnapshot                observability.MetricSnapshot
+	controllerHealthMu             sync.RWMutex
+	activeLoopRunning              bool
+	activeLoopStartedAt            time.Time
+	leaderActive                   bool
+	leaderIdentity                 string
+	imageTrackingMetrics           imagetracking.Metrics
 }
 
 type sourceImporter interface {
@@ -99,14 +89,14 @@ type sourceImporter interface {
 	SuggestUploadedComposeServiceEnv(context.Context, sourceimport.UploadComposeServiceEnvRequest) (sourceimport.ComposeServiceEnvSuggestion, error)
 }
 
-type operationLane int
+type operationLane = operationqueue.Lane
 
 const (
-	operationLaneForegroundImport operationLane = iota
-	operationLaneForegroundActivate
-	operationLaneGitHubSyncImport
-	operationLaneGitHubSyncActivate
-	operationLaneCPURequestRestore
+	operationLaneForegroundImport   = operationqueue.ForegroundImport
+	operationLaneForegroundActivate = operationqueue.ForegroundActivate
+	operationLaneGitHubSyncImport   = operationqueue.GitHubSyncImport
+	operationLaneGitHubSyncActivate = operationqueue.GitHubSyncActivate
+	operationLaneCPURequestRestore  = operationqueue.CPURequestRestore
 )
 
 func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *Service {
@@ -150,7 +140,6 @@ func New(store *store.Store, cfg config.ControllerConfig, logger *log.Logger) *S
 		newKubeClient:                newKubeClient,
 		now:                          time.Now,
 		metricsStartedAt:             time.Now().UTC(),
-		imageTrackingDecisionCounts:  map[string]int64{},
 	}
 	s.safeRolloutDrainMetricsQuerier = kubeSafeRolloutDrainObserver{service: s}
 	return s
@@ -348,7 +337,7 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	defer stopMigrations()
 	stopSourceSync := s.startGitHubSourceSync(ctx, triggerBackgroundOps)
 	defer stopSourceSync()
-	stopImageTracking := s.startAppImageTracking(ctx, triggerBackgroundOps)
+	stopImageTracking := s.imageTrackingPoller().Start(ctx, triggerBackgroundOps)
 	defer stopImageTracking()
 	if s.Config.HostJournaldPolicyEnabled {
 		if err := s.scheduleHostJournaldPolicyReconciliation(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -694,23 +683,6 @@ func triggerPendingOperationWorkers(workers ...chan struct{}) {
 	}
 }
 
-func (lane operationLane) String() string {
-	switch lane {
-	case operationLaneForegroundImport:
-		return "foreground-import"
-	case operationLaneForegroundActivate:
-		return "foreground-activate"
-	case operationLaneGitHubSyncImport:
-		return "github-sync-import"
-	case operationLaneGitHubSyncActivate:
-		return "github-sync-activate"
-	case operationLaneCPURequestRestore:
-		return "cpu-request-restore"
-	default:
-		return "unknown"
-	}
-}
-
 type operationWorkerLifetimeKey struct{}
 
 type operationWorkerLifetime struct {
@@ -801,81 +773,19 @@ func (s *Service) dispatchPendingOperationsInLane(ctx context.Context, lane oper
 }
 
 func (s *Service) claimNextPendingOperationInLane(lane operationLane) (model.Operation, bool, error) {
-	s.operationClaimMu.Lock()
-	defer s.operationClaimMu.Unlock()
-	for {
-		now := time.Now().UTC()
-		if s.now != nil {
-			now = s.now().UTC()
-		}
-		activeOps, err := s.Store.ListActiveOperations()
-		if err != nil {
-			return model.Operation{}, false, fmt.Errorf("list active operations: %w", err)
-		}
-		if changed, err := s.cancelDeploysSupersededByDeletion(activeOps); err != nil {
-			return model.Operation{}, false, err
-		} else if changed {
-			continue
-		}
-		apps, err := s.loadAppsForPendingOperationClaim(activeOps, lane)
-		if err != nil {
-			return model.Operation{}, false, fmt.Errorf("list apps: %w", err)
-		}
-		appsByID, composeAppsByProject := indexAppsForPendingOperations(apps)
-		activeOpsByApp := indexActiveOperationsByApp(activeOps)
+	return s.operationQueue.Claim(s.Store.OperationQueue(), lane, s.now, s.observeOperationClaim)
+}
 
-		restartScan := false
-		for _, op := range activeOps {
-			if op.Status != model.OperationStatusPending {
-				continue
-			}
-			if !pendingOperationMatchesLane(op, lane) {
-				continue
-			}
-			if !pendingOperationRetryReady(op, now) {
-				continue
-			}
-			app, ok := appsByID[op.AppID]
-			ready, terminalReason := pendingOperationReadyForClaim(op, app, ok, activeOpsByApp, composeAppsByProject)
-			if terminalReason != "" {
-				if s.Logger != nil {
-					s.Logger.Printf("operation %s failed before claim: %s", op.ID, terminalReason)
-				}
-				failed, failErr := s.Store.FailOperation(op.ID, terminalReason)
-				if failErr != nil {
-					if errors.Is(failErr, store.ErrConflict) || errors.Is(failErr, store.ErrNotFound) {
-						restartScan = true
-						break
-					}
-					return model.Operation{}, false, fmt.Errorf("fail blocked pending operation %s: %w", op.ID, failErr)
-				}
-				s.logOperationAppEvent("failed_before_claim", "error", failed, app, terminalReason, map[string]any{
-					"lane": lane.String(),
-				})
-				restartScan = true
-				break
-			}
-			if !ready {
-				continue
-			}
-			claimed, claimedOK, claimErr := s.Store.TryClaimPendingOperation(op.ID)
-			if claimErr != nil {
-				return model.Operation{}, false, fmt.Errorf("try claim operation %s: %w", op.ID, claimErr)
-			}
-			if !claimedOK {
-				restartScan = true
-				break
-			}
-			s.logOperationAppEvent("claimed", "info", claimed, app, "operation claimed", map[string]any{
-				"lane": lane.String(),
-			})
-			s.runningManagedOperations.Store(claimed.ID, operationExecutionKey(claimed))
-			return claimed, true, nil
+func (s *Service) observeOperationClaim(event operationqueue.Event) {
+	switch event.Kind {
+	case operationqueue.Blocking:
+		if s.Logger != nil {
+			s.Logger.Printf("operation %s failed before claim: %s", event.Operation.ID, event.Message)
 		}
-		if restartScan {
-			continue
-		}
-		return model.Operation{}, false, nil
+	case operationqueue.Failed:
+		s.logOperationAppEvent("failed_before_claim", "error", event.Operation, event.App, event.Message, map[string]any{"lane": event.Lane.String()})
+	case operationqueue.Claimed:
+		s.logOperationAppEvent("claimed", "info", event.Operation, event.App, event.Message, map[string]any{"lane": event.Lane.String()})
 	}
 }
 
@@ -898,7 +808,7 @@ func (s *Service) drainPendingOperationsInLane(ctx context.Context, lane operati
 }
 
 func (s *Service) handleClaimedOperation(ctx context.Context, op model.Operation) error {
-	defer s.runningManagedOperations.CompareAndDelete(op.ID, operationExecutionKey(op))
+	defer s.operationQueue.FinishAttempt(op)
 	switch op.ExecutionMode {
 	case model.ExecutionModeManaged:
 		if err := s.executeManagedOperation(ctx, op); err != nil {

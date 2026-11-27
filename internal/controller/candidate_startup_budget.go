@@ -78,7 +78,7 @@ func (s *Service) candidateStartupOperationFingerprint(app model.App, op model.O
 	if !found || digest == "" {
 		digest = model.ImageDigestFromReference(app.Spec.Image)
 		if op.RequestedByID == model.OperationRequestedByImageTracking {
-			tracking, err := s.Store.GetAppImageTracking(app.TenantID, false, app.ID)
+			tracking, err := s.Store.ReadImageTracking().GetAppImageTracking(app.TenantID, false, app.ID)
 			if err != nil {
 				return "", err
 			}

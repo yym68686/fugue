@@ -1,9 +1,9 @@
-package api
+package nodehostpolicy
 
-// hostMemorySafetyShellLibrary is shared by the cluster join installer and the
+// MemorySafetyShell is shared by the cluster join installer and the
 // node updater. Keep this fragment side-effect free: callers explicitly run
 // plan, stage, and activate so k3s can accept host swap before zram is enabled.
-func hostMemorySafetyShellLibrary() string {
+func MemorySafetyShell() string {
 	return `
 FUGUE_HOST_ZRAM_MODE="${FUGUE_HOST_ZRAM_MODE:-auto}"
 FUGUE_HOST_ZRAM_PERCENT="${FUGUE_HOST_ZRAM_PERCENT:-25}"

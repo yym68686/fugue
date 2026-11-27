@@ -134,8 +134,11 @@ func TestOperationStartedAtDurablePrecision(t *testing.T) {
 }
 
 func TestGuardedFinalizationPostgres(t *testing.T) {
-	s := billingBatchPGStore(t)
-	tenant := billingBatchPGTenant(t, s)
+	s := platformStatePostgresFixture(t)
+	tenant, err := s.CreateTenant("Operation recovery")
+	if err != nil {
+		t.Fatal(err)
+	}
 	project, err := s.CreateProject(tenant.ID, "recovery", "")
 	if err != nil {
 		t.Fatal(err)

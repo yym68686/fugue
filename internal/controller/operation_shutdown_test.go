@@ -106,7 +106,7 @@ func TestPendingOperationWorkersJoinCancellationBeforeReturning(t *testing.T) {
 			if err != nil || got.Status != model.OperationStatusPending || got.ResultMessage != "operation requeued after controller interruption" {
 				t.Fatalf("guarded cancellation was not persisted before stop returned: %+v %v", got, err)
 			}
-			if _, running := svc.runningManagedOperations.Load(op.ID); running {
+			if svc.operationQueue.IsExecuting(op.ID) {
 				t.Fatal("stopped worker retained an in-flight operation")
 			}
 		})

@@ -28,7 +28,7 @@ func newImageTrackingLoopFixture(t *testing.T) (*store.Store, model.App) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.UpsertAppImageTracking(model.AppImageTracking{TenantID: tenant.ID, AppID: app.ID, ImageRef: source.ImageRef, Enabled: true}); err != nil {
+	if _, err := st.ImageTracking().UpsertAppImageTracking(model.AppImageTracking{TenantID: tenant.ID, AppID: app.ID, ImageRef: source.ImageRef, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	return st, app
@@ -132,7 +132,7 @@ func TestImageTrackingWorkerCoalescesTicksAndJoinsCanceledCheck(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop := svc.startAppImageTracking(ctx, func() { triggers.Add(1) })
+	stop := svc.imageTrackingPoller().Start(ctx, func() { triggers.Add(1) })
 	defer stop()
 	var releaseExit sync.Once
 	defer releaseExit.Do(func() { close(allowExit) })
@@ -179,14 +179,14 @@ func TestImageTrackingWorkerCoalescesTicksAndJoinsCanceledCheck(t *testing.T) {
 	if calls.Load() != 2 || triggers.Load() != 1 {
 		t.Fatalf("calls=%d triggers=%d; canceled scan must not wake operation workers", calls.Load(), triggers.Load())
 	}
-	checks, err := st.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{TenantID: app.TenantID, AppID: app.ID})
+	checks, err := st.ImageTracking().ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{TenantID: app.TenantID, AppID: app.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(checks) != 1 || checks[0].Decision != model.AppImageTrackingDecisionAlreadyDeployed {
 		t.Fatalf("leadership cancellation recorded an image decision: %+v", checks)
 	}
-	tracking, err := st.GetAppImageTracking(app.TenantID, false, app.ID)
+	tracking, err := st.ImageTracking().GetAppImageTracking(app.TenantID, false, app.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,8 @@ func TestImageTrackingWorkerCoalescesTicksAndJoinsCanceledCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tracking.LastError != "" || len(ops) != 0 || !svc.imageTrackingLastSyncErrorAt.IsZero() || svc.imageTrackingSyncRunning {
+	running, _, _, _, errorAt, _ := svc.imageTrackingMetrics.SyncSnapshot()
+	if tracking.LastError != "" || len(ops) != 0 || !errorAt.IsZero() || running {
 		t.Fatalf("cancellation left failure or work behind: tracking=%+v operations=%+v", tracking, ops)
 	}
 }
@@ -213,7 +214,7 @@ func TestImageTrackingWorkerRetriesAfterRegistryTimeout(t *testing.T) {
 		return imageTrackingLoopTestDigest, nil
 	}
 	passes := make(chan struct{}, 10)
-	stop := svc.startAppImageTracking(context.Background(), func() {
+	stop := svc.imageTrackingPoller().Start(context.Background(), func() {
 		select {
 		case passes <- struct{}{}:
 		default:
@@ -228,7 +229,7 @@ func TestImageTrackingWorkerRetriesAfterRegistryTimeout(t *testing.T) {
 		}
 	}
 	stop()
-	checks, err := st.ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{TenantID: app.TenantID, AppID: app.ID})
+	checks, err := st.ImageTracking().ListAppImageTrackingChecks(model.AppImageTrackingCheckFilter{TenantID: app.TenantID, AppID: app.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +252,7 @@ func TestImageTrackingWorkerDisabledOrAlreadyCanceled(t *testing.T) {
 				cancel()
 			}
 			defer cancel()
-			stop := svc.startAppImageTracking(ctx, func() { t.Error("inactive worker triggered operations") })
+			stop := svc.imageTrackingPoller().Start(ctx, func() { t.Error("inactive worker triggered operations") })
 			stop()
 		})
 	}
