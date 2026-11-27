@@ -518,6 +518,11 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if shadow_select is None and set(paths) & {
+        "internal/api/localpv_unit.py", "internal/api/test_localpv_unit.py",
+        "scripts/prepare_fugue_lvm_localpv_node.sh",
+    }:
+        non_go_tasks["localpv-host-contract-tests"] = ["go", "test", "-count=1", "./internal/nodehostpolicy"]
     if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
                     "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
                     "scripts/test_prepush_replay.py", "scripts/prepush_shadow_fixture.py",

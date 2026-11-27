@@ -34,6 +34,7 @@ ENV_FIELDS = ("GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS")
 # An input not owned by Go (e.g. a runtime testdata read) still falls back.
 SOURCE_READERS = {
     "cmd/fugue-declarative-release/main.go": "./internal/declarativerelease",
+    "internal/api/localpv_unit.py": "./internal/nodehostpolicy",
     "internal/edge/service.go": "./internal/platformsafety",
     "internal/edgegroupfront/service.go": "./internal/platformsafety",
     "internal/observability/pipeline.go": "./internal/platformsafety",
