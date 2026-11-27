@@ -13,6 +13,7 @@ import (
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	"fugue/internal/routeprobe"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 )
 
@@ -37,16 +38,27 @@ type nodeWorkerWatchReady struct {
 // credentials and transport allow only reads, even while the old writer
 // drives a separately armed transaction.
 func runNodeWorkerWatch(parent context.Context, args []string, in io.Reader, out io.Writer) error {
-	if len(args) != 0 || in == nil || out == nil {
-		return errors.New("node-worker-watch requires one canonical stdin journal")
+	if out == nil {
+		return errors.New("node-worker-watch requires an output stream")
 	}
-	raw, err := readClaimStdin(in)
-	if err != nil {
-		return err
-	}
-	j, err := edgegroupfront.ReadNodeWorkerJournal(raw)
-	if err != nil {
-		return err
+	var j edgegroupfront.NodeWorkerJournal
+	var group string
+	switch {
+	case len(args) == 0 && in != nil:
+		raw, err := readClaimStdin(in)
+		if err != nil {
+			return err
+		}
+		j, err = edgegroupfront.ReadNodeWorkerJournal(raw)
+		if err != nil {
+			return err
+		}
+		group = j.Recipient.Group
+	case len(args) == 4 && args[0] == "--claimed" && frontRepairIdentity(args[1]) &&
+		frontRepairIdentity(args[2]) && exactSHA256Digest(args[3]):
+		group = args[1]
+	default:
+		return errors.New("usage: node-worker-watch [--claimed GROUP NODE CANDIDATE_RELEASE_DIGEST]; without arguments, supply the sealed journal on stdin")
 	}
 	cfg, err := loadKubeConfig()
 	if err != nil {
@@ -56,11 +68,17 @@ func runNodeWorkerWatch(parent context.Context, args []string, in io.Reader, out
 	reader.Wrap(func(next http.RoundTripper) http.RoundTripper {
 		return nodeWorkerShadowObjects{next: next}
 	})
-	targets, store, front, err := loadNodeWorkerAuthority(reader, cfg, j.Recipient.Group)
+	targets, store, front, err := loadNodeWorkerAuthority(reader, cfg, group)
 	if err != nil {
 		return err
 	}
 	front.executor = nodeWorkerShadowExec{next: front.executor, namespace: front.config.Namespace}
+	if len(args) != 0 {
+		j, err = front.waitForClaimedNodeWorkerWatch(parent, store, args[2], args[3])
+		if err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
 	component, err := store.FindNodeWorkerComponent(ctx, targets, j.Recipient.Group)
@@ -80,6 +98,27 @@ func runNodeWorkerWatch(parent context.Context, args []string, in io.Reader, out
 		return err
 	}
 	return encoder.Encode(report)
+}
+
+func (a *frontAuthorityActivator) waitForClaimedNodeWorkerWatch(ctx context.Context, store *releaseguardian.AuthorityStore,
+	node, releaseDigest string) (edgegroupfront.NodeWorkerJournal, error) {
+	var journal edgegroupfront.NodeWorkerJournal
+	err := wait.PollUntilContextTimeout(ctx, time.Second, 10*time.Minute, true, func(ctx context.Context) (bool, error) {
+		fence, found, err := store.LoadNodeWorker(ctx, a.config.GroupID)
+		if err != nil || !found {
+			return false, err
+		}
+		j := fence.Journal
+		if j.Recipient.Node != node || j.ReleaseDigest != releaseDigest || !a.recentNodeWorkerJournal(j) {
+			return false, nil
+		}
+		journal = j
+		return true, nil
+	})
+	if err != nil {
+		err = fmt.Errorf("observe the claimed handoff for the requested node and candidate release: %w", err)
+	}
+	return journal, err
 }
 
 type nodeWorkerWatchSocket struct {

@@ -492,7 +492,11 @@ namespace. A missing mapping stops the approved shadow.
 
 For a coordinated handoff rehearsal, pass the same canonical sealed journal
 to `fugue-release-guardian node-worker-watch` on stdin before the Front
-selects the candidate. The first JSON line has phase `observing` once the
+selects the candidate. When the existing driver seals the journal itself,
+start `node-worker-watch --claimed GROUP NODE CANDIDATE_RELEASE_DIGEST`
+before the lane runs. The watcher reads the group's shared claim and waits
+up to ten minutes for a recent journal matching the node and release digest.
+The first JSON line has phase `observing` once the
 watcher has opened and attributed its own public connection to the retained
 Worker. The watcher keeps that socket open while observing the durable and
 live selection. It then opens new sockets on the public and optional probe
