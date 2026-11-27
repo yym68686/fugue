@@ -52,6 +52,15 @@ Deployment and ReplicaSet GET and Pod LIST in the topology namespace only.
 The operator-selected context is not a cryptographic cluster binding; this
 report alone is not independent cutover evidence and cannot authorize a write.
 
+`observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE` verifies
+physical Node identity and a bounded group inventory. It checks the exact
+version and legacy spec digest of the selected serving Front Service, or checks
+the three retained group-owned OnDelete DaemonSets if none matched the bounded
+manager-scoped list. It repeats those observations and rejects object drift.
+The diagnostic requires Node GET/LIST, Service GET/LIST and DaemonSet GET,
+with namespaced reads restricted to the topology namespace. It does not query
+DNS, infer traffic withdrawal, approve recovery or authorize a write.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
