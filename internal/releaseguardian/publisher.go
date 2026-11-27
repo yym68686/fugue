@@ -200,14 +200,20 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
-	return store.commitDesiredPublication(ctx, key, publication, nil)
+	return store.commitDesiredPublication(ctx, key, publication, nil, nil)
 }
 
-func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, publication desiredPublication, recheck func(context.Context) error) (ReleaseRecord, DesiredRelease, error) {
+func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, publication desiredPublication, writer configMapPublicationWriter, recheck func(context.Context) error) (ReleaseRecord, DesiredRelease, error) {
 	preview := publication.preview
 	record, next := preview.Record, preview.ProposedDesired
 	recordMap, executionMap, desiredMap := publication.record, publication.execution, publication.desired
 	configMaps := store.client.CoreV1().ConfigMaps(preview.Namespace)
+	if writer == nil {
+		if recheck != nil {
+			return ReleaseRecord{}, DesiredRelease{}, errors.New("native publication has no single-attempt writer")
+		}
+		writer = configMaps
+	}
 	readPointer := func() (*corev1.ConfigMap, error) {
 		current, err := configMaps.Get(ctx, desiredMap.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) && preview.DesiredResourceVersion == "" {
@@ -238,7 +244,7 @@ func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, p
 	if err := checkWrite(); err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
-	created, createErr := configMaps.Create(ctx, recordMap, metav1.CreateOptions{})
+	created, createErr := writer.Create(ctx, recordMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) {
 		created, createErr = configMaps.Get(ctx, recordMap.Name, metav1.GetOptions{})
 		if createErr == nil && !immutableReleaseRecordMatches(created, recordMap, key, record) {
@@ -251,7 +257,7 @@ func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, p
 	if err := checkWrite(); err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
-	executionCreated, executionErr := configMaps.Create(ctx, executionMap, metav1.CreateOptions{})
+	executionCreated, executionErr := writer.Create(ctx, executionMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(executionErr) {
 		executionCreated, executionErr = configMaps.Get(ctx, executionMap.Name, metav1.GetOptions{})
 		if executionErr == nil && (executionCreated.Immutable == nil || !*executionCreated.Immutable ||
@@ -270,7 +276,7 @@ func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, p
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
 	if current == nil {
-		_, err = configMaps.Create(ctx, desiredMap, metav1.CreateOptions{})
+		_, err = writer.Create(ctx, desiredMap, metav1.CreateOptions{})
 	} else {
 		updated := current.DeepCopy()
 		updated.Labels, updated.Data = desiredMap.Labels, desiredMap.Data
@@ -280,12 +286,17 @@ func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, p
 			}
 			updated.Annotations[name] = value
 		}
-		_, err = configMaps.Update(ctx, updated, metav1.UpdateOptions{})
+		_, err = writer.Update(ctx, updated, metav1.UpdateOptions{})
 	}
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("advance DesiredRelease with resourceVersion CAS: %w", err)
 	}
 	return record, next, nil
+}
+
+type configMapPublicationWriter interface {
+	Create(context.Context, *corev1.ConfigMap, metav1.CreateOptions) (*corev1.ConfigMap, error)
+	Update(context.Context, *corev1.ConfigMap, metav1.UpdateOptions) (*corev1.ConfigMap, error)
 }
 
 func canonicalStableReleaseRecord(key Key, data map[string]string) (ReleaseRecord, declarativerelease.MonitorRecord, error) {
