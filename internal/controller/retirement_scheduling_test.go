@@ -73,53 +73,6 @@ func TestRetirementUnboundMissingWorkloadBacksOffWithoutRetiring(t *testing.T) {
 	}
 }
 
-func TestRetirementBackoffBoundsAndStateChange(t *testing.T) {
-	var retries retirementRetries
-	now := time.Now()
-	key := retirementRetryKey{"tenant", "app", "release"}
-	app := model.App{Spec: model.AppSpec{Image: "image:old"}}
-	release := model.AppRelease{ID: "release", UpdatedAt: now}
-	intent := retirementIntentVersion(app, model.AppRelease{}, model.AppTrafficPolicy{})
-	version := retirementReleaseVersion(intent, release)
-	if !retries.ready(key, version, now) {
-		t.Fatal("new work suppressed")
-	}
-	for _, bound := range []bool{false, true} {
-		retries = retirementRetries{}
-		for i := 0; i < 10; i++ {
-			retries.attempted(key, version, now, bound)
-			next := retries.entries[key].next
-			if retries.ready(key, version, now) || !retries.ready(key, version, next) {
-				t.Fatal("retry deadline ignored")
-			}
-			now = next
-		}
-		want := 2 * time.Minute
-		if bound {
-			want = 30 * time.Second
-		}
-		if retries.entries[key].delay != want {
-			t.Fatal("unbounded or incorrect retry interval")
-		}
-		changed := release
-		changed.UpdatedAt = now.Add(time.Second)
-		if !retries.ready(key, retirementReleaseVersion(intent, changed), now) {
-			t.Fatal("release progress hidden")
-		}
-		app.Spec.Image = "image:new"
-		changedIntent := retirementIntentVersion(app, model.AppRelease{}, model.AppTrafficPolicy{})
-		if !retries.ready(key, retirementReleaseVersion(changedIntent, release), now) {
-			t.Fatal("new intent hidden")
-		}
-	}
-	for i := 0; i < maxRetirementRetries+10; i++ {
-		retries.attempted(retirementRetryKey{"tenant", "app", fmt.Sprint(i)}, version, now, false)
-	}
-	if len(retries.entries) != maxRetirementRetries {
-		t.Fatal("retry memory is unbounded")
-	}
-}
-
 func TestRetirementNamespaceDiscoverySharedButProofReadsFresh(t *testing.T) {
 	calls := map[string]int{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

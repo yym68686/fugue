@@ -10,8 +10,6 @@ import (
 	"fugue/internal/store"
 )
 
-const appReleaseRetirementConcurrency = 100
-
 // This worker belongs to the active leadership lifetime. Its serial app sweep
 // and bounded per-app attempts limit concurrency; shutdown joins before handoff.
 func (s *Service) startAppReleaseRetirementWorker(ctx context.Context) func() {

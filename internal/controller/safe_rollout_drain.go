@@ -18,8 +18,8 @@ import (
 
 	"fugue/internal/drainprotocol"
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/runtime"
-	"fugue/internal/store"
 )
 
 type kubeSafeRolloutDrainObserver struct{ service *Service }
@@ -80,7 +80,7 @@ func (q kubeSafeRolloutDrainObserver) queryReleaseDrainMetrics(ctx context.Conte
 	// would not prove anything about this release's original connections.
 	if previous.ID == "" || previous.AppID != app.ID || previous.TenantID != app.TenantID ||
 		previous.DeploymentName == "" || previous.DeploymentName == runtime.RuntimeAppResourceName(app) ||
-		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || (!aligned && !store.AppReleaseAwaitingDrain(previous)) || (aligned && !store.AppReleaseHasAlignedRevision(expected)) {
+		previous.RuntimeID == "" || previous.ResolvedImageRef == "" || (!aligned && !retirement.AwaitingDrain(previous)) || (aligned && !retirement.HasAlignedRevision(expected)) {
 		return out, fmt.Errorf("drain requires an independent release workload identity")
 	}
 	policy, err := s.Store.GetAppTrafficPolicy(app.TenantID, true, app.ID)
@@ -277,7 +277,7 @@ func (s *Service) captureDrainWorkloadState(ctx context.Context, client *kubeCli
 	}
 	var dep kubeDeployment
 	data, _ := json.Marshal(deployment)
-	requireReady := canonical || !store.AppReleaseAwaitingDrain(release)
+	requireReady := canonical || !retirement.AwaitingDrain(release)
 	if err := json.Unmarshal(data, &dep); err != nil || dep.Metadata.UID == "" || dep.Spec.Replicas == nil || *dep.Spec.Replicas < 0 || (!unstarted && *dep.Spec.Replicas == 0) || *dep.Spec.Replicas > 32 || (requireReady && !stopped && !unstarted && !managedDeploymentStatusReady(dep, *dep.Spec.Replicas)) || !s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(dep), release.ResolvedImageRef) {
 		return out, fmt.Errorf("release Deployment is not a complete current workload")
 	}

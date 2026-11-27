@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	retirement "fugue/internal/releaseretirement/contract"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
@@ -15,7 +16,7 @@ import (
 // Migration captures existing resources; it never reapplies a historical
 // executable spec, replaces a Pod, or turns missing resources into a binding.
 func (s *Service) migrateSafeRolloutWorkload(ctx context.Context, app model.App, release model.AppRelease) (model.AppRelease, error) {
-	if release.RevisionWorkload != nil || !store.AppReleaseAwaitingDrain(release) || release.SpecSnapshot == nil || !s.Config.KubectlApply {
+	if release.RevisionWorkload != nil || !retirement.AwaitingDrain(release) || release.SpecSnapshot == nil || !s.Config.KubectlApply {
 		return release, nil
 	}
 	historical := app

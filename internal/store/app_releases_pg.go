@@ -194,7 +194,7 @@ func (s *Store) pgListAppReleaseProjectionIDsContext(ctx context.Context, filter
 	case appReleaseNoSpec:
 		columns = strings.Replace(columns, "spec_snapshot_json", "NULL AS spec_snapshot_json", 1)
 	case appReleaseDrainSpec:
-		// Same exact role/status predicate as AppReleaseAwaitingDrain. All rows,
+		// Same exact role/status predicate as retirement.AwaitingDrain. All rows,
 		// ordering, ownership filters and revision bindings remain unchanged.
 		expression := fmt.Sprintf(`CASE WHEN (role = '%s' AND status = '%s') OR (role = '%s' AND status = '%s') THEN spec_snapshot_json ELSE NULL END AS spec_snapshot_json`,
 			model.AppReleaseRolePrevious, model.AppReleaseStatusDraining,
