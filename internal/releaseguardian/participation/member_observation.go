@@ -44,24 +44,34 @@ type MemberObservation struct {
 	DNSObserved bool                       `json:"dnsObserved"`
 }
 
+type memberCapture struct {
+	report   MemberObservation
+	snapshot ParticipationSnapshot
+}
+
 // ObserveMemberObjects checks the Kubernetes half of the phase inputs twice.
 // A missing service means that the bounded manager-scoped search did not
 // find one, not proof that DNS is withdrawn or that the member can rejoin.
 func (o *KubernetesObserver) ObserveMemberObjects(ctx context.Context, policy productioncontrol.ParticipationPolicy, node string) (MemberObservation, error) {
+	capture, err := o.observeMember(ctx, policy, node)
+	return capture.report, err
+}
+
+func (o *KubernetesObserver) observeMember(ctx context.Context, policy productioncontrol.ParticipationPolicy, node string) (memberCapture, error) {
 	member, err := enrolledMember(policy, node)
 	if err != nil || o == nil || o.core == nil || o.apps == nil {
-		return MemberObservation{}, errors.New("no exact participation member or Kubernetes observation client")
+		return memberCapture{}, errors.New("no exact participation member or Kubernetes observation client")
 	}
 	first, err := o.readMemberObjects(ctx, policy.Namespace, member)
 	if err != nil {
-		return MemberObservation{}, err
+		return memberCapture{}, err
 	}
 	second, err := o.readMemberObjects(ctx, policy.Namespace, member)
 	if err != nil {
-		return MemberObservation{}, err
+		return memberCapture{}, err
 	}
-	if !reflect.DeepEqual(first, second) {
-		return MemberObservation{}, errors.New("Kubernetes participation objects changed during observation")
+	if !reflect.DeepEqual(first.report, second.report) {
+		return memberCapture{}, errors.New("Kubernetes participation objects changed during observation")
 	}
 	return second, nil
 }
@@ -82,22 +92,23 @@ func enrolledMember(policy productioncontrol.ParticipationPolicy, node string) (
 	return result, nil
 }
 
-func (o *KubernetesObserver) readMemberObjects(ctx context.Context, ns string, m productioncontrol.ParticipationMember) (MemberObservation, error) {
+func (o *KubernetesObserver) readMemberObjects(ctx context.Context, ns string, m productioncontrol.ParticipationMember) (memberCapture, error) {
 	n, err := o.core.Nodes().Get(ctx, m.Node, metav1.GetOptions{})
 	if err != nil || !exactLiveObject(n, "", m.Node) || string(n.UID) != m.NodeUID ||
 		n.Labels[participationGroup] != m.Group || n.Labels[participationRole] != "true" {
-		return MemberObservation{}, errors.New("physical participation Node changed or is unavailable")
+		return memberCapture{}, errors.New("physical participation Node changed or is unavailable")
 	}
 	status, err := observedReadiness(n)
 	if err != nil {
-		return MemberObservation{}, err
+		return memberCapture{}, err
 	}
 	group, err := o.core.Nodes().List(ctx, metav1.ListOptions{
 		LabelSelector: labels.Set{participationGroup: m.Group}.AsSelector().String(), Limit: maxGroupNodes + 1})
 	if err != nil || group.Continue != "" || group.ResourceVersion == "" || len(group.Items) > maxGroupNodes {
-		return MemberObservation{}, errors.New("group Node inventory is incomplete")
+		return memberCapture{}, errors.New("group Node inventory is incomplete")
 	}
 	result := MemberObservation{Node: describeObject(n), Readiness: status}
+	snapshot := ParticipationSnapshot{Node: *n, Inventory: group}
 	names, uids := make(map[string]bool), make(map[string]bool)
 	for i := range group.Items {
 		item := &group.Items[i]
@@ -105,38 +116,39 @@ func (o *KubernetesObserver) readMemberObjects(ctx context.Context, ns string, m
 			continue
 		}
 		if !exactLiveObject(item, "", item.Name) || item.Labels[participationGroup] != m.Group || names[item.Name] || uids[string(item.UID)] {
-			return MemberObservation{}, errors.New("group Node inventory has an ambiguous physical identity")
+			return memberCapture{}, errors.New("group Node inventory has an ambiguous physical identity")
 		}
 		if item.Name == n.Name && (!reflect.DeepEqual(item.ObjectMeta, n.ObjectMeta) || !reflect.DeepEqual(item.Status, n.Status)) {
-			return MemberObservation{}, errors.New("participation Node changed while listing its group")
+			return memberCapture{}, errors.New("participation Node changed while listing its group")
 		}
 		names[item.Name], uids[string(item.UID)] = true, true
 		result.Nodes = append(result.Nodes, describeObject(item))
 	}
 	if !names[n.Name] {
-		return MemberObservation{}, errors.New("participation Node absent from its group inventory")
+		return memberCapture{}, errors.New("participation Node absent from its group inventory")
 	}
 	sortObjectVersions(result.Nodes)
 	result.Service, err = o.readServingService(ctx, ns, m.Node)
 	if err != nil {
-		return MemberObservation{}, err
+		return memberCapture{}, err
 	}
 	if result.Service == nil {
 		names, uids := map[string]bool{}, map[string]bool{}
 		for _, name := range []string{m.Front, m.Workers.A, m.Workers.B} {
 			if name == "" || names[name] {
-				return MemberObservation{}, errors.New("retained workload references are missing or duplicated")
+				return memberCapture{}, errors.New("retained workload references are missing or duplicated")
 			}
 			workload, err := o.apps.DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
 			if err != nil || !exactLiveObject(workload, ns, name) || uids[string(workload.UID)] ||
 				workload.Spec.UpdateStrategy.Type != appsv1.OnDeleteDaemonSetStrategyType || workload.Spec.Template.Labels[participationGroup] != m.Group {
-				return MemberObservation{}, errors.New("retained Front or Worker is not a live group-owned OnDelete DaemonSet")
+				return memberCapture{}, errors.New("retained Front or Worker is not a live group-owned OnDelete DaemonSet")
 			}
 			names[name], uids[string(workload.UID)] = true, true
 			result.Retained = append(result.Retained, describeObject(workload))
+			snapshot.Retained = append(snapshot.Retained, *workload)
 		}
 	}
-	return result, nil
+	return memberCapture{report: result, snapshot: snapshot}, nil
 }
 
 func observedReadiness(n *corev1.Node) (corev1.ConditionStatus, error) {

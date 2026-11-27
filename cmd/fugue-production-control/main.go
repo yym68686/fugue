@@ -35,6 +35,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control preview-participation JOURNAL_CONFIG NODE SNAPSHOT
        fugue-production-control observe-participation-readers JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
+       fugue-production-control shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -128,7 +129,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			return emit(report)
 		})
-	case "observe-participation-readers", "observe-participation-member":
+	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes":
 		if len(args) != 5 {
 			return errors.New(usage)
 		}
@@ -151,18 +152,29 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				return err
 			}
 			report := participationObservationReport{JournalCluster: cluster, KubeContext: args[3], Topology: topology.Version}
-			if args[0] == "observe-participation-readers" {
+			switch args[0] {
+			case "observe-participation-readers":
 				readers, err := observer.ObserveReaderRollouts(ctx, topology.Policy, args[4])
 				if err != nil {
 					return err
 				}
 				report.Kind, report.Readers = "participation_reader_observation", &readers
-			} else {
+			case "observe-participation-member":
 				member, err := observer.ObserveMemberObjects(ctx, topology.Policy, args[4])
 				if err != nil {
 					return err
 				}
 				report.Kind, report.Member = "participation_member_object_observation", &member
+			case "shadow-participation-kubernetes":
+				shadow, err := observer.ShadowKubernetes(ctx, topology.Policy, args[4], now)
+				if err != nil {
+					return err
+				}
+				latest, err := j.ReadParticipationTopology(ctx, cluster)
+				if err != nil || latest.Version != topology.Version || latest.ApprovalDigest != topology.ApprovalDigest {
+					return errors.New("approved participation topology could not be revalidated after observation")
+				}
+				report.Kind, report.Shadow = "participation_kubernetes_only_shadow", &shadow
 			}
 			return emit(report)
 		})
@@ -271,6 +283,7 @@ type participationObservationReport struct {
 	Topology          productioncontrol.Version        `json:"topology"`
 	Readers           *participation.ReaderObservation `json:"readers,omitempty"`
 	Member            *participation.MemberObservation `json:"member,omitempty"`
+	Shadow            *participation.KubernetesShadow  `json:"shadow,omitempty"`
 }
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {

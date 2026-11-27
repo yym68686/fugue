@@ -61,6 +61,17 @@ The diagnostic requires Node GET/LIST, Service GET/LIST and DaemonSet GET,
 with namespaced reads restricted to the topology namespace. It does not query
 DNS, infer traffic withdrawal, approve recovery or authorize a write.
 
+`shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE`
+runs the native phase preview on observed Kubernetes objects rather than on
+a supplied snapshot. It rechecks the approved topology after the reads and
+uses the live reader baseline between two checks of member object versions.
+If a Ready Node has a serving Service, it reports that DNS and heartbeat
+evidence is required, with no proposed action. If stabilization has elapsed,
+it still requires Front, Worker and network recovery checks before any
+readmission can be considered. It is not a comparison against the legacy
+runtime on production, does not bind the selected Kubernetes context to the
+journal, and emits no executable intent or cutover evidence.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
