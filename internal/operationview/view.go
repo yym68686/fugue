@@ -14,7 +14,6 @@ import (
 var ErrNotVisible = errors.New("operation is not visible to this principal")
 
 type Filter = contract.Filter
-type Repository = contract.Repository
 
 func List(reads Repository, principal model.Principal, filter Filter, includeDesired bool) ([]model.Operation, error) {
 	if !principal.IsPlatformAdmin() && filter.TenantID != "" && filter.TenantID != principal.TenantID {

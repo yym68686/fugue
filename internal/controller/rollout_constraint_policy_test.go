@@ -12,7 +12,7 @@ import (
 
 func TestConstraintPolicyCompletesWithoutKubernetesOrImageAvailability(t *testing.T) {
 	st, app, _, pending := newSafeRolloutTestState(t)
-	if _, err := st.CancelOperation(pending.ID, "fixture pending code release"); err != nil {
+	if _, err := cancelFixtureOperation(st, pending, "fixture pending code release"); err != nil {
 		t.Fatal(err)
 	}
 	app, err := st.GetApp(app.ID)

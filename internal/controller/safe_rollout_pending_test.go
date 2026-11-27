@@ -166,7 +166,7 @@ func TestSafeRolloutCanonicalWaitRemainsNonterminal(t *testing.T) {
 func TestSafeRolloutPendingDoesNotOverrideCancellation(t *testing.T) {
 	st, _, _, op := newSafeRolloutTestState(t)
 	op, _, _ = st.TryClaimPendingOperation(op.ID)
-	if _, err := st.CancelOperation(op.ID, "operator canceled"); err != nil {
+	if _, err := cancelFixtureOperation(st, op, "operator canceled"); err != nil {
 		t.Fatal(err)
 	}
 	s := &Service{Store: st}

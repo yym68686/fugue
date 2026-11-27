@@ -45,7 +45,7 @@ func (s *Server) handleGetOperationEvidence(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	evidence = redactOperationEvidenceForAPI(evidence, queryBool(r, "include_payload"), principal.IsPlatformAdmin())
+	evidence = operationview.RedactEvidence(evidence, queryBool(r, "include_payload"), principal.IsPlatformAdmin())
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"evidence": evidence})
 }
 
@@ -62,7 +62,7 @@ func (s *Server) handleGetOperationTimeline(w http.ResponseWriter, r *http.Reque
 		s.writeStoreError(w, err)
 		return
 	}
-	timeline = redactOperationTimelineForAPI(timeline, includePayload)
+	timeline = operationview.RedactTimeline(timeline, includePayload)
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"timeline": timeline})
 }
 
@@ -103,7 +103,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 	_ = s.attachOperationEvidenceDiagnosis(r.Context(), op, &diagnosis)
 	var diagnosisPtr *model.OperationDiagnosis
 	if strings.TrimSpace(diagnosis.Category) != "" {
-		redactedDiagnosis := redactOperationDiagnosisForAPI(diagnosis)
+		redactedDiagnosis := operationview.RedactDiagnosis(diagnosis)
 		diagnosisPtr = &redactedDiagnosis
 	}
 	app, appFound, _ := s.getDiagnosisApp(op.AppID)
@@ -128,8 +128,8 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		ImageTrackingChecks: trackingChecks,
 		MetricsSummary:      metricsSummary,
 		Diagnosis:           diagnosisPtr,
-		Timeline:            redactOperationTimelineForAPI(timeline, true),
-		Evidence:            redactOperationEvidenceForAPI(evidence, true),
+		Timeline:            operationview.RedactTimeline(timeline, true),
+		Evidence:            operationview.RedactEvidence(evidence, true, false),
 	}
 	for _, item := range evidence {
 		if strings.TrimSpace(item.ReleaseAttemptID) == "" {
@@ -146,7 +146,7 @@ func (s *Server) operationDebugBundle(r *http.Request, principal model.Principal
 		break
 	}
 	bundle := releaseflow.ReleaseEvidenceViewBuilder{}.OperationBundle(view)
-	return redactOperationDebugBundleForAPI(bundle), nil
+	return operationview.RedactDebugBundle(bundle, redactOperationForDebugBundle), nil
 }
 
 func (s *Server) handleListAppReleaseAttempts(w http.ResponseWriter, r *http.Request) {
