@@ -618,6 +618,19 @@ version. Replaying a settled result returns the recorded outcome for the
 same witness. Missing or changed provider evidence leaves the claim
 pending and preserves the last verified version.
 
+## Storage audit ownership
+
+`fugue-production-control observe-storage-audit-owner CONFIG` reads the
+current storage audit owner, effective policy, activation receipt and
+latest committed sample in one read-only PostgreSQL transaction. The
+private configuration contains `databaseUrl` and `provider` with the
+exact `database`, `role` and PostgreSQL `systemId`. Use a dedicated
+observer with SELECT on `lifecycle_status_v1` and `lifecycle_activation`,
+USAGE on `fugue_storage_audit`, and EXECUTE on `pg_control_system()`.
+The observer checks the primary and rejects logins that can change
+storage audit state or run a sample. Use the output to compare the
+current database state with the legacy ownership receipt before cutover.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
