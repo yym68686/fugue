@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,7 @@ func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
 	if err := s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{schemamigrate.CompilerInputLifecycleSQL, schemamigrate.CompilerInputZeroTempSQL} {
+	for _, statement := range []string{schemamigrate.CompilerInputLifecycleSQL, schemamigrate.CompilerInputZeroTempSQL, schemamigrate.PlatformQualityEvidenceRetentionSQL} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
@@ -53,11 +54,89 @@ func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPresent(digest("a"), false)
-	key := observationCheckpointKey(qualityEvidenceRetentionWriterCheckpoint)
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_meta (key,value,updated_at) VALUES ($1,'worker',NOW())`, key); err != nil {
+	if _, err := s.db.ExecContext(ctx, `CREATE ROLE synthetic_quality_retention_worker NOLOGIN;
+GRANT USAGE ON SCHEMA fugue_observation_maintenance TO synthetic_quality_retention_worker;
+GRANT SELECT ON fugue_observation_maintenance.quality_evidence_worker_progress TO synthetic_quality_retention_worker;
+GRANT EXECUTE ON FUNCTION fugue_observation_maintenance.prune_quality_evidence_v1() TO synthetic_quality_retention_worker;`); err != nil {
 		t.Fatal(err)
 	}
+	worker, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer worker.Close()
+	if _, err := worker.ExecContext(ctx, `SET ROLE synthetic_quality_retention_worker`); err != nil {
+		t.Fatal(err)
+	}
+	defer worker.ExecContext(ctx, `RESET ROLE`)
+	if _, err := worker.ExecContext(ctx, `SELECT evidence FROM fugue_platform_quality_evidence`); err == nil {
+		t.Fatal("retention role could read raw evidence")
+	}
+	if _, err := worker.ExecContext(ctx, `SELECT key FROM fugue_meta`); err == nil {
+		t.Fatal("retention role could read shared metadata")
+	}
+	if _, err := worker.ExecContext(ctx, `UPDATE fugue_observation_maintenance.quality_evidence_progress SET total_deleted=0`); err == nil {
+		t.Fatal("retention role could forge durable progress")
+	}
+	report, err := readQualityEvidenceRetentionProgress(ctx, worker)
+	if err != nil || report.Owner != "api" || report.CompletedPasses != 0 || !report.CompletedAt.IsZero() {
+		t.Fatalf("standby report: %+v, %v", report, err)
+	}
+	queryPass := func(db interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	}, wantState string, wantDeleted int64) {
+		t.Helper()
+		var state string
+		var deleted int64
+		var at sql.NullTime
+		err := db.QueryRowContext(ctx, `SELECT * FROM fugue_observation_maintenance.prune_quality_evidence_v1()`).Scan(&state, &deleted, &at)
+		if err != nil || state != wantState || deleted != wantDeleted || at.Valid != (wantState == "completed") {
+			t.Fatalf("unexpected expiry pass: state=%q deleted=%d timestamp=%v err=%v", state, deleted, at, err)
+		}
+	}
+	queryPass(worker, "standby", 0)
+	for range 2 {
+		if _, err := s.db.ExecContext(ctx, schemamigrate.PlatformQualityEvidenceRetentionActivateSQL); err != nil {
+			t.Fatal(err)
+		}
+	}
 	seedExpired(digest("b"))
+	legacy, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Close()
+	if _, err := legacy.ExecContext(ctx, `CREATE ROLE synthetic_quality_legacy_api NOLOGIN;
+GRANT SELECT, DELETE ON public.fugue_platform_quality_evidence TO synthetic_quality_legacy_api;
+SET ROLE synthetic_quality_legacy_api;`); err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.ExecContext(ctx, `RESET ROLE`)
+	if _, err := legacy.ExecContext(ctx, `DELETE FROM fugue_platform_quality_evidence WHERE content_hash=$1`, digest("b")); err == nil ||
+		!strings.Contains(err.Error(), "legacy periodic quality evidence deletion fenced") {
+		t.Fatalf("rollback binary's old DELETE must be fenced: %v", err)
+	}
+	admission, err := legacy.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admission.Rollback()
+	if _, err := admission.ExecContext(ctx, `SET LOCAL fugue.quality_evidence_admission='v1'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := admission.ExecContext(ctx, `DELETE FROM fugue_platform_quality_evidence WHERE content_hash=$1`, digest("b"))
+	if err != nil {
+		t.Fatalf("current foreground admission must preserve the old deletion behavior: %v", err)
+	}
+	if touched, err := result.RowsAffected(); err != nil || touched != 1 {
+		t.Fatalf("foreground admission deleted %d rows: %v", touched, err)
+	}
+	if err := admission.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.ExecContext(ctx, `DELETE FROM fugue_platform_quality_evidence WHERE content_hash=$1`, digest("b")); err == nil {
+		t.Fatal("foreground admission authorization leaked past the transaction")
+	}
 	s.qualityEvidenceMetrics.attemptedAt.Store(1)
 	if err := s.maintainPlatformQualityEvidenceForAPI(ctx, nil, now, true); err != nil {
 		t.Fatal(err)
@@ -73,6 +152,59 @@ func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
 	}
 	assertPresent(digest("b"), false)
 	assertPresent(digest("c"), true)
+
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_platform_quality_evidence
+   (content_hash, evidence, size_bytes, created_at, expires_at)
+   SELECT 'sha256:' || repeat('0',60) || lpad(to_hex(i),4,'0'), decode('61','hex'), 1, $1, $2
+   FROM generate_series(1,257) AS seed(i)`, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	inFlight, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inFlight.Rollback()
+	if _, err = inFlight.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, qualityEvidenceLockID); err != nil {
+		t.Fatal(err)
+	}
+	queryPass(worker, "busy", 0)
+	if err := inFlight.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	interrupted, err := worker.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer interrupted.Rollback()
+	queryPass(interrupted, "completed", 256)
+	if err := interrupted.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	queryPass(worker, "completed", 256)
+	queryPass(worker, "completed", 1)
+	assertPresent(digest("c"), true)
+	if _, err := s.db.ExecContext(ctx, schemamigrate.PlatformQualityEvidenceRetentionSQL); err != nil {
+		t.Fatalf("retry installation must leave authorization and progress intact: %v", err)
+	}
+	if _, err := worker.ExecContext(ctx, `RESET ROLE`); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.ExecContext(ctx, `SET ROLE synthetic_quality_retention_worker`); err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.ExecContext(ctx, `RESET ROLE`)
+	report, err = readQualityEvidenceRetentionProgress(ctx, reopened)
+	if err != nil || report.Owner != "worker" || report.CompletedPasses != 2 || report.TotalDeleted != 257 || report.CompletedAt.Before(now) {
+		t.Fatalf("reopened worker must see committed progress: %+v, %v", report, err)
+	}
 }
 
 func compactOnlyStoreFixture(t *testing.T, s *Store) (platformconfig.CompileResult, model.PlatformArtifact) {

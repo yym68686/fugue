@@ -55,6 +55,10 @@
                   {
                     "name": "GOMEMLIMIT",
                     "value": "384MiB"
+                  },
+                  {
+                    "name": "FUGUE_OBSERVATION_QUALITY_EVIDENCE_RETENTION",
+                    "value": "enabled"
                   }
                 ],
                 "securityContext": {

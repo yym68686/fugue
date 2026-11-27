@@ -39,6 +39,7 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 	}
 	defer closePool()
 	rollups := qualityrollup.NewWorker(storage, logger)
+	qualityRetention := os.Getenv("FUGUE_OBSERVATION_QUALITY_EVIDENCE_RETENTION") == "enabled"
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
@@ -60,6 +61,20 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 		progress, err := storage.ReadEdgeQualityRollupWorkerProgress(read)
 		writeProgressMetrics(w, progress, err)
 	})
+	if qualityRetention {
+		mux.HandleFunc("GET /maintenance/metrics", evidenceRetentionMetrics(storage))
+		mux.HandleFunc("GET /maintenance/readyz", func(w http.ResponseWriter, r *http.Request) {
+			if ctx.Err() != nil {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			if _, err := storage.ReadQualityEvidenceRetentionProgress(r.Context()); err != nil {
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte("ok\n"))
+		})
+	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -73,6 +88,14 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	defer stopWorker()
 	done := make(chan struct{})
+	var retentionDone chan struct{}
+	if qualityRetention {
+		retentionDone = make(chan struct{})
+		go func() {
+			defer close(retentionDone)
+			runQualityEvidenceRetention(workerCtx, storage, logger)
+		}()
+	}
 	go func() {
 		defer close(done)
 		rollups.Run(workerCtx)
@@ -89,6 +112,13 @@ func run(ctx context.Context, addr, dsn string, logger *log.Logger) error {
 	case <-done:
 	case <-shutdown.Done():
 		return errors.Join(shutdownErr, errors.New("observation worker drain timed out"))
+	}
+	if retentionDone != nil {
+		select {
+		case <-retentionDone:
+		case <-shutdown.Done():
+			return errors.Join(shutdownErr, errors.New("observation maintenance drain timed out"))
+		}
 	}
 	return errors.Join(err, shutdownErr)
 }
