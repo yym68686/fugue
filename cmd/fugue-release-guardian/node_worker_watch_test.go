@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
@@ -17,7 +18,56 @@ import (
 	"fugue/internal/edgegroupfront"
 	"fugue/internal/releaseguardian"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestNodeWorkerWatchDiscoversOnlyTheRequestedClaim(t *testing.T) {
+	front, client, journal := nodeWorkerRuntimeFixture(t)
+	front.now = func() time.Time { return journal.CreatedAt }
+	raw, err := json.Marshal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	immutable := true
+	_, err = client.CoreV1().ConfigMaps(front.config.Namespace).Create(t.Context(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: releaseguardian.FrontRepairFenceName(journal.Recipient.Group), UID: "existing-claim", ResourceVersion: "200",
+			Labels: map[string]string{
+				"fugue.pro/group": journal.Recipient.Group, "fugue.pro/authority-kind": "node-worker-journal",
+				"app.kubernetes.io/managed-by": "fugue-release-guardian",
+			},
+		},
+		Immutable: &immutable, Data: map[string]string{"journal.json": string(raw)},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.ClearActions()
+	store, err := releaseguardian.NewAuthorityStore(client, front.config.Namespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := front.waitForClaimedNodeWorkerWatch(t.Context(), store, journal.Recipient.Node, journal.ReleaseDigest)
+	if err != nil || got.Digest != journal.Digest {
+		t.Fatalf("failed to discover the exact claim: %+v, %v", got, err)
+	}
+	for _, target := range [][2]string{
+		{"another-node", journal.ReleaseDigest},
+		{journal.Recipient.Node, shaDigest([]byte("other release"))},
+	} {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		got, err := front.waitForClaimedNodeWorkerWatch(ctx, store, target[0], target[1])
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) || got.Digest != "" {
+			t.Fatalf("accepted a claim outside the requested scope: %+v, %v", got, err)
+		}
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "get" {
+			t.Fatalf("watch attempted to mutate the cluster: %+v", action)
+		}
+	}
+}
 
 func TestNodeWorkerWatchAttributesRealFrontSocketsAcrossSelection(t *testing.T) {
 	const domain = "example.com"
