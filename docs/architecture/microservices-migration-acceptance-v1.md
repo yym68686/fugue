@@ -138,7 +138,25 @@ resource. A lost commit response, process restart, expired approval, or
 timeout does not expire an existing claim or confer a second dispatch.
 Recovery observes the existing claim rather than reissuing its operation.
 For this first lane the rollback target must be its existing verified version.
-These are journal guarantees: a provider adapter still has to prove exclusive
-authority and enforce the fence where it makes writes. The journal and
-release draft have no provider mutation path and are not evidence that a
-release was applied or a resource has been cut over.
+The native Guardian publication adapter accepts only the digest-bound,
+healthy-predecessor, single existing Deployment case, without delegated
+runtime writes. It requires a trusted provider-admission dependency to check
+exclusive authority, in-flight legacy fencing, and verified forward and
+rollback artifacts available independently of GitHub. It checks the live
+Deployment UID and resourceVersion before claiming execution, then rechecks
+authority and the unexpired pending claim before each ConfigMap write. It
+records the claim on the DesiredRelease CAS; that marker is a correlation
+identifier, not an authorization or a substitute for provider enforcement.
+The legacy publisher refuses a marked pointer before staging new artifacts.
+
+A successful CAS submits the release to Guardian; it is not a rollout or
+health receipt. A partial write or an unknown response keeps the claim
+pending and never authorizes another submission. Observation may advance the
+verified version only after independent terminal and fencing evidence.
+The read-only publication observation can correlate the exact claim with a
+candidate pointer or a rollback pointer even if the CAS response was lost.
+It does not infer anything about actual serving health or permit a redispatch.
+There is no production entrypoint or admission implementation configured
+for the native adapter yet. None of these behaviors establish that legacy
+identities have actually lost permission, that Guardian applied a release,
+or that any production resource has been cut over.

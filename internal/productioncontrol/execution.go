@@ -128,6 +128,35 @@ func (e *ExecutionJournal) Resource(ctx context.Context, scope Scope) (ResourceS
 	return readResource(ctx, e.journal.db, scope)
 }
 
+func (e *ExecutionJournal) ReadIntent(ctx context.Context, intentDigest string) (Intent, []byte, error) {
+	return e.journal.ReadIntent(ctx, intentDigest)
+}
+
+// VerifyOpenClaim rechecks approval expiry, authority key and the pending
+// journal fence immediately before provider writes. It is not a reservation:
+// a rehydrated claim must never use it to initiate a second dispatch.
+func (e *ExecutionJournal) VerifyOpenClaim(ctx context.Context, claim Claim) error {
+	stored, result, err := e.Execution(ctx, claim.Scope, claim.IntentDigest)
+	if err != nil {
+		return err
+	}
+	if stored != claim || result != nil {
+		return ErrStaleFence
+	}
+	intent, _, err := e.ReadIntent(ctx, claim.IntentDigest)
+	if err != nil {
+		return err
+	}
+	state, err := e.Resource(ctx, claim.Scope)
+	if err != nil {
+		return err
+	}
+	if state.LastFence != claim.Fence || state.Pending != claim.IntentDigest {
+		return ErrStaleFence
+	}
+	return verifyRecordedApproval(ctx, e.journal.db, e.journal, intent, claim.IntentDigest, claim.ApprovalDigest)
+}
+
 // Execution reads the persistent handle for recovery, whether or not a result
 // is already known. It does not issue or renew dispatch authority.
 func (e *ExecutionJournal) Execution(ctx context.Context, scope Scope, intentDigest string) (Claim, *ExecutionResult, error) {

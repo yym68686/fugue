@@ -34,6 +34,7 @@ type PublicationPreview struct {
 type desiredPublication struct {
 	preview                    PublicationPreview
 	record, execution, desired *corev1.ConfigMap
+	bundle                     ExecutionBundle
 }
 
 // PreviewDesired evaluates the same candidate and predecessor rules as
@@ -153,7 +154,7 @@ func (store *KubeStore) planDesiredPublication(ctx context.Context, key Key, fil
 			PrewriteWorkload: bundle.Prepared.Prewrite.Primary, PrewriteResourceVersion: bundle.Prepared.Prewrite.ResourceVersion,
 			Health: snapshot.Health,
 		},
-		record: recordMap, execution: executionMap, desired: desiredMap,
+		record: recordMap, execution: executionMap, desired: desiredMap, bundle: bundle,
 	}, nil
 }
 
@@ -165,10 +166,44 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, err
 	}
+	return store.commitDesiredPublication(ctx, key, publication, nil)
+}
+
+func (store *KubeStore) commitDesiredPublication(ctx context.Context, key Key, publication desiredPublication, recheck func(context.Context) error) (ReleaseRecord, DesiredRelease, error) {
 	preview := publication.preview
 	record, next := preview.Record, preview.ProposedDesired
 	recordMap, executionMap, desiredMap := publication.record, publication.execution, publication.desired
 	configMaps := store.client.CoreV1().ConfigMaps(preview.Namespace)
+	readPointer := func() (*corev1.ConfigMap, error) {
+		current, err := configMaps.Get(ctx, desiredMap.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) && preview.DesiredResourceVersion == "" {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read DesiredRelease before CAS: %w", err)
+		}
+		var observed DesiredRelease
+		if current.ResourceVersion != preview.DesiredResourceVersion ||
+			decodeStrict([]byte(current.Data["desired.json"]), &observed) != nil || observed != preview.CurrentDesired {
+			return nil, errors.New("DesiredRelease changed before resourceVersion CAS")
+		}
+		if recheck == nil && hasNativePublicationMarker(current.Annotations) {
+			return nil, errors.New("marked native Guardian release cannot use the legacy publisher")
+		}
+		return current, nil
+	}
+	if _, err := readPointer(); err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	checkWrite := func() error {
+		if recheck != nil {
+			return recheck(ctx)
+		}
+		return nil
+	}
+	if err := checkWrite(); err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
 	created, createErr := configMaps.Create(ctx, recordMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(createErr) {
 		created, createErr = configMaps.Get(ctx, recordMap.Name, metav1.GetOptions{})
@@ -178,6 +213,9 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	}
 	if createErr != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian release record: %w", createErr)
+	}
+	if err := checkWrite(); err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
 	}
 	executionCreated, executionErr := configMaps.Create(ctx, executionMap, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(executionErr) {
@@ -190,21 +228,25 @@ func (store *KubeStore) PublishDesired(ctx context.Context, key Key, files map[s
 	if executionErr != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("persist immutable Guardian execution snapshot: %w", executionErr)
 	}
-	current, getErr := configMaps.Get(ctx, desiredMap.Name, metav1.GetOptions{})
-	if apierrors.IsNotFound(getErr) {
-		if preview.DesiredResourceVersion != "" {
-			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease disappeared before CAS")
-		}
+	current, err := readPointer()
+	if err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	if err := checkWrite(); err != nil {
+		return ReleaseRecord{}, DesiredRelease{}, err
+	}
+	if current == nil {
 		_, err = configMaps.Create(ctx, desiredMap, metav1.CreateOptions{})
-	} else if getErr == nil {
-		if current.ResourceVersion != preview.DesiredResourceVersion {
-			return ReleaseRecord{}, DesiredRelease{}, errors.New("DesiredRelease changed before resourceVersion CAS")
-		}
+	} else {
 		updated := current.DeepCopy()
 		updated.Labels, updated.Data = desiredMap.Labels, desiredMap.Data
+		for name, value := range desiredMap.Annotations {
+			if updated.Annotations == nil {
+				updated.Annotations = make(map[string]string, len(desiredMap.Annotations))
+			}
+			updated.Annotations[name] = value
+		}
 		_, err = configMaps.Update(ctx, updated, metav1.UpdateOptions{})
-	} else {
-		err = getErr
 	}
 	if err != nil {
 		return ReleaseRecord{}, DesiredRelease{}, fmt.Errorf("advance DesiredRelease with resourceVersion CAS: %w", err)

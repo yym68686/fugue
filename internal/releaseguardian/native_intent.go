@@ -26,8 +26,9 @@ type nativeReleasePayload struct {
 }
 
 // DraftNativeRelease reuses the legacy publisher's exact admission preview.
-// The initial native lane supports only healthy, settled predecessors; repair
-// and takeover of an in-flight legacy operation require separate proofs.
+// The initial native lane supports only an existing Deployment with a healthy,
+// settled predecessor and no shared/delegated writes. Repair and takeover of
+// an in-flight legacy operation require separate proofs.
 func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, clusterID, requestID string, files map[string][]byte) (NativeReleaseDraft, error) {
 	publication, err := store.planDesiredPublication(ctx, key, files)
 	if err != nil {
@@ -39,26 +40,30 @@ func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, cluster
 		preview.Health.Local.State != HealthHealthy || preview.Health.Dependency.State != HealthHealthy || preview.Health.Route.State != HealthHealthy {
 		return NativeReleaseDraft{}, errors.New("native release draft requires a healthy settled Guardian predecessor")
 	}
-	boundFiles, err := executionFilesFromStrings(publication.record.Data)
-	if err != nil {
-		return NativeReleaseDraft{}, err
-	}
 	workload := preview.PrewriteWorkload
 	if workload.Namespace != preview.Namespace || workload.Kind == "" || workload.Name == "" {
 		return NativeReleaseDraft{}, errors.New("native release draft does not identify a workload in the configured namespace")
 	}
-	payload, err := declarativerelease.CanonicalJSON(nativeReleasePayload{
+	binding := nativeReleasePayload{
 		Namespace: preview.Namespace, ProposedRecord: preview.Record, ExpectedDesiredDigest: preview.CurrentDesired.RecordDigest,
-		RollbackManifest: preview.RollbackManifestDigest, Files: boundFiles,
-	})
+		RollbackManifest: preview.RollbackManifestDigest, Files: publication.bundle.Files,
+	}
+	payload, err := declarativerelease.CanonicalJSON(binding)
 	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
-	resourceID := "kubernetes/" + workload.Namespace + "/" + strings.ToLower(workload.Kind) + "/" + workload.Name
+	resourceID := nativeKubernetesResourceID(workload)
 	intent, err := productioncontrol.NewIntent(clusterID, resourceID, requestID, productioncontrol.ComponentRelease, preview.CurrentDesired.Generation,
 		preview.CurrentRecordDigest, preview.Record.RecordDigest, preview.Record.LKGRecordDigest, payload)
 	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
+	if _, err := bindNativePublication(intent, binding, publication); err != nil {
+		return NativeReleaseDraft{}, err
+	}
 	return NativeReleaseDraft{Intent: intent, Payload: payload, Preview: preview}, nil
+}
+
+func nativeKubernetesResourceID(workload declarativerelease.ResourceIdentity) string {
+	return "kubernetes/" + workload.Namespace + "/" + strings.ToLower(workload.Kind) + "/" + workload.Name
 }
