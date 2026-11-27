@@ -83,6 +83,18 @@ After cutover also require committed watermarks and a worker last-success
 timestamp, rather than treating a Ready pod or a successful scrape as proof
 of work.
 
+An explicit `writer-handoff.json` change selects the forward-only Actions
+step. It verifies the exact settled API and worker workloads, worker metrics
+and fresh database watermarks before installing the fence. The transition
+takes the existing writer lock and conflicting table locks without waiting;
+if either is held, nothing changes and the same admitted release may retry.
+It installs database triggers, changes the owner and captures the baseline
+watermark in one transaction. The triggers reject actual changes from older
+API binaries but still allow no-op startup SQL. A new watermark beyond that
+transaction's baseline plus a new worker success sample is the completion
+proof. A failed check after commit requires recovery on the worker side, not
+resetting the owner to the API.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance

@@ -304,11 +304,24 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"deploy_image_cache", "deploy_release_guardian", "deploy_runtime_agent", "deploy_schema", "deploy_ssh_control", "deploy_telemetry", "diagnostic_packages", "diagnostics_configuration", "diagnostics_package_activation", "dns_authority_promotion", "dns_authority_promotion_plan", "dns_authority_stage", "dns_authority_stage_plan", "dns_configuration_plan", "dns_port_retirement", "dns_probe_egress", "dns_probe_egress_plan", "dns_public_observation", "dns_selector_retirement", "dns_selector_retirement_plan", "dns_slot_retirement", "dns_transport", "drain_observation_access", "drain_observer_artifact", "dynamic_quality_plan", "dynamic_quality_reconfiguration", "edge_capacity_external_observation", "edge_member_recovery", "edge_member_recovery_plan", "edge_offline_configuration", "edge_release_hold", "edge_release_hold_plan", "external_controller_release", "fixed_node_retention", "front_drain_observation", "front_external_observation", "front_observation", "front_probe_transport", "front_public_recovery", "front_public_verification", "front_replacement", "front_replacement_external", "front_replacement_plan", "front_replacement_recovery", "front_restricted_egress_observation", "front_serving_handoff", "front_serving_stage", "k3s_transport_integration", "longhorn_gc_build", "longhorn_gc_install", "managed_postgres_cpu_policy", "managed_postgres_cpu_policy_plan", "managed_ssh_artifact", "managed_ssh_front_artifact", "managed_ssh_front_stage", "managed_ssh_identity_maintenance", "managed_ssh_keyrings", "managed_ssh_runtime", "managed_ssh_runtime_plan", "managed_ssh_transport", "node_resource_policy", "node_resource_policy_tasks", "observability_configuration", "physical_dns_plan", "physical_dns_reconfiguration", "postgres_bootstrap_cpu", "postgres_bootstrap_cpu_plan", "postgres_protection", "postgres_volume_recovery", "prepush", "producer_publication_renewal", "runtime_agent_identity", "static_edge_observability", "storage_policy", "tls_issuance_policy", "traffic_safety_stage0", "worker_standby_observation", "workload_memory_policy",
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
-	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker")
+	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
+	}
+	observation := yamlMappingValue(t, jobs, "observation_writer_handoff")
+	for _, required := range []string{"github.event_name == 'push' && github.ref == 'refs/heads/main'", "needs.prepush.result == 'success'", "needs.prepush.outputs.observation_writer_handoff == 'true'"} {
+		if !strings.Contains(yamlMappingValue(t, observation, "if").Value, required) {
+			t.Fatalf("observation write authority is missing a production admission gate: %s", required)
+		}
+	}
+	for _, job := range []*yaml.Node{observation, yamlMappingValue(t, jobs, "deploy_observation_worker")} {
+		queue := yamlMappingValue(t, job, "concurrency")
+		if yamlMappingValue(t, queue, "group").Value != "fugue-production-observation-worker" ||
+			yamlMappingValue(t, queue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, queue, "queue").Value != "max" {
+			t.Fatal("observation ownership and workload changes must share a non-canceling release queue")
+		}
 	}
 	nodeWorker := yamlMappingValue(t, jobs, "node_worker_handoff")
 	nodeWorkerWhen := yamlMappingValue(t, nodeWorker, "if").Value
