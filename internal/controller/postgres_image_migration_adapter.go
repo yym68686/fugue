@@ -8,7 +8,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/pgimage"
-	"fugue/internal/pgimage/migration"
+	migration "fugue/internal/pgimagemigration"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
 )
