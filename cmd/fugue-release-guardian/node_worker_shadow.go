@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"fugue/internal/edgegroupfront"
@@ -23,8 +24,15 @@ type nodeWorkerShadowReport struct {
 	LeaseName  string                                 `json:"component_lease"`
 	Journal    edgegroupfront.NodeWorkerJournal       `json:"journal"`
 	Selection  edgegroupfront.NodeWorkerSelectionPlan `json:"selection"`
+	Rollback   nodeWorkerRollbackObservation          `json:"rollback_observation"`
 	Retirement *workerRetirementPlan                  `json:"retirement,omitempty"`
 	ObservedAt time.Time                              `json:"observed_at"`
+}
+
+type nodeWorkerRollbackObservation struct {
+	RetainedWorkerUID string `json:"retained_worker_uid"`
+	RetainedTarget    string `json:"retained_target"`
+	CanaryBodyDigest  string `json:"canary_body_digest"`
 }
 
 func runNodeWorkerShadow(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -78,10 +86,15 @@ func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *r
 	}
 	observer := *a
 	observer.executor = nodeWorkerShadowExec{next: a.executor, namespace: a.config.Namespace}
-	retirement, err := observer.preflightNodeWorker(ctx, store, component, journal)
+	preflight, err := observer.preflightNodeWorker(ctx, store, component, journal)
 	if err != nil {
 		return nodeWorkerShadowReport{}, err
 	}
+	rollback, err := observer.observeNodeWorkerRollback(ctx, journal, preflight)
+	if err != nil {
+		return nodeWorkerShadowReport{}, err
+	}
+	retirement := preflight.retirement
 	freshRetirement, err := observer.loadWorkerRetirement(ctx, journal)
 	if err != nil || (retirement == nil) != (freshRetirement == nil) ||
 		(retirement != nil && *retirement != *freshRetirement) {
@@ -96,7 +109,27 @@ func (a *frontAuthorityActivator) shadowNodeWorker(ctx context.Context, store *r
 	return nodeWorkerShadowReport{
 		Schema: nodeWorkerShadowSchema, Namespace: a.config.Namespace,
 		GroupFence: releaseguardian.FrontRepairFenceName(journal.Recipient.Group), Component: component.Component,
-		LeaseName: component.LeaseName, Journal: journal, Selection: selection, Retirement: retirement, ObservedAt: a.now().UTC(),
+		LeaseName: component.LeaseName, Journal: journal, Selection: selection,
+		Rollback: rollback, Retirement: retirement, ObservedAt: a.now().UTC(),
+	}, nil
+}
+
+func (a *frontAuthorityActivator) observeNodeWorkerRollback(ctx context.Context, j edgegroupfront.NodeWorkerJournal,
+	preflight nodeWorkerPreflight) (nodeWorkerRollbackObservation, error) {
+	if strings.TrimSpace(a.config.RouteHost) == "" || !strings.HasPrefix(a.config.RoutePath, "/") ||
+		!exactSHA256Digest(a.config.RouteBodyDigest) {
+		return nodeWorkerRollbackObservation{}, errors.New("node Worker rollback observation requires the configured TLS route canary")
+	}
+	prior := preflight.runtime.prior
+	// Use the same signed-publication and TLS checks as Guardian's rollback.
+	if err := a.verifyLocalWorkerServing(ctx, j, prior, j.Expected.BundleGeneration); err != nil {
+		return nodeWorkerRollbackObservation{}, errors.Join(errors.New("node Worker shadow could not prove the retained listener can serve"), err)
+	}
+	if err := a.requireSameNodeWorkerRuntime(ctx, j, preflight.activation, preflight.runtime, true); err != nil {
+		return nodeWorkerRollbackObservation{}, err
+	}
+	return nodeWorkerRollbackObservation{
+		RetainedWorkerUID: string(prior.pod.UID), RetainedTarget: prior.target, CanaryBodyDigest: a.config.RouteBodyDigest,
 	}, nil
 }
 

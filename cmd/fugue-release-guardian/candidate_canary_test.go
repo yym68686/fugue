@@ -198,6 +198,14 @@ func candidateWorkerPod(name, node, uid, slot, source, image string) *corev1.Pod
 }
 
 func TestCandidateRouteUsesFrontCompatibleProxyPreambleBeforeTLS(t *testing.T) {
+	for _, size := range []int{2, 64 << 10, (64 << 10) + 1} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) { testCandidateRouteCanaryBody(t, size) })
+	}
+}
+
+func testCandidateRouteCanaryBody(t *testing.T, size int) {
+	t.Helper()
+	payload := strings.Repeat("o", size)
 	template := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	certificate := template.TLS.Certificates[0]
 	previousRoots := candidateTLSRootCAs
@@ -240,12 +248,16 @@ func TestCandidateRouteUsesFrontCompatibleProxyPreambleBeforeTLS(t *testing.T) {
 			serverErr <- fmt.Errorf("unexpected candidate request %s %s", request.Host, request.URL.Path)
 			return
 		}
-		_, err = fmt.Fprint(tlsConnection, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nX-Fugue-Candidate-Record-Digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\nConnection: close\r\n\r\nok")
+		_, err = fmt.Fprintf(tlsConnection, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nX-Fugue-Candidate-Record-Digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\nConnection: close\r\n\r\n%s", size, payload)
 		serverErr <- err
 	}()
 	status, body, headers, err := requestCandidateRoute(context.Background(), listener.Addr().String(), "example.com", "/route-canary")
-	if err != nil || status != http.StatusOK || string(body) != "ok" {
-		t.Fatalf("status=%d body=%q err=%v", status, body, err)
+	if size > 64<<10 {
+		if err == nil || body != nil || !strings.Contains(err.Error(), "exceeds the digest limit") {
+			t.Fatalf("oversized response was treated as a digestible body: len=%d err=%v", len(body), err)
+		}
+	} else if err != nil || status != http.StatusOK || string(body) != payload {
+		t.Fatalf("status=%d body length=%d err=%v", status, len(body), err)
 	}
 	if headers.Get("X-Fugue-Candidate-Record-Digest") == "" {
 		t.Fatal("candidate response attestation header was lost")

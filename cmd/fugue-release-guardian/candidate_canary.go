@@ -357,7 +357,12 @@ func requestCandidateRoute(ctx context.Context, address, host, path string) (int
 		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	const maxCanaryBody = 64 << 10
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxCanaryBody+1))
+	if len(body) > maxCanaryBody {
+		_ = connection.Close()
+		return response.StatusCode, nil, response.Header.Clone(), errors.New("candidate TLS canary response exceeds the digest limit")
+	}
 	return response.StatusCode, body, response.Header.Clone(), err
 }
 

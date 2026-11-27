@@ -76,3 +76,25 @@ func TestNodeWorkerShadowFailsClosedOnRecipientDriftWithoutWrites(t *testing.T) 
 		}
 	}
 }
+
+func TestNodeWorkerShadowRequiresRetainedCanaryObservation(t *testing.T) {
+	front, client, journal := nodeWorkerRuntimeFixture(t)
+	if got, err := front.observeNodeWorkerRollback(context.Background(), journal, nodeWorkerPreflight{}); got != (nodeWorkerRollbackObservation{}) ||
+		err == nil || !strings.Contains(err.Error(), "requires the configured TLS route canary") {
+		t.Fatalf("unconfigured shadow produced rollback proof: %+v %v", got, err)
+	}
+	front.now = func() time.Time { return journal.CreatedAt }
+	front.config.RouteHost, front.config.RoutePath = "example.test", "/canary"
+	front.config.RouteBodyDigest = shaDigest([]byte("canary"))
+	runtime, err := front.observeNodeWorkerRuntime(context.Background(), journal, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.ClearActions()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got, err := front.observeNodeWorkerRollback(ctx, journal, nodeWorkerPreflight{runtime: runtime, activation: journal.Expected}); got != (nodeWorkerRollbackObservation{}) ||
+		err == nil || !strings.Contains(err.Error(), "could not prove the retained listener can serve") || len(client.Actions()) != 0 {
+		t.Fatalf("shadow continued without a retained canary observation: %+v %v", got, err)
+	}
+}
