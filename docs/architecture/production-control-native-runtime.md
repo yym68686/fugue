@@ -461,7 +461,9 @@ that the shared group fence is vacant on both sides of the observation, and
 reports the component Lease, exact journal and optional retirement plan.
 The projected advance and rollback digests cover the selection states
 with their execution timestamps zeroed. Rollback reselects the retained
-Worker at the next generation.
+Worker at the next generation. A successful report also proves that the
+retained listener currently serves the expected signed publication and
+TLS canary, and gives the retained Pod UID, listener and canary digest.
 
 The Kubernetes object client uses plain GET. The only Pod exec calls read
 the exact Front recipient and its local activation file. Keep the current

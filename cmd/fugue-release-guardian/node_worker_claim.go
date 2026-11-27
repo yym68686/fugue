@@ -190,38 +190,44 @@ func (a *frontAuthorityActivator) recentNodeWorkerJournal(j edgegroupfront.NodeW
 	return !j.CreatedAt.After(now) && j.CreatedAt.Add(2*time.Minute).After(now)
 }
 
+type nodeWorkerPreflight struct {
+	runtime    nodeWorkerRuntime
+	activation edgegroupfront.ActivationState
+	retirement *workerRetirementPlan
+}
+
 // preflightNodeWorker is shared by the live claim and the shadow. The live
 // caller holds both mutation Leases and must still claim the group fence.
 func (a *frontAuthorityActivator) preflightNodeWorker(ctx context.Context, store *releaseguardian.AuthorityStore,
-	component releaseguardian.NodeWorkerComponent, j edgegroupfront.NodeWorkerJournal) (*workerRetirementPlan, error) {
+	component releaseguardian.NodeWorkerComponent, j edgegroupfront.NodeWorkerJournal) (nodeWorkerPreflight, error) {
 	r, err := a.observeNodeWorkerRuntime(ctx, j, true, true)
 	if err != nil {
-		return nil, err
+		return nodeWorkerPreflight{}, err
 	}
 	retirement, err := a.loadWorkerRetirement(ctx, j)
 	if err != nil {
-		return nil, err
+		return nodeWorkerPreflight{}, err
 	}
 	if err := a.checkWorkerRetirementPreflight(ctx, j, r, retirement); err != nil {
-		return nil, err
+		return nodeWorkerPreflight{}, err
 	}
 	raw, execErr := a.executor.Exec(ctx, a.config.Namespace, r.front.Name, "edge-front", frontActivationCASBinary, "--worker-recipient")
 	var id edgegroupfront.NativeRecipient
 	if execErr != nil || decodeStrictJSON(raw, &id) != nil || id != j.Recipient {
-		return nil, errors.Join(errors.New("new node Worker journal lacks the exact running Front recipient"), execErr)
+		return nodeWorkerPreflight{}, errors.Join(errors.New("new node Worker journal lacks the exact running Front recipient"), execErr)
 	}
 	state, err := a.readNodeWorkerSelection(ctx, j, r)
 	if err != nil || j.Progress(state) != edgegroupfront.NodeWorkerPending {
-		return nil, errors.Join(errors.New("node Worker serving pointer is not the exact observed predecessor"), err)
+		return nodeWorkerPreflight{}, errors.Join(errors.New("node Worker serving pointer is not the exact observed predecessor"), err)
 	}
 	if _, alreadyFinished, err := store.ReadNodeWorkerResult(ctx, j); err != nil || alreadyFinished {
-		return nil, errors.Join(errors.New("node Worker journal was already finalized"), err)
+		return nodeWorkerPreflight{}, errors.Join(errors.New("node Worker journal was already finalized"), err)
 	}
 	if err := store.VerifyNodeWorkerClaimArtifact(ctx, j, r.next.pod, component); err != nil {
-		return nil, err
+		return nodeWorkerPreflight{}, err
 	}
 	if err := a.requireSameNodeWorkerRuntime(ctx, j, state, r, true); err != nil {
-		return nil, err
+		return nodeWorkerPreflight{}, err
 	}
-	return retirement, nil
+	return nodeWorkerPreflight{runtime: r, activation: state, retirement: retirement}, nil
 }
