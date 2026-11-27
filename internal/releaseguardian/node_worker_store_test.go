@@ -114,6 +114,32 @@ func TestNodeWorkerFenceRejectsActivatedGroupTransitionAndMalformedProjection(t 
 	}
 }
 
+func TestNodeWorkerShadowFenceRejectsAnyExistingOwner(t *testing.T) {
+	ctx := context.Background()
+	j := nodeWorkerFenceFixture(t)
+	group := j.Recipient.Group
+	const ns = "fugue-system"
+	for _, name := range []string{"", transitionActivatedJournalName(group), FrontRepairFenceName(group)} {
+		var objects []runtime.Object
+		if name != "" {
+			objects = append(objects, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}})
+		}
+		client := fake.NewSimpleClientset(objects...)
+		store, err := NewAuthorityStore(client, ns)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CheckNodeWorkerShadowFence(ctx, group); (err != nil) != (name != "") {
+			t.Fatalf("unexpected fence observation for %q: %v", name, err)
+		}
+		for _, action := range client.Actions() {
+			if action.GetVerb() != "get" {
+				t.Fatalf("shadow acquired or mutated the fence: %+v", action)
+			}
+		}
+	}
+}
+
 func TestNodeWorkerResultRequiresARealHandoffAndSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	j := nodeWorkerFenceFixture(t)

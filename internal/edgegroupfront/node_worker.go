@@ -139,6 +139,40 @@ const (
 	NodeWorkerConflict  NodeWorkerProgress = "conflict"
 )
 
+// NodeWorkerSelectionPlan projects the two exact successor states, apart
+// from their execution timestamps. The rollback state restores the old Worker
+// at a fresh generation; it is not a replay of the predecessor pointer.
+type NodeWorkerSelectionPlan struct {
+	AdvanceDigest      string `json:"advance_digest"`
+	AdvanceGeneration  uint64 `json:"advance_generation"`
+	RollbackDigest     string `json:"rollback_digest"`
+	RollbackGeneration uint64 `json:"rollback_generation"`
+}
+
+func (j NodeWorkerJournal) SelectionPlan() (NodeWorkerSelectionPlan, error) {
+	if sealed, err := j.Seal(); err != nil || sealed.Digest != j.Digest {
+		return NodeWorkerSelectionPlan{}, errors.New("node Worker selection plan requires a sealed journal")
+	}
+	advance, rollback := j.target(), j.rollbackTarget()
+	digestState := func(state ActivationState) (string, error) {
+		raw, err := json.Marshal(activationWithoutTime(state))
+		if err != nil {
+			return "", err
+		}
+		return nativeDigest(raw), nil
+	}
+	advanceDigest, err := digestState(advance)
+	if err != nil {
+		return NodeWorkerSelectionPlan{}, err
+	}
+	rollbackDigest, err := digestState(rollback)
+	if err != nil {
+		return NodeWorkerSelectionPlan{}, err
+	}
+	return NodeWorkerSelectionPlan{AdvanceDigest: advanceDigest, AdvanceGeneration: advance.Generation,
+		RollbackDigest: rollbackDigest, RollbackGeneration: rollback.Generation}, nil
+}
+
 // Progress distinguishes a safe retry from a lost successful response and
 // from a third-party change. "Activated" says nothing about route readiness
 // or connection survival; the Guardian must re-observe both before closing.

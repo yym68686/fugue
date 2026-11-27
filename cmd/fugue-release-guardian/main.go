@@ -57,6 +57,11 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "node-worker-claim" {
 		return runNodeWorkerClaim(os.Args[2:], os.Stdin, os.Stdout)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "node-worker-shadow" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runNodeWorkerShadow(ctx, os.Args[2:], os.Stdin, os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "node-worker-seal" {
 		return runNodeWorkerSeal(os.Args[2:], os.Stdin, os.Stdout)
 	}

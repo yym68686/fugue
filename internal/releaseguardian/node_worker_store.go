@@ -49,6 +49,19 @@ type NodeWorkerFence struct {
 	RV      string
 }
 
+// CheckNodeWorkerShadowFence observes whether a new handoff can claim the
+// shared group fence. A shadow does not acquire a Lease or resume a live claim.
+func (store *AuthorityStore) CheckNodeWorkerShadowFence(ctx context.Context, group string) error {
+	if err := store.RequireNoActivatedTransition(ctx, group); err != nil {
+		return err
+	}
+	_, err := store.client.CoreV1().ConfigMaps(store.namespace).Get(ctx, FrontRepairFenceName(group), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return errors.Join(errors.New("node Worker group mutation fence is not proven vacant"), err)
+}
+
 // ClaimNodeWorker must be invoked by the Guardian under the group mutation
 // Lease, after proving the independent release and physical node bindings.
 func (store *AuthorityStore) ClaimNodeWorker(ctx context.Context, j edgegroupfront.NodeWorkerJournal) (NodeWorkerFence, error) {
