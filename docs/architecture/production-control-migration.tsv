@@ -252,6 +252,10 @@ release-file	deploy/releases/guardian/resources.json	migrate	native release cata
 release-file	deploy/releases/image-cache/daemonset.json	migrate	native release catalog or runtime topology, resolved by stable identity
 release-file	deploy/releases/image-cache/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/image-cache/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/observation-worker/database.json	migrate	native database ownership and scoped credential provisioning
+release-file	deploy/releases/observation-worker/intent.json	migrate	import live authority and predecessor; archive the Git intent history
+release-file	deploy/releases/observation-worker/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/observation-worker/writer-handoff.json	migrate	native verified database writer transition
 release-file	deploy/releases/retired-dns-components.json	retire	archive tombstones and verify no live predecessor depends on the file
 release-file	deploy/releases/runtime-agent-canary/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/runtime-agent-canary/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
@@ -311,12 +315,14 @@ release-lane	edge-worker-us-primary-a-hosted	migrate	native digest-bound release
 release-lane	edge-worker-us-primary-prewarm	migrate	native digest-bound release keyed by stable resource identity
 release-lane	guardian	migrate	native digest-bound release keyed by stable resource identity
 release-lane	image-cache	migrate	native digest-bound release keyed by stable resource identity
+release-lane	observation-worker	migrate	native digest-bound release keyed by stable resource identity
 release-lane	runtime-agent-canary	migrate	native digest-bound release keyed by stable resource identity
 release-lane	schema	migrate	native digest-bound release keyed by stable resource identity
 release-lane	ssh-control	migrate	native digest-bound release keyed by stable resource identity
 release-lane	telemetry	migrate	native digest-bound release keyed by stable resource identity
 script	scripts/activate_agent_edge_policy.py	migrate	native platform policy and reconciliation
 script	scripts/apply_fugue_traffic_safety.sh	migrate	native platform policy and reconciliation
+script	scripts/apply_observation_writer_handoff.py	migrate	native verified database writer transition
 script	scripts/artifact_content_storage.py	migrate	native data and storage maintenance
 script	scripts/audit_dns_selector_retirement.py	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/audit_fugue_registry_host.sh	migrate	native observation and evidence; assess any retained write side effects
@@ -372,6 +378,7 @@ script	scripts/issue_fugue_app_wildcard_tls.sh	migrate	native policy, observatio
 script	scripts/longhorn_snapshot_map.py	migrate	native data and storage maintenance
 script	scripts/migrate_fugue_registry_hostpath_to_pvc.sh	migrate	native data and storage maintenance
 script	scripts/node_worker_handoff.py	migrate	Guardian Front/Worker coordination
+script	scripts/observation_rollup_writer_fence.py	migrate	native transactionally fenced database writer transition
 script	scripts/observe_capacity_recovery.py	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/observe_dns_failure_timeline.py	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/observe_front_candidate.py	migrate	native observation and evidence; assess any retained write side effects
@@ -390,10 +397,13 @@ script	scripts/postgres_baked_manager.sh	migrate	native data and storage mainten
 script	scripts/prepare_fugue_lvm_localpv_node.sh	migrate	native administrative operation or build interface
 script	scripts/prepare_static_caddy.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/prepush.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/prepush_replay.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/prepush_shadow.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/preview_dns_refused_stage.py	migrate	native DNS policy and reconciliation
 script	scripts/probe_fugue_public_dns.sh	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/promote_cell_routes.py	migrate	native platform policy and reconciliation
 script	scripts/promote_dns_authority.py	migrate	native DNS policy and reconciliation
+script	scripts/provision_observation_worker_database.py	migrate	native database ownership and scoped credential provisioning
 script	scripts/provision_runtime_agent_identity.py	migrate	native platform policy and reconciliation
 script	scripts/publish_agent_edge_shadow.py	migrate	native platform policy and reconciliation
 script	scripts/publish_diagnostic_catalog.py	migrate	native administrative operation or build interface
@@ -422,6 +432,7 @@ script	scripts/recover_dns_transport.py	migrate	native DNS policy and reconcilia
 script	scripts/recover_longhorn_snapshot.py	migrate	native data and storage maintenance
 script	scripts/refresh_producer_dependencies.py	migrate	native platform policy and reconciliation
 script	scripts/rehearse_edge_origin_relay.sh	migrate	unprivileged build check or scoped runtime verification
+script	scripts/rehearse_observation_writer_fence.sh	migrate	unprivileged database transition rehearsal
 script	scripts/release_edge_origin_relay_policy.py	migrate	Guardian Front/Worker coordination
 script	scripts/release_external_controller.py	migrate	native administrative operation or build interface
 script	scripts/release_idle_front_standby.py	migrate	Guardian Front/Worker coordination
@@ -465,6 +476,7 @@ script	scripts/verify_dns_configuration_revision.py	migrate	unprivileged build c
 script	scripts/verify_dns_transport_isolation.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_k3s_transport.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/verify_managed_ssh_image.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_observation_writer_handoff.py	migrate	native verified database writer transition observations
 script	scripts/verify_registry_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_transport.py	migrate	unprivileged build check or scoped runtime verification
@@ -496,6 +508,7 @@ workflow-job	.github/workflows/ci.yml#deploy_edge_control	migrate	native digest-
 workflow-job	.github/workflows/ci.yml#deploy_edge_image_gc	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_edge_worker	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_image_cache	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_observation_worker	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_release_guardian	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_runtime_agent	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_schema	migrate	native digest-bound release
@@ -567,6 +580,7 @@ workflow-job	.github/workflows/ci.yml#node_resource_policy_tasks	migrate	native 
 workflow-job	.github/workflows/ci.yml#node_worker_handoff	migrate	Guardian Front/Worker coordination
 workflow-job	.github/workflows/ci.yml#node_worker_handoff_plan	retire	remove Git-diff trigger after porting validation
 workflow-job	.github/workflows/ci.yml#observability_configuration	migrate	native policy, observation or maintenance
+workflow-job	.github/workflows/ci.yml#observation_writer_handoff	migrate	native verified database writer transition
 workflow-job	.github/workflows/ci.yml#physical_dns_plan	retire	remove Git-diff trigger after porting validation
 workflow-job	.github/workflows/ci.yml#physical_dns_reconfiguration	migrate	native DNS policy and reconciliation
 workflow-job	.github/workflows/ci.yml#postgres_bootstrap_cpu	migrate	native data and storage maintenance
