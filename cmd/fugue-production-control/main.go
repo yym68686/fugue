@@ -37,6 +37,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control draft-dns-policy JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID REQUEST
        fugue-production-control draft-dns-policy-rollback JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE ORIGINAL_INTENT_DIGEST REQUEST
        fugue-production-control observe-dns-cutover JOURNAL_CONFIG
+       fugue-production-control draft-dns-cutover CLUSTER REQUEST PLAN
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -72,6 +73,23 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "draft-dns-cutover":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		raw, err := readFile(args[3], productioncontrol.MaxPayloadBytes, false)
+		if err != nil {
+			return err
+		}
+		plan, err := productioncontrol.DecodeDNSCutoverPlan(raw)
+		if err != nil {
+			return err
+		}
+		s, err := productioncontrol.DraftDNSCutover(args[1], args[2], plan)
+		if err != nil {
+			return err
+		}
+		return emit(s)
 	case "observe-dns-cutover":
 		if len(args) != 2 {
 			return errors.New(usage)

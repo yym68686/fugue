@@ -123,7 +123,8 @@ BEGIN
     RAISE EXCEPTION 'global producer activation lacks exact closed baseline enrollment' USING ERRCODE = '40001';
   END IF;
   SELECT oid,rolcanlogin INTO writer FROM pg_roles WHERE rolname=NEW.writer_role;
-  IF writer.oid IS NULL OR NOT writer.rolcanlogin OR NEW.writer_role=session_user THEN
+  IF writer.oid IS NULL OR NOT writer.rolcanlogin OR NEW.writer_role=session_user
+     OR (NEW.writer_oid IS NOT NULL AND NEW.writer_oid <> writer.oid) THEN
     RAISE EXCEPTION 'global producer requires a separate unprivileged writer login' USING ERRCODE = '40001';
   END IF;
   EXECUTE format('SELECT %I.fugue_native_global_producer_writer_isolated($1,$2)', TG_TABLE_SCHEMA)

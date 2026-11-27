@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS fugue_control.participation_topologies (
     FOREIGN KEY (approval_digest, intent_digest) REFERENCES fugue_control.approvals (digest, intent_digest)
 );
 
+CREATE TABLE IF NOT EXISTS fugue_control.dns_cutovers (
+    cluster_id text NOT NULL,
+    resource_id text NOT NULL CHECK (resource_id = 'producer/global-policy-cutover'),
+    phase text NOT NULL CHECK (phase IN ('freeze', 'activate')),
+    intent_digest text NOT NULL UNIQUE,
+    approval_digest text NOT NULL,
+    actor text NOT NULL,
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (cluster_id, phase),
+    FOREIGN KEY (intent_digest, cluster_id, resource_id) REFERENCES fugue_control.intents (digest, cluster_id, resource_id),
+    FOREIGN KEY (approval_digest, intent_digest) REFERENCES fugue_control.approvals (digest, intent_digest)
+);
+
 REVOKE ALL ON FUNCTION fugue_control.audit_execution_transition() FROM PUBLIC;
 
 -- CREATE TABLE IF NOT EXISTS does not upgrade the original audit CHECK.

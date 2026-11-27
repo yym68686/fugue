@@ -201,6 +201,11 @@ func (r *Reader) observeServingCheckpoint(ctx context.Context, j *productioncont
 // SQL lock domain as the provider. The signer also retains its application
 // DNS observations independently of this sweep.
 func NewSettlement(j *productioncontrol.Journal, r *Reader, cluster string, source productioncontrol.WitnessReader, key ed25519.PublicKey) (*productioncontrol.ExecutionJournal, error) {
+	return newSettlement(j, r, cluster, source, key, nil)
+}
+
+func newSettlement(j *productioncontrol.Journal, r *Reader, cluster string, source productioncontrol.WitnessReader, key ed25519.PublicKey,
+	baselineCheck func(string, ServingCheckpoint, productioncontrol.ExecutionWitness) error) (*productioncontrol.ExecutionJournal, error) {
 	return productioncontrol.NewGlobalProducerExecutionJournal(j, source, map[string]productioncontrol.TrustedWitness{
 		"provider-observer": {Scope: Scope(cluster), PublicKey: key},
 	}, func(ctx context.Context, w productioncontrol.ExecutionWitness) error {
@@ -239,7 +244,12 @@ func NewSettlement(j *productioncontrol.Journal, r *Reader, cluster string, sour
 			}
 		}
 		if w.Kind == productioncontrol.BaselineWitness {
-			return j.CheckGlobalProducerFreeze(ctx, c.Producer.ReleaseID, c.Version(), w.AuthorityDigest)
+			if baselineCheck != nil {
+				if err := baselineCheck(d, c, w); err != nil {
+					return err
+				}
+			}
+			return verifyDNSRevocation(ctx, j, source, c, w)
 		}
 		return nil
 	})

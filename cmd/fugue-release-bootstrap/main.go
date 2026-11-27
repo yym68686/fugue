@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,7 +40,9 @@ const usage = `usage: fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPRO
        fugue-release-bootstrap CONFIG participation-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
        fugue-release-bootstrap CONFIG participation-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST
        fugue-release-bootstrap CONFIG dns-checkpoint [INTENT_DIGEST]
+       fugue-release-bootstrap CONFIG dns-freeze INTENT_DIGEST APPROVAL_DIGEST
        fugue-release-bootstrap CONFIG dns-anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
+       fugue-release-bootstrap CONFIG dns-activate INTENT_DIGEST APPROVAL_DIGEST
        fugue-release-bootstrap CONFIG dns-settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
 
 var digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -213,6 +216,11 @@ func parseRequest(args []string) (request, error) {
 	}
 	r := request{command: args[0]}
 	switch r.command {
+	case "dns-freeze", "dns-activate":
+		if len(args) == 3 && allDigests(args[1], args[2]) {
+			r.intent, r.approval = args[1], args[2]
+			return r, nil
+		}
 	case "publish":
 		if len(args) == 4 && allDigests(args[1], args[2]) && filepath.IsAbs(args[3]) {
 			r.intent, r.approval, r.attestation = args[1], args[2], args[3]
@@ -268,7 +276,7 @@ func readSettings(path, command string) (settings, error) {
 		return settings{}, errors.New("bootstrap configuration is invalid or does not authorize this command")
 	}
 	switch cfg.Mode {
-	case "dns-checkpoint", "dns-anchor", "dns-settle":
+	case "dns-checkpoint", "dns-freeze", "dns-anchor", "dns-activate", "dns-settle":
 		if cfg.DNSOrigin == "" || !filepath.IsAbs(cfg.DNSReadTokenFile) || cfg.DNSReadTokenFile == cfg.JournalFile ||
 			cfg.Node != "" || cfg.Cutover != (releaseguardian.KubeDeploymentCutover{}) || cfg.DependencyService != "" {
 			return settings{}, errors.New("bootstrap DNS profile requires an independent API reader and no Kubernetes settings")
@@ -283,7 +291,7 @@ func readSettings(path, command string) (settings, error) {
 			return settings{}, errors.New("bootstrap Deployment profile must not specify a Node")
 		}
 	}
-	if cfg.Mode != "dns-checkpoint" && cfg.Mode != "dns-anchor" && cfg.Mode != "dns-settle" && (cfg.DNSOrigin != "" || cfg.DNSReadTokenFile != "") {
+	if !strings.HasPrefix(cfg.Mode, "dns-") && (cfg.DNSOrigin != "" || cfg.DNSReadTokenFile != "") {
 		return settings{}, errors.New("only DNS bootstrap may configure a DNS reader")
 	}
 	if cfg.Mode == "publish" {
@@ -337,11 +345,26 @@ func runDNSSettlement(ctx context.Context, j *productioncontrol.Journal, cluster
 			ExecutionEvidence      bool                         `json:"executionEvidence"`
 		}{d, c, coverageDigest, coverage, false})
 	}
+	if req.command == "dns-freeze" {
+		record, err := dnscontrol.ApplyCutover(ctx, j, r, cluster, cfg.Actor, req.intent, req.approval, productioncontrol.DNSFreeze, nil, nil)
+		if err != nil {
+			return err
+		}
+		return emit(record)
+	}
 	root, err := os.OpenRoot(cfg.WitnessDirectory)
 	if err != nil {
 		return errors.New("independent DNS witness directory is unavailable")
 	}
 	defer root.Close()
+	if req.command == "dns-activate" {
+		record, err := dnscontrol.ApplyCutover(ctx, j, r, cluster, cfg.Actor, req.intent, req.approval, productioncontrol.DNSActivate,
+			directoryWitnesses{root}, cfg.ObserverPublicKey)
+		if err != nil {
+			return err
+		}
+		return emit(record)
+	}
 	e, err := dnscontrol.NewSettlement(j, r, cluster, directoryWitnesses{root}, cfg.ObserverPublicKey)
 	if err != nil {
 		return err

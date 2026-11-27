@@ -32,6 +32,7 @@ const (
 	ComponentRelease      Operation = "component_release"
 	NodeParticipation     Operation = "node_participation"
 	DNSMembership         Operation = "dns_membership"
+	DNSCutover            Operation = "dns_cutover"
 	FrontWorker           Operation = "front_worker_handoff"
 	Maintenance           Operation = "maintenance"
 	ParticipationTopology Operation = "participation_topology"
@@ -70,7 +71,7 @@ func (intent Intent) Validate() error {
 		return errors.New("invalid production intent binding")
 	}
 	switch intent.Operation {
-	case ComponentRelease, NodeParticipation, DNSMembership, FrontWorker, Maintenance, ParticipationTopology:
+	case ComponentRelease, NodeParticipation, DNSMembership, DNSCutover, FrontWorker, Maintenance, ParticipationTopology:
 		return nil
 	}
 	return errors.New("unsupported production operation")
