@@ -196,6 +196,14 @@ GRANT INSERT ON fugue_control.execution_claims TO fugue_native_dns_store_fixture
 		t.Fatal(err)
 	}
 	control := &NativeDNSControl{store: nativeStore, journal: nativeJournal, cluster: cluster, reader: reader}
+	exec(`GRANT UPDATE (evidence_digest) ON fugue_control.execution_results TO fugue_native_dns_store_fixture`)
+	if _, err := control.Dispatch(ctx, row.Digest, approved.Digest); err == nil || !strings.Contains(err.Error(), "conflicting journal or provider privileges") {
+		t.Fatalf("did not refuse dispatch with conflicting privileges: %v", err)
+	}
+	if head, err := nativeJournal.ReadResource(ctx, dnscontrol.Scope(cluster)); err != nil || head.LastFence != 0 || head.Pending != "" {
+		t.Fatalf("privilege preflight reserved an execution: %+v %v", head, err)
+	}
+	exec(`REVOKE UPDATE (evidence_digest) ON fugue_control.execution_results FROM fugue_native_dns_store_fixture`)
 	if err := control.isActive(ctx); err != nil {
 		t.Fatal(err)
 	}

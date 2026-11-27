@@ -96,7 +96,9 @@ LANGUAGE sql STABLE SET search_path = pg_catalog, pg_temp AS $$
     )
   );
 $$;
-REVOKE ALL ON FUNCTION fugue_native_global_producer_writer_isolated(oid,name) FROM PUBLIC;
+-- This invoker-rights function only reads public catalog metadata so the
+-- Guardian can detect conflicting grants before reserving a claim.
+GRANT EXECUTE ON FUNCTION fugue_native_global_producer_writer_isolated(oid,name) TO PUBLIC;
 
 CREATE OR REPLACE FUNCTION fugue_native_global_producer_enable() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$

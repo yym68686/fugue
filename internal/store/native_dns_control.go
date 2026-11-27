@@ -61,13 +61,19 @@ type NativeDNSDispatchResult struct {
 }
 
 func (c *NativeDNSControl) isActive(ctx context.Context) error {
-	var ready bool
-	err := c.store.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_native_global_producer_gate g
+	var isolated bool
+	err := c.store.db.QueryRowContext(ctx, `SELECT fugue_native_global_producer_writer_isolated(a.writer_oid,n.nspname)
+FROM fugue_native_global_producer_gate g
 JOIN fugue_native_global_producer_authority a ON a.singleton=g.singleton
+JOIN pg_catalog.pg_class c ON c.oid='fugue_native_global_producer_gate'::regclass
+JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 WHERE g.singleton AND g.frozen AND a.cluster_id=$1 AND a.writer_role=session_user
-AND a.writer_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user))`, c.cluster).Scan(&ready)
-	if err != nil || !ready {
+AND a.writer_oid=(SELECT oid FROM pg_roles WHERE rolname=session_user)`, c.cluster).Scan(&isolated)
+	if err != nil {
 		return errors.New("native DNS provider authority has not been activated for this writer")
+	}
+	if !isolated {
+		return errors.New("native DNS writer has conflicting journal or provider privileges")
 	}
 	return nil
 }
