@@ -33,14 +33,20 @@ type kubeDeploymentAdmission struct {
 // NewKubeFencedNativePublisher uses exactly the same authenticated client for
 // admission readback, publisher identity verification and eventual writes.
 // It does not install RBAC, policies or credentials, or promote the phase.
-func NewKubeFencedNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, config KubeDeploymentCutover, clusterID string, evidence DeploymentCutoverEvidence) (*NativePublisher, error) {
-	if store == nil || store.client == nil || evidence == nil || config.Phase != KubeCutoverNative || config.validate() != nil {
-		return nil, errors.New("native publisher requires a native cutover scope and independent evidence verifier")
+func NewKubeFencedNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, config KubeDeploymentCutover, clusterID string, evidence DeploymentCutoverEvidence, registry *IndependentRegistry) (*NativePublisher, error) {
+	if store == nil || store.client == nil || evidence == nil || registry == nil || registry.transport == nil ||
+		config.Phase != KubeCutoverNative || config.validate() != nil {
+		return nil, errors.New("native publisher requires a native cutover scope, independent evidence verifier, and runtime registry")
 	}
 	if target, ok := store.targets[config.Key]; !ok || target.Namespace != config.Namespace || target.MonitorComponent != config.MonitorComponent {
 		return nil, errors.New("native publisher's Guardian target differs from its Kubernetes cutover scope")
 	}
-	return NewNativePublisher(store, journal, &kubeDeploymentAdmission{store.client, config, clusterID, evidence}, clusterID)
+	publisher, err := newNativePublisher(store, journal, &kubeDeploymentAdmission{store.client, config, clusterID, evidence}, clusterID)
+	if err != nil {
+		return nil, err
+	}
+	publisher.artifacts = registry
+	return publisher, nil
 }
 
 func (gate *kubeDeploymentAdmission) VerifyNativePublication(ctx context.Context, boundary NativePublicationBoundary) error {

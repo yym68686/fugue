@@ -160,6 +160,19 @@ A second release keeps the already verified DesiredRelease digest as its
 predecessor and rollback identity when it is a serving-equivalent alias of the
 canonical monitor record. The rollback bytes must still match that monitor;
 changing the alias does not relax manifest, image, or health-contract checks.
+
+The Kubernetes-fenced publisher requires an explicitly configured independent
+HTTPS registry. Before reserving an execution it reads the immutable forward
+and rollback artifacts in their actual runtime repositories, including the
+selected platform manifest, configuration and all layers. It verifies their
+digests and sizes and checks the OCI revision against each receipt. It rejects
+mutable references, out-of-origin authentication or redirects, and unavailable
+or corrupt blobs. It rechecks cutover evidence and the live workload after
+the streaming read and before issuing any claim. A successful read does not
+grant authorization or prove retention or worker reachability. The mirror,
+registry credentials, and existing rollout/repair consumers must still be
+configured and tested independently of GitHub before cutover.
+
 ### Kubernetes admission barrier for an existing Deployment
 
 The offline renderer produces three Kubernetes v1

@@ -36,6 +36,7 @@ type desiredPublication struct {
 	record, execution, desired *corev1.ConfigMap
 	bundle                     ExecutionBundle
 	monitorComponent           string
+	rollbackReceipt            declarativerelease.ArtifactReceipt
 }
 
 // PreviewDesired evaluates the same candidate and predecessor rules as
@@ -102,10 +103,15 @@ func (store *KubeStore) planDesiredPublicationFor(ctx context.Context, key Key, 
 		return desiredPublication{}, errors.New("Guardian candidate LKG is not the exact current stable release")
 	}
 	predecessorDigest := stableRecord.RecordDigest
+	var rollbackReceipt declarativerelease.ArtifactReceipt
 	if native {
 		predecessorDigest, err = nativePublicationPredecessor(snapshot, stableRecord)
 		if err != nil {
 			return desiredPublication{}, err
+		}
+		rollbackReceipt, err = declarativerelease.DecodeArtifactReceipt(strings.NewReader(snapshot.CurrentMonitorData["artifact-receipt.json"]))
+		if err != nil || rollbackReceipt.ImmutableRef != bundle.Prepared.LKG.ImageRef || rollbackReceipt.OCIRevision != bundle.Prepared.LKG.OCIRevision {
+			return desiredPublication{}, errors.New("native rollback artifact differs from the verified stable monitor")
 		}
 	}
 	record, err := bundle.ReleaseRecord(key, predecessorDigest)
@@ -167,6 +173,7 @@ func (store *KubeStore) planDesiredPublicationFor(ctx context.Context, key Key, 
 			Health: snapshot.Health,
 		},
 		record: recordMap, execution: executionMap, desired: desiredMap, bundle: bundle, monitorComponent: target.MonitorComponent,
+		rollbackReceipt: rollbackReceipt,
 	}, nil
 }
 

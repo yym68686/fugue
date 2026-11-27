@@ -40,6 +40,8 @@ type NativePublicationBoundary struct {
 	WorkloadUID, WorkloadVersion string
 	ForwardOCI, RollbackOCI      string
 	ArtifactReceiptDigest        string
+	ForwardReceipt               declarativerelease.ArtifactReceipt
+	RollbackReceipt              declarativerelease.ArtifactReceipt
 }
 
 // NativePublicationAdmission is a trusted provider-side admission dependency,
@@ -67,9 +69,10 @@ type NativePublisher struct {
 	journal   nativeExecutionJournal
 	admission NativePublicationAdmission
 	clusterID string
+	artifacts *IndependentRegistry
 }
 
-func NewNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, admission NativePublicationAdmission, clusterID string) (*NativePublisher, error) {
+func newNativePublisher(store *KubeStore, journal *productioncontrol.ExecutionJournal, admission NativePublicationAdmission, clusterID string) (*NativePublisher, error) {
 	if store == nil || store.client == nil || journal == nil || admission == nil || !componentPattern.MatchString(clusterID) {
 		return nil, errors.New("native Guardian publisher requires its cluster, journal and provider admission")
 	}
@@ -113,6 +116,16 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 	}
 	if err := p.verifyBoundary(ctx, boundary); err != nil {
 		return NativePublication{}, err
+	}
+	if p.artifacts != nil {
+		if err := p.artifacts.VerifyReleaseArtifacts(ctx, boundary); err != nil {
+			return NativePublication{}, err
+		}
+		// A streaming image check can take longer than a reconciliation
+		// interval. Do not reserve based on the preceding workload read.
+		if err := p.verifyBoundary(ctx, boundary); err != nil {
+			return NativePublication{}, err
+		}
 	}
 	claim, created, err := p.journal.ReserveExecution(ctx, actor, intentDigest, approvalDigest)
 	result := NativePublication{Claim: claim}
@@ -201,6 +214,7 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 		Predecessor: preview.CurrentDesired, Candidate: preview.ProposedDesired, DesiredResourceVersion: preview.DesiredResourceVersion,
 		Workload: workload, WorkloadUID: prewrite.UID, WorkloadVersion: prewrite.ResourceVersion,
 		ForwardOCI: bundle.Prepared.Forward.ImageRef, RollbackOCI: bundle.Prepared.LKG.ImageRef, ArtifactReceiptDigest: bundle.Artifact.ReceiptDigest,
+		ForwardReceipt: bundle.Artifact, RollbackReceipt: publication.rollbackReceipt,
 	}, nil
 }
 
