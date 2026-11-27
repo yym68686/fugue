@@ -37,9 +37,8 @@ const (
 	projectImageUsageReasonMissingBlob             = "missing_blob"
 	projectImageUsageReasonNoStorageEvidence       = "no_storage_evidence"
 	projectImageUsageReasonRegistryNotConfigured   = "registry_not_configured"
-	defaultProjectImageUsageCacheTTL               = 5 * time.Minute
 	projectImageUsageAppBuildLimit                 = 8
-	projectImageUsageSoftWait                      = 50 * time.Millisecond
+	projectImageUsageSoftWait                      = appimages.UsageSnapshotSoftWait
 )
 
 type appImageSummary struct {
@@ -99,50 +98,9 @@ type appImageRedeployResponse struct {
 	Operation model.Operation  `json:"operation"`
 }
 
-type projectImageUsageAppSummary struct {
-	AppID                string   `json:"app_id"`
-	AppName              string   `json:"app_name"`
-	VersionCount         int      `json:"version_count"`
-	CurrentVersionCount  int      `json:"current_version_count"`
-	StaleVersionCount    int      `json:"stale_version_count"`
-	TotalSizeBytes       int64    `json:"total_size_bytes"`
-	CurrentSizeBytes     int64    `json:"current_size_bytes"`
-	StaleSizeBytes       int64    `json:"stale_size_bytes"`
-	ReclaimableSizeBytes int64    `json:"reclaimable_size_bytes"`
-	MeasurementStatus    string   `json:"measurement_status,omitempty"`
-	MeasurementReasons   []string `json:"measurement_reasons,omitempty"`
-}
-
-type projectImageUsageSummary struct {
-	ProjectID            string                        `json:"project_id"`
-	VersionCount         int                           `json:"version_count"`
-	CurrentVersionCount  int                           `json:"current_version_count"`
-	StaleVersionCount    int                           `json:"stale_version_count"`
-	TotalSizeBytes       int64                         `json:"total_size_bytes"`
-	CurrentSizeBytes     int64                         `json:"current_size_bytes"`
-	StaleSizeBytes       int64                         `json:"stale_size_bytes"`
-	ReclaimableSizeBytes int64                         `json:"reclaimable_size_bytes"`
-	Apps                 []projectImageUsageAppSummary `json:"apps"`
-	MeasurementStatus    string                        `json:"measurement_status,omitempty"`
-	MeasurementReasons   []string                      `json:"measurement_reasons,omitempty"`
-}
-
-type projectImageUsageResponse struct {
-	RegistryConfigured bool                       `json:"registry_configured"`
-	ReclaimRequiresGC  bool                       `json:"reclaim_requires_gc"`
-	ReclaimNote        string                     `json:"reclaim_note,omitempty"`
-	ImageStoreMode     string                     `json:"image_store_mode,omitempty"`
-	MeasurementStatus  string                     `json:"measurement_status,omitempty"`
-	MeasurementNote    string                     `json:"measurement_note,omitempty"`
-	MeasurementReasons []string                   `json:"measurement_reasons,omitempty"`
-	ObservedAt         *time.Time                 `json:"observed_at,omitempty"`
-	Projects           []projectImageUsageSummary `json:"projects"`
-}
-
-type projectImageUsageLoadResult struct {
-	err      error
-	response projectImageUsageResponse
-}
+type projectImageUsageAppSummary = appimages.ProjectUsageAppSummary
+type projectImageUsageSummary = appimages.ProjectUsageSummary
+type projectImageUsageResponse = appimages.ProjectUsageResponse
 
 type appImageCandidate struct {
 	ImageRef        string
@@ -194,72 +152,17 @@ func (s *Server) cachedProjectImageUsageResponse(
 	ctx context.Context,
 	principal model.Principal,
 ) (projectImageUsageResponse, error) {
-	key := projectImageUsageCacheKey(principal)
-	if response, ok := s.projectImageUsageCache.get(key); ok {
-		return response, nil
-	}
-	staleEntry, hasStaleEntry := s.projectImageUsageCache.getEntry(key)
-
-	resultCh := make(chan projectImageUsageLoadResult, 1)
-	// Preserve the request's Server-Timing recorder while detaching the
-	// refresh from client cancellation. Without this, the expensive cold
-	// image snapshot was invisible in the API's own stage timings.
-	refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-	go func() {
-		defer cancel()
-		response, err := s.projectImageUsageCache.do(key, func() (projectImageUsageResponse, error) {
-			return s.loadProjectImageUsageResponse(refreshCtx, principal)
-		})
-		resultCh <- projectImageUsageLoadResult{err: err, response: response}
-	}()
-
-	// A cold cache has no truthful project/app skeleton to return. Wait for the
-	// initial load instead of fabricating an empty project list. The bounded
-	// soft wait is only a stale-while-revalidate optimization for callers that
-	// already have a previously observed snapshot.
-	if !hasStaleEntry {
-		select {
-		case result := <-resultCh:
-			if result.err != nil {
-				return projectImageUsageResponse{}, result.err
-			}
-			return result.response, nil
-		case <-ctx.Done():
-			return projectImageUsageResponse{}, ctx.Err()
+	return s.projectImageUsageCache.Load(ctx, projectImageUsageCacheKey(principal), func(refreshCtx context.Context) (projectImageUsageResponse, error) {
+		return s.loadProjectImageUsageResponse(refreshCtx, principal)
+	}, func(err error) {
+		if s.log != nil {
+			s.log.Printf("project image usage background refresh failed: %v", err)
 		}
-	}
-
-	timer := time.NewTimer(projectImageUsageSoftWait)
-	defer timer.Stop()
-
-	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			var httpErr consoleHTTPError
-			if errors.As(result.err, &httpErr) {
-				return projectImageUsageResponse{}, result.err
-			}
-			return projectImageUsageResponse{}, result.err
-		}
-		return result.response, nil
-	case <-ctx.Done():
-		return projectImageUsageResponse{}, ctx.Err()
-	case <-timer.C:
-	}
-
-	go s.logProjectImageUsageRefreshResult(resultCh)
-	return staleEntry.value, nil
+	})
 }
 
-func projectImageUsageCacheKey(principal model.Principal) string {
-	return principalVisibilityCacheKey(principal)
-}
-
-func (s *Server) logProjectImageUsageRefreshResult(resultCh <-chan projectImageUsageLoadResult) {
-	result := <-resultCh
-	if result.err != nil && s.log != nil {
-		s.log.Printf("project image usage background refresh failed: %v", result.err)
-	}
+func projectImageUsageCacheKey(principal model.Principal) appimages.UsageScope {
+	return appimages.ScopeForPrincipal(principal)
 }
 
 func (s *Server) loadProjectImageUsageResponse(

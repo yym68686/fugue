@@ -10,11 +10,17 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/appimages"
 	"fugue/internal/auth"
 	"fugue/internal/imagebilling"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
+
+type projectImageUsageLoadResult struct {
+	err      error
+	response projectImageUsageResponse
+}
 
 func mustRuntimeDigestRefForAppImagesTest(t *testing.T, pushBase, pullBase, imageRef, digest string) string {
 	t.Helper()
@@ -482,12 +488,13 @@ func TestCachedProjectImageUsageExpiredEntryUsesStaleWhileRevalidate(t *testing.
 			}},
 		}},
 	}
-	server.projectImageUsageCache.set(key, stale)
-	server.projectImageUsageCache.mu.Lock()
-	entry := server.projectImageUsageCache.byKey[key]
-	entry.expiresAt = time.Now().Add(-time.Second)
-	server.projectImageUsageCache.byKey[key] = entry
-	server.projectImageUsageCache.mu.Unlock()
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	server.projectImageUsageCache = appimages.NewUsageSnapshots(time.Minute, func() time.Time {
+		return time.Unix(0, clock.Load())
+	})
+	server.projectImageUsageCache.Publish(key, stale, time.Time{})
+	clock.Add(int64(2 * time.Minute))
 
 	inspectStarted := make(chan struct{}, 1)
 	inspectRelease := make(chan struct{})
@@ -525,7 +532,7 @@ func TestCachedProjectImageUsageExpiredEntryUsesStaleWhileRevalidate(t *testing.
 	close(inspectRelease)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if fresh, ok := server.projectImageUsageCache.get(key); ok && !reflect.DeepEqual(fresh, stale) {
+		if fresh, ok := server.projectImageUsageCache.Fresh(key); ok && !reflect.DeepEqual(fresh, stale) {
 			break
 		}
 		if time.Now().After(deadline) {
