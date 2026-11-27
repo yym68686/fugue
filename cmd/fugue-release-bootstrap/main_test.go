@@ -142,3 +142,42 @@ func TestBootstrapParticipationProfilesDoNotAuthorizePublication(t *testing.T) {
 		t.Fatalf("participation settlement did not bind the claimed version: %+v %v", r, err)
 	}
 }
+
+func TestBootstrapDNSProfilesDoNotAuthorizeOtherResources(t *testing.T) {
+	root := t.TempDir()
+	profile := filepath.Join(root, "dns.json")
+	cfg := settings{Mode: "dns-settle", Actor: "dns-observer", JournalFile: "/fixture/dns-journal.json",
+		WitnessDirectory: root, ObserverPublicKey: make(ed25519.PublicKey, ed25519.PublicKeySize),
+		DNSOrigin: "https://dns-control.example.test", DNSReadTokenFile: "/fixture/dns-reader"}
+	write := func() {
+		t.Helper()
+		raw, err := json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(profile, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	if _, err := readSettings(profile, "dns-settle"); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"dns-anchor", "publish", "participation-settle"} {
+		if _, err := readSettings(profile, command); err == nil {
+			t.Fatalf("DNS settlement profile authorized %s", command)
+		}
+	}
+	cfg.Registry = "registry.example.test"
+	write()
+	if _, err := readSettings(profile, "dns-settle"); err == nil {
+		t.Fatal("DNS settlement accepted registry authority")
+	}
+	d := "sha256:" + strings.Repeat("b", 64)
+	if _, err := parseRequest([]string{"dns-checkpoint"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseRequest([]string{"dns-settle", d, "restored", "8", d, d}); err == nil {
+		t.Fatal("DNS settlement accepted rollback with no dedicated operation")
+	}
+}

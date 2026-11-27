@@ -129,10 +129,6 @@ func ValidateSources(s Sources, now time.Time) (Payload, platformproducer.Projec
 	if err != nil {
 		return out, projection, err
 	}
-	full, err := publicationRef(s.Full, model.PlatformArtifactKindReleaseSet, "global", "full")
-	if err != nil {
-		return out, projection, err
-	}
 	p, err := platformproducer.Decode(s.Producer.Artifact)
 	if err != nil {
 		return out, projection, err
@@ -159,28 +155,11 @@ func ValidateSources(s Sources, now time.Time) (Payload, platformproducer.Projec
 		platformproducer.ValidateOfflineEdgeUpdate(p, n, s.Static, s.PreviousDNS, s.NextDNS) != nil {
 		return out, projection, errors.New("DNS request is not the existing producer's exact single-hold transition")
 	}
-	a, r, l := s.Full.Artifact, s.Full.Release, s.LKG
-	if r.VerificationState != model.PlatformArtifactVerificationStateVerified || r.VerifiedLKGGeneration != a.Generation ||
-		r.ReleasedByType != model.ActorTypeBootstrap || r.ReleasedByID != platformproducer.Actor ||
-		a.Metadata[platformproducer.PolicyReleaseMetadata] != previous.ReleaseID ||
-		a.Metadata[platformproducer.StaticIntentIDMetadata] != p.StaticIntentArtifactID ||
-		a.Metadata[platformproducer.StaticIntentDigestMetadata] != p.StaticIntentDigest ||
-		a.Metadata[platformproducer.DNSPolicyIDMetadata] != p.DNSPolicyArtifactID ||
-		a.Metadata[platformproducer.DNSPolicyDigestMetadata] != p.DNSPolicyDigest ||
-		(a.Content["publication_role"] != nil && a.Content["publication_role"] != "") {
-		return out, projection, errors.New("full publication does not verify the exact predecessor producer and pinned sources")
-	}
-	if _, err := platformconfig.ValidateReleaseComposition(a); err != nil {
+	full, err := verifiedServingFull(s.Producer, p, s.Full, s.LKG, now)
+	if err != nil {
 		return out, projection, err
 	}
-	if !validID(l.ID) || l.ArtifactID != full.ArtifactID || l.ContentHash != full.ContentHash ||
-		l.ArtifactKind != a.ArtifactKind || l.Scope != a.Scope || l.ScopeKey != "global" ||
-		l.SchemaVersion != a.SchemaVersion || l.Generation != a.Generation || l.GenerationSequence != a.GenerationSequence ||
-		l.ArtifactProvenance != a.Provenance || l.SnapshotProvenance.Signature == "" ||
-		l.VerifiedByReleaseID != full.ReleaseID || !platformproducer.ValidDigest(l.VerificationEvidenceHash) ||
-		now.IsZero() || !l.ExpiresAt.After(now) {
-		return out, projection, errors.New("DNS transition requires the exact unexpired verified full LKG")
-	}
+	l := s.LKG
 	static, err := platformproducer.DecodeStaticIntent(s.Static)
 	if err != nil {
 		return out, projection, err
@@ -224,6 +203,39 @@ func ValidateSources(s Sources, now time.Time) (Payload, platformproducer.Projec
 		return Payload{}, projection, errors.New("DNS offline change has no exact edge delta")
 	}
 	return out, projection, nil
+}
+
+// verifiedServingFull binds a current Full and its verified, unexpired LKG
+// to the exact selected producer policy and pinned source artifacts. It is
+// not itself external DNS answer evidence.
+func verifiedServingFull(producer Publication, p platformproducer.Policy, serving Publication, l model.PlatformLKGSnapshot, now time.Time) (model.PlatformPublicationPrecondition, error) {
+	full, err := publicationRef(serving, model.PlatformArtifactKindReleaseSet, "global", "full")
+	if err != nil {
+		return full, err
+	}
+	a, r := serving.Artifact, serving.Release
+	if r.VerificationState != model.PlatformArtifactVerificationStateVerified || r.VerifiedLKGGeneration != a.Generation ||
+		r.ReleasedByType != model.ActorTypeBootstrap || r.ReleasedByID != platformproducer.Actor ||
+		a.Metadata[platformproducer.PolicyReleaseMetadata] != producer.Release.ID ||
+		a.Metadata[platformproducer.StaticIntentIDMetadata] != p.StaticIntentArtifactID ||
+		a.Metadata[platformproducer.StaticIntentDigestMetadata] != p.StaticIntentDigest ||
+		a.Metadata[platformproducer.DNSPolicyIDMetadata] != p.DNSPolicyArtifactID ||
+		a.Metadata[platformproducer.DNSPolicyDigestMetadata] != p.DNSPolicyDigest ||
+		(a.Content["publication_role"] != nil && a.Content["publication_role"] != "") {
+		return full, errors.New("full publication does not verify the exact selected producer and pinned sources")
+	}
+	if _, err := platformconfig.ValidateReleaseComposition(a); err != nil {
+		return full, err
+	}
+	if !validID(l.ID) || l.ArtifactID != full.ArtifactID || l.ContentHash != full.ContentHash ||
+		l.ArtifactKind != a.ArtifactKind || l.Scope != a.Scope || l.ScopeKey != "global" ||
+		l.SchemaVersion != a.SchemaVersion || l.Generation != a.Generation || l.GenerationSequence != a.GenerationSequence ||
+		l.ArtifactProvenance != a.Provenance || l.SnapshotProvenance.Signature == "" ||
+		l.VerifiedByReleaseID != full.ReleaseID || !platformproducer.ValidDigest(l.VerificationEvidenceHash) ||
+		now.IsZero() || !l.ExpiresAt.After(now) {
+		return full, errors.New("DNS control requires the exact unexpired verified full LKG")
+	}
+	return full, nil
 }
 
 func (p Payload) validate() error {

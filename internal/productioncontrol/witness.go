@@ -132,6 +132,23 @@ func NewObservedExecutionJournal(journal *Journal, source WitnessReader, trusted
 	return newWitnessedExecutionJournal(journal, source, trusted, check)
 }
 
+// NewGlobalProducerExecutionJournal adds transactional provider closure to
+// the signed, live DNS readback. Use the database containing both the journal
+// and the platform-store tables. Observer keys are scoped to this resource.
+func NewGlobalProducerExecutionJournal(journal *Journal, source WitnessReader, trusted map[string]TrustedWitness, check WitnessObservationCheck) (*ExecutionJournal, error) {
+	for _, key := range trusted {
+		if key.Scope.ResourceID != GlobalProducerPolicyResource {
+			return nil, errors.New("global producer verifier cannot authorize another resource")
+		}
+	}
+	e, err := NewObservedExecutionJournal(journal, source, trusted, check)
+	if err != nil {
+		return nil, err
+	}
+	e.globalProducer = true
+	return e, nil
+}
+
 func newWitnessedExecutionJournal(journal *Journal, source WitnessReader, trusted map[string]TrustedWitness, check WitnessObservationCheck) (*ExecutionJournal, error) {
 	if journal == nil || source == nil || len(trusted) == 0 {
 		return nil, errors.New("production execution requires an independent witness source and trust")

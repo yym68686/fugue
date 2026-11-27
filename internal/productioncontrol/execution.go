@@ -82,8 +82,9 @@ type ExecutionEvidence interface {
 }
 
 type ExecutionJournal struct {
-	journal  *Journal
-	evidence ExecutionEvidence
+	journal        *Journal
+	evidence       ExecutionEvidence
+	globalProducer bool
 }
 
 func NewExecutionJournal(journal *Journal, evidence ExecutionEvidence) (*ExecutionJournal, error) {
@@ -387,6 +388,14 @@ func (e *ExecutionJournal) CompleteExecution(ctx context.Context, actor string, 
 		}
 		if state.LastFence != claim.Fence || state.Pending != claim.IntentDigest {
 			return false, ErrStaleFence
+		}
+		if claim.ResourceID == GlobalProducerPolicyResource {
+			if !e.globalProducer {
+				return false, errors.New("global producer requires transactional provider closure verification")
+			}
+			if err := verifyGlobalProducerClosure(ctx, tx, claim, result); err != nil {
+				return false, err
+			}
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO fugue_control.execution_results
 			(intent_digest,outcome,generation,verified_digest,evidence_digest,actor) VALUES ($1,$2,$3,$4,$5,$6)`,
