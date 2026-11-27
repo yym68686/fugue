@@ -85,6 +85,29 @@ it still requires Front, Worker and network recovery checks before any
 readmission can be considered. It is not a comparison against the legacy
 runtime on production and emits no executable intent or cutover evidence.
 
+`shadow-participation-dns JOURNAL_CONFIG KUBECONFIG CONTEXT NODE PRIVATE_TOKEN_FILE`
+adds a GET to the exact HTTPS Fugue origin in the approved topology when a
+Ready Node has a serving Service. It binds the returned node, group and
+public address to that Service and compares two fresh observations around
+the Kubernetes reads. A suspension without verified serving exclusion,
+unavailable policy, expired heartbeat evidence or a change during the read
+fails closed. A matching result is a phase preview only; it is not an
+independent readback from the DNS provider and cannot authorize any write.
+Stabilization still does not prove Front/Worker or network recovery.
+
+The API serves this projection at
+`GET /v1/edge/nodes/{edge_id}/participation-observation`. Leave it disabled
+unless a dedicated seed is provisioned as
+`FUGUE_PARTICIPATION_OBSERVER_SIGNING_KEY` and its key ID as
+`FUGUE_PARTICIPATION_OBSERVER_SIGNING_KEY_ID`. Keep the seed out of the
+shadow client, Actions, the repository and logs. On the trusted issuer,
+`issue-participation-observer JOURNAL_CONFIG NODE KEY_ID PRIVATE_SEED_FILE`
+reads the approved enrollment and outputs a node/group-scoped token valid
+for two minutes. Redirect stdout straight to a new private file (use
+`umask 077`) for the read-only observer; never print the token in logs.
+These credentials do not grant admission, DNS publication or Kubernetes
+permissions and cannot authenticate an admin or other component endpoint.
+
 `render-participation-freeze NODE` prints a Kubernetes admission policy and
 binding. It installs nothing and grants nobody a write path. For one Node
 name it prevents admission of creates/deletes and changes to the automatic

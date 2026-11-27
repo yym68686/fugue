@@ -46,7 +46,7 @@ func TestKubernetesShadowWaitsForEvidenceItCannotCollect(t *testing.T) {
 			if tc.baseline > 0 {
 				readers = &ReaderObservation{Baseline: tc.baseline, Namespace: policy.Namespace, Group: policy.Members[0].Group}
 			}
-			got, err := evaluateKubernetesShadow(policy, "node-a", memberCapture{report: member, snapshot: s}, readers, now)
+			got, err := evaluateKubernetesShadow(policy, "node-a", memberCapture{report: member, snapshot: s}, readers, nil, now)
 			if tc.waiting == "" && tc.wantAction == "" {
 				if err == nil || got.Preview != nil {
 					t.Fatalf("unverified reader baseline should fail closed: %+v, %v", got, err)

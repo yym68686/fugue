@@ -179,7 +179,7 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 	for _, requirement := range security {
 		for scheme := range requirement {
 			switch scheme {
-			case "BearerAuth", "RuntimeBearerAuth", "NodeUpdaterBearerAuth", "PlatformComponentBearerAuth", "EdgeRouteIntentComponentBearerAuth":
+			case "BearerAuth", "RuntimeBearerAuth", "NodeUpdaterBearerAuth", "PlatformComponentBearerAuth", "EdgeRouteIntentComponentBearerAuth", "ParticipationObserverBearerAuth":
 			case "KubernetesServiceAccountBearerAuth", "EdgeToken", "DownloadToken":
 				// These purpose-specific tokens are validated by their handlers.
 			default:
@@ -191,6 +191,12 @@ func inferAuthKind(doc *openapi3.T, operation *openapi3.Operation) (string, erro
 				return "", errors.New("cannot combine bearer auth schemes on the same operation")
 			}
 			auth = "edge-route-intent-component"
+		}
+		if _, ok := requirement["ParticipationObserverBearerAuth"]; ok {
+			if auth != "none" {
+				return "", errors.New("cannot combine bearer auth schemes on the same operation")
+			}
+			auth = "participation-observer"
 		}
 		if _, ok := requirement["PlatformComponentBearerAuth"]; ok {
 			if auth != "none" {
@@ -242,6 +248,8 @@ func renderRoutesFile(routes []routeDefinition) ([]byte, error) {
 			handlerExpr = "s.auth.RequirePlatformComponent(" + handlerExpr + ")"
 		case "edge-route-intent-component":
 			handlerExpr = "s.auth.RequireEdgeRouteIntentComponent(" + handlerExpr + ")"
+		case "participation-observer":
+			handlerExpr = "s.auth.RequireParticipationObserver(" + handlerExpr + ")"
 		}
 		fmt.Fprintf(&b, "\tmux.Handle(%q, %s)\n", route.Pattern, handlerExpr)
 	}

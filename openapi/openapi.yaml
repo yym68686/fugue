@@ -1215,6 +1215,31 @@ paths:
                 $ref: "#/components/schemas/EdgeNodeResponse"
         default:
           $ref: "#/components/responses/ErrorResponse"
+  /v1/edge/nodes/{edge_id}/participation-observation:
+    get:
+      operationId: getEdgeParticipationObservation
+      summary: Observe one Edge member for production participation shadowing
+      description: Reports heartbeat and DNS policy/serving observations. Does not authorize recovery or mutate production.
+      tags: [Edge]
+      x-fugue-handler: handleEdgeParticipationObservation
+      security:
+        - ParticipationObserverBearerAuth: []
+      parameters:
+        - in: path
+          name: edge_id
+          required: true
+          schema:
+            type: string
+            maxLength: 253
+      responses:
+        '200':
+          description: Diagnostic observation for the exact enrolled node and group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeParticipationObservation"
+        default:
+          $ref: "#/components/responses/ErrorResponse"
   /v1/edge/nodes/{edge_id}/quality:
     get:
       operationId: getEdgeNodeQuality
@@ -16559,6 +16584,11 @@ components:
       scheme: bearer
       bearerFormat: fugue_pc_v1
       description: Short-lived Edge Control identity accepted only by the RouteIntent endpoint.
+    ParticipationObserverBearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: fugue_pc_v1
+      description: Short-lived node- and group-bound identity signed by the dedicated participation observer keyring.
     EdgeToken:
       type: apiKey
       in: query
@@ -21621,6 +21651,20 @@ components:
           $ref: "#/components/schemas/EdgeNode"
         group:
           $ref: "#/components/schemas/EdgeGroup"
+    EdgeParticipationObservation:
+      type: object
+      additionalProperties: false
+      required: [node, group, public_ipv4, evaluated_at, heartbeat_fresh, dns_state, dns_reason, dns_serving_evidence]
+      properties:
+        node: {type: string}
+        group: {type: string}
+        public_ipv4: {type: string}
+        evaluated_at: {type: string, format: date-time}
+        fresh_until: {type: string, format: date-time}
+        heartbeat_fresh: {type: boolean}
+        dns_state: {type: string}
+        dns_reason: {type: string}
+        dns_serving_evidence: {type: string}
     EdgeNodeQualitySummary:
       type: object
       additionalProperties: false

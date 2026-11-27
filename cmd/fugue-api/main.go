@@ -22,6 +22,7 @@ import (
 	"fugue/internal/livediagnostics"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
+	"fugue/internal/platformcontrol"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/store"
 )
@@ -67,6 +68,10 @@ func main() {
 	authenticator.WorkloadIdentitySigningKey = cfg.WorkloadIdentitySigningKey
 	authenticator.PlatformComponentIdentityKeyring = platformComponentIdentityKeyringFromEnv()
 	authenticator.EdgeRouteIntentIdentityKeyring = edgeRouteIntentIdentityKeyringFromEnv()
+	authenticator.ParticipationObserverKeyring = platformcontrol.DeriveParticipationObserverKeyring(
+		os.Getenv("FUGUE_PARTICIPATION_OBSERVER_SIGNING_KEY"),
+		os.Getenv("FUGUE_PARTICIPATION_OBSERVER_SIGNING_KEY_ID"),
+	)
 
 	server := api.NewServer(store, authenticator, logger, api.ServerConfig{
 		WorkerFrontBindings:             workers,
