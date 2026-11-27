@@ -291,19 +291,6 @@ func (s AppReleaseService) AbortRelease(ctx context.Context, principal model.Pri
 	return policy, nil
 }
 
-func (s AppReleaseService) RetireRelease(ctx context.Context, app model.App, release model.AppRelease, reason string) (model.AppRelease, error) {
-	if s.Store == nil {
-		return model.AppRelease{}, fmt.Errorf("app release store is nil")
-	}
-	now := s.now()
-	release.Role = model.AppReleaseRoleRetired
-	release.Status = model.AppReleaseStatusRetired
-	release.StatusReason = strings.TrimSpace(reason)
-	release.ReleaseMessage = "retired: " + strings.TrimSpace(reason)
-	release.RetiredAt = &now
-	return s.Store.UpdateAppRelease(release)
-}
-
 func (s AppReleaseService) RestoreStableTraffic(ctx context.Context, principal model.Principal, app model.App) (model.AppTrafficPolicy, error) {
 	policy, err := s.EnsureStableTrafficPolicy(ctx, principal, app)
 	if err != nil {
