@@ -202,6 +202,15 @@ func TestNativePublicationPersistsClaimBeforeProviderWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if observed, err := gate.ReadReleaseState(ctx, snapshot); err != nil || observed.LastIntent != recorded.Digest ||
+		observed.LastFence != publication.Claim.Fence || observed.Pending != recorded.Digest || observed.LastVerified != baseline.Verified {
+		t.Fatalf("status did not observe its exact open fence and serving baseline: %+v error=%v", observed, err)
+	}
+	changed := snapshot
+	changed.DesiredResourceVersion = "19"
+	if _, err := gate.ReadReleaseState(ctx, changed); err == nil {
+		t.Fatal("status accepted the last verified version for a stale pointer")
+	}
 	for name, edit := range map[string]func(*Snapshot){
 		"different approval":    func(s *Snapshot) { s.NativeIntent = testDigest },
 		"different fence":       func(s *Snapshot) { s.NativeFence++ },
