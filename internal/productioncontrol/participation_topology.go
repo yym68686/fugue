@@ -16,10 +16,12 @@ import (
 )
 
 const (
-	ParticipationTopologyResource  = "topology/node-participation"
-	ParticipationPolicySchema      = "fugue.automatic-node-participation/v1"
-	BoundParticipationPolicySchema = "fugue.automatic-node-participation/v2"
-	MaxParticipationPolicyBytes    = 128 << 10
+	ParticipationTopologyResource   = "topology/node-participation"
+	ParticipationNodeResourcePrefix = "kubernetes/node/"
+	ParticipationHoldIntentSchema   = "fugue.node-participation-hold/v1"
+	ParticipationPolicySchema       = "fugue.automatic-node-participation/v1"
+	BoundParticipationPolicySchema  = "fugue.automatic-node-participation/v2"
+	MaxParticipationPolicyBytes     = 128 << 10
 )
 
 var (
@@ -78,6 +80,12 @@ type ParticipationMember struct {
 type ParticipationWorkers struct {
 	A string `json:"a"`
 	B string `json:"b"`
+}
+
+// ParticipationNodeResource keeps replacement UIDs under one physical
+// Node name's fence; the signed hold payload still pins the particular UID.
+func ParticipationNodeResource(cluster, node string) Scope {
+	return Scope{ClusterID: cluster, ResourceID: ParticipationNodeResourcePrefix + digest([]byte(node))[7:]}
 }
 
 type ParticipationProbe struct {
@@ -226,6 +234,18 @@ func (j *Journal) ActivateParticipationTopology(ctx context.Context, cluster, ac
 		if current != (Version{intent.Generation, intent.CurrentDigest}) {
 			return false, ErrResourceDrift
 		}
+		var pending bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM fugue_control.execution_claims c
+			WHERE c.cluster_id=$1 AND starts_with(c.resource_id,$2) AND NOT EXISTS(
+				SELECT 1 FROM fugue_control.execution_results r WHERE r.intent_digest=c.intent_digest
+			)
+		)`, cluster, ParticipationNodeResourcePrefix).Scan(&pending); err != nil {
+			return false, err
+		}
+		if pending {
+			return false, ErrResourceBusy
+		}
 		at := j.now().UTC().Truncate(time.Microsecond)
 		if err := verifyRecordedApprovalAt(ctx, tx, j, intent, intentDigest, approvalDigest, at); err != nil {
 			return false, err
@@ -235,6 +255,36 @@ func (j *Journal) ActivateParticipationTopology(ctx context.Context, cluster, ac
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, cluster, scope.ResourceID, p.Generation, intent.TargetDigest, intentDigest, approvalDigest, actor, at)
 		return err == nil, err
 	})
+}
+
+// verifyParticipationExecutionTopology binds the one-time reservation to
+// the current topology while its activation lock is held. The provider
+// adapter still checks the full payload, current state, and write authority.
+func verifyParticipationExecutionTopology(ctx context.Context, tx *sql.Tx, intent Intent, payload []byte) error {
+	var b struct {
+		Schema           string  `json:"schema"`
+		Phase            string  `json:"phase"`
+		Topology         Version `json:"topology"`
+		TopologyApproval string  `json:"topologyApproval"`
+		To               struct {
+			Node string `json:"node"`
+		} `json:"to"`
+	}
+	strict, err := kubejson.UnmarshalStrict(payload, &b, kubejson.DisallowDuplicateFields)
+	if err != nil || len(strict) != 0 || b.Schema != ParticipationHoldIntentSchema || b.Phase != "offline" ||
+		!b.Topology.valid() || !digestPattern.MatchString(b.TopologyApproval) ||
+		!participationName.MatchString(b.To.Node) || intent.scope() != ParticipationNodeResource(intent.ClusterID, b.To.Node) {
+		return errors.New("node participation reservation requires a topology-bound offline hold")
+	}
+	var v Version
+	var a string
+	err = tx.QueryRowContext(ctx, `SELECT generation, policy_digest, approval_digest
+		FROM fugue_control.participation_topologies WHERE cluster_id=$1 ORDER BY generation DESC LIMIT 1`, intent.ClusterID).
+		Scan(&v.Generation, &v.Digest, &a)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && (v != b.Topology || a != b.TopologyApproval) {
+		return ErrResourceDrift
+	}
+	return err
 }
 
 // ReadParticipationTopology authenticates the stored policy at the moment it

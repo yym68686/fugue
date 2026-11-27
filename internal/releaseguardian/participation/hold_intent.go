@@ -12,12 +12,12 @@ import (
 	"fugue/internal/productioncontrol"
 )
 
-const holdIntentSchema = "fugue.node-participation-hold/v1"
+const holdIntentSchema = productioncontrol.ParticipationHoldIntentSchema
 
 // HoldResource identifies the one protected Node object regardless of a
 // replacement UID. The physical UID is bound to the version and payload.
 func HoldResource(cluster, node string) productioncontrol.Scope {
-	return productioncontrol.Scope{ClusterID: cluster, ResourceID: "kubernetes/node/" + digest([]byte(node))[7:]}
+	return productioncontrol.ParticipationNodeResource(cluster, node)
 }
 
 type holdIntentState struct {

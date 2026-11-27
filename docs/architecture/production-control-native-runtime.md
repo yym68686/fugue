@@ -200,6 +200,12 @@ changes during observation. It never accepts a local replacement
 submission, reserves another dispatch or settles the claim. This
 command reports `executionEvidence=false` even when the target is visible.
 
+The ledger serializes Node hold reservation with topology activation.
+An offline hold can acquire a new fence only for the current approved
+topology; an unsettled Node fence prevents a successor topology from
+activating. Replaying the previous topology activation still returns the
+original receipt. This serialization does not fence any provider writer.
+
 Pre-dispatch authority for an offline hold is a separate, short-lived
 provider attestation. It binds the reviewed intent, approved Kubernetes
 identity and topology, dedicated writer, and exact type-checked policy and

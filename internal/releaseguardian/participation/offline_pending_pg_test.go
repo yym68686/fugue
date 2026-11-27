@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,6 +26,12 @@ type pendingFixtureEvidence struct{}
 
 func (pendingFixtureEvidence) VerifyBaseline(context.Context, productioncontrol.Baseline) error {
 	return nil // Disposable database only.
+}
+
+type pendingFixtureTerminalEvidence struct{ pendingFixtureEvidence }
+
+func (pendingFixtureTerminalEvidence) VerifyTerminal(context.Context, productioncontrol.Claim, productioncontrol.Intent, productioncontrol.ExecutionResult) error {
+	return nil // Used only for the synthetic transition at the end of this test.
 }
 
 func (pendingFixtureEvidence) VerifyTerminal(context.Context, productioncontrol.Claim, productioncontrol.Intent, productioncontrol.ExecutionResult) error {
@@ -153,6 +160,21 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("reserve fixture claim: %+v %v", claim, err)
 	}
+	currentVersion := topology.Version
+	successorPolicy := topology.Policy
+	successorPolicy.Generation++
+	raw, err := json.Marshal(successorPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := productioncontrol.DraftParticipationTopology("fixture", "topology-b", currentVersion, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorIntent, successorApproval := record(successor)
+	if _, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval); !errors.Is(err, productioncontrol.ErrResourceBusy) {
+		t.Fatalf("topology moved while a Node claim was pending: %v", err)
+	}
 	visible := before.DeepCopy()
 	visible.Annotations, visible.ResourceVersion = after, "11"
 	live.Store(visible)
@@ -168,4 +190,65 @@ func TestPendingOfflineHoldReadsReopenedPostgresJournal(t *testing.T) {
 	if replay, created, err := runtime.ReserveExecution(ctx, "fixture-writer", hold, approval); err != nil || created || replay != claim {
 		t.Fatalf("observation refreshed dispatch permission: %+v %v %v", replay, created, err)
 	}
+	terminalWriter, err := productioncontrol.NewExecutionJournal(j, pendingFixtureTerminalEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := productioncontrol.ExecutionResult{Outcome: productioncontrol.NotApplied, Verified: predecessor,
+		EvidenceDigest: digest([]byte("synthetic terminal fence"))}
+	if created, err := terminalWriter.CompleteExecution(ctx, "fixture-observer", claim, result); err != nil || !created {
+		t.Fatalf("fixture settlement: %v, %v", created, err)
+	}
+	if next, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval); err != nil || !next.Created {
+		t.Fatalf("settled operation prevented topology advancement: %+v, %v", next, err)
+	}
+	newRequest := s
+	newRequest.Intent.RequestID = "stale-topology"
+	stale, staleApproval := record(newRequest)
+	if _, created, err := runtime.ReserveExecution(ctx, "fixture-writer", stale, staleApproval); !errors.Is(err, productioncontrol.ErrResourceDrift) || created {
+		t.Fatalf("new claim on previous topology was accepted: %v, %v", created, err)
+	}
+
+	current, err := j.ReadParticipationTopology(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	racingHold, _, _ := draftFixtureOfflineHold(t, current, time.Now().UTC())
+	racingHold.Intent.RequestID = "racing-hold"
+	raceIntent, raceApproval := record(racingHold)
+	successorPolicy.Generation++
+	raw, err = json.Marshal(successorPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err = productioncontrol.DraftParticipationTopology("fixture", "topology-c", current.Version, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorIntent, successorApproval = record(successor)
+	start := make(chan struct{})
+	type transition struct {
+		created bool
+		err     error
+	}
+	reserved, activated := make(chan transition, 1), make(chan transition, 1)
+	go func() {
+		<-start
+		_, created, err := runtime.ReserveExecution(ctx, "fixture-writer", raceIntent, raceApproval)
+		reserved <- transition{created, err}
+	}()
+	go func() {
+		<-start
+		r, err := j.ActivateParticipationTopology(ctx, "fixture", "fixture-owner", successorIntent, successorApproval)
+		activated <- transition{r.Created, err}
+	}()
+	close(start)
+	h, a := <-reserved, <-activated
+	if h.created && h.err == nil && !a.created && errors.Is(a.err, productioncontrol.ErrResourceBusy) {
+		return
+	}
+	if a.created && a.err == nil && !h.created && errors.Is(h.err, productioncontrol.ErrResourceDrift) {
+		return
+	}
+	t.Fatalf("concurrent topology activation and hold must have one winner: reserve=%+v activate=%+v", h, a)
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -203,12 +204,23 @@ func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDi
 		return Claim{}, false, errors.New("invalid production execution request")
 	}
 	record, err := e.journal.record(ctx, intentDigest, func(tx *sql.Tx) (bool, error) {
-		intent, _, err := readIntent(ctx, tx, intentDigest)
+		intent, payload, err := readIntent(ctx, tx, intentDigest)
 		if err != nil {
 			return false, err
 		}
 		if intent.Operation == ParticipationTopology {
 			return false, errors.New("topology revisions do not authorize provider execution")
+		}
+		nodeScope := strings.HasPrefix(intent.ResourceID, ParticipationNodeResourcePrefix)
+		if nodeScope != (intent.Operation == NodeParticipation) {
+			return false, errors.New("node participation execution must use its canonical resource boundary")
+		}
+		if nodeScope {
+			// Lock order is topology then resource. Activation uses the
+			// same topology lock before checking for outstanding claims.
+			if err := lockResource(ctx, tx, Scope{intent.ClusterID, ParticipationTopologyResource}); err != nil {
+				return false, err
+			}
 		}
 		if err := lockResource(ctx, tx, intent.scope()); err != nil {
 			return false, err
@@ -223,6 +235,11 @@ func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDi
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return false, err
+		}
+		if nodeScope {
+			if err := verifyParticipationExecutionTopology(ctx, tx, intent, payload); err != nil {
+				return false, err
+			}
 		}
 		state, err := readResource(ctx, tx, intent.scope())
 		if err != nil {
