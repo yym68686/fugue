@@ -11,15 +11,15 @@ import (
 	"fugue/internal/productioncontrol"
 )
 
-func TestOfflineHoldAuthorityRequiresExactSignedCutover(t *testing.T) {
-	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+func offlineFixtureTopology(now time.Time) productioncontrol.VerifiedParticipationTopology {
 	adopt := false
-	topology := productioncontrol.VerifiedParticipationTopology{
+	return productioncontrol.VerifiedParticipationTopology{
 		Version:        productioncontrol.Version{Generation: 1, Digest: digest([]byte("topology"))},
 		IntentDigest:   digest([]byte("topology intent")),
 		ApprovalDigest: digest([]byte("approval")), RecordedAt: now.Add(-time.Minute),
 		Policy: productioncontrol.ParticipationPolicy{
 			Schema: productioncontrol.BoundParticipationPolicySchema, Generation: 1, Namespace: "fixture",
+			Origin: "https://fugue.example.test", Readers: productioncontrol.ParticipationReaders{Guardian: "guardian", CanaryProber: "canary"},
 			Kubernetes: &productioncontrol.ParticipationKubernetesBinding{
 				Endpoint: "https://cluster.example.test", CADigest: digest([]byte("ca")), NamespaceUID: "ns-a",
 			},
@@ -27,9 +27,15 @@ func TestOfflineHoldAuthorityRequiresExactSignedCutover(t *testing.T) {
 				Node: "node-a", NodeUID: "uid-a", Group: "cell-a", Component: "component-a",
 				Front: "front-a", Workers: productioncontrol.ParticipationWorkers{A: "worker-a", B: "worker-b"},
 				Reason: "network_unavailable", AdoptHold: &adopt, StableSeconds: 300,
+				Probes: []productioncontrol.ParticipationProbe{{Host: "front-a.example.test", Path: "/"}, {Host: "front-b.example.test", Path: "/health"}},
 			}},
 		},
 	}
+}
+
+func TestOfflineHoldAuthorityRequiresExactSignedCutover(t *testing.T) {
+	now := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+	topology := offlineFixtureTopology(now)
 	s, _, _ := draftFixtureOfflineHold(t, topology, now)
 	const writer = "system:serviceaccount:fixture:writer-a"
 	p, b, err := RenderOfflineHoldGuard(s, writer)
