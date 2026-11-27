@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"fugue/internal/appimages"
+	"fugue/internal/imagebilling"
 )
 
 const postOperationMaintenanceTimeout = 15 * time.Second
@@ -20,28 +20,7 @@ func (s *Service) syncTenantBillingImageStorage(ctx context.Context, tenantID st
 		return nil
 	}
 
-	apps, err := s.Store.ListAppsMetadata(tenantID, false)
-	if err != nil {
-		return err
-	}
-	ops, err := s.Store.ListImageRetentionOperations(tenantID, false)
-	if err != nil {
-		return err
-	}
-
-	storageBytes, err := appimages.MeasureTenantStorageBytes(
-		ctx,
-		s.inspectManagedImage,
-		apps,
-		ops,
-		s.registryPushBase,
-		s.registryPullBase,
-	)
-	if err != nil {
-		return err
-	}
-	_, err = s.Store.SyncTenantBillingImageStorage(tenantID, appimages.StorageBytesToGibibytes(storageBytes))
-	return err
+	return imagebilling.Refresh(ctx, s.Store.ImageStorageBilling(tenantID), s.inspectManagedImage, s.registryPushBase, s.registryPullBase)
 }
 
 func postOperationMaintenanceContext(ctx context.Context) (context.Context, context.CancelFunc) {

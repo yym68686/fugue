@@ -6399,7 +6399,7 @@ func TestSyncTenantBillingImageStorageContributesToCommittedStorageAndEstimate(t
 		t.Fatalf("create tenant: %v", err)
 	}
 
-	summary, err := s.SyncTenantBillingImageStorage(tenant.ID, 5)
+	summary, err := s.syncTenantBillingImageStorage(tenant.ID, 5)
 	if err != nil {
 		t.Fatalf("sync image storage: %v", err)
 	}

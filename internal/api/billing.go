@@ -2,13 +2,14 @@ package api
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"fugue/internal/appimages"
 	"fugue/internal/httpx"
+	"fugue/internal/imagebilling"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -203,53 +204,23 @@ func (s *Server) scheduleTenantBillingImageStorageRefresh(tenantID string) {
 	if !s.appImageInventoryConfigured() {
 		return
 	}
-	s.billingImageStorageRefresh.schedule(tenantID, s.log, s.refreshTenantBillingImageStorage)
+	s.billingImageStorageRefresh.Schedule(tenantID, s.log, s.refreshTenantBillingImageStorage)
 }
 
 func (s *Server) refreshTenantBillingImageStorage(ctx context.Context, tenantID string) error {
 	if !s.appImageInventoryConfigured() {
 		return nil
 	}
-	storageGibibytes, err := s.currentTenantManagedImageStorageGibibytes(ctx, tenantID)
-	if err != nil {
-		return err
-	}
-	_, err = s.store.SyncTenantBillingImageStorage(tenantID, storageGibibytes)
-	return err
-}
-
-func (s *Server) currentTenantManagedImageStorageGibibytes(ctx context.Context, tenantID string) (int64, error) {
-	apps, err := s.store.ListAppsMetadata(tenantID, false)
-	if err != nil {
-		return 0, err
-	}
-	ops, err := s.store.ListImageRetentionOperations(tenantID, false)
-	if err != nil {
-		return 0, err
-	}
-
-	storageBytes, err := appimages.MeasureTenantStorageBytes(ctx, func(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
+	return imagebilling.Refresh(ctx, s.store.ImageStorageBilling(tenantID), func(ctx context.Context, imageRef string) (bool, map[string]int64, error) {
 		result, err := s.appImageRegistry.InspectImage(ctx, imageRef)
 		if err != nil {
 			return false, nil, err
 		}
-		return result.Exists, cloneAppImageBlobSizes(result.BlobSizes), nil
-	}, apps, ops, s.registryPushBase, s.registryPullBase)
-	if err != nil {
-		return 0, err
-	}
-	return appimages.StorageBytesToGibibytes(storageBytes), nil
-}
-
-func cloneAppImageBlobSizes(blobSizes map[string]int64) map[string]int64 {
-	if len(blobSizes) == 0 {
-		return nil
-	}
-	cloned := make(map[string]int64, len(blobSizes))
-	for digest, sizeBytes := range blobSizes {
-		cloned[digest] = sizeBytes
-	}
-	return cloned
+		if len(result.BlobSizes) == 0 {
+			return result.Exists, nil, nil
+		}
+		return result.Exists, maps.Clone(result.BlobSizes), nil
+	}, s.registryPushBase, s.registryPullBase)
 }
 
 func (s *Server) currentTenantManagedUsage(ctx context.Context, tenantID string, platformAdmin bool) *model.ResourceUsage {

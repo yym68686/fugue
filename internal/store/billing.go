@@ -70,7 +70,7 @@ func (s *Store) SetTenantBillingBalance(tenantID string, balanceCents int64, met
 	return s.pgSetTenantBillingBalance(tenantID, balanceCents, metadata)
 }
 
-func (s *Store) SyncTenantBillingImageStorage(tenantID string, storageGibibytes int64) (model.TenantBillingSummary, error) {
+func (s *Store) syncTenantBillingImageStorage(tenantID string, storageGibibytes int64) (model.TenantBillingSummary, error) {
 	tenantID = strings.TrimSpace(tenantID)
 	if tenantID == "" || storageGibibytes < 0 {
 		return model.TenantBillingSummary{}, ErrInvalidInput

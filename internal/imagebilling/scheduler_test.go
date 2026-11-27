@@ -1,4 +1,4 @@
-package api
+package imagebilling
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 func TestBillingImageStorageRefreshSchedulerDebouncesRapidRequests(t *testing.T) {
 	t.Parallel()
 
-	scheduler := newBillingImageStorageRefreshScheduler(20*time.Millisecond, time.Second)
+	scheduler := NewScheduler(20*time.Millisecond, time.Second)
 	t.Cleanup(func() {
-		scheduler.wait()
+		scheduler.Wait()
 	})
 	logger := log.New(io.Discard, "", 0)
 	started := make(chan string, 4)
@@ -26,9 +26,9 @@ func TestBillingImageStorageRefreshSchedulerDebouncesRapidRequests(t *testing.T)
 		return nil
 	}
 
-	scheduler.schedule("tenant-a", logger, refresh)
-	scheduler.schedule("tenant-a", logger, refresh)
-	scheduler.schedule("tenant-a", logger, refresh)
+	scheduler.Schedule("tenant-a", logger, refresh)
+	scheduler.Schedule("tenant-a", logger, refresh)
+	scheduler.Schedule("tenant-a", logger, refresh)
 
 	select {
 	case <-started:
@@ -45,9 +45,9 @@ func TestBillingImageStorageRefreshSchedulerDebouncesRapidRequests(t *testing.T)
 func TestBillingImageStorageRefreshSchedulerRunsTrailingRefreshAfterInFlightRequest(t *testing.T) {
 	t.Parallel()
 
-	scheduler := newBillingImageStorageRefreshScheduler(10*time.Millisecond, time.Second)
+	scheduler := NewScheduler(10*time.Millisecond, time.Second)
 	t.Cleanup(func() {
-		scheduler.wait()
+		scheduler.Wait()
 	})
 	logger := log.New(io.Discard, "", 0)
 	started := make(chan struct{}, 4)
@@ -61,14 +61,14 @@ func TestBillingImageStorageRefreshSchedulerRunsTrailingRefreshAfterInFlightRequ
 		return nil
 	}
 
-	scheduler.schedule("tenant-a", logger, refresh)
+	scheduler.Schedule("tenant-a", logger, refresh)
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for first refresh")
 	}
 
-	scheduler.schedule("tenant-a", logger, refresh)
+	scheduler.Schedule("tenant-a", logger, refresh)
 	release <- struct{}{}
 
 	select {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/imagebilling"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -1169,9 +1170,9 @@ func TestHandleGetBillingCountsManagedImageInventoryStorage(t *testing.T) {
 	t.Parallel()
 
 	stateStore, server, apiKey, tenant, _, _, _, _, _, _ := setupAppImagesTestServer(t)
-	server.billingImageStorageRefresh = newBillingImageStorageRefreshScheduler(5*time.Millisecond, time.Second)
+	server.billingImageStorageRefresh = imagebilling.NewScheduler(5*time.Millisecond, time.Second)
 	t.Cleanup(func() {
-		server.billingImageStorageRefresh.wait()
+		server.billingImageStorageRefresh.Wait()
 	})
 
 	recorder := performJSONRequest(t, server, http.MethodGet, "/v1/billing", apiKey, nil)

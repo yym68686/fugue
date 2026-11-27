@@ -1,4 +1,4 @@
-package api
+package imagebilling
 
 import (
 	"context"
@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	defaultBillingImageStorageRefreshDebounce = 2 * time.Second
-	defaultBillingImageStorageRefreshTimeout  = 15 * time.Second
+	defaultDebounce = 2 * time.Second
+	defaultTimeout  = 15 * time.Second
 )
 
-type billingImageStorageRefreshScheduler struct {
+type Scheduler struct {
 	debounce time.Duration
 	timeout  time.Duration
 
@@ -25,21 +25,21 @@ type billingImageStorageRefreshScheduler struct {
 	wg          sync.WaitGroup
 }
 
-func newBillingImageStorageRefreshScheduler(debounce, timeout time.Duration) billingImageStorageRefreshScheduler {
+func NewScheduler(debounce, timeout time.Duration) *Scheduler {
 	if debounce <= 0 {
-		debounce = defaultBillingImageStorageRefreshDebounce
+		debounce = defaultDebounce
 	}
 	if timeout <= 0 {
-		timeout = defaultBillingImageStorageRefreshTimeout
+		timeout = defaultTimeout
 	}
-	return billingImageStorageRefreshScheduler{
+	return &Scheduler{
 		debounce:    debounce,
 		timeout:     timeout,
 		nextRunByID: make(map[string]time.Time),
 	}
 }
 
-func (s *billingImageStorageRefreshScheduler) schedule(
+func (s *Scheduler) Schedule(
 	tenantID string,
 	logger *log.Logger,
 	refresh func(context.Context, string) error,
@@ -71,7 +71,7 @@ func (s *billingImageStorageRefreshScheduler) schedule(
 	}()
 }
 
-func (s *billingImageStorageRefreshScheduler) run(
+func (s *Scheduler) run(
 	tenantID string,
 	refresh func(context.Context, string) error,
 ) error {
@@ -119,7 +119,7 @@ func (s *billingImageStorageRefreshScheduler) run(
 	}
 }
 
-func (s *billingImageStorageRefreshScheduler) nextRunAt(tenantID string) (time.Time, bool) {
+func (s *Scheduler) nextRunAt(tenantID string) (time.Time, bool) {
 	if s == nil {
 		return time.Time{}, false
 	}
@@ -129,21 +129,21 @@ func (s *billingImageStorageRefreshScheduler) nextRunAt(tenantID string) (time.T
 	return nextRunAt, ok
 }
 
-func (s *billingImageStorageRefreshScheduler) debounceDuration() time.Duration {
+func (s *Scheduler) debounceDuration() time.Duration {
 	if s == nil || s.debounce <= 0 {
-		return defaultBillingImageStorageRefreshDebounce
+		return defaultDebounce
 	}
 	return s.debounce
 }
 
-func (s *billingImageStorageRefreshScheduler) refreshTimeout() time.Duration {
+func (s *Scheduler) refreshTimeout() time.Duration {
 	if s == nil || s.timeout <= 0 {
-		return defaultBillingImageStorageRefreshTimeout
+		return defaultTimeout
 	}
 	return s.timeout
 }
 
-func (s *billingImageStorageRefreshScheduler) wait() {
+func (s *Scheduler) Wait() {
 	if s == nil {
 		return
 	}
