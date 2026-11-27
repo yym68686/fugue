@@ -10,9 +10,10 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/operationview"
 )
 
-var errOperationNotVisible = errors.New("operation is not visible to this principal")
+var errOperationNotVisible = operationview.ErrNotVisible
 
 var (
 	operationSecretAssignmentPattern = regexp.MustCompile(`(?i)(\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PWD|API_KEY|DATABASE_URL|DB_URL|DSN)[A-Z0-9_]*\s*[=:]\s*)([^\s&]+)`)
@@ -24,31 +25,8 @@ var (
 	operationJSONSecretPattern       = regexp.MustCompile(`(?i)("[^"]*(?:token|secret|password|passwd|api[_-]?key|database[_-]?url|dsn|authorization|cookie)[^"]*"\s*:\s*")([^"]*)(")`)
 )
 
-// loadAuthorizedOperation is the shared authorization boundary for every
-// operation-derived API view. Operations do not carry a project ID, so a
-// project-scoped principal must be confined through the operation's App.
 func (s *Server) loadAuthorizedOperation(principal model.Principal, operationID string) (model.Operation, error) {
-	op, err := s.store.GetOperation(strings.TrimSpace(operationID))
-	if err != nil {
-		return model.Operation{}, err
-	}
-	if principal.IsPlatformAdmin() {
-		return op, nil
-	}
-	if strings.TrimSpace(op.TenantID) != strings.TrimSpace(principal.TenantID) {
-		return model.Operation{}, errOperationNotVisible
-	}
-	if strings.TrimSpace(principal.ProjectID) == "" {
-		return op, nil
-	}
-	if strings.TrimSpace(op.AppID) == "" {
-		return model.Operation{}, errOperationNotVisible
-	}
-	app, err := s.store.GetApp(op.AppID)
-	if err != nil || !principalAllowsApp(principal, app) {
-		return model.Operation{}, errOperationNotVisible
-	}
-	return op, nil
+	return operationview.LoadAuthorized(s.store.OperationViews(), principal, operationID)
 }
 
 func (s *Server) writeOperationReadError(w http.ResponseWriter, err error) {
@@ -60,15 +38,7 @@ func (s *Server) writeOperationReadError(w http.ResponseWriter, err error) {
 }
 
 func operationListProjectForPrincipal(principal model.Principal, requested string) (string, error) {
-	requested = strings.TrimSpace(requested)
-	projectID := strings.TrimSpace(principal.ProjectID)
-	if principal.IsPlatformAdmin() || projectID == "" {
-		return requested, nil
-	}
-	if requested != "" && requested != projectID {
-		return "", errOperationNotVisible
-	}
-	return projectID, nil
+	return operationview.ScopeProject(principal, requested)
 }
 
 func redactOperationEvidenceForAPI(items []model.OperationEvidence, includePayload bool, platformAdmin ...bool) []model.OperationEvidence {

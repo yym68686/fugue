@@ -19,6 +19,7 @@ import (
 	"fugue/internal/edgetopology"
 	"fugue/internal/inputarchive"
 	"fugue/internal/model"
+	"fugue/internal/operationview"
 	"fugue/internal/pgimage"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/sshidentity"
@@ -3569,16 +3570,7 @@ func duplicateOOMRightSizingOperation(operations []model.Operation, candidate mo
 	return false
 }
 
-type OperationListFilter struct {
-	TenantID  string
-	AppID     string
-	ProjectID string
-	ServiceID string
-	ActorID   string
-	Types     []string
-	Statuses  []string
-	Limit     int
-}
+type OperationListFilter = operationview.Filter
 
 func (s *Store) ListOperations(tenantID string, platformAdmin bool) ([]model.Operation, error) {
 	return s.ListOperationsFiltered(tenantID, platformAdmin, OperationListFilter{})

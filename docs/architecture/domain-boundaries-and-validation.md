@@ -9,7 +9,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | --- | --- | --- | --- |
 | Backup usage | The backup-usage service builds the inventory and owns its tenant cache and locks. The API authorizes and adapts a read-only source. | No backup mutations are available through the usage source. | The usage package verifies cache behavior and its dependency boundary; API and Store tests cover the adapters. |
 | Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment and JSON deletions join the caller's existing transaction. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
-| Application operation queue | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. The Controller opens its existing leader scope, handles worker lifecycle and runs the resulting operation. | The Controller's queue receives only its durable transition port. Store still applies each transition through its original JSON or PostgreSQL transaction; the local reservation is not a replacement for a Store fence. API submission, cancellation and status contracts are unchanged. | The queue verifies ordering, durable attempt identity and claim/recovery exclusion without loading API, Controller or Store. Controller integration tests still verify cancellation and stale execution behavior through Store. |
+| Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through the original JSON or PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view tests run without API, Controller or Store. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
 
 These are migrated boundaries, not a claim that the remaining API, Controller
 and Store files are composition-only. App release and reconciliation, billing,
@@ -61,6 +61,15 @@ updates deployed digests in the operation completion transaction. No separate
 image-tracking release or production failure injection is justified by this
 refactor.
 
+The application operation queue is also not a separate-release candidate.
+The Controller reservation covers the interval between a Store claim and
+worker registration; the durable lifecycle then meets app configuration,
+runtime evidence, and finalization. Splitting queue arbitration from its
+executor would introduce another recovery boundary without a measured need.
+Edge quality rollup remains a separate candidate under the
+[worker handoff](api-worker-handoff.md): an API rollout is not an ownership
+handoff, and a standby worker is not a serving writer.
+
 For a future candidate, record why fault isolation or autonomous release is
 needed and the concrete writes it would own, then use the
 [migration gates](microservices-migration-acceptance-v1.md). Stop before cutover
@@ -68,7 +77,12 @@ if Gate B's credential/transaction isolation or Gate C's recovery proof is
 missing. Separate release jobs and ordinary health checks never substitute for
 the Gate D canary and rollback witnesses.
 
-JSON retirement remains independent: file-backed Store initialization,
-image-tracking transaction and deletion tests still use that backend. Its
-consumer inventory, data compatibility and recovery path must be evaluated
-before deprecation; neither backend nor schema is changed here.
+JSON retirement remains independent. The production API, Controller and SSH
+Control manifests require the configured PostgreSQL secret; standalone API and
+Controller still fall back to `./data/store.json` when the DSN is absent, as
+documented in both READMEs. File-backed initialization, image-tracking and
+operation tests still exercise it. The agent's cell-local JSON state is not the
+control-plane Store. Do not infer that there are no external standalone
+consumers from managed production wiring. Verify the import and recovery path,
+the standalone upgrade behavior and real PostgreSQL test coverage before
+deprecation. Neither backend nor schema is changed here.

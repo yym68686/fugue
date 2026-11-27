@@ -85,6 +85,48 @@ class SelectionTest(unittest.TestCase):
             with patch.object(prepush, "ROOT", directory):
                 self.assertEqual(shadow.git_paths("HEAD"), ["fixture.txt", "new.go", "old.go"])
 
+    def test_live_go_graph_catches_a_transitive_test_only_contract_regression(self):
+        with tempfile.TemporaryDirectory() as location:
+            root = Path(location)
+            files = {
+                "go.mod": "module test.example/fugue-shadow\n\ngo 1.22\n",
+                "domain/core.go": 'package domain\nfunc Value() string { return "stable" }\n',
+                "facade/adapter.go": (
+                    'package facade\nimport "test.example/fugue-shadow/domain"\n'
+                    'func Value() string { return domain.Value() }\n'
+                ),
+                "contract/contract.go": "package contract\n",
+                "contract/contract_test.go": (
+                    'package contract_test\nimport ("testing"; "test.example/fugue-shadow/facade")\n'
+                    'func TestProjectionContract(t *testing.T) { '
+                    'if facade.Value() != "stable" { t.Fatal("projection drift") } }\n'
+                ),
+                "unrelated/unrelated.go": "package unrelated\n",
+            }
+            for name, contents in files.items():
+                path = root / name
+                path.parent.mkdir(exist_ok=True)
+                path.write_text(contents)
+
+            def run(command):
+                return subprocess.run(command, cwd=root, text=True, capture_output=True, timeout=45, check=False)
+
+            baseline = run(["go", "test", "./..."])
+            self.assertEqual(baseline.returncode, 0, baseline.stderr)
+            changed = root / "domain/core.go"
+            changed.write_text(files["domain/core.go"].replace('"stable"', '"drifted"'))
+            graph = run(["go", "list", "-json=" + ",".join(shadow.FIELDS), "./..."])
+            self.assertEqual(graph.returncode, 0, graph.stderr)
+            plan = shadow.select(["domain/core.go"], shadow.packages_from_stream(graph.stdout), root)
+            self.assertEqual(plan["scope"], "dependency-closure")
+            self.assertEqual(plan["goTests"], [["go", "test", "./contract", "./domain", "./facade"]])
+            self.assertEqual(plan["goBuilds"], [["go", "build", "./domain", "./facade"]])
+            witness = run(plan["goTests"][0])
+            oracle = run(["go", "test", "-count=1", "./..."])
+            for result in (witness, oracle):
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("projection drift", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

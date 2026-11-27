@@ -7,7 +7,7 @@ import argparse
 from collections import defaultdict, deque
 import json
 import os
-from pathlib import PurePosixPath
+from pathlib import Path
 import subprocess
 import time
 
@@ -65,12 +65,15 @@ def select(paths, packages, root):
     labels = {}
     reverse_runtime = defaultdict(set)
     reverse_test = defaultdict(set)
+    checkout = Path(root).resolve()
     for p in packages:
         # go list has no canonical package variant suffix without -test; test
         # imports are explicitly included, but never affect runtime builds.
         name = p["ImportPath"]
-        directory = PurePosixPath(p["Dir"]).relative_to(PurePosixPath(root))
-        labels[name] = "." if directory == PurePosixPath(".") else "./" + directory.as_posix()
+        # macOS Go reports the real directory even when the checkout was
+        # reached through a symlink (including /var -> /private/var).
+        directory = Path(p["Dir"]).resolve().relative_to(checkout)
+        labels[name] = "." if directory == Path(".") else "./" + directory.as_posix()
         for fields, is_source in ((SOURCE, True), (TEST, False)):
             for field in fields:
                 for filename in p.get(field, ()):

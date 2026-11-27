@@ -27,6 +27,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/operationview"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
 	"fugue/internal/qualityrollup"
@@ -1854,12 +1855,7 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	storeStartedAt := time.Now()
-	var ops []model.Operation
-	if includeDesired {
-		ops, err = s.store.ListOperationsFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
-	} else {
-		ops, err = s.store.ListOperationSummariesFiltered(principal.TenantID, principal.IsPlatformAdmin(), filter)
-	}
+	ops, err := operationview.List(s.store.OperationViews(), principal, filter, includeDesired)
 	timings.Add("store_operations", time.Since(storeStartedAt))
 	if err != nil {
 		s.writeStoreError(w, err)
