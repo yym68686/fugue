@@ -102,7 +102,9 @@ func TestRestoreMonitorLeaseFencesCurrentPointerNotRollbackDestination(t *testin
 			if mode == "tampered-source" {
 				bundle.Artifact = parent.Bundle.Artifact
 			}
-			err = restoreMonitorWithLease(ctx, &output, store, cluster, lease, release, monitorRestoreBinding{before, bundle, parent.RecordName, parent.Bundle})
+			err = restoreMonitorWithLease(ctx, &output, store, cluster, lease, release, monitorRestoreBinding{
+				current: before, rollback: bundle, lkgName: parent.RecordName, lkgBundle: parent.Bundle,
+			})
 			if mode == "tampered-source" {
 				if err == nil || !strings.Contains(err.Error(), "not bound") || cluster.observations != 0 || output.Len() != 0 {
 					t.Fatalf("unbound rollback source reached workload recovery: %v", err)

@@ -141,10 +141,11 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		"FUGUE_RELEASE_GUARDIAN_POD_UID="+executor.PodUID,
 		"FUGUE_RELEASE_GUARDIAN_RECORD_DIGEST="+snapshot.Record.RecordDigest,
 	)
-	trustedArtifact, err := trustedCurrentArtifact(snapshot.CurrentMonitorData)
+	bindingRaw, trustedArtifact, err := executorArtifactEnvironment(snapshot)
 	if err != nil {
 		return ExecutionReceipt{}, err
 	}
+	command.Env = setEnvironment(command.Env, NativeRuntimeBindingEnv, bindingRaw)
 	command.Env = setEnvironment(command.Env, trustedCurrentArtifactEnv, trustedArtifact)
 	var stdout, stderr boundedBuffer
 	stdout.limit, stderr.limit = 1<<20, 1<<20
@@ -218,6 +219,23 @@ func (executor *ProcessExecutor) execute(ctx context.Context, snapshot Snapshot,
 		recordDigest = snapshot.Record.LKGRecordDigest
 	}
 	return ExecutionReceipt{Status: result.Status, Reason: guardianTerminalReason(result), FailureCode: strings.TrimSpace(result.FailureClass), RecordDigest: recordDigest, ReceiptDigest: result.ReceiptDigest}, nil
+}
+
+func executorArtifactEnvironment(snapshot Snapshot) (nativeBinding, trustedArtifact string, err error) {
+	if !snapshot.NativePublication {
+		trustedArtifact, err = trustedCurrentArtifact(snapshot.CurrentMonitorData)
+		return "", trustedArtifact, err
+	}
+	binding := NativeRuntimeBinding{
+		Key:                    snapshot.Key,
+		DesiredResourceVersion: snapshot.DesiredResourceVersion, DesiredRecordDigest: snapshot.Desired.RecordDigest,
+		LKGMonitorRecordDigest: snapshot.LKGMonitorRecordDigest,
+	}
+	if !binding.valid() || !snapshot.Managed || snapshot.DesiredRecordMissing || snapshot.Desired.RecordDigest != snapshot.Record.RecordDigest {
+		return "", "", errors.New("Guardian native execution requires the loaded, fenced DesiredRelease")
+	}
+	raw, err := declarativerelease.CanonicalJSON(binding)
+	return string(raw), "", err
 }
 
 func trustedCurrentArtifact(data map[string]string) (string, error) {

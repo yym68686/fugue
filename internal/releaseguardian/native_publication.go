@@ -195,6 +195,13 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 		return NativePublicationBoundary{}, errors.New("native Guardian publication requires one existing Deployment without delegated writes")
 	}
 	for index, raw := range [][]byte{bundle.Forward, bundle.LKG} {
+		target := bundle.Prepared.Forward
+		if index == 1 {
+			target = bundle.Prepared.LKG
+		}
+		if err := VerifyNativeDeploymentImages(raw, workload, target); err != nil {
+			return NativePublicationBoundary{}, err
+		}
 		set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(raw))
 		if err != nil || len(set.Items) != 1 {
 			return NativePublicationBoundary{}, errors.New("native Guardian forward and rollback must both affect only the fenced workload")

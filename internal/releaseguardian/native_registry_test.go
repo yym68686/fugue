@@ -135,6 +135,14 @@ func TestIndependentRegistryReadbacksForwardAndRollback(t *testing.T) {
 			if mode == "verified" && (forwardReads.Load() != 1 || rollbackReads.Load() != 1) {
 				t.Fatalf("expected both layer bodies to be read once, got forward=%d rollback=%d", forwardReads.Load(), rollbackReads.Load())
 			}
+			if mode == "verified" {
+				evidence, err := registry.VerifyRuntimeArtifact(context.Background(), forward)
+				if err != nil || evidence.Image != forward.ImmutableRef || evidence.IndexDigest != forward.TopDigest ||
+					evidence.ManifestDigest != forward.PlatformManifestDigest || evidence.ConfigDigest != forward.ConfigDigest ||
+					evidence.OCIRevision != forward.OCIRevision || forwardReads.Load() != 2 {
+					t.Fatalf("Guardian runtime evidence=%+v err=%v layerReads=%d", evidence, err, forwardReads.Load())
+				}
+			}
 		})
 	}
 }

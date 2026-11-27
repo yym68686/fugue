@@ -115,8 +115,10 @@ type kubectlCluster struct {
 	metadata         metadataclient.Interface
 	resources        dynamic.Interface
 	trustedCurrent   *declarativerelease.ArtifactReceipt
+	nativeArtifacts  *nativeKubectlArtifacts
 	registryMu       sync.Mutex
 	registryVerified map[string]declarativerelease.RegistryVerification
+	nativePreflight  bool // guarded by registryMu
 	envRetirements   map[string][]retiredEnvironment
 }
 
@@ -168,13 +170,25 @@ func (tracker *healthSoakTracker) reset() {
 }
 
 func newKubectlCluster() (*kubectlCluster, error) {
+	return newKubectlClusterWithArtifacts(nil)
+}
+
+func newKubectlClusterWithArtifacts(native *nativeKubectlArtifacts) (*kubectlCluster, error) {
 	kubectl, err := exec.LookPath("kubectl")
 	if err != nil {
 		return nil, errors.New("kubectl is unavailable")
 	}
-	verifier := "scripts/verify_registry_image.py"
-	if info, err := os.Stat(verifier); err != nil || !info.Mode().IsRegular() {
-		return nil, errors.New("registry verifier is unavailable")
+	var verifier string
+	var trustedCurrent *declarativerelease.ArtifactReceipt
+	if native == nil {
+		verifier = "scripts/verify_registry_image.py"
+		if info, err := os.Stat(verifier); err != nil || !info.Mode().IsRegular() {
+			return nil, errors.New("registry verifier is unavailable")
+		}
+		trustedCurrent, err = trustedCurrentArtifactFromEnv()
+		if err != nil {
+			return nil, err
+		}
 	}
 	config, err := loadComponentLeaseClientConfig()
 	if err != nil {
@@ -188,13 +202,9 @@ func newKubectlCluster() (*kubectlCluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes dynamic client: %w", err)
 	}
-	trustedCurrent, err := trustedCurrentArtifactFromEnv()
-	if err != nil {
-		return nil, err
-	}
 	return &kubectlCluster{
 		kubectl: kubectl, verifier: verifier, timeout: 120 * time.Second,
-		metadata: metadata, resources: resources, trustedCurrent: trustedCurrent,
+		metadata: metadata, resources: resources, trustedCurrent: trustedCurrent, nativeArtifacts: native,
 	}, nil
 }
 
@@ -660,6 +670,14 @@ func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image,
 	if prior, ok := cluster.registryVerified[key]; ok {
 		return prior, nil
 	}
+	if cluster.nativeArtifacts != nil {
+		verification, err := cluster.nativeArtifacts.verifyImage(ctx, image, revision)
+		if err != nil {
+			return declarativerelease.RegistryVerification{}, err
+		}
+		cluster.cacheRegistryVerification(key, verification)
+		return verification, nil
+	}
 	if artifact := cluster.trustedCurrent; artifact != nil && artifact.ImmutableRef == image && artifact.OCIRevision == revision {
 		return declarativerelease.RegistryVerification{
 			Image: image, IndexDigest: artifact.TopDigest, ManifestDigest: artifact.PlatformManifestDigest,
@@ -681,6 +699,12 @@ func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image,
 	if verification.Image != image || verification.OCIRevision != revision {
 		return declarativerelease.RegistryVerification{}, errors.New("registry target identity mismatch")
 	}
+	cluster.cacheRegistryVerification(key, verification)
+	return verification, nil
+}
+
+// Caller holds registryMu.
+func (cluster *kubectlCluster) cacheRegistryVerification(key string, verification declarativerelease.RegistryVerification) {
 	if cluster.registryVerified == nil {
 		cluster.registryVerified = make(map[string]declarativerelease.RegistryVerification)
 	}
@@ -689,7 +713,6 @@ func (cluster *kubectlCluster) verifyRuntimeArtifact(ctx context.Context, image,
 	if len(cluster.registryVerified) < 64 {
 		cluster.registryVerified[key] = verification
 	}
-	return verification, nil
 }
 
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
@@ -700,6 +723,20 @@ func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarat
 }
 
 func (cluster *kubectlCluster) Apply(ctx context.Context, release declarativerelease.PlanRelease, target declarativerelease.TargetIdentity, manifest []byte) error {
+	if cluster.nativeArtifacts != nil {
+		cluster.registryMu.Lock()
+		preflight := cluster.nativePreflight
+		cluster.registryMu.Unlock()
+		if !preflight {
+			return errors.New("native artifact preflight has not verified the complete execution set")
+		}
+		if err := cluster.nativeArtifacts.checkApply(target, manifest); err != nil {
+			return err
+		}
+		if err := cluster.VerifyTarget(ctx, target); err != nil {
+			return err
+		}
+	}
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
 	}
@@ -734,6 +771,9 @@ func (cluster *kubectlCluster) requireReferencedSecrets(ctx context.Context, rel
 }
 
 func (cluster *kubectlCluster) Delete(ctx context.Context, _ declarativerelease.PlanRelease, manifest []byte, observation declarativerelease.Observation) error {
+	if cluster.nativeArtifacts != nil {
+		return errors.New("native execution cannot delete the enrolled Deployment")
+	}
 	identities, err := declarativerelease.ResourceSetIdentities(manifest)
 	if err != nil {
 		return err
@@ -824,6 +864,12 @@ func (cluster *kubectlCluster) deleteCreated(ctx context.Context, forwardManifes
 	deletions, err := createdResourceDeletions(identities, before, after)
 	if err != nil {
 		return err
+	}
+	if cluster.nativeArtifacts != nil {
+		if len(deletions) != 0 {
+			return errors.New("native execution cannot delete resources during rollback")
+		}
+		return nil
 	}
 	if len(preserve) > 0 {
 		filtered := deletions[:0]

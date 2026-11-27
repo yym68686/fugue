@@ -31,6 +31,7 @@ type Snapshot struct {
 	Bundle                 ExecutionBundle
 	CurrentMonitorData     map[string]string
 	LKGMonitorRecordDigest string
+	NativePublication      bool
 	// DesiredRecordMissing means the mutable DesiredRelease points at an
 	// immutable candidate that was pruned. The stable monitor remains the
 	// runtime authority until an explicit predecessor-bound successor replaces
@@ -91,14 +92,23 @@ type Executor interface {
 }
 
 type Controller struct {
-	mode     Mode
-	store    Store
-	executor Executor
-	queue    workqueue.TypedRateLimitingInterface[Key]
-	now      func() time.Time
+	mode       Mode
+	nativeOnly bool
+	store      Store
+	executor   Executor
+	queue      workqueue.TypedRateLimitingInterface[Key]
+	now        func() time.Time
 }
 
 func NewController(mode Mode, store Store, executor Executor) (*Controller, error) {
+	return newController(mode, false, store, executor)
+}
+
+func NewNativeController(store Store, executor Executor) (*Controller, error) {
+	return newController(ModeWrite, true, store, executor)
+}
+
+func newController(mode Mode, nativeOnly bool, store Store, executor Executor) (*Controller, error) {
 	if mode != ModeShadow && mode != ModeWrite {
 		return nil, errors.New("release guardian mode is invalid")
 	}
@@ -106,7 +116,7 @@ func NewController(mode Mode, store Store, executor Executor) (*Controller, erro
 		return nil, errors.New("release guardian dependencies are invalid")
 	}
 	return &Controller{
-		mode: mode, store: store, executor: executor, now: time.Now,
+		mode: mode, nativeOnly: nativeOnly, store: store, executor: executor, now: time.Now,
 		queue: workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[Key]()),
 	}, nil
 }
@@ -155,6 +165,11 @@ func (controller *Controller) Reconcile(ctx context.Context, key Key) error {
 	snapshot, err := controller.store.Load(ctx, key)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", key.String(), err)
+	}
+	if snapshot.NativePublication != controller.nativeOnly {
+		// The separate writer groups must not even publish release status for
+		// each other's scope. The provider fence is still the write authority.
+		return nil
 	}
 	now := controller.now().UTC()
 	if err := snapshot.Validate(now); err != nil {

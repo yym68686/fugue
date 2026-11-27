@@ -44,16 +44,35 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	// Guardian's rollback anchor is that same record, not its historical
 	// predecessor. Repair that exact target without walking older history.
 	currentOnly := args[2] == currentBundle.Record.RecordDigest
+	native, err := nativeExecutionRuntimeFromEnv()
+	if err != nil {
+		return err
+	}
+	if native != nil && native.binding.LKGMonitorRecordDigest != args[2] {
+		return errors.New("native repair does not use the bound LKG record")
+	}
+	if err := native.checkPointer(ctx, store.client, release); err != nil {
+		return err
+	}
 	var lkgName string
 	var lkgBundle monitorBundle
+	var predecessor *monitorBundle
 	if !currentOnly {
 		lkgName, lkgBundle, err = loadBoundMonitorLKG(ctx, store, currentBundle, release, args[2])
 		if err != nil {
 			return err
 		}
+		predecessor = &lkgBundle
 	}
-	cluster, err := newKubectlCluster()
+	artifacts, err := native.artifactSet(release, currentBundle.Prepared, currentBundle.Artifact, predecessor, currentBundle.Forward, currentBundle.LKG)
 	if err != nil {
+		return err
+	}
+	cluster, err := newKubectlClusterWithArtifacts(artifacts)
+	if err != nil {
+		return err
+	}
+	if err := cluster.preflightNativeArtifacts(ctx); err != nil {
 		return err
 	}
 	lease, err := newComponentLeaseCoordinator()
@@ -65,11 +84,16 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 		return fmt.Errorf("acquire component mutation lease: %w", err)
 	}
 	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
-	if freshErr != nil || fresh.Bundle.Record != currentBundle.Record {
+	if freshErr != nil || fresh.Bundle.Record != currentBundle.Record || (native != nil && !sameMonitorSnapshot(current, fresh)) {
 		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
 		_ = lease.release(releaseCtx, held)
 		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
+	}
+	if err := native.checkPointer(ctx, store.client, release); err != nil {
+		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+		defer releaseCancel()
+		return errors.Join(err, lease.release(releaseCtx, held))
 	}
 	var result declarativerelease.ExecutionResult
 	if currentOnly {
@@ -169,19 +193,40 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	if err != nil {
 		return err
 	}
-	cluster, err := newKubectlCluster()
+	rollback := currentBundle
+	if !monitorRestore {
+		rollback = monitorBundle{Plan: candidateBundle.Plan, Artifact: candidateBundle.Artifact, Prepared: candidateBundle.Prepared, Forward: candidateBundle.Forward, LKG: candidateBundle.LKG}
+	}
+	native, err := nativeExecutionRuntimeFromEnv()
 	if err != nil {
+		return err
+	}
+	if err := native.checkPointer(ctx, store.client, release); err != nil {
+		return err
+	}
+	if native != nil && !monitorRestore {
+		if err := native.binding.VerifyCandidate(ctx, store.client, release.Workload.Namespace, candidateBundle.Files); err != nil {
+			return err
+		}
+	}
+	artifacts, err := native.artifactSet(release, rollback.Prepared, rollback.Artifact, &lkgBundle, rollback.Forward, rollback.LKG)
+	if err != nil {
+		return err
+	}
+	cluster, err := newKubectlClusterWithArtifacts(artifacts)
+	if err != nil {
+		return err
+	}
+	if err := cluster.preflightNativeArtifacts(ctx); err != nil {
 		return err
 	}
 	lease, err := newComponentLeaseCoordinator()
 	if err != nil {
 		return err
 	}
-	rollback := currentBundle
-	if !monitorRestore {
-		rollback = monitorBundle{Plan: candidateBundle.Plan, Artifact: candidateBundle.Artifact, Prepared: candidateBundle.Prepared, Forward: candidateBundle.Forward, LKG: candidateBundle.LKG}
-	}
-	return restoreMonitorWithLease(ctx, output, store, cluster, lease, release, monitorRestoreBinding{current, rollback, lkgName, lkgBundle})
+	return restoreMonitorWithLease(ctx, output, store, cluster, lease, release, monitorRestoreBinding{
+		current: current, rollback: rollback, lkgName: lkgName, lkgBundle: lkgBundle, native: native,
+	})
 }
 
 type monitorRestoreBinding struct {
@@ -189,6 +234,7 @@ type monitorRestoreBinding struct {
 	rollback  monitorBundle
 	lkgName   string
 	lkgBundle monitorBundle
+	native    *nativeExecutionRuntime
 }
 
 func restoreMonitorWithLease(ctx context.Context, output io.Writer, store *monitorStore, cluster declarativerelease.Cluster, lease *componentLeaseCoordinator, release declarativerelease.PlanRelease, binding monitorRestoreBinding) error {
@@ -209,11 +255,16 @@ func restoreMonitorWithLease(ctx context.Context, output io.Writer, store *monit
 	fresh, freshErr := store.load(ctx, release.Workload.Namespace, release.ComponentID)
 	// Fence the pointer observed before acquiring the Lease, not the rollback
 	// destination: a committed forward record legitimately differs from LKG.
-	if freshErr != nil || fresh.Bundle.Record != current.Bundle.Record || fresh.RecordName != current.RecordName || fresh.StateUID != current.StateUID || fresh.StateRV != current.StateRV {
+	if freshErr != nil || !sameMonitorSnapshot(fresh, current) {
 		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
 		_ = lease.release(releaseCtx, held)
 		releaseCancel()
 		return errors.New("monitor pointer changed after component Lease acquisition")
+	}
+	if err := binding.native.checkPointer(ctx, store.client, release); err != nil {
+		releaseCtx, releaseCancel := componentLeaseFinalizationContext(ctx)
+		defer releaseCancel()
+		return errors.Join(err, lease.release(releaseCtx, held))
 	}
 	result := declarativerelease.RestoreMonitoredLKG(ctx, cluster, rollback.Plan, rollback.Prepared, rollback.Forward, rollback.LKG, release)
 	finalizeCtx, finalizeCancel := componentLeaseFinalizationContext(ctx)
