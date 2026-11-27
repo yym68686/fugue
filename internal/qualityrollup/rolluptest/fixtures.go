@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/schemamigrate"
 	"fugue/internal/store"
 )
 
@@ -47,6 +48,14 @@ func PostgresStore(b testing.TB, samples []model.EdgePerformanceSample) *store.S
 	parsed.RawQuery = query.Encode()
 	stateStore := store.New("", parsed.String())
 	if err := stateStore.RecordEdgePerformanceSamples(samples, time.Time{}); err != nil {
+		b.Fatal(err)
+	}
+	db, err := sql.Open("pgx", parsed.String())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	if err := schemamigrate.EnsureEdgeQualityRollupOwnerProjection(b.Context(), db); err != nil {
 		b.Fatal(err)
 	}
 	return stateStore

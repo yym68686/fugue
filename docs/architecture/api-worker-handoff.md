@@ -40,6 +40,36 @@ read under a pinned session lock alone is not proof of that invariant
 across loss of the lock connection. Releasing API compatibility is not
 evidence that cross-process handoff or rollback has been exercised.
 
+## Independent rollup worker
+
+The observation worker opens only its own PostgreSQL pool. It must not use
+the API bootstrap path, its Kubernetes service account token, or its admin
+credentials. Both PostgreSQL writers take the same transaction-scoped
+advisory lock on the transaction that commits rollups and watermarks. While
+the persisted owner is absent the worker stays passive; a restart or
+readiness probe never promotes it.
+
+The next declarative rollout needs a separate database credential for the
+worker, a Deployment with token automount disabled, and health/metric
+collection. Grants must cover only sample reads, rollup and watermark reads
+and writes, and reads from the single-row owner view. The worker must not
+be granted direct access to the shared metadata table. Transfer is a
+separate, privileged release action and must verify the API rollback floor and the standby worker before
+changing the owner. Do not give the worker the credential used to transfer
+ownership. A previous worker revision can keep running after worker
+rollback if it understands the persisted owner and the same transaction
+fence. A rollback must never reset the owner to let an old API run.
+
+The release expects `fugue-observation-worker-database/database-url` in
+`fugue-system`. The worker must reject the schema-owner credentials. Do
+not work around missing credential provisioning by mounting the API
+Secret. Provision a non-owner login through the database operator's
+approved release path; verify that its credential can connect and that
+it cannot transfer the owner. The observation-worker Actions lane
+provisions the immutable credential and a restricted PostgreSQL login
+after binding the production declaration to a ready primary and the live
+PostgreSQL system ID. It does not transfer ownership.
+
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker
 from persisted state, observe one committed outcome with an old instance

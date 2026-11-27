@@ -42,6 +42,7 @@ test:
 	python3 -m unittest scripts.test_verify_managed_ssh_image
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby
+	python3 -m unittest scripts.test_provision_observation_worker_database
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity
@@ -79,6 +80,7 @@ test-scripts:
 	python3 -m unittest scripts.test_configure_edge_offline scripts.test_configure_edge_offline_recovery
 	python3 -m unittest scripts.test_run_ssh_identity_maintenance
 	python3 -m unittest scripts.test_observe_worker_standby
+	python3 -m unittest scripts.test_provision_observation_worker_database
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity

@@ -4555,6 +4555,31 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: telemetry, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
+  deploy_observation_worker:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'observation-worker') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-observation-worker, cancel-in-progress: false, queue: max}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Provision the declared standby database credential
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/observation-worker/database.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$declaration" scripts/provision_observation_worker_database.py scripts/test_provision_observation_worker_database.py deploy/releases/components.json deploy/releases/observation-worker/resources.json deploy/releases/observation-worker/intent.json .github/workflows/ci.yml
+          python3 -m unittest scripts.test_provision_observation_worker_database
+          python3 -m scripts.provision_observation_worker_database "$declaration"
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+
   deploy_runtime_agent:
     needs: [prepush, component-build, runtime_agent_identity]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.runtime_agent_identity.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'runtime-agent-canary') }}

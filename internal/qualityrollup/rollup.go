@@ -20,9 +20,9 @@ import (
 const Interval = 5 * time.Minute
 const PlatformHostname = "__platform__"
 const edgeQualityRollupSampleChunkSize = 128
-const writerLock = "edge-quality-rollup-builder"
-const writerCheckpoint = "edge-quality-rollup-writer/v1"
-const dedicatedWriter = "worker"
+const writerLock = store.EdgeQualityRollupWriterLock
+const writerCheckpoint = store.EdgeQualityRollupWriterCheckpoint
+const dedicatedWriter = string(store.EdgeQualityRollupWorkerWriter)
 
 var edgeQualityRollupWindows = []struct {
 	Name      string
@@ -40,6 +40,7 @@ var edgeQualityRollupWindows = []struct {
 type Builder struct {
 	store        *store.Store
 	log          *log.Logger
+	writer       store.EdgeQualityRollupWriter
 	mu           sync.Mutex
 	lastRun      time.Time
 	lastSuccess  time.Time
@@ -52,6 +53,10 @@ type Builder struct {
 
 func New(storage *store.Store, logger *log.Logger) *Builder {
 	return &Builder{store: storage, log: logger}
+}
+
+func NewWorker(storage *store.Store, logger *log.Logger) *Builder {
+	return &Builder{store: storage, log: logger, writer: store.EdgeQualityRollupWorkerWriter}
 }
 
 func (b *Builder) Run(ctx context.Context) {
@@ -73,37 +78,8 @@ func (b *Builder) Run(ctx context.Context) {
 
 func (b *Builder) runOnce(ctx context.Context, now time.Time) {
 	started := time.Now().UTC()
-	count := 0
-	ran := false
-	acquired, err := b.store.WithAdvisoryLock(ctx, writerLock, func() error {
-		owner, err := b.store.ReadObservationCheckpoint(ctx, writerCheckpoint)
-		if err != nil {
-			return fmt.Errorf("read edge quality rollup writer: %w", err)
-		}
-		switch string(owner) {
-		case "":
-			// The compatibility API revision is the writer until the
-			// dedicated process explicitly takes ownership.
-		case dedicatedWriter:
-			return nil
-		default:
-			return fmt.Errorf("unknown edge quality rollup writer")
-		}
-		ran = true
-		var buildErr error
-		count, buildErr = b.rebuild(ctx, now)
-		return buildErr
-	})
-	if ctx.Err() != nil {
-		return
-	}
-	if !acquired && err == nil {
-		if b.log != nil {
-			b.log.Printf("edge quality rollup builder skipped: another writer holds lock")
-		}
-		return
-	}
-	if !ran && err == nil {
+	count, ran, err := b.runOwnedPass(ctx, now)
+	if ctx.Err() != nil || (!ran && err == nil) {
 		return
 	}
 	duration := time.Since(started)
@@ -131,13 +107,54 @@ func (b *Builder) runOnce(ctx context.Context, now time.Time) {
 	}
 }
 
+func (b *Builder) runOwnedPass(ctx context.Context, now time.Time) (int, bool, error) {
+	if b.store.BackendKind() == "postgres" {
+		session, err := b.store.BeginEdgeQualityRollupBuild(ctx)
+		if err != nil {
+			return 0, false, err
+		}
+		defer session.Rollback()
+		acquired, err := session.AcquireWriter(b.writer)
+		if !acquired || err != nil {
+			return 0, false, err
+		}
+		count, err := b.rebuildSession(session, now)
+		return count, true, err
+	}
+	var count int
+	var ran bool
+	_, err := b.store.WithAdvisoryLock(ctx, writerLock, func() error {
+		owner, err := b.store.ReadObservationCheckpoint(ctx, writerCheckpoint)
+		if err != nil {
+			return fmt.Errorf("read edge quality rollup writer: %w", err)
+		}
+		switch string(owner) {
+		case "", dedicatedWriter:
+		default:
+			return fmt.Errorf("unknown edge quality rollup writer")
+		}
+		if string(owner) != string(b.writer) {
+			return nil
+		}
+		ran = true
+		var buildErr error
+		count, buildErr = b.rebuild(ctx, now)
+		return buildErr
+	})
+	return count, ran, err
+}
+
 func (b *Builder) rebuild(ctx context.Context, now time.Time) (int, error) {
-	now = now.UTC()
 	session, err := b.store.BeginEdgeQualityRollupBuild(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer session.Rollback()
+	return b.rebuildSession(session, now)
+}
+
+func (b *Builder) rebuildSession(session *store.EdgeQualityRollupBuildSession, now time.Time) (int, error) {
+	now = now.UTC()
 	watermarks, err := session.Watermarks()
 	if err != nil {
 		return 0, err
