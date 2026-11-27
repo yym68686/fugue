@@ -12,9 +12,10 @@ import (
 // NativeReleaseDraft binds a preflight observation to the exact execution
 // bundle for persistent owner review. It cannot advance DesiredRelease.
 type NativeReleaseDraft struct {
-	Intent  productioncontrol.Intent
-	Payload []byte
-	Preview PublicationPreview
+	Intent   productioncontrol.Intent
+	Payload  []byte
+	Preview  PublicationPreview
+	Boundary NativePublicationBoundary
 }
 
 type nativeReleasePayload struct {
@@ -55,10 +56,11 @@ func (store *KubeStore) DraftNativeRelease(ctx context.Context, key Key, cluster
 	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
-	if _, err := bindNativePublication(intent, binding, publication); err != nil {
+	boundary, err := bindNativePublication(intent, binding, publication)
+	if err != nil {
 		return NativeReleaseDraft{}, err
 	}
-	return NativeReleaseDraft{Intent: intent, Payload: payload, Preview: preview}, nil
+	return NativeReleaseDraft{Intent: intent, Payload: payload, Preview: preview, Boundary: boundary}, nil
 }
 
 func nativeKubernetesResourceID(workload declarativerelease.ResourceIdentity) string {

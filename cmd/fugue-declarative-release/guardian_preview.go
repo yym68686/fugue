@@ -44,9 +44,10 @@ func guardianSubmissionTarget(files map[string][]byte) (releaseguardian.TargetCo
 func runGuardianPreview(parent context.Context, args []string, output io.Writer) error {
 	compare := len(args) > 0 && args[0] == "guardian-native-shadow"
 	draft := len(args) > 0 && args[0] == "guardian-native-draft"
-	native := compare || draft
+	boundary := len(args) > 0 && args[0] == "guardian-native-boundary"
+	native := compare || draft || boundary
 	if (!native && len(args) != 4) || (native && len(args) != 6) || strings.TrimSpace(args[1]) == "" || strings.TrimSpace(args[2]) == "" {
-		return errors.New("usage: guardian-preview KUBECONFIG CONTEXT PLAN_DIR; guardian-native-{shadow,draft} KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID")
+		return errors.New("usage: guardian-preview KUBECONFIG CONTEXT PLAN_DIR; guardian-native-{shadow,draft,boundary} KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID")
 	}
 	files, err := readPlanDirectory(args[3])
 	if err != nil {
@@ -75,10 +76,13 @@ func runGuardianPreview(parent context.Context, args []string, output io.Writer)
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	if draft {
+	if draft || boundary {
 		review, err := store.DraftNativeRelease(ctx, target.Key, args[4], args[5], files)
 		if err != nil {
 			return err
+		}
+		if boundary {
+			return json.NewEncoder(output).Encode(review.Boundary)
 		}
 		return json.NewEncoder(output).Encode(productioncontrol.Submission{Intent: review.Intent, Payload: review.Payload})
 	}

@@ -28,6 +28,53 @@ and does not record an intent or submit a release. Use the standalone
   on audit, not execution, Kubernetes, DNS or artifact write permissions.
   The caller label is an audit annotation, not an authorization credential.
 
+## API-independent bootstrap
+
+Build the standalone image with `Dockerfile.release-bootstrap`. It does not
+contain the Fugue API, Python, or a provider administration client. Run it
+outside the API Deployment's lifecycle. It connects directly to PostgreSQL;
+publication and observation also require the dedicated in-cluster identity
+and Kubernetes CA. It does not apply policy, grant access, or modify the
+Deployment directly. Guardian remains the sole workload writer.
+
+Mount one read-only bootstrap configuration per command. The fields are
+`mode` (one of `publish`, `observe`, `anchor`, `settle`), `journalFile`,
+`actor`, `cutover` (the exact native `KubeDeploymentCutover`), the
+`dependencyService` used by Guardian, `observerPublicKey` (base64 Ed25519
+public key), and `witnessDirectory` (read-only, with execution witness
+files named by the hexadecimal part of their digest plus `.json`).
+Only the publisher takes `registry` and optional `registryAuthFile`.
+Keep identities separate in Kubernetes and PostgreSQL, not just in the
+command profiles: publication cannot anchor or settle; observation only
+reads; the anchoring and settlement principals have no provider mutations.
+The profiles do not install roles or grant permissions.
+
+- `publish INTENT_DIGEST APPROVAL_DIGEST ATTESTATION_FILE` requires a signed
+  attestation covering the exact release boundary, including separately
+  recorded endpoint admission, old credential revocation and request
+  drainage, active native Guardian, node pull tests and registry retention.
+  The observer can read the boundary with `guardian-native-boundary`
+  (same arguments and GET-only transport as `guardian-native-draft`).
+  The bootstrapper checks the signature, binding and freshness before the
+  claim and before each publication write. It does not create or sign the
+  supporting evidence.
+- `observe INTENT_DIGEST` performs Kubernetes GETs and reads the journal.
+  It reports the candidate or previously verified version actually
+  serving; it does not conclude that this execution can no longer write.
+- `anchor GENERATION VERSION_DIGEST WITNESS_DIGEST` and
+  `settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST`
+  append only to PostgreSQL and require a signed execution witness using the
+  `provider-observer` key ID. Settlement checks the original persisted claim.
+  Neither operation needs a Kubernetes token.
+
+Compensation still runs through Guardian and remains bound to the approved
+rollback. A failed or lost submission must not be replayed as a new intent to
+clear its fence. This bootstrapper is not authority to recover arbitrary
+unhealthy or deleted workloads; such a recovery must have its own fenced
+operation and proof before the API release path can be cut over.
+
+## Guardian execution
+
 - On an approved, marked DesiredRelease, Guardian compares the live pointer,
   candidate, and rollback monitor with the signed journal payload. It reserves
   an append-only launch entry under the pending resource fence and passes the

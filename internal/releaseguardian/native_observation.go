@@ -33,6 +33,21 @@ type NativePublicationObservation struct {
 	ResourceVersion string
 }
 
+// ReleaseObserver has no publication entry point and does not require a
+// registry, writer credentials, or any provider admission write.
+type ReleaseObserver struct{ reader *NativePublisher }
+
+func NewNativeReleaseObserver(store *KubeStore, journal *productioncontrol.ExecutionJournal, clusterID string) (*ReleaseObserver, error) {
+	if store == nil || store.client == nil || journal == nil || !componentPattern.MatchString(clusterID) {
+		return nil, errors.New("native release observer requires its cluster, journal and Kubernetes client")
+	}
+	return &ReleaseObserver{&NativePublisher{store: store, journal: journal, clusterID: clusterID}}, nil
+}
+
+func (o *ReleaseObserver) ObserveServingRelease(ctx context.Context, intentDigest string) (NativeServingObservation, error) {
+	return o.reader.ObserveServingRelease(ctx, intentDigest)
+}
+
 // ObservePublication is safe after a timeout or restart. It only reads the
 // existing claim and pointer, even if no provider write was attempted.
 func (p *NativePublisher) ObservePublication(ctx context.Context, intentDigest string) (NativePublicationObservation, error) {

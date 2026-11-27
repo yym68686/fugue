@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/productioncontrol"
 	admission "k8s.io/api/admissionregistration/v1"
 	authentication "k8s.io/api/authentication/v1"
@@ -28,6 +29,14 @@ type kubeDeploymentAdmission struct {
 	config   KubeDeploymentCutover
 	cluster  string
 	evidence DeploymentCutoverEvidence
+}
+
+func DeploymentCutoverScope(config KubeDeploymentCutover, clusterID string) (productioncontrol.Scope, error) {
+	if config.Phase != KubeCutoverNative || config.validate() != nil || !componentPattern.MatchString(clusterID) {
+		return productioncontrol.Scope{}, errors.New("invalid native Deployment enrollment")
+	}
+	workload := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: config.Namespace, Name: config.Deployment}
+	return productioncontrol.Scope{ClusterID: clusterID, ResourceID: nativeKubernetesResourceID(workload)}, nil
 }
 
 // NewKubeFencedNativePublisher uses exactly the same authenticated client for
