@@ -39,6 +39,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control issue-participation-observer JOURNAL_CONFIG NODE KEY_ID PRIVATE_SEED_FILE
        fugue-production-control shadow-participation-dns JOURNAL_CONFIG KUBECONFIG CONTEXT NODE PRIVATE_TOKEN_FILE
+       fugue-production-control draft-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT NODE REQUEST [PRIVATE_TOKEN_FILE]
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
@@ -183,10 +184,29 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New("participation observer target is not enrolled")
 		})
 	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
-		"shadow-participation-dns", "observe-participation-freeze":
-		if (args[0] == "shadow-participation-dns" && len(args) != 6) ||
-			(args[0] != "shadow-participation-dns" && len(args) != 5) {
+		"shadow-participation-dns", "draft-participation-hold", "observe-participation-freeze":
+		minArgs, maxArgs := 5, 5
+		var tokenPath string
+		var usesToken bool
+		switch args[0] {
+		case "shadow-participation-dns":
+			minArgs, maxArgs = 6, 6
+			if len(args) == 6 {
+				tokenPath = args[5]
+				usesToken = true
+			}
+		case "draft-participation-hold":
+			minArgs, maxArgs = 6, 7
+			if len(args) == 7 {
+				tokenPath = args[6]
+				usesToken = true
+			}
+		}
+		if len(args) < minArgs || len(args) > maxArgs {
 			return errors.New(usage)
+		}
+		if usesToken && !filepath.IsAbs(tokenPath) {
+			return errors.New("participation observation requires an absolute token file path")
 		}
 		if !filepath.IsAbs(args[2]) || args[3] == "" {
 			return errors.New("participation observation requires an absolute kubeconfig path and explicit context")
@@ -223,30 +243,28 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Member = "participation_member_object_observation", &member
-			case "shadow-participation-kubernetes":
-				shadow, err := observer.ShadowKubernetes(ctx, topology.Policy, args[4], now)
+			case "shadow-participation-kubernetes", "shadow-participation-dns", "draft-participation-hold":
+				var shadow participation.KubernetesShadow
+				if tokenPath == "" {
+					shadow, err = observer.ShadowKubernetes(ctx, topology.Policy, args[4], now)
+					report.Kind = "participation_kubernetes_only_shadow"
+				} else {
+					token, readErr := readFile(tokenPath, 4096, true)
+					if readErr != nil {
+						return readErr
+					}
+					defer clear(token)
+					dns, createErr := participation.NewDNSObserver(topology.Policy.Origin, string(token))
+					if createErr != nil {
+						return createErr
+					}
+					shadow, err = observer.ShadowWithDNS(ctx, topology.Policy, args[4], dns, now)
+					report.Kind = "participation_kubernetes_and_fugue_shadow"
+				}
 				if err != nil {
 					return err
 				}
-				report.Kind, report.Shadow = "participation_kubernetes_only_shadow", &shadow
-			case "shadow-participation-dns":
-				if !filepath.IsAbs(args[5]) {
-					return errors.New("participation observation requires an absolute token file path")
-				}
-				token, err := readFile(args[5], 4096, true)
-				if err != nil {
-					return err
-				}
-				defer clear(token)
-				dns, err := participation.NewDNSObserver(topology.Policy.Origin, string(token))
-				if err != nil {
-					return err
-				}
-				shadow, err := observer.ShadowWithDNS(ctx, topology.Policy, args[4], dns, now)
-				if err != nil {
-					return err
-				}
-				report.Kind, report.Shadow = "participation_kubernetes_and_fugue_shadow", &shadow
+				report.Shadow = &shadow
 			case "observe-participation-freeze":
 				freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, args[4])
 				if err != nil {
@@ -260,6 +278,17 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			latest, err := j.ReadParticipationTopology(ctx, cluster)
 			if err != nil || latest.Version != topology.Version || latest.ApprovalDigest != topology.ApprovalDigest {
 				return errors.New("approved participation topology could not be revalidated after observation")
+			}
+			if args[0] == "draft-participation-hold" {
+				head, err := j.ReadResource(ctx, participation.HoldResource(cluster, args[4]))
+				if err != nil {
+					return errors.New("participation hold resource has no readable verified journal head")
+				}
+				draft, err := participation.DraftHold(cluster, args[5], args[4], latest, head, *report.Shadow)
+				if err != nil {
+					return err
+				}
+				return emit(draft)
 			}
 			return emit(report)
 		})
@@ -288,10 +317,18 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		if err != nil {
 			return err
 		}
+		var hold json.RawMessage
+		if s.Intent.Operation == productioncontrol.NodeParticipation {
+			hold, err = participation.InspectHold(s)
+			if err != nil {
+				return err
+			}
+		}
 		return emit(struct {
 			Digest string                   `json:"digest"`
 			Intent productioncontrol.Intent `json:"intent"`
-		}{digest, s.Intent})
+			Hold   json.RawMessage          `json:"hold,omitempty"`
+		}{digest, s.Intent, hold})
 	case "sign":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -303,6 +340,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		digest, err := s.Intent.Digest()
 		if err != nil || digest != args[2] {
 			return errors.New("submission differs from the exact reviewed intent digest")
+		}
+		if s.Intent.Operation == productioncontrol.NodeParticipation {
+			if _, err := participation.InspectHold(s); err != nil {
+				return err
+			}
 		}
 		ttl, err := time.ParseDuration(args[5])
 		if err != nil || ttl < time.Second || ttl > productioncontrol.MaxApprovalTTL {
