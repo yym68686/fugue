@@ -65,6 +65,7 @@ type ResourceState struct {
 	Baseline
 	LastVerified Version
 	LastFence    int64
+	LastIntent   string
 	Pending      string
 }
 
@@ -122,10 +123,16 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 }
 
 func (e *ExecutionJournal) Resource(ctx context.Context, scope Scope) (ResourceState, error) {
+	return e.journal.ReadResource(ctx, scope)
+}
+
+// ReadResource does not require mutation or settlement privileges. A serving
+// observer must use the durable head, not infer it from provider health.
+func (j *Journal) ReadResource(ctx context.Context, scope Scope) (ResourceState, error) {
 	if !scope.valid() {
 		return ResourceState{}, errors.New("invalid production resource identity")
 	}
-	return readResource(ctx, e.journal.db, scope)
+	return readResource(ctx, j.db, scope)
 }
 
 func (e *ExecutionJournal) ReadIntent(ctx context.Context, intentDigest string) (Intent, []byte, error) {
@@ -355,7 +362,7 @@ func readResult(ctx context.Context, db queryRow, intentDigest string) (Executio
 func readResource(ctx context.Context, db queryRow, s Scope) (ResourceState, error) {
 	state := ResourceState{Baseline: Baseline{Scope: s}}
 	var missingPrevious bool
-	err := db.QueryRowContext(ctx, `SELECT b.generation,b.verified_digest,b.evidence_digest,COALESCE(c.fence,0),
+	err := db.QueryRowContext(ctx, `SELECT b.generation,b.verified_digest,b.evidence_digest,COALESCE(c.fence,0),COALESCE(c.intent_digest,''),
 		CASE WHEN r.intent_digest IS NULL THEN COALESCE(c.intent_digest,'') ELSE '' END,
 		COALESCE(r.generation,pr.generation,b.generation),COALESCE(r.verified_digest,pr.verified_digest,b.verified_digest),
 		COALESCE(c.fence>1 AND r.intent_digest IS NULL AND pr.intent_digest IS NULL,false)
@@ -366,13 +373,14 @@ func readResource(ctx context.Context, db queryRow, s Scope) (ResourceState, err
 		LEFT JOIN fugue_control.execution_claims p ON p.cluster_id=b.cluster_id AND p.resource_id=b.resource_id AND p.fence=c.fence-1
 		LEFT JOIN fugue_control.execution_results pr ON pr.intent_digest=p.intent_digest
 		WHERE b.cluster_id=$1 AND b.resource_id=$2`, s.ClusterID, s.ResourceID).
-		Scan(&state.Verified.Generation, &state.Verified.Digest, &state.EvidenceDigest, &state.LastFence, &state.Pending,
+		Scan(&state.Verified.Generation, &state.Verified.Digest, &state.EvidenceDigest, &state.LastFence, &state.LastIntent, &state.Pending,
 			&state.LastVerified.Generation, &state.LastVerified.Digest, &missingPrevious)
 	if err != nil {
 		return ResourceState{}, err
 	}
 	if missingPrevious || !state.Verified.valid() || !state.LastVerified.valid() || !digestPattern.MatchString(state.EvidenceDigest) ||
-		(state.Pending != "" && !digestPattern.MatchString(state.Pending)) {
+		(state.LastIntent != "" && !digestPattern.MatchString(state.LastIntent)) ||
+		(state.Pending != "" && state.Pending != state.LastIntent) {
 		return ResourceState{}, errors.New("production resource contains an invalid execution chain")
 	}
 	return state, nil

@@ -53,3 +53,6 @@ the independent cutover checks.
   local, dependency, and route health. It never advances the PostgreSQL
   last-verified version: that additionally needs proof this claim cannot
   issue a delayed write. Unknown state is not proof of no write.
+- Guardian status reports the serving record separately from the durable
+  last-verified record. A healthy provider pointer with an unresolved journal
+  claim remains `verifying`; a missing journal does not advance status.
