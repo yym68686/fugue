@@ -77,7 +77,7 @@ func checkStorageUnmountCommit(t *testing.T, s *Store, tenant string) {
 	if err != nil || stored.StorageUnmount == nil || *stored.StorageUnmount != req || stored.ConfigBaseSpec == nil {
 		t.Fatalf("operation lost its immutable request or baseline: %v", err)
 	}
-	if _, err := s.CancelOperation(op.ID, "test"); !errors.Is(err, ErrConflict) {
+	if _, err := cancelOperationForTest(s, op, "test"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("running operation cancellation was not fenced: %v", err)
 	}
 	changed := claimed

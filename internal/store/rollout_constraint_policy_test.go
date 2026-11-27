@@ -110,7 +110,7 @@ func testRolloutConstraintPolicyOperation(t *testing.T, s *Store) {
 	if _, err := s.CompleteRolloutConstraintPolicyOperation(op2, stale, "stale"); !errors.Is(err, ErrConflict) {
 		t.Fatal("stale configuration accepted", err)
 	}
-	if _, err := s.CancelOperation(op2.ID, "cancel"); err != nil {
+	if _, err := cancelOperationForTest(s, op2, "cancel"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.CompleteRolloutConstraintPolicyOperation(op2, after, "cancelled"); !errors.Is(err, ErrConflict) {

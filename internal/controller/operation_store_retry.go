@@ -13,12 +13,13 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/operationexecution"
 	"fugue/internal/operationqueue"
 	"fugue/internal/store"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var errOperationPersistenceInterrupted = errors.New("operation persistence unavailable during observation")
+var errOperationPersistenceInterrupted = operationexecution.ErrPersistenceInterrupted
 
 func operationStoreTransient(err error) bool {
 	if err == nil || errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
@@ -38,45 +39,10 @@ func operationStoreTransient(err error) bool {
 	return false
 }
 
-// Retry persistence, never the operation's side effects. The leader context
-// cancels ownership. Each Store call already has a bounded DB timeout; backoff
-// is capped so restoration does not require another controller restart.
 func retryOperationStore(ctx context.Context, delay time.Duration, pending func(int), call func() error) error {
-	if delay <= 0 {
-		delay = time.Second
-	}
-	for attempt := 1; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		err := call()
-		if ctx.Err() != nil {
-			if operationStoreTransient(err) {
-				return fmt.Errorf("%w: %w", errOperationPersistenceInterrupted, ctx.Err())
-			}
-			return ctx.Err()
-		}
-		if !operationStoreTransient(err) {
-			return err
-		}
-		if pending != nil {
-			pending(attempt)
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return fmt.Errorf("%w: %w", errOperationPersistenceInterrupted, ctx.Err())
-		case <-timer.C:
-		}
-		if delay < 15*time.Second {
-			delay *= 2
-			if delay > 15*time.Second {
-				delay = 15 * time.Second
-			}
-		}
-	}
+	return operationexecution.RetryPersistence(ctx, delay, pending, call, operationStoreTransient)
 }
+
 func (s *Service) operationPersistencePending(id, stage string) func(int) {
 	return func(attempt int) {
 		if s.Logger != nil {
@@ -114,23 +80,6 @@ func (s *Service) finalizeManagedOperation(ctx context.Context, expected model.O
 	return result, err
 }
 
-// An expired observation budget during a Store outage says nothing about the
-// workload. Resume observation when persistence returns, without rollback/apply.
 func retryRolloutPersistenceObservation(ctx context.Context, observe func() error) error {
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		err := observe()
-		if !errors.Is(err, errOperationPersistenceInterrupted) || ctx.Err() != nil {
-			return err
-		}
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return operationexecution.ResumeObservation(ctx, observe)
 }
