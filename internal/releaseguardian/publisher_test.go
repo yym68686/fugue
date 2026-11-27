@@ -16,7 +16,19 @@ import (
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
-func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *testing.T) {
+type healthyPublication struct {
+	now            time.Time
+	key            Key
+	stableData     map[string]string
+	stableMonitor  declarativerelease.MonitorRecord
+	stableGuardian ReleaseRecord
+	candidate      map[string][]byte
+	client         *kubernetesfake.Clientset
+	store          *KubeStore
+}
+
+func healthyPublicationFixture(t *testing.T) healthyPublication {
+	t.Helper()
 	now := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	key := Key{Component: "edge-control-de", Group: "de"}
 	stableData, stableRecord, stableArtifact, stableTarget := guardianStableFixture(t, key, now)
@@ -32,7 +44,7 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 	}
 	replicas := int32(1)
 	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "edge-control-de", Namespace: "fugue-system", Annotations: map[string]string{"fugue.pro/production-config-sha": stableTarget.ConfigSHA}, Generation: 4},
+		ObjectMeta: metav1.ObjectMeta{Name: "edge-control-de", Namespace: "fugue-system", UID: "uid", ResourceVersion: "10", Annotations: map[string]string{"fugue.pro/production-config-sha": stableTarget.ConfigSHA}, Generation: 4},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "edge-control-de"}},
 			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "edge-control-de"}, Annotations: map[string]string{"fugue.pro/oci-revision": stableTarget.OCIRevision}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "edge-control", Image: stableTarget.ImageRef}}}},
@@ -79,6 +91,12 @@ func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *tes
 		t.Fatal(err)
 	}
 	candidate := guardianCandidateFixture(t, key, stableTarget, stableArtifact.TopDigest, []byte(stableData["forward.json"]), now)
+	return healthyPublication{now: now, key: key, stableData: stableData, stableMonitor: stableRecord, stableGuardian: stableGuardian, candidate: candidate, client: client, store: store}
+}
+
+func TestPublishDesiredCreatesImmutableRecordAndRejectsUnsettledSuccessor(t *testing.T) {
+	f := healthyPublicationFixture(t)
+	key, stableData, stableRecord, stableGuardian, candidate, client, store := f.key, f.stableData, f.stableMonitor, f.stableGuardian, f.candidate, f.client, f.store
 	candidatePlan, err := declarativerelease.DecodePlan(bytes.NewReader(candidate["release-plan.json"]))
 	if err != nil {
 		t.Fatal(err)
