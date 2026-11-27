@@ -58,7 +58,7 @@ func dispatchOfflineHold(ctx context.Context, j offlineDispatchJournal, provider
 	s := productioncontrol.Submission{Intent: i, Payload: raw}
 	p, err := decodeHold(s)
 	actual, digestErr := i.Digest()
-	if err != nil || digestErr != nil || actual != intentDigest || i.ClusterID != cluster || p.Phase != ParticipationOffline ||
+	if err != nil || digestErr != nil || actual != intentDigest || i.ClusterID != cluster || !exactHoldPhase(p.Phase) ||
 		!canonicalDigest(approvalDigest) {
 		return result, errors.New("dispatch requires an exact offline hold in this cluster and its approval")
 	}
@@ -71,33 +71,47 @@ func dispatchOfflineHold(ctx context.Context, j offlineDispatchJournal, provider
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return result, err
 	}
-	check := func(claim *productioncontrol.Claim) (*corev1.Node, string, error) {
+	check := func(claim *productioncontrol.Claim) (*corev1.Node, string, readmissionRequirements, error) {
+		var required readmissionRequirements
 		topology, err := j.ReadParticipationTopology(ctx, cluster)
 		if err != nil || topology.Version != p.Topology || topology.ApprovalDigest != p.TopologyApproval {
-			return nil, "", errors.New("offline hold no longer matches the approved topology")
+			return nil, "", required, errors.New("offline hold no longer matches the approved topology")
 		}
 		head, err := j.ReadResource(ctx, scope)
 		if err != nil || head.Scope != scope || head.LastVerified != (productioncontrol.Version{Generation: i.Generation, Digest: i.CurrentDigest}) {
-			return nil, "", productioncontrol.ErrResourceDrift
+			return nil, "", required, productioncontrol.ErrResourceDrift
 		}
 		if claim == nil {
 			if head.Pending != "" {
-				return nil, "", productioncontrol.ErrResourceBusy
+				return nil, "", required, productioncontrol.ErrResourceBusy
 			}
 		} else if head.Pending != claim.IntentDigest || head.LastFence != claim.Fence {
-			return nil, "", productioncontrol.ErrStaleFence
+			return nil, "", required, productioncontrol.ErrStaleFence
+		}
+		if p.Phase == rollbackPhase {
+			if err := checkOfflineHoldRollbackSource(ctx, j, s, p, claim); err != nil {
+				return nil, "", required, err
+			}
+			member, err := enrolledMember(topology.Policy, p.To.Node)
+			if err != nil || member.StableSeconds < 120 {
+				return nil, "", required, errors.New("rollback requires the approved per-member stability window")
+			}
+			required.StableSeconds = member.StableSeconds
 		}
 		head.Pending = "" // Only our already-matched claim is ignored for the pure planner.
 		live, boundary, err := provider.Check(ctx, topology, s, head)
 		if err != nil {
-			return nil, "", err
+			return nil, "", required, err
 		}
-		if err := verifyOfflineHoldAuthority(authority, observerKey, boundary, now()); err != nil {
-			return nil, "", err
+		if p.Phase == rollbackPhase {
+			required.ReadySince = rollbackNodeReadySince(live).Unix()
 		}
-		return live, boundary, nil
+		if err := verifyOfflineDispatchAuthority(authority, observerKey, boundary, required, now()); err != nil {
+			return nil, "", required, err
+		}
+		return live, boundary, required, nil
 	}
-	if _, _, err := check(nil); err != nil {
+	if _, _, _, err := check(nil); err != nil {
 		return result, err
 	}
 	claim, created, err := j.ReserveExecution(ctx, actor, intentDigest, approvalDigest)
@@ -107,12 +121,12 @@ func dispatchOfflineHold(ctx context.Context, j offlineDispatchJournal, provider
 	}
 	// This is deliberately after durable reservation. Any error or crash
 	// from here on leaves a pending claim; no path refunds the permit.
-	live, boundary, err := check(&claim)
+	live, boundary, required, err := check(&claim)
 	if err == nil {
 		err = j.VerifyOpenClaim(ctx, claim)
 	}
 	if err == nil {
-		err = verifyOfflineHoldAuthority(authority, observerKey, boundary, now())
+		err = verifyOfflineDispatchAuthority(authority, observerKey, boundary, required, now())
 	}
 	if err != nil {
 		return result, fmt.Errorf("offline hold reserved; resolve its pending claim before any further writes: %w", err)
@@ -151,29 +165,39 @@ func (k *kubeOfflineDispatch) Check(ctx context.Context, topology productioncont
 	if err := o.VerifyNamespace(ctx); err != nil {
 		return nil, "", err
 	}
-	node, err := HoldTarget(s)
+	hold, err := decodeHold(s)
 	if err != nil {
 		return nil, "", err
 	}
-	var shadow KubernetesShadow
-	if k.dns == nil {
-		shadow, err = o.ShadowKubernetes(ctx, topology.Policy, node, time.Now)
+	node := hold.To.Node
+	var boundary string
+	if hold.Phase == rollbackPhase {
+		observed, err := o.ObserveOfflineHoldRollbackBoundary(ctx, topology, s, k.writer, time.Now())
+		if err != nil {
+			return nil, "", err
+		}
+		boundary = observed.Digest
 	} else {
-		shadow, err = o.ShadowWithDNS(ctx, topology.Policy, node, k.dns, time.Now)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	if err := PreflightHold(s, topology, head, shadow, time.Now()); err != nil {
-		return nil, "", err
-	}
-	guard, err := o.ObserveOfflineHoldGuard(ctx, topology, s, k.writer)
-	if err != nil {
-		return nil, "", err
-	}
-	boundary, err := OfflineHoldAuthorityBoundary(topology, s, k.writer, guard)
-	if err != nil {
-		return nil, "", err
+		var shadow KubernetesShadow
+		if k.dns == nil {
+			shadow, err = o.ShadowKubernetes(ctx, topology.Policy, node, time.Now)
+		} else {
+			shadow, err = o.ShadowWithDNS(ctx, topology.Policy, node, k.dns, time.Now)
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		if err := PreflightHold(s, topology, head, shadow, time.Now()); err != nil {
+			return nil, "", err
+		}
+		guard, err := o.ObserveOfflineHoldGuard(ctx, topology, s, k.writer)
+		if err != nil {
+			return nil, "", err
+		}
+		boundary, err = OfflineHoldAuthorityBoundary(topology, s, k.writer, guard)
+		if err != nil {
+			return nil, "", err
+		}
 	}
 	if err := o.VerifyNamespace(ctx); err != nil {
 		return nil, "", err

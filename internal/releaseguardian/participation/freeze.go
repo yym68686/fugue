@@ -21,15 +21,15 @@ func FreezeNodePolicy(node string) (*admission.ValidatingAdmissionPolicy, *admis
 }
 
 // RenderOfflineHoldGuard derives a provider-side admission constraint, not
-// permission to install it. It admits only the reviewed offline hold at the
-// reviewed resourceVersion; a successful update consumes that version.
+// permission to install it. It admits only the reviewed offline hold or its
+// exact inverse at the reviewed resourceVersion; success consumes that version.
 // Recovering holds are deliberately unsupported: their stabilization clock
 // must start at actual application, not draft time.
 func RenderOfflineHoldGuard(s productioncontrol.Submission, writer string) (*admission.ValidatingAdmissionPolicy, *admission.ValidatingAdmissionPolicyBinding, error) {
 	hold, err := decodeHold(s)
 	path, prefix := strings.CutPrefix(writer, "system:serviceaccount:")
 	ns, name, split := strings.Cut(path, ":")
-	if err != nil || hold.Phase != ParticipationOffline || !prefix || !split ||
+	if err != nil || !exactHoldPhase(hold.Phase) || !prefix || !split ||
 		len(validation.IsDNS1123Label(ns)) != 0 || len(validation.IsDNS1123Subdomain(name)) != 0 || name == "default" ||
 		len(hold.ResourceVersion) > 128 || len(hold.To.UID) > 128 {
 		return nil, nil, errors.New("invalid offline hold admission boundary or dedicated writer")

@@ -41,10 +41,12 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control issue-participation-observer JOURNAL_CONFIG NODE KEY_ID PRIVATE_SEED_FILE
        fugue-production-control shadow-participation-dns JOURNAL_CONFIG KUBECONFIG CONTEXT NODE PRIVATE_TOKEN_FILE
        fugue-production-control draft-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT NODE REQUEST [PRIVATE_TOKEN_FILE]
+       fugue-production-control draft-participation-hold-rollback JOURNAL_CONFIG KUBECONFIG CONTEXT ORIGINAL_INTENT_DIGEST REQUEST
        fugue-production-control preflight-participation-hold JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION [PRIVATE_TOKEN_FILE]
        fugue-production-control render-participation-freeze NODE
        fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control observe-participation-offline-guard JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
+       fugue-production-control observe-participation-rollback-boundary JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
        fugue-production-control observe-participation-offline-readback JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
        fugue-production-control observe-participation-pending JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
@@ -97,6 +99,21 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				KubeContext       string                                   `json:"kubeContext"`
 				Pending           participation.PendingOfflineHoldReadback `json:"pending"`
 			}{"participation_pending_offline_hold_readback", false, cluster, args[3], pending})
+		})
+	case "draft-participation-hold-rollback":
+		if len(args) != 6 {
+			return errors.New(usage)
+		}
+		kubeConfig, err := readKubeObservationConfig(args[2], args[3])
+		if err != nil {
+			return err
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			draft, err := participation.DraftOfflineHoldRollback(ctx, j, kubeConfig, cluster, args[4], args[5])
+			if err != nil {
+				return err
+			}
+			return emit(draft)
 		})
 	case "draft-participation":
 		if len(args) != 4 && len(args) != 6 {
@@ -211,12 +228,13 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		})
 	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes",
 		"shadow-participation-dns", "draft-participation-hold", "preflight-participation-hold",
-		"observe-participation-freeze", "observe-participation-offline-guard", "observe-participation-offline-readback":
+		"observe-participation-freeze", "observe-participation-offline-guard",
+		"observe-participation-offline-readback", "observe-participation-rollback-boundary":
 		minArgs, maxArgs := 5, 5
 		var tokenPath string
 		var usesToken bool
 		usesSubmission := args[0] == "preflight-participation-hold" || args[0] == "observe-participation-offline-guard" ||
-			args[0] == "observe-participation-offline-readback"
+			args[0] == "observe-participation-offline-readback" || args[0] == "observe-participation-rollback-boundary"
 		switch args[0] {
 		case "shadow-participation-dns":
 			minArgs, maxArgs = 6, 6
@@ -236,7 +254,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 				tokenPath = args[5]
 				usesToken = true
 			}
-		case "observe-participation-offline-guard":
+		case "observe-participation-offline-guard", "observe-participation-rollback-boundary":
 			minArgs, maxArgs = 6, 6
 		}
 		if len(args) < minArgs || len(args) > maxArgs {
@@ -335,6 +353,16 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Readback = "participation_offline_hold_readback", &readback
+				report.IntentDigest, err = submission.Intent.Digest()
+				if err != nil {
+					return err
+				}
+			case "observe-participation-rollback-boundary":
+				boundary, err := observer.ObserveOfflineHoldRollbackBoundary(ctx, topology, submission, args[5], now())
+				if err != nil {
+					return err
+				}
+				report.Kind, report.RollbackBoundary = "participation_offline_hold_rollback_boundary", &boundary
 				report.IntentDigest, err = submission.Intent.Digest()
 				if err != nil {
 					return err
@@ -495,17 +523,18 @@ func readKubeObservationConfig(path, context string) (*rest.Config, error) {
 }
 
 type participationObservationReport struct {
-	Kind              string                             `json:"kind"`
-	ExecutionEvidence bool                               `json:"executionEvidence"`
-	JournalCluster    string                             `json:"journalCluster"`
-	KubeContext       string                             `json:"kubeContext"`
-	Topology          productioncontrol.Version          `json:"topology"`
-	IntentDigest      string                             `json:"intentDigest,omitempty"`
-	Readers           *participation.ReaderObservation   `json:"readers,omitempty"`
-	Member            *participation.MemberObservation   `json:"member,omitempty"`
-	Shadow            *participation.KubernetesShadow    `json:"shadow,omitempty"`
-	Freeze            *participation.FreezeObservation   `json:"freeze,omitempty"`
-	Readback          *participation.OfflineHoldReadback `json:"readback,omitempty"`
+	Kind              string                                     `json:"kind"`
+	ExecutionEvidence bool                                       `json:"executionEvidence"`
+	JournalCluster    string                                     `json:"journalCluster"`
+	KubeContext       string                                     `json:"kubeContext"`
+	Topology          productioncontrol.Version                  `json:"topology"`
+	IntentDigest      string                                     `json:"intentDigest,omitempty"`
+	Readers           *participation.ReaderObservation           `json:"readers,omitempty"`
+	Member            *participation.MemberObservation           `json:"member,omitempty"`
+	Shadow            *participation.KubernetesShadow            `json:"shadow,omitempty"`
+	Freeze            *participation.FreezeObservation           `json:"freeze,omitempty"`
+	Readback          *participation.OfflineHoldReadback         `json:"readback,omitempty"`
+	RollbackBoundary  *participation.OfflineHoldRollbackBoundary `json:"rollbackBoundary,omitempty"`
 }
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {

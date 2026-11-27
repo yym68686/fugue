@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -166,6 +167,72 @@ func TestOfflineHoldWriteAgainstIsolatedProvider(t *testing.T) {
 	freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, node)
 	if err != nil || freeze.Policy.UID != string(installed.UID) || freeze.Policy.ResourceVersion == installed.ResourceVersion {
 		t.Fatalf("independent read did not find the exact replacement freeze: %+v, %v", freeze, err)
+	}
+	// This tests provider-side exactness only; the real Guardian also
+	// requires independently fenced readmission and a separate claim.
+	original, err := decodeHold(submission)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse, err := submission.Intent.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := encodeHoldRollback("fixture", "rollback-a", original, reverse, stored.ResourceVersion,
+		productioncontrol.Version{Generation: 2, Digest: submission.Intent.TargetDigest}, digest([]byte("fixture checkpoint")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollbackGuard, _, err := RenderOfflineHoldGuard(rollback, writer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, err = policies.Get(ctx, closed.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed.Spec = rollbackGuard.Spec
+	if _, err := policies.Update(ctx, installed, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, body, err := offlineHoldPatch(rollback, stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := func(body []byte) error {
+		return writerClient.Patch(types.JSONPatchType).Resource("nodes").Name(node).
+			Param("dryRun", metav1.DryRunAll).MaxRetries(0).Body(body).Do(ctx).Error()
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(context.Context) (bool, error) {
+		return probe(body) == nil, nil
+	}); err != nil {
+		t.Fatalf("rollback guard did not admit the exact dry-run: %v", err)
+	}
+	var ops []nodePatchOperation
+	if err := json.Unmarshal(body, &ops); err != nil || len(ops) != 4 || ops[2].Op != "remove" || ops[3].Op != "remove" {
+		t.Fatalf("absent predecessors were not rendered as exact removals: %s %v", body, err)
+	}
+	ops = append(ops, nodePatchOperation{Op: "add", Path: "/metadata/annotations/fixture.example~1preserve", Value: "wrong"})
+	tampered, err := json.Marshal(ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := probe(tampered); !apierrors.IsForbidden(err) {
+		t.Fatalf("rollback guard accepted an unrelated annotation change: %v", err)
+	}
+	if got, err := writeOfflineHoldOnce(ctx, wrongClient, rollback, stored); got != nil || !apierrors.IsForbidden(err) {
+		t.Fatalf("rollback guard did not fence the old identity: %v", err)
+	}
+	back, err := writeOfflineHoldOnce(ctx, writerClient, rollback, stored)
+	if err != nil || back == nil || !reflect.DeepEqual(back.Annotations, n.Annotations) {
+		t.Fatalf("exact rollback did not preserve unrelated annotations: %+v %v", back, err)
+	}
+	if got, err := writeOfflineHoldOnce(ctx, writerClient, rollback, stored); got != nil || err == nil {
+		t.Fatal("rollback guard accepted a stale replay")
+	}
+	rolledBack, err := observer.ObserveOfflineHoldReadback(ctx, topology, rollback)
+	if err != nil || rolledBack.State != OfflineHoldTargetVisible || rolledBack.ObservedDigest != submission.Intent.CurrentDigest {
+		t.Fatalf("independent rollback readback did not find the exact original state: %+v %v", rolledBack, err)
 	}
 }
 

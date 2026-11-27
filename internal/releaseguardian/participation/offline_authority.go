@@ -20,14 +20,31 @@ const (
 // must be retained by the provider observer. This statement cannot be
 // derived from a policy GET, a Node GET or an owner approval.
 type OfflineHoldAuthority struct {
-	BoundaryDigest     string `json:"boundaryDigest"`
-	EndpointAdmission  string `json:"endpointAdmissionDigest"`
-	LegacyRevocation   string `json:"legacyRevocationDigest"`
-	LegacyRequestDrain string `json:"legacyRequestDrainDigest"`
-	WriterIdentity     string `json:"writerIdentityDigest"`
-	ObservedAt         int64  `json:"observedAtUnix"`
-	ExpiresAt          int64  `json:"expiresAtUnix"`
-	Signature          []byte `json:"signature"`
+	BoundaryDigest     string                  `json:"boundaryDigest"`
+	EndpointAdmission  string                  `json:"endpointAdmissionDigest"`
+	LegacyRevocation   string                  `json:"legacyRevocationDigest"`
+	LegacyRequestDrain string                  `json:"legacyRequestDrainDigest"`
+	WriterIdentity     string                  `json:"writerIdentityDigest"`
+	ObservedAt         int64                   `json:"observedAtUnix"`
+	ExpiresAt          int64                   `json:"expiresAtUnix"`
+	Readmission        *OfflineHoldReadmission `json:"readmission,omitempty"`
+	Signature          []byte                  `json:"signature"`
+}
+
+// OfflineHoldReadmission attests successful probes against the exact active
+// Front/Worker generation and independently verified network approval. The
+// serving fence must stay closed to other changes until the exact rollback
+// guard closes and the one possible provider request drains, even if this
+// statement expires or the dispatcher crashes first.
+// The signer retains the underlying records; a ready Node, Git record or
+// provider response is not a substitute for any of the three records.
+type OfflineHoldReadmission struct {
+	NetworkRecovery  string `json:"networkRecoveryDigest"`
+	ServingAuthority string `json:"servingAuthorityDigest"`
+	ServingFence     string `json:"servingFenceDigest"`
+	StableSince      int64  `json:"stableSinceUnix"`
+	ActivatedAt      int64  `json:"servingActivatedAtUnix"`
+	NetworkSuccessAt int64  `json:"networkSuccessAtUnix"`
 }
 
 // OfflineHoldAuthorityBoundary binds the resource, signed topology and
@@ -81,6 +98,18 @@ func (a OfflineHoldAuthority) SigningInput() ([]byte, error) {
 		a.ExpiresAt-a.ObservedAt > int64(maxOfflineAuthorityAge/time.Second) {
 		return nil, errors.New("offline hold authority has an invalid lifetime")
 	}
+	if r := a.Readmission; r != nil {
+		for _, d := range []string{r.NetworkRecovery, r.ServingAuthority, r.ServingFence} {
+			if !canonicalDigest(d) || seen[d] {
+				return nil, errors.New("readmission requires distinct network recovery, serving authority and serving fence evidence")
+			}
+			seen[d] = true
+		}
+		if r.StableSince <= 0 || r.ActivatedAt <= 0 || r.NetworkSuccessAt < r.StableSince ||
+			r.NetworkSuccessAt < r.ActivatedAt || r.NetworkSuccessAt > a.ObservedAt {
+			return nil, errors.New("network recovery must be observed after stability began and the current serving activation")
+		}
+	}
 	a.Signature = nil
 	raw, err := json.Marshal(a)
 	if err != nil {
@@ -93,6 +122,15 @@ func (a OfflineHoldAuthority) SigningInput() ([]byte, error) {
 // provisioner or a collector. Its key must come from independently
 // provisioned verifier configuration, not the submitter or the writer.
 func verifyOfflineHoldAuthority(raw []byte, observer ed25519.PublicKey, boundary string, now time.Time) error {
+	return verifyOfflineDispatchAuthority(raw, observer, boundary, readmissionRequirements{}, now)
+}
+
+type readmissionRequirements struct {
+	StableSeconds int
+	ReadySince    int64
+}
+
+func verifyOfflineDispatchAuthority(raw []byte, observer ed25519.PublicKey, boundary string, required readmissionRequirements, now time.Time) error {
 	var a OfflineHoldAuthority
 	if len(raw) == 0 || len(raw) > maxOfflineAuthorityBytes || len(observer) != ed25519.PublicKeySize ||
 		decodeStrict(raw, &a) != nil || !canonicalDigest(boundary) {
@@ -106,6 +144,19 @@ func verifyOfflineHoldAuthority(raw []byte, observer ed25519.PublicKey, boundary
 	}
 	if a.BoundaryDigest != boundary || now.Unix() < a.ObservedAt || now.Unix() >= a.ExpiresAt {
 		return errors.New("offline hold authority is stale or does not cover the exact dispatch")
+	}
+	if required == (readmissionRequirements{}) {
+		if a.Readmission != nil {
+			return errors.New("readmission evidence is only valid for an exact rollback")
+		}
+		return nil
+	}
+	r := a.Readmission
+	if required.StableSeconds < 120 || required.StableSeconds > 3600 || required.ReadySince <= 0 ||
+		r == nil || r.StableSince < required.ReadySince ||
+		a.ObservedAt-max(r.StableSince, r.ActivatedAt) < int64(required.StableSeconds) ||
+		now.Unix()-r.NetworkSuccessAt > int64((10*time.Minute)/time.Second) {
+		return errors.New("rollback requires fresh, fenced network and serving evidence over the approved stability window")
 	}
 	return nil
 }
