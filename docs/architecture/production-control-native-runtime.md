@@ -490,12 +490,24 @@ the original socket to the Front Pod. The Linux socket origin must have
 read access to that connection tracking table in its own network
 namespace. A missing mapping stops the approved shadow.
 
+For a coordinated handoff rehearsal, pass the same canonical sealed journal
+to `fugue-release-guardian node-worker-watch` on stdin before the Front
+selects the candidate. The first JSON line has phase `observing` once the
+watcher has opened and attributed its own public connection to the retained
+Worker. The watcher keeps that socket open while observing the durable and
+live selection. It then opens new sockets on the public and optional probe
+listener, checks the route against the original digest, and verifies the
+Guardian result against the original arm and exact activation. The final
+JSON line has phase `verified`. Treat a missing final line or nonzero exit
+as an unsuccessful rehearsal. Source-address attribution has the same
+connection tracking requirements as the approved shadow.
+
 The Kubernetes object client uses plain GET. The only Pod exec calls read
 the exact Front recipient and its local activation file. Keep the current
-production writer until the replacement also proves peer stability,
-existing TLS connection survival, and the exact terminal serving result.
-Those proofs, old writer drainage and revocation, and the production
-cutover require separate evidence.
+production writer until the replacement also proves peer stability, old
+writer drainage and revocation, and production cutover. The watcher's
+`verified` line records connection survival and the terminal serving result
+for that journal only.
 
 ## Single-Deployment release draft
 

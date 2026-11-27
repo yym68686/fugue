@@ -67,6 +67,11 @@ func run() error {
 		defer stop()
 		return runApprovedNodeWorkerShadow(ctx, os.Args[2:], os.Stdout)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "node-worker-watch" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runNodeWorkerWatch(ctx, os.Args[2:], os.Stdin, os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "node-worker-seal" {
 		return runNodeWorkerSeal(os.Args[2:], os.Stdin, os.Stdout)
 	}

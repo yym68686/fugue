@@ -17,7 +17,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-var errNodeWorkerWriteUnknown = errors.New("node Worker native write result is unknown; retain the lease until expiry")
+var (
+	errNodeWorkerWriteUnknown   = errors.New("node Worker native write result is unknown; retain the lease until expiry")
+	errNodeWorkerFrontReloading = errors.New("public Front still serves the exact predecessor after the durable activation")
+)
 
 // An existing installation may have durable node-local outcomes predating
 // the named index. Populate it under the same lease as normal finalization.
@@ -233,20 +236,31 @@ func (a *frontAuthorityActivator) readNodeWorkerSelection(ctx context.Context, j
 		return s, errors.Join(errors.New("node Worker Front activation is invalid"), err)
 	}
 	var live nodeWorkerFrontHealth
-	if err := readAuthorityRuntimeJSON(ctx, repairHealthEndpoint(runtime.front.Status.PodIP, frontHealthPort, "/healthz"), &live); err != nil ||
-		!frontRepairLiveMatches(live.observedFront, s) {
-		return s, errors.Join(errors.New("public Front does not match the durable node activation"), err)
+	if err := readAuthorityRuntimeJSON(ctx, repairHealthEndpoint(runtime.front.Status.PodIP, frontHealthPort, "/healthz"), &live); err != nil {
+		return s, errors.Join(errors.New("public Front health is unreadable"), err)
 	}
-	target := runtime.prior.target
-	if j.Progress(s) == edgegroupfront.NodeWorkerActivated {
+	return s, checkNodeWorkerLiveSelection(j, s, live, runtime.prior.target, runtime.front.Status.HostIP)
+}
+
+func checkNodeWorkerLiveSelection(j edgegroupfront.NodeWorkerJournal, s edgegroupfront.ActivationState, live nodeWorkerFrontHealth,
+	predecessorTarget, hostIP string) error {
+	progress := j.Progress(s)
+	if progress == edgegroupfront.NodeWorkerActivated && frontRepairLiveMatches(live.observedFront, j.Expected) && live.Target == predecessorTarget {
+		return errNodeWorkerFrontReloading
+	}
+	if !frontRepairLiveMatches(live.observedFront, s) {
+		return errors.New("public Front does not match the durable node activation")
+	}
+	target := predecessorTarget
+	if progress == edgegroupfront.NodeWorkerActivated {
 		// Derive from the exact Front host even if its selected Worker
 		// replica is gone. Never dial an address from the health response.
-		target = net.JoinHostPort(runtime.front.Status.HostIP, strconv.Itoa(int(j.CandidateHTTPSPort())))
+		target = net.JoinHostPort(hostIP, strconv.Itoa(int(j.CandidateHTTPSPort())))
 	}
 	if live.Target != target {
-		return s, errors.New("public Front did not select the journal's exact physical listener")
+		return errors.New("public Front did not select the journal's exact physical listener")
 	}
-	return s, nil
+	return nil
 }
 
 func (a *frontAuthorityActivator) requireSameNodeWorkerRuntime(ctx context.Context, j edgegroupfront.NodeWorkerJournal, state edgegroupfront.ActivationState,

@@ -141,62 +141,35 @@ func observeNodeWorkerIngressFact(ctx context.Context, runtime nodeWorkerRuntime
 func (a *frontAuthorityActivator) observeNodeWorkerIngress(ctx context.Context, j edgegroupfront.NodeWorkerJournal,
 	preflight nodeWorkerPreflight) (nodeWorkerIngressObservation, error) {
 	runtime := preflight.runtime
-	if len(runtime.service.Spec.ExternalIPs) != 1 {
-		return nodeWorkerIngressObservation{}, errors.New("public Front Service lacks an exact address")
-	}
-	ip, err := netip.ParseAddr(runtime.service.Spec.ExternalIPs[0])
+	publicAddress, probeAddress, err := nodeWorkerIngressAddresses(runtime, j)
 	if err != nil {
 		return nodeWorkerIngressObservation{}, err
 	}
-	host, path, body := a.config.RouteHost, a.config.RoutePath, a.config.RouteBodyDigest
 	retained := j.Expected.ActiveSlot
 	retainedTarget := runtime.prior.target
-	public, err := openNodeWorkerTLS(ctx, netip.AddrPortFrom(ip, 443), host, nil)
+	public, before, err := a.openObservedNodeWorkerSocket(ctx, runtime, j, publicAddress, retained, retainedTarget)
 	if err != nil {
-		return nodeWorkerIngressObservation{}, fmt.Errorf("open public Front TLS: %w", err)
+		return nodeWorkerIngressObservation{}, fmt.Errorf("observe retained public Front TLS: %w", err)
 	}
-	defer public.close()
-	before, err := public.proof(ctx, path, j.Recipient.Node, j.Recipient.Group)
-	if err != nil {
-		return nodeWorkerIngressObservation{}, err
-	}
-	if err := public.serving(ctx, path, body); err != nil {
-		return nodeWorkerIngressObservation{}, err
-	}
-	fact, err := observeNodeWorkerIngressFact(ctx, runtime, j, public, retained, retainedTarget)
-	if err != nil {
-		return nodeWorkerIngressObservation{}, err
-	}
-	result := nodeWorkerIngressObservation{Public: fact, Route: before}
-	if j.ProbeServiceUID != "" {
-		if len(runtime.probe.Spec.Ports) != 1 || runtime.probe.Spec.Ports[0].Port != 15443 {
-			return nodeWorkerIngressObservation{}, errors.New("approved Front probe listener is missing")
-		}
-		probe, err := openNodeWorkerTLS(ctx, netip.AddrPortFrom(ip, uint16(runtime.probe.Spec.Ports[0].Port)), host, nil)
+	defer public.tls.close()
+	result := nodeWorkerIngressObservation{Public: public.fact, Route: before}
+	if probeAddress.IsValid() {
+		probe, proof, err := a.openObservedNodeWorkerSocket(ctx, runtime, j, probeAddress, retained, retainedTarget)
 		if err != nil {
-			return nodeWorkerIngressObservation{}, fmt.Errorf("open independent Front probe TLS: %w", err)
+			return nodeWorkerIngressObservation{}, fmt.Errorf("observe independent Front probe TLS: %w", err)
 		}
-		defer probe.close()
-		p, err := probe.proof(ctx, path, j.Recipient.Node, j.Recipient.Group)
-		if err != nil || !sameNodeWorkerProof(before, p) {
-			return nodeWorkerIngressObservation{}, errors.Join(errors.New("Front public and probe route proofs differ"), err)
+		defer probe.tls.close()
+		if !sameNodeWorkerProof(before, proof) || probe.fact.Connection.ID == public.fact.Connection.ID {
+			return nodeWorkerIngressObservation{}, errors.New("independent Front probe did not confirm the same route on a distinct TLS socket")
 		}
-		if err := probe.serving(ctx, path, body); err != nil {
-			return nodeWorkerIngressObservation{}, err
-		}
-		probeFact, err := observeNodeWorkerIngressFact(ctx, runtime, j, probe, retained, retainedTarget)
-		if err != nil || probeFact.Connection.ID == fact.Connection.ID {
-			return nodeWorkerIngressObservation{}, errors.Join(errors.New("independent Front probe did not have its own confirmed TLS socket"), err)
-		}
-		result.Probe = &probeFact
+		result.Probe = &probe.fact
 	}
-	after, err := public.proof(ctx, path, j.Recipient.Node, j.Recipient.Group)
+	after, err := public.tls.proof(ctx, a.config.RoutePath, j.Recipient.Node, j.Recipient.Group)
 	if err != nil || !sameNodeWorkerProof(before, after) {
 		return nodeWorkerIngressObservation{}, errors.Join(errors.New("Front route proof changed during the ingress observation"), err)
 	}
-	again, err := observeNodeWorkerIngressFact(ctx, runtime, j, public, retained, retainedTarget)
-	if err != nil || !fact.Connection.Same(again.Connection) || fact.Source != again.Source {
-		return nodeWorkerIngressObservation{}, errors.Join(errors.New("original public Front socket changed during observation"), err)
+	if err := a.proveWatchedNodeWorkerSocket(ctx, runtime, j, public); err != nil {
+		return nodeWorkerIngressObservation{}, err
 	}
 	return result, nil
 }
