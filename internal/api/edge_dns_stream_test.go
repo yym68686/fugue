@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/qualityrollup/rolluptest"
 	"fugue/internal/store"
 )
 
@@ -24,7 +25,7 @@ func TestStreamedDNSProfilesMatchMaterializedEveryField(t *testing.T) {
 			if err := st.Init(); err != nil {
 				t.Fatal(err)
 			}
-			samples := benchmarkEdgeQualitySamples(4096, now, 1)
+			samples := rolluptest.Samples(4096, now, 1)
 			// Distinct group performance makes rank, cooldown and degradation visible.
 			for i := range samples {
 				if samples[i].EdgeGroupID == "edge-group-0" {
@@ -78,8 +79,8 @@ func TestStreamedDNSProfilesMatchMaterializedEveryField(t *testing.T) {
 
 func TestStreamedDNSProfilesPostgresParity(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	samples := benchmarkEdgeQualitySamples(8192, now, 1)
-	st := benchmarkEdgeQualityPostgresStore(t, samples)
+	samples := rolluptest.Samples(8192, now, 1)
+	st := rolluptest.PostgresStore(t, samples)
 	ordered, err := st.ListEdgePerformanceSamples("", now.Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +100,8 @@ func TestStreamedDNSProfilesPostgresParity(t *testing.T) {
 
 func BenchmarkDNSProfilesPostgres(b *testing.B) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	samples := benchmarkEdgeQualitySamples(600000, now, 1)
-	st := benchmarkEdgeQualityPostgresStore(b, samples)
+	samples := rolluptest.Samples(600000, now, 1)
+	st := rolluptest.PostgresStore(b, samples)
 	server := &Server{store: st}
 	samples = nil
 	for _, streamed := range []bool{false, true} {

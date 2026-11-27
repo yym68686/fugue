@@ -6,7 +6,26 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/qualityrollup"
 )
+
+const edgeQualityPlatformRollupHostname = qualityrollup.PlatformHostname
+const edgeQualityRollupBuilderInterval = qualityrollup.Interval
+
+func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, window string, startedAt, endedAt, now time.Time) []model.EdgeQualityRollup {
+	builder := qualityrollup.NewWindowAccumulator(window, startedAt, endedAt)
+	builder.AddSamples(samples)
+	return builder.Rollups(now)
+}
+
+func firstPositiveFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
 
 func TestBuildEdgeQualityRollupsIncludesWindowsQuantilesAndPlatformFallback(t *testing.T) {
 	t.Parallel()

@@ -29,6 +29,7 @@ import (
 	"fugue/internal/observability"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
+	"fugue/internal/qualityrollup"
 	"fugue/internal/runtime"
 	"fugue/internal/runtimeobservation"
 	"fugue/internal/sourceimport"
@@ -174,14 +175,7 @@ type Server struct {
 	logStreamTuning                        logStreamTuning
 	oomRightSizingMu                       sync.Mutex
 	oomRightSizingEvents                   map[string]time.Time
-	edgeQualityRollupMu                    sync.Mutex
-	edgeQualityRollupLastRun               time.Time
-	edgeQualityRollupLastSuccess           time.Time
-	edgeQualityRollupLastDuration          time.Duration
-	edgeQualityRollupLastCount             int
-	edgeQualityRollupRunCount              int64
-	edgeQualityRollupErrorCount            int64
-	edgeQualityRollupLastError             string
+	qualityRollups                         *qualityrollup.Builder
 	passiveASN                             passiveASNState
 	dnsObservation                         dnsObservationState
 	edgeDNSArtifactMu                      sync.Mutex
@@ -251,6 +245,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		store:                           store,
 		auth:                            authn,
 		log:                             logger,
+		qualityRollups:                  qualityrollup.New(store, logger),
 		metricsStartedAt:                time.Now().UTC(),
 		producerCaptureRuntime:          newProducerCaptureRuntime(),
 		backupInventoryConfig:           cfg.BackupInventory.normalized(),

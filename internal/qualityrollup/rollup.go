@@ -1,12 +1,15 @@
-package api
+// Package qualityrollup builds and publishes edge observation aggregates.
+package qualityrollup
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"fugue/internal/model"
@@ -14,9 +17,12 @@ import (
 	"fugue/internal/store"
 )
 
-const edgeQualityRollupBuilderInterval = 5 * time.Minute
-const edgeQualityPlatformRollupHostname = "__platform__"
+const Interval = 5 * time.Minute
+const PlatformHostname = "__platform__"
 const edgeQualityRollupSampleChunkSize = 128
+const writerLock = "edge-quality-rollup-builder"
+const writerCheckpoint = "edge-quality-rollup-writer/v1"
+const dedicatedWriter = "worker"
 
 var edgeQualityRollupWindows = []struct {
 	Name      string
@@ -29,74 +35,105 @@ var edgeQualityRollupWindows = []struct {
 	{Name: "24h", Duration: 24 * time.Hour, Retention: 180 * 24 * time.Hour},
 }
 
-func (s *Server) StartBackgroundEdgeQualityRollups(ctx context.Context) {
-	if s == nil || s.store == nil {
+// Builder owns the rollup execution and its process-local metrics. Completed
+// windows are tracked in the store, not in the lifetime of the builder.
+type Builder struct {
+	store        *store.Store
+	log          *log.Logger
+	mu           sync.Mutex
+	lastRun      time.Time
+	lastSuccess  time.Time
+	lastDuration time.Duration
+	lastCount    int
+	runCount     int64
+	errorCount   int64
+	lastError    string
+}
+
+func New(storage *store.Store, logger *log.Logger) *Builder {
+	return &Builder{store: storage, log: logger}
+}
+
+func (b *Builder) Run(ctx context.Context) {
+	if b == nil || b.store == nil || ctx.Err() != nil {
 		return
 	}
-	s.runEdgeQualityRollupBuilder(ctx, time.Now().UTC())
-	timer := time.NewTicker(edgeQualityRollupBuilderInterval)
+	b.runOnce(ctx, time.Now().UTC())
+	timer := time.NewTicker(Interval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-timer.C:
-			s.runEdgeQualityRollupBuilder(ctx, now.UTC())
+			b.runOnce(ctx, now.UTC())
 		}
 	}
 }
 
-func (s *Server) runEdgeQualityRollupBuilder(ctx context.Context, now time.Time) {
+func (b *Builder) runOnce(ctx context.Context, now time.Time) {
 	started := time.Now().UTC()
 	count := 0
-	acquired := true
-	var err error
-	if s.store != nil {
-		acquired, err = s.store.WithAdvisoryLock(ctx, "edge-quality-rollup-builder", func() error {
-			var buildErr error
-			count, buildErr = s.rebuildEdgeQualityRollups(ctx, now)
-			return buildErr
-		})
-	} else {
-		count, err = s.rebuildEdgeQualityRollups(ctx, now)
+	ran := false
+	acquired, err := b.store.WithAdvisoryLock(ctx, writerLock, func() error {
+		owner, err := b.store.ReadObservationCheckpoint(ctx, writerCheckpoint)
+		if err != nil {
+			return fmt.Errorf("read edge quality rollup writer: %w", err)
+		}
+		switch string(owner) {
+		case "":
+			// The compatibility API revision is the writer until the
+			// dedicated process explicitly takes ownership.
+		case dedicatedWriter:
+			return nil
+		default:
+			return fmt.Errorf("unknown edge quality rollup writer")
+		}
+		ran = true
+		var buildErr error
+		count, buildErr = b.rebuild(ctx, now)
+		return buildErr
+	})
+	if ctx.Err() != nil {
+		return
+	}
+	if !acquired && err == nil {
+		if b.log != nil {
+			b.log.Printf("edge quality rollup builder skipped: another writer holds lock")
+		}
+		return
+	}
+	if !ran && err == nil {
+		return
 	}
 	duration := time.Since(started)
-	if !acquired {
-		if s.log != nil {
-			s.log.Printf("edge quality rollup builder skipped: another writer holds lock")
-		}
-		return
-	}
-	s.edgeQualityRollupMu.Lock()
-	s.edgeQualityRollupLastRun = started
-	s.edgeQualityRollupLastDuration = duration
-	s.edgeQualityRollupLastCount = count
-	s.edgeQualityRollupRunCount++
+	b.mu.Lock()
+	b.lastRun = started
+	b.lastDuration = duration
+	b.lastCount = count
+	b.runCount++
 	if err != nil {
-		s.edgeQualityRollupLastError = err.Error()
-		s.edgeQualityRollupErrorCount++
+		b.lastError = err.Error()
+		b.errorCount++
 	} else {
-		s.edgeQualityRollupLastError = ""
-		s.edgeQualityRollupLastSuccess = time.Now().UTC()
+		b.lastError = ""
+		b.lastSuccess = time.Now().UTC()
 	}
-	s.edgeQualityRollupMu.Unlock()
+	b.mu.Unlock()
 	if err != nil {
-		if s.log != nil {
-			s.log.Printf("edge quality rollup builder failed: duration=%s err=%v", duration, err)
+		if b.log != nil {
+			b.log.Printf("edge quality rollup builder failed: duration=%s err=%v", duration, err)
 		}
 		return
 	}
-	if s.log != nil {
-		s.log.Printf("edge quality rollup builder complete: rollups=%d duration=%s", count, duration)
+	if b.log != nil {
+		b.log.Printf("edge quality rollup builder complete: rollups=%d duration=%s", count, duration)
 	}
 }
 
-func (s *Server) rebuildEdgeQualityRollups(ctx context.Context, now time.Time) (int, error) {
-	if s == nil || s.store == nil {
-		return 0, nil
-	}
+func (b *Builder) rebuild(ctx context.Context, now time.Time) (int, error) {
 	now = now.UTC()
-	session, err := s.store.BeginEdgeQualityRollupBuild(ctx)
+	session, err := b.store.BeginEdgeQualityRollupBuild(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -141,20 +178,19 @@ func (s *Server) rebuildEdgeQualityRollups(ctx context.Context, now time.Time) (
 	return len(rollups), nil
 }
 
-func (s *Server) writeEdgeQualityRollupMetrics(w io.Writer) {
-	s.edgeQualityRollupMu.Lock()
-	lastRun := s.edgeQualityRollupLastRun
-	lastSuccess := s.edgeQualityRollupLastSuccess
-	lastDuration := s.edgeQualityRollupLastDuration
-	lastCount := s.edgeQualityRollupLastCount
-	runCount := s.edgeQualityRollupRunCount
-	errorCount := s.edgeQualityRollupErrorCount
-	lastError := s.edgeQualityRollupLastError
-	s.edgeQualityRollupMu.Unlock()
-
-	labels := map[string]string{"mode": "retired"}
-	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_active", "Whether scoped edge quality ranking actively changes DNS answers.", labels, 0)
-	observability.WriteGaugeMetric(w, "fugue_edge_quality_ranking_shadow", "Whether scoped edge quality ranking only records shadow decisions.", labels, 0)
+func (b *Builder) WriteMetrics(w io.Writer) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	lastRun := b.lastRun
+	lastSuccess := b.lastSuccess
+	lastDuration := b.lastDuration
+	lastCount := b.lastCount
+	runCount := b.runCount
+	errorCount := b.errorCount
+	lastError := b.lastError
+	b.mu.Unlock()
 	observability.WriteCounterMetric(w, "fugue_edge_quality_rollup_runs_total", "Total edge quality rollup builder runs.", nil, float64(runCount))
 	observability.WriteCounterMetric(w, "fugue_edge_quality_rollup_errors_total", "Total edge quality rollup builder errors.", nil, float64(errorCount))
 	observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_last_duration_seconds", "Duration of the last edge quality rollup builder run.", nil, lastDuration.Seconds())
@@ -165,7 +201,11 @@ func (s *Server) writeEdgeQualityRollupMetrics(w io.Writer) {
 	if !lastSuccess.IsZero() {
 		observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_last_success_timestamp_seconds", "Unix timestamp of the last successful edge quality rollup builder run.", nil, float64(lastSuccess.Unix()))
 	}
-	observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_last_error", "Whether the last edge quality rollup builder run failed.", map[string]string{"error": truncateMetricLabel(lastError, 160)}, boolMetric(lastError != ""))
+	failed := 0.0
+	if lastError != "" {
+		failed = 1
+	}
+	observability.WriteGaugeMetric(w, "fugue_edge_quality_rollup_last_error", "Whether the last edge quality rollup builder run failed.", map[string]string{"error": truncateMetricLabel(lastError, 160)}, failed)
 }
 
 type edgeQualityRollupKey struct {
@@ -342,16 +382,16 @@ func (b *edgeQualityRollupBuildState) percentileWindows() []store.EdgeQualityPer
 
 func (b *edgeQualityRollupBuildState) addSamples(samples []model.EdgePerformanceSample, percentileWeights map[store.EdgeQualityPercentileValueKey]int) {
 	for _, sample := range samples {
-		hostname := normalizeExternalAppDomain(sample.Hostname)
+		hostname := normalizedHostname(sample.Hostname)
 		edgeGroupID := strings.TrimSpace(sample.EdgeGroupID)
 		if hostname == "" || edgeGroupID == "" {
 			continue
 		}
-		trafficClass := normalizeEdgeTrafficClass(sample.TrafficClass)
+		trafficClass := NormalizeTrafficClass(sample.TrafficClass)
 		method := strings.ToUpper(strings.TrimSpace(sample.Method))
-		pathPrefixBucket := edgeQualityPathPrefixBucket(sample.PathPrefix)
+		pathPrefixBucket := PathPrefixBucket(sample.PathPrefix)
 		scopes := edgeQualityRollupScopesForSample(sample)
-		hostnames := []string{hostname, edgeQualityPlatformRollupHostname}
+		hostnames := []string{hostname, PlatformHostname}
 		edgeIDs := []string{""}
 		if edgeID := strings.TrimSpace(sample.EdgeID); edgeID != "" {
 			edgeIDs = append(edgeIDs, edgeID)
@@ -417,15 +457,27 @@ func (b *edgeQualityRollupBuildState) rollups(percentiles map[string]store.EdgeQ
 	return out
 }
 
-func buildEdgeQualityRollupsForWindow(samples []model.EdgePerformanceSample, window string, startedAt, endedAt, now time.Time) []model.EdgeQualityRollup {
+// WindowAccumulator aggregates an explicit window incrementally in memory.
+type WindowAccumulator struct {
+	builder *edgeQualityRollupBuildState
+	weights map[store.EdgeQualityPercentileValueKey]int
+}
+
+func NewWindowAccumulator(window string, startedAt, endedAt time.Time) *WindowAccumulator {
 	target := &edgeQualityRollupWindowTarget{ID: 0, Window: window, Duration: endedAt.Sub(startedAt), StartedAt: startedAt, EndedAt: endedAt}
 	builder := newEdgeQualityRollupBuildState([]edgeQualityRollupWindowPlan{{
 		Duration: target.Duration,
 		Targets:  map[int64]*edgeQualityRollupWindowTarget{endedAt.UnixNano(): target},
 	}})
-	weights := map[store.EdgeQualityPercentileValueKey]int{}
-	builder.addSamples(samples, weights)
-	return builder.rollups(edgeQualityPercentilesFromWeights(weights), now)
+	return &WindowAccumulator{builder: builder, weights: map[store.EdgeQualityPercentileValueKey]int{}}
+}
+
+func (a *WindowAccumulator) AddSamples(samples []model.EdgePerformanceSample) {
+	a.builder.addSamples(samples, a.weights)
+}
+
+func (a *WindowAccumulator) Rollups(now time.Time) []model.EdgeQualityRollup {
+	return a.builder.rollups(edgeQualityPercentilesFromWeights(a.weights), now)
 }
 
 func edgeQualityPercentilesFromWeights(weights map[store.EdgeQualityPercentileValueKey]int) map[string]store.EdgeQualityPercentileSet {
@@ -741,15 +793,6 @@ func divideWeighted(sum float64, count int) float64 {
 		return 0
 	}
 	return sum / float64(count)
-}
-
-func firstPositiveFloat(values ...float64) float64 {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }
 
 func truncateMetricLabel(value string, max int) string {

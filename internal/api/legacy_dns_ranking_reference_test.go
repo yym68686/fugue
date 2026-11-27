@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/model"
-	"fugue/internal/store"
+	"fugue/internal/qualityrollup"
 )
 
 const edgeDNSQualityRankingVersion = "edge-quality-scoped-v1"
@@ -208,17 +208,14 @@ type edgeDNSLatencyProfileBuilder struct {
 // the same sample snapshot; a failed read publishes no partial catalog.
 func (s *Server) loadEdgeDNSLatencyProfileBuilder(ctx context.Context, now time.Time, withSeverity bool) (*edgeDNSLatencyProfileBuilder, map[string]float64, error) {
 	builder := newEdgeDNSLatencyProfileBuilder()
-	var severe *edgeQualityRollupBuildState
-	var weights map[store.EdgeQualityPercentileValueKey]int
+	var severe *qualityrollup.WindowAccumulator
 	if withSeverity {
-		target := &edgeQualityRollupWindowTarget{ID: 0, Window: "5m", Duration: 5 * time.Minute, StartedAt: now.Add(-5 * time.Minute), EndedAt: now}
-		severe = newEdgeQualityRollupBuildState([]edgeQualityRollupWindowPlan{{Duration: target.Duration, Targets: map[int64]*edgeQualityRollupWindowTarget{now.UnixNano(): target}}})
-		weights = make(map[store.EdgeQualityPercentileValueKey]int)
+		severe = qualityrollup.NewWindowAccumulator("5m", now.Add(-5*time.Minute), now)
 	}
 	err := s.store.WalkEdgePerformanceSamples(ctx, "", now.Add(-edgeDNSLatencyWindow), func(sample model.EdgePerformanceSample) error {
 		builder.add(sample)
 		if severe != nil {
-			severe.addSamples([]model.EdgePerformanceSample{sample}, weights)
+			severe.AddSamples([]model.EdgePerformanceSample{sample})
 		}
 		return nil
 	})
@@ -227,7 +224,7 @@ func (s *Server) loadEdgeDNSLatencyProfileBuilder(ctx context.Context, now time.
 	}
 	var degraded map[string]float64
 	if severe != nil {
-		degraded = edgeDNSSevereDegradeGroupsFromRollups(severe.rollups(edgeQualityPercentilesFromWeights(weights), now))
+		degraded = edgeDNSSevereDegradeGroupsFromRollups(severe.Rollups(now))
 	}
 	return builder, degraded, nil
 }
