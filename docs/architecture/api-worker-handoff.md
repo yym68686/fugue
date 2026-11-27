@@ -23,6 +23,12 @@ connection preparation are not durable background operations.
 
 This is the target allocation, not a claim that these tasks have moved.
 
+The PostgreSQL billing integration test uses two separate pools against the
+same database. Warming the first pool prepares all four statements there and
+none on the second pool. Warming the second pool directly prepares those same
+four statements without executing billing. Keep the bounded warmer attached
+to its API pool; it is connection lifecycle work, not a durable operation.
+
 ## First compatibility release: Edge quality rollups
 
 The extraction leaves the deployed API as the writer and keeps its metrics
@@ -69,6 +75,13 @@ it cannot transfer the owner. The observation-worker Actions lane
 provisions the immutable credential and a restricted PostgreSQL login
 after binding the production declaration to a ready primary and the live
 PostgreSQL system ID. It does not transfer ownership.
+
+Scrape the worker's own Pod endpoint independently of API metrics. The
+configured target and a fresh rollup error-counter series are prerequisites
+for cutover; those facts only prove observability while the worker is passive.
+After cutover also require committed watermarks and a worker last-success
+timestamp, rather than treating a Ready pod or a successful scrape as proof
+of work.
 
 After every batch, verify the exact rollout and its consumer separately:
 carry an in-flight operation across API rollout, restart the selected worker

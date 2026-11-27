@@ -26,7 +26,8 @@ func (capture *billingPrepareCapture) TracePrepareStart(ctx context.Context, con
 
 func TestPreparedBillingStatementsPreserveResultsWithoutForegroundPreparation(t *testing.T) {
 	s := billingBatchPGStore(t)
-	if err := s.Init(); err != nil {
+	// Billing depends on the tables, not on a production Edge migration receipt.
+	if err := s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
 	}
 	tenant := billingBatchPGTenant(t, s)
@@ -89,7 +90,7 @@ func TestPreparedBillingStatementsPreserveResultsWithoutForegroundPreparation(t 
 
 func TestBillingStatementWarmDistinctConnectionsAndReplacement(t *testing.T) {
 	s := billingBatchPGStore(t)
-	if err := s.Init(); err != nil {
+	if err := s.ensureDatabaseReady(); err != nil {
 		t.Fatal(err)
 	}
 	db, err := openPostgresDatabase(s.databaseURL)
@@ -138,4 +139,41 @@ func TestBillingStatementWarmDistinctConnectionsAndReplacement(t *testing.T) {
 	if stats := db.Stats(); stats.OpenConnections != 0 {
 		t.Fatalf("disabled warmer opened connections: %+v", stats)
 	}
+}
+
+func TestBillingStatementWarmCannotWarmSeparateAPIPool(t *testing.T) {
+	s := billingBatchPGStore(t)
+	if err := s.ensureDatabaseReady(); err != nil {
+		t.Fatal(err)
+	}
+	openPool := func() *Store {
+		t.Helper()
+		db, err := openPostgresDatabase(s.databaseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		db.SetMaxIdleConns(1)
+		db.SetMaxOpenConns(1)
+		return &Store{db: db}
+	}
+	prepared := func(pool *Store, want int) {
+		t.Helper()
+		var got int
+		queries := []string{billingSnapshotInputsSQL, billingSnapshotLocksSQL, billingSnapshotPersistSQL, billingSnapshotEventsSQL}
+		err := pool.db.QueryRowContext(t.Context(), "SELECT count(*) FROM pg_prepared_statements WHERE statement = ANY($1::text[])", queries).Scan(&got)
+		if err != nil || got != want {
+			t.Fatalf("prepared=%d, want %d: %v", got, want, err)
+		}
+	}
+	workerPool, apiPool := openPool(), openPool()
+	if err := workerPool.WarmBillingStatements(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	prepared(workerPool, 4)
+	prepared(apiPool, 0)
+	if err := apiPool.WarmBillingStatements(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	prepared(apiPool, 4)
 }
