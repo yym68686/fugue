@@ -109,7 +109,7 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 	if inventory.ObservedAt.IsZero() {
 		inventory.ObservedAt = time.Now().UTC()
 	}
-	inventory.SafeToDecommission, inventory.UnsafeReasons = evaluateLocalPVDecommissionSafety(inventory)
+	inventory.SafeToDecommission, inventory.UnsafeReasons = localpvsafety.EvaluateDecommission(inventory)
 	inventory, err = s.store.UpsertLocalPVInventory(inventory)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -350,7 +350,7 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	}
 	now := time.Now().UTC()
 	for index := range inventories {
-		safe, reasons := evaluateLocalPVDecommissionSafety(inventories[index])
+		safe, reasons := localpvsafety.EvaluateDecommission(inventories[index])
 		if !localpvsafety.IsFresh(inventories[index].ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
 			safe = false
 			reasons = uniqueNonEmptyStrings(append(reasons, "inventory_stale"))
@@ -1145,32 +1145,6 @@ func pruneTaskTargets(candidates []model.ImageCachePruneCandidate, limit int) []
 		})
 	}
 	return out
-}
-
-func evaluateLocalPVDecommissionSafety(in model.LocalPVInventory) (bool, []string) {
-	reasons := append([]string(nil), in.UnsafeReasons...)
-	if in.LVCount != 0 {
-		reasons = append(reasons, "active_lvs_present")
-	}
-	if in.ActiveLVCount != 0 {
-		reasons = append(reasons, "active_lvs_present")
-	}
-	if in.BoundPVCount < 0 {
-		reasons = append(reasons, "bound_pv_count_unknown")
-	} else if in.BoundPVCount != 0 {
-		reasons = append(reasons, "bound_pvs_present")
-	}
-	if strings.TrimSpace(in.ImagePath) == "" {
-		reasons = append(reasons, "image_path_missing")
-	}
-	if strings.TrimSpace(in.LoopDevice) == "" {
-		reasons = append(reasons, "loop_device_missing")
-	}
-	if strings.TrimSpace(in.LoopBackingFile) != "" && strings.TrimSpace(in.ImagePath) != "" && strings.TrimSpace(in.LoopBackingFile) != strings.TrimSpace(in.ImagePath) {
-		reasons = append(reasons, "loop_backing_file_mismatch")
-	}
-	reasons = uniqueNonEmptyStrings(reasons)
-	return len(reasons) == 0, reasons
 }
 
 func normalizeImageCachePruneAPIMode(raw string) string {
