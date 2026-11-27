@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/declarativerelease"
+	"fugue/internal/productioncontrol"
 )
 
 const (
@@ -114,6 +115,61 @@ type nativeRolloutGateFunc func(context.Context, Snapshot) (bool, error)
 
 func (f nativeRolloutGateFunc) ReserveRollout(ctx context.Context, snapshot Snapshot) (bool, error) {
 	return f(ctx, snapshot)
+}
+
+func (f nativeRolloutGateFunc) ReadReleaseState(_ context.Context, snapshot Snapshot) (productioncontrol.ResourceState, error) {
+	return productioncontrol.ResourceState{
+		LastVerified: productioncontrol.Version{Generation: 1, Digest: snapshot.LastSuccessfulLKG}, Pending: testDigest,
+	}, nil
+}
+
+type nativeObservedGate struct {
+	nativeRolloutGateFunc
+	state productioncontrol.ResourceState
+	err   error
+}
+
+func (g nativeObservedGate) ReadReleaseState(context.Context, Snapshot) (productioncontrol.ResourceState, error) {
+	return g.state, g.err
+}
+
+func TestNativeStatusDoesNotConflateServingHealthAndDurableVerification(t *testing.T) {
+	now := time.Unix(20, 0).UTC()
+	snapshot := testSnapshot(t, testHealth(HealthHealthy, HealthHealthy, HealthHealthy, now), "")
+	snapshot.NativePublication = true
+	snapshot.CurrentRecordDigest, snapshot.LastSuccessfulLKG = snapshot.Desired.RecordDigest, snapshot.Desired.RecordDigest
+	current := productioncontrol.Version{Generation: snapshot.Desired.Generation, Digest: snapshot.Desired.RecordDigest}
+	predecessor := productioncontrol.Version{Generation: current.Generation, Digest: otherDigest}
+	for _, tc := range []struct {
+		name, pending string
+		verified      productioncontrol.Version
+		want          ReleaseState
+		err           error
+	}{
+		{"healthy candidate still pending", testDigest, predecessor, StateVerifying, nil},
+		{"settled generation differs", "", productioncontrol.Version{Generation: current.Generation + 1, Digest: current.Digest}, StateRecoveryRequired, nil},
+		{"settled record differs", "", predecessor, StateRecoveryRequired, nil},
+		{"settled exact healthy release", "", current, StateStable, nil},
+		{"journal unavailable", "", productioncontrol.Version{}, "", context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeStore{snapshot: snapshot}
+			executor := &fakeExecutor{}
+			gate := nativeObservedGate{state: productioncontrol.ResourceState{LastVerified: tc.verified, Pending: tc.pending}, err: tc.err}
+			controller, err := NewNativeController(store, executor, gate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer controller.queue.ShutDown()
+			controller.now = func() time.Time { return now }
+			if err := controller.Reconcile(context.Background(), snapshot.Key); (err != nil) != (tc.err != nil) {
+				t.Fatalf("unexpected reconcile result: %v", err)
+			}
+			if store.status.State != tc.want || store.status.LastSuccessfulLKG != tc.verified.Digest || executor.rollouts != 0 || store.lkgCAS != 0 {
+				t.Fatalf("status conflated observed health and durable verification: %+v", store.status)
+			}
+		})
+	}
 }
 
 type lostNativeExecutor struct{ fakeExecutor }

@@ -12,12 +12,49 @@ import (
 )
 
 type NativeRolloutGate interface {
+	ReadReleaseState(context.Context, Snapshot) (productioncontrol.ResourceState, error)
 	ReserveRollout(context.Context, Snapshot) (bool, error)
 }
 
 type nativeLaunchLedger interface {
 	ReadIntent(context.Context, string) (productioncontrol.Intent, []byte, error)
+	ReadResource(context.Context, productioncontrol.Scope) (productioncontrol.ResourceState, error)
 	ReserveReleaseLaunch(context.Context, string, productioncontrol.Intent, []byte, int64) (bool, error)
+}
+
+func (gate *nativeLaunchGate) ReadReleaseState(ctx context.Context, s Snapshot) (productioncontrol.ResourceState, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	target, ok := gate.store.targets[s.Key]
+	if !ok || target.MonitorComponent != s.Key.Component || !s.Managed || !s.NativePublication || s.DesiredRecordMissing {
+		return productioncontrol.ResourceState{}, errors.New("native release status has no enrolled snapshot")
+	}
+	intent, payload, err := readNativeReleaseIntent(ctx, gate.ledger.ReadIntent, gate.cluster, s.NativeIntent)
+	if err != nil {
+		return productioncontrol.ResourceState{}, err
+	}
+	workload := s.Bundle.Release.Workload
+	identity := declarativerelease.ResourceIdentity{APIVersion: workload.APIVersion, Kind: workload.Kind, Namespace: workload.Namespace, Name: workload.Name}
+	if payload.ProposedRecord.Key() != s.Key || payload.Namespace != target.Namespace || workload.Namespace != target.Namespace ||
+		workload.Kind != "Deployment" || workload.APIVersion != "apps/v1" || nativeKubernetesResourceID(identity) != intent.ResourceID ||
+		intent.Generation > math.MaxInt64-2 || !((s.Desired.Generation == intent.Generation+1 && s.Desired.RecordDigest == intent.TargetDigest) ||
+		(s.Desired.Generation == intent.Generation+2 && s.Desired.RecordDigest == intent.RollbackDigest)) {
+		return productioncontrol.ResourceState{}, errors.New("native release status does not match its production intent")
+	}
+	state, err := gate.ledger.ReadResource(ctx, productioncontrol.Scope{ClusterID: intent.ClusterID, ResourceID: intent.ResourceID})
+	if err != nil {
+		return productioncontrol.ResourceState{}, err
+	}
+	if state.LastFence != s.NativeFence || state.LastIntent != s.NativeIntent {
+		return productioncontrol.ResourceState{}, errors.New("native release pointer differs from its durable production fence")
+	}
+	binding := NativeRuntimeBinding{Key: s.Key, DesiredResourceVersion: s.DesiredResourceVersion, DesiredRecordDigest: s.Desired.RecordDigest,
+		LKGMonitorRecordDigest: payload.RollbackMonitor, IntentDigest: s.NativeIntent, Fence: s.NativeFence}
+	pointer, err := binding.readPointer(ctx, gate.store.client.CoreV1(), target.Namespace)
+	if err != nil || pointer != s.Desired {
+		return productioncontrol.ResourceState{}, errors.New("native release status pointer changed while reading its durable fence")
+	}
+	return state, nil
 }
 
 type nativeLaunchGate struct {
@@ -81,20 +118,36 @@ func (gate *nativeLaunchGate) ReserveRollout(ctx context.Context, s Snapshot) (b
 }
 
 func (controller *Controller) reconcileNative(ctx context.Context, snapshot Snapshot, now time.Time) error {
+	if !snapshot.Managed || snapshot.DesiredRecordMissing {
+		return nil
+	}
+	if controller.nativeGate == nil {
+		return errors.New("native Guardian rollout gate is unavailable")
+	}
+	journalState, err := controller.nativeGate.ReadReleaseState(ctx, snapshot)
+	if err != nil || !digestPattern.MatchString(journalState.LastVerified.Digest) {
+		return errors.New("native release journal head is unavailable or disagrees with the pointer; prior status retained")
+	}
 	decision := Classify(snapshot.CurrentRecordDigest, snapshot.Desired.RecordDigest, snapshot.Health)
 	status := ReleaseStatus{
 		Component: snapshot.Key.Component, Group: snapshot.Key.Group, State: decision.State,
 		CurrentRecordDigest: snapshot.CurrentRecordDigest, TargetRecordDigest: snapshot.Desired.RecordDigest,
-		LastSuccessfulLKG: snapshot.LastSuccessfulLKG, Health: snapshot.Health, Reason: decision.Reason,
+		LastSuccessfulLKG: journalState.LastVerified.Digest, Health: snapshot.Health, Reason: decision.Reason,
 		ObservedAt: now.Format(time.RFC3339Nano),
 	}
 	switch {
-	case !snapshot.Managed || snapshot.DesiredRecordMissing:
-		return nil
-	case decision.RolloutEligible:
-		if controller.nativeGate == nil {
-			return errors.New("native Guardian rollout gate is unavailable")
+	case journalState.Pending == "":
+		if journalState.LastVerified != (productioncontrol.Version{Generation: snapshot.Desired.Generation, Digest: snapshot.Desired.RecordDigest}) ||
+			snapshot.CurrentRecordDigest != journalState.LastVerified.Digest {
+			status.State, status.Reason = StateRecoveryRequired, "native serving pointer differs from the last independently verified version"
+		} else if decision.RollbackEligible {
+			status.State, status.Reason = StateRecoveryRequired, "native recovery requires separate fenced recovery authority"
 		}
+	case decision.State == StateStable:
+		status.State, status.Reason = StateVerifying, "native serving observation is healthy; durable execution is still open"
+	case journalState.LastVerified.Digest != snapshot.CurrentRecordDigest:
+		status.State, status.Reason = StateRecoveryRequired, "native serving version is not yet durably verified"
+	case decision.RolloutEligible:
 		permitted, err := controller.nativeGate.ReserveRollout(ctx, snapshot)
 		switch {
 		case err != nil:
