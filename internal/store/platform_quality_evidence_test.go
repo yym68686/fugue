@@ -19,6 +19,62 @@ import (
 	"fugue/internal/schemamigrate"
 )
 
+func TestPostgresPeriodicQualityEvidenceOwnerFencesOnlyTheTimer(t *testing.T) {
+	s := billingBatchPGStore(t)
+	ctx := t.Context()
+	if err := s.ensureDatabaseReady(); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{schemamigrate.CompilerInputLifecycleSQL, schemamigrate.CompilerInputZeroTempSQL} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	digest := func(n string) string { return "sha256:" + strings.Repeat(n, 64) }
+	seedExpired := func(key string) {
+		t.Helper()
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_platform_quality_evidence
+  (content_hash, evidence, size_bytes, created_at, expires_at) VALUES ($1, $2, 1, $3, $4)`,
+			key, []byte("a"), now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertPresent := func(key string, want bool) {
+		t.Helper()
+		var exists bool
+		err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_platform_quality_evidence WHERE content_hash=$1)`, key).Scan(&exists)
+		if err != nil || exists != want {
+			t.Fatalf("evidence present=%t, want %t: %v", exists, want, err)
+		}
+	}
+	seedExpired(digest("a"))
+	if err := s.maintainPlatformQualityEvidenceForAPI(ctx, nil, now, true); err != nil {
+		t.Fatal(err)
+	}
+	assertPresent(digest("a"), false)
+	key := observationCheckpointKey(qualityEvidenceRetentionWriterCheckpoint)
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_meta (key,value,updated_at) VALUES ($1,'worker',NOW())`, key); err != nil {
+		t.Fatal(err)
+	}
+	seedExpired(digest("b"))
+	s.qualityEvidenceMetrics.attemptedAt.Store(1)
+	if err := s.maintainPlatformQualityEvidenceForAPI(ctx, nil, now, true); err != nil {
+		t.Fatal(err)
+	}
+	assertPresent(digest("b"), true)
+	if got := s.qualityEvidenceMetrics.attemptedAt.Load(); got != 1 {
+		t.Fatal("standby API claimed a timer pass")
+	}
+	newEvidence := model.PlatformQualityEvidence{ContentHash: digest("c"), Evidence: []byte("c"), SizeBytes: 1,
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := s.maintainPlatformQualityEvidence(ctx, &newEvidence, now); err != nil {
+		t.Fatal(err)
+	}
+	assertPresent(digest("b"), false)
+	assertPresent(digest("c"), true)
+}
+
 func compactOnlyStoreFixture(t *testing.T, s *Store) (platformconfig.CompileResult, model.PlatformArtifact) {
 	t.Helper()
 	s.ConfigurePlatformArtifactSigning(bundleauth.NewKeyring("synthetic-compact-key", "compact", "", "", nil))
