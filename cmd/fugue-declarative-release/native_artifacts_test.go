@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +15,61 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/releaseguardian"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	appsclient "k8s.io/client-go/kubernetes/typed/apps/v1"
+	"k8s.io/client-go/rest"
 )
+
+func TestNativeDeploymentSendsOneCASWithoutRetryOrForcedOwnership(t *testing.T) {
+	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fixture", Name: "candidate"}
+	release := declarativerelease.PlanRelease{Workload: declarativerelease.Workload{FieldManager: "fixture-guardian"}}
+	const manifest = `{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"candidate","namespace":"fixture","uid":"proven-uid","resourceVersion":"42"},"spec":{}}]}`
+	const success = `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"candidate","namespace":"fixture","uid":"proven-uid","resourceVersion":"43"}}`
+	for _, tc := range []struct {
+		name              string
+		status            int
+		body              string
+		unknown, conflict bool
+	}{
+		{"success", 200, success, false, false},
+		{"wrong UID", 200, strings.Replace(success, "proven-uid", "foreign", 1), true, false},
+		{"unreadable result", 200, "{", true, false},
+		{"CAS conflict", 409, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","code":409}`, false, true},
+		{"timeout", 504, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"Timeout","code":504}`, true, false},
+		{"retry after", 429, `{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"TooManyRequests","code":429}`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan struct{}, 8)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- struct{}{}
+				raw, err := io.ReadAll(r.Body)
+				if err != nil || r.Method != http.MethodPatch || r.URL.Path != "/apis/apps/v1/namespaces/fixture/deployments/candidate" ||
+					r.URL.Query().Get("fieldManager") != "fixture-guardian" || r.URL.Query().Has("force") ||
+					!strings.Contains(string(raw), `"uid":"proven-uid"`) || !strings.Contains(string(raw), `"resourceVersion":"42"`) {
+					t.Errorf("request did not bind the one approved CAS: %s %s, %s, %v", r.Method, r.URL, raw, err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			apps, err := appsclient.NewForConfigAndClient(&rest.Config{Host: server.URL}, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cluster := &kubectlCluster{nativeArtifacts: &nativeKubectlArtifacts{workload: identity}, nativeDeployment: apps.RESTClient()}
+			err = cluster.applyNativeDeployment(context.Background(), release, []byte(manifest))
+			if (err != nil) != (tc.unknown || tc.conflict) || errors.Is(err, declarativerelease.ErrWriteOutcomeUnknown) != tc.unknown ||
+				apierrors.IsConflict(err) != tc.conflict || errors.Is(err, declarativerelease.ErrWriteRejected) != tc.conflict || len(requests) != 1 {
+				t.Fatalf("attempts=%d error=%v", len(requests), err)
+			}
+			if err := cluster.applyNativeDeployment(context.Background(), release, []byte(strings.Replace(manifest, `,"resourceVersion":"42"`, "", 1))); err == nil || len(requests) != 1 {
+				t.Fatalf("missing CAS reached the provider: attempts=%d error=%v", len(requests), err)
+			}
+		})
+	}
+}
 
 func TestNativeArtifactPreflightNeverFallsBackToHistoricalReceipt(t *testing.T) {
 	ctx := context.Background()

@@ -14,6 +14,9 @@ import (
 	"fugue/internal/releaseguardian"
 
 	"github.com/google/go-containerregistry/pkg/authn"
+	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
@@ -171,6 +174,43 @@ func (artifacts *nativeKubectlArtifacts) checkApply(target declarativerelease.Ta
 		}
 	}
 	return errors.New("native apply target is not approved for this execution")
+}
+
+func (cluster *kubectlCluster) applyNativeDeployment(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	identity := cluster.nativeArtifacts.workload
+	item, err := declarativerelease.ResourceSetItem(manifest, identity)
+	if err != nil {
+		return errors.Join(declarativerelease.ErrWriteRejected, err)
+	}
+	meta := mapField(item, "metadata")
+	uid, rv := stringValue(meta["uid"]), stringValue(meta["resourceVersion"])
+	if cluster.nativeDeployment == nil || release.Workload.FieldManager == "" || uid == "" || rv == "" {
+		return fmt.Errorf("%w: native update lacks its exact Deployment UID and resource version", declarativerelease.ErrWriteRejected)
+	}
+	if len(cluster.envRetirements) != 0 {
+		return fmt.Errorf("%w: native update cannot delegate legacy environment retirement writes", declarativerelease.ErrWriteRejected)
+	}
+	body, err := declarativerelease.CanonicalJSON(item)
+	if err != nil {
+		return errors.Join(declarativerelease.ErrWriteRejected, err)
+	}
+	// One server-side compare-and-swap. Do not enter the legacy field-owner
+	// transfer (which patches then reapplies), and do not force ownership.
+	var observed appsv1.Deployment
+	err = cluster.nativeDeployment.Patch(types.ApplyPatchType).Namespace(identity.Namespace).Resource("deployments").Name(identity.Name).
+		Param("fieldManager", release.Workload.FieldManager).MaxRetries(0).Body(body).Do(ctx).Into(&observed)
+	if err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) ||
+			apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsNotFound(err) {
+			return errors.Join(declarativerelease.ErrWriteRejected, err)
+		}
+		return fmt.Errorf("%w: Deployment compare-and-swap did not return a definitive result: %v", declarativerelease.ErrWriteOutcomeUnknown, err)
+	}
+	if observed.GetName() != identity.Name || observed.GetNamespace() != identity.Namespace ||
+		string(observed.GetUID()) != uid || observed.GetResourceVersion() == "" {
+		return fmt.Errorf("%w: Deployment response does not identify the bound object", declarativerelease.ErrWriteOutcomeUnknown)
+	}
+	return nil
 }
 
 func sameMonitorSnapshot(left, right monitorSnapshot) bool {

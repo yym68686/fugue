@@ -38,6 +38,10 @@ the independent cutover checks.
   one existing Deployment and one approved image per manifest, including every
   declared sidecar and init container. It does not authorize deletion,
   additional image volumes, or delegated writes.
+- Each native workload write is one UID/resourceVersion-bound server-side
+  apply with no forced ownership transfer or client replay. A rejected CAS
+  or unknown response cannot authorize compensation against a drifted
+  Deployment, or be treated as a completed execution.
 - A registry readback from Guardian does not prove that nodes can pull with
   GitHub disconnected, that registry retention pins both versions, or that old
   writers have been revoked and drained. Before switching a resource, prove all
