@@ -43,7 +43,8 @@ type KubernetesObserver struct {
 }
 
 func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {
-	if config == nil || config.Insecure || config.ExecProvider != nil || config.AuthProvider != nil || config.WrapTransport != nil || config.Transport != nil {
+	if config == nil || config.Insecure || config.ExecProvider != nil || config.AuthProvider != nil || config.WrapTransport != nil ||
+		config.Transport != nil || config.Proxy != nil {
 		return nil, errors.New("participation observation requires an explicit verifiable Kubernetes TLS transport")
 	}
 	u, err := url.Parse(config.Host)
@@ -51,7 +52,10 @@ func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {
 		u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return nil, errors.New("participation observation requires one HTTPS Kubernetes origin")
 	}
-	client, err := rest.HTTPClientFor(config)
+	cfg := rest.CopyConfig(config)
+	// Do not pass the observer credentials through an ambient proxy.
+	cfg.Proxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+	client, err := rest.HTTPClientFor(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -65,11 +69,11 @@ func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {
 	observing.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	apps, err := appsclient.NewForConfigAndClient(config, &observing)
+	apps, err := appsclient.NewForConfigAndClient(cfg, &observing)
 	if err != nil {
 		return nil, err
 	}
-	core, err := coreclient.NewForConfigAndClient(config, &observing)
+	core, err := coreclient.NewForConfigAndClient(cfg, &observing)
 	if err != nil {
 		return nil, err
 	}
