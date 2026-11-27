@@ -1918,6 +1918,9 @@ func managedAppPreApplyErrorStatus(
 ) runtime.ManagedAppStatus {
 	status := managedAppBaseStatus(managed, app)
 	status.Phase = runtime.ManagedAppPhaseError
+	if canonicalDrainStillInProgress(cause, time.Now()) {
+		status.Phase = runtime.ManagedAppPhaseProgressing
+	}
 	status.Message = strings.TrimSpace(cause.Error())
 	status.CurrentReleaseKey = strings.TrimSpace(managed.Status.CurrentReleaseKey)
 	status.CurrentReleaseStartedAt = strings.TrimSpace(managed.Status.CurrentReleaseStartedAt)

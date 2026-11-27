@@ -322,6 +322,12 @@ func (s *Service) canonicalServicesReferenceRelease(ctx context.Context, client 
 // still running, then let Kubernetes drain those Pods within one durable
 // budget before changing the canonical template.
 func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeClient, app model.App, objects []map[string]any) (result []map[string]any, resultErr error) {
+	return s.prepareSafeCanonicalHandoffMode(ctx, client, app, objects, false)
+}
+
+// The deadline worker may stop the checkpointed source, but cannot establish
+// a new checkpoint, change Service selectors or apply the replacement.
+func (s *Service) prepareSafeCanonicalHandoffMode(ctx context.Context, client *kubeClient, app model.App, objects []map[string]any, stopOnly bool) (result []map[string]any, resultErr error) {
 	if client == nil || s.Store == nil || !s.Config.KubectlApply || !model.AppSafeZeroDowntimeRolloutEnabled(app.Spec) {
 		return objects, nil
 	}
@@ -336,6 +342,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	}
 	metadata := objectMapField(live, "metadata")
 	marker := objectStringMapValue(metadata["annotations"])[safeCanonicalHandoffAnnotation]
+	if stopOnly && marker == "" {
+		return objects, nil
+	}
 	// Explicit administrator maintenance does not create a zero-downtime
 	// handoff. A persisted handoff is still recovered, never abandoned.
 	if marker == "" {
@@ -414,6 +423,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 		if err := json.Unmarshal([]byte(marker), &handoff); err != nil || handoff.DeploymentUID != objectStringField(metadata, "uid") || handoff.ReleaseKey == "" || handoff.Image == "" {
 			return nil, fmt.Errorf("canonical handoff identity changed")
 		}
+		if stopOnly && (handoff.ReleaseID != release.ID || liveKey != handoff.ReleaseKey || !canonicalDrainDue(handoff, time.Now())) {
+			return objects, nil
+		}
 	} else {
 		containers := mapSlice(nestedObjectValue(live, "spec", "template", "spec", "containers"))
 		if len(containers) == 0 {
@@ -469,6 +481,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	// A prior pass has already drained and replaced the canonical Deployment.
 	// Restore canonical Service selectors only after that exact new template is ready.
 	if marker != "" && liveKey == desiredKey && managedDeploymentStatusReady(deployment, app.Spec.Replicas) && s.migrationImageRefsEquivalent(app, deploymentPrimaryContainerImage(deployment), app.Spec.Image) {
+		if stopOnly {
+			return objects, nil
+		}
 		if err := s.restoreSafeCanonicalServices(ctx, client, app, objects, live, selector); err != nil {
 			return nil, err
 		}
@@ -502,6 +517,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	}
 	original := model.AppRelease{AppID: app.ID, TenantID: app.TenantID, DeploymentName: name, ResolvedImageRef: handoff.Image, RevisionWorkload: &model.AppReleaseWorkload{DeploymentName: name, DeploymentUID: handoff.DeploymentUID, ReleaseKey: handoff.ReleaseKey, DeploymentGeneration: deployment.Metadata.Generation}}
 	if marker == "" || advanceTarget || sourceChanged {
+		if stopOnly {
+			return nil, fmt.Errorf("deadline worker requires a complete canonical source checkpoint")
+		}
 		requireReady := !handoff.Stopping && handoff.DrainDeadline == nil
 		if requireReady {
 			if _, err := s.captureDrainWorkload(ctx, client, app, original, false, true); err != nil {
@@ -543,6 +561,9 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			return nil, fmt.Errorf("canonical handoff Service ownership differs")
 		}
 		existing := objectStringMapValue(nestedObjectValue(current, "spec", "selector"))
+		if stopOnly && !reflect.DeepEqual(existing, selector) {
+			return nil, fmt.Errorf("deadline worker cannot change a canonical Service selector")
+		}
 		previousMatch := false
 		for _, prior := range previousSelectors {
 			previousMatch = previousMatch || reflect.DeepEqual(existing, prior)
@@ -582,8 +603,13 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 	// connections finish naturally, keeping a small reserve for kubelet shutdown.
 	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	endpointsVerified := false
 	pending := func() error {
-		return fmt.Errorf("%w: stage=canonical_drain_wait drain_deadline=%v context=%s", errSafeCanonicalHandoffPending, handoff.DrainDeadline, drainObservationContext(waitCtx))
+		detail := fmt.Sprintf("stage=canonical_drain_wait drain_deadline=%v context=%s", handoff.DrainDeadline, drainObservationContext(waitCtx))
+		if endpointsVerified && handoff.DrainDeadline != nil {
+			return &canonicalDrainInProgress{deadline: *handoff.DrainDeadline, detail: detail}
+		}
+		return fmt.Errorf("%w: %s", errSafeCanonicalHandoffPending, detail)
 	}
 	quietDrain := false
 	if !handoff.Stopping {
@@ -601,6 +627,10 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 					break
 				}
 			}
+			endpointsVerified = ready
+			if !ready && stopOnly {
+				return nil, fmt.Errorf("deadline worker has no current canonical endpoint proof")
+			}
 			if ready {
 				if handoff.DrainDeadline == nil {
 					deadline := time.Now().UTC().Add(canonicalDrainBudget)
@@ -613,9 +643,16 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 				if canonicalDrainDue(handoff, time.Now()) {
 					break
 				}
+				// A slow source API or socket observer must yield when the quiet
+				// wait ends so it cannot consume the kubelet stop reserve.
+				probeCtx, endProbe := context.WithDeadline(waitCtx, handoff.DrainDeadline.Add(-canonicalDrainStopReserve))
 				if sourceWorkload.DeploymentUID == "" {
-					sourceWorkload, err = s.captureCanonicalAfterMarker(waitCtx, client, app, original)
+					sourceWorkload, err = s.captureCanonicalAfterMarker(probeCtx, client, app, original)
 					if err != nil {
+						endProbe()
+						if canonicalDrainDue(handoff, time.Now()) {
+							break
+						}
 						return nil, err
 					}
 					for _, pod := range sourceWorkload.Pods {
@@ -626,23 +663,35 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 				}
 				idle := true
 				for _, pod := range sourceWorkload.Pods {
-					receipt, observeErr := client.observeReleasePodDrain(waitCtx, namespace, pod)
+					receipt, observeErr := client.observeReleasePodDrain(probeCtx, namespace, pod)
 					if observeErr != nil || *receipt.ActiveConnections != 0 {
 						idle = false
 					}
+					if probeCtx.Err() != nil {
+						break
+					}
+				}
+				if canonicalDrainDue(handoff, time.Now()) {
+					endProbe()
+					break
 				}
 				if !idle {
 					quietSince = time.Time{}
 				} else if quietSince.IsZero() {
 					quietSince = time.Now()
 				} else if time.Since(quietSince) >= quiet {
-					latest, err := s.captureDrainWorkload(waitCtx, client, app, original, false, true)
+					latest, err := s.captureDrainWorkload(probeCtx, client, app, original, false, true)
+					endProbe()
+					if canonicalDrainDue(handoff, time.Now()) {
+						break
+					}
 					if err != nil || !reflect.DeepEqual(sourceWorkload, latest) {
 						return nil, fmt.Errorf("canonical workload changed during quiet drain proof")
 					}
 					quietDrain = true
 					break
 				}
+				endProbe()
 			} else {
 				quietSince = time.Time{}
 			}
@@ -666,6 +715,12 @@ func (s *Service) prepareSafeCanonicalHandoff(ctx context.Context, client *kubeC
 			return nil, fmt.Errorf("canonical handoff selector changed during observation")
 		}
 		if err := safeCanonicalEndpoints(ctx, client, namespace, serviceName, candidateWorkload.Pods); err != nil {
+			return nil, err
+		}
+	}
+	if stopOnly {
+		allowed, err := s.canonicalDrainOperationAllowed(app, release)
+		if err != nil || !allowed {
 			return nil, err
 		}
 	}

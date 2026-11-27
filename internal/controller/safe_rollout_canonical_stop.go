@@ -11,6 +11,7 @@ import (
 
 	"fugue/internal/model"
 	"fugue/internal/runtime"
+	"fugue/internal/store"
 )
 
 const (
@@ -27,9 +28,24 @@ func canonicalDrainDue(handoff safeCanonicalHandoff, now time.Time) bool {
 	return handoff.DrainDeadline != nil && !now.Before(handoff.DrainDeadline.Add(-canonicalDrainStopReserve))
 }
 
+type canonicalDrainInProgress struct {
+	deadline time.Time
+	detail   string
+}
+
+func (e *canonicalDrainInProgress) Error() string {
+	return errSafeCanonicalHandoffPending.Error() + ": " + e.detail
+}
+func (e *canonicalDrainInProgress) Unwrap() error { return errSafeCanonicalHandoffPending }
+
+func canonicalDrainStillInProgress(err error, now time.Time) bool {
+	var progress *canonicalDrainInProgress
+	return errors.As(err, &progress) && now.Before(progress.deadline)
+}
+
 // A canceled/superseded deploy may have left the durable handoff behind.
 // Discover only armed canonical Deployments instead of waiting for the slower
-// full ManagedApp scan. Active operations still own their own reconciliation.
+// full ManagedApp scan or for a deployment operation to be dequeued again.
 func (s *Service) reconcileCanonicalDrainDeadlines(ctx context.Context) error {
 	client, err := s.kubeClient()
 	if err != nil {
@@ -63,7 +79,18 @@ func (s *Service) reconcileCanonicalDrainDeadlines(ctx context.Context) error {
 		if err == nil && found && managed.Metadata.DeletionTimestamp == "" {
 			identity := runtime.AppFromManagedApp(managed)
 			if identity.ID == app.ID && identity.TenantID == app.TenantID {
-				err = s.reconcileManagedAppObject(withSkipExistingCloudNativePGWrites(ctx), client, managed)
+				// Scope a failed Edge or Kubernetes proof to one checkpoint so it
+				// does not consume the whole sweep's budget.
+				stopCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+				identity, _ = s.normalizeManagedAppRuntimeImageRefs(identity)
+				objects := s.Renderer.BuildManagedAppChildObjects(identity, managed.Spec.Scheduling, runtime.ManagedAppOwnerReference(managed))
+				_, err = s.prepareSafeCanonicalHandoffMode(stopCtx, client, identity, objects, true)
+				cancel()
+				// Only the ordinary reconciler may apply/restore the replacement;
+				// it still defers to an active operation when one owns the app.
+				if err == nil && handoff.Stopping {
+					err = s.reconcileManagedAppObject(withSkipExistingCloudNativePGWrites(ctx), client, managed)
+				}
 			}
 		}
 		if err != nil && !errors.Is(err, errSafeCanonicalHandoffPending) && firstErr == nil {
@@ -74,6 +101,39 @@ func (s *Service) reconcileCanonicalDrainDeadlines(ctx context.Context) error {
 		}
 	}
 	return firstErr
+}
+
+func (s *Service) canonicalDrainOperationAllowed(app model.App, release model.AppRelease) (bool, error) {
+	stored, err := s.Store.GetApp(app.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil || stored.TenantID != app.TenantID {
+		return false, err
+	}
+	tenant, err := s.Store.GetTenant(app.TenantID)
+	if err != nil || tenant.Status == model.TenantStatusAccessHeld {
+		return false, err
+	}
+	operations, err := s.Store.ListOperationSummariesFiltered(app.TenantID, false, store.OperationListFilter{
+		AppID:    app.ID,
+		Statuses: []string{model.OperationStatusPending, model.OperationStatusRunning, model.OperationStatusWaitingAgent},
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, op := range operations {
+		if op.Type != model.OperationTypeDeploy || op.Status == model.OperationStatusWaitingAgent {
+			return false, nil
+		}
+		if model.OperationWaitingForCanonicalHandoff(op) {
+			continue
+		}
+		if release.RevisionWorkload == nil || release.RevisionWorkload.OperationID != op.ID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (s *Service) canonicalDrainSource(ctx context.Context, client *kubeClient, app model.App, handoff safeCanonicalHandoff, expected string) (map[string]any, kubeDeployment, error) {
@@ -203,7 +263,7 @@ func (s *Service) stopWithdrawnCanonicalPods(ctx context.Context, client *kubeCl
 	if stopErr != nil {
 		return fmt.Errorf("cap canonical Pod termination: %w", stopErr)
 	}
-	return fmt.Errorf("%w: stage=canonical_drain_terminating pod_count=%d drain_deadline=%s", errSafeCanonicalHandoffPending, len(pods), handoff.DrainDeadline.Format(time.RFC3339))
+	return &canonicalDrainInProgress{deadline: *handoff.DrainDeadline, detail: fmt.Sprintf("stage=canonical_drain_terminating pod_count=%d drain_deadline=%s", len(pods), handoff.DrainDeadline.Format(time.RFC3339))}
 }
 
 func canonicalPodHasDrainHook(pod map[string]any) bool {
