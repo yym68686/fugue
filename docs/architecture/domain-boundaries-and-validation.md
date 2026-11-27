@@ -20,7 +20,21 @@ snapshot under its existing write transaction. A stale dependency verdict
 cannot overwrite a claimed or cancelled operation. Queue/Store contract tests
 for Compose ordering, retry and deletion run outside the Controller root;
 Controller retains worker execution and shutdown tests. Store imports the
-operation read contract without importing either read or queue policy.
+operation query data and exposes explicit read methods. The read domain
+owns the interface consumed by API. Release planning binds queue
+implementation to Controller, operation views to API, and shared query
+data to the components that import Store.
+
+Operation cancellation uses an actor-bound port for HTTP callers and a
+deploy-only supersession port for Controller. PostgreSQL rechecks the
+actor's tenant and project in the same transaction as cancellation and the
+app status update. The cancellation domain verifies which operation states
+can transition. The operation view owns audience-specific diagnostic
+projections, evidence ranking and historical scheduling reconstruction.
+API loads authorized evidence and serves the HTTP contract.
+The operation execution domain owns stage timing and persistence retry
+behavior. Controller supplies error classification and keeps guarded Store
+calls and the leader context in its execution adapters.
 
 These are migrated boundaries, not a claim that the remaining API, Controller
 and Store files are composition-only. App release and reconciliation, billing,

@@ -12,19 +12,6 @@ import (
 	"time"
 )
 
-func TestOperationStoreRetryRetainsFinalizationUntilDatabaseReturns(t *testing.T) {
-	calls, pending := 0, 0
-	err := retryOperationStore(context.Background(), time.Millisecond, func(int) { pending++ }, func() error {
-		calls++
-		if calls <= 3 {
-			return &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
-		}
-		return nil
-	})
-	if err != nil || calls != 4 || pending != 3 {
-		t.Fatalf("calls=%d pending=%d err=%v", calls, pending, err)
-	}
-}
 func TestOperationStoreRetryStopsOnFenceAndLeadershipLoss(t *testing.T) {
 	for _, err := range []error{store.ErrConflict, store.ErrNotFound, store.ErrInvalidInput, &pgconn.PgError{Code: "23505"}} {
 		calls := 0
@@ -37,24 +24,6 @@ func TestOperationStoreRetryStopsOnFenceAndLeadershipLoss(t *testing.T) {
 	calls := 0
 	err := retryOperationStore(ctx, time.Millisecond, func(int) { cancel() }, func() error { calls++; return &pgconn.PgError{Code: "57P01"} })
 	if !errors.Is(err, context.Canceled) || calls != 1 {
-		t.Fatal(err, calls)
-	}
-}
-func TestRolloutPersistenceTimeoutIsNotWorkloadFailure(t *testing.T) {
-	calls := 0
-	err := retryRolloutPersistenceObservation(context.Background(), func() error {
-		calls++
-		if calls == 1 {
-			return errors.Join(errOperationPersistenceInterrupted, context.DeadlineExceeded)
-		}
-		return nil
-	})
-	if err != nil || calls != 2 {
-		t.Fatal(err, calls)
-	}
-	calls = 0
-	failure := errors.New("pod failed")
-	if err = retryRolloutPersistenceObservation(context.Background(), func() error { calls++; return failure }); err != failure || calls != 1 {
 		t.Fatal(err, calls)
 	}
 }
@@ -80,7 +49,7 @@ func TestFinalizationCannotResurrectCancelledTaskAfterOutage(t *testing.T) {
 	_, err := s.finalizeManagedOperation(context.Background(), op, model.OperationStatusFailed, func() (model.Operation, error) {
 		calls++
 		if calls == 1 {
-			if _, e := s.Store.CancelOperation(op.ID, "user cancelled"); e != nil {
+			if _, e := cancelFixtureOperation(s.Store, op, "user cancelled"); e != nil {
 				t.Fatal(e)
 			}
 			return model.Operation{}, &pgconn.PgError{Code: "57P01"}

@@ -4,10 +4,11 @@ import (
 	"strings"
 
 	"fugue/internal/model"
+	"fugue/internal/operationview"
 	"fugue/internal/runtime"
 )
 
-const apiRedactedSecretValue = "[redacted]"
+const apiRedactedSecretValue = operationview.RedactedSecretValue
 
 func sanitizeAppForAPI(app model.App) model.App {
 	out := cloneApp(app)
@@ -55,8 +56,8 @@ func redactOperationForDebugBundle(op model.Operation) model.Operation {
 	}
 	out.DesiredSource = redactAppSourceForDebugBundle(op.DesiredSource)
 	out.DesiredOriginSource = redactAppSourceForDebugBundle(op.DesiredOriginSource)
-	out.ResultMessage = redactOperationDiagnosticString(op.ResultMessage)
-	out.ErrorMessage = redactOperationDiagnosticString(op.ErrorMessage)
+	out.ResultMessage = operationview.RedactDiagnosticString(op.ResultMessage)
+	out.ErrorMessage = operationview.RedactDiagnosticString(op.ErrorMessage)
 	return out
 }
 
@@ -69,9 +70,9 @@ func redactAppSourceForDebugBundle(source *model.AppSource) *model.AppSource {
 		out.RepoAuthToken = apiRedactedSecretValue
 	}
 	if out != nil {
-		out.RepoURL = redactOperationDiagnosticString(out.RepoURL)
-		out.ImageRef = redactOperationDiagnosticString(out.ImageRef)
-		out.ResolvedImageRef = redactOperationDiagnosticString(out.ResolvedImageRef)
+		out.RepoURL = operationview.RedactDiagnosticString(out.RepoURL)
+		out.ImageRef = operationview.RedactDiagnosticString(out.ImageRef)
+		out.ResolvedImageRef = operationview.RedactDiagnosticString(out.ResolvedImageRef)
 	}
 	return out
 }
