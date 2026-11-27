@@ -139,8 +139,7 @@ func TestRetainedReleaseSecretsSurvivePruning(t *testing.T) {
 			}
 			// Explicit retirement releases the Deployment, but a terminating Pod
 			// still owns its dependencies until Kubernetes finishes collecting it.
-			release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-			if _, err := st.UpdateAppRelease(release); err != nil {
+			if _, err := retireFixtureRelease(t.Context(), st, release); err != nil {
 				t.Fatal(err)
 			}
 			cluster.pods = []map[string]any{{"metadata": map[string]any{"deletionTimestamp": "2026-01-01T00:00:00Z"}, "spec": spec}}
@@ -177,7 +176,11 @@ func TestReleaseFileSecretRecoveryUsesImmutableBinding(t *testing.T) {
 			options := runtime.RenderOptions{Revision: revision}
 			release.DeploymentName = runtime.RuntimeAppResourceNameWithOptions(app, options)
 			release.ServiceName = runtime.RuntimeAppServiceNameWithOptions(app, options)
-			release, err = st.UpdateAppRelease(release)
+			if release.Status == model.AppReleaseStatusRetired {
+				release, err = retireFixtureRelease(t.Context(), st, release)
+			} else {
+				release, err = st.UpdateAppRelease(release)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -246,8 +249,7 @@ func TestReleaseFileSecretRecoveryUsesImmutableBinding(t *testing.T) {
 						meta["uid"] = "replacement-uid"
 						return
 					}
-					release.Role, release.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-					if _, err := st.UpdateAppRelease(release); err != nil {
+					if _, err := retireFixtureRelease(t.Context(), st, release); err != nil {
 						t.Error(err)
 					}
 				}

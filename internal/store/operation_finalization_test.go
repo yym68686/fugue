@@ -46,7 +46,7 @@ func TestGuardedFinalizationCompletesAndNeverOverwritesCancellation(t *testing.T
 		t.Run(map[bool]string{false: "ready", true: "cancelled"}[cancel], func(t *testing.T) {
 			s, app, op := finalizationFixture(t)
 			if cancel {
-				if _, err := s.CancelOperation(op.ID, "user cancelled"); err != nil {
+				if _, err := cancelOperationForTest(s, op, "user cancelled"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -155,7 +155,7 @@ func TestGuardedFinalizationPostgres(t *testing.T) {
 	if _, err = s.CompleteManagedOperationGuarded(op, &baseline, "", "stale observation", &next, nil, nil); !errors.Is(err, ErrConflict) {
 		t.Fatal("configuration fence failed", err)
 	}
-	if _, err = s.CancelOperation(op.ID, "user cancelled"); err != nil {
+	if _, err = cancelOperationForTest(s, op, "user cancelled"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.FailManagedOperationGuarded(op, "late failure"); !errors.Is(err, ErrConflict) {
