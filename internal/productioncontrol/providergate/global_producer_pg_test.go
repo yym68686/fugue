@@ -220,6 +220,11 @@ GRANT SELECT,INSERT ON fugue_native_global_producer_receipts TO fugue_gate_fixtu
 	baselineEvidence := "sha256:" + strings.Repeat("e", 64)
 	activationEvidence := "sha256:" + strings.Repeat("f", 64)
 	scope := productioncontrol.Scope{ClusterID: "fixture", ResourceID: productioncontrol.GlobalProducerPolicyResource}
+	boundary, err := j.ReadGlobalProducerBoundary(ctx, scope)
+	if err != nil || !boundary.Frozen || boundary.SelectedReleaseID != "r2" || boundary.WriterEnrolled ||
+		boundary.Journal != nil || boundary.FrozenVersion == nil || *boundary.FrozenVersion != boundary.Selected {
+		t.Fatalf("frozen predecessor readback: %+v %v", boundary, err)
+	}
 	if _, err := w.AnchorResource(ctx, "observer", productioncontrol.Baseline{Scope: scope, Verified: productioncontrol.Version{Generation: 2, Digest: newDigest}, EvidenceDigest: baselineEvidence}); err != nil {
 		t.Fatal(err)
 	}
@@ -233,6 +238,11 @@ GRANT fugue_gate_fixture_writer TO fugue_gate_fixture_native`)
 	exec(admin, `REVOKE fugue_gate_fixture_writer FROM fugue_gate_fixture_native;
 REVOKE INSERT (envelope) ON fugue_control.approvals FROM fugue_gate_fixture_writer`)
 	exec(admin, activate, "fugue_gate_fixture_native", baselineEvidence, activationEvidence)
+	boundary, err = j.ReadGlobalProducerBoundary(ctx, scope)
+	if err != nil || !boundary.WriterEnrolled || !boundary.WriterStillIsolated || boundary.ActivationEvidenceDigest != activationEvidence ||
+		boundary.Journal == nil || boundary.Journal.LastVerified != boundary.Selected {
+		t.Fatalf("native enrollment readback: %+v %v", boundary, err)
+	}
 
 	// The real journal verifies the owner's signature. The provider receipt
 	// separately derives its exact publication fields from that recorded claim.
@@ -319,6 +329,11 @@ UPDATE fugue_platform_artifact_releases SET status='superseded' WHERE id='r2'`);
 	}
 	if err := admin.QueryRowContext(ctx, `SELECT active_release_id,fencing_token FROM fugue_platform_release_lanes WHERE lane_key='policy_snapshot|platform-config-producer|shadow'`).Scan(&active, &fence); err != nil || active != "r3" || fence != 3 {
 		t.Fatalf("wrong native selection: %q %d %v", active, fence, err)
+	}
+	boundary, err = j.ReadGlobalProducerBoundary(ctx, scope)
+	if err != nil || boundary.SelectedReleaseID != "r3" || boundary.Journal == nil ||
+		boundary.Journal.Pending != claim.IntentDigest || boundary.Selected == boundary.Journal.LastVerified {
+		t.Fatalf("pending selection readback: %+v %v", boundary, err)
 	}
 	var receiptCount int
 	if err := admin.QueryRowContext(ctx, `SELECT count(*) FROM fugue_native_global_producer_receipts WHERE intent_digest=$1 AND target_digest=$2`, claim.IntentDigest, targetDigest).Scan(&receiptCount); err != nil || receiptCount != 1 {

@@ -36,6 +36,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control prepare-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE HOLD_CHANGE
        fugue-production-control draft-dns-policy JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID REQUEST
        fugue-production-control draft-dns-policy-rollback JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE ORIGINAL_INTENT_DIGEST REQUEST
+       fugue-production-control observe-dns-cutover JOURNAL_CONFIG
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -71,6 +72,17 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "observe-dns-cutover":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		return withJournal(ctx, args[1], true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			boundary, err := j.ReadGlobalProducerBoundary(ctx, dnscontrol.Scope(cluster))
+			if err != nil {
+				return fmt.Errorf("read DNS provider and journal boundary: %w", err)
+			}
+			return emit(boundary)
+		})
 	case "prepare-dns-policy":
 		if len(args) != 5 {
 			return errors.New(usage)
