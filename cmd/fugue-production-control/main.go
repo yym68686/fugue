@@ -37,6 +37,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-participation-member JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control shadow-participation-kubernetes JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control render-participation-freeze NODE
+       fugue-production-control observe-participation-freeze JOURNAL_CONFIG KUBECONFIG CONTEXT NODE
        fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
 
 func main() {
@@ -143,7 +144,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			return emit(report)
 		})
-	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes":
+	case "observe-participation-readers", "observe-participation-member", "shadow-participation-kubernetes", "observe-participation-freeze":
 		if len(args) != 5 {
 			return errors.New(usage)
 		}
@@ -188,6 +189,12 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 					return err
 				}
 				report.Kind, report.Shadow = "participation_kubernetes_only_shadow", &shadow
+			case "observe-participation-freeze":
+				freeze, err := observer.ObserveNodeFreeze(ctx, topology.Policy, args[4])
+				if err != nil {
+					return err
+				}
+				report.Kind, report.Freeze = "participation_freeze_configuration_observation", &freeze
 			}
 			if err := observer.VerifyNamespace(ctx); err != nil {
 				return err
@@ -304,6 +311,7 @@ type participationObservationReport struct {
 	Readers           *participation.ReaderObservation `json:"readers,omitempty"`
 	Member            *participation.MemberObservation `json:"member,omitempty"`
 	Shadow            *participation.KubernetesShadow  `json:"shadow,omitempty"`
+	Freeze            *participation.FreezeObservation `json:"freeze,omitempty"`
 }
 
 func record(ctx context.Context, path string, fn func(context.Context, *productioncontrol.Journal, string) (productioncontrol.Recorded, error)) (productioncontrol.Recorded, error) {

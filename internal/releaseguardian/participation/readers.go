@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	admissionclient "k8s.io/client-go/kubernetes/typed/admissionregistration/v1"
 	appsclient "k8s.io/client-go/kubernetes/typed/apps/v1"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
@@ -40,6 +41,7 @@ var (
 type KubernetesObserver struct {
 	apps         appsclient.AppsV1Interface
 	core         coreclient.CoreV1Interface
+	admission    admissionclient.AdmissionregistrationV1Interface
 	namespace    string
 	namespaceUID string
 }
@@ -79,7 +81,11 @@ func NewKubernetesObserver(config *rest.Config) (*KubernetesObserver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &KubernetesObserver{apps: apps, core: core}, nil
+	admission, err := admissionclient.NewForConfigAndClient(cfg, &observing)
+	if err != nil {
+		return nil, err
+	}
+	return &KubernetesObserver{apps: apps, core: core, admission: admission}, nil
 }
 
 type getOnlyTransport struct{ next http.RoundTripper }
