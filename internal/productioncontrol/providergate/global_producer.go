@@ -116,6 +116,7 @@ DECLARE
   authority record;
   boundary BOOLEAN;
   operation record;
+  inverse BOOLEAN;
   selected BOOLEAN;
 BEGIN
   IF current_setting('transaction_isolation') <> 'read committed' THEN
@@ -175,6 +176,37 @@ BEGIN
         WHERE p.cluster_id=NEW.cluster_id AND p.resource_id='producer/global-policy' AND p.fence=NEW.claim_fence-1
         AND r.generation=NEW.previous_fence AND r.verified_digest=NEW.previous_digest)) THEN
     RAISE EXCEPTION 'global producer dispatch no longer has its settled journal predecessor' USING ERRCODE = '40001';
+  END IF;
+  IF operation.payload ? 'reverses' THEN
+    EXECUTE format('SELECT EXISTS(
+      SELECT 1 FROM %I.fugue_native_global_producer_receipts p
+      JOIN fugue_control.execution_claims c ON c.intent_digest=p.intent_digest AND c.cluster_id=p.cluster_id
+        AND c.resource_id=''producer/global-policy'' AND c.approval_digest=p.approval_digest AND c.fence=p.claim_fence
+      JOIN fugue_control.execution_results e ON e.intent_digest=c.intent_digest
+      JOIN fugue_control.intents i ON i.digest=c.intent_digest
+      CROSS JOIN LATERAL (SELECT convert_from(i.payload,''UTF8'')::jsonb AS body) AS original
+      WHERE p.intent_digest=$1#>>''{reverses,intentDigest}'' AND p.approval_digest=$1#>>''{reverses,approvalDigest}''
+        AND p.cluster_id=$2 AND p.claim_fence<$3 AND p.writer_role=session_user
+        AND p.target_digest=$4 AND p.previous_fence=$5-1
+        AND e.outcome=''applied'' AND e.verified_digest=$4 AND e.generation=$5
+        AND e.evidence_digest=$1#>>''{reverses,evidenceDigest}''
+        AND original.body->''nextProducer''=$1->''previousProducer''
+        AND original.body->''nextDNS''=$1->''previousDNS''
+        AND original.body->''static''=$1->''static''
+        AND original.body->''origin''=$1->''origin''
+        AND original.body->''changedEdge''=$1->''changedEdge''
+        AND original.body->''beforeHold''=$1->''afterHold''
+        AND original.body->''afterHold''=$1->''beforeHold''
+        AND NOT EXISTS(SELECT 1 FROM fugue_control.execution_claims lc
+          LEFT JOIN fugue_control.execution_results le ON le.intent_digest=lc.intent_digest
+          WHERE lc.cluster_id=p.cluster_id AND lc.resource_id=''producer/global-policy''
+            AND lc.fence>p.claim_fence AND lc.fence<$3
+            AND (le.outcome IS DISTINCT FROM ''not_applied''
+              OR EXISTS(SELECT 1 FROM %I.fugue_native_global_producer_receipts later WHERE later.intent_digest=lc.intent_digest))))', TG_TABLE_SCHEMA, TG_TABLE_SCHEMA)
+    INTO inverse USING operation.payload, NEW.cluster_id, NEW.claim_fence, NEW.previous_digest, NEW.previous_fence;
+    IF inverse IS DISTINCT FROM TRUE THEN
+      RAISE EXCEPTION 'global producer rollback is not bound to the exact settled inverse' USING ERRCODE = '40001';
+    END IF;
   END IF;
   EXECUTE format('SELECT EXISTS (
     SELECT 1 FROM %1$I.fugue_platform_release_lanes l

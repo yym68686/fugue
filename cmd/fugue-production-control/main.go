@@ -35,6 +35,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID
        fugue-production-control prepare-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE HOLD_CHANGE
        fugue-production-control draft-dns-policy JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID REQUEST
+       fugue-production-control draft-dns-policy-rollback JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE ORIGINAL_INTENT_DIGEST REQUEST
        fugue-production-control draft-participation CLUSTER REQUEST POLICY [PREVIOUS_GENERATION PREVIOUS_DIGEST]
        fugue-production-control store-participation JOURNAL_CONFIG ACTOR INTENT_DIGEST APPROVAL_DIGEST
        fugue-production-control read-participation JOURNAL_CONFIG [GENERATION]
@@ -142,6 +143,35 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return err
 		}
 		return emitDNSShadow(args[offset], o, now, emit)
+	case "draft-dns-policy-rollback":
+		if len(args) != 7 {
+			return errors.New(usage)
+		}
+		readToken, err := readFile(args[3], 4096, true)
+		if err != nil {
+			return err
+		}
+		defer clear(readToken)
+		draftToken, err := readFile(args[4], 4096, true)
+		if err != nil {
+			return err
+		}
+		defer clear(draftToken)
+		reader, err := dnscontrol.NewReader(args[2], string(bytes.TrimSpace(readToken)))
+		if err != nil {
+			return err
+		}
+		preparer, err := dnscontrol.NewDraftPreparer(reader, string(bytes.TrimSpace(draftToken)))
+		if err != nil {
+			return err
+		}
+		return withJournalDeadline(ctx, args[1], true, 5*time.Minute, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			submission, err := reader.DraftRollback(ctx, j, preparer, cluster, args[5], args[6], now)
+			if err != nil {
+				return err
+			}
+			return emit(submission)
+		})
 	case "render-participation-freeze":
 		if len(args) != 2 {
 			return errors.New(usage)

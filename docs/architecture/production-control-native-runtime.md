@@ -30,6 +30,13 @@ verified LKG. All three must match the observed predecessor.
   matching the previous producer fence and digest. The owner can inspect and
   sign the resulting exact intent. The shadow output itself is not approval
   or terminal evidence.
+- `draft-dns-policy-rollback JOURNAL_CONFIG HTTPS_ORIGIN READ_TOKEN_FILE DRAFT_TOKEN_FILE ORIGINAL_INTENT_DIGEST REQUEST`
+  accepts only the exact currently settled `applied` DNS intent. It constructs
+  the inverse one-edge delta, prepares immutable drafts, and runs the same
+  read-only shadow before returning a new intent. This is not an automatic
+  revert: the inverse requires a fresh independent approval and the ordinary
+  native dispatch/serving-settlement path. It refuses a pending, superseded,
+  `not_applied`, or mismatched original operation.
 
 These commands use dedicated credentials and an explicit HTTPS origin, do
 not follow redirects, and never use a publication endpoint. A signed intent
@@ -93,19 +100,23 @@ The independent bootstrap profiles `dns-checkpoint`, `dns-anchor`, and
 `dns-settle` accept `dnsOrigin`, `dnsReadTokenFile`, the corresponding journal
 profile, and the observer public key and witness directory. Do not provide a
 publication or Kubernetes credential. `dns-checkpoint [INTENT_DIGEST]` is
-read-only. It reports the exact producer selection, Full/LKG and immutable
-DNS member, which it verifies before and after reading the member. A target
-policy selection while Full still points at its predecessor is not accepted.
+read-only. It reports the exact producer selection, Full/LKG and immutable DNS
+member. It checks the member's SOA serial and primary and its probe record
+answers on every declared public listener address over both UDP and TCP. It
+rereads the checkpoint after the sweep and rejects a changed checkpoint or a
+target selection whose Full still points at its predecessor.
 
 For `dns-anchor` or `dns-settle`, the observer signs the ordinary production
 execution witness. Its `observationDigest` identifies a canonical DNS
-`ServingEvidence` record with two distinct references: `checkpointDigest`
-from the read-only command and `authoritativeDnsDigest` from the separately
-collected DNS answer report. The witness also names separate `authorityDigest`
-evidence. Mount the witness, observation record, DNS answer report and authority
-record under their content digests; this verifier checks presence and SHA-256
-binding, not the underlying DNS sample's coverage. The observer must verify
-the real affected serving endpoints before signing. A baseline witness must
+`ServingEvidence` record with `checkpointDigest` and `listenerCoverageDigest`
+from the read-only command, and `authoritativeDnsDigest` from the separately
+collected application DNS answer report. The witness also names separate
+`authorityDigest` evidence. Mount the witness, observation record, canonical
+`listenerCoverage` object, application DNS answer report and authority record
+under their content digests. Settlement repeats the listener sweep and requires
+an exact match. The signer verifies the affected application answers before
+signing. The verifier checks the separate application report's SHA-256 binding.
+A baseline witness must
 also match the exact provider freeze before native activation. An `applied`
 result needs its matching committed provider receipt; `not_applied` requires
 the exact unchanged verified predecessor and no receipt. The result check
@@ -113,10 +124,12 @@ and insert hold the same journal resource lock as publication, and once the
 terminal record commits, no late native write under that claim can commit.
 
 There is intentionally no production freeze/activation command yet. Do not
-manually edit the gate or native authority. Complete the independently
-approved cutover coordinator, actual DNS answer collection and inverse
-rollback (including recovery if a selected policy cannot converge) before
-freezing the legacy lane or declaring it migrated. The
+manually edit the gate or native authority. The rollback draft above covers
+only a settled, serving `applied` change; recovery from an ambiguous or
+non-converging selected policy still needs an independently approved recovery
+coordinator and must not bypass the claim fence. Complete the independently
+approved cutover coordinator and actual DNS answer collection before freezing
+the legacy lane or declaring it migrated. The
 database principal for schema migration and authority activation must be
 isolated from the old clients, and the dedicated runtime role must not have
 authority-table, DDL, approval, or terminal-journal mutation privileges.

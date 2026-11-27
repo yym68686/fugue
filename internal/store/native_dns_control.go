@@ -100,6 +100,9 @@ func (c *NativeDNSControl) Dispatch(ctx context.Context, intentDigest, approvalD
 	if err := c.isActive(ctx); err != nil {
 		return NativeDNSDispatchResult{}, err
 	}
+	if err := dnscontrol.RevalidateRollback(ctx, c.journal, c.cluster, approved); err != nil {
+		return NativeDNSDispatchResult{}, err
+	}
 	live, err := c.reader.Revalidate(ctx, sub, time.Now)
 	if err != nil {
 		return NativeDNSDispatchResult{}, err
@@ -207,6 +210,7 @@ func (s *Store) verifyNativeDNSSources(ctx context.Context, tx *sql.Tx, p dnscon
 		return err
 	}
 	live.Origin, live.ShadowDigest = p.Origin, p.ShadowDigest
+	live.Reverses = p.Reverses // checked under the journal fence and by the receipt trigger
 	if !dnscontrol.EqualChange(p, live) {
 		return ErrConflict
 	}

@@ -66,14 +66,18 @@ func TestServingCheckpointSeparatesSelectionFromConvergence(t *testing.T) {
 
 func TestServingEvidenceDoesNotAcceptCheckpointAlone(t *testing.T) {
 	checkpoint, _ := platformconfig.Digest("checkpoint")
+	coverage, _ := platformconfig.Digest("listener coverage")
 	answers, _ := platformconfig.Digest("independent answers")
 	if _, _, err := EncodeServingEvidence(ServingEvidence{CheckpointDigest: checkpoint}); err == nil {
 		t.Fatal("checkpoint alone was sufficient")
 	}
-	if _, _, err := EncodeServingEvidence(ServingEvidence{checkpoint, checkpoint}); err == nil {
+	if _, _, err := EncodeServingEvidence(ServingEvidence{CheckpointDigest: checkpoint, AuthoritativeDNSDigest: answers}); err == nil {
+		t.Fatal("missing listener coverage was accepted")
+	}
+	if _, _, err := EncodeServingEvidence(ServingEvidence{checkpoint, coverage, checkpoint}); err == nil {
 		t.Fatal("checkpoint was accepted as authoritative DNS report")
 	}
-	if raw, digest, err := EncodeServingEvidence(ServingEvidence{checkpoint, answers}); err != nil || len(raw) == 0 || digest == checkpoint || digest == answers {
+	if raw, digest, err := EncodeServingEvidence(ServingEvidence{checkpoint, coverage, answers}); err != nil || len(raw) == 0 || digest == checkpoint || digest == coverage || digest == answers {
 		t.Fatalf("could not bind distinct observation records: %s %v", digest, err)
 	}
 }

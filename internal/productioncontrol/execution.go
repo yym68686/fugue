@@ -223,6 +223,9 @@ func (j *Journal) LockVerifiedGlobalProducerClaim(ctx context.Context, tx *sql.T
 		state.LastVerified != (Version{Generation: intent.Generation, Digest: intent.CurrentDigest}) || intent.RollbackDigest != intent.CurrentDigest {
 		return Submission{}, ErrStaleFence
 	}
+	if err := checkGlobalProducerRollback(ctx, tx, intent, payload, state, claim.Fence-1); err != nil {
+		return Submission{}, err
+	}
 	if err := verifyRecordedApproval(ctx, tx, j, intent, claim.IntentDigest, claim.ApprovalDigest); err != nil {
 		return Submission{}, err
 	}
@@ -319,6 +322,11 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		}
 		if nodeScope {
 			if err := verifyParticipationExecutionTopology(ctx, tx, intent, payload, state); err != nil {
+				return false, err
+			}
+		}
+		if intent.Operation == DNSMembership {
+			if err := checkGlobalProducerRollback(ctx, tx, intent, payload, state, state.LastFence); err != nil {
 				return false, err
 			}
 		}
