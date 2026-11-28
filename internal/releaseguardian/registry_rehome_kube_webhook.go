@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"time"
 
-	"fugue/internal/productioncontrol"
 	admission "k8s.io/api/admission/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -18,34 +17,14 @@ import (
 	kubejson "sigs.k8s.io/json"
 )
 
-// rehomePendingWrite must check the read-only durable journal for this
-// pre-enrolled claim. It is never selected using data from AdmissionReview.
+// rehomePendingWrite must check the read-only durable journal for the claim
+// for the enrolled intent and approval, never selected from AdmissionReview.
 type rehomePendingWrite func(ctx context.Context, policyDigest, writeDigest string) error
 
 type registryRehomeAdmissionHandler struct {
 	gate   registryRehomeKubeFence
 	review RegistryRehomeReview
 	verify rehomePendingWrite
-}
-
-// newJournaledRegistryRehomeAdmission binds the webhook to an exact intent
-// and expected claim before it serves any AdmissionReview. The reader's
-// database identity does not need to grant reservations or modify the ledger.
-func newJournaledRegistryRehomeAdmission(gate registryRehomeKubeFence, s productioncontrol.Submission,
-	claim productioncontrol.Claim, reader *productioncontrol.RegistryRehomeAdmissionReader) (*registryRehomeAdmissionHandler, error) {
-	review, err := InspectRegistryRehomeSubmission(s)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := s.Intent.Digest()
-	if err != nil || reader == nil || claim.IntentDigest != identity || claim.ResourceID != s.Intent.ResourceID ||
-		claim.ClusterID != s.Intent.ClusterID || claim.Fence < 1 || !digestPattern.MatchString(claim.ApprovalDigest) ||
-		gate.cutover.Key != review.Source.Key || gate.cutover.MonitorComponent != review.Draft.Component {
-		return nil, errors.New("registry rehome webhook requires the exact pre-enrolled claim and Guardian scope")
-	}
-	return registryRehomeAdmissionServer(gate, review, func(ctx context.Context, policy, write string) error {
-		return reader.VerifyPendingWrite(ctx, claim, policy, write)
-	})
 }
 
 func registryRehomeAdmissionServer(gate registryRehomeKubeFence, review RegistryRehomeReview, verify rehomePendingWrite) (*registryRehomeAdmissionHandler, error) {

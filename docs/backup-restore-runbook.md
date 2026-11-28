@@ -122,8 +122,8 @@ pending claim. It compares the live Deployment and each read-only Service
 to the archived declarations and repeats the source and journal reads after
 checking both mirror copies. The output is an intent for `inspect`, owner
 `sign`, and journal recording. It is not a Deployment patch or fresh
-baseline evidence. An approved registry rehome is explicitly rejected by
-the ordinary claim path; no production dispatch command is enabled.
+baseline evidence. An approved registry rehome is rejected by the ordinary
+claim path; only the dedicated Guardian command may reserve a rehome claim.
 
 Package the reviewed intent and exact source archive for independent custody:
 
@@ -142,6 +142,49 @@ JSON config with `registry` and optional `registryAuthFile` to re-read both OCI
 images from that origin; the bundle pins the repository. Neither command
 authenticates production approval, grants write access, or certifies rollout,
 rollback, or serving health. Do not apply the templates as a recovery shortcut.
+
+For the registry-only move, start from a plain Deployment freeze. Keep the
+legacy sources disabled and independently prove that their credentials were
+revoked and requests drained. Do not enable this exception as part of normal
+release. Run the admission service outside the API being upgraded, with a
+separate **SELECT-only** journal identity and no Kubernetes credentials:
+
+```bash
+fugue-release-guardian registry-rehome-render-fence "$FENCE_CONFIG"
+fugue-release-guardian registry-rehome-admission "$ADMISSION_CONFIG" "$INTENT_DIGEST" "$APPROVAL_DIGEST"
+```
+
+The config files have the same `cutover` (phase `frozen`), bound `provider`,
+dedicated `writer`, `deploymentUID`, `deploymentGeneration`,
+`deploymentResourceVersion`, `admissionEndpoint`, and `admissionCABundleFile`.
+The admission config additionally uses `journalFile`, `observerPublicKey`
+(base64 Ed25519 public key), `listenAddress` (IP and port),
+`tlsCertificateFile`, and `tlsPrivateKeyFile`. Use absolute paths and keep
+profiles, journal credentials and the TLS private key private. Restrict the
+listener to the enrolled Kubernetes API servers. The renderer only emits
+separate webhook and policy specifications; it does not apply them. Stage the
+webhook and verify its fail-closed behavior before replacing the plain
+workload policy with the exception. Verify the exact dry-run and denial
+behavior at every serving API endpoint, and verify node pulls of both sealed
+images without the legacy registry. A ready webhook is not that evidence.
+
+Only after the independent observer signs the exact, short-lived admission
+receipt, use the dedicated writer's static Kubernetes context:
+
+```bash
+fugue-release-guardian registry-rehome-dispatch "$DISPATCH_CONFIG" "$INTENT_DIGEST" "$APPROVAL_DIGEST" "$SIGNED_ADMISSION"
+```
+
+The dispatch config adds `journalFile`, `observerPublicKey`, `writerKubeconfig`,
+`writerContext`, `archiveFile`, `archiveDigest` (the independently pinned
+archive SHA-256), and an audit `actor`. It uses no GitHub or Fugue API
+credentials. The command verifies exact installed policies and live source,
+then reserves at most one journal claim and submits at most one image-only
+patch. It installs no policy or permission. Restart or rerun never replays a
+claimed write. `submitted: true` means Kubernetes acknowledged that patch,
+not that the release is healthy, the LKG advanced, or the migration is done.
+Restore the plain freeze before evaluating placement or opening a different
+production writer.
 
 If the one-shot provider write lost its response, freeze the Deployment first,
 remove the temporary rehome webhook exception, and wait for any previously

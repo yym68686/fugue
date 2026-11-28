@@ -41,6 +41,22 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 {
+		var registryRehome func(context.Context, []string, io.Writer) error
+		switch os.Args[1] {
+		case "registry-rehome-render-fence":
+			registryRehome = runRegistryRehomeRenderFence
+		case "registry-rehome-dispatch":
+			registryRehome = runRegistryRehomeDispatch
+		case "registry-rehome-admission":
+			registryRehome = runRegistryRehomeAdmission
+		}
+		if registryRehome != nil {
+			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			return registryRehome(ctx, os.Args[2:], os.Stdout)
+		}
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "node-worker-baseline-checkpoint" || os.Args[1] == "node-worker-baseline-import") {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()

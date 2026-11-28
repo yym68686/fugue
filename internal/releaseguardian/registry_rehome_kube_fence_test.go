@@ -326,10 +326,10 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	ct := cutoverFixture()
 	ct.Key, ct.MonitorComponent, ct.Namespace, ct.Deployment = source.Key, pair.Component, id.Namespace, id.Name
 	ct.DeploymentStatusWriter = statusWriter
-	var handler atomic.Pointer[registryRehomeAdmissionHandler]
+	var handler atomic.Pointer[http.Handler]
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h := handler.Load(); h != nil {
-			h.ServeHTTP(w, r)
+			(*h).ServeHTTP(w, r)
 			return
 		}
 		http.Error(w, "fixture not configured", http.StatusServiceUnavailable)
@@ -337,15 +337,26 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	defer server.Close()
 	ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
 	provider := registryRehomeTestProvider(t, ctx, admin, cfg, x.Namespace)
-	gate, err := renderRegistryRehomeKubeFence(ct, provider, registryRehomeKubeScope{writer, string(x.UID), x.ResourceVersion, x.Generation}, server.URL+registryRehomeAdmissionPath, ca)
+	enrollment := RegistryRehomeKubeEnrollment{Cutover: ct, Provider: provider, Writer: writer, DeploymentUID: string(x.UID),
+		DeploymentResourceVersion: x.ResourceVersion, DeploymentGeneration: x.Generation,
+		AdmissionEndpoint: server.URL + registryRehomeAdmissionPath, AdmissionCABundle: ca}
+	gate, err := enrollment.render()
 	if err != nil {
 		t.Fatal(err)
+	}
+	preview, err := RenderRegistryRehomeKubeFence(enrollment)
+	if err != nil || preview.Webhook.Name != gate.hook.Name || len(preview.Policies) != len(gate.pairs) {
+		t.Fatalf("unexpected staged fence preview: %+v %v", preview, err)
 	}
 	dispatcher, err := newRegistryRehomeDispatcher(clients[writer], gate, scope.ClusterID, ledger, observer, raw, archive.ArchiveDigest)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := dispatcher.dispatch(ctx, "fixture-mover", recorded.Digest, testDigest, nil); err == nil || got.Submitted {
+	dispatch := func(approval string, evidence []byte) (RegistryRehomeKubernetesDispatchResult, error) {
+		return DispatchRegistryRehomeKubernetes(ctx, clients[writer], enrollment, scope.ClusterID, ledger,
+			observer, raw, archive.ArchiveDigest, "fixture-mover", recorded.Digest, approval, evidence)
+	}
+	if got, err := dispatch(testDigest, nil); err == nil || got.Submitted {
 		t.Fatalf("unapproved submission attempted a write: %+v %v", got, err)
 	}
 	a, err := productioncontrol.SignApproval(s.Intent, "fixture-owner", key, time.Now(), 2*time.Minute)
@@ -379,15 +390,11 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reader, err := productioncontrol.NewRegistryRehomeAdmissionReader(readerLedger, scope, observer)
+	h, err := NewRegistryRehomeKubernetesAdmissionHandler(enrollment, scope.ClusterID, s, recorded.Digest, approval.Digest, readerLedger, observer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := newJournaledRegistryRehomeAdmission(gate, s, claim, reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler.Store(h)
+	handler.Store(&h)
 	shadow, err := InspectRegistryRehomeSubmission(s)
 	if err != nil {
 		t.Fatal(err)
@@ -446,15 +453,11 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := dispatcher.dispatch(ctx, "fixture-mover", recorded.Digest, approval.Digest, wire)
+	got, err := dispatch(approval.Digest, wire)
 	if err != nil || !got.Submitted || got.Claim != claim || got.Workload.UID != string(x.UID) {
 		t.Fatalf("provider dispatch: %+v %v", got, err)
 	}
-	restart, err := newRegistryRehomeDispatcher(clients[writer], gate, scope.ClusterID, ledger, observer, raw, archive.ArchiveDigest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	replay, err := restart.dispatch(ctx, "fixture-restart", recorded.Digest, approval.Digest, nil)
+	replay, err := dispatch(approval.Digest, nil)
 	if err != nil || replay.Submitted || replay.Claim != claim {
 		t.Fatalf("restart did not stay inspection-only: %+v %v", replay, err)
 	}

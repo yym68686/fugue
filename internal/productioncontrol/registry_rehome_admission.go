@@ -214,6 +214,21 @@ func (e *RegistryRehomeAdmissionReader) VerifyPendingWrite(ctx context.Context, 
 	return nil
 }
 
+// VerifyPendingIntentWrite is the request-scoped provider-admission check.
+// Its intent and approval digests are fixed when the webhook is configured;
+// neither is selected from AdmissionReview. It discovers only an already
+// persisted claim and never reserves, renews, or settles one.
+func (e *RegistryRehomeAdmissionReader) VerifyPendingIntentWrite(ctx context.Context, intentDigest, approvalDigest, policy, write string) error {
+	if e == nil || e.journal == nil || !digestPattern.MatchString(intentDigest) || !digestPattern.MatchString(approvalDigest) {
+		return ErrStaleFence
+	}
+	claim, terminal, err := e.journal.ReadExecution(ctx, e.scope, intentDigest)
+	if err != nil || terminal != nil || claim.ApprovalDigest != approvalDigest {
+		return errors.Join(ErrStaleFence, err)
+	}
+	return e.VerifyPendingWrite(ctx, claim, policy, write)
+}
+
 func readRegistryRehomeClaimAdmission(ctx context.Context, db queryRow, claim Claim, observer ed25519.PublicKey) (RegistryRehomeAdmission, string, error) {
 	var raw []byte
 	var d string

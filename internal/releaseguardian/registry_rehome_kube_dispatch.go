@@ -28,12 +28,6 @@ type registryRehomeDispatcher struct {
 	archive verifiedReleaseRecoveryArchive
 }
 
-type registryRehomeDispatchResult struct {
-	Claim     productioncontrol.Claim
-	Submitted bool
-	Workload  RecoveryRecordRef
-}
-
 // newRegistryRehomeDispatcher wires a separate provider and journal identity.
 // It installs no policies and must not be called by the normal release lane.
 func newRegistryRehomeDispatcher(config *rest.Config,
@@ -146,22 +140,22 @@ func (e *registryRehomeDispatcher) preflight(ctx context.Context, s productionco
 	return cas, policy, write, nil
 }
 
-func (e *registryRehomeDispatcher) dispatch(ctx context.Context, actor, intentDigest, approvalDigest string, evidence []byte) (registryRehomeDispatchResult, error) {
+func (e *registryRehomeDispatcher) dispatch(ctx context.Context, actor, intentDigest, approvalDigest string, evidence []byte) (RegistryRehomeKubernetesDispatchResult, error) {
 	if e == nil {
-		return registryRehomeDispatchResult{}, errors.New("registry rehome dispatcher is not configured")
+		return RegistryRehomeKubernetesDispatchResult{}, errors.New("registry rehome dispatcher is not configured")
 	}
 	// An existing claim is always inspection-only, even if the attestation
 	// has since expired or the workload no longer matches the preimage.
 	if found, _, err := e.ledger.ReadExecution(ctx, e.scope, intentDigest); err == nil {
 		if found.ApprovalDigest != approvalDigest {
-			return registryRehomeDispatchResult{}, productioncontrol.ErrStaleFence
+			return RegistryRehomeKubernetesDispatchResult{}, productioncontrol.ErrStaleFence
 		}
-		return registryRehomeDispatchResult{Claim: found}, nil
+		return RegistryRehomeKubernetesDispatchResult{Claim: found}, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		return registryRehomeDispatchResult{}, err
+		return RegistryRehomeKubernetesDispatchResult{}, err
 	}
 	claim, created, err := e.journal.Reserve(ctx, actor, intentDigest, approvalDigest, evidence)
-	result := registryRehomeDispatchResult{Claim: claim}
+	result := RegistryRehomeKubernetesDispatchResult{Claim: claim}
 	if err != nil || !created {
 		return result, err
 	}
