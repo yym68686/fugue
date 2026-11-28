@@ -30,18 +30,9 @@ func verifyReleaseArchive(ctx context.Context, args []string, out io.Writer) err
 		Mirror *releaseguardian.RegistryRecoveryReport `json:"mirror,omitempty"`
 	}{ReleaseRecoveryArchiveReport: report}
 	if len(args) == 3 {
-		raw, err := readFile(args[2], 16<<10)
+		cfg, err := readReleaseMirrorConfig(args[2])
 		if err != nil {
 			return err
-		}
-		var cfg struct {
-			Registry           string `json:"registry"`
-			RegistryAuthFile   string `json:"registryAuthFile,omitempty"`
-			ForwardRepository  string `json:"forwardRepository"`
-			RollbackRepository string `json:"rollbackRepository"`
-		}
-		if decode(raw, &cfg) != nil || cfg.ForwardRepository == "" || cfg.RollbackRepository == "" {
-			return errors.New("invalid archived release mirror configuration")
 		}
 		registry, err := openRegistry(cfg.Registry, cfg.RegistryAuthFile)
 		if err != nil {
@@ -58,6 +49,49 @@ func verifyReleaseArchive(ctx context.Context, args []string, out io.Writer) err
 		result.Mirror = &checked
 	}
 	return json.NewEncoder(out).Encode(result)
+}
+
+type releaseMirrorConfig struct {
+	Registry           string `json:"registry"`
+	RegistryAuthFile   string `json:"registryAuthFile,omitempty"`
+	ForwardRepository  string `json:"forwardRepository"`
+	RollbackRepository string `json:"rollbackRepository"`
+}
+
+func readReleaseMirrorConfig(path string) (releaseMirrorConfig, error) {
+	raw, err := readFile(path, 16<<10)
+	if err != nil {
+		return releaseMirrorConfig{}, err
+	}
+	var cfg releaseMirrorConfig
+	if decode(raw, &cfg) != nil || cfg.ForwardRepository == "" || cfg.RollbackRepository == "" {
+		return releaseMirrorConfig{}, errors.New("invalid archived release mirror configuration")
+	}
+	return cfg, nil
+}
+
+func draftReleaseRegistryRehome(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 3 || !allDigests(args[1]) {
+		return errors.New(usage)
+	}
+	raw, err := readPrivateReleaseArchive(args[0])
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	cfg, err := readReleaseMirrorConfig(args[2])
+	if err != nil {
+		return err
+	}
+	registry, err := openRegistry(cfg.Registry, cfg.RegistryAuthFile)
+	if err != nil {
+		return err
+	}
+	draft, err := registry.DraftRegistryRehome(ctx, raw, args[1], cfg.ForwardRepository, cfg.RollbackRepository)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(draft)
 }
 
 func readPrivateReleaseArchive(path string) ([]byte, error) {

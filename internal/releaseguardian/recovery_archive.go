@@ -62,8 +62,18 @@ func CaptureReleaseRecoveryArchive(ctx context.Context, client coreclient.CoreV1
 // archive bytes and trusted as the intended historical recovery point. A
 // valid archive is neither current serving evidence nor permission to apply.
 func VerifyReleaseRecoveryArchive(raw []byte, expectedDigest string) (ReleaseRecoveryArchiveReport, error) {
-	invalid := func(reason string) (ReleaseRecoveryArchiveReport, error) {
-		return ReleaseRecoveryArchiveReport{}, errors.New(reason)
+	verified, err := readReleaseRecoveryArchive(raw, expectedDigest)
+	return verified.report, err
+}
+
+type verifiedReleaseRecoveryArchive struct {
+	report            ReleaseRecoveryArchiveReport
+	forward, rollback sealedRecoveryRecord
+}
+
+func readReleaseRecoveryArchive(raw []byte, expectedDigest string) (verifiedReleaseRecoveryArchive, error) {
+	invalid := func(reason string) (verifiedReleaseRecoveryArchive, error) {
+		return verifiedReleaseRecoveryArchive{}, errors.New(reason)
 	}
 	if len(raw) == 0 || len(raw) > MaxReleaseArchiveBytes || !digestPattern.MatchString(expectedDigest) || digest(raw) != expectedDigest {
 		return invalid("release recovery archive does not match its independently pinned digest or size bound")
@@ -87,8 +97,9 @@ func VerifyReleaseRecoveryArchive(raw []byte, expectedDigest string) (ReleaseRec
 		!isSealedRollback(forward, rollback) {
 		return invalid("release recovery archive does not bind its exact verified forward and rollback records")
 	}
-	return ReleaseRecoveryArchiveReport{ArchiveDigest: expectedDigest, Pair: SealedRecoveryPair{
+	report := ReleaseRecoveryArchiveReport{ArchiveDigest: expectedDigest, Pair: SealedRecoveryPair{
 		Namespace: archive.Namespace, Component: archive.Component, Pointer: archive.Pointer,
 		Forward: forward.version, Rollback: rollback.version,
-	}}, nil
+	}}
+	return verifiedReleaseRecoveryArchive{report: report, forward: forward, rollback: rollback}, nil
 }
