@@ -7,18 +7,17 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/resourcesizing"
 	runtimepkg "fugue/internal/runtime"
 	"fugue/internal/store"
 )
 
 const (
-	rightSizingAutoApplyInterval  = time.Hour
 	rightSizingAutoFailureBackoff = 6 * time.Hour
 	defaultRightSizingWindowHours = 168
 	defaultRightSizingMinSamples  = 12
@@ -26,17 +25,9 @@ const (
 
 	rightSizingAutoApplyRequestedByID     = model.OperationRequestedByRightSizing
 	rightSizingAutoDownscaleRequestedByID = model.OperationRequestedByRightSizingDownscale
-	rightSizingAutoApplyMinCPUIncrease    = int64(5)
-	rightSizingAutoApplyMinMemIncrease    = int64(0)
-	rightSizingAutoApplyMinCPUIncreaseR   = 0.05
-	rightSizingAutoApplyMinMemIncreaseR   = 0.05
-	rightSizingAutoApplyMinCPUDecrease    = int64(5)
-	rightSizingAutoApplyMinMemDecrease    = int64(0)
-	rightSizingAutoApplyMinCPUDecreaseR   = 0.05
-	rightSizingAutoApplyMinMemDecreaseR   = 0.05
-	rightSizingAutoDownscaleStepRatio     = 0.75
-	rightSizingAutoDownscaleOOMWindow     = 48 * time.Hour
-	rightSizingRolloutCPUHeadroomRatio    = 0.15
+
+	rightSizingAutoDownscaleOOMWindow  = 48 * time.Hour
+	rightSizingRolloutCPUHeadroomRatio = 0.15
 )
 
 func (s *Server) handleGetAppResourceRecommendation(w http.ResponseWriter, r *http.Request) {
@@ -104,50 +95,7 @@ func (s *Server) appResourceRecommendation(app model.App, windowHours, minSample
 	windowHours = normalizeRightSizingWindowHours(windowHours)
 	minSamples = normalizeRightSizingMinSamples(minSamples)
 	since := time.Now().UTC().Add(-time.Duration(windowHours) * time.Hour)
-
-	appSamples, err := s.store.ListResourceUsageSamples(app.TenantID, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindApp), app.ID, since)
-	if err != nil {
-		return model.AppRightSizingRecommendation{}, err
-	}
-	out := model.AppRightSizingRecommendation{
-		App: buildRightSizingRecommendation(
-			model.ClusterNodeWorkloadKindApp,
-			app.ID,
-			app.Name,
-			"",
-			model.EffectiveWorkloadClass(app.Spec),
-			windowHours,
-			minSamples,
-			app.Spec.Resources,
-			appSamples,
-		),
-	}
-
-	for _, service := range app.BackingServices {
-		if strings.TrimSpace(service.OwnerAppID) != strings.TrimSpace(app.ID) {
-			continue
-		}
-		if service.Type != model.BackingServiceTypePostgres || service.Spec.Postgres == nil {
-			continue
-		}
-		samples, err := s.store.ListResourceUsageSamples(service.TenantID, rightSizingSampleTargetKind(model.ClusterNodeWorkloadKindBackingService), service.ID, since)
-		if err != nil {
-			return model.AppRightSizingRecommendation{}, err
-		}
-		currentRuntimeResources := model.ManagedPostgresRuntimeResources(*service.Spec.Postgres)
-		out.BackingServices = append(out.BackingServices, buildRightSizingRecommendation(
-			model.ClusterNodeWorkloadKindBackingService,
-			service.ID,
-			service.Name,
-			service.Type,
-			model.WorkloadClassCritical,
-			windowHours,
-			minSamples,
-			&currentRuntimeResources,
-			samples,
-		))
-	}
-	return out, nil
+	return resourcesizing.RecommendApp(app, windowHours, minSamples, since, s.store.ListResourceUsageSamples)
 }
 
 func (s *Server) applyAppRightSizingRecommendation(
@@ -160,11 +108,11 @@ func (s *Server) applyAppRightSizingRecommendation(
 	if err != nil {
 		return recommendation, nil, false, err
 	}
-	if recommendation.App.Ready && appCPURequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appCPUResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
+	if recommendation.App.Ready && resourcesizing.CPURequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appCPUResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
 		op, err := s.queueAppCPUResize(app, recommendation.App.RequestTarget.CPUMilliCores, actorType, actorID)
 		return recommendation, op, op == nil && err == nil, err
 	}
-	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && appMemoryRequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appMemoryResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
+	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && resourcesizing.MemoryRequestOnlyChange(app.Spec.Resources, recommendation.App.RequestTarget) && s.appMemoryResizeEnabled(app) && !backingServiceRightSizingChange(app, recommendation) {
 		op, err := s.queueAppMemoryResize(app, recommendation.App.RequestTarget.MemoryMebibytes, actorType, actorID)
 		return recommendation, op, op == nil && err == nil, err
 	}
@@ -233,10 +181,10 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	// Memory requests do not need a new Pod. Stage this dimension separately
 	// from limits, CPU and database changes, preserving the existing gradual
 	// downscale/OOM/billing/backoff policy but avoiding rollout surge admission.
-	memoryDecision := autoAppMemoryRequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
-	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && memoryDecision.allowed && s.appMemoryResizeEnabled(app) {
+	memoryDecision := resourcesizing.AutomaticMemoryRequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
+	if recommendation.App.Ready && app.Spec.Replicas > 0 && app.Status.CurrentReplicas == app.Spec.Replicas && memoryDecision.Allowed && s.appMemoryResizeEnabled(app) {
 		memoryBlocked := false
-		if memoryDecision.memoryDownscale {
+		if memoryDecision.MemoryDownscale {
 			oom, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
 			if err != nil {
 				return recommendation, nil, false, err
@@ -247,7 +195,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 			}
 		}
 		if !memoryBlocked {
-			op, err := s.queueAppMemoryResize(app, memoryDecision.resources.MemoryMebibytes, model.ActorTypeSystem, memoryDecision.requestedByID)
+			op, err := s.queueAppMemoryResize(app, memoryDecision.Resources.MemoryMebibytes, model.ActorTypeSystem, memoryDecision.RequestedByID)
 			if errors.Is(err, store.ErrConflict) {
 				s.logRightSizingDecision(app, "memory_resize_deferred", "in-place memory resize deferred by an active operation or target failure backoff; no rolling fallback", nil)
 				return recommendation, nil, true, nil
@@ -256,9 +204,9 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		}
 	}
 	// Free memory reservations before CPU admission can defer another dimension.
-	cpuDecision := autoAppCPURequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
-	if recommendation.App.Ready && cpuDecision.allowed && s.appCPUResizeEnabled(app) {
-		op, err := s.queueAppCPUResize(app, cpuDecision.resources.CPUMilliCores, model.ActorTypeSystem, cpuDecision.requestedByID)
+	cpuDecision := resourcesizing.AutomaticCPURequestChange(app.Spec.Resources, recommendation.App.RequestTarget)
+	if recommendation.App.Ready && cpuDecision.Allowed && s.appCPUResizeEnabled(app) {
+		op, err := s.queueAppCPUResize(app, cpuDecision.Resources.CPUMilliCores, model.ActorTypeSystem, cpuDecision.RequestedByID)
 		if errors.Is(err, store.ErrConflict) {
 			s.logRightSizingDecision(app, "active_operation_exists", "in-place CPU resize deferred while another app operation is active", nil)
 			return recommendation, nil, true, nil
@@ -272,8 +220,8 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	if s.appCPUResizeEnabled(app) {
 		spec.Resources = model.CloneResourceSpec(app.Spec.Resources)
 	}
-	decision := autoRightSizingAppResourceChange(spec.Resources, recommendation.App.RequestTarget)
-	if !recommendation.App.Ready || !decision.allowed {
+	decision := resourcesizing.AutomaticChange(spec.Resources, recommendation.App.RequestTarget)
+	if !recommendation.App.Ready || !decision.Allowed {
 		if !recommendation.App.Ready {
 			s.logRightSizingDecision(app, "recommendation_not_ready", "right-sizing auto apply skipped because recommendation is not ready", map[string]any{
 				"sample_count":   recommendation.App.SampleCount,
@@ -302,7 +250,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		return recommendation, nil, true, nil
 	}
 
-	if decision.memoryDownscale {
+	if decision.MemoryDownscale {
 		hasRecentOOM, err := s.appHasRecentOOMRightSizingOperation(app, time.Now().UTC().Add(-rightSizingAutoDownscaleOOMWindow))
 		if err != nil {
 			return recommendation, nil, false, err
@@ -312,30 +260,30 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 			if spec.Resources != nil {
 				current = *spec.Resources
 			}
-			decision.resources.MemoryMebibytes = current.MemoryMebibytes
-			decision.resources.MemoryLimitMebibytes = current.MemoryLimitMebibytes
-			decision.memoryDownscale = false
+			decision.Resources.MemoryMebibytes = current.MemoryMebibytes
+			decision.Resources.MemoryLimitMebibytes = current.MemoryLimitMebibytes
+			decision.MemoryDownscale = false
 			s.logRightSizingDecision(app, "recent_oom_memory_blocked", "right-sizing preserved memory after a recent OOM event", map[string]any{
-				"requested_by": decision.requestedByID,
+				"requested_by": decision.RequestedByID,
 				"current":      rightSizingResourceSummary(spec.Resources),
-				"target":       rightSizingResourceSummary(decision.resources),
+				"target":       rightSizingResourceSummary(decision.Resources),
 			})
-			if resourceSpecsEqual(spec.Resources, decision.resources) {
+			if resourceSpecsEqual(spec.Resources, decision.Resources) {
 				return recommendation, nil, true, nil
 			}
 		}
 	}
-	spec.Resources = cloneResourceSpec(decision.resources)
+	spec.Resources = cloneResourceSpec(decision.Resources)
 	if reason, err := s.autoRightSizingAdmission(app, spec, recommendation.App.Recommended); err != nil {
 		s.logRightSizingDecision(app, "capacity_check_failed", "right-sizing auto apply skipped because rollout capacity could not be verified", map[string]any{
-			"requested_by": decision.requestedByID,
+			"requested_by": decision.RequestedByID,
 			"target":       rightSizingResourceSummary(spec.Resources),
 			"error":        err.Error(),
 		})
 		return recommendation, nil, true, nil
 	} else if reason != "" {
 		s.logRightSizingDecision(app, "rollout_policy_blocked", "right-sizing auto apply skipped because the serving rollout policy is incompatible", map[string]any{
-			"requested_by": decision.requestedByID,
+			"requested_by": decision.RequestedByID,
 			"target":       rightSizingResourceSummary(spec.Resources),
 			"reason":       reason,
 		})
@@ -345,7 +293,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		return recommendation, nil, false, err
 	} else if blocked {
 		s.logRightSizingDecision(app, "failure_backoff", "right-sizing auto apply skipped because the same target failed recently", map[string]any{
-			"requested_by":  decision.requestedByID,
+			"requested_by":  decision.RequestedByID,
 			"target":        rightSizingResourceSummary(spec.Resources),
 			"backoff_hours": rightSizingAutoFailureBackoff.Hours(),
 		})
@@ -353,7 +301,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	}
 	if err := s.validateAutoscalingTenantEnvelope(app, spec); err != nil {
 		s.logRightSizingDecision(app, "billing_cap_blocked", "right-sizing auto apply skipped because tenant billing/resource envelope would be exceeded", map[string]any{
-			"requested_by": decision.requestedByID,
+			"requested_by": decision.RequestedByID,
 			"target":       rightSizingResourceSummary(spec.Resources),
 			"error":        err.Error(),
 		})
@@ -363,7 +311,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 		TenantID:            app.TenantID,
 		Type:                model.OperationTypeDeploy,
 		RequestedByType:     model.ActorTypeSystem,
-		RequestedByID:       decision.requestedByID,
+		RequestedByID:       decision.RequestedByID,
 		AppID:               app.ID,
 		DesiredSpec:         &spec,
 		DesiredSource:       source,
@@ -371,7 +319,7 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	})
 	if err != nil {
 		s.logRightSizingDecision(app, "queue_error", "right-sizing auto apply failed while creating deploy operation", map[string]any{
-			"requested_by": decision.requestedByID,
+			"requested_by": decision.RequestedByID,
 			"target":       rightSizingResourceSummary(spec.Resources),
 			"error":        err.Error(),
 		})
@@ -380,27 +328,27 @@ func (s *Server) applyAutoAppRightSizingRecommendation(
 	switch outcome.Decision {
 	case store.AutoscalingDeployDecisionActiveDeployExists:
 		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply skipped because an active deploy already exists", map[string]any{
-			"requested_by":            decision.requestedByID,
+			"requested_by":            decision.RequestedByID,
 			"existing_operation_id":   outcome.ExistingOperationID,
 			"target":                  rightSizingResourceSummary(spec.Resources),
-			"downscale":               decision.downscale,
+			"downscale":               decision.Downscale,
 			"autoscaling_benign_skip": true,
 		})
 		return recommendation, nil, true, nil
 	case store.AutoscalingDeployDecisionAlreadyCurrent:
 		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply skipped because desired resources are already current", map[string]any{
-			"requested_by":            decision.requestedByID,
+			"requested_by":            decision.RequestedByID,
 			"target":                  rightSizingResourceSummary(spec.Resources),
-			"downscale":               decision.downscale,
+			"downscale":               decision.Downscale,
 			"autoscaling_benign_skip": true,
 		})
 		return recommendation, nil, true, nil
 	default:
 		s.logRightSizingDecision(app, string(outcome.Decision), "right-sizing auto apply queued deploy operation", map[string]any{
-			"requested_by": decision.requestedByID,
+			"requested_by": decision.RequestedByID,
 			"operation_id": op.ID,
 			"target":       rightSizingResourceSummary(spec.Resources),
-			"downscale":    decision.downscale,
+			"downscale":    decision.Downscale,
 		})
 	}
 	return recommendation, &op, false, nil
@@ -514,383 +462,37 @@ func (s *Server) appHasRecentAutoRightSizingFailure(app model.App, desired model
 	if err != nil {
 		return false, err
 	}
-	for _, op := range ops {
-		if (op.Type != model.OperationTypeDeploy && !model.IsAppRequestResize(op.Type)) || op.Status != model.OperationStatusFailed ||
-			op.RequestedByType != model.ActorTypeSystem ||
-			(op.RequestedByID != model.OperationRequestedByRightSizing && op.RequestedByID != model.OperationRequestedByRightSizingDownscale) {
-			continue
-		}
-		at := op.CompletedAt
-		if at == nil {
-			at = &op.UpdatedAt
-		}
-		if at == nil || at.Before(since) || op.DesiredSpec == nil || op.DesiredSpec.Resources == nil {
-			continue
-		}
-		matches := resourceSpecsEqual(op.DesiredSpec.Resources, desired.Resources)
-		if op.Type == model.OperationTypeAppMemoryResize {
-			matches = op.DesiredSpec.Resources.MemoryMebibytes == desired.Resources.MemoryMebibytes
-		}
-		if matches {
-			return true, nil
-		}
-	}
-	return false, nil
+	return resourcesizing.HasRecentAutomaticFailure(ops, desired.Resources, since), nil
 }
 
-type autoRightSizingAppResourceDecision struct {
-	allowed         bool
-	downscale       bool
-	memoryDownscale bool
-	requestedByID   string
-	resources       *model.ResourceSpec
-}
-
-func autoRightSizingAppResourceChange(current, recommended *model.ResourceSpec) autoRightSizingAppResourceDecision {
-	decision := autoRightSizingAppResourceDecision{
-		requestedByID: rightSizingAutoApplyRequestedByID,
+func (s *Server) enqueueSizingRequest(op model.Operation, baseline model.AppSpec) (model.Operation, error) {
+	if op.RequestedByType == model.ActorTypeSystem &&
+		(op.RequestedByID == model.OperationRequestedByRightSizing || op.RequestedByID == model.OperationRequestedByRightSizingDownscale) {
+		return s.store.EnqueueAutomaticResourceSizingRequest(op, baseline)
 	}
-	if recommended == nil {
-		return decision
-	}
-	// A nil resources block means the renderer emits no requests (zero), not
-	// the historical managed default. Treat it as zero so auto right-sizing
-	// cannot mistake an unset request for a downscale and inflate it silently.
-	effectiveCurrent := model.ResourceSpec{}
-	if current != nil {
-		effectiveCurrent = *current
-	}
-	if resourceSpecsEqual(&effectiveCurrent, recommended) {
-		return decision
-	}
-	materialCPUIncrease := materialResourceIncrease(
-		effectiveCurrent.CPUMilliCores,
-		recommended.CPUMilliCores,
-		rightSizingAutoApplyMinCPUIncrease,
-		rightSizingAutoApplyMinCPUIncreaseR,
-	)
-	materialMemoryIncrease := materialResourceIncrease(
-		effectiveCurrent.MemoryMebibytes,
-		recommended.MemoryMebibytes,
-		rightSizingAutoApplyMinMemIncrease,
-		rightSizingAutoApplyMinMemIncreaseR,
-	)
-	materialCPUDecrease := materialResourceDecrease(
-		effectiveCurrent.CPUMilliCores,
-		recommended.CPUMilliCores,
-		rightSizingAutoApplyMinCPUDecrease,
-		rightSizingAutoApplyMinCPUDecreaseR,
-	)
-	materialMemoryDecrease := materialResourceDecrease(
-		effectiveCurrent.MemoryMebibytes,
-		recommended.MemoryMebibytes,
-		rightSizingAutoApplyMinMemDecrease,
-		rightSizingAutoApplyMinMemDecreaseR,
-	)
-	if materialCPUIncrease || materialMemoryIncrease {
-		decision.allowed = true
-		decision.resources = autoRightSizingUpscaleTarget(effectiveCurrent, *recommended)
-		if materialCPUDecrease {
-			// A memory safety increase must not keep an inflated CPU reservation.
-			decision.resources.CPUMilliCores = recommended.CPUMilliCores
-		}
-		return decision
-	}
-	if materialCPUDecrease || materialMemoryDecrease {
-		target := autoRightSizingDownscaleTarget(
-			effectiveCurrent,
-			*recommended,
-			materialCPUDecrease,
-			materialMemoryDecrease,
-		)
-		if resourceSpecsEqual(&effectiveCurrent, target) {
-			return decision
-		}
-		decision.allowed = true
-		decision.downscale = true
-		decision.memoryDownscale = materialMemoryDecrease
-		decision.requestedByID = rightSizingAutoDownscaleRequestedByID
-		decision.resources = target
-		return decision
-	}
-	return decision
-}
-
-func materialResourceIncrease(current, recommended, minIncrease int64, minRatio float64) bool {
-	if recommended <= current {
-		return false
-	}
-	if current <= 0 {
-		return true
-	}
-	increase := recommended - current
-	return increase >= minIncrease && float64(increase)/float64(current) >= minRatio
-}
-
-func materialResourceDecrease(current, recommended, minDecrease int64, minRatio float64) bool {
-	if recommended >= current {
-		return false
-	}
-	if current <= 0 {
-		return false
-	}
-	decrease := current - recommended
-	return decrease >= minDecrease && float64(decrease)/float64(current) >= minRatio
-}
-
-func autoRightSizingUpscaleTarget(current, recommended model.ResourceSpec) *model.ResourceSpec {
-	return &model.ResourceSpec{
-		CPUMilliCores:        maxInt64(current.CPUMilliCores, recommended.CPUMilliCores),
-		MemoryMebibytes:      maxInt64(current.MemoryMebibytes, recommended.MemoryMebibytes),
-		CPULimitMilliCores:   maxInt64(current.CPULimitMilliCores, recommended.CPULimitMilliCores),
-		MemoryLimitMebibytes: maxInt64(current.MemoryLimitMebibytes, recommended.MemoryLimitMebibytes),
-	}
-}
-
-func autoRightSizingDownscaleTarget(current, recommended model.ResourceSpec, downscaleCPU, downscaleMemory bool) *model.ResourceSpec {
-	target := current
-	if downscaleCPU && recommended.CPUMilliCores < current.CPUMilliCores {
-		// CPU is compressible. Converge directly to the measured guarantee;
-		// gradual reduction is retained only for memory where OOM risk exists.
-		target.CPUMilliCores = recommended.CPUMilliCores
-	}
-	if downscaleMemory && recommended.MemoryMebibytes < current.MemoryMebibytes {
-		floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
-		// Creation defaults are not right-sizing floors. Keep the conservative
-		// step, but never let its rounding prevent a material reduction at small
-		// requests. The recommendation already carries the workload usage policy.
-		floor = min(floor, current.MemoryMebibytes-1)
-		target.MemoryMebibytes = maxInt64(recommended.MemoryMebibytes, floor)
-		if recommended.MemoryLimitMebibytes < current.MemoryLimitMebibytes {
-			target.MemoryLimitMebibytes = recommended.MemoryLimitMebibytes
-		}
-		if target.MemoryLimitMebibytes > 0 && target.MemoryLimitMebibytes < current.MemoryLimitMebibytes {
-			target.MemoryLimitMebibytes = maxInt64(target.MemoryMebibytes+128, target.MemoryMebibytes*2)
-			floor := roundUpInt64(int64(math.Ceil(float64(current.MemoryLimitMebibytes)*rightSizingAutoDownscaleStepRatio)), 16)
-			target.MemoryLimitMebibytes = maxInt64(target.MemoryLimitMebibytes, floor)
-			target.MemoryLimitMebibytes = min(target.MemoryLimitMebibytes, current.MemoryLimitMebibytes)
-		}
-	}
-	return &target
+	return s.store.CreateAppRequestResizeOperation(op, baseline)
 }
 
 func (s *Server) startRightSizingAutoApplyLoop(ctx context.Context) <-chan struct{} {
 	if s == nil || s.store == nil || ctx == nil {
 		return joinWarmerTasks()
 	}
-	return startWarmerTask(ctx, func() {
-		timer := time.NewTimer(2 * time.Minute)
-		defer timer.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-timer.C:
-				s.applyAutoRightSizingOnce()
-				timer.Reset(rightSizingAutoApplyInterval)
-			}
-		}
-	})
-}
-
-func (s *Server) applyAutoRightSizingOnce() {
-	acquired, lockErr := s.store.WithAdvisoryLock(context.Background(), "background:right-sizing:auto-apply", func() error {
-		return s.applyAutoRightSizingOnceLocked()
-	})
-	if lockErr != nil {
-		if s.log != nil {
-			s.log.Printf("right-sizing auto apply skipped because advisory lock failed: %v", lockErr)
-		}
-		return
+	ports := resourcesizing.PeriodicPorts{
+		WithLock: s.store.RunAutomaticResourceSizing,
+		Apps:     func() ([]model.App, error) { return s.store.ListApps("", true) },
+		Managed: func(app model.App) bool {
+			rt, err := s.store.GetRuntime(app.Spec.RuntimeID)
+			return err == nil && rt.Type != model.RuntimeTypeExternalOwned
+		},
+		Apply: func(app model.App, windowHours, minSamples int) error {
+			_, _, _, err := s.applyAutoAppRightSizingRecommendation(app, windowHours, minSamples)
+			return err
+		},
 	}
-	if !acquired && s.log != nil {
-		s.log.Printf("right-sizing auto apply skipped because another fugue-api replica holds the advisory lock")
+	if s.log != nil {
+		ports.Logf = s.log.Printf
 	}
-}
-
-func (s *Server) applyAutoRightSizingOnceLocked() error {
-	apps, err := s.store.ListApps("", true)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("list apps for right-sizing auto apply failed: %v", err)
-		}
-		return err
-	}
-	for _, app := range apps {
-		spec := model.AppRightSizingSpec{Mode: model.AppRightSizingModeAuto}
-		if app.Spec.RightSizing != nil {
-			spec = model.NormalizeAppRightSizingSpec(*app.Spec.RightSizing)
-		}
-		if spec.Mode != model.AppRightSizingModeAuto {
-			continue
-		}
-		runtimeObj, err := s.store.GetRuntime(app.Spec.RuntimeID)
-		if err != nil || runtimeObj.Type == model.RuntimeTypeExternalOwned {
-			continue
-		}
-		if _, _, _, err := s.applyAutoAppRightSizingRecommendation(app, spec.WindowHours, spec.MinSamples); err != nil && s.log != nil {
-			s.log.Printf("right-sizing auto apply for app=%s failed: %v", app.ID, err)
-		}
-	}
-	return nil
-}
-
-func buildRightSizingRecommendation(
-	targetKind, targetID, targetName, serviceType, workloadClass string,
-	windowHours, minSamples int,
-	current *model.ResourceSpec,
-	samples []model.ResourceUsageSample,
-) model.ResourceRightSizingRecommendation {
-	workloadClass = model.NormalizeWorkloadClass(workloadClass)
-	if workloadClass == "" {
-		workloadClass = model.WorkloadClassService
-	}
-	policy := rightSizingPolicy(workloadClass, serviceType, windowHours, minSamples)
-	out := model.ResourceRightSizingRecommendation{
-		TargetKind:    strings.TrimSpace(targetKind),
-		TargetID:      strings.TrimSpace(targetID),
-		TargetName:    strings.TrimSpace(targetName),
-		ServiceType:   strings.TrimSpace(serviceType),
-		WorkloadClass: workloadClass,
-		WindowHours:   windowHours,
-		SampleCount:   len(samples),
-		Current:       cloneResourceSpec(current),
-		Policy:        policy,
-		Reason:        "not enough samples",
-	}
-	now := time.Now().UTC()
-	out.ObservedAt = &now
-	if len(samples) > 0 {
-		last := samples[len(samples)-1].ObservedAt
-		out.LastSampleObservedAt = &last
-	}
-	if len(samples) < minSamples {
-		return out
-	}
-
-	cpuValues := make([]int64, 0, len(samples))
-	memoryValues := make([]int64, 0, len(samples))
-	for _, sample := range samples {
-		if sample.CPUMilliCores != nil {
-			cpuValues = append(cpuValues, *sample.CPUMilliCores)
-		}
-		if sample.MemoryBytes != nil {
-			memoryValues = append(memoryValues, *sample.MemoryBytes)
-		}
-	}
-	if len(cpuValues) == 0 && len(memoryValues) == 0 {
-		out.Reason = "samples do not include CPU or memory usage"
-		return out
-	}
-	// Capacity is evidence-only: an unobserved dimension stays unknown instead
-	// of being mislabeled with the current Kubernetes request.
-	rec := &model.ResourceSpec{}
-	requestTarget := &model.ResourceSpec{}
-	if current != nil {
-		*requestTarget = *current
-	}
-	if len(cpuValues) > 0 {
-		sort.Slice(cpuValues, func(i, j int) bool { return cpuValues[i] < cpuValues[j] })
-		peak := cpuValues[len(cpuValues)-1]
-		out.PeakCPUUsageMilli = &peak
-		value := int64(math.Ceil(float64(percentileInt64(cpuValues, policy.CPUPercentile)) * policy.CPUMultiplier))
-		rec.CPUMilliCores = maxInt64(policy.CPUFloorMilli, roundUpInt64(value, 5))
-		rec.CPULimitMilliCores = 0
-
-		requestValue := int64(math.Ceil(float64(percentileInt64(cpuValues, policy.CPURequestPercentile)) * policy.CPURequestMultiplier))
-		requestTarget.CPUMilliCores = maxInt64(policy.CPUFloorMilli, roundUpInt64(requestValue, 5))
-		// Preserve explicit CPU limits. The runtime no longer synthesizes a
-		// limit from the request, but right-sizing must not erase user intent.
-		if requestTarget.CPULimitMilliCores > 0 && requestTarget.CPULimitMilliCores < requestTarget.CPUMilliCores {
-			requestTarget.CPULimitMilliCores = requestTarget.CPUMilliCores
-		}
-	} else if requestTarget.CPUMilliCores <= 0 {
-		requestTarget.CPUMilliCores = policy.CPUFloorMilli
-	}
-	if len(memoryValues) > 0 {
-		sort.Slice(memoryValues, func(i, j int) bool { return memoryValues[i] < memoryValues[j] })
-		peak := memoryValues[len(memoryValues)-1]
-		out.PeakMemoryUsageBytes = &peak
-		valueBytes := int64(math.Ceil(float64(percentileInt64(memoryValues, policy.MemoryPercentile)) * policy.MemoryMultiplier))
-		valueMiB := int64(math.Ceil(float64(valueBytes) / 1024 / 1024))
-		rec.MemoryMebibytes = maxInt64(policy.MemoryFloorMiB, roundUpInt64(valueMiB, 16))
-		if serviceType == model.BackingServiceTypePostgres {
-			rec.MemoryLimitMebibytes = roundUpInt64(rec.MemoryMebibytes+128, 16)
-		} else if workloadClass == model.WorkloadClassCritical {
-			rec.MemoryLimitMebibytes = rec.MemoryMebibytes
-		} else {
-			rec.MemoryLimitMebibytes = maxInt64(rec.MemoryMebibytes+128, rec.MemoryMebibytes*2)
-		}
-		requestTarget.MemoryMebibytes = rec.MemoryMebibytes
-		requestTarget.MemoryLimitMebibytes = rec.MemoryLimitMebibytes
-	}
-	out.Recommended = rec
-	out.RequestTarget = requestTarget
-	out.Ready = true
-	out.AlreadyCurrent = resourceSpecsEqual(current, requestTarget)
-	out.Reason = ""
-	return out
-}
-
-func rightSizingPolicy(workloadClass, serviceType string, windowHours, minSamples int) model.ResourceRightSizingPolicy {
-	policy := model.ResourceRightSizingPolicy{
-		WindowHours:          windowHours,
-		MinSamples:           minSamples,
-		CPUPercentile:        0.95,
-		CPUMultiplier:        1.5,
-		CPURequestPercentile: 0.50,
-		CPURequestMultiplier: 1.0,
-		CPUFloorMilli:        1,
-		MemoryPercentile:     0.99,
-		MemoryMultiplier:     1.2,
-		MemoryFloorMiB:       64,
-	}
-	switch workloadClass {
-	case model.WorkloadClassDemo:
-		policy.MemoryFloorMiB = 32
-	case model.WorkloadClassBatch:
-		policy.MemoryFloorMiB = 64
-	case model.WorkloadClassCritical:
-		policy.CPURequestPercentile = 0.75
-		policy.MemoryFloorMiB = 128
-	}
-	if serviceType == model.BackingServiceTypePostgres {
-		policy.CPURequestPercentile = 0.75
-		policy.MemoryFloorMiB = 256
-		policy.MemoryMultiplier = 1.5
-	}
-	return policy
-}
-
-func percentileInt64(sorted []int64, percentile float64) int64 {
-	if len(sorted) == 0 {
-		return 0
-	}
-	if percentile <= 0 {
-		return sorted[0]
-	}
-	if percentile >= 1 {
-		return sorted[len(sorted)-1]
-	}
-	index := int(math.Ceil(percentile*float64(len(sorted)))) - 1
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(sorted) {
-		index = len(sorted) - 1
-	}
-	return sorted[index]
-}
-
-func roundUpInt64(value, step int64) int64 {
-	if step <= 1 || value <= 0 {
-		return value
-	}
-	remainder := value % step
-	if remainder == 0 {
-		return value
-	}
-	return value + step - remainder
+	return startWarmerTask(ctx, func() { resourcesizing.RunPeriodic(ctx, ports) })
 }
 
 func cloneResourceSpec(in *model.ResourceSpec) *model.ResourceSpec {

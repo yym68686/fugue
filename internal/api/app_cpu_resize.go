@@ -32,7 +32,7 @@ func (s *Server) queueAppCPUResize(app model.App, cpu int64, actorType, actorID 
 		s.logRightSizingDecision(app, "failure_backoff", "in-place CPU resize target failed recently; no rolling fallback", nil)
 		return nil, store.ErrConflict
 	}
-	op, err := s.store.CreateAppRequestResizeOperation(model.Operation{
+	op, err := s.enqueueSizingRequest(model.Operation{
 		TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppCPUResize,
 		RequestedByType: actorType, RequestedByID: actorID, DesiredSpec: &spec,
 	}, app.Spec)
@@ -43,26 +43,6 @@ func (s *Server) queueAppCPUResize(app model.App, cpu int64, actorType, actorID 
 		"operation_id": op.ID, "current_cpu_millicores": app.Spec.Resources.CPUMilliCores, "target_cpu_millicores": cpu,
 	})
 	return &op, nil
-}
-
-// Do not silently drop simultaneous memory or limit recommendations. Those
-// continue through the existing deployment path with their complete target.
-func appCPURequestOnlyChange(current, target *model.ResourceSpec) bool {
-	if current == nil || target == nil || current.CPUMilliCores == target.CPUMilliCores {
-		return false
-	}
-	other := *target
-	other.CPUMilliCores = current.CPUMilliCores
-	return resourceSpecsEqual(current, &other)
-}
-
-func autoAppCPURequestChange(current, target *model.ResourceSpec) autoRightSizingAppResourceDecision {
-	if current == nil || target == nil {
-		return autoRightSizingAppResourceChange(current, current)
-	}
-	cpuOnly := model.CloneResourceSpec(current)
-	cpuOnly.CPUMilliCores = target.CPUMilliCores
-	return autoRightSizingAppResourceChange(current, cpuOnly)
 }
 
 func backingServiceRightSizingChange(app model.App, recommendation model.AppRightSizingRecommendation) bool {
