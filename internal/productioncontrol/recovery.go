@@ -65,6 +65,45 @@ func (j *Journal) RecoveryCheckpoint(ctx context.Context, cluster, snapshot stri
 			return JournalRecoveryCheckpoint{}, fmt.Errorf("import PostgreSQL recovery snapshot: %w", err)
 		}
 	}
+	checkpoint, err := readRecoveryCheckpoint(ctx, tx, cluster)
+	if err != nil {
+		return JournalRecoveryCheckpoint{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return JournalRecoveryCheckpoint{}, fmt.Errorf("finish recovery snapshot: %w", err)
+	}
+	return checkpoint, nil
+}
+
+// CaptureRecovery keeps the read-only exporter alive for the full dump. Its
+// callback must finish consuming the exported snapshot before returning.
+func (j *Journal) CaptureRecovery(ctx context.Context, cluster string, dump func(context.Context, string) error) (JournalRecoveryCheckpoint, error) {
+	if !tokenPattern.MatchString(cluster) || dump == nil {
+		return JournalRecoveryCheckpoint{}, errors.New("recovery capture requires a cluster and a backup reader")
+	}
+	tx, err := j.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return JournalRecoveryCheckpoint{}, fmt.Errorf("open read-only recovery exporter: %w", err)
+	}
+	defer tx.Rollback()
+	var snapshot string
+	if err := tx.QueryRowContext(ctx, `SELECT pg_catalog.pg_export_snapshot()`).Scan(&snapshot); err != nil {
+		return JournalRecoveryCheckpoint{}, fmt.Errorf("export PostgreSQL recovery snapshot: %w", err)
+	}
+	checkpoint, err := readRecoveryCheckpoint(ctx, tx, cluster)
+	if err != nil {
+		return JournalRecoveryCheckpoint{}, err
+	}
+	if err := dump(ctx, snapshot); err != nil {
+		return JournalRecoveryCheckpoint{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return JournalRecoveryCheckpoint{}, fmt.Errorf("finish recovery snapshot exporter: %w", err)
+	}
+	return checkpoint, nil
+}
+
+func readRecoveryCheckpoint(ctx context.Context, tx *sql.Tx, cluster string) (JournalRecoveryCheckpoint, error) {
 	if _, err := tx.ExecContext(ctx, `SET LOCAL search_path TO pg_catalog; SET LOCAL TimeZone TO 'UTC';
 		SET LOCAL DateStyle TO 'ISO, YMD'; SET LOCAL bytea_output TO 'hex'; SET LOCAL row_security TO off;
 		SET LOCAL statement_timeout TO '4min';`); err != nil {
@@ -91,9 +130,6 @@ func (j *Journal) RecoveryCheckpoint(ctx context.Context, cluster, snapshot stri
 		return JournalRecoveryCheckpoint{}, err
 	}
 	checkpoint.Digest = digest(encoded)
-	if err := tx.Commit(); err != nil {
-		return JournalRecoveryCheckpoint{}, fmt.Errorf("finish recovery snapshot: %w", err)
-	}
 	return checkpoint, nil
 }
 
