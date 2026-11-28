@@ -1174,6 +1174,7 @@ jobs:
       quality_evidence_rehearsed: ${{ steps.quality_evidence_rehearsal.outputs.verified }}
       quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
       observation_sample_retention_handoff: ${{ steps.observation_sample_retention_handoff.outputs.selected }}
+      hosted_dns_writer_handoff: ${{ steps.hosted_dns_writer_handoff.outputs.selected }}
       storage_audit_worker_rehearsed: ${{ steps.storage_audit_worker_rehearsal.outputs.verified }}
       storage_audit_activation: ${{ steps.storage_audit_activation.outputs.verified }}
     steps:
@@ -1271,6 +1272,24 @@ jobs:
             pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
             docker run --rm --network none --user 26:26 --entrypoint bash \
               -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_observation_writer_fence.sh
+            echo 'selected=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Admit only a declared hosted DNS writer transfer
+        id: hosted_dns_writer_handoff
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/hosted-dns-worker/writer-handoff.json
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BASE_SHA" == 0000000000000000000000000000000000000000 ]]; then exit 0; fi
+          if ! git diff --quiet "$BASE_SHA" HEAD -- "$declaration" && [[ -f "$declaration" ]]; then
+            test "$(git rev-parse HEAD^)" = "$BASE_SHA"
+            test "$(git diff --name-only "$BASE_SHA" HEAD)" = "$declaration"
+            python3 -m unittest scripts.test_apply_hosted_dns_writer_handoff scripts.test_verify_observation_rollback_floor
+            pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
+            docker run --rm --network none --user 26:26 --entrypoint python3 \
+              -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" -B -m scripts.rehearse_hosted_dns_writer_handoff
             echo 'selected=true' >> "$GITHUB_OUTPUT"
           fi
       - name: Run store-backed regressions on disposable PostgreSQL
@@ -4785,7 +4804,9 @@ jobs:
         run: |
           set -euo pipefail
           files=deploy/releases/hosted-dns-worker
-          jq -e '.expectedPreviousPresent == false' "$files/intent.json" >/dev/null || exit 0
+          # Verify both bootstrap releases in standby; the second records the
+          # first as a real rollback target before any separate owner change.
+          jq -e '.generation <= 2' "$files/intent.json" >/dev/null || exit 0
           python3 -m scripts.verify_hosted_dns_worker "$files/database.json" \
             "$RUNNER_TEMP/fugue-component-artifact/fugue-hosted-dns-worker-artifact-receipt.json" "$GITHUB_SHA" \
             >"$RUNNER_TEMP/fugue-hosted-dns-worker-standby.json"
@@ -4968,6 +4989,37 @@ jobs:
         with:
           name: fugue-observation-sample-retention-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/fugue-observation-sample-retention.json
+          if-no-files-found: error
+          retention-days: 30
+
+  hosted_dns_writer_handoff:
+    needs: prepush
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.hosted_dns_writer_handoff == 'true' }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-hosted-dns-worker, cancel-in-progress: false, queue: max}
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Verify both runtime and rollback targets and transfer DNS answers
+        run: |
+          set -euo pipefail
+          dir=deploy/releases/hosted-dns-worker
+          metrics=deploy/environments/production/observability/scrape-policy.json
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/api "$dir" "$metrics" deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json .github/workflows/ci.yml scripts/apply_hosted_dns_writer_handoff.py scripts/apply_quality_evidence_retention_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_hosted_dns_worker.py scripts/provision_observation_worker_database.py scripts/verify_hosted_dns_worker.py scripts/verify_storage_audit_worker.py scripts/rehearse_hosted_dns_writer_handoff.py
+          python3 -m scripts.apply_hosted_dns_writer_handoff "$dir/database.json" "$dir/writer-handoff.json" "$metrics" --apply \
+            > "$RUNNER_TEMP/fugue-hosted-dns-writer-handoff.json"
+      - name: Retain DNS transfer and first committed progress
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-hosted-dns-writer-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-hosted-dns-writer-handoff.json
           if-no-files-found: error
           retention-days: 30
 

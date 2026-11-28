@@ -49,6 +49,33 @@
       ]
     },
     {
+      "job_name": "fugue-hosted-dns-worker",
+      "metrics_path": "/metrics",
+      "scrape_interval": "30s",
+      "scrape_timeout": "5s",
+      "sample_limit": 25,
+      "body_size_limit": "32KB",
+      "kubernetes_sd_configs": [
+        {"role": "pod", "namespaces": {"names": ["fugue-system"]}}
+      ],
+      "relabel_configs": [
+        {
+          "source_labels": [
+            "__meta_kubernetes_pod_label_app_kubernetes_io_name",
+            "__meta_kubernetes_pod_container_name",
+            "__meta_kubernetes_pod_container_port_name",
+            "__meta_kubernetes_pod_phase"
+          ],
+          "regex": "fugue-hosted-dns-worker;hosted-dns-worker;metrics;Running",
+          "action": "keep"
+        },
+        {"source_labels": ["__meta_kubernetes_pod_name"], "target_label": "pod"},
+        {"source_labels": ["__meta_kubernetes_pod_uid"], "target_label": "pod_uid"},
+        {"source_labels": ["__meta_kubernetes_namespace"], "target_label": "namespace"},
+        {"target_label": "component", "replacement": "hosted-dns-worker"}
+      ]
+    },
+    {
       "job_name": "fugue-storage-audit-worker",
       "metrics_path": "/metrics",
       "scrape_interval": "30s",

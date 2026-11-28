@@ -27,7 +27,7 @@ def parse_target(raw, workload, expected, verify_template=None):
 
 
 def checked_rollback(provision, component, workload, *, verify_template=None, allow_absent=False):
-    if component not in {"api", "observation-worker", "storage-audit-worker"}:
+    if component not in {"api", "observation-worker", "storage-audit-worker", "hosted-dns-worker"}:
         raise ProvisionError("unsupported observation rollback component")
     name = f"fugue-release-monitor-{component}"
     try:
