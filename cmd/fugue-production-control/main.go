@@ -32,6 +32,8 @@ import (
 const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
        fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
+       fugue-production-control journal-recovery-checkpoint JOURNAL_CONFIG [POSTGRES_SNAPSHOT]
+       fugue-production-control journal-recovery-verify JOURNAL_CONFIG CHECKPOINT_DIGEST
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control shadow-storage-audit-native CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
@@ -84,6 +86,27 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "journal-recovery-checkpoint", "journal-recovery-verify":
+		if len(args) < 2 || len(args) > 3 || (args[0] == "journal-recovery-verify" && len(args) != 3) {
+			return errors.New(usage)
+		}
+		return withJournalDeadline(ctx, args[1], true, 5*time.Minute, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+			var checkpoint productioncontrol.JournalRecoveryCheckpoint
+			var err error
+			if args[0] == "journal-recovery-verify" {
+				checkpoint, err = j.VerifyRecoveryCheckpoint(ctx, cluster, args[2])
+			} else {
+				var snapshot string
+				if len(args) == 3 {
+					snapshot = args[2]
+				}
+				checkpoint, err = j.RecoveryCheckpoint(ctx, cluster, snapshot)
+			}
+			if err != nil {
+				return err
+			}
+			return emit(checkpoint)
+		})
 	case "render-storage-audit-projection-fence":
 		if len(args) != 2 {
 			return errors.New(usage)

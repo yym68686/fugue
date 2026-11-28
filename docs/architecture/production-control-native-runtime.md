@@ -773,6 +773,13 @@ clear its fence. This bootstrapper is not authority to recover arbitrary
 unhealthy or deleted workloads; such a recovery must have its own fenced
 operation and proof before the API release path can be cut over.
 
+The [native journal recovery drill](../backup-restore-runbook.md#native-production-journal-recovery)
+pins a read-only, whole-journal fingerprint to the same PostgreSQL snapshot as
+the backup. Restore verification does not give the bootstrapper credentials or
+settle an unresolved claim. The provider must be reconciled independently
+before re-enabling dispatch, including writes after the backup point and any
+authority bound to pre-restore database role OIDs.
+
 ## Guardian execution
 
 - On an approved, marked DesiredRelease, Guardian compares the live pointer,
