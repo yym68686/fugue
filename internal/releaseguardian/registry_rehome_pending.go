@@ -13,7 +13,10 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-const registryRehomeOriginalPlacement = "original_registry_observed"
+const (
+	registryRehomeOriginalPlacement    = "original_registry_observed"
+	registryRehomeIndependentPlacement = "independent_registry_observed"
+)
 
 // RegistryRehomePendingObservation is observational only. It does not prove
 // provider propagation, request drain, route health, or a terminal version.
@@ -25,6 +28,52 @@ type RegistryRehomePendingObservation struct {
 	Placement        string                    `json:"placement"`
 	ProviderReadback rehomePlacement           `json:"providerReadback"`
 	ReadbackDigest   string                    `json:"readbackDigest,omitempty"`
+}
+
+// RegistryRehomeCutoverReadback binds read-only placement to the recovery
+// bundle and mirror. It is evidence for review, not a serving or LKG receipt.
+type RegistryRehomeCutoverReadback struct {
+	Placement RegistryRehomePendingObservation `json:"placement"`
+	Recovery  RegistryRehomeRecoveryReport     `json:"recovery"`
+}
+
+// ObserveRegistryRehomeCutover requires the same frozen workload, Pods,
+// companions and pending claim on both sides of the independent image
+// readback. It cannot install a new baseline or settle the journal.
+func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interface, journal *productioncontrol.Journal,
+	cluster, intentDigest string, cutover KubeDeploymentCutover, provider productioncontrol.ParticipationKubernetesBinding,
+	observer ed25519.PublicKey, recoveryRaw []byte, recoveryPin string, registry *IndependentRegistry) (RegistryRehomeCutoverReadback, error) {
+	var none RegistryRehomeCutoverReadback
+	if registry == nil || registry.transport == nil {
+		return none, errors.New("registry rehome cutover readback requires a configured independent registry")
+	}
+	verified, err := verifyRegistryRehomeRecoveryBundle(recoveryRaw, recoveryPin)
+	if err != nil {
+		return none, err
+	}
+	report := verified.report
+	if report.IntentDigest != intentDigest || verified.bundle.Review.Intent.ClusterID != cluster {
+		return none, errors.New("registry rehome recovery bundle does not match the pending intent and cluster")
+	}
+	observe := func() (RegistryRehomePendingObservation, error) {
+		return ObserveFrozenRegistryRehomePending(ctx, client, journal, cluster, intentDigest, cutover, provider,
+			observer, verified.bundle.Archive, report.ArchiveDigest)
+	}
+	before, err := observe()
+	if err != nil {
+		return none, err
+	}
+	if before.Placement != registryRehomeIndependentPlacement {
+		return none, errors.New("registry rehome cutover has not reached the independent placement")
+	}
+	if err := verifyRegistryRehomeRecoveryMirror(ctx, verified, registry); err != nil {
+		return none, err
+	}
+	after, err := observe()
+	if err != nil || after.ReadbackDigest != before.ReadbackDigest {
+		return none, errors.Join(errors.New("registry rehome placement or claim changed during independent mirror verification"), err)
+	}
+	return RegistryRehomeCutoverReadback{Placement: after, Recovery: report}, nil
 }
 
 // ObserveFrozenRegistryRehomePending resumes inspection after losing the
@@ -170,7 +219,7 @@ func observeClosedRegistryRehomePlacement(ctx context.Context, client kubernetes
 	if err != nil {
 		return rehomePlacement{}, "", err
 	}
-	original, kind := live.Generation == review.Source.Deployment.Generation, "independent_registry_observed"
+	original, kind := live.Generation == review.Source.Deployment.Generation, registryRehomeIndependentPlacement
 	if original {
 		kind = registryRehomeOriginalPlacement
 	}

@@ -144,18 +144,32 @@ func VerifyRegistryRehomeRecoveryBundle(ctx context.Context, raw []byte, pin str
 	if err != nil {
 		return RegistryRehomeRecoveryReport{}, err
 	}
-	report := verified.report
 	if registry != nil {
-		ref, err := name.NewDigest(report.Current.Image, name.StrictValidation)
-		if err != nil {
+		if err := verifyRegistryRehomeRecoveryMirror(ctx, verified, registry); err != nil {
 			return RegistryRehomeRecoveryReport{}, err
 		}
-		draft, err := registry.DraftRegistryRehome(ctx, verified.bundle.Archive, report.ArchiveDigest, ref.Context().Name(), ref.Context().Name())
-		if err != nil || draft.DraftDigest != verified.bundle.Review.Intent.TargetDigest {
-			return RegistryRehomeRecoveryReport{}, errors.Join(errors.New("independent registry readback differs from the recovery bundle"), err)
-		}
 	}
-	return report, nil
+	return verified.report, nil
+}
+
+func verifyRegistryRehomeRecoveryMirror(ctx context.Context, verified verifiedRegistryRehomeRecoveryBundle, registry *IndependentRegistry) error {
+	ref, err := name.NewDigest(verified.report.Current.Image, name.StrictValidation)
+	if err != nil {
+		return err
+	}
+	pair := verified.archive.report.Pair
+	source := func(v SealedRecoveryVersion) RegistryRecoveryArtifact {
+		return RegistryRecoveryArtifact{Source: v.Receipt, SourceReceiptDigest: v.Monitor.ArtifactDigest, DestinationRepository: ref.Context().Name()}
+	}
+	readback, err := registry.VerifyRecoveryMirror(ctx, source(pair.Forward), source(pair.Rollback))
+	if err != nil {
+		return err
+	}
+	review, err := InspectRegistryRehomeSubmission(verified.bundle.Review)
+	if err != nil || readback != review.Draft.Mirror {
+		return errors.Join(errors.New("independent registry readback differs from the recovery bundle"), err)
+	}
+	return nil
 }
 
 type verifiedRegistryRehomeRecoveryBundle struct {

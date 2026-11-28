@@ -231,7 +231,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		t.Fatal(err)
 	}
 	images := map[string]registryTestContent{}
-	oldImage, _ := registryImageFixture(t, images, "fixture/rehome", strings.Repeat("2", 40), false)
+	oldImage, oldLayer := registryImageFixture(t, images, "fixture/rehome", strings.Repeat("2", 40), false)
 	servingImage, _ := registryImageFixture(t, images, "fixture/rehome", strings.Repeat("3", 40), true)
 	const repoPath = "/v2/fixture/rehome/manifests/"
 	for _, d := range []string{oldImage.TopDigest, servingImage.TopDigest} {
@@ -313,7 +313,11 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 	if ok, err := execution.AnchorResource(ctx, "fixture-observer", baseline); !ok || err != nil {
 		t.Fatalf("baseline: %v %v", ok, err)
 	}
+	var duringRegistryRead atomic.Pointer[func()]
 	registry, err := NewIndependentRegistry(testNativeRegistry, nil, registryRoundTrip(func(r *http.Request) (*http.Response, error) {
+		if f := duringRegistryRead.Swap(nil); f != nil {
+			(*f)()
+		}
 		o, ok := images[r.URL.Path]
 		if !ok && r.URL.Path != "/v2/" {
 			return nil, errors.New("missing fixture registry object")
@@ -525,7 +529,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		t.Fatalf("wrong namespace instance was accepted: %v", err)
 	}
 	observed, err := observe(provider)
-	wantPlacement := "independent_registry_observed"
+	wantPlacement := registryRehomeIndependentPlacement
 	if !writeWorkload {
 		wantPlacement = registryRehomeOriginalPlacement
 	}
@@ -537,8 +541,54 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 	if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
 		t.Fatalf("observation mutated the journal: %+v %v", after, err)
 	}
+	bundle, bundleReport, err := BuildRegistryRehomeRecoveryBundle(raw, archive.ArchiveDigest, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joint := func(pin string) (RegistryRehomeCutoverReadback, error) {
+		return ObserveRegistryRehomeCutover(ctx, admin, readerLedger, scope.ClusterID, claim.IntentDigest, ct, provider, observer, bundle, pin, registry)
+	}
+	if _, err := joint(otherDigest); err == nil {
+		t.Fatal("joint readback accepted an unpinned bundle")
+	}
 	if writeWorkload {
+		combined, err := joint(bundleReport.BundleDigest)
+		if err != nil || combined.Recovery != bundleReport || combined.Placement.ReadbackDigest != observed.ReadbackDigest {
+			t.Fatalf("joint verification did not bind both mirrors to the pending placement: %+v %v", combined, err)
+		}
+		retained := images[oldLayer]
+		delete(images, oldLayer)
+		if _, err := joint(bundleReport.BundleDigest); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {
+			t.Fatalf("joint readback did not check the full rollback image: %v", err)
+		}
+		images[oldLayer] = retained
+		changeCompanion := func() {
+			services := admin.CoreV1().Services(id.Namespace)
+			name := observed.ProviderReadback.Services[0].Name
+			service, err := services.Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if service.Annotations == nil {
+				service.Annotations = map[string]string{}
+			}
+			service.Annotations["fixture.invalid/changed"] = "true"
+			if _, err := services.Update(ctx, service, metav1.UpdateOptions{}); err != nil {
+				t.Error(err)
+			}
+		}
+		duringRegistryRead.Store(&changeCompanion)
+		if _, err := joint(bundleReport.BundleDigest); err == nil || !strings.Contains(err.Error(), "changed during independent mirror verification") {
+			t.Fatalf("joint readback accepted provider drift during registry verification: %v", err)
+		}
+		if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
+			t.Fatalf("joint verification mutated the journal: %+v %v", after, err)
+		}
 		return
+	}
+	if _, err := joint(bundleReport.BundleDigest); err == nil || !strings.Contains(err.Error(), "has not reached the independent placement") {
+		t.Fatalf("joint readback accepted the original placement: %v", err)
 	}
 	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 8*time.Second, true, func(context.Context) (bool, error) {
 		return time.Now().Unix() >= proof.ExpiresAt, nil

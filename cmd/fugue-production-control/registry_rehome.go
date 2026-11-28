@@ -19,12 +19,15 @@ import (
 
 const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
 
-func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, settle bool) error {
+func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, settle, cutoverReadback bool) error {
 	count := 7
 	if settle {
 		count = 9
+	} else if cutoverReadback {
+		count = 8
 	}
-	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) || (settle && !filepath.IsAbs(args[8])) {
+	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) ||
+		(settle && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) {
 		return errors.New(usage)
 	}
 	var cfg struct {
@@ -39,13 +42,36 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 	if decodeRecoveryMirrorJSON(config, &cfg) != nil || len(cfg.Observer) != ed25519.PublicKeySize || cfg.Cutover.Phase != releaseguardian.KubeCutoverFrozen {
 		return errors.New("invalid frozen registry rehome observation enrollment")
 	}
-	archive, err := readFile(args[3], releaseguardian.MaxReleaseArchiveBytes, true)
+	limit, timeout := int64(releaseguardian.MaxReleaseArchiveBytes), 30*time.Second
+	if cutoverReadback {
+		limit, timeout = releaseguardian.MaxRegistryRehomeRecoveryBytes, 4*time.Minute
+	}
+	archive, err := readFile(args[3], limit, true)
 	if err != nil {
 		return err
 	}
 	defer clear(archive)
-	if _, err := releaseguardian.VerifyReleaseRecoveryArchive(archive, args[4]); err != nil {
-		return err
+	var registry *releaseguardian.IndependentRegistry
+	if cutoverReadback {
+		var endpoint struct {
+			Registry         string `json:"registry"`
+			RegistryAuthFile string `json:"registryAuthFile,omitempty"`
+		}
+		raw, err := readFile(args[7], 16<<10, false)
+		if err != nil {
+			return err
+		}
+		if err := decodeRecoveryMirrorJSON(raw, &endpoint); err != nil {
+			return err
+		}
+		registry, err = newRecoveryRegistry(endpoint.Registry, endpoint.RegistryAuthFile)
+		if err != nil {
+			return err
+		}
+	} else {
+		if _, err := releaseguardian.VerifyReleaseRecoveryArchive(archive, args[4]); err != nil {
+			return err
+		}
 	}
 	kube, err := readKubeObservationConfig(args[1], args[2])
 	if err != nil {
@@ -75,7 +101,7 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 		}
 		defer clear(evidence)
 	}
-	return withJournalDeadline(ctx, args[0], !settle, 30*time.Second, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+	return withJournalDeadline(ctx, args[0], !settle, timeout, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
 		if settle {
 			result, err := releaseguardian.SettleRegistryRehomeWithoutWrite(ctx, client, j, cluster, args[7], args[5],
 				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], evidence)
@@ -83,6 +109,14 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 				return err
 			}
 			return json.NewEncoder(out).Encode(result)
+		}
+		if cutoverReadback {
+			observed, err := releaseguardian.ObserveRegistryRehomeCutover(ctx, client, j, cluster, args[5],
+				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], registry)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(observed)
 		}
 		observed, err := releaseguardian.ObserveFrozenRegistryRehomePending(ctx, client, j, cluster, args[5], cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4])
 		if err != nil {

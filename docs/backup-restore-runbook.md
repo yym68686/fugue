@@ -223,6 +223,19 @@ binds that observation to the provider and its plain freeze. The command
 never retries the provider write or settles the claim. Placement alone is
 not proof of health or request drainage.
 
+For `independent_registry_observed`, use the pinned recovery bundle and
+the independent registry endpoint configuration for a joint readback:
+
+```bash
+fugue-production-control observe-release-registry-rehome-cutover "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG" "$REGISTRY_ENDPOINT_CONFIG"
+```
+
+The registry profile contains `registry` and optional `registryAuthFile`.
+The command re-reads both exact OCI images and their recovery tags, and
+rejects the result if the bound workload, Pods, Services or pending claim
+change while it does so. It does not establish serving health, node pull
+independence, provider drain or the next Guardian baseline.
+
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
 Retain independent evidence of the plain freeze on every serving API
