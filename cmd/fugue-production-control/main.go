@@ -35,6 +35,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control journal-recovery-create JOURNAL_CONFIG PG_SERVICE_FILE PG_SERVICE NEW_PRIVATE_DIRECTORY
        fugue-production-control journal-recovery-checkpoint JOURNAL_CONFIG [POSTGRES_SNAPSHOT]
        fugue-production-control journal-recovery-verify JOURNAL_CONFIG CHECKPOINT_DIGEST
+       fugue-production-control verify-release-recovery-mirror CONFIG
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -90,6 +91,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "verify-release-recovery-mirror":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		return verifyReleaseRecoveryMirror(ctx, args[1], out)
 	case "journal-recovery-create":
 		if len(args) != 5 {
 			return errors.New(usage)
