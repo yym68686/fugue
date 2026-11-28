@@ -9,6 +9,18 @@ from scripts import prepush, prepush_replay
 
 
 class ReplayTest(unittest.TestCase):
+    def test_target_checked_sample_uses_the_conservative_selector_in_the_timed_gate(self):
+        def gate(*, shadow_select, shadow_result, shadow_build_first):
+            self.assertIs(shadow_select, prepush_replay.prepush_shadow.conservative_report)
+            self.assertTrue(shadow_build_first)
+            shadow_result({"status": "pass"})
+            return 0
+
+        with mock.patch.object(prepush, "_run_gate", side_effect=gate):
+            result = prepush_replay.candidate_sample(build_first=True, verify_targets=True)
+        self.assertEqual(result["status"], "pass")
+        self.assertGreaterEqual(result["elapsedMs"], 0)
+
     def test_candidate_keeps_non_selection_checks_and_cannot_write_production_receipt(self):
         results = []
         seen = []

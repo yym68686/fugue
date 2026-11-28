@@ -310,6 +310,22 @@ class SelectionTest(unittest.TestCase):
             self.assertNotIn("./consumer", linux["selection"]["goTests"][0])
             self.assertIn("./consumer", windows["selection"]["goTests"][0])
             self.assertTrue(linux["differencesFromNative"] or windows["differencesFromNative"])
+            conservative = shadow.selection_from_comparison(result)
+            self.assertEqual(conservative["scope"], "full")
+            self.assertEqual(conservative["goTests"], [["go", "test", "-count=1", "./..."]])
+            self.assertEqual(conservative["goBuilds"], [["go", "build", "./..."]])
+            self.assertEqual(conservative["paths"], ["domain/domain.go"])
+
+    def test_conservative_report_requires_both_artifact_profiles(self):
+        native = {"scope": "test-only", "goTests": [["go", "test", "./package"]], "goBuilds": []}
+        with patch.object(shadow, "compare_targets", return_value={
+            "native": {"selection": native},
+            "disposition": "same-selection-across-requested-profiles",
+        }) as compare:
+            selected = shadow.conservative_report("exact-base")
+        compare.assert_called_once_with("exact-base", ("linux/amd64", "linux/arm64"))
+        self.assertEqual(selected["goTests"], native["goTests"])
+        self.assertGreaterEqual(selected["elapsedMs"], 0)
 
     def test_target_comparison_rejects_content_changes_even_if_paths_are_unchanged(self):
         env = '{"GOVERSION":"go1.25.7","GOOS":"darwin","GOARCH":"arm64","CGO_ENABLED":"1","GOFLAGS":""}'
