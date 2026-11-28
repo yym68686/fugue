@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
@@ -481,7 +482,7 @@ func projectBusinessRouteDraftWithPolicy(snapshot model.EdgeRouteIntentSnapshot,
 		status := model.EdgeRouteStatusUnavailable
 		reason := "exact healthy serving release evidence is unavailable"
 		if app, ok := observed[release.AppID]; ok && app.ID == release.AppID && app.TenantID == release.TenantID &&
-			appObservedReadyForServing(app, snapshot.GeneratedAt) &&
+			managedappstatus.ReadyForServing(app, snapshot.GeneratedAt) &&
 			app.ObservedStatus.ServingReleaseID == release.ID && release.RuntimeID != "" &&
 			app.ObservedStatus.RuntimeID == release.RuntimeID && release.ResolvedImageRef != "" &&
 			app.ObservedStatus.ImageRef == release.ResolvedImageRef &&

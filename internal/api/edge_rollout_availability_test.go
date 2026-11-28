@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 )
 
@@ -40,7 +41,7 @@ func TestEdgeRetainsServingEndpointsWithoutDeclaringRolloutComplete(t *testing.T
 	if status, _ := edgeRouteStatus(app, app.Spec.RuntimeID, true); status != model.EdgeRouteStatusActive {
 		t.Fatalf("serving rollout was withdrawn: %s", status)
 	}
-	if appObservedReadyForServing(app, now) {
+	if managedappstatus.ReadyForServing(app, now) {
 		t.Fatal("availability was confused with deployment convergence")
 	}
 	for name, mutate := range map[string]func(*model.App){

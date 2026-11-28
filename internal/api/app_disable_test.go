@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -54,7 +55,7 @@ func TestDisableAppReturnsAlreadyDisabledOnlyForFreshConfirmedZero(t *testing.T)
 			name:         "stale zero",
 			physical:     0,
 			physicalWant: 0,
-			observedAt:   time.Now().UTC().Add(-2 * defaultAppObservedStatusMaxAge),
+			observedAt:   time.Now().UTC().Add(-2 * managedappstatus.MaxObservationAge),
 			clusterID:    "cluster-test",
 			wantAccepted: true,
 		},
