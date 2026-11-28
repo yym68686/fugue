@@ -2,10 +2,7 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"strings"
-	"time"
 
 	"fugue/internal/buildadmission"
 	"fugue/internal/model"
@@ -37,57 +34,27 @@ func (s *Service) effectiveImportBuilderPolicy(ceiling int64) sourceimport.Build
 }
 
 func (s *Service) githubBuildOOMAdmission(ctx context.Context, app model.App, source model.AppSource, spec model.AppSpec, policy sourceimport.BuilderPodPolicy) (bool, error) {
-	fingerprint := buildadmission.OOMInputFingerprint(source, spec)
-	history, err := s.buildAdmission().ReadOOMHistory(ctx, app, fingerprint)
-	if err != nil {
-		return false, err
-	}
-	if history.MemoryLimitBytes == 0 {
-		return true, nil
-	}
-	strategy := source.BuildStrategy
-	switch history.WorkloadProfile {
-	case "heavy":
-		strategy = model.AppBuildStrategyDockerfile
-	case "light":
-		strategy = model.AppBuildStrategyStaticSite
-	default:
-		if strings.TrimSpace(strategy) == "" || strings.EqualFold(strings.TrimSpace(strategy), model.AppBuildStrategyAuto) {
-			// Legacy evidence lacks the resolved profile. Allow one operation
-			// to resolve it from source, then persist it before Pod admission.
-			// The execution guard still enforces the historical memory limit.
-			return true, nil
-		}
-	}
 	inspect := s.inspectBuilderOOMPlacement
 	if inspect == nil {
 		inspect = sourceimport.InspectBuilderPlacementAfterOOM
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-	defer cancel()
-	stateful := spec.Workspace != nil || spec.PersistentStorage != nil || spec.Postgres != nil
-	labels := s.importBuildPlacementNodeSelector(ctx, app, model.Operation{DesiredSpec: &spec, DesiredSource: &source})
-	namespace := s.Config.KubectlNamespace
-	if namespace == "" {
-		namespace = "fugue-system"
-	}
-	report, err := inspect(checkCtx, namespace, policy, strategy, stateful, labels, history.MemoryLimitBytes)
-	var blocked *sourceimport.BuilderMemoryAdmissionError
-	if err != nil && !errors.As(err, &blocked) {
+	rejection, err := s.buildAdmission().EvaluatePlacement(ctx, app, source, spec,
+		func(checkCtx context.Context, strategy string, stateful bool, previous int64) (model.BuilderPlacementInspection, error) {
+			labels := s.importBuildPlacementNodeSelector(ctx, app, model.Operation{DesiredSpec: &spec, DesiredSource: &source})
+			namespace := s.Config.KubectlNamespace
+			if namespace == "" {
+				namespace = "fugue-system"
+			}
+			return inspect(checkCtx, namespace, policy, strategy, stateful, labels, previous)
+		})
+	if err != nil {
 		return false, err
 	}
-	var available int64
-	for _, node := range report.Nodes {
-		if node.Eligible && node.Allocation.MemoryBytes > history.MemoryLimitBytes {
-			return true, nil
-		}
-		if node.Allocation.MemoryBytes > available {
-			available = node.Allocation.MemoryBytes
-		}
+	if rejection == nil {
+		return true, nil
 	}
-	message := (&sourceimport.BuilderMemoryAdmissionError{PreviousOOMBytes: history.MemoryLimitBytes, AllocatedBytes: available}).Error()
 	now := s.gitHubSyncNow()
-	_, err = s.Store.RecordAppSourceSyncCheck(ctx, app, &model.AppSourceSyncStatus{Provider: model.AppSourceSyncProviderGitHub, Phase: model.AppSourceSyncPhaseDegraded, LastCheckedAt: &now, LastSuccessAt: &now, LastErrorAt: &now, LastErrorCode: "builder_memory_not_increased", LastErrorMessage: message})
+	_, err = s.Store.RecordAppSourceSyncCheck(ctx, app, &model.AppSourceSyncStatus{Provider: model.AppSourceSyncProviderGitHub, Phase: model.AppSourceSyncPhaseDegraded, LastCheckedAt: &now, LastSuccessAt: &now, LastErrorAt: &now, LastErrorCode: "builder_memory_not_increased", LastErrorMessage: rejection.Error()})
 	if err != nil {
 		return false, fmt.Errorf("record build admission block: %w", err)
 	}
