@@ -1,5 +1,5 @@
 // fugue-production-control records reviewable intent and independently signed
-// approval. It has no provider client, dispatcher, or automatic trigger.
+// approval and reads provider state for review. It has no production dispatcher.
 package main
 
 import (
@@ -32,6 +32,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
        fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control observe-storage-audit-owner CONFIG
+       fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
        fugue-production-control shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID
@@ -78,6 +79,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "shadow-storage-audit":
+		if len(args) != 6 {
+			return errors.New(usage)
+		}
+		return shadowStorageAudit(ctx, args[1:], out)
 	case "observe-storage-audit-owner":
 		if len(args) != 2 {
 			return errors.New(usage)
@@ -734,7 +740,7 @@ func emitDNSShadow(origin string, o dnscontrol.Observation, now func() time.Time
 
 func readKubeObservationConfig(path, context string) (*rest.Config, error) {
 	if !filepath.IsAbs(path) || context == "" {
-		return nil, errors.New("participation observation requires an absolute kubeconfig path and explicit context")
+		return nil, errors.New("provider observation requires an absolute kubeconfig path and explicit context")
 	}
 	loader := &clientcmd.ClientConfigLoadingRules{ExplicitPath: path}
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: context}
