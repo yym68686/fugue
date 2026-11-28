@@ -165,7 +165,7 @@ func createBackupUsageArtifact(t *testing.T, stateStore *store.Store, artifact m
 func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	now := time.Now().UTC()
 
 	active := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
@@ -242,7 +242,7 @@ func TestBackupUsageReconciliationReportsExactTenantPhysicalBytes(t *testing.T) 
 func TestBackupUsageReconciliationTreatsRecentUnreferencedUploadAsReconciling(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	_, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	fake.put("backup-root/apps/tenant_a/project_a/app_a/backup_run_upload/database.dump", 42, time.Now().UTC().Add(-time.Minute))
 
 	usage, err := loadBackupUsageAfterScan(t, server, t.Context(), "tenant_a", false)
@@ -260,7 +260,7 @@ func TestBackupUsageReconciliationTreatsRecentUnreferencedUploadAsReconciling(t 
 func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	_, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	now := time.Now().UTC().Add(-2 * backupFailedRunGCGrace)
 	fake.put("backup-root//unsafe-object", 41, now)
 	fake.put("backup-root-old/not-in-fugue-namespace", 99, now)
@@ -290,7 +290,7 @@ func TestBackupUsageReconciliationCountsUnsafeKeysInsidePhysicalNamespace(t *tes
 func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 
 	// Prime only the shared physical inventory. A later tenant reconciliation
 	// must not claim an artifact created after this snapshot is missing.
@@ -322,7 +322,7 @@ func TestBackupUsageReconciliationDoesNotCompareNewMetadataToOlderInventory(t *t
 func TestBackupUsageReconciliationDoesNotReportCleanupNewerThanCachedInventoryAsLingering(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	now := time.Now().UTC()
 	deletedAt := now.Add(-2 * backupArtifactGCGrace)
 	artifact := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
@@ -360,7 +360,7 @@ func TestBackupUsageReconciliationOmitsPhysicalTotalsWhenR2IsUnavailable(t *test
 	fake := newBackupUsageS3(t)
 	fake.failList = true
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-unmeasured",
 		RunID:             "backup_run_unmeasured",
@@ -392,7 +392,7 @@ func TestBackupUsageReconciliationOmitsPhysicalTotalsWhenR2IsUnavailable(t *test
 func TestBackupUsageReconciliationFailsClosedForArtifactWithoutBackend(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, _, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-without-backend",
 		RunID:             "backup_run_without_backend",
@@ -418,7 +418,7 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 	unavailable := newBackupUsageS3(t)
 	unavailable.failList = true
 	stateStore, _, server := newBackupUsageTestServer(t, measured)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	_, err := stateStore.CreateBackupBackend(model.BackupBackend{
 		ID:           "backup_backend_usage_unavailable",
 		Name:         "usage-r2-unavailable",
@@ -455,7 +455,7 @@ func TestBackupUsageReconciliationMarksMixedBackendMeasurementPartial(t *testing
 func TestBackupUsageReconciliationDetectsMissingOverdueAndLingeringObjects(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	now := time.Now().UTC()
 	target := model.BackupTarget{Type: model.BackupTargetAppDatabase, TenantID: "tenant_a", ProjectID: "project_a", AppID: "app_a"}
 
@@ -489,7 +489,7 @@ func TestBackupUsageReconciliationDetectsMissingOverdueAndLingeringObjects(t *te
 func TestBackupUsageReconciliationIgnoresInvalidMetadataAlreadyPhysicallyDeleted(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	stateStore, backend, server := newBackupUsageTestServer(t, fake)
-	server.backupUsage = newBackupUsageService(server.store, server.backupInventoryConfig, 0)
+	server.backupUsage = newBackupUsageService(server.store, server.backupInventory, 0)
 	deletedAt := time.Now().UTC().Add(-2 * backupArtifactGCGrace)
 	artifact := createBackupUsageArtifact(t, stateStore, model.BackupArtifact{
 		ID:                "artifact-legacy-invalid",
@@ -537,7 +537,7 @@ func TestBackupUsageEndpointAndMetricsExposeCompletePhysicalInventory(t *testing
 	fake.put("backup-root/"+artifact.ManifestObjectKey, 17, now.Add(-time.Hour))
 	fake.put("backup-root-old/not-in-fugue-namespace", 999, now.Add(-time.Hour))
 
-	if err := server.advanceBackupInventories(t.Context()); err != nil {
+	if err := server.backupInventory.Advance(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if rejected := performJSONRequest(t, server, http.MethodGet, "/v1/backups/usage", "", nil); rejected.Code != http.StatusUnauthorized {
@@ -615,7 +615,7 @@ func clearBackupUsageSeedEnv(t *testing.T) {
 
 func loadBackupUsageAfterScan(t *testing.T, s *Server, ctx context.Context, tenant string, admin bool) (backupusage.Usage, error) {
 	t.Helper()
-	if err := s.advanceBackupInventories(ctx); err != nil {
+	if err := s.backupInventory.Advance(ctx); err != nil {
 		t.Fatal(err)
 	}
 	return s.loadBackupUsage(ctx, tenant, admin)

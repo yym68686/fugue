@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Observation checkpoints contain only rebuildable runtime facts. They never
@@ -24,12 +25,26 @@ func (s *Store) ReadObservationCheckpoint(ctx context.Context, key string) ([]by
 // UpdateObservationCheckpoint serializes one bounded page and its cursor
 // across replicas. A canceled/failed update cannot publish partial progress.
 func (s *Store) UpdateObservationCheckpoint(ctx context.Context, key string, fn func([]byte) ([]byte, error)) (bool, error) {
+	if strings.HasPrefix(key, backupInventoryCheckpointPrefix) || key == backupInventoryOwnerKey {
+		return false, fmt.Errorf("%w: backup inventory uses its dedicated checkpoint writer", ErrInvalidInput)
+	}
+	return s.updateObservationCheckpoint(ctx, key, fn, nil)
+}
+
+type observationWriteGuard func(context.Context, *sql.Tx) (bool, error)
+
+func (s *Store) updateObservationCheckpoint(ctx context.Context, key string, fn func([]byte) ([]byte, error), guard observationWriteGuard) (bool, error) {
 	key = observationCheckpointKey(key)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
+	if guard != nil {
+		if allowed, err := guard(ctx, tx); err != nil || !allowed {
+			return false, err
+		}
+	}
 	var locked bool
 	if err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&locked); err != nil || !locked {
 		return false, err

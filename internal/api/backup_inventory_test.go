@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +30,7 @@ func TestBackupInventoryResumesAcrossReplicasAndPreservesComplete(t *testing.T) 
 			fmt.Fprint(w, `<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>backup-root/apps/tenant_b/p/a/old</Key><Size>20</Size></Contents></ListBucketResult>`)
 		}
 	})
-	if err := a.advanceBackupInventories(t.Context()); err != nil {
+	if err := a.backupInventory.Advance(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	usage, err := a.loadBackupUsage(t.Context(), "", true)
@@ -41,9 +40,9 @@ func TestBackupInventoryResumesAcrossReplicasAndPreservesComplete(t *testing.T) 
 	if usage.PhysicalBytes != nil || !usage.Reconciliation.Refreshing {
 		t.Fatalf("partial scan became complete: %+v", usage)
 	}
-	b := &Server{store: state, backupInventoryConfig: BackupInventoryConfig{RefreshInterval: time.Nanosecond}}
-	b.backupUsage = newBackupUsageService(b.store, b.backupInventoryConfig, 0)
-	if err = b.advanceBackupInventories(t.Context()); err != nil {
+	b := &Server{store: state, backupInventory: newBackupInventory(state, BackupInventoryConfig{RefreshInterval: time.Nanosecond})}
+	b.backupUsage = newBackupUsageService(b.store, b.backupInventory, 0)
+	if err = b.backupInventory.Advance(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	usage, err = b.loadBackupUsage(t.Context(), "tenant_a", false)
@@ -55,7 +54,7 @@ func TestBackupInventoryResumesAcrossReplicasAndPreservesComplete(t *testing.T) 
 	}
 	before := *usage.Reconciliation.LastSuccessAt
 	fail = true
-	if err = b.advanceBackupInventories(t.Context()); err != nil {
+	if err = b.backupInventory.Advance(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	usage, err = b.loadBackupUsage(t.Context(), "tenant_a", false)
@@ -74,26 +73,6 @@ func TestMetricsReadCannotStartR2Work(t *testing.T) {
 		t.Fatalf("scrape performed external work: %d %d", fake.calls(), rr.Code)
 	}
 }
-func TestBackupInventoryRejectsBrokenPagination(t *testing.T) {
-	fake := newBackupUsageS3(t)
-	_, _, s := newBackupUsageTestServer(t, fake)
-	fake.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `<ListBucketResult><IsTruncated>true</IsTruncated></ListBucketResult>`)
-	})
-	if err := s.advanceBackupInventories(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	groups, _ := s.backupInventoryGroups()
-	for _, g := range groups {
-		raw, _ := s.store.ReadObservationCheckpoint(t.Context(), g.key)
-		var cp backupInventoryCheckpoint
-		_ = json.Unmarshal(raw, &cp)
-		if cp.Complete != nil || cp.Error != "invalid_pagination" {
-			t.Fatalf("bad pagination accepted: %+v", cp)
-		}
-	}
-}
-
 func TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects(t *testing.T) {
 	fake := newBackupUsageS3(t)
 	state, backend, s := newBackupUsageTestServer(t, fake)
@@ -113,15 +92,8 @@ func TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects(t *testin
 	fake.put("backup-root/"+artifact.ManifestObjectKey, 123, old)
 	fake.put("backup-root/shared-repository/blocks/chunk", 456, old)
 	fake.put("backup-root/shared-repository-old/not-owned", 7, old)
-	groups, err := s.backupInventoryGroups()
-	if err != nil {
+	if err := s.backupInventory.Advance(t.Context()); err != nil {
 		t.Fatal(err)
-	}
-	for _, g := range groups {
-		due, err := s.advanceBackupInventoryScheduled(t.Context(), g)
-		if err != nil || time.Until(due) < 14*time.Minute {
-			t.Fatalf("completed scan should sleep until refresh: %v %v", due, err)
-		}
 	}
 	usage, err := s.loadBackupUsage(t.Context(), "", true)
 	if err != nil {

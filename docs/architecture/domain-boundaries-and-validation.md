@@ -7,7 +7,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 
 | Domain | Command ownership | Persistence boundary | Verification |
 | --- | --- | --- | --- |
-| Backup usage | The backup-usage service builds the inventory and owns its tenant cache and locks. The API authorizes and adapts a read-only source. | No backup mutations are available through the usage source. | The usage package verifies cache behavior and its dependency boundary; API and Store tests cover the adapters. |
+| Backup inventory and usage | The backup domain owns inventory scheduling, pagination, physical reconciliation, directly owned object keys, and the tenant usage cache and locks. API authorizes reads and adapts the Store and object reader. The CLI depends only on the wire contract. | The Store port derives the existing key from the namespace digest and commits the cursor and pages under the API writer fence. The generic checkpoint writer cannot write an inventory checkpoint or its owner. Reconciliation receives a read view. | Domain tests cover old checkpoint resumption, page integrity, object ownership, tenant cache isolation and how the writer is wired. PostgreSQL tests verify that both checkpoint formats preserve the cursor when the owner changes and that an open page blocks an owner transfer. |
 | Application image tracking | HTTP handles authorization, status translation, sanitization and audit. The image-tracking domain handles interactive commands, diagnosis and the Controller's leader-scoped polling, retry and metrics. The Controller still executes queued operations. | Store assembles the private PostgreSQL tracking repository. Configuration upsert/check retention keep their original SQL transactions; successful deployment joins the caller's existing transaction and deletions use foreign-key cascades. Evidence consumers receive a read-only view. | The image-tracking domain and repository run without importing the three composition roots. Root contract tests still exercise HTTP, authorization, leadership, and existing storage wiring. |
 | Application operations | The queue owns lane selection, claim order, dependency checks, retry delays, deletion precedence and the local claim/recovery reservation. Controller opens its existing leader scope and runs the operation. The operation view owns tenant/project read policy and projections; HTTP still owns request and response contracts. | Store exposes a separate read-only view and a queue transition port. The first-execution projection reads only its original release-step snapshot. Store applies queue writes through PostgreSQL transactions; the local reservation and response timestamps are not Store fences. | Queue and operation view logic runs without API, Controller or Store; queue integration tests also run against the real Store port. Root contract tests still exercise HTTP authorization, cancellation and stale execution behavior. |
 | Node host policy (installer side) | The host policy module owns the Journald and ZRAM shell fragments; API embeds them in the existing updater and join contracts. | Host-side staging, verification and rollback remain in the original shell transaction. No Controller desired-state or Store mutation was moved by this extraction. | Shell behavior is verified from the host policy package; a small API contract test proves the installer renders the exact payload. |
@@ -55,11 +55,20 @@ API warmup only on this local path. Profile disagreement or unclear ownership
 keeps the full uncached Go gate. It rejects CI use and a changed worktree.
 Keep using the unchanged `make prepush` for the production gate.
 
-The local fallback has a separate six-minute ceiling and does not count
+The local fallback has a separate ten-minute ceiling and does not count
 towards the 60-second local-edit target. In the hosted cross-domain replay,
 the selector widened on all profiles; all 20 pairs exceeded the candidate's
 short timeout, while the separately run full oracle passed. A wider fallback
 that still times out fails the command; it never retries with fewer checks.
+On Darwin arm64 (Go 1.25.7, `GOFLAGS=-p=2`), the uncached whole-module Go
+test command alone passed in 368.92 seconds on the cross-domain fixture at
+`5544660e4`. The former six-minute ceiling could fail even before counting
+selection and the other checks. The production timeout is unchanged.
+Dispatch the manual audit with `shadow_case=cross-domain` and
+`shadow_incremental=false` to exercise this actual full fallback budget once.
+Its separate witness binds the native and artifact plans and executes the
+whole-module build and uncached tests. It fails on a narrowed plan, timeout
+or source drift and is not counted in the local-edit P95.
 
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do
