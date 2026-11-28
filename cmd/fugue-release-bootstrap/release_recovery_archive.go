@@ -95,6 +95,54 @@ func draftReleaseRegistryRehome(ctx context.Context, args []string, out io.Write
 }
 
 func readPrivateReleaseArchive(path string) ([]byte, error) {
+	return readPrivateReleaseRecovery(path, releaseguardian.MaxReleaseArchiveBytes)
+}
+
+func verifyRegistryRehomeRecovery(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) < 2 || len(args) > 3 || !allDigests(args[1]) {
+		return errors.New(usage)
+	}
+	raw, err := readPrivateReleaseRecovery(args[0], releaseguardian.MaxRegistryRehomeRecoveryBytes)
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	var registry *releaseguardian.IndependentRegistry
+	if len(args) == 3 {
+		cfg, err := readRegistryEndpointConfig(args[2])
+		if err != nil {
+			return err
+		}
+		registry, err = openRegistry(cfg.Registry, cfg.RegistryAuthFile)
+		if err != nil {
+			return err
+		}
+	}
+	report, err := releaseguardian.VerifyRegistryRehomeRecoveryBundle(ctx, raw, args[1], registry)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
+type registryEndpointConfig struct {
+	Registry         string `json:"registry"`
+	RegistryAuthFile string `json:"registryAuthFile,omitempty"`
+}
+
+func readRegistryEndpointConfig(path string) (registryEndpointConfig, error) {
+	var cfg registryEndpointConfig
+	raw, err := readFile(path, 16<<10)
+	if err != nil {
+		return cfg, err
+	}
+	if decode(raw, &cfg) != nil || cfg.Registry == "" {
+		return cfg, errors.New("invalid registry rehome recovery endpoint configuration")
+	}
+	return cfg, nil
+}
+
+func readPrivateReleaseRecovery(path string, limit int64) ([]byte, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errors.New("release recovery archive requires an absolute path")
 	}
@@ -107,5 +155,5 @@ func readPrivateReleaseArchive(path string) ([]byte, error) {
 	if err != nil || info.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("release recovery archive must be private")
 	}
-	return boundedRead(file, releaseguardian.MaxReleaseArchiveBytes)
+	return boundedRead(file, limit)
 }

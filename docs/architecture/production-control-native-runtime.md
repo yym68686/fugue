@@ -894,6 +894,10 @@ authority bound to pre-restore database role OIDs.
   checks the two image projections without opening a production writer.
   Companion Services may appear in its read-only context; this does not
   widen the native Deployment executor's admission or write set.
+  The dispatcher also reconstructs both reviewed templates from the exact
+  sealed archive before reserving a claim. The offline bootstrap can verify
+  the same reconstruction from an independently pinned private bundle; it
+  does not contact the API or the journal or promote either version.
 - The registry-only move has a separate, internal image patch and readback.
   The patch is built from the reviewed spec and issued once against the
   current Deployment UID and resourceVersion. It replaces the image locations

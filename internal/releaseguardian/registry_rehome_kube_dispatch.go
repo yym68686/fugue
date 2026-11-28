@@ -112,6 +112,9 @@ func (e *registryRehomeDispatcher) preflight(ctx context.Context, s productionco
 		review.Source.Key != e.gate.cutover.Key || review.Source.ArchiveDigest != e.archive.report.ArchiveDigest {
 		return fail(errors.Join(errors.New("intent does not bind the enrolled registry rehome source"), err))
 	}
+	if _, _, err := deriveRegistryRehomeRecovery(e.archive, review); err != nil {
+		return fail(err)
+	}
 	auth, err := e.client.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authv1.SelfSubjectReview{}, metav1.CreateOptions{})
 	if err != nil || auth.Status.UserInfo.Username != e.gate.scope.Writer {
 		return fail(errors.Join(errors.New("Kubernetes did not authenticate the dedicated registry rehome writer"), err))

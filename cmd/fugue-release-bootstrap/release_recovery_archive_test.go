@@ -41,3 +41,24 @@ func TestOfflineReleaseArchiveProfileNeedsNoClusterConfigAndRejectsUntrustedInpu
 	}
 	check("public archive", path, pin, "archive must be private")
 }
+
+func TestOfflineRegistryRehomeRejectsUntrustedBundleWithoutClusterConfig(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	path := filepath.Join(t.TempDir(), "registry-rehome-recovery.json")
+	raw := []byte(`{"schema":"not-a-recovery-bundle"}`)
+	pin := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ digest, want string }{
+		{pin, "invalid registry rehome recovery bundle"},
+		{"sha256:" + strings.Repeat("f", 64), "independently pinned digest"},
+	} {
+		var output bytes.Buffer
+		err := run(t.Context(), []string{"verify-release-registry-rehome", path, tc.digest}, &output)
+		if err == nil || !strings.Contains(err.Error(), tc.want) || output.Len() != 0 {
+			t.Fatalf("output=%q err=%v want=%q", output.String(), err, tc.want)
+		}
+	}
+}

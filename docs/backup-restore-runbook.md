@@ -123,7 +123,25 @@ to the archived declarations and repeats the source and journal reads after
 checking both mirror copies. The output is an intent for `inspect`, owner
 `sign`, and journal recording. It is not a Deployment patch or fresh
 baseline evidence. An approved registry rehome is explicitly rejected by
-the ordinary claim path until a dedicated provider-fenced executor exists.
+the ordinary claim path; no production dispatch command is enabled.
+
+Package the reviewed intent and exact source archive for independent custody:
+
+```bash
+fugue-production-control pack-release-registry-rehome "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$REVIEW_SUBMISSION" "$NEW_PRIVATE_DIRECTORY"
+fugue-release-bootstrap verify-release-registry-rehome "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256"
+```
+
+The first command creates `registry-rehome-recovery.json` in a new private
+directory. It keeps the original archive byte-for-byte and derives the current
+and rollback Deployment templates from their own sealed records. Companion
+Services never appear in those templates. Both commands output only the
+identities and digests. Retain the bundle and its pin independently of each
+other, outside Git and Actions. Optionally pass the second command an absolute
+JSON config with `registry` and optional `registryAuthFile` to re-read both OCI
+images from that origin; the bundle pins the repository. Neither command
+authenticates production approval, grants write access, or certifies rollout,
+rollback, or serving health. Do not apply the templates as a recovery shortcut.
 
 ## Native production journal recovery
 
