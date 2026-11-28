@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +136,99 @@ func TestArtifactPrunerKeepsMonitorReferencedByRetainedGuardianRecord(t *testing
 	if _, err := client.CoreV1().ConfigMaps("fugue-system").Get(ctx, monitorNames[1], metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("expired unreferenced monitor remains: %v", err)
 	}
+}
+
+func TestArtifactPrunerPinsExactDirectRollbackFromActiveMonitorWithoutGuardianDesired(t *testing.T) {
+	const ns = "fugue-system"
+	ctx := context.Background()
+	now := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	key := Key{Component: "api", Group: "global"}
+	objects := make([]runtime.Object, 0, 13)
+	addRecord := func(at time.Time, monitor declarativerelease.MonitorRecord, data map[string]string) string {
+		name := monitorRecordNameFromDigest(key.Component, monitor.RecordDigest)
+		objects = append(objects, retentionConfigMap(name, at, recoveryMonitorLabels(monitor), nil, data, true))
+		return name
+	}
+	previousAt := now.Add(-72 * time.Hour)
+	data, previous, artifact, target := guardianStableFixture(t, key, previousAt)
+	previousName := addRecord(previousAt, previous, data)
+	currentData, current, _ := sealedRecoverySuccessor(t, guardianCandidateFixture(t, key, target, artifact.TopDigest, []byte(data["forward.json"]), now))
+	currentName := addRecord(now, current, currentData)
+
+	// Another valid historical receipt for this same exact target must
+	// survive too. Cleanup must not turn an ambiguous source into evidence.
+	alternateAt := previousAt.Add(time.Hour)
+	data, alternate, _, _ := guardianStableFixture(t, key, alternateAt)
+	alternateName := addRecord(alternateAt, alternate, data)
+
+	// These records have the same config SHA as the rollback, but a different
+	// image and manifest. Only the ordinary history window should keep them.
+	wrongImage := "sha256:" + strings.Repeat("7", 64)
+	var expired string
+	for i := 0; i < 9; i++ {
+		at := now.Add(time.Duration(i-48) * time.Hour)
+		data, monitor, _, _ := guardianStableFixtureWithImage(t, key, at, wrongImage)
+		name := addRecord(at, monitor, data)
+		if i == 0 {
+			expired = name
+		}
+	}
+	state, _, err := declarativerelease.NewMonitorState(current, declarativerelease.MonitorState{}, true, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := declarativerelease.CanonicalJSON(state)
+	pointer := retentionConfigMap("fugue-release-monitor-"+key.Component, now, recoveryMonitorLabels(current), nil,
+		map[string]string{"recordName": currentName, "state.json": string(raw)}, false)
+	objects = append(objects, pointer)
+
+	collision := pointer.DeepCopy()
+	state.RecordDigest = state.RecordDigest[:len("sha256:")+16] + strings.Repeat("0", 48)
+	raw, _ = declarativerelease.CanonicalJSON(state)
+	collision.Data["state.json"] = string(raw)
+	collisionClient := fake.NewSimpleClientset(append(append([]runtime.Object{}, objects[:len(objects)-1]...), collision)...)
+	collisionPruner, _ := NewArtifactPruner(collisionClient, ns, ArtifactRetentionPolicy{MinimumAge: time.Hour, MinimumHistory: 8, MaximumDeletes: 10})
+	if _, err := collisionPruner.Prune(ctx, now); err == nil || !strings.Contains(err.Error(), "cannot resolve current monitor") {
+		t.Fatalf("truncated name match was accepted without the full record digest: %v", err)
+	}
+
+	client := fake.NewSimpleClientset(objects...)
+	pruner, err := NewArtifactPruner(client, ns, ArtifactRetentionPolicy{MinimumAge: time.Hour, MinimumHistory: 8, MaximumDeletes: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := pruner.Prune(ctx, now)
+	if err != nil || result.Candidates != 2 || result.Deleted != 2 || result.Deferred {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, protected := range []string{previousName, alternateName, currentName} {
+		if _, err := client.CoreV1().ConfigMaps(ns).Get(ctx, protected, metav1.GetOptions{}); err != nil {
+			t.Fatalf("verified recovery record %s was pruned: %v", protected, err)
+		}
+	}
+	if _, err := client.CoreV1().ConfigMaps(ns).Get(ctx, expired, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("release with identical config SHA but a different artifact was not pruned: %v", err)
+	}
+
+	// A retained pointer with its active record now missing cannot determine
+	// which history it needs; future collection must stop before any delete.
+	if err := client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("configmaps"), ns, currentName); err != nil {
+		t.Fatal(err)
+	}
+	client.ClearActions()
+	if _, err := pruner.Prune(ctx, now); err == nil || !strings.Contains(err.Error(), "cannot resolve current monitor") {
+		t.Fatalf("missing active record did not stop cleanup: %v", err)
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "delete" {
+			t.Fatal("cleanup wrote with unresolved active monitor")
+		}
+	}
+}
+
+func recoveryMonitorLabels(monitor declarativerelease.MonitorRecord) map[string]string {
+	return map[string]string{"app.kubernetes.io/managed-by": "fugue-declarative-release",
+		"fugue.pro/component": monitor.Component, "fugue.pro/config-sha": monitor.ConfigSHA}
 }
 
 func TestArtifactPrunerFailsClosedBeforeDeletingInvalidInventory(t *testing.T) {

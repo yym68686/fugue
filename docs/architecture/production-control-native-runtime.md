@@ -909,6 +909,11 @@ authority bound to pre-restore database role OIDs.
   If the monitor is updated during the read, retry against a stable pointer.
   `observe-sealed-release-recovery-pair NAMESPACE COMPONENT KUBECONFIG CONTEXT`
   reports just the source records and does not need registry access.
+  Guardian's ConfigMap cleanup keeps the active record's exact direct
+  predecessor even when it falls outside the ordinary history window and
+  there is no Guardian DesiredRelease. If several records match, cleanup
+  keeps them all so it cannot manufacture a unique rollback by pruning.
+  This safeguard does not set registry retention or preserve OCI blobs.
   When Kubernetes is unavailable, the lower-level
   `verify-release-recovery-mirror CONFIG` can recheck a previously archived
   pair using independently pinned receipt files; it does not tell whether
