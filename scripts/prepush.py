@@ -484,7 +484,9 @@ def main() -> int:
     return _run_gate()
 
 
-def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
+def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=False) -> int:
+    if shadow_build_first and (shadow_select is None or shadow_result is None):
+        raise ValueError("build-first remains a non-authorizing shadow experiment")
     started = time.monotonic()
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
@@ -505,12 +507,15 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
     declarative_vet_finished = threading.Event()
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
+    build_before_tests = False
     if shadow_select is not None:
         if shadow_result is None:
             raise ValueError("shadow replay must use a non-production result collector")
         selection = shadow_select(base)
         test_commands = selection["goTests"]
         compile_task = ("compile-all", selection["goBuilds"][0] if selection["goBuilds"] else None)
+        build_before_tests = (shadow_build_first and selection.get("scope") == "dependency-closure"
+                              and compile_task[1] is not None)
     go_dependent_tasks: dict[str, list[str] | None] = {
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
@@ -719,7 +724,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         compile_name, compile_command = compile_task
         compile_future = phase_one.submit(execute, compile_name, compile_command) if compile_command else None
         affected_futures = {}
-        if test_commands:
+        if test_commands and not build_before_tests:
             affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
         non_go_futures = {
             phase_one.submit(execute, name, command): name
@@ -740,6 +745,9 @@ def _run_gate(*, shadow_select=None, shadow_result=None) -> int:
         else:
             compile_status, compile_output, compile_before = compile_future.result()
             record(compile_name, compile_before, compile_status, compile_output)
+
+        if build_before_tests and test_commands:
+            affected_futures[phase_one.submit(execute, "affected-tests", None)] = "affected-tests"
 
         if not failures:
             with concurrent.futures.ThreadPoolExecutor(
