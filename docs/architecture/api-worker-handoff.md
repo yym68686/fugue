@@ -96,13 +96,19 @@ the same standby worker as the active owner. The API cleanup publishes before
 and after observations to show that the worker Pod stays up and commits a
 new durable pass while both API replicas are replaced.
 
-Before enabling, exercise both the SQL and the worker restart against a
-disposable database:
+Before enabling, exercise the SQL, worker restart and a dependency timeout
+against a disposable database:
 
 ```sh
 go build -o /tmp/fugue-storage-audit-worker ./cmd/fugue-storage-audit-worker
 python3 -m scripts.rehearse_storage_lifecycle_audit --worker /tmp/fugue-storage-audit-worker
 ```
+
+The rehearsal locks only the worker's disposable control table after the
+worker is ready. The worker stays live but not ready, retains the last
+committed page, and leaves the API fixture's business rows readable and
+unchanged. Releasing the lock allows one new page to commit under the same
+owner and policy. This is not a production canary or rollback witness.
 
 The PostgreSQL billing integration test uses two separate pools against the
 same database. Warming the first pool prepares all four statements there and
