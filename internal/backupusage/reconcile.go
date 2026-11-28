@@ -88,7 +88,7 @@ func (s *Service) reconcile(ctx context.Context, tenantID string, platformAdmin 
 			continue
 		}
 		namespace := NamespaceOf(model.BackupBackendAsDataBackend(backend))
-		logicalKeys, keyErr := s.artifactKeys(artifact)
+		logicalKeys, keyErr := OwnedObjectKeys(artifact)
 		if keyErr != nil {
 			if usageArtifact.PhysicalDeletedAt == nil {
 				reconciliation.InvalidReferenceCount++

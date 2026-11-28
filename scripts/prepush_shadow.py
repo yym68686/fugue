@@ -51,7 +51,16 @@ TEST_BINARY_CONSUMERS = {
 REPOSITORY_TEST_CONSUMERS = {"./internal/platformsafety", "./internal/releasesourceaudit"}
 EDGE_GROUP_SOURCE_PREFIXES = ("internal/edge/", "internal/edgecontrol/", "internal/edgegroupfront/")
 # These composition guards scan non-test Go files under both source trees.
-APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking", "./internal/releaseretirement"}
+APPLICATION_SOURCE_TEST_CONSUMERS = {
+    "./internal/backupusage", "./internal/imagetracking", "./internal/releaseretirement",
+}
+# A source dependency can sit beneath a large composition-root test package.
+# Keep its domain contract tests as a first-class, name-scoped edge rather than
+# paying to run unrelated root-package suites for every leaf implementation edit.
+DEPENDENT_TEST_FILTERS = {
+    ("./internal/backupusage/inventoryscan", "./internal/api"):
+        r"^Test(BackupInventory|BackupUsage|MetricsReadCannotStartR2Work|InventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects)",
+}
 
 
 def packages_from_stream(stream):
@@ -97,6 +106,14 @@ def commands_for(kind, packages):
         return []
     flags = (["-o", os.devnull] if len(packages) == 1 else []) if kind == "build" else []
     return [["go", kind, *flags, *sorted(packages)]]
+
+
+def test_commands_for(packages, filters):
+    selected = set(packages)
+    filtered = selected & set(filters)
+    commands = commands_for("test", selected - filtered)
+    commands.extend(["go", "test", "-run", filters[package], package] for package in sorted(filtered))
+    return commands
 
 
 def full(reason):
@@ -175,7 +192,14 @@ def select(paths, packages, root, *, repository_tests=(), application_source_tes
     )
     if implicit_tests - available_labels:
         return full("declared implicit test consumer is missing from the Go graph")
-    test_commands = commands_for("test", {labels[name] for name in tests} - implicit_tests)
+    test_packages = {labels[name] for name in tests} - implicit_tests
+    package_filters = {}
+    if runtime_edits:
+        source = labels[next(iter(runtime_edits))]
+        for (owner, dependent), pattern in DEPENDENT_TEST_FILTERS.items():
+            if source == owner and dependent in test_packages:
+                package_filters[dependent] = pattern
+    test_commands = test_commands_for(test_packages, package_filters)
     if implicit_tests:
         # In particular, inputs read by a child process are not a reliable
         # cache key for the Go test that invokes it.

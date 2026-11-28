@@ -1,4 +1,4 @@
-package api
+package inventoryscan
 
 import (
 	"crypto/sha256"
@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"fugue/internal/store"
+	"fugue/internal/backupusage"
 )
 
 type inventoryPageRef struct {
@@ -18,17 +18,17 @@ type inventoryPageRef struct {
 }
 type inventoryPagesEnvelope struct {
 	Version    int
-	Checkpoint backupInventoryCheckpoint
+	Checkpoint checkpoint
 	Maps       map[string][]inventoryPageRef
 }
 
 // Stable hash partitions keep a changed observation page from shifting every
 // later page. Generation keys let Current become Complete without rewriting
 // the complete inventory again. Only changed pages are written by the store.
-func encodeBackupInventoryPages(cp backupInventoryCheckpoint) (store.ObservationPages, error) {
+func encodePages(cp checkpoint) (Pages, error) {
 	envelope := inventoryPagesEnvelope{Version: 2, Checkpoint: cp, Maps: map[string][]inventoryPageRef{}}
-	out := store.ObservationPages{Pages: map[string][]byte{}}
-	for _, ptr := range []**backupInventoryScan{&envelope.Checkpoint.Current, &envelope.Checkpoint.Complete} {
+	out := Pages{Pages: map[string][]byte{}}
+	for _, ptr := range []**scanState{&envelope.Checkpoint.Current, &envelope.Checkpoint.Complete} {
 		if *ptr == nil {
 			continue
 		}
@@ -118,8 +118,8 @@ func encodeInventoryMapPages(prefix string, value reflect.Value, pages map[strin
 	return refs, nil
 }
 
-func decodeBackupInventoryPages(pages store.ObservationPages, legacy []byte) (backupInventoryCheckpoint, error) {
-	cp := backupInventoryCheckpoint{Version: 1}
+func decodePages(pages Pages, legacy []byte) (checkpoint, error) {
+	cp := checkpoint{Version: 1}
 	if pages.Metadata == nil {
 		if len(legacy) > 0 {
 			if err := json.Unmarshal(legacy, &cp); err != nil {
@@ -140,13 +140,13 @@ func decodeBackupInventoryPages(pages store.ObservationPages, legacy []byte) (ba
 	}
 	cp = envelope.Checkpoint
 	used := map[string]bool{}
-	for _, scan := range []*backupInventoryScan{cp.Current, cp.Complete} {
+	for _, scan := range []*scanState{cp.Current, cp.Complete} {
 		if scan == nil {
 			continue
 		}
 		scan.Wanted = map[string]bool{}
-		scan.References = map[string]backupInventoryObject{}
-		scan.Totals = map[string]backupInventoryTotals{}
+		scan.References = map[string]backupusage.InventoryObject{}
+		scan.Totals = map[string]backupusage.InventoryTotals{}
 		for _, field := range []struct {
 			name   string
 			target any

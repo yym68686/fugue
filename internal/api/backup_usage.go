@@ -5,12 +5,14 @@ import (
 	"time"
 
 	"fugue/internal/backupusage"
+	"fugue/internal/backupusage/inventoryscan"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
 
 type backupUsageSource struct {
-	store *store.Store
+	store         *store.Store
+	readInventory func(context.Context, string) (backupusage.Inventory, error)
 }
 
 // Cleanup compares identities across backend records for the same physical key.
@@ -18,9 +20,9 @@ func backupUsagePhysicalObjectID(backend model.DataBackend, key string) string {
 	return backupusage.NamespaceOf(backend).ObjectID(key)
 }
 
-func newBackupUsageService(db *store.Store, inventory BackupInventoryConfig, ttl time.Duration) *backupusage.Service {
-	return backupusage.New(backupUsageSource{store: db}, backupArtifactObjectKeysForDeletion, backupusage.Config{
-		CacheTTL: ttl, InventoryRefreshInterval: inventory.normalized().RefreshInterval,
+func newBackupUsageService(db *store.Store, inventory *inventoryscan.Service, ttl time.Duration) *backupusage.Service {
+	return backupusage.New(backupUsageSource{store: db, readInventory: inventory.Read}, backupusage.Config{
+		CacheTTL: ttl, InventoryRefreshInterval: inventory.RefreshInterval(),
 		ArtifactGCGrace: backupArtifactGCGrace, FailedRunGCGrace: backupFailedRunGCGrace,
 	})
 }
@@ -64,24 +66,5 @@ func (a backupUsageSource) ResolveNamespace(backendID, tenantID string, platform
 }
 
 func (a backupUsageSource) ReadInventory(ctx context.Context, namespaceKey string) (backupusage.Inventory, error) {
-	cp, err := readBackupInventory(ctx, a.store, namespaceKey)
-	if err != nil {
-		return backupusage.Inventory{}, err
-	}
-	progress := func(scan *backupInventoryScan) backupusage.InventoryProgress {
-		return backupusage.InventoryProgress{Generation: scan.Generation, Pages: scan.Pages, Objects: scan.Objects}
-	}
-	view := backupusage.Inventory{LastAttempt: cp.LastAttempt, Error: cp.Error}
-	if cp.Current != nil {
-		p := progress(cp.Current)
-		view.Current = &p
-	}
-	if scan := cp.Complete; scan != nil {
-		view.Complete = &backupusage.InventorySnapshot{
-			InventoryProgress: progress(scan),
-			NamespaceOwner:    scan.NamespaceOwner, StartedAt: scan.StartedAt, FinishedAt: scan.FinishedAt,
-			Wanted: scan.Wanted, References: scan.References, Totals: scan.Totals,
-		}
-	}
-	return view, nil
+	return a.readInventory(ctx, namespaceKey)
 }

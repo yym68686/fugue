@@ -41,6 +41,30 @@ class SelectionTest(unittest.TestCase):
         ])
         self.assertEqual(result["goBuilds"], [["go", "build", "./cmd", "./domain", "./facade"]])
 
+    def test_backup_inventory_change_scopes_api_to_backup_contract_tests(self):
+        source = pkg("internal/backupusage/inventoryscan", GoFiles=["service.go"])
+        api = pkg("internal/api", Imports=["demo/internal/backupusage/inventoryscan"])
+        command = pkg("cmd/fugue-api", Imports=["demo/internal/api"])
+        graph = [source, api, command]
+        result = shadow.select(
+            ["internal/backupusage/inventoryscan/service.go"], graph, ROOT,
+        )
+        pattern = shadow.DEPENDENT_TEST_FILTERS[("./internal/backupusage/inventoryscan", "./internal/api")]
+        self.assertEqual(result["scope"], "dependency-closure")
+        self.assertIn(["go", "test", "-run", pattern, "./internal/api"], result["goTests"])
+        self.assertFalse(any("./internal/api" in command and "-run" not in command
+                             for command in result["goTests"]))
+        for name in (
+            "TestBackupInventoryResumesAcrossReplicasAndPreservesComplete",
+            "TestBackupUsageEndpointAndMetricsExposeCompletePhysicalInventory",
+            "TestMetricsReadCannotStartR2Work",
+            "TestInventorySeparatesDeclaredRepositoryBlocksFromArtifactObjects",
+        ):
+            self.assertRegex(name, pattern)
+        direct_api_change = shadow.select(["internal/api/impl.go"], graph, ROOT)
+        self.assertIn("./internal/api", direct_api_change["goTests"][0])
+        self.assertNotIn("-run", direct_api_change["goTests"][0])
+
     def test_test_only_does_not_rebuild_or_retest_consumers(self):
         result = shadow.select(["facade/impl_test.go"], self.graph, ROOT)
         self.assertEqual(result["scope"], "test-only")
@@ -209,7 +233,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(shadow.select([path + "/impl_test.go"], [owner], ROOT)["scope"], "test-only")
 
     def test_domain_guards_are_runtime_source_edges_without_build_edges(self):
-        audits = [pkg("internal/imagetracking"), pkg("internal/releaseretirement")]
+        audits = [pkg("internal/backupusage"), pkg("internal/imagetracking"), pkg("internal/releaseretirement")]
         options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
         for path in ("internal/unrelated", "cmd/unrelated"):
             with self.subTest(path=path):
@@ -217,7 +241,7 @@ class SelectionTest(unittest.TestCase):
                 plan = shadow.select([path + "/impl.go"], [owner, *audits], ROOT, **options)
                 self.assertEqual(plan["goTests"], [
                     ["go", "test", "./" + path],
-                    ["go", "test", "-count=1", "./internal/imagetracking", "./internal/releaseretirement"],
+                    ["go", "test", "-count=1", "./internal/backupusage", "./internal/imagetracking", "./internal/releaseretirement"],
                 ])
                 self.assertEqual(plan["goBuilds"], [["go", "build", "-o", os.devnull, "./" + path]])
                 self.assertEqual(shadow.select([path + "/impl.go"], [owner, audits[0]], ROOT, **options)["scope"], "full")
@@ -229,7 +253,8 @@ class SelectionTest(unittest.TestCase):
             patch.object(prepush, "changed_files", return_value=[]),
             patch.object(prepush, "run", return_value=(0, "")),
             patch.object(shadow, "packages_from_stream", return_value=[
-                pkg("internal/anotherdomain"), pkg("internal/imagetracking"), pkg("internal/releaseretirement"),
+                pkg("internal/anotherdomain"), pkg("internal/backupusage"),
+                pkg("internal/imagetracking"), pkg("internal/releaseretirement"),
                 *repository_consumers(),
             ]),
             patch.object(prepush, "ROOT", ROOT),
@@ -238,7 +263,7 @@ class SelectionTest(unittest.TestCase):
             plan = shadow.report("HEAD")
         self.assertEqual(plan["scope"], "dependency-closure")
         self.assertIn("-count=1", plan["goTests"][-1])
-        for audit in ("./internal/imagetracking", "./internal/releaseretirement"):
+        for audit in ("./internal/backupusage", "./internal/imagetracking", "./internal/releaseretirement"):
             self.assertIn(audit, plan["goTests"][-1])
             self.assertNotIn(audit, plan["goBuilds"][0])
 
