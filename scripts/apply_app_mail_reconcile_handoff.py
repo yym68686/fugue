@@ -104,6 +104,7 @@ WITH marker AS (
         EXISTS(SELECT 1 FROM public.fugue_meta WHERE key='{SEED}' AND value::jsonb->>'complete'='true') AS seeded
 ), summary AS (
     SELECT count(*) FILTER(WHERE binding.body->>'state'='active') AS active,
+        count(*) FILTER(WHERE work.app_id IS NULL) AS missing,
         count(*) FILTER(WHERE binding.body->>'state'='active' AND work.last_result='synced'
             AND work.last_success_at>=marker.activated) AS confirmed
     FROM public.fugue_app_mail_bindings binding
@@ -111,7 +112,7 @@ WITH marker AS (
         ON work.app_id=binding.app_id AND work.generation=binding.generation CROSS JOIN marker
 )
 SELECT json_build_object('owner',marker.owner,'activated',marker.activated,
-    'seeded',marker.seeded,'active',summary.active,'confirmed',summary.confirmed)
+    'seeded',marker.seeded,'active',summary.active,'missing',summary.missing,'confirmed',summary.confirmed)
 FROM marker CROSS JOIN summary;
 COMMIT;
 """).splitlines()

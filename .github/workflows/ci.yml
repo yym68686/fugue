@@ -5231,6 +5231,43 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: controller, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
+  app_mail_standby_observation:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 8
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    permissions: {contents: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Observe the exact application mail standby without transferring ownership
+        id: observe
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          declaration=deploy/releases/controller/app-mail-standby-observation.json
+          git cat-file -e "${BASE_SHA}^{commit}"
+          if git diff --quiet "$BASE_SHA" HEAD -- "$declaration"; then exit 0; fi
+          test -f "$declaration" && test ! -L "$declaration"
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller deploy/releases/observation-worker/database.json .github/workflows/ci.yml scripts/verify_app_mail_standby.py scripts/apply_app_mail_reconcile_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
+          python3 -m unittest scripts.test_verify_app_mail_standby
+          python3 -m scripts.verify_app_mail_standby deploy/releases/observation-worker/database.json "$declaration" \
+            > "$RUNNER_TEMP/fugue-app-mail-standby-observation.json"
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
+      - name: Retain the independent application mail standby observation
+        if: steps.observe.outputs.verified == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-app-mail-standby-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-app-mail-standby-observation.json
+          if-no-files-found: error
+          retention-days: 30
+
   app_mail_reconcile_handoff:
     needs: prepush
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.app_mail_reconcile_handoff == 'true' }}

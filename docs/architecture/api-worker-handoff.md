@@ -340,6 +340,12 @@ The metrics distinguish local configuration, authenticated connectivity
 and write ownership; none exposes binding or provider details. Only the
 persisted owner authorizes a claim; standby and startup never set it.
 
+The read-only standby observation pins both deployed revisions, verifies
+that every current binding generation has a queue row, and checks an
+authenticated provider GET from the Controller leader. It reports the
+actual rollback targets and their compatibility separately. A successful
+standby observation with an incompatible rollback is not cutover approval.
+
 The handoff must include every binding reconciliation PUT, including the
 preflight PUT in credential creation and login requests, not just the
 scheduled sweep. Keep binding generation/CAS as the intent boundary and
