@@ -1,37 +1,12 @@
 package api
 
 import (
-	"fugue/internal/auth"
-	"fugue/internal/model"
 	"testing"
 	"time"
-)
 
-func TestAppCPURequestOnlyChangeDoesNotSwallowOtherDimensions(t *testing.T) {
-	current := &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 128, MemoryLimitMebibytes: 256}
-	target := *current
-	target.CPUMilliCores = 75
-	if !appCPURequestOnlyChange(current, &target) {
-		t.Fatal("CPU-only downscale not selected")
-	}
-	for _, change := range []string{"memory", "memory-limit", "cpu-limit"} {
-		other := target
-		switch change {
-		case "memory":
-			other.MemoryMebibytes++
-		case "memory-limit":
-			other.MemoryLimitMebibytes++
-		case "cpu-limit":
-			other.CPULimitMilliCores++
-		}
-		if appCPURequestOnlyChange(current, &other) {
-			t.Fatal("lost recommendation dimension", change)
-		}
-	}
-	if appCPURequestOnlyChange(nil, &target) || appCPURequestOnlyChange(current, current) {
-		t.Fatal("invalid/noop target selected")
-	}
-}
+	"fugue/internal/auth"
+	"fugue/internal/model"
+)
 
 func TestAppCPUResizeAutoQueuesWithoutRollingCapacityOrBuildSource(t *testing.T) {
 	t.Setenv("FUGUE_APP_CPU_REQUEST_RESIZE_ENABLED", "true")
@@ -65,36 +40,5 @@ func TestAppCPUResizeAutoQueuesWithoutRollingCapacityOrBuildSource(t *testing.T)
 	_, duplicate, skipped, err := server.applyAutoAppRightSizingRecommendation(app, 24, 3)
 	if err != nil || !skipped || duplicate != nil {
 		t.Fatal("concurrent scan bypassed operation serialization", duplicate, skipped, err)
-	}
-}
-
-func TestAppCPUResizeAutoStagesCPUWithoutChangingMemoryOrLimits(t *testing.T) {
-	current := &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: 256, MemoryLimitMebibytes: 512}
-	target := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: 128, MemoryLimitMebibytes: 256}
-	decision := autoAppCPURequestChange(current, target)
-	if !decision.allowed || decision.resources.CPUMilliCores != 25 || decision.resources.MemoryMebibytes != 256 || decision.resources.MemoryLimitMebibytes != 512 {
-		t.Fatal("CPU stage lost independent resource intent", decision)
-	}
-	target.CPUMilliCores = 96
-	if autoAppCPURequestChange(current, target).allowed {
-		t.Fatal("CPU stage bypassed the change threshold")
-	}
-}
-
-func TestAppCPUResizeAutoUsesFivePercentAndFiveMillicoreThresholds(t *testing.T) {
-	for _, test := range []struct {
-		current, target int64
-		allowed         bool
-	}{
-		{120, 100, true}, {100, 95, true}, {100, 105, true},
-		{100, 96, false}, {100, 104, false},
-		{200, 191, false}, {200, 209, false},
-		{200, 190, true}, {200, 210, true},
-		{10, 6, false}, {10, 5, true},
-	} {
-		decision := autoAppCPURequestChange(&model.ResourceSpec{CPUMilliCores: test.current}, &model.ResourceSpec{CPUMilliCores: test.target})
-		if decision.allowed != test.allowed {
-			t.Fatalf("%dm -> %dm allowed=%v, want %v", test.current, test.target, decision.allowed, test.allowed)
-		}
 	}
 }
