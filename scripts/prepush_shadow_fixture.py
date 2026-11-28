@@ -44,6 +44,18 @@ RETIREMENT_TEST = (
     f"func TestSweepOnlyBacksOffAttemptsWithoutProgress_{SAMPLE_MARKER}(t *testing.T) {{\n",
 )
 
+BUILDER_RUNTIME = (
+    "internal/buildadmission/failure.go",
+    '"unsupported permanent build failure ledger"',
+    f'"unsupported permanent build failure ledger ({SAMPLE_MARKER})"',
+)
+
+BUILDER_TEST = (
+    "internal/buildadmission/placement_test.go",
+    "func TestEvaluatePlacementRequiresEligibleAllocationAbovePreviousOOM(t *testing.T) {\n",
+    f"func TestEvaluatePlacementRequiresEligibleAllocationAbovePreviousOOM_{SAMPLE_MARKER}(t *testing.T) {{\n",
+)
+
 TRACKING_SCOPE_REGRESSION = (
     "internal/controller/candidate_startup_budget.go",
     "s.Store.ReadImageTracking().GetAppImageTracking(",
@@ -69,16 +81,29 @@ BACKUP_SCOPE_REGRESSION = (
     "\tbackupInventory := newBackupInventory(store, cfg.BackupInventory)\n",
 )
 
+BUILDER_SCOPE_REGRESSION = (
+    "internal/controller/safe_rollout_resume.go",
+    "\treleases, err := s.Store.ListAppReleases(",
+    "\t_ = s.Store.BuilderAdmissionCheckpoints\n\treleases, err := s.Store.ListAppReleases(",
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
     "host-policy-test": (HOST_POLICY_TEST,),
     "backup-runtime": (BACKUP_RUNTIME,),
     "retirement-test": (RETIREMENT_TEST,),
+    "builder-runtime": (BUILDER_RUNTIME,),
+    "builder-test": (BUILDER_TEST,),
     "cross-domain": (QUEUE_RUNTIME, HOST_POLICY_TEST),
 }
 
 CONTRACTS = {
+    "contract-builder-checkpoint": (
+        BUILDER_SCOPE_REGRESSION, "./internal/buildadmission",
+        "TestOnlyControllerAdapterAcquiresBuilderAdmissionCheckpoints",
+        "acquire builder admission checkpoints only in the Controller adapter",
+    ),
     "contract-backup-checkpoint": (
         BACKUP_SCOPE_REGRESSION, "./internal/backupusage",
         "TestOnlyBackupInventoryAssemblyAcquiresCheckpointWriter",

@@ -15,8 +15,11 @@ on:
           - host-policy-test
           - backup-runtime
           - retirement-test
+          - builder-runtime
+          - builder-test
           - cross-domain
           - contract-backup-checkpoint
+          - contract-builder-checkpoint
           - contract-tracking-scope
           - contract-generator-consumer
           - contract-retirement-scope
