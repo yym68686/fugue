@@ -138,15 +138,14 @@ type ObjectReader struct {
 }
 
 type Service struct {
-	store        Store
-	open         func(model.BackupBackend) (ObjectReader, error)
-	artifactKeys func(model.BackupArtifact) ([]string, error)
-	cfg          Config
-	grace        time.Duration
+	store Store
+	open  func(model.BackupBackend) (ObjectReader, error)
+	cfg   Config
+	grace time.Duration
 }
 
-func New(db Store, open func(model.BackupBackend) (ObjectReader, error), artifactKeys func(model.BackupArtifact) ([]string, error), cfg Config, grace time.Duration) *Service {
-	return &Service{store: db, open: open, artifactKeys: artifactKeys, cfg: cfg.withDefaults(), grace: grace}
+func New(db Store, open func(model.BackupBackend) (ObjectReader, error), cfg Config, grace time.Duration) *Service {
+	return &Service{store: db, open: open, cfg: cfg.withDefaults(), grace: grace}
 }
 
 func (s *Service) RefreshInterval() time.Duration { return s.cfg.RefreshInterval }
@@ -286,7 +285,7 @@ func (s *Service) advance(parent context.Context, g *namespaceGroup) (time.Time,
 						cp.Current.RepositoryPrefixes = append(cp.Current.RepositoryPrefixes, prefix)
 					}
 				}
-				keys, err := s.artifactKeys(a)
+				keys, err := backupusage.OwnedObjectKeys(a)
 				if err != nil {
 					continue
 				}

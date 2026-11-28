@@ -25,7 +25,7 @@ func (s *Server) StartBackgroundBackupInventory(ctx context.Context) {
 }
 
 func newBackupInventory(db *store.Store, cfg BackupInventoryConfig) *inventoryscan.Service {
-	return inventoryscan.New(backupInventoryStore{db}, openBackupInventory, backupArtifactObjectKeysForDeletion, cfg, backupFailedRunGCGrace)
+	return inventoryscan.New(backupInventoryStore{db}, openBackupInventory, cfg, backupFailedRunGCGrace)
 }
 
 func backupRepositoryPrefix(artifact model.BackupArtifact, backend model.DataBackend) string {

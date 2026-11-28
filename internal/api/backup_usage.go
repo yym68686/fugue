@@ -21,7 +21,7 @@ func backupUsagePhysicalObjectID(backend model.DataBackend, key string) string {
 }
 
 func newBackupUsageService(db *store.Store, inventory *inventoryscan.Service, ttl time.Duration) *backupusage.Service {
-	return backupusage.New(backupUsageSource{store: db, readInventory: inventory.Read}, backupArtifactObjectKeysForDeletion, backupusage.Config{
+	return backupusage.New(backupUsageSource{store: db, readInventory: inventory.Read}, backupusage.Config{
 		CacheTTL: ttl, InventoryRefreshInterval: inventory.RefreshInterval(),
 		ArtifactGCGrace: backupArtifactGCGrace, FailedRunGCGrace: backupFailedRunGCGrace,
 	})
