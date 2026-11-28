@@ -218,9 +218,9 @@ func TestManagedAppObservationSequenceIsMonotonic(t *testing.T) {
 	t.Parallel()
 
 	cache := newManagedAppStatusCache(time.Minute, time.Second)
-	first := cache.nextObservationSequence()
-	second := cache.nextObservationSequence()
-	third := cache.nextObservationSequence()
+	first := cache.refresh.NextSequence()
+	second := cache.refresh.NextSequence()
+	third := cache.refresh.NextSequence()
 	if !(first > 0 && first < second && second < third) {
 		t.Fatalf("observation sequence is not monotonic: %d %d %d", first, second, third)
 	}

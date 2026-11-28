@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/edgetopology"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	runtimepkg "fugue/internal/runtime"
@@ -210,7 +211,7 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 			if edgeRouteServingDuringRollout(app, time.Now().UTC()) {
 				return model.EdgeRouteStatusActive, "deployment progressing; verified serving endpoints remain available"
 			}
-			if observed.Phase != "unknown" && !appObservedStatusFresh(observed, time.Now().UTC()) {
+			if observed.Phase != "unknown" && !managedappstatus.ObservationFresh(observed, time.Now().UTC()) {
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "runtime observation is stale")
 			}
 			// A stale envelope must never be advertised as a healthy deployed
@@ -270,7 +271,7 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 			if observed.ReadyReplicas != nil && *observed.ReadyReplicas < app.Spec.Replicas {
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, appRouteUnavailableMessage(app))
 			}
-			if observed.Phase == "deployed" && !appObservedReadyForServing(app, time.Now().UTC()) {
+			if observed.Phase == "deployed" && !managedappstatus.ReadyForServing(app, time.Now().UTC()) {
 				return model.EdgeRouteStatusUnavailable, firstNonEmpty(observed.Message, "deployed status lacks complete serving evidence")
 			}
 			return model.EdgeRouteStatusActive, ""
@@ -292,7 +293,7 @@ func edgeRouteStatus(app model.App, runtimeID string, runtimeFound bool) (string
 func edgeRouteServingDuringRollout(app model.App, now time.Time) bool {
 	o := app.ObservedStatus
 	if o == nil || o.Phase != "deploying" || app.Spec.Replicas <= 0 ||
-		!appObservedStatusFresh(o, now) || o.ClusterID == "" || o.EvidenceSource == "" ||
+		!managedappstatus.ObservationFresh(o, now) || o.ClusterID == "" || o.EvidenceSource == "" ||
 		o.Generation <= 0 || o.ObservedGeneration < o.Generation ||
 		o.RuntimeID == "" || o.RuntimeID != app.Spec.RuntimeID ||
 		o.ServingReplicas == nil || *o.ServingReplicas <= 0 ||

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/platformcontrol"
 )
@@ -290,10 +291,10 @@ func (s *Server) buildRuntimeContinuityStatuses() ([]model.RuntimeContinuityStat
 			}
 			phase = observed.Phase
 			status.Evidence["phase"] = phase
-			if strings.EqualFold(strings.TrimSpace(phase), "deployed") && !appObservedReadyForServing(app, time.Now().UTC()) {
+			if strings.EqualFold(strings.TrimSpace(phase), "deployed") && !managedappstatus.ReadyForServing(app, time.Now().UTC()) {
 				status.Blockers = append(status.Blockers, "deployed observation lacks complete serving evidence")
 			}
-			if !appObservedStatusFresh(observed, time.Now().UTC()) || phase == "unknown" {
+			if !managedappstatus.ObservationFresh(observed, time.Now().UTC()) || phase == "unknown" {
 				status.Blockers = append(status.Blockers, "runtime observation is not fresh")
 			}
 			if observed.RuntimeObjectPresent != nil && !*observed.RuntimeObjectPresent {

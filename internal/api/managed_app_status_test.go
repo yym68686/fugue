@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
@@ -338,7 +339,7 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 		endpointMissing.Store(true)
 		apiServer.managedAppStatusCache.invalidate()
 		failed := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
-		if failed.ObservedStatus == nil || failed.ObservedStatus.ServingReleaseID != "" || appObservedReadyForServing(failed, time.Now().UTC()) {
+		if failed.ObservedStatus == nil || failed.ObservedStatus.ServingReleaseID != "" || managedappstatus.ReadyForServing(failed, time.Now().UTC()) {
 			t.Fatal("implicit identity bypassed independent endpoint readiness")
 		}
 
@@ -2135,9 +2136,9 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	})
 	// Keep this unit test deterministic; production immediately schedules the
 	// refresh, while the assertion below exercises the safe interim projection.
-	apiServer.managedAppStatusCache.mu.Lock()
-	apiServer.managedAppStatusCache.listRefreshNotBefore = now.Add(time.Hour)
-	apiServer.managedAppStatusCache.mu.Unlock()
+	_, _ = apiServer.managedAppStatusCache.refresh.List(func() (managedAppStatusListCacheEntry, error) {
+		return managedAppStatusListCacheEntry{}, errors.New("test refresh unavailable")
+	})
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
 	}
@@ -2215,8 +2216,8 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsAgedExpiredObservation(t *
 		items:       map[string]runtime.ManagedAppObject{app.ID: managed},
 		ok:          true,
 		clusterID:   "cluster-test-uid",
-		refreshedAt: now.Add(-defaultAppObservedStatusMaxAge - time.Second),
-		expiresAt:   now.Add(-defaultAppObservedStatusMaxAge),
+		refreshedAt: now.Add(-managedappstatus.MaxObservationAge - time.Second),
+		expiresAt:   now.Add(-managedappstatus.MaxObservationAge),
 	})
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
@@ -2327,30 +2328,6 @@ func TestEdgeRouteRejectsIncompleteDeployedObservation(t *testing.T) {
 	}
 }
 
-func TestAppObservedReadyForServingRequiresDesiredReplicaAgreement(t *testing.T) {
-	t.Parallel()
-	ready := 1
-	present := true
-	app := model.App{
-		Spec: model.AppSpec{Image: "registry.example/app:v1", Ports: []int{8080}, Replicas: 1},
-		ObservedStatus: &model.AppObservedStatus{
-			Phase: "deployed", DesiredReplicas: 1, ReadyReplicas: &ready,
-			RuntimeObjectPresent: &present, NamespacePresent: &present, ServicePresent: &present,
-			EndpointPresent: &present, EndpointReady: &present, PhysicalReplicas: &ready,
-			PhysicalDesired: &ready, ImagePresent: &present, Fresh: true, ObservedAt: time.Now().UTC(),
-			ClusterID: "cluster-current", Generation: 2, ObservedGeneration: 2,
-			EvidenceSource: runtime.AppObservationSourceKubernetesAPI,
-		},
-	}
-	if !appObservedReadyForServing(app, time.Now().UTC()) {
-		t.Fatal("complete matching runtime evidence should be publishable")
-	}
-	app.ObservedStatus.DesiredReplicas = 0
-	if appObservedReadyForServing(app, time.Now().UTC()) {
-		t.Fatal("observed desired replicas below the durable spec were accepted")
-	}
-}
-
 func TestEdgeRoutePreservesAuthoritativeAbsenceWhenDesiredReplicasZero(t *testing.T) {
 	ready := 0
 	present := false
@@ -2405,9 +2382,7 @@ func TestOverlayManagedAppStatusCachedBacksOffAfterBackgroundListError(t *testin
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		apiServer.managedAppStatusCache.mu.RLock()
-		blocked := time.Now().Before(apiServer.managedAppStatusCache.listRefreshNotBefore)
-		apiServer.managedAppStatusCache.mu.RUnlock()
+		blocked := !apiServer.managedAppStatusCache.refresh.ListAllowed(time.Now())
 		if blocked {
 			break
 		}

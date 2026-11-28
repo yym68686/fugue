@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/store"
@@ -1452,11 +1453,11 @@ func appDomainRouteActivityCheck(app model.App, configurationReady bool, now tim
 		check.Message = "application service protocol does not support HTTP routing"
 		return check
 	}
-	if appObservedReadyForServing(app, now) {
+	if managedappstatus.ReadyForServing(app, now) {
 		check.Status = "pass"
 		return check
 	}
-	if !appObservedStatusFresh(app.ObservedStatus, now) {
+	if !managedappstatus.ObservationFresh(app.ObservedStatus, now) {
 		check.Status = "unknown"
 		check.Message = "fresh application runtime evidence is unavailable"
 		return check
