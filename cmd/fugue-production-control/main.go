@@ -33,6 +33,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
+       fugue-production-control draft-storage-audit JOURNAL_CONFIG REQUEST SHADOW
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
        fugue-production-control shadow-dns-policy HTTPS_ORIGIN READ_TOKEN_FILE NEXT_PRODUCER_ARTIFACT_ID
@@ -84,6 +85,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New(usage)
 		}
 		return shadowStorageAudit(ctx, args[1:], out)
+	case "draft-storage-audit":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		return draftStorageAudit(ctx, args[1], args[2], args[3], out)
 	case "observe-storage-audit-owner":
 		if len(args) != 2 {
 			return errors.New(usage)
@@ -611,6 +617,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		var hold json.RawMessage
 		var dns *dnscontrol.Payload
 		var handoff *productioncontrol.FrontWorkerShadow
+		var storageAudit *productioncontrol.StorageAuditShadow
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			hold, err = participation.InspectHold(s)
 			if err != nil {
@@ -631,13 +638,21 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			handoff = &p
 		}
+		if s.Intent.ResourceID == productioncontrol.StorageAuditPolicyResource {
+			p, err := productioncontrol.InspectStorageAuditPolicy(s)
+			if err != nil {
+				return err
+			}
+			storageAudit = &p
+		}
 		return emit(struct {
-			Digest      string                               `json:"digest"`
-			Intent      productioncontrol.Intent             `json:"intent"`
-			Hold        json.RawMessage                      `json:"hold,omitempty"`
-			DNS         *dnscontrol.Payload                  `json:"dns,omitempty"`
-			FrontWorker *productioncontrol.FrontWorkerShadow `json:"frontWorker,omitempty"`
-		}{digest, s.Intent, hold, dns, handoff})
+			Digest       string                                `json:"digest"`
+			Intent       productioncontrol.Intent              `json:"intent"`
+			Hold         json.RawMessage                       `json:"hold,omitempty"`
+			DNS          *dnscontrol.Payload                   `json:"dns,omitempty"`
+			FrontWorker  *productioncontrol.FrontWorkerShadow  `json:"frontWorker,omitempty"`
+			StorageAudit *productioncontrol.StorageAuditShadow `json:"storageAudit,omitempty"`
+		}{digest, s.Intent, hold, dns, handoff, storageAudit})
 	case "sign":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -662,6 +677,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		}
 		if s.Intent.Operation == productioncontrol.FrontWorker {
 			if _, err := productioncontrol.InspectFrontWorker(s); err != nil {
+				return err
+			}
+		}
+		if s.Intent.ResourceID == productioncontrol.StorageAuditPolicyResource {
+			if _, err := productioncontrol.InspectStorageAuditPolicy(s); err != nil {
 				return err
 			}
 		}

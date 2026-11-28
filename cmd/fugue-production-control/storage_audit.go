@@ -9,10 +9,36 @@ import (
 	"io"
 	"time"
 
+	"fugue/internal/productioncontrol"
 	"fugue/internal/storageaudit"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 )
+
+func draftStorageAudit(ctx context.Context, journalPath, request, shadowPath string, out io.Writer) error {
+	raw, err := readFile(shadowPath, 16<<10, false)
+	if err != nil {
+		return err
+	}
+	shadow, err := productioncontrol.DecodeStorageAuditShadow(raw)
+	if err != nil {
+		return err
+	}
+	return withJournal(ctx, journalPath, true, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+		state, err := j.ReadResource(ctx, productioncontrol.Scope{ClusterID: cluster, ResourceID: productioncontrol.StorageAuditPolicyResource})
+		if err != nil {
+			return err
+		}
+		if state.Pending != "" {
+			return productioncontrol.ErrResourceBusy
+		}
+		submission, err := productioncontrol.DraftStorageAuditPolicy(cluster, request, state.LastVerified, shadow)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(submission)
+	})
+}
 
 func observeStorageAudit(ctx context.Context, path string, out io.Writer) error {
 	provider, db, err := openStorageAuditObserver(path)

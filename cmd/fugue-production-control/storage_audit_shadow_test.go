@@ -24,7 +24,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 	}
 	target := current
 	target.SourcePageRows = 96
-	spec := storageAuditShadowSpec{
+	spec := productioncontrol.StorageAuditShadowBinding{
 		Kubernetes: productioncontrol.ParticipationKubernetesBinding{NamespaceUID: "namespace-v1"},
 		Namespace:  "control", ConfigMap: "storage", ConfigMapUID: "storage-v1",
 	}
@@ -36,7 +36,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 		wantError    string
 	}{
 		{name: "same provider facts", afterVersion: "1"},
-		{name: "concurrent Change", afterVersion: "2", wantError: "changed during"},
+		{name: "concurrent change", afterVersion: "2", wantError: "changed during"},
 		{name: "configMap recreation", afterVersion: "2", recreate: true, wantError: "ConfigMap does not match"},
 		{name: "database-only commit", afterVersion: "1", diverge: true, wantError: "policy disagree"},
 	} {

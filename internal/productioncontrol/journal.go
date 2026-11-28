@@ -90,6 +90,11 @@ func (j *Journal) RecordIntent(ctx context.Context, actor string, intent Intent,
 			return Recorded{}, err
 		}
 	}
+	if intent.ResourceID == StorageAuditPolicyResource {
+		if _, err := InspectStorageAuditPolicy(Submission{intent, payload}); err != nil {
+			return Recorded{}, err
+		}
+	}
 	intentDigest, err := intent.Digest()
 	if err != nil {
 		return Recorded{}, err

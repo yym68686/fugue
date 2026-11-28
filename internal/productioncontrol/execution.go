@@ -320,6 +320,9 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if intent.Operation == ParticipationTopology || intent.Operation == DNSCutover || intent.ResourceID == GlobalProducerCutoverResource {
 			return false, errors.New("topology and cutover intents do not authorize ordinary execution")
 		}
+		if intent.ResourceID == StorageAuditPolicyResource {
+			return false, errors.New("storage audit policy requires a provider-fenced executor")
+		}
 		if intent.Operation == FrontWorker {
 			if _, err := InspectFrontWorker(Submission{intent, payload}); err != nil {
 				return false, err
