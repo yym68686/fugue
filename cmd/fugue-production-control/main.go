@@ -36,6 +36,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control journal-recovery-checkpoint JOURNAL_CONFIG [POSTGRES_SNAPSHOT]
        fugue-production-control journal-recovery-verify JOURNAL_CONFIG CHECKPOINT_DIGEST
        fugue-production-control verify-release-recovery-mirror CONFIG
+       fugue-production-control observe-sealed-release-recovery-pair NAMESPACE COMPONENT KUBECONFIG CONTEXT
+       fugue-production-control verify-sealed-release-recovery-mirror CONFIG KUBECONFIG CONTEXT
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -91,6 +93,24 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "observe-sealed-release-recovery-pair":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		client, err := sealedRecoveryClient(args[3], args[4])
+		if err != nil {
+			return err
+		}
+		pair, err := observeSealedRecoveryPair(ctx, client, args[1], args[2])
+		if err != nil {
+			return err
+		}
+		return emit(pair)
+	case "verify-sealed-release-recovery-mirror":
+		if len(args) != 4 {
+			return errors.New(usage)
+		}
+		return verifySealedReleaseRecoveryMirror(ctx, args[1], args[2], args[3], out)
 	case "verify-release-recovery-mirror":
 		if len(args) != 2 {
 			return errors.New(usage)
