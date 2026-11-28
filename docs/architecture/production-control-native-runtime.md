@@ -791,6 +791,16 @@ and does not record an intent or submit a release. Use the standalone
 
 ## API-independent bootstrap
 
+The standalone `build-native-control` workflow can build Linux candidate
+binaries for the bootstrap, Guardian, the declarative release executor and
+the production-control CLI. It runs on a GitHub-hosted runner with source
+read permissions and uploads only to the run's artifact storage. The
+checksums and source revision help identify a candidate; they are not
+production approval or independent custody. There is no promotion step.
+Verify a candidate and retain the approved binary or image independently of
+GitHub before attempting a disconnected drill. The separate legacy release
+workflow remains in effect until provider-side cutover is proven.
+
 Build the standalone image with `Dockerfile.release-bootstrap`. It does not
 contain the Fugue API, Python, or a provider administration client. Run it
 outside the API Deployment's lifecycle. It connects directly to PostgreSQL;

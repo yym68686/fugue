@@ -527,6 +527,7 @@ script	scripts/verify_registry_image.py	migrate	unprivileged build check or scop
 script	scripts/verify_ssh_front_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_ssh_front_transport.py	migrate	unprivileged build check or scoped runtime verification
 workflow-job	.github/workflows/build-cli.yml#package	migrate	unprivileged source checks or build
+workflow-job	.github/workflows/build-native-control.yml#candidate-binaries	migrate	unprivileged candidate binaries only; no production enrollment or approval
 workflow-job	.github/workflows/ci.yml#agent_edge_activation	migrate	native platform policy and reconciliation
 workflow-job	.github/workflows/ci.yml#agent_edge_shadow_policy	migrate	native platform policy and reconciliation
 workflow-job	.github/workflows/ci.yml#agent_edge_trust	migrate	native platform policy and reconciliation
