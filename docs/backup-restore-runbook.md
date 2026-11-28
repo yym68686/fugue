@@ -143,6 +143,24 @@ images from that origin; the bundle pins the repository. Neither command
 authenticates production approval, grants write access, or certifies rollout,
 rollback, or serving health. Do not apply the templates as a recovery shortcut.
 
+To stage byte-exact inputs for the next Guardian baseline without a provider
+connection, export the retained versions into separate, new private directories:
+
+```bash
+fugue-production-control stage-release-registry-rehome-input "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" current "$NEW_CURRENT_DIRECTORY"
+fugue-production-control stage-release-registry-rehome-input "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" rollback "$NEW_ROLLBACK_DIRECTORY"
+```
+
+Each `manifest.json` retains the corresponding archived resource set,
+including unchanged companion Services. Only the reviewed Deployment image
+references and its image stamp at that version are relocated. The output
+identifies the role, companion identities, original monitor digest, and the
+new exact manifest digest. Keep the input and the original archive private.
+This is offline staging, not a fresh registry readback or a release seal.
+Do not apply the staged set: the current single-Deployment native executor
+does not accept sets with companions, and staging neither changes the live
+monitor pointer nor establishes the new journal LKG.
+
 For the registry-only move, start from a plain Deployment freeze. Keep the
 legacy sources disabled and independently prove that their credentials were
 revoked and requests drained. Do not enable this exception as part of normal

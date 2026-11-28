@@ -103,14 +103,14 @@ func deriveRegistryRehomeRecovery(archive verifiedReleaseRecoveryArchive, review
 // the single Deployment in each derived template. Keep this package
 // private: it contains the same historical manifests as the source archive.
 func BuildRegistryRehomeRecoveryBundle(raw []byte, archiveDigest string, s productioncontrol.Submission) ([]byte, RegistryRehomeRecoveryReport, error) {
-	return buildRegistryRehomeRecoveryBundle(raw, archiveDigest, s, nil)
-}
-
-func buildRegistryRehomeRecoveryBundle(raw []byte, archiveDigest string, s productioncontrol.Submission, expected *registryRehomeRecoveryBundle) ([]byte, RegistryRehomeRecoveryReport, error) {
 	archive, err := readReleaseRecoveryArchive(raw, archiveDigest)
 	if err != nil {
 		return nil, RegistryRehomeRecoveryReport{}, err
 	}
+	return buildRegistryRehomeRecoveryBundle(raw, archive, s, nil)
+}
+
+func buildRegistryRehomeRecoveryBundle(raw []byte, archive verifiedReleaseRecoveryArchive, s productioncontrol.Submission, expected *registryRehomeRecoveryBundle) ([]byte, RegistryRehomeRecoveryReport, error) {
 	review, err := InspectRegistryRehomeSubmission(s)
 	if err != nil {
 		return nil, RegistryRehomeRecoveryReport{}, err
@@ -131,7 +131,7 @@ func buildRegistryRehomeRecoveryBundle(raw []byte, archiveDigest string, s produ
 		return nil, RegistryRehomeRecoveryReport{}, err
 	}
 	d := review.Draft
-	return packaged, RegistryRehomeRecoveryReport{digest(packaged), archiveDigest, intent, d.Workload,
+	return packaged, RegistryRehomeRecoveryReport{digest(packaged), archive.report.ArchiveDigest, intent, d.Workload,
 		RegistryRehomeRecoveryVersion{d.Current.RecordDigest, digest(current), d.Current.IndependentImage},
 		RegistryRehomeRecoveryVersion{d.Rollback.RecordDigest, digest(rollback), d.Rollback.IndependentImage}}, nil
 }
@@ -140,26 +140,46 @@ func buildRegistryRehomeRecoveryBundle(raw []byte, archiveDigest string, s produ
 // reconstructs both templates, and optionally checks that both private
 // runtime images still read back from the independent OCI origin.
 func VerifyRegistryRehomeRecoveryBundle(ctx context.Context, raw []byte, pin string, registry *IndependentRegistry) (RegistryRehomeRecoveryReport, error) {
-	if len(raw) == 0 || len(raw) > MaxRegistryRehomeRecoveryBytes || !digestPattern.MatchString(pin) || digest(raw) != pin {
-		return RegistryRehomeRecoveryReport{}, errors.New("registry rehome recovery bundle does not match its independently pinned digest or size bound")
+	verified, err := verifyRegistryRehomeRecoveryBundle(raw, pin)
+	if err != nil {
+		return RegistryRehomeRecoveryReport{}, err
 	}
-	var bundle registryRehomeRecoveryBundle
-	if err := decodeStrict(raw, &bundle); err != nil || bundle.Schema != registryRehomeRecoverySchema {
-		return RegistryRehomeRecoveryReport{}, errors.New("invalid registry rehome recovery bundle")
-	}
-	canonical, report, err := buildRegistryRehomeRecoveryBundle(bundle.Archive, digest(bundle.Archive), bundle.Review, &bundle)
-	if err != nil || !bytes.Equal(canonical, raw) {
-		return RegistryRehomeRecoveryReport{}, errors.Join(errors.New("registry rehome recovery bundle is not its canonical sealed projection"), err)
-	}
+	report := verified.report
 	if registry != nil {
 		ref, err := name.NewDigest(report.Current.Image, name.StrictValidation)
 		if err != nil {
 			return RegistryRehomeRecoveryReport{}, err
 		}
-		draft, err := registry.DraftRegistryRehome(ctx, bundle.Archive, report.ArchiveDigest, ref.Context().Name(), ref.Context().Name())
-		if err != nil || draft.DraftDigest != bundle.Review.Intent.TargetDigest {
+		draft, err := registry.DraftRegistryRehome(ctx, verified.bundle.Archive, report.ArchiveDigest, ref.Context().Name(), ref.Context().Name())
+		if err != nil || draft.DraftDigest != verified.bundle.Review.Intent.TargetDigest {
 			return RegistryRehomeRecoveryReport{}, errors.Join(errors.New("independent registry readback differs from the recovery bundle"), err)
 		}
 	}
 	return report, nil
+}
+
+type verifiedRegistryRehomeRecoveryBundle struct {
+	bundle  registryRehomeRecoveryBundle
+	archive verifiedReleaseRecoveryArchive
+	report  RegistryRehomeRecoveryReport
+}
+
+func verifyRegistryRehomeRecoveryBundle(raw []byte, pin string) (verifiedRegistryRehomeRecoveryBundle, error) {
+	var none verifiedRegistryRehomeRecoveryBundle
+	if len(raw) == 0 || len(raw) > MaxRegistryRehomeRecoveryBytes || !digestPattern.MatchString(pin) || digest(raw) != pin {
+		return none, errors.New("registry rehome recovery bundle does not match its independently pinned digest or size bound")
+	}
+	var bundle registryRehomeRecoveryBundle
+	if err := decodeStrict(raw, &bundle); err != nil || bundle.Schema != registryRehomeRecoverySchema {
+		return none, errors.New("invalid registry rehome recovery bundle")
+	}
+	archive, err := readReleaseRecoveryArchive(bundle.Archive, digest(bundle.Archive))
+	if err != nil {
+		return none, errors.Join(errors.New("registry rehome recovery bundle contains an invalid sealed archive"), err)
+	}
+	canonical, report, err := buildRegistryRehomeRecoveryBundle(bundle.Archive, archive, bundle.Review, &bundle)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return none, errors.Join(errors.New("registry rehome recovery bundle is not its canonical sealed projection"), err)
+	}
+	return verifiedRegistryRehomeRecoveryBundle{bundle, archive, report}, nil
 }

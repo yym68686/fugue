@@ -43,6 +43,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-release-registry-rehome ARCHIVE PIN GROUP KUBECONFIG CONTEXT
        fugue-production-control draft-release-registry-rehome JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN GROUP REQUEST MIRROR_CONFIG
        fugue-production-control pack-release-registry-rehome ARCHIVE PIN SUBMISSION NEW_PRIVATE_DIRECTORY
+       fugue-production-control stage-release-registry-rehome-input BUNDLE PIN current|rollback NEW_PRIVATE_DIRECTORY
        fugue-production-control observe-release-registry-rehome-pending JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG
        fugue-production-control sign-registry-rehome-no-write DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control settle-registry-rehome-no-write JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG ACTOR SIGNED_CLOSURE
@@ -105,6 +106,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		return registryRehomeReviewCommand(ctx, args, out)
 	case "pack-release-registry-rehome":
 		return packRegistryRehomeRecovery(args[1:], out)
+	case "stage-release-registry-rehome-input":
+		return stageRegistryRehomeReleaseInput(args[1:], out)
 	case "observe-release-registry-rehome-pending":
 		return pendingRegistryRehomeCommand(ctx, args[1:], out, false)
 	case "sign-registry-rehome-no-write":

@@ -165,6 +165,26 @@ func packRegistryRehomeRecovery(args []string, out io.Writer) error {
 	return json.NewEncoder(out).Encode(report)
 }
 
+func stageRegistryRehomeReleaseInput(args []string, out io.Writer) error {
+	if len(args) != 4 || !filepath.IsAbs(args[0]) {
+		return errors.New(usage)
+	}
+	bundle, err := readFile(args[0], releaseguardian.MaxRegistryRehomeRecoveryBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(bundle)
+	manifest, report, err := releaseguardian.ExportRegistryRehomeReleaseInput(bundle, args[1], args[2])
+	if err != nil {
+		return err
+	}
+	defer clear(manifest)
+	if err := writePrivateReleaseRecovery(args[3], "manifest.json", manifest); err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
 func registryRehomeReviewCommand(ctx context.Context, args []string, out io.Writer) error {
 	draft := args[0] == "draft-release-registry-rehome"
 	if (!draft && len(args) != 6) || (draft && len(args) != 9) {

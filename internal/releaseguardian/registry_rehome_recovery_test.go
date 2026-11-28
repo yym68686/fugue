@@ -95,6 +95,61 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 			t.Fatalf("verification failed: %+v %v", observed, err)
 		}
 	}
+	for _, v := range []struct {
+		role    string
+		record  sealedRecoveryRecord
+		version RegistryRehomeRecoveryVersion
+	}{
+		{"current", sealed.forward, report.Current},
+		{"rollback", sealed.rollback, report.Rollback},
+	} {
+		t.Run("stage "+v.role, func(t *testing.T) {
+			manifest, input, err := ExportRegistryRehomeReleaseInput(raw, report.BundleDigest, v.role)
+			wantTarget := v.record.prepared.Forward
+			wantTarget.ImageRef, wantTarget.ManifestDigest = v.version.Image, digest(manifest)
+			if err != nil || input.Role != v.role || input.BundleDigest != report.BundleDigest || input.IntentDigest != report.IntentDigest ||
+				input.Workload != report.Workload || input.SourceRecordDigest != v.version.SourceRecordDigest || input.Target != wantTarget ||
+				len(input.Companions) != 1 || input.Companions[0].Kind != "Service" {
+				t.Fatalf("wrong staged input: %+v %v", input, err)
+			}
+			// Test bytes and roles, not just the manifest digest: the exact
+			// original Service must survive, including its historical stamps.
+			want := bytes.ReplaceAll(v.record.forward, []byte(v.record.version.Receipt.ImmutableRef), []byte(v.version.Image))
+			if !bytes.Equal(want, manifest) {
+				t.Fatal("the staged set changed more than the selected release's Deployment images")
+			}
+			for _, id := range input.Companions {
+				original, _ := declarativerelease.ResourceSetItem(v.record.forward, id)
+				derived, err := declarativerelease.ResourceSetItem(manifest, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a, _ := declarativerelease.CanonicalJSON(original)
+				b, _ := declarativerelease.CanonicalJSON(derived)
+				if !bytes.Equal(a, b) {
+					t.Fatal("staging changed a companion object")
+				}
+			}
+			if err := VerifyNativeDeploymentImages(manifest, report.Workload, input.Target); err == nil {
+				t.Fatal("the static input must not bypass the current single-Deployment executor")
+			}
+			key := Key{Component: sealed.report.Pair.Component, Group: "global"}
+			next := guardianPlanRelease(key, strings.Repeat("a", 40), wantTarget.ConfigSHA, v.record.version.Receipt.TopDigest,
+				&declarativerelease.Delivery{Writer: "guardian", Group: key.Group})
+			next.Artifact.Repository = current.Repository
+			plan := guardianPlan(t, wantTarget.ConfigSHA, strings.Repeat("a", 40), next)
+			bound, err := declarativerelease.BindGuardianLKG(plan, key.Component, declarativerelease.RenderedManifests{Forward: manifest}, manifest)
+			if err != nil || !bytes.Equal(bound.LKG, manifest) || bound.LKGDigest != input.Target.ManifestDigest {
+				t.Fatalf("ordinary Guardian exact-LKG binder rejected the staged input: %v", err)
+			}
+		})
+	}
+	if staged, _, err := ExportRegistryRehomeReleaseInput(raw, otherDigest, "current"); err == nil || staged != nil {
+		t.Fatal("staged a manifest from an unpinned recovery bundle")
+	}
+	if staged, _, err := ExportRegistryRehomeReleaseInput(raw, report.BundleDigest, "unknown"); err == nil || staged != nil {
+		t.Fatal("staged a manifest with an ambiguous recovery role")
+	}
 	delete(objects, oldLayer)
 	if _, err := VerifyRegistryRehomeRecoveryBundle(ctx, raw, report.BundleDigest, registry); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {
 		t.Fatalf("mirror verification did not detect missing rollback layer: %v", err)
@@ -110,6 +165,9 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 		}
 		if _, err := VerifyRegistryRehomeRecoveryBundle(ctx, tampered, digest(tampered), nil); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("recomputed pin let a modified bundle pass: %v; wanted %s", err, want)
+		}
+		if manifest, _, err := ExportRegistryRehomeReleaseInput(tampered, digest(tampered), "rollback"); err == nil || manifest != nil {
+			t.Fatal("staged an input from an invalid projection")
 		}
 	}
 	reject(func(b *registryRehomeRecoveryBundle) { b.Rollback = b.Current }, "differs from the sealed projection")
