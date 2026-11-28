@@ -4,7 +4,6 @@ package inventoryscan
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/url"
@@ -73,11 +72,11 @@ type checkpoint struct {
 	Error       string
 }
 type namespaceGroup struct {
-	key      string
+	key      [sha256.Size]byte
 	backends []model.BackupBackend
 }
 
-func checkpointKey(backends []model.BackupBackend) string {
+func checkpointKey(backends []model.BackupBackend) [sha256.Size]byte {
 	// Backend identity, ownership and credential revision are part of the cache
 	// boundary. Only a digest is persisted; credentials never enter a checkpoint.
 	copyBackends := append([]model.BackupBackend(nil), backends...)
@@ -87,8 +86,7 @@ func checkpointKey(backends []model.BackupBackend) string {
 	}
 	sort.Slice(copyBackends, func(i, j int) bool { return copyBackends[i].ID < copyBackends[j].ID })
 	b, _ := json.Marshal(copyBackends)
-	h := sha256.Sum256(b)
-	return "backup-inventory/v3/" + hex.EncodeToString(h[:])
+	return sha256.Sum256(b)
 }
 
 // Repository blocks are owned by the snapshot engine, not by a single artifact.
@@ -124,8 +122,8 @@ type Store interface {
 	Backends() ([]model.BackupBackend, error)
 	BackendForInventory(id string) (model.BackupBackend, error)
 	Artifacts() ([]model.BackupArtifact, error)
-	ReadPages(context.Context, string) (Pages, []byte, error)
-	UpdatePages(context.Context, string, func(Pages, []byte) (Pages, error), func([]byte) ([]byte, error)) (bool, error)
+	ReadPages(context.Context, [sha256.Size]byte) (Pages, []byte, error)
+	UpdatePages(context.Context, [sha256.Size]byte, func(Pages, []byte) (Pages, error), func([]byte) ([]byte, error)) (bool, error)
 }
 type Page struct {
 	Cursor  string
@@ -179,14 +177,14 @@ func (s *Service) groups() (map[string]*namespaceGroup, error) {
 func (s *Service) Run(ctx context.Context, onError func(error)) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	next := map[string]time.Time{}
+	next := map[[sha256.Size]byte]time.Time{}
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		groups, err := s.groups()
 		if err == nil {
-			live := map[string]bool{}
+			live := map[[sha256.Size]byte]bool{}
 			for _, g := range groups {
 				live[g.key] = true
 				if time.Now().Before(next[g.key]) {

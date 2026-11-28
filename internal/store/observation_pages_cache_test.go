@@ -257,7 +257,7 @@ func TestObservationPagesCachePostgresFreshBytesAndSnapshot(t *testing.T) {
 		s.db.Exec(`DELETE FROM fugue_observation_checkpoint_heads WHERE checkpoint_key=$1`, dbKey)
 	})
 	legacy := func([]byte) ([]byte, error) { t.Fatal("unexpected legacy write"); return nil, nil }
-	if _, err := s.UpdateObservationPages(t.Context(), key, func(ObservationPages, []byte) (ObservationPages, error) {
+	if _, err := s.updateObservationPages(t.Context(), key, func(ObservationPages, []byte) (ObservationPages, error) {
 		return ObservationPages{Metadata: []byte("first"), Pages: map[string][]byte{"page": []byte("before")}}, nil
 	}, legacy); err != nil {
 		t.Fatal(err)
@@ -283,7 +283,7 @@ func TestObservationPagesCachePostgresFreshBytesAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateObservationPages(t.Context(), key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
+	if _, err := s.updateObservationPages(t.Context(), key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
 		p.Metadata = []byte("second")
 		p.Pages["page"] = []byte("new generation")
 		return p, nil
@@ -324,7 +324,7 @@ func BenchmarkObservationPagesVerifiedReuse(b *testing.B) {
 	for i := 0; i < 64; i++ {
 		fixture.Pages[fmt.Sprintf("page-%03d", i)] = []byte(strings.Repeat("synthetic-page-", 4096))
 	}
-	_, err := s.UpdateObservationPages(b.Context(), key, func(ObservationPages, []byte) (ObservationPages, error) { return fixture, nil }, func([]byte) ([]byte, error) { return nil, nil })
+	_, err := s.updateObservationPages(b.Context(), key, func(ObservationPages, []byte) (ObservationPages, error) { return fixture, nil }, func([]byte) ([]byte, error) { return nil, nil })
 	if err != nil {
 		b.Fatal(err)
 	}

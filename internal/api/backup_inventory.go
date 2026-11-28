@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 
 	"fugue/internal/backupusage"
 	"fugue/internal/backupusage/inventoryscan"
@@ -25,14 +26,18 @@ func (s *Server) StartBackgroundBackupInventory(ctx context.Context) {
 }
 
 func newBackupInventory(db *store.Store, cfg BackupInventoryConfig) *inventoryscan.Service {
-	return inventoryscan.New(backupInventoryStore{db}, openBackupInventory, cfg, backupFailedRunGCGrace)
+	source := backupInventoryStore{db: db, checkpoints: db.BackupInventoryCheckpointWriter()}
+	return inventoryscan.New(source, openBackupInventory, cfg, backupFailedRunGCGrace)
 }
 
 func backupRepositoryPrefix(artifact model.BackupArtifact, backend model.DataBackend) string {
 	return inventoryscan.RepositoryPrefix(artifact, backend)
 }
 
-type backupInventoryStore struct{ db *store.Store }
+type backupInventoryStore struct {
+	db          *store.Store
+	checkpoints store.BackupInventoryCheckpoints
+}
 
 func (s backupInventoryStore) Backends() ([]model.BackupBackend, error) {
 	return s.db.ListBackupBackends("", true)
@@ -54,13 +59,13 @@ func (s backupInventoryStore) Artifacts() ([]model.BackupArtifact, error) {
 	return artifacts, nil
 }
 
-func (s backupInventoryStore) ReadPages(ctx context.Context, key string) (inventoryscan.Pages, []byte, error) {
-	pages, raw, err := s.db.ReadObservationPages(ctx, key)
+func (s backupInventoryStore) ReadPages(ctx context.Context, key [sha256.Size]byte) (inventoryscan.Pages, []byte, error) {
+	pages, raw, err := s.checkpoints.Read(ctx, key)
 	return inventoryscan.Pages(pages), raw, err
 }
 
-func (s backupInventoryStore) UpdatePages(ctx context.Context, key string, update func(inventoryscan.Pages, []byte) (inventoryscan.Pages, error), legacy func([]byte) ([]byte, error)) (bool, error) {
-	return s.db.UpdateObservationPages(ctx, key, func(pages store.ObservationPages, raw []byte) (store.ObservationPages, error) {
+func (s backupInventoryStore) UpdatePages(ctx context.Context, key [sha256.Size]byte, update func(inventoryscan.Pages, []byte) (inventoryscan.Pages, error), legacy func([]byte) ([]byte, error)) (bool, error) {
+	return s.checkpoints.Update(ctx, key, func(pages store.ObservationPages, raw []byte) (store.ObservationPages, error) {
 		result, err := update(inventoryscan.Pages(pages), raw)
 		return store.ObservationPages(result), err
 	}, legacy)
