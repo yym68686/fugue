@@ -702,6 +702,36 @@ execution results. A committed write with a pending witness leaves the last
 verified journal version in place. Rollback uses another signed intent
 selecting the exact preceding policy and a new receipt.
 
+## Observation sample retention ownership
+
+`fugue-production-control observe-sample-retention CONFIG` reads the active
+owner and durable worker progress for network, performance and resource-usage
+sample retention. Its private configuration has `databaseUrl` and a
+`provider` object with `systemId`, `database` and `role`. Connect to the
+exact primary over hostname-verified TLS using a distinct login. Grant
+`USAGE` on `fugue_observation_maintenance`, `SELECT` on
+`fugue_observation_maintenance.sample_worker_progress` and `EXECUTE` on
+`pg_catalog.pg_control_system()`. The observer must have no role memberships,
+sample write rights, maintenance execution rights, or `CREATE` on
+`public` or `fugue_observation_maintenance`.
+
+The report distinguishes an API writer with the worker in standby, the
+worker selected with progress pending, and all three worker targets reporting
+completed passes. A missing or mixed delete fence fails observation. The
+proposed provider actions are derived from that database state. They grant no
+release authority and do not validate live or rollback artifacts, the
+independent worker scrape, or Actions/runner revocation. The source currently
+retains these checks in the legacy maintenance lane. A native writer must
+still bind that evidence to the exact approved intent and apply the existing
+all-target fence and owner swap together. On admission contention, leave
+the owner unchanged and obtain fresh evidence before any later attempt.
+
+The 2026-11-28 legacy release attempt at `998ed6168` reached the production
+transaction. PostgreSQL rejected admission because an existing sample
+retention or ingestion transaction held the lock. A read-only query after
+the attempt reported `owner=api`, no fence and zero worker passes on all
+three targets.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
