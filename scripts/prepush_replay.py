@@ -20,7 +20,6 @@ from scripts import prepush_shadow_fixture
 
 
 MIN_SAMPLES = 20
-ARTIFACT_PROFILES = ("linux/amd64", "linux/arm64")
 
 
 def p95_ms(samples):
@@ -58,10 +57,11 @@ def legacy_sample():
         }
 
 
-def candidate_sample(*, build_first=False):
+def candidate_sample(*, build_first=False, verify_targets=False):
     results = []
     started = time.monotonic()
-    result = prepush._run_gate(shadow_select=prepush_shadow.report, shadow_result=results.append,
+    selector = prepush_shadow.conservative_report if verify_targets else prepush_shadow.report
+    result = prepush._run_gate(shadow_select=selector, shadow_result=results.append,
                                shadow_build_first=build_first)
     sample = results.pop()
     sample["elapsedMs"] = round((time.monotonic() - started) * 1000)
@@ -194,7 +194,7 @@ def replay(case, base, count, run_oracle, oracle_timeout):
     }
 
 
-def replay_incremental(case, base, count, oracle_timeout, *, build_first=False):
+def replay_incremental(case, base, count, oracle_timeout, *, build_first=False, verify_targets=False):
     # Each policy warms its own baseline cache. Every measured pair uses the
     # same Go source, and neither cache has seen those exact bytes previously.
     if (prepush.git_output(["rev-parse", base]) != prepush.git_output(["rev-parse", "HEAD"])
@@ -236,8 +236,10 @@ def replay_incremental(case, base, count, oracle_timeout, *, build_first=False):
                     path.write_bytes(source.replace(marker, f"fugue_shadow_sample_{index + 1:03}".encode("ascii"), 1))
                 snapshot = prepush_shadow.snapshot(base)
                 if index == 0:
-                    target_comparison = prepush_shadow.compare_targets(base, ARTIFACT_PROFILES)
-                candidate = (lambda: candidate_sample(build_first=True)) if build_first else candidate_sample
+                    target_comparison = prepush_shadow.compare_targets(base, prepush_shadow.ARTIFACT_PROFILES)
+                candidate = candidate_sample
+                if build_first or verify_targets:
+                    candidate = lambda: candidate_sample(build_first=build_first, verify_targets=verify_targets)
                 order = [("legacy", legacy_sample), ("candidate", candidate)]
                 if index % 2:
                     order.reverse()
@@ -247,7 +249,9 @@ def replay_incremental(case, base, count, oracle_timeout, *, build_first=False):
                         pair[name] = sample()
                 if selection is None:
                     selection = dict(pair["candidate"]["selection"])
-                    compare_selection = {"selection": target_comparison["native"]["selection"]}
+                    expected = (prepush_shadow.selection_from_comparison(target_comparison)
+                                if verify_targets else target_comparison["native"]["selection"])
+                    compare_selection = {"selection": expected}
                     check_selection(compare_selection, selection, "native target comparison")
                 check_selection(pair["candidate"], selection, f"sample {index + 1}")
                 if snapshot != prepush_shadow.snapshot(base):
@@ -267,6 +271,7 @@ def replay_incremental(case, base, count, oracle_timeout, *, build_first=False):
         "case": case,
         "cacheState": "separate-warm-baselines-distinct-edit-inputs",
         "candidateSchedule": "dependency-build-first" if build_first else "parallel",
+        "candidateTargetVerification": "per-sample" if verify_targets else "first-sample-outside-budget",
         "baselineSnapshot": baseline,
         "baselineWarmCommands": warm_commands,
         "machine": {"system": platform.system(), "release": platform.release(),
@@ -288,13 +293,14 @@ def main():
     parser.add_argument("--oracle-timeout", type=int, default=600)
     parser.add_argument("--incremental", action="store_true", help="replay distinct edits against two separate caches")
     parser.add_argument("--build-first", action="store_true", help="test dependency-based compile ordering in shadow")
+    parser.add_argument("--verify-targets", action="store_true", help="include artifact graph verification in each candidate timing")
     options = parser.parse_args()
     if options.samples < 1 or options.oracle_timeout < 1:
         parser.error("samples and oracle-timeout must be positive")
     if options.incremental and options.case not in prepush_shadow_fixture.CASES:
         parser.error("--incremental requires a known representative edit case")
-    if options.build_first and not options.incremental:
-        parser.error("--build-first requires --incremental")
+    if (options.build_first or options.verify_targets) and not options.incremental:
+        parser.error("--build-first and --verify-targets require --incremental")
     try:
         os.environ["PREPUSH_BASE_REF"] = prepush.git_output(
             ["rev-parse", "--verify", f"{options.base}^{{commit}}"],
@@ -305,7 +311,8 @@ def main():
         os.environ.pop("PREPUSH_MAX_ELAPSED_SECONDS", None)
         if options.incremental:
             result = replay_incremental(options.case, os.environ["PREPUSH_BASE_REF"],
-                                        options.samples, options.oracle_timeout, build_first=options.build_first)
+                                        options.samples, options.oracle_timeout, build_first=options.build_first,
+                                        verify_targets=options.verify_targets)
         else:
             result = replay(options.case, os.environ["PREPUSH_BASE_REF"], options.samples,
                             options.full_oracle, options.oracle_timeout)
