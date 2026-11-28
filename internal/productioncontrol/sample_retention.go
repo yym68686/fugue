@@ -34,11 +34,12 @@ type SampleRetentionProgress struct {
 }
 
 type SampleRetentionObservation struct {
-	Provider SampleRetentionProvider   `json:"provider"`
-	Resource string                    `json:"resource"`
-	State    string                    `json:"state"`
-	Actions  []string                  `json:"actions"`
-	Targets  []SampleRetentionProgress `json:"targets"`
+	Provider   SampleRetentionProvider   `json:"provider"`
+	Resource   string                    `json:"resource"`
+	State      string                    `json:"state"`
+	TransferAt time.Time                 `json:"transferAt,omitzero"`
+	Actions    []string                  `json:"actions"`
+	Targets    []SampleRetentionProgress `json:"targets"`
 }
 
 func (p SampleRetentionProvider) valid() bool {
@@ -99,27 +100,7 @@ func (p SampleRetentionProvider) Observe(ctx context.Context, db *sql.DB) (Sampl
 	if err := tx.QueryRowContext(ctx, sampleRetentionObserverIdentity, p.SystemID, p.Database, p.Role).Scan(&matched); err != nil || !matched {
 		return SampleRetentionObservation{}, errors.New("sample retention observer identity, privileges or PostgreSQL primary did not match")
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT target,owner,fence_enforced,completed_passes,total_deleted,completed_at
-		FROM fugue_observation_maintenance.sample_worker_progress ORDER BY target COLLATE pg_catalog."C"`)
-	if err != nil {
-		return SampleRetentionObservation{}, errors.New("sample retention progress was not readable")
-	}
-	defer rows.Close()
-	targets := make([]SampleRetentionProgress, 0, len(sampleRetentionTargets))
-	for rows.Next() {
-		var entry SampleRetentionProgress
-		var at sql.NullTime
-		if len(targets) == len(sampleRetentionTargets) ||
-			rows.Scan(&entry.Target, &entry.Owner, &entry.DeleteFenced, &entry.CompletedPasses, &entry.TotalDeleted, &at) != nil {
-			return SampleRetentionObservation{}, errors.New("sample retention progress shape was invalid")
-		}
-		entry.CompletedAt = at.Time.UTC()
-		targets = append(targets, entry)
-	}
-	if rows.Err() != nil {
-		return SampleRetentionObservation{}, errors.New("sample retention progress read did not finish")
-	}
-	result, err := sampleRetentionObservation(p, targets)
+	result, err := readSampleRetentionProgress(ctx, tx, p)
 	if err != nil {
 		return SampleRetentionObservation{}, err
 	}
@@ -129,7 +110,44 @@ func (p SampleRetentionProvider) Observe(ctx context.Context, db *sql.DB) (Sampl
 	return result, nil
 }
 
-func sampleRetentionObservation(p SampleRetentionProvider, rows []SampleRetentionProgress) (SampleRetentionObservation, error) {
+func readSampleRetentionProgress(ctx context.Context, tx *sql.Tx, p SampleRetentionProvider) (SampleRetentionObservation, error) {
+	// A pre-migration observation may read the old view, which omits the
+	// transfer timestamp. An import always needs the upgraded projection.
+	rows, err := tx.QueryContext(ctx, `SELECT target,owner,fence_enforced,completed_passes,total_deleted,completed_at,
+		to_jsonb(p) ? 'transfer_at', (to_jsonb(p)->>'transfer_at')::timestamptz
+		FROM fugue_observation_maintenance.sample_worker_progress p ORDER BY target COLLATE pg_catalog."C"`)
+	if err != nil {
+		return SampleRetentionObservation{}, errors.New("sample retention progress was not readable")
+	}
+	defer rows.Close()
+	targets := make([]SampleRetentionProgress, 0, len(sampleRetentionTargets))
+	var transferAt time.Time
+	var hasTransferColumn bool
+	for rows.Next() {
+		var entry SampleRetentionProgress
+		var at, transfer sql.NullTime
+		var hasTransfer bool
+		if len(targets) == len(sampleRetentionTargets) ||
+			rows.Scan(&entry.Target, &entry.Owner, &entry.DeleteFenced, &entry.CompletedPasses, &entry.TotalDeleted,
+				&at, &hasTransfer, &transfer) != nil {
+			return SampleRetentionObservation{}, errors.New("sample retention progress shape was invalid")
+		}
+		entry.CompletedAt = at.Time.UTC()
+		if len(targets) == 0 {
+			hasTransferColumn = hasTransfer
+			transferAt = transfer.Time.UTC()
+		} else if hasTransfer != hasTransferColumn || !transferAt.Equal(transfer.Time) {
+			return SampleRetentionObservation{}, errors.New("sample retention targets disagree on transfer checkpoint")
+		}
+		targets = append(targets, entry)
+	}
+	if rows.Err() != nil {
+		return SampleRetentionObservation{}, errors.New("sample retention progress read did not finish")
+	}
+	return sampleRetentionObservation(p, transferAt, hasTransferColumn, targets)
+}
+
+func sampleRetentionObservation(p SampleRetentionProvider, transferAt time.Time, hasTransferColumn bool, rows []SampleRetentionProgress) (SampleRetentionObservation, error) {
 	inconsistent := errors.New("sample retention owner, fences or completed passes are inconsistent")
 	if len(rows) != len(sampleRetentionTargets) {
 		return SampleRetentionObservation{}, inconsistent
@@ -139,6 +157,9 @@ func sampleRetentionObservation(p SampleRetentionProvider, rows []SampleRetentio
 		return SampleRetentionObservation{}, inconsistent
 	}
 	worker := owner == "worker"
+	if hasTransferColumn && worker == transferAt.IsZero() {
+		return SampleRetentionObservation{}, inconsistent
+	}
 	passed := 0
 	for i, row := range rows {
 		if row.Target != sampleRetentionTargets[i] || row.Owner != owner || row.DeleteFenced != worker ||
@@ -147,10 +168,13 @@ func sampleRetentionObservation(p SampleRetentionProvider, rows []SampleRetentio
 			return SampleRetentionObservation{}, inconsistent
 		}
 		if row.CompletedPasses > 0 {
+			if hasTransferColumn && row.CompletedAt.Before(transferAt) {
+				return SampleRetentionObservation{}, inconsistent
+			}
 			passed++
 		}
 	}
-	r := SampleRetentionObservation{Provider: p, Resource: ObservationSampleRetentionResource, Targets: slices.Clone(rows)}
+	r := SampleRetentionObservation{Provider: p, Resource: ObservationSampleRetentionResource, TransferAt: transferAt, Targets: slices.Clone(rows)}
 	switch {
 	case !worker:
 		r.State = SampleRetentionAPIStandby

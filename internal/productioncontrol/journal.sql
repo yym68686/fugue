@@ -61,6 +61,18 @@ CREATE TABLE IF NOT EXISTS fugue_control.execution_claims (
     PRIMARY KEY (cluster_id, resource_id, fence)
 );
 
+-- The adopted sample retention owner has no reverse authorizer or production
+-- dispatch adapter. A durable baseline cannot become an executable claim.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_constraint
+        WHERE conrelid='fugue_control.execution_claims'::pg_catalog.regclass AND conname='observation_sample_retention_no_claim') THEN
+        ALTER TABLE fugue_control.execution_claims ADD CONSTRAINT observation_sample_retention_no_claim
+            CHECK (resource_id <> 'maintenance/observation-sample-retention-writer');
+    END IF;
+END;
+$$;
+
 CREATE TABLE IF NOT EXISTS fugue_control.execution_results (
     intent_digest text PRIMARY KEY REFERENCES fugue_control.execution_claims(intent_digest),
     outcome text NOT NULL CHECK (outcome IN ('applied', 'restored', 'not_applied')),

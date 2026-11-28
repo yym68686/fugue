@@ -159,7 +159,8 @@ func newWitnessedExecutionJournal(journal *Journal, source WitnessReader, truste
 			return nil, errors.New("invalid production execution witness trust")
 		}
 		if check == nil && (strings.HasPrefix(key.Scope.ResourceID, ParticipationNodeResourcePrefix) ||
-			strings.HasPrefix(key.Scope.ResourceID, FrontWorkerResourcePrefix) || key.Scope.ResourceID == StorageAuditPolicyResource) {
+			strings.HasPrefix(key.Scope.ResourceID, FrontWorkerResourcePrefix) || key.Scope.ResourceID == StorageAuditPolicyResource ||
+			key.Scope.ResourceID == ObservationSampleRetentionResource) {
 			return nil, errors.New("this production resource requires independent live readback")
 		}
 		if err := journal.VerifyIndependentObserverKey(key.PublicKey); err != nil {

@@ -37,6 +37,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control journal-recovery-verify JOURNAL_CONFIG CHECKPOINT_DIGEST
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
+       fugue-production-control sample-retention-baseline-checkpoint CONFIG
+       fugue-production-control sample-retention-baseline-import CONFIG WITNESS_DIGEST
        fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control shadow-storage-audit-native CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control render-storage-audit-projection-fence SPEC
@@ -139,6 +141,19 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			return errors.New(usage)
 		}
 		return observeSampleRetention(ctx, args[1], out)
+	case "sample-retention-baseline-checkpoint", "sample-retention-baseline-import":
+		persist := args[0] == "sample-retention-baseline-import"
+		if (!persist && len(args) != 2) || (persist && len(args) != 3) {
+			return errors.New(usage)
+		}
+		var evidence string
+		if persist {
+			evidence = args[2]
+			if !sampleRetentionWitnessDigest.MatchString(evidence) {
+				return errors.New("sample retention import requires an exact witness digest")
+			}
+		}
+		return runSampleRetentionBaseline(ctx, args[1], evidence, out, now)
 	case "sign-execution-witness":
 		return signExecutionWitness(args[1:], out, now)
 	case "render-front-worker-cutover", "observe-front-worker-cutover":

@@ -103,6 +103,9 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 	if baseline.ResourceID == StorageAuditPolicyResource {
 		return false, errors.New("storage audit enrollment requires the verified policy snapshot")
 	}
+	if baseline.ResourceID == ObservationSampleRetentionResource {
+		return false, errors.New("sample retention enrollment requires the observed worker transfer snapshot")
+	}
 	return e.anchorResource(ctx, actor, baseline, nil)
 }
 
@@ -158,6 +161,11 @@ func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, bas
 				return false, errors.Join(ErrResourceDrift, err)
 			}
 		}
+		if baseline.ResourceID == ObservationSampleRetentionResource {
+			if err := checkSampleRetentionBaselineAtAppend(ctx, tx, baseline.Scope, snapshot); err != nil {
+				return false, err
+			}
+		}
 		if isNode {
 			if err := lockResource(ctx, tx, Scope{baseline.ClusterID, ParticipationTopologyResource}); err != nil {
 				return false, err
@@ -205,6 +213,9 @@ func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, bas
 func snapshotVersion(scope Scope, snapshot []byte) (Version, error) {
 	if scope.ResourceID == StorageAuditPolicyResource {
 		return storageAuditPolicyBaselineVersion(snapshot)
+	}
+	if scope.ResourceID == ObservationSampleRetentionResource {
+		return sampleRetentionBaselineVersion(scope, snapshot)
 	}
 	return FrontWorkerBaselineVersion(snapshot)
 }
@@ -363,6 +374,9 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		}
 		if intent.ResourceID == StorageAuditPolicyResource {
 			return false, errors.New("storage audit policy requires a provider-fenced executor")
+		}
+		if intent.ResourceID == ObservationSampleRetentionResource {
+			return false, errors.New("sample retention ownership is observation-only and cannot be transferred through an execution claim")
 		}
 		if intent.Operation == FrontWorker {
 			if _, err := InspectFrontWorker(Submission{intent, payload}); err != nil {
