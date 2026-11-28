@@ -120,6 +120,14 @@ def summarize(samples, selection, oracle):
     }
 
 
+def summarize_incremental(samples, selection, oracle, target_comparison):
+    summary = summarize(samples, selection, oracle)
+    timing_criteria_met = summary.pop("warmReplayCriteriaMet")
+    targets_agree = target_comparison["disposition"] == "same-selection-across-requested-profiles"
+    summary["incrementalReplayCriteriaMet"] = timing_criteria_met and targets_agree
+    return summary
+
+
 @contextmanager
 def go_cache(path):
     old = os.environ.get("GOCACHE")
@@ -237,6 +245,8 @@ def replay_incremental(case, base, count, oracle_timeout):
                         pair[name] = sample()
                 if selection is None:
                     selection = dict(pair["candidate"]["selection"])
+                    compare_selection = {"selection": target_comparison["native"]["selection"]}
+                    check_selection(compare_selection, selection, "native target comparison")
                 check_selection(pair["candidate"], selection, f"sample {index + 1}")
                 if snapshot != prepush_shadow.snapshot(base):
                     raise ValueError("source changed during incremental replay")
@@ -248,8 +258,6 @@ def replay_incremental(case, base, count, oracle_timeout):
         finally:
             for path, original in zip(files, originals):
                 path.write_bytes(original)
-    summary = summarize(pairs, selection, oracle)
-    summary["incrementalReplayCriteriaMet"] = summary.pop("warmReplayCriteriaMet")
     return {
         "apiVersion": "prepush.fugue.dev/replay-v1",
         "kind": "ShadowExperiment",
@@ -264,7 +272,7 @@ def replay_incremental(case, base, count, oracle_timeout):
         "targetComparison": target_comparison,
         "samples": pairs,
         "fullTestOracle": oracle,
-        "summary": summary,
+        "summary": summarize_incremental(pairs, selection, oracle, target_comparison),
     }
 
 
