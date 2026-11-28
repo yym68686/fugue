@@ -1,90 +1,18 @@
 package api
 
 import (
-	"fmt"
 	"reflect"
 	"slices"
 	"strings"
 
+	"fugue/internal/appmail"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/store"
 )
 
-// Manual administrator records retain authority. Add exact provider requirements
-// only when compatible; never silently replace existing MX, SPF or DKIM.
-func appMailDNSRules(config model.MailPlatformConfig, binding model.AppMailBinding, provider []model.AppMailDNSRecord) ([]model.AppMailDNSRecord, error) {
-	rules := append(append([]model.AppMailDNSRecord(nil), config.DNSRecords...), config.AppDNSRecords[binding.AppID]...)
-	for _, record := range provider {
-		found := false
-		for _, existing := range rules {
-			if existing.Name != record.Name || existing.Type != record.Type {
-				continue
-			}
-			if !appMailDNSMatches(record.Type, record.Values, existing.Values) || !appMailDNSMatches(record.Type, existing.Values, record.Values) {
-				return nil, fmt.Errorf("mail DNS conflicts with administrator policy")
-			}
-			found = true
-		}
-		if !found {
-			rules = append(rules, record)
-		}
-	}
-	return rules, validateMailDNSPolicy(rules)
-}
-
 func sameAppMailBinding(a, b model.AppMailBinding) bool {
 	return reflect.DeepEqual(a, b)
-}
-
-func validateMailDNSPolicy(records []model.AppMailDNSRecord) error {
-	if len(records) > 12 {
-		return store.ErrInvalidInput
-	}
-	intents := []platformconfig.DNSIntent{}
-	for _, r := range records {
-		if r.TTL < 60 || r.TTL > 86400 || len(r.Name) > 160 || len(r.Values) > 8 || (r.Type != "MX" && r.Type != "TXT" && r.Type != "CNAME") {
-			return store.ErrInvalidInput
-		}
-		name := "app.apps.example.test"
-		if r.Name != "@" {
-			if r.Name == "" || r.Name != strings.ToLower(r.Name) || strings.HasSuffix(r.Name, ".") || strings.ContainsAny(r.Name, "/ @\t\r\n") {
-				return store.ErrInvalidInput
-			}
-			name = r.Name + "." + name
-		} else if r.Type == "CNAME" {
-			return store.ErrInvalidInput
-		}
-		for _, v := range r.Values {
-			if len(v) > 4096 {
-				return store.ErrInvalidInput
-			}
-		}
-		intents = append(intents, platformconfig.DNSIntent{Hostname: name, Type: r.Type, Values: r.Values, TTL: r.TTL})
-	}
-	if err := platformconfig.ValidateDNSIntents(intents); err != nil {
-		return fmt.Errorf("invalid mail DNS policy: %w", store.ErrInvalidInput)
-	}
-	return nil
-}
-
-func validateMailDNSConfig(config model.MailPlatformConfig) error {
-	if len(config.AppDNSRecords) > 128 {
-		return store.ErrInvalidInput
-	}
-	if err := validateMailDNSPolicy(config.DNSRecords); err != nil {
-		return err
-	}
-	for appID, records := range config.AppDNSRecords {
-		if len(appID) < 1 || len(appID) > 160 || strings.ContainsAny(appID, " /\t\r\n") {
-			return store.ErrInvalidInput
-		}
-		combined := append(append([]model.AppMailDNSRecord(nil), config.DNSRecords...), records...)
-		if err := validateMailDNSPolicy(combined); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // Consume only the frozen business snapshot. A provider request, runtime
@@ -94,7 +22,7 @@ func projectAppMailDNS(result *platformIntentProjectionResponse, business store.
 	if cfg == nil || !cfg.Enabled {
 		return nil
 	}
-	if err := validateMailDNSConfig(*cfg); err != nil {
+	if err := appmail.ValidateDNSConfig(*cfg); err != nil {
 		return err
 	}
 	apps := map[string]model.App{}
@@ -103,11 +31,11 @@ func projectAppMailDNS(result *platformIntentProjectionResponse, business store.
 	}
 	for _, b := range business.AppMailBindings {
 		app, exists := apps[b.AppID]
-		host, err := appMailHostname(app, base)
+		host, err := appmail.Hostname(app, base)
 		if b.State != "active" || !exists || err != nil || host != b.Hostname || app.ID != b.AppID || app.TenantID != b.TenantID || app.ProjectID != b.ProjectID || app.Status.Phase == "deleted" || app.Status.Phase == "deleting" || app.Status.Phase == "disabled" {
 			continue
 		}
-		rules, rulesErr := appMailDNSRules(*cfg, b, b.ProviderDNSRecords)
+		rules, rulesErr := appmail.DNSRules(*cfg, b, b.ProviderDNSRecords)
 		if rulesErr != nil {
 			return rulesErr
 		}

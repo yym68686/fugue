@@ -312,3 +312,61 @@ and checks for a new committed pass on every sample target from the same
 independent worker. Sample submissions still retain their foreground cutoff
 contract. Signed heartbeat retention keeps the existing API timer and lock
 until its key and database capabilities are moved separately.
+
+## Application mail: provider boundary before executor handoff
+
+The reusable mail provider protocol and one bounded reconciliation pass
+live in `internal/appmail`. The API still owns the existing schedule,
+cursor and lock until the production handoff. This preparation does not
+change HTTP behavior, grant Controller access, or transfer a write.
+
+The durable schedule records the desired binding generation in the same
+transaction as the intent. Bounded seeding covers bindings created before
+the schedule existed. The Controller owner gate defaults to closed. A
+claim reserves one app with database-clock expiry and an unpredictable
+lease ID. A newer generation becomes due immediately without stealing a
+live lease; a stale completion cannot publish status for the new intent.
+Failures back off with a fixed upper bound, and successful bindings get
+periodic refreshes for DNS and provider readiness. Persist outcome codes,
+not provider bodies or credentials.
+
+The Controller leader can seed the queue while the API is still the
+writer. The seed cursor and that page's work commit together. The leader
+checks the enqueue trigger, HTTPS provider configuration and the same
+application suffix as the API. At most once per minute in standby it
+uses the provider's read-only GET for one existing active binding and
+checks the exact identity and generation without persisting the response.
+The metrics distinguish local configuration, authenticated connectivity
+and write ownership; none exposes binding or provider details. Only the
+persisted owner authorizes a claim; standby and startup never set it.
+
+The handoff must include every binding reconciliation PUT, including the
+preflight PUT in credential creation and login requests, not just the
+scheduled sweep. Keep binding generation/CAS as the intent boundary and
+report the outcome against that exact generation via the existing
+`binding`, `reconciled`, `provider` and `error` response fields. A restart
+must not lose a pending binding or reapply an older generation. Keep
+credential issuance, login updates and credential revocation separate
+from background binding retries; a one-time credential result must not
+become part of persisted reconciliation status.
+
+There are two distinct fences: the existing PostgreSQL CAS for desired
+state and the Mailflare protocol for external effects. A canceled HTTP
+request can already have reached Mailflare. Before takeover, prove that
+app identity and generation fence delayed and duplicate provider PUTs,
+and that both the running API and its actual rollback image refuse new
+binding PUTs once Controller owns them. A green Controller readiness
+check and the database cursor alone do not prove these properties.
+
+The dedicated main-branch job requires a handoff-only commit and a
+rehearsal on the pinned PostgreSQL base image. API and Controller
+publication share its non-canceling queue; the running processes do
+not share a lifecycle. Admission verifies both settled deployments,
+their immutable monitored rollback targets, the current Controller
+leader and fresh provider GET, and the declared PostgreSQL primary.
+The transaction will refuse to proceed while any compatible API
+reconciler is in flight or any current binding lacks a durable job.
+After committing, only a fresh success for each still-active binding's
+exact generation proves takeover. If confirmation fails, inspect the
+database owner and provider result; repair forward. A release rollback
+must not reset the database owner or restore a pre-fence image.

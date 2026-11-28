@@ -319,6 +319,10 @@ var postgresSchemaStatements = []string{
 	)`,
 	`CREATE TABLE IF NOT EXISTS fugue_mail_platform_config (id TEXT PRIMARY KEY CHECK(id='platform'), body JSONB NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS fugue_app_mail_bindings (app_id TEXT PRIMARY KEY, generation BIGINT NOT NULL CHECK(generation>0), body JSONB NOT NULL)`,
+	appMailReconcileTableSQL,
+	appMailReconcileIndexSQL,
+	appMailReconcileEnqueueSQL,
+	appMailReconcileTriggerSQL,
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_fugue_apps_tenant_project_name_ci ON fugue_apps (tenant_id, project_id, lower(name))`,
 	`CREATE TABLE IF NOT EXISTS fugue_app_recoveries (
 		id TEXT PRIMARY KEY,

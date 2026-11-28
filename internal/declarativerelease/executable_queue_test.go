@@ -18,8 +18,9 @@ func TestAPIAndDNSReleaseQueuesRetainPendingPredecessors(t *testing.T) {
 	}
 	jobs := yamlMappingValue(t, document.Content[0], "jobs")
 	for name, group := range map[string]string{
-		"deploy_api":         "fugue-production-api",
-		"deploy_edge_client": "${{ matrix.concurrency }}",
+		"deploy_api":                 "fugue-production-controller",
+		"app_mail_reconcile_handoff": "fugue-production-controller",
+		"deploy_edge_client":         "${{ matrix.concurrency }}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			job := yamlMappingValue(t, jobs, name)

@@ -74,6 +74,7 @@ type Service struct {
 	now                            func() time.Time
 	metricsStartedAt               time.Time
 	metricsSnapshot                observability.MetricSnapshot
+	appMailObservation             atomic.Pointer[appMailSchedulerObservation]
 	controllerHealthMu             sync.RWMutex
 	activeLoopRunning              bool
 	activeLoopStartedAt            time.Time
@@ -250,6 +251,13 @@ func (s *Service) runActiveLoop(ctx context.Context) error {
 	prewarmDone := make(chan struct{})
 	go func() { defer close(prewarmDone); s.runDataPrewarmLoop(prewarmContext) }()
 	defer func() { stopPrewarm(); <-prewarmDone }()
+
+	if strings.TrimSpace(s.Config.AppBaseDomain) != "" {
+		mailCtx, stopMail := context.WithCancel(ctx)
+		mailDone := make(chan struct{})
+		go func() { defer close(mailDone); s.runAppMailScheduler(mailCtx) }()
+		defer func() { stopMail(); <-mailDone }()
+	}
 
 	s.markActiveLoopRunning(true)
 	defer s.markActiveLoopRunning(false)

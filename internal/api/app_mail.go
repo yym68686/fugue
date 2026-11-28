@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,133 +11,36 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/appmail"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/store"
 )
 
 var mailLocalPart = regexp.MustCompile(`^[a-z0-9]+(?:[._+%-][a-z0-9]+)*$`)
-var mailAppLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
-
-func appMailHostname(app model.App, base string) (string, error) {
-	base = normalizeExternalAppDomain(base)
-	if app.Route == nil || base == "" {
-		return "", store.ErrInvalidInput
-	}
-	host := normalizeExternalAppDomain(app.Route.Hostname)
-	label := strings.TrimSuffix(host, "."+base)
-	if !strings.HasSuffix(host, "."+base) || !mailAppLabel.MatchString(label) {
-		return "", store.ErrInvalidInput
-	}
-	return host, nil
-}
 
 func (s *Server) mailProvider(ctx context.Context, method, path string, input any) (json.RawMessage, error) {
-	cfg, err := s.store.GetMailPlatformConfig()
-	if err != nil {
-		return nil, err
-	}
-	revocation := false
-	if value, ok := input.(map[string]any); ok {
-		revocation = value["state"] == "revoked"
-	}
-	if !cfg.Enabled && method != http.MethodGet && !(method == http.MethodPut && revocation) {
-		return nil, errors.New("mail service disabled")
-	}
-	app, err := s.store.GetApp(cfg.MailflareAppID)
-	if err != nil {
-		return nil, err
-	}
-	if app.Route == nil || app.Route.PublicURL == "" {
-		return nil, errors.New("mail service has no public endpoint")
-	}
-	base, err := url.Parse(app.Route.PublicURL)
-	if err != nil || base.Scheme != "https" || base.User != nil || base.Hostname() != app.Route.Hostname || base.RawQuery != "" || base.Fragment != "" {
-		return nil, errors.New("mail service endpoint is invalid")
-	}
-	token := app.Spec.Env["FUGUE_MAIL_SERVICE_TOKEN"]
-	if len(token) < 32 {
-		return nil, errors.New("mail service credentials unavailable")
-	}
-	var body []byte
-	if input != nil {
-		body, err = json.Marshal(input)
-		if err != nil {
-			return nil, err
-		}
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(base.String(), "/")+"/api/internal/fugue/mail/"+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
-	if err != nil {
-		return nil, errors.New("mail provider unavailable")
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 256*1024+1))
-	if err != nil || len(raw) > 256*1024 {
-		return nil, errors.New("mail provider response invalid")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("mail provider returned HTTP %d", response.StatusCode)
-	}
-	if !json.Valid(raw) {
-		return nil, errors.New("mail provider response invalid")
-	}
-	return raw, nil
+	return appmail.NewProvider(s.store).Request(ctx, method, path, input)
 }
 
 func (s *Server) syncAppMail(ctx context.Context, binding model.AppMailBinding) (json.RawMessage, error) {
-	raw, err := s.mailProvider(ctx, http.MethodPut, url.PathEscape(binding.AppID), map[string]any{"tenantId": binding.TenantID, "projectId": binding.ProjectID, "appId": binding.AppID, "hostname": binding.Hostname, "localPart": binding.LocalPart, "generation": binding.Generation, "state": binding.State})
+	var observation json.RawMessage
+	var syncErr error
+	executed, err := s.store.WithLegacyAppMailReconciliation(ctx, false, func() error {
+		observation, syncErr = appmail.NewProvider(s.store).Sync(ctx, binding)
+		return syncErr
+	})
+	if syncErr != nil {
+		return nil, syncErr
+	}
 	if err != nil {
-		return nil, err
+		return nil, errors.New("mail reconciliation unavailable")
 	}
-	if err = validateMailObservation(raw, binding); err != nil {
-		return nil, err
+	if executed {
+		return observation, nil
 	}
-	var observation struct {
-		DNSRecords *[]model.AppMailDNSRecord `json:"dnsRecords"`
-	}
-	if err = json.Unmarshal(raw, &observation); err != nil {
-		return nil, err
-	}
-	if observation.DNSRecords != nil && binding.State == "active" {
-		if err = validateMailDNSPolicy(*observation.DNSRecords); err != nil {
-			return nil, errors.New("mail provider DNS policy invalid")
-		}
-		cfg, configErr := s.store.GetMailPlatformConfig()
-		if configErr != nil {
-			return nil, configErr
-		}
-		if _, err = appMailDNSRules(cfg, binding, *observation.DNSRecords); err != nil {
-			return nil, err
-		}
-		if err = s.store.SaveAppMailProviderDNS(binding, *observation.DNSRecords); err != nil {
-			return nil, err
-		}
-	}
-	return raw, nil
-}
-
-func validateMailObservation(raw json.RawMessage, binding model.AppMailBinding) error {
-	var observation struct {
-		AppID      string `json:"appId"`
-		TenantID   string `json:"tenantId"`
-		ProjectID  string `json:"projectId"`
-		Hostname   string `json:"hostname"`
-		Generation uint64 `json:"generation"`
-		State      string `json:"state"`
-	}
-	if json.Unmarshal(raw, &observation) != nil || observation.AppID != binding.AppID || observation.TenantID != binding.TenantID || observation.ProjectID != binding.ProjectID || observation.Hostname != binding.Hostname || observation.Generation != binding.Generation || observation.State != binding.State {
-		return errors.New("mail provider identity does not match desired state")
-	}
-	return nil
+	return appmail.AwaitReconciliation(ctx, binding, s.store.GetAppMailReconciliation, func(ctx context.Context) (json.RawMessage, error) {
+		return s.mailProvider(ctx, http.MethodGet, url.PathEscape(binding.AppID), nil)
+	})
 }
 
 func (s *Server) appMailAuthorized(w http.ResponseWriter, r *http.Request, write bool) (model.App, bool) {
@@ -178,7 +79,7 @@ func (s *Server) handlePutMailPlatformConfig(w http.ResponseWriter, r *http.Requ
 	if !decodeMailInput(w, r, &cfg) {
 		return
 	}
-	if err := validateMailDNSConfig(cfg); err != nil {
+	if err := appmail.ValidateDNSConfig(cfg); err != nil {
 		s.writeStoreError(w, err)
 		return
 	}
@@ -231,7 +132,7 @@ func (s *Server) handleGetAppMail(w http.ResponseWriter, r *http.Request) {
 	// GET never mutates: background reconciliation applies saved intent.
 	provider, err := s.mailProvider(r.Context(), http.MethodGet, url.PathEscape(app.ID), nil)
 	if err == nil {
-		err = validateMailObservation(provider, binding)
+		err = appmail.ValidateObservation(provider, binding)
 	}
 	result := map[string]any{"binding": binding, "reconciled": err == nil}
 	s.addMailServiceURL(result)
@@ -261,7 +162,7 @@ func (s *Server) handlePutAppMail(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, 400, "expected_generation required")
 		return
 	}
-	host, err := appMailHostname(app, s.appBaseDomain)
+	host, err := appmail.Hostname(app, s.appBaseDomain)
 	if err != nil {
 		httpx.WriteError(w, 400, "only the owned default application subdomain can enable mail")
 		return
@@ -440,6 +341,9 @@ func (s *Server) handleRevokeAppMailCredential(w http.ResponseWriter, r *http.Re
 // One bounded pass per page. Invalid/deleted/transferred app ownership revokes
 // rather than silently granting the new owner the previous mailbox contents.
 func (s *Server) RunAppMailReconciler(ctx context.Context) {
+	reconciler := appmail.Reconciler{
+		Store: s.store, Provider: appmail.NewProvider(s.store), BaseDomain: s.appBaseDomain, Log: s.log,
+	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	after := ""
@@ -451,43 +355,10 @@ func (s *Server) RunAppMailReconciler(ctx context.Context) {
 			func() {
 				pass, cancel := context.WithTimeout(ctx, 25*time.Second)
 				defer cancel()
-				_, passErr := s.store.WithAdvisoryLock(pass, "app-mail-reconcile", func() error {
-					bindings, err := s.store.ListAppMailBindings(after, 20)
-					if err != nil {
-						return err
-					}
-					if len(bindings) == 0 {
-						after = ""
-						return nil
-					}
-					for _, b := range bindings {
-						if pass.Err() != nil {
-							return pass.Err()
-						}
-						// Advance past a failing binding; the next sweep retries it.
-						after = b.AppID
-						app, appErr := s.store.GetAppMetadata(b.AppID)
-						if appErr != nil && !errors.Is(appErr, store.ErrNotFound) {
-							s.log.Printf("mail reconciliation app=%s lookup failed: %v", b.AppID, appErr)
-							continue
-						}
-						host, _ := appMailHostname(app, s.appBaseDomain)
-						if b.State != "revoked" && (appErr != nil || app.TenantID != b.TenantID || app.ProjectID != b.ProjectID || host != b.Hostname || app.Status.Phase == "deleted" || app.Status.Phase == "deleting" || app.Status.Phase == "disabled") {
-							b.State = "revoked"
-							b, err = s.store.SaveAppMailBinding(b, b.Generation)
-							if err != nil {
-								s.log.Printf("mail reconciliation app=%s revoke failed: %v", b.AppID, err)
-								continue
-							}
-						}
-						if _, err = s.syncAppMail(pass, b); err != nil {
-							s.log.Printf("mail reconciliation app=%s sync failed: %v", b.AppID, err)
-						}
-					}
-					if len(bindings) < 20 {
-						after = ""
-					}
-					return nil
+				_, passErr := s.store.WithLegacyAppMailReconciliation(pass, true, func() error {
+					var err error
+					after, err = reconciler.Pass(pass, after)
+					return err
 				})
 				if passErr != nil {
 					s.log.Printf("mail reconciliation pass failed: %v", passErr)

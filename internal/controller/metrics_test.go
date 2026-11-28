@@ -29,6 +29,9 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 			RecoveryEnabled:          true,
 		},
 	}, nil)
+	service.appMailObservation.Store(&appMailSchedulerObservation{
+		Seeded: true, Provider: true, Checked: time.Unix(1000, 0), ProviderRead: time.Unix(995, 0),
+	})
 
 	recorder := httptest.NewRecorder()
 	if err := service.refreshMetrics(context.Background()); err != nil {
@@ -46,6 +49,11 @@ func TestMetricsHandlerReportsControllerConfiguration(t *testing.T) {
 		`fugue_controller_poll_interval_seconds 15.000000`,
 		`fugue_controller_managed_app_reconcile_fallback_interval_seconds 300.000000`,
 		`fugue_controller_host_journald_policy_enabled 0.000000`,
+		`fugue_controller_app_mail_seed_complete 1.000000`,
+		`fugue_controller_app_mail_provider_config_ready 1.000000`,
+		`fugue_controller_app_mail_executor_owner 0.000000`,
+		`fugue_controller_app_mail_last_check_timestamp_seconds 1000.000000`,
+		`fugue_controller_app_mail_provider_read_timestamp_seconds 995.000000`,
 		`fugue_controller_workers_configured{lane="foreground_activate"} 4.000000`,
 		`fugue_controller_workers_configured{lane="github_sync_activate"} 2.000000`,
 		`fugue_managed_postgres_in_place_resize_enabled 1.000000`,

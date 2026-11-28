@@ -6,12 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"fugue/internal/appmail"
 	"fugue/internal/hosteddns"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
@@ -37,7 +36,7 @@ func (s *Server) handleGetAppMailDNS(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	host, hostErr := appMailHostname(app, s.appBaseDomain)
+	host, hostErr := appmail.Hostname(app, s.appBaseDomain)
 	if hostErr != nil || binding.Hostname != host || binding.TenantID != app.TenantID || binding.ProjectID != app.ProjectID {
 		httpx.WriteError(w, 409, "mail binding no longer matches application ownership and route")
 		return
@@ -47,14 +46,14 @@ func (s *Server) handleGetAppMailDNS(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreError(w, err)
 		return
 	}
-	if err = validateMailDNSConfig(cfg); err != nil {
+	if err = appmail.ValidateDNSConfig(cfg); err != nil {
 		httpx.WriteError(w, 500, "mail DNS policy is invalid")
 		return
 	}
 	status := "inactive"
 	records := []appMailDNSRecordObservation{}
 	if cfg.Enabled && binding.State == "active" && app.Status.Phase != "deleted" && app.Status.Phase != "deleting" && app.Status.Phase != "disabled" {
-		rules, ruleErr := appMailDNSRules(cfg, binding, binding.ProviderDNSRecords)
+		rules, ruleErr := appmail.DNSRules(cfg, binding, binding.ProviderDNSRecords)
 		if ruleErr != nil {
 			httpx.WriteError(w, 409, "mail DNS policy conflicts with provider requirements")
 			return
@@ -72,7 +71,7 @@ func (s *Server) handleGetAppMailDNS(w http.ResponseWriter, r *http.Request) {
 	current, currentErr := s.store.GetApp(app.ID)
 	saved, savedErr := s.store.GetAppMailBinding(app.ID)
 	policy, policyErr := s.store.GetMailPlatformConfig()
-	currentHost, routeErr := appMailHostname(current, s.appBaseDomain)
+	currentHost, routeErr := appmail.Hostname(current, s.appBaseDomain)
 	if currentErr != nil || savedErr != nil || policyErr != nil || routeErr != nil || currentHost != host || current.TenantID != app.TenantID || current.ProjectID != app.ProjectID || current.Status.Phase != app.Status.Phase || !sameAppMailBinding(saved, binding) || policy.Enabled != cfg.Enabled || !reflect.DeepEqual(policy.DNSRecords, cfg.DNSRecords) || !reflect.DeepEqual(policy.AppDNSRecords[app.ID], cfg.AppDNSRecords[app.ID]) {
 		httpx.WriteError(w, 409, "mail DNS intent changed during observation; refresh")
 		return
@@ -99,7 +98,7 @@ func observeAppMailDNS(ctx context.Context, host string, rules []model.AppMailDN
 			status := "mismatch"
 			if err != nil {
 				status, observed = "unknown", []string{}
-			} else if appMailDNSMatches(rule.Type, rule.Values, observed) {
+			} else if appmail.DNSMatches(rule.Type, rule.Values, observed) {
 				status = "match"
 			}
 			records[i] = appMailDNSRecordObservation{name, rule.Type, append([]string{}, rule.Values...), observed, status}
@@ -116,53 +115,6 @@ func observeAppMailDNS(ctx context.Context, host string, rules []model.AppMailDN
 		}
 	}
 	return records, status
-}
-
-func normalizeAppMailDNSValue(kind, value string) string {
-	if kind == "CNAME" {
-		return strings.ToLower(dns.Fqdn(strings.TrimSpace(value)))
-	}
-	if kind == "MX" {
-		parts := strings.Fields(value)
-		if len(parts) == 2 {
-			priority, err := strconv.Atoi(parts[0])
-			if err == nil {
-				return fmt.Sprintf("%d %s", priority, strings.ToLower(dns.Fqdn(parts[1])))
-			}
-		}
-	}
-	return value // TXT content is case-sensitive; never normalize a DKIM key.
-}
-
-func appMailDNSMatches(kind string, expected, observed []string) bool {
-	normalize := func(values []string) []string {
-		out := make([]string, len(values))
-		for i, value := range values {
-			out[i] = normalizeAppMailDNSValue(kind, value)
-		}
-		slices.Sort(out)
-		return slices.Compact(out)
-	}
-	want, got := normalize(expected), normalize(observed)
-	if kind != "TXT" {
-		return slices.Equal(want, got)
-	}
-	for _, value := range want {
-		if !slices.Contains(got, value) {
-			return false
-		}
-		for _, prefix := range []string{"v=spf1", "v=dmarc1", "v=dkim1"} {
-			if !strings.HasPrefix(strings.ToLower(value), prefix) {
-				continue
-			}
-			for _, actual := range got {
-				if actual != value && strings.HasPrefix(strings.ToLower(actual), prefix) {
-					return false // Two competing policies must not report healthy.
-				}
-			}
-		}
-	}
-	return true
 }
 
 // Query only the exact RR owner through the system resolver. Do not follow

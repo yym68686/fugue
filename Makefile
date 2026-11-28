@@ -45,6 +45,7 @@ test:
 	python3 -m unittest scripts.test_reconcile_managed_ssh_keys
 	python3 -m unittest scripts.test_observe_worker_standby
 	python3 -m unittest scripts.test_provision_observation_worker_database
+	python3 -m unittest scripts.test_apply_app_mail_reconcile_handoff scripts.test_verify_observation_rollback_floor
 	python3 -m unittest scripts.test_enroll_cell_member
 	python3 -m unittest scripts.test_activate_agent_edge_policy
 	python3 -m unittest scripts.test_provision_runtime_agent_identity

@@ -305,7 +305,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	}
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff", "quality_evidence_retention_handoff")
-	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff")
+	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff", "app_mail_reconcile_handoff")
 	expectedJobs = append(expectedJobs, "deploy_hosted_dns_worker", "hosted_dns_writer_handoff", "deploy_storage_audit_worker", "storage_audit_activation")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
@@ -313,7 +313,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
 	}
 	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff", "observation_sample_retention_handoff"}
-	for _, name := range observationJobs {
+	for _, name := range append(observationJobs, "app_mail_reconcile_handoff") {
 		job := yamlMappingValue(t, jobs, name)
 		for _, required := range []string{"github.event_name == 'push' && github.ref == 'refs/heads/main'", "needs.prepush.result == 'success'", "needs.prepush.outputs." + name + " == 'true'"} {
 			if !strings.Contains(yamlMappingValue(t, job, "if").Value, required) {
@@ -521,7 +521,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	// Both lanes mutate the controller but are independent release intents.
 	// GitHub's default single pending slot lets a no-op configuration job
 	// cancel an already-built executable release before it gets a runner.
-	for _, name := range []string{"managed_postgres_cpu_policy", "deploy_controller"} {
+	for _, name := range []string{"managed_postgres_cpu_policy", "deploy_controller", "deploy_api", "app_mail_reconcile_handoff"} {
 		concurrency := yamlMappingValue(t, yamlMappingValue(t, jobs, name), "concurrency")
 		if yamlMappingValue(t, concurrency, "group").Value != "fugue-production-controller" ||
 			yamlMappingValue(t, concurrency, "cancel-in-progress").Value != "false" ||
@@ -1017,7 +1017,6 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		"\"${RELEASE_TOOL}\" plan",
 		"\"${RELEASE_TOOL}\" build",
 		"uses: ./.github/actions/deploy-declarative-component",
-		"group: fugue-production-api",
 		"group: fugue-production-controller",
 		"group: '${{ matrix.concurrency }}'",
 		"group: fugue-production-image-cache",

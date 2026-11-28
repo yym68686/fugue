@@ -558,6 +558,12 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         non_go_tasks["baked-postgres-tests"] = ["python3", "-m", "unittest", "scripts.test_baked_postgres", "scripts.test_release_external_controller"]
     if any(name in {"scripts/install_compiler_input_zero_temp.py", "scripts/test_install_compiler_input_zero_temp.py", "internal/schemamigrate/compiler_input_zero_temp.sql", ".github/workflows/ci.yml"} or name.startswith("deploy/environments/production/compiler-input-safety/") for name in paths):
         non_go_tasks["input-zero-temp-tests"] = ["python3", "-m", "unittest", "scripts.test_install_compiler_input_zero_temp"]
+    if any(name in {".github/workflows/ci.yml", "scripts/apply_app_mail_reconcile_handoff.py",
+                    "scripts/test_apply_app_mail_reconcile_handoff.py", "scripts/rehearse_app_mail_handoff.py",
+                    "scripts/verify_observation_rollback_floor.py", "internal/schemamigrate/app_mail_reconcile_activate.sql",
+                    "deploy/releases/controller/app-mail-reconcile-handoff.json"} for name in paths):
+        non_go_tasks["app-mail-handoff-tests"] = [sys.executable, "-m", "unittest",
+            "scripts.test_apply_app_mail_reconcile_handoff", "scripts.test_verify_observation_rollback_floor"]
     if any(name.startswith("internal/inputhistory/") or name in {
             "scripts/compiler_input_history_compatibility.py", "scripts/test_compiler_input_history_compatibility.py",
             "scripts/compiler_input_storage.py", "scripts/test_compiler_input_storage.py",

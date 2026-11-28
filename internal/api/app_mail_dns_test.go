@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/appmail"
 	"fugue/internal/model"
 
 	"github.com/miekg/dns"
@@ -27,7 +28,7 @@ func TestAppMailDNSMatchesExactRecordsAndRejectsConflictingPolicies(t *testing.T
 		{"TXT", []string{"v=DKIM1; p=CaseSensitive"}, []string{"v=DKIM1; p=casesensitive"}, false},
 		{"MX", []string{"10 mx.example.test."}, nil, false},
 	} {
-		if got := appMailDNSMatches(tc.kind, tc.want, tc.got); got != tc.match {
+		if got := appmail.DNSMatches(tc.kind, tc.want, tc.got); got != tc.match {
 			t.Fatalf("%+v: %v", tc, got)
 		}
 	}

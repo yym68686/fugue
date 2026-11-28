@@ -5,16 +5,17 @@ import (
 	"net/http"
 	"testing"
 
+	"fugue/internal/appmail"
 	"fugue/internal/model"
 )
 
 func TestAppMailHostnameRequiresExactOwnedApplicationSubdomain(t *testing.T) {
 	for _, host := range []string{"apps.example.test", "nested.app.apps.example.test", "foreign.example.test", "-invalid.apps.example.test"} {
-		if _, err := appMailHostname(model.App{Route: &model.AppRoute{Hostname: host}}, "apps.example.test"); err == nil {
+		if _, err := appmail.Hostname(model.App{Route: &model.AppRoute{Hostname: host}}, "apps.example.test"); err == nil {
 			t.Fatal("accepted", host)
 		}
 	}
-	if host, err := appMailHostname(model.App{Route: &model.AppRoute{Hostname: "app.apps.example.test"}}, "apps.example.test"); err != nil || host != "app.apps.example.test" {
+	if host, err := appmail.Hostname(model.App{Route: &model.AppRoute{Hostname: "app.apps.example.test"}}, "apps.example.test"); err != nil || host != "app.apps.example.test" {
 		t.Fatal(host, err)
 	}
 }
@@ -68,7 +69,7 @@ func TestAppMailProviderObservationMustMatchSavedGenerationAndOwner(t *testing.T
 	b := model.AppMailBinding{AppID: "app", TenantID: "tenant", ProjectID: "project", Hostname: "app.apps.example.test", Generation: 3, State: "suspended"}
 	value := map[string]any{"appId": b.AppID, "tenantId": b.TenantID, "projectId": b.ProjectID, "hostname": b.Hostname, "generation": b.Generation, "state": b.State}
 	raw, _ := json.Marshal(value)
-	if err := validateMailObservation(raw, b); err != nil {
+	if err := appmail.ValidateObservation(raw, b); err != nil {
 		t.Fatal(err)
 	}
 	for key, altered := range map[string]any{"tenantId": "other", "projectId": "other", "hostname": "other.apps.example.test", "generation": 2, "state": "active"} {
@@ -78,7 +79,7 @@ func TestAppMailProviderObservationMustMatchSavedGenerationAndOwner(t *testing.T
 		}
 		copy[key] = altered
 		raw, _ = json.Marshal(copy)
-		if err := validateMailObservation(raw, b); err == nil {
+		if err := appmail.ValidateObservation(raw, b); err == nil {
 			t.Fatal("accepted stale or foreign observation", key)
 		}
 	}

@@ -67,6 +67,10 @@ func (s *Store) GetAppMailBinding(appID string) (model.AppMailBinding, error) {
 // Exact CAS; retries cannot overwrite a concurrent revocation. Identity fields
 // cannot change, so a project transfer needs explicit suspension/migration.
 func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (model.AppMailBinding, error) {
+	return s.saveAppMailBinding(context.Background(), v, expected, nil)
+}
+
+func (s *Store) saveAppMailBinding(parent context.Context, v model.AppMailBinding, expected uint64, lease *AppMailReconcileLease) (model.AppMailBinding, error) {
 	if v.AppID == "" || v.TenantID == "" || v.ProjectID == "" || v.Hostname == "" || v.LocalPart == "" || expected >= 9007199254740991 || (v.State != "active" && v.State != "suspended" && v.State != "revoked") {
 		return v, ErrInvalidInput
 	}
@@ -87,7 +91,7 @@ func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (mod
 		}
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -123,6 +127,11 @@ func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (mod
 	if err = prepare(prior); err != nil {
 		return v, err
 	}
+	if lease != nil {
+		if err = lockAppMailReconciliationLease(ctx, tx, *lease); err != nil {
+			return v, err
+		}
+	}
 	raw, err = json.Marshal(v)
 	if err != nil {
 		return v, err
@@ -137,6 +146,10 @@ func (s *Store) SaveAppMailBinding(v model.AppMailBinding, expected uint64) (mod
 // Provider observations are independent of user lifecycle generations. Exact
 // identity/generation CAS prevents a delayed response from changing revoked DNS.
 func (s *Store) SaveAppMailProviderDNS(binding model.AppMailBinding, records []model.AppMailDNSRecord) error {
+	return s.saveAppMailProviderDNS(context.Background(), binding, records, nil)
+}
+
+func (s *Store) saveAppMailProviderDNS(parent context.Context, binding model.AppMailBinding, records []model.AppMailDNSRecord, lease *AppMailReconcileLease) error {
 	apply := func(current *model.AppMailBinding) error {
 		if current.AppID != binding.AppID || current.TenantID != binding.TenantID || current.ProjectID != binding.ProjectID || current.Hostname != binding.Hostname || current.Generation != binding.Generation || current.State != "active" || binding.State != "active" {
 			return ErrConflict
@@ -147,7 +160,7 @@ func (s *Store) SaveAppMailProviderDNS(binding model.AppMailBinding, records []m
 		current.ProviderDNSRecords = records
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -168,6 +181,11 @@ func (s *Store) SaveAppMailProviderDNS(binding model.AppMailBinding, records []m
 	unchanged := reflect.DeepEqual(current.ProviderDNSRecords, records)
 	if err = apply(&current); err != nil {
 		return err
+	}
+	if lease != nil {
+		if err = lockAppMailReconciliationLease(ctx, tx, *lease); err != nil {
+			return err
+		}
 	}
 	if unchanged {
 		return tx.Commit()

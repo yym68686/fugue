@@ -182,6 +182,7 @@ type ControllerConfig struct {
 	DatabaseURL                                string
 	Observability                              observability.Config
 	APIPublicDomain                            string
+	AppBaseDomain                              string
 	AppObservabilityEndpoint                   string
 	StrictDrainMode                            string
 	StrictDrainTimeoutSeconds                  int64
@@ -570,6 +571,7 @@ func ControllerFromEnv() ControllerConfig {
 		DatabaseURL:                                getenv("FUGUE_DATABASE_URL", ""),
 		Observability:                              ObservabilityFromEnv(),
 		APIPublicDomain:                            getenv("FUGUE_API_PUBLIC_DOMAIN", ""),
+		AppBaseDomain:                              getenv("FUGUE_APP_BASE_DOMAIN", ""),
 		AppObservabilityEndpoint:                   getenv("FUGUE_APP_OBSERVABILITY_ENDPOINT", ""),
 		StrictDrainMode:                            getenv("FUGUE_STRICT_DRAIN_MODE", "connection-aware"),
 		StrictDrainTimeoutSeconds:                  int64(getenvInt("FUGUE_STRICT_DRAIN_TIMEOUT_SECONDS", 600)),

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"fugue/internal/appmail"
 	"fugue/internal/model"
 	"fugue/internal/platformconfig"
 	"fugue/internal/store"
@@ -104,7 +105,7 @@ func TestAppMailDNSRequiresFrozenApplicationIdentityAndActiveLifecycle(t *testin
 }
 func TestMailDNSPolicyCannotAliasWebOrEscapeApplicationNamespace(t *testing.T) {
 	for _, record := range []model.AppMailDNSRecord{{Name: "@", Type: "CNAME", Values: []string{"mx.example.test."}, TTL: 300}, {Name: "evil.", Type: "TXT", Values: []string{"claim"}, TTL: 300}, {Name: "@", Type: "A", Values: []string{"192.0.2.10"}, TTL: 300}, {Name: "@", Type: "MX", Values: []string{"invalid"}, TTL: 300}} {
-		if err := validateMailDNSPolicy([]model.AppMailDNSRecord{record}); err == nil {
+		if err := appmail.ValidateDNSPolicy([]model.AppMailDNSRecord{record}); err == nil {
 			t.Fatal("invalid mail policy accepted", record)
 		}
 	}
@@ -181,15 +182,15 @@ func TestMailRelayDNSIsSpecificToExactActiveApplication(t *testing.T) {
 func TestMailDNSConfigRejectsUnboundedAndConflictingPerAppRules(t *testing.T) {
 	config := *mailDNSFixture().MailPlatformConfig
 	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"app": {{Name: "@", Type: "CNAME", Values: []string{"relay.example.test."}, TTL: 300}}}
-	if err := validateMailDNSConfig(config); err == nil {
+	if err := appmail.ValidateDNSConfig(config); err == nil {
 		t.Fatal("app-specific policy aliased the Web host")
 	}
 	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"bad/key": nil}
-	if err := validateMailDNSConfig(config); err == nil {
+	if err := appmail.ValidateDNSConfig(config); err == nil {
 		t.Fatal("invalid application identity accepted")
 	}
 	config.AppDNSRecords = map[string][]model.AppMailDNSRecord{"app": make([]model.AppMailDNSRecord, 12)}
-	if err := validateMailDNSConfig(config); err == nil {
+	if err := appmail.ValidateDNSConfig(config); err == nil {
 		t.Fatal("combined per-app record bound was bypassed")
 	}
 }
