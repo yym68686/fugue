@@ -30,6 +30,20 @@ class ProvisionError(Exception):
     pass
 
 
+class ProvisionLockBusy(ProvisionError):
+    pass
+
+
+def classify_sql_failure(stderr, busy_messages):
+    errors = re.findall(r"(?m)^ERROR:[ \t]+([A-Z0-9]{5}):[ \t]+([^\r\n]*)$", stderr)
+    if len(errors) != 1:
+        return None
+    code, message = errors[0]
+    if code == "55P03" or (code == "P0001" and message in busy_messages):
+        return ProvisionLockBusy("database activation lock is busy")
+    return ProvisionError(f"database activation refused (SQLSTATE {code})")
+
+
 def parse_config(raw):
     fields = {"schema", "namespace", "cluster", "clusterUID", "systemID", "database", "role", "secret"}
     if not isinstance(raw, dict) or raw.keys() != fields or raw["schema"] != SCHEMA:
@@ -69,7 +83,7 @@ class Provision:
         self.server = f'{self.service}.{config["namespace"]}.svc'
         self.binding = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
 
-    def kube(self, *args, body=None):
+    def kube(self, *args, body=None, busy_messages=None):
         try:
             result = subprocess.run(
                 [self.kubectl, "--request-timeout=20s", "-n", self.config["namespace"], *args],
@@ -79,6 +93,10 @@ class Provision:
             raise ProvisionError("Kubernetes operation unavailable") from None
         # Raw subprocess stderr or stdout can contain the Secret or SQL.
         if result.returncode != 0:
+            if busy_messages is not None:
+                failure = classify_sql_failure(result.stderr, busy_messages)
+                if failure:
+                    raise failure
             raise ProvisionError(f"Kubernetes operation failed: {args[0]}")
         return result.stdout.strip()
 
@@ -109,11 +127,13 @@ class Provision:
             raise ProvisionError("CNPG primary Pod is not ready or independently bound")
         return primary, meta["uid"]
 
-    def sql(self, primary, body):
+    def sql(self, primary, body, *, busy_messages=None):
+        options = ("-v", "VERBOSITY=verbose") if busy_messages is not None else ()
+        diagnostics = {"busy_messages": busy_messages} if busy_messages is not None else {}
         return self.kube(
             "exec", "-i", primary, "-c", "postgres", "--", "psql", "-XAtqw",
-            "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", self.config["database"],
-            body=body,
+            "-v", "ON_ERROR_STOP=1", *options, "-U", "postgres", "-d", self.config["database"],
+            body=body, **diagnostics,
         )
 
     def identity_sql(self):

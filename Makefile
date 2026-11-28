@@ -36,6 +36,7 @@ test:
 	python3 -m unittest scripts.test_observe_managed_ssh_front
 	python3 -m unittest scripts.test_select_managed_ssh_transport
 	python3 -m unittest scripts.test_publish_storage_policy
+	python3 -m unittest scripts.test_verify_storage_audit_api_rollout scripts.test_verify_observation_sample_retention_api_rollout
 	python3 -m unittest scripts.test_artifact_content_storage
 	python3 -m unittest scripts.test_compiler_input_storage
 	python3 -m unittest scripts.test_compiler_input_history_compatibility

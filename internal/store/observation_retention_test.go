@@ -79,6 +79,14 @@ func retentionPostgres(t *testing.T) *Store {
 	return &Store{db: db, databaseURL: dsn, dbReady: true}
 }
 
+type observationTable struct{ table, timestamp string }
+
+var retainedObservationTables = []observationTable{
+	{"fugue_edge_network_samples", "observed_at"},
+	{"fugue_edge_performance_samples", "sampled_at"},
+	{"fugue_resource_usage_samples", "observed_at"},
+}
+
 func TestObservationRetentionPostgresPreservesBusinessAndVerifiableHeartbeatSuffix(t *testing.T) {
 	s := retentionPostgres(t)
 	now := time.Now().UTC()
@@ -121,7 +129,7 @@ func TestObservationRetentionPostgresPreservesBusinessAndVerifiableHeartbeatSuff
 			}
 		}
 	}
-	counts, err := s.pruneObservationHistory(context.Background(), p, keys, now)
+	counts, err := s.pruneSignedHeartbeatHistory(context.Background(), p, keys, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +146,8 @@ func TestObservationRetentionPostgresPreservesBusinessAndVerifiableHeartbeatSuff
 	}
 	for _, table := range retainedObservationTables {
 		var n int
-		if err = s.db.QueryRow("SELECT count(*) FROM " + table.table).Scan(&n); err != nil || n != 2 {
-			t.Fatal("bounded observation cleanup failed", table, n, err)
+		if err = s.db.QueryRow("SELECT count(*) FROM " + table.table).Scan(&n); err != nil || n != 4 {
+			t.Fatal("heartbeat timer modified sample retention", table, n, err)
 		}
 	}
 	var preserved int
@@ -195,41 +203,6 @@ func TestObservationRetentionPostgresPreservesBusinessAndVerifiableHeartbeatSuff
 	}
 }
 
-func TestObservationRetentionCapacityNeverRemovesProtectedRecentSamples(t *testing.T) {
-	s := retentionPostgres(t)
-	p := testRetentionPolicy()
-	p.ProbeDays = 30
-	p.BatchRows = 1000
-	now := time.Now().UTC()
-	if _, err := s.db.Exec(`INSERT INTO fugue_edge_network_samples SELECT n::text,$1::timestamptz-interval '8 days'+n*interval '1 second' FROM generate_series(1,10010)n`, now); err != nil {
-		t.Fatal(err)
-	}
-	conn, err := s.db.Conn(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := pruneObservationTable(t.Context(), conn, retainedObservationTables[0], p, now)
-	conn.Close()
-	if err != nil || n != 10 {
-		t.Fatal("capacity boundary did not discard only the oldest eligible observations", n, err)
-	}
-	if _, err = s.db.Exec(`UPDATE fugue_edge_network_samples SET observed_at=$1`, now); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.db.Exec(`INSERT INTO fugue_edge_network_samples VALUES('extra',$1)`, now); err != nil {
-		t.Fatal(err)
-	}
-	conn, err = s.db.Conn(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err = pruneObservationTable(t.Context(), conn, retainedObservationTables[0], p, now)
-	conn.Close()
-	if err != nil || n != 0 {
-		t.Fatal("row budget overrode protected recent evidence", n, err)
-	}
-}
-
 func TestObservationRetentionSampleOwnerDoesNotMoveHeartbeatRetention(t *testing.T) {
 	s := retentionPostgres(t)
 	now := time.Now().UTC()
@@ -241,28 +214,21 @@ func TestObservationRetentionSampleOwnerDoesNotMoveHeartbeatRetention(t *testing
 		}
 	}
 	checkpoint := observationCheckpointKey(observationSampleRetentionOwnerKey)
-	for _, tc := range []struct {
-		owner string
-		valid bool
-	}{
-		{owner: "worker", valid: true},
-		{owner: "", valid: false},
-		{owner: "not-a-writer", valid: false},
-	} {
-		if _, err := s.db.Exec(`INSERT INTO fugue_meta(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, checkpoint, tc.owner); err != nil {
+	for _, owner := range []string{"worker", "", "not-a-writer"} {
+		if _, err := s.db.Exec(`INSERT INTO fugue_meta(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, checkpoint, owner); err != nil {
 			t.Fatal(err)
 		}
-		counts, err := s.pruneObservationHistory(t.Context(), p, keys, now)
-		if (err == nil) != tc.valid {
-			t.Fatalf("sample checkpoint %q: unexpected result: %v", tc.owner, err)
+		counts, err := s.pruneSignedHeartbeatHistory(t.Context(), p, keys, now)
+		if err != nil {
+			t.Fatalf("sample checkpoint %q: unexpected result: %v", owner, err)
 		}
 		if _, ran := counts["heartbeat_history"]; !ran {
-			t.Fatalf("sample checkpoint %q disabled independent heartbeat retention", tc.owner)
+			t.Fatalf("sample checkpoint %q disabled independent heartbeat retention", owner)
 		}
 		for _, table := range retainedObservationTables {
 			var n int
 			if _, ran := counts[table.table]; ran {
-				t.Fatalf("sample checkpoint %q permitted legacy deletion from %s", tc.owner, table.table)
+				t.Fatalf("sample checkpoint %q permitted legacy deletion from %s", owner, table.table)
 			}
 			if err := s.db.QueryRow("SELECT count(*) FROM " + table.table).Scan(&n); err != nil || n != 1 {
 				t.Fatalf("protected sample lost from %s: %d, %v", table.table, n, err)

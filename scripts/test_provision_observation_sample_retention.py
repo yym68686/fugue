@@ -1,12 +1,13 @@
 import os
+import select
 import subprocess
 import unittest
 from unittest.mock import Mock
 from urllib.parse import urlsplit
 
-from scripts.apply_observation_sample_retention_handoff import activation_sql
+from scripts.apply_observation_sample_retention_handoff import ACTIVATION_LOCK_MESSAGES, activation_sql
 from scripts.provision_observation_sample_retention import CAPABILITY, FENCE, prepare_standby, standby_sql
-from scripts.provision_observation_worker_database import Provision, ProvisionError
+from scripts.provision_observation_worker_database import Provision, ProvisionError, ProvisionLockBusy, classify_sql_failure
 
 
 UID = "33759d3c-def3-4490-aa6c-deb4b77cc4f0"
@@ -57,10 +58,11 @@ class SampleRetentionStandbyTest(unittest.TestCase):
         self.assertEqual(address.hostname, "127.0.0.1")
         self.assertEqual(address.path, "/sample_retention_test")
 
-        def run(sql, *, role="", ok=True):
+        def run(sql, *, role="", ok=True, verbose=False):
             if role:
                 sql = f"SET ROLE {role};\n" + sql
-            result = subprocess.run(["psql", "-XAtqw", "-v", "ON_ERROR_STOP=1", dsn],
+            options = ["-v", "VERBOSITY=verbose"] if verbose else []
+            result = subprocess.run(["psql", "-XAtqw", "-v", "ON_ERROR_STOP=1", *options, dsn],
                                     input=sql, capture_output=True, text=True, timeout=12)
             self.assertEqual(result.returncode == 0, ok, result.stderr)
             return result.stdout.strip() if ok else result.stderr
@@ -99,8 +101,20 @@ INSERT INTO fugue_edge_network_samples VALUES ('expired', now()-interval '8 days
         self.assertIn("excess sample write rights", run(installer, ok=False))
         run(f"REVOKE DELETE ON fugue_edge_network_samples FROM {role}")
 
-        activate = FENCE.with_name("observation_sample_retention_activate.sql").read_text()
-        run(activation_sql(Provision(config), UID, activate))
+        activate = activation_sql(Provision(config), UID, FENCE.with_name("observation_sample_retention_activate.sql").read_text())
+        with subprocess.Popen(["psql", "-XAtqw", "-v", "ON_ERROR_STOP=1", dsn],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as legacy:
+            try:
+                legacy.stdin.write("SELECT pg_advisory_lock(315609238744311::bigint) \\g /dev/null\nSELECT 'held';\n")
+                legacy.stdin.flush()
+                self.assertTrue(select.select([legacy.stdout], [], [], 5)[0])
+                self.assertEqual(legacy.stdout.readline().strip(), "held")
+                self.assertIsInstance(classify_sql_failure(run(activate, ok=False, verbose=True),
+                                                           ACTIVATION_LOCK_MESSAGES), ProvisionLockBusy)
+                self.assertEqual(run(progress, role=role), "api|0|0")
+            finally:
+                legacy.communicate(timeout=5)
+        run(activate)
         run("BEGIN; DELETE FROM fugue_edge_network_samples; INSERT INTO fugue_edge_network_samples VALUES ('fresh',now()); COMMIT;",
             role="sample_retention_legacy")
         self.assertEqual(run(prune, role=role), "completed|1")

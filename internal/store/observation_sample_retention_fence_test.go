@@ -263,3 +263,41 @@ GRANT SELECT ON fugue_observation_maintenance.sample_worker_progress TO %[1]s;`,
 		t.Fatalf("worker deleted protected recent history: %v", err)
 	}
 }
+
+func TestPostgresSampleRetentionWorkerCapacityPreservesProtectedHistory(t *testing.T) {
+	address := testpostgres.Database(t, "")
+	db, err := openPostgresDatabase(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := t.Context()
+	exec := func(query string) {
+		t.Helper()
+		if _, err := db.ExecContext(ctx, query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(schemamigrate.PlatformQualityEvidenceRetentionSQL)
+	exec(schemamigrate.ObservationSampleRetentionFenceSQL)
+	exec(schemamigrate.ObservationSampleRetentionSQL)
+	exec(schemamigrate.ObservationSampleRetentionActivateSQL)
+	exec(`INSERT INTO public.fugue_edge_network_samples (edge_id,id,hostname,observed_at,sample_json)
+SELECT 'synthetic', n::text, 'example.test', now()-interval '8 days'+n*interval '1 second', '{}'
+FROM generate_series(1,10010) n`)
+	pass := func(wantDeleted int64) {
+		t.Helper()
+		var state string
+		var deleted int64
+		err := db.QueryRowContext(ctx, `SELECT state, deleted
+FROM fugue_observation_maintenance.prune_samples_v1('network',true,30,10000,1000)`).Scan(&state, &deleted)
+		if err != nil || state != "completed" || deleted != wantDeleted {
+			t.Fatalf("worker capacity pass: state=%q deleted=%d, want %d: %v", state, deleted, wantDeleted, err)
+		}
+	}
+	pass(10)
+	exec(`UPDATE public.fugue_edge_network_samples SET observed_at=now();
+INSERT INTO public.fugue_edge_network_samples (edge_id,id,hostname,observed_at,sample_json)
+VALUES ('synthetic','extra','example.test',now(),'{}')`)
+	pass(0)
+}
