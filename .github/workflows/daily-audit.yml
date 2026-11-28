@@ -16,6 +16,7 @@ on:
           - backup-runtime
           - retirement-test
           - cross-domain
+          - contract-backup-checkpoint
           - contract-tracking-scope
           - contract-generator-consumer
           - contract-retirement-scope

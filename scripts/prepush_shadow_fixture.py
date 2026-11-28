@@ -62,6 +62,13 @@ RETIREMENT_SCOPE_REGRESSION = (
     "\t_ = s.Store.AppReleaseRetirement\n\treleases, err := s.Store.ListAppReleases(",
 )
 
+BACKUP_SCOPE_REGRESSION = (
+    "internal/api/server.go",
+    "\tbackupInventory := newBackupInventory(store, cfg.BackupInventory)\n",
+    "\t_ = store.BackupInventoryCheckpointWriter\n"
+    "\tbackupInventory := newBackupInventory(store, cfg.BackupInventory)\n",
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
@@ -72,6 +79,11 @@ CASES = {
 }
 
 CONTRACTS = {
+    "contract-backup-checkpoint": (
+        BACKUP_SCOPE_REGRESSION, "./internal/backupusage",
+        "TestOnlyBackupInventoryAssemblyAcquiresCheckpointWriter",
+        "acquire backup inventory checkpoint writer only in its assembly",
+    ),
     "contract-tracking-scope": (
         TRACKING_SCOPE_REGRESSION, "./internal/imagetracking",
         "TestTrackingWriteCapabilityIsWiredOnlyAtComposition",
