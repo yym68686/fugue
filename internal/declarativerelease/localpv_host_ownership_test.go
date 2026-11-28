@@ -22,6 +22,8 @@ func TestLocalPVHostReleaseSourceOwnership(t *testing.T) {
 	}{
 		{"internal/localpvsafety/host/localpv_unit.go", []string{"api"}},
 		{"internal/localpvsafety/host/localpv_unit.py", []string{"api"}},
+		{"internal/localpvsafety/inventory/scheduler.go", []string{"api", "controller"}},
+		{"internal/store/localpv_inventory_tasks.go", []string{"api", "controller", "observation-worker", "ssh-control"}},
 		{"internal/localpvsafety/host/test_localpv_unit.py", nil},
 		{"internal/localpvsafety/hostcontract/prepare_test.go", nil},
 		{"scripts/prepare_fugue_lvm_localpv_node.sh", nil},

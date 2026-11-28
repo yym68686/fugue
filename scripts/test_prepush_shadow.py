@@ -234,7 +234,7 @@ class SelectionTest(unittest.TestCase):
 
     def test_domain_guards_are_runtime_source_edges_without_build_edges(self):
         labels = ["./internal/backupusage", "./internal/buildadmission",
-                  "./internal/imagetracking", "./internal/oomrightsizing", "./internal/releaseretirement"]
+                  "./internal/imagetracking", "./internal/localpvsafety/inventory", "./internal/oomrightsizing", "./internal/releaseretirement"]
         audits = [pkg(label.removeprefix("./")) for label in labels]
         options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
         for path in ("internal/unrelated", "cmd/unrelated"):
@@ -257,7 +257,7 @@ class SelectionTest(unittest.TestCase):
             patch.object(shadow, "packages_from_stream", return_value=[
                 pkg("internal/anotherdomain"), pkg("internal/backupusage"),
                 pkg("internal/buildadmission"), pkg("internal/imagetracking"),
-                pkg("internal/oomrightsizing"), pkg("internal/releaseretirement"),
+                pkg("internal/localpvsafety/inventory"), pkg("internal/oomrightsizing"), pkg("internal/releaseretirement"),
                 *repository_consumers(),
             ]),
             patch.object(prepush, "ROOT", ROOT),
