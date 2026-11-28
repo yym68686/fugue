@@ -4752,6 +4752,53 @@ jobs:
       - uses: ./.github/actions/deploy-declarative-component
         with: {component: observation-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
 
+  deploy_hosted_dns_worker:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'hosted-dns-worker') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-hosted-dns-worker, cancel-in-progress: false, queue: max}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Provision only the first hosted DNS standby credential
+        run: |
+          set -euo pipefail
+          files=deploy/releases/hosted-dns-worker
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$files" deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json cmd/fugue-hosted-dns-worker internal/hosteddns internal/schemamigrate/hosted_dns_flatten_worker.sql scripts/provision_hosted_dns_worker.py scripts/provision_observation_worker_database.py scripts/verify_hosted_dns_worker.py scripts/test_verify_hosted_dns_worker.py .github/workflows/ci.yml
+          python3 -m unittest scripts.test_verify_hosted_dns_worker
+          if jq -e '.expectedPreviousPresent == false' "$files/intent.json" >/dev/null; then
+            python3 -m scripts.provision_hosted_dns_worker "$files/database.json" --apply
+          else
+            git diff --exit-code HEAD^ HEAD -- "$files/database.json" internal/schemamigrate/hosted_dns_flatten_worker.sql
+          fi
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: hosted-dns-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Observe DNS standby without transferring ownership
+        id: dns_standby
+        run: |
+          set -euo pipefail
+          files=deploy/releases/hosted-dns-worker
+          jq -e '.expectedPreviousPresent == false' "$files/intent.json" >/dev/null || exit 0
+          python3 -m scripts.verify_hosted_dns_worker "$files/database.json" \
+            "$RUNNER_TEMP/fugue-component-artifact/fugue-hosted-dns-worker-artifact-receipt.json" "$GITHUB_SHA" \
+            >"$RUNNER_TEMP/fugue-hosted-dns-worker-standby.json"
+          echo 'observed=true' >> "$GITHUB_OUTPUT"
+      - name: Retain the hosted DNS standby evidence
+        if: steps.dns_standby.outputs.observed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-hosted-dns-worker-standby-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-hosted-dns-worker-standby.json
+          if-no-files-found: error
+          retention-days: 30
+
   deploy_storage_audit_worker:
     needs: [prepush, component-build, deploy_schema, observability_configuration, storage_policy]
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.storage_audit_worker_rehearsed == 'true' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && needs.observability_configuration.result == 'success' && needs.storage_policy.result == 'success' && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'storage-audit-worker') }}

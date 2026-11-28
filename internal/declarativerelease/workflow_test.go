@@ -306,7 +306,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_executor_release", "dns_observation_policy", "automatic_node_participation", "production_maintenance_plan", "edge_origin_relay_trust", "edge_origin_relay_policy")
 	expectedJobs = append(expectedJobs, "longhorn_cleanup_observer_release", "deploy_observation_worker", "observation_writer_handoff", "quality_evidence_retention_handoff")
 	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff")
-	expectedJobs = append(expectedJobs, "deploy_storage_audit_worker", "storage_audit_activation")
+	expectedJobs = append(expectedJobs, "deploy_hosted_dns_worker", "deploy_storage_audit_worker", "storage_audit_activation")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
