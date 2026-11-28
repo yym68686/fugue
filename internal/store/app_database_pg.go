@@ -30,6 +30,9 @@ func (s *Store) pgCreateAppDatabaseImportJob(job model.AppDatabaseImportJob) (mo
 	if err := s.pgValidateAppDatabaseImportRunnableTx(ctx, tx, app); err != nil {
 		return model.AppDatabaseImportJob{}, err
 	}
+	if err := validateAppDatabaseImportRetry(ctx, tx, job); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 
 	now := time.Now().UTC()
 	if strings.TrimSpace(job.ID) == "" {
@@ -113,6 +116,20 @@ WHERE app_id = $1 AND id = $2
 	return redactAppDatabaseImportJob(job), nil
 }
 
+const appDatabaseImportPendingPredicate = `
+FROM fugue_app_database_import_jobs pending
+WHERE status = $1
+  AND EXISTS (
+    SELECT 1 FROM fugue_tenants t WHERE t.id = pending.tenant_id AND t.status <> $3
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM fugue_app_database_import_jobs running
+    WHERE running.app_id = pending.app_id AND running.status = 'running'
+  )
+ORDER BY created_at ASC, id ASC
+LIMIT $2
+`
+
 func (s *Store) pgListPendingAppDatabaseImportJobs(limit int) ([]model.AppDatabaseImportJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -122,11 +139,7 @@ func (s *Store) pgListPendingAppDatabaseImportJobs(limit int) ([]model.AppDataba
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256, label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id, logs_json, requested_by_type, requested_by_id, created_at, updated_at, started_at, completed_at
-FROM fugue_app_database_import_jobs
-WHERE status = $1
-ORDER BY created_at ASC, id ASC
-LIMIT $2
-`, model.OperationStatusPending, limit)
+`+appDatabaseImportPendingPredicate, model.OperationStatusPending, limit, model.TenantStatusAccessHeld)
 	if err != nil {
 		return nil, mapDBErr(err)
 	}
@@ -146,12 +159,18 @@ LIMIT $2
 func (s *Store) pgClaimAppDatabaseImportJob(jobID string) (model.AppDatabaseImportJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return s.claimAppDatabaseImport(ctx, jobID, AppDatabaseImportAPIWriter, "")
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) claimAppDatabaseImport(ctx context.Context, jobID string, writer AppDatabaseImportWriter, attempt string) (model.AppDatabaseImportJob, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return model.AppDatabaseImportJob{}, fmt.Errorf("begin database import claim transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := requireAppDatabaseImportWriter(ctx, tx, writer); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 	var appID string
 	if err := tx.QueryRowContext(ctx, `
 SELECT app_id
@@ -178,6 +197,16 @@ FOR UPDATE
 		return model.AppDatabaseImportJob{}, mapDBErr(err)
 	}
 	if strings.TrimSpace(current.Status) != model.OperationStatusPending {
+		return model.AppDatabaseImportJob{}, ErrConflict
+	}
+	if err := requireAppDatabaseImportTenantActive(ctx, tx, current.TenantID); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
+	var active bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM fugue_app_database_import_jobs WHERE app_id=$1 AND status='running')`, appID).Scan(&active); err != nil {
+		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if active {
 		return model.AppDatabaseImportJob{}, ErrConflict
 	}
 
@@ -211,6 +240,14 @@ RETURNING id, tenant_id, app_id, source_upload_id, source_upload_filename, sourc
 `, strings.TrimSpace(jobID), model.OperationStatusRunning, now))
 	if err != nil {
 		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if attempt != "" {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO fugue_meta(key, value, updated_at)
+VALUES ($1, jsonb_build_object('attempt', $2::text, 'phase', 'preparing')::text, statement_timestamp())
+`, appDatabaseImportAttemptPrefix+jobID, attempt); err != nil {
+			return model.AppDatabaseImportJob{}, mapDBErr(err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return model.AppDatabaseImportJob{}, fmt.Errorf("commit database import claim transaction: %w", err)
@@ -283,12 +320,18 @@ SELECT EXISTS (
 func (s *Store) pgAppendAppDatabaseImportJobLog(jobID, message string) (model.AppDatabaseImportJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return s.appendAppDatabaseImportLog(ctx, jobID, message, AppDatabaseImportAPIWriter, "")
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) appendAppDatabaseImportLog(ctx context.Context, jobID, message string, writer AppDatabaseImportWriter, attempt string) (model.AppDatabaseImportJob, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return model.AppDatabaseImportJob{}, fmt.Errorf("begin database import log transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := requireAppDatabaseImportWriter(ctx, tx, writer); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 
 	current, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256, label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id, logs_json, requested_by_type, requested_by_id, created_at, updated_at, started_at, completed_at
@@ -298,6 +341,14 @@ FOR UPDATE
 `, strings.TrimSpace(jobID)))
 	if err != nil {
 		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
+	if attempt != "" {
+		if current.Status != model.OperationStatusRunning {
+			return model.AppDatabaseImportJob{}, ErrConflict
+		}
+		if _, err := lockAppDatabaseImportAttempt(ctx, tx, jobID, attempt); err != nil {
+			return model.AppDatabaseImportJob{}, err
+		}
 	}
 	now := time.Now().UTC()
 	if strings.TrimSpace(message) != "" {
@@ -328,13 +379,28 @@ RETURNING id, tenant_id, app_id, source_upload_id, source_upload_filename, sourc
 func (s *Store) pgCompleteAppDatabaseImportJob(jobID, status, message, errorMessage string) (model.AppDatabaseImportJob, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	return s.completeAppDatabaseImport(ctx, jobID, status, message, errorMessage, AppDatabaseImportAPIWriter, "")
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+func (s *Store) completeAppDatabaseImport(ctx context.Context, jobID, status, message, errorMessage string, writer AppDatabaseImportWriter, attempt string) (model.AppDatabaseImportJob, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return model.AppDatabaseImportJob{}, fmt.Errorf("begin database import complete transaction: %w", err)
 	}
 	defer tx.Rollback()
+	if err := requireAppDatabaseImportWriter(ctx, tx, writer); err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 
+	// Lock in the same order as claim and recovery so terminal failure
+	// can invalidate pre-existing requests atomically with the result.
+	var appID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT a.id FROM fugue_apps a JOIN fugue_app_database_import_jobs j ON j.app_id=a.id
+WHERE j.id=$1 FOR UPDATE OF a
+`, strings.TrimSpace(jobID)).Scan(&appID); err != nil {
+		return model.AppDatabaseImportJob{}, mapDBErr(err)
+	}
 	current, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 SELECT id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256, label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id, logs_json, requested_by_type, requested_by_id, created_at, updated_at, started_at, completed_at
 FROM fugue_app_database_import_jobs
@@ -347,14 +413,56 @@ FOR UPDATE
 	if strings.TrimSpace(current.Status) != model.OperationStatusRunning {
 		return model.AppDatabaseImportJob{}, ErrConflict
 	}
-
 	now := time.Now().UTC()
+	if attempt != "" {
+		phase, err := lockAppDatabaseImportAttempt(ctx, tx, jobID, attempt)
+		if err != nil {
+			return model.AppDatabaseImportJob{}, err
+		}
+		if status == model.OperationStatusCompleted && phase != "executing" {
+			return model.AppDatabaseImportJob{}, ErrConflict
+		}
+		if status == model.OperationStatusFailed && phase == "executing" {
+			// psql and pg_restore may commit part of the dump before a
+			// nonzero exit. Its exit status is not a rollback receipt.
+			if detail := strings.TrimSpace(errorMessage); detail != "" {
+				current.Logs = append(current.Logs, model.AppDatabaseImportJobLog{At: now, Message: detail})
+			}
+			errorMessage = AppDatabaseImportAmbiguousMessage
+			if err := invalidateQueuedAppDatabaseImports(ctx, tx, appID); err != nil {
+				return model.AppDatabaseImportJob{}, mapDBErr(err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM fugue_meta WHERE key=$1`, appDatabaseImportAttemptPrefix+jobID); err != nil {
+			return model.AppDatabaseImportJob{}, mapDBErr(err)
+		}
+	} else {
+		var attemptExists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fugue_meta WHERE key=$1)`, appDatabaseImportAttemptPrefix+jobID).Scan(&attemptExists); err != nil {
+			return model.AppDatabaseImportJob{}, mapDBErr(err)
+		}
+		if attemptExists {
+			return model.AppDatabaseImportJob{}, ErrConflict
+		}
+	}
+
+	if attempt != "" {
+		terminalLog := "database import completed"
+		if status == model.OperationStatusFailed {
+			terminalLog = strings.TrimSpace(errorMessage)
+		}
+		current.Logs = append(current.Logs, model.AppDatabaseImportJobLog{At: now, Message: terminalLog})
+	}
+	logsJSON, err := marshalNullableJSON(current.Logs)
+	if err != nil {
+		return model.AppDatabaseImportJob{}, err
+	}
 	completed, err := scanAppDatabaseImportJob(tx.QueryRowContext(ctx, `
 UPDATE fugue_app_database_import_jobs
-SET status = $2, result_message = $3, error_message = $4, completed_at = $5, updated_at = $5
+SET status = $2, result_message = $3, error_message = $4, completed_at = $5, updated_at = $5, logs_json = $6
 WHERE id = $1
 RETURNING id, tenant_id, app_id, source_upload_id, source_upload_filename, source_upload_sha256, label, format, clean, status, result_message, error_message, retry_count, retry_of_job_id, logs_json, requested_by_type, requested_by_id, created_at, updated_at, started_at, completed_at
-`, strings.TrimSpace(jobID), status, strings.TrimSpace(message), strings.TrimSpace(errorMessage), now))
+`, strings.TrimSpace(jobID), status, strings.TrimSpace(message), strings.TrimSpace(errorMessage), now, logsJSON))
 	if err != nil {
 		return model.AppDatabaseImportJob{}, mapDBErr(err)
 	}

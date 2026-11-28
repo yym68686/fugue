@@ -376,3 +376,27 @@ After committing, only a fresh success for each still-active binding's
 exact generation proves takeover. If confirmation fails, inspect the
 database owner and provider result; repair forward. A release rollback
 must not reset the database owner or restore a pre-fence image.
+
+## Application database import: API compatibility
+
+The API still validates, enqueues and reads imports on the existing routes.
+During compatibility it also remains the executor; the import domain takes
+an execution-only interface, not a server or a general store. A claim
+serializes imports per app and records a durable attempt before resolving
+credentials or loading the archive. The API adapter binds its identity and
+checks ownership, the attempt ID and freshness before execution writes.
+
+An expired preparation attempt returns the existing job to pending. The
+runner records the execution phase before launching the PostgreSQL client.
+An expired execution attempt or a tool error after this boundary leaves an
+unknown outcome: a client may have committed part of the dump. The failed
+job and previously queued jobs for that app cannot be retried from history.
+Inspect the target database before submitting a new import. A legacy
+running job without an attempt is not taken over or replayed automatically.
+
+This release does not create a worker identity or change the production
+owner. Before a separate handoff, require a dedicated login with
+attempt-scoped claims, archive and connection access; a database-enforced
+fence against legacy executor writes; proof that live and rollback images
+respect the fence; and evidence that existing imports have drained.
+Compatible code using the API schema-owner credential is not that fence.

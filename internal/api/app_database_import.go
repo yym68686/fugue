@@ -2,9 +2,7 @@ package api
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,15 +11,13 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"fugue/internal/appdbimport"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -31,11 +27,8 @@ import (
 
 const (
 	maxAppDatabaseImportRequestFieldBytes = 64 << 10
-	maxAppDatabaseImportDumpBytes         = 128 << 20
+	maxAppDatabaseImportDumpBytes         = appdbimport.MaxDumpBytes
 	maxAppDatabaseImportRequestBytes      = 130 << 20
-	maxAppDatabaseImportExpandedBytes     = 256 << 20
-	appDatabaseImportPollInterval         = 5 * time.Second
-	appDatabaseImportBatchSize            = 5
 	appDatabaseTunnelBufferBytes          = 32 * 1024
 )
 
@@ -77,6 +70,10 @@ func writeAppDatabaseImportError(w http.ResponseWriter, err error) {
 func (s *Server) writeAppDatabaseImportStoreError(w http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrManagedPostgresDatabaseImportConflict) {
 		httpx.WriteError(w, http.StatusConflict, store.ManagedPostgresDatabaseImportConflictMessage)
+		return
+	}
+	if errors.Is(err, store.ErrAppDatabaseImportOutcomeUnknown) {
+		httpx.WriteError(w, http.StatusConflict, store.AppDatabaseImportAmbiguousMessage)
 		return
 	}
 	s.writeStoreError(w, err)
@@ -451,117 +448,13 @@ func (s *Server) handleAppDatabaseAccessTunnel(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) StartBackgroundAppDatabaseImports(ctx context.Context) {
-	ticker := time.NewTicker(appDatabaseImportPollInterval)
-	defer ticker.Stop()
-	for {
-		s.processPendingAppDatabaseImportJobs(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+	appdbimport.Run(ctx, s.store.APIDatabaseImportExecution(), s.appDatabaseImportRunner, s.appDatabaseImportLog)
 }
 
-func (s *Server) processPendingAppDatabaseImportJobs(ctx context.Context) {
-	jobs, err := s.store.ListPendingAppDatabaseImportJobs(appDatabaseImportBatchSize)
-	if err != nil {
-		if s.log != nil {
-			s.log.Printf("list pending database import jobs failed: %v", err)
-		}
-		return
+func (s *Server) appDatabaseImportLog(format string, args ...any) {
+	if s.log != nil {
+		s.log.Printf(format, args...)
 	}
-	for _, pending := range jobs {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		tenant, err := s.store.GetTenant(pending.TenantID)
-		if err != nil || tenant.Status == model.TenantStatusAccessHeld {
-			continue
-		}
-		job, err := s.store.ClaimAppDatabaseImportJob(pending.ID)
-		if err != nil {
-			if !errors.Is(err, store.ErrConflict) && !errors.Is(err, store.ErrNotFound) && s.log != nil {
-				s.log.Printf("claim database import job %s failed: %v", pending.ID, err)
-			}
-			continue
-		}
-		if _, err := s.store.AppendAppDatabaseImportJobLog(job.ID, "starting database import"); err != nil && s.log != nil {
-			s.log.Printf("append database import job log %s failed: %v", job.ID, err)
-		}
-		runner := s.appDatabaseImportRunner
-		if runner == nil {
-			runner = s.runAppDatabaseImportJob
-		}
-		result, runErr := runner(ctx, job)
-		if runErr != nil {
-			if _, err := s.store.AppendAppDatabaseImportJobLog(job.ID, runErr.Error()); err != nil && s.log != nil {
-				s.log.Printf("append failed database import job log %s failed: %v", job.ID, err)
-			}
-			if _, err := s.store.CompleteAppDatabaseImportJob(job.ID, model.OperationStatusFailed, "", runErr.Error()); err != nil && s.log != nil {
-				s.log.Printf("complete failed database import job %s failed: %v", job.ID, err)
-			}
-			continue
-		}
-		if _, err := s.store.AppendAppDatabaseImportJobLog(job.ID, "database import completed"); err != nil && s.log != nil {
-			s.log.Printf("append completed database import job log %s failed: %v", job.ID, err)
-		}
-		if _, err := s.store.CompleteAppDatabaseImportJob(job.ID, model.OperationStatusCompleted, result, ""); err != nil && s.log != nil {
-			s.log.Printf("complete database import job %s failed: %v", job.ID, err)
-		}
-	}
-}
-
-func (s *Server) runAppDatabaseImportJob(ctx context.Context, job model.AppDatabaseImportJob) (string, error) {
-	// Claim applies the same check under the app serialization lock. Keep this
-	// final guard immediately before resolving credentials/opening PostgreSQL so
-	// alternate runners cannot bypass the lifecycle invariant.
-	if err := s.store.ValidateAppDatabaseImportRunnable(job.AppID); err != nil {
-		return "", err
-	}
-	app, err := s.store.GetApp(job.AppID)
-	if err != nil {
-		return "", err
-	}
-	if store.OwnedManagedPostgresSpec(app) == nil {
-		return "", fmt.Errorf("managed postgres is not configured for this app")
-	}
-	connection, err := authorizedDatabaseConnection(app)
-	if err != nil {
-		return "", err
-	}
-	upload, dumpBytes, err := s.store.GetSourceUploadArchive(job.SourceUploadID)
-	if err != nil {
-		return "", err
-	}
-	if len(dumpBytes) == 0 {
-		return "", fmt.Errorf("database import dump is empty")
-	}
-	if len(dumpBytes) > maxAppDatabaseImportDumpBytes {
-		return "", fmt.Errorf("database import dump exceeds %d bytes", maxAppDatabaseImportDumpBytes)
-	}
-	data, err := maybeGunzipDatabaseDump(dumpBytes, upload.Filename)
-	if err != nil {
-		return "", err
-	}
-	format := detectDatabaseImportFormat(job.Format, data, upload.Filename)
-	if format == "" {
-		return "", fmt.Errorf("could not detect database import format")
-	}
-	if _, err := s.store.AppendAppDatabaseImportJobLog(job.ID, fmt.Sprintf("running %s import into %s/%s", format, connection.Host, connection.Database)); err != nil && s.log != nil {
-		s.log.Printf("append database import job log %s failed: %v", job.ID, err)
-	}
-	output, err := runPostgresImportCommand(ctx, connection, format, job.Clean, data)
-	if err != nil {
-		return "", err
-	}
-	message := fmt.Sprintf("imported %d bytes into database %s", len(data), connection.Database)
-	if strings.TrimSpace(output) != "" {
-		message += ": " + trimCommandOutput(output)
-	}
-	return message, nil
 }
 
 func decodeAppDatabaseImportMultipart(w http.ResponseWriter, r *http.Request) (model.AppDatabaseImportRequest, string, string, []byte, error) {
@@ -751,16 +644,7 @@ func appDatabaseImportDumpFilename(raw string) string {
 }
 
 func normalizeAppDatabaseImportRequestFormat(raw string) string {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case "", model.AppDatabaseImportFormatAuto:
-		return model.AppDatabaseImportFormatAuto
-	case model.AppDatabaseImportFormatSQL:
-		return model.AppDatabaseImportFormatSQL
-	case model.AppDatabaseImportFormatCustom:
-		return model.AppDatabaseImportFormatCustom
-	default:
-		return ""
-	}
+	return appdbimport.NormalizeFormat(raw)
 }
 
 func normalizeAppDatabaseAccessMode(raw string) string {
@@ -770,181 +654,6 @@ func normalizeAppDatabaseAccessMode(raw string) string {
 	default:
 		return ""
 	}
-}
-
-func maybeGunzipDatabaseDump(data []byte, filename string) ([]byte, error) {
-	return maybeGunzipDatabaseDumpWithLimit(data, filename, maxAppDatabaseImportExpandedBytes)
-}
-
-func maybeGunzipDatabaseDumpWithLimit(data []byte, filename string, maxExpandedBytes int64) ([]byte, error) {
-	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
-		if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(filename)), ".gz") {
-			return data, nil
-		}
-	}
-	if maxExpandedBytes < 0 {
-		return nil, errors.New("invalid gzip database import expansion boundary")
-	}
-	reader, err := gzip.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil, fmt.Errorf("open gzip dump: %w", err)
-	}
-	defer reader.Close()
-	out, err := io.ReadAll(io.LimitReader(reader, maxExpandedBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("read gzip dump: %w", err)
-	}
-	if int64(len(out)) > maxExpandedBytes {
-		return nil, fmt.Errorf("gzip database import expands beyond %d bytes", maxExpandedBytes)
-	}
-	return out, nil
-}
-
-func detectDatabaseImportFormat(requested string, data []byte, filename string) string {
-	requested = normalizeAppDatabaseImportRequestFormat(requested)
-	if requested != model.AppDatabaseImportFormatAuto {
-		return requested
-	}
-	if bytes.HasPrefix(data, []byte("PGDMP")) {
-		return model.AppDatabaseImportFormatCustom
-	}
-	lowerName := strings.ToLower(strings.TrimSpace(filename))
-	switch {
-	case strings.HasSuffix(lowerName, ".dump"), strings.HasSuffix(lowerName, ".backup"), strings.HasSuffix(lowerName, ".custom"):
-		return model.AppDatabaseImportFormatCustom
-	default:
-		return model.AppDatabaseImportFormatSQL
-	}
-}
-
-func runPostgresImportCommand(ctx context.Context, connection appDatabaseConnection, format string, clean bool, data []byte) (string, error) {
-	pgEnv, commonArgs, err := postgresCommandEnvAndArgs(connection)
-	if err != nil {
-		return "", err
-	}
-	tempFile, err := os.CreateTemp("", "fugue-db-import-*")
-	if err != nil {
-		return "", fmt.Errorf("create temporary database import file: %w", err)
-	}
-	tempPath := tempFile.Name()
-	defer os.Remove(tempPath)
-	if format == model.AppDatabaseImportFormatSQL {
-		data = unwrapPostgresDumpRestrictions(data)
-	}
-	if _, err := tempFile.Write(data); err != nil {
-		tempFile.Close()
-		return "", fmt.Errorf("write temporary database import file: %w", err)
-	}
-	if err := tempFile.Close(); err != nil {
-		return "", fmt.Errorf("close temporary database import file: %w", err)
-	}
-
-	var name string
-	var args []string
-	switch format {
-	case model.AppDatabaseImportFormatCustom:
-		name = "pg_restore"
-		args = append([]string{"--no-owner", "--no-privileges"}, commonArgs...)
-		if clean {
-			args = append(args, "--clean", "--if-exists")
-		}
-		args = append(args, tempPath)
-	case model.AppDatabaseImportFormatSQL:
-		name = "psql"
-		args = append([]string{"--no-psqlrc", "--no-password", "--set", "ON_ERROR_STOP=on"}, commonArgs...)
-		// Restrict client commands for the entire input using a fresh key
-		// independent of the archive. Older clients fail before reading it.
-		args = append(args, "--command", "\\restrict "+rand.Text())
-		if clean {
-			args = append(args, "--command", sqlCleanPublicSchema(connection.User))
-		}
-		args = append(args, "--file", tempPath)
-	default:
-		return "", fmt.Errorf("unsupported database import format %q", format)
-	}
-
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = pgEnv
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-	if err := cmd.Run(); err != nil {
-		return output.String(), fmt.Errorf("%s failed: %w: %s", name, err, trimCommandOutput(output.String()))
-	}
-	return output.String(), nil
-}
-
-var dumpRestrictionStart = regexp.MustCompile(`(?m)^(?:--[^\r\n]*\r?\n|[ \t]*\r?\n)*\\restrict ([A-Za-z0-9]+)[ \t]*\r?$\n`)
-var dumpRestrictionEnd = regexp.MustCompile(`(?m)^\\unrestrict ([A-Za-z0-9]+)[ \t]*\r?(?:\n[ \t\r\n]*)?\z`)
-
-// Standard pg_dump plain archives have their own outer guard. Remove only a
-// matching pair surrounding the complete dump; psql supplies our guard instead.
-func unwrapPostgresDumpRestrictions(data []byte) []byte {
-	start := dumpRestrictionStart.FindSubmatchIndex(data)
-	if start == nil || start[0] != 0 {
-		return data
-	}
-	end := dumpRestrictionEnd.FindSubmatchIndex(data[start[1]:])
-	if end == nil || !bytes.Equal(data[start[2]:start[3]], data[start[1]+end[2]:start[1]+end[3]]) {
-		return data
-	}
-	return data[start[1] : start[1]+end[0]]
-}
-
-func postgresCommandEnvAndArgs(connection appDatabaseConnection) ([]string, []string, error) {
-	parsed, err := url.Parse(connection.DSN)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parse database dsn: %w", err)
-	}
-	host := firstNonEmptyString(connection.Host, parsed.Hostname())
-	port := firstNonEmptyString(connection.Port, parsed.Port(), "5432")
-	database := firstNonEmptyString(connection.Database, strings.TrimPrefix(parsed.Path, "/"))
-	user := firstNonEmptyString(connection.User, parsed.User.Username())
-	if host == "" || database == "" || user == "" {
-		return nil, nil, fmt.Errorf("database connection is missing host, database, or user")
-	}
-	password, _ := parsed.User.Password()
-	env := []string{
-		"PGHOST=" + host,
-		"PGPORT=" + port,
-		"PGDATABASE=" + database,
-		"PGUSER=" + user,
-		"PGSSLMODE=" + firstNonEmptyString(parsed.Query().Get("sslmode"), "disable"),
-	}
-	if password != "" {
-		env = append(env, "PGPASSWORD="+password)
-	}
-	args := []string{
-		"--host", host,
-		"--port", port,
-		"--username", user,
-		"--dbname", (&url.URL{Scheme: "postgresql", Host: net.JoinHostPort(host, port), Path: "/" + database, User: url.User(user)}).String(),
-	}
-	return env, args, nil
-}
-
-func sqlCleanPublicSchema(owner string) string {
-	quotedOwner := quotePostgresIdentifier(strings.TrimSpace(owner))
-	if quotedOwner == "" {
-		quotedOwner = "CURRENT_USER"
-	}
-	return "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO " + quotedOwner + "; GRANT ALL ON SCHEMA public TO public;"
-}
-
-func quotePostgresIdentifier(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
-}
-
-func trimCommandOutput(output string) string {
-	output = strings.TrimSpace(output)
-	if len(output) <= 2000 {
-		return output
-	}
-	return output[:2000] + "...[truncated]"
 }
 
 func relayTCPToWebSocket(ws *websocket.Conn, conn net.Conn, errCh chan<- error) {

@@ -95,6 +95,12 @@ func TestPGClaimAppDatabaseImportJobCommitsTerminalFailureWhenSuspendWins(t *tes
 	now := time.Date(2026, time.July, 15, 9, 10, 11, 0, time.UTC)
 
 	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0))`)).
+		WithArgs(appDatabaseImportOwnerKey).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(true))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT value FROM fugue_meta WHERE key=$1`)).
+		WithArgs(appDatabaseImportOwnerKey).
+		WillReturnRows(sqlmock.NewRows([]string{"value"}))
 	mock.ExpectQuery(regexp.QuoteMeta(`
 SELECT app_id
 FROM fugue_app_database_import_jobs
@@ -143,6 +149,12 @@ WHERE id = $1
 			nil,
 			nil,
 		))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT status FROM fugue_tenants WHERE id=$1 FOR SHARE`)).
+		WithArgs("tenant_database_import").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT EXISTS (SELECT 1 FROM fugue_app_database_import_jobs WHERE app_id=$1 AND status='running')`)).
+		WithArgs("app_database_import").
+		WillReturnRows(sqlmock.NewRows([]string{"exists"}).AddRow(false))
 	mock.ExpectQuery(`(?s)SELECT EXISTS \(.*FROM fugue_operations.*type IN \(\$1, \$2, \$3, 'database-recover', 'database-image-migrate', 'database-replica-retire', 'database-source-retire'\).*status IN \(\$4, \$5, \$6\).*app_id = \$7`).
 		WithArgs(
 			model.OperationTypeDatabaseSuspend,

@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/json"
 	"errors"
 	"mime/multipart"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"fugue/internal/appdbimport"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -159,17 +159,13 @@ func TestRetryAppDatabaseImportReturnsStableConflictWhenManagedPostgresSuspended
 	}
 }
 
-func TestRunAppDatabaseImportJobDefendsAgainstSuspendedManagedPostgres(t *testing.T) {
-	stateStore, server, _, app, service := managedPostgresLifecycleFixture(t, 0)
+func TestValidateAppDatabaseImportRunnableRejectsSuspendedManagedPostgres(t *testing.T) {
+	stateStore, _, _, app, service := managedPostgresLifecycleFixture(t, 0)
 	completeManagedPostgresLifecycleForTest(t, stateStore, app, service, model.OperationTypeDatabaseSuspend)
 
-	_, err := server.runAppDatabaseImportJob(context.Background(), model.AppDatabaseImportJob{
-		ID:             "dbimport_defense",
-		AppID:          app.ID,
-		SourceUploadID: "upload_must_not_be_read",
-	})
+	err := stateStore.ValidateAppDatabaseImportRunnable(app.ID)
 	if !errors.Is(err, store.ErrManagedPostgresDatabaseImportConflict) {
-		t.Fatalf("runAppDatabaseImportJob error = %v, want managed postgres import conflict", err)
+		t.Fatalf("validate database import: %v, want managed postgres import conflict", err)
 	}
 }
 
@@ -502,10 +498,10 @@ func TestDatabaseImportDumpAndGzipHelpersEnforceHardLimits(t *testing.T) {
 	if err := zipWriter.Close(); err != nil {
 		t.Fatalf("close gzip fixture: %v", err)
 	}
-	if _, err := maybeGunzipDatabaseDumpWithLimit(compressed.Bytes(), "dump.sql.gz", 5); err == nil || !strings.Contains(err.Error(), "expands beyond 5 bytes") {
+	if _, err := appdbimport.ExpandDump(compressed.Bytes(), "dump.sql.gz", 5); err == nil || !strings.Contains(err.Error(), "expands beyond 5 bytes") {
 		t.Fatalf("gzip expansion error = %v", err)
 	}
-	expanded, err := maybeGunzipDatabaseDumpWithLimit(compressed.Bytes(), "dump.sql.gz", 10)
+	expanded, err := appdbimport.ExpandDump(compressed.Bytes(), "dump.sql.gz", 10)
 	if err != nil || string(expanded) != "0123456789" {
 		t.Fatalf("bounded gzip expansion = %q err=%v", expanded, err)
 	}

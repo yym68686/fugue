@@ -9,19 +9,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"fugue/internal/appmanageddb"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
-	"fugue/internal/runtime"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -36,14 +34,7 @@ const (
 	appDatabaseQueryDefaultDriver     = "pgx"
 )
 
-type appDatabaseConnection struct {
-	ServiceID string
-	DSN       string
-	Host      string
-	Port      string
-	Database  string
-	User      string
-}
+type appDatabaseConnection = appmanageddb.Connection
 
 type appDatabaseQueryColumn struct {
 	Name         string `json:"name"`
@@ -371,25 +362,8 @@ func queryAppDatabase(ctx context.Context, db *sql.DB, connection appDatabaseCon
 	}, nil
 }
 
-var postgresServiceLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
-
-// Resolve only from the platform's recorded binding. App and binding environment
-// overrides are for the workload and must never configure a control-plane connection.
 func authorizedDatabaseConnection(app model.App) (appDatabaseConnection, error) {
-	bound, ok := firstManagedPostgresBinding(app)
-	service := bound.Service
-	if !ok || app.TenantID == "" || service.TenantID != app.TenantID || bound.Binding.TenantID != app.TenantID ||
-		bound.Binding.AppID != app.ID || bound.Binding.ServiceID != service.ID || service.ID == "" || service.Spec.Postgres == nil {
-		return appDatabaseConnection{}, errors.New("an authorized managed database binding is required")
-	}
-	pg := *service.Spec.Postgres
-	name := model.PostgresEndpointName(pg)
-	if !postgresServiceLabel.MatchString(name) || pg.Database == "" || pg.User == "" || pg.Password == "" || pg.Suspended {
-		return appDatabaseConnection{}, errors.New("managed database connection unavailable")
-	}
-	host := name + "." + runtime.NamespaceForTenant(service.TenantID) + ".svc.cluster.local"
-	u := url.URL{Scheme: "postgresql", Host: net.JoinHostPort(host, "5432"), Path: "/" + pg.Database, User: url.UserPassword(pg.User, pg.Password)}
-	return appDatabaseConnection{ServiceID: service.ID, DSN: u.String(), Host: host, Port: "5432", Database: pg.Database, User: pg.User}, nil
+	return appmanageddb.Resolve(app)
 }
 
 func normalizeDatabaseValue(value any) any {

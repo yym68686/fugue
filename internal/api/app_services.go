@@ -4,34 +4,15 @@ import (
 	"sort"
 	"strings"
 
+	"fugue/internal/appmanageddb"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
 
-type appBoundService struct {
-	Binding model.ServiceBinding
-	Service model.BackingService
-}
+type appBoundService = appmanageddb.BoundService
 
 func appBoundServices(app model.App) []appBoundService {
-	servicesByID := make(map[string]model.BackingService, len(app.BackingServices))
-	for _, service := range app.BackingServices {
-		servicesByID[service.ID] = service
-	}
-
-	bound := make([]appBoundService, 0, len(app.Bindings))
-	for _, binding := range app.Bindings {
-		service, ok := servicesByID[binding.ServiceID]
-		if !ok {
-			continue
-		}
-		bound = append(bound, appBoundService{
-			Binding: binding,
-			Service: service,
-		})
-	}
-
-	return bound
+	return appmanageddb.BoundServices(app)
 }
 
 func mergedAppEnv(app model.App) map[string]string {
@@ -171,30 +152,11 @@ func appendUniqueString(values []string, value string) []string {
 }
 
 func firstManagedPostgresBinding(app model.App) (appBoundService, bool) {
-	var fallback appBoundService
-	for _, bound := range appBoundServices(app) {
-		if !strings.EqualFold(strings.TrimSpace(bound.Service.Type), model.BackingServiceTypePostgres) {
-			continue
-		}
-		if !isManagedBackingService(bound.Service) {
-			continue
-		}
-		if bound.Service.OwnerAppID == app.ID {
-			return bound, true
-		}
-		if fallback.Service.ID == "" {
-			fallback = bound
-		}
-	}
-	if fallback.Service.ID != "" {
-		return fallback, true
-	}
-	return appBoundService{}, false
+	return appmanageddb.FirstPostgresBinding(app)
 }
 
 func isManagedBackingService(service model.BackingService) bool {
-	provisioner := strings.TrimSpace(service.Provisioner)
-	return provisioner == "" || strings.EqualFold(provisioner, model.BackingServiceProvisionerManaged)
+	return appmanageddb.IsManagedService(service)
 }
 
 func defaultAPIBindingPostgresEnv(spec model.AppPostgresSpec) map[string]string {
