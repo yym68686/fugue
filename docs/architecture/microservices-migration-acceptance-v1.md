@@ -134,8 +134,11 @@ and the [K3s certificate rotation reference](https://docs.k3s.io/cli/certificate
 A read-only production observation on 2026-11-28 found one ready CNPG
 control-plane instance and a suspended CNPG physical backup schedule. The
 most recent completed physical backup reported by that schedule was
-2026-11-01. The product backup status showed a successful logical
-control-plane backup on 2026-11-27 with recovery status `plan-available`.
+2026-11-01. The cluster's current specification has no Barman object store
+and has the explicit operator-disabled annotation. The artifact inventory
+classified the successful product backup on 2026-11-27 as a Longhorn
+snapshot, and listed no independent logical dump for that target. The
+reported recovery status was `plan-available`.
 Neither the native journal nor the native storage audit policy boundary was
 installed on the primary. The application database role was neither a
 superuser nor a member of `pg_read_all_data`. These observations do not

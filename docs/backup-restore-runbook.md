@@ -68,25 +68,25 @@ being accepted. Retain independent evidence for the exact recovery point.
    GitHub, the serving API and their deploy credentials. The app's configured
    backup DSN is not assumed to have this access. Verify the existing backup
    schedule still produces complete backups after installing the journal.
-2. In one persistent, independent PostgreSQL session, run
-   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;` and then
-   `SELECT pg_export_snapshot();`. Leave the transaction open until both
-   commands below have succeeded against that same database and exported
-   snapshot. Use a private staging directory for the dump and explicit
-   PostgreSQL connection settings such as an independently provisioned
-   `PGSERVICE`. Keep connection passwords out of shell arguments.
+2. Use an independently provisioned, owner-only libpq service file with a
+   reader credential and a CA for the same PostgreSQL hostname as the
+   source journal configuration. Choose an encrypted staging filesystem and
+   pass an absolute directory that does not already exist.
 
    ```bash
-   pg_dump --snapshot="$SNAPSHOT" --format=custom --no-owner --no-privileges --file=control.dump
-   fugue-production-control journal-recovery-checkpoint "$SOURCE_JOURNAL_CONFIG" "$SNAPSHOT"
+   fugue-production-control journal-recovery-create "$SOURCE_JOURNAL_CONFIG" "$PG_SERVICE_FILE" "$PG_SERVICE" "$NEW_PRIVATE_DIRECTORY"
    ```
 
-   Commit the exporter transaction after both reads finish. In the independent,
-   append-only recovery inventory, pin the backup's SHA-256, the command's
-   checkpoint digest, source cluster and archive identity together. Preserve
-   the installed policy/grant manifests, independent execution witnesses and
-   required release artifacts separately. Review the latest eligible entry
-   against known later claims and provider writes before deciding to restore.
+   The command holds a read-only PostgreSQL snapshot until the journal
+   fingerprint and custom-format database export finish. It creates
+   `control-plane.dump` and then `recovery.json` in the new private directory.
+   The resulting recovery record stages the pin, but does not itself establish
+   independent custody. Copy the verified archive to the independently
+   accessible archive store and pin its SHA-256, checkpoint digest, source
+   cluster and archive identity in an append-only inventory. Preserve installed
+   policy/grant manifests, independent execution witnesses and required release
+   artifacts separately. Review the latest eligible entry against known later
+   claims and provider writes before choosing a restore point.
 3. Restore the pinned dump to a fresh, private database with local tooling.
    No API, controller, bootstrap publisher or Guardian worker may connect until
    the restored state and provider fences are reconciled. Verify the archive

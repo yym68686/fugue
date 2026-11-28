@@ -32,6 +32,7 @@ import (
 const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign SUBMISSION EXPECTED_DIGEST KEY_ID PRIVATE_PKCS8_PEM TTL
        fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
+       fugue-production-control journal-recovery-create JOURNAL_CONFIG PG_SERVICE_FILE PG_SERVICE NEW_PRIVATE_DIRECTORY
        fugue-production-control journal-recovery-checkpoint JOURNAL_CONFIG [POSTGRES_SNAPSHOT]
        fugue-production-control journal-recovery-verify JOURNAL_CONFIG CHECKPOINT_DIGEST
        fugue-production-control observe-storage-audit-owner CONFIG
@@ -86,6 +87,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "journal-recovery-create":
+		if len(args) != 5 {
+			return errors.New(usage)
+		}
+		return createJournalRecovery(ctx, args[1], args[2], args[3], args[4], out)
 	case "journal-recovery-checkpoint", "journal-recovery-verify":
 		if len(args) < 2 || len(args) > 3 || (args[0] == "journal-recovery-verify" && len(args) != 3) {
 			return errors.New(usage)
