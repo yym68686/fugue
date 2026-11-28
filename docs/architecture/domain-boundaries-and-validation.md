@@ -145,7 +145,8 @@ a narrower test set. The manual daily audit exposes these switches as
 `make prepush` or emits a production receipt.
 
 For a source-owned writer capability or generator with an implicit downstream
-consumer, use the manual `contract-tracking-scope`,
+consumer, use the manual `contract-backup-checkpoint`,
+`contract-builder-checkpoint`, `contract-tracking-scope`,
 `contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
 exact named consumer test to pass, applies one synthetic source regression,
 proves native and Linux artifact-target reports select that consumer uncached
@@ -154,6 +155,11 @@ the expected diagnostic. The temporary edit exists only in the disposable CI
 checkout; its evidence never authorizes a production release. A passing suite
 without this negative witness is not evidence that the contract edge is
 selected.
+
+The `builder-runtime` and `builder-test` incremental cases measure one
+changed domain source file and one changed placement test, respectively.
+They measure local edits, not the shared checkpoint-contract or release
+intent changes. Use the target comparisons inside every timed sample.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing
