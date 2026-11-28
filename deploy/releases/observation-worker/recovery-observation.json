@@ -1,0 +1,10 @@
+{
+  "worker": {
+    "deployment": "fugue-observation-worker",
+    "container": "observation-worker",
+    "image": "ghcr.io/yym68686/fugue-observation-worker@sha256:32c4b9712512aa5efc35e12ea089a0a415527747275e0a217316f17b6c68dcd1",
+    "revision": "16862482829129c77075b1dc2a98ab8115344cfe",
+    "replicas": 1
+  },
+  "notBefore": "2026-11-28T11:12:28+00:00"
+}
