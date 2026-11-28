@@ -96,12 +96,20 @@ func (r *IndependentRegistry) DraftRegistryRehome(ctx context.Context, raw []byt
 	draft := RegistryRehomeDraft{Schema: "fugue.production.registry-rehome-draft.v1", ArchiveDigest: archiveDigest,
 		Component: pair.Component, Workload: recoveryWorkloadKey(archive.forward.workload).resource, Services: currentServices,
 		Current: current, Rollback: rollback, Mirror: mirror}
-	canonical, err := declarativerelease.CanonicalJSON(draft)
+	draft.DraftDigest, err = registryRehomeDraftDigest(draft)
 	if err != nil {
 		return RegistryRehomeDraft{}, err
 	}
-	draft.DraftDigest = digest(canonical)
 	return draft, nil
+}
+
+func registryRehomeDraftDigest(draft RegistryRehomeDraft) (string, error) {
+	draft.DraftDigest = ""
+	canonical, err := declarativerelease.CanonicalJSON(draft)
+	if err != nil {
+		return "", err
+	}
+	return digest(canonical), nil
 }
 
 func projectRegistryRehome(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, []RegistryRehomeService, error) {
@@ -133,23 +141,7 @@ func projectRegistryRehome(record sealedRecoveryRecord, destination string) (Reg
 		if id.Kind != "Service" || id.APIVersion != "v1" || id.Namespace != scope.Namespace {
 			return RegistryRehomeProjection{}, nil, errors.New("registry rehome cannot delegate writes to other release resources")
 		}
-		item := set.Items[index]
-		meta, _ := item["metadata"].(map[string]any)
-		if raw, present := meta["annotations"]; present {
-			annotations, ok := raw.(map[string]any)
-			if !ok {
-				return RegistryRehomeProjection{}, nil, errors.New("registry rehome Service annotations are invalid")
-			}
-			// These three stamps describe the release that observed this
-			// object, not a change to the Service. All other fields bind.
-			for _, key := range []string{"fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/artifact-receipt-digest"} {
-				delete(annotations, key)
-			}
-			if len(annotations) == 0 {
-				delete(meta, "annotations")
-			}
-		}
-		canonical, err := declarativerelease.CanonicalJSON(item)
+		canonical, err := registryRehomeServiceShape(set.Items[index])
 		if err != nil {
 			return RegistryRehomeProjection{}, nil, err
 		}
@@ -178,4 +170,23 @@ func projectRegistryRehome(record sealedRecoveryRecord, destination string) (Reg
 	monitor := record.version.Monitor
 	return RegistryRehomeProjection{RecordDigest: monitor.RecordDigest, SourceManifestDigest: monitor.ForwardManifestDigest,
 		SourceImage: source, IndependentImage: destination, SourcePodSpecDigest: digest(before), TargetPodSpecDigest: digest(after), Containers: changes}, services, nil
+}
+
+func registryRehomeServiceShape(item map[string]any) ([]byte, error) {
+	meta, _ := item["metadata"].(map[string]any)
+	if raw, present := meta["annotations"]; present {
+		annotations, ok := raw.(map[string]any)
+		if !ok {
+			return nil, errors.New("registry rehome Service annotations are invalid")
+		}
+		// These three stamps describe the release that observed this object,
+		// not a change to the Service. All other fields bind.
+		for _, key := range []string{"fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/artifact-receipt-digest"} {
+			delete(annotations, key)
+		}
+		if len(annotations) == 0 {
+			delete(meta, "annotations")
+		}
+	}
+	return declarativerelease.CanonicalJSON(item)
 }

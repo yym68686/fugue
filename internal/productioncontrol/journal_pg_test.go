@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -181,4 +182,31 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 	}
 	t.Run("independent-witness-gate", func(t *testing.T) { testPostgresWitnessGate(t, ctx, runtimeDB) })
 	t.Run("participation-topology", func(t *testing.T) { testPostgresParticipationTopology(t, ctx, db, runtimeDB) })
+	t.Run("registry-rehome-review-cannot-claim", func(t *testing.T) {
+		payload := []byte(`{"test":"registry rehome approval path"}`)
+		move, err := NewIntent(intent.ClusterID, "kubernetes/fugue-system/deployment/test-api", "rehome",
+			ComponentRegistryMove, 1, intent.CurrentDigest, intent.TargetDigest, intent.CurrentDigest, payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held, err := second.RecordIntent(ctx, "operator-a", move, payload)
+		if err != nil || !held.Created {
+			t.Fatalf("record review intent: %+v %v", held, err)
+		}
+		a, err := SignApproval(move, "owner-a", private, now, time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signed, err := second.RecordApproval(ctx, a)
+		if err != nil || !signed.Created {
+			t.Fatalf("record independent approval: %+v %v", signed, err)
+		}
+		if claim, created, err := second.ReserveExecution(ctx, "operator-a", held.Digest, signed.Digest); err == nil ||
+			!strings.Contains(err.Error(), "dedicated provider-fenced executor") || created || claim != (Claim{}) {
+			t.Fatalf("approved review obtained ordinary execution claim: %+v created=%v err=%v", claim, created, err)
+		}
+		if _, _, err := second.ReadExecution(ctx, move.scope(), held.Digest); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("refused review left a claim: %v", err)
+		}
+	})
 }

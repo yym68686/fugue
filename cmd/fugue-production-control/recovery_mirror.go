@@ -14,6 +14,7 @@ import (
 	"fugue/internal/declarativerelease"
 	"fugue/internal/releaseguardian"
 	"github.com/google/go-containerregistry/pkg/authn"
+	"k8s.io/client-go/kubernetes"
 	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
@@ -124,6 +125,14 @@ func observeSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Inte
 }
 
 func sealedRecoveryClient(path, contextName string) (coreclient.CoreV1Interface, error) {
+	client, err := sealedRecoveryProvider(path, contextName)
+	if err != nil {
+		return nil, err
+	}
+	return client.CoreV1(), nil
+}
+
+func sealedRecoveryProvider(path, contextName string) (kubernetes.Interface, error) {
 	cfg, err := readKubeObservationConfig(path, contextName)
 	if err != nil {
 		return nil, err
@@ -141,7 +150,7 @@ func sealedRecoveryClient(path, contextName string) (coreclient.CoreV1Interface,
 		return nil, err
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return coreclient.NewForConfigAndClient(cfg, client)
+	return kubernetes.NewForConfigAndClient(cfg, client)
 }
 
 type recoveryObservationTransport struct {

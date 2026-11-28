@@ -22,6 +22,7 @@ import (
 	"fugue/internal/platformcontrol"
 	"fugue/internal/productioncontrol"
 	"fugue/internal/productioncontrol/providergate"
+	"fugue/internal/releaseguardian"
 	"fugue/internal/releaseguardian/dnscontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -39,6 +40,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-sealed-release-recovery-pair NAMESPACE COMPONENT KUBECONFIG CONTEXT
        fugue-production-control verify-sealed-release-recovery-mirror CONFIG KUBECONFIG CONTEXT
        fugue-production-control capture-release-recovery-archive NAMESPACE COMPONENT KUBECONFIG CONTEXT NEW_PRIVATE_DIRECTORY
+       fugue-production-control observe-release-registry-rehome ARCHIVE PIN GROUP KUBECONFIG CONTEXT
+       fugue-production-control draft-release-registry-rehome JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN GROUP REQUEST MIRROR_CONFIG
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -94,6 +97,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "observe-release-registry-rehome", "draft-release-registry-rehome":
+		return registryRehomeReviewCommand(ctx, args, out)
 	case "capture-release-recovery-archive":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -712,6 +717,14 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		var dns *dnscontrol.Payload
 		var handoff *productioncontrol.FrontWorkerShadow
 		var storageAudit *productioncontrol.StorageAuditShadow
+		var registryRehome *releaseguardian.RegistryRehomeReview
+		if s.Intent.Operation == productioncontrol.ComponentRegistryMove {
+			p, err := releaseguardian.InspectRegistryRehomeSubmission(s)
+			if err != nil {
+				return err
+			}
+			registryRehome = &p
+		}
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			hold, err = participation.InspectHold(s)
 			if err != nil {
@@ -740,13 +753,14 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			storageAudit = &p
 		}
 		return emit(struct {
-			Digest       string                                `json:"digest"`
-			Intent       productioncontrol.Intent              `json:"intent"`
-			Hold         json.RawMessage                       `json:"hold,omitempty"`
-			DNS          *dnscontrol.Payload                   `json:"dns,omitempty"`
-			FrontWorker  *productioncontrol.FrontWorkerShadow  `json:"frontWorker,omitempty"`
-			StorageAudit *productioncontrol.StorageAuditShadow `json:"storageAudit,omitempty"`
-		}{digest, s.Intent, hold, dns, handoff, storageAudit})
+			Digest         string                                `json:"digest"`
+			Intent         productioncontrol.Intent              `json:"intent"`
+			Hold           json.RawMessage                       `json:"hold,omitempty"`
+			DNS            *dnscontrol.Payload                   `json:"dns,omitempty"`
+			FrontWorker    *productioncontrol.FrontWorkerShadow  `json:"frontWorker,omitempty"`
+			StorageAudit   *productioncontrol.StorageAuditShadow `json:"storageAudit,omitempty"`
+			RegistryRehome *releaseguardian.RegistryRehomeReview `json:"registryRehome,omitempty"`
+		}{digest, s.Intent, hold, dns, handoff, storageAudit, registryRehome})
 	case "sign":
 		if len(args) != 6 {
 			return errors.New(usage)
@@ -758,6 +772,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		digest, err := s.Intent.Digest()
 		if err != nil || digest != args[2] {
 			return errors.New("submission differs from the exact reviewed intent digest")
+		}
+		if s.Intent.Operation == productioncontrol.ComponentRegistryMove {
+			if _, err := releaseguardian.InspectRegistryRehomeSubmission(s); err != nil {
+				return err
+			}
 		}
 		if s.Intent.Operation == productioncontrol.NodeParticipation {
 			if _, err := participation.InspectHold(s); err != nil {
@@ -800,6 +819,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		s, err := readSubmission(args[3])
 		if err != nil {
 			return err
+		}
+		if s.Intent.Operation == productioncontrol.ComponentRegistryMove {
+			if _, err := releaseguardian.InspectRegistryRehomeSubmission(s); err != nil {
+				return err
+			}
 		}
 		record, err := record(ctx, args[1], func(ctx context.Context, j *productioncontrol.Journal, cluster string) (productioncontrol.Recorded, error) {
 			if s.Intent.ClusterID != cluster {
