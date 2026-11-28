@@ -15,6 +15,7 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Registry-backed image storage billing | One domain owns registry measurement, deduplication and the API's per-tenant refresh scheduling. API and Controller keep their respective triggers and provide registry adapters. | The Store port is bound to one tenant, exposes the two inventory reads, and commits only measured image storage through the existing accrual transaction. It cannot change balances, caps, or operations. | Domain tests exercise measurement, failure handling and coalescing. An HTTP contract covers scheduled storage updates and Store tests cover ledger accrual. |
 | Application release retirement | The retirement domain owns bounded per-app scheduling, cursor and retry state. Controller owns the leader lifecycle, verifies live traffic, runtime and workload evidence, and invokes guarded writes. | A tenant/app-scoped port serves the retirement projection and guarded writes. Store revalidates the same snapshots and keeps the retirement and historical binding changes in the existing transaction. | Domain tests independently verify fairness, exclusion, retry isolation and worker cancellation. A source audit limits acquisition of the write port to the Controller adapters. Controller and Store verify runtime evidence, tenant/app scope and concurrent transitions. |
 | Application image registry and usage snapshots | The image domain owns registry transport, manifest traversal, blob accounting, distributed measurement and reference indexes, inspection cache and visibility-scoped snapshot refresh. HTTP authorizes and supplies read adapters. Controller maintenance verifies the current reference before deletion. | Registry deletion requires the observed digest. HTTP invalidates its observation after deletion or a confirmed absence. Usage snapshots detach their values and discard stale background observations. | Domain tests exercise registry behavior, scope, generation coherence and measurement conflicts. API tests cover first load, stale responses and tenant-specific observations. |
+| Builder admission | The domain owns build input identity, bounded memory history, permanent-failure reuse, OOM evidence and admission decisions. Controller supplies app-scoped evidence and coordinates build placement and source-sync status. | Only the Controller composition adapter acquires the builder checkpoint writer. The generic writer rejects the three historical namespaces, and there is no public generic page writer. The scoped adapter uses the original keys, PostgreSQL transaction and replica lock. | Domain tests run without API, Controller or Store. Store verifies namespace isolation; Controller integration verifies restart, concurrency, contention and old evidence replay. |
 
 For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
@@ -144,7 +145,8 @@ a narrower test set. The manual daily audit exposes these switches as
 `make prepush` or emits a production receipt.
 
 For a source-owned writer capability or generator with an implicit downstream
-consumer, use the manual `contract-tracking-scope`,
+consumer, use the manual `contract-backup-checkpoint`,
+`contract-builder-checkpoint`, `contract-tracking-scope`,
 `contract-retirement-scope`, or `contract-generator-consumer` shadow case. The witness first requires the
 exact named consumer test to pass, applies one synthetic source regression,
 proves native and Linux artifact-target reports select that consumer uncached
@@ -153,6 +155,11 @@ the expected diagnostic. The temporary edit exists only in the disposable CI
 checkout; its evidence never authorizes a production release. A passing suite
 without this negative witness is not evidence that the contract edge is
 selected.
+
+The `builder-runtime` and `builder-test` incremental cases measure one
+changed domain source file and one changed placement test, respectively.
+They measure local edits, not the shared checkpoint-contract or release
+intent changes. Use the target comparisons inside every timed sample.
 
 First measured case: a test-only operation-queue edit on Darwin arm64
 (8 logical CPUs, Go 1.25.7, `GOFLAGS=-p=2`), over 20 warm pairs: existing

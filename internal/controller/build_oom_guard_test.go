@@ -12,10 +12,15 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/buildadmission"
 	"fugue/internal/config"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
 )
+
+func testOOMHistoryKey(app model.App, fingerprint string) string {
+	return "builder-oom-history/v1/" + app.TenantID + "/" + app.ID + "/" + fingerprint
+}
 
 func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "postgres-fixture")
@@ -26,34 +31,34 @@ func TestOOMHistoryIsMonotonicDurableAndInputScoped(t *testing.T) {
 	app := model.App{ID: "app-fixture", TenantID: "tenant-fixture"}
 	src := model.AppSource{CommitSHA: strings.Repeat("a", 40)}
 	spec := model.AppSpec{Env: map[string]string{"BUILD_MODE": "release"}}
-	fp := buildOOMInputFingerprint(src, spec)
+	fp := buildadmission.OOMInputFingerprint(src, spec)
 	var wg sync.WaitGroup
 	for _, limit := range []int64{6 << 30, 5 << 30, 7 << 30, 4 << 30} {
 		wg.Add(1)
 		go func(limit int64) {
 			defer wg.Done()
-			if err := s.recordBuildOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: limit, Attempt: 1, ObservedAt: time.Now()}); err != nil {
+			if err := s.buildAdmission().RecordOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: limit, Attempt: 1, ObservedAt: time.Now()}); err != nil {
 				t.Error(err)
 			}
 		}(limit)
 	}
 	wg.Wait()
 	s = &Service{Store: newStoreTestDatabase(t, path)}
-	history, err := s.readBuildOOMHistory(context.Background(), app, fp)
+	history, err := s.buildAdmission().ReadOOMHistory(context.Background(), app, fp)
 	if err != nil || history.MemoryLimitBytes != 7<<30 {
 		t.Fatal(history, err)
 	}
 	// Policy ceilings are intentionally absent from this input key.
-	if fp != buildOOMInputFingerprint(src, spec) {
+	if fp != buildadmission.OOMInputFingerprint(src, spec) {
 		t.Fatal("unstable input identity")
 	}
 	src.CommitSHA = strings.Repeat("b", 40)
-	other, err := s.readBuildOOMHistory(context.Background(), app, buildOOMInputFingerprint(src, spec))
+	other, err := s.buildAdmission().ReadOOMHistory(context.Background(), app, buildadmission.OOMInputFingerprint(src, spec))
 	if err != nil || other.MemoryLimitBytes != 0 {
 		t.Fatal("new input inherited OOM", other, err)
 	}
 	app.TenantID = "another-tenant"
-	other, err = s.readBuildOOMHistory(context.Background(), app, fp)
+	other, err = s.buildAdmission().ReadOOMHistory(context.Background(), app, fp)
 	if err != nil || other.MemoryLimitBytes != 0 {
 		t.Fatal("tenant history leaked", other, err)
 	}
@@ -67,17 +72,24 @@ func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.
 				t.Fatal(err)
 			}
 			app := model.App{ID: "app-neutral", TenantID: "tenant-neutral"}
-			fingerprint := buildOOMInputFingerprint(model.AppSource{CommitSHA: strings.Repeat("c", 40)}, model.AppSpec{})
+			fingerprint := buildadmission.OOMInputFingerprint(model.AppSource{CommitSHA: strings.Repeat("c", 40)}, model.AppSpec{})
 			locked, release, holderDone := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 			go func() {
-				_, err := state.UpdateObservationCheckpoint(t.Context(), buildOOMHistoryKey(app, fingerprint), func([]byte) ([]byte, error) {
+				acquired, err := state.BuilderAdmissionCheckpoints().Update(t.Context(), testOOMHistoryKey(app, fingerprint), func([]byte) ([]byte, error) {
 					close(locked)
 					<-release
 					return nil, nil
 				})
+				if err == nil && !acquired {
+					err = errors.New("fixture did not acquire the checkpoint lock")
+				}
 				holderDone <- err
 			}()
-			<-locked
+			select {
+			case err := <-holderDone:
+				t.Fatalf("fixture failed before lock acquisition: %v", err)
+			case <-locked:
+			}
 			var once sync.Once
 			unlock := func() { once.Do(func() { close(release) }) }
 			t.Cleanup(unlock)
@@ -85,7 +97,7 @@ func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.
 			defer cancel()
 			done := make(chan error, 1)
 			go func() {
-				done <- (&Service{Store: state}).recordBuildOOM(ctx, app, "operation-neutral", fingerprint, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 7 << 30})
+				done <- (&Service{Store: state}).buildAdmission().RecordOOM(ctx, app, "operation-neutral", fingerprint, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 7 << 30})
 			}()
 			if canceled {
 				cancel()
@@ -105,8 +117,8 @@ func TestOOMHistoryWaitsForCheckpointContentionAndHonorsCancellation(t *testing.
 				if err := <-done; err != nil {
 					t.Fatal(err)
 				}
-				raw, err := state.ReadObservationCheckpoint(t.Context(), buildOOMHistoryKey(app, fingerprint))
-				history, decodeErr := decodeBuildOOMHistory(raw)
+				raw, err := state.ReadObservationCheckpoint(t.Context(), testOOMHistoryKey(app, fingerprint))
+				history, decodeErr := buildadmission.DecodeOOMHistory(raw)
 				if err != nil || decodeErr != nil || history.MemoryLimitBytes != 7<<30 {
 					t.Fatalf("lost OOM after contention: %+v %v %v", history, err, decodeErr)
 				}
@@ -156,21 +168,21 @@ func TestOOMHistorySeedsOnlyExecutedOOMForMatchingInputs(t *testing.T) {
 		}
 	}
 	svc := &Service{Store: state}
-	fp := buildOOMInputFingerprint(src, app.Spec)
-	history, err := svc.readBuildOOMHistory(context.Background(), app, fp)
+	fp := buildadmission.OOMInputFingerprint(src, app.Spec)
+	history, err := svc.buildAdmission().ReadOOMHistory(context.Background(), app, fp)
 	if err != nil || history.MemoryLimitBytes != 6<<30 {
 		t.Fatal(history, err)
 	}
 	app.Spec.Env = map[string]string{"BUILD_MODE": "changed"}
-	history, err = svc.readBuildOOMHistory(context.Background(), app, buildOOMInputFingerprint(src, app.Spec))
+	history, err = svc.buildAdmission().ReadOOMHistory(context.Background(), app, buildadmission.OOMInputFingerprint(src, app.Spec))
 	if err != nil || history.MemoryLimitBytes != 0 {
 		t.Fatal("changed inputs inherited history", history, err)
 	}
-	if _, err := decodeBuildOOMHistory([]byte("corrupt")); err == nil {
+	if _, err := buildadmission.DecodeOOMHistory([]byte("corrupt")); err == nil {
 		t.Fatal("corrupt history accepted")
 	}
-	negative, _ := json.Marshal(buildOOMHistory{Version: 1, BuilderOOMObservation: sourceimport.BuilderOOMObservation{MemoryLimitBytes: -1}})
-	if _, err := decodeBuildOOMHistory(negative); err == nil {
+	negative, _ := json.Marshal(buildadmission.OOMHistory{Version: 1, BuilderOOMObservation: sourceimport.BuilderOOMObservation{MemoryLimitBytes: -1}})
+	if _, err := buildadmission.DecodeOOMHistory(negative); err == nil {
 		t.Fatal("negative history accepted")
 	}
 }
@@ -209,8 +221,8 @@ func TestGitHubOOMAdmissionStopsRepeatedOperationsAndResumes(t *testing.T) {
 	svc := &Service{Store: state, Logger: log.New(io.Discard, "", 0), Config: config.ControllerConfig{GitHubSyncTimeout: time.Second}, latestGitHubCommit: func(context.Context, string, string, string) (string, string, error) {
 		return next.CommitSHA, "main", nil
 	}}
-	fp := buildOOMInputFingerprint(next, app.Spec)
-	if err := svc.recordBuildOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 5 << 30}); err != nil {
+	fp := buildadmission.OOMInputFingerprint(next, app.Spec)
+	if err := svc.buildAdmission().RecordOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 5 << 30}); err != nil {
 		t.Fatal(err)
 	}
 	available := int64(5 << 30)
@@ -257,8 +269,8 @@ func TestAutoOOMAdmissionUsesResolvedProfile(t *testing.T) {
 			app := model.App{ID: "app-fixture", TenantID: "tenant-fixture"}
 			source := model.AppSource{CommitSHA: strings.Repeat("a", 40), BuildStrategy: model.AppBuildStrategyAuto}
 			spec := model.AppSpec{}
-			fp := buildOOMInputFingerprint(source, spec)
-			if err := svc.recordBuildOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 5 << 30}); err != nil {
+			fp := buildadmission.OOMInputFingerprint(source, spec)
+			if err := svc.buildAdmission().RecordOOM(context.Background(), app, "op-fixture", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 5 << 30}); err != nil {
 				t.Fatal(err)
 			}
 			// Old evidence may have no profile. Resolve it once without
@@ -267,13 +279,13 @@ func TestAutoOOMAdmissionUsesResolvedProfile(t *testing.T) {
 			if err != nil || !admitted {
 				t.Fatal(admitted, err)
 			}
-			history, err := svc.resolveBuildOOMProfile(context.Background(), app, fp, profile)
+			history, err := svc.buildAdmission().ResolveOOMProfile(context.Background(), app, fp, profile)
 			if err != nil || history.MemoryLimitBytes != 5<<30 || history.WorkloadProfile != profile {
 				t.Fatal(history, err)
 			}
 			// A smaller observation must not lower the memory fact when
 			// enriching its resolved profile.
-			if err := svc.recordBuildOOM(context.Background(), app, "op-smaller", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 4 << 30, WorkloadProfile: profile}); err != nil {
+			if err := svc.buildAdmission().RecordOOM(context.Background(), app, "op-smaller", fp, sourceimport.BuilderOOMObservation{MemoryLimitBytes: 4 << 30, WorkloadProfile: profile}); err != nil {
 				t.Fatal(err)
 			}
 			svc.inspectBuilderOOMPlacement = func(_ context.Context, _ string, _ sourceimport.BuilderPodPolicy, strategy string, _ bool, _ map[string]string, previous int64) (model.BuilderPlacementInspection, error) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"fugue/internal/buildadmission"
 	"fugue/internal/model"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
@@ -16,7 +17,7 @@ import (
 // identity are build inputs too. Keep existing permanent-failure keys stable.
 func importBuildReuseFingerprint(source model.AppSource, spec model.AppSpec, policy sourceimport.BuilderPodPolicy) string {
 	input := source
-	base := buildInputFingerprint(input, spec, policy)
+	base := buildadmission.InputFingerprint(input, spec, policy)
 	if base == "" {
 		return ""
 	}

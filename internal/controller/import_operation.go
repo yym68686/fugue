@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"fugue/internal/appimages"
+	"fugue/internal/buildadmission"
 	"fugue/internal/model"
 	"fugue/internal/operationexecution"
 	"fugue/internal/runtime"
@@ -57,12 +58,12 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		})
 	}
 	importCtx = sourceimport.WithBuilderEvidenceRecorder(importCtx, recordBuildEvidence)
-	memoryLedgerKey := buildMemoryLedgerKey(app)
-	memoryScope := buildMemoryScope(*op.DesiredSource, *op.DesiredSpec)
+	admission := s.buildAdmission()
+	memoryScope := buildadmission.MemoryScope(*op.DesiredSource, *op.DesiredSpec)
 	importCtx = sourceimport.WithBuilderMemoryHistory(importCtx, func(readCtx context.Context, profile string) (int64, error) {
-		return s.readBuildMemoryTarget(readCtx, memoryLedgerKey, buildMemoryProfile(memoryScope, profile))
+		return admission.MemoryTarget(readCtx, app, buildadmission.MemoryProfile(memoryScope, profile))
 	}, func(writeCtx context.Context, profile, uid string, peak int64) error {
-		return s.recordBuildMemoryPeak(writeCtx, memoryLedgerKey, buildMemoryProfile(memoryScope, profile), uid, peak)
+		return admission.RecordMemoryPeak(writeCtx, app, buildadmission.MemoryProfile(memoryScope, profile), uid, peak)
 	})
 
 	jobLabels := map[string]string{
@@ -75,12 +76,12 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 	builderMemoryCeiling := s.importBuilderMemoryCeilingBytes(app.TenantID)
 	builderPolicy := s.effectiveImportBuilderPolicy(builderMemoryCeiling)
 	failureFingerprint := ""
-	oomFingerprint := buildOOMInputFingerprint(*op.DesiredSource, *op.DesiredSpec)
+	oomFingerprint := buildadmission.OOMInputFingerprint(*op.DesiredSource, *op.DesiredSpec)
 	importCtx = sourceimport.WithBuilderOOMGuard(importCtx, func(readCtx context.Context, profile string) (int64, error) {
-		history, err := s.resolveBuildOOMProfile(readCtx, app, oomFingerprint, profile)
+		history, err := admission.ResolveOOMProfile(readCtx, app, oomFingerprint, profile)
 		return history.MemoryLimitBytes, err
 	}, func(writeCtx context.Context, fact sourceimport.BuilderOOMObservation) error {
-		return s.recordBuildOOM(writeCtx, app, op.ID, oomFingerprint, fact)
+		return admission.RecordOOM(writeCtx, app, op.ID, oomFingerprint, fact)
 	})
 	guardRejected := false
 	importCtx = sourceimport.WithBuildInputGuard(importCtx, func(actualCommit string) error {
@@ -89,13 +90,13 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		}
 		source := *op.DesiredSource
 		source.CommitSHA = actualCommit
-		oomFingerprint = buildOOMInputFingerprint(source, *op.DesiredSpec)
-		failureFingerprint = buildInputFingerprint(source, *op.DesiredSpec, builderPolicy)
-		ledger, loadErr := s.readBuildFailureLedger(importCtx, app)
+		oomFingerprint = buildadmission.OOMInputFingerprint(source, *op.DesiredSpec)
+		failureFingerprint = buildadmission.InputFingerprint(source, *op.DesiredSpec, builderPolicy)
+		ledger, loadErr := admission.ReadFailureLedger(importCtx, app)
 		if loadErr != nil {
 			return fmt.Errorf("read build admission history: %w", loadErr)
 		}
-		if rejection := cachedBuildRejection(ledger, failureFingerprint); rejection != nil {
+		if rejection := buildadmission.CachedRejection(ledger, failureFingerprint); rejection != nil {
 			guardRejected = true
 			failure := rejection.(*sourceimport.BuilderResourceFailure)
 			now := time.Now().UTC()
@@ -112,7 +113,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		}
 		writeCtx, done := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Second)
 		defer done()
-		if persistErr := s.recordPermanentBuildFailure(writeCtx, app, op.ID, failureFingerprint, failure); persistErr != nil {
+		if persistErr := admission.RecordPermanentFailure(writeCtx, app, op.ID, failureFingerprint, failure); persistErr != nil {
 			err = errors.Join(err, fmt.Errorf("persist permanent build failure: %w", persistErr))
 		}
 	}()
@@ -198,7 +199,7 @@ func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Op
 		}
 		resolvedSource := *op.DesiredSource
 		resolvedSource.ArchiveSHA256 = upload.SHA256
-		oomFingerprint = buildOOMInputFingerprint(resolvedSource, *op.DesiredSpec)
+		oomFingerprint = buildadmission.OOMInputFingerprint(resolvedSource, *op.DesiredSpec)
 		archiveURL, archiveURLErr := sourceUploadDownloadURL(s.Config.SourceUploadBaseURL, upload.ID, upload.DownloadToken)
 		if archiveURLErr != nil {
 			return archiveURLErr
