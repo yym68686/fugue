@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -96,21 +95,9 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inventory := req.Inventory.LocalPVInventory
-	// Older reports may contain zero alongside a failed kubectl observation.
-	inventory.ReportedByNodeUpdaterID = updater.ID
-	inventory.NodeID = firstNonEmptyImageAPIString(inventory.NodeID, updater.MachineID)
-	inventory.ClusterNodeName = firstNonEmptyImageAPIString(inventory.ClusterNodeName, updater.ClusterNodeName)
-	inventory.RuntimeID = firstNonEmptyImageAPIString(inventory.RuntimeID, updater.RuntimeID)
-	if (req.Inventory.Known != nil && !*req.Inventory.Known) || inventory.BoundPVCount < 0 || slices.Contains(inventory.UnsafeReasons, "kubectl_pv_unavailable") || slices.Contains(inventory.UnsafeReasons, "bound_pv_count_unknown") {
-		s.enrichLocalPVBindings(r.Context(), &inventory)
-	} else {
-		inventory.BoundPVCountKnown = true
-	}
-	if inventory.ObservedAt.IsZero() {
-		inventory.ObservedAt = time.Now().UTC()
-	}
-	inventory.SafeToDecommission, inventory.UnsafeReasons = localpvinventory.DecommissionSafety(inventory)
+	inventory := localpvinventory.PrepareReport(req.Inventory.LocalPVInventory, updater, req.Inventory.Known, time.Now, func(in *model.LocalPVInventory) {
+		s.enrichLocalPVBindings(r.Context(), in)
+	})
 	inventory, err = s.store.UpsertLocalPVInventory(inventory)
 	if err != nil {
 		s.writeStoreError(w, err)
