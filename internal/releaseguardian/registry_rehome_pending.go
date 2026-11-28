@@ -104,6 +104,9 @@ func ObserveFrozenRegistryRehomePending(ctx context.Context, client kubernetes.I
 		id.Namespace != cutover.Namespace || id.Name != cutover.Deployment {
 		return none, errors.Join(errors.New("pending registry rehome does not match the frozen Deployment enrollment"), err)
 	}
+	if err := review.requireExecutableCompanions(); err != nil {
+		return none, err
+	}
 	archive, err := readReleaseRecoveryArchive(archiveRaw, archiveDigest)
 	if err != nil {
 		return none, err

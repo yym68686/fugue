@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"fugue/internal/declarativerelease"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -16,15 +17,28 @@ type RegistryRehomeDraft struct {
 	Component     string                              `json:"component"`
 	Workload      declarativerelease.ResourceIdentity `json:"workload"`
 	Services      []RegistryRehomeService             `json:"unchangedServices"`
+	RBAC          []RegistryRehomeCompanion           `json:"unchangedRBAC,omitempty"`
 	Current       RegistryRehomeProjection            `json:"current"`
 	Rollback      RegistryRehomeProjection            `json:"rollback"`
 	Mirror        RegistryRecoveryReport              `json:"mirror"`
 	DraftDigest   string                              `json:"draftDigest,omitempty"`
 }
 
-type RegistryRehomeService struct {
+type RegistryRehomeCompanion struct {
 	Identity    declarativerelease.ResourceIdentity `json:"identity"`
 	ShapeDigest string                              `json:"shapeDigest"`
+}
+
+type RegistryRehomeService = RegistryRehomeCompanion
+
+const (
+	registryRehomeDraftV1 = "fugue.production.registry-rehome-draft.v1"
+	registryRehomeDraftV2 = "fugue.production.registry-rehome-draft.v2"
+)
+
+type registryRehomeCompanions struct {
+	services []RegistryRehomeService
+	rbac     []RegistryRehomeCompanion
 }
 
 type RegistryRehomeProjection struct {
@@ -43,9 +57,9 @@ type RegistryRehomeContainer struct {
 }
 
 // DraftRegistryRehome checks a registry-only change for one existing
-// Deployment against the independently pinned recovery point. Services can
-// be carried as unchanged context only. The draft is neither a Kubernetes
-// apply manifest nor an approval; it cannot replace either historical seal.
+// Deployment against the independently pinned recovery point. Services and
+// static RBAC can be carried as unchanged context only. The draft is neither
+// a Kubernetes apply manifest nor an approval; it cannot replace either seal.
 func (r *IndependentRegistry) DraftRegistryRehome(ctx context.Context, raw []byte, archiveDigest, currentRepository, rollbackRepository string) (RegistryRehomeDraft, error) {
 	if r == nil || r.transport == nil {
 		return RegistryRehomeDraft{}, errors.New("independent registry is unavailable")
@@ -57,31 +71,27 @@ func (r *IndependentRegistry) DraftRegistryRehome(ctx context.Context, raw []byt
 	if err != nil {
 		return RegistryRehomeDraft{}, err
 	}
-	project := func(record sealedRecoveryRecord, repository string) (RegistryRehomeProjection, []RegistryRehomeService, error) {
+	project := func(record sealedRecoveryRecord, repository string) (RegistryRehomeProjection, registryRehomeCompanions, error) {
 		source := record.version.Receipt
 		repo, err := name.NewRepository(repository, name.StrictValidation)
 		sourceRepo, srcErr := name.NewRepository(source.Repository, name.StrictValidation)
 		if err != nil || srcErr != nil || repo.Name() != repository || repo.RegistryStr() != r.host ||
 			sourceRepo.RegistryStr() == r.host {
-			return RegistryRehomeProjection{}, nil, errors.New("rehome requires a change of registry to the configured independent origin")
+			return RegistryRehomeProjection{}, registryRehomeCompanions{}, errors.New("rehome requires a change of registry to the configured independent origin")
 		}
-		return projectRegistryRehome(record, repo.Digest(source.TopDigest).Name())
+		projection, companions, _, err := projectRegistryRehomeWorkload(record, repo.Digest(source.TopDigest).Name())
+		return projection, companions, err
 	}
-	current, currentServices, err := project(archive.forward, currentRepository)
+	current, currentCompanions, err := project(archive.forward, currentRepository)
 	if err != nil {
 		return RegistryRehomeDraft{}, fmt.Errorf("draft current registry move: %w", err)
 	}
-	rollback, rollbackServices, err := project(archive.rollback, rollbackRepository)
+	rollback, rollbackCompanions, err := project(archive.rollback, rollbackRepository)
 	if err != nil {
 		return RegistryRehomeDraft{}, fmt.Errorf("draft rollback registry move: %w", err)
 	}
-	if len(currentServices) != len(rollbackServices) {
-		return RegistryRehomeDraft{}, errors.New("registry rehome cannot introduce or remove a Service")
-	}
-	for i, service := range currentServices {
-		if service != rollbackServices[i] {
-			return RegistryRehomeDraft{}, errors.New("registry rehome cannot change a Service")
-		}
+	if !slices.Equal(currentCompanions.services, rollbackCompanions.services) || !slices.Equal(currentCompanions.rbac, rollbackCompanions.rbac) {
+		return RegistryRehomeDraft{}, errors.New("registry rehome cannot introduce, remove or change a Service or RBAC companion")
 	}
 	pair := archive.report.Pair
 	mirror, err := r.VerifyRecoveryMirror(ctx,
@@ -93,8 +103,13 @@ func (r *IndependentRegistry) DraftRegistryRehome(ctx context.Context, raw []byt
 	if mirror.Forward.RecoveryImage.Image != current.IndependentImage || mirror.Rollback.RecoveryImage.Image != rollback.IndependentImage {
 		return RegistryRehomeDraft{}, errors.New("draft image projection differs from independent registry readback")
 	}
-	draft := RegistryRehomeDraft{Schema: "fugue.production.registry-rehome-draft.v1", ArchiveDigest: archiveDigest,
-		Component: pair.Component, Workload: recoveryWorkloadKey(archive.forward.workload).resource, Services: currentServices,
+	schema := registryRehomeDraftV1
+	if len(currentCompanions.rbac) != 0 {
+		schema = registryRehomeDraftV2
+	}
+	draft := RegistryRehomeDraft{Schema: schema, ArchiveDigest: archiveDigest,
+		Component: pair.Component, Workload: recoveryWorkloadKey(archive.forward.workload).resource,
+		Services: currentCompanions.services, RBAC: currentCompanions.rbac,
 		Current: current, Rollback: rollback, Mirror: mirror}
 	draft.DraftDigest, err = registryRehomeDraftDigest(draft)
 	if err != nil {
@@ -112,17 +127,12 @@ func registryRehomeDraftDigest(draft RegistryRehomeDraft) (string, error) {
 	return digest(canonical), nil
 }
 
-func projectRegistryRehome(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, []RegistryRehomeService, error) {
-	p, services, _, err := projectRegistryRehomeWorkload(record, destination)
-	return p, services, err
-}
-
 // projectRegistryRehomeWorkload keeps the original archives immutable. In
 // addition to the reviewed PodSpec digest, it derives a single-Deployment
 // recovery template. Companions remain context, never delegated writes.
-func projectRegistryRehomeWorkload(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, []RegistryRehomeService, []byte, error) {
-	fail := func(err error) (RegistryRehomeProjection, []RegistryRehomeService, []byte, error) {
-		return RegistryRehomeProjection{}, nil, nil, err
+func projectRegistryRehomeWorkload(record sealedRecoveryRecord, destination string) (RegistryRehomeProjection, registryRehomeCompanions, []byte, error) {
+	fail := func(err error) (RegistryRehomeProjection, registryRehomeCompanions, []byte, error) {
+		return RegistryRehomeProjection{}, registryRehomeCompanions{}, nil, err
 	}
 	scope := recoveryWorkloadKey(record.workload).resource
 	source := record.prepared.Forward.ImageRef
@@ -144,19 +154,20 @@ func projectRegistryRehomeWorkload(record sealedRecoveryRecord, destination stri
 	if err != nil {
 		return fail(err)
 	}
-	services := make([]RegistryRehomeService, 0, len(ids)-1)
+	companions := registryRehomeCompanions{services: make([]RegistryRehomeService, 0, len(ids)-1)}
 	for index, id := range ids {
 		if id == scope {
 			continue
 		}
-		if id.Kind != "Service" || id.APIVersion != "v1" || id.Namespace != scope.Namespace {
-			return fail(errors.New("registry rehome cannot delegate writes to other release resources"))
-		}
-		canonical, err := registryRehomeServiceShape(set.Items[index])
+		companion, err := registryRehomeCompanionShape(set.Items[index], id, scope.Namespace)
 		if err != nil {
 			return fail(err)
 		}
-		services = append(services, RegistryRehomeService{Identity: id, ShapeDigest: digest(canonical)})
+		if id.Kind == "Service" {
+			companions.services = append(companions.services, companion)
+		} else {
+			companions.rbac = append(companions.rbac, companion)
+		}
 	}
 	spec, _ := deployment["spec"].(map[string]any)
 	template, _ := spec["template"].(map[string]any)
@@ -199,18 +210,26 @@ func projectRegistryRehomeWorkload(record sealedRecoveryRecord, destination stri
 	}
 	monitor := record.version.Monitor
 	return RegistryRehomeProjection{RecordDigest: monitor.RecordDigest, SourceManifestDigest: monitor.ForwardManifestDigest,
-		SourceImage: source, IndependentImage: destination, SourcePodSpecDigest: digest(before), TargetPodSpecDigest: digest(after), Containers: changes}, services, workload, nil
+		SourceImage: source, IndependentImage: destination, SourcePodSpecDigest: digest(before), TargetPodSpecDigest: digest(after), Containers: changes}, companions, workload, nil
 }
 
-func registryRehomeServiceShape(item map[string]any) ([]byte, error) {
+func registryRehomeCompanionShape(item map[string]any, id declarativerelease.ResourceIdentity, namespace string) (RegistryRehomeCompanion, error) {
+	if !registryRehomeServiceIdentity(id, namespace) && !registryRehomeRBACIdentity(id) {
+		return RegistryRehomeCompanion{}, errors.New("registry rehome can only carry Service or static RBAC companions")
+	}
+	if registryRehomeRBACIdentity(id) {
+		if _, err := registryRehomeRBACAccess(id, item); err != nil {
+			return RegistryRehomeCompanion{}, err
+		}
+	}
 	meta, _ := item["metadata"].(map[string]any)
 	if raw, present := meta["annotations"]; present {
 		annotations, ok := raw.(map[string]any)
 		if !ok {
-			return nil, errors.New("registry rehome Service annotations are invalid")
+			return RegistryRehomeCompanion{}, errors.New("registry rehome companion annotations are invalid")
 		}
 		// These three stamps describe the release that observed this object,
-		// not a change to the Service. All other fields bind.
+		// not a change to the companion. All other fields bind.
 		for _, key := range []string{"fugue.pro/production-config-sha", "fugue.pro/release-plan-digest", "fugue.pro/artifact-receipt-digest"} {
 			delete(annotations, key)
 		}
@@ -218,5 +237,9 @@ func registryRehomeServiceShape(item map[string]any) ([]byte, error) {
 			delete(meta, "annotations")
 		}
 	}
-	return declarativerelease.CanonicalJSON(item)
+	canonical, err := declarativerelease.CanonicalJSON(item)
+	if err != nil {
+		return RegistryRehomeCompanion{}, err
+	}
+	return RegistryRehomeCompanion{Identity: id, ShapeDigest: digest(canonical)}, nil
 }

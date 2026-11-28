@@ -17,12 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/productioncontrol"
 	"fugue/internal/testfixture/kubeadmission"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -204,6 +206,65 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 
 func TestRegistryRehomeKubernetesNoWriteSettlement(t *testing.T) {
 	testRegistryRehomeKubernetesWithJournal(t, "FUGUE_TEST_REHOME_NO_WRITE_DATABASE_URL", false)
+}
+
+func TestRegistryRehomeKubernetesRBACShadow(t *testing.T) {
+	cfg, _ := kubeadmission.Start(t)
+	client := admissionClient(t, cfg, "")
+	ctx := t.Context()
+	const roleName = "fixture-read"
+	const bindingName = "fixture-bind"
+	role := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: roleName},
+		Rules: []rbacv1.PolicyRule{{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}}}}
+	binding := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: bindingName},
+		RoleRef:  rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: roleName},
+		Subjects: []rbacv1.Subject{{Kind: "ServiceAccount", Name: "fixture", Namespace: "default"}}}
+	roles, bindings := client.RbacV1().ClusterRoles(), client.RbacV1().ClusterRoleBindings()
+	liveRole, err := roles.Create(ctx, role, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveBinding, err := bindings.Create(ctx, binding, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeRead := func(kind string, original, live metav1.Object) func() (RegistryRehomeObservedCompanion, error) {
+		t.Helper()
+		id := declarativerelease.ResourceIdentity{APIVersion: registryRehomeRBACVersion, Kind: kind, Name: original.GetName()}
+		item, err := rehomeJSONMap(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Use a sealed declaration without system-owned metadata/defaults.
+		item["metadata"] = map[string]any{"name": id.Name}
+		item["apiVersion"], item["kind"] = id.APIVersion, id.Kind
+		decl, err := registryRehomeCompanionShape(item, id, "default")
+		if err != nil {
+			t.Fatal(err)
+		}
+		read := func() (RegistryRehomeObservedCompanion, error) {
+			return readRegistryRehomeRBAC(ctx, client, id, item, decl)
+		}
+		if observed, err := read(); err != nil || observed.Live.UID != string(live.GetUID()) || observed.ResourceVersion != live.GetResourceVersion() {
+			t.Fatalf("read-only RBAC observation did not bind the live object: %+v %v", observed, err)
+		}
+		return read
+	}
+	readRole := makeRead("ClusterRole", role, liveRole)
+	readBinding := makeRead("ClusterRoleBinding", binding, liveBinding)
+	liveRole.Rules[0].Verbs = append(liveRole.Rules[0].Verbs, "list")
+	if _, err := roles.Update(ctx, liveRole, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	liveBinding.Subjects = append(liveBinding.Subjects, rbacv1.Subject{Kind: "ServiceAccount", Name: "unexpected", Namespace: "default"})
+	if _, err := bindings.Update(ctx, liveBinding, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, read := range []func() (RegistryRehomeObservedCompanion, error){readRole, readBinding} {
+		if _, err := read(); err == nil || !strings.Contains(err.Error(), "RBAC access differs") {
+			t.Fatalf("accepted drifted RBAC: %v", err)
+		}
+	}
 }
 
 func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWorkload bool) {

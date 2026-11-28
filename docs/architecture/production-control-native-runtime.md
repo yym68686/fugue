@@ -903,7 +903,11 @@ authority bound to pre-restore database role OIDs.
   [registry-only rehome draft](../backup-restore-runbook.md#sealed-release-recovery-archive)
   checks the two image projections without opening a production writer.
   Companion Services may appear in its read-only context; this does not
-  widen the native Deployment executor's admission or write set.
+  widen the native Deployment executor's admission or write set. Static
+  ClusterRoles and ClusterRoleBindings can also be compared and included in
+  the offline recovery input. RBAC-bearing drafts remain shadow-only until
+  provider write boundaries are enrolled for those companions, even if the
+  live rules, subjects and role references match the sealed history.
   The dispatcher also reconstructs both reviewed templates from the exact
   sealed archive before reserving a claim. The offline bootstrap can verify
   the same reconstruction from an independently pinned private bundle; it

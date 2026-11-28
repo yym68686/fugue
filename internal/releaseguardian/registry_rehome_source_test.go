@@ -13,6 +13,7 @@ import (
 	"fugue/internal/productioncontrol"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -29,7 +30,7 @@ func (f rehomeResourceStub) ReadResource(ctx context.Context, scope productionco
 
 func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 	ctx := context.Background()
-	for _, mode := range []string{"verified", "busy journal", "wrong head", "replacement Deployment", "Service drift", "journal changed", "pending legacy pointer", "patch projection drift"} {
+	for _, mode := range []string{"verified", "RBAC verified", "RBAC drift", "RBAC version changed", "busy journal", "wrong head", "replacement Deployment", "Service drift", "journal changed", "pending legacy pointer", "patch projection drift"} {
 		t.Run(mode, func(t *testing.T) {
 			objects := map[string]registryTestContent{}
 			rollback, _ := registryImageFixture(t, objects, "fixture/rehome", strings.Repeat("2", 40), false)
@@ -38,7 +39,11 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				root := "/v2/fixture/rehome/manifests/"
 				objects[root+"fugue-recovery-sha256-"+strings.TrimPrefix(image.TopDigest, "sha256:")] = objects[root+image.TopDigest]
 			}
-			raw, _, _ := rehomeArchiveFixture(t, rollback, forward, "")
+			fixture := ""
+			if strings.HasPrefix(mode, "RBAC") {
+				fixture = "rbac"
+			}
+			raw, _, _ := rehomeArchiveFixture(t, rollback, forward, fixture)
 			pin := digest(raw)
 			archive, err := readReleaseRecoveryArchive(raw, pin)
 			if err != nil {
@@ -56,6 +61,17 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				}
 				s.Spec.Ports[0].Port++
 				if _, err := client.CoreV1().Services(s.Namespace).Update(ctx, s, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "RBAC drift" {
+				roles := client.RbacV1().ClusterRoles()
+				role, err := roles.Get(ctx, "fixture-read", metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				role.Rules[0].Verbs = append(role.Rules[0].Verbs, "list")
+				if _, err := roles.Update(ctx, role, metav1.UpdateOptions{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -103,6 +119,18 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 			})
 			registry, err := NewIndependentRegistry(testNativeRegistry, nil, registryRoundTrip(func(req *http.Request) (*http.Response, error) {
 				reads++
+				if mode == "RBAC version changed" && reads == 1 {
+					res := rbacv1.SchemeGroupVersion.WithResource("clusterrolebindings")
+					obj, err := client.Tracker().Get(res, "", "fixture-bind")
+					if err != nil {
+						t.Fatal(err)
+					}
+					binding := obj.(*rbacv1.ClusterRoleBinding).DeepCopy()
+					binding.ResourceVersion = "200"
+					if err := client.Tracker().Update(res, binding, ""); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if mode == "replacement Deployment" && reads == 1 {
 					d := source.Deployment.Identity
 					obj, err := client.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("deployments"), d.Namespace, d.Name)
@@ -126,7 +154,7 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				t.Fatal(err)
 			}
 			s, err := DraftRegistryRehomeSubmission(ctx, client, journal, registry, raw, pin, "global", "fixture", "request-1", forward.Repository)
-			if mode == "verified" {
+			if mode == "verified" || mode == "RBAC verified" {
 				if err != nil || s.Intent.Operation != productioncontrol.ComponentRegistryMove || s.Intent.ResourceID != "kubernetes/fugue-system/deployment/edge-control-de" {
 					t.Fatalf("draft=%+v: %v", s.Intent, err)
 				}
@@ -134,6 +162,26 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				if err != nil || review.Source.Deployment.UID != "deployment-uid" || review.Source.Services[0].Live.UID != "service-uid" ||
 					review.Draft.DraftDigest != s.Intent.TargetDigest || s.Intent.RollbackDigest != source.Version.Digest {
 					t.Fatalf("review=%+v: %v", review, err)
+				}
+				if mode == "RBAC verified" {
+					if len(review.Source.RBAC) != 2 || len(review.Draft.RBAC) != 2 || review.Draft.Schema != registryRehomeDraftV2 {
+						t.Fatalf("RBAC readback was not bound to the draft: %+v", review)
+					}
+					dispatcher := &registryRehomeDispatcher{scope: productioncontrol.Scope{ClusterID: s.Intent.ClusterID, ResourceID: s.Intent.ResourceID},
+						archive: archive, gate: registryRehomeKubeFence{cutover: KubeDeploymentCutover{Key: source.Key}}}
+					if _, _, _, err := dispatcher.preflight(ctx, s); err == nil || !strings.Contains(err.Error(), "shadow-only") {
+						t.Fatalf("RBAC shadow draft passed the dispatch boundary: %v", err)
+					}
+					if _, err := registryRehomeAdmissionServer(registryRehomeKubeFence{}, review, nil); err == nil || !strings.Contains(err.Error(), "shadow-only") {
+						t.Fatalf("RBAC shadow draft passed the webhook boundary: %v", err)
+					}
+					bundle, report, err := BuildRegistryRehomeRecoveryBundle(raw, pin, s)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, input, err := ExportRegistryRehomeReleaseInput(bundle, report.BundleDigest, "rollback"); err != nil || len(input.Companions) != 3 {
+						t.Fatalf("recovery bundle dropped unchanged RBAC: %+v %v", input, err)
+					}
 				}
 				if _, err := productioncontrol.NewIntent("fixture", "registry/edge-control-de", "request-1", s.Intent.Operation,
 					s.Intent.Generation, s.Intent.CurrentDigest, s.Intent.TargetDigest, s.Intent.RollbackDigest, s.Payload); err == nil {
@@ -151,6 +199,7 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				}
 			} else {
 				want := map[string]string{"busy journal": "settled journal", "wrong head": "settled journal", "replacement Deployment": "provider changed",
+					"RBAC drift": "RBAC access differs", "RBAC version changed": "provider changed",
 					"Service drift": "differs from its sealed declaration", "journal changed": "journal head changed", "pending legacy pointer": "read retained Guardian release alias",
 					"patch projection drift": "cannot build a reviewed image-only patch"}[mode]
 				if err == nil || !strings.Contains(err.Error(), want) || len(s.Payload) != 0 {
@@ -202,5 +251,34 @@ func fakeRehomeProvider(t *testing.T, raw []byte, archive verifiedReleaseRecover
 	deploy.UID, deploy.ResourceVersion, deploy.Generation = "deployment-uid", "100", 1
 	deploy.Status = appsv1.DeploymentStatus{ObservedGeneration: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
 	service.UID, service.ResourceVersion = "service-uid", "101"
+	ids, err := declarativerelease.ResourceSetIdentities(archive.forward.forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if !registryRehomeRBACIdentity(id) {
+			continue
+		}
+		var dst interface {
+			metav1.Object
+			runtime.Object
+		}
+		if id.Kind == "ClusterRole" {
+			dst = &rbacv1.ClusterRole{}
+		} else {
+			dst = &rbacv1.ClusterRoleBinding{}
+		}
+		item, err := declarativerelease.ResourceSetItem(archive.forward.forward, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(item)
+		if err := json.Unmarshal(encoded, dst); err != nil {
+			t.Fatal(err)
+		}
+		dst.SetUID(types.UID(id.Name + "-uid"))
+		dst.SetResourceVersion("102")
+		objects = append(objects, dst)
+	}
 	return fake.NewSimpleClientset(append(objects, deploy, service)...)
 }

@@ -106,6 +106,9 @@ func (e *registryRehomeDispatcher) preflight(ctx context.Context, s productionco
 		review.Source.Key != e.gate.cutover.Key || review.Source.ArchiveDigest != e.archive.report.ArchiveDigest {
 		return fail(errors.Join(errors.New("intent does not bind the enrolled registry rehome source"), err))
 	}
+	if err := review.requireExecutableCompanions(); err != nil {
+		return fail(err)
+	}
 	if _, _, err := deriveRegistryRehomeRecovery(e.archive, review); err != nil {
 		return fail(err)
 	}

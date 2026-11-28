@@ -14,7 +14,7 @@ import (
 )
 
 func TestDraftRegistryRehomeReadsBothImagesAndDoesNotGrantSharedServiceWrites(t *testing.T) {
-	for _, mode := range []string{"verified", "service changed", "additional workload", "foreign container image", "missing rollback layer", "wrong digest", "wrong mirror"} {
+	for _, mode := range []string{"verified", "rbac", "rbac changed", "rbac aggregated", "service changed", "additional workload", "foreign container image", "missing rollback layer", "wrong digest", "wrong mirror"} {
 		t.Run(mode, func(t *testing.T) {
 			objects := map[string]registryTestContent{}
 			const repoPath = "fixture/rehome"
@@ -55,8 +55,9 @@ func TestDraftRegistryRehomeReadsBothImagesAndDoesNotGrantSharedServiceWrites(t 
 				t.Fatal(err)
 			}
 			draft, err := registry.DraftRegistryRehome(context.Background(), raw, pin, repo, repo)
-			if mode != "verified" {
-				want := map[string]string{"service changed": "cannot change a Service", "additional workload": "cannot delegate writes",
+			if mode != "verified" && mode != "rbac" {
+				want := map[string]string{"service changed": "cannot introduce, remove or change a Service", "additional workload": "can only carry Service or static RBAC companions",
+					"rbac changed": "cannot introduce, remove or change", "rbac aggregated": "explicit static ClusterRole rules",
 					"foreign container image": "outside its artifact approval", "missing rollback layer": "verify rollback recovery mirror",
 					"wrong digest": "independently pinned digest", "wrong mirror": "configured independent origin"}[mode]
 				if err == nil || !strings.Contains(err.Error(), want) || !reflect.DeepEqual(draft, RegistryRehomeDraft{}) {
@@ -73,6 +74,13 @@ func TestDraftRegistryRehomeReadsBothImagesAndDoesNotGrantSharedServiceWrites(t 
 				draft.Current.IndependentImage != forwardImage.ImmutableRef || draft.Rollback.IndependentImage != rollbackImage.ImmutableRef ||
 				reads[forwardLayer] != 1 || reads[rollbackLayer] != 1 {
 				t.Fatalf("incomplete draft: %+v requests=%v err=%v", draft, reads, err)
+			}
+			if mode == "rbac" && (draft.Schema != registryRehomeDraftV2 || len(draft.RBAC) != 2 ||
+				draft.RBAC[0].Identity.Kind != "ClusterRole" || draft.RBAC[1].Identity.Kind != "ClusterRoleBinding") {
+				t.Fatalf("incomplete RBAC companion draft: %+v", draft)
+			}
+			if mode == "verified" && (draft.Schema != registryRehomeDraftV1 || len(draft.RBAC) != 0) {
+				t.Fatalf("legacy draft changed formats: %+v", draft)
 			}
 			for _, projection := range []RegistryRehomeProjection{draft.Current, draft.Rollback} {
 				want := []RegistryRehomeContainer{{Field: "containers", Name: "edge-control"}, {Field: "initContainers", Name: "fixture-init"}}
@@ -132,6 +140,23 @@ func rehomeArchiveFixture(t *testing.T, rollbackImage, forwardImage declarativer
 			"spec": map[string]any{"ports": []any{map[string]any{"port": port}}}}
 		if candidate && mode == "additional workload" {
 			service["kind"] = "ConfigMap"
+		}
+		if strings.HasPrefix(mode, "rbac") {
+			verbs := []any{"get"}
+			if candidate && mode == "rbac changed" {
+				verbs = append(verbs, "list")
+			}
+			role := map[string]any{"apiVersion": registryRehomeRBACVersion, "kind": "ClusterRole",
+				"metadata": map[string]any{"name": "fixture-read"},
+				"rules":    []any{map[string]any{"apiGroups": []any{""}, "resources": []any{"pods"}, "verbs": verbs}}}
+			if mode == "rbac aggregated" {
+				role["aggregationRule"] = map[string]any{"clusterRoleSelectors": []any{}}
+			}
+			binding := map[string]any{"apiVersion": registryRehomeRBACVersion, "kind": "ClusterRoleBinding",
+				"metadata": map[string]any{"name": "fixture-bind"},
+				"roleRef":  map[string]any{"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "fixture-read"},
+				"subjects": []any{map[string]any{"kind": "ServiceAccount", "name": "fixture-sa", "namespace": release.Workload.Namespace}}}
+			set.Items = append(set.Items, role, binding)
 		}
 		set.Items = append(set.Items, service)
 		canonical, err = declarativerelease.CanonicalJSON(set)

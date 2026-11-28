@@ -30,14 +30,15 @@ type RegistryRehomeObservedService struct {
 }
 
 type RegistryRehomeSource struct {
-	Key           Key                             `json:"key"`
-	ArchiveDigest string                          `json:"archiveDigest"`
-	MonitorDigest string                          `json:"monitorDigest"`
-	MonitorUID    string                          `json:"monitorUid"`
-	Desired       RecoveryRecordRef               `json:"desired"`
-	Version       productioncontrol.Version       `json:"version"`
-	Deployment    RegistryRehomeObservedObject    `json:"deployment"`
-	Services      []RegistryRehomeObservedService `json:"services"`
+	Key           Key                               `json:"key"`
+	ArchiveDigest string                            `json:"archiveDigest"`
+	MonitorDigest string                            `json:"monitorDigest"`
+	MonitorUID    string                            `json:"monitorUid"`
+	Desired       RecoveryRecordRef                 `json:"desired"`
+	Version       productioncontrol.Version         `json:"version"`
+	Deployment    RegistryRehomeObservedObject      `json:"deployment"`
+	Services      []RegistryRehomeObservedService   `json:"services"`
+	RBAC          []RegistryRehomeObservedCompanion `json:"rbac,omitempty"`
 }
 
 type RegistryRehomeReview struct {
@@ -168,16 +169,21 @@ func observeRegistryRehomeSource(ctx context.Context, client kubernetes.Interfac
 		if id == workload {
 			continue
 		}
-		if id.Kind != "Service" || id.APIVersion != "v1" || id.Namespace != workload.Namespace {
-			return RegistryRehomeSource{}, errors.New("registry rehome can only observe Service companions")
-		}
 		wanted, err := declarativerelease.ResourceSetItem(current.forward, id)
 		if err != nil {
 			return RegistryRehomeSource{}, err
 		}
-		decl, err := registryRehomeServiceShape(wanted)
+		decl, err := registryRehomeCompanionShape(wanted, id, workload.Namespace)
 		if err != nil {
 			return RegistryRehomeSource{}, err
+		}
+		if registryRehomeRBACIdentity(id) {
+			live, err := readRegistryRehomeRBAC(ctx, client, id, wanted, decl)
+			if err != nil {
+				return RegistryRehomeSource{}, err
+			}
+			source.RBAC = append(source.RBAC, live)
+			continue
 		}
 		live, err := client.CoreV1().Services(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
 		if err != nil {
@@ -200,7 +206,7 @@ func observeRegistryRehomeSource(ctx context.Context, client kubernetes.Interfac
 		}
 		source.Services = append(source.Services, RegistryRehomeObservedService{
 			Live:        RegistryRehomeObservedObject{id, string(live.UID), live.Generation, digest(serviceSpec)},
-			Declaration: RegistryRehomeService{id, digest(decl)},
+			Declaration: decl,
 		})
 	}
 	return source, nil
@@ -287,14 +293,15 @@ func InspectRegistryRehomeSubmission(s productioncontrol.Submission) (RegistryRe
 	before, d := p.Source, p.Draft
 	want, digestErr := registryRehomeDraftDigest(d)
 	if err != nil || !bytes.Equal(canonical, s.Payload) || digestErr != nil || d.DraftDigest != want ||
-		d.Schema != "fugue.production.registry-rehome-draft.v1" || !digestPattern.MatchString(d.ArchiveDigest) ||
+		!validRegistryRehomeCompanionSchema(d.Schema, len(d.RBAC)) || !digestPattern.MatchString(d.ArchiveDigest) ||
 		d.ArchiveDigest != before.ArchiveDigest || d.Current.RecordDigest != before.MonitorDigest || before.MonitorUID == "" ||
 		d.Workload != before.Deployment.Identity || d.Workload.APIVersion != "apps/v1" || d.Workload.Kind != "Deployment" ||
 		before.Deployment.UID == "" || before.Deployment.Generation < 1 || !digestPattern.MatchString(before.Deployment.SpecDigest) ||
 		before.Key.Validate() != nil || before.Key.Component != d.Component ||
 		s.Intent.ResourceID != nativeKubernetesResourceID(d.Workload) || s.Intent.Generation != before.Version.Generation ||
 		s.Intent.CurrentDigest != before.Version.Digest || s.Intent.RollbackDigest != before.Version.Digest || s.Intent.TargetDigest != d.DraftDigest ||
-		len(d.Services) != len(before.Services) || !validRegistryRehomeProjection(d.Current, d.Mirror.Forward) ||
+		len(d.Services) != len(before.Services) || len(d.RBAC) != len(before.RBAC) || len(d.Services)+len(d.RBAC) > 31 ||
+		!validRegistryRehomeProjection(d.Current, d.Mirror.Forward) ||
 		!validRegistryRehomeProjection(d.Rollback, d.Mirror.Rollback) || d.Current.RecordDigest == d.Rollback.RecordDigest {
 		return RegistryRehomeReview{}, errors.New("registry rehome payload does not bind the verified scope, mirror and predecessor")
 	}
@@ -313,13 +320,26 @@ func InspectRegistryRehomeSubmission(s productioncontrol.Submission) (RegistryRe
 	for i, service := range d.Services {
 		live := before.Services[i]
 		if live.Declaration != service || live.Live.Identity != service.Identity ||
-			service.Identity.APIVersion != "v1" || service.Identity.Kind != "Service" || service.Identity.Namespace != d.Workload.Namespace ||
+			!registryRehomeServiceIdentity(service.Identity, d.Workload.Namespace) ||
 			live.Live.UID == "" || !digestPattern.MatchString(live.Live.SpecDigest) || !digestPattern.MatchString(service.ShapeDigest) ||
 			(i > 0 && d.Services[i-1].Identity.Name >= service.Identity.Name) {
 			return RegistryRehomeReview{}, errors.New("registry rehome companion Service does not match live readback")
 		}
 	}
+	for i, companion := range d.RBAC {
+		live := before.RBAC[i]
+		if live.Declaration != companion || live.Live.Identity != companion.Identity || !registryRehomeRBACIdentity(companion.Identity) ||
+			live.Live.UID == "" || live.ResourceVersion == "" || live.Live.Generation < 0 || !digestPattern.MatchString(live.Live.SpecDigest) ||
+			!digestPattern.MatchString(companion.ShapeDigest) ||
+			(i > 0 && registryRehomeRBACOrder(d.RBAC[i-1].Identity) >= registryRehomeRBACOrder(companion.Identity)) {
+			return RegistryRehomeReview{}, errors.New("registry rehome companion RBAC does not match live readback")
+		}
+	}
 	return p, nil
+}
+
+func validRegistryRehomeCompanionSchema(schema string, rbacCount int) bool {
+	return (schema == registryRehomeDraftV1 && rbacCount == 0) || (schema == registryRehomeDraftV2 && rbacCount > 0)
 }
 
 func validRegistryRehomeProjection(p RegistryRehomeProjection, mirror RegistryRecoveryReadback) bool {

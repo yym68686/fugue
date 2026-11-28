@@ -28,6 +28,9 @@ type registryRehomeAdmissionHandler struct {
 }
 
 func registryRehomeAdmissionServer(gate registryRehomeKubeFence, review RegistryRehomeReview, verify rehomePendingWrite) (*registryRehomeAdmissionHandler, error) {
+	if err := review.requireExecutableCompanions(); err != nil {
+		return nil, err
+	}
 	id := review.Draft.Workload
 	source := review.Source.Deployment
 	if gate.hook == nil || verify == nil || id.APIVersion != "apps/v1" || id.Kind != "Deployment" || id.Namespace != gate.cutover.Namespace ||

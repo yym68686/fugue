@@ -99,10 +99,11 @@ fugue-release-bootstrap draft-release-registry-rehome "$ARCHIVE" "$INDEPENDENTLY
 Use the same independent repository for the current and rollback images.
 The draft compares both sealed Deployment PodSpecs, changes only the digest-
 pinned image references in the projection, and reads through both mirror tags
-and all runtime image blobs. A companion Service is read-only context: its
-declarations must agree, ignoring only the three release provenance stamps.
-Different Services, other resources, and unverified container or volume
-images reject the draft. The result contains identities and digests, not an
+and all runtime image blobs. Same-namespace Services and static ClusterRoles
+and ClusterRoleBindings can be read-only context: their declarations must
+agree, ignoring only the three release provenance stamps. Aggregated roles,
+changed companions, other resources, and unverified container or volume images
+reject the draft. The result contains identities and digests, not an
 apply manifest. It does not prove live Service agreement, runtime pull by
 the nodes, writer revocation, or a verified cutover. Do not apply a draft or
 modify the original monitor records to treat the draft as a new baseline.
@@ -118,9 +119,14 @@ fugue-production-control draft-release-registry-rehome "$READ_ONLY_JOURNAL_CONFI
 ```
 
 The second command requires a pre-existing verified journal head with no
-pending claim. It compares the live Deployment and each read-only Service
-to the archived declarations and repeats the source and journal reads after
-checking both mirror copies. The output is an intent for `inspect`, owner
+pending claim. It compares the live Deployment and each named read-only
+companion to the archived declarations and repeats the source and journal
+reads after checking both mirror copies. For RBAC, the reader needs only
+`get` on the named ClusterRoles and ClusterRoleBindings. It checks exact rules,
+subjects and role references, plus stable UIDs and resource versions. Draft v2
+with RBAC companions is shadow-only: do not sign or dispatch one. The current
+dispatcher and admission handler reject it until those companions have an
+enrolled write boundary. A Service-only v1 output is an intent for `inspect`, owner
 `sign`, and journal recording. It is not a Deployment patch or fresh
 baseline evidence. An approved registry rehome is rejected by the ordinary
 claim path; only the dedicated Guardian command may reserve a rehome claim.
@@ -134,8 +140,8 @@ fugue-release-bootstrap verify-release-registry-rehome "$BUNDLE" "$INDEPENDENTLY
 
 The first command creates `registry-rehome-recovery.json` in a new private
 directory. It keeps the original archive byte-for-byte and derives the current
-and rollback Deployment templates from their own sealed records. Companion
-Services never appear in those templates. Both commands output only the
+and rollback Deployment templates from their own sealed records. Companions
+never appear in those templates. Both commands output only the
 identities and digests. Retain the bundle and its pin independently of each
 other, outside Git and Actions. Optionally pass the second command an absolute
 JSON config with `registry` and optional `registryAuthFile` to re-read both OCI
@@ -152,14 +158,19 @@ fugue-production-control stage-release-registry-rehome-input "$BUNDLE" "$INDEPEN
 ```
 
 Each `manifest.json` retains the corresponding archived resource set,
-including unchanged companion Services. Only the reviewed Deployment image
-references and its image stamp at that version are relocated. The output
+including unchanged Service and static RBAC companions. Only the reviewed
+Deployment image references and its image stamp at that version are relocated. The output
 identifies the role, companion identities, original monitor digest, and the
 new exact manifest digest. Keep the input and the original archive private.
 This is offline staging, not a fresh registry readback or a release seal.
 Do not apply the staged set: the current single-Deployment native executor
 does not accept sets with companions, and staging neither changes the live
 monitor pointer nor establishes the new journal LKG.
+
+A relocated Deployment artifact does not relocate images configured for
+workloads that the component will create later. Verify those consumers'
+effective settings and uncached target-node pulls separately before counting
+the component as independent of GitHub.
 
 Use the same pinned bundle to derive one proposed handoff identity for the
 two exact manifests, relocated OCI receipts, original monitor identities,

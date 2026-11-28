@@ -68,11 +68,11 @@ func deriveRegistryRehomeRecovery(archive verifiedReleaseRecoveryArchive, review
 		if record.release.Transition != nil || len(record.release.RuntimeResourcesFromForward) != 0 || record.workload.NodeParticipation != "" {
 			return nil, errors.New("sealed release delegates a runtime transition")
 		}
-		projected, services, template, err := projectRegistryRehomeWorkload(record, p.IndependentImage)
+		projected, companions, template, err := projectRegistryRehomeWorkload(record, p.IndependentImage)
 		if err != nil {
 			return nil, err
 		}
-		if !slices.Equal(services, d.Services) || !slices.Equal(projected.Containers, p.Containers) {
+		if !slices.Equal(companions.services, d.Services) || !slices.Equal(companions.rbac, d.RBAC) || !slices.Equal(projected.Containers, p.Containers) {
 			return nil, errors.New("reviewed resources differ from the sealed release")
 		}
 		// Containers have already been compared by value and order.
