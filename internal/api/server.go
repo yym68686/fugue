@@ -23,7 +23,9 @@ import (
 	"fugue/internal/backupusage"
 	"fugue/internal/backupusage/inventoryscan"
 	"fugue/internal/bundleauth"
+	clientprobe "fugue/internal/clientmeasurement/planning"
 	"fugue/internal/failover"
+	"fugue/internal/frontnetwork"
 	"fugue/internal/httpx"
 	"fugue/internal/imagebilling"
 	"fugue/internal/livediagnostics"
@@ -135,12 +137,10 @@ type Server struct {
 	appProxyServiceHostCache               expiringResponseCache[string]
 	managedSharedLocationSync              managedSharedLocationSyncState
 	newClusterNodeClient                   func() (*clusterNodeClient, error)
-	frontNetworkObservationMu              sync.Mutex
-	frontNetworkObservationLast            map[string]time.Time
+	frontNetworkObservation                frontnetwork.ObservationBudget
 	dynamicQuality                         dynamicQualityState
 	networkRouteWitness                    networkRouteWitnessState
-	clientProbePlanMu                      sync.Mutex
-	clientProbePlans                       map[string]time.Time
+	clientProbePlanBudget                  clientprobe.Budget
 	newManagedAppStatusClient              func() (*managedAppStatusClient, error)
 	managedAppStatusCache                  managedAppStatusCache
 	edgeRouteDecisionMu                    sync.Mutex

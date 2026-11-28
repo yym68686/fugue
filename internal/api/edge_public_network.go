@@ -58,7 +58,7 @@ func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWrit
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 	defer cancel()
-	if !s.waitPublicNetworkObservation(ctx, query.EdgeID) {
+	if !s.frontNetworkObservation.Wait(ctx, query.EdgeID) {
 		if s.log != nil {
 			s.log.Printf("public Front network observation rejected; edge_id=%s slot=%s reason=rate_limited", query.EdgeID, query.Slot)
 		}
@@ -85,53 +85,6 @@ func (s *Server) handleReadEdgePublicNetworkObservation(writer http.ResponseWrit
 	}
 	writer.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(writer, http.StatusOK, response)
-}
-
-func (s *Server) waitPublicNetworkObservation(ctx context.Context, edgeID string) bool {
-	delay, ok := s.reservePublicNetworkObservation(edgeID, time.Now())
-	if !ok || ctx.Err() != nil {
-		return false
-	}
-	if delay <= 0 {
-		return true
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return ctx.Err() == nil
-	}
-}
-
-func (s *Server) reservePublicNetworkObservation(edgeID string, now time.Time) (time.Duration, bool) {
-	if !s.frontNetworkObservationMu.TryLock() {
-		return 0, false
-	}
-	defer s.frontNetworkObservationMu.Unlock()
-	if s.frontNetworkObservationLast == nil {
-		s.frontNetworkObservationLast = map[string]time.Time{}
-	}
-	delay := time.Duration(0)
-	if previous, found := s.frontNetworkObservationLast[edgeID]; found {
-		// Reserve only the next slot. A future reservation already belongs to
-		// one waiter; further callers cannot build a queue or consume its slot.
-		if previous.After(now) {
-			return 0, false
-		}
-		delay = max(0, previous.Add(time.Second).Sub(now))
-	}
-	for identity, previous := range s.frontNetworkObservationLast {
-		if now.Sub(previous) > time.Minute {
-			delete(s.frontNetworkObservationLast, identity)
-		}
-	}
-	if len(s.frontNetworkObservationLast) >= 256 {
-		return 0, false
-	}
-	s.frontNetworkObservationLast[edgeID] = now.Add(delay)
-	return delay, true
 }
 
 func publicFrontService(services []corev1.Service, node model.EdgeNode, namespace string) (*corev1.Service, error) {

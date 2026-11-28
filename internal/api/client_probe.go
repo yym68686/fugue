@@ -13,6 +13,7 @@ import (
 
 	"fugue/internal/bundleauth"
 	"fugue/internal/clientmeasurement"
+	clientprobe "fugue/internal/clientmeasurement/planning"
 	"fugue/internal/httpx"
 	"fugue/internal/model"
 	"fugue/internal/routeprobe"
@@ -42,7 +43,7 @@ func (s *Server) handleIssueEdgeClientProbePlan(writer http.ResponseWriter, requ
 		return
 	}
 	observer := clientProbeObserver(principal)
-	if !s.reserveClientProbePlan(observer, time.Now()) {
+	if !s.clientProbePlanBudget.Reserve(observer, time.Now()) {
 		httpx.WriteError(writer, http.StatusServiceUnavailable, "client probe plan budget exhausted")
 		return
 	}
@@ -79,7 +80,7 @@ func (s *Server) handleIssueEdgeClientProbePlan(writer http.ResponseWriter, requ
 	plan := model.EdgeClientProbePlan{Schema: "fugue.client-probe-plan/v1", RoundID: model.NewID("client_probe"), ObserverLabel: input.ObserverLabel, Permits: []model.EdgeClientProbePermit{}}
 	ctx, cancel := context.WithTimeout(request.Context(), 12*time.Second)
 	defer cancel()
-	ready, proofs := clientProbeReadyCandidates(ctx, input, eligible, func(ctx context.Context, node model.EdgeNode) (routeprobe.Proof, error) {
+	ready, proofs := clientprobe.ReadyCandidates(ctx, eligible, func(ctx context.Context, node model.EdgeNode) (routeprobe.Proof, error) {
 		proof, err := routeprobe.Probe(ctx, input.Hostname, input.Path, node.PublicIPv4, "", 2*time.Second)
 		if (err != nil || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || proof.State != "") && s.log != nil {
 			s.log.Printf("client probe plan candidate unavailable; edge_id=%s hostname=%s proof_edge=%s proof_group=%s proof_state=%s error=%v", node.ID, input.Hostname, proof.EdgeID, proof.GroupID, proof.State, err)
@@ -112,41 +113,6 @@ func (s *Server) handleIssueEdgeClientProbePlan(writer http.ResponseWriter, requ
 	s.captureClientProbeCapacityWitnesses(ctx, input, eligible, proofs)
 	writer.Header().Set("Cache-Control", "private, no-store")
 	httpx.WriteJSON(writer, http.StatusOK, plan)
-}
-
-func clientProbeReadyCandidates(ctx context.Context, input model.EdgeClientProbeRequest, nodes []model.EdgeNode, probe func(context.Context, model.EdgeNode) (routeprobe.Proof, error)) ([]model.EdgeNode, []routeprobe.Proof) {
-	ready, proofs := []model.EdgeNode{}, []routeprobe.Proof{}
-	for _, node := range nodes {
-		if ctx.Err() != nil {
-			break
-		}
-		proof, err := probe(ctx, node)
-		if err != nil || proof.EdgeID != node.ID || proof.GroupID != node.EdgeGroupID || proof.State != "" {
-			continue
-		}
-		ready, proofs = append(ready, node), append(proofs, proof)
-	}
-	return ready, proofs
-}
-
-func (s *Server) reserveClientProbePlan(observer string, now time.Time) bool {
-	if !s.clientProbePlanMu.TryLock() {
-		return false
-	}
-	defer s.clientProbePlanMu.Unlock()
-	if s.clientProbePlans == nil {
-		s.clientProbePlans = map[string]time.Time{}
-	}
-	for identity, at := range s.clientProbePlans {
-		if now.Sub(at) >= 5*time.Minute {
-			delete(s.clientProbePlans, identity)
-		}
-	}
-	if len(s.clientProbePlans) >= 128 || now.Sub(s.clientProbePlans[observer]) < 30*time.Second {
-		return false
-	}
-	s.clientProbePlans[observer] = now
-	return true
 }
 
 func (s *Server) handleReportEdgeClientProbeRound(writer http.ResponseWriter, request *http.Request) {
