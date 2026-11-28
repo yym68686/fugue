@@ -16,6 +16,8 @@ func (s *Store) CreateAppRelease(release model.AppRelease) (model.AppRelease, er
 	if err != nil {
 		return model.AppRelease{}, err
 	}
+	// Insertion can register an already-retired historical record. It
+	// cannot replace a live release; transitions still require retirement.
 	return s.pgCreateAppRelease(release)
 }
 
@@ -23,6 +25,9 @@ func (s *Store) UpdateAppRelease(release model.AppRelease) (model.AppRelease, er
 	release, err := normalizeAppReleaseForStore(release)
 	if err != nil {
 		return model.AppRelease{}, err
+	}
+	if AppReleaseIsRetired(release) || release.RetiredAt != nil {
+		return model.AppRelease{}, ErrConflict
 	}
 	return s.pgUpdateAppRelease(release)
 }

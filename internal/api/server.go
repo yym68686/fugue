@@ -29,6 +29,7 @@ import (
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
+	"fugue/internal/operationcancel"
 	"fugue/internal/operationview"
 	"fugue/internal/platformconfig"
 	"fugue/internal/platformproducer"
@@ -1881,7 +1882,7 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 	principal := mustPrincipal(r)
-	if !principal.IsPlatformAdmin() && !principal.HasScope("app.write") && !principal.HasScope("project.write") {
+	if !operationcancel.MayRequest(principal) {
 		httpx.WriteError(w, http.StatusForbidden, "missing app.write or project.write scope")
 		return
 	}
@@ -1890,7 +1891,7 @@ func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 		s.writeOperationReadError(w, err)
 		return
 	}
-	message := "operation canceled before execution"
+	message := ""
 	var req struct {
 		Message string `json:"message"`
 	}
@@ -1899,16 +1900,16 @@ func (s *Server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteError(w, http.StatusBadRequest, decodeErr.Error())
 			return
 		}
-		if strings.TrimSpace(req.Message) != "" {
-			message = strings.TrimSpace(req.Message)
-		}
+		message = req.Message
 	}
-	// A deploy may be canceled after it is claimed because its desired state is
-	// immutable and a later deploy can safely supersede it.
-	canceled, err := s.store.CancelOperation(op.ID, message)
+	canceled, err := s.store.OperationCancellation(principal).Cancel(op.ID, message)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			httpx.WriteError(w, http.StatusConflict, "operation is already running or terminal; only pending operations or running deploys can be canceled")
+			return
+		}
+		if errors.Is(err, operationcancel.ErrNotVisible) {
+			s.writeOperationReadError(w, errOperationNotVisible)
 			return
 		}
 		s.writeStoreError(w, err)

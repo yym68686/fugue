@@ -175,13 +175,13 @@ func TestSafeCanonicalHandoffStartsBoundedStopAfterTrafficProof(t *testing.T) {
 			if scenario == "retired_source" || scenario == "retired_logical_source" {
 				source, _ := s.Store.GetAppRelease(app.TenantID, true, "original-source")
 				archiveCanonicalTestRelease(&source)
-				if _, err := s.Store.UpdateAppRelease(source); err != nil {
+				if _, err := retireFixtureRelease(t.Context(), s.Store, source); err != nil {
 					t.Fatal(err)
 				}
 				if scenario == "retired_logical_source" {
 					logical := createCanonicalHandoffTestRevision(t, s, app, "logical-source", source.ID)
 					archiveCanonicalTestRelease(&logical)
-					if _, err := s.Store.UpdateAppRelease(logical); err != nil {
+					if _, err := retireFixtureRelease(t.Context(), s.Store, logical); err != nil {
 						t.Fatal(err)
 					}
 					candidate.RollbackTargetID = logical.ID
@@ -742,7 +742,7 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 				if scenario == "retired_unpromoted_source" {
 					source.PromotedAt = nil
 				}
-				if _, err := st.UpdateAppRelease(source); err != nil {
+				if _, err := retireFixtureRelease(t.Context(), st, source); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -754,8 +754,14 @@ func TestCanonicalSourceSurvivesSuccessivePromotions(t *testing.T) {
 			if scenario == "retired_logical_source" {
 				archiveCanonicalTestRelease(&previous)
 			}
-			if _, err := st.UpdateAppRelease(previous); err != nil {
-				t.Fatal(err)
+			var storeErr error
+			if previous.Role == model.AppReleaseRoleRetired {
+				_, storeErr = retireFixtureRelease(t.Context(), st, previous)
+			} else {
+				_, storeErr = st.UpdateAppRelease(previous)
+			}
+			if storeErr != nil {
+				t.Fatal(storeErr)
 			}
 			predecessorID := previous.ID
 			if scenario == "multiple_successors" {

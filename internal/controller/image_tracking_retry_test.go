@@ -23,8 +23,7 @@ func TestImageTrackingRetryWaitsForWithdrawnResourcesIncludingNewDigest(t *testi
 				t.Fatal(err)
 			}
 			if scenario == "retired_cleanup_failed" {
-				old.Role, old.Status = model.AppReleaseRoleRetired, model.AppReleaseStatusRetired
-				if _, err := s.Store.UpdateAppRelease(old); err != nil {
+				if _, err := retireFixtureRelease(t.Context(), s.Store, old); err != nil {
 					t.Fatal(err)
 				}
 			}

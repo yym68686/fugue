@@ -1,4 +1,4 @@
-package controller
+package operationexecution
 
 import (
 	"bytes"
@@ -12,13 +12,14 @@ import (
 
 func TestOperationTimingDistinguishesTrafficPendingFromFailure(t *testing.T) {
 	for _, tc := range []struct {
-		err    error
-		status string
-	}{{nil, "completed"}, {errSafeRolloutTrafficPending, "pending"}, {errors.New("executable failed"), "failed"}} {
+		err     error
+		pending bool
+		status  string
+	}{{nil, false, "completed"}, {errors.New("traffic publication is pending"), true, "pending"}, {errors.New("executable failed"), false, "failed"}} {
 		var output bytes.Buffer
-		timer := newControllerOperationTimer(nil)
+		timer := NewTimer(nil)
 		timer.Mark("traffic_publication_wait")
-		timer.Log(log.New(&output, "", 0), "managed_operation", model.Operation{ID: "operation-a"}, tc.err)
+		timer.Log(log.New(&output, "", 0), "managed_operation", model.Operation{ID: "operation-a"}, tc.err, tc.pending)
 		if !strings.Contains(output.String(), "status="+tc.status) || !strings.Contains(output.String(), "traffic_publication_wait=") {
 			t.Fatal("misleading stage timing", output.String())
 		}
