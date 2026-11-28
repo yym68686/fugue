@@ -44,6 +44,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control draft-release-registry-rehome JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN GROUP REQUEST MIRROR_CONFIG
        fugue-production-control pack-release-registry-rehome ARCHIVE PIN SUBMISSION NEW_PRIVATE_DIRECTORY
        fugue-production-control stage-release-registry-rehome-input BUNDLE PIN current|rollback NEW_PRIVATE_DIRECTORY
+       fugue-production-control stage-release-registry-rehome-baseline BUNDLE PIN NEW_PRIVATE_DIRECTORY
+       fugue-production-control verify-release-registry-rehome-baseline BASELINE BASELINE_PIN BUNDLE BUNDLE_PIN
        fugue-production-control observe-release-registry-rehome-pending JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG
        fugue-production-control observe-release-registry-rehome-cutover JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG
        fugue-production-control sign-registry-rehome-no-write DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
@@ -109,6 +111,8 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		return packRegistryRehomeRecovery(args[1:], out)
 	case "stage-release-registry-rehome-input":
 		return stageRegistryRehomeReleaseInput(args[1:], out)
+	case "stage-release-registry-rehome-baseline", "verify-release-registry-rehome-baseline":
+		return registryRehomeBaselineCommand(args[1:], out, args[0] == "stage-release-registry-rehome-baseline")
 	case "observe-release-registry-rehome-pending":
 		return pendingRegistryRehomeCommand(ctx, args[1:], out, false, false)
 	case "observe-release-registry-rehome-cutover":

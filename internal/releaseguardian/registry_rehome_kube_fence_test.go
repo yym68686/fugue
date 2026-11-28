@@ -556,6 +556,11 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		if err != nil || combined.Recovery != bundleReport || combined.Placement.ReadbackDigest != observed.ReadbackDigest {
 			t.Fatalf("joint verification did not bind both mirrors to the pending placement: %+v %v", combined, err)
 		}
+		_, proposed, err := BuildRegistryRehomeBaseline(bundle, bundleReport.BundleDigest)
+		if err != nil || combined.Baseline != proposed || combined.Baseline.Predecessor != state.LastVerified ||
+			combined.Baseline.Scope != claim.Scope || combined.Baseline.Version().Digest == s.Intent.TargetDigest {
+			t.Fatalf("joint readback did not identify the exact next baseline without settling it: %+v %v", combined.Baseline, err)
+		}
 		retained := images[oldLayer]
 		delete(images, oldLayer)
 		if _, err := joint(bundleReport.BundleDigest); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {

@@ -219,6 +219,44 @@ func stageRegistryRehomeReleaseInput(args []string, out io.Writer) error {
 	return json.NewEncoder(out).Encode(report)
 }
 
+func registryRehomeBaselineCommand(args []string, out io.Writer, stage bool) error {
+	if stage {
+		if len(args) != 3 || !filepath.IsAbs(args[0]) {
+			return errors.New(usage)
+		}
+		bundle, err := readFile(args[0], releaseguardian.MaxRegistryRehomeRecoveryBytes, true)
+		if err != nil {
+			return err
+		}
+		defer clear(bundle)
+		raw, report, err := releaseguardian.BuildRegistryRehomeBaseline(bundle, args[1])
+		if err != nil {
+			return err
+		}
+		if err := writePrivateReleaseRecovery(args[2], "baseline.json", raw); err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(report)
+	}
+	if len(args) != 4 || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[2]) {
+		return errors.New(usage)
+	}
+	raw, err := readFile(args[0], releaseguardian.MaxRegistryRehomeBaselineBytes, true)
+	if err != nil {
+		return err
+	}
+	bundle, err := readFile(args[2], releaseguardian.MaxRegistryRehomeRecoveryBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(bundle)
+	report, err := releaseguardian.VerifyRegistryRehomeBaseline(raw, args[1], bundle, args[3])
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
 func registryRehomeReviewCommand(ctx context.Context, args []string, out io.Writer) error {
 	draft := args[0] == "draft-release-registry-rehome"
 	if (!draft && len(args) != 6) || (draft && len(args) != 9) {

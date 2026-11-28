@@ -35,6 +35,7 @@ type RegistryRehomePendingObservation struct {
 type RegistryRehomeCutoverReadback struct {
 	Placement RegistryRehomePendingObservation `json:"placement"`
 	Recovery  RegistryRehomeRecoveryReport     `json:"recovery"`
+	Baseline  RegistryRehomeBaseline           `json:"proposedBaseline"`
 }
 
 // ObserveRegistryRehomeCutover requires the same frozen workload, Pods,
@@ -55,6 +56,10 @@ func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interfa
 	if report.IntentDigest != intentDigest || verified.bundle.Review.Intent.ClusterID != cluster {
 		return none, errors.New("registry rehome recovery bundle does not match the pending intent and cluster")
 	}
+	_, baseline, err := buildRegistryRehomeBaseline(verified)
+	if err != nil {
+		return none, err
+	}
 	observe := func() (RegistryRehomePendingObservation, error) {
 		return ObserveFrozenRegistryRehomePending(ctx, client, journal, cluster, intentDigest, cutover, provider,
 			observer, verified.bundle.Archive, report.ArchiveDigest)
@@ -63,7 +68,8 @@ func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interfa
 	if err != nil {
 		return none, err
 	}
-	if before.Placement != registryRehomeIndependentPlacement {
+	if before.Placement != registryRehomeIndependentPlacement ||
+		before.LastVerified != baseline.Predecessor || before.Claim.Scope != baseline.Scope {
 		return none, errors.New("registry rehome cutover has not reached the independent placement")
 	}
 	if err := verifyRegistryRehomeRecoveryMirror(ctx, verified, registry); err != nil {
@@ -73,7 +79,7 @@ func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interfa
 	if err != nil || after.ReadbackDigest != before.ReadbackDigest {
 		return none, errors.Join(errors.New("registry rehome placement or claim changed during independent mirror verification"), err)
 	}
-	return RegistryRehomeCutoverReadback{Placement: after, Recovery: report}, nil
+	return RegistryRehomeCutoverReadback{Placement: after, Recovery: report, Baseline: baseline}, nil
 }
 
 // ObserveFrozenRegistryRehomePending resumes inspection after losing the

@@ -33,6 +33,11 @@ func ExportRegistryRehomeReleaseInput(raw []byte, pin, role string) ([]byte, Reg
 	if err != nil {
 		return nil, none, err
 	}
+	return registryRehomeReleaseInput(verified, role)
+}
+
+func registryRehomeReleaseInput(verified verifiedRegistryRehomeRecoveryBundle, role string) ([]byte, RegistryRehomeReleaseInput, error) {
+	var none RegistryRehomeReleaseInput
 	bundle, report, archive := verified.bundle, verified.report, verified.archive
 	record, projection, version := archive.forward, bundle.Current, report.Current
 	if role == "rollback" {
@@ -75,7 +80,7 @@ func ExportRegistryRehomeReleaseInput(raw []byte, pin, role string) ([]byte, Reg
 		return nil, none, err
 	}
 	return manifest, RegistryRehomeReleaseInput{
-		BundleDigest: pin, IntentDigest: report.IntentDigest, Role: role,
+		BundleDigest: report.BundleDigest, IntentDigest: report.IntentDigest, Role: role,
 		SourceRecordDigest: version.SourceRecordDigest, Workload: report.Workload, Companions: companions, Target: target,
 	}, nil
 }

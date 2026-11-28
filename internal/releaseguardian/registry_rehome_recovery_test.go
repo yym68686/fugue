@@ -150,6 +150,37 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 	if staged, _, err := ExportRegistryRehomeReleaseInput(raw, report.BundleDigest, "unknown"); err == nil || staged != nil {
 		t.Fatal("staged a manifest with an ambiguous recovery role")
 	}
+	baselineRaw, baseline, err := BuildRegistryRehomeBaseline(raw, report.BundleDigest)
+	if err != nil || baseline.Current.SourceMonitorDigest != report.Current.SourceRecordDigest ||
+		baseline.Rollback.SourceMonitorDigest != report.Rollback.SourceRecordDigest ||
+		baseline.Current.Target.ImageRef != report.Current.Image || baseline.Rollback.Target.ImageRef != report.Rollback.Image ||
+		baseline.Predecessor != source.Version || baseline.Version().Generation != source.Version.Generation+1 ||
+		baseline.Version().Digest == source.Version.Digest || baseline.Version().Digest == s.Intent.TargetDigest {
+		t.Fatalf("new baseline must bind both versions without reusing a proposal or predecessor digest: %+v %v", baseline, err)
+	}
+	if observed, err := VerifyRegistryRehomeBaseline(baselineRaw, baseline.BaselineDigest, raw, report.BundleDigest); err != nil || observed != baseline {
+		t.Fatalf("fresh recovery did not reconstruct the exact baseline: %+v %v", observed, err)
+	}
+	if _, err := VerifyRegistryRehomeBaseline(baselineRaw, digest(baselineRaw), raw, report.BundleDigest); err == nil {
+		t.Fatal("raw file digest substituted for its role-bound baseline identity")
+	}
+	for _, alter := range []func(*RegistryRehomeBaseline){
+		func(b *RegistryRehomeBaseline) { b.Current, b.Rollback = b.Rollback, b.Current },
+		func(b *RegistryRehomeBaseline) { b.Predecessor.Generation++ },
+		func(b *RegistryRehomeBaseline) { b.Scope.ClusterID = "other-cluster" },
+		func(b *RegistryRehomeBaseline) { b.Current.Artifact.RecoveryPin = b.Rollback.Artifact.RecoveryPin },
+		func(b *RegistryRehomeBaseline) { b.Current.HealthContractDigest = otherDigest },
+	} {
+		changed := baseline
+		alter(&changed)
+		changed.BaselineDigest = ""
+		canonical, _ := declarativerelease.CanonicalJSON(changed)
+		changed.BaselineDigest = digest(canonical)
+		encoded, _ := declarativerelease.CanonicalJSON(changed)
+		if _, err := VerifyRegistryRehomeBaseline(encoded, changed.BaselineDigest, raw, report.BundleDigest); err == nil {
+			t.Fatal("recomputed baseline ID let a changed handoff pass")
+		}
+	}
 	delete(objects, oldLayer)
 	if _, err := VerifyRegistryRehomeRecoveryBundle(ctx, raw, report.BundleDigest, registry); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {
 		t.Fatalf("mirror verification did not detect missing rollback layer: %v", err)
@@ -168,6 +199,9 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 		}
 		if manifest, _, err := ExportRegistryRehomeReleaseInput(tampered, digest(tampered), "rollback"); err == nil || manifest != nil {
 			t.Fatal("staged an input from an invalid projection")
+		}
+		if record, _, err := BuildRegistryRehomeBaseline(tampered, digest(tampered)); err == nil || record != nil {
+			t.Fatal("created a baseline identity from an invalid projection")
 		}
 	}
 	reject(func(b *registryRehomeRecoveryBundle) { b.Rollback = b.Current }, "differs from the sealed projection")

@@ -161,6 +161,22 @@ Do not apply the staged set: the current single-Deployment native executor
 does not accept sets with companions, and staging neither changes the live
 monitor pointer nor establishes the new journal LKG.
 
+Use the same pinned bundle to derive one proposed handoff identity for the
+two exact manifests, relocated OCI receipts, original monitor identities,
+health contracts and enrolled predecessor generation:
+
+```bash
+fugue-production-control stage-release-registry-rehome-baseline "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$NEW_BASELINE_DIRECTORY"
+fugue-production-control verify-release-registry-rehome-baseline "$BASELINE" "$INDEPENDENTLY_PINNED_BASELINE_DIGEST" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256"
+```
+
+The baseline pin is the `baselineDigest` (SHA-256 of the canonical record
+without that field), not the file digest, the intent's target digest, or
+either historical monitor digest. The verifier reconstructs the canonical
+record from the two pinned versions. Keep both the bundle and baseline in
+independent custody. Neither staging nor verification creates a release
+monitor, advances the journal, or authorizes a write.
+
 For the registry-only move, start from a plain Deployment freeze. Keep the
 legacy sources disabled and independently prove that their credentials were
 revoked and requests drained. Do not enable this exception as part of normal
@@ -233,8 +249,10 @@ fugue-production-control observe-release-registry-rehome-cutover "$READ_ONLY_JOU
 The registry profile contains `registry` and optional `registryAuthFile`.
 The command re-reads both exact OCI images and their recovery tags, and
 rejects the result if the bound workload, Pods, Services or pending claim
-change while it does so. It does not establish serving health, node pull
-independence, provider drain or the next Guardian baseline.
+change while it does so. The returned `proposedBaseline` is the same record
+as the offline staging command. The readback does not establish serving
+health, node pull independence or provider drain, and does not install the
+proposed baseline as Guardian's stable release.
 
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
