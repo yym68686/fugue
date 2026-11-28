@@ -86,6 +86,7 @@ type ExecutionJournal struct {
 	journal        *Journal
 	evidence       ExecutionEvidence
 	globalProducer bool
+	storageAudit   bool
 }
 
 func NewExecutionJournal(journal *Journal, evidence ExecutionEvidence) (*ExecutionJournal, error) {
@@ -457,6 +458,14 @@ func (e *ExecutionJournal) CompleteExecution(ctx context.Context, actor string, 
 				return false, err
 			}
 		}
+		if claim.ResourceID == StorageAuditPolicyResource {
+			if !e.storageAudit {
+				return false, errors.New("storage audit policy requires transactional provider receipt verification")
+			}
+			if err := verifyStorageAuditPolicyClosure(ctx, tx, claim, intent, result); err != nil {
+				return false, err
+			}
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO fugue_control.execution_results
 			(intent_digest,outcome,generation,verified_digest,evidence_digest,actor) VALUES ($1,$2,$3,$4,$5,$6)`,
 			claim.IntentDigest, result.Outcome, result.Verified.Generation, result.Verified.Digest, result.EvidenceDigest, actor)
@@ -466,6 +475,10 @@ func (e *ExecutionJournal) CompleteExecution(ctx context.Context, actor string, 
 }
 
 func (result ExecutionResult) matches(intent Intent) error {
+	if intent.ResourceID == StorageAuditPolicyResource &&
+		(result.Outcome != Applied || intent.Generation == math.MaxInt64 || result.Verified.Generation != intent.Generation+1) {
+		return errors.New("storage audit policy can only settle an atomic write at the next verified generation")
+	}
 	if intent.Operation == FrontWorker && result.Outcome != NotApplied &&
 		(intent.Generation == math.MaxInt64 || result.Verified.Generation != intent.Generation+1) {
 		return errors.New("Front/Worker result must advance the group ledger by exactly one generation")
