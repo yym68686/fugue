@@ -183,8 +183,8 @@ func recoveryObjectIs(object *corev1.ConfigMap, namespace, name, component strin
 		object.Labels["app.kubernetes.io/managed-by"] == "fugue-declarative-release" && object.Labels["fugue.pro/component"] == component
 }
 
-func recoveryRef(object *corev1.ConfigMap) RecoveryRecordRef {
-	return RecoveryRecordRef{Name: object.Name, UID: string(object.UID), ResourceVersion: object.ResourceVersion}
+func recoveryRef(object metav1.Object) RecoveryRecordRef {
+	return RecoveryRecordRef{Name: object.GetName(), UID: string(object.GetUID()), ResourceVersion: object.GetResourceVersion()}
 }
 
 type recoveryWorkload struct {

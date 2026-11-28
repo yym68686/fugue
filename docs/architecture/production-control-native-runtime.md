@@ -898,6 +898,16 @@ authority bound to pre-restore database role OIDs.
   checks the two image projections without opening a production writer.
   Companion Services may appear in its read-only context; this does not
   widen the native Deployment executor's admission or write set.
+- The registry-only move has a separate, internal image patch and readback.
+  The patch is built from the reviewed spec and issued once against the
+  current Deployment UID and resourceVersion. It replaces the image locations
+  and their existing pod-template artifact stamp only. After a lost reply,
+  readback reconstructs the signed source spec from the next live generation
+  and verifies the active Pod image IDs and companion Service identities
+  without repeating the write. This is placement evidence only: it does not
+  settle the journal, create a new release seal, verify route health, or prove
+  node pulls without GitHub. Ordinary release execution cannot dispatch the
+  registry-only move.
 - To check preservation of the current and rollback artifacts before that
   transition, provision an independent HTTPS registry and replicate the
   original OCI content byte-for-byte. In each destination repository, retain
