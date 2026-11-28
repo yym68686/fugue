@@ -162,6 +162,9 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 	if observed, err := VerifyRegistryRehomeBaseline(baselineRaw, baseline.BaselineDigest, raw, report.BundleDigest); err != nil || observed != baseline {
 		t.Fatalf("fresh recovery did not reconstruct the exact baseline: %+v %v", observed, err)
 	}
+	if observed, err := VerifyRegistryRehomeRecoveryBaseline(ctx, baselineRaw, baseline.BaselineDigest, raw, report.BundleDigest, registry); err != nil || observed != baseline {
+		t.Fatalf("online recovery did not verify the exact baseline and both mirrors: %+v %v", observed, err)
+	}
 	if _, err := VerifyRegistryRehomeBaseline(baselineRaw, digest(baselineRaw), raw, report.BundleDigest); err == nil {
 		t.Fatal("raw file digest substituted for its role-bound baseline identity")
 	}
@@ -186,6 +189,10 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 		}
 	}
 	delete(objects, oldLayer)
+	if observed, err := VerifyRegistryRehomeRecoveryBaseline(ctx, baselineRaw, baseline.BaselineDigest, raw, report.BundleDigest, registry); err == nil ||
+		!strings.Contains(err.Error(), "verify rollback recovery mirror") || observed != (RegistryRehomeBaseline{}) {
+		t.Fatalf("online baseline verification accepted a missing rollback layer: %+v %v", observed, err)
+	}
 	if _, err := VerifyRegistryRehomeRecoveryBundle(ctx, raw, report.BundleDigest, registry); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {
 		t.Fatalf("mirror verification did not detect missing rollback layer: %v", err)
 	}

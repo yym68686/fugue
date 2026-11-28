@@ -2,6 +2,7 @@ package releaseguardian
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"math"
 
@@ -108,16 +109,32 @@ func buildRegistryRehomeBaseline(verified verifiedRegistryRehomeRecoveryBundle) 
 // baseline identity and its byte-for-byte derivation from the pinned bundle.
 // A rehashed but changed predecessor, version or role is still rejected.
 func VerifyRegistryRehomeBaseline(raw []byte, expectedPin string, bundle []byte, bundlePin string) (RegistryRehomeBaseline, error) {
+	return VerifyRegistryRehomeRecoveryBaseline(context.Background(), raw, expectedPin, bundle, bundlePin, nil)
+}
+
+// VerifyRegistryRehomeRecoveryBaseline reconstructs the handoff and, when
+// supplied, re-reads both retained images from the independent registry.
+// A verified backup is neither a live serving receipt nor a journal head.
+func VerifyRegistryRehomeRecoveryBaseline(ctx context.Context, raw []byte, expectedPin string, bundle []byte, bundlePin string, registry *IndependentRegistry) (RegistryRehomeBaseline, error) {
 	var none RegistryRehomeBaseline
 	if len(raw) == 0 || len(raw) > MaxRegistryRehomeBaselineBytes || !digestPattern.MatchString(expectedPin) {
 		return none, errors.New("registry rehome baseline has invalid size or pin")
 	}
-	canonical, record, err := BuildRegistryRehomeBaseline(bundle, bundlePin)
+	verified, err := verifyRegistryRehomeRecoveryBundle(bundle, bundlePin)
+	if err != nil {
+		return none, err
+	}
+	canonical, record, err := buildRegistryRehomeBaseline(verified)
 	if err != nil {
 		return none, err
 	}
 	if record.BaselineDigest != expectedPin || !bytes.Equal(raw, canonical) {
 		return none, errors.New("registry rehome baseline differs from the pinned canonical handoff")
+	}
+	if registry != nil {
+		if err := verifyRegistryRehomeRecoveryMirror(ctx, verified, registry); err != nil {
+			return none, err
+		}
 	}
 	return record, nil
 }

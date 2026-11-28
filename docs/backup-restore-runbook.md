@@ -188,6 +188,19 @@ record from the two pinned versions. Keep both the bundle and baseline in
 independent custody. Neither staging nor verification creates a release
 monitor, advances the journal, or authorizes a write.
 
+From the standalone bootstrap binary, the same retained baseline can be
+verified without Fugue's API, Kubernetes, the journal, or GitHub:
+
+```bash
+fugue-release-bootstrap verify-release-registry-rehome-baseline "$BASELINE" "$INDEPENDENTLY_PINNED_BASELINE_DIGEST" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$REGISTRY_ENDPOINT_CONFIG"
+```
+
+Omit the optional registry profile for an offline comparison of the private
+files. When a profile is supplied, success requires both exact images and
+their recovery tags to be readable from that independent origin. The result
+explicitly says whether this mirror readback ran; it remains a proposed
+baseline, not a restore, upgrade, or serving receipt.
+
 Before selecting a successor, compare its prepared Guardian files with the
 relocated baseline offline:
 

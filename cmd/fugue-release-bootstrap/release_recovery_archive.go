@@ -125,6 +125,41 @@ func verifyRegistryRehomeRecovery(ctx context.Context, args []string, out io.Wri
 	return json.NewEncoder(out).Encode(report)
 }
 
+func verifyRegistryRehomeBaseline(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) < 4 || len(args) > 5 || !allDigests(args[1], args[3]) {
+		return errors.New(usage)
+	}
+	raw, err := readPrivateReleaseRecovery(args[0], releaseguardian.MaxRegistryRehomeBaselineBytes)
+	if err != nil {
+		return err
+	}
+	defer clear(raw)
+	bundle, err := readPrivateReleaseRecovery(args[2], releaseguardian.MaxRegistryRehomeRecoveryBytes)
+	if err != nil {
+		return err
+	}
+	defer clear(bundle)
+	var registry *releaseguardian.IndependentRegistry
+	if len(args) == 5 {
+		cfg, err := readRegistryEndpointConfig(args[4])
+		if err != nil {
+			return err
+		}
+		registry, err = openRegistry(cfg.Registry, cfg.RegistryAuthFile)
+		if err != nil {
+			return err
+		}
+	}
+	baseline, err := releaseguardian.VerifyRegistryRehomeRecoveryBaseline(ctx, raw, args[1], bundle, args[3], registry)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(struct {
+		ProposedBaseline releaseguardian.RegistryRehomeBaseline `json:"proposedBaseline"`
+		MirrorReadBack   bool                                   `json:"mirrorReadBack"`
+	}{baseline, registry != nil})
+}
+
 type registryEndpointConfig struct {
 	Registry         string `json:"registry"`
 	RegistryAuthFile string `json:"registryAuthFile,omitempty"`
