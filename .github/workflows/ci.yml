@@ -1321,7 +1321,7 @@ jobs:
           test -f "$declaration" && test ! -L "$declaration"
           test "$(git rev-parse HEAD^)" = "$BASE_SHA"
           test "$(git diff --name-only "$BASE_SHA" HEAD)" = "$declaration"
-          python3 -m unittest scripts.test_apply_app_mail_reconcile_handoff scripts.test_verify_observation_rollback_floor
+          python3 -m unittest scripts.test_apply_app_mail_reconcile_handoff scripts.test_verify_app_mail_provider_runtime scripts.test_verify_observation_rollback_floor
           pg_image=$(jq -er '.candidateReceipt.baked_postgres_verification.postgres_base | strings | select(test("@sha256:[a-f0-9]{64}$"))' deploy/environments/production/cnpg-controller/release.json)
           docker run --rm --network none --user 26:26 --entrypoint python3 \
             -v "$GITHUB_WORKSPACE:/fugue:ro" -w /fugue "$pg_image" scripts/rehearse_app_mail_handoff.py
@@ -5288,7 +5288,7 @@ jobs:
           declaration=deploy/releases/controller/app-mail-reconcile-handoff.json
           database=deploy/releases/observation-worker/database.json
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller "$database" deploy/environments/production/cnpg-controller/release.json .github/workflows/ci.yml internal/appmail internal/store/app_mail.go internal/store/app_mail_reconcile.go internal/store/postgres.go internal/schemamigrate/app_mail_reconcile_activate.sql scripts/apply_app_mail_reconcile_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
+          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller "$database" deploy/environments/production/cnpg-controller/release.json .github/workflows/ci.yml internal/appmail internal/store/app_mail.go internal/store/app_mail_reconcile.go internal/store/postgres.go internal/schemamigrate/app_mail_reconcile_activate.sql scripts/apply_app_mail_reconcile_handoff.py scripts/verify_app_mail_provider_runtime.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
           python3 -m scripts.apply_app_mail_reconcile_handoff "$database" "$declaration" --apply \
             > "$RUNNER_TEMP/fugue-app-mail-reconcile-handoff.json"
       - name: Retain ownership and provider reconciliation evidence

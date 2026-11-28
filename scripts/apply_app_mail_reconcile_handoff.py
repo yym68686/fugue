@@ -10,6 +10,7 @@ import sys
 import time
 
 from scripts.provision_observation_worker_database import Provision, ProvisionError
+from scripts.verify_app_mail_provider_runtime import REPO, observe_provider_runtime
 from scripts.verify_observation_rollback_floor import checked_rollback
 from scripts.verify_observation_writer_handoff import (
     COMMIT, RELEASE_SCHEMA, load_release, matches, verify_workload,
@@ -30,14 +31,23 @@ CONTROLLER_PATHS = COMMON + (
 )
 
 
-def parse_release(value):
+def parse_release(value, *, standby=False):
     floors = {"apiForwardFloor", "apiRollbackFloor", "controllerForwardFloor", "controllerRollbackFloor"}
-    if (not isinstance(value, dict) or value.keys() != {"schema", "api", "controller", *floors}
+    properties = {"schema", "api", "controller", *floors}
+    if not standby:
+        properties.add("provider")
+    if (not isinstance(value, dict) or value.keys() != properties
             or value["schema"] != SCHEMA or not all(matches(value[key], COMMIT) for key in floors)):
         raise ProvisionError("invalid application mail handoff declaration")
     workloads = load_release({"schema": RELEASE_SCHEMA, "api": value["api"], "worker": value["controller"]})
     if workloads["api"]["container"] != "api" or workloads["worker"]["container"] != "controller":
         raise ProvisionError("application mail deployment roles do not match")
+    if not standby:
+        provider = value["provider"]
+        if (not isinstance(provider, dict) or provider.keys() != {"repository", "revision", "imageDigest"}
+                or not matches(provider["repository"], REPO) or not matches(provider["revision"], COMMIT)
+                or not matches(provider["imageDigest"], r"sha256:[a-f0-9]{64}")):
+            raise ProvisionError("application mail handoff requires a pinned, reviewed provider artifact")
     return value
 
 
@@ -132,18 +142,28 @@ def activation_sql(provision, source):
     return "BEGIN;\nSET LOCAL statement_timeout = '5s';\n" + provision.identity_sql() + "\n" + source.removeprefix("BEGIN;\n")
 
 
+def verify_provider(provision, primary, expected):
+    observed, witness = observe_provider_runtime(provision, primary)
+    if any(observed[key] != value for key, value in expected.items()):
+        raise ProvisionError("running mail provider does not match the reviewed artifact")
+    return observed, witness
+
+
 def handoff(provision, release, source, *, apply=False, wait_seconds=180):
+    release = parse_release(release)
     runtime = runtime_snapshot(provision, release)
     primary = provision.find_primary()
     before = read_progress(provision, primary[0])
     if before["active"] < 1:
         raise ProvisionError("no existing active binding can prove the application mail handoff")
     leader = check_leader(provision, release["controller"], runtime["controller"][0][2], before["owner"])
+    provider = verify_provider(provision, primary[0], release["provider"])
     if not apply:
         return {"database": before, "controllerLeader": leader[1], "applied": False}
     if (runtime_snapshot(provision, release) != runtime or provision.find_primary() != primary
-            or check_leader(provision, release["controller"], runtime["controller"][0][2], before["owner"]) != leader):
-        raise ProvisionError("live, rollback, leader or primary evidence changed before handoff")
+            or check_leader(provision, release["controller"], runtime["controller"][0][2], before["owner"]) != leader
+            or verify_provider(provision, primary[0], release["provider"]) != provider):
+        raise ProvisionError("live, rollback, leader, primary or provider evidence changed before handoff")
     if before["owner"] == "api":
         provision.sql(primary[0], activation_sql(provision, source))
         print("application mail ownership committed; waiting for actual provider results", file=sys.stderr, flush=True)
@@ -157,7 +177,9 @@ def handoff(provision, release, source, *, apply=False, wait_seconds=180):
         if current["active"] > 0 and current["confirmed"] == current["active"]:
             current_runtime = runtime_snapshot(provision, release)
             confirmed_leader = check_leader(provision, release["controller"], current_runtime["controller"][0][2], "controller")
-            return {"database": current, "controllerLeader": confirmed_leader[1], "applied": True}
+            provider, _ = verify_provider(provision, primary[0], release["provider"])
+            return {"database": current, "controllerLeader": confirmed_leader[1],
+                    "providerRuntime": provider, "applied": True}
         if time.monotonic() >= deadline:
             raise ProvisionError("provider results did not advance after handoff; do not reset the owner")
         time.sleep(5)

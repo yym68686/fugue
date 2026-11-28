@@ -11,10 +11,14 @@ def target(component):
             "deployment": f"control-{component}", "container": component, "replicas": 1}
 
 
-DECLARATION = {
+STANDBY = {
     "schema": mail.SCHEMA, "api": target("api"), "controller": target("controller"),
     **{role + kind + "Floor": "b" * 40 for role in ("api", "controller") for kind in ("Forward", "Rollback")},
 }
+PROVIDER = {"repository": "https://github.com/example/fixture", "revision": "d" * 40,
+            "imageDigest": "sha256:" + "1" * 64}
+DECLARATION = {**STANDBY, "provider": PROVIDER}
+PROVIDER_RUNTIME = ({**PROVIDER, "readyPods": 1}, {"deployment": ("pod",)})
 API = {"owner": "api", "activated": None, "seeded": True, "active": 2, "confirmed": 0}
 CONTROLLER = {"owner": "controller", "activated": "2026-11-01T12:15:01Z",
               "seeded": True, "active": 2, "confirmed": 2}
@@ -34,7 +38,10 @@ def metrics(*, owner=0, read_age=8, check_age=1):
 class MailHandoffTests(unittest.TestCase):
     def test_declaration_requires_immutable_roles_and_floors(self):
         self.assertEqual(mail.parse_release(DECLARATION), DECLARATION)
+        self.assertEqual(mail.parse_release(STANDBY, standby=True), STANDBY)
         for candidate in (
+            STANDBY,
+            {**DECLARATION, "provider": {**PROVIDER, "revision": "main"}},
             {**DECLARATION, "controller": {**DECLARATION["controller"], "container": "worker"}},
             {**DECLARATION, "api": {**DECLARATION["api"], "image": "image:latest"}},
             {**DECLARATION, "controllerRollbackFloor": "main"},
@@ -69,6 +76,7 @@ class MailHandoffTests(unittest.TestCase):
         p.find_primary.return_value = ("primary", "uid-one")
         with (patch.object(mail, "runtime_snapshot", return_value=RUNTIME),
               patch.object(mail, "read_progress", return_value=API),
+              patch.object(mail, "observe_provider_runtime", return_value=PROVIDER_RUNTIME),
               patch.object(mail, "check_leader", return_value=LEADER)):
             self.assertFalse(mail.handoff(p, DECLARATION, "unused")["applied"])
             p.find_primary.side_effect = [("primary", "uid-one"), ("new-primary", "uid-two")]
@@ -82,6 +90,7 @@ class MailHandoffTests(unittest.TestCase):
         p.identity_sql.return_value = "SELECT 1 /* primary identity fixture */;"
         with (patch.object(mail, "runtime_snapshot", return_value=RUNTIME),
               patch.object(mail, "read_progress", side_effect=[API, {**CONTROLLER, "confirmed": 1}]),
+              patch.object(mail, "observe_provider_runtime", return_value=PROVIDER_RUNTIME),
               patch.object(mail, "check_leader", return_value=LEADER)):
             with self.assertRaisesRegex(ProvisionError, "did not advance.*do not reset"):
                 mail.handoff(p, DECLARATION, mail.ACTIVATION.read_text(), apply=True, wait_seconds=0)
@@ -90,8 +99,24 @@ class MailHandoffTests(unittest.TestCase):
         p.reset_mock()
         with (patch.object(mail, "runtime_snapshot", return_value=RUNTIME),
               patch.object(mail, "read_progress", return_value=CONTROLLER),
+              patch.object(mail, "observe_provider_runtime", return_value=PROVIDER_RUNTIME),
               patch.object(mail, "check_leader", return_value=LEADER)):
             self.assertEqual(mail.handoff(p, DECLARATION, mail.ACTIVATION.read_text(), apply=True)["database"], CONTROLLER)
+        p.sql.assert_not_called()
+
+    def test_incompatible_provider_or_provider_replacement_cannot_write(self):
+        p = Mock()
+        p.find_primary.return_value = ("primary", "uid-one")
+        with (patch.object(mail, "runtime_snapshot", return_value=RUNTIME),
+              patch.object(mail, "read_progress", return_value=API),
+              patch.object(mail, "check_leader", return_value=LEADER),
+              patch.object(mail, "observe_provider_runtime") as provider):
+            provider.return_value = ({**PROVIDER, "revision": "f" * 40}, {})
+            with self.assertRaisesRegex(ProvisionError, "does not match"):
+                mail.handoff(p, DECLARATION, "unused", apply=True)
+            provider.side_effect = [PROVIDER_RUNTIME, (PROVIDER_RUNTIME[0], {"new": "pod"})]
+            with self.assertRaisesRegex(ProvisionError, "provider evidence changed"):
+                mail.handoff(p, DECLARATION, "unused", apply=True)
         p.sql.assert_not_called()
 
     def test_rollback_source_is_checked_for_both_components(self):

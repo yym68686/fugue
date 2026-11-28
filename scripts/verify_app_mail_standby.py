@@ -76,7 +76,7 @@ def main():
     args = parser.parse_args()
     try:
         provision = Provision(json.loads(args.database.read_text()))
-        release = parse_release(json.loads(args.observation.read_text()))
+        release = parse_release(json.loads(args.observation.read_text()), standby=True)
         deadline = time.monotonic() + 90
         while True:
             try:
