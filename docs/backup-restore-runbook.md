@@ -89,6 +89,24 @@ version. It does not modify a historical manifest to use a mirror, authorize
 a rollout, recreate provider state, or prove that a node can pull without
 GitHub. Record those checks separately in the recovery drill.
 
+For a release still using a registry that is being retired, use the same
+archive and mirror configuration to draft a registry-only rehome:
+
+```bash
+fugue-release-bootstrap draft-release-registry-rehome "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$MIRROR_CONFIG"
+```
+
+Use the same independent repository for the current and rollback images.
+The draft compares both sealed Deployment PodSpecs, changes only the digest-
+pinned image references in the projection, and reads through both mirror tags
+and all runtime image blobs. A companion Service is read-only context: its
+declarations must agree, ignoring only the three release provenance stamps.
+Different Services, other resources, and unverified container or volume
+images reject the draft. The result contains identities and digests, not an
+apply manifest. It does not prove live Service agreement, runtime pull by
+the nodes, writer revocation, or a verified cutover. Do not apply a draft or
+modify the original monitor records to treat the draft as a new baseline.
+
 ## Native production journal recovery
 
 Use this additional gate once a resource's native journal can authorize writes.

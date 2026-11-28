@@ -127,27 +127,51 @@ func VerifyNativeDeploymentImages(raw []byte, scope declarativerelease.ResourceI
 	spec, _ := object["spec"].(map[string]any)
 	template, _ := spec["template"].(map[string]any)
 	podSpec, _ := template["spec"].(map[string]any)
+	_, err = singleArtifactDeploymentContainers(podSpec, target.ImageRef)
+	return err
+}
+
+type singleArtifactContainer struct {
+	field, name string
+	object      map[string]any
+}
+
+func singleArtifactDeploymentContainers(podSpec map[string]any, imageRef string) ([]singleArtifactContainer, error) {
+	var containers []singleArtifactContainer
+	names := map[string]bool{}
 	for _, field := range []string{"containers", "initContainers"} {
 		list, ok := podSpec[field].([]any)
 		if !ok && (field == "containers" || podSpec[field] != nil) || field == "containers" && len(list) == 0 {
-			return errors.New("native Deployment container specification is invalid")
+			return nil, errors.New("native Deployment container specification is invalid")
 		}
 		for _, item := range list {
 			container, _ := item.(map[string]any)
-			if image, _ := container["image"].(string); image != target.ImageRef || image == "" {
-				return errors.New("native Deployment uses an image outside its artifact approval")
+			name, _ := container["name"].(string)
+			if name == "" || names[name] {
+				return nil, errors.New("native Deployment container identity is absent or ambiguous")
 			}
+			if image, _ := container["image"].(string); image != imageRef || image == "" {
+				return nil, errors.New("native Deployment uses an image outside its artifact approval")
+			}
+			names[name] = true
+			containers = append(containers, singleArtifactContainer{field: field, name: name, object: container})
 		}
 	}
 	if podSpec["ephemeralContainers"] != nil {
-		return errors.New("native Deployment may not declare ephemeral containers")
+		return nil, errors.New("native Deployment may not declare ephemeral containers")
 	}
-	volumes, _ := podSpec["volumes"].([]any)
+	volumes, ok := podSpec["volumes"].([]any)
+	if !ok && podSpec["volumes"] != nil {
+		return nil, errors.New("native Deployment volumes are invalid")
+	}
 	for _, rawVolume := range volumes {
-		volume, _ := rawVolume.(map[string]any)
+		volume, ok := rawVolume.(map[string]any)
+		if !ok {
+			return nil, errors.New("native Deployment volume is invalid")
+		}
 		if _, found := volume["image"]; found {
-			return errors.New("native Deployment may not pull an additional image volume")
+			return nil, errors.New("native Deployment may not pull an additional image volume")
 		}
 	}
-	return nil
+	return containers, nil
 }

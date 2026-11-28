@@ -893,7 +893,11 @@ authority bound to pre-restore database role OIDs.
   copying its bytes to another registry: its sealed manifest uses the original
   immutable reference. The registry transition needs its own verified baseline
   and cutover procedure. Do not rewrite its historical monitor record to
-  synthesize that evidence.
+  synthesize that evidence. The
+  [registry-only rehome draft](../backup-restore-runbook.md#sealed-release-recovery-archive)
+  checks the two image projections without opening a production writer.
+  Companion Services may appear in its read-only context; this does not
+  widen the native Deployment executor's admission or write set.
 - To check preservation of the current and rollback artifacts before that
   transition, provision an independent HTTPS registry and replicate the
   original OCI content byte-for-byte. In each destination repository, retain
