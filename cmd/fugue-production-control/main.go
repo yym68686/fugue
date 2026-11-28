@@ -48,6 +48,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control verify-release-registry-rehome-baseline BASELINE BASELINE_PIN BUNDLE BUNDLE_PIN
        fugue-production-control observe-release-registry-rehome-pending JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG
        fugue-production-control observe-release-registry-rehome-cutover JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG
+       fugue-production-control observe-release-registry-rehome-serving JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG ROUTE_CONFIG
        fugue-production-control sign-registry-rehome-no-write DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control settle-registry-rehome-no-write JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG ACTOR SIGNED_CLOSURE
        fugue-production-control observe-storage-audit-owner CONFIG
@@ -113,14 +114,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		return stageRegistryRehomeReleaseInput(args[1:], out)
 	case "stage-release-registry-rehome-baseline", "verify-release-registry-rehome-baseline":
 		return registryRehomeBaselineCommand(args[1:], out, args[0] == "stage-release-registry-rehome-baseline")
-	case "observe-release-registry-rehome-pending":
-		return pendingRegistryRehomeCommand(ctx, args[1:], out, false, false)
-	case "observe-release-registry-rehome-cutover":
-		return pendingRegistryRehomeCommand(ctx, args[1:], out, false, true)
+	case "observe-release-registry-rehome-pending", "observe-release-registry-rehome-cutover",
+		"observe-release-registry-rehome-serving", "settle-registry-rehome-no-write":
+		return pendingRegistryRehomeCommand(ctx, args[1:], out, args[0])
 	case "sign-registry-rehome-no-write":
 		return signRegistryRehomeNoWrite(args[1:], out, now)
-	case "settle-registry-rehome-no-write":
-		return pendingRegistryRehomeCommand(ctx, args[1:], out, true, false)
 	case "capture-release-recovery-archive":
 		if len(args) != 6 {
 			return errors.New(usage)

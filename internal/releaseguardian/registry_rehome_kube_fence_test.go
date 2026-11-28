@@ -24,13 +24,16 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/utils/ptr"
 )
 
 func registryRehomeTestProvider(t *testing.T, ctx context.Context, client kubernetes.Interface, config *rest.Config, namespace string) productioncontrol.ParticipationKubernetesBinding {
@@ -298,7 +301,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 	for _, d := range []string{oldImage.TopDigest, servingImage.TopDigest} {
 		images[repoPath+"fugue-recovery-sha256-"+strings.TrimPrefix(d, "sha256:")] = images[repoPath+d]
 	}
-	synthetic, _, _ := rehomeArchiveFixture(t, oldImage, servingImage, "")
+	synthetic, _, _ := rehomeArchiveFixture(t, oldImage, servingImage, "serving")
 	initial, err := readReleaseRecoveryArchive(synthetic, digest(synthetic))
 	if err != nil {
 		t.Fatal(err)
@@ -583,7 +586,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		}
 	}
 	controller := admissionClient(t, clients[ct.DeploymentStatusWriter], "")
-	readyProviderRehomeFixture(t, ctx, admin, controller, id.Namespace, id.Name)
+	pod := readyProviderRehomeFixture(t, ctx, admin, controller, id.Namespace, id.Name)
 	badProvider := provider
 	badProvider.NamespaceUID = "other-instance"
 	if _, err := observe(badProvider); err == nil || !strings.Contains(err.Error(), "enrolled provider") {
@@ -628,6 +631,65 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 			t.Fatalf("joint readback did not check the full rollback image: %v", err)
 		}
 		images[oldLayer] = retained
+		svc, err := admin.CoreV1().Services(id.Namespace).Create(ctx, &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: "fixture-serving"},
+			Spec: corev1.ServiceSpec{Selector: pod.Labels,
+				Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromString("http")}}},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		slicesClient := admin.DiscoveryV1().EndpointSlices(id.Namespace)
+		endpoints, err := slicesClient.Create(ctx, &discoveryv1.EndpointSlice{
+			ObjectMeta: metav1.ObjectMeta{Name: "fixture-endpoints", Labels: map[string]string{discoveryv1.LabelServiceName: svc.Name},
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(svc, corev1.SchemeGroupVersion.WithKind("Service"))}},
+			AddressType: discoveryv1.AddressTypeIPv4,
+			Ports:       []discoveryv1.EndpointPort{{Name: ptr.To("http"), Port: ptr.To[int32](8080)}},
+			Endpoints: []discoveryv1.Endpoint{{Addresses: []string{pod.Status.PodIP},
+				TargetRef:  &corev1.ObjectReference{Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID},
+				Conditions: discoveryv1.EndpointConditions{Ready: ptr.To(true)}}},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		route := RegistryRehomeRoute{Service: svc.Name, ServicePort: "http", Address: "192.0.2.10:443", Host: "route.example.test", Path: "/healthz", Expected: "ready"}
+		runServing := func(probe registryRehomeHTTPReader) (RegistryRehomeServingObservation, error) {
+			return observeRegistryRehomeServing(ctx, admin, readerLedger, scope.ClusterID, claim.IntentDigest, ct, provider, observer,
+				bundle, bundleReport.BundleDigest, registry, route, probe)
+		}
+		probe := func(_ context.Context, address, host, path, marker string) (string, error) {
+			if path != "/healthz" || marker != "ready" ||
+				(host == "" && address != pod.Status.PodIP+":8080") || (host != "" && (host != route.Host || address != route.Address)) {
+				t.Errorf("unexpected probe %q %q %q %q", address, host, path, marker)
+			}
+			return digest([]byte("ready")), nil
+		}
+		health, err := runServing(probe)
+		if err != nil || health.Cutover.Baseline != proposed || health.Cutover.Placement.Claim != claim ||
+			len(health.PodHTTP) != 1 || health.PodHTTP[0].PodUID != string(pod.UID) || len(health.PublicHTTP) != 1 ||
+			health.Service.UID != string(svc.UID) || len(health.EndpointSlices) != 1 || !digestPattern.MatchString(health.EvidenceDigest) {
+			t.Fatalf("missing exact serving evidence: %+v %v", health, err)
+		}
+		if _, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
+			if host != "" {
+				return "", errors.New("fixture route offline")
+			}
+			return probe(ctx, address, host, path, expected)
+		}); err == nil || !strings.Contains(err.Error(), "public HTTPS route probe failed") {
+			t.Fatalf("accepted failed external health: %v", err)
+		}
+		if _, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
+			if host != "" {
+				copy := endpoints.DeepCopy()
+				copy.Ports[0].Port = ptr.To[int32](8081)
+				if _, err := slicesClient.Update(ctx, copy, metav1.UpdateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			return probe(ctx, address, host, path, expected)
+		}); err == nil || !strings.Contains(err.Error(), "endpoint inventory changed") {
+			t.Fatalf("accepted endpoint drift during HTTPS probe: %v", err)
+		}
 		changeCompanion := func() {
 			services := admin.CoreV1().Services(id.Namespace)
 			name := observed.ProviderReadback.Services[0].Name
@@ -697,7 +759,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 
 // Envtest has API admission and storage, but no Deployment controller or
 // kubelet. Simulate only their observations; this is not a node-pull drill.
-func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin, controller kubernetes.Interface, namespace, deployment string) {
+func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin, controller kubernetes.Interface, namespace, deployment string) *corev1.Pod {
 	t.Helper()
 	apps := admin.AppsV1().Deployments(namespace)
 	d, err := apps.Get(ctx, deployment, metav1.GetOptions{})
@@ -726,13 +788,15 @@ func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin, contro
 		}
 		return out
 	}
-	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.12.34.5", Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 		ContainerStatuses: statuses(pod.Spec.Containers), InitContainerStatuses: statuses(pod.Spec.InitContainers)}
-	if _, err := pods.UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+	pod, err = pods.UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
 	d.Status.ObservedGeneration, d.Status.Replicas, d.Status.UpdatedReplicas, d.Status.ReadyReplicas, d.Status.AvailableReplicas = d.Generation, 1, 1, 1, 1
 	if _, err := controller.AppsV1().Deployments(namespace).UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	return pod
 }

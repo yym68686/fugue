@@ -109,6 +109,12 @@ func rehomeArchiveFixture(t *testing.T, rollbackImage, forwardImage declarativer
 	ancestor, _, previousArtifact, predecessor := guardianStableFixture(t, key, now)
 	makeRelease := func(image declarativerelease.ArtifactReceipt, previous declarativerelease.TargetIdentity, previousDigest string, previousRaw []byte, candidate bool) (archivedRecoveryRecord, declarativerelease.MonitorRecord, declarativerelease.TargetIdentity, []byte) {
 		release := guardianPlanRelease(key, image.OCIRevision, previous.ConfigSHA, previousDigest, nil)
+		if mode == "serving" {
+			release.Delivery = &declarativerelease.Delivery{Writer: "guardian", Group: key.Group, DependencyService: "fixture-serving"}
+			release.Health = append(release.Health, declarativerelease.HealthProbe{
+				Type: "pod-http", Name: release.Workload.Name, Port: "http", Path: "/healthz", Expected: "ready",
+			})
+		}
 		plan := guardianPlan(t, previous.ConfigSHA, image.OCIRevision, release)
 		receipt, err := declarativerelease.MaterializeArtifactReceipt(plan, key.Component, declarativerelease.RegistryVerification{
 			Image: release.Artifact.Repository + "@" + image.TopDigest, IndexDigest: image.TopDigest, ManifestDigest: image.PlatformManifestDigest,
@@ -125,6 +131,9 @@ func rehomeArchiveFixture(t *testing.T, rollbackImage, forwardImage declarativer
 		}
 		deployment, _ := set.Primary(release.Workload)
 		pod := deployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		if mode == "serving" {
+			pod["containers"].([]any)[0].(map[string]any)["ports"] = []any{map[string]any{"name": "http", "containerPort": 8080}}
+		}
 		initImage := receipt.ImmutableRef
 		if candidate && mode == "foreign container image" {
 			initImage = "ghcr.io/example/foreign@" + image.TopDigest

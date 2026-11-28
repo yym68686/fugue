@@ -19,15 +19,18 @@ import (
 
 const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
 
-func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, settle, cutoverReadback bool) error {
+func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, mode string) error {
+	settle := mode == "settle-registry-rehome-no-write"
+	serving := mode == "observe-release-registry-rehome-serving"
+	cutoverReadback := serving || mode == "observe-release-registry-rehome-cutover"
 	count := 7
-	if settle {
+	if settle || serving {
 		count = 9
 	} else if cutoverReadback {
 		count = 8
 	}
 	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) ||
-		(settle && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) {
+		((settle || serving) && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) {
 		return errors.New(usage)
 	}
 	var cfg struct {
@@ -52,6 +55,16 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 	}
 	defer clear(archive)
 	var registry *releaseguardian.IndependentRegistry
+	var route releaseguardian.RegistryRehomeRoute
+	if serving {
+		raw, err := readFile(args[8], 16<<10, false)
+		if err != nil {
+			return err
+		}
+		if decodeRecoveryMirrorJSON(raw, &route) != nil || route.Validate() != nil {
+			return errors.New("invalid registry rehome serving route enrollment")
+		}
+	}
 	if cutoverReadback {
 		var endpoint struct {
 			Registry         string `json:"registry"`
@@ -109,6 +122,14 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 				return err
 			}
 			return json.NewEncoder(out).Encode(result)
+		}
+		if serving {
+			observation, err := releaseguardian.ObserveRegistryRehomeServing(ctx, client, j, cluster, args[5],
+				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], registry, route)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(observation)
 		}
 		if cutoverReadback {
 			observed, err := releaseguardian.ObserveRegistryRehomeCutover(ctx, client, j, cluster, args[5],

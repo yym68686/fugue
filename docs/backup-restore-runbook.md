@@ -265,6 +265,26 @@ as the offline staging command. The readback does not establish serving
 health, node pull independence or provider drain, and does not install the
 proposed baseline as Guardian's stable release.
 
+For a Guardian-managed Deployment whose sealed contract includes per-Pod
+HTTP checks, collect serving evidence from a host that can reach the actual
+Pod network and the publicly routed endpoint:
+
+```bash
+fugue-production-control observe-release-registry-rehome-serving "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG" "$REGISTRY_ENDPOINT_CONFIG" "$ROUTE_CONFIG"
+```
+
+Enroll the route independently of the candidate. The JSON contains the
+backend `service` and `servicePort` name, literal public `address` on
+port 443, TLS `host`, HTTP `path` and `expected` response marker. The
+observer reads that Service and its EndpointSlices, checks that the
+selected port reaches the exact verified Pods, runs the sealed HTTP probe
+on each Pod, checks the sealed dependency and makes an HTTPS GET with no
+redirect. It rechecks placement and the pending fence before returning.
+It rejects unsupported sealed probes. Public reachability and Service
+membership are separate checks: retain independent route-to-backend
+configuration and propagation evidence as well. This report does not
+settle the claim, prove provider drain or prove GitHub is disconnected.
+
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
 Retain independent evidence of the plain freeze on every serving API

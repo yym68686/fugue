@@ -44,6 +44,15 @@ type RegistryRehomeCutoverReadback struct {
 func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interface, journal *productioncontrol.Journal,
 	cluster, intentDigest string, cutover KubeDeploymentCutover, provider productioncontrol.ParticipationKubernetesBinding,
 	observer ed25519.PublicKey, recoveryRaw []byte, recoveryPin string, registry *IndependentRegistry) (RegistryRehomeCutoverReadback, error) {
+	return observeRegistryRehomeCutover(ctx, client, journal, cluster, intentDigest, cutover, provider, observer, recoveryRaw, recoveryPin, registry, nil)
+}
+
+type registryRehomeHealthRead func(verifiedRegistryRehomeRecoveryBundle, RegistryRehomeBaseline, RegistryRehomePendingObservation) error
+
+func observeRegistryRehomeCutover(ctx context.Context, client kubernetes.Interface, journal *productioncontrol.Journal,
+	cluster, intentDigest string, cutover KubeDeploymentCutover, provider productioncontrol.ParticipationKubernetesBinding,
+	observer ed25519.PublicKey, recoveryRaw []byte, recoveryPin string, registry *IndependentRegistry,
+	readHealth registryRehomeHealthRead) (RegistryRehomeCutoverReadback, error) {
 	var none RegistryRehomeCutoverReadback
 	if registry == nil || registry.transport == nil {
 		return none, errors.New("registry rehome cutover readback requires a configured independent registry")
@@ -75,9 +84,14 @@ func ObserveRegistryRehomeCutover(ctx context.Context, client kubernetes.Interfa
 	if err := verifyRegistryRehomeRecoveryMirror(ctx, verified, registry); err != nil {
 		return none, err
 	}
+	if readHealth != nil {
+		if err := readHealth(verified, baseline, before); err != nil {
+			return none, err
+		}
+	}
 	after, err := observe()
 	if err != nil || after.ReadbackDigest != before.ReadbackDigest {
-		return none, errors.Join(errors.New("registry rehome placement or claim changed during independent mirror verification"), err)
+		return none, errors.Join(errors.New("registry rehome placement or claim changed during independent mirror verification or health readback"), err)
 	}
 	return RegistryRehomeCutoverReadback{Placement: after, Recovery: report, Baseline: baseline}, nil
 }
