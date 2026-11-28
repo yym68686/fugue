@@ -67,6 +67,88 @@ type storageAuditPolicyObserverSettings struct {
 	ObserverPublicKey ed25519.PublicKey `json:"observerPublicKey"`
 }
 
+type storageAuditPolicyBaselineSettings struct {
+	storageAuditPolicyObserverSettings
+	SystemID                 string `json:"systemId"`
+	Database                 string `json:"database"`
+	LegacyRevocationEvidence string `json:"legacyRevocationEvidence"`
+}
+
+func runStorageAuditPolicyBaseline(ctx context.Context, persist bool, args []string, out io.Writer) error {
+	if (!persist && len(args) != 1) || (persist && len(args) != 2) || (persist && !exactSHA256Digest(args[1])) {
+		return errors.New("usage: storage-audit-policy-baseline-checkpoint CONFIG or storage-audit-policy-baseline-import CONFIG WITNESS_DIGEST")
+	}
+	raw, err := readOfflineDispatchInput(args[0], 16<<10, false)
+	if err != nil {
+		return err
+	}
+	var settings storageAuditPolicyBaselineSettings
+	if err := decodeStrictJSON(raw, &settings); err != nil || !filepath.IsAbs(settings.JournalFile) ||
+		!exactSHA256Digest(settings.LegacyRevocationEvidence) || settings.ObserverKeyID == "" ||
+		len(settings.ObserverPublicKey) != ed25519.PublicKeySize || (persist && !filepath.IsAbs(settings.WitnessDirectory)) {
+		return errors.New("storage audit baseline requires independently reviewed legacy revocation evidence")
+	}
+	cfg, owners, cluster, err := productioncontrol.LoadJournalEndpoint(settings.JournalFile)
+	if err != nil {
+		return err
+	}
+	if !persist {
+		if cfg.RuntimeParams == nil {
+			cfg.RuntimeParams = make(map[string]string)
+		}
+		cfg.RuntimeParams["default_transaction_read_only"] = "on"
+	}
+	db := stdlib.OpenDB(*cfg)
+	defer db.Close()
+	journal, err := productioncontrol.NewJournal(db, owners)
+	if err != nil {
+		return err
+	}
+	if err := journal.VerifyIndependentObserverKey(settings.ObserverPublicKey); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	scope := productioncontrol.Scope{ClusterID: cluster, ResourceID: productioncontrol.StorageAuditPolicyResource}
+	emit := json.NewEncoder(out).Encode
+	if !persist {
+		live, err := journal.ReadFrozenStorageAuditPolicy(ctx, scope, settings.SystemID, settings.Database)
+		if err != nil {
+			return err
+		}
+		if settings.LegacyRevocationEvidence == live.FreezeEvidence {
+			return errors.New("storage audit baseline requires revocation evidence recorded separately from policy freeze")
+		}
+		return emit(productioncontrol.ExecutionWitness{
+			Kind: productioncontrol.BaselineWitness, KeyID: settings.ObserverKeyID, ClusterID: cluster, ResourceID: scope.ResourceID,
+			Generation: live.Verified.Generation, VerifiedDigest: live.Verified.Digest, ObservationDigest: live.ObservationDigest,
+			AuthorityDigest: settings.LegacyRevocationEvidence, ObservedAt: time.Now().Unix(),
+		})
+	}
+	root, err := os.OpenRoot(settings.WitnessDirectory)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	source := nodeWorkerWitnessDirectory{root: root}
+	raw, err = source.ReadExecutionWitness(ctx, args[1])
+	if err != nil {
+		return err
+	}
+	var witness productioncontrol.ExecutionWitness
+	if err := decodeStrictJSON(raw, &witness); err != nil {
+		return err
+	}
+	baseline := productioncontrol.Baseline{Scope: scope, Verified: productioncontrol.Version{Generation: witness.Generation, Digest: witness.VerifiedDigest},
+		EvidenceDigest: args[1]}
+	added, err := journal.ImportStorageAuditPolicyBaseline(ctx, baseline, settings.SystemID, settings.Database, settings.LegacyRevocationEvidence,
+		source, settings.ObserverKeyID, productioncontrol.TrustedWitness{Scope: scope, PublicKey: settings.ObserverPublicKey})
+	if err != nil {
+		return err
+	}
+	return emit(productioncontrol.Recorded{Digest: args[1], Created: added})
+}
+
 func runStorageAuditPolicySettlement(ctx context.Context, settle bool, args []string, out io.Writer) error {
 	if (!settle && len(args) != 2) || (settle && len(args) != 3) || !exactSHA256Digest(args[1]) ||
 		(settle && !exactSHA256Digest(args[2])) {

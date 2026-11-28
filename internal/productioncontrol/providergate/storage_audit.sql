@@ -122,6 +122,7 @@ BEGIN
           AND b.resource_id='maintenance/storage-audit-policy' AND b.generation=1 AND b.verified_digest=f.baseline_digest
         JOIN fugue_storage_audit.lifecycle_control c USING (singleton)
         WHERE f.cluster_id=cluster AND b.evidence_digest=evidence AND f.evidence_digest<>evidence
+          AND convert_from(b.verified_snapshot,'UTF8')::jsonb=f.baseline_policy
           AND c.owner='worker' AND 'sha256:' || c.policy_sha256=f.baseline_digest AND c.policy_document=f.baseline_policy
     ) OR EXISTS (SELECT FROM fugue_control.execution_claims c WHERE c.cluster_id=cluster
         AND c.resource_id='maintenance/storage-audit-policy') THEN

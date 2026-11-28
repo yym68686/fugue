@@ -100,6 +100,9 @@ func (e *ExecutionJournal) AnchorResource(ctx context.Context, actor string, bas
 	if strings.HasPrefix(baseline.ResourceID, FrontWorkerResourcePrefix) {
 		return false, errors.New("Front/Worker enrollment requires the verified group snapshot")
 	}
+	if baseline.ResourceID == StorageAuditPolicyResource {
+		return false, errors.New("storage audit enrollment requires the verified policy snapshot")
+	}
 	return e.anchorResource(ctx, actor, baseline, nil)
 }
 
@@ -131,12 +134,30 @@ func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, bas
 	var snapshot []byte
 	if verifiedSnapshot != nil {
 		snapshot = bytes.Clone(verifiedSnapshot())
-		version, err := FrontWorkerBaselineVersion(snapshot)
+		version, err := snapshotVersion(baseline.Scope, snapshot)
 		if err != nil || version != baseline.Verified {
-			return false, errors.New("Front/Worker baseline snapshot does not match the verified version")
+			return false, errors.New("production baseline snapshot does not match the verified version")
 		}
 	}
 	record, err := e.journal.record(ctx, baseline.EvidenceDigest, func(tx *sql.Tx) (bool, error) {
+		if baseline.ResourceID == StorageAuditPolicyResource {
+			if err := lockResource(ctx, tx, baseline.Scope); err != nil {
+				return false, err
+			}
+			if err := lockStorageAuditPolicy(ctx, tx); err != nil {
+				return false, err
+			}
+			var exact bool
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			  SELECT FROM fugue_storage_audit.native_policy_freeze f
+			  JOIN fugue_storage_audit.lifecycle_control p USING (singleton)
+			  WHERE f.cluster_id=$1 AND f.baseline_digest=$2 AND f.baseline_policy=convert_from($3::bytea,'UTF8')::jsonb
+			    AND p.owner='worker' AND 'sha256:'||p.policy_sha256=f.baseline_digest AND p.policy_document=f.baseline_policy
+			    AND NOT EXISTS (SELECT FROM fugue_storage_audit.native_policy_authority)
+			)`, baseline.ClusterID, baseline.Verified.Digest, snapshot).Scan(&exact); err != nil || !exact {
+				return false, errors.Join(ErrResourceDrift, err)
+			}
+		}
 		if isNode {
 			if err := lockResource(ctx, tx, Scope{baseline.ClusterID, ParticipationTopologyResource}); err != nil {
 				return false, err
@@ -171,7 +192,7 @@ func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, bas
 			return false, ErrBaselineConflict
 		}
 		if snapshot != nil {
-			existing, err := readFrontWorkerBaselineSnapshot(ctx, tx, baseline.Scope, stored.Verified)
+			existing, err := readBaselineSnapshot(ctx, tx, baseline.Scope, stored.Verified)
 			if err != nil || !bytes.Equal(existing, snapshot) {
 				return false, errors.Join(ErrBaselineConflict, err)
 			}
@@ -179,6 +200,25 @@ func (e *ExecutionJournal) anchorResource(ctx context.Context, actor string, bas
 		return false, nil
 	})
 	return record.Created, err
+}
+
+func snapshotVersion(scope Scope, snapshot []byte) (Version, error) {
+	if scope.ResourceID == StorageAuditPolicyResource {
+		return storageAuditPolicyBaselineVersion(snapshot)
+	}
+	return FrontWorkerBaselineVersion(snapshot)
+}
+
+func readBaselineSnapshot(ctx context.Context, db queryRow, scope Scope, verified Version) ([]byte, error) {
+	var raw []byte
+	if err := db.QueryRowContext(ctx, `SELECT verified_snapshot FROM fugue_control.resource_baselines
+		WHERE cluster_id=$1 AND resource_id=$2`, scope.ClusterID, scope.ResourceID).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if version, err := snapshotVersion(scope, raw); err != nil || version != verified {
+		return nil, errors.New("stored baseline snapshot differs from the verified version")
+	}
+	return raw, nil
 }
 
 func (e *ExecutionJournal) Resource(ctx context.Context, scope Scope) (ResourceState, error) {
