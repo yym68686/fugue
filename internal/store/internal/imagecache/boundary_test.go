@@ -2,6 +2,9 @@ package imagecache
 
 import (
 	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -16,6 +19,11 @@ func TestImageCacheSnapshotAndPlanSQLStayWithTheirRepository(t *testing.T) {
 		"internal/store/postgres.go":                           true,
 		"internal/schemamigrate/image_orphans.go":              true,
 		"internal/schemamigrate/image_cache_manifest_graph.go": true,
+	}
+	writers := map[string]string{
+		"UpsertImageCacheInventory":        "internal/api/image_cache_localpv_admin.go",
+		"UpsertImageCachePrunePlan":        "internal/api/image_cache_localpv_admin.go",
+		"UpsertImageCachePrunePlanSummary": "internal/controller/image_cache_orphan_cleanup.go",
 	}
 	for _, tree := range []string{"internal", "cmd"} {
 		if err := filepath.WalkDir(filepath.Join(root, tree), func(path string, entry fs.DirEntry, err error) error {
@@ -43,6 +51,21 @@ func TestImageCacheSnapshotAndPlanSQLStayWithTheirRepository(t *testing.T) {
 			if bytes.Contains(data, []byte(`"fugue/internal/store/internal/imagecache"`)) &&
 				relative != "internal/store/image_cache.go" {
 				t.Errorf("%s: only the Store image-cache adapter may open the private repository", relative)
+			}
+			if relative != "internal/store/image_cache.go" && bytes.Contains(data, []byte("UpsertImageCache")) {
+				fset := token.NewFileSet()
+				source, err := parser.ParseFile(fset, path, data, parser.SkipObjectResolution)
+				if err != nil {
+					return err
+				}
+				ast.Inspect(source, func(n ast.Node) bool {
+					if selector, ok := n.(*ast.SelectorExpr); ok {
+						if allowed, write := writers[selector.Sel.Name]; write && relative != allowed {
+							t.Errorf("%s: only %s may use %s", fset.Position(selector.Pos()), allowed, selector.Sel.Name)
+						}
+					}
+					return true
+				})
 			}
 			if owners[relative] {
 				return nil
