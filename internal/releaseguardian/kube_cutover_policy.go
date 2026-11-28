@@ -66,8 +66,17 @@ func StorageAuditProjectionFence(config productioncontrol.StorageAuditShadowBind
 // legacy credentials/RBAC are removed, and the native runtime and independent
 // artifact store are verified. Admission by itself does not prove those facts.
 func DeploymentCutoverPolicies(config KubeDeploymentCutover) ([]KubeCutoverPolicy, error) {
+	return deploymentCutoverPolicies(config, nil)
+}
+
+func deploymentCutoverPolicies(config KubeDeploymentCutover, rehome *registryRehomeKubeScope) ([]KubeCutoverPolicy, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
+	}
+	if rehome != nil {
+		if err := rehome.validate(config); err != nil {
+			return nil, err
+		}
 	}
 	// Own one actual workload regardless of a lane's alias or component key.
 	id := strings.TrimPrefix(digest([]byte("fugue.cutover.deployment.v1\n"+config.Namespace+"\n"+config.Deployment)), "sha256:")[:20]
@@ -104,6 +113,17 @@ func DeploymentCutoverPolicies(config KubeDeploymentCutover) ([]KubeCutoverPolic
 		workloadPermit = joinCEL(" || ", workloadPermit,
 			joinCEL(" && ", "(!has(request.subResource) || request.subResource == '')", "request.operation == 'UPDATE'", username(config.Guardian)))
 		leasePermit = joinCEL(" && ", mutating, username(config.Guardian))
+	}
+	if rehome != nil {
+		// Only the dedicated bundle includes this exception. The exact
+		// projection, expiration and durable claim are independently
+		// enforced by the fail-closed validating webhook.
+		workloadPermit = joinCEL(" || ", workloadPermit, joinCEL(" && ",
+			"(!has(request.subResource) || request.subResource == '')", "request.operation == 'UPDATE'",
+			username(rehome.Writer), "oldObject != null && object != null",
+			"oldObject.metadata.uid == "+strconv.Quote(rehome.UID),
+			"oldObject.metadata.resourceVersion == "+strconv.Quote(rehome.ResourceVersion),
+			"oldObject.metadata.generation == "+strconv.FormatInt(rehome.Generation, 10)))
 	}
 	return []KubeCutoverPolicy{
 		makeCutoverPolicy(prefix+"-maps", config.Namespace, "", []string{"configmaps"}, mapTarget, mapPermit, mapVariables),
