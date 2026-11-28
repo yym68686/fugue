@@ -37,6 +37,7 @@ SOURCE_READERS = {
     "cmd/fugue-declarative-release/main.go": "./internal/declarativerelease",
     "internal/edge/service.go": "./internal/platformsafety",
     "internal/edgegroupfront/service.go": "./internal/platformsafety",
+    "internal/localpvsafety/host/localpv_unit.py": "./internal/localpvsafety/hostcontract",
     "internal/observability/pipeline.go": "./internal/platformsafety",
 }
 COMMAND_TEST_CONSUMERS = {

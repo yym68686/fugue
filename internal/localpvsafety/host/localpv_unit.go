@@ -1,11 +1,12 @@
-package api
+package host
 
 import _ "embed"
 
 //go:embed localpv_unit.py
 var localPVUnitProgram string
 
-func localPVUnitShellLibrary() string {
+// BootUnitShellLibrary renders the LocalPV functions bundled by the node updater.
+func BootUnitShellLibrary() string {
 	return `
 localpv_boot_unit_observation() {
   if ! command -v python3 >/dev/null 2>&1; then

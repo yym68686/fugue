@@ -2,31 +2,12 @@ package api
 
 import (
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 
+	localpvhost "fugue/internal/localpvsafety/host"
 	"fugue/internal/noderesourcepolicy"
 )
-
-func mustLocalPVUnitProgramPath(t *testing.T) string {
-	t.Helper()
-	path, err := filepath.Abs("localpv_unit.py")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
-
-func TestLocalPVUnitRecoveryAndConvergence(t *testing.T) {
-	if _, err := exec.LookPath("python3"); err != nil {
-		t.Skip("python3 is unavailable")
-	}
-	cmd := exec.Command("python3", "-m", "unittest", "-v", "test_localpv_unit")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("LocalPV boot unit tests failed: %v\n%s", err, output)
-	}
-}
 
 func TestNodeUpdaterIncludesLocalPVUnitConvergenceAndFreshEvidence(t *testing.T) {
 	if nodeUpdaterScriptVersion != noderesourcepolicy.UpdaterVersion {
@@ -34,7 +15,7 @@ func TestNodeUpdaterIncludesLocalPVUnitConvergenceAndFreshEvidence(t *testing.T)
 	}
 	script := (&Server{}).nodeUpdaterInstallScript("https://control.example.test")
 	for _, want := range []string{
-		localPVUnitProgram,
+		localpvhost.BootUnitShellLibrary(),
 		"  reconcile_localpv_boot_unit\n",
 		`FUGUE_HEARTBEAT_LOCALPV_BOOT_UNIT="$(localpv_boot_unit_observation observe)"`,
 		`"localpv_boot_unit", "storage", status`,
