@@ -11,7 +11,7 @@ import time
 from scripts.apply_observation_writer_handoff import verify_collector
 from scripts.apply_quality_evidence_retention_handoff import check_workload
 from scripts.provision_observation_sample_retention import FENCE, sample_role_binding_sql, transaction_body
-from scripts.provision_observation_worker_database import Provision, ProvisionError
+from scripts.provision_observation_worker_database import Provision, ProvisionError, ProvisionLockBusy
 from scripts.publish_storage_policy import manifest as storage_policy_manifest
 from scripts.verify_observation_writer_handoff import COMMIT, RELEASE_SCHEMA, load_release, matches
 
@@ -27,6 +27,11 @@ WORKER_PATHS = (
     "internal/store/observation_sample_retention_worker.go", "deploy/releases/observation-worker/resources.json",
 )
 TARGETS = {"network", "performance", "resource-usage"}
+ACTIVATION_RETRY_DELAYS = (2, 3, 5, 8, 13)
+ACTIVATION_LOCK_MESSAGES = (
+    "legacy sample retention or ingestion transaction is active",
+    "sample retention worker batch is active",
+)
 COLLECTOR_EXPRESSION = (
     'up{job="fugue-observation-sample-retention"} == 1 and on(pod) '
     '(fugue_observation_sample_retention_storage_available{job="fugue-observation-sample-retention"} == 1) and on(pod) '
@@ -112,11 +117,28 @@ def apply(provision, release, scrape, policy, source, wait_seconds=240):
     before = read_progress(provision, primary[0])
     if not all_standby(before) and not all_active(before):
         raise ProvisionError("sample retention is outside the supported forward-only transition")
-    if (check_workload(*api_spec) != api or check_workload(*worker_spec) != worker
-            or verify_policy(provision, policy) != config_identity or provision.find_primary() != primary):
-        raise ProvisionError("workloads, policy, database or rollback changed during admission")
-    provision.sql(primary[0], activation_sql(provision, secret_uid, source))
-    print("sample retention writer and all three fences committed; checking durable progress", flush=True)
+    for attempt in range(len(ACTIVATION_RETRY_DELAYS) + 1):
+        if (check_workload(*api_spec) != api or check_workload(*worker_spec) != worker
+                or verify_policy(provision, policy) != config_identity or provision.find_primary() != primary
+                or provision.credential(provision.get("secret", provision.config["secret"]))[0] != secret_uid):
+            raise ProvisionError("workloads, policy, database, credential or rollback changed during admission")
+        if attempt:
+            before = read_progress(provision, primary[0])
+        if all_active(before):
+            print("sample retention writer and fences are already durable; checking new progress", flush=True)
+            break
+        if not all_standby(before):
+            raise ProvisionError("sample retention ownership or fences changed during admission")
+        try:
+            provision.sql(primary[0], activation_sql(provision, secret_uid, source), busy_messages=ACTIVATION_LOCK_MESSAGES)
+        except ProvisionLockBusy:
+            if attempt >= len(ACTIVATION_RETRY_DELAYS):
+                raise ProvisionError("sample retention activation locks did not clear within the retry budget") from None
+            print("sample retention activation was rolled back on lock contention; rechecking admission", flush=True)
+            time.sleep(ACTIVATION_RETRY_DELAYS[attempt])
+        else:
+            print("sample retention writer and all three fences committed; checking durable progress", flush=True)
+            break
     deadline = time.monotonic() + wait_seconds
     while True:
         if provision.find_primary() != primary:
