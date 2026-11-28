@@ -24,6 +24,10 @@ on:
         description: 'Use distinct edits and independent baseline caches for a timing case'
         type: boolean
         default: false
+      shadow_build_first:
+        description: 'Experiment with compiling the selected runtime closure before affected tests'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -99,10 +103,16 @@ jobs:
       - name: Run paired incremental experiment without a production receipt
         if: ${{ !startsWith(inputs.shadow_case, 'contract-') && inputs.shadow_incremental }}
         shell: bash
+        env:
+          SHADOW_BUILD_FIRST: ${{ inputs.shadow_build_first }}
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/fugue-shadow-evidence"
-          python3 -m scripts.prepush_replay --incremental --case "$SHADOW_CASE" --base HEAD --samples 20 --oracle-timeout 1200 > "$evidence/incremental-replay.json" 2> "$evidence/incremental-replay.stderr"
+          extra=()
+          if [[ "$SHADOW_BUILD_FIRST" == "true" ]]; then
+            extra+=(--build-first)
+          fi
+          python3 -m scripts.prepush_replay --incremental --case "$SHADOW_CASE" --base HEAD --samples 20 --oracle-timeout 1200 "${extra[@]}" > "$evidence/incremental-replay.json" 2> "$evidence/incremental-replay.stderr"
       - name: Preserve experiment or diagnostic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

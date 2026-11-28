@@ -58,10 +58,11 @@ def legacy_sample():
         }
 
 
-def candidate_sample():
+def candidate_sample(*, build_first=False):
     results = []
     started = time.monotonic()
-    result = prepush._run_gate(shadow_select=prepush_shadow.report, shadow_result=results.append)
+    result = prepush._run_gate(shadow_select=prepush_shadow.report, shadow_result=results.append,
+                               shadow_build_first=build_first)
     sample = results.pop()
     sample["elapsedMs"] = round((time.monotonic() - started) * 1000)
     if result:
@@ -193,7 +194,7 @@ def replay(case, base, count, run_oracle, oracle_timeout):
     }
 
 
-def replay_incremental(case, base, count, oracle_timeout):
+def replay_incremental(case, base, count, oracle_timeout, *, build_first=False):
     # Each policy warms its own baseline cache. Every measured pair uses the
     # same Go source, and neither cache has seen those exact bytes previously.
     if (prepush.git_output(["rev-parse", base]) != prepush.git_output(["rev-parse", "HEAD"])
@@ -236,7 +237,8 @@ def replay_incremental(case, base, count, oracle_timeout):
                 snapshot = prepush_shadow.snapshot(base)
                 if index == 0:
                     target_comparison = prepush_shadow.compare_targets(base, ARTIFACT_PROFILES)
-                order = [("legacy", legacy_sample), ("candidate", candidate_sample)]
+                candidate = (lambda: candidate_sample(build_first=True)) if build_first else candidate_sample
+                order = [("legacy", legacy_sample), ("candidate", candidate)]
                 if index % 2:
                     order.reverse()
                 pair = {"sourceSnapshot": snapshot}
@@ -264,6 +266,7 @@ def replay_incremental(case, base, count, oracle_timeout):
         "productionAuthorization": False,
         "case": case,
         "cacheState": "separate-warm-baselines-distinct-edit-inputs",
+        "candidateSchedule": "dependency-build-first" if build_first else "parallel",
         "baselineSnapshot": baseline,
         "baselineWarmCommands": warm_commands,
         "machine": {"system": platform.system(), "release": platform.release(),
@@ -284,11 +287,14 @@ def main():
     parser.add_argument("--full-oracle", action="store_true", help="also run all Go tests uncached")
     parser.add_argument("--oracle-timeout", type=int, default=600)
     parser.add_argument("--incremental", action="store_true", help="replay distinct edits against two separate caches")
+    parser.add_argument("--build-first", action="store_true", help="test dependency-based compile ordering in shadow")
     options = parser.parse_args()
     if options.samples < 1 or options.oracle_timeout < 1:
         parser.error("samples and oracle-timeout must be positive")
     if options.incremental and options.case not in prepush_shadow_fixture.CASES:
         parser.error("--incremental requires a known representative edit case")
+    if options.build_first and not options.incremental:
+        parser.error("--build-first requires --incremental")
     try:
         os.environ["PREPUSH_BASE_REF"] = prepush.git_output(
             ["rev-parse", "--verify", f"{options.base}^{{commit}}"],
@@ -299,7 +305,7 @@ def main():
         os.environ.pop("PREPUSH_MAX_ELAPSED_SECONDS", None)
         if options.incremental:
             result = replay_incremental(options.case, os.environ["PREPUSH_BASE_REF"],
-                                        options.samples, options.oracle_timeout)
+                                        options.samples, options.oracle_timeout, build_first=options.build_first)
         else:
             result = replay(options.case, os.environ["PREPUSH_BASE_REF"], options.samples,
                             options.full_oracle, options.oracle_timeout)
