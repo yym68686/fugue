@@ -210,8 +210,6 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	for _, want := range []string{
 		`fugue_component_info{component="api"} 1.000000`,
 		`fugue_api_ready 1.000000`,
-		`fugue_storage_lifecycle_audit_enabled 0.000000`,
-		`fugue_storage_lifecycle_last_success_timestamp_seconds 0.000000`,
 		`fugue_go_goroutines{component="api"}`,
 		`fugue_hosted_dns_zones{status="active"} 0.000000`,
 		`fugue_hosted_dns_record_publish_lag_seconds 0.000000`,
@@ -219,6 +217,14 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output missing %q:\n%s", want, body)
+		}
+	}
+	for _, retired := range []string{
+		"fugue_storage_lifecycle_audit_enabled",
+		"fugue_storage_lifecycle_last_success_timestamp_seconds",
+	} {
+		if strings.Contains(body, retired) {
+			t.Fatalf("API unexpectedly exposed retired worker metric %q", retired)
 		}
 	}
 
