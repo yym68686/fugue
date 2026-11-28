@@ -248,7 +248,7 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 		workflowFiles = append(workflowFiles, entry.Name())
 	}
 	sort.Strings(workflowFiles)
-	if !reflect.DeepEqual(workflowFiles, []string{"build-cli.yml", "ci.yml", "daily-audit.yml", "release-cli.yml"}) {
+	if !reflect.DeepEqual(workflowFiles, []string{"build-cli.yml", "build-native-control.yml", "ci.yml", "daily-audit.yml", "release-cli.yml"}) {
 		t.Fatalf("legacy or parallel production workflow remains reachable: %v", workflowFiles)
 	}
 
@@ -1209,6 +1209,66 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "run: make test") || !strings.Contains(string(raw), "persist-credentials: false") {
 		t.Fatal("daily audit must run the full tests without persisting credentials")
+	}
+}
+
+func TestNativeControlCandidateWorkflowHasNoProductionAuthority(t *testing.T) {
+	raw, err := os.ReadFile("../../.github/workflows/build-native-control.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil || len(doc.Content) != 1 {
+		t.Fatalf("decode candidate workflow: %v", err)
+	}
+	root := doc.Content[0]
+	if keys := yamlMappingKeys(t, root); !reflect.DeepEqual(keys, []string{"jobs", "name", "on", "permissions"}) {
+		t.Fatalf("candidate workflow has unexpected root keys: %v", keys)
+	}
+	permissions := yamlMappingValue(t, root, "permissions")
+	if !reflect.DeepEqual(yamlMappingKeys(t, permissions), []string{"contents"}) || yamlMappingValue(t, permissions, "contents").Value != "read" {
+		t.Fatal("candidate workflow must use only contents: read")
+	}
+	trigger := yamlMappingValue(t, root, "on")
+	if !reflect.DeepEqual(yamlMappingKeys(t, trigger), []string{"push"}) {
+		t.Fatal("candidate workflow should not accept privileged or scheduled triggers")
+	}
+	jobs := yamlMappingValue(t, root, "jobs")
+	if !reflect.DeepEqual(yamlMappingKeys(t, jobs), []string{"candidate-binaries"}) {
+		t.Fatal("candidate workflow must have exactly one build job")
+	}
+	job := yamlMappingValue(t, jobs, "candidate-binaries")
+	if !reflect.DeepEqual(yamlMappingKeys(t, job), []string{"runs-on", "steps", "timeout-minutes"}) ||
+		yamlMappingValue(t, job, "runs-on").Value != "ubuntu-latest" {
+		t.Fatal("candidate build must use a GitHub-hosted runner without job-level authority or environment")
+	}
+	steps := yamlMappingValue(t, job, "steps")
+	if steps.Kind != yaml.SequenceNode || len(steps.Content) != 4 {
+		t.Fatal("candidate workflow must only check out, set up Go, compile, and upload")
+	}
+	for i, action := range []string{"actions/checkout", "actions/setup-go", "", "actions/upload-artifact"} {
+		if action == "" {
+			continue
+		}
+		ref := yamlMappingValue(t, steps.Content[i], "uses").Value
+		if !regexp.MustCompile("^" + regexp.QuoteMeta(action) + "@[0-9a-f]{40}$").MatchString(ref) {
+			t.Fatalf("candidate step %d must use pinned %s", i, action)
+		}
+	}
+	checkout := yamlMappingValue(t, steps.Content[0], "with")
+	if !reflect.DeepEqual(yamlMappingKeys(t, checkout), []string{"persist-credentials"}) ||
+		yamlMappingValue(t, checkout, "persist-credentials").Value != "false" {
+		t.Fatal("candidate checkout must not retain credentials")
+	}
+	if !reflect.DeepEqual(yamlMappingKeys(t, steps.Content[2]), []string{"env", "name", "run"}) ||
+		!strings.Contains(yamlMappingValue(t, steps.Content[2], "run").Value, "go build -mod=readonly") ||
+		!strings.Contains(yamlMappingValue(t, steps.Content[2], "run").Value, "sha256sum") {
+		t.Fatal("candidate build must compile and checksum candidates")
+	}
+	for _, forbidden := range []string{"secrets.", "github.token", "id-token:", "self-hosted", "kubectl", "ghcr.io", "docker push", "deploy-declarative-component"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("candidate workflow crosses the production boundary: %s", forbidden)
+		}
 	}
 }
 

@@ -278,6 +278,35 @@ func registryRehomeBaselineCommand(args []string, out io.Writer, stage bool) err
 	return json.NewEncoder(out).Encode(report)
 }
 
+func shadowRegistryRehomeSuccessor(args []string, out io.Writer) error {
+	if len(args) != 3 || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[2]) || filepath.Clean(args[2]) != args[2] {
+		return errors.New(usage)
+	}
+	bundle, err := readFile(args[0], releaseguardian.MaxRegistryRehomeRecoveryBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(bundle)
+	files := make(map[string][]byte, 5)
+	defer func() {
+		for _, raw := range files {
+			clear(raw)
+		}
+	}()
+	for _, name := range []string{"release-plan.json", "artifact-receipt.json", "execution-plan.json", "forward.json", "lkg.json"} {
+		raw, err := readFile(filepath.Join(args[2], name), 4<<20, true)
+		if err != nil {
+			return fmt.Errorf("read registry rehome successor %s: %w", name, err)
+		}
+		files[name] = raw
+	}
+	report, err := releaseguardian.ShadowRegistryRehomeSuccessor(bundle, args[1], files)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(report)
+}
+
 func registryRehomeReviewCommand(ctx context.Context, args []string, out io.Writer) error {
 	draft := args[0] == "draft-release-registry-rehome"
 	if (!draft && len(args) != 6) || (draft && len(args) != 9) {

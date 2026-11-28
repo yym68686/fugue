@@ -188,6 +188,23 @@ record from the two pinned versions. Keep both the bundle and baseline in
 independent custody. Neither staging nor verification creates a release
 monitor, advances the journal, or authorizes a write.
 
+Before selecting a successor, compare its prepared Guardian files with the
+relocated baseline offline:
+
+```bash
+fugue-production-control shadow-release-registry-rehome-successor "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$PRIVATE_EXECUTION_DIRECTORY"
+```
+
+The directory contains the private `release-plan.json`, `artifact-receipt.json`,
+`execution-plan.json`, `forward.json`, and `lkg.json`. The rollback input must
+be the exact relocated **current** manifest, not the older retained rollback
+manifest. The successor must bind its Deployment and artifact to the same
+independent repository and leave the companion inventory and declarations
+unchanged (apart from release provenance stamps). The report is a static
+comparison: it does not check the successor's registry blobs or live
+prewrite state, install the baseline, or give Guardian permission to write
+the Deployment or any companion objects.
+
 For the registry-only move, start from a plain Deployment freeze. Keep the
 legacy sources disabled and independently prove that their credentials were
 revoked and requests drained. Do not enable this exception as part of normal

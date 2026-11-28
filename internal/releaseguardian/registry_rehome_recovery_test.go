@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/productioncontrol"
@@ -21,7 +22,7 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 	for _, ref := range []string{old.TopDigest, current.TopDigest} {
 		objects[repoPath+"fugue-recovery-sha256-"+strings.TrimPrefix(ref, "sha256:")] = objects[repoPath+ref]
 	}
-	archive, _, _ := rehomeArchiveFixture(t, old, current, "")
+	archive, _, _ := rehomeArchiveFixture(t, old, current, "serving")
 	archivePin := digest(archive)
 	sealed, err := readReleaseRecoveryArchive(archive, archivePin)
 	if err != nil {
@@ -164,6 +165,9 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 	if _, err := VerifyRegistryRehomeBaseline(baselineRaw, digest(baselineRaw), raw, report.BundleDigest); err == nil {
 		t.Fatal("raw file digest substituted for its role-bound baseline identity")
 	}
+	t.Run("successor shadow", func(t *testing.T) {
+		testRegistryRehomeSuccessorShadow(t, raw, baseline, sealed.forward.release, current.Repository)
+	})
 	for _, alter := range []func(*RegistryRehomeBaseline){
 		func(b *RegistryRehomeBaseline) { b.Current, b.Rollback = b.Rollback, b.Current },
 		func(b *RegistryRehomeBaseline) { b.Predecessor.Generation++ },
@@ -231,4 +235,106 @@ func TestRegistryRehomeRecoveryReconstructsBothSealedVersions(t *testing.T) {
 			t.Fatalf("test needs a structurally valid review: %v", err)
 		}
 	}, "rollback recovery: reviewed projection or mirror does not match its sealed manifest and artifact identity")
+}
+
+func testRegistryRehomeSuccessorShadow(t *testing.T, raw []byte, b RegistryRehomeBaseline, old declarativerelease.PlanRelease, repository string) {
+	t.Helper()
+	current, _, err := ExportRegistryRehomeReleaseInput(raw, b.RecoveryBundle, "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback, _, err := ExportRegistryRehomeReleaseInput(raw, b.RecoveryBundle, "rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := guardianPlanRelease(b.Key, testSHA, b.Current.Target.ConfigSHA, b.Current.Artifact.RecoveryImage.IndexDigest, old.Delivery)
+	release.Artifact.Repository = repository
+	plan := guardianPlan(t, b.Current.Target.ConfigSHA, testSHA, release)
+	const nextImageDigest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	artifact, err := declarativerelease.MaterializeArtifactReceipt(plan, b.Key.Component, declarativerelease.RegistryVerification{
+		Image: repository + "@" + nextImageDigest, IndexDigest: nextImageDigest, ManifestDigest: otherDigest,
+		ConfigDigest: testDigest, OCIRevision: testSHA, Platform: "linux/amd64",
+		Verification: "registry_manifest_config_and_layer_get", BlobCount: 2, LayerProbeCount: 1, RequestCount: 4, TotalLayerBytes: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workload, _ := guardianManifests(t, plan, artifact)
+	for _, mutation := range []string{"none", "wrong rollback", "service port", "missing service", "foreign image", "wrong stamp", "wrong artifact plan", "wrong prewrite"} {
+		t.Run(mutation, func(t *testing.T) {
+			set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(current))
+			if err != nil {
+				t.Fatal(err)
+			}
+			deployment, err := declarativerelease.ResourceSetItem(workload, b.Workload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			predecessor, lkg := b.Current.Target, current
+			candidate := artifact
+			switch mutation {
+			case "wrong rollback":
+				predecessor, lkg = b.Rollback.Target, rollback
+			case "service port":
+				set.Items[1]["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)["port"] = 1234
+			case "missing service":
+				set.Items = set.Items[:1]
+			case "foreign image":
+				pod := deployment["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+				pod["initContainers"] = []any{map[string]any{"name": "unreviewed", "image": b.Current.Target.ImageRef}}
+			case "wrong stamp":
+				template := deployment["spec"].(map[string]any)["template"].(map[string]any)
+				delete(template["metadata"].(map[string]any)["annotations"].(map[string]any), podArtifactImageAnnotation)
+			case "wrong artifact plan":
+				candidate.PlanDigest, candidate.ReceiptDigest = otherDigest, ""
+				unsigned, _ := declarativerelease.CanonicalJSON(candidate)
+				candidate.ReceiptDigest = digest(unsigned)
+			}
+			set.Items[0] = deployment
+			forward, err := declarativerelease.CanonicalJSON(set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := declarativerelease.TargetIdentity{
+				Present: true, ImageRef: candidate.ImmutableRef, ConfigSHA: testSHA,
+				ManifestSHA: testSHA, OCIRevision: testSHA, ManifestDigest: digest(forward),
+			}
+			selectedPlan := plan
+			if mutation == "wrong rollback" {
+				wrong := release
+				wrong.ExpectedPreviousConfigSHA = predecessor.ConfigSHA
+				wrong.ExpectedPreviousManifestSHA = predecessor.ManifestSHA
+				wrong.ExpectedPreviousOCIRevision = predecessor.OCIRevision
+				wrong.ExpectedPreviousImageDigest = b.Rollback.Artifact.RecoveryImage.IndexDigest
+				selectedPlan = guardianPlan(t, predecessor.ConfigSHA, testSHA, wrong)
+			}
+			prepared := guardianPrepared(t, selectedPlan, selectedPlan.Releases[0], candidate, target, predecessor, time.Unix(200, 0).UTC())
+			if mutation == "wrong prewrite" {
+				prepared.Prewrite.Primary.Name = "other"
+				prepared.Prewrite.Resources[0].Identity = prepared.Prewrite.Primary
+				prepared.PlanDigest = ""
+				unsigned, _ := declarativerelease.CanonicalJSON(prepared)
+				prepared.PlanDigest = digest(unsigned)
+			}
+			files := map[string][]byte{"forward.json": forward, "lkg.json": lkg}
+			for name, value := range map[string]any{"release-plan.json": selectedPlan, "artifact-receipt.json": candidate, "execution-plan.json": prepared} {
+				files[name], _ = declarativerelease.CanonicalJSON(value)
+			}
+			out, err := ShadowRegistryRehomeSuccessor(raw, b.RecoveryBundle, files)
+			if mutation != "none" {
+				if err == nil {
+					t.Fatalf("invalid successor passed: %+v", out)
+				}
+				return
+			}
+			if err != nil || out.Baseline != b.Version() || out.Rollback != b.Current.Target || out.Forward != target ||
+				out.ExecutionPlan != prepared.PlanDigest || out.ArtifactReceipt != artifact.ReceiptDigest ||
+				len(out.StaticCompanions) != 1 || out.StaticCompanions[0].Kind != "Service" {
+				t.Fatalf("exact successor got %+v, %v", out, err)
+			}
+			if _, err := ShadowRegistryRehomeSuccessor(raw, otherDigest, files); err == nil {
+				t.Fatal("unpinned successor baseline passed")
+			}
+		})
+	}
 }
