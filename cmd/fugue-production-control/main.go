@@ -21,6 +21,7 @@ import (
 
 	"fugue/internal/platformcontrol"
 	"fugue/internal/productioncontrol"
+	"fugue/internal/productioncontrol/providergate"
 	"fugue/internal/releaseguardian/dnscontrol"
 	"fugue/internal/releaseguardian/participation"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -33,6 +34,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
+       fugue-production-control shadow-storage-audit-native CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control draft-storage-audit JOURNAL_CONFIG REQUEST SHADOW
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
@@ -63,7 +65,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-participation-rollback-boundary JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION WRITER
        fugue-production-control observe-participation-offline-readback JOURNAL_CONFIG KUBECONFIG CONTEXT SUBMISSION
        fugue-production-control observe-participation-pending JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST
-       fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG`
+       fugue-production-control migrate-journal JOURNAL_OWNER_CONFIG
+       fugue-production-control migrate-storage-audit-provider PROVIDER_OWNER_CONFIG`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,11 +83,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
-	case "shadow-storage-audit":
+	case "shadow-storage-audit", "shadow-storage-audit-native":
 		if len(args) != 6 {
 			return errors.New(usage)
 		}
-		return shadowStorageAudit(ctx, args[1:], out)
+		return shadowStorageAudit(ctx, args[1:], args[0] == "shadow-storage-audit-native", out)
 	case "draft-storage-audit":
 		if len(args) != 4 {
 			return errors.New(usage)
@@ -589,7 +592,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 			}
 			return emit(report)
 		})
-	case "migrate-journal":
+	case "migrate-journal", "migrate-storage-audit-provider":
 		if len(args) != 2 {
 			return errors.New(usage)
 		}
@@ -601,6 +604,9 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 		defer db.Close()
 		ctx, cancel := context.WithTimeout(ctx, time.Minute)
 		defer cancel()
+		if args[0] == "migrate-storage-audit-provider" {
+			return providergate.ApplyStorageAuditPolicySchema(ctx, db)
+		}
 		return productioncontrol.ApplySchema(ctx, db)
 	case "inspect":
 		if len(args) != 2 {

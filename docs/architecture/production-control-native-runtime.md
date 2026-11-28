@@ -649,12 +649,47 @@ and the native writer is verified.
 `draft-storage-audit JOURNAL_CONFIG REQUEST SHADOW` binds that report to
 the last verified native journal version. Review the exact current, target
 and rollback documents with `inspect` before using `sign` and recording the
-intent and approval. Storage audit policy execution requires its own provider
-fence. The journal rejects ordinary execution claims for this resource.
+intent and approval.
 The old workflow's database access runs `pods/exec` with the PostgreSQL
 administrator. Revocation must cover this path as well as its ConfigMap
 and any other routes to PostgreSQL administration. A row trigger cannot
 contain a principal that still holds administrator access.
+
+The journal and policy provider share one PostgreSQL database for the native
+write. `migrate-storage-audit-provider PROVIDER_OWNER_CONFIG` installs the
+provider schema after the journal and worker schema are installed. The schema
+owner can freeze the exact active policy with `freeze_native_policy`. This
+preserves the worker's current sampling configuration while fencing policy
+updates. Store the provider freeze evidence and verify legacy revocation
+before importing the journal baseline or using `enroll_native_policy_writer`.
+Enrollment checks the frozen document and exact baseline evidence. Give the
+new isolated login SELECT on the journal input and execution tables, INSERT
+on execution claims, and EXECUTE on `commit_native_policy`. Sampling, direct
+provider table updates and journal approval writes use separate identities.
+
+Before the first native publication, verify that the running release and its
+rollback versions read the worker-owned PostgreSQL policy and that the old
+`storage-lifecycle.json` ConfigMap key has been retired. The remaining
+ConfigMap settings have their own migration. `shadow-storage-audit-native`
+checks the key's absence and reads the current PostgreSQL policy. The Guardian
+command `storage-audit-policy-dispatch JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST APPROVAL_DIGEST`
+checks the signed approval and re-reads the approved Kubernetes projection
+at its exact UID and resourceVersion. The claim, provider compare-and-swap,
+and immutable receipt commit in one PostgreSQL transaction. Repeating a
+committed request returns its existing claim.
+
+Use `storage-audit-policy-checkpoint CONFIG INTENT_DIGEST` under a dedicated
+read-only identity to observe the receipt and prepare a witness. The observer
+profile contains `journalFile`, `observerKeyId` and `observerPublicKey`.
+The dispatch principal cannot settle. The settlement profile also contains
+`witnessDirectory`. Use `sign-execution-witness` to sign the reviewed
+observation and `storage-audit-policy-settle CONFIG INTENT_DIGEST WITNESS_DIGEST`
+to record it. The observer and settlement profiles need SELECT on the provider
+freeze, authority, receipt, and policy tables, plus EXECUTE on
+`pg_control_system()`. The settlement principal also needs INSERT on
+execution results. A committed write with a pending witness leaves the last
+verified journal version in place. Rollback uses another signed intent
+selecting the exact preceding policy and a new receipt.
 
 ## Single-Deployment release draft
 

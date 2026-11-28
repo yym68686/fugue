@@ -61,6 +61,16 @@ func run() error {
 		defer stop()
 		return runDNSPolicyDispatch(ctx, os.Args[2:], os.Stdout)
 	}
+	if len(os.Args) > 1 && os.Args[1] == "storage-audit-policy-dispatch" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runStorageAuditPolicyDispatch(ctx, os.Args[2:], os.Stdout)
+	}
+	if len(os.Args) > 1 && (os.Args[1] == "storage-audit-policy-checkpoint" || os.Args[1] == "storage-audit-policy-settle") {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runStorageAuditPolicySettlement(ctx, os.Args[1] == "storage-audit-policy-settle", os.Args[2:], os.Stdout)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "participation-offline-dispatch" {
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()

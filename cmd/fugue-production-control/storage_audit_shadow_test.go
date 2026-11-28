@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +13,7 @@ import (
 	"time"
 
 	"fugue/internal/productioncontrol"
+	"fugue/internal/releaseguardian/storageauditcontrol"
 	"fugue/internal/storageaudit"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,16 +33,20 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 		Namespace:  "control", ConfigMap: "storage", ConfigMapUID: "storage-v1",
 	}
 	for _, test := range []struct {
-		name         string
-		afterVersion string
-		recreate     bool
-		diverge      bool
-		wantError    string
+		name             string
+		afterVersion     string
+		recreate         bool
+		diverge          bool
+		retired          bool
+		projectionAbsent bool
+		wantError        string
 	}{
 		{name: "same provider facts", afterVersion: "1"},
 		{name: "concurrent change", afterVersion: "2", wantError: "changed during"},
 		{name: "configMap recreation", afterVersion: "2", recreate: true, wantError: "ConfigMap does not match"},
 		{name: "database-only commit", afterVersion: "1", diverge: true, wantError: "policy disagree"},
+		{name: "native policy", afterVersion: "1", retired: true, projectionAbsent: true},
+		{name: "native policy still published", afterVersion: "1", retired: true, wantError: "remains"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			policy, err := json.Marshal(current)
@@ -46,7 +54,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 				t.Fatal(err)
 			}
 			reads := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
 					t.Error("storage audit shadow sent a mutation")
 					w.WriteHeader(http.StatusMethodNotAllowed)
@@ -66,18 +74,26 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 							meta.UID = "storage-v2"
 						}
 					}
+					data := map[string]string{}
+					if !test.projectionAbsent {
+						data[storageauditcontrol.ConfigKey] = string(policy)
+					}
 					_ = json.NewEncoder(w).Encode(v1.ConfigMap{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
-						ObjectMeta: meta, Data: map[string]string{storageAuditConfigKey: string(policy)}})
+						ObjectMeta: meta, Data: data})
 				default:
 					http.NotFound(w, r)
 				}
 			}))
 			defer server.Close()
-			client, err := newStorageAuditShadowClient(&rest.Config{Host: server.URL})
+			spec := spec
+			spec.Kubernetes.Endpoint = server.URL
+			spec.Kubernetes.CADigest = fmt.Sprintf("sha256:%x", sha256.Sum256(server.Certificate().Raw))
+			ca := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+			client, err := storageauditcontrol.NewReader(&rest.Config{Host: server.URL, TLSClientConfig: rest.TLSClientConfig{CAData: ca}}, spec)
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := readStorageAuditShadow(t.Context(), client, spec, target, func(context.Context) (storageaudit.OwnerObservation, error) {
+			report, err := readStorageAuditShadow(t.Context(), client, spec, target, test.retired, func(context.Context) (storageaudit.OwnerObservation, error) {
 				dbPolicy := current
 				if test.diverge {
 					dbPolicy = target
@@ -93,7 +109,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 				}
 				return
 			}
-			if err != nil || report.ExecutionEvidence || report.ConfigMapResourceVersion != "1" ||
+			if err != nil || report.ExecutionEvidence || report.ConfigMapResourceVersion != "1" || report.PublishedPolicyRetired != test.retired ||
 				report.Current != report.Rollback || report.Target.Digest != "sha256:"+target.Digest() || report.Rollback.Document != current {
 				t.Fatalf("unexpected storage audit shadow: %+v, %v", report, err)
 			}
