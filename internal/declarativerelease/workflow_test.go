@@ -308,10 +308,27 @@ func TestCIHasOneDeclarativeProductionEntryPoint(t *testing.T) {
 	expectedJobs = append(expectedJobs, "observation_sample_retention_handoff", "app_mail_reconcile_handoff", "app_mail_standby_observation")
 	expectedJobs = append(expectedJobs, "observation_worker_recovery_observation")
 	expectedJobs = append(expectedJobs, "deploy_hosted_dns_worker", "hosted_dns_writer_handoff", "deploy_storage_audit_worker", "storage_audit_activation")
+	expectedJobs = append(expectedJobs, "deploy_database_import_worker")
 	expectedJobs = append(expectedJobs, "node_worker_handoff", "node_worker_handoff_plan", "front_hostport_retirement", "idle_front_standby_release")
 	sort.Strings(expectedJobs)
 	if !reflect.DeepEqual(jobKeys, expectedJobs) {
 		t.Fatalf("CI job inventory is not the single component pipeline: %v", jobKeys)
+	}
+	importWorker := yamlMappingValue(t, jobs, "deploy_database_import_worker")
+	importWorkerWhen := yamlMappingValue(t, importWorker, "if").Value
+	for _, gate := range []string{
+		"github.event_name == 'push' && github.ref == 'refs/heads/main'",
+		"needs.prepush.result == 'success'", "needs.prepush.outputs.database_import_worker_rehearsed == 'true'",
+		"needs.component-build.result == 'success'", "'database-import-worker')",
+	} {
+		if !strings.Contains(importWorkerWhen, gate) {
+			t.Fatalf("database import standby release is missing its admission gate: %s", gate)
+		}
+	}
+	importQueue := yamlMappingValue(t, importWorker, "concurrency")
+	if yamlMappingValue(t, importQueue, "group").Value != "fugue-production-database-import-worker" ||
+		yamlMappingValue(t, importQueue, "cancel-in-progress").Value != "false" || yamlMappingValue(t, importQueue, "queue").Value != "max" {
+		t.Fatal("database import standby must use its non-canceling release queue")
 	}
 	observationJobs := []string{"observation_writer_handoff", "quality_evidence_retention_handoff", "observation_sample_retention_handoff"}
 	for _, name := range append(observationJobs, "app_mail_reconcile_handoff") {

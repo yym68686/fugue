@@ -4883,7 +4883,7 @@ jobs:
           installer=internal/dbimportworker/app_database_import_worker_reads.sql
           git fetch origin main
           git diff --exit-code HEAD origin/main -- "$release" "$installer" deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json scripts/provision_database_import_worker.py scripts/provision_observation_worker_database.py scripts/verify_database_import_standby.py scripts/verify_observation_writer_handoff.py .github/workflows/ci.yml
-          if jq -e '.expectedPreviousPresent == false and .generation == 1' "$release/intent.json" >/dev/null; then
+          if jq -e '.expectedPreviousPresent == false' "$release/intent.json" >/dev/null; then
             python3 -B -m scripts.provision_database_import_worker "$release/database.json" --apply
           else
             git diff --exit-code HEAD^ HEAD -- "$release/database.json" "$installer"
