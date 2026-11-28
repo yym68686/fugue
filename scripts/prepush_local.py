@@ -8,7 +8,7 @@ import time
 
 from scripts import prepush, prepush_shadow
 
-FULL_VERIFICATION_TIMEOUT_SECONDS = 360
+FULL_VERIFICATION_TIMEOUT_SECONDS = prepush.MAX_SHADOW_FULL_TIMEOUT_SECONDS
 
 
 def main() -> int:
