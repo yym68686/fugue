@@ -10,6 +10,7 @@ import (
 
 	"fugue/internal/httpx"
 	"fugue/internal/model"
+	"fugue/internal/resourcesizing"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -109,7 +110,7 @@ func (s *Server) handleGetClusterResourceReport(w http.ResponseWriter, r *http.R
 			s.writeStoreError(w, err)
 			return
 		}
-		rec := buildRightSizingRecommendation(row.Kind, row.ID, row.Name, serviceType, workloadClass, window, minimum, current, samples)
+		rec := resourcesizing.Recommend(row.Kind, row.ID, row.Name, serviceType, workloadClass, window, minimum, current, samples)
 		row.Recommendation = &rec
 		row.RecommendationReason = rec.Reason
 		if !rec.Ready || rec.RequestTarget == nil || rec.Recommended == nil {
