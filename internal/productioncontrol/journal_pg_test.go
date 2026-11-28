@@ -44,6 +44,9 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		CREATE ROLE fugue_test_control_journal NOLOGIN;
 		GRANT USAGE ON SCHEMA fugue_control TO fugue_test_control_journal;
 		GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA fugue_control TO fugue_test_control_journal;
+		REVOKE INSERT ON fugue_control.registry_rehome_admissions FROM fugue_test_control_journal;
+		CREATE ROLE fugue_test_rehome_journal NOLOGIN IN ROLE fugue_test_control_journal;
+		GRANT INSERT ON fugue_control.registry_rehome_admissions TO fugue_test_rehome_journal;
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +156,14 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 	t.Run("global-dns-execution-boundary", func(t *testing.T) { testGlobalDNSExecutionBoundary(t, ctx, j) })
 	t.Run("front-worker-approval", func(t *testing.T) { testPostgresFrontWorkerApproval(t, ctx, j, second) })
 	t.Run("storage-audit-approval", func(t *testing.T) { testPostgresStorageAuditApproval(t, ctx, j) })
+	rehomeDB := stdlib.OpenDB(*cfg, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `SET ROLE fugue_test_rehome_journal`)
+		return err
+	}))
+	defer rehomeDB.Close()
+	t.Run("registry-rehome-shares-deployment-fence", func(t *testing.T) {
+		testPostgresRegistryRehome(t, ctx, db, runtimeDB, rehomeDB)
+	})
 
 	// Recreate the v1 audit layout in this disposable database without
 	// touching the transition tables. The migrator must rehydrate the audit

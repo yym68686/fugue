@@ -92,6 +92,58 @@ CREATE TABLE IF NOT EXISTS fugue_control.execution_launches (
     recorded_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+-- The existing claim allocates the one shared Deployment fence. Keep the
+-- signed evidence beside it, never in the approval or a Git declaration.
+CREATE TABLE IF NOT EXISTS fugue_control.registry_rehome_admissions (
+    intent_digest text PRIMARY KEY REFERENCES fugue_control.execution_claims(intent_digest),
+    approval_digest text NOT NULL,
+    fence bigint NOT NULL CHECK (fence > 0),
+    evidence_digest text NOT NULL UNIQUE CHECK (evidence_digest ~ '^sha256:[0-9a-f]{64}$'),
+    envelope bytea NOT NULL CHECK (octet_length(envelope) BETWEEN 1 AND 8192),
+    FOREIGN KEY (approval_digest, intent_digest) REFERENCES fugue_control.approvals (digest, intent_digest)
+);
+
+-- Ordinary runtime roles must not have INSERT on registry_rehome_admissions.
+-- The deferred check makes a raw ordinary claim fail without the atomic
+-- admission append. It does not substitute for signature/provider checks.
+CREATE OR REPLACE FUNCTION fugue_control.require_registry_rehome_admission() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM fugue_control.intents
+        WHERE digest=NEW.intent_digest AND convert_from(envelope, 'UTF8')::jsonb->>'operation'='component_registry_rehome') THEN
+        RETURN NULL;
+    END IF;
+    IF TG_TABLE_NAME='execution_results' THEN
+        -- An approval binds the registry projection, not a new verified
+        -- serving/rollback record. No ordinary result may advance this head.
+        RAISE EXCEPTION 'registry rehome needs a verified recovery baseline for settlement' USING ERRCODE='23514';
+    END IF;
+    IF NOT EXISTS (SELECT FROM fugue_control.registry_rehome_admissions
+            WHERE intent_digest=NEW.intent_digest AND approval_digest=NEW.approval_digest AND fence=NEW.fence) THEN
+        RAISE EXCEPTION 'registry rehome claim requires atomic dedicated admission' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION fugue_control.require_registry_rehome_admission() FROM PUBLIC;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_trigger
+        WHERE tgrelid='fugue_control.execution_claims'::pg_catalog.regclass AND tgname='registry_rehome_claim_admission') THEN
+        CREATE CONSTRAINT TRIGGER registry_rehome_claim_admission
+            AFTER INSERT ON fugue_control.execution_claims DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.require_registry_rehome_admission();
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_trigger
+        WHERE tgrelid='fugue_control.execution_results'::pg_catalog.regclass AND tgname='registry_rehome_result_guard') THEN
+        CREATE TRIGGER registry_rehome_result_guard
+            AFTER INSERT ON fugue_control.execution_results
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.require_registry_rehome_admission();
+    END IF;
+END;
+$$;
+
 -- Triggers keep execution audit inseparable from the append. In particular,
 -- the launch principal does not need a general INSERT grant on audit.
 -- This SECURITY DEFINER function is installed by the owner-only migrator.

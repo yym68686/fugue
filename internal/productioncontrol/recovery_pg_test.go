@@ -2,6 +2,7 @@ package productioncontrol
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"errors"
 	"os"
@@ -56,6 +57,26 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 		return j
 	}
 	j := journalFor(source)
+	// A v1 backup is verified in its restored schema before migration. The
+	// rehome admission table, even when empty, selects a separate v2 digest.
+	if _, err := source.ExecContext(ctx, `DROP TRIGGER registry_rehome_claim_admission ON fugue_control.execution_claims;
+		DROP TRIGGER registry_rehome_result_guard ON fugue_control.execution_results;
+		DROP TABLE fugue_control.registry_rehome_admissions`); err != nil {
+		t.Fatal(err)
+	}
+	old, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
+	if err != nil || old.Format != recoveryDomainV1 {
+		t.Fatalf("legacy journal checkpoint: %s %v", old.Format, err)
+	}
+	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, old.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySchema(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, old.Digest); err == nil {
+		t.Fatal("upgraded v2 journal matched a legacy inventory digest")
+	}
 	lkg := Version{intent.Generation, intent.CurrentDigest}
 	b := Baseline{Scope: intent.scope(), Verified: lkg, EvidenceDigest: digest([]byte("baseline witness"))}
 	w, err := NewExecutionJournal(j, &testExecutionEvidence{enrollment: b.EvidenceDigest})
@@ -89,6 +110,18 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	if consumed, err := j.ReserveReleaseLaunch(ctx, "guardian-a", intent, payload, claim.Fence); err != nil || !consumed {
 		t.Fatalf("launch: %v %v", consumed, err)
 	}
+	move := anchorRegistryRehomeFixture(t, ctx, j, key, "rehome-recovery")
+	_, admission, admissionDigest := signRegistryRehomeFixture(t, move.report(1), move.observer)
+	observer := move.observer.Public().(ed25519.PublicKey)
+	readOnlyCheck := func(context.Context, RegistryRehomeAdmission, Submission) error { return nil }
+	moveJournal, err := NewRegistryRehomeJournal(j, move.intent.scope(), observer, readOnlyCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveClaim, granted, err := moveJournal.Reserve(ctx, "fixture-rehome", move.record, move.approval, admission)
+	if err != nil || !granted {
+		t.Fatalf("fixture rehome reservation: %v %v", granted, err)
+	}
 
 	exporter, err := source.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -103,8 +136,8 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	other.RequestID = "after-export"
 	second, secondApproval := record(j, other)
 	checkpoint, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, snapshot)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || checkpoint.Format != recoveryDomainV2 {
+		t.Fatalf("rehome checkpoint did not use v2: %s %v", checkpoint.Format, err)
 	}
 	live, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
 	if err != nil || checkpoint.Digest == live.Digest {
@@ -158,6 +191,16 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := journalFor(restored)
+	restoredMove, err := NewRegistryRehomeJournal(r, move.intent.scope(), observer, readOnlyCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, d, err := restoredMove.ReadAdmission(ctx, moveClaim); err != nil || d != admissionDigest {
+		t.Fatalf("restored rehome admission not byte exact: %s %v", d, err)
+	}
+	if found, created, err := restoredMove.Reserve(ctx, "fixture-rehome", move.record, move.approval, admission); err != nil || created || found != moveClaim {
+		t.Fatalf("restored database granted a second rehome dispatch: %+v %v %v", found, created, err)
+	}
 	if _, err := r.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, live.Digest); err == nil {
 		t.Fatal("accepted stale backup with current journal's pinned digest")
 	}

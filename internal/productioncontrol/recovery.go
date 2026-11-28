@@ -8,9 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 )
 
-const recoveryDomain = "fugue.production.journal-recovery.v1"
+const (
+	recoveryDomainV1 = "fugue.production.journal-recovery.v1"
+	recoveryDomainV2 = "fugue.production.journal-recovery.v2"
+)
 
 var snapshotPattern = regexp.MustCompile(`^[0-9A-F]{8}-[0-9A-F]{8}-[1-9][0-9]{0,9}$`)
 
@@ -21,7 +25,7 @@ type recoveryTable struct {
 
 // Keep this inventory exhaustive. A new journal table or a change to the
 // canonical row representation needs an explicit recovery format migration.
-var recoveryTables = [...]recoveryTable{
+var recoveryTablesV1 = []recoveryTable{
 	{"approvals", `ORDER BY digest COLLATE pg_catalog."C"`},
 	{"audit", `ORDER BY kind COLLATE pg_catalog."C", subject_digest COLLATE pg_catalog."C"`},
 	{"dns_cutovers", `ORDER BY cluster_id COLLATE pg_catalog."C", phase COLLATE pg_catalog."C"`},
@@ -32,6 +36,9 @@ var recoveryTables = [...]recoveryTable{
 	{"participation_topologies", `ORDER BY cluster_id COLLATE pg_catalog."C", generation`},
 	{"resource_baselines", `ORDER BY cluster_id COLLATE pg_catalog."C", resource_id COLLATE pg_catalog."C"`},
 }
+
+var recoveryTablesV2 = slices.Insert(slices.Clone(recoveryTablesV1), len(recoveryTablesV1)-1,
+	recoveryTable{"registry_rehome_admissions", `ORDER BY intent_digest COLLATE pg_catalog."C"`})
 
 type JournalRecoveryTable struct {
 	Name   string `json:"name"`
@@ -109,12 +116,13 @@ func readRecoveryCheckpoint(ctx context.Context, tx *sql.Tx, cluster string) (Jo
 		SET LOCAL statement_timeout TO '4min';`); err != nil {
 		return JournalRecoveryCheckpoint{}, fmt.Errorf("configure recovery snapshot: %w", err)
 	}
-	if err := verifyRecoveryTableInventory(ctx, tx); err != nil {
+	format, inventory, err := verifyRecoveryTableInventory(ctx, tx)
+	if err != nil {
 		return JournalRecoveryCheckpoint{}, err
 	}
 
-	checkpoint := JournalRecoveryCheckpoint{Format: recoveryDomain, Cluster: cluster}
-	for _, table := range recoveryTables {
+	checkpoint := JournalRecoveryCheckpoint{Format: format, Cluster: cluster}
+	for _, table := range inventory {
 		sum, err := readRecoveryTable(ctx, tx, table)
 		if err != nil {
 			return JournalRecoveryCheckpoint{}, fmt.Errorf("fingerprint recovery table %s: %w", table.name, err)
@@ -125,7 +133,7 @@ func readRecoveryCheckpoint(ctx context.Context, tx *sql.Tx, cluster string) (Jo
 		Cluster string                 `json:"cluster"`
 		Tables  []JournalRecoveryTable `json:"tables"`
 	}{Cluster: cluster, Tables: checkpoint.Tables}
-	encoded, err := signedBytes(recoveryDomain, binding)
+	encoded, err := signedBytes(format, binding)
 	if err != nil {
 		return JournalRecoveryCheckpoint{}, err
 	}
@@ -133,35 +141,49 @@ func readRecoveryCheckpoint(ctx context.Context, tx *sql.Tx, cluster string) (Jo
 	return checkpoint, nil
 }
 
-func verifyRecoveryTableInventory(ctx context.Context, tx *sql.Tx) error {
+func verifyRecoveryTableInventory(ctx context.Context, tx *sql.Tx) (string, []recoveryTable, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT c.relname, c.relkind = 'r' AND c.relpersistence = 'p'
 		AND NOT EXISTS (SELECT FROM pg_catalog.pg_inherits i WHERE c.oid IN (i.inhparent, i.inhrelid))
 		FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
 		WHERE n.nspname='fugue_control' AND c.relkind IN ('r','p','f','v','m','S')
 		ORDER BY c.relname::text COLLATE pg_catalog."C"`)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	defer rows.Close()
-	var index int
+	var names []string
 	for rows.Next() {
 		var name string
 		var permanentTable bool
 		if err := rows.Scan(&name, &permanentTable); err != nil {
-			return err
+			return "", nil, err
 		}
-		if index >= len(recoveryTables) || name != recoveryTables[index].name || !permanentTable {
-			return errors.New("production journal recovery table inventory does not match checkpoint format")
+		if len(names) >= len(recoveryTablesV2) || !permanentTable {
+			return "", nil, errors.New("production journal recovery table inventory does not match checkpoint format")
 		}
-		index++
+		names = append(names, name)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return "", nil, err
 	}
-	if index != len(recoveryTables) {
-		return errors.New("production journal recovery table inventory is incomplete")
+	matches := func(tables []recoveryTable) bool {
+		if len(names) != len(tables) {
+			return false
+		}
+		for i, table := range tables {
+			if names[i] != table.name {
+				return false
+			}
+		}
+		return true
 	}
-	return nil
+	if matches(recoveryTablesV2) {
+		return recoveryDomainV2, recoveryTablesV2, nil
+	}
+	if matches(recoveryTablesV1) {
+		return recoveryDomainV1, recoveryTablesV1, nil
+	}
+	return "", nil, errors.New("production journal recovery table inventory is incomplete or does not match checkpoint format")
 }
 
 func readRecoveryTable(ctx context.Context, tx *sql.Tx, table recoveryTable) (JournalRecoveryTable, error) {

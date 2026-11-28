@@ -360,7 +360,11 @@ func (e *ExecutionJournal) ReserveExecution(ctx context.Context, actor, intentDi
 	return e.journal.ReserveExecution(ctx, actor, intentDigest, approvalDigest)
 }
 
-func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string) (claim Claim, created bool, err error) {
+func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string) (Claim, bool, error) {
+	return j.reserveExecution(ctx, actor, intentDigest, approvalDigest, nil)
+}
+
+func (j *Journal) reserveExecution(ctx context.Context, actor, intentDigest, approvalDigest string, rehome *verifiedRegistryRehomeAdmission) (claim Claim, created bool, err error) {
 	if !tokenPattern.MatchString(actor) || !digestPattern.MatchString(intentDigest) || !digestPattern.MatchString(approvalDigest) {
 		return Claim{}, false, errors.New("invalid production execution request")
 	}
@@ -372,8 +376,15 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if intent.Operation == ParticipationTopology || intent.Operation == DNSCutover || intent.ResourceID == GlobalProducerCutoverResource {
 			return false, errors.New("topology and cutover intents do not authorize ordinary execution")
 		}
-		if intent.Operation == ComponentRegistryMove {
+		if intent.Operation == ComponentRegistryMove && rehome == nil {
 			return false, errors.New("registry rehome requires a dedicated provider-fenced executor; review cannot reserve a claim")
+		}
+		if rehome != nil {
+			a := rehome.admission
+			if intent.Operation != ComponentRegistryMove || a.scope() != intent.scope() ||
+				a.IntentDigest != intentDigest || a.ApprovalDigest != approvalDigest {
+				return false, ErrStaleFence
+			}
 		}
 		if intent.ResourceID == StorageAuditPolicyResource {
 			return false, errors.New("storage audit policy requires a provider-fenced executor")
@@ -407,6 +418,17 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if err == nil {
 			if existing.Scope != intent.scope() || existing.ApprovalDigest != approvalDigest {
 				return false, ErrStaleFence
+			}
+			if rehome != nil {
+				var observed string
+				if err := tx.QueryRowContext(ctx, `SELECT evidence_digest FROM fugue_control.registry_rehome_admissions
+					WHERE intent_digest=$1 AND approval_digest=$2 AND fence=$3`,
+					intentDigest, approvalDigest, existing.Fence).Scan(&observed); err != nil {
+					return false, err
+				}
+				if observed != rehome.digest {
+					return false, ErrStaleFence
+				}
 			}
 			claim = existing
 			return false, nil
@@ -446,10 +468,16 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if state.LastFence == math.MaxInt64 {
 			return false, errors.New("production resource fence is exhausted")
 		}
+		if rehome != nil && (rehome.admission.Fence != state.LastFence+1 || !rehome.admission.fresh(j.now())) {
+			return false, ErrStaleFence
+		}
 		claim = Claim{intent.scope(), state.LastFence + 1, intentDigest, approvalDigest}
 		_, err = tx.ExecContext(ctx, `INSERT INTO fugue_control.execution_claims
 			(cluster_id,resource_id,fence,intent_digest,approval_digest,actor) VALUES ($1,$2,$3,$4,$5,$6)`,
 			claim.ClusterID, claim.ResourceID, claim.Fence, claim.IntentDigest, claim.ApprovalDigest, actor)
+		if err == nil && rehome != nil {
+			err = appendRegistryRehomeAdmission(ctx, tx, rehome)
+		}
 		return err == nil, err
 	})
 	if err != nil {
@@ -470,6 +498,9 @@ func (e *ExecutionJournal) CompleteExecution(ctx context.Context, actor string, 
 	intent, _, err := e.journal.ReadIntent(ctx, claim.IntentDigest)
 	if err != nil {
 		return false, err
+	}
+	if intent.Operation == ComponentRegistryMove {
+		return false, errors.New("registry rehome needs a dedicated verified recovery baseline, not ordinary execution settlement")
 	}
 	stored, err := readClaim(ctx, e.journal.db, claim.IntentDigest)
 	if err != nil {
