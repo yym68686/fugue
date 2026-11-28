@@ -99,6 +99,14 @@ func VerifyDeploymentCutoverPolicies(ctx context.Context, client kubernetes.Inte
 	if err != nil {
 		return err
 	}
+	return VerifyKubeCutoverPolicyPairs(ctx, client, expected)
+}
+
+// VerifyKubeCutoverPolicyPairs checks the exact persisted fail-closed rule and binding.
+func VerifyKubeCutoverPolicyPairs(ctx context.Context, client kubernetes.Interface, expected []KubeCutoverPolicy) error {
+	if client == nil || len(expected) == 0 {
+		return errors.New("missing Kubernetes client or cutover policy")
+	}
 	registry := client.AdmissionregistrationV1()
 	for _, pair := range expected {
 		policy, err := registry.ValidatingAdmissionPolicies().Get(ctx, pair.Policy.Name, metav1.GetOptions{})

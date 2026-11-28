@@ -17,6 +17,7 @@ import (
 	"fugue/internal/productioncontrol/providergate"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -190,6 +191,12 @@ func TestPostgresNativeStorageAuditPolicy(t *testing.T) {
 		t.Fatalf("failed provider mutation left a journal claim: %v", err)
 	}
 	run(`SELECT fugue_storage_audit.enroll_native_policy_writer($1,'fixture_policy_writer',$2)`, cluster, baseline.EvidenceDigest)
+	var refused *pgconn.PgError
+	if _, err := writer.ExecContext(ctx, `INSERT INTO fugue_control.execution_claims
+		(cluster_id,resource_id,fence,intent_digest,approval_digest,actor)
+		VALUES ($1,'maintenance/another-resource',1,$2,$3,'policy-writer')`, cluster, intent.Digest, approval.Digest); !errors.As(err, &refused) || refused.Code != "42501" {
+		t.Fatalf("native writer was not denied an unrelated execution claim: %v", err)
+	}
 	if _, err := writer.ExecContext(ctx, `INSERT INTO fugue_control.execution_claims
 		(cluster_id,resource_id,fence,intent_digest,approval_digest,actor)
 		VALUES ($1,'maintenance/storage-audit-policy',1,$2,$3,'policy-writer')`, cluster, intent.Digest, approval.Digest); err == nil {

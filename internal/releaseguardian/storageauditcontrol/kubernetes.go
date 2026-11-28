@@ -6,15 +6,17 @@ import (
 	"net/http"
 
 	"fugue/internal/productioncontrol"
+	"fugue/internal/releaseguardian"
 	"fugue/internal/releaseguardian/participation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 const ConfigKey = "storage-lifecycle.json"
 
-func NewReader(config *rest.Config, spec productioncontrol.StorageAuditShadowBinding) (*corev1.CoreV1Client, error) {
+func NewReader(config *rest.Config, spec productioncontrol.StorageAuditShadowBinding) (*kubernetes.Clientset, error) {
 	if config == nil || config.Insecure || spec.Validate() != nil {
 		return nil, errors.New("storage audit requires a verified Kubernetes endpoint and exact ConfigMap identity")
 	}
@@ -28,7 +30,7 @@ func NewReader(config *rest.Config, spec productioncontrol.StorageAuditShadowBin
 		return nil, err
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return corev1.NewForConfigAndClient(config, client)
+	return kubernetes.NewForConfigAndClient(config, client)
 }
 
 type getOnly struct{ next http.RoundTripper }
@@ -61,8 +63,15 @@ func ReadProjection(ctx context.Context, client corev1.CoreV1Interface,
 	return raw, present, cm.ResourceVersion, nil
 }
 
-func VerifyRetiredProjection(ctx context.Context, client corev1.CoreV1Interface, shadow productioncontrol.StorageAuditShadow) error {
-	_, present, version, err := ReadProjection(ctx, client, shadow.Binding)
+func VerifyRetiredProjection(ctx context.Context, client kubernetes.Interface, shadow productioncontrol.StorageAuditShadow) error {
+	fence, err := releaseguardian.StorageAuditProjectionFence(shadow.Binding)
+	if err != nil {
+		return err
+	}
+	if err := releaseguardian.VerifyKubeCutoverPolicyPairs(ctx, client, []releaseguardian.KubeCutoverPolicy{fence}); err != nil {
+		return err
+	}
+	_, present, version, err := ReadProjection(ctx, client.CoreV1(), shadow.Binding)
 	if err != nil {
 		return err
 	}

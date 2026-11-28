@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"fugue/internal/productioncontrol"
 	admission "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -40,6 +41,23 @@ type KubeDeploymentCutover struct {
 type KubeCutoverPolicy struct {
 	Policy  *admission.ValidatingAdmissionPolicy
 	Binding *admission.ValidatingAdmissionPolicyBinding
+}
+
+// StorageAuditProjectionFence permits retiring a legacy policy key but
+// forbids restoring it, including through binaryData or object replacement.
+func StorageAuditProjectionFence(config productioncontrol.StorageAuditShadowBinding) (KubeCutoverPolicy, error) {
+	if err := config.Validate(); err != nil {
+		return KubeCutoverPolicy{}, err
+	}
+	const key = "'storage-lifecycle.json'"
+	name := "fugue-storage-audit-retired-" + digest([]byte(config.Namespace + "/" + config.ConfigMap))[7:27]
+	target := "variables.targetName == " + strconv.Quote(config.ConfigMap)
+	permit := "request.operation == 'UPDATE' && oldObject != null && object != null" +
+		" && oldObject.metadata.uid == " + strconv.Quote(config.ConfigMapUID) +
+		" && object.metadata.uid == oldObject.metadata.uid" +
+		" && (!has(object.data) || !(" + key + " in object.data))" +
+		" && (!has(object.binaryData) || !(" + key + " in object.binaryData))"
+	return makeCutoverPolicy(name, config.Namespace, "", []string{"configmaps"}, target, "("+permit+")", nil), nil
 }
 
 // DeploymentCutoverPolicies only renders. Freeze and native use the same

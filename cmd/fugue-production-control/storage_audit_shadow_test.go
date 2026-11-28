@@ -93,7 +93,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			report, err := readStorageAuditShadow(t.Context(), client, spec, target, test.retired, func(context.Context) (storageaudit.OwnerObservation, error) {
+			report, err := readStorageAuditShadow(t.Context(), client.CoreV1(), spec, target, test.retired, func(context.Context) (storageaudit.OwnerObservation, error) {
 				dbPolicy := current
 				if test.diverge {
 					dbPolicy = target
@@ -113,7 +113,7 @@ func TestStorageAuditShadowRejectsDivergenceAndConfigMapReplacement(t *testing.T
 				report.Current != report.Rollback || report.Target.Digest != "sha256:"+target.Digest() || report.Rollback.Document != current {
 				t.Fatalf("unexpected storage audit shadow: %+v, %v", report, err)
 			}
-			if _, err := client.ConfigMaps(spec.Namespace).Create(t.Context(), &v1.ConfigMap{}, metav1.CreateOptions{}); err == nil ||
+			if _, err := client.CoreV1().ConfigMaps(spec.Namespace).Create(t.Context(), &v1.ConfigMap{}, metav1.CreateOptions{}); err == nil ||
 				!strings.Contains(err.Error(), "permits only plain") {
 				t.Fatalf("write reached the storage audit shadow transport: %v", err)
 			}
