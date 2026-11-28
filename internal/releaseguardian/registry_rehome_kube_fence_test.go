@@ -21,6 +21,8 @@ import (
 	"fugue/internal/testfixture/kubeadmission"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -438,7 +440,7 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	proof.Signature = ed25519.Sign(witness, msg)
-	wire, _, err := productioncontrol.EncodeRegistryRehomeAdmission(proof)
+	wire, admissionDigest, err := productioncontrol.EncodeRegistryRehomeAdmission(proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,5 +459,90 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	state, err := readerLedger.ReadResource(ctx, scope)
 	if err != nil || state.Pending != claim.IntentDigest || state.LastVerified != source.Version {
 		t.Fatalf("provider response settled an unverified release: %+v %v", state, err)
+	}
+	observe := func(enrolled productioncontrol.ParticipationKubernetesBinding) (RegistryRehomePendingObservation, error) {
+		return ObserveFrozenRegistryRehomePending(ctx, admin, readerLedger, scope.ClusterID, claim.IntentDigest, ct, enrolled, observer, raw, archive.ArchiveDigest)
+	}
+	if _, err := observe(provider); err == nil || !strings.Contains(err.Error(), "plain Deployment freeze readback") {
+		t.Fatalf("placement readback accepted an open temporary write exception: %v", err)
+	}
+	pairs, err := DeploymentCutoverPolicies(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := pairs[1].Policy.DeepCopy()
+	open, err := admission.ValidatingAdmissionPolicies().Get(ctx, closed.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed.ResourceVersion = open.ResourceVersion
+	if _, err := admission.ValidatingAdmissionPolicies().Update(ctx, closed, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := admission.ValidatingWebhookConfigurations().Delete(ctx, gate.hook.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admission.ValidatingWebhookConfigurations().Get(ctx, gate.hook.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("temporary registry rehome exception was not removed: %v", err)
+	}
+	if _, err := observe(provider); err == nil || !strings.Contains(err.Error(), "placement has not converged") {
+		t.Fatalf("nonconverged rollout was accepted after the freeze: %v", err)
+	}
+	readyProviderRehomeFixture(t, ctx, admin, id.Namespace, id.Name)
+	badProvider := provider
+	badProvider.NamespaceUID = "other-instance"
+	if _, err := observe(badProvider); err == nil || !strings.Contains(err.Error(), "enrolled provider") {
+		t.Fatalf("wrong namespace instance was accepted: %v", err)
+	}
+	observed, err := observe(provider)
+	if err != nil || observed.Claim != claim || observed.AdmissionDigest != admissionDigest || observed.LastVerified != source.Version ||
+		observed.Placement != "independent_registry_observed" || observed.ProviderReadback.Deployment.UID != string(x.UID) ||
+		len(observed.ProviderReadback.Pods) != 1 || len(observed.ProviderReadback.Services) != 1 {
+		t.Fatalf("pending placement readback did not bind the existing claim: %+v %v", observed, err)
+	}
+	if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
+		t.Fatalf("observation mutated the journal: %+v %v", after, err)
+	}
+}
+
+// Envtest has API admission and storage, but no Deployment controller or
+// kubelet. Simulate only their observations; this is not a node-pull drill.
+func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin kubernetes.Interface, namespace, deployment string) {
+	t.Helper()
+	apps := admin.AppsV1().Deployments(namespace)
+	d, err := apps.Get(ctx, deployment, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := admin.AppsV1().ReplicaSets(namespace).Create(ctx, &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{Name: deployment + "-moved", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(d, appsv1.SchemeGroupVersion.WithKind("Deployment"))}},
+		Spec:       appsv1.ReplicaSetSpec{Replicas: d.Spec.Replicas, Selector: d.Spec.Selector, Template: d.Spec.Template},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pods := admin.CoreV1().Pods(namespace)
+	pod, err := pods.Create(ctx, &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: set.Name + "-0", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(set, appsv1.SchemeGroupVersion.WithKind("ReplicaSet"))}, Labels: d.Spec.Template.Labels},
+		Spec:       d.Spec.Template.Spec,
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := func(containers []corev1.Container) []corev1.ContainerStatus {
+		var out []corev1.ContainerStatus
+		for _, c := range containers {
+			out = append(out, corev1.ContainerStatus{Name: c.Name, Image: c.Image, ImageID: c.Image, Ready: true})
+		}
+		return out
+	}
+	pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+		ContainerStatuses: statuses(pod.Spec.Containers), InitContainerStatuses: statuses(pod.Spec.InitContainers)}
+	if _, err := pods.UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	d.Status.ObservedGeneration, d.Status.Replicas, d.Status.UpdatedReplicas, d.Status.ReadyReplicas, d.Status.AvailableReplicas = d.Generation, 1, 1, 1, 1
+	if _, err := apps.UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
 	}
 }

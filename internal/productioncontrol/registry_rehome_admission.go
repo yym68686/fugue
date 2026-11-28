@@ -182,6 +182,15 @@ func (e *RegistryRehomeJournal) ReadAdmission(ctx context.Context, claim Claim) 
 	return readRegistryRehomeClaimAdmission(ctx, e.journal.db, claim, e.observer)
 }
 
+// ReadAdmission identifies the immutable admission behind an existing claim.
+// This is an audit read; expiry cannot renew the write or erase its history.
+func (e *RegistryRehomeAdmissionReader) ReadAdmission(ctx context.Context, claim Claim) (RegistryRehomeAdmission, string, error) {
+	if e == nil || e.journal == nil || claim.Scope != e.scope || claim.Fence < 1 {
+		return RegistryRehomeAdmission{}, "", ErrStaleFence
+	}
+	return readRegistryRehomeClaimAdmission(ctx, e.journal.db, claim, e.observer)
+}
+
 // VerifyPendingWrite is usable by an independent provider admission server
 // with read-only journal access. A claim, attestation and owner approval
 // must all still be live. This grants no dispatch and never extends expiry.

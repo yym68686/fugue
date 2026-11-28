@@ -898,6 +898,13 @@ authority bound to pre-restore database role OIDs.
   sealed archive before reserving a claim. The offline bootstrap can verify
   the same reconstruction from an independently pinned private bundle; it
   does not contact the API or the journal or promote either version.
+  A frozen-pending observer can inspect an existing single-use claim after a
+  lost response without redispatching it. It requires the plain Deployment
+  freeze, removal of the temporary webhook exception, an enrolled read-only
+  provider context, and the exact sealed archive; it checks original or next
+  generation placement and brackets the read with the monitor, desired
+  pointer and journal. Its result is placement evidence only. It neither
+  certifies route health or request drain nor permits claim settlement.
 - The registry-only move has a separate, internal image patch and readback.
   The patch is built from the reviewed spec and issued once against the
   current Deployment UID and resourceVersion. It replaces the image locations

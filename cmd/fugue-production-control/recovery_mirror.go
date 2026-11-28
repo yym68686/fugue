@@ -137,10 +137,15 @@ func sealedRecoveryProvider(path, contextName string) (kubernetes.Interface, err
 	if err != nil {
 		return nil, err
 	}
+	return sealedRecoveryObserver(cfg)
+}
+
+func sealedRecoveryObserver(cfg *rest.Config) (kubernetes.Interface, error) {
 	server, err := url.Parse(cfg.Host)
 	if err != nil || server.Scheme != "https" || server.Host == "" || server.User != nil || server.RawQuery != "" ||
 		server.Fragment != "" || (server.Path != "" && server.Path != "/") || cfg.Insecure ||
-		cfg.ExecProvider != nil || cfg.AuthProvider != nil || cfg.Proxy != nil {
+		cfg.ExecProvider != nil || cfg.AuthProvider != nil || cfg.Proxy != nil || cfg.Transport != nil || cfg.WrapTransport != nil || cfg.Dial != nil ||
+		cfg.Impersonate.UserName != "" || cfg.Impersonate.UID != "" || len(cfg.Impersonate.Groups) != 0 || len(cfg.Impersonate.Extra) != 0 {
 		return nil, errors.New("sealed recovery observation requires a static, TLS-verified Kubernetes API context")
 	}
 	cfg.Proxy = func(*http.Request) (*url.URL, error) { return nil, nil }
