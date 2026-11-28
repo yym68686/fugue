@@ -41,6 +41,12 @@ API warmup only on this local path. Profile disagreement or unclear ownership
 keeps the full uncached Go gate. It rejects CI use and a changed worktree.
 Keep using the unchanged `make prepush` for the production gate.
 
+The local fallback has a separate six-minute ceiling and does not count
+towards the 60-second local-edit target. In the hosted cross-domain replay,
+the selector widened on all profiles; all 20 pairs exceeded the candidate's
+short timeout, while the separately run full oracle passed. A wider fallback
+that still times out fails the command; it never retries with fewer checks.
+
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do
   not rebuild downstream packages.

@@ -8,6 +8,8 @@ import time
 
 from scripts import prepush, prepush_shadow
 
+FULL_VERIFICATION_TIMEOUT_SECONDS = 360
+
 
 def main() -> int:
     if any(name in os.environ for name in ("CI", "GITHUB_ACTIONS", "PREPUSH_RECEIPT")):
@@ -27,6 +29,7 @@ def main() -> int:
 
         code = prepush._run_gate(
             shadow_select=select, shadow_result=results.append, shadow_build_first=True,
+            shadow_full_timeout=FULL_VERIFICATION_TIMEOUT_SECONDS,
         )
         result = results.pop()
         final = prepush_shadow.snapshot(base)
@@ -36,7 +39,7 @@ def main() -> int:
             result["status"] = "fail"
             result["diagnostic"] = "source changed during local verification; rerun the checks"
             code = 1
-        elif code == 0 and prepush.elapsed_timeout_exceeded(set(result["checks"]), elapsed):
+        elif code == 0 and elapsed >= result["elapsedLimitMs"]:
             result["status"] = "fail"
             result["diagnostic"] = "local verification exceeded the elapsed-time budget"
             code = 1

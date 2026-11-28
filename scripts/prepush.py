@@ -484,9 +484,14 @@ def main() -> int:
     return _run_gate()
 
 
-def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=False) -> int:
-    if shadow_build_first and (shadow_select is None or shadow_result is None):
-        raise ValueError("build-first remains a non-authorizing shadow experiment")
+def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=False,
+              shadow_full_timeout=None) -> int:
+    if (shadow_build_first or shadow_full_timeout is not None) and (
+        shadow_select is None or shadow_result is None
+    ):
+        raise ValueError("shadow scheduling requires a non-authorizing shadow result")
+    if shadow_full_timeout is not None and not 0 < shadow_full_timeout <= MAX_CONFIGURED_TIMEOUT_SECONDS:
+        raise ValueError("invalid shadow full verification timeout")
     started = time.monotonic()
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
     if timeout_seconds <= 0 or timeout_seconds > MAX_CONFIGURED_TIMEOUT_SECONDS:
@@ -508,6 +513,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
 
     compile_task = ("compile-all", ["go", "build", "-p", "4", "./..."])
     build_before_tests = False
+    use_full_timeout = False
     if shadow_select is not None:
         if shadow_result is None:
             raise ValueError("shadow replay must use a non-production result collector")
@@ -516,6 +522,9 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         compile_task = ("compile-all", selection["goBuilds"][0] if selection["goBuilds"] else None)
         build_before_tests = (shadow_build_first and selection.get("scope") == "dependency-closure"
                               and compile_task[1] is not None)
+        if selection.get("scope") == "full" and shadow_full_timeout is not None:
+            use_full_timeout = True
+            deadline = started + shadow_full_timeout
     go_dependent_tasks: dict[str, list[str] | None] = {
         "openapi-generated": [
             "go", "run", "./cmd/fugue-openapi-gen", "-spec", "openapi/openapi.yaml",
@@ -790,11 +799,14 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         "sourceCommit": source_commit,
         "status": "fail" if failures else "pass",
     }
+    elapsed_limit_seconds = shadow_full_timeout if use_full_timeout else elapsed_timeout_seconds(set(checks))
+    over_budget = elapsed_ms >= round(elapsed_limit_seconds * 1000)
     if shadow_select is not None:
         shadow_result({
             "elapsedMs": elapsed_ms,
+            "elapsedLimitMs": round(elapsed_limit_seconds * 1000),
             "checks": receipt["checks"],
-            "status": "fail" if failures or elapsed_timeout_exceeded(set(checks), elapsed_ms) else "pass",
+            "status": "fail" if failures or over_budget else "pass",
             "selection": selection,
         })
     else:
@@ -806,8 +818,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
             if output.strip():
                 print(output.rstrip(), file=sys.stderr)
         return 1
-    elapsed_limit_seconds = elapsed_timeout_seconds(set(checks))
-    if elapsed_timeout_exceeded(set(checks), elapsed_ms):
+    if over_budget:
         print(f"prepush exceeded {elapsed_limit_seconds:g}s: {elapsed_ms}ms", file=sys.stderr)
         return 1
     return 0
