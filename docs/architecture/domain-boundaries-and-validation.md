@@ -46,6 +46,11 @@ towards the 60-second local-edit target. In the hosted cross-domain replay,
 the selector widened on all profiles; all 20 pairs exceeded the candidate's
 short timeout, while the separately run full oracle passed. A wider fallback
 that still times out fails the command; it never retries with fewer checks.
+Dispatch the manual audit with `shadow_case=cross-domain` and
+`shadow_incremental=false` to exercise this actual full fallback budget once.
+Its separate witness binds the native and artifact plans and executes the
+whole-module build and uncached tests. It fails on a narrowed plan, timeout
+or source drift and is not counted in the local-edit P95.
 
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do

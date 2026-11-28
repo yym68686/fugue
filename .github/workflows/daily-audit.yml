@@ -81,7 +81,7 @@ jobs:
             git diff --binary > "$evidence/representative.patch"
           fi
       - name: Compare real native and artifact dependency graphs
-        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && !inputs.shadow_incremental }}
+        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && inputs.shadow_case != 'cross-domain' && !inputs.shadow_incremental }}
         shell: bash
         run: |
           set -euo pipefail
@@ -96,7 +96,7 @@ jobs:
           git diff --check
           git diff --binary > "$evidence/representative.patch"
       - name: Run paired shadow experiment without a production receipt
-        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && !inputs.shadow_incremental }}
+        if: ${{ !startsWith(inputs.shadow_case, 'contract-') && inputs.shadow_case != 'cross-domain' && !inputs.shadow_incremental }}
         shell: bash
         env:
           GOCACHE: ${{ runner.temp }}/fugue-shadow-go-cache
@@ -104,6 +104,13 @@ jobs:
           set -euo pipefail
           evidence="$RUNNER_TEMP/fugue-shadow-evidence"
           python3 -m scripts.prepush_replay --case "$SHADOW_CASE" --base HEAD --samples 20 --full-oracle --oracle-timeout 1200 > "$evidence/replay.json" 2> "$evidence/replay.stderr"
+      - name: Exercise the whole-module local fallback without a production receipt
+        if: ${{ inputs.shadow_case == 'cross-domain' && !inputs.shadow_incremental }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/fugue-shadow-evidence"
+          python3 -m scripts.prepush_replay --case "$SHADOW_CASE" --base HEAD --full-fallback-witness > "$evidence/fallback.json" 2> "$evidence/fallback.stderr"
       - name: Run paired incremental experiment without a production receipt
         if: ${{ !startsWith(inputs.shadow_case, 'contract-') && inputs.shadow_incremental }}
         shell: bash
