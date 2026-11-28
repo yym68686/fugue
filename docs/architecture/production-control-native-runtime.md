@@ -720,11 +720,42 @@ worker selected with progress pending, and all three worker targets reporting
 completed passes. A missing or mixed delete fence fails observation. The
 proposed provider actions are derived from that database state. They grant no
 release authority and do not validate live or rollback artifacts, the
-independent worker scrape, or Actions/runner revocation. The source currently
-retains these checks in the legacy maintenance lane. A native writer must
-still bind that evidence to the exact approved intent and apply the existing
-all-target fence and owner swap together. On admission contention, leave
-the owner unchanged and obtain fresh evidence before any later attempt.
+independent worker scrape, or Actions/runner revocation.
+
+For an already completed legacy transfer, keep the existing Worker selected.
+Read-only observation works with the previous view. Baseline import needs
+the `transfer_at` column from the updated
+`internal/schemamigrate/observation_sample_retention.sql`. The schema owner
+installs the view without running the activation script or changing grants.
+After verifying that the legacy control identities have been revoked and
+drained, use the native baseline commands:
+
+```sh
+fugue-production-control sample-retention-baseline-checkpoint CONFIG
+fugue-production-control sign-execution-witness DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
+fugue-production-control sample-retention-baseline-import CONFIG WITNESS_DIGEST
+```
+
+The private config names `journalFile`, `observerFile`, `witnessDirectory`,
+`observerKeyId`, `observerPublicKey`, and the independently retained
+`legacyRevocationEvidence` digest. Store the signed envelope in the witness
+directory as its lowercase SHA-256 hex digest plus `.json`. Use a
+read-only journal profile to draft and a separate principal with
+`SELECT` and `INSERT` on `resource_baselines` and the journal reads used
+by `ReadResource` for import. The journal must share the provider database;
+grant the import principal read access to the upgraded progress view and
+`EXECUTE` on `pg_control_system()` so it can recheck the checkpoint in the
+append transaction. Use the same owner key configuration for
+both. The technical observer key must differ from the production approval
+key.
+
+The import rereads all three fences and verifies that every Worker completed
+a pass at or after the common transfer time. The checkpoint binds the exact
+logical cluster, PostgreSQL system, database and transfer time. Additional
+successful passes leave that identity stable. PostgreSQL records the
+checkpoint and witness digest once in the native journal. The CLI and the
+journal schema prevent dispatch claims for this resource. A component
+rollback must leave sample retention with the Worker.
 
 The 2026-11-28 legacy release attempt at `998ed6168` reached the production
 transaction. PostgreSQL rejected admission because an existing sample

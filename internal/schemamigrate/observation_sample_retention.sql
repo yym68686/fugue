@@ -153,7 +153,9 @@ SELECT seed.target, COALESCE(
             WHERE tgrelid = pg_catalog.to_regclass(seed.relation)
               AND tgname = 'fugue_sample_retention_delete_fence_v1'
               AND tgfoid = pg_catalog.to_regprocedure('fugue_observation_maintenance.fence_legacy_sample_delete_v1()')
-              AND tgenabled = 'A' AND tgtype = 11 AND NOT tgisinternal) AS fence_enforced
+              AND tgenabled = 'A' AND tgtype = 11 AND NOT tgisinternal) AS fence_enforced,
+    (SELECT updated_at FROM public.fugue_meta WHERE key = 'observation/v1/' ||
+        encode(sha256(convert_to('observation-sample-retention-writer/v1', 'UTF8')), 'hex')) AS transfer_at
 FROM (VALUES ('network'::text,'public.fugue_edge_network_samples'::text),
              ('performance'::text,'public.fugue_edge_performance_samples'::text),
              ('resource-usage'::text,'public.fugue_resource_usage_samples'::text)) AS seed(target,relation)
