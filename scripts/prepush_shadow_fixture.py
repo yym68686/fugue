@@ -32,6 +32,12 @@ HOST_POLICY_TEST = (
     f"func TestHostMemorySafetyShellHasValidBashSyntax_{SAMPLE_MARKER}(t *testing.T) {{\n",
 )
 
+LOCALPV_PYTHON_TEST = (
+    "internal/localpvsafety/host/test_localpv_unit.py",
+    "    def test_observe_reports_drift_without_writes(self):\n",
+    f"    def test_observe_reports_drift_without_writes_{SAMPLE_MARKER}(self):\n",
+)
+
 BACKUP_RUNTIME = (
     "internal/backupusage/inventoryscan/service.go",
     '"backup namespace is not measurable"',
@@ -105,10 +111,17 @@ OOM_SCOPE_REGRESSION = (
     "\t_ = s.Store.EnqueueOOMRightSizingDeploy\n\treleases, err := s.Store.ListAppReleases(",
 )
 
+LOCALPV_INVENTORY_SCOPE_REGRESSION = (
+    "internal/controller/safe_rollout_resume.go",
+    "\treleases, err := s.Store.ListAppReleases(",
+    "\t_ = s.Store.LocalPVInventoryReporter\n\treleases, err := s.Store.ListAppReleases(",
+)
+
 CASES = {
     "queue-runtime": (QUEUE_RUNTIME,),
     "queue-test": (QUEUE_TEST,),
     "host-policy-test": (HOST_POLICY_TEST,),
+    "localpv-python-test": (LOCALPV_PYTHON_TEST,),
     "backup-runtime": (BACKUP_RUNTIME,),
     "retirement-test": (RETIREMENT_TEST,),
     "builder-runtime": (BUILDER_RUNTIME,),
@@ -119,6 +132,11 @@ CASES = {
 }
 
 CONTRACTS = {
+    "contract-localpv-inventory": (
+        LOCALPV_INVENTORY_SCOPE_REGRESSION, "./internal/localpvsafety/inventory",
+        "TestLocalPVInventoryWritesStayOnTheirDomainPorts",
+        "only internal/api/image_cache_localpv_admin.go may acquire LocalPVInventoryReporter",
+    ),
     "contract-builder-checkpoint": (
         BUILDER_SCOPE_REGRESSION, "./internal/buildadmission",
         "TestOnlyControllerAdapterAcquiresBuilderAdmissionCheckpoints",

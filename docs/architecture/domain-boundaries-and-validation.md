@@ -148,7 +148,10 @@ the compiler sees a different input and the edit can propagate to importers.
 The report records every input hash, the uncached Go oracle, and the native
 and Linux artifact target plans for the first sample. The manual daily audit
 exposes this profile through `shadow_incremental`. It offers operation queue,
-backup usage, retirement, installer policy, and cross-domain edit cases.
+backup usage, retirement, installer policy, LocalPV's embedded Python test and
+cross-domain edit cases. The `contract-localpv-inventory` audit separately
+requires the exact uncached domain guard to reject Controller acquisition of
+the API's snapshot writer on native and both artifact profiles.
 
 For runtime edits, `--build-first` tries the selected dependency build before
 the selected tests so the two Go processes do not compete to compile the same

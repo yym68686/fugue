@@ -13,6 +13,7 @@ on:
           - queue-runtime
           - queue-test
           - host-policy-test
+          - localpv-python-test
           - backup-runtime
           - retirement-test
           - builder-runtime
@@ -23,6 +24,7 @@ on:
           - contract-backup-checkpoint
           - contract-builder-checkpoint
           - contract-oom-admission
+          - contract-localpv-inventory
           - contract-tracking-scope
           - contract-generator-consumer
           - contract-retirement-scope
