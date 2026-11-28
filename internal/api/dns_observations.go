@@ -27,8 +27,8 @@ func (s *Server) StartBackgroundDNSObservations(ctx context.Context) {
 	ticker := time.NewTicker(edgeDNSArtifactControllerInterval)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		// Reuse the old writer lock during rolling upgrades; old and new processes
-		// cannot update the ranking observation cursor concurrently.
+		// This compatibility monitor is read-only. Retain its per-fleet sampling
+		// cadence until the signed-policy checks move to their own executor.
 		acquired, err := s.store.WithAdvisoryLock(ctx, edgeDNSArtifactControllerLockName, func() error { return s.reconcileDNSObservations(ctx, time.Now().UTC()) })
 		s.dnsObservation.mu.Lock()
 		if !acquired {
@@ -67,9 +67,6 @@ func (s *Server) verifiedDNSObservationPolicy() (model.PlatformArtifact, platfor
 
 func (s *Server) reconcileDNSObservations(ctx context.Context, now time.Time) error {
 	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if _, err := s.reconcileHostedDNSFlattenRecords(ctx, now); err != nil {
 		return err
 	}
 	_, policy, err := s.verifiedDNSObservationPolicy()

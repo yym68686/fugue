@@ -132,8 +132,12 @@ fugue_dns_observation_policy_mode
 fugue_dns_observation_last_success_timestamp_seconds
 ```
 
-The observation loop refreshes flatten and ranking facts using the verified
-PolicySnapshot's ranking mode and cooldown. It does not publish DNS artifacts.
+The API observation loop checks the verified PolicySnapshot without writing
+ranking facts or publishing DNS artifacts. The dedicated Hosted DNS worker
+refreshes derived answers independently. Its health and persisted progress
+are exposed as `fugue_hosted_dns_worker_storage_available`,
+`fugue_hosted_dns_owner`, `fugue_hosted_dns_last_completed_at_seconds` and
+`fugue_hosted_dns_last_updated_records`.
 TrafficReleaseSet convergence and consumer serving facts determine whether
 the compiled configuration is serving. The old standalone DNS publisher and
 its HTTP serving endpoint are retired.

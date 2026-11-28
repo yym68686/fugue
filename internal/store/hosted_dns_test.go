@@ -13,6 +13,7 @@ func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	s := newHostedDNSTestStore(t)
+	installHostedDNSWorkerFunctions(t, s)
 	zone := putHostedDNSTestZone(t, s, createHostedDNSTestTenant(t, s, "dns-owner"), "example.com")
 	record := putHostedDNSTestRecord(t, s, zone, model.DNSRecord{
 		Name: "@", Type: model.DNSRecordTypeALIAS, Values: []string{"old.example.net"},
@@ -32,15 +33,28 @@ func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, record, result); err != nil || changed {
-		t.Fatalf("stale answer changed current intent: changed=%t err=%v", changed, err)
-	}
-
 	// The exact current revision accepts derived answers without receiving
 	// authority to apply any user fields copied into the observation.
 	result.Values = []string{"other.example.net"}
 	result.TTL = 300
-	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, changedIntent, result); err != nil || !changed {
+	commit := func(revision model.DNSRecord) (bool, error) {
+		var changed bool
+		err := s.db.QueryRowContext(ctx, `SELECT fugue_hosted_dns_maintenance.commit_v1(
+$1,$2,$3,$4,$5,$6,'["1.1.1.1"]'::jsonb,'[]'::jsonb,$7,$8,$9,'','')`,
+			zone.ID, zone.TenantID, zone.ProjectID, revision.ID, revision.CreatedAt, revision.UpdatedAt,
+			result.FlattenStatus, result.Status, result.LastResolvedAt).Scan(&changed)
+		return changed, err
+	}
+	if changed, err := commit(changedIntent); err != nil || changed {
+		t.Fatalf("standby worker wrote an answer: changed=%t err=%v", changed, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_meta (key,value) VALUES('hosted-dns-flatten/v1/writer','worker')`); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := commit(record); err != nil || changed {
+		t.Fatalf("stale answer changed current intent: changed=%t err=%v", changed, err)
+	}
+	if changed, err := commit(changedIntent); err != nil || !changed {
 		t.Fatalf("current answer did not commit: changed=%t err=%v", changed, err)
 	}
 	current, err := s.GetDNSRecord(zone.ID, record.ID)
@@ -52,24 +66,8 @@ func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
 		!current.UpdatedAt.After(changedIntent.UpdatedAt) {
 		t.Fatalf("wrong persisted intent or answer: %+v", current)
 	}
-	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, changedIntent, result); err != nil || changed {
+	if changed, err := commit(changedIntent); err != nil || changed {
 		t.Fatalf("competing observation reused a consumed revision: changed=%t err=%v", changed, err)
-	}
-	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
-		t.Fatalf("standby worker wrote an answer: changed=%t err=%v", changed, err)
-	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO fugue_meta (key,value) VALUES($1,$2)`, hostedDNSFlattenOwnerKey, HostedDNSFlattenWorker); err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := s.CommitHostedDNSFlattenObservation(ctx, zone, current, result); err != nil || changed {
-		t.Fatalf("old API wrote after authority changed: changed=%t err=%v", changed, err)
-	}
-	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || !changed {
-		t.Fatalf("active worker could not publish an answer: changed=%t err=%v", changed, err)
-	}
-	current, err = s.GetDNSRecord(zone.ID, record.ID)
-	if err != nil {
-		t.Fatal(err)
 	}
 	suspended := zone
 	suspended.Status = model.HostedZoneStatusSuspended
@@ -77,7 +75,7 @@ func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
+	if changed, err := commit(current); err != nil || changed {
 		t.Fatalf("suspended zone accepted an answer: changed=%t err=%v", changed, err)
 	}
 	suspended.Status = zone.Status
@@ -87,7 +85,7 @@ func TestHostedDNSFlattenObservationFencesConcurrentIntent(t *testing.T) {
 	if _, err := s.DeleteDNSRecord(zone.ID, record.ID); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenWorker, zone, current, result); err != nil || changed {
+	if changed, err := commit(current); err != nil || changed {
 		t.Fatalf("observation recreated a deleted record: changed=%t err=%v", changed, err)
 	}
 }
