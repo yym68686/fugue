@@ -7,7 +7,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -87,7 +86,7 @@ func (s *Store) RunObservationRetention(ctx context.Context, storagePolicyPath s
 		s.retention.mu.Unlock()
 		if p.Enabled && time.Since(lastRun) >= time.Duration(p.IntervalSeconds)*time.Second {
 			lastRun = time.Now().UTC()
-			counts, runErr := s.pruneObservationHistory(ctx, p, keys, lastRun)
+			counts, runErr := s.pruneSignedHeartbeatHistory(ctx, p, keys, lastRun)
 			s.retention.mu.Lock()
 			s.retention.observedAt = lastRun
 			s.retention.lastError = runErr != nil
@@ -133,8 +132,6 @@ func (s *Store) retentionObservation() any {
 		"minimum_probe_history_seconds": 604800, "capacity_semantics": "row budgets apply only after minimum protected history; physical bytes need vacuum/reuse"}
 }
 
-type observationTable struct{ table, timestamp string }
-
 type retentionFailure struct {
 	stage string
 	cause error
@@ -143,13 +140,9 @@ type retentionFailure struct {
 func (e *retentionFailure) Error() string { return "observation retention failed at " + e.stage }
 func (e *retentionFailure) Unwrap() error { return e.cause }
 
-var retainedObservationTables = []observationTable{
-	{"fugue_edge_network_samples", "observed_at"},
-	{"fugue_edge_performance_samples", "sampled_at"},
-	{"fugue_resource_usage_samples", "observed_at"},
-}
-
 const (
+	// Keep the legacy timer lock so rolling back cannot start a second
+	// heartbeat pass while this API is still using the database.
 	observationRetentionLockID         = int64(315609238744311)
 	observationSampleRetentionOwnerKey = "observation-sample-retention-writer/v1"
 	observationSampleRetentionDemand   = "observation-sample-retention-demand/v1/"
@@ -160,15 +153,10 @@ const (
 
 var errUnrecognizedSampleRetentionWriter = errors.New("unrecognized sample retention writer")
 
-// The sample deleter and signed heartbeat retention are separate capabilities.
-// A sample cutover must take this same advisory lock before publishing the
-// owner and fencing the three legacy tables. Reading through the leased
-// connection keeps admission and every legacy sample delete in that interval.
-func apiOwnsObservationSampleRetention(ctx context.Context, conn interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (bool, error) {
+// Read ownership under the foreground transaction's shared cutover lock.
+func apiOwnsObservationSampleRetention(ctx context.Context, tx *sql.Tx) (bool, error) {
 	var owner string
-	err := conn.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, observationCheckpointKey(observationSampleRetentionOwnerKey)).Scan(&owner)
+	err := tx.QueryRowContext(ctx, `SELECT value FROM fugue_meta WHERE key=$1`, observationCheckpointKey(observationSampleRetentionOwnerKey)).Scan(&owner)
 	if errors.Is(err, sql.ErrNoRows) {
 		return true, nil
 	}
@@ -200,7 +188,7 @@ func apiMayPruneDuringSampleIngestion(ctx context.Context, tx *sql.Tx, target st
 	allowed, err := apiOwnsObservationSampleRetention(ctx, tx)
 	if errors.Is(err, errUnrecognizedSampleRetentionWriter) {
 		// A corrupt owner must stop deletion, not stop collection. The
-		// independent compatibility timer reports the invalid value.
+		// independent sample worker reports the invalid value.
 		return false, nil
 	}
 	if err != nil || allowed {
@@ -223,7 +211,7 @@ WHERE COALESCE(CASE WHEN demand.value ~ '^-?[0-9]{1,12}$' THEN demand.value::big
 	return false, err
 }
 
-func (s *Store) pruneObservationHistory(ctx context.Context, p ObservationRetentionPolicy, keys bundleauth.Keyring, now time.Time) (map[string]int64, error) {
+func (s *Store) pruneSignedHeartbeatHistory(ctx context.Context, p ObservationRetentionPolicy, keys bundleauth.Keyring, now time.Time) (map[string]int64, error) {
 	raw, _ := json.Marshal(p)
 	if _, err := ParseObservationRetentionPolicy(raw); err != nil {
 		return nil, err
@@ -250,26 +238,12 @@ func (s *Store) pruneObservationHistory(ctx context.Context, p ObservationRetent
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
-	var sampleErr error
-	if ownsSamples, e := apiOwnsObservationSampleRetention(ctx, conn); e != nil {
-		// Do not allow a bad sample handoff checkpoint to stop independent
-		// signed-heartbeat retention. Surface both errors if it also fails.
-		sampleErr = &retentionFailure{stage: "sample_writer_admission", cause: e}
-	} else if ownsSamples {
-		for _, table := range retainedObservationTables {
-			deleted, e := pruneObservationTable(ctx, conn, table, p, now)
-			counts[table.table] = deleted
-			if e != nil {
-				return counts, &retentionFailure{stage: table.table, cause: e}
-			}
-		}
-	}
 	deleted, err := s.pruneHeartbeatHistories(ctx, conn, p, keys, now)
 	counts["heartbeat_history"] = deleted
 	if err != nil {
-		return counts, errors.Join(sampleErr, &retentionFailure{stage: "heartbeat_history", cause: err})
+		return counts, &retentionFailure{stage: "heartbeat_history", cause: err}
 	}
-	return counts, sampleErr
+	return counts, nil
 }
 
 func retentionTx(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {
@@ -282,40 +256,6 @@ func retentionTx(ctx context.Context, conn *sql.Conn) (*sql.Tx, error) {
 		return nil, err
 	}
 	return tx, nil
-}
-
-func pruneObservationTable(ctx context.Context, conn *sql.Conn, table observationTable, p ObservationRetentionPolicy, now time.Time) (int64, error) {
-	allowed := false
-	for _, t := range retainedObservationTables {
-		if t == table {
-			allowed = true
-		}
-	}
-	if !allowed {
-		return 0, errors.New("table is not an observation retention target")
-	}
-	tx, err := retentionTx(ctx, conn)
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
-	// Count-based budgets use a timestamp index and never select the protected
-	// seven-day interval, even under capacity pressure or a delayed aggregator.
-	query := fmt.Sprintf(`WITH boundary AS (SELECT %s AS at FROM %s ORDER BY %s DESC OFFSET $1 LIMIT 1),
- candidates AS (SELECT ctid FROM %s WHERE %s<$2 AND (%s<$3 OR %s<(SELECT at FROM boundary)) ORDER BY %s ASC LIMIT $4 FOR UPDATE SKIP LOCKED)
- DELETE FROM %s t USING candidates c WHERE t.ctid=c.ctid`, table.timestamp, table.table, table.timestamp, table.table, table.timestamp, table.timestamp, table.timestamp, table.timestamp, table.table)
-	result, err := tx.ExecContext(ctx, query, p.ProbeRowsPerTable-1, now.Add(-7*24*time.Hour), now.Add(-time.Duration(p.ProbeDays)*24*time.Hour), p.BatchRows)
-	if err != nil {
-		return 0, err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	return n, nil
 }
 
 const heartbeatRetentionAnchorPrefix = "observation-retention/heartbeat-boundary/"

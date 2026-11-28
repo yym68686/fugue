@@ -12,16 +12,21 @@ connection preparation are not durable background operations.
 | --- | --- | --- |
 | Billing query preparation | API database pool | PostgreSQL prepared statements belong to a connection. Preparing the same query in another process does not warm the API. Do not remove the current bounded warmer without measuring a replacement on the API pool. |
 | Edge quality rollups | Observation worker | Commit rollups and completed window watermarks together. Retry uncommitted windows on the next pass. |
-| Passive ASN, DNS policy verification, observation and quality-evidence retention | Observation worker | Reuse observation cursors or bounded retention passes. The current DNS loop also reconciles serving hosted-DNS flattened records; separate those writes from observation before moving it. Preserve the quality-evidence capacity guard on insert. |
+| Passive ASN, DNS policy verification, signed heartbeat and observation sample retention | Observation worker | Persist classification and retention cursors with the last usable observation. Preserve signed heartbeat anchors and replay heads. Preserve the quality-evidence capacity guard on insert. |
+| Hosted DNS flattened answers | Hosted DNS worker | Refresh derived records against the observed revision. Preserve user record intent across concurrent edits, retries and worker replacement. Keep policy verification separate from record writes. |
+| Resource usage sampling and distributed project-image usage snapshots | Observation worker | Keep usage timestamps, source provenance, and the existing status projections. Rebuild incomplete snapshots without changing the most recent usable result. |
+| Bootstrap machine inventory, shared-pool policy drift, legacy node labels and managed-shared location runtimes | Node or application reconciliation according to the resource | Persist per-node or per-runtime decisions. Keep cache refresh read-only. Move incidental mutations from stale GET refresh paths behind the same authority before revoking API credentials. |
+| Automatic right-sizing and OOM right-sizing | Controller | Carry app and backing-service identity, resource revision, and deduplication of OOM evidence into the existing durable deploy-operation boundary. Preserve user-controlled policy modes. |
+| Console and API metrics snapshots | API-local | Refresh only process-local read caches. Ownership of the source observation belongs to its executor. |
 | Storage policy and lifecycle | API-local pool and codec configuration; storage worker for audit and maintenance | Reload the local policy in each consumer; separate the artifact deduplication writes currently bundled in its reload loop. Give maintenance its own bounded work progress. |
 | Backup execution, retirement, inventory | Backup execution and inventory workers | Preserve atomic backup claims, coordination leases and artifact identities. Inventory remains separate from execution and does not enqueue replacement backup effects. |
 | Database imports and TLS issuance | Import and certificate workers | Preserve the durable jobs and replay rules. Require explicit treatment of ambiguous SQL or CA effects before any retry. |
 | App mail and other application-resource reconciliation | Controller | Advance the existing app desired state and report status on persistent app resources. |
-| Platform compile/publish | Guardian | Do not bypass existing publication fences, signing or consumer selection. Move read-only capture separately where necessary. |
+| Platform compile/publish and offline Edge recovery | Guardian | Preserve per-authority publication fences, signed inputs, consumer selection, verified LKG, and the explicit offline recovery policy. Move read-only capture separately where needed. |
 | Automation shadow | Observation/automation worker | Reports are evidence only; do not inherit actuator credentials. |
 | Node participation | Dedicated executor after read-only comparison | Preserve target identity, lease fencing and actual consumer evidence. Both the API and scheduled Actions currently invoke the legacy apply path; migrate their authority together. |
 
-This is the target allocation, not a claim that these tasks have moved.
+Record production ownership against an exact release receipt for each transfer.
 
 ### Storage lifecycle audit worker
 
@@ -41,17 +46,20 @@ Reinstalling the capability does not enable it or reset its owner. A rollback
 must keep the worker owner after activation; the policy can independently
 disable sampling without restoring the legacy executor.
 
-`FUGUE_STORAGE_LIFECYCLE_HANDOFF_ENABLED=true` is API startup configuration,
-not ownership activation. Set it only after the capability is installed with
-`owner=api`, and grant the API only `USAGE` on `fugue_storage_audit` and
-`SELECT` on `lifecycle_status_v1` in that schema. The API checks ownership
+The compatibility API used `FUGUE_STORAGE_LIFECYCLE_HANDOFF_ENABLED=true`
+after installing the capability with `owner=api`. Its database role received
+`USAGE` on `fugue_storage_audit` and `SELECT` on `lifecycle_status_v1` in
+that schema. The compatibility API checked ownership
 under a shared advisory lock on the same PostgreSQL session as its legacy
 read-only scan. The SQL transfer refuses to change ownership while that lock
 is held. Once an API process observes `owner=worker`, it does not resume that
 scan even if the status view becomes temporarily unavailable. The existing
 API-local policy refresh projects the last durable sample into the unchanged
 diagnostic response; neither a diagnostic request nor a metrics scrape reads
-PostgreSQL. The owner also exclusively exports the existing lifecycle metrics.
+PostgreSQL. The worker exclusively exports the lifecycle metrics after
+activation. The cleanup release removes the API inventory scan and its
+startup flag. The API keeps its existing diagnostic response using only the
+redacted status view.
 
 The standby installer verifies the CNPG cluster and database identity, binds
 a new immutable Secret to a dedicated login, and only grants the API access
@@ -81,6 +89,12 @@ the worker is restored. The durable owner stays with the worker throughout.
 After activation the verifier checks a committed sample under the declared
 policy and verifies threshold series on the worker scrape. The storage policy
 job can pause sampling through its existing policy update path.
+
+The production transfer completed on November 28, 2026 (`6df331068`). The
+database recorded a successful pass after transfer, and Prometheus observed
+the same standby worker as the active owner. The API cleanup publishes before
+and after observations to show that the worker Pod stays up and commits a
+new durable pass while both API replicas are replaced.
 
 Before enabling, exercise both the SQL and the worker restart against a
 disposable database:
@@ -255,5 +269,15 @@ actual rollback artifacts. The transfer must take both API locks and atomically
 attach and enable the database fence with the ownership change. The fence
 preserves legitimate tenant cascades and turns a legacy inline delete into a
 no-op rather than aborting the associated insert. The worker refuses to
-advance without that fence. These are prerequisites, not evidence that the
-sampling writer has been moved in production.
+advance without that fence. A temporary lock conflict rolls back the whole
+activation. Actions retries that conflict only after checking the exact
+serving and rollback artifacts, primary, credential, policy and writer
+state again. An ambiguous transport failure is not an automatic write retry.
+
+After the transfer has committed and all three targets have new durable
+progress, retire the API's scheduled sample delete. A release replacing the
+compatibility API records before and after observations of both API replicas
+and checks for a new committed pass on every sample target from the same
+independent worker. Sample submissions still retain their foreground cutoff
+contract. Signed heartbeat retention keeps the existing API timer and lock
+until its key and database capabilities are moved separately.

@@ -4976,8 +4976,81 @@ jobs:
         run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Observe the storage audit worker before retiring the API scanner
+        id: storage_audit_before
+        run: |
+          set -euo pipefail
+          retired=internal/store/storage_lifecycle_handoff.go
+          if [[ -e "$retired" ]]; then exit 0; fi
+          previous=$(jq -er '.expectedPreviousConfigSha | strings | select(test("^[a-f0-9]{40}$"))' deploy/releases/api/intent.json)
+          if ! git cat-file -e "$previous:$retired" 2>/dev/null; then exit 0; fi
+          python3 -m scripts.verify_storage_audit_api_rollout \
+            deploy/releases/storage-audit-worker/database.json deploy/releases/storage-audit-worker/activation.json \
+            deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json \
+            --api-intent deploy/releases/api/intent.json \
+            > "$RUNNER_TEMP/fugue-storage-audit-before-api-rollout.json"
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
+      - name: Observe sample retention before retiring the API timer
+        id: sample_retention_before
+        run: |
+          set -euo pipefail
+          executor=internal/store/observation_retention.go
+          marker='func pruneObservationTable('
+          if [[ $(< "$executor") == *"$marker"* ]]; then exit 0; fi
+          previous=$(jq -er '.expectedPreviousConfigSha | strings | select(test("^[a-f0-9]{40}$"))' deploy/releases/api/intent.json)
+          source=$(git show "$previous:$executor")
+          if [[ "$source" != *"$marker"* ]]; then exit 0; fi
+          python3 -m scripts.verify_observation_sample_retention_api_rollout \
+            deploy/releases/observation-worker/database.json deploy/releases/observation-worker/sample-retention-handoff.json \
+            deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json \
+            --api-intent deploy/releases/api/intent.json \
+            > "$RUNNER_TEMP/fugue-sample-retention-before-api-rollout.json"
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/deploy-declarative-component
+        id: deploy_api_component
         with: {component: api, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Verify all sample retention targets advanced during the API rollout
+        if: ${{ !cancelled() && steps.sample_retention_before.outputs.selected == 'true' && steps.deploy_api_component.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.verify_observation_sample_retention_api_rollout \
+            deploy/releases/observation-worker/database.json deploy/releases/observation-worker/sample-retention-handoff.json \
+            deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json \
+            --api-intent deploy/releases/api/intent.json \
+            --before "$RUNNER_TEMP/fugue-sample-retention-before-api-rollout.json" \
+            --api-receipt "$RUNNER_TEMP/fugue-component-artifact/fugue-api-artifact-receipt.json" \
+            > "$RUNNER_TEMP/fugue-sample-retention-after-api-rollout.json"
+      - name: Verify durable audit progress after the API rollout
+        if: ${{ !cancelled() && steps.storage_audit_before.outputs.selected == 'true' && steps.deploy_api_component.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.verify_storage_audit_api_rollout \
+            deploy/releases/storage-audit-worker/database.json deploy/releases/storage-audit-worker/activation.json \
+            deploy/environments/production/storage-policy/policy.json deploy/environments/production/observability/scrape-policy.json \
+            --api-intent deploy/releases/api/intent.json \
+            --before "$RUNNER_TEMP/fugue-storage-audit-before-api-rollout.json" \
+            --api-receipt "$RUNNER_TEMP/fugue-component-artifact/fugue-api-artifact-receipt.json" \
+            > "$RUNNER_TEMP/fugue-storage-audit-after-api-rollout.json"
+      - name: Retain storage audit API rollout evidence
+        if: always() && steps.storage_audit_before.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-storage-audit-api-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fugue-storage-audit-before-api-rollout.json
+            ${{ runner.temp }}/fugue-storage-audit-after-api-rollout.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain sample retention API rollout evidence
+        if: always() && steps.sample_retention_before.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-sample-retention-api-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fugue-sample-retention-before-api-rollout.json
+            ${{ runner.temp }}/fugue-sample-retention-after-api-rollout.json
+          if-no-files-found: error
+          retention-days: 30
 
   deploy_controller:
     needs: [prepush, component-build, deploy_schema]
