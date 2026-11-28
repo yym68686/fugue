@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Observation checkpoints contain only rebuildable runtime facts. They never
@@ -24,6 +25,13 @@ func (s *Store) ReadObservationCheckpoint(ctx context.Context, key string) ([]by
 // UpdateObservationCheckpoint serializes one bounded page and its cursor
 // across replicas. A canceled/failed update cannot publish partial progress.
 func (s *Store) UpdateObservationCheckpoint(ctx context.Context, key string, fn func([]byte) ([]byte, error)) (bool, error) {
+	if strings.HasPrefix(key, backupInventoryCheckpointPrefix) {
+		return false, fmt.Errorf("%w: backup inventory uses its dedicated checkpoint writer", ErrInvalidInput)
+	}
+	return s.updateObservationCheckpoint(ctx, key, fn)
+}
+
+func (s *Store) updateObservationCheckpoint(ctx context.Context, key string, fn func([]byte) ([]byte, error)) (bool, error) {
 	key = observationCheckpointKey(key)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

@@ -2,6 +2,7 @@ package inventoryscan
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -16,7 +17,7 @@ type memoryStore struct {
 	backend model.BackupBackend
 	pages   Pages
 	legacy  []byte
-	key     string
+	key     [sha256.Size]byte
 	updates int
 }
 
@@ -30,15 +31,15 @@ func (m *memoryStore) BackendForInventory(id string) (model.BackupBackend, error
 	return m.backend, nil
 }
 func (*memoryStore) Artifacts() ([]model.BackupArtifact, error) { return nil, nil }
-func (m *memoryStore) ReadPages(_ context.Context, key string) (Pages, []byte, error) {
+func (m *memoryStore) ReadPages(_ context.Context, key [sha256.Size]byte) (Pages, []byte, error) {
 	if key != m.key {
-		return Pages{}, nil, fmt.Errorf("unexpected checkpoint key %q", key)
+		return Pages{}, nil, fmt.Errorf("unexpected checkpoint key %x", key)
 	}
 	return m.pages, m.legacy, nil
 }
-func (m *memoryStore) UpdatePages(_ context.Context, key string, update func(Pages, []byte) (Pages, error), _ func([]byte) ([]byte, error)) (bool, error) {
+func (m *memoryStore) UpdatePages(_ context.Context, key [sha256.Size]byte, update func(Pages, []byte) (Pages, error), _ func([]byte) ([]byte, error)) (bool, error) {
 	if key != m.key {
-		return false, fmt.Errorf("unexpected checkpoint key %q", key)
+		return false, fmt.Errorf("unexpected checkpoint key %x", key)
 	}
 	pages, err := update(m.pages, m.legacy)
 	if err != nil || pages.Metadata == nil {
