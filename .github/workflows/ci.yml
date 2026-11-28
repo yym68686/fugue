@@ -5254,8 +5254,8 @@ jobs:
           if git diff --quiet "$BASE_SHA" HEAD -- "$declaration"; then exit 0; fi
           test -f "$declaration" && test ! -L "$declaration"
           git fetch origin main
-          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller deploy/releases/observation-worker/database.json .github/workflows/ci.yml scripts/verify_app_mail_standby.py scripts/apply_app_mail_reconcile_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
-          python3 -m unittest scripts.test_verify_app_mail_standby
+          git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller deploy/releases/observation-worker/database.json .github/workflows/ci.yml scripts/verify_app_mail_standby.py scripts/verify_app_mail_provider_runtime.py scripts/apply_app_mail_reconcile_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
+          python3 -m unittest scripts.test_verify_app_mail_standby scripts.test_verify_app_mail_provider_runtime
           python3 -m scripts.verify_app_mail_standby deploy/releases/observation-worker/database.json "$declaration" \
             > "$RUNNER_TEMP/fugue-app-mail-standby-observation.json"
           echo 'verified=true' >> "$GITHUB_OUTPUT"

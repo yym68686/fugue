@@ -21,10 +21,12 @@ class AppMailStandbyTests(unittest.TestCase):
               patch.object(standby, "verify_workload", return_value=("deployment", 5, [(LEADER[1], LEADER[2])])),
               patch.object(standby, "checked_rollback", return_value=(rollback_revision, "pinned")),
               patch.object(standby, "read_progress", return_value=progress),
+              patch.object(standby, "observe_provider_runtime", side_effect=ProvisionError("missing evidence")),
               patch.object(standby, "check_leader", return_value=LEADER)):
             result = standby.verify_standby(p, DECLARATION)
         self.assertTrue(result["providerExactGenerationRead"])
         self.assertFalse(result["writerTransferred"])
+        self.assertEqual(result["providerRuntime"], {"verified": False, "reason": "missing evidence"})
         self.assertFalse(result["rollback"]["api"]["compatible"])
         self.assertTrue(result["rollback"]["controller"]["compatible"])
         p.sql.assert_not_called()

@@ -10,6 +10,7 @@ from scripts.apply_app_mail_reconcile_handoff import (
     API_PATHS, CONTROLLER_PATHS, check_leader, parse_release, read_progress, verify_source,
 )
 from scripts.provision_observation_worker_database import Provision, ProvisionError
+from scripts.verify_app_mail_provider_runtime import observe_provider_runtime
 from scripts.verify_observation_rollback_floor import checked_rollback
 from scripts.verify_observation_writer_handoff import verify_workload
 
@@ -39,6 +40,16 @@ def verify_standby(provision, release):
         raise ProvisionError("mail queue coverage or its active provider witness is missing")
     controller = release["controller"]
     leader = check_leader(provision, controller, live["controller"][2], "api")
+    try:
+        provider, provider_witness = observe_provider_runtime(provision, primary[0])
+    except ProvisionError as err:
+        # A missing provider artifact does not erase the independent rollback
+        # and standby evidence. It remains explicitly unsatisfied.
+        provider = {"verified": False, "reason": str(err)}
+    else:
+        if observe_provider_runtime(provision, primary[0]) != (provider, provider_witness):
+            raise ProvisionError("provider changed during mail standby verification")
+        provider["verified"] = True
     for component, _ in targets:
         if (verify_workload(provision, release[component]) != live[component]
                 or checked_rollback(provision, component, release[component]) != (
@@ -53,6 +64,7 @@ def verify_standby(provision, release):
         "rollback": rollback,
         "revisions": {name: release[name]["revision"] for name, _ in targets},
         "providerExactGenerationRead": True,
+        "providerRuntime": provider,
         "writerTransferred": False,
     }
 
