@@ -248,11 +248,20 @@ func DraftRegistryRehomeSubmission(ctx context.Context, client kubernetes.Interf
 	if err != nil || !reflect.DeepEqual(source, after) {
 		return productioncontrol.Submission{}, errors.Join(errors.New("registry rehome provider changed during mirror verification"), err)
 	}
+	review := RegistryRehomeReview{source, draft}
+	id := source.Deployment.Identity
+	live, err := client.AppsV1().Deployments(id.Namespace).Get(ctx, id.Name, metav1.GetOptions{})
+	if err != nil {
+		return productioncontrol.Submission{}, fmt.Errorf("read registry rehome Deployment for shadow projection: %w", err)
+	}
+	if _, err := prepareRegistryRehomeDeploymentCAS(review, live); err != nil {
+		return productioncontrol.Submission{}, fmt.Errorf("registry rehome cannot build a reviewed image-only patch: %w", err)
+	}
 	fresh, err := journal.ReadResource(ctx, scope)
 	if err != nil || fresh != state {
 		return productioncontrol.Submission{}, errors.Join(errors.New("registry rehome journal head changed during verification"), err)
 	}
-	rawPayload, err := declarativerelease.CanonicalJSON(RegistryRehomeReview{source, draft})
+	rawPayload, err := declarativerelease.CanonicalJSON(review)
 	if err != nil {
 		return productioncontrol.Submission{}, err
 	}

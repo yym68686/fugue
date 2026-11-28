@@ -17,6 +17,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
+	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 )
 
 type rehomeResourceStub func(context.Context, productioncontrol.Scope) (productioncontrol.ResourceState, error)
@@ -27,7 +29,7 @@ func (f rehomeResourceStub) ReadResource(ctx context.Context, scope productionco
 
 func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 	ctx := context.Background()
-	for _, mode := range []string{"verified", "busy journal", "wrong head", "replacement Deployment", "Service drift", "journal changed", "pending legacy pointer"} {
+	for _, mode := range []string{"verified", "busy journal", "wrong head", "replacement Deployment", "Service drift", "journal changed", "pending legacy pointer", "patch projection drift"} {
 		t.Run(mode, func(t *testing.T) {
 			objects := map[string]registryTestContent{}
 			rollback, _ := registryImageFixture(t, objects, "fixture/rehome", strings.Repeat("2", 40), false)
@@ -70,6 +72,23 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				}
 			}
 			client.ClearActions()
+			if mode == "patch projection drift" {
+				deploymentReads := 0
+				client.PrependReactor("get", "deployments", func(clienttesting.Action) (bool, runtime.Object, error) {
+					deploymentReads++
+					if deploymentReads != 3 {
+						return false, nil, nil
+					}
+					d := source.Deployment.Identity
+					obj, err := client.Tracker().Get(appsv1.SchemeGroupVersion.WithResource("deployments"), d.Namespace, d.Name)
+					if err != nil {
+						return true, nil, err
+					}
+					changed := obj.(*appsv1.Deployment).DeepCopy()
+					changed.Spec.Replicas = ptr.To[int32](23)
+					return true, changed, nil
+				})
+			}
 			count, reads := 0, 0
 			journal := rehomeResourceStub(func(_ context.Context, scope productioncontrol.Scope) (productioncontrol.ResourceState, error) {
 				count++
@@ -132,7 +151,8 @@ func TestRegistryRehomeApprovalReadyDraft(t *testing.T) {
 				}
 			} else {
 				want := map[string]string{"busy journal": "settled journal", "wrong head": "settled journal", "replacement Deployment": "provider changed",
-					"Service drift": "differs from its sealed declaration", "journal changed": "journal head changed", "pending legacy pointer": "read retained Guardian release alias"}[mode]
+					"Service drift": "differs from its sealed declaration", "journal changed": "journal head changed", "pending legacy pointer": "read retained Guardian release alias",
+					"patch projection drift": "cannot build a reviewed image-only patch"}[mode]
 				if err == nil || !strings.Contains(err.Error(), want) || len(s.Payload) != 0 {
 					t.Fatalf("accepted drifted draft=%+v err=%v want=%q", s.Intent, err, want)
 				}
