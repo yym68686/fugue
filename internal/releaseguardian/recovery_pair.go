@@ -42,6 +42,10 @@ type SealedRecoveryPair struct {
 // immutable monitor record that proves that exact predecessor. This does not
 // prove which version is serving now, retention, or any authority to recover.
 func ObserveSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Interface, namespace, component string) (SealedRecoveryPair, error) {
+	return observeSealedRecoveryPair(ctx, client, namespace, component, nil)
+}
+
+func observeSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Interface, namespace, component string, archive *sealedRecoveryArchive) (SealedRecoveryPair, error) {
 	if client == nil || !componentPattern.MatchString(namespace) || !componentPattern.MatchString(component) {
 		return SealedRecoveryPair{}, errors.New("sealed recovery observation requires a Kubernetes namespace and release component")
 	}
@@ -96,8 +100,7 @@ func ObserveSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Inte
 		if err != nil || candidate.prepared.ConfigSHA != current.prepared.LKG.ConfigSHA {
 			return SealedRecoveryPair{}, errors.New("invalid sealed record in rollback release history")
 		}
-		if candidate.prepared.Forward != current.prepared.LKG || !bytes.Equal(candidate.forward, current.lkg) ||
-			recoveryWorkloadKey(candidate.workload) != recoveryWorkloadKey(current.workload) {
+		if !isSealedRollback(current, candidate) {
 			continue
 		}
 		if rollback.version.Record.Name != "" {
@@ -117,8 +120,15 @@ func ObserveSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Inte
 			return SealedRecoveryPair{}, errors.New("verified recovery records changed during observation")
 		}
 	}
-	return SealedRecoveryPair{Namespace: namespace, Component: component, Pointer: recoveryRef(pointer),
-		Forward: current.version, Rollback: rollback.version}, nil
+	pair := SealedRecoveryPair{Namespace: namespace, Component: component, Pointer: recoveryRef(pointer),
+		Forward: current.version, Rollback: rollback.version}
+	if archive != nil {
+		*archive = sealedRecoveryArchive{Schema: recoveryArchiveSchema,
+			Namespace: namespace, Component: component, Pointer: pair.Pointer, State: state,
+			Forward:  archivedRecoveryRecord{Ref: pair.Forward.Record, Files: current.files},
+			Rollback: archivedRecoveryRecord{Ref: pair.Rollback.Record, Files: rollback.files}}
+	}
+	return pair, nil
 }
 
 type sealedRecoveryRecord struct {
@@ -127,6 +137,7 @@ type sealedRecoveryRecord struct {
 	workload declarativerelease.Workload
 	forward  []byte
 	lkg      []byte
+	files    map[string]string
 }
 
 func readSealedRecoveryRecord(object *corev1.ConfigMap, namespace, component string) (sealedRecoveryRecord, error) {
@@ -134,19 +145,36 @@ func readSealedRecoveryRecord(object *corev1.ConfigMap, namespace, component str
 		object.Immutable == nil || !*object.Immutable || len(object.BinaryData) != 0 || totalConfigMapBytes(object.Data) > maxRecordBytes {
 		return sealedRecoveryRecord{}, errors.New("invalid immutable recovery record metadata")
 	}
-	plan, artifact, prepared, monitor, forward, lkg, err := decodeStableRecord(object.Data)
+	record, err := decodeSealedRecoveryRecord(recoveryRef(object), object.Data, component)
+	if err != nil || object.Labels["fugue.pro/config-sha"] != record.version.Monitor.ConfigSHA {
+		return sealedRecoveryRecord{}, errors.New("invalid binding in immutable recovery record")
+	}
+	return record, nil
+}
+
+func decodeSealedRecoveryRecord(ref RecoveryRecordRef, data map[string]string, component string) (sealedRecoveryRecord, error) {
+	if ref.UID == "" || ref.ResourceVersion == "" || totalConfigMapBytes(data) > maxRecordBytes {
+		return sealedRecoveryRecord{}, errors.New("invalid immutable recovery record identity or size")
+	}
+	plan, artifact, prepared, monitor, forward, lkg, err := decodeStableRecord(data)
 	release, ok := releaseForComponent(plan, component)
 	if err != nil || !ok || monitor.Component != component || prepared.Component != component ||
-		object.Name != monitorRecordNameFromDigest(component, monitor.RecordDigest) || object.Labels["fugue.pro/config-sha"] != monitor.ConfigSHA ||
+		ref.Name != monitorRecordNameFromDigest(component, monitor.RecordDigest) ||
 		!prepared.Forward.Present || artifact.Component != component || artifact.ConfigSHA != prepared.Forward.ConfigSHA ||
 		artifact.ImmutableRef != prepared.Forward.ImageRef || artifact.OCIRevision != prepared.Forward.OCIRevision ||
 		artifact.PlanDigest != plan.PlanDigest || artifact.IntentDigest != release.IntentDigest || prepared.IntentDigest != release.IntentDigest {
 		return sealedRecoveryRecord{}, errors.New("invalid binding in immutable recovery record")
 	}
 	return sealedRecoveryRecord{
-		version:  SealedRecoveryVersion{Record: recoveryRef(object), Monitor: monitor, Receipt: artifact},
-		prepared: prepared, workload: release.Workload, forward: forward, lkg: lkg,
+		version:  SealedRecoveryVersion{Record: ref, Monitor: monitor, Receipt: artifact},
+		prepared: prepared, workload: release.Workload, forward: forward, lkg: lkg, files: data,
 	}, nil
+}
+
+func isSealedRollback(current, rollback sealedRecoveryRecord) bool {
+	return current.version.Record.Name != rollback.version.Record.Name && current.prepared.LKG.Present &&
+		rollback.prepared.Forward == current.prepared.LKG && bytes.Equal(rollback.forward, current.lkg) &&
+		recoveryWorkloadKey(rollback.workload) == recoveryWorkloadKey(current.workload)
 }
 
 func recoveryObjectIs(object *corev1.ConfigMap, namespace, name, component string) bool {

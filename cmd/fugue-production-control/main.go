@@ -38,6 +38,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control verify-release-recovery-mirror CONFIG
        fugue-production-control observe-sealed-release-recovery-pair NAMESPACE COMPONENT KUBECONFIG CONTEXT
        fugue-production-control verify-sealed-release-recovery-mirror CONFIG KUBECONFIG CONTEXT
+       fugue-production-control capture-release-recovery-archive NAMESPACE COMPONENT KUBECONFIG CONTEXT NEW_PRIVATE_DIRECTORY
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -93,6 +94,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "capture-release-recovery-archive":
+		if len(args) != 6 {
+			return errors.New(usage)
+		}
+		return captureReleaseRecoveryArchive(ctx, args[1], args[2], args[3], args[4], args[5], out)
 	case "observe-sealed-release-recovery-pair":
 		if len(args) != 5 {
 			return errors.New(usage)
