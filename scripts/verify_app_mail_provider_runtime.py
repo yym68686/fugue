@@ -36,11 +36,19 @@ COMMIT;
     if len(lines) != 2 or lines[0] != "1":
         raise ProvisionError("configured mail provider has no source/image record")
     value = json.loads(lines[1])
-    if not isinstance(value, dict) or not all(matches(value.get(field), expr) for field, expr in (
-        ("id", APP_ID), ("tenant", APP_ID), ("image", IMAGE), ("sourceImage", IMAGE),
-        ("revision", COMMIT), ("repository", REPO),
-    )):
-        raise ProvisionError("configured mail provider source and immutable image are not bound")
+    if not isinstance(value, dict) or not all(matches(value.get(field), APP_ID) for field in ("id", "tenant")):
+        raise ProvisionError("configured mail provider app identity is missing or malformed")
+    # Classify the failure without emitting raw metadata: a malformed value
+    # may contain a credential. Cutover still requires all four witnesses.
+    checks = (
+        ("repository", REPO, "configured mail provider has no canonical GitHub source repository"),
+        ("revision", COMMIT, "configured mail provider has no full Git source revision"),
+        ("sourceImage", IMAGE, "configured mail provider build has no immutable image reference"),
+        ("image", IMAGE, "configured mail provider workload has no immutable image reference"),
+    )
+    missing = [reason for key, expression, reason in checks if not matches(value.get(key), expression)]
+    if missing:
+        raise ProvisionError("; ".join(missing))
     if value["sourceImage"].split("@")[1] != value["image"].split("@")[1]:
         raise ProvisionError("configured mail provider build and runtime image digests differ")
     return value

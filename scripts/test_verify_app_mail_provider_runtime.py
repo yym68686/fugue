@@ -81,7 +81,10 @@ class ProviderRuntimeTests(unittest.TestCase):
 
     def test_rejects_mutable_mismatched_or_changed_source(self):
         for changes, expected_message in (
-            ({"image": "registry.example.test/fixture/mail:latest"}, "immutable image"),
+            ({"image": "registry.example.test/fixture/mail:latest"}, "workload has no immutable image"),
+            ({"sourceImage": "registry.example.test/fixture/mail:latest"}, "build has no immutable image"),
+            ({"revision": None}, "no full Git source revision"),
+            ({"repository": None}, "no canonical GitHub source repository"),
             ({"sourceImage": IMAGE.replace("a" * 64, "c" * 64)}, "digests differ"),
         ):
             with self.subTest(reason=expected_message):
@@ -94,3 +97,14 @@ class ProviderRuntimeTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ProvisionError, "source changed"):
             observe_provider_runtime(self.provision, "primary")
+
+    def test_reports_all_missing_witnesses_without_raw_values(self):
+        self.provision.sql.return_value = "1\n" + json.dumps(
+            dict(SOURCE, repository="private-value", revision=None, image=None, sourceImage=None))
+        with self.assertRaises(ProvisionError) as result:
+            observe_provider_runtime(self.provision, "primary")
+        message = str(result.exception)
+        for detail in ("source repository", "source revision", "build has no immutable image",
+                       "workload has no immutable image"):
+            self.assertIn(detail, message)
+        self.assertNotIn("private-value", message)

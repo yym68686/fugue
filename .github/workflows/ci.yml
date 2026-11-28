@@ -5289,7 +5289,7 @@ jobs:
           set -euo pipefail
           declaration=deploy/releases/controller/app-mail-standby-observation.json
           git cat-file -e "${BASE_SHA}^{commit}"
-          if git diff --quiet "$BASE_SHA" HEAD -- "$declaration"; then exit 0; fi
+          if git diff --quiet "$BASE_SHA" HEAD -- "$declaration" scripts/verify_app_mail_provider_runtime.py; then exit 0; fi
           test -f "$declaration" && test ! -L "$declaration"
           git fetch origin main
           git diff --exit-code HEAD origin/main -- deploy/releases/api deploy/releases/controller deploy/releases/observation-worker/database.json .github/workflows/ci.yml scripts/verify_app_mail_standby.py scripts/verify_app_mail_provider_runtime.py scripts/apply_app_mail_reconcile_handoff.py scripts/verify_observation_rollback_floor.py scripts/verify_observation_writer_handoff.py scripts/provision_observation_worker_database.py
