@@ -38,6 +38,20 @@ class LocalPVGenerationTest(unittest.TestCase):
 
 
 class CanonicalReceiptTest(unittest.TestCase):
+    def test_standalone_localpv_preparation_runs_host_contract(self):
+        commands = []
+
+        def fake_run(command, _timeout):
+            commands.append(command)
+            return 0, ""
+
+        status, receipt = self.run_main_with_fake(
+            fake_run, paths=["scripts/prepare_fugue_lvm_localpv_node.sh"],
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(receipt["checks"]["localpv-host-contract-tests"]["status"], "pass")
+        self.assertIn(["go", "test", "-count=1", "./internal/nodehostpolicy"], commands)
+
     def test_history_capability_gate_and_import_dependencies_are_checked(self):
         for dependency in ('internal/inputhistory/capabilities.json', 'internal/inputhistory/capabilities.go',
                            'scripts/compiler_input_history_compatibility.py', 'scripts/test_compiler_input_history_compatibility.py',

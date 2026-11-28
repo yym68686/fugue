@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 )
@@ -173,11 +174,11 @@ func TestOverlayManagedAppStatusesPublishesCompleteRuntimeEvidence(t *testing.T)
 	if status.PhysicalReplicas == nil || *status.PhysicalReplicas != 1 || status.Generation != 3 || status.ObservedGeneration != 3 {
 		t.Fatalf("missing physical/generation evidence: %#v", status)
 	}
-	cached, ok, _ := apiServer.managedAppStatusCache.getList()
+	cached, ok, _ := apiServer.managedAppStatusCache.Inventory()
 	if !ok {
 		t.Fatal("expected successful refresh to populate list cache")
 	}
-	assertManagedAppFullRefreshSequence(t, cached.sequence)
+	assertManagedAppFullRefreshSequence(t, cached.Sequence)
 }
 
 func TestOverlayManagedAppStatusesUsesPromotedServingReleaseRuntime(t *testing.T) {
@@ -336,9 +337,9 @@ func testOverlayManagedAppReleaseIdentity(t *testing.T, implicit bool) {
 			t.Fatal("observation rewrote historical release", err)
 		}
 		endpointMissing.Store(true)
-		apiServer.managedAppStatusCache.invalidate()
+		apiServer.managedAppStatusCache.Invalidate()
 		failed := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
-		if failed.ObservedStatus == nil || failed.ObservedStatus.ServingReleaseID != "" || appObservedReadyForServing(failed, time.Now().UTC()) {
+		if failed.ObservedStatus == nil || failed.ObservedStatus.ServingReleaseID != "" || managedappstatus.ReadyForServing(failed, time.Now().UTC()) {
 			t.Fatal("implicit identity bypassed independent endpoint readiness")
 		}
 
@@ -361,11 +362,11 @@ func TestFetchManagedAppInventorySequenceOmitsUnperformedStages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch inventory: %v", err)
 	}
-	sequence := entry.sequence
-	if !(sequence.refreshStarted > 0 && sequence.refreshStarted < sequence.managedAppsRead && sequence.managedAppsRead < sequence.refreshCompleted) {
+	sequence := entry.Sequence
+	if !(sequence.RefreshStarted > 0 && sequence.RefreshStarted < sequence.ManagedAppsRead && sequence.ManagedAppsRead < sequence.RefreshCompleted) {
 		t.Fatalf("inventory sequence is not ordered: %+v", sequence)
 	}
-	if sequence.kubeSnapshotRead != 0 || sequence.durableAppsRead != 0 {
+	if sequence.KubeSnapshotRead != 0 || sequence.DurableAppsRead != 0 {
 		t.Fatalf("inventory refresh fabricated unperformed stages: %+v", sequence)
 	}
 }
@@ -389,8 +390,8 @@ func TestFailedManagedAppInventoryRefreshDoesNotFabricateCompletion(t *testing.T
 	if err == nil {
 		t.Fatal("expected inventory refresh failure")
 	}
-	if entry.sequence != (managedAppObservationSequence{}) {
-		t.Fatalf("failed refresh returned fabricated completion sequence: %+v", entry.sequence)
+	if entry.Sequence != (managedAppObservationSequence{}) {
+		t.Fatalf("failed refresh returned fabricated completion sequence: %+v", entry.Sequence)
 	}
 	logOutput := logs.String()
 	if !strings.Contains(logOutput, `"phase":"start"`) || !strings.Contains(logOutput, `"phase":"end"`) || !strings.Contains(logOutput, `"result":"error"`) {
@@ -403,11 +404,11 @@ func TestFailedManagedAppInventoryRefreshDoesNotFabricateCompletion(t *testing.T
 
 func assertManagedAppFullRefreshSequence(t *testing.T, sequence managedAppObservationSequence) {
 	t.Helper()
-	if !(sequence.refreshStarted > 0 &&
-		sequence.refreshStarted < sequence.managedAppsRead &&
-		sequence.managedAppsRead < sequence.kubeSnapshotRead &&
-		sequence.kubeSnapshotRead < sequence.durableAppsRead &&
-		sequence.durableAppsRead < sequence.refreshCompleted) {
+	if !(sequence.RefreshStarted > 0 &&
+		sequence.RefreshStarted < sequence.ManagedAppsRead &&
+		sequence.ManagedAppsRead < sequence.KubeSnapshotRead &&
+		sequence.KubeSnapshotRead < sequence.DurableAppsRead &&
+		sequence.DurableAppsRead < sequence.RefreshCompleted) {
 		t.Fatalf("managed app refresh sequence is not ordered: %+v", sequence)
 	}
 }
@@ -502,7 +503,7 @@ func TestManagedAppEvidenceDoesNotORStaleLegacyEndpointsWithEmptyEndpointSlices(
 	if err != nil {
 		t.Fatalf("build runtime evidence: %v", err)
 	}
-	if evidence.endpointReady == nil || *evidence.endpointReady {
+	if evidence.EndpointReady == nil || *evidence.EndpointReady {
 		t.Fatalf("empty current EndpointSlice inventory must override stale legacy readiness: %+v", evidence)
 	}
 }
@@ -554,7 +555,7 @@ func TestManagedAppEvidenceTreatsConfiguredRegistryPushAndPullRefsAsSameImage(t 
 	if err != nil {
 		t.Fatalf("build runtime evidence: %v", err)
 	}
-	if evidence.imagePresent == nil || !*evidence.imagePresent || slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+	if evidence.ImagePresent == nil || !*evidence.ImagePresent || slices.Contains(evidence.InvariantViolations, "current_image_mismatch") {
 		t.Fatalf("configured registry aliases must identify the same image: %+v", evidence)
 	}
 }
@@ -604,15 +605,15 @@ func TestManagedAppEvidenceDoesNotCountReadyReplicasFromPreviousRevision(t *test
 	if err != nil {
 		t.Fatalf("build runtime evidence: %v", err)
 	}
-	if evidence.physicalReplicas == nil || *evidence.physicalReplicas != 0 {
+	if evidence.PhysicalReplicas == nil || *evidence.PhysicalReplicas != 0 {
 		t.Fatalf("old-revision ready replicas must not count as current physical evidence: %+v", evidence)
 	}
 	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
 		ObservedAt: time.Now().UTC(), ClusterID: "cluster-current",
-		NamespacePresent: evidence.namespacePresent, PhysicalReplicas: evidence.physicalReplicas,
-		PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-		ImagePresent:            evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+		NamespacePresent: evidence.NamespacePresent, PhysicalReplicas: evidence.PhysicalReplicas,
+		PhysicalDesiredReplicas: evidence.PhysicalDesiredReplicas,
+		ImagePresent:            evidence.ImagePresent, InvariantViolations: evidence.InvariantViolations,
 	})
 	if status.Phase != "unavailable" || !slices.Contains(status.InvariantViolations, "physical_replicas_zero") {
 		t.Fatalf("previous-revision replicas must fail the deployed invariant: %+v", status)
@@ -667,8 +668,8 @@ func TestManagedAppEvidenceKeepsSourceRuntimeUntilTargetCohortIsReady(t *testing
 	if err != nil {
 		t.Fatalf("build incomplete handoff evidence: %v", err)
 	}
-	if evidence.currentRuntimeID != "runtime-source" {
-		t.Fatalf("incomplete target cohort must retain source runtime, got %q", evidence.currentRuntimeID)
+	if evidence.CurrentRuntimeID != "runtime-source" {
+		t.Fatalf("incomplete target cohort must retain source runtime, got %q", evidence.CurrentRuntimeID)
 	}
 
 	deployment.Status.Replicas = 1
@@ -680,8 +681,8 @@ func TestManagedAppEvidenceKeepsSourceRuntimeUntilTargetCohortIsReady(t *testing
 	if err != nil {
 		t.Fatalf("build complete handoff evidence: %v", err)
 	}
-	if evidence.currentRuntimeID != "runtime-target" {
-		t.Fatalf("complete target cohort must publish target runtime, got %q", evidence.currentRuntimeID)
+	if evidence.CurrentRuntimeID != "runtime-target" {
+		t.Fatalf("complete target cohort must publish target runtime, got %q", evidence.CurrentRuntimeID)
 	}
 }
 
@@ -750,17 +751,17 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 
 	t.Run("progressing old and new cohorts do not create a mismatch", func(t *testing.T) {
 		app, managed, evidence := buildEvidence(t, runtime.ManagedAppPhaseProgressing, oldImage, 1, 2, 2)
-		if evidence.imageRef != newImage {
-			t.Fatalf("managed app target must win over lagging durable image, got %q", evidence.imageRef)
+		if evidence.ImageRef != newImage {
+			t.Fatalf("managed app target must win over lagging durable image, got %q", evidence.ImageRef)
 		}
-		if slices.Contains(evidence.invariantViolations, "current_image_mismatch") || evidence.imagePresent != nil {
+		if slices.Contains(evidence.InvariantViolations, "current_image_mismatch") || evidence.ImagePresent != nil {
 			t.Fatalf("progressing mixed cohorts must not claim final image consistency: %+v", evidence)
 		}
 		status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 			ManagedApp: managed, Found: true, Complete: true, Fresh: true,
 			ObservedAt: time.Now().UTC(), ClusterID: "cluster-rollout",
-			PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-			ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+			PhysicalReplicas: evidence.PhysicalReplicas, PhysicalDesiredReplicas: evidence.PhysicalDesiredReplicas,
+			ImagePresent: evidence.ImagePresent, InvariantViolations: evidence.InvariantViolations,
 		})
 		if slices.Contains(status.InvariantViolations, "current_image_mismatch") || slices.Contains(status.InvariantViolations, "image_missing") {
 			t.Fatalf("progressing rollout synthesized an image invariant: %+v", status)
@@ -769,10 +770,10 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 
 	t.Run("complete new cohort ignores lagging durable image", func(t *testing.T) {
 		_, _, evidence := buildEvidence(t, runtime.ManagedAppPhaseReady, newImage, 3, 3, 3)
-		if evidence.imageRef != newImage || slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+		if evidence.ImageRef != newImage || slices.Contains(evidence.InvariantViolations, "current_image_mismatch") {
 			t.Fatalf("complete current cohort must compare to managed target: %+v", evidence)
 		}
-		if evidence.imagePresent == nil || !*evidence.imagePresent {
+		if evidence.ImagePresent == nil || !*evidence.ImagePresent {
 			t.Fatalf("complete matching deployment must provide positive image evidence: %+v", evidence)
 		}
 	})
@@ -780,17 +781,17 @@ func TestManagedAppEvidenceChecksImageOnlyForCompleteCurrentCohort(t *testing.T)
 	t.Run("complete wrong cohort reports mismatch without image missing", func(t *testing.T) {
 		app, managed, evidence := buildEvidence(t, runtime.ManagedAppPhaseReady, oldImage, 3, 3, 3)
 		managed.Status.Message = "deployment ready (1/1 replicas)"
-		if !slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
+		if !slices.Contains(evidence.InvariantViolations, "current_image_mismatch") {
 			t.Fatalf("stable wrong cohort must fail closed: %+v", evidence)
 		}
-		if evidence.imagePresent != nil {
+		if evidence.ImagePresent != nil {
 			t.Fatalf("image mismatch is not image-location absence evidence: %+v", evidence)
 		}
 		status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 			ManagedApp: managed, Found: true, Complete: true, Fresh: true,
 			ObservedAt: time.Now().UTC(), ClusterID: "cluster-rollout",
-			PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-			ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+			PhysicalReplicas: evidence.PhysicalReplicas, PhysicalDesiredReplicas: evidence.PhysicalDesiredReplicas,
+			ImagePresent: evidence.ImagePresent, InvariantViolations: evidence.InvariantViolations,
 		})
 		if !slices.Equal(status.InvariantViolations, []string{"current_image_mismatch"}) {
 			t.Fatalf("stable mismatch must not derive image_missing: %+v", status.InvariantViolations)
@@ -850,17 +851,17 @@ func TestManagedAppEvidenceDoesNotOverrideFreshImageLocationFailure(t *testing.T
 	if err != nil {
 		t.Fatalf("build runtime evidence: %v", err)
 	}
-	if evidence.imagePresent == nil || *evidence.imagePresent || evidence.imageLocationStatus != model.ImageLocationStatusFailed {
+	if evidence.ImagePresent == nil || *evidence.ImagePresent || evidence.ImageLocationStatus != model.ImageLocationStatusFailed {
 		t.Fatalf("matching deployment overwrote fresh negative image-location evidence: %+v", evidence)
 	}
-	if slices.Contains(evidence.invariantViolations, "current_image_mismatch") {
-		t.Fatalf("matching deployment must not add mismatch: %+v", evidence.invariantViolations)
+	if slices.Contains(evidence.InvariantViolations, "current_image_mismatch") {
+		t.Fatalf("matching deployment must not add mismatch: %+v", evidence.InvariantViolations)
 	}
 	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
 		ObservedAt: time.Now().UTC(), ClusterID: "cluster-image-location",
-		PhysicalReplicas: evidence.physicalReplicas, PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-		ImagePresent: evidence.imagePresent, InvariantViolations: evidence.invariantViolations,
+		PhysicalReplicas: evidence.PhysicalReplicas, PhysicalDesiredReplicas: evidence.PhysicalDesiredReplicas,
+		ImagePresent: evidence.ImagePresent, InvariantViolations: evidence.InvariantViolations,
 	})
 	if !slices.Equal(status.InvariantViolations, []string{"image_missing"}) {
 		t.Fatalf("fresh negative evidence must be the only image_missing source: %+v", status.InvariantViolations)
@@ -900,20 +901,6 @@ func TestOverlayManagedAppStatusesTreatsChildQueryFailureAsUnknown(t *testing.T)
 	updated := apiServer.overlayManagedAppStatuses(context.Background(), []model.App{app})[0]
 	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "unknown" || updated.ObservedStatus.Fresh || updated.ObservedStatus.RuntimeObjectPresent != nil {
 		t.Fatalf("child query failure must be unknown without absence claims: %#v", updated.ObservedStatus)
-	}
-}
-
-func TestAppMayUseManagedRuntimeChecksDesiredAndCurrentRuntimeDuringMigration(t *testing.T) {
-	app := model.App{
-		Spec:   model.AppSpec{RuntimeID: "runtime_target_managed"},
-		Status: model.AppStatus{CurrentRuntimeID: "runtime_source_external"},
-	}
-	runtimes := map[string]model.Runtime{
-		"runtime_source_external": {ID: "runtime_source_external", Type: model.RuntimeTypeExternalOwned},
-		"runtime_target_managed":  {ID: "runtime_target_managed", Type: model.RuntimeTypeManagedOwned},
-	}
-	if !appMayUseManagedRuntime(app, runtimes) {
-		t.Fatal("migration with a managed desired runtime must still receive live status observation")
 	}
 }
 
@@ -1059,8 +1046,8 @@ func TestManagedAppRuntimeEvidenceRejectsUnobservedDeploymentGeneration(t *testi
 	if err != nil {
 		t.Fatalf("build evidence: %v", err)
 	}
-	if !slices.Contains(evidence.invariantViolations, "deployment_generation_unobserved") {
-		t.Fatalf("missing deployment generation invariant: %+v", evidence.invariantViolations)
+	if !slices.Contains(evidence.InvariantViolations, "deployment_generation_unobserved") {
+		t.Fatalf("missing deployment generation invariant: %+v", evidence.InvariantViolations)
 	}
 	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 		ManagedApp:              managed,
@@ -1069,11 +1056,11 @@ func TestManagedAppRuntimeEvidenceRejectsUnobservedDeploymentGeneration(t *testi
 		Fresh:                   true,
 		ObservedAt:              time.Now().UTC(),
 		ClusterID:               "cluster-test-uid",
-		NamespacePresent:        evidence.namespacePresent,
-		PhysicalReplicas:        evidence.physicalReplicas,
-		PhysicalDesiredReplicas: evidence.physicalDesiredReplicas,
-		ImagePresent:            evidence.imagePresent,
-		InvariantViolations:     evidence.invariantViolations,
+		NamespacePresent:        evidence.NamespacePresent,
+		PhysicalReplicas:        evidence.PhysicalReplicas,
+		PhysicalDesiredReplicas: evidence.PhysicalDesiredReplicas,
+		ImagePresent:            evidence.ImagePresent,
+		InvariantViolations:     evidence.InvariantViolations,
 	})
 	if status.Phase != "unavailable" {
 		t.Fatalf("unobserved deployment generation must fail closed, got %+v", status)
@@ -1111,7 +1098,7 @@ func TestManagedAppRuntimeEvidenceRejectsForeignManagedAppIdentity(t *testing.T)
 	status := runtime.CalculateAppObservedStatus(app, runtime.AppRuntimeObservation{
 		ManagedApp: managed, Found: true, Complete: true, Fresh: true,
 		ObservedAt: time.Now().UTC(), ClusterID: "cluster-identity",
-		InvariantViolations: evidence.invariantViolations,
+		InvariantViolations: evidence.InvariantViolations,
 	})
 	if status.Phase != "unavailable" || !slices.Contains(status.InvariantViolations, "managed_app_identity_mismatch") {
 		t.Fatalf("foreign ManagedApp identity must fail closed: %+v", status)
@@ -1594,7 +1581,7 @@ func TestFetchManagedAppStatusesClosesIdleKubeConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch managed app statuses: %v", err)
 	}
-	if !entry.ok || len(entry.items) != 1 {
+	if !entry.Ok || entry.Len() != 1 {
 		t.Fatalf("expected fetched managed app status entry, got %#v", entry)
 	}
 	if tracker.closeCount.Load() == 0 {
@@ -1644,11 +1631,12 @@ func TestOverlayManagedAppStatusFallsBackToStaleCacheOnRefreshError(t *testing.T
 	}
 
 	key := managedAppStatusCacheKey(app)
-	apiServer.managedAppStatusCache.mu.Lock()
-	entry := apiServer.managedAppStatusCache.byApp[key]
-	entry.expiresAt = time.Now().Add(-time.Second)
-	apiServer.managedAppStatusCache.byApp[key] = entry
-	apiServer.managedAppStatusCache.mu.Unlock()
+	entry, ok, _ := apiServer.managedAppStatusCache.App(key)
+	if !ok {
+		t.Fatal("initial observation did not populate the cache")
+	}
+	entry.ExpiresAt = time.Now().Add(-time.Second)
+	apiServer.managedAppStatusCache.PublishApp(key, entry)
 
 	apiServer.newManagedAppStatusClient = func() (*managedAppStatusClient, error) {
 		return nil, errors.New("boom")
@@ -1805,8 +1793,8 @@ func TestOverlayManagedAppStatusCachedReturnsImmediatelyAndRefreshesInBackground
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		cached, ok, _ := apiServer.managedAppStatusCache.getApp(managedAppStatusCacheKey(app))
-		if ok && cached.found {
+		cached, ok, _ := apiServer.managedAppStatusCache.App(managedAppStatusCacheKey(app))
+		if ok && cached.Found {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -1896,8 +1884,8 @@ func TestOverlayManagedAppStatusCachedCoalescesBackgroundListRefresh(t *testing.
 
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		cached, ok, _ := apiServer.managedAppStatusCache.getList()
-		if ok && len(cached.items) == len(apps) {
+		cached, ok, _ := apiServer.managedAppStatusCache.Inventory()
+		if ok && cached.Len() == len(apps) {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -1951,13 +1939,13 @@ func TestOverlayManagedAppStatusesForEdgeRoutesKeepsVerifiedErrorServingAndMarks
 
 	apiServer := &Server{managedAppStatusCache: newManagedAppStatusCache(time.Minute, time.Second)}
 	now := time.Now()
-	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:       map[string]runtime.ManagedAppObject{present.ID: managed},
-		ok:          true,
-		clusterID:   "cluster-test-uid",
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
-	})
+	apiServer.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:       map[string]runtime.ManagedAppObject{present.ID: managed},
+		Ok:          true,
+		ClusterID:   "cluster-test-uid",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
+	}))
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {
 			ID:   model.DefaultManagedRuntimeID,
@@ -2016,25 +2004,25 @@ func TestOverlayManagedAppStatusesForEdgeRoutesKeepsRecentExpiredObservationActi
 		log:                   log.New(io.Discard, "", 0),
 		managedAppStatusCache: newManagedAppStatusCache(time.Second, time.Second),
 	}
-	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:     map[string]runtime.ManagedAppObject{app.ID: managed},
-		ok:        true,
-		clusterID: "cluster-test-uid",
-		evidence: map[string]managedAppRuntimeEvidence{
+	apiServer.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:     map[string]runtime.ManagedAppObject{app.ID: managed},
+		Ok:        true,
+		ClusterID: "cluster-test-uid",
+		Evidence: map[string]managedAppRuntimeEvidence{
 			app.ID: {
-				namespacePresent:        &present,
-				servicePresent:          &present,
-				endpointPresent:         &present,
-				endpointReady:           &present,
-				physicalReplicas:        &replicas,
-				physicalDesiredReplicas: &replicas,
-				imagePresent:            &present,
-				imageRef:                app.Spec.Image,
+				NamespacePresent:        &present,
+				ServicePresent:          &present,
+				EndpointPresent:         &present,
+				EndpointReady:           &present,
+				PhysicalReplicas:        &replicas,
+				PhysicalDesiredReplicas: &replicas,
+				ImagePresent:            &present,
+				ImageRef:                app.Spec.Image,
 			},
 		},
-		refreshedAt: now.Add(-2 * time.Second),
-		expiresAt:   now.Add(-time.Second),
-	})
+		RefreshedAt: now.Add(-2 * time.Second),
+		ExpiresAt:   now.Add(-time.Second),
+	}))
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
 	}
@@ -2118,26 +2106,26 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	if err != nil {
 		t.Fatalf("build previous-revision evidence: %v", err)
 	}
-	if slices.Contains(previousEvidence.invariantViolations, "current_image_mismatch") || previousEvidence.imagePresent == nil || !*previousEvidence.imagePresent {
+	if slices.Contains(previousEvidence.InvariantViolations, "current_image_mismatch") || previousEvidence.ImagePresent == nil || !*previousEvidence.ImagePresent {
 		t.Fatalf("managed target and complete deployment must stay clean while the durable image lags: %+v", previousEvidence)
 	}
-	if previousEvidence.appObservationKey == managedAppRuntimeEvidenceObservationKey(current) {
+	if previousEvidence.AppObservationKey == managedAppRuntimeEvidenceObservationKey(current) {
 		t.Fatal("previous and current app revisions unexpectedly share an observation key")
 	}
 	now := time.Now().UTC()
-	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:       map[string]runtime.ManagedAppObject{current.ID: managed},
-		evidence:    map[string]managedAppRuntimeEvidence{current.ID: previousEvidence},
-		ok:          true,
-		clusterID:   "cluster-test-uid",
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
-	})
+	apiServer.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:       map[string]runtime.ManagedAppObject{current.ID: managed},
+		Evidence:    map[string]managedAppRuntimeEvidence{current.ID: previousEvidence},
+		Ok:          true,
+		ClusterID:   "cluster-test-uid",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
+	}))
 	// Keep this unit test deterministic; production immediately schedules the
 	// refresh, while the assertion below exercises the safe interim projection.
-	apiServer.managedAppStatusCache.mu.Lock()
-	apiServer.managedAppStatusCache.listRefreshNotBefore = now.Add(time.Hour)
-	apiServer.managedAppStatusCache.mu.Unlock()
+	_, _ = apiServer.managedAppStatusCache.RefreshInventory(func() (managedAppStatusListCacheEntry, error) {
+		return managedAppStatusListCacheEntry{}, errors.New("test refresh unavailable")
+	})
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
 	}
@@ -2157,14 +2145,14 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsEvidenceFromPreviousAppRev
 	if err != nil {
 		t.Fatalf("build current-revision evidence: %v", err)
 	}
-	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:       map[string]runtime.ManagedAppObject{current.ID: managed},
-		evidence:    map[string]managedAppRuntimeEvidence{current.ID: currentEvidence},
-		ok:          true,
-		clusterID:   "cluster-test-uid",
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
-	})
+	apiServer.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:       map[string]runtime.ManagedAppObject{current.ID: managed},
+		Evidence:    map[string]managedAppRuntimeEvidence{current.ID: currentEvidence},
+		Ok:          true,
+		ClusterID:   "cluster-test-uid",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
+	}))
 	updated = apiServer.overlayManagedAppStatusesForEdgeRoutesCached([]model.App{current}, runtimes)[0]
 	if updated.ObservedStatus == nil || updated.ObservedStatus.Phase != "deployed" || !updated.ObservedStatus.Fresh {
 		t.Fatalf("current-revision evidence should restore a fresh deployed projection: %+v", updated.ObservedStatus)
@@ -2211,13 +2199,13 @@ func TestOverlayManagedAppStatusesForEdgeRoutesRejectsAgedExpiredObservation(t *
 		log:                   log.New(io.Discard, "", 0),
 		managedAppStatusCache: newManagedAppStatusCache(time.Second, time.Second),
 	}
-	apiServer.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:       map[string]runtime.ManagedAppObject{app.ID: managed},
-		ok:          true,
-		clusterID:   "cluster-test-uid",
-		refreshedAt: now.Add(-defaultAppObservedStatusMaxAge - time.Second),
-		expiresAt:   now.Add(-defaultAppObservedStatusMaxAge),
-	})
+	apiServer.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:       map[string]runtime.ManagedAppObject{app.ID: managed},
+		Ok:          true,
+		ClusterID:   "cluster-test-uid",
+		RefreshedAt: now.Add(-managedappstatus.MaxObservationAge - time.Second),
+		ExpiresAt:   now.Add(-managedappstatus.MaxObservationAge),
+	}))
 	runtimes := map[string]model.Runtime{
 		model.DefaultManagedRuntimeID: {ID: model.DefaultManagedRuntimeID, Type: model.RuntimeTypeManagedShared},
 	}
@@ -2327,30 +2315,6 @@ func TestEdgeRouteRejectsIncompleteDeployedObservation(t *testing.T) {
 	}
 }
 
-func TestAppObservedReadyForServingRequiresDesiredReplicaAgreement(t *testing.T) {
-	t.Parallel()
-	ready := 1
-	present := true
-	app := model.App{
-		Spec: model.AppSpec{Image: "registry.example/app:v1", Ports: []int{8080}, Replicas: 1},
-		ObservedStatus: &model.AppObservedStatus{
-			Phase: "deployed", DesiredReplicas: 1, ReadyReplicas: &ready,
-			RuntimeObjectPresent: &present, NamespacePresent: &present, ServicePresent: &present,
-			EndpointPresent: &present, EndpointReady: &present, PhysicalReplicas: &ready,
-			PhysicalDesired: &ready, ImagePresent: &present, Fresh: true, ObservedAt: time.Now().UTC(),
-			ClusterID: "cluster-current", Generation: 2, ObservedGeneration: 2,
-			EvidenceSource: runtime.AppObservationSourceKubernetesAPI,
-		},
-	}
-	if !appObservedReadyForServing(app, time.Now().UTC()) {
-		t.Fatal("complete matching runtime evidence should be publishable")
-	}
-	app.ObservedStatus.DesiredReplicas = 0
-	if appObservedReadyForServing(app, time.Now().UTC()) {
-		t.Fatal("observed desired replicas below the durable spec were accepted")
-	}
-}
-
 func TestEdgeRoutePreservesAuthoritativeAbsenceWhenDesiredReplicasZero(t *testing.T) {
 	ready := 0
 	present := false
@@ -2405,9 +2369,7 @@ func TestOverlayManagedAppStatusCachedBacksOffAfterBackgroundListError(t *testin
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		apiServer.managedAppStatusCache.mu.RLock()
-		blocked := time.Now().Before(apiServer.managedAppStatusCache.listRefreshNotBefore)
-		apiServer.managedAppStatusCache.mu.RUnlock()
+		blocked := !apiServer.managedAppStatusCache.CanRefreshInventory(time.Now())
 		if blocked {
 			break
 		}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"fugue/internal/auth"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -54,7 +55,7 @@ func TestDisableAppReturnsAlreadyDisabledOnlyForFreshConfirmedZero(t *testing.T)
 			name:         "stale zero",
 			physical:     0,
 			physicalWant: 0,
-			observedAt:   time.Now().UTC().Add(-2 * defaultAppObservedStatusMaxAge),
+			observedAt:   time.Now().UTC().Add(-2 * managedappstatus.MaxObservationAge),
 			clusterID:    "cluster-test",
 			wantAccepted: true,
 		},
@@ -159,23 +160,21 @@ func cacheDisableAppObservation(t *testing.T, server *Server, app model.App, phy
 	if err != nil {
 		t.Fatalf("build managed app observation: %v", err)
 	}
-	server.managedAppStatusCache.mu.Lock()
-	defer server.managedAppStatusCache.mu.Unlock()
-	server.managedAppStatusCache.byApp[managedAppStatusCacheKey(app)] = managedAppStatusCacheEntry{
-		managed:     managed,
-		found:       true,
-		ok:          true,
-		clusterID:   clusterID,
-		refreshedAt: observedAt,
-		expiresAt:   time.Now().UTC().Add(time.Minute),
-		evidence: managedAppRuntimeEvidence{
-			appObservationKey:       managedAppRuntimeEvidenceObservationKey(app),
-			namespacePresent:        &namespacePresent,
-			physicalReplicas:        intPointerForDisableAppTest(physical),
-			physicalDesiredReplicas: intPointerForDisableAppTest(physicalDesired),
-			evidenceSources:         []string{runtime.AppObservationSourceKubernetesAPI},
+	server.managedAppStatusCache.PublishApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
+		Managed:     managed,
+		Found:       true,
+		Ok:          true,
+		ClusterID:   clusterID,
+		RefreshedAt: observedAt,
+		ExpiresAt:   time.Now().UTC().Add(time.Minute),
+		Evidence: managedAppRuntimeEvidence{
+			AppObservationKey:       managedAppRuntimeEvidenceObservationKey(app),
+			NamespacePresent:        &namespacePresent,
+			PhysicalReplicas:        intPointerForDisableAppTest(physical),
+			PhysicalDesiredReplicas: intPointerForDisableAppTest(physicalDesired),
+			EvidenceSources:         []string{runtime.AppObservationSourceKubernetesAPI},
 		},
-	}
+	})
 }
 
 func intPointerForDisableAppTest(value int) *int { return &value }
@@ -198,15 +197,15 @@ func TestContinuityDoesNotRequireReadyEndpointForStoppedApp(t *testing.T) {
 		}
 		now := time.Now().UTC()
 		cacheDisableAppObservation(t, server, app, 0, desired, now, "cluster-test")
-		entry, _, _ := server.managedAppStatusCache.getApp(managedAppStatusCacheKey(app))
+		entry, _, _ := server.managedAppStatusCache.App(managedAppStatusCacheKey(app))
 		yes, no := true, false
-		entry.evidence.servicePresent, entry.evidence.endpointPresent = &yes, &yes
-		entry.evidence.endpointReady = &no
-		server.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-			items:    map[string]runtime.ManagedAppObject{app.ID: entry.managed},
-			evidence: map[string]managedAppRuntimeEvidence{app.ID: entry.evidence},
-			ok:       true, clusterID: "cluster-test", refreshedAt: now, expiresAt: now.Add(time.Minute),
-		})
+		entry.Evidence.ServicePresent, entry.Evidence.EndpointPresent = &yes, &yes
+		entry.Evidence.EndpointReady = &no
+		server.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+			Items:    map[string]runtime.ManagedAppObject{app.ID: entry.Managed},
+			Evidence: map[string]managedAppRuntimeEvidence{app.ID: entry.Evidence},
+			Ok:       true, ClusterID: "cluster-test", RefreshedAt: now, ExpiresAt: now.Add(time.Minute),
+		}))
 		statuses, err := server.buildRuntimeContinuityStatuses()
 		if err != nil {
 			t.Fatal(err)

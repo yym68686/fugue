@@ -33,7 +33,7 @@ func (s *Server) startConsoleObservationWarmLoop(ctx context.Context) <-chan str
 			}
 		}))
 	}
-	startLoop(max(s.managedAppStatusCache.cacheTTL()/2, time.Second), func() {
+	startLoop(max(s.managedAppStatusCache.TTL()/2, time.Second), func() {
 		if _, err := s.refreshManagedAppStatuses(ctx); err != nil && ctx.Err() == nil && s.log != nil {
 			s.log.Printf("console runtime observation warm failed: %v", err)
 		}

@@ -61,22 +61,22 @@ func TestEdgeRouteDecisionProvenanceDistinguishesIncidentClasses(t *testing.T) {
 
 	crossResourceApp := edgeRouteObservationTestApp("deploying", "op_running")
 	crossResource := base
-	crossResource.evidence.managedImageDigest = edgeObservationDigest("registry/new")
-	crossResource.evidence.deploymentImageDigest = edgeObservationDigest("registry/old")
-	crossResource.evidence.invariantViolations = []string{"current_image_mismatch", "image_missing"}
+	crossResource.evidence.ManagedImageDigest = edgeObservationDigest("registry/new")
+	crossResource.evidence.DeploymentImageDigest = edgeObservationDigest("registry/old")
+	crossResource.evidence.InvariantViolations = []string{"current_image_mismatch", "image_missing"}
 
 	imageNegativeApp := edgeRouteObservationTestApp("deploying", "op_running")
 	imageNegative := base
-	imageNegative.evidence.imageLocationStatus = model.ImageLocationStatusMissing
-	imageNegative.evidence.imageLocationSource = "image_location_store"
-	imageNegative.evidence.imageLocationObservedAt = time.Date(2026, 7, 31, 11, 29, 25, 0, time.UTC)
-	imageNegative.evidence.invariantViolations = []string{"image_missing"}
+	imageNegative.evidence.ImageLocationStatus = model.ImageLocationStatusMissing
+	imageNegative.evidence.ImageLocationSource = "image_location_store"
+	imageNegative.evidence.ImageLocationObservedAt = time.Date(2026, 7, 31, 11, 29, 25, 0, time.UTC)
+	imageNegative.evidence.InvariantViolations = []string{"image_missing"}
 
 	driftApp := edgeRouteObservationTestApp("deployed", "op_completed")
 	drift := base
-	drift.evidence.managedImageDigest = edgeObservationDigest("registry/new")
-	drift.evidence.deploymentImageDigest = edgeObservationDigest("registry/old")
-	drift.evidence.invariantViolations = []string{"current_image_mismatch", "image_missing"}
+	drift.evidence.ManagedImageDigest = edgeObservationDigest("registry/new")
+	drift.evidence.DeploymentImageDigest = edgeObservationDigest("registry/old")
+	drift.evidence.InvariantViolations = []string{"current_image_mismatch", "image_missing"}
 
 	cases := []struct {
 		name       string
@@ -125,13 +125,13 @@ func TestEdgeRouteDecisionEventBindsRefreshSequenceWithoutRawRefs(t *testing.T) 
 
 	app := edgeRouteObservationTestApp("deploying", "op_sensitive_value")
 	provenance := edgeRouteObservationTestProvenance()
-	provenance.evidence.appObservationKey = "registry.example/private/image:secret"
+	provenance.evidence.AppObservationKey = "registry.example/private/image:secret"
 	provenance.sequence = managedAppObservationSequence{
-		refreshStarted:   10,
-		managedAppsRead:  11,
-		kubeSnapshotRead: 12,
-		durableAppsRead:  13,
-		refreshCompleted: 14,
+		RefreshStarted:   10,
+		ManagedAppsRead:  11,
+		KubeSnapshotRead: 12,
+		DurableAppsRead:  13,
+		RefreshCompleted: 14,
 	}
 	route := edgeRouteObservationTestRoute()
 	route.DeploymentGeneration = "deployment_op_sensitive_value"
@@ -173,7 +173,7 @@ func TestEdgeRouteInvariantDecisionBypassesChangeLogDedup(t *testing.T) {
 
 	app := edgeRouteObservationTestApp("deploying", "op_running")
 	provenance := edgeRouteObservationTestProvenance()
-	provenance.evidence.invariantViolations = []string{"current_image_mismatch", "image_missing"}
+	provenance.evidence.InvariantViolations = []string{"current_image_mismatch", "image_missing"}
 	route := edgeRouteObservationTestRoute()
 	route.DecisionID = edgeRouteDecisionID(edgeRouteDecisionMaterialFor(app, route, provenance))
 	bundle := model.EdgeRouteBundle{Version: "routegen_bundle", Routes: []model.EdgeRouteBinding{route}}
@@ -211,18 +211,6 @@ func TestEdgeRouteActiveDecisionStillUsesChangeLogDedup(t *testing.T) {
 	}
 	if got := strings.Count(output.String(), `"event_type":"edge_route_decision"`); got != 1 {
 		t.Fatalf("active decision dedup changed: got %d events: %s", got, output.String())
-	}
-}
-
-func TestManagedAppObservationSequenceIsMonotonic(t *testing.T) {
-	t.Parallel()
-
-	cache := newManagedAppStatusCache(time.Minute, time.Second)
-	first := cache.nextObservationSequence()
-	second := cache.nextObservationSequence()
-	third := cache.nextObservationSequence()
-	if !(first > 0 && first < second && second < third) {
-		t.Fatalf("observation sequence is not monotonic: %d %d %d", first, second, third)
 	}
 }
 
@@ -280,23 +268,23 @@ func edgeRouteObservationTestProvenance() managedAppObservationProvenance {
 		refreshedAt:      now,
 		expiresAt:        now.Add(15 * time.Second),
 		evidence: managedAppRuntimeEvidence{
-			appObservationKey:            "observation-key",
-			managedGeneration:            2,
-			managedObservedGeneration:    2,
-			managedImageDigest:           edgeObservationDigest("registry/new"),
-			managedDesiredReplicas:       1,
-			managedReadyReplicas:         1,
-			deploymentGeneration:         2,
-			deploymentObservedGeneration: 2,
-			deploymentImageDigest:        edgeObservationDigest("registry/new"),
-			deploymentReplicas:           1,
-			deploymentUpdatedReplicas:    1,
-			deploymentReadyReplicas:      1,
-			deploymentAvailableReplicas:  1,
-			namespacePresent:             &present,
-			servicePresent:               &present,
-			endpointPresent:              &present,
-			endpointReady:                &present,
+			AppObservationKey:            "observation-key",
+			ManagedGeneration:            2,
+			ManagedObservedGeneration:    2,
+			ManagedImageDigest:           edgeObservationDigest("registry/new"),
+			ManagedDesiredReplicas:       1,
+			ManagedReadyReplicas:         1,
+			DeploymentGeneration:         2,
+			DeploymentObservedGeneration: 2,
+			DeploymentImageDigest:        edgeObservationDigest("registry/new"),
+			DeploymentReplicas:           1,
+			DeploymentUpdatedReplicas:    1,
+			DeploymentReadyReplicas:      1,
+			DeploymentAvailableReplicas:  1,
+			NamespacePresent:             &present,
+			ServicePresent:               &present,
+			EndpointPresent:              &present,
+			EndpointReady:                &present,
 		},
 	}
 }

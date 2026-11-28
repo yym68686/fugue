@@ -52,6 +52,18 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result["goTests"], [["go", "test", "./files"]])
         self.assertEqual(result["goBuilds"], [["go", "build", "-o", os.devnull, "./files"]])
 
+    def test_localpv_renderer_edit_selects_independent_host_tests(self):
+        graph = [
+            pkg("internal/api", EmbedFiles=["localpv_unit.py"]),
+            pkg("internal/nodehostpolicy"),
+        ]
+        result = shadow.select(["internal/api/localpv_unit.py"], graph, ROOT)
+        self.assertEqual(result["goTests"], [
+            ["go", "test", "./internal/api"],
+            ["go", "test", "-count=1", "./internal/nodehostpolicy"],
+        ])
+        self.assertEqual(result["goBuilds"], [["go", "build", "-o", os.devnull, "./internal/api"]])
+
     def test_compile_inputs_are_runtime_inputs_and_dependency_errors_fail_wide(self):
         for field in ("CXXFiles", "HFiles", "SFiles", "SysoFiles"):
             graph = [pkg("domain", **{field: ["native"]}), pkg("cmd", Imports=["demo/domain"])]

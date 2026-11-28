@@ -26,6 +26,7 @@ import (
 	"fugue/internal/httpx"
 	"fugue/internal/imagebilling"
 	"fugue/internal/livediagnostics"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/objectstorage"
 	"fugue/internal/observability"
@@ -1579,7 +1580,7 @@ func (s *Server) handleDisableApp(w http.ResponseWriter, r *http.Request) {
 		// controller can converge the physical state.
 		app = s.overlayManagedAppStatus(r.Context(), app)
 	}
-	if appDisableConverged(app, time.Now().UTC()) {
+	if managedappstatus.DisableConverged(app, time.Now().UTC()) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"app":              sanitizeAppForAPI(app),
 			"already_disabled": true,

@@ -317,7 +317,7 @@ func (s *Server) overlayBackingServiceRuntimeStatuses(ctx context.Context, servi
 	if len(services) == 0 {
 		return services
 	}
-	_, cacheOK, cacheExpired := s.managedAppStatusCache.getList()
+	_, cacheOK, cacheExpired := s.managedAppStatusCache.Inventory()
 	usedFreshCache := cacheOK && !cacheExpired
 	managedApps, err := s.managedAppInventory(ctx, false)
 	if err != nil {
@@ -406,16 +406,16 @@ func parseManagedBackingServiceTime(value string) (time.Time, bool) {
 }
 
 func (s *Server) managedAppInventory(ctx context.Context, requireFresh bool) (map[string]runtime.ManagedAppObject, error) {
-	cached, ok, expired := s.managedAppStatusCache.getList()
+	cached, ok, expired := s.managedAppStatusCache.Inventory()
 	if !requireFresh && ok && !expired {
-		return cached.items, nil
+		return cached.CopyItems(), nil
 	}
 	fresh, err := s.refreshManagedAppInventory(ctx)
 	if err != nil {
 		if !requireFresh && ok {
-			return cached.items, nil
+			return cached.CopyItems(), nil
 		}
 		return nil, err
 	}
-	return fresh.items, nil
+	return fresh.CopyItems(), nil
 }

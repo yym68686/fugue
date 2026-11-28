@@ -295,7 +295,7 @@ func (s *Server) handleManagedPostgresOrphanLifecycle(w http.ResponseWriter, r *
 		httpx.WriteError(w, http.StatusServiceUnavailable, "managed app lifecycle update could not be applied")
 		return
 	}
-	s.managedAppStatusCache.invalidate()
+	s.managedAppStatusCache.Invalidate()
 	for index := range summary.BackingServices {
 		summary.BackingServices[index].Suspended = suspended
 		if status := managedAppBackingServiceStatus(managed.Status, summary.BackingServices[index].ID); status != nil {
@@ -415,7 +415,7 @@ func (s *Server) handleDeleteManagedPostgresOrphan(w http.ResponseWriter, r *htt
 		httpx.WriteError(w, http.StatusServiceUnavailable, "orphan deletion could not be submitted")
 		return
 	}
-	s.managedAppStatusCache.invalidate()
+	s.managedAppStatusCache.Invalidate()
 	s.appendAudit(principal, "backing_service.orphan.delete", "app", appID, snapshot.TenantID, map[string]string{
 		"result":             "accepted",
 		"managed_app_name":   summary.ManagedAppName,
