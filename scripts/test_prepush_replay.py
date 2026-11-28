@@ -9,6 +9,44 @@ from scripts import prepush, prepush_replay
 
 
 class ReplayTest(unittest.TestCase):
+    def test_full_fallback_checks_exact_snapshot_and_does_not_qualify_for_p95(self):
+        broad = {"paths": ["internal/a/a.go", "internal/b/b.go"], **prepush_replay.prepush_shadow.full("multiple owners")}
+        for selected, snapshots, should_fail in (
+            (broad, ["source", "source"], False),
+            (broad, ["source", "different"], True),
+            ({**broad, "goTests": [["go", "test", "./internal/a"]]}, ["source", "source"], True),
+        ):
+            with self.subTest(selected=selected, snapshots=snapshots):
+                comparison = {
+                    "disposition": "full-verification-required",
+                    "sourceSnapshot": "source",
+                    "native": {"selection": selected},
+                }
+
+                def gate(*, shadow_select, shadow_result, shadow_build_first, shadow_full_timeout):
+                    self.assertTrue(shadow_build_first)
+                    self.assertEqual(shadow_full_timeout, prepush_replay.prepush_local.FULL_VERIFICATION_TIMEOUT_SECONDS)
+                    shadow_result({
+                        "status": "pass", "elapsedLimitMs": shadow_full_timeout * 1000,
+                        "selection": shadow_select("base"),
+                    })
+                    return 0
+
+                with (
+                    mock.patch.object(prepush, "_run_gate", side_effect=gate),
+                    mock.patch.object(prepush_replay.prepush_shadow, "snapshot", side_effect=snapshots),
+                    mock.patch.object(prepush_replay.prepush_shadow, "compare_targets", return_value=comparison) as compare,
+                ):
+                    if should_fail:
+                        with self.assertRaises(ValueError):
+                            prepush_replay.replay_full_fallback("cross-domain", "base")
+                    else:
+                        result = prepush_replay.replay_full_fallback("cross-domain", "base")
+                        compare.assert_called_once_with("base", ("linux/amd64", "linux/arm64"))
+                        self.assertEqual(result["result"]["status"], "pass")
+                        self.assertFalse(result["productionAuthorization"])
+                        self.assertNotIn("summary", result)
+
     def test_target_checked_sample_uses_the_conservative_selector_in_the_timed_gate(self):
         def gate(*, shadow_select, shadow_result, shadow_build_first):
             self.assertIs(shadow_select, prepush_replay.prepush_shadow.conservative_report)

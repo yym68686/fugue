@@ -1160,7 +1160,7 @@ func TestDailyAuditHasNoProductionAccess(t *testing.T) {
 	}
 	wantCases := []string{
 		"none", "queue-runtime", "queue-test", "host-policy-test", "backup-runtime", "retirement-test", "cross-domain",
-		"contract-tracking-scope", "contract-generator-consumer", "contract-retirement-scope",
+		"contract-backup-checkpoint", "contract-tracking-scope", "contract-generator-consumer", "contract-retirement-scope",
 	}
 	if !reflect.DeepEqual(gotCases, wantCases) {
 		t.Fatalf("daily audit shadow cases: %v", gotCases)

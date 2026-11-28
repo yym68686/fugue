@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import socket as net
 import subprocess as sp
 from tempfile import TemporaryDirectory
@@ -53,7 +54,7 @@ def verify(condition, message):
 
 
 def witness_worker(binary, socket, verify_passes, *, database_user=WORKER_ROLE, refused=False,
-                   policy_unavailable=False):
+                   policy_unavailable=False, while_ready=None):
     with net.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -100,6 +101,8 @@ def witness_worker(binary, socket, verify_passes, *, database_user=WORKER_ROLE, 
                    and "fugue_storage_lifecycle_last_success_timestamp_seconds " in metrics
                    and "fugue_storage_source_page_rows" in metrics
                    and "tenant-one" not in metrics, "worker metrics changed audit thresholds or leaked progress details")
+                if while_ready is not None:
+                    while_ready(address)
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -110,6 +113,20 @@ def witness_worker(binary, socket, verify_passes, *, database_user=WORKER_ROLE, 
                 process.wait(timeout=3)
                 raise
         verify(process.returncode == 0, "worker did not drain after a normal termination")
+
+
+def wait_worker_status(address, path, expected, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(f"http://{address}/{path}", timeout=1) as response:
+                observed = response.status
+        except HTTPError as error:
+            observed = error.code
+        if observed == expected:
+            return
+        time.sleep(0.15)
+    raise RuntimeError(f"worker {path} did not reach HTTP {expected}")
 
 
 def rehearse(socket, worker_binary, *, client=("psql",), client_socket=None):
@@ -345,7 +362,49 @@ FROM pg_roles WHERE rolname='fugue_storage_audit_definer';
         witness_worker(worker_binary, socket, 4)
         verify(status()["completed_passes"] == 4 and status()["sample"]["source_page"]["declared_bytes"] == 700,
                "replacement worker duplicated or skipped a committed page")
-        print("verified worker binary: rejects broad credentials, publishes readiness and committed progress, resumes after restart")
+
+        def unavailable_dependency(address):
+            unchanged = status()
+            uploads = "SELECT json_agg(u ORDER BY id)::text FROM public.fugue_source_uploads u;"
+            business = sql(uploads, reader=True)
+            with sp.Popen(command, stdin=sp.PIPE, stdout=sp.PIPE, text=True) as locker:
+                try:
+                    locker.stdin.write(
+                        "BEGIN; LOCK TABLE fugue_storage_audit.lifecycle_control IN ACCESS EXCLUSIVE MODE; "
+                        "SELECT 'audit-control-locked';\n"
+                    )
+                    locker.stdin.flush()
+                    readable, _, _ = select.select([locker.stdout], [], [], 6)
+                    verify(readable and locker.stdout.readline().strip() == "audit-control-locked",
+                           "could not lock the disposable worker dependency")
+                    wait_worker_status(address, "readyz", 503, 25)
+                    wait_worker_status(address, "healthz", 200, 2)
+                    with urlopen(f"http://{address}/metrics", timeout=1) as response:
+                        metrics = response.read().decode()
+                    verify("fugue_storage_audit_progress_available 0\n" in metrics and
+                           "fugue_storage_audit_committed_passes 4\n" in metrics,
+                           "timed-out dependency hid or advanced the last committed sample")
+                    verify(sql(uploads, reader=True) == business,
+                           "worker dependency timeout blocked or changed the API's business rows")
+                finally:
+                    locker.stdin.close()  # EOF rolls back the fixture lock.
+                    try:
+                        locker.wait(timeout=8)
+                    except sp.TimeoutExpired:
+                        locker.kill()
+                        locker.wait(timeout=3)
+            verify(status() == unchanged, "timed-out worker advanced the durable audit or changed its owner")
+            due()
+            wait_worker_status(address, "readyz", 200, 25)
+            recovered = status()
+            verify(recovered["owner"] == unchanged["owner"] and
+                   recovered["policy_sha256"] == unchanged["policy_sha256"] and
+                   recovered["completed_passes"] == unchanged["completed_passes"] + 1 and
+                   sql(uploads, reader=True) == business,
+                   "worker did not recover exactly one owned page without changing business rows")
+
+        witness_worker(worker_binary, socket, 4, while_ready=unavailable_dependency)
+        print("verified worker binary: restricted credentials, durable restart and isolated dependency timeout/recovery")
     print("verified storage lifecycle audit: separate roles, bounded aggregate, durable retry/resume, no business writes")
 
 

@@ -184,7 +184,7 @@ func readObservationPageBodies(ctx context.Context, db inputQueryer, key string,
 	return rows.Close()
 }
 
-func (s *Store) ReadObservationPages(ctx context.Context, key string) (ObservationPages, []byte, error) {
+func (s *Store) readObservationPages(ctx context.Context, key string) (ObservationPages, []byte, error) {
 	{
 		// One transaction gives head and pages a consistent generation during
 		// another replica's cursor update or completion swap.
@@ -211,8 +211,7 @@ func (s *Store) ReadObservationPages(ctx context.Context, key string) (Observati
 	return ObservationPages{}, raw, err
 }
 
-func (s *Store) UpdateObservationPages(ctx context.Context, key string, update ObservationPageUpdate, legacy func([]byte) ([]byte, error)) (bool, error) {
-
+func (s *Store) updateObservationPages(ctx context.Context, key string, update ObservationPageUpdate, legacy func([]byte) ([]byte, error), guard observationWriteGuard) (bool, error) {
 	originalKey := key
 	key = observationCheckpointKey(key)
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -220,6 +219,11 @@ func (s *Store) UpdateObservationPages(ctx context.Context, key string, update O
 		return false, err
 	}
 	defer tx.Rollback()
+	if guard != nil {
+		if allowed, err := guard(ctx, tx); err != nil || !allowed {
+			return false, err
+		}
+	}
 	var locked bool
 	if err = tx.QueryRowContext(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))`, key).Scan(&locked); err != nil || !locked {
 		return false, err
@@ -230,7 +234,9 @@ func (s *Store) UpdateObservationPages(ctx context.Context, key string, update O
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		if absentInputManifest(err) && !s.StoragePolicy().CheckpointPages {
 			tx.Rollback()
-			return s.UpdateObservationCheckpoint(ctx, originalKey, legacy)
+			// The missing-table error aborted this transaction. Reacquire
+			// the writer fence with the legacy key lock before any callback.
+			return s.updateObservationCheckpoint(ctx, originalKey, legacy, guard)
 		}
 		return true, err
 	}

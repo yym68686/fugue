@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"fugue/internal/backupschedule"
-	"fugue/internal/backupusage"
+	backupusagecontract "fugue/internal/backupusage/contract"
 	"fugue/internal/model"
 
 	"github.com/spf13/cobra"
@@ -1584,7 +1584,7 @@ func renderBackupRestoreRun(w io.Writer, run model.BackupRestoreRun, showID bool
 	return nil
 }
 
-func renderBackupUsage(w io.Writer, usage backupusage.Usage) error {
+func renderBackupUsage(w io.Writer, usage backupusagecontract.Usage) error {
 	_, _ = fmt.Fprintf(w, "billable_bytes: %d\nprovider: %s\nmarkup_percent: %d\neffective_multiplier: %.2f\nprice_code: %s\n",
 		usage.BillableBytes, usage.Provider, usage.MarkupPercent, usage.EffectiveMultiplier, blankDash(usage.CloudflareR2PriceCode))
 	physicalBytes := "unavailable"

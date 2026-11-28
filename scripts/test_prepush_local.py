@@ -37,7 +37,7 @@ class LocalVerificationTest(unittest.TestCase):
             selection = shadow_select("HEAD")
             self.assertEqual(selection["scope"], "full")
             self.assertEqual(selection["goTests"], [["go", "test", "-count=1", "./..."]])
-            shadow_result({"status": "pass", "checks": {}, "elapsedLimitMs": 360000, "selection": selection})
+            shadow_result({"status": "pass", "checks": {}, "elapsedLimitMs": 600000, "selection": selection})
             return 0
 
         with (
@@ -55,11 +55,11 @@ class LocalVerificationTest(unittest.TestCase):
 
         def run_gate(*, shadow_select, shadow_result, shadow_build_first, shadow_full_timeout):
             self.assertTrue(shadow_build_first)
-            self.assertEqual(shadow_full_timeout, 360)
+            self.assertEqual(shadow_full_timeout, 600)
             selected = shadow_select("HEAD")
             self.assertEqual(selected, plan)
             self.assertEqual(selected["goTests"], [["go", "test", "-count=1", "./..."]])
-            shadow_result({"status": "pass", "selection": selected, "checks": {}, "elapsedLimitMs": 360000})
+            shadow_result({"status": "pass", "selection": selected, "checks": {}, "elapsedLimitMs": 600000})
             return 0
 
         for last in ("original", "different"):
@@ -82,9 +82,14 @@ class LocalVerificationTest(unittest.TestCase):
 
     def test_widened_budget_only_applies_to_the_full_local_plan(self):
         with self.assertRaisesRegex(ValueError, "non-authorizing"):
-            prepush._run_gate(shadow_full_timeout=360)
+            prepush._run_gate(shadow_full_timeout=600)
+        with self.assertRaisesRegex(ValueError, "invalid shadow full"):
+            prepush._run_gate(shadow_select=lambda _: {}, shadow_result=lambda _: None, shadow_full_timeout=601)
+        with mock.patch.dict(os.environ, {"PREPUSH_TIMEOUT_SECONDS": "600"}, clear=True):
+            with self.assertRaisesRegex(SystemExit, "at most 360"):
+                prepush.main()
 
-        for scope, expected_limit in (("test-only", 60), ("full", 360)):
+        for scope, expected_limit in (("test-only", 60), ("full", 600)):
             with self.subTest(scope=scope):
                 seen = {}
                 reports = []
@@ -106,12 +111,12 @@ class LocalVerificationTest(unittest.TestCase):
                     mock.patch.object(prepush, "write_receipt", side_effect=AssertionError("unexpected receipt")),
                 ):
                     self.assertEqual(prepush._run_gate(
-                        shadow_select=lambda _: plan, shadow_result=reports.append, shadow_full_timeout=360,
+                        shadow_select=lambda _: plan, shadow_result=reports.append, shadow_full_timeout=600,
                     ), 0)
                 self.assertEqual(reports[0]["elapsedLimitMs"], expected_limit * 1000)
                 test_timeout = seen[("go", "test", "-count=1", "./...")]
                 if scope == "full":
-                    self.assertGreater(test_timeout, 300)
+                    self.assertGreater(test_timeout, 540)
                 else:
                     self.assertLessEqual(test_timeout, 55)
 

@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"path"
 
-	"fugue/internal/backupusage"
+	backupusagecontract "fugue/internal/backupusage/contract"
 	"fugue/internal/model"
 )
 
@@ -37,10 +37,10 @@ type backupArtifactListPage struct {
 }
 
 type adminBackupStatusResponse struct {
-	Policies []model.BackupPolicy  `json:"policies"`
-	Runs     []model.BackupRun     `json:"runs"`
-	Usage    backupusage.Usage     `json:"usage"`
-	Posture  []model.BackupPosture `json:"posture"`
+	Policies []model.BackupPolicy      `json:"policies"`
+	Runs     []model.BackupRun         `json:"runs"`
+	Usage    backupusagecontract.Usage `json:"usage"`
+	Posture  []model.BackupPosture     `json:"posture"`
 }
 
 type appBackupStatusResponse struct {
@@ -242,12 +242,12 @@ func (c *Client) CreateBackupRestoreRun(req map[string]any) (model.BackupRestore
 	return resp.Run, nil
 }
 
-func (c *Client) GetBackupUsage() (backupusage.Usage, error) {
+func (c *Client) GetBackupUsage() (backupusagecontract.Usage, error) {
 	var resp struct {
-		Usage backupusage.Usage `json:"usage"`
+		Usage backupusagecontract.Usage `json:"usage"`
 	}
 	if err := c.doJSON(http.MethodGet, "/v1/backups/usage", nil, &resp); err != nil {
-		return backupusage.Usage{}, err
+		return backupusagecontract.Usage{}, err
 	}
 	return resp.Usage, nil
 }

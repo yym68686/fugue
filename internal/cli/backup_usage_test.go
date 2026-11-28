@@ -2,26 +2,56 @@ package cli
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"fugue/internal/backupusage"
+	backupusagecontract "fugue/internal/backupusage/contract"
 	"fugue/internal/model"
 )
+
+func TestGetBackupUsageDecodesWireContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/backups/usage" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"provider":"cloudflare_r2","billable_bytes":19,"physical_bytes":0,"physical_object_count":0,"reconciliation":{"status":"complete","backend_count":1}}}`))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "fixture-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := client.GetBackupUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.BillableBytes != 19 || usage.PhysicalBytes == nil || *usage.PhysicalBytes != 0 ||
+		usage.PhysicalObjectCount == nil || *usage.PhysicalObjectCount != 0 ||
+		usage.Reconciliation == nil || usage.Reconciliation.Status != backupusagecontract.ReconciliationStatusComplete ||
+		usage.Reconciliation.BackendCount != 1 {
+		t.Fatalf("unexpected decoded usage: %+v", usage)
+	}
+}
 
 func TestRenderBackupUsageSeparatesBillableAndPhysicalBytes(t *testing.T) {
 	physicalBytes := int64(248)
 	physicalObjects := 5
-	usage := backupusage.Usage{
+	usage := backupusagecontract.Usage{
 		Provider:            model.DataBackendProviderCloudflareR2,
 		BillableBytes:       100,
 		PhysicalBytes:       &physicalBytes,
 		PhysicalObjectCount: &physicalObjects,
 		MarkupPercent:       5,
 		EffectiveMultiplier: 1.05,
-		Reconciliation: &backupusage.Reconciliation{
-			Status:                   backupusage.ReconciliationStatusDrift,
+		Reconciliation: &backupusagecontract.Reconciliation{
+			Status:                   backupusagecontract.ReconciliationStatusDrift,
 			BackendCount:             1,
 			MeasuredBackendCount:     1,
 			ReferencedBytes:          178,
@@ -55,12 +85,12 @@ func TestRenderBackupUsageSeparatesBillableAndPhysicalBytes(t *testing.T) {
 }
 
 func TestRenderBackupUsageDoesNotRenderUnavailablePhysicalBytesAsZero(t *testing.T) {
-	usage := backupusage.Usage{
+	usage := backupusagecontract.Usage{
 		Provider:            model.DataBackendProviderCloudflareR2,
 		MarkupPercent:       5,
 		EffectiveMultiplier: 1.05,
-		Reconciliation: &backupusage.Reconciliation{
-			Status:               backupusage.ReconciliationStatusUnavailable,
+		Reconciliation: &backupusagecontract.Reconciliation{
+			Status:               backupusagecontract.ReconciliationStatusUnavailable,
 			BackendCount:         1,
 			MeasuredBackendCount: 0,
 			ObservedAt:           time.Date(2026, time.July, 30, 12, 0, 0, 0, time.UTC),

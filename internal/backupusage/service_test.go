@@ -71,10 +71,7 @@ func newTestService(now *time.Time) (*Service, *testSource) {
 			},
 		}},
 	}
-	artifactKeys := func(model.BackupArtifact) ([]string, error) {
-		return nil, errors.New("fixture should not contain artifacts")
-	}
-	svc := New(f, artifactKeys, Config{
+	svc := New(f, Config{
 		CacheTTL: 30 * time.Second, InventoryRefreshInterval: 15 * time.Minute,
 		ArtifactGCGrace: time.Hour, FailedRunGCGrace: time.Hour,
 	})
@@ -173,7 +170,11 @@ func TestBackupUsagePackageDoesNotImportConcreteApplicationLayers(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.HasPrefix(path, "fugue/internal/") && path != "fugue/internal/model" && path != "fugue/internal/objectstorage" {
+			switch path {
+			case "fugue/internal/backupusage/contract", "fugue/internal/model", "fugue/internal/objectstorage":
+				continue
+			}
+			if strings.HasPrefix(path, "fugue/internal/") {
 				t.Errorf("%s depends on %s; adapt dependencies outside backupusage", file.Name(), path)
 			}
 		}

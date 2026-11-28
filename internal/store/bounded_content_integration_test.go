@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -156,21 +157,23 @@ func TestChunkedCompilerInputPostgresCompatibilityCorruptionAndRollback(t *testi
 
 func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	s := boundedContentTestStore(t)
-	key := fmt.Sprintf("scan-%d", time.Now().UnixNano())
+	digest := sha256.Sum256([]byte(fmt.Sprintf("scan-%d", time.Now().UnixNano())))
+	checkpoint := s.BackupInventoryCheckpointWriter()
+	key := fmt.Sprintf("backup-inventory/v3/%x", digest)
 	raw := []byte(`{"cursor":"legacy"}`)
 	if _, err := s.db.Exec(`INSERT INTO fugue_meta(key,value) VALUES($1,$2)`, observationCheckpointKey(key), string(raw)); err != nil {
 		t.Fatal(err)
 	}
 	s.db.SetMaxOpenConns(1)
 	readCtx, cancelRead := context.WithTimeout(t.Context(), time.Second)
-	_, legacyBefore, err := s.ReadObservationPages(readCtx, key)
+	_, legacyBefore, err := checkpoint.Read(readCtx, digest)
 	cancelRead()
 	if err != nil || string(legacyBefore) != string(raw) {
 		t.Fatal("legacy fallback blocked or changed", err)
 	}
 	s.db.SetMaxOpenConns(4)
 	legacy := func([]byte) ([]byte, error) { t.Fatal("legacy writer used after activation"); return nil, nil }
-	_, err = s.UpdateObservationPages(t.Context(), key, func(p ObservationPages, b []byte) (ObservationPages, error) {
+	_, err = checkpoint.Update(t.Context(), digest, func(p ObservationPages, b []byte) (ObservationPages, error) {
 		if string(b) != string(raw) {
 			t.Fatal("legacy checkpoint lost")
 		}
@@ -179,14 +182,14 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read, _, err := s.ReadObservationPages(t.Context(), key)
+	read, _, err := checkpoint.Read(t.Context(), digest)
 	if err != nil || string(read.Metadata) != `{"cursor":"page2"}` {
 		t.Fatal(err)
 	}
 	var before string
 	s.db.QueryRow(`SELECT xmin::text FROM fugue_observation_checkpoint_entries WHERE checkpoint_key=$1 AND entry_key='b'`, observationCheckpointKey(key)).Scan(&before)
 	ctx, cancel := context.WithCancel(t.Context())
-	_, err = s.UpdateObservationPages(ctx, key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
+	_, err = checkpoint.Update(ctx, digest, func(p ObservationPages, _ []byte) (ObservationPages, error) {
 		p.Metadata = []byte(`{"cursor":"bad"}`)
 		p.Pages["a"] = []byte("changed")
 		cancel()
@@ -195,12 +198,12 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	if err == nil {
 		t.Fatal("canceled page advanced cursor")
 	}
-	read, _, err = s.ReadObservationPages(t.Context(), key)
+	read, _, err = checkpoint.Read(t.Context(), digest)
 	if err != nil || string(read.Metadata) != `{"cursor":"page2"}` || string(read.Pages["a"]) != "page-a" {
 		t.Fatal("partial checkpoint committed", err)
 	}
-	_, err = s.UpdateObservationPages(t.Context(), key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
-		ok, err := s.UpdateObservationPages(t.Context(), key, func(ObservationPages, []byte) (ObservationPages, error) {
+	_, err = checkpoint.Update(t.Context(), digest, func(p ObservationPages, _ []byte) (ObservationPages, error) {
+		ok, err := checkpoint.Update(t.Context(), digest, func(ObservationPages, []byte) (ObservationPages, error) {
 			t.Fatal("replica entered held checkpoint")
 			return ObservationPages{}, nil
 		}, legacy)
@@ -219,11 +222,11 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	if before != unchanged {
 		t.Fatal("unchanged page rewritten")
 	}
-	read, _, err = s.ReadObservationPages(t.Context(), key)
+	read, _, err = checkpoint.Read(t.Context(), digest)
 	if err != nil || string(read.Pages["a"]) != "changed" {
 		t.Fatalf("callback page replacement was not persisted: %q %v", read.Pages["a"], err)
 	}
-	_, err = s.UpdateObservationPages(t.Context(), key, func(p ObservationPages, _ []byte) (ObservationPages, error) {
+	_, err = checkpoint.Update(t.Context(), digest, func(p ObservationPages, _ []byte) (ObservationPages, error) {
 		p.Pages["a"][0] = 'C'
 		delete(p.Pages, "b")
 		p.Pages["empty"] = nil
@@ -232,7 +235,7 @@ func TestObservationPagesPostgresAtomicCursorAndReplicaLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	read, _, err = s.ReadObservationPages(t.Context(), key)
+	read, _, err = checkpoint.Read(t.Context(), digest)
 	_, deletedPresent := read.Pages["b"]
 	empty, emptyPresent := read.Pages["empty"]
 	if err != nil || string(read.Pages["a"]) != "Changed" || deletedPresent || !emptyPresent || len(empty) != 0 {
