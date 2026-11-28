@@ -886,6 +886,9 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 	if op.TenantID == "" || op.Type == "" || op.AppID == "" {
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 	}
+	if isOOMRightSizingActor(op) && !policy.AllowOOMRightSizingDeploy {
+		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
+	}
 	return s.pgCreateOperation(op, policy)
 }
 
