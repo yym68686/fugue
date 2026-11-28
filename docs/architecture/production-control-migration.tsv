@@ -309,6 +309,7 @@ script	scripts/verify_observation_writer_handoff.py	migrate	port live observatio
 script	scripts/verify_storage_audit_activation.py	migrate	port live observation to Guardian read-only shadow mode
 script	scripts/verify_storage_audit_api_rollout.py	migrate	port live observation to Guardian read-only shadow mode
 script	scripts/verify_storage_audit_worker.py	migrate	port live observation to Guardian read-only shadow mode
+script	scripts/verify_hosted_dns_api_rollout.py	migrate	port live rollout observation to Guardian read-only shadow mode
 
 workflow-job	.github/workflows/ci.yml#deploy_hosted_dns_worker	migrate	Guardian-owned build artifact verification and release
 workflow-job	.github/workflows/ci.yml#deploy_observation_worker	migrate	Guardian-owned build artifact verification and release
