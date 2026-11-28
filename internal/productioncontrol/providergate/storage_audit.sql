@@ -174,6 +174,27 @@ BEFORE UPDATE ON fugue_storage_audit.lifecycle_control FOR EACH ROW
 EXECUTE FUNCTION fugue_storage_audit.guard_native_policy_change();
 ALTER TABLE fugue_storage_audit.lifecycle_control ENABLE ALWAYS TRIGGER storage_audit_native_policy_fence;
 
+CREATE OR REPLACE FUNCTION fugue_storage_audit.scope_native_policy_claim() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $body$
+DECLARE
+    enrolled_cluster text;
+BEGIN
+    SELECT f.cluster_id INTO enrolled_cluster
+      FROM fugue_storage_audit.native_policy_authority a JOIN fugue_storage_audit.native_policy_freeze f USING (singleton)
+      JOIN pg_roles r ON r.oid=a.writer_oid AND r.rolname=a.writer_name
+      WHERE r.rolname=session_user;
+    IF (NEW.resource_id = 'maintenance/storage-audit-policy' AND enrolled_cluster IS DISTINCT FROM NEW.cluster_id)
+        OR (enrolled_cluster IS NOT NULL AND NEW.resource_id <> 'maintenance/storage-audit-policy') THEN
+        RAISE EXCEPTION 'storage audit claim must use its enrolled writer and resource' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END;
+$body$;
+REVOKE ALL ON FUNCTION fugue_storage_audit.scope_native_policy_claim() FROM PUBLIC;
+CREATE OR REPLACE TRIGGER storage_audit_claim_scope BEFORE INSERT ON fugue_control.execution_claims
+FOR EACH ROW EXECUTE FUNCTION fugue_storage_audit.scope_native_policy_claim();
+ALTER TABLE fugue_control.execution_claims ENABLE ALWAYS TRIGGER storage_audit_claim_scope;
+
 CREATE OR REPLACE FUNCTION fugue_storage_audit.require_native_policy_receipt() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $body$
 BEGIN

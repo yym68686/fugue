@@ -17,9 +17,71 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
 )
+
+func TestStorageAuditProjectionFenceAtProvider(t *testing.T) {
+	cfg := startAdmissionTestServer(t)
+	admin := admissionClient(t, cfg, "")
+	ctx, cancel := context.WithTimeout(t.Context(), 35*time.Second)
+	defer cancel()
+	const namespace, name, key = "isolated-storage", "storage-settings", "storage-lifecycle.json"
+	ns, err := admin.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: namespace}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	maps := admin.CoreV1().ConfigMaps(namespace)
+	old, err := maps.Create(ctx, &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: name},
+		Data: map[string]string{key: "legacy", "policy.json": "unchanged"}}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := productioncontrol.StorageAuditShadowBinding{
+		Kubernetes: productioncontrol.ParticipationKubernetesBinding{
+			Endpoint: "https://cluster.example.test", CADigest: digest([]byte("ca")), NamespaceUID: string(ns.UID),
+		},
+		Namespace: namespace, ConfigMap: name, ConfigMapUID: string(old.UID),
+	}
+	pair, err := StorageAuditProjectionFence(scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := admin.AdmissionregistrationV1()
+	if _, err := registry.ValidatingAdmissionPolicies().Create(ctx, pair.Policy, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ValidatingAdmissionPolicyBindings().Create(ctx, pair.Binding, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	dry := metav1.UpdateOptions{DryRun: []string{metav1.DryRunAll}}
+	if err := wait.PollUntilContextTimeout(ctx, 150*time.Millisecond, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := maps.Update(ctx, old.DeepCopy(), dry)
+		return isCutoverDenial(err), nil
+	}); err != nil {
+		t.Fatal("retirement policy did not become active", err)
+	}
+	if err := VerifyKubeCutoverPolicyPairs(ctx, admin, []KubeCutoverPolicy{pair}); err != nil {
+		t.Fatal(err)
+	}
+	retired := old.DeepCopy()
+	delete(retired.Data, key)
+	retired.Data["policy.json"] = "updated independently"
+	retired, err = maps.Update(ctx, retired, metav1.UpdateOptions{})
+	if err != nil {
+		t.Fatalf("retirement and unrelated settings must work: %v", err)
+	}
+	reintroduced := retired.DeepCopy()
+	reintroduced.Data[key] = "reintroduced"
+	_, err = maps.Update(ctx, reintroduced, dry)
+	requireCutoverDenial(t, err)
+	reintroduced = retired.DeepCopy()
+	reintroduced.BinaryData = map[string][]byte{key: []byte("reintroduced")}
+	_, err = maps.Update(ctx, reintroduced, dry)
+	requireCutoverDenial(t, err)
+	requireCutoverDenial(t, maps.Delete(ctx, name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}}))
+}
 
 type deploymentEvidenceFunc func(context.Context, KubeDeploymentCutover, NativePublicationBoundary) error
 

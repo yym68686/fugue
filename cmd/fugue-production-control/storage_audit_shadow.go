@@ -9,26 +9,48 @@ import (
 	"time"
 
 	"fugue/internal/productioncontrol"
+	"fugue/internal/releaseguardian"
 	"fugue/internal/releaseguardian/storageauditcontrol"
 	"fugue/internal/storageaudit"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
-func shadowStorageAudit(ctx context.Context, paths []string, retired bool, out io.Writer) error {
-	raw, err := readFile(paths[3], 16<<10, false)
+func readStorageAuditShadowSpec(path string) (productioncontrol.StorageAuditShadowBinding, error) {
+	raw, err := readFile(path, 16<<10, false)
 	if err != nil {
-		return err
+		return productioncontrol.StorageAuditShadowBinding{}, err
 	}
 	var spec productioncontrol.StorageAuditShadowBinding
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if d.Decode(&spec) != nil || d.Decode(new(any)) != io.EOF {
-		return errors.New("invalid storage audit shadow specification")
+		return productioncontrol.StorageAuditShadowBinding{}, errors.New("invalid storage audit shadow specification")
 	}
-	if err := spec.Validate(); err != nil {
+	return spec, spec.Validate()
+}
+
+func renderStorageAuditProjectionFence(path string, out io.Writer) error {
+	spec, err := readStorageAuditShadowSpec(path)
+	if err != nil {
 		return err
 	}
-	raw, err = readFile(paths[4], 4096, false)
+	fence, err := releaseguardian.StorageAuditProjectionFence(spec)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(struct {
+		APIVersion string `json:"apiVersion"`
+		Kind       string `json:"kind"`
+		Items      []any  `json:"items"`
+	}{"v1", "List", []any{fence.Policy, fence.Binding}})
+}
+
+func shadowStorageAudit(ctx context.Context, paths []string, retired bool, out io.Writer) error {
+	spec, err := readStorageAuditShadowSpec(paths[3])
+	if err != nil {
+		return err
+	}
+	raw, err := readFile(paths[4], 4096, false)
 	if err != nil {
 		return err
 	}
@@ -51,11 +73,16 @@ func shadowStorageAudit(ctx context.Context, paths []string, retired bool, out i
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	report, err := readStorageAuditShadow(ctx, client, spec, target, retired, func(ctx context.Context) (storageaudit.OwnerObservation, error) {
+	report, err := readStorageAuditShadow(ctx, client.CoreV1(), spec, target, retired, func(ctx context.Context) (storageaudit.OwnerObservation, error) {
 		return provider.Observe(ctx, db)
 	})
 	if err != nil {
 		return err
+	}
+	if retired {
+		if err := storageauditcontrol.VerifyRetiredProjection(ctx, client, report); err != nil {
+			return err
+		}
 	}
 	return json.NewEncoder(out).Encode(report)
 }

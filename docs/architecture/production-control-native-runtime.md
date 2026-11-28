@@ -677,8 +677,12 @@ provider table updates and journal approval writes use separate identities.
 Before the first native publication, verify that the running release and its
 rollback versions read the worker-owned PostgreSQL policy and that the old
 `storage-lifecycle.json` ConfigMap key has been retired. The remaining
-ConfigMap settings have their own migration. `shadow-storage-audit-native`
-checks the key's absence and reads the current PostgreSQL policy. The Guardian
+ConfigMap settings have their own migration. Use
+`render-storage-audit-projection-fence SPEC` to prepare the admission pair
+that prevents reintroducing the key or replacing the ConfigMap. Verify actual
+enforcement and drain earlier admitted writes before relying on the pair.
+`shadow-storage-audit-native` checks the pair and absence of the key and
+reads the current PostgreSQL policy. The Guardian
 command `storage-audit-policy-dispatch JOURNAL_CONFIG KUBECONFIG CONTEXT INTENT_DIGEST APPROVAL_DIGEST`
 checks the signed approval and re-reads the approved Kubernetes projection
 at its exact UID and resourceVersion. The claim, provider compare-and-swap,

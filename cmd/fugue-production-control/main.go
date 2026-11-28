@@ -35,6 +35,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
        fugue-production-control shadow-storage-audit-native CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE
+       fugue-production-control render-storage-audit-projection-fence SPEC
        fugue-production-control draft-storage-audit JOURNAL_CONFIG REQUEST SHADOW
        fugue-production-control record-intent JOURNAL_CONFIG ACTOR SUBMISSION
        fugue-production-control record-approval JOURNAL_CONFIG APPROVAL
@@ -83,6 +84,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	}
 	emit := json.NewEncoder(out).Encode
 	switch args[0] {
+	case "render-storage-audit-projection-fence":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		return renderStorageAuditProjectionFence(args[1], out)
 	case "shadow-storage-audit", "shadow-storage-audit-native":
 		if len(args) != 6 {
 			return errors.New(usage)
