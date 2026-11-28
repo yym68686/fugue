@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/api/internal/routeobservation"
 	"fugue/internal/edgetopology"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
@@ -924,7 +925,7 @@ func (s *Server) listRouteInventoryNodes(edgeGroupID string) ([]model.EdgeNode, 
 		}
 		return nil, nil, err
 	}
-	s.recordEdgeRouteInventoryFallback(fallbackReason)
+	s.routeObservationMetrics.RecordInventoryFallback(fallbackReason)
 	return s.store.ListEdgeNodes(edgeGroupID)
 }
 
@@ -933,10 +934,10 @@ func edgeRouteInventoryFallbackReason(inventoryErr error, activeNodes []model.Ed
 		return ""
 	}
 	if errors.Is(inventoryErr, store.ErrEdgeInstanceFencingNotReady) {
-		return edgeRouteInventoryFallbackFencingNotReady
+		return routeobservation.FallbackFencingNotReady
 	}
 	if inventoryErr == nil && len(activeNodes) == 0 {
-		return edgeRouteInventoryFallbackActiveEmpty
+		return routeobservation.FallbackActiveEmpty
 	}
 	return ""
 }

@@ -38,8 +38,7 @@ func (s *Server) logEdgeRouteIntentObservations(snapshot model.EdgeRouteIntentSn
 		identityMaterial.CacheExpired = false
 		identityMaterial.ImageLocationObservedAt = ""
 		observationID := "intent_observation_" + strings.TrimPrefix(edgeRouteDecisionID(identityMaterial), "decision_")
-		key := strings.Join([]string{"intent_observation", app.ID, normalizeExternalAppDomain(intent.Hostname), model.NormalizeAppRoutePathPrefix(intent.PathPrefix), intent.RouteKind}, "\x00")
-		if !s.edgeRouteObservationChanged(key, observationID) {
+		if !s.routeDecisionObservations.IntentChanged(app.ID, intent.Hostname, intent.PathPrefix, intent.RouteKind, observationID) {
 			continue
 		}
 		s.logStructuredEvent(map[string]any{

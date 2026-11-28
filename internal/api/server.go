@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/api/internal/routeobservation"
 	"fugue/internal/appimages"
 	"fugue/internal/auth"
 	"fugue/internal/backupusage"
@@ -143,12 +144,8 @@ type Server struct {
 	clientProbePlanBudget                  clientprobe.Budget
 	newManagedAppStatusClient              func() (*managedAppStatusClient, error)
 	managedAppStatusCache                  managedAppStatusCache
-	edgeRouteDecisionMu                    sync.Mutex
-	edgeRouteDecisionLast                  map[string]string
-	trafficPublicationTimeouts             atomic.Uint64
-	edgeRouteSourceMu                      sync.Mutex
-	edgeRouteSourceHeartbeats              map[string]uint64
-	edgeRouteInventoryFallbacks            map[string]uint64
+	routeDecisionObservations              routeobservation.Decisions
+	routeObservationMetrics                routeobservation.Metrics
 	edgeAuthMu                             sync.Mutex
 	edgeAuthMethods                        map[string]uint64
 	nodeUpdaterEdgeIdentityMu              sync.Mutex
@@ -328,8 +325,6 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		newClusterNodeClient:                   newClusterNodeClient,
 		newManagedAppStatusClient:              newManagedAppStatusClient,
 		managedAppStatusCache:                  newManagedAppStatusCache(0, 0),
-		edgeRouteSourceHeartbeats:              map[string]uint64{"edge_control": 0, "core_api": 0, "unknown": 0, "other": 0},
-		edgeRouteInventoryFallbacks:            map[string]uint64{"fencing_not_ready": 0, "active_inventory_empty": 0},
 		consoleGalleryCache:                    newExpiringResponseCache[consoleGalleryResponse](defaultConsoleGalleryCacheTTL),
 		consoleProjectsSnapshotCache:           newExpiringResponseCache[consoleProjectsSnapshotResponse](defaultConsoleProjectsSnapshotCacheTTL),
 		sourceUploadSlots:                      make(chan struct{}, maxConcurrentSourceUploadRequests),
@@ -458,7 +453,7 @@ func (s *Server) collectMetrics(ctx context.Context, w io.Writer) error {
 	s.writeDNSObservationMetrics(w)
 	s.writeHostedDNSMetrics(w)
 	s.writeEdgeExclusionMetrics(w)
-	s.writeEdgeRouteSourceMetrics(w)
+	s.routeObservationMetrics.WritePrometheus(w)
 	s.writeEdgeAuthMetrics(w)
 	s.writeNodeUpdaterEdgeIdentityMetrics(w)
 	return ctx.Err()

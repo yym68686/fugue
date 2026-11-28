@@ -207,7 +207,7 @@ func (s *Server) logEdgeRouteDecisionChanges(bundle model.EdgeRouteBundle, appsB
 		app := appsByID[strings.TrimSpace(route.AppID)]
 		provenance := provenanceByAppID[strings.TrimSpace(route.AppID)]
 		material := edgeRouteDecisionMaterialFor(app, route, provenance)
-		changed := s.edgeRouteDecisionChanged(route)
+		changed := s.routeDecisionObservations.RouteChanged(route)
 		mustPersist := material.Status != model.EdgeRouteStatusActive || len(material.InvariantViolations) > 0
 		if !changed && !mustPersist {
 			continue
@@ -273,34 +273,6 @@ func (s *Server) logEdgeRouteDecisionChanges(bundle model.EdgeRouteBundle, appsB
 		}
 		s.logStructuredEvent(event)
 	}
-}
-
-func (s *Server) edgeRouteDecisionChanged(route model.EdgeRouteBinding) bool {
-	keyParts := []string{
-		normalizeExternalAppDomain(route.Hostname),
-		model.NormalizeAppRoutePathPrefix(route.PathPrefix),
-		strings.TrimSpace(route.RouteKind),
-		strings.TrimSpace(route.EdgeGroupID),
-	}
-	key := strings.Join(keyParts, "\x00")
-	decisionID := strings.TrimSpace(route.DecisionID)
-	return s.edgeRouteObservationChanged(key, decisionID)
-}
-
-func (s *Server) edgeRouteObservationChanged(key, observationID string) bool {
-	s.edgeRouteDecisionMu.Lock()
-	defer s.edgeRouteDecisionMu.Unlock()
-	if s.edgeRouteDecisionLast == nil {
-		s.edgeRouteDecisionLast = make(map[string]string)
-	}
-	if s.edgeRouteDecisionLast[key] == observationID {
-		return false
-	}
-	if len(s.edgeRouteDecisionLast) >= 4096 {
-		s.edgeRouteDecisionLast = make(map[string]string)
-	}
-	s.edgeRouteDecisionLast[key] = observationID
-	return true
 }
 
 func (s *Server) logManagedAppRefreshEvent(cacheLayer, phase, result string, sequence uint64, err error) {

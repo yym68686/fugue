@@ -114,7 +114,7 @@ func (s *Server) reconcilePendingProducedTraffic(ctx context.Context, policy pla
 			return true, err
 		}
 		if reason == trafficPublicationTimeoutReason {
-			s.trafficPublicationTimeouts.Add(1)
+			s.routeObservationMetrics.RecordPublicationTimeout()
 		}
 		s.appendAudit(principal, "platform_config.serving_rolled_back", "platform_release_set", parent.ID, "", map[string]string{"reason": reason, "channel": current.ReleaseChannel, "policy_release_id": authority.ID, "failed_release_id": current.ID, "recovery_release_id": release.ID, "lkg_artifact_id": artifact.ID})
 		if s.log != nil {

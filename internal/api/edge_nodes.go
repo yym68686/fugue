@@ -580,7 +580,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 			s.writeStoreError(w, updateErr)
 			return
 		}
-		s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
+		s.routeObservationMetrics.RecordHeartbeat(req.RouteBundleSource)
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"node": legacyNode, "accepted": true, "activation_phase": activation.Phase})
 		return
 	}
@@ -641,7 +641,7 @@ func (s *Server) handleEdgeHeartbeat(w http.ResponseWriter, r *http.Request) {
 			s.log.Printf("edge performance sample ingest failed; edge_id=%s edge_group_id=%s error=%v", req.EdgeID, req.EdgeGroupID, err)
 		}
 	}
-	s.recordEdgeRouteSourceHeartbeat(req.RouteBundleSource)
+	s.routeObservationMetrics.RecordHeartbeat(req.RouteBundleSource)
 	if samples := sanitizeEdgeNetworkSamples(req, servingActive, now); len(samples) > 0 {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 		err := s.store.RecordEdgeNetworkSamples(ctx, samples, now.Add(-time.Hour))
