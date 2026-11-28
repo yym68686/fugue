@@ -31,7 +31,7 @@ func managedAppListObservationProvenance(apps []model.App, entry managedAppStatu
 	out := make(map[string]managedAppObservationProvenance, len(apps))
 	for _, app := range apps {
 		appID := strings.TrimSpace(app.ID)
-		_, found := entry.items[appID]
+		found := entry.Has(appID)
 		durablePhase := strings.TrimSpace(app.Status.Phase)
 		if app.StoredStatus != nil {
 			durablePhase = strings.TrimSpace(app.StoredStatus.Phase)
@@ -41,15 +41,15 @@ func managedAppListObservationProvenance(apps []model.App, entry managedAppStatu
 			cacheHit:               true,
 			cacheExpired:           expired,
 			observationFresh:       fresh,
-			clusterIDDigest:        edgeObservationDigest(entry.clusterID),
+			clusterIDDigest:        edgeObservationDigest(entry.ClusterID),
 			durableRevisionDigest:  edgeObservationDigest(managedAppRuntimeEvidenceObservationKey(app)),
 			durablePhase:           durablePhase,
 			durableOperationDigest: edgeObservationDigest(app.Status.LastOperationID),
 			managedFound:           found,
-			refreshedAt:            entry.refreshedAt,
-			expiresAt:              entry.expiresAt,
-			sequence:               entry.sequence,
-			evidence:               entry.evidence[appID],
+			refreshedAt:            entry.RefreshedAt,
+			expiresAt:              entry.ExpiresAt,
+			sequence:               entry.Sequence,
+			evidence:               entry.EvidenceFor(appID),
 		}
 	}
 	return out
@@ -138,33 +138,33 @@ func edgeRouteDecisionMaterialFor(app model.App, route model.EdgeRouteBinding, p
 		DurableImageDigest:             edgeObservationDigest(app.Spec.Image),
 		DurablePhase:                   storedPhase,
 		DurableOperationDigest:         durableOperationDigest,
-		AppObservationKeyDigest:        edgeObservationDigest(evidence.appObservationKey),
+		AppObservationKeyDigest:        edgeObservationDigest(evidence.AppObservationKey),
 		CacheLayer:                     strings.TrimSpace(provenance.cacheLayer),
 		CacheHit:                       provenance.cacheHit,
 		CacheExpired:                   provenance.cacheExpired,
 		ObservationFresh:               provenance.observationFresh,
 		ClusterIDDigest:                provenance.clusterIDDigest,
 		ManagedFound:                   provenance.managedFound,
-		ManagedGeneration:              evidence.managedGeneration,
-		ManagedObservedGeneration:      evidence.managedObservedGeneration,
-		ManagedImageDigest:             evidence.managedImageDigest,
-		ManagedDesiredReplicas:         evidence.managedDesiredReplicas,
-		ManagedReadyReplicas:           evidence.managedReadyReplicas,
-		DeploymentObservedGeneration:   evidence.deploymentObservedGeneration,
-		DeploymentKubernetesGeneration: evidence.deploymentGeneration,
-		DeploymentImageDigest:          evidence.deploymentImageDigest,
-		DeploymentReplicas:             evidence.deploymentReplicas,
-		DeploymentUpdatedReplicas:      evidence.deploymentUpdatedReplicas,
-		DeploymentReadyReplicas:        evidence.deploymentReadyReplicas,
-		DeploymentAvailableReplicas:    evidence.deploymentAvailableReplicas,
-		NamespacePresent:               evidence.namespacePresent,
-		ServicePresent:                 evidence.servicePresent,
-		EndpointPresent:                evidence.endpointPresent,
-		EndpointReady:                  evidence.endpointReady,
-		ImageLocationStatus:            strings.TrimSpace(evidence.imageLocationStatus),
-		ImageLocationSource:            strings.TrimSpace(evidence.imageLocationSource),
-		ImageLocationObservedAt:        formatObservationTime(evidence.imageLocationObservedAt),
-		InvariantViolations:            sortedInvariantViolations(evidence.invariantViolations),
+		ManagedGeneration:              evidence.ManagedGeneration,
+		ManagedObservedGeneration:      evidence.ManagedObservedGeneration,
+		ManagedImageDigest:             evidence.ManagedImageDigest,
+		ManagedDesiredReplicas:         evidence.ManagedDesiredReplicas,
+		ManagedReadyReplicas:           evidence.ManagedReadyReplicas,
+		DeploymentObservedGeneration:   evidence.DeploymentObservedGeneration,
+		DeploymentKubernetesGeneration: evidence.DeploymentGeneration,
+		DeploymentImageDigest:          evidence.DeploymentImageDigest,
+		DeploymentReplicas:             evidence.DeploymentReplicas,
+		DeploymentUpdatedReplicas:      evidence.DeploymentUpdatedReplicas,
+		DeploymentReadyReplicas:        evidence.DeploymentReadyReplicas,
+		DeploymentAvailableReplicas:    evidence.DeploymentAvailableReplicas,
+		NamespacePresent:               evidence.NamespacePresent,
+		ServicePresent:                 evidence.ServicePresent,
+		EndpointPresent:                evidence.EndpointPresent,
+		EndpointReady:                  evidence.EndpointReady,
+		ImageLocationStatus:            strings.TrimSpace(evidence.ImageLocationStatus),
+		ImageLocationSource:            strings.TrimSpace(evidence.ImageLocationSource),
+		ImageLocationObservedAt:        formatObservationTime(evidence.ImageLocationObservedAt),
+		InvariantViolations:            sortedInvariantViolations(evidence.InvariantViolations),
 	}
 }
 
@@ -265,11 +265,11 @@ func (s *Server) logEdgeRouteDecisionChanges(bundle model.EdgeRouteBundle, appsB
 			"invariant_violations":             material.InvariantViolations,
 			"invariant_violations_json":        string(invariantJSON),
 			"persistence_priority":             mustPersist,
-			"refresh_started_sequence":         provenance.sequence.refreshStarted,
-			"managed_apps_read_sequence":       provenance.sequence.managedAppsRead,
-			"kube_snapshot_read_sequence":      provenance.sequence.kubeSnapshotRead,
-			"durable_apps_read_sequence":       provenance.sequence.durableAppsRead,
-			"refresh_completed_sequence":       provenance.sequence.refreshCompleted,
+			"refresh_started_sequence":         provenance.sequence.RefreshStarted,
+			"managed_apps_read_sequence":       provenance.sequence.ManagedAppsRead,
+			"kube_snapshot_read_sequence":      provenance.sequence.KubeSnapshotRead,
+			"durable_apps_read_sequence":       provenance.sequence.DurableAppsRead,
+			"refresh_completed_sequence":       provenance.sequence.RefreshCompleted,
 		}
 		s.logStructuredEvent(event)
 	}

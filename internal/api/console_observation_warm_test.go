@@ -28,8 +28,8 @@ func TestConsoleWarmPublishesCompleteObservationBeforePageRequest(t *testing.T) 
 	defer func() { cancel(); <-warmersDone }()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if snapshot, ok, expired := s.managedAppStatusCache.getObservedList(); ok && !expired {
-			if snapshot.clusterID == "" || !snapshot.ok {
+		if snapshot, ok, expired := s.managedAppStatusCache.Inventory(); ok && !expired {
+			if snapshot.ClusterID == "" || !snapshot.Ok {
 				t.Fatal("warmer published incomplete observation")
 			}
 			cancel()
