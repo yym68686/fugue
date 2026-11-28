@@ -7,7 +7,12 @@ import (
 )
 
 func TestOperationViewPortCannotAcquireCoreWrites(t *testing.T) {
-	reads := (&Store{}).OperationViews()
+	reads := any((&Store{}).OperationViews())
+	if _, ok := reads.(interface {
+		CreateOperation(model.Operation) (model.Operation, error)
+	}); ok {
+		t.Fatal("read-only port exposes operation creation")
+	}
 	if _, ok := reads.(interface {
 		CancelOperation(string, string) (model.Operation, error)
 	}); ok {

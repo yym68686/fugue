@@ -43,7 +43,7 @@ func TestQueueTerminalFailureCannotOverwriteClaimOrCancellation(t *testing.T) {
 		}
 	}
 	expectStatus(model.OperationStatusRunning)
-	if _, err := s.CancelOperation(op.ID, "user cancelled"); err != nil {
+	if _, err := cancelOperationForTest(s, op, "user cancelled"); err != nil {
 		t.Fatal(err)
 	}
 	expectStatus(model.OperationStatusCanceled)

@@ -61,7 +61,7 @@ func TestAppCPUResizePreservesServingStateAndFencesOtherOperations(t *testing.T)
 	if err != nil || !claimed {
 		t.Fatal(err)
 	}
-	if _, err := s.CancelOperation(op.ID, "stop"); !errors.Is(err, ErrConflict) {
+	if _, err := cancelOperationForTest(s, op, "stop"); !errors.Is(err, ErrConflict) {
 		t.Fatal("running mutation canceled", err)
 	}
 	if count, err := s.RequeueInFlightManagedOperations("controller restarted"); err != nil || count != 0 {

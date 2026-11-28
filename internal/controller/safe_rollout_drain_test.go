@@ -96,7 +96,7 @@ func newDrainWorkloadFixtureWithTerminalOutcome(t *testing.T, failed, snapshot, 
 		}
 	}
 	if canceled {
-		_, err = st.CancelOperation(op.ID, "superseded after promotion")
+		_, err = cancelFixtureOperation(st, op, "superseded after promotion")
 	} else if failed {
 		_, err = st.FailOperation(op.ID, old.StatusReason)
 	} else {
