@@ -730,7 +730,11 @@ The 2026-11-28 legacy release attempt at `998ed6168` reached the production
 transaction. PostgreSQL rejected admission because an existing sample
 retention or ingestion transaction held the lock. A read-only query after
 the attempt reported `owner=api`, no fence and zero worker passes on all
-three targets.
+three targets. A later read of the same primary found the shared transfer
+checkpoint at 01:13:53 UTC, all three Worker fences enforced and new passes
+committed on all targets. This observes the legacy transfer and supplies a
+baseline to preserve during migration. It supplies neither a native switch
+receipt nor proof that the legacy writer credentials were revoked.
 
 ## Single-Deployment release draft
 
