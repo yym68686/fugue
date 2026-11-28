@@ -17,32 +17,6 @@ func (s *Server) appMemoryResizeEnabled(app model.App) bool {
 	return err == nil && (rt.Type == model.RuntimeTypeManagedShared || rt.Type == model.RuntimeTypeManagedOwned)
 }
 
-func appMemoryRequestOnlyChange(current, target *model.ResourceSpec) bool {
-	if current == nil || target == nil || current.MemoryMebibytes == target.MemoryMebibytes {
-		return false
-	}
-	other := *target
-	other.MemoryMebibytes = current.MemoryMebibytes
-	return resourceSpecsEqual(current, &other)
-}
-
-func autoAppMemoryRequestChange(current, target *model.ResourceSpec) autoRightSizingAppResourceDecision {
-	if current == nil || target == nil {
-		return autoRightSizingAppResourceChange(current, current)
-	}
-	memoryOnly := model.CloneResourceSpec(current)
-	memoryOnly.MemoryMebibytes = target.MemoryMebibytes
-	decision := autoRightSizingAppResourceChange(current, memoryOnly)
-	if decision.resources != nil {
-		// A request-only resize cannot authorize a limit increase, even when
-		// the recommendation needs one. Defer that transition explicitly.
-		if current.MemoryLimitMebibytes > 0 && decision.resources.MemoryMebibytes > current.MemoryLimitMebibytes {
-			decision.allowed = false
-		}
-	}
-	return decision
-}
-
 func (s *Server) queueAppMemoryResize(app model.App, memory int64, actorType, actorID string) (*model.Operation, error) {
 	spec := app.Spec.DeepCopy()
 	if spec.Resources == nil || memory <= 0 {
@@ -60,7 +34,7 @@ func (s *Server) queueAppMemoryResize(app model.App, memory int64, actorType, ac
 		s.logRightSizingDecision(app, "failure_backoff", "in-place memory resize target failed recently; no rolling fallback", nil)
 		return nil, store.ErrConflict
 	}
-	op, err := s.store.CreateAppRequestResizeOperation(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize,
+	op, err := s.enqueueSizingRequest(model.Operation{TenantID: app.TenantID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize,
 		RequestedByType: actorType, RequestedByID: actorID, DesiredSpec: &spec}, app.Spec)
 	if err != nil {
 		return nil, err
