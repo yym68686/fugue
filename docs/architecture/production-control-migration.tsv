@@ -249,6 +249,9 @@ release-file	deploy/releases/edge-worker-us-primary-prewarm/resources.json	migra
 release-file	deploy/releases/edge-worker-us/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/guardian/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/guardian/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/hosted-dns-worker/database.json	migrate	native scoped DNS standby database role and credential provisioning
+release-file	deploy/releases/hosted-dns-worker/intent.json	migrate	import verified hosted DNS standby state and archive Git intent history
+release-file	deploy/releases/hosted-dns-worker/resources.json	migrate	native release catalog for the isolated hosted DNS standby worker
 release-file	deploy/releases/image-cache/daemonset.json	migrate	native release catalog or runtime topology, resolved by stable identity
 release-file	deploy/releases/image-cache/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/image-cache/lkg.json	migrate	native release catalog or runtime topology, resolved by stable identity
@@ -320,6 +323,7 @@ release-lane	edge-worker-us-primary-a	migrate	native digest-bound release keyed 
 release-lane	edge-worker-us-primary-a-hosted	migrate	native digest-bound release keyed by stable resource identity
 release-lane	edge-worker-us-primary-prewarm	migrate	native digest-bound release keyed by stable resource identity
 release-lane	guardian	migrate	native digest-bound release keyed by stable resource identity
+release-lane	hosted-dns-worker	migrate	native digest-bound DNS standby release and independent readiness verification
 release-lane	image-cache	migrate	native digest-bound release keyed by stable resource identity
 release-lane	observation-worker	migrate	native digest-bound release keyed by stable resource identity
 release-lane	runtime-agent-canary	migrate	native digest-bound release keyed by stable resource identity
@@ -407,6 +411,7 @@ script	scripts/postgres_baked_manager.sh	migrate	native data and storage mainten
 script	scripts/prepare_fugue_lvm_localpv_node.sh	migrate	native administrative operation or build interface
 script	scripts/prepare_static_caddy.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/prepush.py	migrate	unprivileged source checks, build or client packaging
+script	scripts/prepush_local.py	migrate	unprivileged dependency-scoped local verification without production authorization
 script	scripts/prepush_replay.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/prepush_shadow.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/prepush_shadow_contract.py	migrate	unprivileged source-check replay validation
@@ -415,6 +420,7 @@ script	scripts/preview_dns_refused_stage.py	migrate	native DNS policy and reconc
 script	scripts/probe_fugue_public_dns.sh	migrate	native observation and evidence; assess any retained write side effects
 script	scripts/promote_cell_routes.py	migrate	native platform policy and reconciliation
 script	scripts/promote_dns_authority.py	migrate	native DNS policy and reconciliation
+script	scripts/provision_hosted_dns_worker.py	migrate	native scoped DNS standby database provisioning
 script	scripts/provision_observation_sample_retention.py	migrate	native scoped database role and standby capability provisioning
 script	scripts/provision_observation_worker_database.py	migrate	native database ownership and scoped credential provisioning
 script	scripts/provision_quality_evidence_retention.py	migrate	native maintenance role provisioning with standby and readiness verification
@@ -492,6 +498,7 @@ script	scripts/verify_baked_postgres.py	migrate	unprivileged build check or scop
 script	scripts/verify_cnpg_candidate.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_dns_configuration_revision.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_dns_transport_isolation.py	migrate	unprivileged build check or scoped runtime verification
+script	scripts/verify_hosted_dns_worker.py	migrate	native read-only DNS standby runtime and readiness verification
 script	scripts/verify_k3s_transport.py	migrate	unprivileged source checks, build or client packaging
 script	scripts/verify_managed_ssh_image.py	migrate	unprivileged build check or scoped runtime verification
 script	scripts/verify_observation_rollback_floor.py	migrate	native read-only exact serving revision and rollback floor verification
@@ -530,6 +537,7 @@ workflow-job	.github/workflows/ci.yml#deploy_edge_client	migrate	native digest-b
 workflow-job	.github/workflows/ci.yml#deploy_edge_control	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_edge_image_gc	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_edge_worker	migrate	native digest-bound release
+workflow-job	.github/workflows/ci.yml#deploy_hosted_dns_worker	migrate	native DNS standby provisioning, digest-bound release and scoped verification
 workflow-job	.github/workflows/ci.yml#deploy_image_cache	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_observation_worker	migrate	native digest-bound release
 workflow-job	.github/workflows/ci.yml#deploy_release_guardian	migrate	native digest-bound release
