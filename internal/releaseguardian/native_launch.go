@@ -106,6 +106,13 @@ func (gate *nativeLaunchGate) ReserveRollout(ctx context.Context, s Snapshot) (b
 	if err := binding.VerifyCandidate(ctx, gate.store.client.CoreV1(), target.Namespace, payload.Files); err != nil {
 		return false, err
 	}
+	services, err := BindNativeStaticServices(identity, bundle.Prepared, bundle.Forward, bundle.LKG)
+	if err != nil {
+		return false, err
+	}
+	if err := VerifyNativeStaticServices(ctx, gate.store.client.CoreV1(), bundle.LKG, services); err != nil {
+		return false, err
+	}
 	_, _, _, monitor, forward, _, err := decodeStableRecord(s.CurrentMonitorData)
 	if err != nil || monitor.RecordDigest != payload.RollbackMonitor || digest(forward) != payload.RollbackManifest || !bytes.Equal(bundle.LKG, forward) {
 		return false, errors.New("native rollout predecessor is not the approved rollback monitor")

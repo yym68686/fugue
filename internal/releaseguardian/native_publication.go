@@ -43,6 +43,7 @@ type NativePublicationBoundary struct {
 	ArtifactReceiptDigest        string
 	ForwardReceipt               declarativerelease.ArtifactReceipt
 	RollbackReceipt              declarativerelease.ArtifactReceipt
+	StaticServices               []NativeStaticService `json:",omitempty"`
 }
 
 // NativePublicationAdmission is a trusted provider-side admission dependency,
@@ -116,7 +117,7 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 	if err != nil {
 		return NativePublication{}, err
 	}
-	if err := p.verifyBoundary(ctx, boundary); err != nil {
+	if err := p.verifyBoundary(ctx, boundary, publication.bundle.LKG); err != nil {
 		return NativePublication{}, err
 	}
 	if p.artifacts != nil {
@@ -125,7 +126,7 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 		}
 		// A streaming image check can take longer than a reconciliation
 		// interval. Do not reserve based on the preceding workload read.
-		if err := p.verifyBoundary(ctx, boundary); err != nil {
+		if err := p.verifyBoundary(ctx, boundary, publication.bundle.LKG); err != nil {
 			return NativePublication{}, err
 		}
 	}
@@ -139,7 +140,7 @@ func (p *NativePublisher) Publish(ctx context.Context, actor, intentDigest, appr
 		nativeFenceAnnotation:  strconv.FormatInt(claim.Fence, 10),
 	}
 	_, desired, err := p.store.commitDesiredPublication(ctx, key, publication, p.writer, func(ctx context.Context) error {
-		if err := p.verifyBoundary(ctx, boundary); err != nil {
+		if err := p.verifyBoundary(ctx, boundary, publication.bundle.LKG); err != nil {
 			return err
 		}
 		return p.journal.VerifyOpenClaim(ctx, claim)
@@ -196,23 +197,17 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 	if publication.monitorComponent != bundle.Release.ComponentID ||
 		workload.Namespace != preview.Namespace || workload.APIVersion != "apps/v1" || workload.Kind != "Deployment" ||
 		bundle.Release.Transition != nil || len(bundle.Release.RuntimeResourcesFromForward) != 0 ||
-		bundle.Release.Workload.NodeParticipation != "" || prewrite.Participation != nil ||
-		!prewrite.Present || prewrite.UID == "" || prewrite.ResourceVersion == "" || len(prewrite.Resources) != 1 ||
-		prewrite.Resources[0].Identity != workload || !prewrite.Resources[0].Present ||
-		prewrite.Resources[0].UID != prewrite.UID || prewrite.Resources[0].ResourceVersion != prewrite.ResourceVersion {
+		bundle.Release.Workload.NodeParticipation != "" || prewrite.Participation != nil {
 		return NativePublicationBoundary{}, errors.New("native Guardian publication requires one existing Deployment without delegated writes")
 	}
+	services, err := BindNativeStaticServices(workload, bundle.Prepared, bundle.Forward, bundle.LKG)
+	if err != nil {
+		return NativePublicationBoundary{}, err
+	}
 	for index, raw := range [][]byte{bundle.Forward, bundle.LKG} {
-		target := bundle.Prepared.Forward
-		if index == 1 {
-			target = bundle.Prepared.LKG
-		}
-		if err := VerifyNativeDeploymentImages(raw, workload, target); err != nil {
-			return NativePublicationBoundary{}, err
-		}
 		set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(raw))
-		if err != nil || len(set.Items) != 1 {
-			return NativePublicationBoundary{}, errors.New("native Guardian forward and rollback must both affect only the fenced workload")
+		if err != nil {
+			return NativePublicationBoundary{}, err
 		}
 		validate := set.Primary
 		if index == 1 {
@@ -230,10 +225,11 @@ func bindNativePublication(intent productioncontrol.Intent, payload nativeReleas
 		Workload: workload, WorkloadUID: prewrite.UID, WorkloadVersion: prewrite.ResourceVersion,
 		ForwardOCI: bundle.Prepared.Forward.ImageRef, RollbackOCI: bundle.Prepared.LKG.ImageRef, ArtifactReceiptDigest: bundle.Artifact.ReceiptDigest,
 		ForwardReceipt: bundle.Artifact, RollbackReceipt: publication.rollbackReceipt,
+		StaticServices: services,
 	}, nil
 }
 
-func (p *NativePublisher) verifyBoundary(ctx context.Context, boundary NativePublicationBoundary) error {
+func (p *NativePublisher) verifyBoundary(ctx context.Context, boundary NativePublicationBoundary, rollback []byte) error {
 	if err := p.admission.VerifyNativePublication(ctx, boundary); err != nil {
 		return fmt.Errorf("native Guardian provider authority denied: %w", err)
 	}
@@ -244,5 +240,5 @@ func (p *NativePublisher) verifyBoundary(ctx context.Context, boundary NativePub
 	if string(live.UID) != boundary.WorkloadUID || live.ResourceVersion != boundary.WorkloadVersion {
 		return productioncontrol.ErrResourceDrift
 	}
-	return nil
+	return VerifyNativeStaticServices(ctx, p.store.client.CoreV1(), rollback, boundary.StaticServices)
 }

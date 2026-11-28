@@ -348,6 +348,12 @@ admission, write an outcome, authorize a rollout, or replace the serving and
 writer-drain evidence. A successful shadow does not mean the legacy Monitor
 pointer can be used as the relocated rollback anchor.
 
+For a native API release with an unchanged static Service, the plan binds its
+live UID and resourceVersion. Guardian checks those before publication and
+launch, before each Deployment write, and during independent serving
+observation. The Deployment writer never creates, patches, or deletes the
+Service. A routing change needs its own enrolled write boundary.
+
 The bootstrap's read-only recovery path for a **settled** registry rehome is:
 
 ```bash

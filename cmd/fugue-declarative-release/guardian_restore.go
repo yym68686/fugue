@@ -68,6 +68,9 @@ func runRepairMonitorContext(parent context.Context, args []string, output io.Wr
 	if err != nil {
 		return err
 	}
+	if artifacts != nil {
+		artifacts.serviceReader = store.client
+	}
 	cluster, err := newKubectlClusterWithArtifacts(artifacts)
 	if err != nil {
 		return err
@@ -212,6 +215,9 @@ func runRestoreMonitorContext(parent context.Context, args []string, output io.W
 	artifacts, err := native.artifactSet(release, rollback.Prepared, rollback.Artifact, &lkgBundle, rollback.Forward, rollback.LKG)
 	if err != nil {
 		return err
+	}
+	if artifacts != nil {
+		artifacts.serviceReader = store.client
 	}
 	cluster, err := newKubectlClusterWithArtifacts(artifacts)
 	if err != nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,10 +16,92 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/releaseguardian"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	appsclient "k8s.io/client-go/kubernetes/typed/apps/v1"
+	coreclient "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
+
+func TestNativeStaticServiceNeverReceivesAWrite(t *testing.T) {
+	ctx := t.Context()
+	id := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fixture", Name: "candidate"}
+	svcID := declarativerelease.ResourceIdentity{APIVersion: "v1", Kind: "Service", Namespace: "fixture", Name: "private"}
+	const service = `{"apiVersion":"v1","kind":"Service","metadata":{"name":"private","namespace":"fixture","annotations":{"fugue.pro/release-plan-digest":"old"}},"spec":{"ports":[{"name":"http","port":8080}],"selector":{"app":"candidate"}}}`
+	image := func(ch string) string { return "registry.fixture.invalid/release/app@sha256:" + strings.Repeat(ch, 64) }
+	buildManifest := func(img, service string) []byte {
+		return []byte(fmt.Sprintf(`{"apiVersion":"release.fugue.dev/v2","kind":"ComponentResourceSet","items":[{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"candidate","namespace":"fixture","uid":"dep","resourceVersion":"14"},"spec":{"template":{"spec":{"containers":[{"name":"app","image":%q}]}}}},%s]}`, img, service))
+	}
+	forward, rollback := buildManifest(image("a"), strings.Replace(service, `"old"`, `"new"`, 1)), buildManifest(image("b"), service)
+	prepared := declarativerelease.ExecutionPlan{Forward: declarativerelease.TargetIdentity{ImageRef: image("a")}, LKG: declarativerelease.TargetIdentity{ImageRef: image("b")},
+		Prewrite: declarativerelease.Observation{Primary: id, Present: true, UID: "dep", ResourceVersion: "14", Resources: []declarativerelease.ResourceObservation{
+			{Identity: id, Present: true, UID: "dep", ResourceVersion: "14"}, {Identity: svcID, Present: true, UID: "svc", ResourceVersion: "17"},
+		}}}
+	bound, err := releaseguardian.BindNativeStaticServices(id, prepared, forward, rollback)
+	if err != nil || len(bound) != 1 {
+		t.Fatalf("unchanged read-only Service not bound: %+v %v", bound, err)
+	}
+	if _, err := releaseguardian.BindNativeStaticServices(id, prepared, []byte(strings.Replace(string(forward), `"port":8080`, `"port":8081`, 1)), rollback); err == nil {
+		t.Fatal("changed Service port admitted")
+	}
+	var live corev1.Service
+	if err := json.Unmarshal([]byte(service), &live); err != nil {
+		t.Fatal(err)
+	}
+	live.UID, live.ResourceVersion = "svc", "17"
+	live.Spec.Type, live.Spec.ClusterIP, live.Spec.SessionAffinity = corev1.ServiceTypeClusterIP, "10.20.0.4", corev1.ServiceAffinityNone
+	for _, tc := range []struct {
+		name   string
+		change func(*corev1.Service)
+		writes int
+	}{
+		{"same declaration and version", func(*corev1.Service) {}, 1},
+		{"changed route", func(s *corev1.Service) { s.Spec.Selector["extra"] = "unsafe" }, 0},
+		{"changed version", func(s *corev1.Service) { s.ResourceVersion = "18" }, 0},
+		{"recreated", func(s *corev1.Service) { s.UID = "new" }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual := live.DeepCopy()
+			tc.change(actual)
+			requests := make(chan string, 8)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests <- r.Method + " " + r.URL.Path
+				w.Header().Set("Content-Type", "application/json")
+				switch r.Method + " " + r.URL.Path {
+				case "GET /api/v1/namespaces/fixture/services/private":
+					_ = json.NewEncoder(w).Encode(actual)
+				case "PATCH /apis/apps/v1/namespaces/fixture/deployments/candidate":
+					_, _ = io.WriteString(w, `{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"candidate","namespace":"fixture","uid":"dep","resourceVersion":"15"}}`)
+				default:
+					t.Errorf("unexpected provider request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+			cfg := &rest.Config{Host: server.URL}
+			apps, err := appsclient.NewForConfigAndClient(cfg, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			core, err := coreclient.NewForConfigAndClient(cfg, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifacts := &nativeKubectlArtifacts{workload: id, services: bound, serviceReader: core, pairs: []nativeArtifactPair{{target: prepared.Forward}, {target: prepared.LKG}}}
+			if err := artifacts.checkApply(prepared.Forward, forward); err != nil {
+				t.Fatal(err)
+			}
+			if err := artifacts.checkApply(prepared.LKG, rollback); err != nil {
+				t.Fatal(err)
+			}
+			cluster := &kubectlCluster{nativeArtifacts: artifacts, nativeDeployment: apps.RESTClient()}
+			err = cluster.applyNativeDeployment(ctx, declarativerelease.PlanRelease{Workload: declarativerelease.Workload{FieldManager: "fixture-guardian"}}, forward)
+			if len(requests) != 1+tc.writes || (err == nil) != (tc.writes == 1) {
+				t.Fatalf("provider observed %d requests, want %d; err=%v", len(requests), 1+tc.writes, err)
+			}
+		})
+	}
+}
 
 func TestNativeDeploymentSendsOneCASWithoutRetryOrForcedOwnership(t *testing.T) {
 	identity := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "fixture", Name: "candidate"}

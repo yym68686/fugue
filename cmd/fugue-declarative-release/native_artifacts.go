@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"fugue/internal/declarativerelease"
@@ -96,9 +97,12 @@ type nativeArtifactPair struct {
 // reviewed references. Neither a foreign revision nor a historical receipt
 // supplied via the legacy env variable can satisfy this verifier.
 type nativeKubectlArtifacts struct {
-	workload declarativerelease.ResourceIdentity
-	pairs    []nativeArtifactPair
-	verify   func(context.Context, declarativerelease.ArtifactReceipt) (declarativerelease.RegistryVerification, error)
+	workload        declarativerelease.ResourceIdentity
+	pairs           []nativeArtifactPair
+	verify          func(context.Context, declarativerelease.ArtifactReceipt) (declarativerelease.RegistryVerification, error)
+	services        []releaseguardian.NativeStaticService
+	serviceReader   coreclient.CoreV1Interface
+	serviceManifest []byte
 }
 
 func (runtime *nativeExecutionRuntime) artifactSet(release declarativerelease.PlanRelease, prepared declarativerelease.ExecutionPlan, forward declarativerelease.ArtifactReceipt, lkg *monitorBundle, forwardBytes, lkgBytes []byte) (*nativeKubectlArtifacts, error) {
@@ -108,12 +112,27 @@ func (runtime *nativeExecutionRuntime) artifactSet(release declarativerelease.Pl
 	scope := declarativerelease.ResourceIdentity{APIVersion: release.Workload.APIVersion, Kind: release.Workload.Kind, Namespace: release.Workload.Namespace, Name: release.Workload.Name}
 	pairs := []nativeArtifactPair{{prepared.Forward, forward}}
 	manifests := [][]byte{forwardBytes}
+	var services []releaseguardian.NativeStaticService
 	if lkg != nil {
 		if lkg.Record.RecordDigest != runtime.binding.LKGMonitorRecordDigest || lkg.Prepared.Forward != prepared.LKG || !bytes.Equal(lkg.Forward, lkgBytes) {
 			return nil, errors.New("native execution LKG is not the exact bound monitor record")
 		}
 		pairs = append(pairs, nativeArtifactPair{prepared.LKG, lkg.Artifact})
 		manifests = append(manifests, lkgBytes)
+		declared, err := releaseguardian.VerifyNativeReleaseResourceSet(forwardBytes, scope, prepared.Forward)
+		if err != nil {
+			return nil, err
+		}
+		if len(declared) != 0 {
+			services, err = releaseguardian.BindNativeStaticServices(scope, prepared, forwardBytes, lkgBytes)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	expected := make([]releaseguardian.RegistryRehomeService, len(services))
+	for i, service := range services {
+		expected[i] = service.Declaration
 	}
 	for i, pair := range pairs {
 		receipt, target := pair.receipt, pair.target
@@ -121,8 +140,9 @@ func (runtime *nativeExecutionRuntime) artifactSet(release declarativerelease.Pl
 			receipt.ImmutableRef != target.ImageRef || receipt.OCIRevision != target.OCIRevision {
 			return nil, errors.New("native runtime receipt differs from the sealed target")
 		}
-		if err := releaseguardian.VerifyNativeDeploymentImages(manifests[i], scope, target); err != nil {
-			return nil, err
+		actual, err := releaseguardian.VerifyNativeReleaseResourceSet(manifests[i], scope, target)
+		if err != nil || !slices.Equal(actual, expected) {
+			return nil, errors.Join(errors.New("native artifact set contains a different Service declaration"), err)
 		}
 		for _, previous := range pairs[:i] {
 			if previous.receipt.ImmutableRef == receipt.ImmutableRef && previous.receipt.OCIRevision == receipt.OCIRevision &&
@@ -131,7 +151,8 @@ func (runtime *nativeExecutionRuntime) artifactSet(release declarativerelease.Pl
 			}
 		}
 	}
-	return &nativeKubectlArtifacts{scope, pairs, runtime.registry.VerifyRuntimeArtifact}, nil
+	return &nativeKubectlArtifacts{workload: scope, pairs: pairs, verify: runtime.registry.VerifyRuntimeArtifact, services: services,
+		serviceManifest: lkgBytes}, nil
 }
 
 func (cluster *kubectlCluster) preflightNativeArtifacts(parent context.Context) error {
@@ -167,15 +188,33 @@ func (artifacts *nativeKubectlArtifacts) verifyImage(ctx context.Context, image,
 func (artifacts *nativeKubectlArtifacts) checkApply(target declarativerelease.TargetIdentity, manifest []byte) error {
 	for _, pair := range artifacts.pairs {
 		if pair.target == target {
-			return releaseguardian.VerifyNativeDeploymentImages(manifest, artifacts.workload, target)
+			actual, err := releaseguardian.VerifyNativeReleaseResourceSet(manifest, artifacts.workload, target)
+			if err != nil || len(actual) != len(artifacts.services) {
+				return errors.Join(errors.New("native apply differs from the approved resource inventory"), err)
+			}
+			for i, d := range actual {
+				if d != artifacts.services[i].Declaration {
+					return errors.New("native apply changes a read-only Service declaration")
+				}
+			}
+			return nil
 		}
 	}
 	return errors.New("native apply target is not approved for this execution")
 }
 
+func (artifacts *nativeKubectlArtifacts) isStaticService(id declarativerelease.ResourceIdentity) bool {
+	return artifacts != nil && slices.ContainsFunc(artifacts.services, func(service releaseguardian.NativeStaticService) bool {
+		return service.Declaration.Identity == id
+	})
+}
+
 func (cluster *kubectlCluster) applyNativeDeployment(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
 	if len(cluster.envRetirements) != 0 {
 		return fmt.Errorf("%w: native update cannot delegate legacy environment retirement writes", declarativerelease.ErrWriteRejected)
+	}
+	if err := releaseguardian.VerifyNativeStaticServices(ctx, cluster.nativeArtifacts.serviceReader, manifest, cluster.nativeArtifacts.services); err != nil {
+		return errors.Join(declarativerelease.ErrWriteRejected, err)
 	}
 	return releaseguardian.ApplyNativeDeployment(ctx, cluster.nativeDeployment, cluster.nativeArtifacts.workload, release.Workload.FieldManager, manifest)
 }

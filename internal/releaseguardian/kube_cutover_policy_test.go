@@ -3,6 +3,7 @@ package releaseguardian
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -293,7 +294,7 @@ func TestDeploymentCutoverAdmissionAtProvider(t *testing.T) {
 	gate := kubeDeploymentAdmission{publisher, config, boundary.Scope.ClusterID, deploymentEvidenceFunc(
 		func(_ context.Context, c KubeDeploymentCutover, b NativePublicationBoundary) error {
 			checks++
-			if c != config || b != boundary {
+			if c != config || !reflect.DeepEqual(b, boundary) {
 				t.Fatal("independent verifier received the wrong enrollment scope")
 			}
 			return missingEvidence

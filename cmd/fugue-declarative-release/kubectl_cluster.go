@@ -24,6 +24,7 @@ import (
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/model/edgecohort"
+	"fugue/internal/releaseguardian"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -733,6 +734,9 @@ func (cluster *kubectlCluster) cacheRegistryVerification(key string, verificatio
 }
 
 func (cluster *kubectlCluster) DryRunApply(ctx context.Context, release declarativerelease.PlanRelease, manifest []byte) error {
+	if cluster.nativeArtifacts != nil {
+		return errors.New("native execution cannot use the legacy resource-set dry-run writer")
+	}
 	if err := cluster.requireReferencedSecrets(ctx, release, manifest); err != nil {
 		return err
 	}
@@ -2441,7 +2445,17 @@ func (cluster *kubectlCluster) Converged(ctx context.Context, release declarativ
 	if err != nil {
 		return err
 	}
+	if native := cluster.nativeArtifacts; native != nil {
+		// The predecessor convergence witness can remove legacy ownership
+		// metadata. Read the Service against the exact approved declaration.
+		if err := releaseguardian.VerifyNativeStaticServices(ctx, native.serviceReader, native.serviceManifest, native.services); err != nil {
+			return err
+		}
+	}
 	for _, identity := range identities {
+		if cluster.nativeArtifacts.isStaticService(identity) {
+			continue
+		}
 		desired, desiredErr := declarativerelease.ResourceSetItem(manifest, identity)
 		if desiredErr != nil {
 			return desiredErr
@@ -2470,6 +2484,9 @@ func (cluster *kubectlCluster) VerifyOwnershipConverged(ctx context.Context, rel
 		return err
 	}
 	for _, identity := range identities {
+		if cluster.nativeArtifacts.isStaticService(identity) {
+			continue
+		}
 		desired, err := declarativerelease.ResourceSetItem(manifest, identity)
 		if err != nil {
 			return err

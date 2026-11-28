@@ -872,6 +872,7 @@ func runExecuteContext(parent context.Context, args []string, output io.Writer) 
 		if err != nil {
 			return err
 		}
+		artifacts.serviceReader = nativeMonitor.client
 		cancel()
 	}
 	cluster, err := newKubectlClusterWithArtifacts(artifacts)

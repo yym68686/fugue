@@ -124,10 +124,14 @@ func VerifyNativeDeploymentImages(raw []byte, scope declarativerelease.ResourceI
 	if err != nil {
 		return err
 	}
+	return verifyNativeDeploymentImageObject(object, target)
+}
+
+func verifyNativeDeploymentImageObject(object map[string]any, target declarativerelease.TargetIdentity) error {
 	spec, _ := object["spec"].(map[string]any)
 	template, _ := spec["template"].(map[string]any)
 	podSpec, _ := template["spec"].(map[string]any)
-	_, err = singleArtifactDeploymentContainers(podSpec, target.ImageRef)
+	_, err := singleArtifactDeploymentContainers(podSpec, target.ImageRef)
 	return err
 }
 

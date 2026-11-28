@@ -28,6 +28,7 @@ type NativeServingObservation struct {
 	DeploymentUID     string
 	DeploymentVersion string
 	VerifiedPods      []NativeServingPod
+	StaticServices    []NativeStaticService `json:",omitempty"`
 	Health            HealthSnapshot
 	EvidenceDigest    string
 }
@@ -135,7 +136,12 @@ func (p *NativePublisher) ObserveServingRelease(ctx context.Context, intentDiges
 	if identity.Kind != "Deployment" || identity.APIVersion != "apps/v1" || nativeKubernetesResourceID(identity) != intent.ResourceID {
 		return NativeServingObservation{}, errors.New("native serving resource does not match the production claim")
 	}
-	if err := VerifyNativeDeploymentImages(forward, identity, prepared.Forward); err != nil {
+	services, err := BindNativeStaticServices(identity, bundle.Prepared, bundle.Forward, bundle.LKG)
+	if err != nil {
+		return NativeServingObservation{}, err
+	}
+	readServices := func() error { return VerifyNativeStaticServices(ctx, p.store.client.CoreV1(), forward, services) }
+	if err := readServices(); err != nil {
 		return NativeServingObservation{}, err
 	}
 	deployments := p.store.client.AppsV1().Deployments(identity.Namespace)
@@ -171,6 +177,9 @@ func (p *NativePublisher) ObserveServingRelease(ctx context.Context, intentDiges
 	if err != nil || fresh.UID != live.UID || fresh.ResourceVersion != live.ResourceVersion {
 		return NativeServingObservation{}, errors.New("Deployment changed during native serving observation")
 	}
+	if err := readServices(); err != nil {
+		return NativeServingObservation{}, err
+	}
 	latestMonitor, err := readMonitorPointer()
 	if err != nil || latestMonitor.UID != monitorPointer.UID || latestMonitor.ResourceVersion != monitorPointer.ResourceVersion ||
 		latestMonitor.Data["recordName"] != monitorPointer.Data["recordName"] {
@@ -183,7 +192,7 @@ func (p *NativePublisher) ObserveServingRelease(ctx context.Context, intentDiges
 	witness := NativeServingObservation{
 		Claim: claim, Serving: productioncontrol.Version{Generation: before.Desired.Generation, Digest: before.Desired.RecordDigest},
 		MonitorDigest: monitor.RecordDigest, DeploymentUID: string(live.UID), DeploymentVersion: live.ResourceVersion,
-		VerifiedPods: pods, Health: health,
+		VerifiedPods: pods, StaticServices: services, Health: health,
 	}
 	raw, err := declarativerelease.CanonicalJSON(witness)
 	if err != nil {
