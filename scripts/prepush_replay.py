@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 
-from scripts import prepush, prepush_shadow
+from scripts import prepush, prepush_local, prepush_shadow
 from scripts import prepush_shadow_fixture
 
 
@@ -68,6 +68,45 @@ def candidate_sample(*, build_first=False, verify_targets=False):
     if result:
         sample["status"] = "fail"
     return sample
+
+
+def replay_full_fallback(case, base):
+    """Exercise the full local scheduler budget once, outside the P95 samples."""
+    initial = prepush_shadow.snapshot(base)
+    comparisons, results = [], []
+    started = time.monotonic()
+
+    def select(selected_base):
+        if selected_base != base:
+            raise ValueError("verification base changed")
+        comparison = prepush_shadow.compare_targets(base, prepush_shadow.ARTIFACT_PROFILES)
+        if comparison["sourceSnapshot"] != initial:
+            raise ValueError("source changed before full fallback selection")
+        comparisons.append(comparison)
+        selected = prepush_shadow.selection_from_comparison(comparison)
+        full = prepush_shadow.full("")
+        if not selected["paths"] or any(selected[key] != full[key] for key in ("scope", "goTests", "goBuilds")):
+            raise ValueError("full fallback witness requires a diff selecting uncached whole-module tests and builds")
+        return selected
+
+    code = prepush._run_gate(
+        shadow_select=select, shadow_result=results.append, shadow_build_first=True,
+        shadow_full_timeout=prepush_local.FULL_VERIFICATION_TIMEOUT_SECONDS,
+    )
+    result = results.pop()
+    if initial != prepush_shadow.snapshot(base):
+        raise ValueError("source changed during full fallback replay")
+    result["elapsedMs"] = round((time.monotonic() - started) * 1000)
+    if code or result["elapsedMs"] >= result["elapsedLimitMs"]:
+        result["status"] = "fail"
+    return {
+        "kind": "FullLocalFallbackWitness",
+        "case": case,
+        "productionAuthorization": False,
+        "sourceSnapshot": initial,
+        "targetComparison": comparisons.pop(),
+        "result": result,
+    }
 
 
 def go_oracle(timeout):
@@ -294,6 +333,8 @@ def main():
     parser.add_argument("--incremental", action="store_true", help="replay distinct edits against two separate caches")
     parser.add_argument("--build-first", action="store_true", help="test dependency-based compile ordering in shadow")
     parser.add_argument("--verify-targets", action="store_true", help="include artifact graph verification in each candidate timing")
+    parser.add_argument("--full-fallback-witness", action="store_true",
+                        help="run one broad verification with the full local timeout, without a receipt")
     options = parser.parse_args()
     if options.samples < 1 or options.oracle_timeout < 1:
         parser.error("samples and oracle-timeout must be positive")
@@ -301,6 +342,8 @@ def main():
         parser.error("--incremental requires a known representative edit case")
     if (options.build_first or options.verify_targets) and not options.incremental:
         parser.error("--build-first and --verify-targets require --incremental")
+    if options.full_fallback_witness and (options.incremental or options.full_oracle):
+        parser.error("--full-fallback-witness cannot be combined with timing or oracle modes")
     try:
         os.environ["PREPUSH_BASE_REF"] = prepush.git_output(
             ["rev-parse", "--verify", f"{options.base}^{{commit}}"],
@@ -309,7 +352,9 @@ def main():
         # about the normal gate. Keep both variants on the same measured budget.
         os.environ.pop("PREPUSH_TIMEOUT_SECONDS", None)
         os.environ.pop("PREPUSH_MAX_ELAPSED_SECONDS", None)
-        if options.incremental:
+        if options.full_fallback_witness:
+            result = replay_full_fallback(options.case, os.environ["PREPUSH_BASE_REF"])
+        elif options.incremental:
             result = replay_incremental(options.case, os.environ["PREPUSH_BASE_REF"],
                                         options.samples, options.oracle_timeout, build_first=options.build_first,
                                         verify_targets=options.verify_targets)
@@ -319,7 +364,8 @@ def main():
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as err:
         parser.exit(2, f"shadow replay unavailable: {err}\n")
     print(json.dumps(result, sort_keys=True))
+    return int(options.full_fallback_witness and result["result"]["status"] != "pass")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

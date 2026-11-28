@@ -41,11 +41,20 @@ API warmup only on this local path. Profile disagreement or unclear ownership
 keeps the full uncached Go gate. It rejects CI use and a changed worktree.
 Keep using the unchanged `make prepush` for the production gate.
 
-The local fallback has a separate six-minute ceiling and does not count
+The local fallback has a separate ten-minute ceiling and does not count
 towards the 60-second local-edit target. In the hosted cross-domain replay,
 the selector widened on all profiles; all 20 pairs exceeded the candidate's
 short timeout, while the separately run full oracle passed. A wider fallback
 that still times out fails the command; it never retries with fewer checks.
+On Darwin arm64 (Go 1.25.7, `GOFLAGS=-p=2`), the uncached whole-module Go
+test command alone passed in 368.92 seconds on the cross-domain fixture at
+`5544660e4`. The former six-minute ceiling could fail even before counting
+selection and the other checks. The production timeout is unchanged.
+Dispatch the manual audit with `shadow_case=cross-domain` and
+`shadow_incremental=false` to exercise this actual full fallback budget once.
+Its separate witness binds the native and artifact plans and executes the
+whole-module build and uncached tests. It fails on a narrowed plan, timeout
+or source drift and is not counted in the local-edit P95.
 
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do

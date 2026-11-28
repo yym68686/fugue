@@ -21,6 +21,7 @@ DEFAULT_TIMEOUT_SECONDS = 55.0
 DEFAULT_MAX_ELAPSED_SECONDS = 60.0
 MAX_CONFIGURED_TIMEOUT_SECONDS = 360.0
 MAX_CONFIGURED_ELAPSED_SECONDS = 360.0
+MAX_SHADOW_FULL_TIMEOUT_SECONDS = 600
 GO_TASK_CONCURRENCY = 2
 SERIAL_WARM_TEST_PACKAGES = {"./internal/api"}
 # Start the measured slow full suites before short jobs can fill the Go slots.
@@ -490,7 +491,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         shadow_select is None or shadow_result is None
     ):
         raise ValueError("shadow scheduling requires a non-authorizing shadow result")
-    if shadow_full_timeout is not None and not 0 < shadow_full_timeout <= MAX_CONFIGURED_TIMEOUT_SECONDS:
+    if shadow_full_timeout is not None and not 0 < shadow_full_timeout <= MAX_SHADOW_FULL_TIMEOUT_SECONDS:
         raise ValueError("invalid shadow full verification timeout")
     started = time.monotonic()
     timeout_seconds = float(os.environ.get("PREPUSH_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS))
