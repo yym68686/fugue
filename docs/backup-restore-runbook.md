@@ -55,6 +55,70 @@ to be recovered outside the running control plane.
    fugue backup restore run --plan <restore-plan-id>
    ```
 
+## Native production journal recovery
+
+Use this additional gate once a resource's native journal can authorize writes.
+The ordinary backup manifest verifies the dump object's bytes. It does not
+identify the correct control journal, or prevent a valid but older archive from
+being accepted. Retain independent evidence for the exact recovery point.
+
+1. Use a dedicated backup principal with `USAGE` and unfiltered `SELECT` on
+   every journal table and the app/provider tables required by the dump. Keep
+   the principal, local control binary and artifact store independent of
+   GitHub, the serving API and their deploy credentials. The app's configured
+   backup DSN is not assumed to have this access. Verify the existing backup
+   schedule still produces complete backups after installing the journal.
+2. In one persistent, independent PostgreSQL session, run
+   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;` and then
+   `SELECT pg_export_snapshot();`. Leave the transaction open until both
+   commands below have succeeded against that same database and exported
+   snapshot. Use a private staging directory for the dump and explicit
+   PostgreSQL connection settings such as an independently provisioned
+   `PGSERVICE`. Keep connection passwords out of shell arguments.
+
+   ```bash
+   pg_dump --snapshot="$SNAPSHOT" --format=custom --no-owner --no-privileges --file=control.dump
+   fugue-production-control journal-recovery-checkpoint "$SOURCE_JOURNAL_CONFIG" "$SNAPSHOT"
+   ```
+
+   Commit the exporter transaction after both reads finish. In the independent,
+   append-only recovery inventory, pin the backup's SHA-256, the command's
+   checkpoint digest, source cluster and archive identity together. Preserve
+   the installed policy/grant manifests, independent execution witnesses and
+   required release artifacts separately. Review the latest eligible entry
+   against known later claims and provider writes before deciding to restore.
+3. Restore the pinned dump to a fresh, private database with local tooling.
+   No API, controller, bootstrap publisher or Guardian worker may connect until
+   the restored state and provider fences are reconciled. Verify the archive
+   checksum before restoring with `--exit-on-error --single-transaction
+   --no-owner --no-privileges`. Provision a separate read-only principal,
+   point its independently installed journal configuration at the restored
+   database, and verify the journal without loading runtime credentials:
+
+   ```bash
+   fugue-production-control journal-recovery-verify "$RESTORE_JOURNAL_CONFIG" "$PINNED_CHECKPOINT_DIGEST"
+   ```
+
+   The check covers all current journal tables, including pending claims,
+   consumed launch permits, recorded results and audit rows. A mismatch leaves
+   the target isolated. The check does not validate provider state, SQL roles,
+   object ownership, functions or trigger definitions.
+4. Keep dispatch disabled while reviewing every pending claim and any
+   operation that may have happened after this recovery point. Neither a
+   missing claim nor a restored approval proves an external write did not
+   happen. Independently verify exact provider readback and closure of old
+   writers before granting any replacement writer. Reinstall and check
+   version-matched roles, grants and database/provider admission from the
+   independently retained configuration. Role names alone do not rebind
+   stored provider role OIDs on a new database. Stop if an adapter cannot
+   prove its restored authority or the last verified state. Never repair the
+   checkpoint by editing history or re-enabling a retired writer.
+
+The isolated checkpoint drill uses the real PostgreSQL dump and restore tools.
+Passing it verifies snapshot alignment and persistence of a pending release
+fence. It is not evidence that production backups, provider role recovery,
+or a GitHub-disconnected production upgrade have been exercised.
+
 ## Restore drill
 
 Run drills against an isolated target database or staging control-plane store.
