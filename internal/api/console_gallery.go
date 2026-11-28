@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"fugue/internal/httpx"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/store"
 
@@ -382,7 +383,7 @@ func isConsoleTerminalAppFailurePhase(app model.App) bool {
 // same fresh cluster/generation/object/endpoint/image/replica evidence that
 // the shared observed-status contract exposes to the other consumers.
 func consoleObservedReadyForServing(app model.App) bool {
-	return appObservedReadyForServing(app, time.Now().UTC())
+	return managedappstatus.ReadyForServing(app, time.Now().UTC())
 }
 
 func consoleLifecyclePhase(app model.App) string {

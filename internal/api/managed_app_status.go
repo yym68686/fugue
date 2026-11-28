@@ -17,113 +17,23 @@ import (
 	"time"
 
 	"fugue/internal/appimages"
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/releaseflow"
 	"fugue/internal/releaseproof"
 	"fugue/internal/runtime"
 
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
 	defaultManagedAppStatusCacheTTL       = 15 * time.Second
 	defaultManagedAppStatusRefreshTimeout = 5 * time.Second
-	defaultManagedAppStatusRefreshBackoff = 15 * time.Second
-	defaultAppObservedStatusMaxAge        = time.Minute
-	managedAppStatusListRefreshKey        = "list"
-	managedAppInventoryRefreshKey         = "inventory"
 )
 
 var (
 	errManagedAppStatusClientUnavailable = errors.New("managed app status client unavailable")
-	errManagedAppStatusRefreshBackoff    = errors.New("managed app status refresh backoff active")
 )
-
-func appObservedStatusFresh(observed *model.AppObservedStatus, now time.Time) bool {
-	if observed == nil || !observed.Fresh {
-		return false
-	}
-	return appObservationTimestampFresh(observed.ObservedAt, now)
-}
-
-// appDisableConverged is the publication gate for the disable idempotency
-// response. Durable app status is only a control-plane projection and can lag
-// a workload that still exists in Kubernetes, so a zero desired/current count
-// is not enough to claim that disable completed. Require a fresh, cluster-
-// identified observation with explicit zero counts for both the controller's
-// desired replicas and the physical serving cohort. Missing evidence fails
-// closed and lets the normal scale-to-zero reconcile repair the state.
-func appDisableConverged(app model.App, now time.Time) bool {
-	if app.Spec.Replicas != 0 || app.Status.CurrentReplicas != 0 {
-		return false
-	}
-	observed := app.ObservedStatus
-	if observed == nil ||
-		!appObservedStatusFresh(observed, now) ||
-		!strings.EqualFold(strings.TrimSpace(observed.Phase), "disabled") ||
-		observed.DesiredReplicas != 0 ||
-		strings.TrimSpace(observed.ClusterID) == "" ||
-		strings.TrimSpace(observed.EvidenceSource) == "" ||
-		observed.RuntimeObjectPresent == nil || !*observed.RuntimeObjectPresent ||
-		observed.NamespacePresent == nil || !*observed.NamespacePresent ||
-		observed.ReadyReplicas == nil || *observed.ReadyReplicas != 0 ||
-		observed.PhysicalReplicas == nil || *observed.PhysicalReplicas != 0 ||
-		observed.PhysicalDesired == nil || *observed.PhysicalDesired != 0 ||
-		len(observed.InvariantViolations) > 0 {
-		return false
-	}
-	return true
-}
-
-func appObservationTimestampFresh(observedAt, now time.Time) bool {
-	if observedAt.IsZero() {
-		return false
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	} else {
-		now = now.UTC()
-	}
-	observedAt = observedAt.UTC()
-	return !observedAt.After(now.Add(30*time.Second)) && now.Sub(observedAt) <= defaultAppObservedStatusMaxAge
-}
-
-// appObservedReadyForServing is the shared publication gate for API surfaces
-// that may render or advertise a green/active application. The observed phase
-// is necessary but never sufficient: every affirmative field must belong to a
-// fresh, cluster-identified, current-generation observation.
-func appObservedReadyForServing(app model.App, now time.Time) bool {
-	observed := app.ObservedStatus
-	if observed == nil || !strings.EqualFold(strings.TrimSpace(observed.Phase), "deployed") ||
-		app.Spec.Replicas <= 0 || observed.DesiredReplicas != app.Spec.Replicas ||
-		!appObservedStatusFresh(observed, now) || strings.TrimSpace(observed.ClusterID) == "" ||
-		strings.TrimSpace(observed.EvidenceSource) == "" || observed.Generation <= 0 ||
-		observed.ObservedGeneration < observed.Generation || len(observed.InvariantViolations) > 0 {
-		return false
-	}
-	if observed.RuntimeObjectPresent == nil || !*observed.RuntimeObjectPresent ||
-		observed.NamespacePresent == nil || !*observed.NamespacePresent ||
-		observed.EndpointPresent == nil || !*observed.EndpointPresent ||
-		observed.EndpointReady == nil || !*observed.EndpointReady ||
-		observed.ImagePresent == nil || !*observed.ImagePresent {
-		return false
-	}
-	if observed.ReadyReplicas == nil || *observed.ReadyReplicas < app.Spec.Replicas ||
-		observed.PhysicalReplicas == nil || *observed.PhysicalReplicas < app.Spec.Replicas ||
-		(app.Spec.Replicas > 0 && *observed.PhysicalReplicas <= 0) {
-		return false
-	}
-	if observed.PhysicalDesired != nil && *observed.PhysicalDesired < app.Spec.Replicas {
-		return false
-	}
-	if model.AppHasClusterService(app.Spec) || model.AppSSHEnabled(app.Spec) {
-		if observed.ServicePresent == nil || !*observed.ServicePresent {
-			return false
-		}
-	}
-	return true
-}
 
 type managedAppStatusClient struct {
 	client      *http.Client
@@ -132,15 +42,12 @@ type managedAppStatusClient struct {
 }
 
 type managedAppStatusCache struct {
-	ttl                  time.Duration
-	refreshTimeout       time.Duration
-	refreshBackoff       time.Duration
-	mu                   sync.RWMutex
-	byApp                map[string]managedAppStatusCacheEntry
-	list                 managedAppStatusListCacheEntry
-	listRefreshNotBefore time.Time
-	observationSequence  uint64
-	group                singleflight.Group
+	ttl            time.Duration
+	refreshTimeout time.Duration
+	mu             sync.RWMutex
+	byApp          map[string]managedAppStatusCacheEntry
+	list           managedAppStatusListCacheEntry
+	refresh        managedappstatus.Refresh[managedAppStatusCacheEntry, managedAppStatusListCacheEntry]
 }
 
 type managedAppStatusCacheEntry struct {
@@ -264,7 +171,6 @@ func newManagedAppStatusCache(ttl, refreshTimeout time.Duration) managedAppStatu
 	return managedAppStatusCache{
 		ttl:            ttl,
 		refreshTimeout: refreshTimeout,
-		refreshBackoff: defaultManagedAppStatusRefreshBackoff,
 		byApp:          make(map[string]managedAppStatusCacheEntry),
 	}
 }
@@ -281,24 +187,6 @@ func (c *managedAppStatusCache) refreshTimeoutDuration() time.Duration {
 		return defaultManagedAppStatusRefreshTimeout
 	}
 	return c.refreshTimeout
-}
-
-func (c *managedAppStatusCache) refreshBackoffDuration() time.Duration {
-	if c == nil || c.refreshBackoff <= 0 {
-		return defaultManagedAppStatusRefreshBackoff
-	}
-	return c.refreshBackoff
-}
-
-func (c *managedAppStatusCache) nextObservationSequence() uint64 {
-	if c == nil {
-		return 0
-	}
-	c.mu.Lock()
-	c.observationSequence++
-	sequence := c.observationSequence
-	c.mu.Unlock()
-	return sequence
 }
 
 func (c *managedAppStatusCache) getApp(key string) (managedAppStatusCacheEntry, bool, bool) {
@@ -320,32 +208,6 @@ func (c *managedAppStatusCache) getObservedApp(key string) (managedAppStatusCach
 		expired = true
 	}
 	return entry, ok, expired
-}
-
-func (c *managedAppStatusCache) listRefreshAllowed(now time.Time) bool {
-	if c == nil {
-		return true
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	c.mu.RLock()
-	notBefore := c.listRefreshNotBefore
-	c.mu.RUnlock()
-	return notBefore.IsZero() || !now.Before(notBefore)
-}
-
-func (c *managedAppStatusCache) recordListRefreshResult(err error) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	if err != nil {
-		c.listRefreshNotBefore = time.Now().Add(c.refreshBackoffDuration())
-	} else {
-		c.listRefreshNotBefore = time.Time{}
-	}
-	c.mu.Unlock()
 }
 
 func (c *managedAppStatusCache) setApp(key string, entry managedAppStatusCacheEntry) {
@@ -434,7 +296,7 @@ func (c *managedAppStatusCache) invalidate() {
 	c.mu.Lock()
 	c.byApp = make(map[string]managedAppStatusCacheEntry)
 	c.list = managedAppStatusListCacheEntry{}
-	c.listRefreshNotBefore = time.Time{}
+	c.refresh.ResetBackoff()
 	c.mu.Unlock()
 }
 
@@ -1008,7 +870,7 @@ func (s *Server) overlayManagedAppStatusesForEdgeRoutesCachedWithProvenance(apps
 		// runtime observation that is still inside the publication freshness SLA.
 		// Marking that short refresh window stale makes edge routes flap on every
 		// cache cycle even though the underlying evidence has not aged out.
-		fresh := appObservationTimestampFresh(cached.refreshedAt, time.Now().UTC())
+		fresh := managedappstatus.TimestampFresh(cached.refreshedAt, time.Now().UTC())
 		return s.applyManagedAppListObservation(apps, cached, runtimeByID, fresh, ""), managedAppListObservationProvenance(apps, cached, expired, fresh)
 	}
 	s.refreshManagedAppStatusesAsync()
@@ -1263,7 +1125,7 @@ func (s *Server) managedAppStatusRefreshContext(parent context.Context) (context
 }
 
 func (s *Server) shouldLogManagedAppStatusError(err error) bool {
-	return err != nil && !errors.Is(err, errManagedAppStatusClientUnavailable) && !errors.Is(err, errManagedAppStatusRefreshBackoff)
+	return err != nil && !errors.Is(err, errManagedAppStatusClientUnavailable) && !errors.Is(err, managedappstatus.ErrRefreshBackoff)
 }
 
 func (s *Server) buildManagedAppRuntimeEvidence(
@@ -1687,15 +1549,15 @@ func (s *Server) currentManagedImagePresenceWithStoreSnapshot(app model.App, ima
 }
 
 func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entry managedAppStatusCacheEntry, err error) {
-	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.nextObservationSequence()}
+	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.refresh.NextSequence()}
 	s.logManagedAppRefreshEvent("by_app", "start", "started", sequence.refreshStarted, nil)
 	defer func() {
 		if sequence.refreshCompleted == 0 {
-			failedSequence := s.managedAppStatusCache.nextObservationSequence()
+			failedSequence := s.managedAppStatusCache.refresh.NextSequence()
 			s.logManagedAppRefreshEvent("by_app", "end", "error", failedSequence, err)
 		}
 	}()
-	sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
+	sequence.durableAppsRead = s.managedAppStatusCache.refresh.NextSequence()
 	client, err := s.managedAppStatusClient()
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
@@ -1722,7 +1584,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entr
 			return managedAppStatusCacheEntry{}, err
 		}
 	}
-	sequence.managedAppsRead = s.managedAppStatusCache.nextObservationSequence()
+	sequence.managedAppsRead = s.managedAppStatusCache.refresh.NextSequence()
 	confirmedClusterID, err := client.getClusterID(refreshCtx)
 	if err != nil {
 		return managedAppStatusCacheEntry{}, err
@@ -1736,7 +1598,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entr
 		if snapshotErr != nil {
 			return managedAppStatusCacheEntry{}, snapshotErr
 		}
-		sequence.kubeSnapshotRead = s.managedAppStatusCache.nextObservationSequence()
+		sequence.kubeSnapshotRead = s.managedAppStatusCache.refresh.NextSequence()
 		finalClusterID, finalErr := client.getClusterID(refreshCtx)
 		if finalErr != nil {
 			return managedAppStatusCacheEntry{}, finalErr
@@ -1751,7 +1613,7 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entr
 	}
 
 	now := time.Now().UTC()
-	sequence.refreshCompleted = s.managedAppStatusCache.nextObservationSequence()
+	sequence.refreshCompleted = s.managedAppStatusCache.refresh.NextSequence()
 	entry = managedAppStatusCacheEntry{
 		managed:     managed,
 		found:       found,
@@ -1768,20 +1630,9 @@ func (s *Server) fetchManagedAppStatus(ctx context.Context, app model.App) (entr
 }
 
 func (s *Server) refreshManagedAppStatus(ctx context.Context, app model.App) (managedAppStatusCacheEntry, error) {
-	key := managedAppStatusCacheKey(app)
-	if key == "" {
-		return managedAppStatusCacheEntry{}, fmt.Errorf("managed app cache key is empty")
-	}
-
-	value, err, _ := s.managedAppStatusCache.group.Do("app:"+key, func() (any, error) {
+	return s.managedAppStatusCache.refresh.App(managedAppStatusCacheKey(app), func() (managedAppStatusCacheEntry, error) {
 		return s.fetchManagedAppStatus(ctx, app)
 	})
-	if err != nil {
-		return managedAppStatusCacheEntry{}, err
-	}
-
-	entry, _ := value.(managedAppStatusCacheEntry)
-	return entry, nil
 }
 
 func (s *Server) fetchManagedAppStatuses(ctx context.Context) (managedAppStatusListCacheEntry, error) {
@@ -1803,11 +1654,11 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	if requireClusterIdentity {
 		cacheLayer = "list"
 	}
-	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.nextObservationSequence()}
+	sequence := managedAppObservationSequence{refreshStarted: s.managedAppStatusCache.refresh.NextSequence()}
 	s.logManagedAppRefreshEvent(cacheLayer, "start", "started", sequence.refreshStarted, nil)
 	defer func() {
 		if sequence.refreshCompleted == 0 {
-			failedSequence := s.managedAppStatusCache.nextObservationSequence()
+			failedSequence := s.managedAppStatusCache.refresh.NextSequence()
 			s.logManagedAppRefreshEvent(cacheLayer, "end", "error", failedSequence, err)
 		}
 	}()
@@ -1838,7 +1689,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 		return managedAppStatusListCacheEntry{}, err
 	}
 	mark("observation_managed_objects")
-	sequence.managedAppsRead = s.managedAppStatusCache.nextObservationSequence()
+	sequence.managedAppsRead = s.managedAppStatusCache.refresh.NextSequence()
 	if requireClusterIdentity {
 		confirmedClusterID, err := client.getClusterID(refreshCtx)
 		if err != nil {
@@ -1856,7 +1707,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			return managedAppStatusListCacheEntry{}, snapshotErr
 		}
 		mark("observation_kubernetes_snapshot")
-		sequence.kubeSnapshotRead = s.managedAppStatusCache.nextObservationSequence()
+		sequence.kubeSnapshotRead = s.managedAppStatusCache.refresh.NextSequence()
 		finalClusterID, finalErr := client.getClusterID(refreshCtx)
 		if finalErr != nil {
 			return managedAppStatusListCacheEntry{}, finalErr
@@ -1871,7 +1722,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 			if err != nil {
 				return managedAppStatusListCacheEntry{}, fmt.Errorf("list apps for runtime evidence: %w", err)
 			}
-			sequence.durableAppsRead = s.managedAppStatusCache.nextObservationSequence()
+			sequence.durableAppsRead = s.managedAppStatusCache.refresh.NextSequence()
 		}
 		mark("observation_durable_apps")
 		appsByID := make(map[string]model.App, len(apps))
@@ -1919,7 +1770,7 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 	}
 
 	now := time.Now().UTC()
-	sequence.refreshCompleted = s.managedAppStatusCache.nextObservationSequence()
+	sequence.refreshCompleted = s.managedAppStatusCache.refresh.NextSequence()
 	entry = managedAppStatusListCacheEntry{
 		items:       items,
 		evidence:    evidenceByAppID,
@@ -1943,49 +1794,23 @@ func (s *Server) fetchManagedAppInventoryWithClusterIdentity(ctx context.Context
 }
 
 func (s *Server) refreshManagedAppInventory(ctx context.Context) (managedAppStatusListCacheEntry, error) {
-	value, err, _ := s.managedAppStatusCache.group.Do(managedAppInventoryRefreshKey, func() (any, error) {
+	return s.managedAppStatusCache.refresh.Inventory(func() (managedAppStatusListCacheEntry, error) {
 		return s.fetchManagedAppInventory(ctx)
 	})
-	if err != nil {
-		return managedAppStatusListCacheEntry{}, err
-	}
-	entry, _ := value.(managedAppStatusListCacheEntry)
-	return entry, nil
 }
 
 func (s *Server) refreshManagedAppStatuses(ctx context.Context) (managedAppStatusListCacheEntry, error) {
-	if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
-		return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
-	}
-	value, err, _ := s.managedAppStatusCache.group.Do(managedAppStatusListRefreshKey, func() (any, error) {
-		if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
-			return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
-		}
-		entry, err := s.fetchManagedAppStatuses(ctx)
-		s.managedAppStatusCache.recordListRefreshResult(err)
-		return entry, err
+	return s.managedAppStatusCache.refresh.List(func() (managedAppStatusListCacheEntry, error) {
+		return s.fetchManagedAppStatuses(ctx)
 	})
-	if err != nil {
-		return managedAppStatusListCacheEntry{}, err
-	}
-
-	entry, _ := value.(managedAppStatusListCacheEntry)
-	return entry, nil
 }
 
 func (s *Server) refreshManagedAppStatusesAsync() {
-	if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
-		return
-	}
-	s.managedAppStatusCache.group.DoChan(managedAppStatusListRefreshKey, func() (any, error) {
-		if !s.managedAppStatusCache.listRefreshAllowed(time.Now()) {
-			return managedAppStatusListCacheEntry{}, errManagedAppStatusRefreshBackoff
-		}
-		entry, err := s.fetchManagedAppStatuses(context.Background())
-		s.managedAppStatusCache.recordListRefreshResult(err)
-		if err != nil && s.shouldLogManagedAppStatusError(err) && s.log != nil {
+	s.managedAppStatusCache.refresh.ListAsync(func() (managedAppStatusListCacheEntry, error) {
+		return s.fetchManagedAppStatuses(context.Background())
+	}, func(err error) {
+		if s.shouldLogManagedAppStatusError(err) && s.log != nil {
 			s.log.Printf("managed app status background list refresh error: %v", err)
 		}
-		return entry, err
 	})
 }
