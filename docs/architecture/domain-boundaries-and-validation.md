@@ -34,6 +34,13 @@ them by writer and transaction, keeping auth, fencing and billing behavior.
 tree. Use `PREPUSH_BASE_REF=<commit> make prepush-shadow` to replay a committed
 diff. It is separate from `make prepush` and cannot authorize a push.
 
+`make prepush-local` runs the proposed checks and does not produce a release
+receipt. It includes the build-profile comparison, runs the selected build
+before affected tests for runtime edits, and omits the legacy priority and
+API warmup only on this local path. Profile disagreement or unclear ownership
+keeps the full uncached Go gate. It rejects CI use and a changed worktree.
+Keep using the unchanged `make prepush` for the production gate.
+
 - One package's runtime edit includes its transitive production importers and
   the tests that import any changed or affected package. Test-only changes do
   not rebuild downstream packages.
@@ -156,6 +163,13 @@ the same packages, omitted no legacy suite, and the uncached oracle ran
 case while exercising more tests, not a speedup over the legacy gate. The
 target comparison for this run was outside the candidate timing; use
 `--verify-targets` to measure the complete conservative local path.
+
+The follow-up at `4b4f4d739` included the target comparison in every
+candidate sample on the same hosted profile: 20 incremental pairs, candidate
+P95 43.003s (legacy 18.805s), zero failures, no known omitted legacy suite, and
+142 packages in the passing uncached oracle. This validates the scheduling
+approach for the backup runtime case, not every local runtime edit or a change
+to production authorization.
 
 ## Production isolation decision
 
