@@ -141,6 +141,10 @@ and has the explicit operator-disabled annotation. The artifact inventory
 classified the successful product backup on 2026-11-27 as a Longhorn
 snapshot, and listed no independent logical dump for that target. The
 reported recovery status was `plan-available`.
+The production database reported 96,570,447,551 bytes during a read-only
+check, and the existing recovery verification cluster reported no ready
+database instance. A snapshot in the product inventory alone does not
+verify a separately accessible archive or establish restore capacity.
 Neither the native journal nor the native storage audit policy boundary was
 installed on the primary. The application database role was neither a
 superuser nor a member of `pg_read_all_data`. These observations do not
