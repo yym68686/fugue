@@ -63,6 +63,7 @@ type RegistryRehomeServingObservation struct {
 	PublicHTTP     []RegistryRehomeHTTPObservation `json:"publicHTTP"`
 	StartedAt      string                          `json:"startedAt"`
 	FinishedAt     string                          `json:"finishedAt"`
+	StateDigest    string                          `json:"stateDigest,omitempty"`
 	EvidenceDigest string                          `json:"evidenceDigest,omitempty"`
 }
 
@@ -117,12 +118,34 @@ func observeRegistryRehomeServing(ctx context.Context, client kubernetes.Interfa
 	}
 	out.FinishedAt = finished.Format(time.RFC3339Nano)
 	out.Cutover = combined
-	raw, err := declarativerelease.CanonicalJSON(out)
-	if err != nil {
+	if err := out.seal(); err != nil {
 		return none, err
 	}
-	out.EvidenceDigest = digest(append([]byte("fugue.registry-rehome.serving-observation.v1\x00"), raw...))
 	return out, nil
+}
+
+// StateDigest excludes only the observation's clock fields. It lets a fresh
+// independent read compare the exact claim, baseline, provider versions and
+// probe results without pretending to reproduce the original signed event.
+// EvidenceDigest retains the full timestamps and binds the comparison digest.
+func (observation *RegistryRehomeServingObservation) seal() error {
+	state := *observation
+	state.StartedAt, state.FinishedAt, state.Dependency.ObservedAt = "", "", ""
+	state.StateDigest, state.EvidenceDigest = "", ""
+	raw, err := declarativerelease.CanonicalJSON(state)
+	if err != nil {
+		return err
+	}
+	event := *observation
+	event.StateDigest = digest(append([]byte("fugue.registry-rehome.serving-state.v1\x00"), raw...))
+	event.EvidenceDigest = ""
+	raw, err = declarativerelease.CanonicalJSON(event)
+	if err != nil {
+		return err
+	}
+	event.EvidenceDigest = digest(append([]byte("fugue.registry-rehome.serving-observation.v2\x00"), raw...))
+	*observation = event
+	return nil
 }
 
 func readRegistryRehomeServingHealth(ctx context.Context, client kubernetes.Interface, release declarativerelease.PlanRelease,

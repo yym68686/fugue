@@ -667,8 +667,22 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		health, err := runServing(probe)
 		if err != nil || health.Cutover.Baseline != proposed || health.Cutover.Placement.Claim != claim ||
 			len(health.PodHTTP) != 1 || health.PodHTTP[0].PodUID != string(pod.UID) || len(health.PublicHTTP) != 1 ||
-			health.Service.UID != string(svc.UID) || len(health.EndpointSlices) != 1 || !digestPattern.MatchString(health.EvidenceDigest) {
+			health.Service.UID != string(svc.UID) || len(health.EndpointSlices) != 1 ||
+			!digestPattern.MatchString(health.EvidenceDigest) || !digestPattern.MatchString(health.StateDigest) {
 			t.Fatalf("missing exact serving evidence: %+v %v", health, err)
+		}
+		repeated, err := runServing(probe)
+		if err != nil || repeated.StateDigest != health.StateDigest || repeated.EvidenceDigest == health.EvidenceDigest {
+			t.Fatalf("same provider state and new probe times must retain one state digest and distinct event digests: %+v %v", repeated, err)
+		}
+		different, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
+			if host != "" {
+				return digest([]byte("ready with different content")), nil
+			}
+			return probe(ctx, address, host, path, expected)
+		})
+		if err != nil || different.StateDigest == health.StateDigest {
+			t.Fatalf("different probe response did not change the state digest: %+v %v", different, err)
 		}
 		if _, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
 			if host != "" {

@@ -314,6 +314,11 @@ It rejects unsupported sealed probes. Public reachability and Service
 membership are separate checks: retain independent route-to-backend
 configuration and propagation evidence as well. This report does not
 settle the claim, prove provider drain or prove GitHub is disconnected.
+Use `stateDigest` to compare repeated observations of the same provider
+versions and probe results. It omits the observer's timestamps only.
+`evidenceDigest` covers those timestamps and the state digest: keep the
+original report for audit, and do not reuse a matching state as proof of
+freshness or of write closure.
 
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
