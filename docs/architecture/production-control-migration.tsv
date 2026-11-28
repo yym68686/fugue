@@ -256,6 +256,7 @@ release-file	deploy/releases/observation-worker/database.json	migrate	native dat
 release-file	deploy/releases/observation-worker/intent.json	migrate	import live authority and predecessor; archive the Git intent history
 release-file	deploy/releases/observation-worker/quality-evidence-retention-handoff.json	migrate	native fenced maintenance ownership transfer and exact rollback floor
 release-file	deploy/releases/observation-worker/resources.json	migrate	native release catalog or runtime topology, resolved by stable identity
+release-file	deploy/releases/observation-worker/sample-retention-handoff.json	migrate	native fenced maintenance ownership transfer and exact rollback floor
 release-file	deploy/releases/observation-worker/writer-handoff.json	migrate	native verified database writer transition
 release-file	deploy/releases/retired-dns-components.json	retire	archive tombstones and verify no live predecessor depends on the file
 release-file	deploy/releases/runtime-agent-canary/intent.json	migrate	import live authority and predecessor; archive the Git intent history
