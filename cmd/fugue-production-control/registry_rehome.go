@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"time"
@@ -12,12 +14,17 @@ import (
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
 	"fugue/internal/releaseguardian/participation"
+	kubejson "sigs.k8s.io/json"
 )
 
 const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
 
-func observePendingRegistryRehome(ctx context.Context, args []string, out io.Writer) error {
-	if len(args) != 7 || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) {
+func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, settle bool) error {
+	count := 7
+	if settle {
+		count = 9
+	}
+	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) || (settle && !filepath.IsAbs(args[8])) {
 		return errors.New(usage)
 	}
 	var cfg struct {
@@ -52,13 +59,82 @@ func observePendingRegistryRehome(ctx context.Context, args []string, out io.Wri
 	if err != nil {
 		return err
 	}
-	return withJournalDeadline(ctx, args[0], true, 30*time.Second, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+	var evidence []byte
+	if settle {
+		if !filepath.IsAbs(args[0]) {
+			return errors.New("registry rehome settlement requires a private absolute journal profile")
+		}
+		profile, err := readFile(args[0], 32<<10, true)
+		clear(profile)
+		if err != nil {
+			return err
+		}
+		evidence, err = readFile(args[8], productioncontrol.MaxWitnessBytes, true)
+		if err != nil {
+			return err
+		}
+		defer clear(evidence)
+	}
+	return withJournalDeadline(ctx, args[0], !settle, 30*time.Second, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+		if settle {
+			result, err := releaseguardian.SettleRegistryRehomeWithoutWrite(ctx, client, j, cluster, args[7], args[5],
+				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], evidence)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(result)
+		}
 		observed, err := releaseguardian.ObserveFrozenRegistryRehomePending(ctx, client, j, cluster, args[5], cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4])
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(observed)
 	})
+}
+
+func signRegistryRehomeNoWrite(args []string, out io.Writer, now func() time.Time) error {
+	if len(args) != 4 {
+		return errors.New(usage)
+	}
+	raw, err := readFile(args[0], productioncontrol.MaxWitnessBytes, true)
+	if err != nil {
+		return err
+	}
+	if fmt.Sprintf("sha256:%x", sha256.Sum256(raw)) != args[1] {
+		return errors.New("registry rehome closure differs from the reviewed file digest")
+	}
+	var e productioncontrol.RegistryRehomeNoWriteEvidence
+	if strict, err := kubejson.UnmarshalStrict(raw, &e); err != nil || len(strict) != 0 || len(e.Signature) != 0 || e.ExpiresAt != 0 {
+		return errors.New("registry rehome closure draft must be a single unsigned observation")
+	}
+	ttl, err := time.ParseDuration(args[3])
+	if err != nil || ttl < time.Second || ttl > productioncontrol.MaxWitnessAge || ttl%time.Second != 0 {
+		return errors.New("invalid registry rehome closure lifetime in whole seconds")
+	}
+	at := now().Unix()
+	if e.ObservedAt <= 0 || e.ObservedAt > at || e.ObservedAt <= at-int64(ttl/time.Second) {
+		return errors.New("registry rehome closure observation falls outside the signing window")
+	}
+	e.ExpiresAt = e.ObservedAt + int64(ttl/time.Second)
+	input, err := e.SigningInput()
+	if err != nil {
+		return err
+	}
+	key, err := readSigningKey(args[2])
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	e.Signature = ed25519.Sign(key, input)
+	canonical, _, err := productioncontrol.EncodeRegistryRehomeNoWriteEvidence(e)
+	if err != nil {
+		return err
+	}
+	n, err := out.Write(canonical)
+	if err == nil && n != len(canonical) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 func packRegistryRehomeRecovery(args []string, out io.Writer) error {

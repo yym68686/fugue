@@ -199,9 +199,18 @@ func TestRegistryRehomeKubernetesFenceAtProvider(t *testing.T) {
 }
 
 func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
-	dsn := os.Getenv("FUGUE_TEST_REHOME_DISPATCH_DATABASE_URL")
+	testRegistryRehomeKubernetesWithJournal(t, "FUGUE_TEST_REHOME_DISPATCH_DATABASE_URL", true)
+}
+
+func TestRegistryRehomeKubernetesNoWriteSettlement(t *testing.T) {
+	testRegistryRehomeKubernetesWithJournal(t, "FUGUE_TEST_REHOME_NO_WRITE_DATABASE_URL", false)
+}
+
+func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWorkload bool) {
+	t.Helper()
+	dsn := os.Getenv(dbEnv)
 	if dsn == "" {
-		t.Skip("set FUGUE_TEST_REHOME_DISPATCH_DATABASE_URL to a disposable empty PostgreSQL database")
+		t.Skipf("set %s to a disposable empty PostgreSQL database", dbEnv)
 	}
 	const writer = "system:serviceaccount:fixture-identities:rehome-dispatch"
 	const statusWriter = "system:serviceaccount:fixture-identities:deployment-status"
@@ -369,7 +378,8 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	}
 	claim := productioncontrol.Claim{Scope: scope, Fence: 1, IntentDigest: recorded.Digest, ApprovalDigest: approval.Digest}
 	if _, err := db.ExecContext(ctx, `
-		CREATE ROLE fugue_fixture_rehome_reader NOLOGIN;
+		DO $$ BEGIN CREATE ROLE fugue_fixture_rehome_reader NOLOGIN;
+		EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 		GRANT USAGE ON SCHEMA fugue_control TO fugue_fixture_rehome_reader;
 		GRANT SELECT ON fugue_control.intents, fugue_control.approvals, fugue_control.execution_claims,
 			fugue_control.execution_results, fugue_control.resource_baselines, fugue_control.registry_rehome_admissions
@@ -444,6 +454,9 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 		LegacyRequestDrain: digest([]byte("fixture drain")), ForwardNodePull: digest([]byte("fixture forward pull")),
 		RollbackNodePull: digest([]byte("fixture rollback pull")), RegistryRetention: digest([]byte("fixture retention")),
 		ObservedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix()}
+	if !writeWorkload {
+		proof.ExpiresAt = now.Add(7 * time.Second).Unix()
+	}
 	msg, err := proof.SigningInput()
 	if err != nil {
 		t.Fatal(err)
@@ -453,9 +466,18 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := dispatch(approval.Digest, wire)
-	if err != nil || !got.Submitted || got.Claim != claim || got.Workload.UID != string(x.UID) {
-		t.Fatalf("provider dispatch: %+v %v", got, err)
+	if writeWorkload {
+		got, err := dispatch(approval.Digest, wire)
+		if err != nil || !got.Submitted || got.Claim != claim || got.Workload.UID != string(x.UID) {
+			t.Fatalf("provider dispatch: %+v %v", got, err)
+		}
+	} else {
+		// Simulate a process stopping after durable reservation and before the
+		// provider call. Runtime replay must not issue the withheld request.
+		got, created, err := dispatcher.journal.Reserve(ctx, "fixture-mover", recorded.Digest, approval.Digest, wire)
+		if err != nil || !created || got != claim {
+			t.Fatalf("reserve exact no-write fixture: %+v %v", got, err)
+		}
 	}
 	replay, err := dispatch(approval.Digest, nil)
 	if err != nil || replay.Submitted || replay.Claim != claim {
@@ -490,8 +512,10 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	if _, err := admission.ValidatingWebhookConfigurations().Get(ctx, gate.hook.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("temporary registry rehome exception was not removed: %v", err)
 	}
-	if _, err := observe(provider); err == nil || !strings.Contains(err.Error(), "placement has not converged") {
-		t.Fatalf("nonconverged rollout was accepted after the freeze: %v", err)
+	if writeWorkload {
+		if _, err := observe(provider); err == nil || !strings.Contains(err.Error(), "placement has not converged") {
+			t.Fatalf("nonconverged rollout was accepted after the freeze: %v", err)
+		}
 	}
 	controller := admissionClient(t, clients[ct.DeploymentStatusWriter], "")
 	readyProviderRehomeFixture(t, ctx, admin, controller, id.Namespace, id.Name)
@@ -501,13 +525,57 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 		t.Fatalf("wrong namespace instance was accepted: %v", err)
 	}
 	observed, err := observe(provider)
+	wantPlacement := "independent_registry_observed"
+	if !writeWorkload {
+		wantPlacement = registryRehomeOriginalPlacement
+	}
 	if err != nil || observed.Claim != claim || observed.AdmissionDigest != admissionDigest || observed.LastVerified != source.Version ||
-		observed.Placement != "independent_registry_observed" || observed.ProviderReadback.Deployment.UID != string(x.UID) ||
-		len(observed.ProviderReadback.Pods) != 1 || len(observed.ProviderReadback.Services) != 1 {
+		observed.Placement != wantPlacement || observed.ProviderReadback.Deployment.UID != string(x.UID) ||
+		len(observed.ProviderReadback.Pods) != 1 || len(observed.ProviderReadback.Services) != 1 || !digestPattern.MatchString(observed.ReadbackDigest) {
 		t.Fatalf("pending placement readback did not bind the existing claim: %+v %v", observed, err)
 	}
 	if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
 		t.Fatalf("observation mutated the journal: %+v %v", after, err)
+	}
+	if writeWorkload {
+		return
+	}
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 8*time.Second, true, func(context.Context) (bool, error) {
+		return time.Now().Unix() >= proof.ExpiresAt, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// These are signed fixture facts, not assertions about real outage health.
+	proofTime := time.Now()
+	closure := productioncontrol.RegistryRehomeNoWriteEvidence{ClusterID: claim.ClusterID, ResourceID: claim.ResourceID,
+		IntentDigest: claim.IntentDigest, ApprovalDigest: claim.ApprovalDigest, Fence: claim.Fence,
+		AdmissionDigest: admissionDigest, ArchiveDigest: archive.ArchiveDigest, ReadbackDigest: observed.ReadbackDigest,
+		EndpointFreeze: digest([]byte("fixture closed endpoints")), WriterRevocation: digest([]byte("fixture mover revoked")),
+		RequestDrain: digest([]byte("fixture mover drained")), ServingHealth: digest([]byte("fixture original healthy")),
+		ObservedAt: proofTime.Unix(), ExpiresAt: proofTime.Add(time.Minute).Unix()}
+	settle := func(c productioncontrol.RegistryRehomeNoWriteEvidence) (productioncontrol.Recorded, error) {
+		msg, err := c.SigningInput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Signature = ed25519.Sign(witness, msg)
+		encoded, _, err := productioncontrol.EncodeRegistryRehomeNoWriteEvidence(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return SettleRegistryRehomeWithoutWrite(ctx, admin, ledger, scope.ClusterID, "fixture-settler", claim.IntentDigest, ct, provider,
+			observer, raw, archive.ArchiveDigest, encoded)
+	}
+	drift := closure
+	drift.ReadbackDigest = digest([]byte("fixture other readback"))
+	if got, err := settle(drift); err == nil || got.Created {
+		t.Fatalf("settlement did not repeat exact enrolled provider readback: %+v %v", got, err)
+	}
+	if got, err := settle(closure); err != nil || !got.Created {
+		t.Fatalf("exact frozen no-write claim did not settle: %+v %v", got, err)
+	}
+	if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after.Pending != "" || after.LastVerified != state.LastVerified || after.LastFence != state.LastFence {
+		t.Fatalf("no-write settlement advanced the LKG or fence: %+v %v", after, err)
 	}
 }
 

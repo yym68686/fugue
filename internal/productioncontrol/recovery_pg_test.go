@@ -61,6 +61,7 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	// rehome admission table, even when empty, selects a separate v2 digest.
 	if _, err := source.ExecContext(ctx, `DROP TRIGGER registry_rehome_claim_admission ON fugue_control.execution_claims;
 		DROP TRIGGER registry_rehome_result_guard ON fugue_control.execution_results;
+		DROP TABLE fugue_control.registry_rehome_no_write;
 		DROP TABLE fugue_control.registry_rehome_admissions`); err != nil {
 		t.Fatal(err)
 	}
@@ -74,8 +75,21 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	if err := ApplySchema(ctx, source); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := source.ExecContext(ctx, `DROP TABLE fugue_control.registry_rehome_no_write`); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
+	if err != nil || v2.Format != recoveryDomainV2 {
+		t.Fatalf("v2 journal checkpoint: %s %v", v2.Format, err)
+	}
 	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, old.Digest); err == nil {
 		t.Fatal("upgraded v2 journal matched a legacy inventory digest")
+	}
+	if err := ApplySchema(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, v2.Digest); err == nil {
+		t.Fatal("upgraded v3 journal matched a v2 inventory digest")
 	}
 	lkg := Version{intent.Generation, intent.CurrentDigest}
 	b := Baseline{Scope: intent.scope(), Verified: lkg, EvidenceDigest: digest([]byte("baseline witness"))}
@@ -122,6 +136,29 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	if err != nil || !granted {
 		t.Fatalf("fixture rehome reservation: %v %v", granted, err)
 	}
+	closed := anchorRegistryRehomeFixture(t, ctx, j, key, "rehome-closed-recovery")
+	admitted, closureAdmission, closureAdmissionPin := signRegistryRehomeFixture(t, closed.report(1), closed.observer)
+	closureObserver := closed.observer.Public().(ed25519.PublicKey)
+	closureJournal, err := NewRegistryRehomeJournal(j, closed.intent.scope(), closureObserver, readOnlyCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closureClaim, created, err := closureJournal.Reserve(ctx, "fixture-rehome", closed.record, closed.approval, closureAdmission)
+	if err != nil || !created {
+		t.Fatalf("fixture closure reservation: %v %v", created, err)
+	}
+	closureTime := time.Unix(admitted.ExpiresAt, 0)
+	closureRaw, closurePin := signRehomeNoWriteFixture(t, rehomeNoWriteFixture(closureClaim, closureAdmissionPin, closureTime), closed.observer)
+	closureWriter := journalFor(source)
+	closureWriter.now = func() time.Time { return closureTime }
+	settler, err := NewRegistryRehomeNoWriteJournal(closureWriter, closureClaim.Scope, closureObserver,
+		func(context.Context, RegistryRehomeNoWriteEvidence) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled, err := settler.CloseWithoutWrite(ctx, "fixture-settler", closed.record, closureRaw); err != nil || !settled.Created {
+		t.Fatalf("fixture no-write settlement: %+v %v", settled, err)
+	}
 
 	exporter, err := source.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -136,8 +173,8 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	other.RequestID = "after-export"
 	second, secondApproval := record(j, other)
 	checkpoint, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, snapshot)
-	if err != nil || checkpoint.Format != recoveryDomainV2 {
-		t.Fatalf("rehome checkpoint did not use v2: %s %v", checkpoint.Format, err)
+	if err != nil || checkpoint.Format != recoveryDomainV3 {
+		t.Fatalf("rehome checkpoint did not use v3: %s %v", checkpoint.Format, err)
 	}
 	live, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
 	if err != nil || checkpoint.Digest == live.Digest {
@@ -176,6 +213,16 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	verify := journalFor(reader)
 	if _, err := verify.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, checkpoint.Digest); err != nil {
 		t.Fatalf("read-only verifier could not match exported backup checkpoint: %v", err)
+	}
+	readBack, err := NewRegistryRehomeNoWriteJournal(verify, closureClaim.Scope, closureObserver,
+		func(context.Context, RegistryRehomeNoWriteEvidence) error {
+			return errors.New("replay must not run live check")
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := readBack.CloseWithoutWrite(ctx, "fixture-settler", closed.record, closureRaw); err != nil || replay.Created || replay.Digest != closurePin {
+		t.Fatalf("restored read-only journal could not replay exact no-write outcome: %+v %v", replay, err)
 	}
 	if _, err := reader.ExecContext(ctx, `UPDATE fugue_control.intents SET request_id='unexpected' WHERE false`); err == nil {
 		t.Fatal("restore verifier could write to the execution journal")

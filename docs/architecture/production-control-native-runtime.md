@@ -922,8 +922,9 @@ authority bound to pre-restore database role OIDs.
   request drainage, and independent pulls and retention of both artifacts.
   The dedicated database writer appends that receipt to
   `registry_rehome_admissions` in the claim transaction. Ordinary runtime
-  roles must not have INSERT there. A v2 recovery checkpoint includes the
-  receipt; verify v1 backups against the restored v1 schema before upgrading.
+  roles must not have INSERT there. Journal recovery v2 includes the signed
+  admission; v3 also covers the signed no-write closure. Verify a v1 or v2
+  backup against its restored schema before upgrading.
   Replays and restores never issue another claim. The internal dispatcher
   rechecks the exact freeze bundle, independently pinned API endpoint, CA
   and namespace UID, live release source, and pending claim before sending
@@ -933,11 +934,13 @@ authority bound to pre-restore database role OIDs.
   reply or webhook outage does not trigger another write. Install and
   positively verify the fail-closed webhook on every serving endpoint
   before enabling the temporary writer exception. A policy object's
-  readback alone is not that verification. No production dispatch command
-  is enabled: the temporary writer's closure and the independent forward
-  and rollback baseline still require a separate verified transition.
-  Ordinary result records cannot promote a migration proposal to a last
-  verified release.
+  readback alone is not that verification. The standalone Guardian's
+  `registry-rehome-dispatch` command is gated by these prerequisites. For a
+  no-write outcome, the separate settlement command requires signed proof of
+  temporary writer closure, drainage and original-version health, then
+  repeats frozen readback before atomically retaining the result and receipt.
+  An applied move still needs a separate forward and rollback baseline.
+  A migration proposal cannot become a last verified release.
 - To check preservation of the current and rollback artifacts before that
   transition, provision an independent HTTPS registry and replicate the
   original OCI content byte-for-byte. In each destination repository, retain

@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 
+	"fugue/internal/declarativerelease"
 	"fugue/internal/productioncontrol"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+const registryRehomeOriginalPlacement = "original_registry_observed"
 
 // RegistryRehomePendingObservation is observational only. It does not prove
 // provider propagation, request drain, route health, or a terminal version.
@@ -21,6 +24,7 @@ type RegistryRehomePendingObservation struct {
 	LastVerified     productioncontrol.Version `json:"lastVerified"`
 	Placement        string                    `json:"placement"`
 	ProviderReadback rehomePlacement           `json:"providerReadback"`
+	ReadbackDigest   string                    `json:"readbackDigest,omitempty"`
 }
 
 // ObserveFrozenRegistryRehomePending resumes inspection after losing the
@@ -83,7 +87,47 @@ func ObserveFrozenRegistryRehomePending(ctx context.Context, client kubernetes.I
 	if next, err := readHead(); err != nil || next != state {
 		return none, errors.Join(errors.New("registry rehome journal changed during readback"), err)
 	}
-	return RegistryRehomePendingObservation{claim, admissionDigest, archiveDigest, state.LastVerified, kind, place}, nil
+	report := RegistryRehomePendingObservation{Claim: claim, AdmissionDigest: admissionDigest, ArchiveDigest: archiveDigest,
+		LastVerified: state.LastVerified, Placement: kind, ProviderReadback: place}
+	raw, err := declarativerelease.CanonicalJSON(struct {
+		Cutover  KubeDeploymentCutover
+		Provider productioncontrol.ParticipationKubernetesBinding
+		Report   RegistryRehomePendingObservation
+	}{cutover, provider, report})
+	if err != nil {
+		return none, err
+	}
+	report.ReadbackDigest = digest(append([]byte("fugue.registry-rehome.frozen-placement.v1\x00"), raw...))
+	return report, nil
+}
+
+// SettleRegistryRehomeWithoutWrite closes only an independently proven
+// no-write attempt. The caller supplies a read-only provider identity and
+// a restricted append-only journal identity; no provider objects are mutated.
+func SettleRegistryRehomeWithoutWrite(ctx context.Context, client kubernetes.Interface, journal *productioncontrol.Journal,
+	cluster, actor, intentDigest string, cutover KubeDeploymentCutover, provider productioncontrol.ParticipationKubernetesBinding,
+	observer ed25519.PublicKey, archive []byte, archiveDigest string, evidence []byte) (productioncontrol.Recorded, error) {
+	if client == nil || journal == nil || cutover.Phase != KubeCutoverFrozen || cutover.validate() != nil || provider.Validate() != nil {
+		return productioncontrol.Recorded{}, errors.New("registry rehome settlement requires an enrolled read-only provider and frozen boundary")
+	}
+	workload := declarativerelease.ResourceIdentity{APIVersion: "apps/v1", Kind: "Deployment", Namespace: cutover.Namespace, Name: cutover.Deployment}
+	scope := productioncontrol.Scope{ClusterID: cluster, ResourceID: nativeKubernetesResourceID(workload)}
+	check := func(ctx context.Context, proof productioncontrol.RegistryRehomeNoWriteEvidence) error {
+		observed, err := ObserveFrozenRegistryRehomePending(ctx, client, journal, cluster, intentDigest, cutover, provider, observer, archive, archiveDigest)
+		if err != nil {
+			return err
+		}
+		if observed.Placement != registryRehomeOriginalPlacement || observed.Claim.Scope != scope ||
+			observed.AdmissionDigest != proof.AdmissionDigest || observed.ArchiveDigest != proof.ArchiveDigest || observed.ReadbackDigest != proof.ReadbackDigest {
+			return errors.New("no-write settlement requires fresh exact placement on the original registry")
+		}
+		return nil
+	}
+	settler, err := productioncontrol.NewRegistryRehomeNoWriteJournal(journal, scope, observer, check)
+	if err != nil {
+		return productioncontrol.Recorded{}, err
+	}
+	return settler.CloseWithoutWrite(ctx, actor, intentDigest, evidence)
 }
 
 func observeClosedRegistryRehomePlacement(ctx context.Context, client kubernetes.Interface, review RegistryRehomeReview,
@@ -128,7 +172,7 @@ func observeClosedRegistryRehomePlacement(ctx context.Context, client kubernetes
 	}
 	original, kind := live.Generation == review.Source.Deployment.Generation, "independent_registry_observed"
 	if original {
-		kind = "original_registry_observed"
+		kind = registryRehomeOriginalPlacement
 	}
 	placement, err := observeRegistryRehomePlacementAt(ctx, client, review, original)
 	if err != nil {

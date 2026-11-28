@@ -172,3 +172,62 @@ func TestOfflineApprovalRequiresExactReviewedSubmission(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSignRegistryRehomeNoWriteBindsReviewedDraft(t *testing.T) {
+	now := time.Unix(1760000000, 0)
+	d := func(s string) string { return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(s))) }
+	proof := productioncontrol.RegistryRehomeNoWriteEvidence{
+		ClusterID: "fixture", ResourceID: "kubernetes/fixture/deployment/example", IntentDigest: d("intent"), ApprovalDigest: d("approval"),
+		Fence: 1, AdmissionDigest: d("admission"), ArchiveDigest: d("archive"), ReadbackDigest: d("readback"),
+		EndpointFreeze: d("freeze"), WriterRevocation: d("revocation"), RequestDrain: d("drain"), ServingHealth: d("health"),
+		ObservedAt: now.Add(-time.Minute).Unix(),
+	}
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "observer.pem")
+	draftPath := filepath.Join(dir, "closure.json")
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(draftPath, draft, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	args := []string{"sign-registry-rehome-no-write", draftPath, d(string(draft)), keyPath, "2m"}
+	clock := func() time.Time { return now }
+	if err := run(t.Context(), args, &out, clock); err != nil {
+		t.Fatal(err)
+	}
+	var got productioncontrol.RegistryRehomeNoWriteEvidence
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	message, err := got.SigningInput()
+	if err != nil || !ed25519.Verify(pub, message, got.Signature) || got.ObservedAt != proof.ObservedAt || got.ExpiresAt != now.Add(time.Minute).Unix() {
+		t.Fatalf("invalid signed closure: %v", err)
+	}
+	out.Reset()
+	args[2] = d("different review")
+	if err := run(t.Context(), args, &out, clock); err == nil || out.Len() != 0 {
+		t.Fatal("unreviewed closure was signed")
+	}
+	duplicate := append(append([]byte(nil), draft[:len(draft)-1]...), []byte(`,"fence":1}`)...)
+	if err := os.WriteFile(draftPath, duplicate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args[2] = d(string(duplicate))
+	if err := run(t.Context(), args, &out, clock); err == nil || out.Len() != 0 {
+		t.Fatal("ambiguous closure was signed")
+	}
+}

@@ -5,12 +5,15 @@ import (
 	"crypto/ed25519"
 	"database/sql"
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 type registryRehomeFixture struct {
@@ -216,6 +219,7 @@ func testPostgresRegistryRehome(t *testing.T, ctx context.Context, ownerDB, ordi
 	if err != nil || state.Pending != claim.IntentDigest || state.LastVerified.Digest != f.intent.CurrentDigest {
 		t.Fatalf("unresolved write dropped the previous verified version: %+v %v", state, err)
 	}
+	testRegistryRehomeNoWrite(t, ctx, ownerDB, ordinary, claim, signed, pin, f)
 
 	race := anchorRegistryRehomeFixture(t, ctx, ordinary, owner, "rehome-race")
 	_, raceRaw, _ := signRegistryRehomeFixture(t, race.report(1), race.observer)
@@ -252,5 +256,122 @@ func testPostgresRegistryRehome(t *testing.T, ctx context.Context, ownerDB, ordi
 	}
 	if !first.created || first.err != nil || second.created || !errors.Is(second.err, ErrResourceBusy) {
 		t.Fatalf("same Deployment fence allowed zero or two dispatches: %+v %+v", first, second)
+	}
+}
+
+func rehomeNoWriteFixture(claim Claim, admission string, observed time.Time) RegistryRehomeNoWriteEvidence {
+	h := func(s string) string { return digest([]byte("fixture rehome closure " + s)) }
+	return RegistryRehomeNoWriteEvidence{ClusterID: claim.ClusterID, ResourceID: claim.ResourceID, IntentDigest: claim.IntentDigest,
+		ApprovalDigest: claim.ApprovalDigest, Fence: claim.Fence, AdmissionDigest: admission, ArchiveDigest: h("archive"),
+		ReadbackDigest: h("readback"), EndpointFreeze: h("endpoint freeze"), WriterRevocation: h("writer revocation"),
+		RequestDrain: h("request drain"), ServingHealth: h("health"), ObservedAt: observed.Unix(), ExpiresAt: observed.Add(time.Minute).Unix()}
+}
+
+func signRehomeNoWriteFixture(t *testing.T, proof RegistryRehomeNoWriteEvidence, key ed25519.PrivateKey) ([]byte, string) {
+	t.Helper()
+	message, err := proof.SigningInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof.Signature = ed25519.Sign(key, message)
+	raw, pin, err := EncodeRegistryRehomeNoWriteEvidence(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw, pin
+}
+
+func testRegistryRehomeNoWrite(t *testing.T, ctx context.Context, ownerDB *sql.DB, ordinary *Journal, claim Claim,
+	admission RegistryRehomeAdmission, admissionPin string, f registryRehomeFixture) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `CREATE ROLE fugue_fixture_rehome_settler NOLOGIN;
+		GRANT USAGE ON SCHEMA fugue_control TO fugue_fixture_rehome_settler;
+		GRANT SELECT ON ALL TABLES IN SCHEMA fugue_control TO fugue_fixture_rehome_settler;
+		GRANT INSERT ON fugue_control.registry_rehome_no_write, fugue_control.execution_results TO fugue_fixture_rehome_settler;`); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(os.Getenv("FUGUE_TEST_PRODUCTION_CONTROL_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settlerDB := stdlib.OpenDB(*cfg, stdlib.OptionAfterConnect(func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, `SET ROLE fugue_fixture_rehome_settler`)
+		return err
+	}))
+	defer settlerDB.Close()
+	settleJournal, err := NewJournal(settlerDB, ordinary.trusted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Unix(admission.ExpiresAt, 0)
+	now := start
+	settleJournal.now = func() time.Time { return now }
+	observer := f.observer.Public().(ed25519.PublicKey)
+	proof := rehomeNoWriteFixture(claim, admissionPin, start)
+	raw, pin := signRehomeNoWriteFixture(t, proof, f.observer)
+	var observations int
+	var deadlineDrift bool
+	check := func(_ context.Context, got RegistryRehomeNoWriteEvidence) error {
+		observations++
+		if got.ReadbackDigest != proof.ReadbackDigest {
+			return errors.New("fixture placement drift")
+		}
+		if deadlineDrift {
+			now = time.Unix(proof.ExpiresAt, 0)
+		}
+		return nil
+	}
+	settler, err := NewRegistryRehomeNoWriteJournal(settleJournal, claim.Scope, observer, check)
+	if err != nil {
+		t.Fatal(err)
+	}
+	early := rehomeNoWriteFixture(claim, admissionPin, start.Add(-time.Second))
+	earlyRaw, _ := signRehomeNoWriteFixture(t, early, f.observer)
+	wrong := proof
+	wrong.ReadbackDigest = digest([]byte("drifted readback"))
+	wrongRaw, _ := signRehomeNoWriteFixture(t, wrong, f.observer)
+	drain := proof
+	drain.RequestDrain = admission.LegacyRequestDrain
+	drainRaw, _ := signRehomeNoWriteFixture(t, drain, f.observer)
+	for _, evidence := range [][]byte{earlyRaw, wrongRaw, drainRaw, append(append([]byte(nil), raw...), '\n')} {
+		if got, err := settler.CloseWithoutWrite(ctx, "fixture-settler", claim.IntentDigest, evidence); err == nil || got.Created {
+			t.Fatalf("unsafe no-write settlement accepted: %+v %v", got, err)
+		}
+	}
+	deadlineDrift = true
+	if got, err := settler.CloseWithoutWrite(ctx, "fixture-settler", claim.IntentDigest, raw); !errors.Is(err, ErrStaleFence) || got.Created {
+		t.Fatalf("evidence expired during provider read: %+v %v", got, err)
+	}
+	deadlineDrift = false
+	now = start
+	if _, err := ordinary.db.ExecContext(ctx, `INSERT INTO fugue_control.execution_results
+		(intent_digest,outcome,generation,verified_digest,evidence_digest,actor)
+		VALUES ($1,'not_applied',$2,$3,$4,'fixture-direct')`, claim.IntentDigest, f.intent.Generation, f.intent.CurrentDigest, pin); err == nil {
+		t.Fatal("ordinary SQL could bypass the separate closure append")
+	}
+	if _, err := settleJournal.db.ExecContext(ctx, `INSERT INTO fugue_control.registry_rehome_no_write
+		(intent_digest,admission_digest,evidence_digest,envelope) VALUES ($1,$2,$3,$4)`, claim.IntentDigest, admissionPin, pin, raw); err == nil {
+		t.Fatal("closure evidence committed without the paired result")
+	}
+	if result, err := settler.CloseWithoutWrite(ctx, "audit-error", claim.IntentDigest, raw); err == nil || result.Created {
+		t.Fatalf("failed audit allowed partial no-write settlement: %+v %v", result, err)
+	}
+	if state, err := ordinary.ReadResource(ctx, claim.Scope); err != nil || state.Pending != claim.IntentDigest {
+		t.Fatalf("failed closure changed head: %+v %v", state, err)
+	}
+	if result, err := settler.CloseWithoutWrite(ctx, "fixture-settler", claim.IntentDigest, raw); err != nil || !result.Created || result.Digest != pin {
+		t.Fatalf("close exact no-write execution: %+v %v", result, err)
+	}
+	lkg := Version{f.intent.Generation, f.intent.CurrentDigest}
+	if state, err := ordinary.ReadResource(ctx, claim.Scope); err != nil || state.Pending != "" || state.LastVerified != lkg || state.LastFence != claim.Fence {
+		t.Fatalf("terminal no-write changed the LKG or fence: %+v %v", state, err)
+	}
+	reads := observations
+	now = time.Unix(proof.ExpiresAt, 0)
+	if result, err := settler.CloseWithoutWrite(ctx, "fixture-settler", claim.IntentDigest, raw); err != nil || result.Created || result.Digest != pin || reads != observations {
+		t.Fatalf("closed claim did not replay as read-only after expiry: %+v %v", result, err)
+	}
+	if result, err := settler.CloseWithoutWrite(ctx, "fixture-settler", claim.IntentDigest, wrongRaw); !errors.Is(err, ErrResultConflict) || result.Created {
+		t.Fatalf("conflicting terminal evidence could replace recorded result: %+v %v", result, err)
 	}
 }

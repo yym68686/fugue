@@ -14,6 +14,7 @@ import (
 const (
 	recoveryDomainV1 = "fugue.production.journal-recovery.v1"
 	recoveryDomainV2 = "fugue.production.journal-recovery.v2"
+	recoveryDomainV3 = "fugue.production.journal-recovery.v3"
 )
 
 var snapshotPattern = regexp.MustCompile(`^[0-9A-F]{8}-[0-9A-F]{8}-[1-9][0-9]{0,9}$`)
@@ -39,6 +40,9 @@ var recoveryTablesV1 = []recoveryTable{
 
 var recoveryTablesV2 = slices.Insert(slices.Clone(recoveryTablesV1), len(recoveryTablesV1)-1,
 	recoveryTable{"registry_rehome_admissions", `ORDER BY intent_digest COLLATE pg_catalog."C"`})
+
+var recoveryTablesV3 = slices.Insert(slices.Clone(recoveryTablesV2), len(recoveryTablesV2)-1,
+	recoveryTable{"registry_rehome_no_write", `ORDER BY intent_digest COLLATE pg_catalog."C"`})
 
 type JournalRecoveryTable struct {
 	Name   string `json:"name"`
@@ -158,7 +162,7 @@ func verifyRecoveryTableInventory(ctx context.Context, tx *sql.Tx) (string, []re
 		if err := rows.Scan(&name, &permanentTable); err != nil {
 			return "", nil, err
 		}
-		if len(names) >= len(recoveryTablesV2) || !permanentTable {
+		if len(names) >= len(recoveryTablesV3) || !permanentTable {
 			return "", nil, errors.New("production journal recovery table inventory does not match checkpoint format")
 		}
 		names = append(names, name)
@@ -176,6 +180,9 @@ func verifyRecoveryTableInventory(ctx context.Context, tx *sql.Tx) (string, []re
 			}
 		}
 		return true
+	}
+	if matches(recoveryTablesV3) {
+		return recoveryDomainV3, recoveryTablesV3, nil
 	}
 	if matches(recoveryTablesV2) {
 		return recoveryDomainV2, recoveryTablesV2, nil

@@ -44,6 +44,8 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control draft-release-registry-rehome JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN GROUP REQUEST MIRROR_CONFIG
        fugue-production-control pack-release-registry-rehome ARCHIVE PIN SUBMISSION NEW_PRIVATE_DIRECTORY
        fugue-production-control observe-release-registry-rehome-pending JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG
+       fugue-production-control sign-registry-rehome-no-write DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
+       fugue-production-control settle-registry-rehome-no-write JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG ACTOR SIGNED_CLOSURE
        fugue-production-control observe-storage-audit-owner CONFIG
        fugue-production-control observe-sample-retention CONFIG
        fugue-production-control sample-retention-baseline-checkpoint CONFIG
@@ -104,7 +106,11 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	case "pack-release-registry-rehome":
 		return packRegistryRehomeRecovery(args[1:], out)
 	case "observe-release-registry-rehome-pending":
-		return observePendingRegistryRehome(ctx, args[1:], out)
+		return pendingRegistryRehomeCommand(ctx, args[1:], out, false)
+	case "sign-registry-rehome-no-write":
+		return signRegistryRehomeNoWrite(args[1:], out, now)
+	case "settle-registry-rehome-no-write":
+		return pendingRegistryRehomeCommand(ctx, args[1:], out, true)
 	case "capture-release-recovery-archive":
 		if len(args) != 6 {
 			return errors.New(usage)

@@ -103,20 +103,41 @@ CREATE TABLE IF NOT EXISTS fugue_control.registry_rehome_admissions (
     FOREIGN KEY (approval_digest, intent_digest) REFERENCES fugue_control.approvals (digest, intent_digest)
 );
 
+-- A no-write settlement keeps the verified predecessor. Retain the exact
+-- technical closure receipt atomically, under a separate append grant.
+CREATE TABLE IF NOT EXISTS fugue_control.registry_rehome_no_write (
+    intent_digest text PRIMARY KEY REFERENCES fugue_control.registry_rehome_admissions(intent_digest),
+    admission_digest text NOT NULL CHECK (admission_digest ~ '^sha256:[0-9a-f]{64}$'),
+    evidence_digest text NOT NULL UNIQUE CHECK (evidence_digest ~ '^sha256:[0-9a-f]{64}$'),
+    envelope bytea NOT NULL CHECK (octet_length(envelope) BETWEEN 1 AND 8192),
+    FOREIGN KEY (intent_digest) REFERENCES fugue_control.execution_results(intent_digest) DEFERRABLE INITIALLY DEFERRED
+);
+
 -- Ordinary runtime roles must not have INSERT on registry_rehome_admissions.
 -- The deferred check makes a raw ordinary claim fail without the atomic
 -- admission append. It does not substitute for signature/provider checks.
 CREATE OR REPLACE FUNCTION fugue_control.require_registry_rehome_admission() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    intent jsonb;
 BEGIN
-    IF NOT EXISTS (SELECT FROM fugue_control.intents
-        WHERE digest=NEW.intent_digest AND convert_from(envelope, 'UTF8')::jsonb->>'operation'='component_registry_rehome') THEN
+    SELECT convert_from(envelope, 'UTF8')::jsonb INTO intent FROM fugue_control.intents WHERE digest=NEW.intent_digest;
+    IF intent->>'operation' IS DISTINCT FROM 'component_registry_rehome' THEN
         RETURN NULL;
     END IF;
     IF TG_TABLE_NAME='execution_results' THEN
-        -- An approval binds the registry projection, not a new verified
-        -- serving/rollback record. No ordinary result may advance this head.
-        RAISE EXCEPTION 'registry rehome needs a verified recovery baseline for settlement' USING ERRCODE='23514';
+        -- A draft is never a verified release; only an independently
+        -- closed no-write result can keep the exact original head.
+        IF NEW.outcome <> 'not_applied'
+            OR intent->>'expectedGeneration' IS DISTINCT FROM NEW.generation::text
+            OR intent->>'expectedCurrentDigest' IS DISTINCT FROM NEW.verified_digest
+            OR NOT EXISTS (SELECT FROM fugue_control.registry_rehome_no_write closure
+                JOIN fugue_control.registry_rehome_admissions admission USING (intent_digest)
+                WHERE closure.intent_digest=NEW.intent_digest AND closure.evidence_digest=NEW.evidence_digest
+                    AND closure.admission_digest=admission.evidence_digest) THEN
+            RAISE EXCEPTION 'registry rehome result requires dedicated no-write closure over the exact predecessor' USING ERRCODE='23514';
+        END IF;
+        RETURN NULL;
     END IF;
     IF NOT EXISTS (SELECT FROM fugue_control.registry_rehome_admissions
             WHERE intent_digest=NEW.intent_digest AND approval_digest=NEW.approval_digest AND fence=NEW.fence) THEN

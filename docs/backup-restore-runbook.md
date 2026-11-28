@@ -200,11 +200,39 @@ binding and `observerPublicKey`. The command verifies the persisted claim and
 its signed admission, confirms the freeze and absence of the temporary webhook,
 brackets the retained monitor history and desired pointer, then compares the
 Deployment, Ready Pods, image IDs and companion Services with either the exact
-reviewed original or next independent-registry placement. It never retries the
-provider write or settles the claim. A placement observation is not terminal
-health or proof of old-request drainage. Keep the journal at its prior LKG and
-use the separate closure, health and recovery gates before any authorized
-settlement; if evidence is inconclusive, leave the resource frozen.
+reviewed original or next independent-registry placement. `readbackDigest`
+binds that observation to the provider and its plain freeze. The command
+never retries the provider write or settles the claim. Placement alone is
+not proof of health or request drainage.
+
+Only for `original_registry_observed`, a separately trusted observer may
+confirm the attempt **did not write** after the original admission expires.
+Retain independent evidence of the plain freeze on every serving API
+endpoint, revocation of the temporary writer, drainage of its in-flight
+requests, and serving health of the original version (local, dependency and
+route health). Prepare a private unsigned JSON draft with the observed
+`clusterId`, `resourceId`, `intentDigest`, `approvalDigest`, `fence`,
+`admissionDigest`, `archiveDigest`, `readbackDigest` and `observedAtUnix`.
+Include the distinct retained digests `endpointFreezeDigest`,
+`writerRevocationDigest`, `requestDrainDigest` and `servingHealthDigest`.
+Do not reuse the original pre-write evidence. Sign the reviewed bytes offline:
+
+```bash
+fugue-production-control sign-registry-rehome-no-write "$DRAFT" "$REVIEWED_DRAFT_SHA256" "$OBSERVER_PKCS8_PEM" 2m
+fugue-production-control settle-registry-rehome-no-write "$SETTLEMENT_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG" "$ACTOR" "$SIGNED_CLOSURE"
+```
+
+Store the canonical signed output in a private file. Use a separate journal
+login with the necessary reads and INSERT only on `registry_rehome_no_write`
+and `execution_results`. Dispatch and ordinary release roles must not have
+INSERT on `registry_rehome_no_write`. The settlement repeats provider readback
+using the read-only Kubernetes profile and appends `not_applied` and its
+evidence atomically. The LKG and fence stay at the original version and
+existing fence respectively. Reusing the same receipt only reads its result.
+An observed registry move, a different readback, or missing proof leaves the
+claim unresolved. A successfully moved workload needs a separate verified
+independent-registry release and rollback baseline; it cannot be settled as
+`not_applied` or promoted using the migration proposal digest.
 
 ## Native production journal recovery
 
