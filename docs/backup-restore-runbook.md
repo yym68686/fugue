@@ -143,6 +143,26 @@ images from that origin; the bundle pins the repository. Neither command
 authenticates production approval, grants write access, or certifies rollout,
 rollback, or serving health. Do not apply the templates as a recovery shortcut.
 
+If the one-shot provider write lost its response, freeze the Deployment first,
+remove the temporary rehome webhook exception, and wait for any previously
+admitted requests to be proven drained. From the enrolled static TLS context
+and SELECT-only journal credentials, use:
+
+```bash
+fugue-production-control observe-release-registry-rehome-pending "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG"
+```
+
+The enrollment JSON contains the exact frozen `cutover`, Kubernetes `provider`
+binding and `observerPublicKey`. The command verifies the persisted claim and
+its signed admission, confirms the freeze and absence of the temporary webhook,
+brackets the retained monitor history and desired pointer, then compares the
+Deployment, Ready Pods, image IDs and companion Services with either the exact
+reviewed original or next independent-registry placement. It never retries the
+provider write or settles the claim. A placement observation is not terminal
+health or proof of old-request drainage. Keep the journal at its prior LKG and
+use the separate closure, health and recovery gates before any authorized
+settlement; if evidence is inconclusive, leave the resource frozen.
+
 ## Native production journal recovery
 
 Use this additional gate once a resource's native journal can authorize writes.

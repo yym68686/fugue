@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,9 +11,55 @@ import (
 
 	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
+	"fugue/internal/releaseguardian/participation"
 )
 
 const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
+
+func observePendingRegistryRehome(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 7 || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) {
+		return errors.New(usage)
+	}
+	var cfg struct {
+		Cutover  releaseguardian.KubeDeploymentCutover            `json:"cutover"`
+		Provider productioncontrol.ParticipationKubernetesBinding `json:"provider"`
+		Observer ed25519.PublicKey                                `json:"observerPublicKey"`
+	}
+	config, err := readFile(args[6], 16<<10, false)
+	if err != nil {
+		return err
+	}
+	if decodeRecoveryMirrorJSON(config, &cfg) != nil || len(cfg.Observer) != ed25519.PublicKeySize || cfg.Cutover.Phase != releaseguardian.KubeCutoverFrozen {
+		return errors.New("invalid frozen registry rehome observation enrollment")
+	}
+	archive, err := readFile(args[3], releaseguardian.MaxReleaseArchiveBytes, true)
+	if err != nil {
+		return err
+	}
+	defer clear(archive)
+	if _, err := releaseguardian.VerifyReleaseRecoveryArchive(archive, args[4]); err != nil {
+		return err
+	}
+	kube, err := readKubeObservationConfig(args[1], args[2])
+	if err != nil {
+		return err
+	}
+	kube, err = participation.BindKubernetesConfig(kube, cfg.Provider)
+	if err != nil {
+		return err
+	}
+	client, err := sealedRecoveryObserver(kube)
+	if err != nil {
+		return err
+	}
+	return withJournalDeadline(ctx, args[0], true, 30*time.Second, func(ctx context.Context, j *productioncontrol.Journal, cluster string) error {
+		observed, err := releaseguardian.ObserveFrozenRegistryRehomePending(ctx, client, j, cluster, args[5], cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4])
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(observed)
+	})
+}
 
 func packRegistryRehomeRecovery(args []string, out io.Writer) error {
 	if len(args) != 4 || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[2]) {

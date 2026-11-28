@@ -55,6 +55,10 @@ func verifyRegistryRehomePlacement(review RegistryRehomeReview, live *appsv1.Dep
 	if err != nil || !apiequality.Semantic.DeepEqual(cas.expected.Spec, live.Spec) {
 		return errors.Join(errors.New("registry rehome placement cannot reconstruct the signed source spec"), err)
 	}
+	return verifyRegistryRehomeReady(live)
+}
+
+func verifyRegistryRehomeReady(live *appsv1.Deployment) error {
 	count := derefReplicas(live.Spec.Replicas)
 	status := live.Status
 	if count < 1 || status.ObservedGeneration != live.Generation || status.Replicas != count || status.UpdatedReplicas != count ||
@@ -68,6 +72,10 @@ func verifyRegistryRehomePlacement(review RegistryRehomeReview, live *appsv1.Dep
 // serving observation. It is safe to repeat after a lost reply, but cannot
 // reserve a claim, infer that a write did not happen, or create a new seal.
 func observeRegistryRehomePlacement(ctx context.Context, client kubernetes.Interface, review RegistryRehomeReview) (rehomePlacement, error) {
+	return observeRegistryRehomePlacementAt(ctx, client, review, false)
+}
+
+func observeRegistryRehomePlacementAt(ctx context.Context, client kubernetes.Interface, review RegistryRehomeReview, original bool) (rehomePlacement, error) {
 	id := review.Draft.Workload
 	if client == nil || id != review.Source.Deployment.Identity ||
 		id.APIVersion != "apps/v1" || id.Kind != "Deployment" || id.Namespace == "" || id.Name == "" {
@@ -78,15 +86,23 @@ func observeRegistryRehomePlacement(ctx context.Context, client kubernetes.Inter
 	if err != nil {
 		return rehomePlacement{}, err
 	}
-	if err := verifyRegistryRehomePlacement(review, live); err != nil {
-		return rehomePlacement{}, err
-	}
 	store := KubeStore{client: client}
 	mirror := review.Draft.Mirror.Forward.RecoveryImage
 	// Only image matching uses this transient view; it is not a new release
 	// receipt and must never be marshalled into the historical archive.
 	image := declarativerelease.ArtifactReceipt{ImmutableRef: mirror.Image,
 		TopDigest: mirror.IndexDigest, PlatformManifestDigest: mirror.ManifestDigest}
+	if original {
+		if _, err := prepareRegistryRehomeDeploymentCAS(review, live); err != nil {
+			return rehomePlacement{}, err
+		}
+		if err := verifyRegistryRehomeReady(live); err != nil {
+			return rehomePlacement{}, err
+		}
+		image.ImmutableRef = review.Draft.Current.SourceImage
+	} else if err := verifyRegistryRehomePlacement(review, live); err != nil {
+		return rehomePlacement{}, err
+	}
 	pods, err := store.nativeServingPods(ctx, live, image)
 	if err != nil {
 		return rehomePlacement{}, err

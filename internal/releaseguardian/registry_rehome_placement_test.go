@@ -19,6 +19,9 @@ import (
 func TestObserveRegistryRehomePlacementIsReadOnlyAndFailsClosed(t *testing.T) {
 	for mode, wantError := range map[string]string{
 		"healthy moved":                 "",
+		"healthy original":              "",
+		"original spec drift":           "spec drifted from the signed review",
+		"original unready Pods":         "not a ready Deployment member",
 		"same artifact at old location": "does not use the independent image",
 		"deployment spec drift":         "cannot reconstruct the signed source spec",
 		"wrong generation":              "not the next reviewed",
@@ -40,6 +43,10 @@ func TestObserveRegistryRehomePlacementIsReadOnlyAndFailsClosed(t *testing.T) {
 			d := cas.expected.DeepCopy()
 			d.Generation++
 			d.ResourceVersion = "11"
+			original := mode == "healthy original" || mode == "original spec drift" || mode == "original unready Pods"
+			if original {
+				d = source.DeepCopy()
+			}
 			replicas := *d.Spec.Replicas
 			d.Status = appsv1.DeploymentStatus{ObservedGeneration: d.Generation, Replicas: replicas,
 				UpdatedReplicas: replicas, ReadyReplicas: replicas, AvailableReplicas: replicas}
@@ -72,6 +79,10 @@ func TestObserveRegistryRehomePlacementIsReadOnlyAndFailsClosed(t *testing.T) {
 			}
 			first, second := fakePod(0), fakePod(1)
 			switch mode {
+			case "original spec drift":
+				d.Spec.Replicas = ptr.To[int32](3)
+			case "original unready Pods":
+				first.Status.Conditions[0].Status = corev1.ConditionFalse
 			case "same artifact at old location":
 				d.Spec.Template.Spec.InitContainers[0].Image = review.Draft.Current.SourceImage
 			case "deployment spec drift":
@@ -110,7 +121,7 @@ func TestObserveRegistryRehomePlacementIsReadOnlyAndFailsClosed(t *testing.T) {
 				moved.ResourceVersion = "30"
 				changed("deployments", func() runtime.Object { return moved })
 			}
-			got, err := observeRegistryRehomePlacement(t.Context(), client, review)
+			got, err := observeRegistryRehomePlacementAt(t.Context(), client, review, original)
 			if wantError == "" {
 				if err != nil || got.Deployment != recoveryRef(d) || got.Generation != d.Generation ||
 					len(got.Pods) != 2 || len(got.Services) != 1 || got.Services[0] != recoveryRef(service) {
