@@ -14,6 +14,7 @@ import (
 	"fugue/internal/appimages"
 	"fugue/internal/httpx"
 	"fugue/internal/imagecachegraph"
+	localpvhost "fugue/internal/localpvsafety/host"
 	"fugue/internal/model"
 	"fugue/internal/model/edgecohort"
 	"fugue/internal/nodehostpolicy"
@@ -5895,7 +5896,7 @@ esac
 		"__FUGUE_HOST_MEMORY_SAFETY_LIBRARY__", nodehostpolicy.MemorySafetyShell(),
 		"__FUGUE_POD_CAPACITY_LIBRARY__", podCapacityShellLibrary(),
 		"__FUGUE_HOST_JOURNALD_POLICY_LIBRARY__", nodehostpolicy.JournaldShell(),
-		"__FUGUE_LOCALPV_UNIT_LIBRARY__", localPVUnitShellLibrary(),
+		"__FUGUE_LOCALPV_UNIT_LIBRARY__", localpvhost.BootUnitShellLibrary(),
 		"__FUGUE_K3S_UPGRADE_LIBRARY__", guardedK3SUpgradeShell,
 	).Replace(script)
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +15,7 @@ import (
 	"fugue/internal/imagecachepolicy"
 	"fugue/internal/imagecacheusage"
 	"fugue/internal/localpvsafety"
+	localpvinventory "fugue/internal/localpvsafety/inventory"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -95,21 +95,9 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inventory := req.Inventory.LocalPVInventory
-	// Older reports may contain zero alongside a failed kubectl observation.
-	inventory.ReportedByNodeUpdaterID = updater.ID
-	inventory.NodeID = firstNonEmptyImageAPIString(inventory.NodeID, updater.MachineID)
-	inventory.ClusterNodeName = firstNonEmptyImageAPIString(inventory.ClusterNodeName, updater.ClusterNodeName)
-	inventory.RuntimeID = firstNonEmptyImageAPIString(inventory.RuntimeID, updater.RuntimeID)
-	if (req.Inventory.Known != nil && !*req.Inventory.Known) || inventory.BoundPVCount < 0 || slices.Contains(inventory.UnsafeReasons, "kubectl_pv_unavailable") || slices.Contains(inventory.UnsafeReasons, "bound_pv_count_unknown") {
-		s.enrichLocalPVBindings(r.Context(), &inventory)
-	} else {
-		inventory.BoundPVCountKnown = true
-	}
-	if inventory.ObservedAt.IsZero() {
-		inventory.ObservedAt = time.Now().UTC()
-	}
-	inventory.SafeToDecommission, inventory.UnsafeReasons = evaluateLocalPVDecommissionSafety(inventory)
+	inventory := localpvinventory.PrepareReport(req.Inventory.LocalPVInventory, updater, req.Inventory.Known, time.Now, func(in *model.LocalPVInventory) {
+		s.enrichLocalPVBindings(r.Context(), in)
+	})
 	inventory, err = s.store.UpsertLocalPVInventory(inventory)
 	if err != nil {
 		s.writeStoreError(w, err)
@@ -350,7 +338,7 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	}
 	now := time.Now().UTC()
 	for index := range inventories {
-		safe, reasons := evaluateLocalPVDecommissionSafety(inventories[index])
+		safe, reasons := localpvinventory.DecommissionSafety(inventories[index])
 		if !localpvsafety.IsFresh(inventories[index].ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
 			safe = false
 			reasons = uniqueNonEmptyStrings(append(reasons, "inventory_stale"))
@@ -1145,32 +1133,6 @@ func pruneTaskTargets(candidates []model.ImageCachePruneCandidate, limit int) []
 		})
 	}
 	return out
-}
-
-func evaluateLocalPVDecommissionSafety(in model.LocalPVInventory) (bool, []string) {
-	reasons := append([]string(nil), in.UnsafeReasons...)
-	if in.LVCount != 0 {
-		reasons = append(reasons, "active_lvs_present")
-	}
-	if in.ActiveLVCount != 0 {
-		reasons = append(reasons, "active_lvs_present")
-	}
-	if in.BoundPVCount < 0 {
-		reasons = append(reasons, "bound_pv_count_unknown")
-	} else if in.BoundPVCount != 0 {
-		reasons = append(reasons, "bound_pvs_present")
-	}
-	if strings.TrimSpace(in.ImagePath) == "" {
-		reasons = append(reasons, "image_path_missing")
-	}
-	if strings.TrimSpace(in.LoopDevice) == "" {
-		reasons = append(reasons, "loop_device_missing")
-	}
-	if strings.TrimSpace(in.LoopBackingFile) != "" && strings.TrimSpace(in.ImagePath) != "" && strings.TrimSpace(in.LoopBackingFile) != strings.TrimSpace(in.ImagePath) {
-		reasons = append(reasons, "loop_backing_file_mismatch")
-	}
-	reasons = uniqueNonEmptyStrings(reasons)
-	return len(reasons) == 0, reasons
 }
 
 func normalizeImageCachePruneAPIMode(raw string) string {

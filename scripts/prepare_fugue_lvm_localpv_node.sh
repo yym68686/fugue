@@ -121,7 +121,7 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-LOCALPV_UNIT_RENDERER="${FUGUE_LOCALPV_UNIT_RENDERER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../internal/api" && pwd)/localpv_unit.py}"
+LOCALPV_UNIT_RENDERER="${FUGUE_LOCALPV_UNIT_RENDERER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../internal/localpvsafety/host" && pwd)/localpv_unit.py}"
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required to validate and render the LocalPV boot unit" >&2
   exit 1
