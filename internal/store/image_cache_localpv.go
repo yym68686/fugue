@@ -82,19 +82,6 @@ func (s *Store) ListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter)
 	return s.pgListImageCachePrunePlans(filter)
 }
 
-func (s *Store) UpsertLocalPVInventory(inventory model.LocalPVInventory) (model.LocalPVInventory, error) {
-	inventory = normalizeLocalPVInventory(inventory)
-	if inventory.NodeID == "" && inventory.ClusterNodeName == "" {
-		return model.LocalPVInventory{}, ErrInvalidInput
-	}
-	return s.pgUpsertLocalPVInventory(inventory)
-}
-
-func (s *Store) ListLocalPVInventories(filter model.LocalPVInventoryFilter) ([]model.LocalPVInventory, error) {
-	filter = normalizeLocalPVInventoryFilter(filter)
-	return s.pgListLocalPVInventories(filter)
-}
-
 func normalizeImageCacheNodeInventory(in model.ImageCacheNodeInventory) model.ImageCacheNodeInventory {
 	in.ID = strings.TrimSpace(in.ID)
 	in.NodeID = strings.TrimSpace(in.NodeID)
@@ -216,47 +203,6 @@ func normalizeImageCachePrunePlanStatus(raw string) string {
 	default:
 		return ""
 	}
-}
-
-func normalizeLocalPVInventory(in model.LocalPVInventory) model.LocalPVInventory {
-	in.ID = strings.TrimSpace(in.ID)
-	in.NodeID = strings.TrimSpace(in.NodeID)
-	in.ClusterNodeName = strings.TrimSpace(in.ClusterNodeName)
-	in.RuntimeID = strings.TrimSpace(in.RuntimeID)
-	in.NodeRoles = normalizeStringList(in.NodeRoles)
-	in.VGName = strings.TrimSpace(in.VGName)
-	in.ImagePath = strings.TrimSpace(in.ImagePath)
-	in.LoopDevice = strings.TrimSpace(in.LoopDevice)
-	in.LoopBackingFile = strings.TrimSpace(in.LoopBackingFile)
-	in.LVNames = normalizeStringList(in.LVNames)
-	in.BoundPVCRefs = normalizeStringList(in.BoundPVCRefs)
-	in.UnsafeReasons = normalizeStringList(in.UnsafeReasons)
-	for _, reason := range in.UnsafeReasons {
-		if reason == "kubectl_pv_unavailable" || reason == "bound_pv_count_unknown" {
-			in.BoundPVCount = -1
-			break
-		}
-	}
-	if in.BoundPVCount < 0 {
-		in.BoundPVCountKnown = false
-	} else if !in.BoundPVCountKnown {
-		// Legacy callers did not have the explicit known bit. A non-negative
-		// count from those callers is a real observation; -1 is the unknown
-		// sentinel emitted when kubectl was unavailable.
-		in.BoundPVCountKnown = true
-	}
-	in.ReportedByNodeUpdaterID = strings.TrimSpace(in.ReportedByNodeUpdaterID)
-	if in.ObservedAt.IsZero() {
-		in.ObservedAt = time.Now().UTC()
-	}
-	return in
-}
-
-func normalizeLocalPVInventoryFilter(filter model.LocalPVInventoryFilter) model.LocalPVInventoryFilter {
-	filter.NodeID = strings.TrimSpace(filter.NodeID)
-	filter.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
-	filter.RuntimeID = strings.TrimSpace(filter.RuntimeID)
-	return filter
 }
 
 func firstNonEmptyImageCacheString(values ...string) string {

@@ -1,10 +1,28 @@
 package inventory
 
 import (
+	"slices"
 	"testing"
+	"time"
 
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 )
+
+func TestObservedSnapshotRecomputesSafetyAtTheFreshnessBoundary(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	in := model.LocalPVInventory{
+		ImagePath: "/storage/volume.img", LoopDevice: "/dev/loop-test",
+		ObservedAt: now.Add(-localpvsafety.DefaultInventoryTTL),
+	}
+	if got := AssessObservedSnapshot(in, now); !got.SafeToDecommission || len(got.UnsafeReasons) != 0 {
+		t.Fatalf("fresh evidence at TTL boundary: %+v", got)
+	}
+	if got := AssessObservedSnapshot(in, now.Add(time.Nanosecond)); got.SafeToDecommission ||
+		!slices.Equal(got.UnsafeReasons, []string{"inventory_stale"}) || in.UnsafeReasons != nil {
+		t.Fatalf("stale evidence or unsafe input alias: %+v; source=%+v", got, in)
+	}
+}
 
 func TestEvaluateLocalPVDecommissionSafetyGates(t *testing.T) {
 	t.Parallel()

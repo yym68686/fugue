@@ -27,12 +27,12 @@ func TestLocalPVInventoryDoesNotImportComposition(t *testing.T) {
 	}
 }
 
-func TestOnlyControllerAdapterUsesLocalPVInventoryQueuePorts(t *testing.T) {
-	ports := map[string]bool{
-		"EnqueueLocalPVInventoryProtocolUpgrade": true,
-		"EnqueueLocalPVInventoryReport":          true,
+func TestLocalPVInventoryWritesStayOnTheirDomainPorts(t *testing.T) {
+	ports := map[string]string{
+		"EnqueueLocalPVInventoryProtocolUpgrade": "internal/controller/localpv_inventory.go",
+		"EnqueueLocalPVInventoryReport":          "internal/controller/localpv_inventory.go",
+		"LocalPVInventoryReporter":               "internal/api/image_cache_localpv_admin.go",
 	}
-	const allowed = "internal/controller/localpv_inventory.go"
 	root := filepath.Join("..", "..", "..")
 	for _, sourceTree := range []string{"internal", "cmd"} {
 		if err := filepath.WalkDir(filepath.Join(root, sourceTree), func(path string, info fs.DirEntry, err error) error {
@@ -49,12 +49,26 @@ func TestOnlyControllerAdapterUsesLocalPVInventoryQueuePorts(t *testing.T) {
 				return nil
 			}
 			relative, err := filepath.Rel(root, path)
-			if err != nil || filepath.ToSlash(relative) == allowed {
+			if err != nil {
 				return err
 			}
+			relative = filepath.ToSlash(relative)
 			content, err := os.ReadFile(path)
-			if err != nil || !bytes.Contains(content, []byte("EnqueueLocalPVInventory")) {
+			if err != nil {
 				return err
+			}
+			if bytes.Contains(bytes.ToLower(content), []byte("fugue_localpv_inventories")) &&
+				relative != "internal/store/postgres.go" &&
+				relative != "internal/schemamigrate/image_retirement.go" &&
+				relative != "internal/store/internal/localpvinventory/postgres.go" {
+				t.Errorf("%s: only the LocalPV repository and its existing schema migrations may use the snapshot table", relative)
+			}
+			if bytes.Contains(content, []byte(`"fugue/internal/store/internal/localpvinventory"`)) &&
+				relative != "internal/store/localpv_inventory.go" {
+				t.Errorf("%s: only the Store LocalPV adapter may open the inventory repository", relative)
+			}
+			if !bytes.Contains(content, []byte("EnqueueLocalPVInventory")) && !bytes.Contains(content, []byte("LocalPVInventoryReporter")) {
+				return nil
 			}
 			set := token.NewFileSet()
 			source, err := parser.ParseFile(set, path, content, parser.SkipObjectResolution)
@@ -62,8 +76,10 @@ func TestOnlyControllerAdapterUsesLocalPVInventoryQueuePorts(t *testing.T) {
 				return err
 			}
 			ast.Inspect(source, func(node ast.Node) bool {
-				if selector, ok := node.(*ast.SelectorExpr); ok && ports[selector.Sel.Name] {
-					t.Errorf("%s: only the Controller LocalPV adapter may acquire this write port", set.Position(selector.Pos()))
+				if selector, ok := node.(*ast.SelectorExpr); ok {
+					if allowed, isWritePort := ports[selector.Sel.Name]; isWritePort && relative != allowed {
+						t.Errorf("%s: only %s may acquire %s", set.Position(selector.Pos()), allowed, selector.Sel.Name)
+					}
 				}
 				return true
 			})

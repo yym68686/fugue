@@ -3,9 +3,22 @@ package inventory
 import (
 	"sort"
 	"strings"
+	"time"
 
+	"fugue/internal/localpvsafety"
 	"fugue/internal/model"
 )
+
+// AssessObservedSnapshot refreshes the safety verdict for a reader without
+// updating the persisted snapshot.
+func AssessObservedSnapshot(in model.LocalPVInventory, now time.Time) model.LocalPVInventory {
+	in.SafeToDecommission, in.UnsafeReasons = DecommissionSafety(in)
+	if !localpvsafety.IsFresh(in.ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
+		in.SafeToDecommission = false
+		in.UnsafeReasons = uniqueNonEmptyStrings(append(in.UnsafeReasons, "inventory_stale"))
+	}
+	return in
+}
 
 // DecommissionSafety classifies reported evidence without writing inventory.
 func DecommissionSafety(in model.LocalPVInventory) (bool, []string) {

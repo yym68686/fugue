@@ -388,7 +388,7 @@ func TestLocalPVInventoryAPIRecomputesEligibility(t *testing.T) {
 		t.Fatalf("expected unsafe LocalPV inventory, got %+v", response.Inventories)
 	}
 
-	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+	if _, err := stateStore.LocalPVInventoryReporter().Report(model.LocalPVInventory{
 		NodeID:          "machine-stale",
 		ClusterNodeName: "worker-stale",
 		VGName:          "fugue-vg",
@@ -396,7 +396,7 @@ func TestLocalPVInventoryAPIRecomputesEligibility(t *testing.T) {
 		LoopDevice:      "/dev/loop9",
 		LoopBackingFile: "/var/lib/fugue/lvm-localpv/fugue-vg.img",
 		ObservedAt:      time.Now().UTC().Add(-2 * localpvsafety.DefaultInventoryTTL),
-	}); err != nil {
+	}, model.NodeUpdater{}, nil, nil); err != nil {
 		t.Fatalf("upsert stale LocalPV inventory: %v", err)
 	}
 	staleList := performFormRequest(t, server, http.MethodGet, "/v1/admin/localpv/inventory?cluster_node_name=worker-stale", adminSecret, nil)

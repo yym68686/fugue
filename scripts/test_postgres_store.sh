@@ -20,4 +20,4 @@ fi
 FUGUE_DATABASE_URL="$FUGUE_STORE_TEST_POSTGRES" go run ./cmd/fugue-store-setup
 psql "$FUGUE_STORE_TEST_POSTGRES" -Xq -v ON_ERROR_STOP=1 -f internal/schemamigrate/compiler_input_zero_temp.sql
 export FUGUE_DATA_CREDENTIAL_ENCRYPTION_KEY=local-disposable-postgres-fixture-key
-go test -count=1 -timeout 35m -p 2 -parallel 4 ./internal/{store,api,controller,cli,cli/datacontract,releaseflow,sshcontrol,qualityrollup,operationqueue} "$@"
+go test -count=1 -timeout 35m -p 2 -parallel 4 ./internal/{store,store/internal/localpvinventory,api,controller,cli,cli/datacontract,releaseflow,sshcontrol,qualityrollup,operationqueue} "$@"

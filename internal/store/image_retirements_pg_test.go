@@ -8,10 +8,9 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
-func TestImageRetirementPostgresArchiveAndLocalPVUnknownRoundTrip(t *testing.T) {
+func TestImageRetirementPostgresArchive(t *testing.T) {
 	dsn := os.Getenv("FUGUE_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("isolated PostgreSQL required")
@@ -63,13 +62,5 @@ func TestImageRetirementPostgresArchiveAndLocalPVUnknownRoundTrip(t *testing.T) 
 	}
 	if !found {
 		t.Fatal("retirement authority disappeared with metadata")
-	}
-	inv, err := s.UpsertLocalPVInventory(model.LocalPVInventory{NodeID: "test-node-" + model.NewID("pv"), ClusterNodeName: "worker", BoundPVCount: -1, ObservedAt: time.Now()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.db.Exec(`DELETE FROM fugue_localpv_inventories WHERE id=$1`, inv.ID)
-	if inv.BoundPVCount != -1 || inv.BoundPVCountKnown {
-		t.Fatalf("lost unknown in postgres: %+v", inv)
 	}
 }

@@ -1,12 +1,32 @@
 package inventory
 
 import (
+	"errors"
 	"slices"
 	"testing"
 	"time"
 
 	"fugue/internal/model"
 )
+
+func TestReporterPersistsOnlyPreparedSnapshotAndPropagatesFailure(t *testing.T) {
+	storeError := errors.New("snapshot unavailable")
+	known := false
+	calls := 0
+	reporter := NewReporter(func(in model.LocalPVInventory) (model.LocalPVInventory, error) {
+		calls++
+		if in.ReportedByNodeUpdaterID != "authenticated" || in.ClusterNodeName != "node" ||
+			in.BoundPVCountKnown || in.BoundPVCount != -1 || in.SafeToDecommission {
+			t.Fatalf("writer received unprepared or unsafe input: %+v", in)
+		}
+		return model.LocalPVInventory{}, storeError
+	})
+	_, err := reporter.Report(model.LocalPVInventory{ReportedByNodeUpdaterID: "untrusted", SafeToDecommission: true},
+		model.NodeUpdater{ID: "authenticated", ClusterNodeName: "node"}, &known, nil)
+	if calls != 1 || !errors.Is(err, storeError) {
+		t.Fatalf("writes=%d, error=%v", calls, err)
+	}
+}
 
 func TestPrepareReportSuppliesIdentityAndRecomputesEligibility(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("test", 3600))
@@ -16,7 +36,7 @@ func TestPrepareReportSuppliesIdentityAndRecomputesEligibility(t *testing.T) {
 		ReportedByNodeUpdaterID: "untrusted",
 	}
 	updater := model.NodeUpdater{ID: "authenticated", MachineID: "machine", ClusterNodeName: " node ", RuntimeID: " runtime "}
-	result := PrepareReport(source, updater, nil, func() time.Time { return now }, func(*model.LocalPVInventory) {
+	result := prepareReport(source, updater, nil, func() time.Time { return now }, func(*model.LocalPVInventory) {
 		t.Fatal("legacy report with a known zero must not require a Kubernetes observation")
 	})
 	if result.NodeID != "reported-node" || result.ClusterNodeName != "node" || result.RuntimeID != "runtime" || result.ReportedByNodeUpdaterID != "authenticated" {
@@ -47,7 +67,7 @@ func TestPrepareReportChecksUnknownBindingsThroughReadAdapter(t *testing.T) {
 			at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			in := model.LocalPVInventory{BoundPVCount: tc.count, UnsafeReasons: []string{tc.reason}, ObservedAt: at}
 			calls := 0
-			got := PrepareReport(in, model.NodeUpdater{ClusterNodeName: "node"}, tc.known, func() time.Time {
+			got := prepareReport(in, model.NodeUpdater{ClusterNodeName: "node"}, tc.known, func() time.Time {
 				t.Fatal("must preserve the supplied timestamp")
 				return time.Time{}
 			}, func(report *model.LocalPVInventory) {

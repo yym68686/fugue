@@ -14,7 +14,6 @@ import (
 	"fugue/internal/imagecachekeys"
 	"fugue/internal/imagecachepolicy"
 	"fugue/internal/imagecacheusage"
-	"fugue/internal/localpvsafety"
 	localpvinventory "fugue/internal/localpvsafety/inventory"
 	"fugue/internal/model"
 	"fugue/internal/store"
@@ -95,10 +94,9 @@ func (s *Server) handleNodeUpdaterReportLocalPVInventory(w http.ResponseWriter, 
 		httpx.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	inventory := localpvinventory.PrepareReport(req.Inventory.LocalPVInventory, updater, req.Inventory.Known, time.Now, func(in *model.LocalPVInventory) {
+	inventory, err := s.store.LocalPVInventoryReporter().Report(req.Inventory.LocalPVInventory, updater, req.Inventory.Known, func(in *model.LocalPVInventory) {
 		s.enrichLocalPVBindings(r.Context(), in)
 	})
-	inventory, err = s.store.UpsertLocalPVInventory(inventory)
 	if err != nil {
 		s.writeStoreError(w, err)
 		return
@@ -338,13 +336,7 @@ func (s *Server) handleAdminListLocalPVInventory(w http.ResponseWriter, r *http.
 	}
 	now := time.Now().UTC()
 	for index := range inventories {
-		safe, reasons := localpvinventory.DecommissionSafety(inventories[index])
-		if !localpvsafety.IsFresh(inventories[index].ObservedAt, now, localpvsafety.DefaultInventoryTTL) {
-			safe = false
-			reasons = uniqueNonEmptyStrings(append(reasons, "inventory_stale"))
-		}
-		inventories[index].SafeToDecommission = safe
-		inventories[index].UnsafeReasons = reasons
+		inventories[index] = localpvinventory.AssessObservedSnapshot(inventories[index], now)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"inventories": inventories})
 }

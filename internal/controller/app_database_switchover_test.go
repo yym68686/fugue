@@ -1072,14 +1072,14 @@ func TestPrepareManagedPostgresInPlaceStorageExpansionRejectsInsufficientLocalPV
 	defer kubeServer.Close()
 
 	stateStore, _ := newImageCacheControllerTestStore(t)
-	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+	if _, err := stateStore.LocalPVInventoryReporter().Report(model.LocalPVInventory{
 		NodeID:          nodeName,
 		ClusterNodeName: nodeName,
 		VGName:          "fugue-vg",
 		PVSizeBytes:     96 << 30,
 		PVFreeBytes:     9 << 30,
 		ObservedAt:      time.Now().UTC(),
-	}); err != nil {
+	}, model.NodeUpdater{}, nil, nil); err != nil {
 		t.Fatalf("upsert LocalPV inventory: %v", err)
 	}
 	client := &kubeClient{
@@ -1108,14 +1108,14 @@ func TestPrepareManagedPostgresInPlaceStorageExpansionRejectsInsufficientLocalPV
 	if patchCount != 0 {
 		t.Fatalf("PVC request was patched before capacity preflight: patches=%d", patchCount)
 	}
-	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+	if _, err := stateStore.LocalPVInventoryReporter().Report(model.LocalPVInventory{
 		NodeID:          nodeName,
 		ClusterNodeName: nodeName,
 		VGName:          "fugue-vg",
 		PVSizeBytes:     96 << 30,
 		PVFreeBytes:     32 << 30,
 		ObservedAt:      time.Now().UTC().Add(-2 * localpvsafety.DefaultInventoryTTL),
-	}); err != nil {
+	}, model.NodeUpdater{}, nil, nil); err != nil {
 		t.Fatalf("upsert stale LocalPV inventory: %v", err)
 	}
 	err = svc.prepareManagedPostgresInPlaceStorageExpansion(
@@ -1134,14 +1134,14 @@ func TestPrepareManagedPostgresInPlaceStorageExpansionRejectsInsufficientLocalPV
 	if patchCount != 0 {
 		t.Fatalf("PVC request was patched with stale inventory: patches=%d", patchCount)
 	}
-	if _, err := stateStore.UpsertLocalPVInventory(model.LocalPVInventory{
+	if _, err := stateStore.LocalPVInventoryReporter().Report(model.LocalPVInventory{
 		NodeID:          nodeName,
 		ClusterNodeName: nodeName,
 		VGName:          "fugue-vg",
 		PVSizeBytes:     96 << 30,
 		PVFreeBytes:     32 << 30,
 		ObservedAt:      time.Now().UTC(),
-	}); err != nil {
+	}, model.NodeUpdater{}, nil, nil); err != nil {
 		t.Fatalf("refresh LocalPV inventory: %v", err)
 	}
 	if err := svc.prepareManagedPostgresInPlaceStorageExpansion(
