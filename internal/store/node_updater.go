@@ -56,6 +56,9 @@ func (s *Store) NodeUpdaterTargetSupportsTask(updaterID, clusterNodeName, runtim
 }
 
 func (s *Store) CreateNodeUpdateTask(principal model.Principal, updaterID, clusterNodeName, runtimeID, taskType string, payload map[string]string) (model.NodeUpdateTask, error) {
+	if principal.ActorType == model.ActorTypeSystem && strings.TrimSpace(principal.ActorID) == localPVInventorySchedulerActor {
+		return model.NodeUpdateTask{}, fmt.Errorf("%w: scheduled LocalPV inventory requires a scoped command", ErrInvalidInput)
+	}
 	taskType = normalizeNodeUpdateTaskType(taskType)
 	if taskType == noderesourcepolicy.TaskType {
 		if !principal.IsPlatformAdmin() {

@@ -23,9 +23,10 @@ SOURCE = (
     "FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles",
 )
 TEST = ("TestGoFiles", "XTestGoFiles", "TestEmbedFiles", "XTestEmbedFiles")
+TEST_EMBED_PATTERNS = ("TestEmbedPatterns", "XTestEmbedPatterns")
 FIELDS = (
     "Dir", "ImportPath", "Incomplete", "Error", "DepsErrors",
-    "Imports", "TestImports", "XTestImports", *SOURCE, *TEST,
+    "Imports", "TestImports", "XTestImports", *SOURCE, *TEST, *TEST_EMBED_PATTERNS,
 )
 ENV_FIELDS = ("GOVERSION", "GOOS", "GOARCH", "CGO_ENABLED", "GOFLAGS")
 ARTIFACT_PROFILES = ("linux/amd64", "linux/arm64")
@@ -37,6 +38,7 @@ SOURCE_READERS = {
     "cmd/fugue-declarative-release/main.go": "./internal/declarativerelease",
     "internal/edge/service.go": "./internal/platformsafety",
     "internal/edgegroupfront/service.go": "./internal/platformsafety",
+    "internal/localpvsafety/host/localpv_unit.py": "./internal/localpvsafety/hostcontract",
     "internal/observability/pipeline.go": "./internal/platformsafety",
 }
 COMMAND_TEST_CONSUMERS = {
@@ -53,8 +55,8 @@ EDGE_GROUP_SOURCE_PREFIXES = ("internal/edge/", "internal/edgecontrol/", "intern
 # These composition guards scan non-test Go files under both source trees.
 APPLICATION_SOURCE_TEST_CONSUMERS = {
     "./internal/backupusage", "./internal/buildadmission",
-    "./internal/imagetracking", "./internal/oomrightsizing", "./internal/releaseretirement",
-    "./internal/resourcesizing",
+    "./internal/imagetracking", "./internal/localpvsafety/inventory", "./internal/oomrightsizing",
+    "./internal/releaseretirement", "./internal/resourcesizing",
 }
 # A source dependency can sit beneath a large composition-root test package.
 # Keep its domain contract tests as a first-class, name-scoped edge rather than
@@ -148,6 +150,20 @@ def select(paths, packages, root, *, repository_tests=(), application_source_tes
             for field in fields:
                 for filename in p.get(field, ()):
                     owners[(directory / filename).as_posix()].add((name, is_source))
+        # Without -test, cmd/go reports test embed patterns but does not
+        # expand them. Recognize only exact, present files; a glob, directory,
+        # symlink, or deleted input must still take the full fallback.
+        for field in TEST_EMBED_PATTERNS:
+            for pattern in p.get(field, ()):
+                if re.search(r"[\\*?\[\]:]", pattern) or not pattern:
+                    continue
+                relative = Path(pattern)
+                if relative.is_absolute() or pattern != relative.as_posix() or ".." in relative.parts:
+                    continue
+                candidate = directory / relative
+                file = checkout / candidate
+                if file.is_file() and file.resolve() == file:
+                    owners[candidate.as_posix()].add((name, False))
         for dependency in p.get("Imports", ()):
             reverse_runtime[dependency].add(name)
         for dependency in (*p.get("TestImports", ()), *p.get("XTestImports", ())):

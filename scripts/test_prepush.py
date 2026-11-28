@@ -12,32 +12,95 @@ from scripts import prepush
 
 
 class LocalPVGenerationTest(unittest.TestCase):
+    renderer = f"{prepush.LOCALPV_HOST_DIR}/localpv_unit.py"
+    library = f"{prepush.LOCALPV_HOST_DIR}/localpv_unit.go"
+
     def test_changed_boot_implementation_requires_new_updater_generation(self):
         for version, expected in [("v7", 1), ("v6", 1), ("v8", 0)]:
             with self.subTest(version=version), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                (root / "internal/api").mkdir(parents=True)
+                (root / self.renderer).parent.mkdir(parents=True)
                 (root / "internal/model").mkdir(parents=True)
-                (root / "internal/api/localpv_unit.py").write_text("new implementation")
+                (root / self.renderer).write_text("new implementation")
                 (root / "internal/model/model.go").write_text(f'const NodeUpdaterCurrentVersion = "{version}"')
                 def previous(command, timeout):
                     if command[-1].endswith("model.go"):
                         return 0, 'const NodeUpdaterCurrentVersion = "v7"'
                     return 0, "old implementation"
                 with mock.patch.object(prepush, "ROOT", root), mock.patch.object(prepush, "run", side_effect=previous):
-                    status, _ = prepush.localpv_updater_generation_check("base", ["internal/api/localpv_unit.py"], 5)
+                    status, _ = prepush.localpv_updater_generation_check("base", [self.renderer], 5)
                 self.assertEqual(status, expected)
 
     def test_unchanged_implementation_does_not_require_a_bump(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "internal/api").mkdir(parents=True)
-            (root / "internal/api/localpv_unit.py").write_text("same implementation")
+            (root / self.renderer).parent.mkdir(parents=True)
+            (root / self.renderer).write_text("same implementation")
             with mock.patch.object(prepush, "ROOT", root), mock.patch.object(prepush, "run", return_value=(0, "same implementation")):
-                self.assertEqual(prepush.localpv_updater_generation_check("base", ["internal/api/localpv_unit.py"], 5), (0, ""))
+                self.assertEqual(prepush.localpv_updater_generation_check("base", [self.renderer], 5), (0, ""))
+
+    def test_relocation_only_allows_equivalent_sources(self):
+        def previous(command, _timeout):
+            before = {
+                "base:internal/api/localpv_unit.py": "same renderer\n",
+                "base:internal/api/localpv_unit.go": "package api\n\nfunc localPVUnitShellLibrary() string {\n\treturn `same`\n}\n",
+                "base:internal/model/model.go": 'const NodeUpdaterCurrentVersion = "v7"',
+            }
+            return (0, before[command[-1]]) if command[-1] in before else (128, "")
+
+        equivalent_library = (
+            "package host\n\n"
+            "// BootUnitShellLibrary renders the LocalPV functions bundled by the node updater.\n"
+            "func BootUnitShellLibrary() string {\n\treturn `same`\n}\n"
+        )
+        for renderer, library, expected in [
+            ("same renderer\n", equivalent_library, 0),
+            ("different renderer\n", equivalent_library, 1),
+            ("same renderer\n", equivalent_library.replace("return `same`", "return `different`"), 1),
+        ]:
+            with self.subTest(expected=expected, renderer=renderer, library=library), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / self.renderer).parent.mkdir(parents=True)
+                (root / self.renderer).write_text(renderer)
+                (root / self.library).write_text(library)
+                (root / "internal/model").mkdir(parents=True)
+                (root / "internal/model/model.go").write_text('const NodeUpdaterCurrentVersion = "v7"')
+                with mock.patch.object(prepush, "ROOT", root), mock.patch.object(prepush, "run", side_effect=previous):
+                    status, _ = prepush.localpv_updater_generation_check("base", [self.renderer, self.library], 5)
+                self.assertEqual(status, expected)
 
 
 class CanonicalReceiptTest(unittest.TestCase):
+    def test_localpv_host_contract_runs_uncached_for_external_inputs(self):
+        for path in prepush.LOCALPV_HOST_CONTRACT_INPUTS:
+            with self.subTest(path=path):
+                commands = []
+
+                def fake_run(command, _timeout):
+                    commands.append(command)
+                    return 0, ""
+
+                with mock.patch.object(prepush, "localpv_updater_generation_check", return_value=(0, "")):
+                    status, receipt = self.run_main_with_fake(fake_run, paths=[path])
+                self.assertEqual(status, 0)
+                self.assertEqual(receipt["checks"]["localpv-host-contract"]["status"], "pass")
+                self.assertIn(["go", "test", "-count=1", "./internal/localpvsafety/hostcontract"], commands)
+
+    def test_localpv_renderer_runs_uncached_for_external_inputs(self):
+        for path in prepush.LOCALPV_RENDERER_TEST_INPUTS:
+            with self.subTest(path=path):
+                commands = []
+
+                def fake_run(command, _timeout):
+                    commands.append(command)
+                    return 0, ""
+
+                with mock.patch.object(prepush, "localpv_updater_generation_check", return_value=(0, "")):
+                    status, receipt = self.run_main_with_fake(fake_run, paths=[path])
+                self.assertEqual(status, 0)
+                self.assertEqual(receipt["checks"]["localpv-host-renderer"]["status"], "pass")
+                self.assertIn(["go", "test", "-count=1", "./internal/localpvsafety/host"], commands)
+
     def test_history_capability_gate_and_import_dependencies_are_checked(self):
         for dependency in ('internal/inputhistory/capabilities.json', 'internal/inputhistory/capabilities.go',
                            'scripts/compiler_input_history_compatibility.py', 'scripts/test_compiler_input_history_compatibility.py',

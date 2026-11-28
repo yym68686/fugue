@@ -30,9 +30,18 @@ FULL_TEST_PACKAGE_PRIORITY = {
     "./internal/controller": 1,
     "./internal/store": 2,
 }
+LOCALPV_HOST_DIR = "internal/localpvsafety/host"
 LOCALPV_BOOT_SOURCES = {
-    "internal/api/localpv_unit.py",
-    "internal/api/localpv_unit.go",
+    f"{LOCALPV_HOST_DIR}/localpv_unit.py": "internal/api/localpv_unit.py",
+    f"{LOCALPV_HOST_DIR}/localpv_unit.go": "internal/api/localpv_unit.go",
+}
+LOCALPV_HOST_CONTRACT_INPUTS = {
+    "scripts/prepare_fugue_lvm_localpv_node.sh",
+    f"{LOCALPV_HOST_DIR}/localpv_unit.py",
+}
+LOCALPV_RENDERER_TEST_INPUTS = {
+    f"{LOCALPV_HOST_DIR}/localpv_unit.py",
+    f"{LOCALPV_HOST_DIR}/test_localpv_unit.py",
 }
 DECLARATIVE_TEST_PACKAGES = {
     "./cmd/fugue-declarative-release",
@@ -361,10 +370,22 @@ def shell_syntax_check(paths: list[str], timeout: float) -> tuple[int, str]:
 
 
 def localpv_updater_generation_check(base: str, paths: list[str], timeout: float) -> tuple[int, str]:
-    relevant = LOCALPV_BOOT_SOURCES.intersection(paths)
+    relevant = LOCALPV_BOOT_SOURCES.keys() & set(paths)
     changed = False
     for name in sorted(relevant):
         status, before = run(["git", "show", f"{base}:{name}"], timeout)
+        if status != 0:
+            # The runtime moved out of API without changing the emitted script.
+            # Compare to the pre-move implementation when releasing across
+            # that boundary; do not exempt later changes to either source.
+            status, before = run(["git", "show", f"{base}:{LOCALPV_BOOT_SOURCES[name]}"], timeout)
+            if status == 0 and name.endswith(".go"):
+                before = before.replace("package api\n", "package host\n", 1).replace(
+                    "func localPVUnitShellLibrary() string {",
+                    "// BootUnitShellLibrary renders the LocalPV functions bundled by the node updater.\n"
+                    "func BootUnitShellLibrary() string {",
+                    1,
+                )
         after = (ROOT / name).read_text() if (ROOT / name).exists() else ""
         if status != 0 or before != after:
             changed = True
@@ -533,6 +554,14 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         ],
     }
     non_go_tasks: dict[str, list[str] | None] = {}
+    if LOCALPV_HOST_CONTRACT_INPUTS.intersection(paths):
+        non_go_tasks["localpv-host-contract"] = [
+            "go", "test", "-count=1", "./internal/localpvsafety/hostcontract",
+        ]
+    if LOCALPV_RENDERER_TEST_INPUTS.intersection(paths):
+        non_go_tasks["localpv-host-renderer"] = [
+            "go", "test", "-count=1", "./internal/localpvsafety/host",
+        ]
     if any(name in {"scripts/prepush.py", "scripts/prepush_shadow.py", "scripts/test_prepush.py",
                     "scripts/test_prepush_shadow.py", "scripts/prepush_replay.py",
                     "scripts/test_prepush_replay.py", "scripts/prepush_shadow_fixture.py",
@@ -675,7 +704,7 @@ def _run_gate(*, shadow_select=None, shadow_result=None, shadow_build_first=Fals
         "gofmt": lambda remaining: gofmt_check([name for name in paths if name.endswith(".go") and (ROOT / name).is_file()], remaining),
         "shell-syntax": lambda remaining: shell_syntax_check(paths, remaining),
     }
-    if LOCALPV_BOOT_SOURCES.intersection(paths):
+    if LOCALPV_BOOT_SOURCES.keys() & set(paths):
         local_checks["localpv-updater-generation"] = lambda remaining: localpv_updater_generation_check(base, paths, remaining)
     if any(name.startswith("deploy/helm/fugue/") for name in paths):
         go_dependent_tasks["helm-lint-render"] = None

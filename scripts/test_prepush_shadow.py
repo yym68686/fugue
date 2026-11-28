@@ -76,6 +76,28 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(result["goTests"], [["go", "test", "./files"]])
         self.assertEqual(result["goBuilds"], [["go", "build", "-o", os.devnull, "./files"]])
 
+    def test_only_literal_existing_test_embeds_are_owned(self):
+        owner = "internal/localpvsafety/host"
+        filename = "test_localpv_unit.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / owner).mkdir(parents=True)
+            fixture = root / owner / filename
+            fixture.write_text("# test data\n")
+            graph = [
+                pkg(owner, Dir=str(root / owner), EmbedFiles=["localpv_unit.py"], TestEmbedPatterns=[filename]),
+                pkg("internal/api", Dir=str(root / "internal/api"), Imports=["demo/" + owner]),
+            ]
+            plan = shadow.select([owner + "/" + filename], graph, root)
+            self.assertEqual(plan["scope"], "test-only")
+            self.assertEqual(plan["goTests"], [["go", "test", "./" + owner]])
+            self.assertEqual(plan["goBuilds"], [])
+            graph[0]["TestEmbedPatterns"] = ["test_*.py"]
+            self.assertEqual(shadow.select([owner + "/" + filename], graph, root)["scope"], "full")
+            graph[0]["TestEmbedPatterns"] = [filename]
+            fixture.unlink()
+            self.assertEqual(shadow.select([owner + "/" + filename], graph, root)["scope"], "full")
+
     def test_compile_inputs_are_runtime_inputs_and_dependency_errors_fail_wide(self):
         for field in ("CXXFiles", "HFiles", "SFiles", "SysoFiles"):
             graph = [pkg("domain", **{field: ["native"]}), pkg("cmd", Imports=["demo/domain"])]
@@ -234,8 +256,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_domain_guards_are_runtime_source_edges_without_build_edges(self):
         labels = ["./internal/backupusage", "./internal/buildadmission",
-                  "./internal/imagetracking", "./internal/oomrightsizing", "./internal/releaseretirement",
-                  "./internal/resourcesizing"]
+                  "./internal/imagetracking", "./internal/localpvsafety/inventory", "./internal/oomrightsizing",
+                  "./internal/releaseretirement", "./internal/resourcesizing"]
         audits = [pkg(label.removeprefix("./")) for label in labels]
         options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
         for path in ("internal/unrelated", "cmd/unrelated"):
@@ -258,7 +280,8 @@ class SelectionTest(unittest.TestCase):
             patch.object(shadow, "packages_from_stream", return_value=[
                 pkg("internal/anotherdomain"), pkg("internal/backupusage"),
                 pkg("internal/buildadmission"), pkg("internal/imagetracking"),
-                pkg("internal/oomrightsizing"), pkg("internal/releaseretirement"), pkg("internal/resourcesizing"),
+                pkg("internal/localpvsafety/inventory"), pkg("internal/oomrightsizing"),
+                pkg("internal/releaseretirement"), pkg("internal/resourcesizing"),
                 *repository_consumers(),
             ]),
             patch.object(prepush, "ROOT", ROOT),

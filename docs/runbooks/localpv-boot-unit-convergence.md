@@ -8,7 +8,7 @@ enable LocalPV on a node.
 
 ## Source And Delivery
 
-`internal/api/localpv_unit.py` is the shared renderer used by both
+`internal/localpvsafety/host/localpv_unit.py` is the shared renderer used by both
 `scripts/prepare_fugue_lvm_localpv_node.sh` and the generated node updater.
 The preparation script needs the repository checkout (or an explicit
 `FUGUE_LOCALPV_UNIT_RENDERER`) and Python 3; it validates the rendered unit
