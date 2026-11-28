@@ -18,6 +18,14 @@ not authorize another writer, add a release lane, or prove fault isolation.
 | Builder admission | The domain owns build input identity, bounded memory history, permanent-failure reuse, OOM evidence and admission decisions. Controller supplies app-scoped evidence and coordinates build placement and source-sync status. | Only the Controller composition adapter acquires the builder checkpoint writer. The generic writer rejects the three historical namespaces, and there is no public generic page writer. The scoped adapter uses the original keys, PostgreSQL transaction and replica lock. | Domain tests run without API, Controller or Store. Store verifies namespace isolation; Controller integration verifies restart, concurrency, contention and old evidence replay. |
 | Runtime OOM right-sizing | The domain owns the periodic pass, workload-event interpretation, local claims, tenant commitment projection and growth decisions. API adapts the namespace-scoped Kubernetes observer and assembles the command; Controller continues executing ordinary deploy operations. | The scoped admission command fixes the operation kind and system actor, and keeps the existing app-row lock and durable per-tenant event index. The generic operation writer cannot impersonate the OOM actor. | Domain tests cover event identity, growth, retry and claim expiry. API contracts exercise observer lifecycle, cap checks and durable cross-replica deduplication. |
 
+Application resource sizing owns recommendation sample selection, CPU/memory
+policy, recent-target backoff and the periodic scan. The scan filters by
+declared policy and runtime under the original PostgreSQL advisory lock. API
+provides evidence adapters and issues commands; Controller still executes
+them. Store rejects automatic sizing actors at generic enqueue paths and
+preserves the existing app-lock and request-resize compare-and-swap contracts
+on their dedicated paths. This does not change the production writer.
+
 For an operation's pre-claim dependency failure, Store verifies the pending
 snapshot under its existing write transaction. A stale dependency verdict
 cannot overwrite a claimed or cancelled operation. Queue/Store contract tests

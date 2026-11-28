@@ -44,7 +44,7 @@ func TestAppMemoryResizeAutoBypassesFullNodeSurgeWithoutChangingLimits(t *testin
 				var op model.Operation
 				var err error
 				if scenario == "failed-target" {
-					op, err = s.CreateAppRequestResizeOperation(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize, RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByRightSizingDownscale, DesiredSpec: &desired}, app.Spec)
+					op, err = s.EnqueueAutomaticResourceSizingRequest(model.Operation{TenantID: tenant.ID, AppID: app.ID, Type: model.OperationTypeAppMemoryResize, RequestedByType: model.ActorTypeSystem, RequestedByID: model.OperationRequestedByRightSizingDownscale, DesiredSpec: &desired}, app.Spec)
 				} else {
 					op, err = s.EnqueueOOMRightSizingDeploy(app, model.OperationRequestedByOOMRightSizing+"/0123456789abcdef01234567", desired, nil)
 				}
@@ -76,22 +76,5 @@ func TestAppMemoryResizeAutoBypassesFullNodeSurgeWithoutChangingLimits(t *testin
 				t.Fatal("parallel scan created a duplicate", duplicate, skipped, err)
 			}
 		})
-	}
-}
-
-func TestAutoAppMemoryRequestChangePreservesOtherDimensionsAndThreshold(t *testing.T) {
-	for _, tc := range []struct {
-		current, target, want int64
-		allowed               bool
-	}{{320, 304, 304, true}, {320, 305, 0, false}, {10, 9, 9, true}, {128, 64, 96, true}, {128, 136, 136, true}} {
-		current := &model.ResourceSpec{CPUMilliCores: 100, MemoryMebibytes: tc.current, MemoryLimitMebibytes: 2048}
-		target := &model.ResourceSpec{CPUMilliCores: 25, MemoryMebibytes: tc.target, MemoryLimitMebibytes: 256}
-		d := autoAppMemoryRequestChange(current, target)
-		if d.allowed != tc.allowed || (tc.allowed && (d.resources.MemoryMebibytes != tc.want || d.resources.MemoryLimitMebibytes != 2048 || d.resources.CPUMilliCores != 100)) {
-			t.Fatalf("%d -> %d: %+v", tc.current, tc.target, d)
-		}
-	}
-	if autoAppMemoryRequestChange(&model.ResourceSpec{MemoryMebibytes: 128, MemoryLimitMebibytes: 256}, &model.ResourceSpec{MemoryMebibytes: 512}).allowed {
-		t.Fatal("request-only resize raised a limit")
 	}
 }

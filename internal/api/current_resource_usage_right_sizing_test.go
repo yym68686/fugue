@@ -8,6 +8,12 @@ import (
 	"fugue/internal/runtime"
 )
 
+// The persisted stream kinds must stay readable across old and new binaries.
+const (
+	rightSizingSampleTargetKindAppV1            = "right_sizing_app_per_replica_v1"
+	rightSizingSampleTargetKindBackingServiceV1 = "right_sizing_backing_service_per_replica_v1"
+)
+
 func TestBuildResourceUsageSamplesUsesBusiestRunningMainContainerReplica(t *testing.T) {
 	t.Parallel()
 

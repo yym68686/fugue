@@ -17,6 +17,7 @@ type operationCreatePolicy struct {
 	ReuseActiveImageRebuildForApp                 bool
 	RejectActiveImportForApp                      bool
 	AllowOOMRightSizingDeploy                     bool
+	AllowAutomaticResourceSizing                  bool
 }
 
 type operationCreateOutcome struct {
@@ -50,8 +51,9 @@ func (s *Store) CreateAutoscalingDeployOperation(op model.Operation) (model.Oper
 		return model.Operation{}, AutoscalingDeployOutcome{}, ErrInvalidInput
 	}
 	created, outcome, err := s.createOperationWithPolicy(op, operationCreatePolicy{
-		RejectActiveDeployForApp: true,
-		RejectNoopDeploy:         true,
+		RejectActiveDeployForApp:     true,
+		RejectNoopDeploy:             true,
+		AllowAutomaticResourceSizing: true,
 	})
 	if err != nil {
 		return model.Operation{}, AutoscalingDeployOutcome{}, err
@@ -88,16 +90,7 @@ func (s *Store) CreateImageRebuildOperation(op model.Operation) (model.Operation
 }
 
 func isAutoRightSizingDeployOperation(op model.Operation) bool {
-	if op.Type != model.OperationTypeDeploy ||
-		strings.TrimSpace(op.RequestedByType) != model.ActorTypeSystem {
-		return false
-	}
-	switch strings.TrimSpace(op.RequestedByID) {
-	case model.OperationRequestedByRightSizing, model.OperationRequestedByRightSizingDownscale:
-		return true
-	default:
-		return false
-	}
+	return op.Type == model.OperationTypeDeploy && isAutomaticResourceSizingActor(op)
 }
 
 func deployOperationDesiredStateAlreadyCurrent(op model.Operation, app model.App) bool {

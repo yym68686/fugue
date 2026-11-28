@@ -8,17 +8,12 @@ import (
 	"time"
 
 	"fugue/internal/model"
+	"fugue/internal/resourcesizing"
 )
 
 const (
 	resourceUsageSampleInterval  = 5 * time.Minute
 	resourceUsageSampleRetention = 168 * time.Hour
-
-	// Resource requests are applied to each replica, so right-sizing samples must
-	// use the same unit. Keep the version in the internal target kind so aggregate
-	// samples written by older releases are never mixed with per-replica samples.
-	rightSizingSampleTargetKindAppV1            = "right_sizing_app_per_replica_v1"
-	rightSizingSampleTargetKindBackingServiceV1 = "right_sizing_backing_service_per_replica_v1"
 )
 
 type currentResourceUsageOverlay struct {
@@ -338,14 +333,7 @@ func buildResourceUsageSamples(
 }
 
 func rightSizingSampleTargetKind(targetKind string) string {
-	switch strings.TrimSpace(targetKind) {
-	case model.ClusterNodeWorkloadKindApp:
-		return rightSizingSampleTargetKindAppV1
-	case model.ClusterNodeWorkloadKindBackingService:
-		return rightSizingSampleTargetKindBackingServiceV1
-	default:
-		return strings.TrimSpace(targetKind)
-	}
+	return resourcesizing.SampleTargetKind(targetKind)
 }
 
 func resourceUsageSampleFromUsage(observedAt time.Time, targetKind, tenantID, projectID, targetID, targetName, serviceType string, usage model.ResourceUsage) model.ResourceUsageSample {
