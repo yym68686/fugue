@@ -110,14 +110,33 @@ type RegistryRehomeJournal struct {
 	boundary RegistryRehomeBoundaryCheck
 }
 
-func NewRegistryRehomeJournal(j *Journal, scope Scope, observer ed25519.PublicKey, check RegistryRehomeBoundaryCheck) (*RegistryRehomeJournal, error) {
-	if j == nil || !scope.valid() || !deploymentScope.MatchString(scope.ResourceID) || check == nil {
-		return nil, errors.New("registry rehome requires an enrolled Deployment and independent live provider boundary")
+// RegistryRehomeAdmissionReader is the read-only side of provider admission.
+// Provision it with a SELECT-only database principal.
+type RegistryRehomeAdmissionReader struct {
+	journal  *Journal
+	scope    Scope
+	observer ed25519.PublicKey
+}
+
+func NewRegistryRehomeAdmissionReader(j *Journal, scope Scope, observer ed25519.PublicKey) (*RegistryRehomeAdmissionReader, error) {
+	if j == nil || !scope.valid() || !deploymentScope.MatchString(scope.ResourceID) {
+		return nil, errors.New("registry rehome admission needs an enrolled Deployment")
 	}
 	if err := j.VerifyIndependentObserverKey(observer); err != nil {
 		return nil, err
 	}
-	return &RegistryRehomeJournal{j, scope, bytes.Clone(observer), check}, nil
+	return &RegistryRehomeAdmissionReader{j, scope, bytes.Clone(observer)}, nil
+}
+
+func NewRegistryRehomeJournal(j *Journal, scope Scope, observer ed25519.PublicKey, check RegistryRehomeBoundaryCheck) (*RegistryRehomeJournal, error) {
+	if check == nil {
+		return nil, errors.New("registry rehome requires independent live provider admission")
+	}
+	reader, err := NewRegistryRehomeAdmissionReader(j, scope, observer)
+	if err != nil {
+		return nil, err
+	}
+	return &RegistryRehomeJournal{reader.journal, reader.scope, reader.observer, check}, nil
 }
 
 // Reserve verifies the signed owner approval and separate short-lived
@@ -161,6 +180,29 @@ func (e *RegistryRehomeJournal) ReadAdmission(ctx context.Context, claim Claim) 
 		return RegistryRehomeAdmission{}, "", ErrStaleFence
 	}
 	return readRegistryRehomeClaimAdmission(ctx, e.journal.db, claim, e.observer)
+}
+
+// VerifyPendingWrite is usable by an independent provider admission server
+// with read-only journal access. A claim, attestation and owner approval
+// must all still be live. This grants no dispatch and never extends expiry.
+func (e *RegistryRehomeAdmissionReader) VerifyPendingWrite(ctx context.Context, claim Claim, policy, write string) error {
+	if e == nil || e.journal == nil || claim.Scope != e.scope || claim.Fence < 1 {
+		return ErrStaleFence
+	}
+	a, _, err := readRegistryRehomeClaimAdmission(ctx, e.journal.db, claim, e.observer)
+	if err != nil {
+		return err
+	}
+	if a.PolicyScope != policy || a.ProviderWrite != write || !a.fresh(e.journal.now()) {
+		return ErrStaleFence
+	}
+	if err := e.journal.VerifyOpenClaim(ctx, claim); err != nil {
+		return err
+	}
+	if !a.fresh(e.journal.now()) {
+		return ErrStaleFence
+	}
+	return nil
 }
 
 func readRegistryRehomeClaimAdmission(ctx context.Context, db queryRow, claim Claim, observer ed25519.PublicKey) (RegistryRehomeAdmission, string, error) {

@@ -917,9 +917,20 @@ authority bound to pre-restore database role OIDs.
   `registry_rehome_admissions` in the claim transaction. Ordinary runtime
   roles must not have INSERT there. A v2 recovery checkpoint includes the
   receipt; verify v1 backups against the restored v1 schema before upgrading.
-  Replays and restores never issue another claim. This adds no production
-  dispatch command; ordinary result records cannot promote a migration
-  proposal to a last verified release.
+  Replays and restores never issue another claim. The internal dispatcher
+  rechecks the exact freeze bundle, independently pinned API endpoint, CA
+  and namespace UID, live release source, and pending claim before sending
+  the single request. While ordinary release writes stay frozen, the
+  provider webhook compares the actual old/new Deployment and rechecks the
+  signed claim and owner approval using a SELECT-only identity. A lost
+  reply or webhook outage does not trigger another write. Install and
+  positively verify the fail-closed webhook on every serving endpoint
+  before enabling the temporary writer exception. A policy object's
+  readback alone is not that verification. No production dispatch command
+  is enabled: the temporary writer's closure and the independent forward
+  and rollback baseline still require a separate verified transition.
+  Ordinary result records cannot promote a migration proposal to a last
+  verified release.
 - To check preservation of the current and rollback artifacts before that
   transition, provision an independent HTTPS registry and replicate the
   original OCI content byte-for-byte. In each destination repository, retain
