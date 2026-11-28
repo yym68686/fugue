@@ -58,15 +58,7 @@ func (j *Journal) ReadFrontWorkerBaselineSnapshot(ctx context.Context, scope Sco
 }
 
 func readFrontWorkerBaselineSnapshot(ctx context.Context, db queryRow, scope Scope, verified Version) ([]byte, error) {
-	var raw []byte
-	if err := db.QueryRowContext(ctx, `SELECT verified_snapshot FROM fugue_control.resource_baselines
-		WHERE cluster_id=$1 AND resource_id=$2`, scope.ClusterID, scope.ResourceID).Scan(&raw); err != nil {
-		return nil, err
-	}
-	if version, err := FrontWorkerBaselineVersion(raw); err != nil || version != verified {
-		return nil, errors.New("stored Front/Worker baseline snapshot differs from the verified version")
-	}
-	return raw, nil
+	return readBaselineSnapshot(ctx, db, scope, verified)
 }
 
 type FrontWorkerShadow struct {

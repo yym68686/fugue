@@ -124,13 +124,42 @@ func TestPostgresNativeStorageAuditPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := Baseline{Scope{cluster, StorageAuditPolicyResource}, head, digest([]byte("fixture baseline witness"))}
-	execution, err := NewExecutionJournal(intake, &testExecutionEvidence{enrollment: baseline.EvidenceDigest})
+	scope := Scope{cluster, StorageAuditPolicyResource}
+	observerPublic, observerKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created, err := execution.AnchorResource(ctx, "observer-a", baseline); err != nil || !created {
+	witnessKey := TrustedWitness{Scope: scope, PublicKey: observerPublic}
+	checkpoint, err := intake.ReadFrozenStorageAuditPolicy(ctx, scope, plan.Provider.SystemID, plan.Provider.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := digest([]byte("fixture external revocation record"))
+	signedBaseline := ExecutionWitness{Kind: BaselineWitness, KeyID: "observer-a", ClusterID: cluster,
+		ResourceID: StorageAuditPolicyResource, Generation: head.Generation, VerifiedDigest: head.Digest,
+		ObservationDigest: checkpoint.ObservationDigest, AuthorityDigest: revoked,
+		ObservedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(time.Minute).Unix()}
+	input, err := signedBaseline.SigningInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedBaseline.Signature = ed25519.Sign(observerKey, input)
+	witness, ref, err := EncodeExecutionWitness(signedBaseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	location := memoryWitnesses{ref: witness}
+	baseline := Baseline{scope, head, ref}
+	if created, err := intake.ImportStorageAuditPolicyBaseline(ctx, baseline, plan.Provider.SystemID,
+		plan.Provider.Database, digest([]byte("another revocation record")), location, "observer-a", witnessKey); err == nil || created {
+		t.Fatal("baseline witness authorized a different revocation record")
+	}
+	if created, err := intake.ImportStorageAuditPolicyBaseline(ctx, baseline, plan.Provider.SystemID,
+		plan.Provider.Database, revoked, location, "observer-a", witnessKey); err != nil || !created {
 		t.Fatalf("recording verified baseline: %v %v", created, err)
+	}
+	if snapshot, err := readBaselineSnapshot(ctx, admin, scope, head); err != nil || string(snapshot) != string(body) {
+		t.Fatalf("baseline did not persist the verified policy: %s %v", snapshot, err)
 	}
 	record := func(request string, head Version, plan StorageAuditShadow) (Recorded, Recorded) {
 		t.Helper()
@@ -200,11 +229,6 @@ func TestPostgresNativeStorageAuditPolicy(t *testing.T) {
 	if err != nil || state.Pending != intent.Digest || state.LastVerified != head {
 		t.Fatalf("write advanced the verified version before independent observation: %+v %v", state, err)
 	}
-	observerPublic, observerKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	location := memoryWitnesses{}
 	native, err := NewStorageAuditPolicyExecutionJournal(intake, baseline.Scope, location,
 		map[string]TrustedWitness{"observer-a": {Scope: baseline.Scope, PublicKey: observerPublic}})
 	if err != nil {

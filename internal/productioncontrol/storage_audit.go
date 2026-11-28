@@ -250,7 +250,7 @@ func readStorageAuditPolicyTransition(ctx context.Context, db queryRow, claim Cl
 }
 
 func verifyStorageAuditPolicyClosure(ctx context.Context, tx *sql.Tx, claim Claim, intent Intent, result ExecutionResult) error {
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-lifecycle-audit/owner/v1',0))`); err != nil {
+	if err := lockStorageAuditPolicy(ctx, tx); err != nil {
 		return err
 	}
 	_, raw, err := readIntent(ctx, tx, claim.IntentDigest)
@@ -265,6 +265,11 @@ func verifyStorageAuditPolicyClosure(ctx context.Context, tx *sql.Tx, claim Clai
 		return ErrStaleFence
 	}
 	return nil
+}
+
+func lockStorageAuditPolicy(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('storage-lifecycle-audit/owner/v1',0))`)
+	return err
 }
 
 // NewStorageAuditPolicyExecutionJournal requires live observation of the

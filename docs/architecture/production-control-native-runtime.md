@@ -662,7 +662,14 @@ owner can freeze the exact active policy with `freeze_native_policy`. This
 preserves the worker's current sampling configuration while fencing policy
 updates. Store the provider freeze evidence and verify legacy revocation
 before importing the journal baseline or using `enroll_native_policy_writer`.
-Enrollment checks the frozen document and exact baseline evidence. Give the
+Use `storage-audit-policy-baseline-checkpoint CONFIG` and
+`storage-audit-policy-baseline-import CONFIG WITNESS_DIGEST` to record the
+verified initial policy and the signed technical evidence. The baseline
+profile adds `systemId`, `database` and `legacyRevocationEvidence` to the
+observer settings. The last field identifies the reviewed provider and
+runner revocation record. The profile needs read access to the worker
+activation table. The importer also needs INSERT on resource baselines.
+Enrollment checks the frozen document and the exact baseline evidence. Give the
 new isolated login SELECT on the journal input and execution tables, INSERT
 on execution claims, and EXECUTE on `commit_native_policy`. Sampling, direct
 provider table updates and journal approval writes use separate identities.
