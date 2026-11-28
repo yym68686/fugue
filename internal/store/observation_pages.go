@@ -212,7 +212,9 @@ func (s *Store) ReadObservationPages(ctx context.Context, key string) (Observati
 }
 
 func (s *Store) UpdateObservationPages(ctx context.Context, key string, update ObservationPageUpdate, legacy func([]byte) ([]byte, error)) (bool, error) {
-
+	if isBuilderAdmissionCheckpoint(key) {
+		return false, errBuilderAdmissionCheckpointScope
+	}
 	originalKey := key
 	key = observationCheckpointKey(key)
 	tx, err := s.db.BeginTx(ctx, nil)

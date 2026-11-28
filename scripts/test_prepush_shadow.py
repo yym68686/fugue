@@ -209,7 +209,7 @@ class SelectionTest(unittest.TestCase):
                 self.assertEqual(shadow.select([path + "/impl_test.go"], [owner], ROOT)["scope"], "test-only")
 
     def test_domain_guards_are_runtime_source_edges_without_build_edges(self):
-        audits = [pkg("internal/imagetracking"), pkg("internal/releaseretirement")]
+        audits = [pkg("internal/buildadmission"), pkg("internal/imagetracking"), pkg("internal/releaseretirement")]
         options = {"application_source_tests": shadow.APPLICATION_SOURCE_TEST_CONSUMERS}
         for path in ("internal/unrelated", "cmd/unrelated"):
             with self.subTest(path=path):
@@ -217,7 +217,7 @@ class SelectionTest(unittest.TestCase):
                 plan = shadow.select([path + "/impl.go"], [owner, *audits], ROOT, **options)
                 self.assertEqual(plan["goTests"], [
                     ["go", "test", "./" + path],
-                    ["go", "test", "-count=1", "./internal/imagetracking", "./internal/releaseretirement"],
+                    ["go", "test", "-count=1", "./internal/buildadmission", "./internal/imagetracking", "./internal/releaseretirement"],
                 ])
                 self.assertEqual(plan["goBuilds"], [["go", "build", "-o", os.devnull, "./" + path]])
                 self.assertEqual(shadow.select([path + "/impl.go"], [owner, audits[0]], ROOT, **options)["scope"], "full")
@@ -229,7 +229,7 @@ class SelectionTest(unittest.TestCase):
             patch.object(prepush, "changed_files", return_value=[]),
             patch.object(prepush, "run", return_value=(0, "")),
             patch.object(shadow, "packages_from_stream", return_value=[
-                pkg("internal/anotherdomain"), pkg("internal/imagetracking"), pkg("internal/releaseretirement"),
+                pkg("internal/anotherdomain"), pkg("internal/buildadmission"), pkg("internal/imagetracking"), pkg("internal/releaseretirement"),
                 *repository_consumers(),
             ]),
             patch.object(prepush, "ROOT", ROOT),
@@ -238,7 +238,7 @@ class SelectionTest(unittest.TestCase):
             plan = shadow.report("HEAD")
         self.assertEqual(plan["scope"], "dependency-closure")
         self.assertIn("-count=1", plan["goTests"][-1])
-        for audit in ("./internal/imagetracking", "./internal/releaseretirement"):
+        for audit in ("./internal/buildadmission", "./internal/imagetracking", "./internal/releaseretirement"):
             self.assertIn(audit, plan["goTests"][-1])
             self.assertNotIn(audit, plan["goBuilds"][0])
 
