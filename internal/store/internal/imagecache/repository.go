@@ -1,8 +1,9 @@
-package store
+package imagecache
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,34 +12,34 @@ import (
 	"fugue/internal/model"
 )
 
-func (s *Store) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
+func (s Repository) UpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
 	node = normalizeImageCacheNodeInventory(node)
 	if node.ManifestCount == 0 {
 		node.ManifestCount = len(manifests)
 	}
 	if node.NodeID == "" && node.ClusterNodeName == "" {
-		return model.ImageCacheNodeInventory{}, ErrInvalidInput
+		return model.ImageCacheNodeInventory{}, s.invalidInput
 	}
 	return s.pgUpsertImageCacheInventory(node, manifests)
 }
 
-func (s *Store) ListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
+func (s Repository) ListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
 	filter = normalizeImageCacheNodeInventoryFilter(filter)
 	return s.pgListImageCacheNodeInventories(filter)
 }
 
-func (s *Store) ListImageCacheManifests(filter model.ImageCacheManifestFilter) ([]model.ImageCacheManifest, error) {
+func (s Repository) ListImageCacheManifests(filter model.ImageCacheManifestFilter) ([]model.ImageCacheManifest, error) {
 	filter = normalizeImageCacheManifestFilter(filter)
 	return s.pgListImageCacheManifests(filter)
 }
 
-func (s *Store) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
+func (s Repository) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
 	plan = normalizeImageCachePrunePlan(plan)
 	if plan.NodeID == "" && plan.ClusterNodeName == "" {
-		return model.ImageCachePrunePlan{}, ErrInvalidInput
+		return model.ImageCachePrunePlan{}, s.invalidInput
 	}
 	if plan.Mode == "" || plan.Status == "" {
-		return model.ImageCachePrunePlan{}, ErrInvalidInput
+		return model.ImageCachePrunePlan{}, s.invalidInput
 	}
 	return s.pgUpsertImageCachePrunePlan(plan)
 }
@@ -48,16 +49,16 @@ func (s *Store) UpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model
 // scheduled task can still bind its exact target payload to the explanation;
 // the detailed per-image rows are not copied into long-lived control-plane
 // history. Explicit admin previews continue to use UpsertImageCachePrunePlan.
-func (s *Store) UpsertImageCachePrunePlanSummary(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
+func (s Repository) UpsertImageCachePrunePlanSummary(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
 	plan = normalizeImageCachePrunePlan(plan)
 	if plan.CreatedAt.IsZero() {
 		plan.CreatedAt = time.Now().UTC()
 	}
 	if plan.NodeID == "" && plan.ClusterNodeName == "" {
-		return model.ImageCachePrunePlan{}, ErrInvalidInput
+		return model.ImageCachePrunePlan{}, s.invalidInput
 	}
 	if plan.Mode == "" || plan.Status == "" {
-		return model.ImageCachePrunePlan{}, ErrInvalidInput
+		return model.ImageCachePrunePlan{}, s.invalidInput
 	}
 	// Automatic scheduler passes describe the same bounded observation until
 	// the underlying inventory/policy hash changes. Give that projection a
@@ -77,7 +78,7 @@ func imageCachePruneSummaryID(plan model.ImageCachePrunePlan) string {
 	return "imgcacheprune-summary-" + hex.EncodeToString(sum[:16])
 }
 
-func (s *Store) ListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter) ([]model.ImageCachePrunePlan, error) {
+func (s Repository) ListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter) ([]model.ImageCachePrunePlan, error) {
 	filter = normalizeImageCachePrunePlanFilter(filter)
 	return s.pgListImageCachePrunePlans(filter)
 }
@@ -106,6 +107,10 @@ func normalizeImageCacheNodeInventoryFilter(filter model.ImageCacheNodeInventory
 	filter.ClusterNodeName = strings.TrimSpace(filter.ClusterNodeName)
 	filter.RuntimeID = strings.TrimSpace(filter.RuntimeID)
 	return filter
+}
+
+func stripImageNUL(value string) string {
+	return strings.ReplaceAll(value, "\x00", "")
 }
 
 func normalizeImageCacheManifest(in model.ImageCacheManifest) model.ImageCacheManifest {
@@ -212,4 +217,22 @@ func firstNonEmptyImageCacheString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeStringList(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }

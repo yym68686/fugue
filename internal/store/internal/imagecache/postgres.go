@@ -1,8 +1,10 @@
-package store
+package imagecache
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,12 +27,12 @@ func imageCachePrunePlanColumns() string {
 	return `id, node_id, cluster_node_name, runtime_id, mode, policy_version, plan_hash, candidate_manifest_count, protected_manifest_count, candidate_blob_count, candidate_blob_bytes, protected_blob_count, planned_delete_bytes, max_delete_bytes, min_manifest_age, protection_summary_json, candidate_summary_json, candidates_json, protected_manifests_json, skipped_manifests_json, unreferenced_blobs_json, node_pressure, budget_exhausted, created_at, executed_at, status, error`
 }
 
-func (s *Store) pgUpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
+func (s Repository) pgUpsertImageCacheInventory(node model.ImageCacheNodeInventory, manifests []model.ImageCacheManifest) (model.ImageCacheNodeInventory, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return model.ImageCacheNodeInventory{}, mapDBErr(err)
+		return model.ImageCacheNodeInventory{}, err
 	}
 	defer tx.Rollback()
 
@@ -47,7 +49,7 @@ FOR UPDATE
 `, node.NodeID, node.ClusterNodeName))
 	if err == nil {
 		if node.ObservedAt.Before(existing.ObservedAt) {
-			return model.ImageCacheNodeInventory{}, ErrConflict
+			return model.ImageCacheNodeInventory{}, s.conflict
 		}
 		node.ID = existing.ID
 		node.CreatedAt = existing.CreatedAt
@@ -68,7 +70,7 @@ SET node_id = $2, cluster_node_name = $3, runtime_id = $4, cache_endpoint = $5,
 WHERE id = $1
 RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.UpdatedAt, node.SnapshotComplete))
 		if updateErr != nil {
-			return model.ImageCacheNodeInventory{}, mapDBErr(updateErr)
+			return model.ImageCacheNodeInventory{}, updateErr
 		}
 		node = updated
 	} else if errors.Is(err, sql.ErrNoRows) {
@@ -95,11 +97,11 @@ INSERT INTO fugue_image_cache_nodes (
 )
 RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName, node.RuntimeID, node.CacheEndpoint, node.StorePath, node.FilesystemTotalBytes, node.FilesystemFreeBytes, node.FilesystemUsedPercent, node.CacheBytes, node.ManifestCount, node.BlobCount, node.UnreferencedBlobCount, node.UnreferencedBlobBytes, unreferencedBlobsJSON, node.PinCount, node.ObservedAt, node.ReportedByNodeUpdaterID, node.Status, node.LastError, node.CreatedAt, node.UpdatedAt, node.SnapshotComplete))
 		if insertErr != nil {
-			return model.ImageCacheNodeInventory{}, mapDBErr(insertErr)
+			return model.ImageCacheNodeInventory{}, insertErr
 		}
 		node = inserted
 	} else {
-		return model.ImageCacheNodeInventory{}, mapDBErr(err)
+		return model.ImageCacheNodeInventory{}, err
 	}
 	node.SnapshotComplete = snapshotComplete
 
@@ -156,9 +158,17 @@ RETURNING `+imageCacheNodeColumns(), node.ID, node.NodeID, node.ClusterNodeName,
 	}
 
 	if err := tx.Commit(); err != nil {
-		return model.ImageCacheNodeInventory{}, mapDBErr(err)
+		return model.ImageCacheNodeInventory{}, err
 	}
 	return node, nil
+}
+
+func sqlPlaceholderList(start, count int) string {
+	placeholders := make([]string, 0, count)
+	for i := range count {
+		placeholders = append(placeholders, fmt.Sprintf("$%d", start+i))
+	}
+	return strings.Join(placeholders, ", ")
 }
 
 func pgUpsertImageCacheManifestBatch(ctx context.Context, tx *sql.Tx, manifests []model.ImageCacheManifest) error {
@@ -199,7 +209,7 @@ ON CONFLICT (node_id, cluster_node_name, repo, target, digest) DO UPDATE SET
 	present = EXCLUDED.present,
 	updated_at = EXCLUDED.updated_at
 	`, args...); err != nil {
-		return mapDBErr(err)
+		return err
 	}
 	return nil
 }
@@ -221,12 +231,12 @@ func pgMarkMissingImageCacheManifestsAbsent(ctx context.Context, tx *sql.Tx, nod
 	args = append(args, now)
 	query := `UPDATE fugue_image_cache_manifests SET present = FALSE, updated_at = $` + fmt.Sprint(len(args)) + ` WHERE ` + strings.Join(clauses, " AND ")
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-		return mapDBErr(err)
+		return err
 	}
 	return nil
 }
 
-func (s *Store) pgListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
+func (s Repository) pgListImageCacheNodeInventories(filter model.ImageCacheNodeInventoryFilter) ([]model.ImageCacheNodeInventory, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clauses := []string{}
@@ -254,21 +264,21 @@ func (s *Store) pgListImageCacheNodeInventories(filter model.ImageCacheNodeInven
 	query += " ORDER BY observed_at DESC"
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, mapDBErr(err)
+		return nil, err
 	}
 	defer rows.Close()
 	var out []model.ImageCacheNodeInventory
 	for rows.Next() {
 		node, err := scanImageCacheNodeInventory(rows)
 		if err != nil {
-			return nil, mapDBErr(err)
+			return nil, err
 		}
 		out = append(out, node)
 	}
-	return out, mapDBErr(rows.Err())
+	return out, rows.Err()
 }
 
-func (s *Store) pgListImageCacheManifests(filter model.ImageCacheManifestFilter) ([]model.ImageCacheManifest, error) {
+func (s Repository) pgListImageCacheManifests(filter model.ImageCacheManifestFilter) ([]model.ImageCacheManifest, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clauses := []string{}
@@ -314,21 +324,21 @@ func (s *Store) pgListImageCacheManifests(filter model.ImageCacheManifestFilter)
 	query += " ORDER BY last_seen_at DESC"
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, mapDBErr(err)
+		return nil, err
 	}
 	defer rows.Close()
 	var out []model.ImageCacheManifest
 	for rows.Next() {
 		manifest, err := scanImageCacheManifest(rows)
 		if err != nil {
-			return nil, mapDBErr(err)
+			return nil, err
 		}
 		out = append(out, manifest)
 	}
-	return out, mapDBErr(rows.Err())
+	return out, rows.Err()
 }
 
-func (s *Store) pgUpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
+func (s Repository) pgUpsertImageCachePrunePlan(plan model.ImageCachePrunePlan) (model.ImageCachePrunePlan, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	now := time.Now().UTC()
@@ -408,12 +418,12 @@ ON CONFLICT (id) DO UPDATE SET
 	error = EXCLUDED.error
 	RETURNING `+imageCachePrunePlanColumns(), plan.ID, plan.NodeID, plan.ClusterNodeName, plan.RuntimeID, plan.Mode, plan.PolicyVersion, plan.PlanHash, plan.CandidateManifestCount, plan.ProtectedManifestCount, plan.CandidateBlobCount, plan.CandidateBlobBytes, plan.ProtectedBlobCount, plan.PlannedDeleteBytes, plan.MaxDeleteBytes, plan.MinManifestAge, protectionJSON, candidateSummaryJSON, candidatesJSON, protectedManifestsJSON, skippedManifestsJSON, unreferencedBlobsJSON, plan.NodePressure, plan.BudgetExhausted, plan.CreatedAt, plan.ExecutedAt, plan.Status, plan.Error))
 	if err != nil {
-		return model.ImageCachePrunePlan{}, mapDBErr(err)
+		return model.ImageCachePrunePlan{}, err
 	}
 	return out, nil
 }
 
-func (s *Store) pgListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter) ([]model.ImageCachePrunePlan, error) {
+func (s Repository) pgListImageCachePrunePlans(filter model.ImageCachePrunePlanFilter) ([]model.ImageCachePrunePlan, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clauses := []string{}
@@ -449,18 +459,18 @@ func (s *Store) pgListImageCachePrunePlans(filter model.ImageCachePrunePlanFilte
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, mapDBErr(err)
+		return nil, err
 	}
 	defer rows.Close()
 	var out []model.ImageCachePrunePlan
 	for rows.Next() {
 		plan, err := scanImageCachePrunePlan(rows)
 		if err != nil {
-			return nil, mapDBErr(err)
+			return nil, err
 		}
 		out = append(out, plan)
 	}
-	return out, mapDBErr(rows.Err())
+	return out, rows.Err()
 }
 
 func scanImageCacheNodeInventory(scanner sqlScanner) (model.ImageCacheNodeInventory, error) {
@@ -621,6 +631,76 @@ func scanImageCachePrunePlan(scanner sqlScanner) (model.ImageCachePrunePlan, err
 	}
 	if planHash.Valid && planHash.String != "" {
 		out.PlanHash = planHash.String
+	}
+	return out, nil
+}
+
+// ListImageCachePrunePlanMetrics reads the same recent plan window as the
+// diagnostic inventory, without transferring or decoding per-image evidence.
+// The result is a metric projection, never an executable deletion plan.
+func (s Repository) ListImageCachePrunePlanMetrics(parent context.Context, limit int) ([]model.ImageCachePrunePlan, error) {
+	if limit <= 0 {
+		return nil, s.invalidInput
+	}
+
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, cluster_node_name, runtime_id, mode, status, created_at,
+ candidate_manifest_count, candidate_blob_count, candidate_blob_bytes, planned_delete_bytes, protected_manifest_count, protection_summary_json
+ FROM fugue_image_cache_prune_plans ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var plans []model.ImageCachePrunePlan
+	for rows.Next() {
+		var p model.ImageCachePrunePlan
+		var protection []byte
+		if err := rows.Scan(&p.ID, &p.NodeID, &p.ClusterNodeName, &p.RuntimeID, &p.Mode, &p.Status, &p.CreatedAt,
+			&p.CandidateManifestCount, &p.CandidateBlobCount, &p.CandidateBlobBytes, &p.PlannedDeleteBytes, &p.ProtectedManifestCount, &protection); err != nil {
+			return nil, err
+		}
+		p.ProtectionSummary, err = decodeJSONValue[map[string]int](protection)
+		if err != nil {
+			return nil, err
+		}
+		plans = append(plans, p)
+	}
+	return plans, rows.Err()
+}
+
+// Repository owns image-cache snapshots, inventory locks and plans. It does not
+// expose its connection or schedule execution of any plan.
+type Repository struct {
+	db                     *sql.DB
+	invalidInput, conflict error
+}
+
+func NewPostgres(db *sql.DB, invalidInput, conflict error) Repository {
+	return Repository{db: db, invalidInput: invalidInput, conflict: conflict}
+}
+
+type sqlScanner interface{ Scan(...any) error }
+
+func marshalNullableJSON(value any) ([]byte, error) {
+	if value == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("marshal json: %w", err)
+	}
+	return raw, nil
+}
+
+func decodeJSONValue[T any](raw []byte) (T, error) {
+	var out T
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return out, nil
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return out, fmt.Errorf("unmarshal json value: %w", err)
 	}
 	return out, nil
 }

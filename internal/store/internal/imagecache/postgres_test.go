@@ -1,20 +1,20 @@
-package store
+package imagecache
 
 import (
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"fugue/internal/imagecacheevidence"
 	"fugue/internal/model"
+	"fugue/internal/testpostgres"
 )
 
 func TestImageCacheIncompleteGraphEvidenceIsOptInAndNeverCarriesBytes(t *testing.T) {
 	t.Parallel()
 
-	s := newStoreTestDatabase(t, "")
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	s := testRepository(t)
 	now := time.Now().UTC()
 	node := model.ImageCacheNodeInventory{
 		NodeID:           "machine-1",
@@ -76,10 +76,7 @@ func TestImageCacheIncompleteGraphEvidenceIsOptInAndNeverCarriesBytes(t *testing
 func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 	t.Parallel()
 
-	s := newStoreTestDatabase(t, "")
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	s := testRepository(t)
 	oldSeen := time.Now().UTC().Add(-3 * time.Hour)
 	newSeen := time.Now().UTC()
 	node := model.ImageCacheNodeInventory{
@@ -123,10 +120,7 @@ func TestImageCacheInventoryUpsertAndStaleFilters(t *testing.T) {
 func TestImageCacheInventoryCompleteSnapshotMarksMissingManifestsAbsent(t *testing.T) {
 	t.Parallel()
 
-	s := newStoreTestDatabase(t, "")
-	if err := s.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
+	s := testRepository(t)
 	firstSeen := time.Now().UTC().Add(-time.Hour)
 	secondSeen := time.Now().UTC()
 	node := model.ImageCacheNodeInventory{
@@ -186,4 +180,14 @@ func TestImageCacheInventoryCompleteSnapshotMarksMissingManifestsAbsent(t *testi
 			t.Fatalf("missing manifest still marked present: %+v", manifest)
 		}
 	}
+}
+
+func testRepository(t *testing.T) Repository {
+	t.Helper()
+	db, err := sql.Open("pgx", testpostgres.Database(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return NewPostgres(db, errors.New("invalid inventory"), errors.New("snapshot conflict"))
 }

@@ -1,4 +1,4 @@
-package store
+package imagecache
 
 import (
 	"fmt"
@@ -10,12 +10,8 @@ import (
 )
 
 func TestImageCacheInventoryBatchPostgresPreservesSnapshotSemantics(t *testing.T) {
-	s := billingBatchPGStore(t)
+	s := testRepository(t)
 	id := model.NewID("cache_batch_test")
-	t.Cleanup(func() {
-		s.db.Exec(`DELETE FROM fugue_image_cache_manifests WHERE node_id=$1`, id)
-		s.db.Exec(`DELETE FROM fugue_image_cache_nodes WHERE node_id=$1`, id)
-	})
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	node := model.ImageCacheNodeInventory{NodeID: id, ClusterNodeName: id, ObservedAt: now}
 	manifests := make([]model.ImageCacheManifest, 1201)
