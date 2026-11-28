@@ -1,0 +1,19 @@
+{
+  "schema": "fugue.hosted-dns-writer-handoff/v1",
+  "api": {
+    "deployment": "fugue-fugue-api",
+    "container": "api",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:ce1413344b5d2e17f1ff9eddc9b5f6fb2e817b3308dd36b6e8905b1df01e4d91",
+    "revision": "bc7f7e648148fb2e479fa7d35c3a0d5cefdfc201",
+    "replicas": 2
+  },
+  "worker": {
+    "deployment": "fugue-hosted-dns-worker",
+    "container": "hosted-dns-worker",
+    "image": "ghcr.io/yym68686/fugue-hosted-dns-worker@sha256:eb628f63445e21fc30711c1cad097bb7beea771331ee9bd09afbd6d8e1224311",
+    "revision": "0d4535dd759ab2be9519e7fcdd4ccb8e5a92c366",
+    "replicas": 1
+  },
+  "apiFloor": "a18ca5a589979c01f6227071da9cd602dec6c79b",
+  "workerFloor": "1c557b24373f71591e5a1ee092584cdd9b89fa75"
+}
