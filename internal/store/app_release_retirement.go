@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 	"sort"
 	"time"
 
@@ -75,28 +74,6 @@ func (s *Store) retireDrainedAppRelease(ctx context.Context, previous, stable mo
 	return s.pgRetireDrainedAppRelease(ctx, previous, stable, policy, source, workload)
 }
 
-func retireDrainedRelease(currentPrevious, currentStable model.AppRelease, currentPolicy model.AppTrafficPolicy, previous, stable model.AppRelease, policy model.AppTrafficPolicy, now time.Time) (model.AppRelease, error) {
-	if !reflect.DeepEqual(currentPrevious, previous) || !reflect.DeepEqual(currentStable, stable) || !reflect.DeepEqual(currentPolicy, policy) ||
-		previous.AppID != policy.AppID || previous.TenantID != policy.TenantID || stable.AppID != policy.AppID || stable.TenantID != policy.TenantID ||
-		!retirement.AwaitingDrain(previous) ||
-		stable.Role != model.AppReleaseRoleStable || stable.Status != model.AppReleaseStatusServing ||
-		policy.Mode != model.AppTrafficModeSingle || policy.StableReleaseID != stable.ID || policy.CandidateReleaseID != "" || policy.StableWeight != 100 || policy.CandidateWeight != 0 ||
-		previous.RetentionUntil != nil && now.Before(*previous.RetentionUntil) {
-		return model.AppRelease{}, ErrConflict
-	}
-	now = now.Truncate(time.Microsecond)
-	currentPrevious.Role = model.AppReleaseRoleRetired
-	currentPrevious.Status = model.AppReleaseStatusRetired
-	currentPrevious.RetiredAt = &now
-	currentPrevious.UpdatedAt = now
-	currentPrevious.StatusReason = "safe rollout previous stable drained"
-	if previous.Status == model.AppReleaseStatusFailed {
-		currentPrevious.StatusReason = "failed candidate drained after rollback"
-	}
-	currentPrevious.ReleaseMessage = "retired after verified traffic withdrawal and Pod drain"
-	return currentPrevious, nil
-}
-
 func (s *Store) pgRetireDrainedAppRelease(ctx context.Context, previous, stable model.AppRelease, policy model.AppTrafficPolicy, source *model.Operation, workload *model.AppReleaseWorkload) (model.AppRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -129,9 +106,11 @@ func (s *Store) pgRetireDrainedAppRelease(ctx context.Context, previous, stable 
 		}
 		current[id] = r
 	}
-	result, err := retireDrainedRelease(current[previous.ID], current[stable.ID], currentPolicy, previous, stable, policy, time.Now().UTC())
-	if err != nil {
-		return model.AppRelease{}, err
+	currentSnapshot := retirement.Snapshot{Previous: current[previous.ID], Stable: current[stable.ID], Traffic: currentPolicy}
+	observedSnapshot := retirement.Snapshot{Previous: previous, Stable: stable, Traffic: policy}
+	result, ok := retirement.SettleDrained(currentSnapshot, observedSnapshot, time.Now().UTC())
+	if !ok {
+		return model.AppRelease{}, ErrConflict
 	}
 	if source != nil {
 		events, err := pgReleaseWorkloadSourceEvents(ctx, tx, previous)

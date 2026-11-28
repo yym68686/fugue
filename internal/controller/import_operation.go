@@ -11,16 +11,17 @@ import (
 
 	"fugue/internal/appimages"
 	"fugue/internal/model"
+	"fugue/internal/operationexecution"
 	"fugue/internal/runtime"
 	"fugue/internal/sourceimport"
 	"fugue/internal/store"
 )
 
 func (s *Service) executeManagedImportOperation(ctx context.Context, op model.Operation, app model.App) (err error) {
-	timer := newControllerOperationTimer(s.now)
+	timer := operationexecution.NewTimer(s.now)
 	defer func() {
-		s.recordOperationControllerTiming(op.ID, timer.modelSegments())
-		timer.Log(s.Logger, "managed_import_operation", op, err)
+		s.recordOperationControllerTiming(op.ID, timer.Segments())
+		timer.Log(s.Logger, "managed_import_operation", op, err, safeRolloutPendingResult(err) != "")
 	}()
 
 	if op.DesiredSpec == nil {

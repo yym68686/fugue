@@ -27,17 +27,22 @@ func TestRetiredAppReleaseCannotChangeServingTraffic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := s.store.CreateAppRelease(model.AppRelease{TenantID: app.TenantID, AppID: app.ID, Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired, UpstreamURL: "http://retired.example.test"})
-	if err != nil {
-		t.Fatal(err)
+	imported := performJSONRequest(t, s, http.MethodPost, "/v1/apps/"+app.ID+"/releases", key, appReleaseCreateRequest{
+		Role: model.AppReleaseRoleRetired, Status: model.AppReleaseStatusRetired, UpstreamURL: "http://retired.example.test",
+	})
+	if imported.Code != http.StatusCreated {
+		t.Fatalf("historical release creation changed: %d %s", imported.Code, imported.Body.String())
 	}
+	var importedResponse appReleaseResponse
+	mustDecodeJSON(t, imported, &importedResponse)
+	id := importedResponse.Release.ID
 	for _, weight := range []int{50, 100} {
-		resp := performJSONRequest(t, s, http.MethodPost, "/v1/apps/"+app.ID+"/releases/"+r.ID+"/promote", key, appReleasePromoteRequest{CandidateWeight: &weight})
+		resp := performJSONRequest(t, s, http.MethodPost, "/v1/apps/"+app.ID+"/releases/"+id+"/promote", key, appReleasePromoteRequest{CandidateWeight: &weight})
 		if resp.Code != http.StatusConflict {
 			t.Fatalf("retired promote status %d: %s", resp.Code, resp.Body.String())
 		}
 	}
-	resp := performJSONRequest(t, s, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", key, appTrafficPatchRequest{StableReleaseID: r.ID})
+	resp := performJSONRequest(t, s, http.MethodPatch, "/v1/apps/"+app.ID+"/traffic", key, appTrafficPatchRequest{StableReleaseID: id})
 	if resp.Code != http.StatusConflict {
 		t.Fatalf("retired traffic status %d: %s", resp.Code, resp.Body.String())
 	}
