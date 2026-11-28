@@ -107,6 +107,24 @@ apply manifest. It does not prove live Service agreement, runtime pull by
 the nodes, writer revocation, or a verified cutover. Do not apply a draft or
 modify the original monitor records to treat the draft as a new baseline.
 
+For an approval-ready review, use the existing Deployment's canonical
+journal resource (`kubernetes/<namespace>/deployment/<name>`), not a
+separate registry lane. With the read-only Kubernetes context, check the
+live source first:
+
+```bash
+fugue-production-control observe-release-registry-rehome "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$GUARDIAN_GROUP" "$READ_ONLY_KUBECONFIG" "$CONTEXT"
+fugue-production-control draft-release-registry-rehome "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256" "$GUARDIAN_GROUP" "$REQUEST_ID" "$MIRROR_CONFIG"
+```
+
+The second command requires a pre-existing verified journal head with no
+pending claim. It compares the live Deployment and each read-only Service
+to the archived declarations and repeats the source and journal reads after
+checking both mirror copies. The output is an intent for `inspect`, owner
+`sign`, and journal recording. It is not a Deployment patch or fresh
+baseline evidence. An approved registry rehome is explicitly rejected by
+the ordinary claim path until a dedicated provider-fenced executor exists.
+
 ## Native production journal recovery
 
 Use this additional gate once a resource's native journal can authorize writes.

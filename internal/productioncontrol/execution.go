@@ -372,6 +372,9 @@ func (j *Journal) ReserveExecution(ctx context.Context, actor, intentDigest, app
 		if intent.Operation == ParticipationTopology || intent.Operation == DNSCutover || intent.ResourceID == GlobalProducerCutoverResource {
 			return false, errors.New("topology and cutover intents do not authorize ordinary execution")
 		}
+		if intent.Operation == ComponentRegistryMove {
+			return false, errors.New("registry rehome requires a dedicated provider-fenced executor; review cannot reserve a claim")
+		}
 		if intent.ResourceID == StorageAuditPolicyResource {
 			return false, errors.New("storage audit policy requires a provider-fenced executor")
 		}

@@ -135,6 +135,7 @@ type sealedRecoveryRecord struct {
 	version  SealedRecoveryVersion
 	prepared declarativerelease.ExecutionPlan
 	workload declarativerelease.Workload
+	release  declarativerelease.PlanRelease
 	forward  []byte
 	lkg      []byte
 	files    map[string]string
@@ -167,7 +168,7 @@ func decodeSealedRecoveryRecord(ref RecoveryRecordRef, data map[string]string, c
 	}
 	return sealedRecoveryRecord{
 		version:  SealedRecoveryVersion{Record: ref, Monitor: monitor, Receipt: artifact},
-		prepared: prepared, workload: release.Workload, forward: forward, lkg: lkg, files: data,
+		prepared: prepared, workload: release.Workload, release: release, forward: forward, lkg: lkg, files: data,
 	}, nil
 }
 

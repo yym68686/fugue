@@ -25,12 +25,14 @@ var (
 	tokenPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,95}$`)
 	resourcePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,159}$`)
 	digestPattern   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	deploymentScope = regexp.MustCompile(`^kubernetes/[a-z0-9][a-z0-9.-]*/deployment/[a-z0-9][a-z0-9.-]*$`)
 )
 
 type Operation string
 
 const (
 	ComponentRelease      Operation = "component_release"
+	ComponentRegistryMove Operation = "component_registry_rehome"
 	NodeParticipation     Operation = "node_participation"
 	DNSMembership         Operation = "dns_membership"
 	DNSCutover            Operation = "dns_cutover"
@@ -77,8 +79,12 @@ func (intent Intent) Validate() error {
 	if intent.ResourceID == StorageAuditPolicyResource && intent.Operation != Maintenance {
 		return errors.New("storage audit policy requires a maintenance intent")
 	}
+	if intent.Operation == ComponentRegistryMove &&
+		(!deploymentScope.MatchString(intent.ResourceID) || intent.RollbackDigest != intent.CurrentDigest || intent.TargetDigest == intent.CurrentDigest) {
+		return errors.New("registry rehome must use the shared Deployment fence with its exact predecessor")
+	}
 	switch intent.Operation {
-	case ComponentRelease, NodeParticipation, DNSMembership, DNSCutover, FrontWorker, Maintenance, ParticipationTopology:
+	case ComponentRelease, ComponentRegistryMove, NodeParticipation, DNSMembership, DNSCutover, FrontWorker, Maintenance, ParticipationTopology:
 		return nil
 	}
 	return errors.New("unsupported production operation")
