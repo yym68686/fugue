@@ -13,58 +13,24 @@ import (
 	"fugue/internal/releaseguardian/participation"
 	"fugue/internal/storageaudit"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
 const storageAuditConfigKey = "storage-lifecycle.json"
 
-type storageAuditShadowSpec struct {
-	Kubernetes   productioncontrol.ParticipationKubernetesBinding `json:"kubernetes"`
-	Namespace    string                                           `json:"namespace"`
-	ConfigMap    string                                           `json:"configMap"`
-	ConfigMapUID string                                           `json:"configMapUid"`
-}
-
-func (s storageAuditShadowSpec) validate() error {
-	if s.Kubernetes.Validate() != nil || s.ConfigMapUID == "" ||
-		len(validation.IsDNS1123Label(s.Namespace)) != 0 || len(validation.IsDNS1123Subdomain(s.ConfigMap)) != 0 {
-		return errors.New("invalid storage audit shadow Kubernetes binding")
-	}
-	return nil
-}
-
-type storageAuditPolicyVersion struct {
-	Document storageaudit.Policy `json:"document"`
-	Digest   string              `json:"digest"`
-}
-
-type storageAuditShadowReport struct {
-	Schema                   string                           `json:"schema"`
-	ExecutionEvidence        bool                             `json:"executionEvidence"`
-	Binding                  storageAuditShadowSpec           `json:"binding"`
-	ConfigMapResourceVersion string                           `json:"configMapResourceVersion"`
-	Provider                 storageaudit.MaintenanceObserver `json:"provider"`
-	Owner                    string                           `json:"owner"`
-	Activation               storageaudit.OwnerActivation     `json:"activation"`
-	Current                  storageAuditPolicyVersion        `json:"current"`
-	Target                   storageAuditPolicyVersion        `json:"target"`
-	Rollback                 storageAuditPolicyVersion        `json:"rollback"`
-}
-
 func shadowStorageAudit(ctx context.Context, paths []string, out io.Writer) error {
 	raw, err := readFile(paths[3], 16<<10, false)
 	if err != nil {
 		return err
 	}
-	var spec storageAuditShadowSpec
+	var spec productioncontrol.StorageAuditShadowBinding
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if d.Decode(&spec) != nil || d.Decode(new(any)) != io.EOF {
 		return errors.New("invalid storage audit shadow specification")
 	}
-	if err := spec.validate(); err != nil {
+	if err := spec.Validate(); err != nil {
 		return err
 	}
 	raw, err = readFile(paths[4], 4096, false)
@@ -136,8 +102,8 @@ func parseShadowPolicy(raw []byte) (storageaudit.Policy, error) {
 	return policy, nil
 }
 
-func readStorageAuditShadow(ctx context.Context, client corev1.CoreV1Interface, spec storageAuditShadowSpec,
-	target storageaudit.Policy, observe func(context.Context) (storageaudit.OwnerObservation, error)) (storageAuditShadowReport, error) {
+func readStorageAuditShadow(ctx context.Context, client corev1.CoreV1Interface, spec productioncontrol.StorageAuditShadowBinding,
+	target storageaudit.Policy, observe func(context.Context) (storageaudit.OwnerObservation, error)) (productioncontrol.StorageAuditShadow, error) {
 	readPublished := func() (storageaudit.Policy, string, error) {
 		ns, err := client.Namespaces().Get(ctx, spec.Namespace, metav1.GetOptions{})
 		if err != nil || ns.Name != spec.Namespace || string(ns.UID) != spec.Kubernetes.NamespaceUID ||
@@ -154,30 +120,30 @@ func readStorageAuditShadow(ctx context.Context, client corev1.CoreV1Interface, 
 	}
 	before, version, err := readPublished()
 	if err != nil {
-		return storageAuditShadowReport{}, err
+		return productioncontrol.StorageAuditShadow{}, err
 	}
 	database, err := observe(ctx)
 	if err != nil {
-		return storageAuditShadowReport{}, err
+		return productioncontrol.StorageAuditShadow{}, err
 	}
 	if database.Owner != "worker" || database.Activation == nil || database.PolicyDigest != before.Digest() ||
 		database.Policy != before {
-		return storageAuditShadowReport{}, errors.New("PostgreSQL and the published storage audit policy disagree")
+		return productioncontrol.StorageAuditShadow{}, errors.New("PostgreSQL and the published storage audit policy disagree")
 	}
 	if target == before {
-		return storageAuditShadowReport{}, errors.New("storage audit candidate matches the live policy")
+		return productioncontrol.StorageAuditShadow{}, errors.New("storage audit candidate matches the live policy")
 	}
 	after, afterVersion, err := readPublished()
 	if err != nil {
-		return storageAuditShadowReport{}, err
+		return productioncontrol.StorageAuditShadow{}, err
 	}
 	if version != afterVersion || before != after {
-		return storageAuditShadowReport{}, errors.New("published storage audit policy changed during PostgreSQL readback")
+		return productioncontrol.StorageAuditShadow{}, errors.New("published storage audit policy changed during PostgreSQL readback")
 	}
-	current := storageAuditPolicyVersion{before, "sha256:" + database.PolicyDigest}
-	return storageAuditShadowReport{
-		Schema: "fugue.storage-audit-policy-shadow/v1", Binding: spec, ConfigMapResourceVersion: version,
-		Provider: database.Provider, Owner: database.Owner, Activation: *database.Activation,
-		Current: current, Target: storageAuditPolicyVersion{target, "sha256:" + target.Digest()}, Rollback: current,
+	current := productioncontrol.StorageAuditPolicyVersion{Document: before, Digest: "sha256:" + database.PolicyDigest}
+	return productioncontrol.StorageAuditShadow{
+		Schema: productioncontrol.StorageAuditShadowSchema, Binding: spec, ConfigMapResourceVersion: version,
+		Provider: database.Provider, Owner: database.Owner, Activation: *database.Activation, Current: current,
+		Target: productioncontrol.StorageAuditPolicyVersion{Document: target, Digest: "sha256:" + target.Digest()}, Rollback: current,
 	}, nil
 }

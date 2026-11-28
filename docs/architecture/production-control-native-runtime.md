@@ -646,6 +646,16 @@ Online policy publication by the old workflow also changes other storage
 settings. That lane remains open until all its writes are independently fenced
 and the native writer is verified.
 
+`draft-storage-audit JOURNAL_CONFIG REQUEST SHADOW` binds that report to
+the last verified native journal version. Review the exact current, target
+and rollback documents with `inspect` before using `sign` and recording the
+intent and approval. Storage audit policy execution requires its own provider
+fence. The journal rejects ordinary execution claims for this resource.
+The old workflow's database access runs `pods/exec` with the PostgreSQL
+administrator. Revocation must cover this path as well as its ConfigMap
+and any other routes to PostgreSQL administration. A row trigger cannot
+contain a principal that still holds administrator access.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`

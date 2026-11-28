@@ -39,6 +39,15 @@ type OwnerActivation struct {
 
 var ownerObservationDigest = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
+func (o MaintenanceObserver) Validate() error {
+	id, err := strconv.ParseUint(o.SystemID, 10, 64)
+	if err != nil || id == 0 || strconv.FormatUint(id, 10) != o.SystemID ||
+		o.Database == "" || len(o.Database) > 63 || o.Role == "" || len(o.Role) > 63 {
+		return errors.New("invalid storage audit provider identity")
+	}
+	return nil
+}
+
 const ownerObserverIdentitySQL = `
 SELECT NOT pg_catalog.pg_is_in_recovery()
   AND control.system_identifier::text = $1
@@ -59,8 +68,7 @@ FROM pg_catalog.pg_roles r CROSS JOIN pg_catalog.pg_control_system() control WHE
 // receipt in the same PostgreSQL snapshot. Repeated observations may report
 // newer progress. The recorded activation remains tied to its own policy.
 func (o MaintenanceObserver) Observe(ctx context.Context, db *sql.DB) (OwnerObservation, error) {
-	if id, err := strconv.ParseUint(o.SystemID, 10, 64); db == nil || err != nil || id == 0 ||
-		strconv.FormatUint(id, 10) != o.SystemID || o.Database == "" || len(o.Database) > 63 || o.Role == "" || len(o.Role) > 63 {
+	if db == nil || o.Validate() != nil {
 		return OwnerObservation{}, errors.New("invalid storage audit provider identity")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)

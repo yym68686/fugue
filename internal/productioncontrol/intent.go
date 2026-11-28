@@ -74,6 +74,9 @@ func (intent Intent) Validate() error {
 	if strings.HasPrefix(intent.ResourceID, FrontWorkerResourcePrefix) != (intent.Operation == FrontWorker) {
 		return errors.New("Front/Worker intent must use its canonical resource boundary")
 	}
+	if intent.ResourceID == StorageAuditPolicyResource && intent.Operation != Maintenance {
+		return errors.New("storage audit policy requires a maintenance intent")
+	}
 	switch intent.Operation {
 	case ComponentRelease, NodeParticipation, DNSMembership, DNSCutover, FrontWorker, Maintenance, ParticipationTopology:
 		return nil
