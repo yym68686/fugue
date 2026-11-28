@@ -71,6 +71,18 @@ type guardianArtifactReference struct {
 	lkgMonitorRecordRef string
 }
 
+type monitorRecoveryKey struct {
+	component string
+	workload  recoveryWorkload
+	target    declarativerelease.TargetIdentity
+}
+
+type retainedMonitorRollback struct {
+	digest   string
+	current  monitorRecoveryKey
+	previous monitorRecoveryKey
+}
+
 func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (ArtifactPruneResult, error) {
 	if pruner == nil || pruner.client == nil || now.IsZero() || !now.Equal(now.UTC()) {
 		return ArtifactPruneResult{}, errors.New("release artifact prune request is invalid")
@@ -173,15 +185,27 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 		}
 	}
 
+	currentMonitors := make(map[string]declarativerelease.MonitorState)
+	monitorTargets := make(map[string]retainedMonitorRollback)
+	monitorsByTarget := make(map[monitorRecoveryKey][]string)
 	for index := range monitorObjects {
 		object := &monitorObjects[index]
 		switch {
 		case strings.HasPrefix(object.Name, "fugue-release-record-"):
-			_, _, _, record, _, _, recordErr := decodeStableRecord(object.Data)
+			plan, _, prepared, record, _, _, recordErr := decodeStableRecord(object.Data)
 			if recordErr != nil || object.Immutable == nil || !*object.Immutable || object.Name != monitorRecordNameFromDigest(record.Component, record.RecordDigest) ||
 				object.Labels["fugue.pro/component"] != record.Component || object.Labels["fugue.pro/config-sha"] != record.ConfigSHA {
 				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered invalid monitor record %s", object.Name)
 			}
+			release, ok := releaseForComponent(plan, record.Component)
+			if !ok {
+				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered a monitor without its workload %s", object.Name)
+			}
+			workload := recoveryWorkloadKey(release.Workload)
+			current := monitorRecoveryKey{component: record.Component, workload: workload, target: prepared.Forward}
+			previous := monitorRecoveryKey{component: record.Component, workload: workload, target: prepared.LKG}
+			monitorTargets[object.Name] = retainedMonitorRollback{digest: record.RecordDigest, current: current, previous: previous}
+			monitorsByTarget[current] = append(monitorsByTarget[current], object.Name)
 			artifacts = append(artifacts, retainedArtifact{object: *object, kind: "monitor-record", scope: record.Component, identity: record.RecordDigest, priority: 3})
 		case strings.HasPrefix(object.Name, "fugue-release-monitor-"):
 			var state declarativerelease.MonitorState
@@ -191,6 +215,23 @@ func (pruner *ArtifactPruner) Prune(ctx context.Context, now time.Time) (Artifac
 				return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup encountered invalid monitor pointer %s", object.Name)
 			}
 			keep[recordName] = true
+			currentMonitors[recordName] = state
+		}
+	}
+	for name, state := range currentMonitors {
+		targets, ok := monitorTargets[name]
+		if !ok || targets.digest != state.RecordDigest || targets.current.component != state.Component || targets.current.target.ConfigSHA != state.ConfigSHA {
+			return ArtifactPruneResult{}, fmt.Errorf("release artifact cleanup cannot resolve current monitor record %s", name)
+		}
+		if targets.previous.target.Present {
+			// Preserve every exact match, including ambiguous historical
+			// receipts. Garbage collection must not manufacture a unique
+			// recovery pair by deleting one of the matching records.
+			// Limit this pin to active roots; do not retain every ancestor
+			// of an ordinary historical release.
+			for _, predecessor := range monitorsByTarget[targets.previous] {
+				keep[predecessor] = true
+			}
 		}
 	}
 	for _, artifact := range artifacts {
@@ -415,7 +456,10 @@ func artifactRootFingerprint(objects []corev1.ConfigMap) string {
 			} else {
 				value += "/" + object.Data["recordName"] + "/" + state.RecordDigest + "/" + state.ConfigSHA + "/" + state.RollbackStatus
 			}
-		} else if object.Immutable == nil || !*object.Immutable {
+		} else if object.Immutable != nil && *object.Immutable {
+			// Immutable bytes can still be relabeled into/out of inventory.
+			value += "/" + object.ResourceVersion
+		} else {
 			raw, _ := declarativerelease.CanonicalJSON(object.Data)
 			value += "/" + digest(raw)
 		}

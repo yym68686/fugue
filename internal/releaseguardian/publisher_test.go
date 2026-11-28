@@ -786,8 +786,13 @@ func TestDegradedRouteTargetTerminalRequiresExactAcceptedTarget(t *testing.T) {
 
 func guardianStableFixture(t *testing.T, key Key, now time.Time) (map[string]string, declarativerelease.MonitorRecord, declarativerelease.ArtifactReceipt, declarativerelease.TargetIdentity) {
 	t.Helper()
+	return guardianStableFixtureWithImage(t, key, now, "sha256:"+strings.Repeat("b", 64))
+}
+
+func guardianStableFixtureWithImage(t *testing.T, key Key, now time.Time, stableDigest string) (map[string]string, declarativerelease.MonitorRecord, declarativerelease.ArtifactReceipt, declarativerelease.TargetIdentity) {
+	t.Helper()
 	baseSHA, stableSHA := strings.Repeat("0", 40), strings.Repeat("1", 40)
-	baseDigest, stableDigest := "sha256:"+strings.Repeat("a", 64), "sha256:"+strings.Repeat("b", 64)
+	baseDigest := "sha256:" + strings.Repeat("a", 64)
 	release := guardianPlanRelease(key, stableSHA, baseSHA, baseDigest, nil)
 	plan := guardianPlan(t, baseSHA, stableSHA, release)
 	artifact := guardianArtifact(t, plan, stableDigest)

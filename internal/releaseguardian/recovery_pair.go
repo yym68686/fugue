@@ -97,7 +97,7 @@ func ObserveSealedRecoveryPair(ctx context.Context, client coreclient.CoreV1Inte
 			return SealedRecoveryPair{}, errors.New("invalid sealed record in rollback release history")
 		}
 		if candidate.prepared.Forward != current.prepared.LKG || !bytes.Equal(candidate.forward, current.lkg) ||
-			!sameRecoveryWorkload(candidate.workload, current.workload) {
+			recoveryWorkloadKey(candidate.workload) != recoveryWorkloadKey(current.workload) {
 			continue
 		}
 		if rollback.version.Record.Name != "" {
@@ -158,6 +158,13 @@ func recoveryRef(object *corev1.ConfigMap) RecoveryRecordRef {
 	return RecoveryRecordRef{Name: object.Name, UID: string(object.UID), ResourceVersion: object.ResourceVersion}
 }
 
-func sameRecoveryWorkload(a, b declarativerelease.Workload) bool {
-	return a.APIVersion == b.APIVersion && a.Kind == b.Kind && a.Namespace == b.Namespace && a.Name == b.Name && a.Container == b.Container
+type recoveryWorkload struct {
+	resource  declarativerelease.ResourceIdentity
+	container string
+}
+
+func recoveryWorkloadKey(w declarativerelease.Workload) recoveryWorkload {
+	return recoveryWorkload{resource: declarativerelease.ResourceIdentity{
+		APIVersion: w.APIVersion, Kind: w.Kind, Namespace: w.Namespace, Name: w.Name,
+	}, container: w.Container}
 }
