@@ -25,18 +25,18 @@ func TestEdgeRouteIntentDerivationPersistsGenerationDriftWithoutChangingRoutes(t
 	managed.Metadata.Generation = 3
 	managed.Status = runtime.ManagedAppStatus{Phase: runtime.ManagedAppPhaseReady, DesiredReplicas: 1, ReadyReplicas: 1, ObservedGeneration: 3}
 	proof := edgeRouteObservationTestProvenance()
-	proof.evidence.appObservationKey = managedAppRuntimeEvidenceObservationKey(app)
-	proof.evidence.managedGeneration = 3
-	proof.evidence.managedObservedGeneration = 3
-	proof.evidence.deploymentGeneration = 9
-	proof.evidence.deploymentObservedGeneration = 8
-	proof.evidence.invariantViolations = []string{"deployment_generation_unobserved"}
+	proof.evidence.AppObservationKey = managedAppRuntimeEvidenceObservationKey(app)
+	proof.evidence.ManagedGeneration = 3
+	proof.evidence.ManagedObservedGeneration = 3
+	proof.evidence.DeploymentGeneration = 9
+	proof.evidence.DeploymentObservedGeneration = 8
+	proof.evidence.InvariantViolations = []string{"deployment_generation_unobserved"}
 	now := time.Now().UTC()
-	server.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:    map[string]runtime.ManagedAppObject{app.ID: managed},
-		evidence: map[string]managedAppRuntimeEvidence{app.ID: proof.evidence},
-		ok:       true, clusterID: "cluster-test", refreshedAt: now, expiresAt: now.Add(time.Hour),
-	})
+	server.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:    map[string]runtime.ManagedAppObject{app.ID: managed},
+		Evidence: map[string]managedAppRuntimeEvidence{app.ID: proof.evidence},
+		Ok:       true, ClusterID: "cluster-test", RefreshedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
 	req := httptest.NewRequest(http.MethodGet, "/v1/edge/route-intents", nil)
 	server.log = nil
 	before, err := server.deriveEdgeRouteIntentSnapshot(req, state)
@@ -114,12 +114,12 @@ func TestEdgeRouteIntentObservationEmitsFactChangesButNotRefreshChurn(t *testing
 	logs.Reset()
 	proof.cacheExpired = true
 	proof.refreshedAt = proof.refreshedAt.Add(time.Minute)
-	proof.evidence.imageLocationObservedAt = proof.refreshedAt
+	proof.evidence.ImageLocationObservedAt = proof.refreshedAt
 	emit()
 	if logs.Len() != 0 {
 		t.Fatal("refresh bookkeeping generated duplicate evidence")
 	}
-	proof.evidence.deploymentObservedGeneration--
+	proof.evidence.DeploymentObservedGeneration--
 	emit()
 	if logs.Len() == 0 {
 		t.Fatal("a generation change was not recorded")

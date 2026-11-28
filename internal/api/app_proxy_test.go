@@ -832,13 +832,13 @@ func TestMaybeHandleAppProxyReturnsLiveFailureDetailsWhenReplicasAreUnavailable(
 	managed.Metadata.Generation = 1
 	managed.Status.ObservedGeneration = 1
 	now := time.Now()
-	server.managedAppStatusCache.setApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
-		managed:     managed,
-		found:       true,
-		ok:          true,
-		clusterID:   "cluster-test-uid",
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
+	server.managedAppStatusCache.PublishApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
+		Managed:     managed,
+		Found:       true,
+		Ok:          true,
+		ClusterID:   "cluster-test-uid",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://"+app.Route.Hostname+"/healthz", nil)

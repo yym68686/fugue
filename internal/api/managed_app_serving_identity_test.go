@@ -78,7 +78,7 @@ func TestManagedAppServingIdentityRequiresHealthyCurrentCohort(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			observed := server.applyManagedAppObservation(app, managedAppStatusCacheEntry{managed: managed, found: true, ok: test.complete, clusterID: "cluster-a", evidence: evidence, refreshedAt: time.Now().UTC()}, nil, test.fresh, "")
+			observed := server.applyManagedAppObservation(app, managedAppStatusCacheEntry{Managed: managed, Found: true, Ok: test.complete, ClusterID: "cluster-a", Evidence: evidence, RefreshedAt: time.Now().UTC()}, nil, test.fresh, "")
 			if observed.ObservedStatus == nil {
 				t.Fatal("observation missing")
 			}

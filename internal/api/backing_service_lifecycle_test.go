@@ -598,8 +598,8 @@ func installManagedAppInventoryServer(t *testing.T, server *Server, items []runt
 
 func cacheManagedPostgresStatus(server *Server, appID string, status runtime.ManagedBackingServiceStatus) {
 	now := time.Now()
-	server.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items: map[string]runtime.ManagedAppObject{
+	server.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items: map[string]runtime.ManagedAppObject{
 			appID: {
 				Spec: runtime.ManagedAppSpec{AppID: appID},
 				Status: runtime.ManagedAppStatus{
@@ -607,10 +607,11 @@ func cacheManagedPostgresStatus(server *Server, appID string, status runtime.Man
 				},
 			},
 		},
-		ok:          true,
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
-	})
+		Ok:          true,
+		ClusterID:   "cluster-test",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
+	}))
 }
 
 func assertBackingServiceLifecycleAudit(t *testing.T, stateStore *store.Store, tenantID, action, result string) {
@@ -1140,12 +1141,13 @@ func retainedManagedPostgresOrphan(tenantID, projectID, password, databaseURL, r
 
 func cacheManagedAppObject(server *Server, managed runtime.ManagedAppObject) {
 	now := time.Now()
-	server.managedAppStatusCache.setList(managedAppStatusListCacheEntry{
-		items:       map[string]runtime.ManagedAppObject{managed.Spec.AppID: managed},
-		ok:          true,
-		refreshedAt: now,
-		expiresAt:   now.Add(time.Minute),
-	})
+	server.managedAppStatusCache.PublishInventory(newManagedAppInventory(managedAppStatusListInput{
+		Items:       map[string]runtime.ManagedAppObject{managed.Spec.AppID: managed},
+		Ok:          true,
+		ClusterID:   "cluster-test",
+		RefreshedAt: now,
+		ExpiresAt:   now.Add(time.Minute),
+	}))
 }
 
 func assertResponseOmitsSecrets(t *testing.T, body string, secrets ...string) {

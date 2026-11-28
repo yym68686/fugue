@@ -178,8 +178,8 @@ func TestAgentMigrationTaskDoesNotUseTargetObservationAsSourceCluster(t *testing
 	t.Parallel()
 	_, server, app, op, _, _ := migrationAgentFixture(t)
 	now := time.Now().UTC()
-	server.managedAppStatusCache.setApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
-		ok: true, found: true, clusterID: "cluster-target", refreshedAt: now, expiresAt: now.Add(time.Minute),
+	server.managedAppStatusCache.PublishApp(managedAppStatusCacheKey(app), managedAppStatusCacheEntry{
+		Ok: true, Found: true, ClusterID: "cluster-target", RefreshedAt: now, ExpiresAt: now.Add(time.Minute),
 	})
 	if clusterID := server.sourceClusterIDForAgentTask(context.Background(), op); clusterID != "" {
 		t.Fatalf("target-side observation was reused as source cluster identity: %q", clusterID)
