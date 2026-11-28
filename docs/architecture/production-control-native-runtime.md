@@ -908,6 +908,18 @@ authority bound to pre-restore database role OIDs.
   settle the journal, create a new release seal, verify route health, or prove
   node pulls without GitHub. Ordinary release execution cannot dispatch the
   registry-only move.
+- The journal reserves registry rehome under the same Deployment lock as
+  ordinary releases. In addition to current owner approval, it requires a
+  separately signed, short-lived receipt for the next fence and exact
+  provider write, live admission readback, old credential revocation and
+  request drainage, and independent pulls and retention of both artifacts.
+  The dedicated database writer appends that receipt to
+  `registry_rehome_admissions` in the claim transaction. Ordinary runtime
+  roles must not have INSERT there. A v2 recovery checkpoint includes the
+  receipt; verify v1 backups against the restored v1 schema before upgrading.
+  Replays and restores never issue another claim. This adds no production
+  dispatch command; ordinary result records cannot promote a migration
+  proposal to a last verified release.
 - To check preservation of the current and rollback artifacts before that
   transition, provision an independent HTTPS registry and replicate the
   original OCI content byte-for-byte. In each destination repository, retain
