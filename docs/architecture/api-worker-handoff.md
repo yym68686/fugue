@@ -400,3 +400,12 @@ attempt-scoped claims, archive and connection access; a database-enforced
 fence against legacy executor writes; proof that live and rollback images
 respect the fence; and evidence that existing imports have drained.
 Compatible code using the API schema-owner credential is not that fence.
+
+The independent import-worker bootstrap is a standby release. Its dedicated
+database login can call only the versioned import capabilities; these return
+no work while the API owns execution. The deployment has no Kubernetes service
+account token and uses a bounded scratch volume. The release verifies the
+immutable running image, readiness and API ownership independently in the
+Pod and database. This bootstrap does not install the write fence or change
+the executor. Handoff still requires settled, compatible current and rollback
+artifacts and a separate database admission and recovery rehearsal.

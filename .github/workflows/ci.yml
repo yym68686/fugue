@@ -1175,6 +1175,7 @@ jobs:
       quality_evidence_retention_handoff: ${{ steps.quality_evidence_retention_handoff.outputs.selected }}
       observation_sample_retention_handoff: ${{ steps.observation_sample_retention_handoff.outputs.selected }}
       hosted_dns_writer_handoff: ${{ steps.hosted_dns_writer_handoff.outputs.selected }}
+      database_import_worker_rehearsed: ${{ steps.database_import_worker_rehearsal.outputs.verified }}
       app_mail_reconcile_handoff: ${{ steps.app_mail_reconcile_handoff.outputs.selected }}
       storage_audit_worker_rehearsed: ${{ steps.storage_audit_worker_rehearsal.outputs.verified }}
       storage_audit_activation: ${{ steps.storage_audit_activation.outputs.verified }}
@@ -1309,20 +1310,27 @@ jobs:
           fi
           make test-postgres
       - name: Rehearse database import writer fencing and build the standalone worker
+        id: database_import_worker_rehearsal
         timeout-minutes: 15
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           IMPORT_FIXTURE_ADMIN_URL: postgresql://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test?sslmode=disable
           FUGUE_IMPORT_FENCE_TEST_DATABASE_URL: postgresql://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test_import_fence?sslmode=disable
+          FUGUE_IMPORT_STANDBY_TEST_DSN: postgresql://postgres:fugue-ci-fixture@127.0.0.1:${{ job.services.postgres.ports[5432] }}/fugue_test_import_standby?sslmode=disable
         run: |
           set -euo pipefail
           base="$BASE_SHA"
           if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then base="$(git rev-parse HEAD^)"; fi
-          if git diff --quiet "$base" HEAD -- internal/dbimportworker internal/appdbimport internal/appmanageddb cmd/fugue-database-import-worker Dockerfile.database-import-worker .github/workflows/ci.yml; then exit 0; fi
+          if git diff --quiet "$base" HEAD -- internal/dbimportworker internal/appdbimport internal/appmanageddb cmd/fugue-database-import-worker Dockerfile.database-import-worker deploy/releases/database-import-worker scripts/provision_database_import_worker.py scripts/test_provision_database_import_worker.py scripts/verify_database_import_standby.py scripts/test_verify_database_import_standby.py .github/workflows/ci.yml; then exit 0; fi
+          psql "$IMPORT_FIXTURE_ADMIN_URL" -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE fugue_test_import_standby'
+          python3 -B -m unittest scripts.test_provision_database_import_worker scripts.test_verify_database_import_standby
+          psql "$IMPORT_FIXTURE_ADMIN_URL" -X -v ON_ERROR_STOP=1 -c "DROP DATABASE fugue_test_import_standby"
+          psql "$IMPORT_FIXTURE_ADMIN_URL" -X -v ON_ERROR_STOP=1 -c 'DROP ROLE fugue_app_db_import_worker, fugue_app_db_import_definer'
           psql "$IMPORT_FIXTURE_ADMIN_URL" -X -v ON_ERROR_STOP=1 -c 'CREATE DATABASE fugue_test_import_fence'
           go test -count=1 -v ./internal/dbimportworker ./internal/appdbimport ./cmd/fugue-database-import-worker
           docker build --platform linux/amd64 --file Dockerfile.database-import-worker --tag fugue-database-import-worker:ci .
           test "$(docker image inspect --format '{{.Config.User}}' fugue-database-import-worker:ci)" = '65532:65532'
+          echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Admit a standalone application mail handoff
         id: app_mail_reconcile_handoff
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -4851,6 +4859,49 @@ jobs:
         with:
           name: fugue-hosted-dns-worker-standby-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/fugue-hosted-dns-worker-standby.json
+          if-no-files-found: error
+          retention-days: 30
+
+  deploy_database_import_worker:
+    needs: [prepush, component-build, deploy_schema]
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.prepush.result == 'success' && needs.prepush.outputs.database_import_worker_rehearsed == 'true' && needs.component-build.result == 'success' && (needs.deploy_schema.result == 'success' || needs.deploy_schema.result == 'skipped') && contains(fromJSON(needs.prepush.outputs.release_components || '[]'), 'database-import-worker') }}
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, fugue, control-plane]
+    environment: production
+    concurrency: {group: fugue-production-database-import-worker, cancel-in-progress: false, queue: max}
+    permissions: {actions: read, contents: read, packages: read}
+    steps:
+      - name: Inspect generated metadata before checkout
+        working-directory: ${{ runner.temp }}
+        run: python3 -B -c "$FUGUE_RUNNER_WORKSPACE_REPAIR" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" "$(id -u)" "$(id -g)"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with: {ref: '${{ github.sha }}', fetch-depth: 0, clean: false}
+      - name: Install only the first standby database capability
+        run: |
+          set -euo pipefail
+          release=deploy/releases/database-import-worker
+          installer=internal/dbimportworker/app_database_import_worker_reads.sql
+          git fetch origin main
+          git diff --exit-code HEAD origin/main -- "$release" "$installer" deploy/releases/components.json deploy/environments/production/cnpg-controller/release.json scripts/provision_database_import_worker.py scripts/provision_observation_worker_database.py scripts/verify_database_import_standby.py scripts/verify_observation_writer_handoff.py .github/workflows/ci.yml
+          if jq -e '.expectedPreviousPresent == false and .generation == 1' "$release/intent.json" >/dev/null; then
+            python3 -B -m scripts.provision_database_import_worker "$release/database.json" --apply
+          else
+            git diff --exit-code HEAD^ HEAD -- "$release/database.json" "$installer"
+          fi
+      - uses: ./.github/actions/deploy-declarative-component
+        with: {component: database-import-worker, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Verify the exact database import worker Pod is in standby
+        run: |
+          set -euo pipefail
+          release=deploy/releases/database-import-worker
+          python3 -B -m scripts.verify_database_import_standby "$release/database.json" \
+            "$RUNNER_TEMP/fugue-component-artifact/fugue-database-import-worker-artifact-receipt.json" "$GITHUB_SHA" \
+            > "$RUNNER_TEMP/fugue-database-import-worker-standby.json"
+      - name: Retain the read-only standby evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-database-import-worker-standby-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fugue-database-import-worker-standby.json
           if-no-files-found: error
           retention-days: 30
 
