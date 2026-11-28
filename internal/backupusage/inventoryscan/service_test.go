@@ -81,7 +81,7 @@ func TestInventoryResumesLegacyCursorAndPublishesDetachedView(t *testing.T) {
 				{Key: "backup/apps/a/01", Size: 7},
 			}}, nil
 		}}, nil
-	}, nil, Config{}, 0)
+	}, Config{}, 0)
 	before, err := svc.Read(t.Context(), nm.Key())
 	if err != nil || lists != 0 || db.updates != 0 || before.Current == nil || before.Complete != nil {
 		t.Fatalf("read ran or advanced scan: %+v, %v", before, err)
@@ -117,7 +117,7 @@ func TestInventoryFailsClosedOnInvalidPagination(t *testing.T) {
 		return ObjectReader{Namespace: nm, ListPage: func(context.Context, string) (Page, error) {
 			return Page{More: true}, nil
 		}}, nil
-	}, nil, Config{}, 0)
+	}, Config{}, 0)
 	if err := svc.Advance(t.Context()); err != nil {
 		t.Fatal(err)
 	}

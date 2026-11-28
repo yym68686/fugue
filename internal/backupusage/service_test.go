@@ -71,10 +71,7 @@ func newTestService(now *time.Time) (*Service, *testSource) {
 			},
 		}},
 	}
-	artifactKeys := func(model.BackupArtifact) ([]string, error) {
-		return nil, errors.New("fixture should not contain artifacts")
-	}
-	svc := New(f, artifactKeys, Config{
+	svc := New(f, Config{
 		CacheTTL: 30 * time.Second, InventoryRefreshInterval: 15 * time.Minute,
 		ArtifactGCGrace: time.Hour, FailedRunGCGrace: time.Hour,
 	})

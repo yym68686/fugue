@@ -38,13 +38,12 @@ type Config struct {
 }
 
 type Service struct {
-	source       Source
-	artifactKeys func(model.BackupArtifact) ([]string, error)
-	cfg          Config
-	now          func() time.Time
-	mu           sync.RWMutex
-	cache        map[string]cacheEntry
-	inFlight     singleflight.Group
+	source   Source
+	cfg      Config
+	now      func() time.Time
+	mu       sync.RWMutex
+	cache    map[string]cacheEntry
+	inFlight singleflight.Group
 }
 
 type cacheEntry struct {
@@ -52,8 +51,8 @@ type cacheEntry struct {
 	value   Reconciliation
 }
 
-func New(source Source, artifactKeys func(model.BackupArtifact) ([]string, error), cfg Config) *Service {
-	return &Service{source: source, artifactKeys: artifactKeys, cfg: cfg, now: time.Now}
+func New(source Source, cfg Config) *Service {
+	return &Service{source: source, cfg: cfg, now: time.Now}
 }
 
 func (s *Service) Load(ctx context.Context, tenantID string, platformAdmin bool) (Usage, error) {
