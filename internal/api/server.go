@@ -20,6 +20,7 @@ import (
 
 	"fugue/internal/auth"
 	"fugue/internal/backupusage"
+	"fugue/internal/backupusage/inventoryscan"
 	"fugue/internal/bundleauth"
 	"fugue/internal/failover"
 	"fugue/internal/httpx"
@@ -56,7 +57,7 @@ type Server struct {
 	log                                    *log.Logger
 	metricsStartedAt                       time.Time
 	metricsSnapshot                        observability.MetricSnapshot
-	backupInventoryConfig                  BackupInventoryConfig
+	backupInventory                        *inventoryscan.Service
 	controlPlaneDatabaseURL                string
 	objectStorageUsageTimeout              time.Duration
 	controlPlaneNamespace                  string
@@ -238,6 +239,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 	if imageStoreMinReplicas <= 0 {
 		imageStoreMinReplicas = imageStoreMinimumReplicasFromEnv()
 	}
+	backupInventory := newBackupInventory(store, cfg.BackupInventory)
 	server := &Server{
 		workerFrontBindings:             cfg.WorkerFrontBindings,
 		hostedDeclarationRestore:        cfg.HostedDeclarationRestore,
@@ -247,7 +249,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		log:                             logger,
 		metricsStartedAt:                time.Now().UTC(),
 		producerCaptureRuntime:          newProducerCaptureRuntime(),
-		backupInventoryConfig:           cfg.BackupInventory.normalized(),
+		backupInventory:                 backupInventory,
 		controlPlaneDatabaseURL:         strings.TrimSpace(cfg.DatabaseURL),
 		objectStorageUsageTimeout:       normalizeObjectStorageUsageTimeout(cfg.ObjectStorageUsageTimeout),
 		controlPlaneNamespace:           strings.TrimSpace(cfg.ControlPlaneNamespace),
@@ -314,7 +316,7 @@ func NewServer(store *store.Store, authn *auth.Authenticator, logger *log.Logger
 		resolveRemoteImageDigest:               sourceimport.ResolveRemoteImageDigest,
 		appImageRegistry:                       newRemoteAppImageRegistry(),
 		projectImageUsageCache:                 newExpiringResponseCache[projectImageUsageResponse](defaultProjectImageUsageCacheTTL),
-		backupUsage:                            newBackupUsageService(store, cfg.BackupInventory, backupusage.DefaultCacheTTL),
+		backupUsage:                            newBackupUsageService(store, backupInventory, backupusage.DefaultCacheTTL),
 		readinessKubernetesAPICache:            newExpiringResponseCache[readinessCheckResult](readinessKubernetesAPICacheTTL),
 		clusterNodeInventoryCache:              newExpiringResponseCache[[]clusterNodeSnapshot](defaultClusterNodeInventoryCacheTTL),
 		persistentVolumeUsageCache:             newExpiringResponseCache[persistentVolumeUsagePolicies](persistentVolumeUsageCacheTTL),

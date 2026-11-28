@@ -1,4 +1,4 @@
-package api
+package inventoryscan
 
 import (
 	"bytes"
@@ -6,25 +6,27 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"fugue/internal/backupusage"
 )
 
-func inventoryPagesFixture() backupInventoryCheckpoint {
+func inventoryPagesFixture() checkpoint {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	scan := &backupInventoryScan{Generation: "inventory-synthetic", StartedAt: now, Wanted: map[string]bool{}, References: map[string]backupInventoryObject{}, Totals: map[string]backupInventoryTotals{"all": {Count: 12000}}}
+	scan := &scanState{Generation: "inventory-synthetic", StartedAt: now, Wanted: map[string]bool{}, References: map[string]backupusage.InventoryObject{}, Totals: map[string]backupusage.InventoryTotals{"all": {Count: 12000}}}
 	for i := 0; i < 12000; i++ {
 		key := fmt.Sprintf("objects/%06d", i)
 		scan.Wanted[key] = true
-		scan.References[key] = backupInventoryObject{Key: key, Size: int64(i), ObservedAt: now}
+		scan.References[key] = backupusage.InventoryObject{Key: key, Size: int64(i), ObservedAt: now}
 	}
-	return backupInventoryCheckpoint{Version: 1, Current: scan}
+	return checkpoint{Version: 1, Current: scan}
 }
 func TestInventoryPagesPreserveContentAndWriteOnlyChangedPartition(t *testing.T) {
 	cp := inventoryPagesFixture()
-	before, err := encodeBackupInventoryPages(cp)
+	before, err := encodePages(cp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := decodeBackupInventoryPages(before, nil)
+	decoded, err := decodePages(before, nil)
 	if err != nil || !reflect.DeepEqual(decoded, cp) {
 		t.Fatal("roundtrip differs", err)
 	}
@@ -33,7 +35,7 @@ func TestInventoryPagesPreserveContentAndWriteOnlyChangedPartition(t *testing.T)
 	cp.Current.References[o.Key] = o
 	cp.Current.Cursor = "next-page"
 	cp.Current.Pages++
-	after, err := encodeBackupInventoryPages(cp)
+	after, err := encodePages(cp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +51,7 @@ func TestInventoryPagesPreserveContentAndWriteOnlyChangedPartition(t *testing.T)
 	}
 	cp.Complete = cp.Current
 	cp.Current = nil
-	complete, err := encodeBackupInventoryPages(cp)
+	complete, err := encodePages(cp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +59,7 @@ func TestInventoryPagesPreserveContentAndWriteOnlyChangedPartition(t *testing.T)
 		t.Fatal("completion rewrote immutable generation pages")
 	}
 	for _, mode := range []string{"missing", "corrupt", "extra"} {
-		broken, err := encodeBackupInventoryPages(cp)
+		broken, err := encodePages(cp)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +73,7 @@ func TestInventoryPagesPreserveContentAndWriteOnlyChangedPartition(t *testing.T)
 			}
 			break
 		}
-		if _, err := decodeBackupInventoryPages(broken, nil); err == nil {
+		if _, err := decodePages(broken, nil); err == nil {
 			t.Fatal("accepted", mode)
 		}
 	}

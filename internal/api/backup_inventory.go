@@ -2,410 +2,97 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"net/url"
-	"os"
-	"path"
-	"sort"
-	"strings"
-	"time"
 
 	"fugue/internal/backupusage"
+	"fugue/internal/backupusage/inventoryscan"
 	"fugue/internal/model"
 	"fugue/internal/store"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-type BackupInventoryConfig struct{ RefreshInterval, PageTimeout, RetryInterval, MaxScanAge time.Duration }
+type BackupInventoryConfig = inventoryscan.Config
 
-func BackupInventoryConfigFromEnv() BackupInventoryConfig {
-	read := func(key string, fallback time.Duration) time.Duration {
-		d, e := time.ParseDuration(os.Getenv(key))
-		if e != nil || d <= 0 {
-			return fallback
+func BackupInventoryConfigFromEnv() BackupInventoryConfig { return inventoryscan.ConfigFromEnv() }
+
+func (s *Server) StartBackgroundBackupInventory(ctx context.Context) {
+	s.backupInventory.Run(ctx, func(err error) {
+		if s.log != nil {
+			s.log.Printf("backup inventory checkpoint refresh failed: %v", err)
 		}
-		return d
-	}
-	return BackupInventoryConfig{read("FUGUE_BACKUP_INVENTORY_REFRESH_INTERVAL", 15*time.Minute), read("FUGUE_BACKUP_INVENTORY_PAGE_TIMEOUT", 10*time.Second), read("FUGUE_BACKUP_INVENTORY_RETRY_INTERVAL", 30*time.Second), read("FUGUE_BACKUP_INVENTORY_MAX_SCAN_AGE", 24*time.Hour)}
-}
-func (c BackupInventoryConfig) normalized() BackupInventoryConfig {
-	d := BackupInventoryConfig{15 * time.Minute, 10 * time.Second, 30 * time.Second, 24 * time.Hour}
-	if c.RefreshInterval > 0 {
-		d.RefreshInterval = c.RefreshInterval
-	}
-	if c.PageTimeout > 0 {
-		d.PageTimeout = c.PageTimeout
-	}
-	if c.RetryInterval > 0 {
-		d.RetryInterval = c.RetryInterval
-	}
-	if c.MaxScanAge > 0 {
-		d.MaxScanAge = c.MaxScanAge
-	}
-	return d
+	})
 }
 
-// Memory and checkpoint size depend on known artifact references and owners,
-// not on the number of unreferenced physical objects in the bucket.
-type backupInventoryTotals = backupusage.InventoryTotals
-type backupInventoryObject = backupusage.InventoryObject
-type backupInventoryScan struct {
-	NamespaceOwner     string
-	Generation         string
-	StartedAt          time.Time
-	FinishedAt         *time.Time
-	Cursor             string
-	LastKey            string
-	Pages              int
-	Objects            int
-	Wanted             map[string]bool
-	References         map[string]backupInventoryObject
-	Totals             map[string]backupInventoryTotals
-	RepositoryPrefixes []string
-}
-type backupInventoryCheckpoint struct {
-	Version     int
-	Current     *backupInventoryScan
-	Complete    *backupInventoryScan
-	LastAttempt time.Time
-	NextAttempt time.Time
-	Error       string
-}
-type backupInventoryGroup struct {
-	key      string
-	backends []model.BackupBackend
+func newBackupInventory(db *store.Store, cfg BackupInventoryConfig) *inventoryscan.Service {
+	return inventoryscan.New(backupInventoryStore{db}, openBackupInventory, backupArtifactObjectKeysForDeletion, cfg, backupFailedRunGCGrace)
 }
 
-func backupInventoryKey(backends []model.BackupBackend) string {
-	// Backend identity, ownership and credential revision are part of the cache
-	// boundary. Only a digest is persisted; credentials never enter a checkpoint.
-	copyBackends := append([]model.BackupBackend(nil), backends...)
-	for i := range copyBackends {
-		copyBackends[i].CreatedAt = time.Time{}
-		copyBackends[i].UpdatedAt = time.Time{}
-	}
-	sort.Slice(copyBackends, func(i, j int) bool { return copyBackends[i].ID < copyBackends[j].ID })
-	b, _ := json.Marshal(copyBackends)
-	h := sha256.Sum256(b)
-	return "backup-inventory/v3/" + hex.EncodeToString(h[:])
-}
-
-// Repository blocks are owned by the snapshot engine, not by a single artifact.
-// Derive the boundary from durable engine metadata, never a hardcoded directory.
 func backupRepositoryPrefix(artifact model.BackupArtifact, backend model.DataBackend) string {
-	if artifact.Kind != model.BackupArtifactKindLonghornSnapshot {
-		return ""
-	}
-	u, err := url.Parse(artifact.Manifest.Metadata["backup_target_url"])
-	if err != nil || u.Scheme != "s3" || u.User == nil || u.User.Username() != backend.Bucket || u.RawQuery != "" || u.Fragment != "" {
-		return ""
-	}
-	prefix := strings.TrimPrefix(u.Path, "/")
-	prefix = strings.TrimSuffix(prefix, "/")
-	if prefix == "" || path.Clean(prefix) != prefix || strings.ContainsRune(prefix, '\x00') {
-		return ""
-	}
-	root := strings.Trim(backend.Prefix, "/")
-	if root != "" && !strings.HasPrefix(prefix, root+"/") {
-		return ""
-	}
-	return prefix + "/"
-}
-func (s *Server) backupInventoryGroups() (map[string]*backupInventoryGroup, error) {
-	return backupInventoryGroups(s.store)
+	return inventoryscan.RepositoryPrefix(artifact, backend)
 }
 
-func backupInventoryGroups(db *store.Store) (map[string]*backupInventoryGroup, error) {
-	backends, err := db.ListBackupBackends("", true)
+type backupInventoryStore struct{ db *store.Store }
+
+func (s backupInventoryStore) Backends() ([]model.BackupBackend, error) {
+	return s.db.ListBackupBackends("", true)
+}
+
+func (s backupInventoryStore) BackendForInventory(id string) (model.BackupBackend, error) {
+	return s.db.GetBackupBackendForUse(id, "", true)
+}
+
+func (s backupInventoryStore) Artifacts() ([]model.BackupArtifact, error) {
+	records, err := s.db.ListBackupUsageArtifacts("", true)
 	if err != nil {
 		return nil, err
 	}
-	groups := map[string]*backupInventoryGroup{}
-	for _, b := range backends {
-		if b.Provider != model.DataBackendProviderCloudflareR2 {
-			continue
-		}
-		b, err = db.GetBackupBackendForUse(b.ID, "", true)
-		if err != nil {
-			return nil, err
-		}
-		key := backupusage.NamespaceOf(model.BackupBackendAsDataBackend(b)).Key()
-		if groups[key] == nil {
-			groups[key] = &backupInventoryGroup{}
-		}
-		groups[key].backends = append(groups[key].backends, b)
+	artifacts := make([]model.BackupArtifact, len(records))
+	for i, record := range records {
+		artifacts[i] = record.Artifact
 	}
-	for _, g := range groups {
-		g.key = backupInventoryKey(g.backends)
-	}
-	return groups, nil
+	return artifacts, nil
 }
 
-func (s *Server) StartBackgroundBackupInventory(ctx context.Context) {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	next := map[string]time.Time{}
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		groups, err := s.backupInventoryGroups()
-		if err == nil {
-			live := map[string]bool{}
-			for _, g := range groups {
-				live[g.key] = true
-				if time.Now().Before(next[g.key]) {
-					continue
-				}
-				var due time.Time
-				due, err = s.advanceBackupInventoryScheduled(ctx, g)
-				if err != nil {
-					next[g.key] = time.Now().Add(s.backupInventoryConfig.normalized().RetryInterval)
-					break
-				}
-				next[g.key] = due
-			}
-			for key := range next {
-				if !live[key] {
-					delete(next, key)
-				}
-			}
-		}
-		if err != nil && ctx.Err() == nil && s.log != nil {
-			s.log.Printf("backup inventory checkpoint refresh failed: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-func (s *Server) advanceBackupInventories(ctx context.Context) error {
-	groups, err := s.backupInventoryGroups()
-	if err != nil {
-		return err
-	}
-	for _, g := range groups {
-		if err = s.advanceBackupInventory(ctx, g); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-func (s *Server) advanceBackupInventory(parent context.Context, g *backupInventoryGroup) error {
-	_, err := s.advanceBackupInventoryScheduled(parent, g)
-	return err
+func (s backupInventoryStore) ReadPages(ctx context.Context, key string) (inventoryscan.Pages, []byte, error) {
+	pages, raw, err := s.db.ReadObservationPages(ctx, key)
+	return inventoryscan.Pages(pages), raw, err
 }
 
-func (s *Server) advanceBackupInventoryScheduled(parent context.Context, g *backupInventoryGroup) (time.Time, error) {
-	cfg := s.backupInventoryConfig.normalized()
-	now := time.Now().UTC()
-	var next time.Time
-	ctx, cancel := context.WithTimeout(parent, cfg.PageTimeout+5*time.Second)
-	defer cancel()
-	advance := func(cp *backupInventoryCheckpoint) (bool, error) {
-		if now.Before(cp.NextAttempt) {
-			next = cp.NextAttempt
-			return false, nil
-		}
-		if cp.Current == nil && cp.Complete != nil && cp.Complete.FinishedAt != nil && now.Sub(*cp.Complete.FinishedAt) < cfg.RefreshInterval {
-			next = cp.Complete.FinishedAt.Add(cfg.RefreshInterval)
-			return false, nil
-		}
-		backend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(g.backends[0]))
-		if err != nil {
-			return false, err
-		}
-		namespace := backupusage.NamespaceOf(backend.backend)
-		if !namespace.Measurable() {
-			return false, errors.New("backup namespace is not measurable")
-		}
-		if cp.Current == nil || now.Sub(cp.Current.StartedAt) > cfg.MaxScanAge {
-			cp.Current = &backupInventoryScan{Generation: model.NewID("inventory"), StartedAt: now, Wanted: map[string]bool{}, References: map[string]backupInventoryObject{}, Totals: map[string]backupInventoryTotals{}}
-			owner := g.backends[0].TenantID
-			for _, b := range g.backends {
-				if b.TenantID != owner {
-					owner = ""
-					break
-				}
-			}
-			cp.Current.NamespaceOwner = owner
-			artifacts, err := s.store.ListBackupUsageArtifacts("", true)
-			if err != nil {
-				return false, err
-			}
-			ids := map[string]bool{}
-			for _, b := range g.backends {
-				ids[b.ID] = true
-			}
-			for _, a := range artifacts {
-				if !ids[a.Artifact.BackendID] {
-					continue
-				}
-				if prefix := backupRepositoryPrefix(a.Artifact, backend.backend); prefix != "" {
-					found := false
-					for _, p := range cp.Current.RepositoryPrefixes {
-						if p == prefix {
-							found = true
-							break
-						}
-					}
-					if !found {
-						cp.Current.RepositoryPrefixes = append(cp.Current.RepositoryPrefixes, prefix)
-					}
-				}
-				keys, err := backupArtifactObjectKeysForDeletion(a.Artifact)
-				if err != nil {
-					continue
-				}
-				for _, k := range keys {
-					cp.Current.Wanted[backend.objectKey(k)] = true
-				}
-			}
-		}
-		scan := cp.Current
-		cp.LastAttempt = now
-		pageCtx, pageCancel := context.WithTimeout(ctx, cfg.PageTimeout)
-		defer pageCancel()
-		var pageErr error
-		// Equivalent namespace credentials may have different permissions. Try each
-		// declared backend within one bounded page budget.
-		var response *s3.ListObjectsV2Output
-		for _, b := range g.backends {
-			candidate, e := newDataObjectBackend(model.BackupBackendAsDataBackend(b))
-			if e != nil {
-				pageErr = e
-				continue
-			}
-			var token *string
-			if scan.Cursor != "" {
-				token = aws.String(scan.Cursor)
-			}
-			response, pageErr = candidate.client.ListObjectsV2(pageCtx, &s3.ListObjectsV2Input{Bucket: aws.String(candidate.backend.Bucket), Prefix: aws.String(candidate.objectKey("")), ContinuationToken: token, MaxKeys: aws.Int32(1000)})
-			if pageErr == nil {
-				break
-			}
-		}
-		if pageErr != nil {
-			cp.Error = "list_failed"
-			if errors.Is(pageErr, context.DeadlineExceeded) {
-				cp.Error = "page_timeout"
-			}
-			cp.NextAttempt = now.Add(cfg.RetryInterval)
-			next = cp.NextAttempt
-			return true, nil
-		}
-		nextCursor := aws.ToString(response.NextContinuationToken)
-		if aws.ToBool(response.IsTruncated) && (nextCursor == "" || nextCursor == scan.Cursor) {
-			cp.Error = "invalid_pagination"
-			cp.NextAttempt = now.Add(cfg.RetryInterval)
-			next = cp.NextAttempt
-			return true, nil
-		}
-		objects := make([]backupInventoryObject, 0, len(response.Contents))
-		for _, o := range response.Contents {
-			objects = append(objects, backupInventoryObject{Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), LastModified: aws.ToTime(o.LastModified), ObservedAt: now})
-		}
-		sort.Slice(objects, func(i, j int) bool { return objects[i].Key < objects[j].Key })
-		for _, o := range objects {
-			if o.Key <= scan.LastKey {
-				continue
-			}
-			scan.LastKey = o.Key
-			scan.Objects++
-			if !namespace.ContainsPhysicalKey(o.Key) {
-				continue
-			}
-			owner := ""
-			logical, ok := backend.logicalObjectKey(o.Key)
-			if ok {
-				parts := strings.Split(logical, "/")
-				if len(parts) > 1 && (parts[0] == "apps" || parts[0] == "data-workspaces") {
-					owner = parts[1]
-				}
-			}
-			add := func(key string) {
-				v := scan.Totals[key]
-				v.Count++
-				v.Bytes += o.Size
-				for _, prefix := range scan.RepositoryPrefixes {
-					if !scan.Wanted[o.Key] && strings.HasPrefix(o.Key, prefix) {
-						v.RepositoryCount++
-						v.RepositoryBytes += o.Size
-						scan.Totals[key] = v
-						return
-					}
-				}
-				if backupusage.ObjectWithinCleanupGrace(o.LastModified, o.ObservedAt, backupFailedRunGCGrace) {
-					v.ProvisionalCount++
-					v.ProvisionalBytes += o.Size
-				}
-				scan.Totals[key] = v
-			}
-			add("all")
-			if owner != "" {
-				add("tenant:" + owner)
-			}
-			if scan.Wanted[o.Key] {
-				scan.References[o.Key] = o
-			}
-		}
-		scan.Pages++
-		scan.Cursor = nextCursor
-		cp.Error = ""
-		cp.NextAttempt = time.Time{}
-		if !aws.ToBool(response.IsTruncated) {
-			finished := time.Now().UTC()
-			scan.FinishedAt = &finished
-			scan.Cursor = ""
-			cp.Complete = scan
-			cp.Current = nil
-			next = scan.FinishedAt.Add(cfg.RefreshInterval)
-		}
-		return true, nil
-	}
-	legacy := func(raw []byte) ([]byte, error) {
-		cp, err := decodeBackupInventoryPages(store.ObservationPages{}, raw)
-		if err != nil {
-			return nil, err
-		}
-		dirty, err := advance(&cp)
-		if err != nil || !dirty {
-			return nil, err
-		}
-		return json.Marshal(cp)
-	}
-	_, err := s.store.UpdateObservationPages(ctx, g.key, func(pages store.ObservationPages, raw []byte) (store.ObservationPages, error) {
-		cp, err := decodeBackupInventoryPages(pages, raw)
-		if err != nil {
-			return store.ObservationPages{}, err
-		}
-		dirty, err := advance(&cp)
-		if err != nil || !dirty {
-			return store.ObservationPages{}, err
-		}
-		return encodeBackupInventoryPages(cp)
+func (s backupInventoryStore) UpdatePages(ctx context.Context, key string, update func(inventoryscan.Pages, []byte) (inventoryscan.Pages, error), legacy func([]byte) ([]byte, error)) (bool, error) {
+	return s.db.UpdateObservationPages(ctx, key, func(pages store.ObservationPages, raw []byte) (store.ObservationPages, error) {
+		result, err := update(inventoryscan.Pages(pages), raw)
+		return store.ObservationPages(result), err
 	}, legacy)
-	return next, err
 }
 
-func readBackupInventory(ctx context.Context, db *store.Store, groupKey string) (backupInventoryCheckpoint, error) {
-	groups, err := backupInventoryGroups(db)
+func openBackupInventory(record model.BackupBackend) (inventoryscan.ObjectReader, error) {
+	backend, err := newDataObjectBackend(model.BackupBackendAsDataBackend(record))
 	if err != nil {
-		return backupInventoryCheckpoint{}, err
+		return inventoryscan.ObjectReader{}, err
 	}
-	g := groups[groupKey]
-	if g == nil {
-		return backupInventoryCheckpoint{}, errors.New("backup namespace no longer configured")
-	}
-	pages, raw, err := db.ReadObservationPages(ctx, g.key)
-	if err != nil {
-		return backupInventoryCheckpoint{}, err
-	}
-	return decodeBackupInventoryPages(pages, raw)
+	return inventoryscan.ObjectReader{
+		Namespace: backupusage.NamespaceOf(backend.backend),
+		ListPage: func(ctx context.Context, cursor string) (inventoryscan.Page, error) {
+			var token *string
+			if cursor != "" {
+				token = aws.String(cursor)
+			}
+			response, err := backend.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+				Bucket: aws.String(backend.backend.Bucket), Prefix: aws.String(backend.objectKey("")),
+				ContinuationToken: token, MaxKeys: aws.Int32(1000),
+			})
+			if err != nil {
+				return inventoryscan.Page{}, err
+			}
+			page := inventoryscan.Page{Cursor: aws.ToString(response.NextContinuationToken), More: aws.ToBool(response.IsTruncated)}
+			page.Objects = make([]backupusage.InventoryObject, 0, len(response.Contents))
+			for _, o := range response.Contents {
+				page.Objects = append(page.Objects, backupusage.InventoryObject{
+					Key: aws.ToString(o.Key), Size: aws.ToInt64(o.Size), LastModified: aws.ToTime(o.LastModified),
+				})
+			}
+			return page, nil
+		},
+	}, nil
 }
