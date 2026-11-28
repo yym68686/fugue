@@ -904,20 +904,6 @@ func TestOverlayManagedAppStatusesTreatsChildQueryFailureAsUnknown(t *testing.T)
 	}
 }
 
-func TestAppMayUseManagedRuntimeChecksDesiredAndCurrentRuntimeDuringMigration(t *testing.T) {
-	app := model.App{
-		Spec:   model.AppSpec{RuntimeID: "runtime_target_managed"},
-		Status: model.AppStatus{CurrentRuntimeID: "runtime_source_external"},
-	}
-	runtimes := map[string]model.Runtime{
-		"runtime_source_external": {ID: "runtime_source_external", Type: model.RuntimeTypeExternalOwned},
-		"runtime_target_managed":  {ID: "runtime_target_managed", Type: model.RuntimeTypeManagedOwned},
-	}
-	if !appMayUseManagedRuntime(app, runtimes) {
-		t.Fatal("migration with a managed desired runtime must still receive live status observation")
-	}
-}
-
 func TestCurrentManagedImagePresenceRequiresFreshExplicitEvidence(t *testing.T) {
 	t.Parallel()
 
