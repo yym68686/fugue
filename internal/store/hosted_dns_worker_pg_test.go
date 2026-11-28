@@ -14,17 +14,22 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestHostedDNSWorkerUsesBoundedDatabaseRole(t *testing.T) {
-	t.Parallel()
-	ctx := t.Context()
-	api := newHostedDNSTestStore(t)
+func installHostedDNSWorkerFunctions(t *testing.T, api *Store) {
+	t.Helper()
 	script, err := os.ReadFile("../schemamigrate/hosted_dns_flatten_worker.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.db.ExecContext(ctx, string(script)); err != nil {
+	if _, err := api.db.ExecContext(t.Context(), string(script)); err != nil {
 		t.Fatalf("install hosted DNS capability: %v", err)
 	}
+}
+
+func TestHostedDNSWorkerUsesBoundedDatabaseRole(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	api := newHostedDNSTestStore(t)
+	installHostedDNSWorkerFunctions(t, api)
 	dsn, err := url.Parse(api.databaseURL)
 	if err != nil {
 		t.Fatal(err)
@@ -152,20 +157,54 @@ EXECUTE FUNCTION hosted_dns_test_reject_checkpoint();
 	if err != nil || observed.FlattenStatus != model.DNSRecordFlattenStatusError || observed.ResolveError != "flatten target is empty" {
 		t.Fatalf("worker did not publish the bounded DNS result: %+v %v", observed, err)
 	}
+	committed, err := worker.Progress(ctx)
+	if err != nil || committed.Owner != "worker" || !committed.CompletedAt.Valid ||
+		!committed.Updated.Valid || committed.Updated.Int64 != 1 || committed.Cursor != record.ID {
+		t.Fatalf("worker did not persist the committed page: %+v %v", committed, err)
+	}
+	// A second Pod may be Ready before the first has drained. Hold the
+	// same session lock as an old in-flight pass, then disconnect it.
+	old, err := restricted.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer old.Close()
+	if _, err := old.ExecContext(ctx, `SELECT pg_advisory_lock(hashtextextended('hosted-dns-flatten/v1/run',0))`); err != nil {
+		t.Fatal(err)
+	}
 	replacement, err := hosteddns.OpenPostgresWorker(ctx, dsn.String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer replacement.Close()
+	if more, err := replacement.Reconcile(ctx); err != nil || more {
+		t.Fatalf("replacement did not defer to the old pass: more=%t err=%v", more, err)
+	}
 	progress, err = replacement.Progress(ctx)
-	if err != nil || progress.Owner != "worker" || !progress.CompletedAt.Valid || !progress.Updated.Valid || progress.Updated.Int64 != 1 || progress.Cursor != record.ID {
-		t.Fatalf("worker restart lost the committed DNS pass: %+v %v", progress, err)
+	if err != nil || progress.Owner != committed.Owner || progress.Cursor != committed.Cursor ||
+		!progress.CompletedAt.Valid || !progress.CompletedAt.Time.Equal(committed.CompletedAt.Time) || progress.Updated != committed.Updated {
+		t.Fatalf("replacement changed the committed DNS pass while the old writer held the lock: %+v %v", progress, err)
+	}
+	// Closing a pooled Conn alone would return the locked session to its
+	// pool. Terminate the simulated old process's connection explicitly.
+	var oldPID int
+	if err := old.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&oldPID); err != nil {
+		t.Fatal(err)
+	}
+	var terminated bool
+	if err := api.db.QueryRowContext(ctx, "SELECT pg_terminate_backend($1, 2000)", oldPID).Scan(&terminated); err != nil || !terminated {
+		t.Fatalf("could not terminate fixture's old DNS session: terminated=%t err=%v", terminated, err)
 	}
 	if more, err := replacement.Reconcile(ctx); err != nil || more {
 		t.Fatalf("last page did not finish the sweep: more=%t err=%v", more, err)
 	}
 	progress, err = replacement.Progress(ctx)
-	if err != nil || progress.Cursor != "" || progress.Updated.Int64 != 0 {
+	if err != nil || progress.Owner != "worker" || progress.Cursor != "" || !progress.Updated.Valid ||
+		progress.Updated.Int64 != 0 || !progress.CompletedAt.Valid || !progress.CompletedAt.Time.After(committed.CompletedAt.Time) {
 		t.Fatalf("worker did not start its next traversal: %+v %v", progress, err)
+	}
+	after, err := api.GetDNSRecord(zone.ID, record.ID)
+	if err != nil || !after.UpdatedAt.Equal(observed.UpdatedAt) {
+		t.Fatalf("replacement replayed the committed page: %+v %v", after, err)
 	}
 }

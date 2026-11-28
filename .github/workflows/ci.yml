@@ -5105,9 +5105,43 @@ jobs:
             --api-intent deploy/releases/api/intent.json \
             > "$RUNNER_TEMP/fugue-sample-retention-before-api-rollout.json"
           echo 'selected=true' >> "$GITHUB_OUTPUT"
+      - name: Observe Hosted DNS progress before retiring the API flattener
+        id: hosted_dns_before
+        run: |
+          set -euo pipefail
+          retired=internal/api/hosted_dns_refresh.go
+          if [[ -e "$retired" ]]; then exit 0; fi
+          previous=$(jq -er '.expectedPreviousConfigSha | strings | select(test("^[a-f0-9]{40}$"))' deploy/releases/api/intent.json)
+          if ! git cat-file -e "$previous:$retired" 2>/dev/null; then exit 0; fi
+          python3 -m unittest scripts.test_verify_hosted_dns_api_rollout
+          python3 -m scripts.verify_hosted_dns_api_rollout \
+            deploy/releases/hosted-dns-worker/database.json deploy/releases/hosted-dns-worker/writer-handoff.json \
+            deploy/environments/production/observability/scrape-policy.json --api-intent deploy/releases/api/intent.json \
+            > "$RUNNER_TEMP/fugue-hosted-dns-before-api-rollout.json"
+          echo 'selected=true' >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/deploy-declarative-component
         id: deploy_api_component
         with: {component: api, registry-token: '${{ secrets.GITHUB_TOKEN }}'}
+      - name: Verify the same Hosted DNS worker committed after replacement of both API Pods
+        if: ${{ !cancelled() && steps.hosted_dns_before.outputs.selected == 'true' && steps.deploy_api_component.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 -m scripts.verify_hosted_dns_api_rollout \
+            deploy/releases/hosted-dns-worker/database.json deploy/releases/hosted-dns-worker/writer-handoff.json \
+            deploy/environments/production/observability/scrape-policy.json --api-intent deploy/releases/api/intent.json \
+            --before "$RUNNER_TEMP/fugue-hosted-dns-before-api-rollout.json" \
+            --api-receipt "$RUNNER_TEMP/fugue-component-artifact/fugue-api-artifact-receipt.json" \
+            > "$RUNNER_TEMP/fugue-hosted-dns-after-api-rollout.json"
+      - name: Retain Hosted DNS API rollout evidence
+        if: always() && steps.hosted_dns_before.outputs.selected == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fugue-hosted-dns-api-rollout-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/fugue-hosted-dns-before-api-rollout.json
+            ${{ runner.temp }}/fugue-hosted-dns-after-api-rollout.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Verify all sample retention targets advanced during the API rollout
         if: ${{ !cancelled() && steps.sample_retention_before.outputs.selected == 'true' && steps.deploy_api_component.outcome == 'success' }}
         run: |

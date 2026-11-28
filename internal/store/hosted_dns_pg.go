@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -191,77 +190,6 @@ WHERE zone_id = $1
 		return model.DNSRecord{}, mapDBErr(err)
 	}
 	return record, nil
-}
-
-// CommitHostedDNSFlattenObservation publishes derived answers for the exact
-// record observed before resolution. A delayed result cannot recreate a
-// deleted record, replace a user's updated intent, or update an inactive zone.
-func (s *Store) CommitHostedDNSFlattenObservation(ctx context.Context, zone model.HostedZone, observed, resolved model.DNSRecord) (bool, error) {
-	return s.commitHostedDNSFlattenObservation(ctx, HostedDNSFlattenAPI, zone, observed, resolved)
-}
-
-func (s *Store) commitHostedDNSFlattenObservation(ctx context.Context, writer HostedDNSFlattenWriter, zone model.HostedZone, observed, resolved model.DNSRecord) (bool, error) {
-	if zone.ID == "" || observed.ID == "" || observed.ZoneID != zone.ID || observed.TenantID != zone.TenantID ||
-		observed.CreatedAt.IsZero() || observed.UpdatedAt.IsZero() {
-		return false, ErrInvalidInput
-	}
-	status, flattenStatus := model.NormalizeDNSRecordStatus(resolved.Status), model.NormalizeDNSRecordFlattenStatus(resolved.FlattenStatus)
-	if (status != model.DNSRecordStatusActive && status != model.DNSRecordStatusDegraded) ||
-		(flattenStatus != model.DNSRecordFlattenStatusResolved && flattenStatus != model.DNSRecordFlattenStatusStale && flattenStatus != model.DNSRecordFlattenStatusError) {
-		return false, ErrInvalidInput
-	}
-	a, err := marshalJSON(normalizeHostedDNSIPs(resolved.FlattenedA, true))
-	if err != nil {
-		return false, err
-	}
-	aaaa, err := marshalJSON(normalizeHostedDNSIPs(resolved.FlattenedAAAA, false))
-	if err != nil {
-		return false, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-	allowed, err := admitHostedDNSFlattenWriter(ctx, tx, writer)
-	if err != nil || !allowed {
-		return false, err
-	}
-	var present bool
-	err = tx.QueryRowContext(ctx, `
-SELECT true FROM fugue_dns_zones
-WHERE id=$1 AND tenant_id=$2 AND project_id=$3 AND status NOT IN ('deleted','suspended','pending_ownership')
-FOR UPDATE
-`, zone.ID, zone.TenantID, zone.ProjectID).Scan(&present)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	updated, err := tx.ExecContext(ctx, `
-UPDATE fugue_dns_records
-SET flattened_a_json=$6, flattened_aaaa_json=$7, flatten_status=$8, status=$9,
-    last_resolved_at=$10, resolve_error=$11, last_message=$12,
-    updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
-WHERE id=$1 AND zone_id=$2 AND tenant_id=$3 AND created_at=$4 AND updated_at=$5
-  AND status <> 'disabled'
-  AND (type IN ('ALIAS','ANAME') OR (type='CNAME' AND flatten_mode NOT IN ('','none')))
-`, observed.ID, zone.ID, zone.TenantID, observed.CreatedAt, observed.UpdatedAt, a, aaaa,
-		flattenStatus, status, resolved.LastResolvedAt, strings.TrimSpace(resolved.ResolveError), strings.TrimSpace(resolved.LastMessage))
-	if err != nil {
-		return false, err
-	}
-	changed, err := updated.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return changed == 1, nil
 }
 
 func (s *Store) pgPutDNSRecord(zone model.HostedZone, record model.DNSRecord, overwrite bool) (model.DNSRecord, error) {
