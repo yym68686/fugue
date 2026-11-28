@@ -113,6 +113,17 @@ CREATE TABLE IF NOT EXISTS fugue_control.registry_rehome_no_write (
     FOREIGN KEY (intent_digest) REFERENCES fugue_control.execution_results(intent_digest) DEFERRABLE INITIALLY DEFERRED
 );
 
+-- This table is not granted to the dispatch or ordinary result roles.
+-- The recovery material lives in independent custody; retain the signed pins.
+CREATE TABLE IF NOT EXISTS fugue_control.registry_rehome_applied (
+    intent_digest text PRIMARY KEY REFERENCES fugue_control.registry_rehome_admissions(intent_digest),
+    admission_digest text NOT NULL CHECK (admission_digest ~ '^sha256:[0-9a-f]{64}$'),
+    evidence_digest text NOT NULL UNIQUE CHECK (evidence_digest ~ '^sha256:[0-9a-f]{64}$'),
+    baseline_digest text NOT NULL CHECK (baseline_digest ~ '^sha256:[0-9a-f]{64}$'),
+    envelope bytea NOT NULL CHECK (octet_length(envelope) BETWEEN 1 AND 8192),
+    FOREIGN KEY (intent_digest) REFERENCES fugue_control.execution_results(intent_digest) DEFERRABLE INITIALLY DEFERRED
+);
+
 -- Ordinary runtime roles must not have INSERT on registry_rehome_admissions.
 -- The deferred check makes a raw ordinary claim fail without the atomic
 -- admission append. It does not substitute for signature/provider checks.
@@ -126,18 +137,27 @@ BEGIN
         RETURN NULL;
     END IF;
     IF TG_TABLE_NAME='execution_results' THEN
-        -- A draft is never a verified release; only an independently
-        -- closed no-write result can keep the exact original head.
-        IF NEW.outcome <> 'not_applied'
-            OR intent->>'expectedGeneration' IS DISTINCT FROM NEW.generation::text
-            OR intent->>'expectedCurrentDigest' IS DISTINCT FROM NEW.verified_digest
-            OR NOT EXISTS (SELECT FROM fugue_control.registry_rehome_no_write closure
+        IF NEW.outcome = 'not_applied'
+            AND intent->>'expectedGeneration' = NEW.generation::text
+            AND intent->>'expectedCurrentDigest' = NEW.verified_digest
+            AND EXISTS (SELECT FROM fugue_control.registry_rehome_no_write closure
                 JOIN fugue_control.registry_rehome_admissions admission USING (intent_digest)
                 WHERE closure.intent_digest=NEW.intent_digest AND closure.evidence_digest=NEW.evidence_digest
-                    AND closure.admission_digest=admission.evidence_digest) THEN
-            RAISE EXCEPTION 'registry rehome result requires dedicated no-write closure over the exact predecessor' USING ERRCODE='23514';
+                    AND closure.admission_digest=admission.evidence_digest)
+            AND NOT EXISTS (SELECT FROM fugue_control.registry_rehome_applied WHERE intent_digest=NEW.intent_digest) THEN
+            RETURN NULL;
         END IF;
-        RETURN NULL;
+        IF NEW.outcome = 'applied'
+            AND (intent->>'expectedGeneration')::numeric + 1 = NEW.generation
+            AND NEW.verified_digest NOT IN (intent->>'expectedCurrentDigest', intent->>'targetDigest')
+            AND EXISTS (SELECT FROM fugue_control.registry_rehome_applied closure
+                JOIN fugue_control.registry_rehome_admissions admission USING (intent_digest)
+                WHERE closure.intent_digest=NEW.intent_digest AND closure.evidence_digest=NEW.evidence_digest
+                    AND closure.baseline_digest=NEW.verified_digest AND closure.admission_digest=admission.evidence_digest)
+            AND NOT EXISTS (SELECT FROM fugue_control.registry_rehome_no_write WHERE intent_digest=NEW.intent_digest) THEN
+            RETURN NULL;
+        END IF;
+        RAISE EXCEPTION 'registry rehome result requires a matching dedicated terminal receipt' USING ERRCODE='23514';
     END IF;
     IF NOT EXISTS (SELECT FROM fugue_control.registry_rehome_admissions
             WHERE intent_digest=NEW.intent_digest AND approval_digest=NEW.approval_digest AND fence=NEW.fence) THEN
@@ -147,6 +167,27 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION fugue_control.require_registry_rehome_admission() FROM PUBLIC;
+
+-- A dedicated receipt cannot be appended afterwards to a terminal result of
+-- another type. Use a deferred check so the receipt can be inserted first.
+CREATE OR REPLACE FUNCTION fugue_control.require_matching_rehome_result() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    IF TG_TABLE_NAME='registry_rehome_applied' THEN
+        IF EXISTS (SELECT FROM fugue_control.execution_results result
+            WHERE result.intent_digest=NEW.intent_digest AND result.outcome='applied'
+                AND result.verified_digest=NEW.baseline_digest AND result.evidence_digest=NEW.evidence_digest) THEN
+            RETURN NULL;
+        END IF;
+    ELSIF EXISTS (SELECT FROM fugue_control.execution_results result
+        WHERE result.intent_digest=NEW.intent_digest AND result.outcome='not_applied'
+            AND result.evidence_digest=NEW.evidence_digest) THEN
+        RETURN NULL;
+    END IF;
+    RAISE EXCEPTION 'registry rehome receipt has no matching result' USING ERRCODE='23514';
+END;
+$$;
+REVOKE ALL ON FUNCTION fugue_control.require_matching_rehome_result() FROM PUBLIC;
 
 DO $$
 BEGIN
@@ -161,6 +202,18 @@ BEGIN
         CREATE TRIGGER registry_rehome_result_guard
             AFTER INSERT ON fugue_control.execution_results
             FOR EACH ROW EXECUTE FUNCTION fugue_control.require_registry_rehome_admission();
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_trigger
+        WHERE tgrelid='fugue_control.registry_rehome_applied'::pg_catalog.regclass AND tgname='registry_rehome_applied_result') THEN
+        CREATE CONSTRAINT TRIGGER registry_rehome_applied_result
+            AFTER INSERT ON fugue_control.registry_rehome_applied DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.require_matching_rehome_result();
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_trigger
+        WHERE tgrelid='fugue_control.registry_rehome_no_write'::pg_catalog.regclass AND tgname='registry_rehome_no_write_result') THEN
+        CREATE CONSTRAINT TRIGGER registry_rehome_no_write_result
+            AFTER INSERT ON fugue_control.registry_rehome_no_write DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION fugue_control.require_matching_rehome_result();
     END IF;
 END;
 $$;

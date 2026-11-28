@@ -61,6 +61,7 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	// rehome admission table, even when empty, selects a separate v2 digest.
 	if _, err := source.ExecContext(ctx, `DROP TRIGGER registry_rehome_claim_admission ON fugue_control.execution_claims;
 		DROP TRIGGER registry_rehome_result_guard ON fugue_control.execution_results;
+		DROP TABLE fugue_control.registry_rehome_applied;
 		DROP TABLE fugue_control.registry_rehome_no_write;
 		DROP TABLE fugue_control.registry_rehome_admissions`); err != nil {
 		t.Fatal(err)
@@ -75,7 +76,7 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	if err := ApplySchema(ctx, source); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.ExecContext(ctx, `DROP TABLE fugue_control.registry_rehome_no_write`); err != nil {
+	if _, err := source.ExecContext(ctx, `DROP TABLE fugue_control.registry_rehome_applied, fugue_control.registry_rehome_no_write`); err != nil {
 		t.Fatal(err)
 	}
 	v2, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
@@ -89,7 +90,20 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, v2.Digest); err == nil {
-		t.Fatal("upgraded v3 journal matched a v2 inventory digest")
+		t.Fatal("upgraded v4 journal matched a v2 inventory digest")
+	}
+	if _, err := source.ExecContext(ctx, `DROP TABLE fugue_control.registry_rehome_applied`); err != nil {
+		t.Fatal(err)
+	}
+	v3, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
+	if err != nil || v3.Format != recoveryDomainV3 {
+		t.Fatalf("legacy v3 journal checkpoint: %s %v", v3.Format, err)
+	}
+	if _, err := j.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, v3.Digest); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplySchema(ctx, source); err != nil {
+		t.Fatal(err)
 	}
 	lkg := Version{intent.Generation, intent.CurrentDigest}
 	b := Baseline{Scope: intent.scope(), Verified: lkg, EvidenceDigest: digest([]byte("baseline witness"))}
@@ -159,6 +173,50 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	if settled, err := settler.CloseWithoutWrite(ctx, "fixture-settler", closed.record, closureRaw); err != nil || !settled.Created {
 		t.Fatalf("fixture no-write settlement: %+v %v", settled, err)
 	}
+	applied := anchorRegistryRehomeFixture(t, ctx, j, key, "rehome-applied-recovery")
+	a, raw, pin := signRegistryRehomeFixture(t, applied.report(1), applied.observer)
+	appliedObserver := applied.observer.Public().(ed25519.PublicKey)
+	admissionWriter, err := NewRegistryRehomeJournal(j, applied.intent.scope(), appliedObserver, readOnlyCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appliedClaim, granted, err := admissionWriter.Reserve(ctx, "fixture-rehome", applied.record, applied.approval, raw)
+	if err != nil || !granted {
+		t.Fatalf("fixture applied reservation: %v %v", granted, err)
+	}
+	appliedWriter, err := NewRegistryRehomeAdmissionReader(closureWriter, appliedClaim.Scope, appliedObserver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := func(s string) string { return digest([]byte("fixture rehome applied " + s)) }
+	proof := RegistryRehomeAppliedEvidence{ClusterID: appliedClaim.ClusterID, ResourceID: appliedClaim.ResourceID,
+		IntentDigest: appliedClaim.IntentDigest, ApprovalDigest: appliedClaim.ApprovalDigest, Fence: appliedClaim.Fence,
+		AdmissionDigest: pin, BaselineDigest: h("baseline"), BundleDigest: h("bundle"), ReadbackDigest: h("readback"),
+		ServingEvent: h("serving event"), ServingState: h("serving state"), EndpointFreeze: h("freeze"), WriterRevocation: h("revoke"),
+		RequestDrain: h("drain"), BackupReadback: h("backup"), ObservedAt: a.ExpiresAt, ExpiresAt: a.ExpiresAt + 60}
+	message, err := proof.SigningInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof.Signature = ed25519.Sign(applied.observer, message)
+	appliedEvidence, evidencePin, err := EncodeRegistryRehomeAppliedEvidence(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.ExecContext(ctx, `INSERT INTO fugue_control.execution_results
+		(intent_digest,outcome,generation,verified_digest,evidence_digest,actor)
+		VALUES ($1,'applied',$2,$3,$4,'fixture-direct')`, applied.record, applied.intent.Generation+1, proof.BaselineDigest, evidencePin); err == nil {
+		t.Fatal("direct SQL settled a rehome without its dedicated receipt")
+	}
+	if got, err := appliedWriter.CloseApplied(ctx, "fixture-settler", applied.record, appliedEvidence,
+		func(context.Context, RegistryRehomeAppliedEvidence) error { return nil }); err != nil || !got.Created || got.Digest != evidencePin {
+		t.Fatalf("fixture applied settlement: %+v %v", got, err)
+	}
+	wrongOutcome, wrongPin := signRehomeNoWriteFixture(t, rehomeNoWriteFixture(appliedClaim, pin, closureTime), applied.observer)
+	if _, err := source.ExecContext(ctx, `INSERT INTO fugue_control.registry_rehome_no_write
+		(intent_digest,admission_digest,evidence_digest,envelope) VALUES ($1,$2,$3,$4)`, applied.record, pin, wrongPin, wrongOutcome); err == nil {
+		t.Fatal("SQL appended a contradictory no-write receipt to an applied settlement")
+	}
 
 	exporter, err := source.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -173,8 +231,8 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	other.RequestID = "after-export"
 	second, secondApproval := record(j, other)
 	checkpoint, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, snapshot)
-	if err != nil || checkpoint.Format != recoveryDomainV3 {
-		t.Fatalf("rehome checkpoint did not use v3: %s %v", checkpoint.Format, err)
+	if err != nil || checkpoint.Format != recoveryDomainV4 {
+		t.Fatalf("rehome checkpoint did not use v4: %s %v", checkpoint.Format, err)
 	}
 	live, err := j.RecoveryCheckpoint(ctx, intent.ClusterID, "")
 	if err != nil || checkpoint.Digest == live.Digest {
@@ -213,6 +271,15 @@ func TestPostgresJournalRecoveryCheckpoint(t *testing.T) {
 	verify := journalFor(reader)
 	if _, err := verify.VerifyRecoveryCheckpoint(ctx, intent.ClusterID, checkpoint.Digest); err != nil {
 		t.Fatalf("read-only verifier could not match exported backup checkpoint: %v", err)
+	}
+	recoveredApplied, err := NewRegistryRehomeAdmissionReader(verify, appliedClaim.Scope, appliedObserver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredProof, terminal, err := recoveredApplied.ReadApplied(ctx, applied.record)
+	if err != nil || recoveredProof.BaselineDigest != proof.BaselineDigest || recoveredProof.BundleDigest != proof.BundleDigest ||
+		terminal != (ExecutionResult{Applied, Version{applied.intent.Generation + 1, proof.BaselineDigest}, evidencePin}) {
+		t.Fatalf("restored journal did not recover the applied rehome result: %+v %v", terminal, err)
 	}
 	readBack, err := NewRegistryRehomeNoWriteJournal(verify, closureClaim.Scope, closureObserver,
 		func(context.Context, RegistryRehomeNoWriteEvidence) error {

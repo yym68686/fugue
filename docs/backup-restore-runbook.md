@@ -348,6 +348,27 @@ admission, write an outcome, authorize a rollout, or replace the serving and
 writer-drain evidence. A successful shadow does not mean the legacy Monitor
 pointer can be used as the relocated rollback anchor.
 
+The bootstrap's read-only recovery path for a **settled** registry rehome is:
+
+```bash
+fugue-release-bootstrap read-verified-registry-rehome-baseline "$READ_ONLY_JOURNAL_CONFIG" "$READER_ENROLLMENT" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256"
+```
+
+The enrollment names `resourceId` and `observerPublicKey`. Use a journal
+identity with SELECT only, including on `registry_rehome_applied`. This
+read checks the signed applied receipt and its exact current journal head,
+reconstructs both manifests from the independently pinned bundle, and emits
+only identities. It works without Fugue API, Kubernetes, or GitHub, but does
+not prove live health or replace a separate registry readback. A proposal,
+pending move, no-write settlement, or superseded baseline is rejected. The
+v4 journal fingerprint includes these receipts; verify a v1–v3 backup before
+running a schema migration on the restored database.
+
+Do not grant the `registry_rehome_applied` append privilege in production
+until the normal Guardian publisher, runner and rollback path can consume
+this baseline without the old monitor. The isolated settlement path tests
+the transaction but is not a production cutover command.
+
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
 Retain independent evidence of the plain freeze on every serving API

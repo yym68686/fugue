@@ -508,7 +508,8 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 		GRANT USAGE ON SCHEMA fugue_control TO fugue_fixture_rehome_reader;
 		GRANT SELECT ON fugue_control.intents, fugue_control.approvals, fugue_control.execution_claims,
-			fugue_control.execution_results, fugue_control.resource_baselines, fugue_control.registry_rehome_admissions
+			fugue_control.execution_results, fugue_control.resource_baselines, fugue_control.registry_rehome_admissions,
+			fugue_control.registry_rehome_applied
 		TO fugue_fixture_rehome_reader;
 	`); err != nil {
 		t.Fatal(err)
@@ -580,9 +581,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		LegacyRequestDrain: digest([]byte("fixture drain")), ForwardNodePull: digest([]byte("fixture forward pull")),
 		RollbackNodePull: digest([]byte("fixture rollback pull")), RegistryRetention: digest([]byte("fixture retention")),
 		ObservedAt: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix()}
-	if !writeWorkload {
-		proof.ExpiresAt = now.Add(7 * time.Second).Unix()
-	}
+	proof.ExpiresAt = now.Add(8 * time.Second).Unix()
 	msg, err := proof.SigningInput()
 	if err != nil {
 		t.Fatal(err)
@@ -843,6 +842,82 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		}
 		if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
 			t.Fatalf("joint verification mutated the journal: %+v %v", after, err)
+		}
+		if _, err := LoadVerifiedRegistryRehomeBaseline(ctx, readerLedger, scope, observer, bundle, bundleReport.BundleDigest); err == nil {
+			t.Fatal("read-only loader used an independently verified but uncommitted candidate")
+		}
+		if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 9*time.Second, true, func(context.Context) (bool, error) {
+			return time.Now().Unix() >= proof.ExpiresAt, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ep, err := slicesClient.Get(ctx, endpoints.Name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ep.Ports[0].Port = ptr.To[int32](8080)
+		if _, err := slicesClient.Update(ctx, ep, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		terminal, err := runServing(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retained.Reset()
+		if err := json.NewEncoder(&retained).Encode(terminal); err != nil {
+			t.Fatal(err)
+		}
+		afterExpiry := time.Now()
+		closure := productioncontrol.RegistryRehomeAppliedEvidence{ClusterID: scope.ClusterID, ResourceID: scope.ResourceID,
+			IntentDigest: claim.IntentDigest, ApprovalDigest: claim.ApprovalDigest, Fence: claim.Fence, AdmissionDigest: admissionDigest,
+			BaselineDigest: proposed.BaselineDigest, BundleDigest: proposed.RecoveryBundle, ReadbackDigest: terminal.Cutover.Placement.ReadbackDigest,
+			ServingEvent: terminal.EvidenceDigest, ServingState: terminal.StateDigest, ObservedAt: afterExpiry.Unix(), ExpiresAt: afterExpiry.Add(time.Minute).Unix(),
+			EndpointFreeze: digest([]byte("fixture post-expiry freeze")), WriterRevocation: digest([]byte("fixture post-expiry revocation")),
+			RequestDrain: digest([]byte("fixture post-expiry drain")), BackupReadback: digest([]byte("fixture post-expiry backup readback"))}
+		settler, err := productioncontrol.NewRegistryRehomeAdmissionReader(ledger, scope, observer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		closeWith := func(p productioncontrol.RegistryRehomeAppliedEvidence, reader *productioncontrol.RegistryRehomeAdmissionReader) (productioncontrol.Recorded, error) {
+			msg, err := p.SigningInput()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.Signature = ed25519.Sign(witness, msg)
+			wire, _, err := productioncontrol.EncodeRegistryRehomeAppliedEvidence(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return reader.CloseApplied(ctx, "fixture-applied-settler", claim.IntentDigest, wire, func(ctx context.Context, e productioncontrol.RegistryRehomeAppliedEvidence) error {
+				return verifyRegistryRehomeAppliedReadback(ctx, admin, readerLedger, ct, provider, observer, bundle, bundleReport.BundleDigest, registry, route, retained.Bytes(), e, probe)
+			})
+		}
+		bad := closure
+		bad.BaselineDigest = otherDigest
+		if got, err := closeWith(bad, settler); err == nil || got.Created {
+			t.Fatalf("closed a mismatched baseline: %+v %v", got, err)
+		}
+		reader, err := productioncontrol.NewRegistryRehomeAdmissionReader(readerLedger, scope, observer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := closeWith(closure, reader); err == nil || got.Created {
+			t.Fatalf("read-only principal appended a result: %+v %v", got, err)
+		}
+		got, err := closeWith(closure, settler)
+		if err != nil || !got.Created {
+			t.Fatalf("could not record a verified relocated baseline: %+v %v", got, err)
+		}
+		if replay, err := closeWith(closure, reader); err != nil || replay.Created || replay.Digest != got.Digest {
+			t.Fatalf("read-only restart did not replay the exact result: %+v %v", replay, err)
+		}
+		loaded, err := LoadVerifiedRegistryRehomeBaseline(ctx, readerLedger, scope, observer, bundle, bundleReport.BundleDigest)
+		if err != nil || loaded.Baseline != proposed || loaded.EvidenceDigest != got.Digest ||
+			digest(loaded.CurrentManifest) != proposed.Current.Target.ManifestDigest || digest(loaded.RollbackManifest) != proposed.Rollback.Target.ManifestDigest {
+			t.Fatalf("could not recover exact retained manifests from verified head: %+v %v", loaded.Baseline, err)
+		}
+		if _, err := LoadVerifiedRegistryRehomeBaseline(ctx, readerLedger, scope, observer, bundle, otherDigest); err == nil {
+			t.Fatal("verified loader accepted a different recovery pin")
 		}
 		return
 	}

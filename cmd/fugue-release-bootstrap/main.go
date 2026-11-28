@@ -36,6 +36,7 @@ const usage = `usage: fugue-release-bootstrap verify-release-recovery-archive AR
        fugue-release-bootstrap draft-release-registry-rehome ARCHIVE EXPECTED_SHA256 MIRROR_CONFIG
        fugue-release-bootstrap verify-release-registry-rehome BUNDLE EXPECTED_SHA256 [REGISTRY_ENDPOINT_CONFIG]
        fugue-release-bootstrap verify-release-registry-rehome-baseline BASELINE BASELINE_PIN BUNDLE BUNDLE_PIN [REGISTRY_ENDPOINT_CONFIG]
+       fugue-release-bootstrap read-verified-registry-rehome-baseline JOURNAL_CONFIG READER_CONFIG BUNDLE BUNDLE_PIN
        fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPROVAL_DIGEST ATTESTATION_FILE
        fugue-release-bootstrap CONFIG observe INTENT_DIGEST
        fugue-release-bootstrap CONFIG anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
@@ -94,6 +95,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if len(args) != 0 && args[0] == "verify-release-registry-rehome-baseline" {
 		return verifyRegistryRehomeBaseline(ctx, args[1:], out)
+	}
+	if len(args) != 0 && args[0] == "read-verified-registry-rehome-baseline" {
+		return readVerifiedRegistryRehomeBaseline(ctx, args[1:], out)
 	}
 	if len(args) < 2 {
 		return errors.New(usage)

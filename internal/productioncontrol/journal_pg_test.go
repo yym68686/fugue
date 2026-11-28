@@ -46,6 +46,7 @@ func TestPostgresJournalReplayAndAtomicAudit(t *testing.T) {
 		GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA fugue_control TO fugue_test_control_journal;
 		REVOKE INSERT ON fugue_control.registry_rehome_admissions FROM fugue_test_control_journal;
 		REVOKE INSERT ON fugue_control.registry_rehome_no_write FROM fugue_test_control_journal;
+		REVOKE INSERT ON fugue_control.registry_rehome_applied FROM fugue_test_control_journal;
 		CREATE ROLE fugue_test_rehome_journal NOLOGIN IN ROLE fugue_test_control_journal;
 		GRANT INSERT ON fugue_control.registry_rehome_admissions TO fugue_test_rehome_journal;
 	`); err != nil {

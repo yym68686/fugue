@@ -2,14 +2,18 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"fugue/internal/productioncontrol"
 	"fugue/internal/releaseguardian"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 func verifyReleaseArchive(ctx context.Context, args []string, out io.Writer) error {
@@ -158,6 +162,53 @@ func verifyRegistryRehomeBaseline(ctx context.Context, args []string, out io.Wri
 		ProposedBaseline releaseguardian.RegistryRehomeBaseline `json:"proposedBaseline"`
 		MirrorReadBack   bool                                   `json:"mirrorReadBack"`
 	}{baseline, registry != nil})
+}
+
+func readVerifiedRegistryRehomeBaseline(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 4 || !allDigests(args[3]) || !filepath.IsAbs(args[0]) || !filepath.IsAbs(args[1]) {
+		return errors.New(usage)
+	}
+	var config struct {
+		ResourceID string            `json:"resourceId"`
+		Observer   ed25519.PublicKey `json:"observerPublicKey"`
+	}
+	raw, err := readFile(args[1], 16<<10)
+	if err != nil || decode(raw, &config) != nil || config.ResourceID == "" || len(config.Observer) != ed25519.PublicKeySize {
+		return errors.New("invalid independent registry rehome reader enrollment")
+	}
+	profile, err := readPrivateReleaseRecovery(args[0], 32<<10)
+	clear(profile)
+	if err != nil {
+		return err
+	}
+	bundle, err := readPrivateReleaseRecovery(args[2], releaseguardian.MaxRegistryRehomeRecoveryBytes)
+	if err != nil {
+		return err
+	}
+	defer clear(bundle)
+	dsn, owners, cluster, err := productioncontrol.LoadJournalEndpoint(args[0])
+	if err != nil {
+		return err
+	}
+	dsn.RuntimeParams["default_transaction_read_only"] = "on"
+	db := stdlib.OpenDB(*dsn)
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	j, err := productioncontrol.NewJournal(db, owners)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	verified, err := releaseguardian.LoadVerifiedRegistryRehomeBaseline(ctx, j,
+		productioncontrol.Scope{ClusterID: cluster, ResourceID: config.ResourceID}, config.Observer, bundle, args[3])
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(struct {
+		Baseline releaseguardian.RegistryRehomeBaseline `json:"verifiedBaseline"`
+		Evidence string                                 `json:"evidenceDigest"`
+	}{verified.Baseline, verified.EvidenceDigest})
 }
 
 type registryEndpointConfig struct {
