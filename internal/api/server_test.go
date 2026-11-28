@@ -210,8 +210,8 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 	for _, want := range []string{
 		`fugue_component_info{component="api"} 1.000000`,
 		`fugue_api_ready 1.000000`,
-		`fugue_storage_lifecycle_audit_enabled 0.000000`,
-		`fugue_storage_lifecycle_last_success_timestamp_seconds 0.000000`,
+		`fugue_observation_retention_enabled 0.000000`,
+		`fugue_observation_retention_last_attempt_timestamp_seconds 0.000000`,
 		`fugue_go_goroutines{component="api"}`,
 		`fugue_hosted_dns_zones{status="active"} 0.000000`,
 		`fugue_hosted_dns_record_publish_lag_seconds 0.000000`,
@@ -220,6 +220,9 @@ func TestMetricsHandlerReportsAPIReadiness(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics output missing %q:\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "fugue_storage_lifecycle_") {
+		t.Fatal("API still exports storage lifecycle metrics owned by the audit worker")
 	}
 
 	server.SetReady(false)

@@ -24,8 +24,8 @@ func TestAPIDeploymentHasGuardianRecoveryBudget(t *testing.T) {
 	jobs := yamlMappingValue(t, document.Content[0], "jobs")
 	job := yamlMappingValue(t, jobs, "deploy_api")
 	minutes, err := strconv.Atoi(yamlMappingValue(t, job, "timeout-minutes").Value)
-	if err != nil || minutes < 35 {
-		t.Fatalf("API deployment must leave time for the bounded Guardian wait, committed-authority adoption, and receipt upload; got timeout=%d err=%v", minutes, err)
+	if err != nil || minutes < 45 {
+		t.Fatalf("API deployment must leave time for Guardian recovery, worker continuity checks, and receipt upload; got timeout=%d err=%v", minutes, err)
 	}
 	encoded, err := yaml.Marshal(job)
 	if err != nil {

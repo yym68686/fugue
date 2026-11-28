@@ -16,7 +16,7 @@ from scripts.verify_storage_audit_activation import (
 from scripts.verify_storage_audit_worker import prometheus_pods, scrape_observed
 
 
-def continuity(provision, policy, scrape, declaration, verify_api, previous=None, wait_seconds=120):
+def continuity(provision, policy, scrape, declaration, verify_api, previous=None, wait_seconds=None):
     provision.verify_published_policy(policy)
     primary = provision.find_primary()
     secret_uid, _ = provision.credential(provision.get("secret", provision.config["secret"]))
@@ -28,6 +28,10 @@ def continuity(provision, policy, scrape, declaration, verify_api, previous=None
                      {tuple(pod) for pod in previous["apiPods"]} & set(api[2])):
         raise ProvisionError("audit worker changed or a preceding API pod is still serving")
     collectors = prometheus_pods(provision, scrape)
+    if wait_seconds is None:
+        # A rollout can finish immediately after the baseline pass. Allow a
+        # full audit period, a worker tick and an independent collector scrape.
+        wait_seconds = provision.policy["interval_seconds"] + 60 if previous else 120
     deadline = time.monotonic() + wait_seconds
     while True:
         state = activated_status(provision, primary[0], declaration, secret_uid)
