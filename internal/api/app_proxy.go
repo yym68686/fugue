@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"fugue/internal/managedappstatus"
 	"fugue/internal/model"
 	"fugue/internal/runtime"
 	"fugue/internal/store"
@@ -460,15 +461,7 @@ func (w *appProxyObservationResponseWriter) statusCode() int {
 }
 
 func appProxyRuntimeID(app model.App) string {
-	if app.ObservedStatus != nil {
-		if runtimeID := strings.TrimSpace(app.ObservedStatus.RuntimeID); runtimeID != "" {
-			return runtimeID
-		}
-	}
-	if runtimeID := strings.TrimSpace(app.Status.CurrentRuntimeID); runtimeID != "" {
-		return runtimeID
-	}
-	return strings.TrimSpace(app.Spec.RuntimeID)
+	return managedappstatus.ObservedRuntimeID(app)
 }
 
 func safeAppProxyLogPath(r *http.Request) string {
