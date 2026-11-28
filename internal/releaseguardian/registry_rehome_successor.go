@@ -2,12 +2,15 @@ package releaseguardian
 
 import (
 	"bytes"
+	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 
 	"fugue/internal/declarativerelease"
 	"fugue/internal/productioncontrol"
 	"github.com/google/go-containerregistry/pkg/name"
+	"k8s.io/client-go/kubernetes"
 )
 
 // RegistryRehomeSuccessorShadow compares a candidate with the proposed
@@ -21,6 +24,97 @@ type RegistryRehomeSuccessorShadow struct {
 	ExecutionPlan    string                                `json:"executionPlanDigest"`
 	ArtifactReceipt  string                                `json:"artifactReceiptDigest"`
 	StaticCompanions []declarativerelease.ResourceIdentity `json:"staticCompanions,omitempty"`
+}
+
+// RegistryRehomeSuccessorPreflight binds Guardian's next execution plan to
+// direct provider and artifact reads. The rehome is still pending; this is
+// not a publishable intent, rollout permit, or terminal rehome receipt.
+type RegistryRehomeSuccessorPreflight struct {
+	Cutover      RegistryRehomeCutoverReadback           `json:"cutover"`
+	Successor    RegistryRehomeSuccessorShadow           `json:"successor"`
+	ForwardImage declarativerelease.RegistryVerification `json:"forwardImage"`
+}
+
+// ObserveRegistryRehomeSuccessorPreflight exercises the successor's real
+// prewrite binding without treating the historical MonitorRecord as the
+// relocated rollback version or issuing a provider dry-run write. Only the
+// independent read-only observation client is needed.
+func ObserveRegistryRehomeSuccessorPreflight(ctx context.Context, client kubernetes.Interface, journal *productioncontrol.Journal,
+	cluster, intentDigest string, cutover KubeDeploymentCutover, provider productioncontrol.ParticipationKubernetesBinding,
+	observer ed25519.PublicKey, raw []byte, pin string, registry *IndependentRegistry, files map[string][]byte) (RegistryRehomeSuccessorPreflight, error) {
+	var out RegistryRehomeSuccessorPreflight
+	var bundle ExecutionBundle
+	read := func(verified verifiedRegistryRehomeRecoveryBundle, baseline RegistryRehomeBaseline, before RegistryRehomePendingObservation) error {
+		var err error
+		bundle, err = DecodeExecutionBundle(files, baseline.Key)
+		if err != nil {
+			return err
+		}
+		out.Successor, err = shadowRegistryRehomeSuccessor(verified, baseline, bundle)
+		if err != nil {
+			return err
+		}
+		if err := checkRegistryRehomeSuccessorPrewrite(bundle.Prepared.Prewrite, baseline, before.ProviderReadback, out.Successor.StaticCompanions); err != nil {
+			return err
+		}
+		if err := validateRegistryRehomeSuccessorFreshness(bundle); err != nil {
+			return err
+		}
+		out.ForwardImage, err = registry.VerifyRuntimeArtifact(ctx, bundle.Artifact)
+		if err != nil {
+			return fmt.Errorf("read successor image from the independent registry: %w", err)
+		}
+		return nil
+	}
+	var err error
+	out.Cutover, err = observeRegistryRehomeCutover(ctx, client, journal, cluster, intentDigest, cutover, provider, observer, raw, pin, registry, read)
+	if err != nil {
+		return RegistryRehomeSuccessorPreflight{}, err
+	}
+	if err := validateRegistryRehomeSuccessorFreshness(bundle); err != nil {
+		return RegistryRehomeSuccessorPreflight{}, err
+	}
+	return out, nil
+}
+
+func validateRegistryRehomeSuccessorFreshness(bundle ExecutionBundle) error {
+	_, err := declarativerelease.DecodeExecutionPlan(bytes.NewReader(bundle.Files["execution-plan.json"]), bundle.Plan, bundle.Forward, bundle.LKG)
+	return err
+}
+
+func checkRegistryRehomeSuccessorPrewrite(pre declarativerelease.Observation, baseline RegistryRehomeBaseline, live rehomePlacement, companions []declarativerelease.ResourceIdentity) error {
+	target, dep := baseline.Current.Target, live.Deployment
+	if !pre.Present || pre.Primary != baseline.Workload || pre.UID != dep.UID || pre.ResourceVersion != dep.ResourceVersion ||
+		pre.Generation != live.Generation || pre.ObservedGeneration != live.Generation ||
+		pre.ImageRef != target.ImageRef || pre.ConfigSHA != target.ConfigSHA || pre.ManifestSHA != target.ManifestSHA || pre.OCIRevision != target.OCIRevision ||
+		pre.Desired < 1 || int64(pre.Desired) != int64(len(live.Pods)) || pre.Updated != pre.Desired ||
+		pre.Ready != pre.Desired || pre.Available != pre.Desired || pre.Unavailable != 0 {
+		return errors.New("successor prewrite differs from the directly observed relocated Deployment")
+	}
+	references := map[declarativerelease.ResourceIdentity]RecoveryRecordRef{baseline.Workload: dep}
+	services := make(map[string]RecoveryRecordRef, len(live.Services))
+	for _, svc := range live.Services {
+		services[svc.Name] = svc
+	}
+	for _, id := range companions {
+		ref := services[id.Name]
+		if id.Kind != "Service" || id.APIVersion != "v1" || id.Namespace != baseline.Workload.Namespace || ref.UID == "" {
+			return errors.New("successor prewrite includes a companion outside the executable Service scope")
+		}
+		references[id] = ref
+	}
+	if len(services) != len(companions) || len(pre.Resources) != len(references) {
+		return errors.New("successor prewrite inventory differs from the directly observed resources")
+	}
+	for _, resource := range pre.Resources {
+		ref, exists := references[resource.Identity]
+		if !exists || !resource.Present || resource.UID != ref.UID || resource.ResourceVersion != ref.ResourceVersion ||
+			(resource.Identity == baseline.Workload && resource.Generation != live.Generation) {
+			return fmt.Errorf("successor prewrite differs from the observed %s %s", resource.Identity.Kind, resource.Identity.Name)
+		}
+		delete(references, resource.Identity)
+	}
+	return nil
 }
 
 // ShadowRegistryRehomeSuccessor verifies that Guardian's prepared candidate can
@@ -37,11 +131,16 @@ func ShadowRegistryRehomeSuccessor(raw []byte, pin string, files map[string][]by
 	if err != nil {
 		return none, err
 	}
-	current, input, err := registryRehomeReleaseInput(verified, "current")
+	bundle, err := DecodeExecutionBundle(files, baseline.Key)
 	if err != nil {
 		return none, err
 	}
-	bundle, err := DecodeExecutionBundle(files, baseline.Key)
+	return shadowRegistryRehomeSuccessor(verified, baseline, bundle)
+}
+
+func shadowRegistryRehomeSuccessor(verified verifiedRegistryRehomeRecoveryBundle, baseline RegistryRehomeBaseline, bundle ExecutionBundle) (RegistryRehomeSuccessorShadow, error) {
+	var none RegistryRehomeSuccessorShadow
+	current, input, err := registryRehomeReleaseInput(verified, "current")
 	if err != nil {
 		return none, err
 	}

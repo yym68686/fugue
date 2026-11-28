@@ -331,6 +331,23 @@ The command checks both digests of the retained event and emits the fresh
 event only for a later, matching observation. It neither accepts a second
 file as live evidence nor writes a settlement.
 
+While the rehome fence is pending and the plain freeze is back in place,
+compare a freshly prepared successor against the relocated deployment:
+
+```bash
+fugue-production-control preflight-release-registry-rehome-successor "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG" "$REGISTRY_ENDPOINT_CONFIG" "$PRIVATE_EXECUTION_DIRECTORY"
+```
+
+The successor must name the complete relocated **current** manifest as its
+rollback, match the observed Deployment and Service UID/resourceVersion
+preconditions, and have a fresh Guardian execution plan. The observer reads
+all required blobs for the candidate and both retained images from the
+independent registry, then rechecks the exact pending fence and placement.
+The check uses GET-only provider access: it does not run provider-side dry-run
+admission, write an outcome, authorize a rollout, or replace the serving and
+writer-drain evidence. A successful shadow does not mean the legacy Monitor
+pointer can be used as the relocated rollback anchor.
+
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
 Retain independent evidence of the plain freeze on every serving API

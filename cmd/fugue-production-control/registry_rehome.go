@@ -23,19 +23,29 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 	settle := mode == "settle-registry-rehome-no-write"
 	compare := mode == "compare-release-registry-rehome-serving"
 	serving := mode == "observe-release-registry-rehome-serving" || compare
-	cutoverReadback := serving || mode == "observe-release-registry-rehome-cutover"
+	successor := mode == "preflight-release-registry-rehome-successor"
+	cutoverReadback := serving || successor || mode == "observe-release-registry-rehome-cutover"
 	count := 7
 	if compare {
 		count = 11
-	} else if settle || serving {
+	} else if settle || serving || successor {
 		count = 9
 	} else if cutoverReadback {
 		count = 8
 	}
 	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) ||
-		((settle || serving) && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) ||
+		((settle || serving || successor) && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) ||
 		(compare && !filepath.IsAbs(args[9])) {
 		return errors.New(usage)
+	}
+	var files map[string][]byte
+	if successor {
+		var err error
+		files, err = readRegistryRehomeSuccessorFiles(args[8])
+		if err != nil {
+			return err
+		}
+		defer clearRegistryRehomeSuccessorFiles(files)
 	}
 	var retained []byte
 	if compare {
@@ -148,6 +158,14 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 				}
 			}
 			return json.NewEncoder(out).Encode(observation)
+		}
+		if successor {
+			result, err := releaseguardian.ObserveRegistryRehomeSuccessorPreflight(ctx, client, j, cluster, args[5],
+				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], registry, files)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(result)
 		}
 		if cutoverReadback {
 			observed, err := releaseguardian.ObserveRegistryRehomeCutover(ctx, client, j, cluster, args[5],
@@ -305,24 +323,38 @@ func shadowRegistryRehomeSuccessor(args []string, out io.Writer) error {
 		return err
 	}
 	defer clear(bundle)
-	files := make(map[string][]byte, 5)
-	defer func() {
-		for _, raw := range files {
-			clear(raw)
-		}
-	}()
-	for _, name := range []string{"release-plan.json", "artifact-receipt.json", "execution-plan.json", "forward.json", "lkg.json"} {
-		raw, err := readFile(filepath.Join(args[2], name), 4<<20, true)
-		if err != nil {
-			return fmt.Errorf("read registry rehome successor %s: %w", name, err)
-		}
-		files[name] = raw
+	files, err := readRegistryRehomeSuccessorFiles(args[2])
+	if err != nil {
+		return err
 	}
+	defer clearRegistryRehomeSuccessorFiles(files)
 	report, err := releaseguardian.ShadowRegistryRehomeSuccessor(bundle, args[1], files)
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(out).Encode(report)
+}
+
+func readRegistryRehomeSuccessorFiles(dir string) (map[string][]byte, error) {
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return nil, errors.New("registry rehome successor requires a clean absolute execution directory")
+	}
+	files := make(map[string][]byte, 5)
+	for _, name := range []string{"release-plan.json", "artifact-receipt.json", "execution-plan.json", "forward.json", "lkg.json"} {
+		raw, err := readFile(filepath.Join(dir, name), 4<<20, true)
+		if err != nil {
+			clearRegistryRehomeSuccessorFiles(files)
+			return nil, fmt.Errorf("read registry rehome successor %s: %w", name, err)
+		}
+		files[name] = raw
+	}
+	return files, nil
+}
+
+func clearRegistryRehomeSuccessorFiles(files map[string][]byte) {
+	for _, raw := range files {
+		clear(raw)
+	}
 }
 
 func registryRehomeReviewCommand(ctx context.Context, args []string, out io.Writer) error {

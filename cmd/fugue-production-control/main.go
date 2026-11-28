@@ -51,6 +51,7 @@ const usage = `usage: fugue-production-control inspect SUBMISSION
        fugue-production-control observe-release-registry-rehome-cutover JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG
        fugue-production-control observe-release-registry-rehome-serving JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG ROUTE_CONFIG
        fugue-production-control compare-release-registry-rehome-serving JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG ROUTE_CONFIG RETAINED_REPORT EVENT_PIN
+       fugue-production-control preflight-release-registry-rehome-successor JOURNAL_CONFIG KUBECONFIG CONTEXT BUNDLE PIN INTENT_DIGEST ENROLLMENT_CONFIG REGISTRY_ENDPOINT_CONFIG PRIVATE_EXECUTION_DIRECTORY
        fugue-production-control sign-registry-rehome-no-write DRAFT REVIEWED_FILE_DIGEST OBSERVER_PKCS8_PEM TTL
        fugue-production-control settle-registry-rehome-no-write JOURNAL_CONFIG KUBECONFIG CONTEXT ARCHIVE PIN INTENT_DIGEST ENROLLMENT_CONFIG ACTOR SIGNED_CLOSURE
        fugue-production-control observe-storage-audit-owner CONFIG
@@ -119,7 +120,7 @@ func run(ctx context.Context, args []string, out io.Writer, now func() time.Time
 	case "shadow-release-registry-rehome-successor":
 		return shadowRegistryRehomeSuccessor(args[1:], out)
 	case "observe-release-registry-rehome-pending", "observe-release-registry-rehome-cutover",
-		"observe-release-registry-rehome-serving", "compare-release-registry-rehome-serving", "settle-registry-rehome-no-write":
+		"observe-release-registry-rehome-serving", "compare-release-registry-rehome-serving", "preflight-release-registry-rehome-successor", "settle-registry-rehome-no-write":
 		return pendingRegistryRehomeCommand(ctx, args[1:], out, args[0])
 	case "sign-registry-rehome-no-write":
 		return signRegistryRehomeNoWrite(args[1:], out, now)

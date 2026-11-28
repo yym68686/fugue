@@ -46,6 +46,63 @@ func registryRehomeTestProvider(t *testing.T, ctx context.Context, client kubern
 	return productioncontrol.ParticipationKubernetesBinding{Endpoint: config.Host, CADigest: digest(ca.Bytes), NamespaceUID: string(ns.UID)}
 }
 
+func prepareRegistryRehomeSuccessorFixture(t *testing.T, raw []byte, baseline RegistryRehomeBaseline, live rehomePlacement,
+	old declarativerelease.PlanRelease, image declarativerelease.ArtifactReceipt,
+	change func(*declarativerelease.ExecutionPlan)) map[string][]byte {
+	t.Helper()
+	lkg, input, err := ExportRegistryRehomeReleaseInput(raw, baseline.RecoveryBundle, "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := baseline.Current
+	release := guardianPlanRelease(baseline.Key, image.OCIRevision, previous.Target.ConfigSHA, previous.Artifact.RecoveryImage.IndexDigest, old.Delivery)
+	release.Artifact.Repository = image.Repository
+	plan := guardianPlan(t, previous.Target.ConfigSHA, image.OCIRevision, release)
+	receipt, err := declarativerelease.MaterializeArtifactReceipt(plan, baseline.Key.Component, declarativerelease.RegistryVerification{
+		Image: image.ImmutableRef, IndexDigest: image.TopDigest, ManifestDigest: image.PlatformManifestDigest, ConfigDigest: image.ConfigDigest,
+		OCIRevision: image.OCIRevision, Platform: image.Platform, Verification: "registry_manifest_config_and_layer_get",
+		BlobCount: 2, LayerProbeCount: 1, RequestCount: 4, TotalLayerBytes: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := guardianManifests(t, plan, receipt)
+	set, err := declarativerelease.DecodeResourceSet(bytes.NewReader(lkg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.Items[0], err = declarativerelease.ResourceSetItem(manifest, baseline.Workload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward, err := declarativerelease.CanonicalJSON(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := declarativerelease.TargetIdentity{Present: true, ImageRef: image.ImmutableRef, ConfigSHA: image.OCIRevision,
+		ManifestSHA: image.OCIRevision, OCIRevision: image.OCIRevision, ManifestDigest: digest(forward)}
+	prepared := guardianPrepared(t, plan, plan.Releases[0], receipt, target, previous.Target, time.Now().UTC())
+	p := &prepared.Prewrite
+	p.UID, p.ResourceVersion, p.Generation, p.ObservedGeneration = live.Deployment.UID, live.Deployment.ResourceVersion, live.Generation, live.Generation
+	p.Resources[0].UID, p.Resources[0].ResourceVersion, p.Resources[0].Generation = p.UID, p.ResourceVersion, p.Generation
+	for i, id := range input.Companions {
+		ref := live.Services[i]
+		p.Resources = append(p.Resources, declarativerelease.ResourceObservation{Identity: id, Present: true, UID: ref.UID,
+			ResourceVersion: ref.ResourceVersion, ObjectDigest: testDigest, FieldManagers: []string{release.Workload.FieldManager}})
+	}
+	if change != nil {
+		change(&prepared)
+	}
+	prepared.PlanDigest = ""
+	unsigned, _ := declarativerelease.CanonicalJSON(prepared)
+	prepared.PlanDigest = digest(unsigned)
+	files := map[string][]byte{"forward.json": forward, "lkg.json": lkg}
+	for name, value := range map[string]any{"release-plan.json": plan, "artifact-receipt.json": receipt, "execution-plan.json": prepared} {
+		files[name], _ = declarativerelease.CanonicalJSON(value)
+	}
+	return files
+}
+
 func TestRegistryRehomeKubernetesFenceAtProvider(t *testing.T) {
 	base := registryRehomeTestDeployment()
 	base.UID, base.ResourceVersion, base.Generation = "", "", 0
@@ -297,6 +354,7 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 	images := map[string]registryTestContent{}
 	oldImage, oldLayer := registryImageFixture(t, images, "fixture/rehome", strings.Repeat("2", 40), false)
 	servingImage, _ := registryImageFixture(t, images, "fixture/rehome", strings.Repeat("3", 40), true)
+	nextImage, nextLayer := registryImageFixture(t, images, "fixture/rehome", testSHA, true)
 	const repoPath = "/v2/fixture/rehome/manifests/"
 	for _, d := range []string{oldImage.TopDigest, servingImage.TopDigest} {
 		images[repoPath+"fugue-recovery-sha256-"+strings.TrimPrefix(d, "sha256:")] = images[repoPath+d]
@@ -631,6 +689,41 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 			t.Fatalf("joint readback did not check the full rollback image: %v", err)
 		}
 		images[oldLayer] = retainedLayer
+		t.Run("successor prewrite uses actual relocated state", func(t *testing.T) {
+			makeFiles := func(change func(*declarativerelease.ExecutionPlan)) map[string][]byte {
+				return prepareRegistryRehomeSuccessorFixture(t, bundle, proposed, combined.Placement.ProviderReadback, initial.forward.release, nextImage, change)
+			}
+			preflight := func(files map[string][]byte) (RegistryRehomeSuccessorPreflight, error) {
+				return ObserveRegistryRehomeSuccessorPreflight(ctx, admin, readerLedger, scope.ClusterID, claim.IntentDigest, ct,
+					provider, observer, bundle, bundleReport.BundleDigest, registry, files)
+			}
+			files := makeFiles(nil)
+			preview, err := preflight(files)
+			if err != nil || preview.Cutover.Baseline != proposed || preview.Cutover.Placement.Claim != claim ||
+				preview.Successor.Rollback != proposed.Current.Target || preview.ForwardImage.Image != nextImage.ImmutableRef {
+				t.Fatalf("live successor compare: %+v, %v", preview, err)
+			}
+			for _, change := range []func(*declarativerelease.ExecutionPlan){
+				func(p *declarativerelease.ExecutionPlan) { p.Prewrite.ResourceVersion = "99999" },
+				func(p *declarativerelease.ExecutionPlan) { p.Prewrite.Resources[1].ResourceVersion = "99999" },
+				func(p *declarativerelease.ExecutionPlan) {
+					p.PreparedAt = time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339Nano)
+				},
+			} {
+				if _, err := preflight(makeFiles(change)); err == nil {
+					t.Fatal("stale successor prewrite was accepted")
+				}
+			}
+			layer := images[nextLayer]
+			delete(images, nextLayer)
+			if _, err := preflight(files); err == nil || !strings.Contains(err.Error(), "read successor image") {
+				t.Fatalf("missing candidate image layer accepted: %v", err)
+			}
+			images[nextLayer] = layer
+			if after, err := readerLedger.ReadResource(ctx, scope); err != nil || after != state {
+				t.Fatalf("live successor comparison changed the journal: %+v, %v", after, err)
+			}
+		})
 		svc, err := admin.CoreV1().Services(id.Namespace).Create(ctx, &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{Name: "fixture-serving"},
 			Spec: corev1.ServiceSpec{Selector: pod.Labels,
