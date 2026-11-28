@@ -89,3 +89,11 @@ func TestSampleRetentionRetryDrainsWithoutBusyLooping(t *testing.T) {
 		}
 	}
 }
+
+func TestSampleRetentionStandbyChecksOwnershipDuringLongIntervals(t *testing.T) {
+	policy := store.ObservationRetentionPolicy{IntervalSeconds: 3600}
+	next := sampleRetentionRetryDelay(policy, store.ObservationSampleRetentionPass{State: "standby"}, nil)
+	if next != 30*time.Second {
+		t.Fatalf("standby would wait %v to observe the writer handoff", next)
+	}
+}

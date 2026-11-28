@@ -31,12 +31,18 @@ func readSampleRetentionPolicy(path string) (store.ObservationRetentionPolicy, e
 }
 
 func sampleRetentionRetryDelay(policy store.ObservationRetentionPolicy, pass store.ObservationSampleRetentionPass, err error) time.Duration {
+	interval := time.Duration(policy.IntervalSeconds) * time.Second
+	if err == nil && pass.State == "standby" {
+		// Observe the ownership change within the rollout's verification
+		// budget, even when deletion passes are configured far apart.
+		return min(interval, 30*time.Second)
+	}
 	if err == nil && (pass.State == "busy" || (pass.State == "completed" && pass.Deleted == int64(policy.BatchRows))) {
 		// A saturated window has independent headroom. Do not process the
 		// next batch in the same transaction or spin while contended.
 		return 5 * time.Second
 	}
-	return time.Duration(policy.IntervalSeconds) * time.Second
+	return interval
 }
 
 func runSampleRetention(ctx context.Context, storage sampleRetentionStore, policyPath string, logger *log.Logger) {
