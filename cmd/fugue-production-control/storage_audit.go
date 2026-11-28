@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,9 +15,22 @@ import (
 )
 
 func observeStorageAudit(ctx context.Context, path string, out io.Writer) error {
-	raw, err := readFile(path, 16<<10, true)
+	provider, db, err := openStorageAuditObserver(path)
 	if err != nil {
 		return err
+	}
+	defer db.Close()
+	observed, err := provider.Observe(ctx, db)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(observed)
+}
+
+func openStorageAuditObserver(path string) (storageaudit.MaintenanceObserver, *sql.DB, error) {
+	raw, err := readFile(path, 16<<10, true)
+	if err != nil {
+		return storageaudit.MaintenanceObserver{}, nil, err
 	}
 	defer clear(raw)
 	var settings struct {
@@ -26,13 +40,13 @@ func observeStorageAudit(ctx context.Context, path string, out io.Writer) error 
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if d.Decode(&settings) != nil || d.Decode(new(any)) != io.EOF || settings.Database == "" {
-		return errors.New("invalid private storage audit observer configuration")
+		return storageaudit.MaintenanceObserver{}, nil, errors.New("invalid private storage audit observer configuration")
 	}
 	cfg, err := pgx.ParseConfig(settings.Database)
 	if err != nil || cfg.Host == "" || cfg.TLSConfig == nil || cfg.TLSConfig.InsecureSkipVerify ||
 		cfg.TLSConfig.ServerName != cfg.Host || len(cfg.Fallbacks) != 0 ||
 		cfg.Database != settings.Provider.Database || cfg.User != settings.Provider.Role {
-		return errors.New("storage audit observer requires the exact role and database on one hostname-verified PostgreSQL endpoint")
+		return storageaudit.MaintenanceObserver{}, nil, errors.New("storage audit observer requires the exact role and database on one hostname-verified PostgreSQL endpoint")
 	}
 	cfg.ConnectTimeout = 5 * time.Second
 	if cfg.RuntimeParams == nil {
@@ -40,11 +54,6 @@ func observeStorageAudit(ctx context.Context, path string, out io.Writer) error 
 	}
 	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	db := stdlib.OpenDB(*cfg)
-	defer db.Close()
 	db.SetMaxOpenConns(1)
-	observed, err := settings.Provider.Observe(ctx, db)
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(out).Encode(observed)
+	return settings.Provider, db, nil
 }

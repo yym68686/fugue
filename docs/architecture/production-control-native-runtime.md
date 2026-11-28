@@ -631,6 +631,21 @@ The observer checks the primary and rejects logins that can change
 storage audit state or run a sample. Use the output to compare the
 current database state with the legacy ownership receipt before cutover.
 
+`fugue-production-control shadow-storage-audit CONFIG KUBECONFIG CONTEXT SPEC CANDIDATE`
+compares the policy selected by PostgreSQL with the one published in
+`storage-lifecycle.json` on the nominated ConfigMap. The specification
+contains `kubernetes` with the pinned endpoint, CA digest and namespace UID,
+plus `namespace`, `configMap` and `configMapUid`. Use an operator-provisioned
+Kubernetes identity with GET on those two objects. The candidate is a standalone
+storage audit policy document. The command reads the ConfigMap before and after
+the database transaction and refuses a changed resourceVersion, recreated
+object, or a policy mismatch. The report retains the complete target and
+predecessor documents and their digests. The predecessor is the proposed
+rollback for both providers. The report covers the storage audit policy field.
+Online policy publication by the old workflow also changes other storage
+settings. That lane remains open until all its writes are independently fenced
+and the native writer is verified.
+
 ## Single-Deployment release draft
 
 Before cutover, `guardian-native-shadow KUBECONFIG CONTEXT PLAN_DIR CLUSTER_ID REQUEST_ID`
