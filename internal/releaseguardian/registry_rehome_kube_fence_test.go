@@ -204,7 +204,8 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 		t.Skip("set FUGUE_TEST_REHOME_DISPATCH_DATABASE_URL to a disposable empty PostgreSQL database")
 	}
 	const writer = "system:serviceaccount:fixture-identities:rehome-dispatch"
-	cfg, clients := kubeadmission.Start(t, writer)
+	const statusWriter = "system:serviceaccount:fixture-identities:deployment-status"
+	cfg, clients := kubeadmission.Start(t, writer, statusWriter)
 	admin, mover := admissionClient(t, cfg, ""), admissionClient(t, clients[writer], "")
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
 	defer cancel()
@@ -324,6 +325,7 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	}
 	ct := cutoverFixture()
 	ct.Key, ct.MonitorComponent, ct.Namespace, ct.Deployment = source.Key, pair.Component, id.Namespace, id.Name
+	ct.DeploymentStatusWriter = statusWriter
 	var handler atomic.Pointer[registryRehomeAdmissionHandler]
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h := handler.Load(); h != nil {
@@ -488,7 +490,8 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 	if _, err := observe(provider); err == nil || !strings.Contains(err.Error(), "placement has not converged") {
 		t.Fatalf("nonconverged rollout was accepted after the freeze: %v", err)
 	}
-	readyProviderRehomeFixture(t, ctx, admin, id.Namespace, id.Name)
+	controller := admissionClient(t, clients[ct.DeploymentStatusWriter], "")
+	readyProviderRehomeFixture(t, ctx, admin, controller, id.Namespace, id.Name)
 	badProvider := provider
 	badProvider.NamespaceUID = "other-instance"
 	if _, err := observe(badProvider); err == nil || !strings.Contains(err.Error(), "enrolled provider") {
@@ -507,7 +510,7 @@ func TestRegistryRehomeKubernetesDispatchWithJournal(t *testing.T) {
 
 // Envtest has API admission and storage, but no Deployment controller or
 // kubelet. Simulate only their observations; this is not a node-pull drill.
-func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin kubernetes.Interface, namespace, deployment string) {
+func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin, controller kubernetes.Interface, namespace, deployment string) {
 	t.Helper()
 	apps := admin.AppsV1().Deployments(namespace)
 	d, err := apps.Get(ctx, deployment, metav1.GetOptions{})
@@ -542,7 +545,7 @@ func readyProviderRehomeFixture(t *testing.T, ctx context.Context, admin kuberne
 		t.Fatal(err)
 	}
 	d.Status.ObservedGeneration, d.Status.Replicas, d.Status.UpdatedReplicas, d.Status.ReadyReplicas, d.Status.AvailableReplicas = d.Generation, 1, 1, 1, 1
-	if _, err := apps.UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
+	if _, err := controller.AppsV1().Deployments(namespace).UpdateStatus(ctx, d, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 }
