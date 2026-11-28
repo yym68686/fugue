@@ -1192,6 +1192,8 @@ jobs:
           version: v4.2.0
       - name: Download Go modules before the bounded test budget
         run: go mod download
+      - name: Require complete production-control migration inventory
+        run: go run ./cmd/fugue-control-migration check .
       - name: Compile test binaries before the bounded test budget
         timeout-minutes: 10
         # Cold compilation is separately bounded. The prepush step below still
