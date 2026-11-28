@@ -320,6 +320,17 @@ versions and probe results. It omits the observer's timestamps only.
 original report for audit, and do not reuse a matching state as proof of
 freshness or of write closure.
 
+To compare a private retained report with a fresh live observation, pin its
+`evidenceDigest` separately and run:
+
+```bash
+fugue-production-control compare-release-registry-rehome-serving "$READ_ONLY_JOURNAL_CONFIG" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$BUNDLE" "$INDEPENDENTLY_PINNED_BUNDLE_SHA256" "$INTENT_DIGEST" "$FROZEN_ENROLLMENT_CONFIG" "$REGISTRY_ENDPOINT_CONFIG" "$ROUTE_CONFIG" "$RETAINED_REPORT" "$INDEPENDENT_EVENT_PIN"
+```
+
+The command checks both digests of the retained event and emits the fresh
+event only for a later, matching observation. It neither accepts a second
+file as live evidence nor writes a settlement.
+
 Only for `original_registry_observed`, a separately trusted observer may
 confirm the attempt **did not write** after the original admission expires.
 Retain independent evidence of the plain freeze on every serving API

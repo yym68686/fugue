@@ -625,12 +625,12 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 			combined.Baseline.Scope != claim.Scope || combined.Baseline.Version().Digest == s.Intent.TargetDigest {
 			t.Fatalf("joint readback did not identify the exact next baseline without settling it: %+v %v", combined.Baseline, err)
 		}
-		retained := images[oldLayer]
+		retainedLayer := images[oldLayer]
 		delete(images, oldLayer)
 		if _, err := joint(bundleReport.BundleDigest); err == nil || !strings.Contains(err.Error(), "verify rollback recovery mirror") {
 			t.Fatalf("joint readback did not check the full rollback image: %v", err)
 		}
-		images[oldLayer] = retained
+		images[oldLayer] = retainedLayer
 		svc, err := admin.CoreV1().Services(id.Namespace).Create(ctx, &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{Name: "fixture-serving"},
 			Spec: corev1.ServiceSpec{Selector: pod.Labels,
@@ -675,6 +675,27 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		if err != nil || repeated.StateDigest != health.StateDigest || repeated.EvidenceDigest == health.EvidenceDigest {
 			t.Fatalf("same provider state and new probe times must retain one state digest and distinct event digests: %+v %v", repeated, err)
 		}
+		var retained bytes.Buffer
+		if err := json.NewEncoder(&retained).Encode(health); err != nil {
+			t.Fatal(err)
+		}
+		if err := VerifyRetainedRegistryRehomeServing(retained.Bytes(), health.EvidenceDigest, repeated); err != nil {
+			t.Fatalf("authentic repeated provider observation did not match retained event: %v", err)
+		}
+		for _, tc := range []struct {
+			raw   []byte
+			pin   string
+			fresh RegistryRehomeServingObservation
+		}{
+			{retained.Bytes(), otherDigest, repeated},
+			{retained.Bytes(), health.EvidenceDigest, health},
+			{bytes.Replace(retained.Bytes(), []byte(health.StateDigest), []byte(otherDigest), 1), health.EvidenceDigest, repeated},
+			{append([]byte(`{"startedAt":"duplicate",`), retained.Bytes()[1:]...), health.EvidenceDigest, repeated},
+		} {
+			if err := VerifyRetainedRegistryRehomeServing(tc.raw, tc.pin, tc.fresh); err == nil {
+				t.Fatal("accepted a replay, wrong pin or tampered event")
+			}
+		}
 		different, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
 			if host != "" {
 				return digest([]byte("ready with different content")), nil
@@ -683,6 +704,9 @@ func testRegistryRehomeKubernetesWithJournal(t *testing.T, dbEnv string, writeWo
 		})
 		if err != nil || different.StateDigest == health.StateDigest {
 			t.Fatalf("different probe response did not change the state digest: %+v %v", different, err)
+		}
+		if err := VerifyRetainedRegistryRehomeServing(retained.Bytes(), health.EvidenceDigest, different); err == nil {
+			t.Fatal("accepted retained evidence for a changed provider observation")
 		}
 		if _, err := runServing(func(ctx context.Context, address, host, path, expected string) (string, error) {
 			if host != "" {

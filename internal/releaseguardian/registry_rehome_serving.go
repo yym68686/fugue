@@ -25,6 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
+	kubejson "sigs.k8s.io/json"
 )
 
 // RegistryRehomeRoute is enrolled independently of the candidate and archive.
@@ -65,6 +66,56 @@ type RegistryRehomeServingObservation struct {
 	FinishedAt     string                          `json:"finishedAt"`
 	StateDigest    string                          `json:"stateDigest,omitempty"`
 	EvidenceDigest string                          `json:"evidenceDigest,omitempty"`
+}
+
+// MaxRegistryRehomeServingReportBytes bounds retained report inputs. Unlike
+// a signature, a report hash identifies bytes but does not prove their origin.
+const MaxRegistryRehomeServingReportBytes = 128 << 10
+
+// VerifyRetainedRegistryRehomeServing compares a fresh observation obtained
+// from the enrolled provider with a separately pinned historical event.
+// The caller must obtain fresh from ObserveRegistryRehomeServing, not a file.
+// This comparison cannot establish provider write closure.
+func VerifyRetainedRegistryRehomeServing(retained []byte, retainedPin string, fresh RegistryRehomeServingObservation) error {
+	a, end, err := readRegistryRehomeServingReport(retained)
+	if err != nil {
+		return err
+	}
+	if a.EvidenceDigest != retainedPin {
+		return errors.New("retained registry rehome serving event differs from its independent pin")
+	}
+	start, err := time.Parse(time.RFC3339Nano, fresh.StartedAt)
+	if err != nil || !start.After(end) || fresh.EvidenceDigest == a.EvidenceDigest {
+		return errors.New("registry rehome comparison requires a separate later observation")
+	}
+	if a.StateDigest != fresh.StateDigest {
+		return errors.New("registry rehome serving state changed between observations")
+	}
+	return nil
+}
+
+func readRegistryRehomeServingReport(raw []byte) (RegistryRehomeServingObservation, time.Time, error) {
+	var report RegistryRehomeServingObservation
+	fail := func(reason string) (RegistryRehomeServingObservation, time.Time, error) {
+		return RegistryRehomeServingObservation{}, time.Time{}, errors.New(reason)
+	}
+	if len(raw) == 0 || len(raw) > MaxRegistryRehomeServingReportBytes {
+		return fail("invalid bounded registry rehome serving report")
+	}
+	if strict, err := kubejson.UnmarshalStrict(raw, &report); err != nil || len(strict) != 0 {
+		return fail("invalid bounded registry rehome serving report")
+	}
+	start, startErr := time.Parse(time.RFC3339Nano, report.StartedAt)
+	end, endErr := time.Parse(time.RFC3339Nano, report.FinishedAt)
+	if startErr != nil || endErr != nil || end.Before(start) || end.Sub(start) > time.Minute ||
+		report.Dependency.ObservedAt != report.StartedAt || report.Dependency.State != HealthHealthy {
+		return fail("registry rehome serving report has an invalid observation window")
+	}
+	before := report
+	if err := report.seal(); err != nil || before.StateDigest != report.StateDigest || before.EvidenceDigest != report.EvidenceDigest {
+		return fail("registry rehome serving report differs from its content digests")
+	}
+	return report, end, nil
 }
 
 type RegistryRehomeHTTPObservation struct {

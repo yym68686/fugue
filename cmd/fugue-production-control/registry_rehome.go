@@ -21,17 +21,30 @@ const registryRehomeRecoveryFilename = "registry-rehome-recovery.json"
 
 func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Writer, mode string) error {
 	settle := mode == "settle-registry-rehome-no-write"
-	serving := mode == "observe-release-registry-rehome-serving"
+	compare := mode == "compare-release-registry-rehome-serving"
+	serving := mode == "observe-release-registry-rehome-serving" || compare
 	cutoverReadback := serving || mode == "observe-release-registry-rehome-cutover"
 	count := 7
-	if settle || serving {
+	if compare {
+		count = 11
+	} else if settle || serving {
 		count = 9
 	} else if cutoverReadback {
 		count = 8
 	}
 	if len(args) != count || !filepath.IsAbs(args[3]) || !filepath.IsAbs(args[6]) ||
-		((settle || serving) && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) {
+		((settle || serving) && !filepath.IsAbs(args[8])) || (cutoverReadback && !filepath.IsAbs(args[7])) ||
+		(compare && !filepath.IsAbs(args[9])) {
 		return errors.New(usage)
+	}
+	var retained []byte
+	if compare {
+		var err error
+		retained, err = readFile(args[9], releaseguardian.MaxRegistryRehomeServingReportBytes, true)
+		if err != nil {
+			return err
+		}
+		defer clear(retained)
 	}
 	var cfg struct {
 		Cutover  releaseguardian.KubeDeploymentCutover            `json:"cutover"`
@@ -128,6 +141,11 @@ func pendingRegistryRehomeCommand(ctx context.Context, args []string, out io.Wri
 				cfg.Cutover, cfg.Provider, cfg.Observer, archive, args[4], registry, route)
 			if err != nil {
 				return err
+			}
+			if compare {
+				if err := releaseguardian.VerifyRetainedRegistryRehomeServing(retained, args[10], observation); err != nil {
+					return err
+				}
 			}
 			return json.NewEncoder(out).Encode(observation)
 		}
