@@ -3,15 +3,15 @@
   "api": {
     "deployment": "fugue-fugue-api",
     "container": "api",
-    "image": "ghcr.io/yym68686/fugue-api@sha256:43a8549323b482721dc88b768e51fcbee4120a69055ee7e7d85532b06f7a7b50",
-    "revision": "e6dfd312eba0b1f0a01cff23a7a3caace9ce56bb",
+    "image": "ghcr.io/yym68686/fugue-api@sha256:6db2856e6606048a23f477f6aeff5a52e6e18affc711e05b43baeee99a466917",
+    "revision": "c215eb92e3d69333e55a83b3d27183bfd7a2dc97",
     "replicas": 2
   },
   "controller": {
     "deployment": "fugue-fugue-controller",
     "container": "controller",
-    "image": "ghcr.io/yym68686/fugue-controller@sha256:5de287a179f77272820ef3cfcaa13a98f8ba1ed354b31f81b4c9ac2815887757",
-    "revision": "e6dfd312eba0b1f0a01cff23a7a3caace9ce56bb",
+    "image": "ghcr.io/yym68686/fugue-controller@sha256:3e5d98d96c57dfdab6087effee6dd62a2eeeec9a14c41aa85dc22f8fc6e043ce",
+    "revision": "c215eb92e3d69333e55a83b3d27183bfd7a2dc97",
     "replicas": 2
   },
   "apiForwardFloor": "c215eb92e3d69333e55a83b3d27183bfd7a2dc97",
