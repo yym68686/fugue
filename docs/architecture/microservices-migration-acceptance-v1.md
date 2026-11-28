@@ -108,6 +108,29 @@ identities at the Kubernetes/API, DNS provider, object store and runner/host
 boundaries. Do not use an Actions run with production credentials as proof
 that those identities have lost authority.
 
+### Legacy runner credential revocation
+
+The legacy `scripts/install_github_runner.sh` copies the K3s administrator
+kubeconfig to the runner account when the source file exists. The K3s
+administrator identity uses the `system:masters` group. Verify which
+credentials were installed or issued to every production runner using host
+and cluster access independent of GitHub. Preserve only non-secret
+identifiers, issuers and expiry in the migration evidence.
+
+Freeze job intake and establish that previously admitted provider actions
+have completed before enabling a native writer. Remove the runner's host
+access, credential files and provider bindings. Prove old credential
+rejection at each reachable API endpoint. A stopped runner, removed file,
+RBAC change, or newly issued admin leaf certificate cannot establish that
+an existing copied client certificate has stopped authenticating. For each
+such credential, verify expiry or that its issuing trust has been withdrawn
+at the provider. K3s documents the impact of replacing the root CA on
+cluster nodes and workloads. Prepare and verify the replacement trust path
+before any production rotation.
+
+Sources are the [K3s administrator kubeconfig reference](https://docs.k3s.io/cluster-access)
+and the [K3s certificate rotation reference](https://docs.k3s.io/cli/certificate).
+
 ## Native intent journal (pre-cutover)
 
 The native journal's schema is in `internal/productioncontrol/journal.sql`.
