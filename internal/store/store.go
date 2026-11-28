@@ -889,6 +889,9 @@ func (s *Store) createOperationWithPolicy(op model.Operation, policy operationCr
 	if isOOMRightSizingActor(op) && !policy.AllowOOMRightSizingDeploy {
 		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
 	}
+	if isAutomaticResourceSizingActor(op) && !policy.AllowAutomaticResourceSizing {
+		return model.Operation{}, operationCreateOutcome{}, ErrInvalidInput
+	}
 	return s.pgCreateOperation(op, policy)
 }
 
