@@ -51,7 +51,9 @@ TEST_BINARY_CONSUMERS = {
 REPOSITORY_TEST_CONSUMERS = {"./internal/platformsafety", "./internal/releasesourceaudit"}
 EDGE_GROUP_SOURCE_PREFIXES = ("internal/edge/", "internal/edgecontrol/", "internal/edgegroupfront/")
 # These composition guards scan non-test Go files under both source trees.
-APPLICATION_SOURCE_TEST_CONSUMERS = {"./internal/imagetracking", "./internal/releaseretirement"}
+APPLICATION_SOURCE_TEST_CONSUMERS = {
+    "./internal/buildadmission", "./internal/imagetracking", "./internal/releaseretirement",
+}
 
 
 def packages_from_stream(stream):

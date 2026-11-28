@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"fugue/internal/buildadmission"
 	"fugue/internal/model"
 	"fugue/internal/store"
 )
@@ -87,8 +88,8 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			s.Logger.Printf("github sync invalid build source app=%s: %v", app.ID, err)
 			continue
 		}
-		fingerprint := buildInputFingerprint(buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
-		ledger, historyErr := s.readBuildFailureLedger(ctx, app)
+		fingerprint := buildadmission.InputFingerprint(buildSource, buildSpec, s.effectiveImportBuilderPolicy(s.importBuilderMemoryCeilingBytes(app.TenantID)))
+		ledger, historyErr := s.buildAdmission().ReadFailureLedger(ctx, app)
 		if historyErr != nil {
 			s.Logger.Printf("github sync build admission history unavailable app=%s: %v", app.ID, historyErr)
 			continue
@@ -117,7 +118,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 			continue
 		}
 		if reusable == nil {
-			if cachedBuildRejection(ledger, fingerprint) != nil {
+			if buildadmission.CachedRejection(ledger, fingerprint) != nil {
 				s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_build_admission", state, len(ops))
 				continue
 			}
@@ -131,7 +132,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 				continue
 			}
 		}
-		if found && !wasOOMBlocked && !buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
+		if found && !wasOOMBlocked && !buildadmission.PolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) &&
 			!(reusable != nil && gitHubTrackedCommitBillingFailure(state.lastAutomaticFailure)) &&
 			!gitHubTrackedCommitRetryReady(state, currentTime, s.Config.GitHubSyncRetryBaseDelay, s.Config.GitHubSyncRetryMaxDelay) {
 			s.recordGitHubReleaseDecision(ctx, app, latestCommit, fingerprint, "blocked_retry_budget_or_backoff", state, len(ops))
@@ -170,7 +171,7 @@ func (s *Service) syncGitHubApps(ctx context.Context) error {
 		if wasOOMBlocked {
 			decision = "queued_build_after_memory_admission_recovered"
 		}
-		if buildPolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) {
+		if buildadmission.PolicyChangedSinceFailure(ledger, state.lastAutomaticFailure, fingerprint) {
 			decision = "queued_build_after_input_policy_change"
 		}
 		if reusable != nil {
