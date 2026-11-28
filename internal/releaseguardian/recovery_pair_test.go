@@ -132,6 +132,8 @@ func TestObserveSealedRecoveryPair(t *testing.T) {
 			} else if err != nil || pair.Pointer != recoveryRef(p) || pair.Forward.Receipt != receipt || pair.Rollback.Receipt != priorReceipt ||
 				pair.Forward.Monitor != current || pair.Rollback.Monitor != prior {
 				t.Fatalf("pair=%+v err=%v", pair, err)
+			} else {
+				checkReleaseRecoveryArchive(t, client, pair, f.Data, h.Data)
 			}
 			for _, action := range client.Actions() {
 				if action.GetResource().Resource != "configmaps" || action.GetNamespace() != p.Namespace ||
@@ -144,6 +146,68 @@ func TestObserveSealedRecoveryPair(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func checkReleaseRecoveryArchive(t *testing.T, client *fake.Clientset, pair SealedRecoveryPair, forward, rollback map[string]string) {
+	t.Helper()
+	raw, expected, err := CaptureReleaseRecoveryArchive(context.Background(), client.CoreV1(), pair.Namespace, pair.Component)
+	if err != nil || expected.Pair != pair {
+		t.Fatalf("archive capture report=%+v err=%v", expected, err)
+	}
+	got, err := VerifyReleaseRecoveryArchive(raw, expected.ArchiveDigest)
+	if err != nil || got != expected {
+		t.Fatalf("offline archive verification report=%+v err=%v", got, err)
+	}
+	if _, err := VerifyReleaseRecoveryArchive(raw, otherDigest); err == nil {
+		t.Fatal("a mismatched external digest accepted a valid archive")
+	}
+	var archive sealedRecoveryArchive
+	if err := decodeStrict(raw, &archive); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range forward {
+		if archive.Forward.Files[name] != value || archive.Rollback.Files[name] != rollback[name] {
+			t.Fatalf("archive changed source bytes for %s", name)
+		}
+	}
+	unrelated, unrelatedMonitor, _, _ := guardianStableFixtureWithImage(t, Key{Component: pair.Component, Group: pair.Component},
+		time.Unix(90, 0).UTC(), "sha256:"+strings.Repeat("7", 64))
+	for _, tc := range []struct {
+		name string
+		edit func(*sealedRecoveryArchive)
+	}{
+		{"swapped versions", func(a *sealedRecoveryArchive) { a.Forward, a.Rollback = a.Rollback, a.Forward }},
+		{"truncated pointer digest", func(a *sealedRecoveryArchive) {
+			a.State.RecordDigest = a.State.RecordDigest[:len("sha256:")+16] + strings.Repeat("0", 48)
+		}},
+		{"changed verified manifest", func(a *sealedRecoveryArchive) { a.Forward.Files["lkg.json"] = a.Forward.Files["forward.json"] }},
+		{"missing original terminal result", func(a *sealedRecoveryArchive) { delete(a.Rollback.Files, "terminal-result.json") }},
+		{"valid but unrelated predecessor", func(a *sealedRecoveryArchive) {
+			a.Rollback.Ref.Name = monitorRecordNameFromDigest(a.Component, unrelatedMonitor.RecordDigest)
+			a.Rollback.Files = unrelated
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var altered sealedRecoveryArchive
+			if err := decodeStrict(raw, &altered); err != nil {
+				t.Fatal(err)
+			}
+			tc.edit(&altered)
+			alteredRaw, err := declarativerelease.CanonicalJSON(altered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Even a correctly hashed malformed envelope is not a
+			// verified pair; the forward and rollback seals must bind.
+			if _, err := VerifyReleaseRecoveryArchive(alteredRaw, digest(alteredRaw)); err == nil {
+				t.Fatal("invalid recovery archive accepted")
+			}
+		})
+	}
+	withSuffix := append(bytes.Clone(raw), '\n')
+	if _, err := VerifyReleaseRecoveryArchive(withSuffix, digest(withSuffix)); err == nil {
+		t.Fatal("noncanonical archive accepted")
 	}
 }
 

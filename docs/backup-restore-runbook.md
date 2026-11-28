@@ -55,6 +55,40 @@ to be recovered outside the running control plane.
    fugue backup restore run --plan <restore-plan-id>
    ```
 
+## Sealed release recovery archive
+
+Before a GitHub-disconnected recovery drill, stage the last verified release
+and its exact rollback record on an encrypted filesystem. Use the dedicated
+GET-only Kubernetes observation context; the new absolute directory must not
+exist.
+
+```bash
+fugue-production-control capture-release-recovery-archive "$NAMESPACE" "$COMPONENT" "$READ_ONLY_KUBECONFIG" "$CONTEXT" "$NEW_PRIVATE_DIRECTORY"
+```
+
+The command publishes `sealed-release.json` with mode `0600` only after
+checking the current pointer, both immutable records, and the rollback
+manifest. The archive contains the original execution plans, manifests,
+verified terminal results, and artifact receipts. Treat it as sensitive:
+do not put it in Git, an Actions artifact, or a public bucket. The command's
+JSON output contains only the archive digest and release identities. Put
+the archive in independent custody and pin its digest, source cluster,
+namespace, component, pointer UID and verified release identities in a
+separately retained inventory. Do not recompute the trusted digest from
+the copy presented for recovery.
+
+```bash
+fugue-release-bootstrap verify-release-recovery-archive "$ARCHIVE" "$INDEPENDENTLY_PINNED_SHA256"
+```
+
+This mode opens no production connection. To also check the independent
+registry copies, append the absolute `MIRROR_CONFIG` path with `registry`,
+optional `registryAuthFile`, `forwardRepository` and `rollbackRepository`.
+It reads only that registry, using the archive's pinned receipt for each
+version. It does not modify a historical manifest to use a mirror, authorize
+a rollout, recreate provider state, or prove that a node can pull without
+GitHub. Record those checks separately in the recovery drill.
+
 ## Native production journal recovery
 
 Use this additional gate once a resource's native journal can authorize writes.

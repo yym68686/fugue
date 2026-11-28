@@ -918,13 +918,15 @@ authority bound to pre-restore database role OIDs.
   there is no Guardian DesiredRelease. If several records match, cleanup
   keeps them all so it cannot manufacture a unique rollback by pruning.
   This safeguard does not set registry retention or preserve OCI blobs.
-  When Kubernetes is unavailable, the lower-level
-  `verify-release-recovery-mirror CONFIG` can recheck a previously archived
-  pair using independently pinned receipt files; it does not tell whether
-  they are still the current and rollback versions. Confirm registry
-  retention separately, then test uncached pulls from the actual target
-  nodes with GitHub disconnected. No mirror report substitutes for a sealed
-  release or owner approval.
+  Before taking Kubernetes offline, preserve both complete immutable
+  records using the [sealed release recovery archive](../backup-restore-runbook.md#sealed-release-recovery-archive).
+  The bootstrap can recheck the independently pinned archive without any
+  Kubernetes, database, GitHub, or Fugue API credentials, optionally
+  streaming the two independent registry copies as well. It cannot say that
+  an archived pair is still current. Confirm registry retention separately,
+  then test uncached pulls from the actual target nodes with GitHub
+  disconnected. No mirror report substitutes for a sealed release or owner
+  approval.
 - `ObserveServingRelease` is read-only. It separately verifies the exact
   marked pointer, immutable monitor record and live Deployment, matches the
   ReplicaSet/Pod ownership chain and actual image IDs, and checks recent

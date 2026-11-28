@@ -32,7 +32,8 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const usage = `usage: fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPROVAL_DIGEST ATTESTATION_FILE
+const usage = `usage: fugue-release-bootstrap verify-release-recovery-archive ARCHIVE EXPECTED_SHA256 [MIRROR_CONFIG]
+       fugue-release-bootstrap CONFIG publish INTENT_DIGEST APPROVAL_DIGEST ATTESTATION_FILE
        fugue-release-bootstrap CONFIG observe INTENT_DIGEST
        fugue-release-bootstrap CONFIG anchor GENERATION VERSION_DIGEST WITNESS_DIGEST
        fugue-release-bootstrap CONFIG settle INTENT_DIGEST OUTCOME GENERATION VERSION_DIGEST WITNESS_DIGEST
@@ -79,6 +80,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) != 0 && args[0] == "verify-release-recovery-archive" {
+		return verifyReleaseArchive(ctx, args[1:], out)
+	}
 	if len(args) < 2 {
 		return errors.New(usage)
 	}
