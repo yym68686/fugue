@@ -129,6 +129,29 @@ before any production rotation.
 Sources are the [K3s administrator kubeconfig reference](https://docs.k3s.io/cluster-access)
 and the [K3s certificate rotation reference](https://docs.k3s.io/cli/certificate).
 
+### Cold recovery before credential withdrawal
+
+A read-only production observation on 2026-11-28 found one ready CNPG
+control-plane instance and a suspended CNPG physical backup schedule. The
+most recent completed physical backup reported by that schedule was
+2026-11-01. The product backup status showed a successful logical
+control-plane backup on 2026-11-27 with recovery status `plan-available`.
+Neither the native journal nor the native storage audit policy boundary was
+installed on the primary. The application database role was neither a
+superuser nor a member of `pg_read_all_data`. These observations do not
+establish that the app backup role will be able to read owner-installed
+journal tables, or that the WAL/archive range required by any physical
+recovery point is available.
+
+Before enabling a native production writer or replacing the only legacy
+administrative trust path, verify a fresh recovery point accessible
+independently of the serving API and GitHub. After provisioning the journal,
+prove the backup reader can capture it with the same snapshot as the database
+dump and restore it with the [native recovery drill](../backup-restore-runbook.md#native-production-journal-recovery).
+Reconcile pending claims and provider state before reconnecting a writer.
+Logical restore verification in disposable PostgreSQL does not satisfy live
+control-plane recovery or any disconnected acceptance criterion.
+
 ## Native intent journal (pre-cutover)
 
 The native journal's schema is in `internal/productioncontrol/journal.sql`.
