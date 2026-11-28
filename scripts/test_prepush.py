@@ -83,6 +83,13 @@ class CanonicalReceiptTest(unittest.TestCase):
         self.assertNotIn("Classify release-related", source)
         self.assertNotIn("grep -Eq", source)
 
+    def test_production_release_plan_is_only_materialized_on_main_push(self) -> None:
+        source = (Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        step = source.split("      - name: Materialize the exact declarative component plan\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}", step)
+        upload = source.split("      - name: Upload the immutable release plan\n", 1)[1].split("\n  agent_edge_activation:", 1)[0]
+        self.assertIn("if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}", upload)
+
     def run_main_with_fake(self, fake_run, paths=None):
         receipts = []
 

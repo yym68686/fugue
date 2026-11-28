@@ -1392,6 +1392,7 @@ jobs:
         run: go test ./internal/sourceimport -run '^TestBuilderMemory(ContainerContract|NestedDockerContract)$' -count=1 -v
       - name: Materialize the exact declarative component plan
         id: release
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           PLAN: ${{ runner.temp }}/fugue-production-release-plan.json
@@ -1441,6 +1442,7 @@ jobs:
         if: ${{ steps.storage_audit_activation_intent.outputs.selected == 'true' && steps.storage_audit_worker_rehearsal.outputs.verified == 'true' }}
         run: echo 'verified=true' >> "$GITHUB_OUTPUT"
       - name: Upload the immutable release plan
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fugue-production-release-plan-${{ github.sha }}
